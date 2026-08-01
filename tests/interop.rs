@@ -175,6 +175,37 @@ fn add_as_uses_custom_archive_name() {
 }
 
 #[test]
+fn add_directory_only_writes_dir_entries_without_children() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("tree");
+    std::fs::create_dir_all(src.join("empty")).expect("mkdir");
+    std::fs::write(src.join("empty", "ignored.txt"), b"x").expect("write");
+    std::fs::write(src.join("top.txt"), b"y").expect("write");
+
+    let path = dir.path().join("dironly.rar");
+    {
+        let mut rar = RarArchive::create(&path).expect("create");
+        // Directory entry only — the child must NOT be pulled in.
+        rar.add_directory_only(&src, "tree").expect("add dir");
+        rar.add_as(src.join("top.txt"), "tree/top.txt", 3).expect("add file");
+        rar.close().expect("close");
+    }
+
+    let mut rar = RarArchive::open(&path).expect("open");
+    let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
+    assert!(names.iter().any(|n| n == "tree/"), "missing dir: {names:?}");
+    assert!(
+        names.iter().any(|n| n == "tree/empty/"),
+        "missing empty dir: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("ignored.txt")),
+        "child leaked in: {names:?}"
+    );
+    assert_eq!(rar.read("tree/top.txt").expect("read"), b"y".to_vec());
+}
+
+#[test]
 fn progress_callback_reports_monotonic_progress() {
     let dir = make_temp_dir();
     let path = dir.path().join("prog.rar");

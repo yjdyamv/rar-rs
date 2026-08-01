@@ -1185,6 +1185,55 @@ impl RarArchive {
         Ok(())
     }
 
+    /// Add a directory entry only (no recursion).
+    ///
+    /// Writes the directory header without traversing children. Callers that
+    /// enumerate files themselves (e.g. with exclusion filtering) use this to
+    /// keep empty directories and the directory structure in the archive.
+    pub fn add_directory_only(
+        &mut self,
+        path: impl AsRef<Path>,
+        arcname: &str,
+    ) -> RarResult<()> {
+        let path = path.as_ref();
+        let name = arcname.replace('\\', "/").trim_end_matches('/').to_string() + "/";
+
+        let meta = fs::metadata(path)?;
+        let mtime = meta
+            .modified()
+            .unwrap_or(SystemTime::now())
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
+
+        #[cfg(unix)]
+        let attrs = {
+            use std::os::unix::fs::MetadataExt;
+            meta.mode() as u64
+        };
+        #[cfg(not(unix))]
+        let attrs = 0o040755u64;
+
+        let fh = FileHeader {
+            name: name.clone(),
+            attributes: attrs,
+            mtime,
+            host_os: OS_UNIX,
+            file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY,
+            is_directory: true,
+            ..Default::default()
+        };
+
+        let stream = self.stream.as_mut().unwrap();
+        stream.write_all(&fh.to_bytes())?;
+        self.entries.push(ArchiveEntry {
+            header: fh,
+            chunks: Vec::new(),
+        });
+
+        Ok(())
+    }
+
     fn add_directory(
         &mut self,
         path: &Path,
