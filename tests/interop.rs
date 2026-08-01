@@ -179,7 +179,7 @@ fn add_directory_only_writes_dir_entries_without_children() {
     let dir = make_temp_dir();
     let src = dir.path().join("tree");
     std::fs::create_dir_all(src.join("empty")).expect("mkdir");
-    std::fs::write(src.join("empty", "ignored.txt"), b"x").expect("write");
+    std::fs::write(src.join("empty").join("ignored.txt"), b"x").expect("write");
     std::fs::write(src.join("top.txt"), b"y").expect("write");
 
     let path = dir.path().join("dironly.rar");
