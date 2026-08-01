@@ -34,6 +34,17 @@ enum Symbol {
 
 /// Encode raw data into RAR5 compressed format.
 pub fn encode(data: &[u8], method: u8, dict_size_log: u8) -> Vec<u8> {
+    encode_with_progress(data, method, dict_size_log, None)
+}
+
+/// Encode raw data into RAR5 compressed format, reporting match-finder
+/// progress as `(bytes_processed, total_bytes)`.
+pub fn encode_with_progress(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Vec<u8> {
     if data.is_empty() {
         return encode_empty_block();
     }
@@ -42,7 +53,7 @@ pub fn encode(data: &[u8], method: u8, dict_size_log: u8) -> Vec<u8> {
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log.max(0) as u32);
 
-    let symbols = find_matches(data, chain_len, lazy_thresh, max_match, dict_size);
+    let symbols = find_matches(data, chain_len, lazy_thresh, max_match, dict_size, progress);
 
     let mut output = Vec::new();
     let mut block_start = 0;
@@ -65,14 +76,23 @@ fn find_matches(
     lazy_thresh: usize,
     max_match: usize,
     window: usize,
+    mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Vec<Symbol> {
     let mut finder = MatchFinder::new(data, 2, max_match, chain_len, window);
     let mut symbols = Vec::new();
     let mut dist_cache = [0u32; DIST_CACHE_SIZE];
     let mut last_length: u32 = 0;
     let mut pos = 0;
+    let mut next_report = 0u64;
 
     while pos < data.len() {
+        if let Some(cb) = progress.as_deref_mut() {
+            if pos as u64 >= next_report {
+                cb(pos as u64, data.len() as u64);
+                next_report = pos as u64 + 0x10000;
+            }
+        }
+
         let (mut dist, mut length) = finder.find_match_cached(pos, &dist_cache);
 
         // Lazy matching

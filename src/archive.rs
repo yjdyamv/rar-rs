@@ -74,6 +74,9 @@ pub struct RarArchive {
     current_volume: usize,
     /// Bytes written in the current volume during creation.
     volume_bytes_written: u64,
+    /// Optional progress callback invoked during compression:
+    /// `(bytes_processed_in_file, total_bytes_in_file)`.
+    progress_callback: Option<Box<dyn FnMut(u64, u64) + Send>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -103,6 +106,7 @@ impl RarArchive {
             volume_size: None,
             current_volume: 0,
             volume_bytes_written: 0,
+            progress_callback: None,
         };
         archive.open_read()?;
         Ok(archive)
@@ -125,6 +129,7 @@ impl RarArchive {
             volume_size: None,
             current_volume: 0,
             volume_bytes_written: 0,
+            progress_callback: None,
         };
         archive.open_read()?;
         Ok(archive)
@@ -152,6 +157,7 @@ impl RarArchive {
             volume_size: None,
             current_volume: 0,
             volume_bytes_written: 0,
+            progress_callback: None,
         };
         archive.open_write()?;
         Ok(archive)
@@ -176,6 +182,7 @@ impl RarArchive {
             volume_size: Some(volume_size),
             current_volume: 1,
             volume_bytes_written: 0,
+            progress_callback: None,
         };
         let f = File::create(&vol_path)?;
         archive.stream = Some(f);
@@ -223,6 +230,15 @@ impl RarArchive {
         }
         self.stream = None;
         Ok(())
+    }
+
+    /// Set an optional progress callback for archive creation.
+    ///
+    /// The callback receives `(bytes_processed, bytes_total)` for the file
+    /// currently being added. A final `(total, total)` is reported once the
+    /// file entry has been written, so callers can drive percent-done UIs.
+    pub fn set_progress_callback(&mut self, callback: Option<Box<dyn FnMut(u64, u64) + Send>>) {
+        self.progress_callback = callback;
     }
 
     // ── Signature ──────────────────────────────────────────────────────────
@@ -1075,8 +1091,14 @@ impl RarArchive {
             (raw_data.clone(), COMP_METHOD_STORE, 0u8)
         } else {
             let dsl = dict_size_for_data(raw_data.len());
-            let compressed = compression::compress(&raw_data, method, dsl)
-                .map_err(|e| RarError::Unsupported(e))?;
+            let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
+            if let Some(cb) = self.progress_callback.as_deref_mut() {
+                let cb: &mut dyn FnMut(u64, u64) = cb;
+                progress = Some(cb);
+            }
+            let compressed =
+                compression::compress_with_progress(&raw_data, method, dsl, progress)
+                    .map_err(|e| RarError::Unsupported(e))?;
             if compressed.len() >= raw_data.len() {
                 (raw_data.clone(), COMP_METHOD_STORE, 0u8)
             } else {
@@ -1126,7 +1148,13 @@ impl RarArchive {
             &extra_data,
             attrs,
             mtime,
-        )
+        )?;
+
+        if let Some(cb) = self.progress_callback.as_deref_mut() {
+            cb(raw_data.len() as u64, raw_data.len() as u64);
+        }
+
+        Ok(())
     }
 
     fn add_directory(
@@ -1217,7 +1245,12 @@ impl RarArchive {
             (data.to_vec(), COMP_METHOD_STORE, 0u8)
         } else {
             let dsl = dict_size_for_data(data.len());
-            let compressed = compression::compress(data, method, dsl)
+            let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
+            if let Some(cb) = self.progress_callback.as_deref_mut() {
+                let cb: &mut dyn FnMut(u64, u64) = cb;
+                progress = Some(cb);
+            }
+            let compressed = compression::compress_with_progress(data, method, dsl, progress)
                 .map_err(|e| RarError::Unsupported(e))?;
             if compressed.len() >= data.len() {
                 (data.to_vec(), COMP_METHOD_STORE, 0u8)
@@ -1248,7 +1281,13 @@ impl RarArchive {
             &extra_data,
             0o100644,
             mtime,
-        )
+        )?;
+
+        if let Some(cb) = self.progress_callback.as_deref_mut() {
+            cb(data.len() as u64, data.len() as u64);
+        }
+
+        Ok(())
     }
 
     /// Write a file entry, splitting across volumes if needed.

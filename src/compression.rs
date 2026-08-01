@@ -5,11 +5,30 @@ use crate::constants::*;
 
 /// Compress `data` using the specified RAR5 compression method.
 pub fn compress(data: &[u8], method: u8, dict_size_log: u8) -> Result<Vec<u8>, String> {
+    compress_with_progress(data, method, dict_size_log, None)
+}
+
+/// Compress `data` using the specified RAR5 compression method, reporting
+/// progress as `(bytes_processed, total_bytes)` through `progress`.
+pub fn compress_with_progress(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<Vec<u8>, String> {
     if method == COMP_METHOD_STORE {
+        if let Some(cb) = progress {
+            cb(data.len() as u64, data.len() as u64);
+        }
         return Ok(data.to_vec());
     }
     if method >= COMP_METHOD_FASTEST && method <= COMP_METHOD_BEST {
-        return Ok(codec::encode(data, method, dict_size_log));
+        return Ok(codec::encode_with_progress(
+            data,
+            method,
+            dict_size_log,
+            progress,
+        ));
     }
     Err(format!("unknown compression method: {method}"))
 }

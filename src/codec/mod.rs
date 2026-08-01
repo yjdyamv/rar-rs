@@ -17,4 +17,4 @@ pub mod tables;
 pub mod window;
 
 pub use decoder::{decode, decode_standalone, DecoderState};
-pub use encoder::encode;
+pub use encoder::{encode, encode_with_progress};
