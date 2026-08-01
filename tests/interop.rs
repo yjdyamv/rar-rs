@@ -140,6 +140,41 @@ fn multivolume_creation_roundtrip() {
 }
 
 #[test]
+fn add_as_uses_custom_archive_name() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("sub")).expect("mkdir");
+    std::fs::write(src.join("a.txt"), b"aaa").expect("write");
+
+    let path = dir.path().join("named.rar");
+    {
+        let mut rar = RarArchive::create(&path).expect("create");
+        rar.add_as(src.join("a.txt"), "docs/renamed.txt", 3).expect("add");
+        rar.add_as(src, "root", 3).expect("add");
+        rar.close().expect("close");
+    }
+
+    let mut rar = RarArchive::open(&path).expect("open");
+    let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
+    assert!(
+        names.iter().any(|n| n == "docs/renamed.txt"),
+        "missing renamed entry: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "root/"),
+        "missing dir entry: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "root/sub/"),
+        "missing nested dir entry: {names:?}"
+    );
+    assert_eq!(
+        rar.read("docs/renamed.txt").expect("read"),
+        b"aaa".to_vec()
+    );
+}
+
+#[test]
 fn progress_callback_reports_monotonic_progress() {
     let dir = make_temp_dir();
     let path = dir.path().join("prog.rar");

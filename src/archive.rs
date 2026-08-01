@@ -1073,6 +1073,34 @@ impl RarArchive {
         }
     }
 
+    /// Add a file or directory to the archive under a custom archive name.
+    ///
+    /// `arcname` overrides the entry name in the archive. For directories the
+    /// children keep the same relative layout beneath `arcname`.
+    pub fn add_as(
+        &mut self,
+        path: impl AsRef<Path>,
+        arcname: &str,
+        compression_level: u8,
+    ) -> RarResult<()> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Err(RarError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("path not found: {}", path.display()),
+            )));
+        }
+
+        let arcname = arcname.replace('\\', "/");
+        let arcname = arcname.trim_start_matches('/').to_string();
+
+        if path.is_dir() {
+            self.add_directory(path, Some(&arcname), true, compression_level)
+        } else {
+            self.add_file(path, Some(&arcname), compression_level)
+        }
+    }
+
     fn add_file(
         &mut self,
         path: &Path,
