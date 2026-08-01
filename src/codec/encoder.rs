@@ -62,6 +62,12 @@ pub fn encode_with_progress(
         let is_last = block_end >= symbols.len();
         let block_data = encode_block(&symbols[block_start..block_end], is_last);
         output.extend(block_data);
+        // Early bail-out: once the compressed stream already exceeds the
+        // input size it can never beat STORE — stop before wasting more
+        // time (callers fall back to STORE on oversized output).
+        if !is_last && output.len() > data.len() {
+            break;
+        }
         block_start = block_end;
     }
 
@@ -79,7 +85,7 @@ fn find_matches(
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Vec<Symbol> {
     let mut finder = MatchFinder::new(data, 2, max_match, chain_len, window);
-    let mut symbols = Vec::new();
+    let mut symbols = Vec::with_capacity(data.len());
     let mut dist_cache = [0u32; DIST_CACHE_SIZE];
     let mut last_length: u32 = 0;
     let mut pos = 0;

@@ -15,7 +15,7 @@ pub struct MatchFinder<'a> {
     prev_mask: usize,
 }
 
-const HASH_BITS: usize = 18;
+const HASH_BITS: usize = 20;
 const HASH_SIZE: usize = 1 << HASH_BITS;
 
 impl<'a> MatchFinder<'a> {
@@ -170,8 +170,17 @@ impl<'a> MatchFinder<'a> {
                 continue;
             }
             let cand = pos - cd;
+            // 3-byte prefilter before the O(len) comparison — the cache
+            // rarely matches on non-repetitive data, so skipping the full
+            // comparison avoids most of the work on random/unique input.
+            if cand + 2 >= self.size || data[cand] != data[pos] {
+                continue;
+            }
+            if data[cand + 1] != data[pos + 1] || data[cand + 2] != data[pos + 2] {
+                continue;
+            }
             let limit = max_len.min(self.size - cand);
-            let mut length = 0;
+            let mut length = 3;
             while length < limit && data[cand + length] == data[pos + length] {
                 length += 1;
             }

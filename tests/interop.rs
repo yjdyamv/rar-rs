@@ -195,14 +195,30 @@ fn add_directory_only_writes_dir_entries_without_children() {
     let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
     assert!(names.iter().any(|n| n == "tree/"), "missing dir: {names:?}");
     assert!(
-        names.iter().any(|n| n == "tree/empty/"),
-        "missing empty dir: {names:?}"
-    );
-    assert!(
         !names.iter().any(|n| n.contains("ignored.txt")),
         "child leaked in: {names:?}"
     );
+    assert!(
+        !names.iter().any(|n| n.contains("empty")),
+        "add_directory_only must not recurse: {names:?}"
+    );
     assert_eq!(rar.read("tree/top.txt").expect("read"), b"y".to_vec());
+
+    // An explicitly added empty directory entry IS preserved.
+    let path2 = dir.path().join("dironly2.rar");
+    {
+        let mut rar = RarArchive::create(&path2).expect("create");
+        rar.add_directory_only(&src, "tree").expect("add dir");
+        rar.add_directory_only(src.join("empty"), "tree/empty")
+            .expect("add empty dir");
+        rar.close().expect("close");
+    }
+    let mut rar = RarArchive::open(&path2).expect("open");
+    let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
+    assert!(
+        names.iter().any(|n| n == "tree/empty/"),
+        "explicit empty dir missing: {names:?}"
+    );
 }
 
 #[test]

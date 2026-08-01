@@ -1117,6 +1117,11 @@ impl RarArchive {
         let method = level_to_method(level);
         let (mut packed_data, actual_method, dict_size_log) = if method == COMP_METHOD_STORE {
             (raw_data.clone(), COMP_METHOD_STORE, 0u8)
+        } else if sample_is_incompressible(&raw_data, method) {
+            // Sample-probe large files: media/archives/random data would waste
+            // minutes of match-finding to end up STORE anyway. Compressing a
+            // 512 KiB head is ~20 ms and reliably flags incompressible input.
+            (raw_data.clone(), COMP_METHOD_STORE, 0u8)
         } else {
             let dsl = dict_size_for_data(raw_data.len());
             let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
@@ -1319,6 +1324,8 @@ impl RarArchive {
             .as_secs() as u32;
 
         let (mut packed_data, actual_method, dict_size_log) = if method == COMP_METHOD_STORE {
+            (data.to_vec(), COMP_METHOD_STORE, 0u8)
+        } else if sample_is_incompressible(data, method) {
             (data.to_vec(), COMP_METHOD_STORE, 0u8)
         } else {
             let dsl = dict_size_for_data(data.len());
@@ -1585,12 +1592,33 @@ impl Drop for RarArchive {
 }
 
 fn dict_size_for_data(data_size: usize) -> u8 {
+    // Cap the window at 1 MiB: larger windows lengthen the hash-chain walk on
+    // incompressible data (each position traverses every in-window candidate),
+    // which dominates compression time. 1 MiB covers virtually all real-world
+    // match distances (WinRAR's default dictionary is 4 MiB).
     let base = 128 * 1024;
     let mut log = 0u8;
-    while (base << log) < data_size && log < 15 {
+    while (base << log) < data_size && log < 3 {
         log += 1;
     }
     log
+}
+
+/// Sample-probe large inputs for incompressibility.
+///
+/// Compressing the first 512 KiB with the same method costs ~20 ms and
+/// reliably identifies media/archives/random data, which would otherwise
+/// spend minutes in the match finder only to end up STORE anyway. The 90%
+/// threshold is conservative: genuinely compressible inputs (text, code,
+/// structured binary) compress the sample far below it.
+fn sample_is_incompressible(data: &[u8], method: u8) -> bool {
+    const SAMPLE: usize = 512 * 1024;
+    if data.len() < 4 * SAMPLE {
+        return false;
+    }
+    let sample = &data[..SAMPLE];
+    let packed = compression::compress(sample, method, 0).unwrap_or_default();
+    packed.len() >= SAMPLE * 9 / 10
 }
 
 /// Discover all volumes of a multi-volume RAR5 archive.
