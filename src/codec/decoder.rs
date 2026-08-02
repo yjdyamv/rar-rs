@@ -3,7 +3,6 @@
 /// Bitstream format derived from analysis of libarchive's
 /// archive_read_support_format_rar5.c by Grzegorz Antoniak (2018),
 /// an independent BSD-2-Clause licensed implementation.
-
 use super::bitstream::BitReader;
 use super::filters::apply_filter_decode;
 use super::huffman::{DecodeTable, decode_symbol};
@@ -174,8 +173,7 @@ fn decode_inner(
         }
 
         let block_bits = ((block_size as u64) - 1) * 8 + (1 + bit_size as u64);
-        let block_start_bits =
-            reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
+        let block_start_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
 
         // ── Read Huffman tables if present ──────────────────────────────
         if table_present {
@@ -193,8 +191,7 @@ fn decode_inner(
 
         // ── Decode symbols ─────────────────────────────────────────────
         while (window.total_written() - output_start) < unpacked_size {
-            let cur_bits =
-                reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
+            let cur_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
             if cur_bits - block_start_bits >= block_bits {
                 break;
             }
@@ -233,10 +230,7 @@ fn decode_inner(
 
         // Position reader at exact end of block
         let block_end_bits = block_start_bits + block_bits;
-        reader.set_position(
-            (block_end_bits / 8) as usize,
-            (block_end_bits % 8) as u8,
-        );
+        reader.set_position((block_end_bits / 8) as usize, (block_end_bits % 8) as u8);
 
         if is_last_block {
             break;
@@ -255,12 +249,8 @@ fn decode_inner(
             continue;
         }
         let region = &mut output[start..end];
-        let filtered = apply_filter_decode(
-            filt.filter_type,
-            region,
-            filt.channels,
-            filt.block_start,
-        );
+        let filtered =
+            apply_filter_decode(filt.filter_type, region, filt.channels, filt.block_start);
         output[start..start + filtered.len()].copy_from_slice(&filtered);
     }
 

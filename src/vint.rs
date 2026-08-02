@@ -2,7 +2,6 @@
 ///
 /// Each byte contributes 7 data bits (bits 0-6). Bit 7 is a continuation
 /// flag: 1 = more bytes follow, 0 = last byte. Little-endian order.
-
 use std::io::{self, Read, Write};
 
 /// Encode a `u64` as a RAR5 vint, returning the bytes.
@@ -106,7 +105,16 @@ mod tests {
 
     #[test]
     fn roundtrip_large() {
-        let values = [0, 1, 127, 128, 16383, 16384, (1u64 << 49) - 1, (1u64 << 56) - 1];
+        let values = [
+            0,
+            1,
+            127,
+            128,
+            16383,
+            16384,
+            (1u64 << 49) - 1,
+            (1u64 << 56) - 1,
+        ];
         for &v in &values {
             let encoded = encode(v);
             let (decoded, _) = decode_from_slice(&encoded, 0).unwrap();

@@ -1,5 +1,4 @@
 /// Error types for RAR5 archive operations.
-
 use std::fmt;
 use std::io;
 

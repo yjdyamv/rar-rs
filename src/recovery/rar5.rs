@@ -980,12 +980,13 @@ fn encode_parity_shards_with_progress(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_inverse_matrix, build_structural_inline_recovery_data, crc64_rar_state, crc64_xz,
+        Error, Gf16, InlineRecoveryPlan, MAX_WINRAR602_DATA_SHARDS, apply_inverse_matrix,
+        build_structural_inline_recovery_data, crc64_rar_state, crc64_xz,
         encode_inline_recovery_parity, encode_parity_shards, invert_linear_system_matrix,
         make_encoder_matrix, plan_inline_recovery, reconstruct_data_shards,
         repair_inline_recovery_archive, repair_inline_recovery_prefix,
         repair_inline_recovery_prefix_shards, shared_gf16, split_prefix_shard_ranges,
-        split_prefix_shards, Error, Gf16, InlineRecoveryPlan, MAX_WINRAR602_DATA_SHARDS,
+        split_prefix_shards,
     };
 
     #[test]
@@ -1217,9 +1218,11 @@ mod tests {
 
         assert_eq!(plan, plan_inline_recovery(prefix.len() as u64, 10).unwrap());
         assert_eq!(parity.len(), plan.recovery_shards as usize);
-        assert!(parity
-            .iter()
-            .all(|shard| shard.len() == plan.group_count as usize));
+        assert!(
+            parity
+                .iter()
+                .all(|shard| shard.len() == plan.group_count as usize)
+        );
 
         let data_shards = split_prefix_shards(prefix, plan).unwrap();
         let shard_refs: Vec<&[u8]> = data_shards.iter().map(Vec::as_slice).collect();

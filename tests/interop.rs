@@ -86,8 +86,7 @@ fn encrypted_archive_roundtrip() {
     let payload = b"classified content".repeat(1000);
 
     {
-        let mut rar =
-            RarArchive::create_with_password(&path, "hunter2").expect("create encrypted");
+        let mut rar = RarArchive::create_with_password(&path, "hunter2").expect("create encrypted");
         rar.add_bytes("secret.txt", &payload, 3).expect("add");
         rar.close().expect("close");
     }
@@ -149,7 +148,8 @@ fn add_as_uses_custom_archive_name() {
     let path = dir.path().join("named.rar");
     {
         let mut rar = RarArchive::create(&path).expect("create");
-        rar.add_as(src.join("a.txt"), "docs/renamed.txt", 3).expect("add");
+        rar.add_as(src.join("a.txt"), "docs/renamed.txt", 3)
+            .expect("add");
         rar.add_as(src, "root", 3).expect("add");
         rar.close().expect("close");
     }
@@ -168,10 +168,7 @@ fn add_as_uses_custom_archive_name() {
         names.iter().any(|n| n == "root/sub/"),
         "missing nested dir entry: {names:?}"
     );
-    assert_eq!(
-        rar.read("docs/renamed.txt").expect("read"),
-        b"aaa".to_vec()
-    );
+    assert_eq!(rar.read("docs/renamed.txt").expect("read"), b"aaa".to_vec());
 }
 
 #[test]
@@ -187,7 +184,8 @@ fn add_directory_only_writes_dir_entries_without_children() {
         let mut rar = RarArchive::create(&path).expect("create");
         // Directory entry only — the child must NOT be pulled in.
         rar.add_directory_only(&src, "tree").expect("add dir");
-        rar.add_as(src.join("top.txt"), "tree/top.txt", 3).expect("add file");
+        rar.add_as(src.join("top.txt"), "tree/top.txt", 3)
+            .expect("add file");
         rar.close().expect("close");
     }
 

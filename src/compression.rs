@@ -1,5 +1,4 @@
 /// RAR5 compression engine — dispatches to store or native LZSS+Huffman codec.
-
 use crate::codec;
 use crate::constants::*;
 

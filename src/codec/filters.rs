@@ -2,7 +2,6 @@
 ///
 /// Post-processing filters applied to regions of decompressed output.
 /// Each filter has decode (inverse) and encode (forward) functions.
-
 use super::tables::*;
 
 /// Apply the inverse filter (for decompression).
@@ -184,7 +183,8 @@ fn arm_decode(data: &mut [u8], file_offset: u64) -> Vec<u8> {
     let mut i = 0;
     while i + 3 < n {
         if data[i + 3] == 0xEB {
-            let offset = (data[i] as u32) | ((data[i + 1] as u32) << 8) | ((data[i + 2] as u32) << 16);
+            let offset =
+                (data[i] as u32) | ((data[i + 1] as u32) << 8) | ((data[i + 2] as u32) << 16);
             let adj = offset.wrapping_sub(((file_offset as u32).wrapping_add(i as u32)) >> 2);
             let masked = adj & 0xFF_FFFF;
             data[i] = (masked & 0xFF) as u8;
@@ -204,7 +204,8 @@ fn arm_encode(data: &mut [u8], file_offset: u64) -> Vec<u8> {
     let mut i = 0;
     while i + 3 < n {
         if data[i + 3] == 0xEB {
-            let offset = (data[i] as u32) | ((data[i + 1] as u32) << 8) | ((data[i + 2] as u32) << 16);
+            let offset =
+                (data[i] as u32) | ((data[i + 1] as u32) << 8) | ((data[i + 2] as u32) << 16);
             let adj = offset.wrapping_add(((file_offset as u32).wrapping_add(i as u32)) >> 2);
             let masked = adj & 0xFF_FFFF;
             data[i] = (masked & 0xFF) as u8;

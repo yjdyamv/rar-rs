@@ -11,7 +11,6 @@
 /// ... type-specific fields ...
 /// [Extra Area]    bytes — if present
 /// ```
-
 use std::io::{self, Read, Seek};
 
 use crate::constants::*;

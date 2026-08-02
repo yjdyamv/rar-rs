@@ -3,7 +3,6 @@
 /// Bitstream format derived from analysis of libarchive's
 /// archive_read_support_format_rar5.c by Grzegorz Antoniak (2018),
 /// an independent BSD-2-Clause licensed implementation.
-
 use super::bitstream::BitWriter;
 use super::huffman::{EncodeTable, build_code_lengths_from_freqs, encode_symbol};
 use super::lz_match::MatchFinder;
@@ -13,12 +12,12 @@ use super::tables::*;
 
 // (chain_len, lazy_threshold, max_match)
 const LEVEL_PARAMS: [(usize, usize, usize); 6] = [
-    (0, 0, 0),            // 0: store (unused)
-    (4, 0, 0x1001),       // 1: fastest
-    (16, 0, 0x1001),      // 2: fast
-    (96, 8, 0x1001),      // 3: normal
-    (256, 8, 0x1001),     // 4: good
-    (1024, 8, 0x1001),    // 5: best
+    (0, 0, 0),         // 0: store (unused)
+    (4, 0, 0x1001),    // 1: fastest
+    (16, 0, 0x1001),   // 2: fast
+    (96, 8, 0x1001),   // 3: normal
+    (256, 8, 0x1001),  // 4: good
+    (1024, 8, 0x1001), // 5: best
 ];
 
 const MAX_BLOCK_SIZE: usize = 0x20000; // 128 KB
@@ -251,7 +250,13 @@ fn encode_block(symbols: &[Symbol], is_last: bool) -> Vec<u8> {
 
     let mut writer = BitWriter::new();
 
-    write_tables(&mut writer, &nc_lengths, &dc_lengths, &ldc_lengths, &rc_lengths);
+    write_tables(
+        &mut writer,
+        &nc_lengths,
+        &dc_lengths,
+        &ldc_lengths,
+        &rc_lengths,
+    );
 
     for sym in symbols {
         match sym {
@@ -301,7 +306,13 @@ fn encode_empty_block() -> Vec<u8> {
         v
     };
 
-    write_tables(&mut writer, &nc_lengths, &dc_lengths, &ldc_lengths, &rc_lengths);
+    write_tables(
+        &mut writer,
+        &nc_lengths,
+        &dc_lengths,
+        &ldc_lengths,
+        &rc_lengths,
+    );
 
     let total_bits = writer.bit_count();
     let block_data = writer.into_bytes();

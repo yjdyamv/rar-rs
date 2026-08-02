@@ -2,7 +2,6 @@
 ///
 /// Clean-room implementation based on the decompression algorithm from
 /// libarchive's archive_read_support_format_rar.c (BSD-2-Clause).
-
 use crate::codec::bitstream::BitReader;
 use crate::codec::huffman::{DecodeTable, decode_symbol};
 use crate::codec::window::SlidingWindow;
@@ -13,8 +12,8 @@ use super::constants::*;
 
 /// Length base values (28 entries, used for match length decoding).
 static LENGTH_BASES: [u32; 28] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112,
-    128, 160, 192, 224,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
+    160, 192, 224,
 ];
 
 /// Extra bits for each length slot.
@@ -25,17 +24,17 @@ static LENGTH_BITS: [u8; 28] = [
 /// Distance base values (60 entries).
 static OFFSET_BASES: [u32; 60] = [
     0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536,
-    2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072,
-    196608, 262144, 327680, 393216, 458752, 524288, 589824, 655360, 720896, 786432, 851968,
-    917504, 983040, 1048576, 1310720, 1572864, 1835008, 2097152, 2359296, 2621440, 2883584,
-    3145728, 3407872, 3670016, 3932160,
+    2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608,
+    262144, 327680, 393216, 458752, 524288, 589824, 655360, 720896, 786432, 851968, 917504, 983040,
+    1048576, 1310720, 1572864, 1835008, 2097152, 2359296, 2621440, 2883584, 3145728, 3407872,
+    3670016, 3932160,
 ];
 
 /// Extra bits for each distance slot.
 static OFFSET_BITS: [u8; 60] = [
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
-    13, 13, 14, 14, 15, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 18, 18, 18,
-    18, 18, 18, 18, 18, 18, 18, 18, 18,
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13, 14, 14, 15, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 18, 18, 18, 18, 18,
+    18, 18, 18, 18, 18, 18, 18,
 ];
 
 /// Short offset base values (8 entries, for symbols 263-270).
@@ -252,8 +251,7 @@ fn decompress_inner(
                 };
                 let to_flush = flush_to - last_flush;
                 if to_flush > 0 {
-                    let chunk =
-                        state.window.get_output(last_flush, to_flush as usize);
+                    let chunk = state.window.get_output(last_flush, to_flush as usize);
                     output.extend_from_slice(&chunk);
                     last_flush = flush_to;
                 }
@@ -278,8 +276,7 @@ fn decompress_inner(
                 // Block control
                 let new_file = reader.read_bits(1).map_err(|e| e.to_string())? == 0;
                 if new_file {
-                    state.start_new_table =
-                        reader.read_bits(1).map_err(|e| e.to_string())? != 0;
+                    state.start_new_table = reader.read_bits(1).map_err(|e| e.to_string())? != 0;
                     break;
                 } else {
                     parse_codes(&mut reader, state)?;
@@ -304,12 +301,12 @@ fn decompress_inner(
                 let cache_idx = sym - 259;
                 let offs = state.old_offset[cache_idx];
 
-                let len_sym =
-                    decode_symbol(t_length, &mut reader).map_err(|e| e.to_string())?;
+                let len_sym = decode_symbol(t_length, &mut reader).map_err(|e| e.to_string())?;
                 let mut len = LENGTH_BASES[len_sym] + 2;
                 if LENGTH_BITS[len_sym] > 0 {
-                    len +=
-                        reader.read_bits(LENGTH_BITS[len_sym]).map_err(|e| e.to_string())?;
+                    len += reader
+                        .read_bits(LENGTH_BITS[len_sym])
+                        .map_err(|e| e.to_string())?;
                 }
 
                 let o = state.old_offset[cache_idx];
@@ -328,8 +325,9 @@ fn decompress_inner(
                 let idx = sym - 263;
                 let mut offs = SHORT_BASES[idx] + 1;
                 if SHORT_BITS[idx] > 0 {
-                    offs +=
-                        reader.read_bits(SHORT_BITS[idx]).map_err(|e| e.to_string())?;
+                    offs += reader
+                        .read_bits(SHORT_BITS[idx])
+                        .map_err(|e| e.to_string())?;
                 }
 
                 state.old_offset[3] = state.old_offset[2];
@@ -345,12 +343,12 @@ fn decompress_inner(
                 let len_idx = sym - 271;
                 let mut len = LENGTH_BASES[len_idx] + 3;
                 if LENGTH_BITS[len_idx] > 0 {
-                    len +=
-                        reader.read_bits(LENGTH_BITS[len_idx]).map_err(|e| e.to_string())?;
+                    len += reader
+                        .read_bits(LENGTH_BITS[len_idx])
+                        .map_err(|e| e.to_string())?;
                 }
 
-                let off_sym =
-                    decode_symbol(t_offset, &mut reader).map_err(|e| e.to_string())?;
+                let off_sym = decode_symbol(t_offset, &mut reader).map_err(|e| e.to_string())?;
                 let mut offs = OFFSET_BASES[off_sym] + 1;
 
                 if OFFSET_BITS[off_sym] > 0 {
@@ -365,8 +363,8 @@ fn decompress_inner(
                             state.num_low_offset_repeats -= 1;
                             offs += state.last_low_offset;
                         } else {
-                            let low_sym = decode_symbol(t_low, &mut reader)
-                                .map_err(|e| e.to_string())?;
+                            let low_sym =
+                                decode_symbol(t_low, &mut reader).map_err(|e| e.to_string())?;
                             if low_sym == 16 {
                                 state.num_low_offset_repeats = 15;
                                 offs += state.last_low_offset;
@@ -578,7 +576,10 @@ fn read_filter(reader: &mut BitReader, state: &mut Rar4DecoderState) -> Result<(
 
 /// Read a byte from the Huffman-decoded bitstream.
 fn rar_decode_byte(reader: &mut BitReader) -> Result<u8, String> {
-    reader.read_bits(8).map(|v| v as u8).map_err(|e| e.to_string())
+    reader
+        .read_bits(8)
+        .map(|v| v as u8)
+        .map_err(|e| e.to_string())
 }
 
 // ── Memory bit reader for VM bytecode parsing ─────────────────────────────
@@ -767,8 +768,7 @@ fn execute_filter_rgb(data: &mut [u8], stride: usize, byte_offset: usize) {
                 if prev_idx + 3 < length && j >= 3 {
                     let delta1 = (dst[prev_idx + 3] as i32 - dst[prev_idx] as i32).unsigned_abs();
                     let delta2 = (byte as i32 - dst[prev_idx] as i32).unsigned_abs();
-                    let delta3 = (dst[prev_idx + 3] as i32 - dst[prev_idx] as i32
-                        + byte as i32
+                    let delta3 = (dst[prev_idx + 3] as i32 - dst[prev_idx] as i32 + byte as i32
                         - dst[prev_idx] as i32)
                         .unsigned_abs();
                     if delta1 > delta2 || delta1 > delta3 {
@@ -863,12 +863,36 @@ fn execute_filter_audio(data: &mut [u8], channels: usize) {
                 }
                 error = [0; 11];
                 match idx {
-                    1 => { if weight[0] >= -16 { weight[0] -= 1; } }
-                    2 => { if weight[0] < 16 { weight[0] += 1; } }
-                    3 => { if weight[1] >= -16 { weight[1] -= 1; } }
-                    4 => { if weight[1] < 16 { weight[1] += 1; } }
-                    5 => { if weight[2] >= -16 { weight[2] -= 1; } }
-                    6 => { if weight[2] < 16 { weight[2] += 1; } }
+                    1 => {
+                        if weight[0] >= -16 {
+                            weight[0] -= 1;
+                        }
+                    }
+                    2 => {
+                        if weight[0] < 16 {
+                            weight[0] += 1;
+                        }
+                    }
+                    3 => {
+                        if weight[1] >= -16 {
+                            weight[1] -= 1;
+                        }
+                    }
+                    4 => {
+                        if weight[1] < 16 {
+                            weight[1] += 1;
+                        }
+                    }
+                    5 => {
+                        if weight[2] >= -16 {
+                            weight[2] -= 1;
+                        }
+                    }
+                    6 => {
+                        if weight[2] < 16 {
+                            weight[2] += 1;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -981,8 +1005,7 @@ fn parse_codes(reader: &mut BitReader, state: &mut Rar4DecoderState) -> Result<(
 
     let main_lengths = &state.length_table[..RAR4_NC];
     let offset_lengths = &state.length_table[RAR4_NC..RAR4_NC + RAR4_DC];
-    let low_offset_lengths =
-        &state.length_table[RAR4_NC + RAR4_DC..RAR4_NC + RAR4_DC + RAR4_LDC];
+    let low_offset_lengths = &state.length_table[RAR4_NC + RAR4_DC..RAR4_NC + RAR4_DC + RAR4_LDC];
     let length_lengths = &state.length_table[RAR4_NC + RAR4_DC + RAR4_LDC..HUFFMAN_TABLE_SIZE];
 
     state.table_main = Some(DecodeTable::new(main_lengths));

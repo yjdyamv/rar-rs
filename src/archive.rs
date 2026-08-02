@@ -2,7 +2,6 @@
 ///
 /// Supports opening existing archives for reading/extraction and creating
 /// new archives from scratch.
-
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -372,10 +371,8 @@ impl RarArchive {
                     "header encryption is not supported for multi-volume archives".into(),
                 ));
             }
-            let encr = encryption::EncryptionParams::generate_for_password(
-                password,
-                ENCR_PBKDF2_ITER_LOG,
-            );
+            let encr =
+                encryption::EncryptionParams::generate_for_password(password, ENCR_PBKDF2_ITER_LOG);
             let block = encr.to_archive_header_block();
             let stream = self.stream.as_mut().unwrap();
             stream.write_all(&block)?;
@@ -440,11 +437,9 @@ impl RarArchive {
             reader.read_exact(&mut prefix)?;
         }
 
-        let rr_data = crate::recovery::rar5::build_structural_inline_recovery_data(
-            &prefix,
-            percent,
-        )
-        .map_err(|e| RarError::Format(format!("recovery record encode: {e}")))?;
+        let rr_data =
+            crate::recovery::rar5::build_structural_inline_recovery_data(&prefix, percent)
+                .map_err(|e| RarError::Format(format!("recovery record encode: {e}")))?;
 
         // RR service header: type 3, name "RR", SubData = percent byte.
         let mut body = Vec::new();
@@ -1241,9 +1236,9 @@ impl RarArchive {
         // Determine dict_size from the first compressed entry in the chain
         if is_rar4 {
             if self.rar4_solid_state.is_none() {
-                self.rar4_solid_state = Some(
-                    rar4::decoder::Rar4DecoderState::new(rar4::constants::RAR4_DEFAULT_DICT_SIZE),
-                );
+                self.rar4_solid_state = Some(rar4::decoder::Rar4DecoderState::new(
+                    rar4::constants::RAR4_DEFAULT_DICT_SIZE,
+                ));
             }
         } else if self.solid_state.is_none() {
             let dict_log = self.entries[chain_start].header.comp_dict_size;
@@ -1357,10 +1352,7 @@ impl RarArchive {
                         return Err(RarError::Crc {
                             expected: expected_crc,
                             actual: actual_crc,
-                            context: format!(
-                                "{} vol {}",
-                                hdr.name, chunk.volume_index
-                            ),
+                            context: format!("{} vol {}", hdr.name, chunk.volume_index),
                         });
                     }
                 }
@@ -1461,11 +1453,7 @@ impl RarArchive {
     // ── Public API: creation ───────────────────────────────────────────────
 
     /// Add a file from the filesystem to the archive.
-    pub fn add(
-        &mut self,
-        path: impl AsRef<Path>,
-        compression_level: u8,
-    ) -> RarResult<()> {
+    pub fn add(&mut self, path: impl AsRef<Path>, compression_level: u8) -> RarResult<()> {
         let path = path.as_ref();
         if !path.exists() {
             return Err(RarError::Io(io::Error::new(
@@ -1509,12 +1497,7 @@ impl RarArchive {
         }
     }
 
-    fn add_file(
-        &mut self,
-        path: &Path,
-        arcname: Option<&str>,
-        level: u8,
-    ) -> RarResult<()> {
+    fn add_file(&mut self, path: &Path, arcname: Option<&str>, level: u8) -> RarResult<()> {
         let raw_data = fs::read(path)?;
         let file_crc = {
             let mut h = crc32fast::Hasher::new();
@@ -1537,9 +1520,8 @@ impl RarArchive {
                 let cb: &mut dyn FnMut(u64, u64) = cb;
                 progress = Some(cb);
             }
-            let compressed =
-                compression::compress_with_progress(&raw_data, method, dsl, progress)
-                    .map_err(|e| RarError::Unsupported(e))?;
+            let compressed = compression::compress_with_progress(&raw_data, method, dsl, progress)
+                .map_err(|e| RarError::Unsupported(e))?;
             if compressed.len() >= raw_data.len() {
                 (raw_data.clone(), COMP_METHOD_STORE, 0u8)
             } else {
@@ -1570,9 +1552,8 @@ impl RarArchive {
 
         // Encrypt if password is set
         let extra_data = if let Some(ref password) = self.password {
-            let enc_params = encryption::EncryptionParams::generate_for_password(
-                password, ENCR_PBKDF2_ITER_LOG,
-            );
+            let enc_params =
+                encryption::EncryptionParams::generate_for_password(password, ENCR_PBKDF2_ITER_LOG);
             packed_data = enc_params.encrypt(&packed_data, password);
             enc_params.to_extra_bytes()
         } else {
@@ -1603,11 +1584,7 @@ impl RarArchive {
     /// Writes the directory header without traversing children. Callers that
     /// enumerate files themselves (e.g. with exclusion filtering) use this to
     /// keep empty directories and the directory structure in the archive.
-    pub fn add_directory_only(
-        &mut self,
-        path: impl AsRef<Path>,
-        arcname: &str,
-    ) -> RarResult<()> {
+    pub fn add_directory_only(&mut self, path: impl AsRef<Path>, arcname: &str) -> RarResult<()> {
         let path = path.as_ref();
         let name = arcname.replace('\\', "/").trim_end_matches('/').to_string() + "/";
 
@@ -1693,9 +1670,7 @@ impl RarArchive {
         });
 
         if recursive {
-            let mut children: Vec<_> = fs::read_dir(path)?
-                .filter_map(|e| e.ok())
-                .collect();
+            let mut children: Vec<_> = fs::read_dir(path)?.filter_map(|e| e.ok()).collect();
             children.sort_by_key(|e| e.file_name());
 
             for child in children {
@@ -1753,9 +1728,8 @@ impl RarArchive {
 
         // Encrypt if password is set
         let extra_data = if let Some(ref password) = self.password {
-            let enc_params = encryption::EncryptionParams::generate_for_password(
-                password, ENCR_PBKDF2_ITER_LOG,
-            );
+            let enc_params =
+                encryption::EncryptionParams::generate_for_password(password, ENCR_PBKDF2_ITER_LOG);
             packed_data = enc_params.encrypt(&packed_data, password);
             enc_params.to_extra_bytes()
         } else {
@@ -1915,8 +1889,7 @@ impl RarArchive {
 
             let chunk_size = bytes_for_data.min(total_packed - offset);
             let is_last = offset + chunk_size >= total_packed;
-            let chunk_packed =
-                &packed_data[offset as usize..(offset + chunk_size) as usize];
+            let chunk_packed = &packed_data[offset as usize..(offset + chunk_size) as usize];
 
             // Set final flags
             if is_last {
@@ -2185,7 +2158,8 @@ mod tests {
             let mut ar = RarArchive::create_with_password(&path, "multi").unwrap();
             ar.add_bytes("a.txt", b"First", 0).unwrap();
             ar.add_bytes("b.txt", &b"Second ".repeat(50), 3).unwrap();
-            ar.add_bytes("c.bin", &(0..=255u8).collect::<Vec<_>>(), 0).unwrap();
+            ar.add_bytes("c.bin", &(0..=255u8).collect::<Vec<_>>(), 0)
+                .unwrap();
             ar.close().unwrap();
         }
         {
@@ -2258,7 +2232,10 @@ mod tests {
         }
         // The raw archive must not contain the plaintext file name.
         let raw = std::fs::read(&path).unwrap();
-        assert!(!raw.windows(b"secret/name.txt".len()).any(|w| w == b"secret/name.txt"));
+        assert!(
+            !raw.windows(b"secret/name.txt".len())
+                .any(|w| w == b"secret/name.txt")
+        );
         {
             let mut ar = RarArchive::open_with_password(&path, "hdr-pw").unwrap();
             assert_eq!(ar.read("secret/name.txt").unwrap(), data);
@@ -2363,7 +2340,10 @@ mod tests {
         // Discover from part2
         let vols2 = discover_volumes(&dir.path().join("disc.part2.rar"));
         assert_eq!(vols2.len(), vols.len());
-        assert_eq!(vols2[0].file_name().unwrap().to_str().unwrap(), "disc.part1.rar");
+        assert_eq!(
+            vols2[0].file_name().unwrap().to_str().unwrap(),
+            "disc.part1.rar"
+        );
     }
 
     #[test]

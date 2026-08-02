@@ -36,7 +36,7 @@ pub mod write_progress;
 pub use write_progress::{WriteOperation, WriteProgressEvent};
 pub mod vint;
 
-pub use archive::{discover_volumes, ArchiveEntry, RarArchive};
+pub use archive::{ArchiveEntry, RarArchive, discover_volumes};
 pub use constants::*;
 pub use encryption::EncryptionParams;
 pub use error::{RarError, RarResult};

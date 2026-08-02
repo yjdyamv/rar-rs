@@ -83,7 +83,9 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
     }
 
     if positional.len() < 2 {
-        return Err("usage: rar a [-m0..-m5] [-p<password>] [-v<size>] <archive.rar> <files...>".into());
+        return Err(
+            "usage: rar a [-m0..-m5] [-p<password>] [-v<size>] <archive.rar> <files...>".into(),
+        );
     }
     let archive_path = positional[0];
     let files = &positional[1..];
@@ -103,15 +105,23 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
     };
 
     for file in files {
-        rar.add(file, level).map_err(|e| format!("add {file}: {e}"))?;
+        rar.add(file, level)
+            .map_err(|e| format!("add {file}: {e}"))?;
     }
 
     rar.close().map_err(|e| format!("close: {e}"))?;
     if volume_size.is_some() {
         let vols = rar5::discover_volumes(std::path::Path::new(archive_path));
-        println!("Created {} volume(s) ({} file(s), level {level})", vols.len(), files.len());
+        println!(
+            "Created {} volume(s) ({} file(s), level {level})",
+            vols.len(),
+            files.len()
+        );
     } else {
-        println!("Created {archive_path} ({} file(s), level {level})", files.len());
+        println!(
+            "Created {archive_path} ({} file(s), level {level})",
+            files.len()
+        );
     }
     Ok(())
 }
@@ -135,7 +145,10 @@ fn cmd_list(args: &[String]) -> Result<(), String> {
         let ratio = if entry.is_dir() {
             "  dir".to_string()
         } else if entry.size() > 0 {
-            format!("{:.1}%", entry.compressed_size() as f64 / entry.size() as f64 * 100.0)
+            format!(
+                "{:.1}%",
+                entry.compressed_size() as f64 / entry.size() as f64 * 100.0
+            )
         } else {
             " 0.0%".to_string()
         };

@@ -6,7 +6,6 @@
 /// an independent BSD-2-Clause licensed implementation.
 ///
 /// License: BSD-2-Clause
-
 pub mod bitstream;
 pub mod decoder;
 pub mod encoder;
@@ -16,5 +15,5 @@ pub mod lz_match;
 pub mod tables;
 pub mod window;
 
-pub use decoder::{decode, decode_standalone, DecoderState};
+pub use decoder::{DecoderState, decode, decode_standalone};
 pub use encoder::{encode, encode_with_progress};

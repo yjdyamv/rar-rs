@@ -9,7 +9,6 @@
 /// 3. Padding: Zero-fill to 16-byte AES block boundary
 /// 4. Header encryption: When archive-level encryption header is present,
 ///    all subsequent blocks (including file headers) are also encrypted.
-
 use crate::constants::*;
 use crate::error::{RarError, RarResult};
 use crate::vint;
@@ -25,12 +24,7 @@ type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 /// Derive a 32-byte AES-256 key from `password` using PBKDF2-HMAC-SHA256.
 pub fn derive_key(password: &str, salt: &[u8], iterations: u32) -> [u8; ENCR_KEY_SIZE] {
     let mut key = [0u8; ENCR_KEY_SIZE];
-    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
-        password.as_bytes(),
-        salt,
-        iterations,
-        &mut key,
-    );
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), salt, iterations, &mut key);
     key
 }
 

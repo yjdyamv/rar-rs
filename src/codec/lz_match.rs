@@ -1,5 +1,4 @@
 /// RAR5 LZ match finder — hash-chain match finder for LZSS compression.
-
 use super::tables::DIST_CACHE_SIZE;
 
 pub struct MatchFinder<'a> {

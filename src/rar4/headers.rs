@@ -2,7 +2,6 @@
 ///
 /// Clean-room implementation based on the header layout documented in
 /// libarchive's archive_read_support_format_rar.c (BSD-2-Clause).
-
 use std::io::{self, Read, Seek, SeekFrom};
 
 use crate::error::{RarError, RarResult};
@@ -67,11 +66,7 @@ impl Rar4CommonHeader {
 
     /// Verify the header CRC16 (lower 16 bits of CRC32 of header bytes
     /// after the CRC field).
-    pub fn verify_crc<R: Read + Seek>(
-        &self,
-        stream: &mut R,
-        header_start: u64,
-    ) -> RarResult<()> {
+    pub fn verify_crc<R: Read + Seek>(&self, stream: &mut R, header_start: u64) -> RarResult<()> {
         let crc_data_len = self.header_size as usize - 2; // exclude CRC16 field
         if crc_data_len == 0 {
             return Ok(());
@@ -149,9 +144,7 @@ pub fn parse_rar4_file_header<R: Read + Seek>(
     // up to header_size).
     let ext_len = common.header_size as usize - 7;
     if ext_len < 25 {
-        return Err(RarError::Format(
-            "RAR4 file header too short".into(),
-        ));
+        return Err(RarError::Format("RAR4 file header too short".into()));
     }
     let mut ext = vec![0u8; ext_len];
     stream.read_exact(&mut ext)?;
@@ -202,8 +195,7 @@ pub fn parse_rar4_file_header<R: Read + Seek>(
         if pos + 8 > ext.len() {
             return Err(RarError::Format("RAR4 FHD_LARGE: header too short".into()));
         }
-        let high_packed =
-            u32::from_le_bytes([ext[pos], ext[pos + 1], ext[pos + 2], ext[pos + 3]]);
+        let high_packed = u32::from_le_bytes([ext[pos], ext[pos + 1], ext[pos + 2], ext[pos + 3]]);
         pos += 4;
         let high_unpacked =
             u32::from_le_bytes([ext[pos], ext[pos + 1], ext[pos + 2], ext[pos + 3]]);
@@ -214,7 +206,9 @@ pub fn parse_rar4_file_header<R: Read + Seek>(
 
     // Filename
     if pos + name_size > ext.len() {
-        return Err(RarError::Format("RAR4 file header: filename extends past header".into()));
+        return Err(RarError::Format(
+            "RAR4 file header: filename extends past header".into(),
+        ));
     }
     let name_bytes = &ext[pos..pos + name_size];
     pos += name_size;
@@ -239,11 +233,12 @@ pub fn parse_rar4_file_header<R: Read + Seek>(
     let _ = pos;
 
     // Determine if directory
-    let is_directory = if host_os == RAR4_OS_UNIX {
-        file_attr & (RAR4_ATTR_UNIX_DIR << 16) != 0
-    } else {
-        file_attr & RAR4_ATTR_DIRECTORY != 0
-    } || (method == RAR4_METHOD_STORE && unpacked_size == 0 && name.ends_with('/'));
+    let is_directory =
+        if host_os == RAR4_OS_UNIX {
+            file_attr & (RAR4_ATTR_UNIX_DIR << 16) != 0
+        } else {
+            file_attr & RAR4_ATTR_DIRECTORY != 0
+        } || (method == RAR4_METHOD_STORE && unpacked_size == 0 && name.ends_with('/'));
 
     // Map RAR4 method (0x30-0x35) to normalized method (0-5)
     let comp_method = method.wrapping_sub(RAR4_METHOD_STORE);
