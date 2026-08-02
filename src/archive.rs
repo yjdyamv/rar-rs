@@ -76,6 +76,9 @@ pub struct RarArchive {
     /// Recovery volumes: percent (0-100) of `.rev` files created alongside
     /// a multi-volume archive (WinRAR `-rv`).
     recovery_volumes_percent: Option<u8>,
+    /// Recovery volumes: exact `.rev` file count (auto-capped at the data
+    /// volume count).
+    recovery_volumes_count: Option<u32>,
     /// File offset of the main archive header (for the recovery-record
     /// locator patch written at close time).
     main_header_start: Option<u64>,
@@ -122,6 +125,7 @@ impl RarArchive {
             archive_encr: None,
             recovery_percent: None,
             recovery_volumes_percent: None,
+            recovery_volumes_count: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -151,6 +155,7 @@ impl RarArchive {
             archive_encr: None,
             recovery_percent: None,
             recovery_volumes_percent: None,
+            recovery_volumes_count: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -185,6 +190,7 @@ impl RarArchive {
             archive_encr: None,
             recovery_percent: None,
             recovery_volumes_percent: None,
+            recovery_volumes_count: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -216,6 +222,7 @@ impl RarArchive {
             archive_encr: None,
             recovery_percent: None,
             recovery_volumes_percent: None,
+            recovery_volumes_count: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: vec![vol_path.clone()],
@@ -256,6 +263,48 @@ impl RarArchive {
             archive_encr: None,
             recovery_percent: None,
             recovery_volumes_percent: Some(percent.min(100)),
+            recovery_volumes_count: None,
+            main_header_start: None,
+            rr_offset_field_pos: None,
+            volume_paths: vec![vol_path.clone()],
+            volume_size: Some(volume_size),
+            current_volume: 1,
+            volume_bytes_written: 0,
+            progress_callback: None,
+        };
+        let f = File::create(&vol_path)?;
+        archive.stream = Some(f);
+        archive.write_signature()?;
+        archive.write_archive_header_vol(None)?;
+        archive.volume_bytes_written = archive.stream.as_ref().unwrap().stream_position()?;
+        Ok(archive)
+    }
+
+    /// Create a new multi-volume RAR5 archive with an exact number of
+    /// recovery volumes. The count is auto-capped at the data volume count.
+    pub fn create_multivolume_with_recovery_count(
+        path: impl AsRef<Path>,
+        volume_size: u64,
+        rec_count: u32,
+    ) -> RarResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let volume_base = get_volume_base(&path);
+        let vol_path = volume_path(path.parent().unwrap_or(Path::new(".")), &volume_base, 1);
+        let mut archive = RarArchive {
+            path,
+            mode: Mode::Write,
+            entries: Vec::new(),
+            stream: None,
+            format_version: 5,
+            solid_state: None,
+            rar4_solid_state: None,
+            solid_decoded_through: -1,
+            password: None,
+            header_encryption: false,
+            archive_encr: None,
+            recovery_percent: None,
+            recovery_volumes_percent: None,
+            recovery_volumes_count: Some(rec_count),
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: vec![vol_path.clone()],
@@ -301,6 +350,7 @@ impl RarArchive {
             archive_encr: None,
             recovery_percent: None,
             recovery_volumes_percent: None,
+            recovery_volumes_count: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -345,6 +395,7 @@ impl RarArchive {
             archive_encr: None,
             recovery_percent: Some(percent.min(100)),
             recovery_volumes_percent: None,
+            recovery_volumes_count: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -379,6 +430,7 @@ impl RarArchive {
             archive_encr: None,
             recovery_percent: Some(percent.min(100)),
             recovery_volumes_percent: None,
+            recovery_volumes_count: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -463,7 +515,7 @@ impl RarArchive {
             self.mode = Mode::Read; // prevent double-write
         }
         self.stream = None;
-        if self.recovery_volumes_percent.is_some() {
+        if self.recovery_volumes_percent.is_some() || self.recovery_volumes_count.is_some() {
             self.write_recovery_volumes()?;
         }
         Ok(())
@@ -472,10 +524,18 @@ impl RarArchive {
     /// Generate the `.rev` recovery-volume files for a completed
     /// multi-volume archive set (WinRAR `-rv` equivalent).
     fn write_recovery_volumes(&mut self) -> RarResult<()> {
-        let percent = self.recovery_volumes_percent.unwrap_or(0) as u64;
-        if self.volume_paths.is_empty() {
+        let nd = self.volume_paths.len();
+        if nd == 0 {
             return Err(RarError::Format("no volumes for recovery volumes".into()));
         }
+        // Exact count wins; the percent variant is converted at close time.
+        let rec_count = if let Some(count) = self.recovery_volumes_count {
+            (count as usize).min(nd)
+        } else if let Some(percent) = self.recovery_volumes_percent {
+            crate::recovery::rev5::plan_recovery_volume_count(nd, percent as u64)?
+        } else {
+            return Ok(());
+        };
         // Read all volume files.
         let mut volume_data: Vec<Vec<u8>> = Vec::with_capacity(self.volume_paths.len());
         let mut volume_sizes = Vec::with_capacity(self.volume_paths.len());
@@ -490,7 +550,7 @@ impl RarArchive {
         }
 
         let refs: Vec<&[u8]> = volume_data.iter().map(|v| v.as_slice()).collect();
-        let (rec_count, payloads) = crate::recovery::rev5::encode_recovery_volumes(&refs, percent)?;
+        let payloads = crate::recovery::rev5::encode_recovery_volumes_exact(&refs, rec_count)?;
 
         let base = get_volume_base(&self.path);
         let parent = self.path.parent().unwrap_or(Path::new("."));
@@ -2262,6 +2322,64 @@ mod tests {
             assert_eq!(ar.read("c.bin").unwrap(), (0..=255u8).collect::<Vec<_>>());
         }
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn recovery_volume_count_is_capped_at_data_volumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("vol.part1.rar");
+        let data = b"volume recovery payload ".repeat(4000); // ~100 KiB
+        {
+            // Ask for 10 .rev files; the archive only splits into 3
+            // volumes, so exactly 3 .rev files must be produced.
+            let mut ar =
+                RarArchive::create_multivolume_with_recovery_count(&base, 32768, 10).unwrap();
+            ar.add_bytes("big.bin", &data, 0).unwrap();
+            ar.close().unwrap();
+        }
+        let revs: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| {
+                let p = e.unwrap().path();
+                (p.extension().is_some_and(|e| e == "rev")).then_some(p)
+            })
+            .collect();
+        let volumes: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| {
+                let p = e.unwrap().path();
+                (p.extension().is_some_and(|e| e == "rar")).then_some(p)
+            })
+            .collect();
+        assert_eq!(volumes.len(), 3, "expected 3 data volumes");
+        assert_eq!(
+            revs.len(),
+            3,
+            "recovery volume count must be capped at data volumes"
+        );
+        std::fs::remove_dir_all(dir.path()).ok();
+    }
+
+    #[test]
+    fn recovery_volume_exact_count_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("vol.part1.rar");
+        let data = b"volume recovery payload ".repeat(4000);
+        {
+            let mut ar =
+                RarArchive::create_multivolume_with_recovery_count(&base, 32768, 2).unwrap();
+            ar.add_bytes("big.bin", &data, 0).unwrap();
+            ar.close().unwrap();
+        }
+        let revs: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| {
+                let p = e.unwrap().path();
+                (p.extension().is_some_and(|e| e == "rev")).then_some(p)
+            })
+            .collect();
+        assert_eq!(revs.len(), 2, "expected exactly 2 .rev files");
+        std::fs::remove_dir_all(dir.path()).ok();
     }
 
     #[test]

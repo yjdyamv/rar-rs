@@ -35,6 +35,24 @@ pub fn encode_recovery_volumes(
     rec_percent: u64,
 ) -> RarResult<(usize, Vec<Vec<u8>>)> {
     let rec_count = plan_recovery_volume_count(volume_data.len(), rec_percent)?;
+    Ok((
+        rec_count,
+        encode_recovery_volumes_exact(volume_data, rec_count)?,
+    ))
+}
+
+/// Encode exactly `rec_count` recovery-volume parity payloads (caller is
+/// responsible for capping `rec_count` at the data volume count).
+pub fn encode_recovery_volumes_exact(
+    volume_data: &[&[u8]],
+    rec_count: usize,
+) -> RarResult<Vec<Vec<u8>>> {
+    if volume_data.is_empty() {
+        return Err(RarError::Format(
+            "no data volumes for recovery volumes".into(),
+        ));
+    }
+    let rec_count = rec_count.min(volume_data.len()).max(1);
     let maxlen = volume_data.iter().map(|d| d.len()).max().unwrap_or(0);
     let maxlen = if maxlen % 2 == 0 { maxlen } else { maxlen + 1 };
     let mut padded: Vec<Vec<u8>> = Vec::with_capacity(volume_data.len());
@@ -46,7 +64,7 @@ pub fn encode_recovery_volumes(
     let refs: Vec<&[u8]> = padded.iter().map(|v| v.as_slice()).collect();
     let parity = encode_parity_shards(&refs, rec_count)
         .map_err(|e| RarError::Format(format!("recovery volumes encode: {e}")))?;
-    Ok((rec_count, parity))
+    Ok(parity)
 }
 
 /// Serialize one `.rev` file: signature, header (with the per-volume
