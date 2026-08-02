@@ -251,3 +251,70 @@ fn progress_callback_reports_monotonic_progress() {
     assert_eq!(last_done, last_total);
     assert_eq!(last_total, payload.len() as u64);
 }
+
+#[test]
+fn lz_tail_match_fixture_roundtrips_without_panic() {
+    // Regression for the 3-byte cache prefilter out-of-bounds read added in
+    // 341bd79: this 362-byte fixture ends with two bytes that match an
+    // earlier position at a cached distance, which used to index past the
+    // end of the buffer at `pos = size - 2` and abort the process.
+    let data = include_bytes!("fixtures/tail-match-362.bin");
+    let dir = make_temp_dir();
+    let path = dir.path().join("tail.rar");
+
+    {
+        let mut rar = RarArchive::create(&path).expect("create");
+        rar.add_bytes("tail.json", data, 3).expect("add");
+        rar.close().expect("close");
+    }
+
+    let mut rar = RarArchive::open(&path).expect("open");
+    assert_eq!(rar.read("tail.json").expect("read").as_slice(), &data[..]);
+}
+
+#[test]
+fn large_file_exceeding_1MiB_window_roundtrips() {
+    // Regression for the 1 MiB dictionary cap added in 341bd79: the decoder
+    // reconstructs the whole file in the sliding window, so a compressed
+    // file larger than the window used to trip `SlidingWindow::get_output`
+    // and panic. The decode buffer must grow to cover the full output.
+    let size = 1024 * 1024 + 1;
+    let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let dir = make_temp_dir();
+    let path = dir.path().join("large.rar");
+
+    {
+        let mut rar = RarArchive::create(&path).expect("create");
+        rar.add_bytes("big.bin", &payload, 5).expect("add");
+        rar.close().expect("close");
+    }
+
+    let mut rar = RarArchive::open(&path).expect("open");
+    assert_eq!(rar.read("big.bin").expect("read"), payload);
+}
+
+#[test]
+fn incompressible_large_file_roundtrips_via_store() {
+    // Lock in the sample-probe STORE fallback: >2 MiB random data must be
+    // stored uncompressed and still read back byte-identical.
+    let size = 4 * 1024 * 1024;
+    let mut state = 0x9E3779B97F4A7C15u64;
+    let mut payload = Vec::with_capacity(size);
+    for _ in 0..size {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        payload.push((state.wrapping_mul(0x2545F4914F6CDD1D) >> 32) as u8);
+    }
+
+    let dir = make_temp_dir();
+    let path = dir.path().join("rand.rar");
+    {
+        let mut rar = RarArchive::create(&path).expect("create");
+        rar.add_bytes("rand.bin", &payload, 3).expect("add");
+        rar.close().expect("close");
+    }
+
+    let mut rar = RarArchive::open(&path).expect("open");
+    assert_eq!(rar.read("rand.bin").expect("read"), payload);
+}

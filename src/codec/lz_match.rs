@@ -173,7 +173,12 @@ impl<'a> MatchFinder<'a> {
             // 3-byte prefilter before the O(len) comparison — the cache
             // rarely matches on non-repetitive data, so skipping the full
             // comparison avoids most of the work on random/unique input.
-            if cand + 2 >= self.size || data[cand] != data[pos] {
+            // Bounds-check BOTH sides before the 3-byte prefilter: `pos` can
+            // be within 2 bytes of the end (min_match = 2 passes the entry
+            // guard), and reading `data[pos + 2]` there is out of bounds.
+            // The tail (fewer than 3 bytes left) cannot form a cached 3-byte
+            // match anyway; `find_match` handles the remaining bytes safely.
+            if cand + 2 >= self.size || self.size - pos < 3 || data[cand] != data[pos] {
                 continue;
             }
             if data[cand + 1] != data[pos + 1] || data[cand + 2] != data[pos + 2] {

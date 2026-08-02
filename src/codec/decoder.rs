@@ -95,6 +95,14 @@ pub fn decode_standalone(
     if !dict_size.is_power_of_two() {
         dict_size = dict_size.next_power_of_two();
     }
+    // The decoder reconstructs the whole file in the sliding window before
+    // extracting it (see `get_output`), so the window must be at least as
+    // large as the unpacked output. The encoder caps its dictionary at 1 MiB
+    // for compression performance, so grow the decode buffer here instead of
+    // reverting that cap.
+    if (unpacked_size as usize) > dict_size {
+        dict_size = (unpacked_size as usize).next_power_of_two();
+    }
 
     let mut reader = BitReader::new(data);
     let mut window = SlidingWindow::new(dict_size);
