@@ -71,6 +71,15 @@ pub struct RarArchive {
     header_encryption: bool,
     /// Archive-level encryption parameters when header encryption is on.
     archive_encr: Option<encryption::EncryptionParams>,
+    /// Recovery record: recovery percent (0-100) when the archive is created
+    /// with an inline RAR5 recovery record ("RR" service header).
+    recovery_percent: Option<u8>,
+    /// File offset of the main archive header (for the recovery-record
+    /// locator patch written at close time).
+    main_header_start: Option<u64>,
+    /// File offset of the recovery-record offset vint inside the main
+    /// header's locator record (preallocated, patched at close time).
+    rr_offset_field_pos: Option<u64>,
     /// All volume file paths (multi-volume archives).
     volume_paths: Vec<PathBuf>,
     /// Volume size limit for multi-volume creation (None = single volume).
@@ -109,6 +118,9 @@ impl RarArchive {
             password: None,
             header_encryption: false,
             archive_encr: None,
+            recovery_percent: None,
+            main_header_start: None,
+            rr_offset_field_pos: None,
             volume_paths: Vec::new(),
             volume_size: None,
             current_volume: 0,
@@ -134,6 +146,9 @@ impl RarArchive {
             password: Some(password.to_string()),
             header_encryption: false,
             archive_encr: None,
+            recovery_percent: None,
+            main_header_start: None,
+            rr_offset_field_pos: None,
             volume_paths: Vec::new(),
             volume_size: None,
             current_volume: 0,
@@ -164,6 +179,9 @@ impl RarArchive {
             password: None,
             header_encryption: false,
             archive_encr: None,
+            recovery_percent: None,
+            main_header_start: None,
+            rr_offset_field_pos: None,
             volume_paths: Vec::new(),
             volume_size: None,
             current_volume: 0,
@@ -191,6 +209,9 @@ impl RarArchive {
             password: None,
             header_encryption: false,
             archive_encr: None,
+            recovery_percent: None,
+            main_header_start: None,
+            rr_offset_field_pos: None,
             volume_paths: vec![vol_path.clone()],
             volume_size: Some(volume_size),
             current_volume: 1,
@@ -232,6 +253,85 @@ impl RarArchive {
             password: Some(password.to_string()),
             header_encryption: true,
             archive_encr: None,
+            recovery_percent: None,
+            main_header_start: None,
+            rr_offset_field_pos: None,
+            volume_paths: Vec::new(),
+            volume_size: None,
+            current_volume: 0,
+            volume_bytes_written: 0,
+            progress_callback: None,
+        };
+        archive.open_write()?;
+        Ok(archive)
+    }
+
+    /// Create a new RAR5 archive with an inline recovery record
+    /// (overwrites existing file). `percent` is the recovery percentage
+    /// (0-100), matching WinRAR's `-rr` switch.
+    pub fn create_with_recovery(path: impl AsRef<Path>, percent: u8) -> RarResult<Self> {
+        Self::create_with_password_recovery(path, "", percent)
+    }
+
+    /// Create a new encrypted RAR5 archive with an inline recovery record.
+    pub fn create_with_password_recovery(
+        path: impl AsRef<Path>,
+        password: &str,
+        percent: u8,
+    ) -> RarResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut archive = RarArchive {
+            path,
+            mode: Mode::Write,
+            entries: Vec::new(),
+            stream: None,
+            format_version: 5,
+            solid_state: None,
+            rar4_solid_state: None,
+            solid_decoded_through: -1,
+            password: if password.is_empty() {
+                None
+            } else {
+                Some(password.to_string())
+            },
+            header_encryption: false,
+            archive_encr: None,
+            recovery_percent: Some(percent.min(100)),
+            main_header_start: None,
+            rr_offset_field_pos: None,
+            volume_paths: Vec::new(),
+            volume_size: None,
+            current_volume: 0,
+            volume_bytes_written: 0,
+            progress_callback: None,
+        };
+        archive.open_write()?;
+        Ok(archive)
+    }
+
+    /// Create a new RAR5 archive with header encryption and an inline
+    /// recovery record.
+    pub fn create_with_password_headers_recovery(
+        path: impl AsRef<Path>,
+        password: &str,
+        percent: u8,
+    ) -> RarResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut archive = RarArchive {
+            path,
+            mode: Mode::Write,
+            entries: Vec::new(),
+            stream: None,
+            format_version: 5,
+            solid_state: None,
+            rar4_solid_state: None,
+            solid_decoded_through: -1,
+            password: Some(password.to_string()),
+            header_encryption: true,
+            archive_encr: None,
+            recovery_percent: Some(percent.min(100)),
+            main_header_start: None,
+            rr_offset_field_pos: None,
             volume_paths: Vec::new(),
             volume_size: None,
             current_volume: 0,
@@ -309,10 +409,177 @@ impl RarArchive {
     /// Finalize the archive (writes end-of-archive block in write mode).
     pub fn close(&mut self) -> RarResult<()> {
         if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
+            if self.recovery_percent.is_some() {
+                self.write_recovery_record()?;
+            }
             self.write_end_block()?;
             self.mode = Mode::Read; // prevent double-write
         }
         self.stream = None;
+        Ok(())
+    }
+
+    /// Compute the RAR5 recovery record over the archive written so far,
+    /// append the `"RR"` service header and patch the main archive header's
+    /// locator record with the recovery-record offset.
+    fn write_recovery_record(&mut self) -> RarResult<()> {
+        let percent = self.recovery_percent.unwrap_or(0) as u64;
+        let stream = self.stream.as_mut().unwrap();
+        let archive_size = stream.stream_position()?;
+
+        // The final main header (with the real RR offset) must be in place
+        // before the parity is computed: the RR protects the raw archive
+        // bytes including the main header.
+        self.patch_main_header_locator(archive_size)?;
+
+        // Read the archive prefix (everything written so far). The write
+        // stream is write-only (File::create), so use a separate handle.
+        let mut prefix = vec![0u8; archive_size as usize];
+        {
+            let mut reader = std::fs::File::open(&self.path)?;
+            reader.read_exact(&mut prefix)?;
+        }
+
+        let rr_data = crate::recovery::rar5::build_structural_inline_recovery_data(
+            &prefix,
+            percent,
+        )
+        .map_err(|e| RarError::Format(format!("recovery record encode: {e}")))?;
+
+        // RR service header: type 3, name "RR", SubData = percent byte.
+        let mut body = Vec::new();
+        body.extend(vint::encode(0x03u64)); // service header
+        body.extend(vint::encode(
+            (BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_SKIP_IF_UNKNOWN) as u64,
+        ));
+        let subdata = {
+            let mut rec = Vec::new();
+            rec.push(percent as u8); // recovery percent (single byte, <= 100)
+            let mut extra = Vec::new();
+            extra.extend(vint::encode((1 + rec.len()) as u64)); // record size: type + data
+            extra.extend(vint::encode(0x07u64)); // service data record type
+            extra.extend(rec);
+            extra
+        };
+        body.extend(vint::encode(subdata.len() as u64)); // extra area size
+        body.extend(vint::encode(rr_data.len() as u64)); // data size
+        body.extend(vint::encode(0u64)); // file flags
+        body.extend(vint::encode(rr_data.len() as u64)); // unpacked size
+        body.extend(vint::encode(0u64)); // attributes
+        body.extend(vint::encode(0u64)); // compression info (store)
+        body.extend(vint::encode(OS_UNIX as u64));
+        body.extend(vint::encode(2u64)); // name length
+        body.extend(b"RR");
+        body.extend(subdata);
+
+        let size_bytes = vint::encode(body.len() as u64);
+        let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
+        header_content.extend(&size_bytes);
+        header_content.extend(&body);
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&header_content);
+        let crc = hasher.finalize();
+        let mut hdr = Vec::with_capacity(4 + header_content.len());
+        hdr.extend(crc.to_le_bytes());
+        hdr.extend(header_content);
+
+        self.write_block_header(&hdr)?;
+        let stream = self.stream.as_mut().unwrap();
+        stream.write_all(&rr_data)?;
+        Ok(())
+    }
+
+    /// Rewrite the main archive header with the real recovery-record offset
+    /// (the locator field was preallocated as a fixed 5-byte vint).
+    fn patch_main_header_locator(&mut self, rr_offset: u64) -> RarResult<()> {
+        let start = self
+            .main_header_start
+            .ok_or_else(|| RarError::Format("main header position unknown".into()))?;
+        let field_pos = self
+            .rr_offset_field_pos
+            .ok_or_else(|| RarError::Format("locator field position unknown".into()))?;
+
+        // Rebuild the main header: read it back (plaintext or decrypted).
+        let plain = if self.header_encryption {
+            let encr = self
+                .archive_encr
+                .as_ref()
+                .ok_or_else(|| RarError::Format("no archive encryption params".into()))?;
+            let password = self
+                .password
+                .as_ref()
+                .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
+            let key = encr.get_key(password);
+            let mut reader = std::fs::File::open(&self.path)?;
+            let mut iv = [0u8; 16];
+            reader.seek(SeekFrom::Start(start))?;
+            reader.read_exact(&mut iv)?;
+            // Decrypt the first block to learn the header size.
+            let mut first = [0u8; 16];
+            reader.read_exact(&mut first)?;
+            let first_pt = encryption::decrypt_data(&first, &key, &iv)?;
+            let (hsize, vint_len) = vint::decode_from_slice(&first_pt, 4)
+                .map_err(|e| RarError::Format(format!("main header vint: {e}")))?;
+            let total_raw = 4 + vint_len + hsize as usize;
+            let enc_size = ((total_raw + 15) / 16) * 16;
+            let mut full_ct = vec![0u8; enc_size];
+            full_ct[..16].copy_from_slice(&first);
+            if enc_size > 16 {
+                reader.read_exact(&mut full_ct[16..])?;
+            }
+            let full_pt = encryption::decrypt_data(&full_ct, &key, &iv)?;
+            full_pt[..total_raw].to_vec()
+        } else {
+            let mut reader = std::fs::File::open(&self.path)?;
+            reader.seek(SeekFrom::Start(start))?;
+            // Read the whole header: parse the size first.
+            let mut crc_hdr = [0u8; 5];
+            reader.read_exact(&mut crc_hdr)?;
+            let (hsize, vint_len) = vint::decode_from_slice(&crc_hdr, 4)
+                .map_err(|e| RarError::Format(format!("main header vint: {e}")))?;
+            let total = 4 + vint_len + hsize as usize;
+            let mut hdr = vec![0u8; total];
+            hdr[..5].copy_from_slice(&crc_hdr);
+            reader.read_exact(&mut hdr[5..])?;
+            hdr
+        };
+
+        // Patch the rr-offset field (fixed 5-byte vint) inside the header.
+        let field = field_pos as usize;
+        let patched = vint_fixed5(rr_offset);
+        if field + patched.len() > plain.len() {
+            return Err(RarError::Format("locator field out of bounds".into()));
+        }
+        let mut new_header = plain;
+        new_header[field..field + patched.len()].copy_from_slice(&patched);
+        // Recompute the header CRC (covers from the size field onwards).
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&new_header[4..]);
+        let crc = hasher.finalize();
+        new_header[..4].copy_from_slice(&crc.to_le_bytes());
+
+        let stream = self.stream.as_mut().unwrap();
+        if self.header_encryption {
+            let encr = self
+                .archive_encr
+                .as_ref()
+                .ok_or_else(|| RarError::Format("no archive encryption params".into()))?;
+            let password = self
+                .password
+                .as_ref()
+                .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
+            let key = encr.get_key(password);
+            let mut iv = [0u8; 16];
+            rand::Rng::fill(&mut rand::rng(), &mut iv);
+            let ciphertext = encryption::encrypt_data(&new_header, &key, &iv);
+            stream.seek(SeekFrom::Start(start))?;
+            stream.write_all(&iv)?;
+            stream.write_all(&ciphertext)?;
+        } else {
+            stream.seek(SeekFrom::Start(start))?;
+            stream.write_all(&new_header)?;
+        }
+        stream.seek(SeekFrom::End(0))?;
         Ok(())
     }
 
@@ -715,6 +982,9 @@ impl RarArchive {
     // ── Writing ────────────────────────────────────────────────────────────
 
     fn write_archive_header(&mut self) -> RarResult<()> {
+        if self.recovery_percent.is_some() {
+            return self.write_archive_header_with_recovery();
+        }
         let hdr = ArchiveHeader {
             flags: 0,
             extra_data: Vec::new(),
@@ -722,6 +992,62 @@ impl RarArchive {
         };
         let hdr_bytes = hdr.to_bytes();
         self.write_block_header(&hdr_bytes)
+    }
+
+    /// Write the main archive header with a recovery-record locator record
+    /// and the `MHFL_RECOVERY` archive flag.
+    ///
+    /// The recovery-record offset field is preallocated to a fixed 5-byte
+    /// vint so the header length never changes; the real offset is patched
+    /// in at close time.
+    fn write_archive_header_with_recovery(&mut self) -> RarResult<()> {
+        if self.volume_size.is_some() {
+            return Err(RarError::Unsupported(
+                "recovery records are not supported for multi-volume archives".into(),
+            ));
+        }
+        // Locator record: [rec_size vint][type vint=0x01][flags vint=0x0002]
+        // [recovery-record offset vint (5 bytes, patched at close)].
+        const RR_OFFSET_FIELD: usize = 5;
+        let mut locator = Vec::new();
+        locator.extend(vint::encode(0x01u64)); // type: locator
+        locator.extend(vint::encode(0x0002u64)); // flags: recovery offset present
+        locator.extend_from_slice(&vint_fixed5(0));
+        let mut extra = Vec::new();
+        extra.extend(vint::encode(locator.len() as u64)); // record size
+        extra.extend(locator);
+
+        let body = [
+            vint::encode(BLOCK_TYPE_ARCHIVE_HEADER),
+            vint::encode(BLOCK_FLAG_EXTRA_DATA as u64),
+            vint::encode(extra.len() as u64),
+            vint::encode(ARCHIVE_FLAG_RECOVERY as u64),
+        ]
+        .concat();
+        let mut content = body;
+        content.extend(&extra);
+
+        let size_bytes = vint::encode(content.len() as u64);
+        let mut header_content = Vec::with_capacity(size_bytes.len() + content.len());
+        header_content.extend(&size_bytes);
+        header_content.extend(&content);
+
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&header_content);
+        let crc = hasher.finalize();
+
+        let mut out = Vec::with_capacity(4 + header_content.len());
+        out.extend(crc.to_le_bytes());
+        out.extend(header_content);
+
+        let main_header_start = self.stream.as_ref().unwrap().stream_position()?;
+        self.write_block_header(&out)?;
+        self.main_header_start = Some(main_header_start);
+        // Plaintext-relative index of the 5-byte rr-offset field inside the
+        // locator: crc(4) + hsize vint + block type + block flags + extra
+        // size + archive flags + record size + locator type + locator flags.
+        self.rr_offset_field_pos = Some(4u64 + size_bytes.len() as u64 + 7);
+        Ok(())
     }
 
     fn write_archive_header_vol(&mut self, volume_number: Option<u64>) -> RarResult<()> {
@@ -1760,6 +2086,22 @@ fn extract_volume_base(name: &str) -> Option<String> {
     None
 }
 
+/// Encode `value` as a fixed 5-byte RAR5 vint (LSB-first, continuation bit
+/// on every byte except the last). Valid for values < 2^35.
+fn vint_fixed5(value: u64) -> [u8; 5] {
+    let mut out = [0x80u8; 5];
+    let mut v = value;
+    for i in 0..5 {
+        let mut b = (v & 0x7F) as u8;
+        v >>= 7;
+        if i < 4 {
+            b |= 0x80;
+        }
+        out[i] = b;
+    }
+    out
+}
+
 fn get_volume_base(path: &Path) -> String {
     let name = path
         .file_name()
@@ -1852,6 +2194,55 @@ mod tests {
             assert_eq!(ar.read("b.txt").unwrap(), b"Second ".repeat(50));
             assert_eq!(ar.read("c.bin").unwrap(), (0..=255u8).collect::<Vec<_>>());
         }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn recovery_record_roundtrip_and_repair() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().with_extension("rar");
+        let data = b"recovery test payload ".repeat(1000);
+        {
+            let mut ar = RarArchive::create_with_recovery(&path, 5).unwrap();
+            ar.add_bytes("a.bin", &data, 0).unwrap();
+            ar.close().unwrap();
+        }
+        let raw = std::fs::read(&path).unwrap();
+        // The RR service header (name "RR") and the {RB} shard magic must
+        // be present, and the main header must carry the recovery flag.
+        assert!(raw.windows(2).any(|w| w == b"RR"));
+        assert!(raw.windows(4).any(|w| w == b"{RB}"));
+        // The plaintext must not be touched by the recovery record.
+        let mut ar = RarArchive::open(&path).unwrap();
+        assert_eq!(ar.read("a.bin").unwrap(), data);
+
+        // Damage bytes inside ONE data shard (NR parity shards can repair
+        // up to NR damaged shards; the archive here is ~21 KiB → D=21,
+        // NR=1).
+        let mut damaged = raw.clone();
+        for pos in [100usize, 200, 300] {
+            damaged[pos] ^= 0xFF;
+        }
+        let repaired = crate::recovery::rar5::repair_inline_recovery_archive(&damaged).unwrap();
+        assert_eq!(repaired, raw, "repair must restore the original bytes");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn recovery_record_with_password_and_headers() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().with_extension("rar");
+        let data = b"encrypted + recovery ".repeat(500);
+        {
+            let mut ar =
+                RarArchive::create_with_password_headers_recovery(&path, "pw", 10).unwrap();
+            ar.add_bytes("secret.bin", &data, 0).unwrap();
+            ar.close().unwrap();
+        }
+        let raw = std::fs::read(&path).unwrap();
+        assert!(raw.windows(4).any(|w| w == b"{RB}"));
+        let mut ar = RarArchive::open_with_password(&path, "pw").unwrap();
+        assert_eq!(ar.read("secret.bin").unwrap(), data);
         std::fs::remove_file(&path).ok();
     }
 

@@ -31,6 +31,9 @@ pub mod encryption;
 pub mod error;
 pub mod headers;
 pub mod rar4;
+pub mod recovery;
+pub mod write_progress;
+pub use write_progress::{WriteOperation, WriteProgressEvent};
 pub mod vint;
 
 pub use archive::{discover_volumes, ArchiveEntry, RarArchive};
