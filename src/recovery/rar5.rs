@@ -11,7 +11,7 @@ const RAR5_RECOVERY_CHUNK_FIXED_HEADER_SIZE: u64 = 0x48;
 use crate::write_progress::ProgressReporter;
 use crate::{WriteOperation, WriteProgressEvent};
 
-fn shared_gf16() -> &'static Gf16 {
+pub fn shared_gf16() -> &'static Gf16 {
     static GF16: std::sync::OnceLock<Gf16> = std::sync::OnceLock::new();
     GF16.get_or_init(Gf16::new)
 }

@@ -6,3 +6,4 @@
 //! header of the archive.
 
 pub mod rar5;
+pub mod rev5;

@@ -73,6 +73,9 @@ pub struct RarArchive {
     /// Recovery record: recovery percent (0-100) when the archive is created
     /// with an inline RAR5 recovery record ("RR" service header).
     recovery_percent: Option<u8>,
+    /// Recovery volumes: percent (0-100) of `.rev` files created alongside
+    /// a multi-volume archive (WinRAR `-rv`).
+    recovery_volumes_percent: Option<u8>,
     /// File offset of the main archive header (for the recovery-record
     /// locator patch written at close time).
     main_header_start: Option<u64>,
@@ -118,6 +121,7 @@ impl RarArchive {
             header_encryption: false,
             archive_encr: None,
             recovery_percent: None,
+            recovery_volumes_percent: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -146,6 +150,7 @@ impl RarArchive {
             header_encryption: false,
             archive_encr: None,
             recovery_percent: None,
+            recovery_volumes_percent: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -179,6 +184,7 @@ impl RarArchive {
             header_encryption: false,
             archive_encr: None,
             recovery_percent: None,
+            recovery_volumes_percent: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -209,6 +215,47 @@ impl RarArchive {
             header_encryption: false,
             archive_encr: None,
             recovery_percent: None,
+            recovery_volumes_percent: None,
+            main_header_start: None,
+            rr_offset_field_pos: None,
+            volume_paths: vec![vol_path.clone()],
+            volume_size: Some(volume_size),
+            current_volume: 1,
+            volume_bytes_written: 0,
+            progress_callback: None,
+        };
+        let f = File::create(&vol_path)?;
+        archive.stream = Some(f);
+        archive.write_signature()?;
+        archive.write_archive_header_vol(None)?;
+        archive.volume_bytes_written = archive.stream.as_ref().unwrap().stream_position()?;
+        Ok(archive)
+    }
+
+    /// Create a new multi-volume RAR5 archive with recovery volumes
+    /// (`-rv`): `percent` of `.rev` files relative to the volume count.
+    pub fn create_multivolume_with_recovery(
+        path: impl AsRef<Path>,
+        volume_size: u64,
+        percent: u8,
+    ) -> RarResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let volume_base = get_volume_base(&path);
+        let vol_path = volume_path(path.parent().unwrap_or(Path::new(".")), &volume_base, 1);
+        let mut archive = RarArchive {
+            path,
+            mode: Mode::Write,
+            entries: Vec::new(),
+            stream: None,
+            format_version: 5,
+            solid_state: None,
+            rar4_solid_state: None,
+            solid_decoded_through: -1,
+            password: None,
+            header_encryption: false,
+            archive_encr: None,
+            recovery_percent: None,
+            recovery_volumes_percent: Some(percent.min(100)),
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: vec![vol_path.clone()],
@@ -253,6 +300,7 @@ impl RarArchive {
             header_encryption: true,
             archive_encr: None,
             recovery_percent: None,
+            recovery_volumes_percent: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -296,6 +344,7 @@ impl RarArchive {
             header_encryption: false,
             archive_encr: None,
             recovery_percent: Some(percent.min(100)),
+            recovery_volumes_percent: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -329,6 +378,7 @@ impl RarArchive {
             header_encryption: true,
             archive_encr: None,
             recovery_percent: Some(percent.min(100)),
+            recovery_volumes_percent: None,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
@@ -413,6 +463,49 @@ impl RarArchive {
             self.mode = Mode::Read; // prevent double-write
         }
         self.stream = None;
+        if self.recovery_volumes_percent.is_some() {
+            self.write_recovery_volumes()?;
+        }
+        Ok(())
+    }
+
+    /// Generate the `.rev` recovery-volume files for a completed
+    /// multi-volume archive set (WinRAR `-rv` equivalent).
+    fn write_recovery_volumes(&mut self) -> RarResult<()> {
+        let percent = self.recovery_volumes_percent.unwrap_or(0) as u64;
+        if self.volume_paths.is_empty() {
+            return Err(RarError::Format("no volumes for recovery volumes".into()));
+        }
+        // Read all volume files.
+        let mut volume_data: Vec<Vec<u8>> = Vec::with_capacity(self.volume_paths.len());
+        let mut volume_sizes = Vec::with_capacity(self.volume_paths.len());
+        let mut volume_crcs = Vec::with_capacity(self.volume_paths.len());
+        for vol in &self.volume_paths {
+            let data = std::fs::read(vol)?;
+            volume_sizes.push(data.len() as u64);
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&data);
+            volume_crcs.push(hasher.finalize());
+            volume_data.push(data);
+        }
+
+        let refs: Vec<&[u8]> = volume_data.iter().map(|v| v.as_slice()).collect();
+        let (rec_count, payloads) = crate::recovery::rev5::encode_recovery_volumes(&refs, percent)?;
+
+        let base = get_volume_base(&self.path);
+        let parent = self.path.parent().unwrap_or(Path::new("."));
+        for (k, payload) in payloads.iter().enumerate() {
+            let rev_path = parent.join(format!("{base}.part{}.rev", k + 1));
+            let file = crate::recovery::rev5::build_recovery_volume_file(
+                k,
+                rec_count,
+                &volume_sizes,
+                &volume_crcs,
+                payload,
+            );
+            std::fs::write(&rev_path, &file)?;
+        }
+        self.recovery_volumes_percent = None;
         Ok(())
     }
 
@@ -2169,6 +2262,108 @@ mod tests {
             assert_eq!(ar.read("c.bin").unwrap(), (0..=255u8).collect::<Vec<_>>());
         }
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn recovery_volumes_roundtrip_and_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("vol.part1.rar");
+        let data = b"volume recovery payload ".repeat(4000); // ~100 KiB
+        {
+            let mut ar = RarArchive::create_multivolume_with_recovery(&base, 32768, 20).unwrap();
+            ar.add_bytes("big.bin", &data, 0).unwrap();
+            ar.close().unwrap();
+        }
+        // Volumes + at least one .rev file must exist.
+        let dir_entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        let mut volume_paths: Vec<_> = dir_entries
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "rar"))
+            .cloned()
+            .collect();
+        volume_paths.sort();
+        let mut volumes: Vec<Vec<u8>> = volume_paths
+            .iter()
+            .map(|p| std::fs::read(p).unwrap())
+            .collect();
+        let revs: Vec<_> = dir_entries
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "rev"))
+            .collect();
+        assert!(
+            volumes.len() >= 3,
+            "expected split volumes, got {}",
+            volumes.len()
+        );
+        assert_eq!(revs.len(), 1, "expected one .rev file");
+
+        // The .rev must carry the REV5 signature, the volume table and a
+        // payload whose CRC32 matches the header field.
+        let rev = std::fs::read(&revs[0]).unwrap();
+        assert!(rev.starts_with(b"Rar!\x1aRev"));
+        let header_size = u32::from_le_bytes(rev[12..16].try_into().unwrap()) as usize;
+        let body = &rev[16..16 + header_size];
+        let data_count = u16::from_le_bytes(body[1..3].try_into().unwrap()) as usize;
+        assert_eq!(data_count, volumes.len());
+        let payload = &rev[16 + header_size..];
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(payload);
+        let payload_crc = u32::from_le_bytes(body[7..11].try_into().unwrap());
+        assert_eq!(hasher.finalize(), payload_crc, ".rev payload CRC mismatch");
+        for (i, vol) in volumes.iter().enumerate() {
+            let mut h = crc32fast::Hasher::new();
+            h.update(vol);
+            let table_crc =
+                u32::from_le_bytes(body[11 + i * 12 + 8..11 + i * 12 + 12].try_into().unwrap());
+            assert_eq!(
+                h.finalize(),
+                table_crc,
+                ".rev volume table CRC mismatch for volume {i}"
+            );
+        }
+
+        // Reconstruct a missing middle volume from the .rev parity and the
+        // remaining volumes (WinRAR `rc` equivalent).
+        let missing = volumes.len() / 2;
+        let expected = volumes[missing].clone();
+        volumes.remove(missing);
+
+        let maxlen = volumes.iter().map(|v| v.len()).max().unwrap_or(0);
+        let maxlen = if maxlen % 2 == 0 { maxlen } else { maxlen + 1 };
+        let mut padded: Vec<Vec<u8>> = volumes
+            .iter()
+            .map(|v| {
+                let mut x = v.clone();
+                x.resize(maxlen, 0);
+                x
+            })
+            .collect();
+        padded.insert(missing, payload.to_vec());
+
+        let gf = crate::recovery::rar5::shared_gf16();
+        let matrix = crate::recovery::rar5::make_encoder_matrix(padded.len(), 1).unwrap();
+        let mut rebuilt = vec![0u8; maxlen];
+        let denom = matrix[0][missing];
+        for off in (0..maxlen).step_by(2) {
+            let mut symbol = 0u16;
+            for (i, shard) in padded.iter().enumerate() {
+                let v = u16::from_le_bytes([shard[off], shard[off + 1]]);
+                if i == missing {
+                    // The parity shard participates with coefficient 1.
+                    symbol ^= v;
+                } else {
+                    symbol ^= gf.mul(matrix[0][i], v);
+                }
+            }
+            let v = gf.div(symbol, denom).unwrap();
+            rebuilt[off..off + 2].copy_from_slice(&v.to_le_bytes());
+        }
+        rebuilt.truncate(expected.len());
+        assert_eq!(rebuilt, expected, "reconstructed volume must match");
+        std::fs::remove_dir_all(dir.path()).ok();
     }
 
     #[test]
