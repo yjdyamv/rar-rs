@@ -15,6 +15,7 @@ use crate::error::{RarError, RarResult};
 use crate::vint;
 
 use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use sha2::Digest;
 
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
@@ -129,9 +130,10 @@ impl EncryptionParams {
 
     /// Verify a password against the stored check value (if present).
     ///
-    /// RAR5 stores an 8-byte password check derived from PBKDF2 with
-    /// extra iterations. Returns true if password is correct or no
-    /// check value is stored.
+    /// RAR5 stores a 12-byte check: 8 bytes from PBKDF2 with extra
+    /// iterations (XOR-folded) plus a 4-byte checksum which is the first
+    /// 4 bytes of SHA-256 over those 8 bytes. Returns true if the password
+    /// is correct or no check value is stored.
     pub fn verify_password(&self, password: &str) -> bool {
         let ck = match &self.checksum {
             Some(c) => c,
@@ -155,7 +157,16 @@ impl EncryptionParams {
             }
         }
 
-        psw_check == ck[..8]
+        if psw_check != ck[..8] {
+            return false;
+        }
+        if ck.len() >= 12 {
+            // 4-byte checksum: first 4 bytes of SHA-256 over the 8-byte
+            // check value (the reference implementations verify this too).
+            let digest = sha2::Sha256::digest(&psw_check);
+            return digest[..4] == ck[8..12];
+        }
+        true
     }
 
     /// Derive and return the AES key for `password`.
@@ -178,8 +189,8 @@ impl EncryptionParams {
     /// Generate random encryption parameters with a password verification checksum.
     ///
     /// Each file gets a unique random salt and IV. The 12-byte checksum
-    /// consists of an 8-byte XOR-folded PswCheck plus a 4-byte CRC32 of
-    /// the raw PBKDF2 output, matching the native RAR5 format.
+    /// consists of an 8-byte XOR-folded PswCheck plus a 4-byte SHA-256
+    /// checksum over it, matching the native RAR5 format.
     pub fn generate_for_password(password: &str, strength: u8) -> Self {
         use rand::Rng;
         let mut rng = rand::rng();
@@ -208,14 +219,12 @@ impl EncryptionParams {
             }
         }
 
-        // 4-byte CRC32 of the raw 32-byte PBKDF2 output
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&psw_check_value);
-        let check_crc = hasher.finalize();
-
+        // 4-byte checksum: first 4 bytes of SHA-256 over the 8-byte check
+        // value (matches WinRAR/unrar and 7-Zip).
+        let digest = sha2::Sha256::digest(&psw_check);
         let mut checksum = [0u8; 12];
         checksum[..8].copy_from_slice(&psw_check);
-        checksum[8..12].copy_from_slice(&check_crc.to_le_bytes());
+        checksum[8..12].copy_from_slice(&digest[..4]);
 
         EncryptionParams {
             version: ENCR_VERSION_AES256,
@@ -248,6 +257,40 @@ impl EncryptionParams {
         out.extend(vint::encode(rec_size as u64));
         out.extend(type_bytes);
         out.extend(body);
+        out
+    }
+
+    /// Serialize as an archive-level encryption header block (type 0x04).
+    ///
+    /// Written once after the main archive header when header encryption is
+    /// enabled; every subsequent header block is `[16-byte IV][AES-256-CBC
+    /// encrypted header]`. Body: `[block_type vint] [block_flags vint]
+    /// [encr_version vint] [encr_flags vint] [u8 strength] [16-byte salt]
+    /// [12-byte check value]` — matching `parse_archive_encrypt_header`.
+    pub fn to_archive_header_block(&self) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend(vint::encode(crate::constants::BLOCK_TYPE_ENCRYPT_HEADER));
+        body.extend(vint::encode(0u64)); // block flags
+        body.extend(vint::encode(ENCR_VERSION_AES256 as u64));
+        body.extend(vint::encode(self.flags as u64));
+        body.push(self.strength);
+        body.extend_from_slice(&self.salt);
+        if let Some(ref ck) = self.checksum {
+            body.extend_from_slice(ck);
+        }
+
+        let size_bytes = vint::encode(body.len() as u64);
+        let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
+        header_content.extend(&size_bytes);
+        header_content.extend(&body);
+
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&header_content);
+        let crc = hasher.finalize();
+
+        let mut out = Vec::with_capacity(4 + header_content.len());
+        out.extend(crc.to_le_bytes());
+        out.extend(header_content);
         out
     }
 }

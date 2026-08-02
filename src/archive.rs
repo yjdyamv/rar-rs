@@ -66,6 +66,11 @@ pub struct RarArchive {
     solid_decoded_through: isize,
     /// Password for encrypted archives.
     password: Option<String>,
+    /// Encrypt archive headers (file names/structure hidden) — RAR5
+    /// archive-level encryption header + AES-256-CBC per-block headers.
+    header_encryption: bool,
+    /// Archive-level encryption parameters when header encryption is on.
+    archive_encr: Option<encryption::EncryptionParams>,
     /// All volume file paths (multi-volume archives).
     volume_paths: Vec<PathBuf>,
     /// Volume size limit for multi-volume creation (None = single volume).
@@ -102,6 +107,8 @@ impl RarArchive {
             rar4_solid_state: None,
             solid_decoded_through: -1,
             password: None,
+            header_encryption: false,
+            archive_encr: None,
             volume_paths: Vec::new(),
             volume_size: None,
             current_volume: 0,
@@ -125,6 +132,8 @@ impl RarArchive {
             rar4_solid_state: None,
             solid_decoded_through: -1,
             password: Some(password.to_string()),
+            header_encryption: false,
+            archive_encr: None,
             volume_paths: Vec::new(),
             volume_size: None,
             current_volume: 0,
@@ -153,6 +162,8 @@ impl RarArchive {
             rar4_solid_state: None,
             solid_decoded_through: -1,
             password: None,
+            header_encryption: false,
+            archive_encr: None,
             volume_paths: Vec::new(),
             volume_size: None,
             current_volume: 0,
@@ -178,6 +189,8 @@ impl RarArchive {
             rar4_solid_state: None,
             solid_decoded_through: -1,
             password: None,
+            header_encryption: false,
+            archive_encr: None,
             volume_paths: vec![vol_path.clone()],
             volume_size: Some(volume_size),
             current_volume: 1,
@@ -196,6 +209,36 @@ impl RarArchive {
     pub fn create_with_password(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
         let mut archive = Self::create(path)?;
         archive.password = Some(password.to_string());
+        Ok(archive)
+    }
+
+    /// Create a new RAR5 archive with encrypted headers (overwrites existing
+    /// file). Hides file names and the whole archive structure: the main
+    /// archive header is followed by an archive-level encryption header and
+    /// every subsequent block header is AES-256-CBC encrypted.
+    ///
+    /// Not supported for multi-volume archives.
+    pub fn create_with_password_headers(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut archive = RarArchive {
+            path,
+            mode: Mode::Write,
+            entries: Vec::new(),
+            stream: None,
+            format_version: 5,
+            solid_state: None,
+            rar4_solid_state: None,
+            solid_decoded_through: -1,
+            password: Some(password.to_string()),
+            header_encryption: true,
+            archive_encr: None,
+            volume_paths: Vec::new(),
+            volume_size: None,
+            current_volume: 0,
+            volume_bytes_written: 0,
+            progress_callback: None,
+        };
+        archive.open_write()?;
         Ok(archive)
     }
 
@@ -218,7 +261,48 @@ impl RarArchive {
         let f = File::create(&self.path)?;
         self.stream = Some(f);
         self.write_signature()?;
+        if self.header_encryption {
+            // The archive-level encryption header precedes the main archive
+            // header; every header after it (main, file, end) is encrypted.
+            let password = self.password.as_ref().ok_or_else(|| {
+                RarError::Encrypted("header encryption requires a password".into())
+            })?;
+            if self.volume_size.is_some() {
+                return Err(RarError::Unsupported(
+                    "header encryption is not supported for multi-volume archives".into(),
+                ));
+            }
+            let encr = encryption::EncryptionParams::generate_for_password(
+                password,
+                ENCR_PBKDF2_ITER_LOG,
+            );
+            let block = encr.to_archive_header_block();
+            let stream = self.stream.as_mut().unwrap();
+            stream.write_all(&block)?;
+            self.archive_encr = Some(encr);
+        }
         self.write_archive_header()?;
+        Ok(())
+    }
+
+    /// Write a block header, wrapping it in `[16-byte IV][AES-256-CBC
+    /// encrypted header]` when header encryption is enabled.
+    fn write_block_header(&mut self, header_bytes: &[u8]) -> RarResult<()> {
+        let stream = self.stream.as_mut().unwrap();
+        if let Some(ref encr) = self.archive_encr {
+            let password = self
+                .password
+                .as_ref()
+                .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
+            let key = encr.get_key(password);
+            let mut iv = [0u8; ENCR_IV_SIZE];
+            rand::Rng::fill(&mut rand::rng(), &mut iv);
+            let ciphertext = encryption::encrypt_data(header_bytes, &key, &iv);
+            stream.write_all(&iv)?;
+            stream.write_all(&ciphertext)?;
+        } else {
+            stream.write_all(header_bytes)?;
+        }
         Ok(())
     }
 
@@ -636,9 +720,8 @@ impl RarArchive {
             extra_data: Vec::new(),
             volume_number: None,
         };
-        let stream = self.stream.as_mut().unwrap();
-        stream.write_all(&hdr.to_bytes())?;
-        Ok(())
+        let hdr_bytes = hdr.to_bytes();
+        self.write_block_header(&hdr_bytes)
     }
 
     fn write_archive_header_vol(&mut self, volume_number: Option<u64>) -> RarResult<()> {
@@ -659,9 +742,8 @@ impl RarArchive {
     fn write_end_block_flags(&mut self, next_volume: bool) -> RarResult<()> {
         let flags = if next_volume { END_FLAG_NEXT_VOLUME } else { 0 };
         let eoa = EndOfArchiveHeader { flags };
-        let stream = self.stream.as_mut().unwrap();
-        stream.write_all(&eoa.to_bytes())?;
-        Ok(())
+        let hdr_bytes = eoa.to_bytes();
+        self.write_block_header(&hdr_bytes)
     }
 
     fn start_next_volume(&mut self) -> RarResult<()> {
@@ -1229,8 +1311,8 @@ impl RarArchive {
             ..Default::default()
         };
 
-        let stream = self.stream.as_mut().unwrap();
-        stream.write_all(&fh.to_bytes())?;
+        let hdr_bytes = fh.to_bytes();
+        self.write_block_header(&hdr_bytes)?;
         self.entries.push(ArchiveEntry {
             header: fh,
             chunks: Vec::new(),
@@ -1277,8 +1359,8 @@ impl RarArchive {
             ..Default::default()
         };
 
-        let stream = self.stream.as_mut().unwrap();
-        stream.write_all(&fh.to_bytes())?;
+        let hdr_bytes = fh.to_bytes();
+        self.write_block_header(&hdr_bytes)?;
         self.entries.push(ArchiveEntry {
             header: fh,
             chunks: Vec::new(),
@@ -1405,8 +1487,8 @@ impl RarArchive {
         if self.volume_size.is_none() {
             // Single-volume
             let hdr_bytes = fh_base.to_bytes();
+            self.write_block_header(&hdr_bytes)?;
             let stream = self.stream.as_mut().unwrap();
-            stream.write_all(&hdr_bytes)?;
             stream.write_all(packed_data)?;
             let data_offset = stream.stream_position()? - packed_data.len() as u64;
             let chunk = DataChunk {
@@ -1770,6 +1852,45 @@ mod tests {
             assert_eq!(ar.read("b.txt").unwrap(), b"Second ".repeat(50));
             assert_eq!(ar.read("c.bin").unwrap(), (0..=255u8).collect::<Vec<_>>());
         }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn header_encryption_roundtrip() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().with_extension("rar");
+        let data = b"Hidden content!".repeat(100);
+        {
+            let mut ar = RarArchive::create_with_password_headers(&path, "hdr-pw").unwrap();
+            ar.add_bytes("secret/name.txt", &data, 3).unwrap();
+            ar.close().unwrap();
+        }
+        // The raw archive must not contain the plaintext file name.
+        let raw = std::fs::read(&path).unwrap();
+        assert!(!raw.windows(b"secret/name.txt".len()).any(|w| w == b"secret/name.txt"));
+        {
+            let mut ar = RarArchive::open_with_password(&path, "hdr-pw").unwrap();
+            assert_eq!(ar.read("secret/name.txt").unwrap(), data);
+        }
+        // Wrong password must be rejected by the header check value.
+        let err = RarArchive::open_with_password(&path, "nope").err();
+        assert!(err.is_some());
+        let msg = err.unwrap().to_string();
+        assert!(msg.contains("password"), "unexpected error: {msg}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn header_encryption_requires_password() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().with_extension("rar");
+        {
+            let mut ar = RarArchive::create_with_password_headers(&path, "pw").unwrap();
+            ar.add_bytes("a.txt", b"data", 0).unwrap();
+            ar.close().unwrap();
+        }
+        // Opening without a password must fail: headers are encrypted.
+        assert!(RarArchive::open(&path).is_err());
         std::fs::remove_file(&path).ok();
     }
 
