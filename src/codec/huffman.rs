@@ -307,40 +307,104 @@ pub fn build_code_lengths_from_freqs(freqs: &[u32], max_length: usize) -> Vec<u8
     }
 
     if needs_fix {
-        let kraft_target: u64 = 1u64 << max_len;
-        let kraft_sum_fn = |lengths: &[u8]| -> u64 {
+        // Clamping depths > max_length to max_length makes the code
+        // overcomplete (Kraft sum > 1). Remove the excess exactly: each step
+        // moves one code from the longest used length below the limit to
+        // length+1 and shortens one overflow code (currently at max_length)
+        // to that same length, which reduces the Kraft sum by exactly 1.
+        let max_len = max_length as u8;
+        let target: i64 = 1i64 << max_len;
+        let kraft = |lengths: &[u8]| -> i64 {
             lengths
                 .iter()
                 .filter(|&&l| l > 0)
-                .map(|&l| 1u64 << (max_len - l))
+                .map(|&l| 1i64 << (max_len - l))
                 .sum()
         };
-
-        // Lengthen shortest codes to reduce Kraft sum.
-        // Each lengthening of a code from L to L+1 reduces the Kraft sum
-        // by 2^(max_len - L - 1).
-        while kraft_sum_fn(&lengths) > kraft_target {
-            // Find the shortest non-zero, non-max code to lengthen
-            let shortest = lengths
-                .iter()
-                .filter(|&&l| l > 0 && l < max_len)
-                .copied()
-                .min();
-            match shortest {
-                Some(s) => {
-                    // Lengthen the least-frequent symbol at this length
-                    // (last occurrence, which tends to be a less important symbol)
-                    for i in (0..n).rev() {
-                        if lengths[i] == s {
-                            lengths[i] += 1;
-                            break;
-                        }
-                    }
-                }
-                None => break, // All codes at max_len, can't fix further
+        let mut excess = kraft(&lengths) - target;
+        let mut syms_by_len: Vec<Vec<usize>> = vec![Vec::new(); max_len as usize + 1];
+        for (i, &l) in lengths.iter().enumerate() {
+            if l > 0 {
+                syms_by_len[l as usize].push(i);
             }
+        }
+        while excess > 0 {
+            // Longest used length strictly below the limit.
+            let mut bits = max_len - 1;
+            while bits > 0 && syms_by_len[bits as usize].is_empty() {
+                bits -= 1;
+            }
+            if bits == 0 || syms_by_len[max_len as usize].is_empty() {
+                break; // cannot resolve exactly; leave as-is
+            }
+            // Move one code: bits -> bits + 1.
+            let sym = syms_by_len[bits as usize].pop().unwrap();
+            lengths[sym] += 1;
+            syms_by_len[(bits + 1) as usize].push(sym);
+            // Shorten one overflow code to bits + 1.
+            let sym2 = syms_by_len[max_len as usize].pop().unwrap();
+            lengths[sym2] = bits + 1;
+            syms_by_len[(bits + 1) as usize].push(sym2);
+            excess -= 1;
         }
     }
 
     lengths
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::tables::HUFF_NC;
+
+    // Regression test for the length-limited Huffman correction.
+    //
+    // This skewed 306-symbol frequency distribution was captured from a real
+    // binary archive (a bundled 7-Zip binary). It forces Huffman depths
+    // beyond MAX_CODE_LENGTH. The old clamp + greedy "lengthen the shortest
+    // code" fix could stop with an INCOMPLETE code (Kraft sum < 2^15), which
+    // 7-Zip's RAR5 decoder rejects ("Data Error") while rar-rs's own decoder
+    // and The Unarchiver tolerate. The exact correction must always land on
+    // a complete code (Kraft sum == 2^MAX_CODE_LENGTH).
+    const FREQS: &[(usize, u32)] = &[
+        (0,775),(1,236),(2,125),(3,136),(4,177),(5,233),(6,107),(7,94),(8,191),(9,120),(10,110),(11,103),
+        (12,119),(13,81),(14,79),(15,381),(16,237),(17,77),(18,87),(19,68),(20,114),(21,83),(22,69),(23,80),
+        (24,164),(25,82),(26,67),(27,79),(28,90),(29,79),(30,242),(31,316),(32,262),(33,75),(34,52),(35,48),
+        (36,215),(37,73),(38,60),(39,60),(40,107),(41,78),(42,49),(43,71),(44,71),(45,62),(46,45),(47,49),
+        (48,120),(49,142),(50,48),(51,121),(52,62),(53,60),(54,53),(55,75),(56,128),(57,110),(58,47),(59,69),
+        (60,68),(61,84),(62,46),(63,49),(64,120),(65,257),(66,65),(67,81),(68,194),(69,130),(70,78),(71,92),
+        (72,511),(73,167),(74,62),(75,50),(76,167),(77,81),(78,46),(79,75),(80,108),(81,55),(82,47),(83,66),
+        (84,66),(85,64),(86,50),(87,71),(88,82),(89,51),(90,48),(91,50),(92,73),(93,71),(94,51),(95,50),
+        (96,99),(97,62),(98,55),(99,58),(100,65),(101,73),(102,100),(103,54),(104,77),(105,50),(106,48),(107,45),
+        (108,58),(109,45),(110,42),(111,78),(112,95),(113,53),(114,69),(115,63),(116,176),(117,207),(118,65),(119,83),
+        (120,103),(121,53),(122,46),(123,82),(124,84),(125,94),(126,84),(127,102),(128,90),(129,93),(130,52),(131,235),
+        (132,193),(133,224),(134,63),(135,71),(136,101),(137,544),(138,53),(139,353),(140,57),(141,260),(142,61),(143,60),
+        (144,124),(145,75),(146,54),(147,59),(148,64),(149,57),(150,61),(151,67),(152,74),(153,52),(154,64),(155,52),
+        (156,58),(157,65),(158,67),(159,64),(160,89),(161,74),(162,69),(163,62),(164,64),(165,64),(166,47),(167,56),
+        (168,71),(169,50),(170,67),(171,57),(172,85),(173,53),(174,63),(175,51),(176,84),(177,57),(178,63),(179,48),
+        (180,72),(181,74),(182,125),(183,72),(184,93),(185,65),(186,64),(187,73),(188,89),(189,135),(190,120),(191,70),
+        (192,170),(193,197),(194,112),(195,118),(196,113),(197,142),(198,117),(199,201),(200,105),(201,84),(202,82),(203,60),
+        (204,66),(205,73),(206,80),(207,56),(208,131),(209,87),(210,105),(211,87),(212,71),(213,74),(214,78),(215,71),
+        (216,102),(217,67),(218,69),(219,83),(220,103),(221,103),(222,80),(223,129),(224,133),(225,87),(226,93),(227,72),
+        (228,80),(229,79),(230,76),(231,111),(232,1608),(233,312),(234,79),(235,282),(236,71),(237,93),(238,97),(239,189),
+        (240,113),(241,68),(242,64),(243,81),(244,67),(245,61),(246,96),(247,129),(248,117),(249,95),(250,85),(251,95),
+        (252,101),(253,111),(254,128),(255,238),(258,2424),(259,455),(260,79),(261,55),(262,758),(263,1627),(264,2190),(265,1364),
+        (266,1081),(267,942),(268,698),(269,569),(270,703),(271,332),(272,176),(273,160),(274,161),(275,27),(276,9),(277,4),
+        (278,4),(279,2),(280,3),(281,2),(282,1),(283,2),(285,1),(289,1),(303,1),
+    ];
+
+    #[test]
+    fn length_limited_huffman_stays_complete() {
+        let mut freqs = vec![0u32; HUFF_NC];
+        for &(sym, f) in FREQS {
+            freqs[sym] = f;
+        }
+        let lengths = build_code_lengths_from_freqs(&freqs, MAX_CODE_LENGTH);
+        let kraft: i64 = lengths
+            .iter()
+            .filter(|&&l| l > 0)
+            .map(|&l| 1i64 << (MAX_CODE_LENGTH - l as usize))
+            .sum();
+        assert!(lengths.iter().all(|&l| l <= MAX_CODE_LENGTH as u8));
+        assert_eq!(kraft, 1i64 << MAX_CODE_LENGTH);
+    }
 }
