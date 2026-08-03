@@ -29,12 +29,15 @@ const FIXTURE_FILES: [(&str, &str); 4] = [
 
 fn sha256(data: &[u8]) -> String {
     // sha2 is a dependency of the library; expose it via the already-linked
-    // crates by re-hashing through the std-only path: build hex manually is
-    // overkill, so use `sha2` from the dependency graph via `use sha2::Digest`.
+    // crates. digest 0.11's output no longer formats as hex, so encode it
+    // manually.
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
     h.update(data);
-    format!("{:x}", h.finalize())
+    h.finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn make_temp_dir() -> tempfile::TempDir {

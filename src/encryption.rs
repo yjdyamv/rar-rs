@@ -16,13 +16,12 @@ use crate::constants::*;
 use crate::error::{RarError, RarResult};
 use crate::vint;
 
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
+use aes::Aes256;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
-type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Maximum accepted KDF strength exponent (2^24 iterations). Larger values
@@ -163,6 +162,60 @@ fn pbkdf2_fallback(password: &str, salt: &[u8], iterations: u32, out: &mut [u8; 
 
 // ── Encryption / Decryption ──────────────────────────────────────────────────
 
+/// AES-256-CBC state for RAR5, whose IV advances block by block and whose
+/// zero-fill padding is handled by the caller.
+#[derive(ZeroizeOnDrop)]
+struct Aes256Cbc {
+    cipher: Aes256,
+    iv: [u8; 16],
+}
+
+impl Aes256Cbc {
+    fn new(key: &[u8; 32], iv: &[u8; 16]) -> Self {
+        Self {
+            cipher: Aes256::new(key.into()),
+            iv: *iv,
+        }
+    }
+
+    fn encrypt_in_place(&mut self, data: &mut [u8]) -> RarResult<()> {
+        if data.len() % 16 != 0 {
+            return Err(RarError::Format(format!(
+                "plaintext length {} is not a multiple of 16",
+                data.len()
+            )));
+        }
+        for block in data.chunks_exact_mut(16) {
+            for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
+                *byte ^= iv_byte;
+            }
+            let block: &mut [u8; 16] = block.try_into().expect("16-byte AES block");
+            self.cipher.encrypt_block(block.into());
+            self.iv.copy_from_slice(block);
+        }
+        Ok(())
+    }
+
+    fn decrypt_in_place(&mut self, data: &mut [u8]) -> RarResult<()> {
+        if data.len() % 16 != 0 {
+            return Err(RarError::Format(format!(
+                "ciphertext length {} is not a multiple of 16",
+                data.len()
+            )));
+        }
+        for block in data.chunks_exact_mut(16) {
+            let ciphertext: [u8; 16] = block.try_into().expect("16-byte AES block");
+            let block: &mut [u8; 16] = block.try_into().expect("16-byte AES block");
+            self.cipher.decrypt_block(block.into());
+            for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
+                *byte ^= iv_byte;
+            }
+            self.iv = ciphertext;
+        }
+        Ok(())
+    }
+}
+
 /// Encrypt `plaintext` with AES-256-CBC using zero-fill padding.
 pub fn encrypt_data(plaintext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> Vec<u8> {
     let block_size = 16;
@@ -170,8 +223,11 @@ pub fn encrypt_data(plaintext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> Vec<u8> 
     let mut buf = vec![0u8; padded_len];
     buf[..plaintext.len()].copy_from_slice(plaintext);
 
-    let enc = Aes256CbcEnc::new(key.into(), iv.into());
-    enc.encrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(&buf)
+    let mut cipher = Aes256Cbc::new(key, iv);
+    cipher
+        .encrypt_in_place(&mut buf)
+        .expect("padded length is a multiple of 16");
+    buf
 }
 
 /// Decrypt AES-256-CBC ciphertext. Returns decrypted bytes including any
@@ -183,9 +239,12 @@ pub fn decrypt_data(ciphertext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> RarResu
             ciphertext.len()
         )));
     }
-    let dec = Aes256CbcDec::new(key.into(), iv.into());
-    dec.decrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(ciphertext)
-        .map_err(|e| RarError::Format(format!("AES decrypt error: {e}")))
+    let mut buf = ciphertext.to_vec();
+    let mut cipher = Aes256Cbc::new(key, iv);
+    cipher
+        .decrypt_in_place(&mut buf)
+        .map_err(|e| RarError::Format(format!("AES decrypt error: {e}")))?;
+    Ok(buf)
 }
 
 // ── Encryption Parameters ───────────────────────────────────────────────────
@@ -328,13 +387,10 @@ impl EncryptionParams {
     /// the hash-key bit (0x0002) so checksums of encrypted files are
     /// MAC'd, matching WinRAR behavior.
     pub fn generate_for_password(password: &str, strength: u8) -> Self {
-        use rand::Rng;
-        let mut rng = rand::rng();
-
         let mut salt = [0u8; ENCR_SALT_SIZE];
         let mut iv = [0u8; ENCR_IV_SIZE];
-        rng.fill(&mut salt);
-        rng.fill(&mut iv);
+        rand::fill(&mut salt);
+        rand::fill(&mut iv);
 
         let keys = derive_keys(password, &salt, strength).expect("valid strength");
         let psw_check = keys.password_check;
