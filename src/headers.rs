@@ -238,6 +238,11 @@ pub struct FileHeader {
     pub attributes: u64,
     pub mtime: u32,
     pub crc32_val: Option<u32>,
+    /// Wire hash-record type (`0` = BLAKE2sp) when a hash extra record is
+    /// present, otherwise `u8::MAX`.
+    pub hash_type: u8,
+    /// Expected file hash from the extra-area hash record.
+    pub hash_value: Option<[u8; 32]>,
     pub comp_method: u8,
     pub comp_version: u8,
     pub comp_solid: bool,
@@ -261,6 +266,8 @@ impl Default for FileHeader {
             attributes: 0o100644,
             mtime: 0,
             crc32_val: None,
+            hash_type: u8::MAX,
+            hash_value: None,
             comp_method: COMP_METHOD_STORE,
             comp_version: 0,
             comp_solid: false,
@@ -435,6 +442,7 @@ impl FileHeader {
         };
 
         let is_directory = file_flags & FILE_FLAG_DIRECTORY != 0;
+        let (hash_type, hash_value) = parse_hash_record(&extra_data);
 
         Ok(FileHeader {
             name,
@@ -443,6 +451,8 @@ impl FileHeader {
             attributes,
             mtime,
             crc32_val,
+            hash_type,
+            hash_value,
             comp_method,
             comp_version,
             comp_solid,
@@ -456,6 +466,57 @@ impl FileHeader {
             format_version: 5,
         })
     }
+}
+
+/// Parse the extra-area hash record (`EXTRA_FILE_HASH`).
+///
+/// Record format: `[rec_size vint][rec_type vint=0x02][hash_type vint]
+/// [hash bytes]`. Hash type `0` is BLAKE2sp (32 bytes).
+fn parse_hash_record(extra_data: &[u8]) -> (u8, Option<[u8; 32]>) {
+    let mut offset = 0usize;
+    while offset < extra_data.len() {
+        let (rec_size, n) = match vint::decode_from_slice(extra_data, offset) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        offset += n;
+        let rec_end = match offset.checked_add(rec_size as usize) {
+            Some(end) if end <= extra_data.len() => end,
+            _ => break,
+        };
+        let (rec_type, tn) = match vint::decode_from_slice(extra_data, offset) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        let body_start = offset + tn;
+        if rec_type == EXTRA_FILE_HASH {
+            if let Ok((hash_type, hn)) = vint::decode_from_slice(extra_data, body_start) {
+                let data_start = body_start + hn;
+                if hash_type == 0 && rec_end - data_start == 32 {
+                    let mut value = [0u8; 32];
+                    value.copy_from_slice(&extra_data[data_start..rec_end]);
+                    return (hash_type as u8, Some(value));
+                }
+            }
+            return (0, None);
+        }
+        offset = rec_end;
+    }
+    (u8::MAX, None)
+}
+
+/// Serialize a BLAKE2sp hash extra record for file headers.
+pub fn hash_extra_record(value: [u8; 32]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(1 + 32);
+    body.extend(vint::encode(0u64)); // hash type: BLAKE2sp
+    body.extend_from_slice(&value);
+    let type_bytes = vint::encode(EXTRA_FILE_HASH);
+    let rec_size = type_bytes.len() + body.len();
+    let mut out = Vec::with_capacity(rec_size + 1 + body.len());
+    out.extend(vint::encode(rec_size as u64));
+    out.extend(type_bytes);
+    out.extend(body);
+    out
 }
 
 // ── End of Archive Header ──────────────────────────────────────────────────

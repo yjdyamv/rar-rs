@@ -256,6 +256,8 @@ pub fn parse_rar4_file_header<R: Read + Seek>(
         attributes: file_attr as u64,
         mtime,
         crc32_val: Some(file_crc),
+        hash_type: u8::MAX,
+        hash_value: None,
         comp_method,
         comp_version: 0,
         comp_solid: common.flags & FHD_SOLID != 0,

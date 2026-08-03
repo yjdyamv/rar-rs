@@ -25,6 +25,10 @@ impl<'a> MatchFinder<'a> {
         chain_len: usize,
         window: usize,
     ) -> Self {
+        // The prev ring only needs to cover the LZ window: older slots are
+        // safely aliased because the finder is rebuilt per chunk and every
+        // chained candidate is strictly older than the current position.
+        // Keeping the ring at window size keeps it hot in cache.
         let prev_bits = window.next_power_of_two().max(1 << 17);
         let prev_size = prev_bits;
         MatchFinder {

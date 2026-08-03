@@ -24,12 +24,14 @@
 //! BSD-2-Clause. See LICENSE for details.
 
 pub mod archive;
+mod blake2sp;
 pub mod codec;
 pub mod compression;
 pub mod constants;
 pub mod encryption;
 pub mod error;
 pub mod headers;
+pub mod options;
 pub mod rar4;
 pub mod recovery;
 pub mod write_progress;
@@ -41,3 +43,4 @@ pub use constants::*;
 pub use encryption::EncryptionParams;
 pub use error::{RarError, RarResult};
 pub use headers::DataChunk;
+pub use options::{CreateOptions, ExtractOptions};

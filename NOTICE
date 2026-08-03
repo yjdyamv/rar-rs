@@ -26,6 +26,21 @@ source code distributed by RARLAB under its restrictive license. The archive
 header and block structure implementations are based on the publicly documented
 RAR format specifications and libarchive's independent BSD-2-Clause work.
 
+Portions from the `rars` project
+--------------------------------
+
+The RAR5 recovery-record codec (`src/recovery/rar5.rs`), the BLAKE2sp hash
+(`src/blake2sp.rs`) and the RAR5 key-derivation / hash-key MAC patterns
+(`src/encryption.rs`) are ported from the `rars` project
+(https://github.com/bitplane/rars, crates.io `rars`), which is licensed
+MIT OR Apache-2.0. Those portions retain their upstream license; the rest
+of this project remains BSD-2-Clause.
+
+Official RAR/UNRAR binaries are used strictly as black-box interoperability
+references for testing (set `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` to run
+the `official_*` interop tests); their code is not used or referenced, and
+this project remains a clean-room implementation.
+
 Scope and Limitations
 ----------------------
 

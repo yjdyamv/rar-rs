@@ -16,11 +16,66 @@ use crate::headers::*;
 use crate::rar4;
 use crate::vint;
 
+/// Maximum archive prefix buffered for inline recovery-record parity.
+/// Streamed recovery records are not implemented yet; larger archives must
+/// create recovery records without `recovery_percent`.
+const MAX_RECOVERY_PREFIX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+
+/// Maximum accepted RAR5 dictionary-size log (1 GiB, the WinRAR 5.x
+/// maximum). Larger values are rejected at decode time to bound window
+/// allocations.
+const MAX_DICT_SIZE_LOG: u8 = 13;
+
 /// A single entry in the archive (public API).
 #[derive(Clone, Debug)]
 pub struct ArchiveEntry {
     pub header: FileHeader,
     pub chunks: Vec<DataChunk>,
+}
+
+/// Decrypted member payload plus the key material needed for integrity
+/// verification.
+struct DecryptedPayload {
+    data: Vec<u8>,
+    params: Option<encryption::EncryptionParams>,
+    keys: Option<encryption::DerivedKeys>,
+}
+
+/// Write sink that computes CRC32 and optional BLAKE2sp over streamed
+/// output.
+struct IntegritySink<'a> {
+    inner: &'a mut dyn Write,
+    crc: crc32fast::Hasher,
+    blake: Option<crate::blake2sp::Hasher>,
+}
+
+impl<'a> IntegritySink<'a> {
+    fn new(inner: &'a mut dyn Write, want_blake: bool) -> Self {
+        Self {
+            inner,
+            crc: crc32fast::Hasher::new(),
+            blake: want_blake.then(crate::blake2sp::Hasher::new),
+        }
+    }
+
+    fn finish(self) -> (u32, Option<[u8; 32]>) {
+        (self.crc.finalize(), self.blake.map(|h| h.finalize()))
+    }
+}
+
+impl Write for IntegritySink<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.crc.update(&buf[..n]);
+        if let Some(h) = self.blake.as_mut() {
+            h.update(&buf[..n]);
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 impl ArchiveEntry {
@@ -96,6 +151,21 @@ pub struct RarArchive {
     /// Optional progress callback invoked during compression:
     /// `(bytes_processed_in_file, total_bytes_in_file)`.
     progress_callback: Option<Box<dyn FnMut(u64, u64) + Send>>,
+    /// Create a solid archive (shared LZ window across compressed members).
+    solid_mode: bool,
+    /// Write a quick-open ("QO") service record at close time.
+    quick_open: bool,
+    /// Write BLAKE2sp hash records for members.
+    blake2: bool,
+    /// Cached (offset, full header bytes) of file headers for quick-open.
+    quick_open_entries: Vec<(u64, Vec<u8>)>,
+    /// File offset of the quick-open offset vint inside the main header's
+    /// locator record (preallocated, patched at close time).
+    qo_offset_field_pos: Option<u64>,
+    /// Persistent RAR5 encoder state for solid archives.
+    encoder_state: Option<crate::codec::EncoderState>,
+    /// Options for the current read/extract operation (set per call).
+    extract_options: crate::options::ExtractOptions,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -133,6 +203,13 @@ impl RarArchive {
             current_volume: 0,
             volume_bytes_written: 0,
             progress_callback: None,
+            solid_mode: false,
+            quick_open: false,
+            blake2: false,
+            quick_open_entries: Vec::new(),
+            qo_offset_field_pos: None,
+            encoder_state: None,
+            extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
         Ok(archive)
@@ -163,6 +240,13 @@ impl RarArchive {
             current_volume: 0,
             volume_bytes_written: 0,
             progress_callback: None,
+            solid_mode: false,
+            quick_open: false,
+            blake2: false,
+            quick_open_entries: Vec::new(),
+            qo_offset_field_pos: None,
+            encoder_state: None,
+            extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
         Ok(archive)
@@ -173,8 +257,51 @@ impl RarArchive {
         self.password = Some(password.to_string());
     }
 
-    /// Create a new RAR5 archive (overwrites existing file).
-    pub fn create(path: impl AsRef<Path>) -> RarResult<Self> {
+    /// Create a new RAR5 archive with explicit options (overwrites an
+    /// existing file).
+    ///
+    /// This is the full-featured constructor: `solid`, `quick_open` and
+    /// `blake2` options can be combined with passwords, header encryption,
+    /// recovery records and volume sizes. The dedicated `create*`
+    /// constructors are thin wrappers around it.
+    pub fn create_with_options(
+        path: impl AsRef<Path>,
+        opts: crate::options::CreateOptions,
+    ) -> RarResult<Self> {
+        if opts.solid && opts.volume_size.is_some() {
+            return Err(RarError::Unsupported(
+                "solid archives with multiple volumes are not supported yet".into(),
+            ));
+        }
+        if opts.encrypt_headers
+            && opts.password.as_deref().is_none_or(|pw| pw.is_empty())
+        {
+            return Err(RarError::Encrypted(
+                "header encryption requires a password".into(),
+            ));
+        }
+        if opts.encrypt_headers && opts.volume_size.is_some() {
+            return Err(RarError::Unsupported(
+                "header encryption is not supported for multi-volume archives".into(),
+            ));
+        }
+        if opts.recovery_percent.is_some() && opts.volume_size.is_some() {
+            return Err(RarError::Unsupported(
+                "recovery records are not supported for multi-volume archives".into(),
+            ));
+        }
+        if (opts.recovery_volumes_percent.is_some() || opts.recovery_volume_count.is_some())
+            && opts.volume_size.is_none()
+        {
+            return Err(RarError::Unsupported(
+                "recovery volumes require a volume size".into(),
+            ));
+        }
+        // Quick-open only applies to single-volume archives without header
+        // encryption; otherwise it is silently skipped (matching the
+        // reference writer behavior).
+        let quick_open = opts.quick_open && !opts.encrypt_headers && opts.volume_size.is_none();
+
         let path = path.as_ref().to_path_buf();
         let mut archive = RarArchive {
             path,
@@ -185,58 +312,45 @@ impl RarArchive {
             solid_state: None,
             rar4_solid_state: None,
             solid_decoded_through: -1,
-            password: None,
-            header_encryption: false,
+            password: opts.password,
+            header_encryption: opts.encrypt_headers,
             archive_encr: None,
-            recovery_percent: None,
-            recovery_volumes_percent: None,
-            recovery_volumes_count: None,
+            recovery_percent: opts.recovery_percent.map(|p| p.min(100)),
+            recovery_volumes_percent: opts.recovery_volumes_percent.map(|p| p.min(100)),
+            recovery_volumes_count: opts.recovery_volume_count,
             main_header_start: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
-            volume_size: None,
+            volume_size: opts.volume_size,
             current_volume: 0,
             volume_bytes_written: 0,
             progress_callback: None,
+            solid_mode: opts.solid,
+            quick_open,
+            blake2: opts.blake2,
+            quick_open_entries: Vec::new(),
+            qo_offset_field_pos: None,
+            encoder_state: None,
+            extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_write()?;
         Ok(archive)
     }
 
+    /// Create a new RAR5 archive (overwrites existing file).
+    pub fn create(path: impl AsRef<Path>) -> RarResult<Self> {
+        Self::create_with_options(path, crate::options::CreateOptions::default())
+    }
+
     /// Create a new multi-volume RAR5 archive.
     pub fn create_multivolume(path: impl AsRef<Path>, volume_size: u64) -> RarResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let volume_base = get_volume_base(&path);
-        let vol_path = volume_path(path.parent().unwrap_or(Path::new(".")), &volume_base, 1);
-        let mut archive = RarArchive {
+        Self::create_with_options(
             path,
-            mode: Mode::Write,
-            entries: Vec::new(),
-            stream: None,
-            format_version: 5,
-            solid_state: None,
-            rar4_solid_state: None,
-            solid_decoded_through: -1,
-            password: None,
-            header_encryption: false,
-            archive_encr: None,
-            recovery_percent: None,
-            recovery_volumes_percent: None,
-            recovery_volumes_count: None,
-            main_header_start: None,
-            rr_offset_field_pos: None,
-            volume_paths: vec![vol_path.clone()],
-            volume_size: Some(volume_size),
-            current_volume: 1,
-            volume_bytes_written: 0,
-            progress_callback: None,
-        };
-        let f = File::create(&vol_path)?;
-        archive.stream = Some(f);
-        archive.write_signature()?;
-        archive.write_archive_header_vol(None)?;
-        archive.volume_bytes_written = archive.stream.as_ref().unwrap().stream_position()?;
-        Ok(archive)
+            crate::options::CreateOptions {
+                volume_size: Some(volume_size),
+                ..Default::default()
+            },
+        )
     }
 
     /// Create a new multi-volume RAR5 archive with recovery volumes
@@ -246,38 +360,14 @@ impl RarArchive {
         volume_size: u64,
         percent: u8,
     ) -> RarResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let volume_base = get_volume_base(&path);
-        let vol_path = volume_path(path.parent().unwrap_or(Path::new(".")), &volume_base, 1);
-        let mut archive = RarArchive {
+        Self::create_with_options(
             path,
-            mode: Mode::Write,
-            entries: Vec::new(),
-            stream: None,
-            format_version: 5,
-            solid_state: None,
-            rar4_solid_state: None,
-            solid_decoded_through: -1,
-            password: None,
-            header_encryption: false,
-            archive_encr: None,
-            recovery_percent: None,
-            recovery_volumes_percent: Some(percent.min(100)),
-            recovery_volumes_count: None,
-            main_header_start: None,
-            rr_offset_field_pos: None,
-            volume_paths: vec![vol_path.clone()],
-            volume_size: Some(volume_size),
-            current_volume: 1,
-            volume_bytes_written: 0,
-            progress_callback: None,
-        };
-        let f = File::create(&vol_path)?;
-        archive.stream = Some(f);
-        archive.write_signature()?;
-        archive.write_archive_header_vol(None)?;
-        archive.volume_bytes_written = archive.stream.as_ref().unwrap().stream_position()?;
-        Ok(archive)
+            crate::options::CreateOptions {
+                volume_size: Some(volume_size),
+                recovery_volumes_percent: Some(percent.min(100)),
+                ..Default::default()
+            },
+        )
     }
 
     /// Create a new multi-volume RAR5 archive with an exact number of
@@ -287,45 +377,25 @@ impl RarArchive {
         volume_size: u64,
         rec_count: u32,
     ) -> RarResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let volume_base = get_volume_base(&path);
-        let vol_path = volume_path(path.parent().unwrap_or(Path::new(".")), &volume_base, 1);
-        let mut archive = RarArchive {
+        Self::create_with_options(
             path,
-            mode: Mode::Write,
-            entries: Vec::new(),
-            stream: None,
-            format_version: 5,
-            solid_state: None,
-            rar4_solid_state: None,
-            solid_decoded_through: -1,
-            password: None,
-            header_encryption: false,
-            archive_encr: None,
-            recovery_percent: None,
-            recovery_volumes_percent: None,
-            recovery_volumes_count: Some(rec_count),
-            main_header_start: None,
-            rr_offset_field_pos: None,
-            volume_paths: vec![vol_path.clone()],
-            volume_size: Some(volume_size),
-            current_volume: 1,
-            volume_bytes_written: 0,
-            progress_callback: None,
-        };
-        let f = File::create(&vol_path)?;
-        archive.stream = Some(f);
-        archive.write_signature()?;
-        archive.write_archive_header_vol(None)?;
-        archive.volume_bytes_written = archive.stream.as_ref().unwrap().stream_position()?;
-        Ok(archive)
+            crate::options::CreateOptions {
+                volume_size: Some(volume_size),
+                recovery_volume_count: Some(rec_count),
+                ..Default::default()
+            },
+        )
     }
 
     /// Create a new encrypted RAR5 archive (overwrites existing file).
     pub fn create_with_password(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
-        let mut archive = Self::create(path)?;
-        archive.password = Some(password.to_string());
-        Ok(archive)
+        Self::create_with_options(
+            path,
+            crate::options::CreateOptions {
+                password: Some(password.to_string()),
+                ..Default::default()
+            },
+        )
     }
 
     /// Create a new RAR5 archive with encrypted headers (overwrites existing
@@ -335,32 +405,14 @@ impl RarArchive {
     ///
     /// Not supported for multi-volume archives.
     pub fn create_with_password_headers(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut archive = RarArchive {
+        Self::create_with_options(
             path,
-            mode: Mode::Write,
-            entries: Vec::new(),
-            stream: None,
-            format_version: 5,
-            solid_state: None,
-            rar4_solid_state: None,
-            solid_decoded_through: -1,
-            password: Some(password.to_string()),
-            header_encryption: true,
-            archive_encr: None,
-            recovery_percent: None,
-            recovery_volumes_percent: None,
-            recovery_volumes_count: None,
-            main_header_start: None,
-            rr_offset_field_pos: None,
-            volume_paths: Vec::new(),
-            volume_size: None,
-            current_volume: 0,
-            volume_bytes_written: 0,
-            progress_callback: None,
-        };
-        archive.open_write()?;
-        Ok(archive)
+            crate::options::CreateOptions {
+                password: Some(password.to_string()),
+                encrypt_headers: true,
+                ..Default::default()
+            },
+        )
     }
 
     /// Create a new RAR5 archive with an inline recovery record
@@ -376,36 +428,18 @@ impl RarArchive {
         password: &str,
         percent: u8,
     ) -> RarResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut archive = RarArchive {
+        Self::create_with_options(
             path,
-            mode: Mode::Write,
-            entries: Vec::new(),
-            stream: None,
-            format_version: 5,
-            solid_state: None,
-            rar4_solid_state: None,
-            solid_decoded_through: -1,
-            password: if password.is_empty() {
-                None
-            } else {
-                Some(password.to_string())
+            crate::options::CreateOptions {
+                password: if password.is_empty() {
+                    None
+                } else {
+                    Some(password.to_string())
+                },
+                recovery_percent: Some(percent.min(100)),
+                ..Default::default()
             },
-            header_encryption: false,
-            archive_encr: None,
-            recovery_percent: Some(percent.min(100)),
-            recovery_volumes_percent: None,
-            recovery_volumes_count: None,
-            main_header_start: None,
-            rr_offset_field_pos: None,
-            volume_paths: Vec::new(),
-            volume_size: None,
-            current_volume: 0,
-            volume_bytes_written: 0,
-            progress_callback: None,
-        };
-        archive.open_write()?;
-        Ok(archive)
+        )
     }
 
     /// Create a new RAR5 archive with header encryption and an inline
@@ -415,32 +449,15 @@ impl RarArchive {
         password: &str,
         percent: u8,
     ) -> RarResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut archive = RarArchive {
+        Self::create_with_options(
             path,
-            mode: Mode::Write,
-            entries: Vec::new(),
-            stream: None,
-            format_version: 5,
-            solid_state: None,
-            rar4_solid_state: None,
-            solid_decoded_through: -1,
-            password: Some(password.to_string()),
-            header_encryption: true,
-            archive_encr: None,
-            recovery_percent: Some(percent.min(100)),
-            recovery_volumes_percent: None,
-            recovery_volumes_count: None,
-            main_header_start: None,
-            rr_offset_field_pos: None,
-            volume_paths: Vec::new(),
-            volume_size: None,
-            current_volume: 0,
-            volume_bytes_written: 0,
-            progress_callback: None,
-        };
-        archive.open_write()?;
-        Ok(archive)
+            crate::options::CreateOptions {
+                password: Some(password.to_string()),
+                encrypt_headers: true,
+                recovery_percent: Some(percent.min(100)),
+                ..Default::default()
+            },
+        )
     }
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -459,6 +476,25 @@ impl RarArchive {
     }
 
     fn open_write(&mut self) -> RarResult<()> {
+        if let Some(volume_size) = self.volume_size {
+            if volume_size == 0 {
+                return Err(RarError::Format(
+                    "volume size must be greater than zero".into(),
+                ));
+            }
+            let base = get_volume_base(&self.path);
+            let parent = self.path.parent().unwrap_or(Path::new("."));
+            let vol_path = volume_path(parent, &base, 1);
+            self.volume_paths = vec![vol_path.clone()];
+            self.current_volume = 1;
+            let f = File::create(&vol_path)?;
+            self.stream = Some(f);
+            self.write_signature()?;
+            self.write_archive_header_vol(None)?;
+            self.volume_bytes_written = self.stream.as_ref().unwrap().stream_position()?;
+            return Ok(());
+        }
+
         let f = File::create(&self.path)?;
         self.stream = Some(f);
         self.write_signature()?;
@@ -468,11 +504,6 @@ impl RarArchive {
             let password = self.password.as_ref().ok_or_else(|| {
                 RarError::Encrypted("header encryption requires a password".into())
             })?;
-            if self.volume_size.is_some() {
-                return Err(RarError::Unsupported(
-                    "header encryption is not supported for multi-volume archives".into(),
-                ));
-            }
             let encr =
                 encryption::EncryptionParams::generate_for_password(password, ENCR_PBKDF2_ITER_LOG);
             let block = encr.to_archive_header_block();
@@ -508,8 +539,24 @@ impl RarArchive {
     /// Finalize the archive (writes end-of-archive block in write mode).
     pub fn close(&mut self) -> RarResult<()> {
         if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
-            if self.recovery_percent.is_some() {
+            let qo_offset = if self.quick_open {
+                Some(self.write_quick_open_record()?)
+            } else {
+                None
+            };
+            let rr_offset = if self.recovery_percent.is_some() {
+                Some(self.stream.as_ref().unwrap().stream_position()?)
+            } else {
+                None
+            };
+            if rr_offset.is_some() {
+                // The final main header (with the real QO/RR offsets) must
+                // be in place before the parity is computed: the RR
+                // protects the raw archive bytes including the main header.
+                self.patch_main_header_locator(qo_offset, rr_offset)?;
                 self.write_recovery_record()?;
+            } else if self.quick_open {
+                self.patch_main_header_locator(qo_offset, None)?;
             }
             self.write_end_block()?;
             self.mode = Mode::Read; // prevent double-write
@@ -528,6 +575,11 @@ impl RarArchive {
         if nd == 0 {
             return Err(RarError::Format("no volumes for recovery volumes".into()));
         }
+        if nd > 65535 {
+            return Err(RarError::Format(format!(
+                "too many volumes ({nd}) for recovery volumes; maximum is 65535"
+            )));
+        }
         // Exact count wins; the percent variant is converted at close time.
         let rec_count = if let Some(count) = self.recovery_volumes_count {
             (count as usize).min(nd)
@@ -536,21 +588,56 @@ impl RarArchive {
         } else {
             return Ok(());
         };
-        // Read all volume files.
-        let mut volume_data: Vec<Vec<u8>> = Vec::with_capacity(self.volume_paths.len());
-        let mut volume_sizes = Vec::with_capacity(self.volume_paths.len());
-        let mut volume_crcs = Vec::with_capacity(self.volume_paths.len());
-        for vol in &self.volume_paths {
-            let data = std::fs::read(vol)?;
-            volume_sizes.push(data.len() as u64);
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(&data);
-            volume_crcs.push(hasher.finalize());
-            volume_data.push(data);
-        }
 
-        let refs: Vec<&[u8]> = volume_data.iter().map(|v| v.as_slice()).collect();
-        let payloads = crate::recovery::rev5::encode_recovery_volumes_exact(&refs, rec_count)?;
+        // Stream all volumes in lockstep chunks: per-chunk Reed-Solomon
+        // parity keeps memory bounded at O(chunk x volumes) and CRCs are
+        // computed in the same pass.
+        const CHUNK: u64 = 1024 * 1024;
+        let mut volume_sizes = Vec::with_capacity(self.volume_paths.len());
+        let mut readers = Vec::with_capacity(self.volume_paths.len());
+        let mut crcs = Vec::with_capacity(self.volume_paths.len());
+        for vol in &self.volume_paths {
+            let size = fs::metadata(vol)?.len();
+            volume_sizes.push(size);
+            readers.push(File::open(vol)?);
+            crcs.push(crc32fast::Hasher::new());
+        }
+        let max_len = *volume_sizes.iter().max().unwrap_or(&0);
+        let padded_max = if max_len % 2 == 0 { max_len } else { max_len + 1 };
+
+        let mut payloads: Vec<Vec<u8>> = vec![Vec::new(); rec_count];
+        let mut offset = 0u64;
+        while offset < padded_max {
+            let want = (padded_max - offset).min(CHUNK) as usize;
+            let mut chunk_bufs: Vec<Vec<u8>> = Vec::with_capacity(nd);
+            for (i, reader) in readers.iter_mut().enumerate() {
+                let mut buf = vec![0u8; want];
+                if offset < volume_sizes[i] {
+                    let to_read = (volume_sizes[i] - offset).min(want as u64) as usize;
+                    let n = read_up_to(reader, &mut buf[..to_read])?;
+                    if n != to_read {
+                        return Err(RarError::Io(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            format!(
+                                "volume {} shrank while building recovery volumes",
+                                self.volume_paths[i].display()
+                            ),
+                        )));
+                    }
+                    crcs[i].update(&buf[..to_read]);
+                    buf[to_read..].fill(0); // zero-pad to the chunk length
+                }
+                chunk_bufs.push(buf);
+            }
+            let refs: Vec<&[u8]> = chunk_bufs.iter().map(|b| b.as_slice()).collect();
+            let parity = crate::recovery::rar5::encode_parity_shards(&refs, rec_count)
+                .map_err(|e| RarError::Format(format!("recovery volumes encode: {e}")))?;
+            for (k, p) in parity.into_iter().enumerate() {
+                payloads[k].extend(p);
+            }
+            offset += want as u64;
+        }
+        let volume_crcs: Vec<u32> = crcs.into_iter().map(|h| h.finalize()).collect();
 
         let base = get_volume_base(&self.path);
         let parent = self.path.parent().unwrap_or(Path::new("."));
@@ -569,18 +656,21 @@ impl RarArchive {
         Ok(())
     }
 
-    /// Compute the RAR5 recovery record over the archive written so far,
-    /// append the `"RR"` service header and patch the main archive header's
-    /// locator record with the recovery-record offset.
+    /// Compute the RAR5 recovery record over the archive written so far
+    /// and append the `"RR"` service header. The main header locator was
+    /// already patched by [`Self::close`].
     fn write_recovery_record(&mut self) -> RarResult<()> {
         let percent = self.recovery_percent.unwrap_or(0) as u64;
         let stream = self.stream.as_mut().unwrap();
         let archive_size = stream.stream_position()?;
-
-        // The final main header (with the real RR offset) must be in place
-        // before the parity is computed: the RR protects the raw archive
-        // bytes including the main header.
-        self.patch_main_header_locator(archive_size)?;
+        if archive_size > MAX_RECOVERY_PREFIX_BYTES {
+            return Err(RarError::LimitExceeded {
+                limit: MAX_RECOVERY_PREFIX_BYTES,
+                context: format!(
+                    "recovery record prefix is {archive_size} bytes; streaming recovery records are not supported"
+                ),
+            });
+        }
 
         // Read the archive prefix (everything written so far). The write
         // stream is write-only (File::create), so use a separate handle.
@@ -637,15 +727,82 @@ impl RarArchive {
         Ok(())
     }
 
-    /// Rewrite the main archive header with the real recovery-record offset
-    /// (the locator field was preallocated as a fixed 5-byte vint).
-    fn patch_main_header_locator(&mut self, rr_offset: u64) -> RarResult<()> {
+    /// Write the quick-open ("QO") service record at the end of the
+    /// archive, caching a full copy of every file header. Returns the
+    /// absolute offset of the record for the main-header locator.
+    fn write_quick_open_record(&mut self) -> RarResult<u64> {
+        let stream = self.stream.as_mut().unwrap();
+        let qo_pos = stream.stream_position()?;
+
+        let mut payload = Vec::new();
+        for (offset, header) in &self.quick_open_entries {
+            let rel = qo_pos.checked_sub(*offset).ok_or_else(|| {
+                RarError::Format("quick-open cached header is after the QO record".into())
+            })?;
+            let mut body = Vec::new();
+            body.extend(vint::encode(0u64)); // entry flags: file header
+            body.extend(vint::encode(rel));
+            body.extend(vint::encode(header.len() as u64));
+            body.extend_from_slice(header);
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&body);
+            let crc = hasher.finalize();
+            payload.extend(crc.to_le_bytes());
+            payload.extend(vint::encode(body.len() as u64));
+            payload.extend(body);
+        }
+
+        // Service header: type 3, name "QO", with an empty service-data
+        // extra record (type 0x07) and the payload as its data area.
+        let mut body = Vec::new();
+        body.extend(vint::encode(0x03u64)); // service header
+        body.extend(vint::encode(
+            (BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_SKIP_IF_UNKNOWN) as u64,
+        ));
+        let mut extra = Vec::new();
+        extra.extend(vint::encode(1u64)); // record size: type only
+        extra.extend(vint::encode(0x07u64)); // service data record type
+        body.extend(vint::encode(extra.len() as u64)); // extra area size
+        body.extend(vint::encode(payload.len() as u64)); // data size
+        body.extend(vint::encode(0u64)); // file flags
+        body.extend(vint::encode(payload.len() as u64)); // unpacked size
+        body.extend(vint::encode(0u64)); // attributes
+        body.extend(vint::encode(0u64)); // compression info (store)
+        body.extend(vint::encode(OS_UNIX as u64));
+        body.extend(vint::encode(2u64)); // name length
+        body.extend(b"QO");
+        body.extend(extra);
+
+        let size_bytes = vint::encode(body.len() as u64);
+        let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
+        header_content.extend(&size_bytes);
+        header_content.extend(&body);
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&header_content);
+        let crc = hasher.finalize();
+        let mut hdr = Vec::with_capacity(4 + header_content.len());
+        hdr.extend(crc.to_le_bytes());
+        hdr.extend(header_content);
+
+        self.write_block_header(&hdr)?;
+        let stream = self.stream.as_mut().unwrap();
+        stream.write_all(&payload)?;
+        Ok(qo_pos)
+    }
+
+    /// Rewrite the main archive header with the real quick-open and/or
+    /// recovery-record offsets. Locator fields are stored as vints
+    /// relative to the archive start (after the 8-byte signature), matching
+    /// WinRAR; fields were preallocated as fixed 5-byte vints at header
+    /// write time.
+    fn patch_main_header_locator(
+        &mut self,
+        qo_offset: Option<u64>,
+        rr_offset: Option<u64>,
+    ) -> RarResult<()> {
         let start = self
             .main_header_start
             .ok_or_else(|| RarError::Format("main header position unknown".into()))?;
-        let field_pos = self
-            .rr_offset_field_pos
-            .ok_or_else(|| RarError::Format("locator field position unknown".into()))?;
 
         // Rebuild the main header: read it back (plaintext or decrypted).
         let plain = if self.header_encryption {
@@ -692,14 +849,29 @@ impl RarArchive {
             hdr
         };
 
-        // Patch the rr-offset field (fixed 5-byte vint) inside the header.
-        let field = field_pos as usize;
-        let patched = vint_fixed5(rr_offset);
-        if field + patched.len() > plain.len() {
-            return Err(RarError::Format("locator field out of bounds".into()));
-        }
         let mut new_header = plain;
-        new_header[field..field + patched.len()].copy_from_slice(&patched);
+        if let Some(qo) = qo_offset {
+            let field = self
+                .qo_offset_field_pos
+                .ok_or_else(|| RarError::Format("quick-open locator field position unknown".into()))?
+                as usize;
+            let patched = vint_fixed5(qo.saturating_sub(RAR5_SIGNATURE.len() as u64));
+            if field + patched.len() > new_header.len() {
+                return Err(RarError::Format("locator field out of bounds".into()));
+            }
+            new_header[field..field + patched.len()].copy_from_slice(&patched);
+        }
+        if let Some(rr) = rr_offset {
+            let field = self
+                .rr_offset_field_pos
+                .ok_or_else(|| RarError::Format("recovery locator field position unknown".into()))?
+                as usize;
+            let patched = vint_fixed5(rr.saturating_sub(RAR5_SIGNATURE.len() as u64));
+            if field + patched.len() > new_header.len() {
+                return Err(RarError::Format("locator field out of bounds".into()));
+            }
+            new_header[field..field + patched.len()].copy_from_slice(&patched);
+        }
         // Recompute the header CRC (covers from the size field onwards).
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&new_header[4..]);
@@ -1130,11 +1302,15 @@ impl RarArchive {
     // ── Writing ────────────────────────────────────────────────────────────
 
     fn write_archive_header(&mut self) -> RarResult<()> {
-        if self.recovery_percent.is_some() {
-            return self.write_archive_header_with_recovery();
+        if self.recovery_percent.is_some() || self.quick_open {
+            return self.write_archive_header_with_locators();
         }
         let hdr = ArchiveHeader {
-            flags: 0,
+            flags: if self.solid_mode {
+                ARCHIVE_FLAG_SOLID
+            } else {
+                0
+            },
             extra_data: Vec::new(),
             volume_number: None,
         };
@@ -1142,34 +1318,62 @@ impl RarArchive {
         self.write_block_header(&hdr_bytes)
     }
 
-    /// Write the main archive header with a recovery-record locator record
-    /// and the `MHFL_RECOVERY` archive flag.
+    /// Write the main archive header with a locator record for the
+    /// quick-open and/or recovery-record offsets, plus the archive flags
+    /// (`MHFL_RECOVERY`, `MHFL_SOLID`) as needed.
     ///
-    /// The recovery-record offset field is preallocated to a fixed 5-byte
-    /// vint so the header length never changes; the real offset is patched
-    /// in at close time.
-    fn write_archive_header_with_recovery(&mut self) -> RarResult<()> {
-        if self.volume_size.is_some() {
-            return Err(RarError::Unsupported(
-                "recovery records are not supported for multi-volume archives".into(),
-            ));
-        }
-        // Locator record: [rec_size vint][type vint=0x01][flags vint=0x0002]
-        // [recovery-record offset vint (5 bytes, patched at close)].
-        const RR_OFFSET_FIELD: usize = 5;
+    /// The offset fields are preallocated as fixed 5-byte vints so the
+    /// header length never changes; the real offsets are patched in at
+    /// close time.
+    fn write_archive_header_with_locators(&mut self) -> RarResult<()> {
+        // Locator record body: [flags vint][qo offset vint][rr offset vint]
+        // (only the offsets whose flags are set).
+        const LOCATOR_TYPE: u64 = 0x01;
+        const LOCATOR_FLAG_QUICK_OPEN: u64 = 0x0001;
+        const LOCATOR_FLAG_RECOVERY: u64 = 0x0002;
+
         let mut locator = Vec::new();
-        locator.extend(vint::encode(0x01u64)); // type: locator
-        locator.extend(vint::encode(0x0002u64)); // flags: recovery offset present
-        locator.extend_from_slice(&vint_fixed5(0));
+        let mut locator_flags = 0u64;
+        if self.quick_open {
+            locator_flags |= LOCATOR_FLAG_QUICK_OPEN;
+        }
+        if self.recovery_percent.is_some() {
+            locator_flags |= LOCATOR_FLAG_RECOVERY;
+        }
+        locator.extend(vint::encode(locator_flags));
+        let qo_field_pos = if self.quick_open {
+            let p = locator.len();
+            locator.extend_from_slice(&vint_fixed5(0));
+            Some(p)
+        } else {
+            None
+        };
+        let rr_field_pos = if self.recovery_percent.is_some() {
+            let p = locator.len();
+            locator.extend_from_slice(&vint_fixed5(0));
+            Some(p)
+        } else {
+            None
+        };
+
         let mut extra = Vec::new();
         extra.extend(vint::encode(locator.len() as u64)); // record size
-        extra.extend(locator);
+        extra.extend(vint::encode(LOCATOR_TYPE));
+        extra.extend(&locator);
+
+        let mut arch_flags = 0u64;
+        if self.recovery_percent.is_some() {
+            arch_flags |= ARCHIVE_FLAG_RECOVERY;
+        }
+        if self.solid_mode {
+            arch_flags |= ARCHIVE_FLAG_SOLID;
+        }
 
         let body = [
             vint::encode(BLOCK_TYPE_ARCHIVE_HEADER),
             vint::encode(BLOCK_FLAG_EXTRA_DATA as u64),
             vint::encode(extra.len() as u64),
-            vint::encode(ARCHIVE_FLAG_RECOVERY as u64),
+            vint::encode(arch_flags),
         ]
         .concat();
         let mut content = body;
@@ -1191,10 +1395,24 @@ impl RarArchive {
         let main_header_start = self.stream.as_ref().unwrap().stream_position()?;
         self.write_block_header(&out)?;
         self.main_header_start = Some(main_header_start);
-        // Plaintext-relative index of the 5-byte rr-offset field inside the
-        // locator: crc(4) + hsize vint + block type + block flags + extra
-        // size + archive flags + record size + locator type + locator flags.
-        self.rr_offset_field_pos = Some(4u64 + size_bytes.len() as u64 + 7);
+        // Plaintext-relative index of the locator body (flags vint then
+        // the preallocated offset fields): crc(4) + hsize vint + block
+        // type + block flags + extra size + archive flags + record size +
+        // locator type.
+        let field_base = 4u64
+            + size_bytes.len() as u64
+            + vint::encoded_size(BLOCK_TYPE_ARCHIVE_HEADER) as u64
+            + vint::encoded_size(BLOCK_FLAG_EXTRA_DATA as u64) as u64
+            + vint::encoded_size(extra.len() as u64) as u64
+            + vint::encoded_size(arch_flags) as u64
+            + vint::encoded_size(locator.len() as u64) as u64
+            + vint::encoded_size(LOCATOR_TYPE) as u64;
+        if let Some(p) = qo_field_pos {
+            self.qo_offset_field_pos = Some(field_base + p as u64);
+        }
+        if let Some(p) = rr_field_pos {
+            self.rr_offset_field_pos = Some(field_base + p as u64);
+        }
         Ok(())
     }
 
@@ -1260,38 +1478,129 @@ impl RarArchive {
 
     /// Read and return the uncompressed content of a member.
     pub fn read(&mut self, name: &str) -> RarResult<Vec<u8>> {
-        let entry = self
-            .entries
-            .iter()
-            .find(|e| e.name() == name)
-            .ok_or_else(|| RarError::Format(format!("member not found: {name:?}")))?
-            .clone();
-        self.decode_single_file(&entry)
+        self.read_with_options(name, crate::options::ExtractOptions::default())
     }
 
-    /// Extract all archive contents to `dest_dir`.
+    /// Read a member with explicit limits (see [`crate::ExtractOptions`]).
+    pub fn read_with_options(
+        &mut self,
+        name: &str,
+        opts: crate::options::ExtractOptions,
+    ) -> RarResult<Vec<u8>> {
+        let target_idx = self
+            .entries
+            .iter()
+            .position(|e| e.name() == name)
+            .ok_or_else(|| RarError::Format(format!("member not found: {name:?}")))?;
+        self.extract_options = opts;
+        self.validate_entry_limits(target_idx)?;
+        if self.is_solid_chain_member(target_idx) {
+            return self.decode_solid_through(target_idx);
+        }
+        self.decode_file_at(target_idx, None)
+    }
+
+    /// Extract all archive contents to `dest_dir` (safe defaults).
     pub fn extract_all(&mut self, dest_dir: impl AsRef<Path>) -> RarResult<()> {
+        self.extract_all_with_options(dest_dir, crate::options::ExtractOptions::default())
+    }
+
+    /// Extract all archive contents with explicit options.
+    pub fn extract_all_with_options(
+        &mut self,
+        dest_dir: impl AsRef<Path>,
+        opts: crate::options::ExtractOptions,
+    ) -> RarResult<()> {
         let dest = dest_dir.as_ref();
+        fs::create_dir_all(dest)?;
+        self.extract_options = opts;
+        let mut total_unpacked = 0u64;
         let entries: Vec<_> = self.entries.clone();
         for entry in &entries {
+            total_unpacked = total_unpacked
+                .checked_add(entry.header.unpacked_size)
+                .ok_or_else(|| RarError::LimitExceeded {
+                    limit: opts.max_total_unpacked_bytes.unwrap_or(u64::MAX),
+                    context: "total unpacked size overflow".into(),
+                })?;
+            if let Some(limit) = opts.max_total_unpacked_bytes {
+                if total_unpacked > limit {
+                    return Err(RarError::LimitExceeded {
+                        limit,
+                        context: format!(
+                            "total unpacked size {total_unpacked} exceeds limit while extracting {}",
+                            entry.name()
+                        ),
+                    });
+                }
+            }
             self.extract_entry(entry, dest)?;
         }
         Ok(())
     }
 
-    /// Extract a single entry to `dest_dir`.
+    /// Extract a single entry to `dest_dir` (safe defaults).
     pub fn extract(&mut self, name: &str, dest_dir: impl AsRef<Path>) -> RarResult<PathBuf> {
-        let entry = self
-            .entries
-            .iter()
-            .find(|e| e.name() == name)
-            .ok_or_else(|| RarError::Format(format!("member not found: {name:?}")))?
-            .clone();
-        self.extract_entry(&entry, dest_dir.as_ref())
+        self.extract_with_options(name, dest_dir, crate::options::ExtractOptions::default())
     }
 
+    /// Extract a single entry with explicit options.
+    pub fn extract_with_options(
+        &mut self,
+        name: &str,
+        dest_dir: impl AsRef<Path>,
+        opts: crate::options::ExtractOptions,
+    ) -> RarResult<PathBuf> {
+        let dest = dest_dir.as_ref();
+        fs::create_dir_all(dest)?;
+        self.extract_options = opts;
+        let idx = self
+            .entries
+            .iter()
+            .position(|e| e.name() == name)
+            .ok_or_else(|| RarError::Format(format!("member not found: {name:?}")))?;
+        self.validate_entry_limits(idx)?;
+        self.extract_entry(&self.entries[idx].clone(), dest)
+    }
+
+    /// Validate per-entry header limits against the current extract options.
+    fn validate_entry_limits(&self, idx: usize) -> RarResult<()> {
+        let hdr = &self.entries[idx].header;
+        if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
+            return Err(RarError::LimitExceeded {
+                limit: MAX_DICT_SIZE_LOG as u64,
+                context: format!(
+                    "{}: dictionary size log {} exceeds supported maximum {}",
+                    hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
+                ),
+            });
+        }
+        if let Some(limit) = self.extract_options.max_unpacked_bytes {
+            if hdr.unpacked_size > limit {
+                return Err(RarError::LimitExceeded {
+                    limit,
+                    context: format!(
+                        "{}: unpacked size {} exceeds limit",
+                        hdr.name, hdr.unpacked_size
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Extract one entry. File contents are decoded to a temporary file and
+    /// renamed over the destination only after integrity checks pass, so a
+    /// failure never leaves partial or corrupt output behind.
     fn extract_entry(&mut self, entry: &ArchiveEntry, dest_dir: &Path) -> RarResult<PathBuf> {
-        let dest_path = dest_dir.join(&entry.header.name);
+        let idx = self
+            .entries
+            .iter()
+            .position(|e| e.header.data_offset == entry.header.data_offset)
+            .unwrap_or(0);
+        self.validate_entry_limits(idx)?;
+
+        let dest_path = self.safe_dest_path(dest_dir, &entry.header.name)?;
 
         if entry.is_dir() {
             fs::create_dir_all(&dest_path)?;
@@ -1302,8 +1611,27 @@ impl RarArchive {
             fs::create_dir_all(parent)?;
         }
 
-        let data = self.decode_single_file(entry)?;
-        fs::write(&dest_path, &data)?;
+        let tmp_path = temp_sibling_path(&dest_path);
+        let result = (|| -> RarResult<u64> {
+            let mut file = File::create(&tmp_path)?;
+            let written = if self.is_solid_chain_member(idx) {
+                self.decode_solid_through_to(idx, &mut file)?
+            } else {
+                self.decode_file_to(idx, &mut file, None)?
+            };
+            file.flush()?;
+            Ok(written)
+        })();
+
+        match result {
+            Ok(_) => {
+                replace_file(&tmp_path, &dest_path)?;
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(e);
+            }
+        }
 
         // Restore mtime (best-effort)
         if entry.header.mtime != 0 {
@@ -1318,20 +1646,28 @@ impl RarArchive {
         Ok(dest_path)
     }
 
-    fn decode_single_file(&mut self, entry: &ArchiveEntry) -> RarResult<Vec<u8>> {
-        // Find the index of this entry
-        let target_idx = self
-            .entries
-            .iter()
-            .position(|e| e.header.data_offset == entry.header.data_offset)
-            .unwrap_or(0);
-
-        // Check if this entry is part of a solid chain
-        if self.is_solid_chain_member(target_idx) {
-            return self.decode_solid_through(target_idx);
+    /// Compute the destination path for an entry name, applying the safe
+    /// path policy (sanitization + canonical containment check).
+    fn safe_dest_path(&self, dest_dir: &Path, name: &str) -> RarResult<PathBuf> {
+        let sanitized = if self.extract_options.safe_paths {
+            sanitize_archive_path(name)?
+        } else {
+            name.replace('\\', "/")
+        };
+        let dest_path = dest_dir.join(&sanitized);
+        if self.extract_options.safe_paths {
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent)?;
+                let canon_dest = dest_dir.canonicalize()?;
+                let canon_parent = parent.canonicalize()?;
+                if !canon_parent.starts_with(&canon_dest) {
+                    return Err(RarError::Security(format!(
+                        "entry {name:?} resolves outside the destination directory"
+                    )));
+                }
+            }
         }
-
-        self.decode_file_at(target_idx, None)
+        Ok(dest_path)
     }
 
     /// Check if entry at `idx` is in a solid chain (is solid itself, or
@@ -1351,19 +1687,7 @@ impl RarArchive {
     /// Decode all files in the solid chain up through `target_idx`,
     /// returning the data for `target_idx`.
     fn decode_solid_through(&mut self, target_idx: usize) -> RarResult<Vec<u8>> {
-        // Find the start of the solid chain (first non-directory file
-        // at or before target_idx that isn't solid, followed by solid files)
-        let mut chain_start = target_idx;
-        for i in (0..target_idx).rev() {
-            if self.entries[i].is_dir() {
-                continue;
-            }
-            if self.entries[i].header.comp_solid || self.is_solid_chain_member(i) {
-                chain_start = i;
-            } else {
-                break;
-            }
-        }
+        let chain_start = self.find_solid_chain_start(target_idx);
 
         // If we've already decoded past this point, and it's a forward request, reuse state.
         // If we need to go backwards, reset.
@@ -1395,11 +1719,11 @@ impl RarArchive {
             }
         } else if self.solid_state.is_none() {
             let dict_log = self.entries[chain_start].header.comp_dict_size;
-            let dict_log32 = dict_log.max(0) as u32;
-            let mut dict_size = 128 * 1024 * (1usize << dict_log32);
-            if !dict_size.is_power_of_two() {
-                dict_size = dict_size.next_power_of_two();
-            }
+            let dict_size = (128usize * 1024)
+                .checked_shl(dict_log as u32)
+                .ok_or_else(|| {
+                    RarError::Format("dictionary size overflows host address space".into())
+                })?;
             self.solid_state = Some(DecoderState::new(dict_size));
         }
 
@@ -1433,74 +1757,152 @@ impl RarArchive {
         Ok(target_data)
     }
 
+    /// Find the start index of the solid chain containing `target_idx`
+    /// (the first non-directory file at or before it that is not solid,
+    /// followed by solid files).
+    fn find_solid_chain_start(&self, target_idx: usize) -> usize {
+        let mut chain_start = target_idx;
+        for i in (0..target_idx).rev() {
+            if self.entries[i].is_dir() {
+                continue;
+            }
+            if self.entries[i].header.comp_solid || self.is_solid_chain_member(i) {
+                chain_start = i;
+            } else {
+                break;
+            }
+        }
+        chain_start
+    }
+
+    /// Streaming variant of [`Self::decode_solid_through`]: decodes the
+    /// chain up to `target_idx`, writing only the target member to
+    /// `writer` (intermediate members are decoded to a discard sink so the
+    /// shared window advances).
+    fn decode_solid_through_to(
+        &mut self,
+        target_idx: usize,
+        writer: &mut dyn Write,
+    ) -> RarResult<u64> {
+        let chain_start = self.find_solid_chain_start(target_idx);
+
+        if self.solid_decoded_through >= chain_start as isize
+            && self.solid_decoded_through < target_idx as isize
+        {
+            // Continue from where we left off.
+        } else if self.solid_decoded_through >= target_idx as isize {
+            self.solid_state = None;
+            self.rar4_solid_state = None;
+            self.solid_decoded_through = -1;
+        } else {
+            self.solid_state = None;
+            self.rar4_solid_state = None;
+            self.solid_decoded_through = -1;
+        }
+
+        let is_rar4 = self.entries[chain_start].header.format_version == 4;
+        if is_rar4 {
+            if self.rar4_solid_state.is_none() {
+                self.rar4_solid_state = Some(rar4::decoder::Rar4DecoderState::new(
+                    rar4::constants::RAR4_DEFAULT_DICT_SIZE,
+                ));
+            }
+        } else if self.solid_state.is_none() {
+            let dict_log = self.entries[chain_start].header.comp_dict_size;
+            let dict_size = (128usize * 1024)
+                .checked_shl(dict_log as u32)
+                .ok_or_else(|| {
+                    RarError::Format("dictionary size overflows host address space".into())
+                })?;
+            self.solid_state = Some(DecoderState::new(dict_size));
+        }
+
+        let start_from = (self.solid_decoded_through + 1) as usize;
+        let mut target_written = 0u64;
+        let mut discard = io::sink();
+
+        for i in start_from..=target_idx {
+            let entry = self.entries[i].clone();
+            if entry.is_dir() {
+                continue;
+            }
+            let sink: &mut dyn Write = if i == target_idx {
+                writer
+            } else {
+                &mut discard
+            };
+            let written = if is_rar4 {
+                self.decode_file_to(i, sink, None)?
+            } else {
+                let mut state = self.solid_state.take().unwrap();
+                let w = self.decode_file_to(i, sink, Some(&mut state))?;
+                self.solid_state = Some(state);
+                w
+            };
+            self.solid_decoded_through = i as isize;
+            if i == target_idx {
+                target_written = written;
+            }
+        }
+
+        Ok(target_written)
+    }
+
     /// Read packed data for an entry, potentially across multiple volumes.
-    fn read_packed_data(&mut self, idx: usize) -> RarResult<(Vec<u8>, bool)> {
+    ///
+    /// The returned payload is decrypted (when applicable) together with
+    /// the derived keys needed for integrity verification.
+    fn read_packed_data(&mut self, idx: usize) -> RarResult<DecryptedPayload> {
         let entry = &self.entries[idx];
         let hdr = &entry.header;
         let chunks = &entry.chunks;
+        let max_packed = self.max_packed_bytes();
 
-        if chunks.len() <= 1 {
-            // Single chunk — read from primary stream or the chunk's volume
-            let chunk = chunks.first();
-            let (offset, size) = if let Some(c) = chunk {
-                (c.data_offset, c.packed_size)
-            } else {
-                (hdr.data_offset, hdr.packed_size)
-            };
-
-            let vol_idx = chunk.map_or(0, |c| c.volume_index);
-            let packed_data = if vol_idx == 0 {
-                let stream = self.stream.as_mut().unwrap();
-                stream.seek(SeekFrom::Start(offset))?;
-                let mut buf = vec![0u8; size as usize];
-                stream.read_exact(&mut buf)?;
-                buf
-            } else {
-                let mut f = File::open(&self.volume_paths[vol_idx])?;
-                f.seek(SeekFrom::Start(offset))?;
-                let mut buf = vec![0u8; size as usize];
-                f.read_exact(&mut buf)?;
-                buf
-            };
-
-            // Decrypt if encrypted
-            let encr_params = if !hdr.extra_data.is_empty() {
-                encryption::parse_encryption_extra(&hdr.extra_data)?
-            } else {
-                None
-            };
-            let is_encrypted = encr_params.is_some();
-            let mut packed_data = packed_data;
-            if let Some(ref params) = encr_params {
-                let password = self.password.as_ref().ok_or_else(|| {
-                    RarError::Encrypted(format!("{}: encrypted, no password set", hdr.name))
-                })?;
-                if !params.verify_password(password) {
-                    return Err(RarError::Encrypted("wrong password".into()));
+        let mut total_packed = 0u64;
+        for c in chunks {
+            total_packed = total_packed.checked_add(c.packed_size).ok_or_else(|| {
+                RarError::LimitExceeded {
+                    limit: max_packed,
+                    context: format!("{}: packed size overflow", hdr.name),
                 }
-                packed_data = params.decrypt(&packed_data, password)?;
+            })?;
+            if total_packed > max_packed {
+                return Err(RarError::LimitExceeded {
+                    limit: max_packed,
+                    context: format!(
+                        "{}: packed data {total_packed} bytes exceeds limit",
+                        hdr.name
+                    ),
+                });
             }
-            if is_encrypted && hdr.comp_method == COMP_METHOD_STORE {
-                packed_data.truncate(hdr.unpacked_size as usize);
-            }
-            return Ok((packed_data, is_encrypted));
         }
 
-        // Multi-volume: read and concatenate chunks
-        let chunks_clone: Vec<DataChunk> = chunks.clone();
-        let mut parts = Vec::new();
-        for chunk in &chunks_clone {
-            let mut f = File::open(&self.volume_paths[chunk.volume_index])?;
-            f.seek(SeekFrom::Start(chunk.data_offset))?;
-            let mut buf = vec![0u8; chunk.packed_size as usize];
-            f.read_exact(&mut buf)?;
+        let mut packed_data = Vec::new();
+        packed_data.try_reserve_exact(total_packed as usize).map_err(|_| {
+            RarError::LimitExceeded {
+                limit: max_packed,
+                context: format!("{}: cannot allocate packed data", hdr.name),
+            }
+        })?;
+
+        for chunk in chunks {
+            let chunk_start = packed_data.len();
+            if chunk.volume_index == 0 {
+                let stream = self.stream.as_mut().unwrap();
+                stream.seek(SeekFrom::Start(chunk.data_offset))?;
+                let mut limited = stream.take(chunk.packed_size);
+                limited.read_to_end(&mut packed_data)?;
+            } else {
+                let mut f = File::open(&self.volume_paths[chunk.volume_index])?;
+                f.seek(SeekFrom::Start(chunk.data_offset))?;
+                let mut limited = f.take(chunk.packed_size);
+                limited.read_to_end(&mut packed_data)?;
+            }
 
             // Verify intermediate chunk CRC (packed data CRC)
             if !chunk.is_final {
                 if let Some(expected_crc) = chunk.crc32_val {
-                    let mut hasher = crc32fast::Hasher::new();
-                    hasher.update(&buf);
-                    let actual_crc = hasher.finalize();
+                    let actual_crc = crc32fast::hash(&packed_data[chunk_start..]);
                     if actual_crc != expected_crc {
                         return Err(RarError::Crc {
                             expected: expected_crc,
@@ -1510,44 +1912,58 @@ impl RarArchive {
                     }
                 }
             }
-            parts.push(buf);
         }
 
-        let packed_data: Vec<u8> = parts.into_iter().flatten().collect();
-
-        // Handle encryption for multi-volume
-        let encr_params = if !self.entries[idx].header.extra_data.is_empty() {
-            encryption::parse_encryption_extra(&self.entries[idx].header.extra_data)?
+        // Decrypt if encrypted, deriving keys once for both decryption and
+        // integrity verification.
+        let params = if !hdr.extra_data.is_empty() {
+            encryption::parse_encryption_extra(&hdr.extra_data)?
         } else {
             None
         };
-        let is_encrypted = encr_params.is_some();
-        let mut packed_data = packed_data;
-        if let Some(ref params) = encr_params {
+        let keys = if let Some(ref p) = params {
             let password = self.password.as_ref().ok_or_else(|| {
-                RarError::Encrypted(format!(
-                    "{}: encrypted, no password set",
-                    self.entries[idx].header.name
-                ))
+                RarError::Encrypted(format!("{}: encrypted, no password set", hdr.name))
             })?;
-            if !params.verify_password(password) {
+            if !p.verify_password(password) {
                 return Err(RarError::Encrypted("wrong password".into()));
             }
-            packed_data = params.decrypt(&packed_data, password)?;
-        }
-        if is_encrypted && self.entries[idx].header.comp_method == COMP_METHOD_STORE {
-            packed_data.truncate(self.entries[idx].header.unpacked_size as usize);
-        }
+            let keys = p.derive_keys(password)?;
+            let mut data = encryption::decrypt_data(&packed_data, &keys.key, &p.iv)?;
+            if hdr.comp_method == COMP_METHOD_STORE {
+                data.truncate(hdr.unpacked_size as usize);
+            }
+            packed_data = data;
+            Some(keys)
+        } else {
+            None
+        };
 
-        Ok((packed_data, is_encrypted))
+        Ok(DecryptedPayload {
+            data: packed_data,
+            params,
+            keys,
+        })
     }
 
-    /// Decode a single file, optionally with a shared DecoderState.
+    /// Maximum packed bytes accepted for one member. Bounded by the
+    /// configured unpacked limit plus a small overhead, or a hard 8 GiB
+    /// guard when unlimited.
+    fn max_packed_bytes(&self) -> u64 {
+        self.extract_options
+            .max_unpacked_bytes
+            .map(|u| u.saturating_add(1 << 20))
+            .unwrap_or(8 * 1024 * 1024 * 1024)
+    }
+
+    /// Decode a single file into memory, optionally with a shared
+    /// DecoderState (solid archives), verifying CRC32/BLAKE2sp.
     fn decode_file_at(
         &mut self,
         idx: usize,
         state: Option<&mut DecoderState>,
     ) -> RarResult<Vec<u8>> {
+        self.validate_entry_limits(idx)?;
         let hdr = &self.entries[idx].header;
 
         // Empty files / directories
@@ -1555,11 +1971,11 @@ impl RarArchive {
             return Ok(Vec::new());
         }
 
-        let (packed_data, is_encrypted) = self.read_packed_data(idx)?;
+        let payload = self.read_packed_data(idx)?;
         let hdr = &self.entries[idx].header;
 
         let raw_data = if hdr.comp_method == COMP_METHOD_STORE {
-            packed_data
+            payload.data
         } else if hdr.format_version == 4 {
             // RAR4 decompression
             if hdr.comp_method >= 4 {
@@ -1568,14 +1984,14 @@ impl RarArchive {
                 ));
             }
             rar4::decoder::rar4_decompress(
-                &packed_data,
+                &payload.data,
                 hdr.unpacked_size,
                 self.rar4_solid_state.as_mut(),
             )
             .map_err(|e| RarError::Unsupported(e))?
         } else {
             compression::decompress(
-                &packed_data,
+                &payload.data,
                 hdr.comp_method,
                 hdr.unpacked_size,
                 hdr.comp_dict_size,
@@ -1584,23 +2000,132 @@ impl RarArchive {
             .map_err(|e| RarError::Unsupported(e))?
         };
 
-        // Verify CRC (skip for encrypted files — CRC is password-dependent)
-        if !is_encrypted {
-            if let Some(expected_crc) = self.entries[idx].header.crc32_val {
-                let mut hasher = crc32fast::Hasher::new();
-                hasher.update(&raw_data);
-                let actual_crc = hasher.finalize();
-                if actual_crc != expected_crc {
-                    return Err(RarError::Crc {
-                        expected: expected_crc,
-                        actual: actual_crc,
-                        context: self.entries[idx].header.name.clone(),
-                    });
-                }
+        let crc = crc32fast::hash(&raw_data);
+        let blake = self.entries[idx]
+            .header
+            .hash_value
+            .map(|_| crate::blake2sp::hash(&raw_data));
+        self.verify_integrity(
+            idx,
+            crc,
+            blake,
+            payload.params.as_ref(),
+            payload.keys.as_ref(),
+        )?;
+        Ok(raw_data)
+    }
+
+    /// Decode a single file, streaming output to `writer` (bounded memory),
+    /// verifying CRC32/BLAKE2sp over the written bytes.
+    fn decode_file_to(
+        &mut self,
+        idx: usize,
+        writer: &mut dyn Write,
+        state: Option<&mut DecoderState>,
+    ) -> RarResult<u64> {
+        self.validate_entry_limits(idx)?;
+        let hdr = &self.entries[idx].header;
+        if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
+            return Ok(0);
+        }
+
+        let payload = self.read_packed_data(idx)?;
+        let hdr = &self.entries[idx].header;
+        let mut sink = IntegritySink::new(writer, self.entries[idx].header.hash_value.is_some());
+
+        let written = if hdr.comp_method == COMP_METHOD_STORE {
+            sink.write_all(&payload.data).map_err(|e| RarError::Io(e))?;
+            payload.data.len() as u64
+        } else if hdr.format_version == 4 {
+            if hdr.comp_method >= 4 {
+                return Err(RarError::Unsupported(
+                    "RAR4 PPMd compression not yet supported".into(),
+                ));
+            }
+            let raw = rar4::decoder::rar4_decompress(
+                &payload.data,
+                hdr.unpacked_size,
+                self.rar4_solid_state.as_mut(),
+            )
+            .map_err(|e| RarError::Unsupported(e))?;
+            sink.write_all(&raw).map_err(|e| RarError::Io(e))?;
+            raw.len() as u64
+        } else {
+            crate::codec::decode_to_writer(
+                &payload.data,
+                hdr.unpacked_size,
+                hdr.comp_dict_size,
+                state,
+                &mut sink,
+            )
+            .map_err(|e| RarError::Unsupported(e))?
+        };
+
+        let (crc, blake) = sink.finish();
+        self.verify_integrity(
+            idx,
+            crc,
+            blake,
+            payload.params.as_ref(),
+            payload.keys.as_ref(),
+        )?;
+        Ok(written)
+    }
+
+    /// Verify CRC32 and BLAKE2sp integrity of decoded data. Encrypted
+    /// members use the hash-key MAC when the encryption record requests it.
+    fn verify_integrity(
+        &self,
+        idx: usize,
+        crc: u32,
+        blake: Option<[u8; 32]>,
+        params: Option<&encryption::EncryptionParams>,
+        keys: Option<&encryption::DerivedKeys>,
+    ) -> RarResult<()> {
+        let hdr = &self.entries[idx].header;
+        let uses_mac = params.is_some_and(|p| p.uses_hash_mac());
+
+        if let Some(expected) = hdr.crc32_val {
+            let mut actual = crc;
+            if uses_mac {
+                let keys = keys.ok_or_else(|| {
+                    RarError::Encrypted(format!(
+                        "{}: missing derived keys for MAC verification",
+                        hdr.name
+                    ))
+                })?;
+                actual = keys.mac_crc32(actual);
+            }
+            if actual != expected {
+                return Err(RarError::Crc {
+                    expected,
+                    actual,
+                    context: hdr.name.clone(),
+                });
             }
         }
 
-        Ok(raw_data)
+        if let (Some(expected), Some(actual)) = (hdr.hash_value, blake) {
+            let actual = if uses_mac {
+                let keys = keys.ok_or_else(|| {
+                    RarError::Encrypted(format!(
+                        "{}: missing derived keys for hash MAC verification",
+                        hdr.name
+                    ))
+                })?;
+                keys.mac_hash32(actual)
+            } else {
+                actual
+            };
+            if !encryption::constant_time_eq(&expected, &actual) {
+                return Err(RarError::HashMismatch {
+                    expected,
+                    actual,
+                    context: hdr.name.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     // ── Public API: creation ───────────────────────────────────────────────
@@ -1651,43 +2176,14 @@ impl RarArchive {
     }
 
     fn add_file(&mut self, path: &Path, arcname: Option<&str>, level: u8) -> RarResult<()> {
-        let raw_data = fs::read(path)?;
-        let file_crc = {
-            let mut h = crc32fast::Hasher::new();
-            h.update(&raw_data);
-            h.finalize()
-        };
-
-        let method = level_to_method(level);
-        let (mut packed_data, actual_method, dict_size_log) = if method == COMP_METHOD_STORE {
-            (raw_data.clone(), COMP_METHOD_STORE, 0u8)
-        } else if sample_is_incompressible(&raw_data, method) {
-            // Sample-probe large files: media/archives/random data would waste
-            // minutes of match-finding to end up STORE anyway. Compressing a
-            // 512 KiB head is ~20 ms and reliably flags incompressible input.
-            (raw_data.clone(), COMP_METHOD_STORE, 0u8)
-        } else {
-            let dsl = dict_size_for_data(raw_data.len());
-            let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
-            if let Some(cb) = self.progress_callback.as_deref_mut() {
-                let cb: &mut dyn FnMut(u64, u64) = cb;
-                progress = Some(cb);
-            }
-            let compressed = compression::compress_with_progress(&raw_data, method, dsl, progress)
-                .map_err(|e| RarError::Unsupported(e))?;
-            if compressed.len() >= raw_data.len() {
-                (raw_data.clone(), COMP_METHOD_STORE, 0u8)
-            } else {
-                (compressed, method, dsl)
-            }
-        };
-
-        let name = arcname
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().into_owned());
-        let name = name.replace('\\', "/");
-
         let meta = fs::metadata(path)?;
+        if !meta.is_file() {
+            return Err(RarError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("not a file: {}", path.display()),
+            )));
+        }
+        let file_size = meta.len();
         let mtime = meta
             .modified()
             .unwrap_or(SystemTime::now())
@@ -1703,30 +2199,169 @@ impl RarArchive {
         #[cfg(not(unix))]
         let attrs = 0o100644u64;
 
-        // Encrypt if password is set
-        let extra_data = if let Some(ref password) = self.password {
-            let enc_params =
-                encryption::EncryptionParams::generate_for_password(password, ENCR_PBKDF2_ITER_LOG);
-            packed_data = enc_params.encrypt(&packed_data, password);
-            enc_params.to_extra_bytes()
-        } else {
-            Vec::new()
-        };
+        let name = arcname
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().into_owned());
+        let name = name.replace('\\', "/");
 
+        let method = level_to_method(level);
+        let probe_incompressible = method != COMP_METHOD_STORE
+            && file_size >= (SAMPLE_PROBE_HEAD as u64) * 4
+            && sample_is_incompressible_file(path, file_size, method)?;
+
+        if method == COMP_METHOD_STORE || probe_incompressible {
+            // STORE is written by streaming the file directly: bounded
+            // memory regardless of file size. Encrypted STORE stays
+            // buffered (CBC padding over the whole member).
+            self.reset_solid_chain();
+            let (plain_crc, plain_blake) = hash_file(path, file_size, self.blake2)?;
+            let (header_crc, extra_data, stored_hash, encr_params) =
+                self.payload_extra_and_crc(plain_crc, plain_blake)?;
+            if self.password.is_some() {
+                let raw_data = fs::read(path)?;
+                let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &raw_data)?;
+                self.write_file_entry(
+                    &name,
+                    file_size,
+                    &packed_data,
+                    header_crc,
+                    COMP_METHOD_STORE,
+                    0,
+                    &extra_data,
+                    attrs,
+                    mtime,
+                    false,
+                    stored_hash,
+                )?;
+            } else {
+                self.write_stored_file(
+                    &name,
+                    file_size,
+                    header_crc,
+                    attrs,
+                    mtime,
+                    File::open(path)?,
+                    &extra_data,
+                    stored_hash,
+                )?;
+            }
+            if let Some(cb) = self.progress_callback.as_deref_mut() {
+                cb(file_size, file_size);
+            }
+            return Ok(());
+        }
+
+        // Compressed path: read and compress in bounded chunks with a
+        // persistent encoder state (solid archives share the LZ window).
+        let dsl = dict_size_for_data(file_size as usize);
+        let chain_solid = self.solid_mode && self.encoder_state.is_some();
+        if self.solid_mode {
+            self.encoder_state.get_or_insert_with(Default::default);
+        }
+
+        let mut crc_hasher = crc32fast::Hasher::new();
+        let mut blake_hasher = if self.blake2 {
+            Some(crate::blake2sp::Hasher::new())
+        } else {
+            None
+        };
+        let mut packed = Vec::new();
+        {
+            let mut file = io::BufReader::with_capacity(1 << 20, File::open(path)?);
+            let mut buf = vec![0u8; crate::codec::DEFAULT_CHUNK_SIZE];
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                crc_hasher.update(&buf[..n]);
+                if let Some(h) = blake_hasher.as_mut() {
+                    h.update(&buf[..n]);
+                }
+                let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
+                if let Some(cb) = self.progress_callback.as_deref_mut() {
+                    let cb: &mut dyn FnMut(u64, u64) = cb;
+                    progress = Some(cb);
+                }
+                let state = self.encoder_state.as_mut();
+                let compressed = compression::compress_chunked(
+                    &buf[..n],
+                    method,
+                    dsl,
+                    crate::codec::DEFAULT_CHUNK_SIZE,
+                    state,
+                    n < buf.len(),
+                    progress,
+                )
+                .map_err(|e| RarError::Unsupported(e))?;
+                packed.extend(compressed);
+                if packed.len() as u64 >= file_size {
+                    break;
+                }
+            }
+        }
+
+        let plain_crc = crc_hasher.finalize();
+        let plain_blake = blake_hasher.map(|h| h.finalize());
+
+        if packed.len() as u64 >= file_size {
+            // Compression is a net loss: fall back to streaming STORE.
+            self.reset_solid_chain();
+            let (header_crc, extra_data, stored_hash, encr_params) =
+                self.payload_extra_and_crc(plain_crc, plain_blake)?;
+            if self.password.is_some() {
+                let raw_data = fs::read(path)?;
+                let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &raw_data)?;
+                self.write_file_entry(
+                    &name,
+                    file_size,
+                    &packed_data,
+                    header_crc,
+                    COMP_METHOD_STORE,
+                    0,
+                    &extra_data,
+                    attrs,
+                    mtime,
+                    false,
+                    stored_hash,
+                )?;
+            } else {
+                self.write_stored_file(
+                    &name,
+                    file_size,
+                    header_crc,
+                    attrs,
+                    mtime,
+                    File::open(path)?,
+                    &extra_data,
+                    stored_hash,
+                )?;
+            }
+            if let Some(cb) = self.progress_callback.as_deref_mut() {
+                cb(file_size, file_size);
+            }
+            return Ok(());
+        }
+
+        let (header_crc, extra_data, stored_hash, encr_params) =
+            self.payload_extra_and_crc(plain_crc, plain_blake)?;
+        let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &packed)?;
         self.write_file_entry(
             &name,
-            raw_data.len() as u64,
+            file_size,
             &packed_data,
-            file_crc,
-            actual_method,
-            dict_size_log,
+            header_crc,
+            method,
+            dsl,
             &extra_data,
             attrs,
             mtime,
+            chain_solid,
+            stored_hash,
         )?;
 
         if let Some(cb) = self.progress_callback.as_deref_mut() {
-            cb(raw_data.len() as u64, raw_data.len() as u64);
+            cb(file_size, file_size);
         }
 
         Ok(())
@@ -1739,6 +2374,7 @@ impl RarArchive {
     /// keep empty directories and the directory structure in the archive.
     pub fn add_directory_only(&mut self, path: impl AsRef<Path>, arcname: &str) -> RarResult<()> {
         let path = path.as_ref();
+        self.reset_solid_chain();
         let name = arcname.replace('\\', "/").trim_end_matches('/').to_string() + "/";
 
         let meta = fs::metadata(path)?;
@@ -1784,6 +2420,7 @@ impl RarArchive {
         recursive: bool,
         level: u8,
     ) -> RarResult<()> {
+        self.reset_solid_chain();
         let name = arcname
             .map(|s| s.to_string())
             .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().into_owned());
@@ -1847,60 +2484,99 @@ impl RarArchive {
         data: &[u8],
         compression_level: u8,
     ) -> RarResult<()> {
-        let file_crc = {
+        let name = arcname.replace('\\', "/");
+        let plain_crc = {
             let mut h = crc32fast::Hasher::new();
             h.update(data);
             h.finalize()
         };
-
-        let method = level_to_method(compression_level);
+        let plain_blake = if self.blake2 {
+            Some(crate::blake2sp::hash(data))
+        } else {
+            None
+        };
         let mtime = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as u32;
 
-        let (mut packed_data, actual_method, dict_size_log) = if method == COMP_METHOD_STORE {
-            (data.to_vec(), COMP_METHOD_STORE, 0u8)
-        } else if sample_is_incompressible(data, method) {
-            (data.to_vec(), COMP_METHOD_STORE, 0u8)
+        let method = level_to_method(compression_level);
+        if method == COMP_METHOD_STORE || sample_is_incompressible(data, method) {
+            self.reset_solid_chain();
+            let (header_crc, extra_data, stored_hash, encr_params) =
+                self.payload_extra_and_crc(plain_crc, plain_blake)?;
+            let packed_data = self.encrypt_payload_with(encr_params.as_ref(), data)?;
+            self.write_file_entry(
+                &name,
+                data.len() as u64,
+                &packed_data,
+                header_crc,
+                COMP_METHOD_STORE,
+                0,
+                &extra_data,
+                0o100644,
+                mtime,
+                false,
+                stored_hash,
+            )?;
         } else {
             let dsl = dict_size_for_data(data.len());
+            let chain_solid = self.solid_mode && self.encoder_state.is_some();
+            if self.solid_mode {
+                self.encoder_state.get_or_insert_with(Default::default);
+            }
             let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
             if let Some(cb) = self.progress_callback.as_deref_mut() {
                 let cb: &mut dyn FnMut(u64, u64) = cb;
                 progress = Some(cb);
             }
-            let compressed = compression::compress_with_progress(data, method, dsl, progress)
-                .map_err(|e| RarError::Unsupported(e))?;
-            if compressed.len() >= data.len() {
-                (data.to_vec(), COMP_METHOD_STORE, 0u8)
+            let packed = compression::compress_chunked(
+                data,
+                method,
+                dsl,
+                crate::codec::DEFAULT_CHUNK_SIZE,
+                self.encoder_state.as_mut(),
+                true,
+                progress,
+            )
+            .map_err(|e| RarError::Unsupported(e))?;
+            if packed.len() >= data.len() {
+                self.reset_solid_chain();
+                let (header_crc, extra_data, stored_hash, encr_params) =
+                    self.payload_extra_and_crc(plain_crc, plain_blake)?;
+                let packed_data = self.encrypt_payload_with(encr_params.as_ref(), data)?;
+                self.write_file_entry(
+                    &name,
+                    data.len() as u64,
+                    &packed_data,
+                    header_crc,
+                    COMP_METHOD_STORE,
+                    0,
+                    &extra_data,
+                    0o100644,
+                    mtime,
+                    false,
+                    stored_hash,
+                )?;
             } else {
-                (compressed, method, dsl)
+                let (header_crc, extra_data, stored_hash, encr_params) =
+                    self.payload_extra_and_crc(plain_crc, plain_blake)?;
+                let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &packed)?;
+                self.write_file_entry(
+                    &name,
+                    data.len() as u64,
+                    &packed_data,
+                    header_crc,
+                    method,
+                    dsl,
+                    &extra_data,
+                    0o100644,
+                    mtime,
+                    chain_solid,
+                    stored_hash,
+                )?;
             }
-        };
-
-        // Encrypt if password is set
-        let extra_data = if let Some(ref password) = self.password {
-            let enc_params =
-                encryption::EncryptionParams::generate_for_password(password, ENCR_PBKDF2_ITER_LOG);
-            packed_data = enc_params.encrypt(&packed_data, password);
-            enc_params.to_extra_bytes()
-        } else {
-            Vec::new()
-        };
-
-        let name = arcname.replace('\\', "/");
-        self.write_file_entry(
-            &name,
-            data.len() as u64,
-            &packed_data,
-            file_crc,
-            actual_method,
-            dict_size_log,
-            &extra_data,
-            0o100644,
-            mtime,
-        )?;
+        }
 
         if let Some(cb) = self.progress_callback.as_deref_mut() {
             cb(data.len() as u64, data.len() as u64);
@@ -1921,6 +2597,8 @@ impl RarArchive {
         extra_data: &[u8],
         attrs: u64,
         mtime: u32,
+        solid: bool,
+        hash_value: Option<[u8; 32]>,
     ) -> RarResult<()> {
         let fh_base = FileHeader {
             name: name.to_string(),
@@ -1929,7 +2607,10 @@ impl RarArchive {
             attributes: attrs,
             mtime,
             crc32_val: Some(file_crc),
+            hash_type: if hash_value.is_some() { 0 } else { u8::MAX },
+            hash_value,
             comp_method: method,
+            comp_solid: solid,
             comp_dict_size: dict_size_log,
             host_os: OS_UNIX,
             file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
@@ -1940,6 +2621,10 @@ impl RarArchive {
         if self.volume_size.is_none() {
             // Single-volume
             let hdr_bytes = fh_base.to_bytes();
+            if self.quick_open {
+                let pos = self.stream.as_ref().unwrap().stream_position()?;
+                self.quick_open_entries.push((pos, hdr_bytes.clone()));
+            }
             self.write_block_header(&hdr_bytes)?;
             let stream = self.stream.as_mut().unwrap();
             stream.write_all(packed_data)?;
@@ -2020,6 +2705,7 @@ impl RarArchive {
                 mtime,
                 crc32_val: Some(0),
                 comp_method: method,
+                comp_solid: solid,
                 comp_dict_size: dict_size_log,
                 host_os: OS_UNIX,
                 flags: block_flags | BLOCK_FLAG_DATA_CONTINUE_TO,
@@ -2067,6 +2753,7 @@ impl RarArchive {
                 mtime,
                 crc32_val: Some(chunk_crc),
                 comp_method: method,
+                comp_solid: solid,
                 comp_dict_size: dict_size_log,
                 host_os: OS_UNIX,
                 flags: block_flags,
@@ -2117,6 +2804,304 @@ impl RarArchive {
 
         Ok(())
     }
+
+    /// Drop the solid-chain encoder state (call after any member that does
+    /// not participate in the LZ window: directories, STORE files, empty
+    /// files, or when compression fell back to STORE).
+    fn reset_solid_chain(&mut self) {
+        self.encoder_state = None;
+    }
+
+    /// Build the header CRC, extra-area records (encryption + BLAKE2sp)
+    /// and stored hash value for a member, plus the encryption parameters
+    /// to reuse for the actual payload encryption (one KDF/salt per
+    /// member). For encrypted members the checksums are MAC'd with the
+    /// hash key, matching WinRAR.
+    fn payload_extra_and_crc(
+        &self,
+        plain_crc: u32,
+        plain_blake: Option<[u8; 32]>,
+    ) -> RarResult<(
+        u32,
+        Vec<u8>,
+        Option<[u8; 32]>,
+        Option<encryption::EncryptionParams>,
+    )> {
+        if let Some(password) = self.password.as_deref() {
+            let params = encryption::EncryptionParams::generate_for_password(
+                password,
+                ENCR_PBKDF2_ITER_LOG,
+            );
+            let header_crc = params.mac_crc32(plain_crc, password)?;
+            let stored_hash = match plain_blake {
+                Some(h) => Some(params.mac_hash32(h, password)?),
+                None => None,
+            };
+            let mut extra = params.to_extra_bytes();
+            if let Some(h) = stored_hash {
+                extra.extend(crate::headers::hash_extra_record(h));
+            }
+            Ok((header_crc, extra, stored_hash, Some(params)))
+        } else {
+            let mut extra = Vec::new();
+            if let Some(h) = plain_blake {
+                extra.extend(crate::headers::hash_extra_record(h));
+            }
+            Ok((plain_crc, extra, plain_blake, None))
+        }
+    }
+
+    /// Encrypt a member payload with the parameters returned by
+    /// [`Self::payload_extra_and_crc`] (must match the member's stored
+    /// salt).
+    fn encrypt_payload_with(
+        &self,
+        params: Option<&encryption::EncryptionParams>,
+        plaintext: &[u8],
+    ) -> RarResult<Vec<u8>> {
+        match (self.password.as_deref(), params) {
+            (Some(password), Some(params)) => Ok(params.encrypt(plaintext, password)),
+            (None, None) => Ok(plaintext.to_vec()),
+            _ => Err(RarError::Format(
+                "internal error: encryption parameters mismatch".into(),
+            )),
+        }
+    }
+
+    /// Stream a STORE member directly from a reader (bounded memory).
+    ///
+    /// Handles single-volume and multi-volume splitting. The plaintext CRC
+    /// must be supplied (it is part of the header, written before data).
+    fn write_stored_file(
+        &mut self,
+        name: &str,
+        unpacked_size: u64,
+        file_crc: u32,
+        attrs: u64,
+        mtime: u32,
+        mut reader: impl Read + Seek,
+        extra_data: &[u8],
+        hash_value: Option<[u8; 32]>,
+    ) -> RarResult<()> {
+        let fh_base = FileHeader {
+            name: name.to_string(),
+            unpacked_size,
+            packed_size: unpacked_size,
+            attributes: attrs,
+            mtime,
+            crc32_val: Some(file_crc),
+            hash_type: if hash_value.is_some() { 0 } else { u8::MAX },
+            hash_value,
+            comp_method: COMP_METHOD_STORE,
+            host_os: OS_UNIX,
+            file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
+            extra_data: extra_data.to_vec(),
+            ..Default::default()
+        };
+
+        if self.volume_size.is_none() {
+            let hdr_bytes = fh_base.to_bytes();
+            if self.quick_open {
+                let pos = self.stream.as_ref().unwrap().stream_position()?;
+                self.quick_open_entries.push((pos, hdr_bytes.clone()));
+            }
+            self.write_block_header(&hdr_bytes)?;
+            let stream = self.stream.as_mut().unwrap();
+            let mut buf = vec![0u8; 1 << 20];
+            let mut written = 0u64;
+            loop {
+                let n = reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                stream.write_all(&buf[..n])?;
+                written += n as u64;
+                if let Some(cb) = self.progress_callback.as_deref_mut() {
+                    cb(written, unpacked_size);
+                }
+            }
+            if written != unpacked_size {
+                return Err(RarError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "file changed size while being archived: expected {unpacked_size} bytes, read {written}"
+                    ),
+                )));
+            }
+            let data_offset = stream.stream_position()? - unpacked_size;
+            self.entries.push(ArchiveEntry {
+                header: FileHeader {
+                    data_offset,
+                    ..fh_base
+                },
+                chunks: vec![DataChunk {
+                    volume_index: 0,
+                    data_offset,
+                    packed_size: unpacked_size,
+                    crc32_val: Some(file_crc),
+                    is_final: true,
+                    extra_data: extra_data.to_vec(),
+                }],
+            });
+            return Ok(());
+        }
+
+        // Multi-volume streaming split.
+        let volume_size = self.volume_size.unwrap();
+        let eoa_size: u64 = 7; // approximate end-of-archive block size
+        let mut offset = 0u64;
+        let mut chunks = Vec::new();
+        let mut is_first = true;
+        while offset < unpacked_size {
+            let remaining_vol = volume_size.saturating_sub(self.volume_bytes_written);
+            let mut block_flags: u64 = 0;
+            if !is_first {
+                block_flags |= BLOCK_FLAG_DATA_CONTINUES;
+            }
+            let chunk_fh = FileHeader {
+                name: name.to_string(),
+                unpacked_size,
+                packed_size: remaining_vol.max(1),
+                attributes: attrs,
+                mtime,
+                crc32_val: Some(0),
+                comp_method: COMP_METHOD_STORE,
+                host_os: OS_UNIX,
+                flags: block_flags | BLOCK_FLAG_DATA_CONTINUE_TO,
+                file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
+                extra_data: if is_first {
+                    extra_data.to_vec()
+                } else {
+                    Vec::new()
+                },
+                hash_type: if is_first && hash_value.is_some() {
+                    0
+                } else {
+                    u8::MAX
+                },
+                hash_value: if is_first { hash_value } else { None },
+                ..Default::default()
+            };
+            let hdr_size = chunk_fh.to_bytes().len() as u64;
+            let bytes_for_data = remaining_vol.saturating_sub(hdr_size + eoa_size);
+            if bytes_for_data == 0 {
+                self.start_next_volume()?;
+                is_first = false;
+                continue;
+            }
+            let chunk_size = bytes_for_data.min(unpacked_size - offset);
+            let is_last = offset + chunk_size >= unpacked_size;
+            if is_last {
+                block_flags &= !BLOCK_FLAG_DATA_CONTINUE_TO;
+            } else {
+                block_flags |= BLOCK_FLAG_DATA_CONTINUE_TO;
+            }
+
+            // For non-final chunks the header carries the CRC of this
+            // chunk's on-disk bytes. Compute it in a first pass and seek
+            // back before the copy pass (bounded memory).
+            let chunk_crc = if is_last {
+                file_crc
+            } else {
+                let chunk_start = reader.stream_position()?;
+                let mut h = crc32fast::Hasher::new();
+                let mut remaining = chunk_size;
+                let mut probe = vec![0u8; 1 << 20];
+                while remaining > 0 {
+                    let want = probe.len().min(remaining as usize);
+                    let n = reader.read(&mut probe[..want])?;
+                    if n == 0 {
+                        return Err(RarError::Io(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "file changed size while being archived (CRC pass)",
+                        )));
+                    }
+                    h.update(&probe[..n]);
+                    remaining -= n as u64;
+                }
+                reader.seek(SeekFrom::Start(chunk_start))?;
+                h.finalize()
+            };
+
+            let final_fh = FileHeader {
+                name: name.to_string(),
+                unpacked_size,
+                packed_size: chunk_size,
+                attributes: attrs,
+                mtime,
+                crc32_val: Some(chunk_crc),
+                comp_method: COMP_METHOD_STORE,
+                host_os: OS_UNIX,
+                flags: block_flags,
+                file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
+                extra_data: if is_first {
+                    extra_data.to_vec()
+                } else {
+                    Vec::new()
+                },
+                hash_type: if is_first && hash_value.is_some() {
+                    0
+                } else {
+                    u8::MAX
+                },
+                hash_value: if is_first { hash_value } else { None },
+                ..Default::default()
+            };
+            let final_hdr = final_fh.to_bytes();
+            let stream = self.stream.as_mut().unwrap();
+            stream.write_all(&final_hdr)?;
+
+            // Copy exactly `chunk_size` bytes.
+            let mut remaining = chunk_size;
+            let mut buf = vec![0u8; 1 << 20];
+            while remaining > 0 {
+                let want = buf.len().min(remaining as usize);
+                let n = reader.read(&mut buf[..want])?;
+                if n == 0 {
+                    return Err(RarError::Io(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "file changed size while being archived: still missing {remaining} bytes"
+                        ),
+                    )));
+                }
+                stream.write_all(&buf[..n])?;
+                remaining -= n as u64;
+                if let Some(cb) = self.progress_callback.as_deref_mut() {
+                    cb(unpacked_size - remaining, unpacked_size);
+                }
+            }
+
+            self.volume_bytes_written += final_hdr.len() as u64 + chunk_size;
+            let data_offset = stream.stream_position()? - chunk_size;
+            chunks.push(DataChunk {
+                volume_index: self.current_volume - 1,
+                data_offset,
+                packed_size: chunk_size,
+                crc32_val: Some(chunk_crc),
+                is_final: is_last,
+                extra_data: if is_first {
+                    extra_data.to_vec()
+                } else {
+                    Vec::new()
+                },
+            });
+            offset += chunk_size;
+            is_first = false;
+            if !is_last {
+                self.start_next_volume()?;
+            }
+        }
+
+        self.entries.push(ArchiveEntry {
+            header: FileHeader {
+                packed_size: unpacked_size,
+                ..fh_base
+            },
+            chunks,
+        });
+        Ok(())
+    }
 }
 
 impl Drop for RarArchive {
@@ -2140,19 +3125,180 @@ fn dict_size_for_data(data_size: usize) -> u8 {
 
 /// Sample-probe large inputs for incompressibility.
 ///
-/// Compressing the first 512 KiB with the same method costs ~20 ms and
-/// reliably identifies media/archives/random data, which would otherwise
-/// spend minutes in the match finder only to end up STORE anyway. The 90%
-/// threshold is conservative: genuinely compressible inputs (text, code,
-/// structured binary) compress the sample far below it.
+/// Compressing small samples with the same method costs ~20 ms per sample
+/// and reliably identifies media/archives/random data, which would
+/// otherwise spend minutes in the match finder only to end up STORE
+/// anyway. The 90% threshold is conservative: genuinely compressible
+/// inputs (text, code, structured binary) compress the samples far below
+/// it. Sampling the head plus quarter points catches files whose tails are
+/// incompressible (e.g. text + random media), which the old head-only
+/// probe missed. A file is only STOREd when at least half of the samples
+/// are incompressible, so files with a small random section keep
+/// compressing.
+const SAMPLE_PROBE_HEAD: usize = 512 * 1024;
+const SAMPLE_PROBE_TAIL: usize = 256 * 1024;
+
+/// In-memory stride probe (used by `add_bytes`).
 fn sample_is_incompressible(data: &[u8], method: u8) -> bool {
-    const SAMPLE: usize = 512 * 1024;
-    if data.len() < 4 * SAMPLE {
+    if data.len() < 4 * SAMPLE_PROBE_HEAD {
         return false;
     }
-    let sample = &data[..SAMPLE];
+    let mut bad = 0;
+    if incompressible_sample(&data[..SAMPLE_PROBE_HEAD], method) {
+        bad += 1;
+    }
+    for &pos in &[data.len() / 4, data.len() / 2, data.len() * 3 / 4] {
+        if pos >= SAMPLE_PROBE_HEAD && pos + SAMPLE_PROBE_TAIL <= data.len() {
+            if incompressible_sample(&data[pos..pos + SAMPLE_PROBE_TAIL], method) {
+                bad += 1;
+            }
+        }
+    }
+    bad >= 2
+}
+
+/// File-based stride probe: head + samples at the quarter points.
+fn sample_is_incompressible_file(path: &Path, size: u64, method: u8) -> RarResult<bool> {
+    let mut f = File::open(path)?;
+    let mut head = vec![0u8; SAMPLE_PROBE_HEAD];
+    let n = read_up_to(&mut f, &mut head)?;
+    let mut bad = 0;
+    if incompressible_sample(&head[..n], method) {
+        bad += 1;
+    }
+    for &quarter in &[size / 4, size / 2, size * 3 / 4] {
+        if quarter < SAMPLE_PROBE_HEAD as u64 {
+            continue;
+        }
+        f.seek(SeekFrom::Start(quarter))?;
+        let mut sample = vec![0u8; SAMPLE_PROBE_TAIL];
+        let n = read_up_to(&mut f, &mut sample)?;
+        if n > 0 && incompressible_sample(&sample[..n], method) {
+            bad += 1;
+        }
+    }
+    Ok(bad >= 2)
+}
+
+fn incompressible_sample(sample: &[u8], method: u8) -> bool {
+    if sample.is_empty() {
+        return false;
+    }
     let packed = compression::compress(sample, method, 0).unwrap_or_default();
-    packed.len() >= SAMPLE * 9 / 10
+    packed.len() >= sample.len() * 9 / 10
+}
+
+/// Compute the plaintext CRC32 (and optional BLAKE2sp) of a file in a
+/// single streaming pass.
+fn hash_file(path: &Path, size: u64, want_blake: bool) -> RarResult<(u32, Option<[u8; 32]>)> {
+    let mut crc = crc32fast::Hasher::new();
+    let mut blake = want_blake.then(crate::blake2sp::Hasher::new);
+    let mut f = File::open(path)?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut total = 0u64;
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        crc.update(&buf[..n]);
+        if let Some(h) = blake.as_mut() {
+            h.update(&buf[..n]);
+        }
+    }
+    if total != size {
+        return Err(RarError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("file changed size while being hashed: expected {size} bytes, read {total}"),
+        )));
+    }
+    Ok((crc.finalize(), blake.map(|h| h.finalize())))
+}
+
+/// Read until `buf` is full or EOF; returns the number of bytes read.
+fn read_up_to<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        let n = r.read(&mut buf[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    Ok(filled)
+}
+
+/// Sanitize an archive member name for safe extraction.
+///
+/// Rejects empty names, absolute paths, `..` traversal components, NUL
+/// bytes and Windows drive/ADS components (`:`). Backslashes are treated
+/// as separators and redundant `.`/empty components are dropped.
+fn sanitize_archive_path(name: &str) -> RarResult<String> {
+    if name.is_empty() {
+        return Err(RarError::Security("empty entry name".into()));
+    }
+    if name.contains('\0') {
+        return Err(RarError::Security("entry name contains a NUL byte".into()));
+    }
+    let normalized = name.replace('\\', "/");
+    if normalized.starts_with('/') {
+        return Err(RarError::Security(format!(
+            "absolute entry name {name:?} rejected"
+        )));
+    }
+    let mut out = String::new();
+    for comp in normalized.split('/') {
+        if comp.is_empty() || comp == "." {
+            continue;
+        }
+        if comp == ".." {
+            return Err(RarError::Security(format!(
+                "entry name {name:?} contains a '..' traversal component"
+            )));
+        }
+        if comp.contains(':') {
+            return Err(RarError::Security(format!(
+                "entry name {name:?} contains a ':' (drive/ADS) component"
+            )));
+        }
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(comp);
+    }
+    if out.is_empty() {
+        return Err(RarError::Security(format!(
+            "entry name {name:?} resolves to an empty path"
+        )));
+    }
+    Ok(out)
+}
+
+/// Build a unique temporary sibling path for atomic extraction.
+fn temp_sibling_path(dest_path: &Path) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let file_name = dest_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "entry".to_string());
+    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_name = format!(".{file_name}.rar5tmp-{}-{counter}", std::process::id());
+    dest_path.with_file_name(tmp_name)
+}
+
+/// Replace `dest` with `src` (atomic on Unix; falls back to remove+rename
+/// on platforms where rename over an existing file fails).
+fn replace_file(src: &Path, dest: &Path) -> RarResult<()> {
+    match fs::rename(src, dest) {
+        Ok(()) => Ok(()),
+        Err(_) if dest.exists() => {
+            fs::remove_file(dest)?;
+            fs::rename(src, dest)?;
+            Ok(())
+        }
+        Err(e) => Err(RarError::Io(e)),
+    }
 }
 
 /// Discover all volumes of a multi-volume RAR5 archive.
@@ -2675,5 +3821,31 @@ mod tests {
         let part2 = dir.path().join("anypart.part2.rar");
         let mut ar = RarArchive::open(&part2).unwrap();
         assert_eq!(ar.read("data.bin").unwrap(), data);
+    }
+
+    #[test]
+    fn sanitize_archive_path_rejects_unsafe_names() {
+        for bad in [
+            "",
+            "../evil",
+            "a/../../b",
+            "/etc/passwd",
+            "//server/share",
+            "C:/windows",
+            "c:\\windows",
+            "file.txt\0",
+            ".",
+            "./",
+        ] {
+            assert!(sanitize_archive_path(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn sanitize_archive_path_normalizes_safe_names() {
+        assert_eq!(sanitize_archive_path("a/b.txt").unwrap(), "a/b.txt");
+        assert_eq!(sanitize_archive_path("a\\b.txt").unwrap(), "a/b.txt");
+        assert_eq!(sanitize_archive_path("./a//b/./c.txt").unwrap(), "a/b/c.txt");
+        assert_eq!(sanitize_archive_path("dir/").unwrap(), "dir");
     }
 }

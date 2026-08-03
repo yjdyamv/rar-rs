@@ -22,12 +22,47 @@ pub fn compress_with_progress(
         return Ok(data.to_vec());
     }
     if method >= COMP_METHOD_FASTEST && method <= COMP_METHOD_BEST {
-        return Ok(codec::encode_with_progress(
+        return compress_chunked(
             data,
             method,
             dict_size_log,
+            codec::DEFAULT_CHUNK_SIZE,
+            None,
+            true,
             progress,
-        ));
+        );
+    }
+    Err(format!("unknown compression method: {method}"))
+}
+
+/// Compress `data` in bounded chunks, optionally carrying encoder state
+/// across files (solid archives). The symbol table and match finder stay
+/// proportional to `chunk_size` instead of the whole file.
+pub fn compress_chunked(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    chunk_size: usize,
+    state: Option<&mut codec::EncoderState>,
+    is_final: bool,
+    progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<Vec<u8>, String> {
+    if method == COMP_METHOD_STORE {
+        if let Some(cb) = progress {
+            cb(data.len() as u64, data.len() as u64);
+        }
+        return Ok(data.to_vec());
+    }
+    if method >= COMP_METHOD_FASTEST && method <= COMP_METHOD_BEST {
+        return codec::encode_chunked(
+            data,
+            method,
+            dict_size_log,
+            chunk_size,
+            state,
+            is_final,
+            progress,
+        );
     }
     Err(format!("unknown compression method: {method}"))
 }

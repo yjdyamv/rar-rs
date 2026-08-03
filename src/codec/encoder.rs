@@ -22,6 +22,11 @@ const LEVEL_PARAMS: [(usize, usize, usize); 6] = [
 
 const MAX_BLOCK_SIZE: usize = 0x20000; // 128 KB
 
+/// Default input chunk size for the encoder. Processing input in bounded
+/// slices keeps the symbol table (and match finder) memory proportional to
+/// the chunk size instead of the whole file.
+pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
 /// Symbol representation for the match finder output.
 #[derive(Clone)]
 enum Symbol {
@@ -31,9 +36,41 @@ enum Symbol {
     Repeat,
 }
 
+/// Persistent encoder state for solid archive support.
+///
+/// Carries the lookbehind window tail, distance cache and last length
+/// across files (and across chunks within a file) so consecutive
+/// compressed members share one LZ window.
+#[derive(Default)]
+pub struct EncoderState {
+    tail: Vec<u8>,
+    dist_cache: [u32; DIST_CACHE_SIZE],
+    last_length: u32,
+}
+
+impl EncoderState {
+    /// Reset the solid chain. Call after any member that does not
+    /// participate in the LZ window (directories, STORE files, empty
+    /// files).
+    pub fn reset(&mut self) {
+        self.tail.clear();
+        self.dist_cache = [0; DIST_CACHE_SIZE];
+        self.last_length = 0;
+    }
+}
+
 /// Encode raw data into RAR5 compressed format.
 pub fn encode(data: &[u8], method: u8, dict_size_log: u8) -> Vec<u8> {
-    encode_with_progress(data, method, dict_size_log, None)
+    encode_chunked(
+        data,
+        method,
+        dict_size_log,
+        DEFAULT_CHUNK_SIZE,
+        None,
+        true,
+        None,
+    )
+    .unwrap_or_default()
 }
 
 /// Encode raw data into RAR5 compressed format, reporting match-finder
@@ -44,68 +81,152 @@ pub fn encode_with_progress(
     dict_size_log: u8,
     progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Vec<u8> {
+    encode_chunked(
+        data,
+        method,
+        dict_size_log,
+        DEFAULT_CHUNK_SIZE,
+        None,
+        true,
+        progress,
+    )
+    .unwrap_or_default()
+}
+
+/// Encode `data` in bounded chunks, optionally carrying encoder state
+/// across calls (solid archives and multi-chunk files). `is_final` marks
+/// the last call of one member so only its final block carries the
+/// end-of-stream flag. Returns the compressed stream; callers fall back to
+/// STORE when the result is not smaller than the input.
+pub fn encode_chunked(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    chunk_size: usize,
+    state: Option<&mut EncoderState>,
+    is_final: bool,
+    mut progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<Vec<u8>, String> {
     if data.is_empty() {
-        return encode_empty_block();
+        return Ok(encode_empty_block());
     }
 
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log.max(0) as u32);
 
-    let symbols = find_matches(data, chain_len, lazy_thresh, max_match, dict_size, progress);
+    let mut local_state = EncoderState::default();
+    let state = state.unwrap_or(&mut local_state);
+    let chunk_size = chunk_size.max(1);
 
     let mut output = Vec::new();
-    let mut block_start = 0;
-    while block_start < symbols.len() {
-        let (block_end, _) = find_block_end(&symbols, block_start, MAX_BLOCK_SIZE);
-        let is_last = block_end >= symbols.len();
-        let block_data = encode_block(&symbols[block_start..block_end], is_last);
-        output.extend(block_data);
-        // Early bail-out: once the compressed stream already exceeds the
-        // input size it can never beat STORE — stop before wasting more
-        // time (callers fall back to STORE on oversized output).
-        if !is_last && output.len() > data.len() {
+    let mut chunk_start = 0usize;
+    let mut next_report = 0u64;
+
+    while chunk_start < data.len() {
+        let chunk_end = (chunk_start + chunk_size).min(data.len());
+        let chunk = &data[chunk_start..chunk_end];
+        let symbols = find_matches_with_tail(
+            state,
+            chunk,
+            chain_len,
+            lazy_thresh,
+            max_match,
+            dict_size,
+        );
+
+        let mut block_start = 0usize;
+        while block_start < symbols.len() {
+            let (block_end, _) = find_block_end(&symbols, block_start, MAX_BLOCK_SIZE);
+            let is_last = is_final && chunk_end >= data.len() && block_end >= symbols.len();
+            let block_data = encode_block(&symbols[block_start..block_end], is_last);
+            output.extend(block_data);
+            // Early bail-out: once the compressed stream already exceeds
+            // the input size it can never beat STORE — stop before wasting
+            // more time (callers fall back to STORE on oversized output).
+            if !is_last && output.len() > data.len() {
+                break;
+            }
+            block_start = block_end;
+        }
+        if output.len() > data.len() {
             break;
         }
-        block_start = block_end;
+
+        chunk_start = chunk_end;
+        if let Some(cb) = progress.as_deref_mut() {
+            if chunk_end as u64 >= next_report {
+                cb(chunk_end as u64, data.len() as u64);
+                next_report = chunk_end as u64 + 0x10000;
+            }
+        }
     }
 
-    output
+    Ok(output)
 }
 
 // ── Match finding ──────────────────────────────────────────────────────────
 
-fn find_matches(
-    data: &[u8],
+/// Find matches for `chunk`, searching against `state.tail` as lookbehind.
+/// Advances `state` so a following chunk/file continues the LZ window.
+fn find_matches_with_tail(
+    state: &mut EncoderState,
+    chunk: &[u8],
     chain_len: usize,
     lazy_thresh: usize,
     max_match: usize,
     window: usize,
-    mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Vec<Symbol> {
-    let mut finder = MatchFinder::new(data, 2, max_match, chain_len, window);
-    let mut symbols = Vec::with_capacity(data.len());
-    let mut dist_cache = [0u32; DIST_CACHE_SIZE];
-    let mut last_length: u32 = 0;
-    let mut pos = 0;
-    let mut next_report = 0u64;
+    let tail_len = state.tail.len();
+    let mut combined = Vec::with_capacity(tail_len + chunk.len());
+    combined.extend_from_slice(&state.tail);
+    combined.extend_from_slice(chunk);
 
-    while pos < data.len() {
-        if let Some(cb) = progress.as_deref_mut() {
-            if pos as u64 >= next_report {
-                cb(pos as u64, data.len() as u64);
-                next_report = pos as u64 + 0x10000;
-            }
-        }
+    let mut finder = MatchFinder::new(&combined, 2, max_match, chain_len, window);
+    for pos in 0..tail_len {
+        finder.insert(pos);
+    }
 
-        let (mut dist, mut length) = finder.find_match_cached(pos, &dist_cache);
+    let mut dist_cache = state.dist_cache;
+    let mut last_length = state.last_length;
+    let symbols = find_matches_in_range(
+        &combined,
+        &mut finder,
+        tail_len,
+        combined.len(),
+        lazy_thresh,
+        &mut dist_cache,
+        &mut last_length,
+    );
 
-        // Lazy matching
-        if dist > 0 && lazy_thresh > 0 && length < lazy_thresh && pos + 1 < data.len() {
-            let (dist2, length2) = finder.find_match_cached(pos + 1, &dist_cache);
+    let keep = window.min(combined.len());
+    state.tail = combined[combined.len() - keep..].to_vec();
+    state.dist_cache = dist_cache;
+    state.last_length = last_length;
+    symbols
+}
+
+/// Match-finding loop over `data[start..end]` with a distance cache.
+fn find_matches_in_range(
+    data: &[u8],
+    finder: &mut MatchFinder<'_>,
+    start: usize,
+    end: usize,
+    lazy_thresh: usize,
+    dist_cache: &mut [u32; DIST_CACHE_SIZE],
+    last_length: &mut u32,
+) -> Vec<Symbol> {
+    let mut symbols = Vec::with_capacity(end - start);
+    let mut pos = start;
+
+    while pos < end {
+        let (mut dist, mut length) = finder.find_match_cached(pos, dist_cache);
+
+        if dist > 0 && lazy_thresh > 0 && length < lazy_thresh && pos + 1 < end {
+            let (dist2, length2) = finder.find_match_cached(pos + 1, dist_cache);
             if length2 > length {
                 symbols.push(Symbol::Literal(data[pos]));
-                last_length = 0;
+                *last_length = 0;
                 pos += 1;
                 dist = dist2;
                 length = length2;
@@ -113,18 +234,18 @@ fn find_matches(
         }
 
         if dist > 0 {
-            let cache_idx = cache_find(&dist_cache, dist as u32);
+            let cache_idx = cache_find(dist_cache, dist as u32);
             if let Some(idx) = cache_idx {
-                if idx == 0 && length as u32 == last_length && last_length > 0 {
+                if idx == 0 && length as u32 == *last_length && *last_length > 0 {
                     symbols.push(Symbol::Repeat);
                 } else {
                     symbols.push(Symbol::CacheRef {
                         index: idx,
                         length: length as u32,
                     });
-                    last_length = length as u32;
+                    *last_length = length as u32;
                 }
-                cache_touch(&mut dist_cache, idx);
+                cache_touch(dist_cache, idx);
             } else {
                 let raw_length = remove_length_bonus(length as u32, dist as u32);
                 if raw_length >= 2 {
@@ -132,14 +253,14 @@ fn find_matches(
                         distance: dist as u32,
                         length: raw_length,
                     });
-                    cache_push(&mut dist_cache, dist as u32);
-                    last_length = apply_length_bonus(raw_length, dist as u32);
+                    cache_push(dist_cache, dist as u32);
+                    *last_length = apply_length_bonus(raw_length, dist as u32);
                 } else {
                     for i in 0..length {
                         symbols.push(Symbol::Literal(data[pos + i]));
                         finder.insert(pos + i);
                     }
-                    last_length = 0;
+                    *last_length = 0;
                     pos += length;
                     continue;
                 }
@@ -151,7 +272,7 @@ fn find_matches(
             pos += length;
         } else {
             symbols.push(Symbol::Literal(data[pos]));
-            last_length = 0;
+            *last_length = 0;
             pos += 1;
         }
     }
@@ -668,5 +789,133 @@ fn ensure_nonzero(freq: &mut [u32]) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::huffman::DecodeTable;
+    use crate::codec::decoder::decode_to_writer;
+
+    /// Emit RAR5 filter data: `[2 bits byte_count-1][LE bytes]`.
+    fn write_filter_data(writer: &mut BitWriter, value: u32) {
+        let bytes = value.to_le_bytes();
+        let count = if value <= 0xFF {
+            1
+        } else if value <= 0xFFFF {
+            2
+        } else if value <= 0xFF_FFFF {
+            3
+        } else {
+            4
+        };
+        writer.write_bits((count - 1) as u32, 2);
+        for i in 0..count {
+            writer.write_bits(bytes[i] as u32, 8);
+        }
+    }
+
+    fn one_symbol_table(count: usize) -> Vec<u8> {
+        let mut v = vec![0u8; count];
+        v[0] = 1;
+        v
+    }
+
+    /// Build a compressed RAR5 stream containing a Delta filter followed by
+    /// delta-encoded literals, then verify the streaming decoder applies
+    /// the filter and produces the original bytes.
+    #[test]
+    fn streaming_decode_applies_delta_filter() {
+        let original: Vec<u8> = (0..300u32).map(|i| (i * 7 % 251) as u8).collect();
+        // delta_decode computes cumulative negative sums:
+        // result[i] = result[i-1] - D[i], so D[i] = prev - original[i].
+        let mut delta = vec![0u8; original.len()];
+        let mut prev = 0u8;
+        for (i, &b) in original.iter().enumerate() {
+            delta[i] = prev.wrapping_sub(b);
+            prev = b;
+        }
+
+        let mut nc_freq = vec![0u32; HUFF_NC];
+        for &b in &delta {
+            nc_freq[b as usize] += 1;
+        }
+        nc_freq[SYM_FILTER] += 1;
+        ensure_nonzero(&mut nc_freq);
+
+        let nc_lengths = build_code_lengths_from_freqs(&nc_freq, MAX_CODE_LENGTH);
+        let dc_lengths = build_code_lengths_from_freqs(&vec![1u32; HUFF_DC], MAX_CODE_LENGTH);
+        let ldc_lengths = build_code_lengths_from_freqs(&vec![1u32; HUFF_LDC], MAX_CODE_LENGTH);
+        let rc_lengths = build_code_lengths_from_freqs(&vec![1u32; HUFF_RC], MAX_CODE_LENGTH);
+        let enc_nc = EncodeTable::new(&nc_lengths);
+
+        let mut writer = BitWriter::new();
+        write_tables(
+            &mut writer,
+            &nc_lengths,
+            &dc_lengths,
+            &ldc_lengths,
+            &rc_lengths,
+        );
+
+        // Filter symbol + data (offset 0, length = original, delta, 1 channel).
+        encode_symbol(&enc_nc, &mut writer, SYM_FILTER);
+        write_filter_data(&mut writer, 0);
+        write_filter_data(&mut writer, original.len() as u32);
+        writer.write_bits(FILTER_DELTA as u32, 3);
+        writer.write_bits(0, 5); // channels - 1
+
+        for &b in &delta {
+            encode_symbol(&enc_nc, &mut writer, b as usize);
+        }
+
+        let total_bits = writer.bit_count();
+        let block_data = writer.into_bytes();
+        let stream = build_block_header(&block_data, total_bits, true, true);
+
+        let mut out = Vec::new();
+        let written = decode_to_writer(&stream, original.len() as u64, 0, None, &mut out)
+            .expect("decode");
+        assert_eq!(written as usize, original.len());
+        assert_eq!(out, original);
+    }
+
+    #[test]
+    fn encoder_state_carries_matches_across_chunks() {
+        // A long run of identical bytes must still compress when the input
+        // is split across chunk boundaries with a shared encoder state.
+        let data = vec![0xABu8; 3 * DEFAULT_CHUNK_SIZE + 12345];
+        let mut state = EncoderState::default();
+        let mut packed = Vec::new();
+        let chunks: Vec<&[u8]> = data.chunks(DEFAULT_CHUNK_SIZE).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            packed.extend(
+                encode_chunked(
+                    chunk,
+                    5,
+                    3,
+                    DEFAULT_CHUNK_SIZE,
+                    Some(&mut state),
+                    i + 1 == chunks.len(),
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        assert!(
+            packed.len() * 4 < data.len(),
+            "long repeats must compress well across chunks: {} vs {}",
+            packed.len(),
+            data.len()
+        );
+        let roundtrip = crate::codec::decode_standalone(&packed, data.len() as u64, 3).unwrap();
+        assert_eq!(roundtrip, data);
+    }
+
+    #[test]
+    fn one_symbol_tables_are_valid() {
+        let table = DecodeTable::new(&one_symbol_table(4));
+        assert_eq!(table.num_symbols, 4);
     }
 }

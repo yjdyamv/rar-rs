@@ -15,5 +15,10 @@ pub mod lz_match;
 pub mod tables;
 pub mod window;
 
-pub use decoder::{DecoderState, decode, decode_standalone};
-pub use encoder::{encode, encode_with_progress};
+pub use decoder::{
+    MAX_STREAMING_FILTER_BUFFER, DecoderState, decode, decode_standalone,
+    decode_standalone_to_writer, decode_to_writer,
+};
+pub use encoder::{
+    DEFAULT_CHUNK_SIZE, EncoderState, encode, encode_chunked, encode_with_progress,
+};

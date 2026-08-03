@@ -21,11 +21,17 @@ archives — no external binaries required.
 | Directory entries                    |   done |
 | Timestamp preservation               |   done |
 | Solid archive decompression          |   done |
+| Solid archive creation               |   done |
+| Quick-open records (`-qo+`)          |   done |
+| BLAKE2sp hash records (`-htb`)       |   done |
+| Streamed extraction (bounded memory) |   done |
 | File-level AES-256 encryption        |   done |
 | File-level AES-256 decryption        |   done |
 | Header-encrypted archive decryption  |   done |
+| Encrypted-data integrity (hash-key MAC) | done |
 | Multi-volume archive reading         |   done |
 | Multi-volume archive creation        |   done |
+| Recovery volumes (`.rev`, WinRAR-compatible) | done |
 | **RAR4 (v1.5–v3.x)**                |        |
 | Extract RAR4 archives               |   done |
 | LZSS+Huffman decompression (m3)      |   done |
@@ -101,6 +107,68 @@ let mut rar = RarArchive::open("backup.part1.rar")?;
 rar.extract_all("/tmp/output/")?;
 ```
 
+### Advanced options
+
+`RarArchive::create_with_options` is the full-featured constructor; the
+dedicated `create*` constructors are thin wrappers around it:
+
+```rust
+use rar5::{CreateOptions, RarArchive};
+
+// Solid + quick-open + BLAKE2sp + password + recovery record.
+let mut rar = RarArchive::create_with_options(
+    "backup.rar",
+    CreateOptions {
+        solid: true,
+        quick_open: true,
+        blake2: true,
+        password: Some("secret".into()),
+        recovery_percent: Some(10),
+        ..Default::default()
+    },
+)?;
+rar.add("src/", 3)?;
+rar.close()?;
+```
+
+Solid archives share one LZ window across consecutive compressed members
+(better ratio; single-volume only for now). Quick-open records copy every
+file header into one block at the end of the archive (`-qo+` semantics),
+which WinRAR uses for fast listing. BLAKE2sp hash records match WinRAR's
+`-htb` and are verified on read (also for archives created by other tools).
+
+### Safe extraction
+
+Extraction is safe by default: member names are sanitized (path traversal,
+absolute paths, drive components and NUL bytes are rejected), resolved
+paths are checked to stay inside the destination, per-file and total output
+sizes are capped, and files are written to a temporary sibling and renamed
+only after integrity checks pass. Encrypted members verify their MAC'd
+checksums, so corrupted ciphertext is always detected.
+
+```rust
+use rar5::{ExtractOptions, RarArchive};
+
+let opts = ExtractOptions {
+    max_unpacked_bytes: Some(4 * 1024 * 1024 * 1024), // 4 GiB per file
+    max_total_unpacked_bytes: Some(32 * 1024 * 1024 * 1024), // 32 GiB total
+    ..Default::default()
+};
+let mut rar = RarArchive::open("backup.rar")?;
+rar.extract_all_with_options("/tmp/output/", opts)?;
+```
+
+Relax these defaults only for trusted archives.
+
+### Streaming and memory
+
+Large members are processed in bounded chunks: STORE members stream from
+disk, compressed members use a 4 MiB chunked encoder with a shared LZ
+window, and extraction streams decoded output to the destination instead
+of materializing whole files. The worst-case memory for a compressed
+member is roughly the packed size plus one chunk, instead of a symbol
+table proportional to the whole file.
+
 ---
 
 ## Module Layout
@@ -144,6 +212,34 @@ cargo build --release
 ```
 
 Binaries are at `target/release/rar` and `target/release/unrar`.
+
+## Interop testing
+
+The official RAR/UNRAR 7.x binaries are used as black-box references:
+UNRAR tests every feature combination we produce (solid, quick-open,
+BLAKE2sp, encryption, recovery records, `.rev` volumes), we read official
+archives byte-identically, `rar r` repairs our recovery records, and
+`rar rc` reconstructs deleted volumes from our `.rev` files.
+
+```bash
+SA_OFFICIAL_RAR=/path/to/rar SA_OFFICIAL_UNRAR=/path/to/unrar \
+  cargo test --release --test interop official_
+```
+
+The tests skip automatically when these variables are not set.
+
+## Known limitations
+
+- RAR4 PPMd and RAR4 encryption are not implemented (read-only LZSS +
+  filters, no compression).
+- Solid archives cannot be combined with multi-volume output yet.
+- Encrypted STORE members are buffered (CBC padding is applied to the
+  whole member); encrypted compressed members only buffer the packed
+  output.
+- Inline recovery records buffer the archive prefix (max 32 GiB); `.rev`
+  generation streams.
+- Quick-open stores headers for every file (WinRAR's default only caches
+  large files); dictionaries are accepted up to 1 GiB (WinRAR 5.x max).
 
 ---
 

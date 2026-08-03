@@ -52,6 +52,12 @@ pub fn encode_recovery_volumes_exact(
             "no data volumes for recovery volumes".into(),
         ));
     }
+    if volume_data.len() > 65535 {
+        return Err(RarError::Format(format!(
+            "too many data volumes ({}) for recovery volumes; maximum is 65535",
+            volume_data.len()
+        )));
+    }
     let rec_count = rec_count.min(volume_data.len()).max(1);
     let maxlen = volume_data.iter().map(|d| d.len()).max().unwrap_or(0);
     let maxlen = if maxlen % 2 == 0 { maxlen } else { maxlen + 1 };
