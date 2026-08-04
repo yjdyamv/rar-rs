@@ -17,6 +17,27 @@ pub struct MatchFinder<'a> {
 const HASH_BITS: usize = 20;
 const HASH_SIZE: usize = 1 << HASH_BITS;
 
+/// Extend a match at `data[cand + start..]` vs `data[pos + start..]`,
+/// capped at `limit`, using 64-bit word compares with a scalar tail.
+/// Returns the total matched length (from `start`).
+#[inline]
+fn match_length(data: &[u8], cand: usize, pos: usize, start: usize, limit: usize) -> usize {
+    let mut length = start;
+    while length + 8 <= limit {
+        let a = u64::from_le_bytes(data[cand + length..cand + length + 8].try_into().unwrap());
+        let b = u64::from_le_bytes(data[pos + length..pos + length + 8].try_into().unwrap());
+        if a != b {
+            length += ((a ^ b).trailing_zeros() / 8) as usize;
+            return length;
+        }
+        length += 8;
+    }
+    while length < limit && data[cand + length] == data[pos + length] {
+        length += 1;
+    }
+    length
+}
+
 impl<'a> MatchFinder<'a> {
     pub fn new(
         data: &'a [u8],
@@ -97,10 +118,7 @@ impl<'a> MatchFinder<'a> {
                 && data[cand + 1] == data[pos + 1]
             {
                 let limit = max_len.min(self.size - cand);
-                let mut length = 0;
-                while length < limit && data[cand + length] == data[pos + length] {
-                    length += 1;
-                }
+                let length = match_length(data, cand, pos, 0, limit);
                 if length > best_len || (length == best_len && dist < best_dist) {
                     best_len = length;
                     best_dist = dist;
@@ -131,10 +149,7 @@ impl<'a> MatchFinder<'a> {
         for dist in 1..max_dist {
             let cand = pos - dist;
             let limit = max_len.min(self.size - cand);
-            let mut length = 0;
-            while length < limit && data[cand + length] == data[pos + length] {
-                length += 1;
-            }
+            let length = match_length(data, cand, pos, 0, limit);
             if length > best_len {
                 best_len = length;
                 best_dist = dist;
@@ -188,10 +203,7 @@ impl<'a> MatchFinder<'a> {
                 continue;
             }
             let limit = max_len.min(self.size - cand);
-            let mut length = 3;
-            while length < limit && data[cand + length] == data[pos + length] {
-                length += 1;
-            }
+            let length = match_length(data, cand, pos, 3, limit);
             if length > best_cache_len && length >= self.min_match {
                 best_cache_len = length;
                 best_cache_dist = cd;

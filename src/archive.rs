@@ -26,6 +26,17 @@ const MAX_RECOVERY_PREFIX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 /// allocations.
 const MAX_DICT_SIZE_LOG: u8 = 13;
 
+/// Memory budget (packed + unpacked) for the optional parallel extraction
+/// path; larger archives stream sequentially to stay bounded.
+#[cfg(feature = "parallel")]
+const PARALLEL_BUFFER_LIMIT: u64 = 256 * 1024 * 1024;
+/// Parallel extraction only engages for at least this many members...
+#[cfg(feature = "parallel")]
+const PARALLEL_MIN_MEMBERS: usize = 4;
+/// ...and at least this much total unpacked data (Rayon overhead amortized).
+#[cfg(feature = "parallel")]
+const PARALLEL_MIN_UNPACKED: u64 = 64 * 1024 * 1024;
+
 /// A single entry in the archive (public API).
 #[derive(Clone, Debug)]
 pub struct ArchiveEntry {
@@ -164,6 +175,8 @@ pub struct RarArchive {
     qo_offset_field_pos: Option<u64>,
     /// Persistent RAR5 encoder state for solid archives.
     encoder_state: Option<crate::codec::EncoderState>,
+    /// Output-filter policy for compressed members.
+    filter_policy: crate::codec::FilterPolicy,
     /// Options for the current read/extract operation (set per call).
     extract_options: crate::options::ExtractOptions,
 }
@@ -209,6 +222,7 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
+            filter_policy: crate::codec::FilterPolicy::default(),
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
@@ -246,6 +260,7 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
+            filter_policy: crate::codec::FilterPolicy::default(),
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
@@ -331,6 +346,7 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
+            filter_policy: opts.filter,
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_write()?;
@@ -1514,6 +1530,14 @@ impl RarArchive {
         let dest = dest_dir.as_ref();
         fs::create_dir_all(dest)?;
         self.extract_options = opts;
+
+        #[cfg(feature = "parallel")]
+        {
+            if self.extract_all_parallel(dest, opts)? {
+                return Ok(());
+            }
+        }
+
         let mut total_unpacked = 0u64;
         let entries: Vec<_> = self.entries.clone();
         for entry in &entries {
@@ -1537,6 +1561,160 @@ impl RarArchive {
             self.extract_entry(entry, dest)?;
         }
         Ok(())
+    }
+
+    /// Parallel extraction for eligible archives (optional `parallel`
+    /// feature).
+    ///
+    /// Eligible: at least [`PARALLEL_MIN_MEMBERS`] members, no solid chains,
+    /// no split/multi-volume members, no progress callback, and total packed
+    /// + unpacked sizes within a bounded memory budget. Packed payloads are
+    /// read sequentially, then decoded and integrity-checked with Rayon
+    /// workers (archive order preserved by replaying writes sequentially
+    /// afterwards). Ineligible archives fall back to the sequential path
+    /// unchanged. The codec's decode is memory-bandwidth-bound, so the
+    /// parallel path mainly helps on machines where decompression is
+    /// CPU-bound; it engages only for member counts and sizes where Rayon
+    /// overhead is amortized.
+    #[cfg(feature = "parallel")]
+    fn extract_all_parallel(
+        &mut self,
+        dest: &Path,
+        opts: crate::options::ExtractOptions,
+    ) -> RarResult<bool> {
+        use rayon::prelude::*;
+
+        if self.progress_callback.is_some() || self.entries.len() < PARALLEL_MIN_MEMBERS {
+            return Ok(false);
+        }
+        for (i, e) in self.entries.iter().enumerate() {
+            if self.is_solid_chain_member(i) || e.chunks.len() != 1 {
+                return Ok(false);
+            }
+        }
+        let mut total_packed = 0u64;
+        let mut total_unpacked = 0u64;
+        for e in &self.entries {
+            total_packed = total_packed.saturating_add(e.header.packed_size);
+            total_unpacked = total_unpacked.saturating_add(e.header.unpacked_size);
+            if total_packed > PARALLEL_BUFFER_LIMIT || total_unpacked > PARALLEL_BUFFER_LIMIT {
+                return Ok(false);
+            }
+        }
+        if total_unpacked < PARALLEL_MIN_UNPACKED {
+            return Ok(false);
+        }
+        if let Some(limit) = opts.max_total_unpacked_bytes {
+            if total_unpacked > limit {
+                return Err(RarError::LimitExceeded {
+                    limit,
+                    context: "total unpacked size exceeds limit".into(),
+                });
+            }
+        }
+
+        // Phase 1: read + decrypt all payloads sequentially.
+        let mut payloads: Vec<(usize, DecryptedPayload)> = Vec::with_capacity(self.entries.len());
+        for i in 0..self.entries.len() {
+            payloads.push((i, self.read_packed_data(i)?));
+        }
+        let headers: Vec<FileHeader> = self.entries.iter().map(|e| e.header.clone()).collect();
+
+        struct DecodedMember {
+            idx: usize,
+            data: Vec<u8>,
+        }
+
+        // Phase 2: decode + integrity-check in parallel.
+        let results: Vec<RarResult<DecodedMember>> = payloads
+            .into_par_iter()
+            .map(|(i, payload)| {
+                let hdr = &headers[i];
+                if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
+                    return Err(RarError::LimitExceeded {
+                        limit: MAX_DICT_SIZE_LOG as u64,
+                        context: format!(
+                            "{}: dictionary size log {} exceeds supported maximum {}",
+                            hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
+                        ),
+                    });
+                }
+                if let Some(limit) = opts.max_unpacked_bytes {
+                    if hdr.unpacked_size > limit {
+                        return Err(RarError::LimitExceeded {
+                            limit,
+                            context: format!(
+                                "{}: unpacked size {} exceeds limit",
+                                hdr.name, hdr.unpacked_size
+                            ),
+                        });
+                    }
+                }
+
+                let data = if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
+                    Vec::new()
+                } else if hdr.comp_method == COMP_METHOD_STORE {
+                    payload.data
+                } else if hdr.format_version == 4 {
+                    rar4::decoder::rar4_decompress(&payload.data, hdr.unpacked_size, None)
+                        .map_err(|e| RarError::Unsupported(e))?
+                } else {
+                    crate::codec::decode_standalone(
+                        &payload.data,
+                        hdr.unpacked_size,
+                        hdr.comp_dict_size,
+                    )
+                    .map_err(|e| RarError::Unsupported(e))?
+                };
+
+                let crc = crc32fast::hash(&data);
+                let blake = if hdr.hash_value.is_some() {
+                    Some(crate::blake2sp::hash(&data))
+                } else {
+                    None
+                };
+                verify_integrity_for(hdr, crc, blake, payload.params.as_ref(), payload.keys.as_ref())?;
+                Ok(DecodedMember { idx: i, data })
+            })
+            .collect();
+
+        // Phase 3: replay writes sequentially in archive order.
+        for result in results {
+            let member = result?;
+            let entry = &self.entries[member.idx];
+            let dest_path = self.safe_dest_path(dest, &entry.header.name)?;
+            if entry.is_dir() {
+                fs::create_dir_all(&dest_path)?;
+                continue;
+            }
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let tmp_path = temp_sibling_path(&dest_path);
+            let write_result = (|| -> RarResult<()> {
+                let mut file = File::create(&tmp_path)?;
+                file.write_all(&member.data)?;
+                file.flush()?;
+                Ok(())
+            })();
+            match write_result {
+                Ok(()) => replace_file(&tmp_path, &dest_path)?,
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(e);
+                }
+            }
+            if entry.header.mtime != 0 {
+                let mtime =
+                    UNIX_EPOCH + std::time::Duration::from_secs(entry.header.mtime as u64);
+                let times = std::fs::FileTimes::new().set_modified(mtime);
+                let _ = std::fs::File::options()
+                    .write(true)
+                    .open(&dest_path)
+                    .and_then(|f| f.set_times(times));
+            }
+        }
+        Ok(true)
     }
 
     /// Extract a single entry to `dest_dir` (safe defaults).
@@ -2083,49 +2261,7 @@ impl RarArchive {
         keys: Option<&encryption::DerivedKeys>,
     ) -> RarResult<()> {
         let hdr = &self.entries[idx].header;
-        let uses_mac = params.is_some_and(|p| p.uses_hash_mac());
-
-        if let Some(expected) = hdr.crc32_val {
-            let mut actual = crc;
-            if uses_mac {
-                let keys = keys.ok_or_else(|| {
-                    RarError::Encrypted(format!(
-                        "{}: missing derived keys for MAC verification",
-                        hdr.name
-                    ))
-                })?;
-                actual = keys.mac_crc32(actual);
-            }
-            if actual != expected {
-                return Err(RarError::Crc {
-                    expected,
-                    actual,
-                    context: hdr.name.clone(),
-                });
-            }
-        }
-
-        if let (Some(expected), Some(actual)) = (hdr.hash_value, blake) {
-            let actual = if uses_mac {
-                let keys = keys.ok_or_else(|| {
-                    RarError::Encrypted(format!(
-                        "{}: missing derived keys for hash MAC verification",
-                        hdr.name
-                    ))
-                })?;
-                keys.mac_hash32(actual)
-            } else {
-                actual
-            };
-            if !encryption::constant_time_eq(&expected, &actual) {
-                return Err(RarError::HashMismatch {
-                    expected,
-                    actual,
-                    context: hdr.name.clone(),
-                });
-            }
-        }
-        Ok(())
+        verify_integrity_for(hdr, crc, blake, params, keys)
     }
 
     // ── Public API: creation ───────────────────────────────────────────────
@@ -2251,9 +2387,90 @@ impl RarArchive {
             return Ok(());
         }
 
+        // Buffered filter path: members within the auto-filter buffer are
+        // transformed (Delta / E8 / E8E9 / ARM) and compressed in one shot;
+        // the policy keeps the smallest packed output and the caller falls
+        // back to streaming STORE when nothing shrinks the payload. Only
+        // non-solid members qualify (filtered regions must not overlap the
+        // shared solid LZ window).
+        if self.filter_policy.is_enabled()
+            && !self.solid_mode
+            && file_size <= crate::codec::AUTO_FILTER_MAX_BUFFER as u64
+        {
+            let raw_data = fs::read(path)?;
+            let plain_crc = {
+                let mut h = crc32fast::Hasher::new();
+                h.update(&raw_data);
+                h.finalize()
+            };
+            let plain_blake = if self.blake2 {
+                Some(crate::blake2sp::hash(&raw_data))
+            } else {
+                None
+            };
+            let dsl = dict_size_for_data(raw_data.len(), method);
+            let packed = crate::codec::filter_policy::encode_member_with_policy(
+                &raw_data,
+                method,
+                dsl,
+                self.filter_policy,
+            )
+            .map_err(|e| RarError::Unsupported(e))?;
+            let (header_crc, extra_data, stored_hash, encr_params) =
+                self.payload_extra_and_crc(plain_crc, plain_blake)?;
+            if packed.len() as u64 >= file_size {
+                if self.password.is_some() {
+                    let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &raw_data)?;
+                    self.write_file_entry(
+                        &name,
+                        file_size,
+                        &packed_data,
+                        header_crc,
+                        COMP_METHOD_STORE,
+                        0,
+                        &extra_data,
+                        attrs,
+                        mtime,
+                        false,
+                        stored_hash,
+                    )?;
+                } else {
+                    self.write_stored_file(
+                        &name,
+                        file_size,
+                        header_crc,
+                        attrs,
+                        mtime,
+                        io::Cursor::new(&raw_data),
+                        &extra_data,
+                        stored_hash,
+                    )?;
+                }
+            } else {
+                let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &packed)?;
+                self.write_file_entry(
+                    &name,
+                    file_size,
+                    &packed_data,
+                    header_crc,
+                    method,
+                    dsl,
+                    &extra_data,
+                    attrs,
+                    mtime,
+                    false,
+                    stored_hash,
+                )?;
+            }
+            if let Some(cb) = self.progress_callback.as_deref_mut() {
+                cb(file_size, file_size);
+            }
+            return Ok(());
+        }
+
         // Compressed path: read and compress in bounded chunks with a
         // persistent encoder state (solid archives share the LZ window).
-        let dsl = dict_size_for_data(file_size as usize);
+        let dsl = dict_size_for_data(file_size as usize, method);
         let chain_solid = self.solid_mode && self.encoder_state.is_some();
         if self.solid_mode {
             self.encoder_state.get_or_insert_with(Default::default);
@@ -2520,26 +2737,40 @@ impl RarArchive {
                 stored_hash,
             )?;
         } else {
-            let dsl = dict_size_for_data(data.len());
+            let dsl = dict_size_for_data(data.len(), method);
             let chain_solid = self.solid_mode && self.encoder_state.is_some();
             if self.solid_mode {
                 self.encoder_state.get_or_insert_with(Default::default);
             }
-            let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
-            if let Some(cb) = self.progress_callback.as_deref_mut() {
-                let cb: &mut dyn FnMut(u64, u64) = cb;
-                progress = Some(cb);
-            }
-            let packed = compression::compress_chunked(
-                data,
-                method,
-                dsl,
-                crate::codec::DEFAULT_CHUNK_SIZE,
-                self.encoder_state.as_mut(),
-                true,
-                progress,
-            )
-            .map_err(|e| RarError::Unsupported(e))?;
+            let packed = if self.filter_policy.is_enabled()
+                && !self.solid_mode
+                && data.len() <= crate::codec::AUTO_FILTER_MAX_BUFFER
+            {
+                // Filtered members report completion progress at the end.
+                crate::codec::filter_policy::encode_member_with_policy(
+                    data,
+                    method,
+                    dsl,
+                    self.filter_policy,
+                )
+                .map_err(|e| RarError::Unsupported(e))?
+            } else {
+                let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
+                if let Some(cb) = self.progress_callback.as_deref_mut() {
+                    let cb: &mut dyn FnMut(u64, u64) = cb;
+                    progress = Some(cb);
+                }
+                compression::compress_chunked(
+                    data,
+                    method,
+                    dsl,
+                    crate::codec::DEFAULT_CHUNK_SIZE,
+                    self.encoder_state.as_mut(),
+                    true,
+                    progress,
+                )
+                .map_err(|e| RarError::Unsupported(e))?
+            };
             if packed.len() >= data.len() {
                 self.reset_solid_chain();
                 let (header_crc, extra_data, stored_hash, encr_params) =
@@ -3110,14 +3341,75 @@ impl Drop for RarArchive {
     }
 }
 
-fn dict_size_for_data(data_size: usize) -> u8 {
-    // Cap the window at 1 MiB: larger windows lengthen the hash-chain walk on
-    // incompressible data (each position traverses every in-window candidate),
-    // which dominates compression time. 1 MiB covers virtually all real-world
-    // match distances (WinRAR's default dictionary is 4 MiB).
+/// Verify CRC32 and BLAKE2sp integrity against a file header. Encrypted
+/// members use the hash-key MAC when the encryption record requests it.
+fn verify_integrity_for(
+    hdr: &FileHeader,
+    crc: u32,
+    blake: Option<[u8; 32]>,
+    params: Option<&encryption::EncryptionParams>,
+    keys: Option<&encryption::DerivedKeys>,
+) -> RarResult<()> {
+    let uses_mac = params.is_some_and(|p| p.uses_hash_mac());
+
+    if let Some(expected) = hdr.crc32_val {
+        let mut actual = crc;
+        if uses_mac {
+            let keys = keys.ok_or_else(|| {
+                RarError::Encrypted(format!(
+                    "{}: missing derived keys for MAC verification",
+                    hdr.name
+                ))
+            })?;
+            actual = keys.mac_crc32(actual);
+        }
+        if actual != expected {
+            return Err(RarError::Crc {
+                expected,
+                actual,
+                context: hdr.name.clone(),
+            });
+        }
+    }
+
+    if let (Some(expected), Some(actual)) = (hdr.hash_value, blake) {
+        let actual = if uses_mac {
+            let keys = keys.ok_or_else(|| {
+                RarError::Encrypted(format!(
+                    "{}: missing derived keys for hash MAC verification",
+                    hdr.name
+                ))
+            })?;
+            keys.mac_hash32(actual)
+        } else {
+            actual
+        };
+        if !encryption::constant_time_eq(&expected, &actual) {
+            return Err(RarError::HashMismatch {
+                expected,
+                actual,
+                context: hdr.name.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn dict_size_for_data(data_size: usize, level: u8) -> u8 {
+    // Window caps per compression level (WinRAR-like, kept conservative for
+    // speed): faster levels stay at 1 MiB; higher levels grow the window so
+    // large files find longer-range matches. The decoder accepts any
+    // dictionary up to MAX_DICT_SIZE_LOG (1 GiB).
+    let cap = match level {
+        1..=2 => 1 * 1024 * 1024,
+        3 => 2 * 1024 * 1024,
+        4 => 4 * 1024 * 1024,
+        _ => 8 * 1024 * 1024, // 5
+    };
     let base = 128 * 1024;
+    let target = data_size.min(cap);
     let mut log = 0u8;
-    while (base << log) < data_size && log < 3 {
+    while (base << log) < target && log < 6 {
         log += 1;
     }
     log

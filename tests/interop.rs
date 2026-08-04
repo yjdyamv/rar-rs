@@ -1033,3 +1033,47 @@ fn incompressible_large_file_roundtrips_via_store() {
     let mut rar = RarArchive::open(&path).expect("open");
     assert_eq!(rar.read("rand.bin").expect("read"), payload);
 }
+
+/// Parallel extraction (feature `parallel`) must produce byte-identical
+/// output to the sequential path for an eligible archive (≥ 4 members,
+/// ≥ 64 MiB total, non-solid).
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_extraction_matches_sequential() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("par.rar");
+    {
+        let mut rar = RarArchive::create(&path).expect("create");
+        for i in 0..4u8 {
+            let mut data = Vec::with_capacity(20 * 1024 * 1024);
+            let base = b"parallel member payload 0123456789abcdefghijklmnopqrstuvwxyz\n";
+            while data.len() < 20 * 1024 * 1024 {
+                data.extend_from_slice(base);
+            }
+            // make each member distinct and delta-friendly
+            for chunk in data.chunks_mut(65536) {
+                for b in chunk.iter_mut().step_by(5) {
+                    *b = b.wrapping_add(i);
+                }
+            }
+            rar.add_bytes(&format!("m{i}.bin"), &data, 3).expect("add");
+        }
+        rar.close().expect("close");
+    }
+
+    let seq_dir = dir.path().join("seq");
+    let par_dir = dir.path().join("par");
+    {
+        let mut rar = RarArchive::open(&path).expect("open");
+        rar.extract_all(&seq_dir).expect("sequential extract");
+    }
+    {
+        let mut rar = RarArchive::open(&path).expect("open");
+        rar.extract_all(&par_dir).expect("parallel extract");
+    }
+    for i in 0..4u8 {
+        let a = std::fs::read(seq_dir.join(format!("m{i}.bin"))).unwrap();
+        let b = std::fs::read(par_dir.join(format!("m{i}.bin"))).unwrap();
+        assert_eq!(a, b, "member m{i} differs between sequential and parallel");
+    }
+}

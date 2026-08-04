@@ -1,5 +1,7 @@
 //! Public option structs for archive creation and extraction.
 
+use crate::codec::FilterPolicy;
+
 /// Options controlling RAR5 archive creation.
 ///
 /// All fields default to the same behavior as the existing `create*`
@@ -32,6 +34,11 @@ pub struct CreateOptions {
     pub recovery_volume_count: Option<u32>,
     /// Volume size in bytes; when set, produces a multi-volume archive.
     pub volume_size: Option<u64>,
+    /// Output-filter policy for compressed members. AutoSize (the default)
+    /// tries Delta / E8 / E8E9 / ARM candidates per member and keeps the
+    /// smallest result; filtered members are non-solid and capped at
+    /// [`crate::codec::AUTO_FILTER_MAX_BUFFER`] bytes.
+    pub filter: FilterPolicy,
 }
 
 /// Options controlling extraction and buffered reads.

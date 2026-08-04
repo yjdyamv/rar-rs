@@ -4,6 +4,7 @@
 /// archive_read_support_format_rar5.c by Grzegorz Antoniak (2018),
 /// an independent BSD-2-Clause licensed implementation.
 use super::bitstream::BitWriter;
+use super::filters::apply_filter_encode;
 use super::huffman::{EncodeTable, build_code_lengths_from_freqs, encode_symbol};
 use super::lz_match::MatchFinder;
 use super::tables::*;
@@ -22,10 +23,42 @@ const LEVEL_PARAMS: [(usize, usize, usize); 6] = [
 
 const MAX_BLOCK_SIZE: usize = 0x20000; // 128 KB
 
+/// Maximum length of one RAR5 filter block.
+///
+/// RARLAB readers (unrar/WinRAR) refuse filter regions larger than 256 KiB
+/// (`0x40000`); the reference writer splits members into filter blocks of at
+/// most `0x3FFFF` bytes. Same value as the `rars` project's
+/// `MAX_FILTER_BLOCK_LENGTH` (MIT OR Apache-2.0).
+pub const MAX_FILTER_BLOCK_LENGTH: u32 = 0x3FFFF;
+
 /// Default input chunk size for the encoder. Processing input in bounded
 /// slices keeps the symbol table (and match finder) memory proportional to
 /// the chunk size instead of the whole file.
 pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
+/// A RAR5 output filter applied to a region of the decompressed member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FilterSpec {
+    /// FILTER_DELTA, FILTER_E8, FILTER_E8E9 or FILTER_ARM.
+    pub filter_type: u8,
+    /// Delta channel count (1-4); ignored for other filter types.
+    pub channels: u8,
+    /// Start offset of the filtered region within the member.
+    pub block_start: u32,
+    /// Length of the filtered region.
+    pub block_length: u32,
+}
+
+impl FilterSpec {
+    pub fn new(filter_type: u8, channels: u8, block_start: u32, block_length: u32) -> Self {
+        Self {
+            filter_type,
+            channels,
+            block_start,
+            block_length,
+        }
+    }
+}
 
 /// Symbol representation for the match finder output.
 #[derive(Clone)]
@@ -34,6 +67,12 @@ enum Symbol {
     Match { distance: u32, length: u32 },
     CacheRef { index: usize, length: u32 },
     Repeat,
+    Filter {
+        block_start: u32,
+        block_length: u32,
+        filter_type: u8,
+        channels: u8,
+    },
 }
 
 /// Persistent encoder state for solid archive support.
@@ -162,6 +201,104 @@ pub fn encode_chunked(
         }
     }
 
+    Ok(output)
+}
+
+/// Encode `data` as a single RAR5 member with output filters applied.
+///
+/// The filters are recorded at the start of the symbol stream (the decoder
+/// applies each filter to its region once the region is fully produced, so
+/// emitting the records early is equivalent to inline emission). `data` is
+/// forward-transformed per filter spec before match finding. The caller is
+/// responsible for comparing the packed size against unfiltered output and
+/// falling back to STORE.
+pub fn encode_with_filters(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    filters: &[FilterSpec],
+) -> Result<Vec<u8>, String> {
+    if data.is_empty() {
+        return Ok(encode_empty_block());
+    }
+    if filters.is_empty() {
+        return encode_chunked(data, method, dict_size_log, data.len(), None, true, None);
+    }
+
+    // Split over-long regions: RARLAB readers reject filter blocks above
+    // MAX_FILTER_BLOCK_LENGTH. Each piece is an independent filter record
+    // with its own transform state, so splitting is byte-exact.
+    let mut specs: Vec<FilterSpec> = Vec::new();
+    for f in filters {
+        let mut start = f.block_start;
+        let mut remaining = f.block_length;
+        while remaining > 0 {
+            let len = remaining.min(MAX_FILTER_BLOCK_LENGTH);
+            specs.push(FilterSpec::new(f.filter_type, f.channels, start, len));
+            start = start.saturating_add(len);
+            remaining = remaining.saturating_sub(len);
+        }
+    }
+
+    // 1. Forward-transform each region. Regions must be disjoint; the
+    //    transform reads only its own slice, and E8/ARM file offsets are
+    //    absolute member positions.
+    let mut transformed = data.to_vec();
+    for f in &specs {
+        let start = f.block_start as usize;
+        let end = (start + f.block_length as usize).min(transformed.len());
+        if start >= end {
+            continue;
+        }
+        let t = apply_filter_encode(
+            f.filter_type,
+            &mut transformed[start..end],
+            f.channels,
+            f.block_start as u64,
+        );
+        transformed[start..end].copy_from_slice(&t);
+    }
+
+    // 2. Match-find on the transformed data.
+    let level = (method as usize).clamp(1, 5);
+    let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
+    let dict_size = 128 * 1024 * (1usize << dict_size_log.max(0) as u32);
+
+    let mut finder = MatchFinder::new(&transformed, 2, max_match, chain_len, dict_size);
+    let mut dist_cache = [0u32; DIST_CACHE_SIZE];
+    let mut last_length = 0u32;
+    let mut symbols: Vec<Symbol> = specs
+        .iter()
+        .map(|f| Symbol::Filter {
+            block_start: f.block_start,
+            block_length: f.block_length,
+            filter_type: f.filter_type,
+            channels: f.channels,
+        })
+        .collect();
+    symbols.extend(find_matches_in_range(
+        &transformed,
+        &mut finder,
+        0,
+        transformed.len(),
+        lazy_thresh,
+        &mut dist_cache,
+        &mut last_length,
+    ));
+
+    // 3. Emit blocks (filters live in the first block).
+    let mut output = Vec::new();
+    let mut block_start = 0usize;
+    while block_start < symbols.len() {
+        let (block_end, _) = find_block_end(&symbols, block_start, MAX_BLOCK_SIZE);
+        let is_last = block_end >= symbols.len();
+        let block_data = encode_block(&symbols[block_start..block_end], is_last);
+        output.extend(block_data);
+        if !is_last && output.len() > data.len() {
+            break;
+        }
+        block_start = block_end;
+    }
     Ok(output)
 }
 
@@ -300,6 +437,7 @@ fn find_block_end(symbols: &[Symbol], start: usize, max_uncompressed: usize) -> 
             Symbol::Repeat => {
                 count += last_len as usize;
             }
+            Symbol::Filter { .. } => {}
         }
         if count >= max_uncompressed {
             return (i + 1, count);
@@ -340,6 +478,7 @@ fn encode_block(symbols: &[Symbol], is_last: bool) -> Vec<u8> {
                 rc_freq[len_slot] += 1;
             }
             Symbol::Repeat => nc_freq[SYM_REPEAT] += 1,
+            Symbol::Filter { .. } => nc_freq[SYM_FILTER] += 1,
         }
     }
 
@@ -389,6 +528,20 @@ fn encode_block(symbols: &[Symbol], is_last: bool) -> Vec<u8> {
                 write_cache_ref(&mut writer, &enc_nc, &enc_rc, *index, *length);
             }
             Symbol::Repeat => encode_symbol(&enc_nc, &mut writer, SYM_REPEAT),
+            Symbol::Filter {
+                block_start,
+                block_length,
+                filter_type,
+                channels,
+            } => {
+                encode_symbol(&enc_nc, &mut writer, SYM_FILTER);
+                write_filter_data(&mut writer, *block_start);
+                write_filter_data(&mut writer, *block_length);
+                writer.write_bits(*filter_type as u32, 3);
+                if *filter_type == FILTER_DELTA {
+                    writer.write_bits(channels.saturating_sub(1) as u32, 5);
+                }
+            }
         }
     }
 
@@ -792,29 +945,29 @@ fn ensure_nonzero(freq: &mut [u32]) {
     }
 }
 
+/// Emit RAR5 filter data: `[2 bits byte_count-1][LE bytes]`.
+fn write_filter_data(writer: &mut BitWriter, value: u32) {
+    let bytes = value.to_le_bytes();
+    let count = if value <= 0xFF {
+        1
+    } else if value <= 0xFFFF {
+        2
+    } else if value <= 0xFF_FFFF {
+        3
+    } else {
+        4
+    };
+    writer.write_bits((count - 1) as u32, 2);
+    for i in 0..count {
+        writer.write_bits(bytes[i] as u32, 8);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use super::super::huffman::DecodeTable;
     use crate::codec::decoder::decode_to_writer;
-
-    /// Emit RAR5 filter data: `[2 bits byte_count-1][LE bytes]`.
-    fn write_filter_data(writer: &mut BitWriter, value: u32) {
-        let bytes = value.to_le_bytes();
-        let count = if value <= 0xFF {
-            1
-        } else if value <= 0xFFFF {
-            2
-        } else if value <= 0xFF_FFFF {
-            3
-        } else {
-            4
-        };
-        writer.write_bits((count - 1) as u32, 2);
-        for i in 0..count {
-            writer.write_bits(bytes[i] as u32, 8);
-        }
-    }
 
     fn one_symbol_table(count: usize) -> Vec<u8> {
         let mut v = vec![0u8; count];

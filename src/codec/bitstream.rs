@@ -19,7 +19,11 @@ impl<'a> BitReader<'a> {
 
     #[inline]
     pub fn bits_remaining(&self) -> usize {
-        (self.data.len() - self.pos) * 8 - self.bit_pos as usize
+        if self.pos >= self.data.len() {
+            0
+        } else {
+            (self.data.len() - self.pos) * 8 - self.bit_pos as usize
+        }
     }
 
     #[inline]

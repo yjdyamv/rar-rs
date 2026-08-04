@@ -198,7 +198,7 @@ fn decode_inner_streaming(
 
         let table_present = (block_flags_byte >> 7) & 1 != 0;
         let is_last_block = (block_flags_byte >> 6) & 1 != 0;
-        let byte_count = ((block_flags_byte >> 3) & 7) + 1;
+        let byte_count = ((block_flags_byte >> 3) & 3) + 1;
         let bit_size = block_flags_byte & 7;
 
         let checksum_byte = reader.read_byte().map_err(|e| e.to_string())?;
@@ -221,6 +221,9 @@ fn decode_inner_streaming(
             ));
         }
 
+        if block_size == 0 {
+            return Err("zero-length block".into());
+        }
         let block_bits = ((block_size as u64) - 1) * 8 + (1 + bit_size as u64);
         let block_start_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
 
@@ -480,7 +483,7 @@ fn decode_inner(
 
         let table_present = (block_flags_byte >> 7) & 1 != 0;
         let is_last_block = (block_flags_byte >> 6) & 1 != 0;
-        let byte_count = ((block_flags_byte >> 3) & 7) + 1;
+        let byte_count = ((block_flags_byte >> 3) & 3) + 1;
         let bit_size = block_flags_byte & 7;
 
         let checksum_byte = reader.read_byte().map_err(|e| e.to_string())?;
@@ -504,6 +507,9 @@ fn decode_inner(
             ));
         }
 
+        if block_size == 0 {
+            return Err("zero-length block".into());
+        }
         let block_bits = ((block_size as u64) - 1) * 8 + (1 + bit_size as u64);
         let block_start_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
 
@@ -712,13 +718,13 @@ fn decode_distance(
             if dbits >= 4 {
                 if dbits > 4 {
                     let upper = reader.read_bits(dbits - 4).map_err(|e| e.to_string())?;
-                    dist += upper << 4;
+                    dist = dist.wrapping_add(upper << 4);
                 }
                 let low_dist = decode_symbol(table_ldc, reader).map_err(|e| e.to_string())?;
-                dist += low_dist as u32;
+                dist = dist.wrapping_add(low_dist as u32);
             } else {
                 let extra = reader.read_bits(dbits).map_err(|e| e.to_string())?;
-                dist += extra;
+                dist = dist.wrapping_add(extra);
             }
         }
         Ok(dist)
@@ -789,4 +795,32 @@ fn parse_filter_data(reader: &mut BitReader) -> Result<u32, String> {
         value |= b << (i * 8);
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fuzz regression: block flags with the reserved bit 5 set previously
+    /// produced a byte_count of 8, overflowing the u32 block-size shift in
+    /// debug builds. The block size field is 2 bits (1-4 bytes); reserved
+    /// bits are ignored.
+    #[test]
+    fn block_flags_with_reserved_bit_do_not_overflow() {
+        let stream = [0xe4u8, 0x00, 0xe0, 0x00, 0xe0, 0x00, 0x00];
+        let result = std::panic::catch_unwind(|| {
+            let _ = decode_standalone(&stream, 78090, 0);
+        });
+        assert!(result.is_ok(), "decode must not panic on reserved flag bits");
+    }
+
+    /// Fuzz regression: a valid archive with a 3-byte block size field
+    /// (byte_count 3) still decodes.
+    #[test]
+    fn three_byte_block_size_field_decodes() {
+        let data = b"rar5 three-byte block size regression test data ".repeat(64);
+        let packed = crate::codec::encode(&data, 3, 3);
+        let back = decode_standalone(&packed, data.len() as u64, 3).unwrap();
+        assert_eq!(back, data);
+    }
 }

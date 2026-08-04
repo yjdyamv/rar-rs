@@ -84,48 +84,43 @@ fn delta_encode(data: &[u8], channels: u8) -> Vec<u8> {
 // ── x86 E8/E8E9 Filter ────────────────────────────────────────────────────
 //
 // RAR5 uses a conditional address normalisation scheme with a virtual
-// file_size of 0x1000000.  During compression the encoder converts
-// relative CALL/JMP targets to position-independent canonical form;
-// the decoder reverses the transform.
+// file_size of 0x1000000 (16 MB). During compression the encoder converts
+// relative CALL/JMP targets to position-independent canonical form; the
+// decoder reverses the transform.
 //
-// Reference: libarchive archive_read_support_format_rar5.c run_e8e9_filter()
-
-const E8_FILE_SIZE: u32 = 0x100_0000;
+// The transform formulas follow the WinRAR-interop-verified `rars` project
+// (https://github.com/bitplane/rars, MIT OR Apache-2.0) `codec/filters.rs`:
+// encode keeps `addr + offset` when it stays below the 16 MB model and
+// otherwise folds negative wraparound targets; decode is the exact inverse.
 
 fn e8_decode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
     let n = data.len();
     if n < 5 {
         return data.to_vec();
     }
+    let cmp_mask = if e8_only { 0xFF } else { 0xFE };
+    let opcode_limit = n - 4;
     let mut i = 0usize;
-    while i < n - 4 {
+    while i < opcode_limit {
         let opcode = data[i];
-        if opcode == 0xE8 || (!e8_only && opcode == 0xE9) {
-            i += 1; // advance past opcode — i now points at address bytes
-            let offset = ((i as u64 + file_offset) % E8_FILE_SIZE as u64) as u32;
-            let addr = u32::from_le_bytes(data[i..i + 4].try_into().unwrap());
+        if opcode & cmp_mask == 0xE8 {
+            let cur_pos = i + 1;
+            let offset = file_offset.wrapping_add(cur_pos as u64) as u32;
+            let addr = u32::from_le_bytes(data[cur_pos..cur_pos + 4].try_into().unwrap());
 
-            let new_addr = if addr & 0x8000_0000 != 0 {
-                // Negative address
-                if addr.wrapping_add(offset) & 0x8000_0000 == 0 {
-                    addr.wrapping_add(E8_FILE_SIZE)
-                } else {
-                    addr // unchanged
-                }
+            let new_addr = if addr < 0x0100_0000 {
+                Some(addr.wrapping_sub(offset))
+            } else if addr & 0x8000_0000 != 0
+                && addr.wrapping_add(offset) & 0x8000_0000 == 0
+            {
+                Some(addr.wrapping_add(0x0100_0000))
             } else {
-                // Positive address
-                if addr.wrapping_sub(E8_FILE_SIZE) & 0x8000_0000 != 0 {
-                    // addr < E8_FILE_SIZE
-                    addr.wrapping_sub(offset)
-                } else {
-                    addr // unchanged
-                }
+                None
             };
-
-            if new_addr != addr {
-                data[i..i + 4].copy_from_slice(&new_addr.to_le_bytes());
+            if let Some(value) = new_addr {
+                data[cur_pos..cur_pos + 4].copy_from_slice(&value.to_le_bytes());
             }
-            i += 4;
+            i = cur_pos + 4;
         } else {
             i += 1;
         }
@@ -138,34 +133,28 @@ fn e8_encode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
     if n < 5 {
         return data.to_vec();
     }
+    let cmp_mask = if e8_only { 0xFF } else { 0xFE };
+    let opcode_limit = n - 4;
     let mut i = 0usize;
-    while i < n - 4 {
+    while i < opcode_limit {
         let opcode = data[i];
-        if opcode == 0xE8 || (!e8_only && opcode == 0xE9) {
-            i += 1;
-            let offset = ((i as u64 + file_offset) % E8_FILE_SIZE as u64) as u32;
-            let addr = u32::from_le_bytes(data[i..i + 4].try_into().unwrap());
+        if opcode & cmp_mask == 0xE8 {
+            let cur_pos = i + 1;
+            let offset = file_offset.wrapping_add(cur_pos as u64) as u32;
+            let addr = u32::from_le_bytes(data[cur_pos..cur_pos + 4].try_into().unwrap());
 
-            let new_addr = if addr & 0x8000_0000 != 0 {
-                // Negative address
-                if addr.wrapping_add(offset) & 0x8000_0000 == 0 {
-                    addr.wrapping_sub(E8_FILE_SIZE)
-                } else {
-                    addr
-                }
+            let candidate = addr.wrapping_add(offset);
+            if candidate < 0x0100_0000 {
+                data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
             } else {
-                // Positive address
-                if addr.wrapping_add(offset) & 0x8000_0000 == 0 {
-                    addr.wrapping_add(offset)
-                } else {
-                    addr
+                let candidate = addr.wrapping_sub(0x0100_0000);
+                if candidate & 0x8000_0000 != 0
+                    && candidate.wrapping_add(offset) & 0x8000_0000 == 0
+                {
+                    data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
                 }
-            };
-
-            if new_addr != addr {
-                data[i..i + 4].copy_from_slice(&new_addr.to_le_bytes());
             }
-            i += 4;
+            i = cur_pos + 4;
         } else {
             i += 1;
         }
