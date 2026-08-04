@@ -1036,8 +1036,11 @@ impl RarArchive {
     /// Set an optional progress callback for archive creation.
     ///
     /// The callback receives `(bytes_processed, bytes_total)` for the file
-    /// currently being added. A final `(total, total)` is reported once the
-    /// file entry has been written, so callers can drive percent-done UIs.
+    /// currently being added. Every file entry starts with a `(0, total)`
+    /// event, then reports absolute bytes processed while the member is
+    /// compressed, and ends with `(total, total)` once the entry has been
+    /// written, so callers can accumulate per-file deltas into a global
+    /// percent-done UI without double-counting.
     pub fn set_progress_callback(&mut self, callback: Option<Box<dyn FnMut(u64, u64) + Send>>) {
         self.progress_callback = callback;
     }
@@ -2330,6 +2333,10 @@ impl RarArchive {
             .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().into_owned());
         let name = name.replace('\\', "/");
 
+        if let Some(cb) = self.progress_callback.as_deref_mut() {
+            cb(0, file_size);
+        }
+
         let method = level_to_method(level);
         let probe_incompressible = method != COMP_METHOD_STORE
             && file_size >= (SAMPLE_PROBE_HEAD as u64) * 4
@@ -2493,6 +2500,7 @@ impl RarArchive {
             None
         };
         let mut packed = Vec::new();
+        let mut bytes_read = 0u64;
         {
             let mut file = io::BufReader::with_capacity(1 << 20, File::open(path)?);
             let mut buf = vec![0u8; crate::codec::DEFAULT_CHUNK_SIZE];
@@ -2501,14 +2509,10 @@ impl RarArchive {
                 if n == 0 {
                     break;
                 }
+                bytes_read += n as u64;
                 crc_hasher.update(&buf[..n]);
                 if let Some(h) = blake_hasher.as_mut() {
                     h.update(&buf[..n]);
-                }
-                let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
-                if let Some(cb) = self.progress_callback.as_deref_mut() {
-                    let cb: &mut dyn FnMut(u64, u64) = cb;
-                    progress = Some(cb);
                 }
                 let state = self.encoder_state.as_mut();
                 let compressed = compression::compress_chunked(
@@ -2518,10 +2522,13 @@ impl RarArchive {
                     crate::codec::DEFAULT_CHUNK_SIZE,
                     state,
                     n < buf.len(),
-                    progress,
+                    None,
                 )
                 .map_err(RarError::Unsupported)?;
                 packed.extend(compressed);
+                if let Some(cb) = self.progress_callback.as_deref_mut() {
+                    cb(bytes_read, file_size);
+                }
                 if packed.len() as u64 >= file_size {
                     break;
                 }
@@ -2740,6 +2747,9 @@ impl RarArchive {
             .as_secs() as u32;
 
         let method = level_to_method(compression_level);
+        if let Some(cb) = self.progress_callback.as_deref_mut() {
+            cb(0, data.len() as u64);
+        }
         if method == COMP_METHOD_STORE || sample_is_incompressible(data, method) {
             self.reset_solid_chain();
             let (header_crc, extra_data, stored_hash, encr_params) =
@@ -2939,6 +2949,9 @@ impl RarArchive {
                 let prepared = self.prepare_batch_wave(&wave)?;
                 for (_, entry) in prepared {
                     let size = entry.unpacked_size;
+                    if let Some(cb) = self.progress_callback.as_deref_mut() {
+                        cb(0, size);
+                    }
                     self.write_prepared_entry(entry)?;
                     if let Some(cb) = self.progress_callback.as_deref_mut() {
                         cb(size, size);

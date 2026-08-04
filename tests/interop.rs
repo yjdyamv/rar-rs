@@ -6,6 +6,9 @@
 //! https://github.com/libarchive/libarchive).
 
 use rar5::RarArchive;
+use std::io::Write;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 const FIXTURE: &str = "tests/fixtures/winrar5_multiple_files.rar";
 const FIXTURE_FILES: [(&str, &str); 4] = [
@@ -59,6 +62,17 @@ fn sha256(data: &[u8]) -> String {
 
 fn make_temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
+}
+
+fn write_repeated(path: &Path, byte: u8, len: usize) {
+    let mut f = std::fs::File::create(path).expect("create file");
+    let chunk = vec![byte; 1 << 20];
+    let mut left = len;
+    while left > 0 {
+        let n = left.min(chunk.len());
+        f.write_all(&chunk[..n]).expect("write file");
+        left -= n;
+    }
 }
 
 // ── RAR5 block-scanning helpers (test-only) ────────────────────────────────
@@ -995,8 +1009,7 @@ fn progress_callback_reports_monotonic_progress() {
     let path = dir.path().join("prog.rar");
     let payload: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
 
-    let events: std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let events: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let mut rar = RarArchive::create(&path).expect("create");
         let sink = events.clone();
@@ -1004,20 +1017,119 @@ fn progress_callback_reports_monotonic_progress() {
             sink.lock().expect("lock").push((done, total));
         });
         rar.set_progress_callback(Some(cb));
-        rar.add_bytes("data.bin", &payload, 5).expect("add");
+        rar.add_batch(&[rar5::BatchEntry::Bytes {
+            name: "data.bin",
+            data: &payload,
+            level: 5,
+        }])
+        .expect("add");
         rar.close().expect("close");
     }
 
     let events: Vec<(u64, u64)> = events.lock().expect("lock").iter().copied().collect();
 
     assert!(!events.is_empty(), "no progress events emitted");
+    assert_eq!(
+        events[0],
+        (0, payload.len() as u64),
+        "file must start with a (0, total) event"
+    );
     for w in events.windows(2) {
         assert!(w[0].0 <= w[1].0, "progress went backwards");
         assert_eq!(w[0].1, w[1].1, "total changed mid-stream");
     }
+    for (done, total) in &events {
+        assert!(*done <= *total, "done {done} exceeded total {total}");
+    }
     let (last_done, last_total) = *events.last().expect("events");
     assert_eq!(last_done, last_total);
     assert_eq!(last_total, payload.len() as u64);
+    let deltas: u64 = events.windows(2).map(|w| w[1].0 - w[0].0).sum();
+    assert_eq!(deltas, payload.len() as u64, "deltas must sum exactly once");
+}
+
+#[test]
+fn progress_callback_reports_exact_deltas_across_batch_files() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("batch.rar");
+    let small = dir.path().join("small.bin");
+    let big = dir.path().join("big.bin");
+    write_repeated(&small, 7, 512 * 1024);
+    // > 64 MiB so add_file takes the streaming sequential path even with the
+    // `parallel` feature (batched waves only accept members up to 64 MiB).
+    write_repeated(&big, 9, 68 * 1024 * 1024);
+    let bytes: Vec<u8> = (0..1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    let expected_totals: [u64; 3] = [512 * 1024, bytes.len() as u64, 68 * 1024 * 1024];
+
+    let events: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let mut rar = RarArchive::create(&path).expect("create");
+        let sink = events.clone();
+        let cb: Box<dyn FnMut(u64, u64) + Send> = Box::new(move |done, total| {
+            sink.lock().expect("lock").push((done, total));
+        });
+        rar.set_progress_callback(Some(cb));
+        rar.add_batch(&[
+            rar5::BatchEntry::File {
+                path: &small,
+                name: Some("small.bin"),
+                level: 5,
+            },
+            rar5::BatchEntry::Bytes {
+                name: "bytes.bin",
+                data: &bytes,
+                level: 5,
+            },
+            rar5::BatchEntry::File {
+                path: &big,
+                name: Some("big.bin"),
+                level: 5,
+            },
+        ])
+        .expect("add batch");
+        rar.close().expect("close");
+    }
+
+    let events: Vec<(u64, u64)> = events.lock().expect("lock").iter().copied().collect();
+    let mut segments: Vec<(u64, Vec<(u64, u64)>)> = Vec::new();
+    for (done, total) in events {
+        if done == 0 {
+            segments.push((total, vec![(done, total)]));
+        } else {
+            segments
+                .last_mut()
+                .expect("progress event before any (0, total) start")
+                .1
+                .push((done, total));
+        }
+    }
+
+    assert_eq!(segments.len(), expected_totals.len());
+    for ((segment_total, segment), expected) in segments.iter().zip(expected_totals) {
+        assert_eq!(*segment_total, expected, "per-file total mismatch");
+        assert_eq!(
+            segment[0],
+            (0, expected),
+            "segment must start with a zero event"
+        );
+        for w in segment.windows(2) {
+            assert!(w[0].0 <= w[1].0, "per-file progress went backwards");
+            assert_eq!(w[0].1, w[1].1, "per-file total changed mid-stream");
+        }
+        for (done, total) in segment {
+            assert!(*done <= *total, "done {done} exceeded total {total}");
+        }
+        assert_eq!(
+            segment.last().expect("segment").0,
+            *segment_total,
+            "segment must end at its file total"
+        );
+        let deltas: u64 = segment.windows(2).map(|w| w[1].0 - w[0].0).sum();
+        assert_eq!(
+            deltas, *segment_total,
+            "per-file deltas must sum exactly once"
+        );
+    }
 }
 
 #[test]
