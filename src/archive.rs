@@ -49,8 +49,9 @@ const PARALLEL_COMPRESS_WAVE_BUDGET: u64 = 256 * 1024 * 1024;
 ///
 /// The global pool (16 threads on this class of machine) makes many small
 /// members *slower*: per-task allocation contention and SMT scheduling
-/// overhead dominate tiny jobs. A small dedicated pool keeps the parallel
-/// win for medium/large members without the small-member regression.
+/// overhead dominate tiny jobs. A small dedicated pool (at most 4 threads,
+/// fewer on low-core machines) keeps the parallel win for medium/large
+/// members without the small-member regression.
 #[cfg(feature = "parallel")]
 fn compression_pool() -> &'static rayon::ThreadPool {
     use std::sync::OnceLock;
