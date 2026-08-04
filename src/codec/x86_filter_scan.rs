@@ -103,7 +103,12 @@ fn auto_x86_filter_ranges_with_cluster_gap(
     ranges
 }
 
-fn push_x86_filter_range(ranges: &mut Vec<Range<usize>>, data_len: usize, start: usize, last: usize) {
+fn push_x86_filter_range(
+    ranges: &mut Vec<Range<usize>>,
+    data_len: usize,
+    start: usize,
+    last: usize,
+) {
     let range_start = start.saturating_sub(AUTO_X86_RANGE_PADDING);
     let range_end = (last + 5 + AUTO_X86_RANGE_PADDING).min(data_len);
     let range = range_start..range_end;
@@ -117,34 +122,53 @@ fn push_x86_filter_range(ranges: &mut Vec<Range<usize>>, data_len: usize, start:
 /// byte == 0xE8 | 0xE9 for mask 0xFE). 64-bit word-compare scan with a
 /// scalar tail; safe on all alignments.
 fn next_x86_opcode(data: &[u8], start: usize, end: usize, cmp_mask: u8) -> Option<usize> {
-    let mut pos = start;
-    if pos >= end {
-        return None;
-    }
-    // Fast path: process 8 bytes at a time. Each byte is matched when
-    // (byte & mask) == 0xE8; compute `(bytes & mask_repl) ^ 0xE8_repl`
-    // and look for zero bytes, which mark matching positions.
-    while pos + 8 <= end {
-        let bytes = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8-byte window"));
-        let mask_repl = u64::from_le_bytes([cmp_mask; 8]);
-        let e8_repl = u64::from_le_bytes([0xE8; 8]);
-        let xored = (bytes & mask_repl) ^ e8_repl;
-        if let Some(off) = has_zero_byte(xored) {
-            return Some(pos + off);
+    #[cfg(feature = "simd")]
+    {
+        // Portable SIMD scan (memchr dispatch: SSE2/AVX2 on x86_64, NEON on
+        // aarch64); the scalar word-scan below is the fallback build.
+        if start >= end {
+            return None;
         }
-        pos += 8;
+        let haystack = &data[start..end];
+        let found = if cmp_mask == 0xFF {
+            memchr::memchr(0xE8, haystack)
+        } else {
+            memchr::memchr2(0xE8, 0xE9, haystack)
+        };
+        return found.map(|off| start + off);
     }
-    // Scalar tail: at most 7 remaining bytes.
-    while pos < end {
-        if data[pos] & cmp_mask == 0xE8 {
-            return Some(pos);
+    #[cfg(not(feature = "simd"))]
+    {
+        let mut pos = start;
+        if pos >= end {
+            return None;
         }
-        pos += 1;
+        // Fast path: process 8 bytes at a time. Each byte is matched when
+        // (byte & mask) == 0xE8; compute `(bytes & mask_repl) ^ 0xE8_repl`
+        // and look for zero bytes, which mark matching positions.
+        while pos + 8 <= end {
+            let bytes = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8-byte window"));
+            let mask_repl = u64::from_le_bytes([cmp_mask; 8]);
+            let e8_repl = u64::from_le_bytes([0xE8; 8]);
+            let xored = (bytes & mask_repl) ^ e8_repl;
+            if let Some(off) = has_zero_byte(xored) {
+                return Some(pos + off);
+            }
+            pos += 8;
+        }
+        // Scalar tail: at most 7 remaining bytes.
+        while pos < end {
+            if data[pos] & cmp_mask == 0xE8 {
+                return Some(pos);
+            }
+            pos += 1;
+        }
+        None
     }
-    None
 }
 
 /// Return the byte offset of the first zero byte in `v`, or `None`.
+#[cfg(not(feature = "simd"))]
 fn has_zero_byte(v: u64) -> Option<usize> {
     let y = v.wrapping_sub(0x0101_0101_0101_0101) & !v & 0x8080_8080_8080_8080;
     if y == 0 {
@@ -178,7 +202,10 @@ mod tests {
                 let mut got = next_x86_opcode(&data, start, data.len() - 4, mask);
                 let mut count = 0;
                 while expected.is_some() && count < 100 {
-                    assert_eq!(got, expected, "mismatch at iteration {count}, start {start}, mask {mask:#x}");
+                    assert_eq!(
+                        got, expected,
+                        "mismatch at iteration {count}, start {start}, mask {mask:#x}"
+                    );
                     let next = expected.unwrap() + 1;
                     expected = scalar_next_x86_opcode(&data, next, data.len() - 4, mask);
                     got = next_x86_opcode(&data, next, data.len() - 4, mask);
@@ -247,15 +274,15 @@ mod tests {
             "missing broad sparse-code span: {ranges:?}"
         );
         assert!(
-            ranges
-                .iter()
-                .any(|range| range.contains(&1024) && range.contains(&1088) && !range.contains(&3600)),
+            ranges.iter().any(|range| range.contains(&1024)
+                && range.contains(&1088)
+                && !range.contains(&3600)),
             "missing first tight code cluster: {ranges:?}"
         );
         assert!(
-            ranges
-                .iter()
-                .any(|range| range.contains(&3600) && range.contains(&3664) && !range.contains(&1088)),
+            ranges.iter().any(|range| range.contains(&3600)
+                && range.contains(&3664)
+                && !range.contains(&1088)),
             "missing second tight code cluster: {ranges:?}"
         );
     }

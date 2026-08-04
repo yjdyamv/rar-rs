@@ -961,20 +961,52 @@ fn encode_parity_shards_with_progress(
 
     let matrix = make_encoder_matrix(data.len(), recovery_shards)?;
     let gf = shared_gf16();
-    let mut parity = vec![vec![0u8; first.len()]; recovery_shards];
-    for (recovery_index, row) in matrix.iter().enumerate() {
-        for word_offset in (0..first.len()).step_by(2) {
-            let mut symbol = 0u16;
-            for (data_index, shard) in data.iter().enumerate() {
-                let data_symbol = u16::from_le_bytes([shard[word_offset], shard[word_offset + 1]]);
-                symbol ^= gf.mul(row[data_index], data_symbol);
-            }
-            parity[recovery_index][word_offset..word_offset + 2]
-                .copy_from_slice(&symbol.to_le_bytes());
-        }
-        progress(((recovery_index + 1) * first.len()) as u64);
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+
+        // Every parity row is independent; the parallel result is
+        // identical to the sequential loop.
+        let parity: Vec<Vec<u8>> = (0..recovery_shards)
+            .into_par_iter()
+            .map(|recovery_index| {
+                let row = &matrix[recovery_index];
+                let mut shard = vec![0u8; first.len()];
+                for word_offset in (0..first.len()).step_by(2) {
+                    let mut symbol = 0u16;
+                    for (data_index, shard_data) in data.iter().enumerate() {
+                        let data_symbol = u16::from_le_bytes([
+                            shard_data[word_offset],
+                            shard_data[word_offset + 1],
+                        ]);
+                        symbol ^= gf.mul(row[data_index], data_symbol);
+                    }
+                    shard[word_offset..word_offset + 2].copy_from_slice(&symbol.to_le_bytes());
+                }
+                shard
+            })
+            .collect();
+        progress((recovery_shards * first.len()) as u64);
+        Ok(parity)
     }
-    Ok(parity)
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut parity = vec![vec![0u8; first.len()]; recovery_shards];
+        for (recovery_index, row) in matrix.iter().enumerate() {
+            for word_offset in (0..first.len()).step_by(2) {
+                let mut symbol = 0u16;
+                for (data_index, shard) in data.iter().enumerate() {
+                    let data_symbol =
+                        u16::from_le_bytes([shard[word_offset], shard[word_offset + 1]]);
+                    symbol ^= gf.mul(row[data_index], data_symbol);
+                }
+                parity[recovery_index][word_offset..word_offset + 2]
+                    .copy_from_slice(&symbol.to_le_bytes());
+            }
+            progress(((recovery_index + 1) * first.len()) as u64);
+        }
+        Ok(parity)
+    }
 }
 
 #[cfg(test)]
@@ -1499,5 +1531,40 @@ mod tests {
         assert_eq!(reconstructed[0], first);
         assert_eq!(reconstructed[1], second);
         assert_eq!(reconstructed[2], third);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_parity_encode_matches_scalar_reference() {
+        let mut state = 0x9E3779B97F4A7C15u64;
+        let mut shards = vec![vec![0u8; 128]; 4];
+        for shard in &mut shards {
+            for byte in shard.iter_mut() {
+                state ^= state >> 12;
+                state ^= state << 25;
+                state ^= state >> 27;
+                *byte = (state.wrapping_mul(0x2545F4914F6CDD1D) >> 32) as u8;
+            }
+        }
+        let refs: Vec<&[u8]> = shards.iter().map(|s| s.as_slice()).collect();
+        let got = encode_parity_shards(&refs, 3).unwrap();
+
+        // Scalar reference row-by-row.
+        let matrix = make_encoder_matrix(refs.len(), 3).unwrap();
+        let gf = shared_gf16();
+        let mut expected = vec![vec![0u8; 128]; 3];
+        for (row_index, row) in matrix.iter().enumerate() {
+            for word_offset in (0..128).step_by(2) {
+                let mut symbol = 0u16;
+                for (data_index, shard) in refs.iter().enumerate() {
+                    let data_symbol =
+                        u16::from_le_bytes([shard[word_offset], shard[word_offset + 1]]);
+                    symbol ^= gf.mul(row[data_index], data_symbol);
+                }
+                expected[row_index][word_offset..word_offset + 2]
+                    .copy_from_slice(&symbol.to_le_bytes());
+            }
+        }
+        assert_eq!(got, expected);
     }
 }

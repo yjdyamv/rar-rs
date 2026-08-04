@@ -220,9 +220,47 @@ impl Hasher {
 
 /// Compute the BLAKE2sp hash of `input`.
 pub(crate) fn hash(input: &[u8]) -> [u8; OUT_BYTES] {
-    let mut hasher = Hasher::new();
-    hasher.update(input);
-    hasher.finalize()
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+
+        // Each leaf owns every 512-byte group's `leaf_index`-th block and
+        // the matching slice of the final partial group, so the result is
+        // identical to the streaming Hasher below.
+        let group_bytes = BLOCK_BYTES * PARALLELISM;
+        let full_groups = input.len() / group_bytes;
+        let full_end = full_groups * group_bytes;
+        let leaf_digests: Vec<[u8; OUT_BYTES]> = (0..PARALLELISM)
+            .into_par_iter()
+            .map(|leaf_index| {
+                let mut leaf = Blake2s::new(leaf_index as u64, 0, leaf_index == PARALLELISM - 1);
+                let start = leaf_index * BLOCK_BYTES;
+                if full_end > 0 {
+                    for group in input[..full_end].chunks_exact(group_bytes) {
+                        leaf.update(&group[start..start + BLOCK_BYTES]);
+                    }
+                }
+                let tail_start = full_end + start;
+                if tail_start < input.len() {
+                    let tail_end = (tail_start + BLOCK_BYTES).min(input.len());
+                    leaf.update(&input[tail_start..tail_end]);
+                }
+                leaf.finalize()
+            })
+            .collect();
+
+        let mut root = Blake2s::new(0, 1, true);
+        for digest in leaf_digests {
+            root.update(&digest);
+        }
+        root.finalize()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut hasher = Hasher::new();
+        hasher.update(input);
+        hasher.finalize()
+    }
 }
 
 fn g(v: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, x: u32, y: u32) {
@@ -238,7 +276,7 @@ fn g(v: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, x: u32, y: u32) 
 
 #[cfg(test)]
 mod tests {
-    use super::{hash, Hasher};
+    use super::{Hasher, hash};
 
     #[test]
     fn matches_public_blake2sp_vectors() {
@@ -260,6 +298,30 @@ mod tests {
             hasher.update(chunk);
         }
         assert_eq!(hasher.finalize(), hash(&input));
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_leaf_hash_matches_streaming_hasher() {
+        let mut state = 0x9E3779B97F4A7C15u64;
+        let mut data = vec![0u8; 5000];
+        for byte in data.iter_mut() {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            *byte = (state.wrapping_mul(0x2545F4914F6CDD1D) >> 32) as u8;
+        }
+        for len in [
+            0usize, 1, 63, 64, 65, 127, 128, 129, 511, 512, 513, 4096, 4097, 4999, 5000,
+        ] {
+            let mut hasher = Hasher::new();
+            hasher.update(&data[..len]);
+            assert_eq!(
+                hash(&data[..len]),
+                hasher.finalize(),
+                "parallel leaves diverged at len {len}"
+            );
+        }
     }
 
     fn hex(bytes: &[u8]) -> String {

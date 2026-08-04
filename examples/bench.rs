@@ -75,10 +75,9 @@ fn bench(name: &str, data: &[u8]) {
 }
 
 fn main() {
-    let size_mb: usize = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let batch_mode = args.iter().any(|a| a == "batch" || a == "--batch");
+    let size_mb: usize = args.iter().find_map(|a| a.parse().ok()).unwrap_or(8);
     let size = size_mb * 1024 * 1024;
 
     let t = text_data(size);
@@ -90,6 +89,72 @@ fn main() {
     bench("random (incompressible)", &r);
     bench("mixed", &m);
     bench("x86 (filter-friendly)", &x);
+    if batch_mode {
+        bench_batch("text (8 members)", &t);
+        bench_batch("x86 (8 members)", &x);
+    }
+}
+
+/// Compare a sequential `add_bytes` loop against `add_batch` for the same
+/// members (8 equal slices). Requires the `parallel` feature for the batch
+/// path to engage; without it both runs are sequential.
+fn bench_batch(name: &str, data: &[u8]) {
+    let dir = std::env::temp_dir().join("rar5-bench-batch");
+    std::fs::create_dir_all(&dir).unwrap();
+    let members: Vec<&[u8]> = data.chunks(data.len() / 8).collect();
+    println!("== {name}: {} bytes in 8 members ==", data.len());
+    for level in [1u8, 3, 5] {
+        let seq = dir.join(format!("seq-l{level}.rar"));
+        let t0 = std::time::Instant::now();
+        let seq_bytes = (|| -> rar5::RarResult<usize> {
+            let mut ar = rar5::RarArchive::create(&seq)?;
+            for (i, member) in members.iter().enumerate() {
+                ar.add_bytes(&format!("m{i}.bin"), member, level)?;
+            }
+            ar.close()?;
+            Ok(std::fs::metadata(&seq)?.len() as usize)
+        })();
+        let seq_elapsed = t0.elapsed();
+        let _ = std::fs::remove_file(&seq);
+
+        let batch = dir.join(format!("batch-l{level}.rar"));
+        let t1 = std::time::Instant::now();
+        let batch_bytes = (|| -> rar5::RarResult<usize> {
+            let mut ar = rar5::RarArchive::create(&batch)?;
+            let names: Vec<String> = (0..members.len()).map(|i| format!("m{i}.bin")).collect();
+            let entries: Vec<rar5::BatchEntry<'_>> = members
+                .iter()
+                .enumerate()
+                .map(|(i, member)| rar5::BatchEntry::Bytes {
+                    name: &names[i],
+                    data: member,
+                    level,
+                })
+                .collect();
+            ar.add_batch(&entries)?;
+            ar.close()?;
+            Ok(std::fs::metadata(&batch)?.len() as usize)
+        })();
+        let batch_elapsed = t1.elapsed();
+        let _ = std::fs::remove_file(&batch);
+
+        match (seq_bytes, batch_bytes) {
+            (Ok(s), Ok(b)) => {
+                let mb = data.len() as f64 / 1048576.0;
+                println!(
+                    "  level {level}: seq {:>6} ms {:>7.1} MiB/s | batch {:>6} ms {:>7.1} MiB/s | size {}/{}",
+                    seq_elapsed.as_millis(),
+                    mb / seq_elapsed.as_secs_f64(),
+                    batch_elapsed.as_millis(),
+                    mb / batch_elapsed.as_secs_f64(),
+                    b,
+                    s,
+                );
+            }
+            (Err(e), _) => println!("  level {level}: sequential ERROR {e}"),
+            (_, Err(e)) => println!("  level {level}: batch ERROR {e}"),
+        }
+    }
 }
 
 /// A fake x86 binary: code bytes with many E8 call sites, for the

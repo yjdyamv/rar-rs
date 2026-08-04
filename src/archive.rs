@@ -36,12 +36,81 @@ const PARALLEL_MIN_MEMBERS: usize = 4;
 /// ...and at least this much total unpacked data (Rayon overhead amortized).
 #[cfg(feature = "parallel")]
 const PARALLEL_MIN_UNPACKED: u64 = 64 * 1024 * 1024;
+/// Parallel batch compression (feature `parallel`): members up to this
+/// size are compressed in Rayon waves; larger members fall back to the
+/// sequential streaming path.
+#[cfg(feature = "parallel")]
+const PARALLEL_COMPRESS_MAX_MEMBER: u64 = 64 * 1024 * 1024;
+/// Total input bytes buffered per parallel compression wave (feature
+/// `parallel`).
+#[cfg(feature = "parallel")]
+const PARALLEL_COMPRESS_WAVE_BUDGET: u64 = 256 * 1024 * 1024;
 
 /// A single entry in the archive (public API).
 #[derive(Clone, Debug)]
 pub struct ArchiveEntry {
     pub header: FileHeader,
     pub chunks: Vec<DataChunk>,
+}
+
+/// One entry to add through [`RarArchive::add_batch`].
+///
+/// Borrowed views only: byte payloads are copied by the library during
+/// preparation, and file entries are read (up to the batch member cap)
+/// before compression.
+#[derive(Debug, Clone, Copy)]
+pub enum BatchEntry<'a> {
+    /// In-memory payload added under `name`.
+    Bytes {
+        /// Archive entry name.
+        name: &'a str,
+        /// Raw member content.
+        data: &'a [u8],
+        /// Compression level 0..=5.
+        level: u8,
+    },
+    /// File from disk; `name` overrides the archive entry name when set.
+    File {
+        /// Path on disk.
+        path: &'a Path,
+        /// Optional archive name override.
+        name: Option<&'a str>,
+        /// Compression level 0..=5.
+        level: u8,
+    },
+    /// Directory header only (no recursion).
+    Directory {
+        /// Path on disk.
+        path: &'a Path,
+        /// Optional archive name override (basename when `None`).
+        name: Option<&'a str>,
+    },
+}
+
+/// A fully prepared member: hashed, filtered/compressed (or STORE) and
+/// encrypted, ready to be written in archive order.
+#[cfg(feature = "parallel")]
+struct PreparedEntry {
+    name: String,
+    unpacked_size: u64,
+    attrs: u64,
+    mtime: u32,
+    file_crc: u32,
+    method: u8,
+    dict_size_log: u8,
+    extra_data: Vec<u8>,
+    stored_hash: Option<[u8; 32]>,
+    payload: Vec<u8>,
+}
+
+/// Immutable snapshot of the writer settings needed to prepare a member
+/// off-thread. `Sync`-safe where `&RarArchive` is not (the progress
+/// callback is a `FnMut` trait object).
+#[cfg(feature = "parallel")]
+struct BatchPrepareCtx<'a> {
+    password: Option<&'a str>,
+    blake2: bool,
+    filter_policy: crate::codec::FilterPolicy,
 }
 
 /// Decrypted member payload plus the key material needed for integrity
@@ -288,9 +357,7 @@ impl RarArchive {
                 "solid archives with multiple volumes are not supported yet".into(),
             ));
         }
-        if opts.encrypt_headers
-            && opts.password.as_deref().is_none_or(|pw| pw.is_empty())
-        {
+        if opts.encrypt_headers && opts.password.as_deref().is_none_or(|pw| pw.is_empty()) {
             return Err(RarError::Encrypted(
                 "header encryption requires a password".into(),
             ));
@@ -619,7 +686,11 @@ impl RarArchive {
             crcs.push(crc32fast::Hasher::new());
         }
         let max_len = *volume_sizes.iter().max().unwrap_or(&0);
-        let padded_max = if max_len % 2 == 0 { max_len } else { max_len + 1 };
+        let padded_max = if max_len % 2 == 0 {
+            max_len
+        } else {
+            max_len + 1
+        };
 
         let mut payloads: Vec<Vec<u8>> = vec![Vec::new(); rec_count];
         let mut offset = 0u64;
@@ -867,10 +938,9 @@ impl RarArchive {
 
         let mut new_header = plain;
         if let Some(qo) = qo_offset {
-            let field = self
-                .qo_offset_field_pos
-                .ok_or_else(|| RarError::Format("quick-open locator field position unknown".into()))?
-                as usize;
+            let field = self.qo_offset_field_pos.ok_or_else(|| {
+                RarError::Format("quick-open locator field position unknown".into())
+            })? as usize;
             let patched = vint_fixed5(qo.saturating_sub(RAR5_SIGNATURE.len() as u64));
             if field + patched.len() > new_header.len() {
                 return Err(RarError::Format("locator field out of bounds".into()));
@@ -1673,7 +1743,13 @@ impl RarArchive {
                 } else {
                     None
                 };
-                verify_integrity_for(hdr, crc, blake, payload.params.as_ref(), payload.keys.as_ref())?;
+                verify_integrity_for(
+                    hdr,
+                    crc,
+                    blake,
+                    payload.params.as_ref(),
+                    payload.keys.as_ref(),
+                )?;
                 Ok(DecodedMember { idx: i, data })
             })
             .collect();
@@ -1705,8 +1781,7 @@ impl RarArchive {
                 }
             }
             if entry.header.mtime != 0 {
-                let mtime =
-                    UNIX_EPOCH + std::time::Duration::from_secs(entry.header.mtime as u64);
+                let mtime = UNIX_EPOCH + std::time::Duration::from_secs(entry.header.mtime as u64);
                 let times = std::fs::FileTimes::new().set_modified(mtime);
                 let _ = std::fs::File::options()
                     .write(true)
@@ -2038,12 +2113,13 @@ impl RarArchive {
 
         let mut total_packed = 0u64;
         for c in chunks {
-            total_packed = total_packed.checked_add(c.packed_size).ok_or_else(|| {
-                RarError::LimitExceeded {
-                    limit: max_packed,
-                    context: format!("{}: packed size overflow", hdr.name),
-                }
-            })?;
+            total_packed =
+                total_packed
+                    .checked_add(c.packed_size)
+                    .ok_or_else(|| RarError::LimitExceeded {
+                        limit: max_packed,
+                        context: format!("{}: packed size overflow", hdr.name),
+                    })?;
             if total_packed > max_packed {
                 return Err(RarError::LimitExceeded {
                     limit: max_packed,
@@ -2056,12 +2132,12 @@ impl RarArchive {
         }
 
         let mut packed_data = Vec::new();
-        packed_data.try_reserve_exact(total_packed as usize).map_err(|_| {
-            RarError::LimitExceeded {
+        packed_data
+            .try_reserve_exact(total_packed as usize)
+            .map_err(|_| RarError::LimitExceeded {
                 limit: max_packed,
                 context: format!("{}: cannot allocate packed data", hdr.name),
-            }
-        })?;
+            })?;
 
         for chunk in chunks {
             let chunk_start = packed_data.len();
@@ -2352,10 +2428,18 @@ impl RarArchive {
             self.reset_solid_chain();
             let (plain_crc, plain_blake) = hash_file(path, file_size, self.blake2)?;
             let (header_crc, extra_data, stored_hash, encr_params) =
-                self.payload_extra_and_crc(plain_crc, plain_blake)?;
+                RarArchive::payload_extra_and_crc(
+                    self.password.as_deref(),
+                    plain_crc,
+                    plain_blake,
+                )?;
             if self.password.is_some() {
                 let raw_data = fs::read(path)?;
-                let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &raw_data)?;
+                let packed_data = RarArchive::encrypt_payload_with(
+                    self.password.as_deref(),
+                    encr_params.as_ref(),
+                    &raw_data,
+                )?;
                 self.write_file_entry(
                     &name,
                     file_size,
@@ -2417,10 +2501,18 @@ impl RarArchive {
             )
             .map_err(|e| RarError::Unsupported(e))?;
             let (header_crc, extra_data, stored_hash, encr_params) =
-                self.payload_extra_and_crc(plain_crc, plain_blake)?;
+                RarArchive::payload_extra_and_crc(
+                    self.password.as_deref(),
+                    plain_crc,
+                    plain_blake,
+                )?;
             if packed.len() as u64 >= file_size {
                 if self.password.is_some() {
-                    let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &raw_data)?;
+                    let packed_data = RarArchive::encrypt_payload_with(
+                        self.password.as_deref(),
+                        encr_params.as_ref(),
+                        &raw_data,
+                    )?;
                     self.write_file_entry(
                         &name,
                         file_size,
@@ -2447,7 +2539,11 @@ impl RarArchive {
                     )?;
                 }
             } else {
-                let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &packed)?;
+                let packed_data = RarArchive::encrypt_payload_with(
+                    self.password.as_deref(),
+                    encr_params.as_ref(),
+                    &packed,
+                )?;
                 self.write_file_entry(
                     &name,
                     file_size,
@@ -2525,10 +2621,18 @@ impl RarArchive {
             // Compression is a net loss: fall back to streaming STORE.
             self.reset_solid_chain();
             let (header_crc, extra_data, stored_hash, encr_params) =
-                self.payload_extra_and_crc(plain_crc, plain_blake)?;
+                RarArchive::payload_extra_and_crc(
+                    self.password.as_deref(),
+                    plain_crc,
+                    plain_blake,
+                )?;
             if self.password.is_some() {
                 let raw_data = fs::read(path)?;
-                let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &raw_data)?;
+                let packed_data = RarArchive::encrypt_payload_with(
+                    self.password.as_deref(),
+                    encr_params.as_ref(),
+                    &raw_data,
+                )?;
                 self.write_file_entry(
                     &name,
                     file_size,
@@ -2561,8 +2665,12 @@ impl RarArchive {
         }
 
         let (header_crc, extra_data, stored_hash, encr_params) =
-            self.payload_extra_and_crc(plain_crc, plain_blake)?;
-        let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &packed)?;
+            RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
+        let packed_data = RarArchive::encrypt_payload_with(
+            self.password.as_deref(),
+            encr_params.as_ref(),
+            &packed,
+        )?;
         self.write_file_entry(
             &name,
             file_size,
@@ -2721,8 +2829,16 @@ impl RarArchive {
         if method == COMP_METHOD_STORE || sample_is_incompressible(data, method) {
             self.reset_solid_chain();
             let (header_crc, extra_data, stored_hash, encr_params) =
-                self.payload_extra_and_crc(plain_crc, plain_blake)?;
-            let packed_data = self.encrypt_payload_with(encr_params.as_ref(), data)?;
+                RarArchive::payload_extra_and_crc(
+                    self.password.as_deref(),
+                    plain_crc,
+                    plain_blake,
+                )?;
+            let packed_data = RarArchive::encrypt_payload_with(
+                self.password.as_deref(),
+                encr_params.as_ref(),
+                data,
+            )?;
             self.write_file_entry(
                 &name,
                 data.len() as u64,
@@ -2774,8 +2890,16 @@ impl RarArchive {
             if packed.len() >= data.len() {
                 self.reset_solid_chain();
                 let (header_crc, extra_data, stored_hash, encr_params) =
-                    self.payload_extra_and_crc(plain_crc, plain_blake)?;
-                let packed_data = self.encrypt_payload_with(encr_params.as_ref(), data)?;
+                    RarArchive::payload_extra_and_crc(
+                        self.password.as_deref(),
+                        plain_crc,
+                        plain_blake,
+                    )?;
+                let packed_data = RarArchive::encrypt_payload_with(
+                    self.password.as_deref(),
+                    encr_params.as_ref(),
+                    data,
+                )?;
                 self.write_file_entry(
                     &name,
                     data.len() as u64,
@@ -2791,8 +2915,16 @@ impl RarArchive {
                 )?;
             } else {
                 let (header_crc, extra_data, stored_hash, encr_params) =
-                    self.payload_extra_and_crc(plain_crc, plain_blake)?;
-                let packed_data = self.encrypt_payload_with(encr_params.as_ref(), &packed)?;
+                    RarArchive::payload_extra_and_crc(
+                        self.password.as_deref(),
+                        plain_crc,
+                        plain_blake,
+                    )?;
+                let packed_data = RarArchive::encrypt_payload_with(
+                    self.password.as_deref(),
+                    encr_params.as_ref(),
+                    &packed,
+                )?;
                 self.write_file_entry(
                     &name,
                     data.len() as u64,
@@ -2814,6 +2946,352 @@ impl RarArchive {
         }
 
         Ok(())
+    }
+
+    // ── Batch addition ─────────────────────────────────────────────────────
+
+    /// Add multiple entries at once.
+    ///
+    /// With the `parallel` feature enabled this compresses eligible
+    /// members (non-solid archives, file/bytes entries up to 64 MiB) in
+    /// Rayon waves and writes them in the original order. For unencrypted
+    /// archives the resulting archive is byte-identical to calling the
+    /// individual `add*` methods sequentially; larger members, directories
+    /// and solid archives fall back to the sequential path. Without the
+    /// feature this is a plain sequential loop over the same `add*` calls.
+    pub fn add_batch(&mut self, entries: &[BatchEntry<'_>]) -> RarResult<()> {
+        #[cfg(feature = "parallel")]
+        {
+            if !self.solid_mode && !entries.is_empty() {
+                return self.add_batch_parallel(entries);
+            }
+        }
+        for entry in entries {
+            self.add_batch_entry_sequential(entry)?;
+        }
+        Ok(())
+    }
+
+    fn add_batch_entry_sequential(&mut self, entry: &BatchEntry<'_>) -> RarResult<()> {
+        match *entry {
+            BatchEntry::Bytes { name, data, level } => self.add_bytes(name, data, level),
+            BatchEntry::File { path, name, level } => match name {
+                Some(name) => self.add_as(path, name, level),
+                None => self.add(path, level),
+            },
+            BatchEntry::Directory { path, name } => {
+                let name = match name {
+                    Some(name) => name.to_string(),
+                    None => path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                };
+                self.add_directory_only(path, &name)
+            }
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    fn add_batch_parallel(&mut self, entries: &[BatchEntry<'_>]) -> RarResult<()> {
+        let mut i = 0usize;
+        while i < entries.len() {
+            // Collect a consecutive run of eligible members into one wave
+            // (bounded total input). Directories and oversized files break
+            // the wave and are handled sequentially at their original
+            // position, preserving archive order.
+            let mut wave: Vec<(usize, BatchEntry<'_>)> = Vec::new();
+            let mut wave_bytes = 0u64;
+            while i < entries.len() {
+                let size = match entries[i] {
+                    BatchEntry::Bytes { data, .. } => Some(data.len() as u64),
+                    BatchEntry::File { path, .. } => {
+                        let size = fs::metadata(path)?.len();
+                        (size <= PARALLEL_COMPRESS_MAX_MEMBER).then_some(size)
+                    }
+                    BatchEntry::Directory { .. } => None,
+                };
+                let Some(size) = size else { break };
+                if wave_bytes + size > PARALLEL_COMPRESS_WAVE_BUDGET && !wave.is_empty() {
+                    break;
+                }
+                wave_bytes += size;
+                wave.push((i, entries[i]));
+                i += 1;
+            }
+
+            if !wave.is_empty() {
+                let prepared = self.prepare_batch_wave(&wave)?;
+                for (_, entry) in prepared {
+                    let size = entry.unpacked_size;
+                    self.write_prepared_entry(entry)?;
+                    if let Some(cb) = self.progress_callback.as_deref_mut() {
+                        cb(size, size);
+                    }
+                }
+            }
+
+            if i < entries.len() {
+                self.add_batch_entry_sequential(&entries[i])?;
+                i += 1;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "parallel")]
+    fn prepare_batch_wave(
+        &self,
+        wave: &[(usize, BatchEntry<'_>)],
+    ) -> RarResult<Vec<(usize, PreparedEntry)>> {
+        use rayon::prelude::*;
+
+        let ctx = BatchPrepareCtx {
+            password: self.password.as_deref(),
+            blake2: self.blake2,
+            filter_policy: self.filter_policy,
+        };
+        let results: Vec<RarResult<(usize, PreparedEntry)>> = wave
+            .par_iter()
+            .map(|&(idx, entry)| {
+                let prepared = match entry {
+                    BatchEntry::Bytes { name, data, level } => {
+                        let mtime = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as u32;
+                        Self::prepare_data_entry(&ctx, name, data, level, 0o100644, mtime, false)
+                    }
+                    BatchEntry::File { path, name, level } => {
+                        Self::prepare_file_entry(&ctx, path, name, level)
+                    }
+                    BatchEntry::Directory { .. } => {
+                        unreachable!("directories never enter a compression wave")
+                    }
+                };
+                prepared.map(|p| (idx, p))
+            })
+            .collect();
+
+        let mut out = Vec::with_capacity(results.len());
+        for result in results {
+            out.push(result?);
+        }
+        out.sort_by_key(|(idx, _)| *idx);
+        Ok(out)
+    }
+
+    /// Hash, filter/compress (or STORE) and encrypt one in-memory member
+    /// without touching the archive stream. `file_origin` selects the exact
+    /// sequential encoding used by [`Self::add_file`] (fresh encoder window
+    /// per chunk) instead of [`Self::add_bytes`] (one shared window pass).
+    #[cfg(feature = "parallel")]
+    fn prepare_data_entry(
+        ctx: &BatchPrepareCtx<'_>,
+        name: &str,
+        data: &[u8],
+        level: u8,
+        attrs: u64,
+        mtime: u32,
+        file_origin: bool,
+    ) -> RarResult<PreparedEntry> {
+        let plain_crc = crc32fast::hash(data);
+        let plain_blake = if ctx.blake2 {
+            Some(crate::blake2sp::hash(data))
+        } else {
+            None
+        };
+        let method = level_to_method(level);
+
+        if method == COMP_METHOD_STORE || sample_is_incompressible(data, method) {
+            return Self::prepared_from_payload(
+                ctx,
+                name,
+                data.len(),
+                attrs,
+                mtime,
+                plain_crc,
+                plain_blake,
+                COMP_METHOD_STORE,
+                0,
+                data.to_vec(),
+            );
+        }
+
+        let dsl = dict_size_for_data(data.len(), method);
+        let packed = if ctx.filter_policy.is_enabled()
+            && data.len() <= crate::codec::AUTO_FILTER_MAX_BUFFER
+        {
+            crate::codec::filter_policy::encode_member_with_policy(
+                data,
+                method,
+                dsl,
+                ctx.filter_policy,
+            )
+            .map_err(RarError::Unsupported)?
+        } else if file_origin {
+            // Mirror add_file's streaming loop exactly: each chunk is
+            // compressed with a fresh encoder window (non-solid archives),
+            // so the batch archive stays byte-identical to the sequential
+            // path.
+            let mut packed = Vec::new();
+            for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
+                let is_final = chunk.len() < crate::codec::DEFAULT_CHUNK_SIZE;
+                let compressed = compression::compress_chunked(
+                    chunk,
+                    method,
+                    dsl,
+                    crate::codec::DEFAULT_CHUNK_SIZE,
+                    None,
+                    is_final,
+                    None,
+                )
+                .map_err(RarError::Unsupported)?;
+                packed.extend(compressed);
+                if packed.len() >= data.len() {
+                    break;
+                }
+            }
+            packed
+        } else {
+            compression::compress_chunked(
+                data,
+                method,
+                dsl,
+                crate::codec::DEFAULT_CHUNK_SIZE,
+                None,
+                true,
+                None,
+            )
+            .map_err(RarError::Unsupported)?
+        };
+
+        if packed.len() >= data.len() {
+            return Self::prepared_from_payload(
+                ctx,
+                name,
+                data.len(),
+                attrs,
+                mtime,
+                plain_crc,
+                plain_blake,
+                COMP_METHOD_STORE,
+                0,
+                data.to_vec(),
+            );
+        }
+        Self::prepared_from_payload(
+            ctx,
+            name,
+            data.len(),
+            attrs,
+            mtime,
+            plain_crc,
+            plain_blake,
+            method,
+            dsl,
+            packed,
+        )
+    }
+
+    #[cfg(feature = "parallel")]
+    fn prepare_file_entry(
+        ctx: &BatchPrepareCtx<'_>,
+        path: &Path,
+        arcname: Option<&str>,
+        level: u8,
+    ) -> RarResult<PreparedEntry> {
+        let meta = fs::metadata(path)?;
+        if !meta.is_file() {
+            return Err(RarError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("not a file: {}", path.display()),
+            )));
+        }
+        let file_size = meta.len();
+        let mtime = meta
+            .modified()
+            .unwrap_or(SystemTime::now())
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
+
+        #[cfg(unix)]
+        let attrs = {
+            use std::os::unix::fs::MetadataExt;
+            meta.mode() as u64
+        };
+        #[cfg(not(unix))]
+        let attrs = 0o100644u64;
+
+        let name = arcname
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().into_owned());
+        let name = name.replace('\\', "/");
+        let name = name.trim_start_matches('/').to_string();
+
+        let data = fs::read(path)?;
+        if data.len() as u64 != file_size {
+            return Err(RarError::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "file changed size while being archived: expected {file_size} bytes, read {}",
+                    data.len()
+                ),
+            )));
+        }
+        Self::prepare_data_entry(ctx, &name, &data, level, attrs, mtime, true)
+    }
+
+    /// Turn a plaintext payload (raw data or compressed stream) into a
+    /// [`PreparedEntry`], deriving the header checksum/extra records and
+    /// applying encryption exactly like the sequential `add*` paths.
+    #[cfg(feature = "parallel")]
+    fn prepared_from_payload(
+        ctx: &BatchPrepareCtx<'_>,
+        name: &str,
+        data_len: usize,
+        attrs: u64,
+        mtime: u32,
+        plain_crc: u32,
+        plain_blake: Option<[u8; 32]>,
+        method: u8,
+        dict_size_log: u8,
+        payload: Vec<u8>,
+    ) -> RarResult<PreparedEntry> {
+        let (header_crc, extra_data, stored_hash, encr) =
+            RarArchive::payload_extra_and_crc(ctx.password, plain_crc, plain_blake)?;
+        let payload = RarArchive::encrypt_payload_with(ctx.password, encr.as_ref(), &payload)?;
+        Ok(PreparedEntry {
+            name: name.to_string(),
+            unpacked_size: data_len as u64,
+            attrs,
+            mtime,
+            file_crc: header_crc,
+            method,
+            dict_size_log,
+            extra_data,
+            stored_hash,
+            payload,
+        })
+    }
+
+    #[cfg(feature = "parallel")]
+    fn write_prepared_entry(&mut self, entry: PreparedEntry) -> RarResult<()> {
+        self.write_file_entry(
+            &entry.name,
+            entry.unpacked_size,
+            &entry.payload,
+            entry.file_crc,
+            entry.method,
+            entry.dict_size_log,
+            &entry.extra_data,
+            entry.attrs,
+            entry.mtime,
+            false,
+            entry.stored_hash,
+        )
     }
 
     /// Write a file entry, splitting across volumes if needed.
@@ -3049,7 +3527,7 @@ impl RarArchive {
     /// member). For encrypted members the checksums are MAC'd with the
     /// hash key, matching WinRAR.
     fn payload_extra_and_crc(
-        &self,
+        password: Option<&str>,
         plain_crc: u32,
         plain_blake: Option<[u8; 32]>,
     ) -> RarResult<(
@@ -3058,11 +3536,9 @@ impl RarArchive {
         Option<[u8; 32]>,
         Option<encryption::EncryptionParams>,
     )> {
-        if let Some(password) = self.password.as_deref() {
-            let params = encryption::EncryptionParams::generate_for_password(
-                password,
-                ENCR_PBKDF2_ITER_LOG,
-            );
+        if let Some(password) = password {
+            let params =
+                encryption::EncryptionParams::generate_for_password(password, ENCR_PBKDF2_ITER_LOG);
             let header_crc = params.mac_crc32(plain_crc, password)?;
             let stored_hash = match plain_blake {
                 Some(h) => Some(params.mac_hash32(h, password)?),
@@ -3086,11 +3562,11 @@ impl RarArchive {
     /// [`Self::payload_extra_and_crc`] (must match the member's stored
     /// salt).
     fn encrypt_payload_with(
-        &self,
+        password: Option<&str>,
         params: Option<&encryption::EncryptionParams>,
         plaintext: &[u8],
     ) -> RarResult<Vec<u8>> {
-        match (self.password.as_deref(), params) {
+        match (password, params) {
             (Some(password), Some(params)) => Ok(params.encrypt(plaintext, password)),
             (None, None) => Ok(plaintext.to_vec()),
             _ => Err(RarError::Format(
@@ -4129,7 +4605,10 @@ mod tests {
             ".",
             "./",
         ] {
-            assert!(sanitize_archive_path(bad).is_err(), "{bad:?} should be rejected");
+            assert!(
+                sanitize_archive_path(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
         }
     }
 
@@ -4137,7 +4616,10 @@ mod tests {
     fn sanitize_archive_path_normalizes_safe_names() {
         assert_eq!(sanitize_archive_path("a/b.txt").unwrap(), "a/b.txt");
         assert_eq!(sanitize_archive_path("a\\b.txt").unwrap(), "a/b.txt");
-        assert_eq!(sanitize_archive_path("./a//b/./c.txt").unwrap(), "a/b/c.txt");
+        assert_eq!(
+            sanitize_archive_path("./a//b/./c.txt").unwrap(),
+            "a/b/c.txt"
+        );
         assert_eq!(sanitize_archive_path("dir/").unwrap(), "dir");
     }
 }

@@ -51,7 +51,8 @@ pub fn encode_member_with_policy(
         return codec::encode_chunked(data, method, dict_size_log, data.len(), None, true, None);
     }
 
-    let mut best = codec::encode_chunked(data, method, dict_size_log, data.len(), None, true, None)?;
+    let mut best =
+        codec::encode_chunked(data, method, dict_size_log, data.len(), None, true, None)?;
     if is_text_like_filter_skip_candidate(data) {
         return Ok(best);
     }
@@ -66,7 +67,12 @@ pub fn encode_member_with_policy(
     candidates.push(FilterSpec::new(FILTER_E8E9, 0, 0, data.len() as u32));
     candidates.push(FilterSpec::new(FILTER_ARM, 0, 0, data.len() as u32));
     for channels in 1..=4 {
-        candidates.push(FilterSpec::new(FILTER_DELTA, channels, 0, data.len() as u32));
+        candidates.push(FilterSpec::new(
+            FILTER_DELTA,
+            channels,
+            0,
+            data.len() as u32,
+        ));
     }
     for range in auto_delta_filter_ranges(data) {
         candidates.push(FilterSpec::new(
@@ -93,14 +99,43 @@ pub fn encode_member_with_policy(
         ));
     }
 
-    let mut seen = std::collections::HashSet::new();
-    for spec in candidates {
-        if !seen.insert(spec) {
-            continue;
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+
+        let mut seen = std::collections::HashSet::new();
+        let deduped: Vec<&FilterSpec> = candidates
+            .iter()
+            .filter(|spec| seen.insert(**spec))
+            .collect();
+        // Encode every candidate in parallel; results are replayed in the
+        // original candidate order so the winning packed stream (and any
+        // tie-break) is identical to the sequential scan.
+        let results: Vec<Result<Vec<u8>, String>> = deduped
+            .par_iter()
+            .map(|spec| {
+                encode_with_filters(data, method, dict_size_log, std::slice::from_ref(spec))
+            })
+            .collect();
+        for packed in results {
+            let packed = packed?;
+            if packed.len() < best.len() {
+                best = packed;
+            }
         }
-        let packed = encode_with_filters(data, method, dict_size_log, std::slice::from_ref(&spec))?;
-        if packed.len() < best.len() {
-            best = packed;
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut seen = std::collections::HashSet::new();
+        for spec in candidates {
+            if !seen.insert(spec) {
+                continue;
+            }
+            let packed =
+                encode_with_filters(data, method, dict_size_log, std::slice::from_ref(&spec))?;
+            if packed.len() < best.len() {
+                best = packed;
+            }
         }
     }
 
@@ -162,7 +197,9 @@ fn auto_delta_filter_range(data: &[u8], channels: usize) -> Option<std::ops::Ran
     (aligned_start + channels * 8 <= aligned_end).then_some(aligned_start..aligned_end)
 }
 
-pub fn disjoint_filter_ranges(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
+pub fn disjoint_filter_ranges(
+    mut ranges: Vec<std::ops::Range<usize>>,
+) -> Vec<std::ops::Range<usize>> {
     ranges.sort_by_key(|range| (range.start, range.end));
     let mut disjoint: Vec<std::ops::Range<usize>> = Vec::new();
     for range in ranges {
@@ -201,8 +238,7 @@ mod tests {
         // filtered member must not be worse than unfiltered.
         let data: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
         let plain = codec::encode_chunked(&data, 3, 3, data.len(), None, true, None).unwrap();
-        let filtered =
-            encode_member_with_policy(&data, 3, 3, FilterPolicy::AutoSize).unwrap();
+        let filtered = encode_member_with_policy(&data, 3, 3, FilterPolicy::AutoSize).unwrap();
         assert!(filtered.len() <= plain.len() + plain.len() / 10);
         let roundtrip = decode_standalone(&filtered, data.len() as u64, 3).unwrap();
         assert_eq!(roundtrip, data);
@@ -218,8 +254,7 @@ mod tests {
             data[pos + 1..pos + 5].copy_from_slice(&addr.to_le_bytes());
         }
         let plain = codec::encode_chunked(&data, 3, 3, data.len(), None, true, None).unwrap();
-        let filtered =
-            encode_member_with_policy(&data, 3, 3, FilterPolicy::AutoSize).unwrap();
+        let filtered = encode_member_with_policy(&data, 3, 3, FilterPolicy::AutoSize).unwrap();
         assert!(
             filtered.len() < plain.len(),
             "E8 filter should shrink: {} vs {}",
@@ -230,6 +265,20 @@ mod tests {
         assert_eq!(roundtrip, data);
     }
 
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_candidate_probing_is_deterministic() {
+        // Mix of x86-ish opcode bytes and a delta-friendly ramp so several
+        // candidate filters are probed in parallel.
+        let mut data: Vec<u8> = (0..80_000u32).map(|i| (i % 251) as u8).collect();
+        for (i, byte) in data.iter_mut().enumerate().step_by(7) {
+            *byte = if i % 3 == 0 { 0xE8 } else { 0xE9 };
+        }
+        let first = encode_member_with_policy(&data, 3, 3, FilterPolicy::AutoSize).unwrap();
+        let second = encode_member_with_policy(&data, 3, 3, FilterPolicy::AutoSize).unwrap();
+        assert_eq!(first, second);
+    }
+
     #[test]
     fn text_like_input_skips_filters_without_regression() {
         let text: Vec<u8> = b"the quick brown fox jumps over the lazy dog\n"
@@ -238,8 +287,7 @@ mod tests {
             .take(20_000)
             .copied()
             .collect();
-        let filtered =
-            encode_member_with_policy(&text, 3, 3, FilterPolicy::AutoSize).unwrap();
+        let filtered = encode_member_with_policy(&text, 3, 3, FilterPolicy::AutoSize).unwrap();
         let roundtrip = decode_standalone(&filtered, text.len() as u64, 3).unwrap();
         assert_eq!(roundtrip, text);
     }

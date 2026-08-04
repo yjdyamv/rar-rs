@@ -38,7 +38,7 @@ pub mod write_progress;
 pub use write_progress::{WriteOperation, WriteProgressEvent};
 pub mod vint;
 
-pub use archive::{ArchiveEntry, RarArchive, discover_volumes};
+pub use archive::{ArchiveEntry, BatchEntry, RarArchive, discover_volumes};
 pub use codec::{FilterPolicy, auto_x86_filter_ranges};
 pub use constants::*;
 pub use encryption::EncryptionParams;
