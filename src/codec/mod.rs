@@ -9,13 +9,11 @@
 pub mod bitstream;
 pub mod decoder;
 pub mod encoder;
-pub mod filter_policy;
 pub mod filters;
 pub mod huffman;
 pub mod lz_match;
 pub mod tables;
 pub mod window;
-pub mod x86_filter_scan;
 
 pub use decoder::{
     DecoderState, MAX_STREAMING_FILTER_BUFFER, decode, decode_standalone,
@@ -25,5 +23,3 @@ pub use encoder::{
     DEFAULT_CHUNK_SIZE, EncoderState, FilterSpec, encode, encode_chunked, encode_with_filters,
     encode_with_progress,
 };
-pub use filter_policy::{AUTO_FILTER_MAX_BUFFER, AUTO_FILTER_MIN_SIZE, FilterPolicy};
-pub use x86_filter_scan::auto_x86_filter_ranges;

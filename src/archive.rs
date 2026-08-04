@@ -165,7 +165,6 @@ struct PreparedEntry {
 struct BatchPrepareCtx<'a> {
     password: Option<&'a str>,
     blake2: bool,
-    filter_policy: crate::codec::FilterPolicy,
 }
 
 /// Decrypted member payload plus the key material needed for integrity
@@ -295,8 +294,6 @@ pub struct RarArchive {
     qo_offset_field_pos: Option<u64>,
     /// Persistent RAR5 encoder state for solid archives.
     encoder_state: Option<crate::codec::EncoderState>,
-    /// Output-filter policy for compressed members.
-    filter_policy: crate::codec::FilterPolicy,
     /// Options for the current read/extract operation (set per call).
     extract_options: crate::options::ExtractOptions,
 }
@@ -340,7 +337,6 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
-            filter_policy: crate::codec::FilterPolicy::default(),
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
@@ -376,7 +372,6 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
-            filter_policy: crate::codec::FilterPolicy::default(),
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
@@ -458,7 +453,6 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
-            filter_policy: opts.filter,
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_write()?;
@@ -2392,99 +2386,6 @@ impl RarArchive {
             return Ok(());
         }
 
-        // Buffered filter path: members within the auto-filter buffer are
-        // transformed (Delta / E8 / E8E9 / ARM) and compressed in one shot;
-        // the policy keeps the smallest packed output and the caller falls
-        // back to streaming STORE when nothing shrinks the payload. Only
-        // non-solid members qualify (filtered regions must not overlap the
-        // shared solid LZ window).
-        if self.filter_policy.is_enabled()
-            && !self.solid_mode
-            && file_size <= crate::codec::AUTO_FILTER_MAX_BUFFER as u64
-        {
-            let raw_data = fs::read(path)?;
-            let plain_crc = {
-                let mut h = crc32fast::Hasher::new();
-                h.update(&raw_data);
-                h.finalize()
-            };
-            let plain_blake = if self.blake2 {
-                Some(crate::blake2sp::hash(&raw_data))
-            } else {
-                None
-            };
-            let dsl = dict_size_for_data(raw_data.len(), method);
-            let packed = crate::codec::filter_policy::encode_member_with_policy(
-                &raw_data,
-                method,
-                dsl,
-                self.filter_policy,
-            )
-            .map_err(RarError::Unsupported)?;
-            let (header_crc, extra_data, stored_hash, encr_params) =
-                RarArchive::payload_extra_and_crc(
-                    self.password.as_deref(),
-                    plain_crc,
-                    plain_blake,
-                )?;
-            if packed.len() as u64 >= file_size {
-                if self.password.is_some() {
-                    let packed_data = RarArchive::encrypt_payload_with(
-                        self.password.as_deref(),
-                        encr_params.as_ref(),
-                        &raw_data,
-                    )?;
-                    self.write_file_entry(
-                        &name,
-                        file_size,
-                        &packed_data,
-                        header_crc,
-                        COMP_METHOD_STORE,
-                        0,
-                        &extra_data,
-                        attrs,
-                        mtime,
-                        false,
-                        stored_hash,
-                    )?;
-                } else {
-                    self.write_stored_file(
-                        &name,
-                        file_size,
-                        header_crc,
-                        attrs,
-                        mtime,
-                        io::Cursor::new(&raw_data),
-                        &extra_data,
-                        stored_hash,
-                    )?;
-                }
-            } else {
-                let packed_data = RarArchive::encrypt_payload_with(
-                    self.password.as_deref(),
-                    encr_params.as_ref(),
-                    &packed,
-                )?;
-                self.write_file_entry(
-                    &name,
-                    file_size,
-                    &packed_data,
-                    header_crc,
-                    method,
-                    dsl,
-                    &extra_data,
-                    attrs,
-                    mtime,
-                    false,
-                    stored_hash,
-                )?;
-            }
-            if let Some(cb) = self.progress_callback.as_deref_mut() {
-                cb(file_size, file_size);
-            }
-            return Ok(());
-        }
-
         // Compressed path: read and compress in bounded chunks with a
         // persistent encoder state (solid archives share the LZ window).
         let dsl = dict_size_for_data(file_size as usize, method);
@@ -2782,35 +2683,21 @@ impl RarArchive {
             if self.solid_mode {
                 self.encoder_state.get_or_insert_with(Default::default);
             }
-            let packed = if self.filter_policy.is_enabled()
-                && !self.solid_mode
-                && data.len() <= crate::codec::AUTO_FILTER_MAX_BUFFER
-            {
-                // Filtered members report completion progress at the end.
-                crate::codec::filter_policy::encode_member_with_policy(
-                    data,
-                    method,
-                    dsl,
-                    self.filter_policy,
-                )
-                .map_err(RarError::Unsupported)?
-            } else {
-                let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
-                if let Some(cb) = self.progress_callback.as_deref_mut() {
-                    let cb: &mut dyn FnMut(u64, u64) = cb;
-                    progress = Some(cb);
-                }
-                compression::compress_chunked(
-                    data,
-                    method,
-                    dsl,
-                    crate::codec::DEFAULT_CHUNK_SIZE,
-                    self.encoder_state.as_mut(),
-                    true,
-                    progress,
-                )
-                .map_err(RarError::Unsupported)?
-            };
+            let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
+            if let Some(cb) = self.progress_callback.as_deref_mut() {
+                let cb: &mut dyn FnMut(u64, u64) = cb;
+                progress = Some(cb);
+            }
+            let packed = compression::compress_chunked(
+                data,
+                method,
+                dsl,
+                crate::codec::DEFAULT_CHUNK_SIZE,
+                self.encoder_state.as_mut(),
+                true,
+                progress,
+            )
+            .map_err(RarError::Unsupported)?;
             if packed.len() >= data.len() {
                 self.reset_solid_chain();
                 let (header_crc, extra_data, stored_hash, encr_params) =
@@ -2977,7 +2864,6 @@ impl RarArchive {
         let ctx = BatchPrepareCtx {
             password: self.password.as_deref(),
             blake2: self.blake2,
-            filter_policy: self.filter_policy,
         };
         let results: Vec<RarResult<(usize, PreparedEntry)>> = compression_pool().install(|| {
             wave.par_iter()
@@ -3051,17 +2937,7 @@ impl RarArchive {
         }
 
         let dsl = dict_size_for_data(data.len(), method);
-        let packed = if ctx.filter_policy.is_enabled()
-            && data.len() <= crate::codec::AUTO_FILTER_MAX_BUFFER
-        {
-            crate::codec::filter_policy::encode_member_with_policy(
-                data,
-                method,
-                dsl,
-                ctx.filter_policy,
-            )
-            .map_err(RarError::Unsupported)?
-        } else if file_origin {
+        let packed = if file_origin {
             // Mirror add_file's streaming loop exactly: each chunk is
             // compressed with a fresh encoder window (non-solid archives),
             // so the batch archive stays byte-identical to the sequential
