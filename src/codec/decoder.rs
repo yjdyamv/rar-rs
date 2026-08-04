@@ -827,4 +827,78 @@ mod tests {
         let back = decode_standalone(&packed, data.len() as u64, 3).unwrap();
         assert_eq!(back, data);
     }
+
+    /// Regression: streaming decode (used by `extract_all`) applied split
+    /// filter records at the wrong staging offset once part of the staging
+    /// buffer had already been written out. Members whose filter region
+    /// exceeds MAX_FILTER_BLOCK_LENGTH are split into multiple records, so
+    /// the streaming path must produce byte-identical output to the
+    /// buffered path for every filter type.
+    #[test]
+    fn streaming_decode_matches_buffered_for_split_filter_records() {
+        use crate::codec::encoder::{FilterSpec, MAX_FILTER_BLOCK_LENGTH, encode_with_filters};
+        use crate::codec::tables::{FILTER_ARM, FILTER_DELTA, FILTER_E8, FILTER_E8E9};
+
+        fn pattern(filter_type: u8, size: usize) -> Vec<u8> {
+            match filter_type {
+                FILTER_E8 | FILTER_E8E9 => {
+                    let mut data = vec![0x90u8; size];
+                    let mut pos = 0usize;
+                    while pos + 5 <= size {
+                        data[pos] = if filter_type == FILTER_E8 || pos % 170 == 0 {
+                            0xE8
+                        } else {
+                            0xE9
+                        };
+                        let addr = ((pos as u32).wrapping_mul(7)) & 0x00FF_FFFF;
+                        data[pos + 1..pos + 5].copy_from_slice(&addr.to_le_bytes());
+                        pos += 85;
+                    }
+                    data
+                }
+                FILTER_ARM => {
+                    let mut data = vec![0x00u8; size];
+                    let mut pos = 0usize;
+                    while pos + 4 <= size {
+                        data[pos + 3] = 0xEB;
+                        let off = ((pos as u32).wrapping_mul(3)) & 0x00FF_FFFF;
+                        data[pos..pos + 3].copy_from_slice(&off.to_le_bytes()[..3]);
+                        pos += 64;
+                    }
+                    data
+                }
+                _ => (0..size).map(|i| (i % 251) as u8).collect(),
+            }
+        }
+
+        let cases: [(u8, u8); 5] = [
+            (FILTER_E8, 0),
+            (FILTER_E8E9, 0),
+            (FILTER_ARM, 0),
+            (FILTER_DELTA, 1),
+            (FILTER_DELTA, 4),
+        ];
+        for &(filter_type, channels) in &cases {
+            for &size in &[MAX_FILTER_BLOCK_LENGTH as usize + 1, 300_000usize] {
+                let data = pattern(filter_type, size);
+                let spec = FilterSpec::new(filter_type, channels, 0, size as u32);
+                let packed = encode_with_filters(&data, 3, 0, &[spec]).unwrap();
+                let buffered = decode_standalone(&packed, size as u64, 0).unwrap();
+                let mut streamed = Vec::new();
+                let written =
+                    decode_standalone_to_writer(&packed, size as u64, 0, &mut streamed).unwrap();
+                assert_eq!(written, size as u64);
+                assert_eq!(
+                    streamed,
+                    buffered,
+                    "streaming != buffered for filter {filter_type:#x}, channels {channels}, size {size}"
+                );
+                assert_eq!(
+                    streamed,
+                    data,
+                    "streaming != original for filter {filter_type:#x}, channels {channels}, size {size}"
+                );
+            }
+        }
+    }
 }
