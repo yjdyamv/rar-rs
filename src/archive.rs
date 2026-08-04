@@ -3248,6 +3248,7 @@ impl RarArchive {
     /// [`PreparedEntry`], deriving the header checksum/extra records and
     /// applying encryption exactly like the sequential `add*` paths.
     #[cfg(feature = "parallel")]
+    #[allow(clippy::too_many_arguments)] // mirrors the existing write_file_entry signature
     fn prepared_from_payload(
         ctx: &BatchPrepareCtx<'_>,
         name: &str,

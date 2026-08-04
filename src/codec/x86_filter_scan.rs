@@ -119,29 +119,30 @@ fn push_x86_filter_range(
 
 /// Find the next byte position in `data[start..end)` whose value masked
 /// with `cmp_mask` equals `0xE8` (i.e. byte == 0xE8 for mask 0xFF, or
-/// byte == 0xE8 | 0xE9 for mask 0xFE). 64-bit word-compare scan with a
-/// scalar tail; safe on all alignments.
+/// byte == 0xE8 | 0xE9 for mask 0xFE).
+#[cfg(feature = "simd")]
 fn next_x86_opcode(data: &[u8], start: usize, end: usize, cmp_mask: u8) -> Option<usize> {
-    #[cfg(feature = "simd")]
-    {
-        // Portable SIMD scan (memchr dispatch: SSE2/AVX2 on x86_64, NEON on
-        // aarch64); the scalar word-scan below is the fallback build.
-        if start >= end {
-            return None;
-        }
-        let haystack = &data[start..end];
-        let found = if cmp_mask == 0xFF {
-            memchr::memchr(0xE8, haystack)
-        } else {
-            memchr::memchr2(0xE8, 0xE9, haystack)
-        };
-        return found.map(|off| start + off);
+    // Portable SIMD scan (memchr dispatch: SSE2/AVX2 on x86_64, NEON on
+    // aarch64); the scalar word-scan below is the fallback build.
+    if start >= end {
+        return None;
     }
-    #[cfg(not(feature = "simd"))]
-    {
-        let mut pos = start;
-        if pos >= end {
-            return None;
+    let haystack = &data[start..end];
+    let found = if cmp_mask == 0xFF {
+        memchr::memchr(0xE8, haystack)
+    } else {
+        memchr::memchr2(0xE8, 0xE9, haystack)
+    };
+    found.map(|off| start + off)
+}
+
+/// Scalar fallback: 64-bit word-compare scan with a scalar tail; safe on
+/// all alignments.
+#[cfg(not(feature = "simd"))]
+fn next_x86_opcode(data: &[u8], start: usize, end: usize, cmp_mask: u8) -> Option<usize> {
+    let mut pos = start;
+    if pos >= end {
+        return None;
         }
         // Fast path: process 8 bytes at a time. Each byte is matched when
         // (byte & mask) == 0xE8; compute `(bytes & mask_repl) ^ 0xE8_repl`
@@ -160,11 +161,10 @@ fn next_x86_opcode(data: &[u8], start: usize, end: usize, cmp_mask: u8) -> Optio
         while pos < end {
             if data[pos] & cmp_mask == 0xE8 {
                 return Some(pos);
-            }
-            pos += 1;
         }
-        None
+        pos += 1;
     }
+    None
 }
 
 /// Return the byte offset of the first zero byte in `v`, or `None`.
