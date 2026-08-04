@@ -64,8 +64,14 @@ impl FilterSpec {
 #[derive(Clone)]
 enum Symbol {
     Literal(u8),
-    Match { distance: u32, length: u32 },
-    CacheRef { index: usize, length: u32 },
+    Match {
+        distance: u32,
+        length: u32,
+    },
+    CacheRef {
+        index: usize,
+        length: u32,
+    },
     Repeat,
     Filter {
         block_start: u32,
@@ -152,7 +158,7 @@ pub fn encode_chunked(
 
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
-    let dict_size = 128 * 1024 * (1usize << dict_size_log.max(0) as u32);
+    let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
 
     let mut local_state = EncoderState::default();
     let state = state.unwrap_or(&mut local_state);
@@ -165,14 +171,8 @@ pub fn encode_chunked(
     while chunk_start < data.len() {
         let chunk_end = (chunk_start + chunk_size).min(data.len());
         let chunk = &data[chunk_start..chunk_end];
-        let symbols = find_matches_with_tail(
-            state,
-            chunk,
-            chain_len,
-            lazy_thresh,
-            max_match,
-            dict_size,
-        );
+        let symbols =
+            find_matches_with_tail(state, chunk, chain_len, lazy_thresh, max_match, dict_size);
 
         let mut block_start = 0usize;
         while block_start < symbols.len() {
@@ -193,11 +193,11 @@ pub fn encode_chunked(
         }
 
         chunk_start = chunk_end;
-        if let Some(cb) = progress.as_deref_mut() {
-            if chunk_end as u64 >= next_report {
-                cb(chunk_end as u64, data.len() as u64);
-                next_report = chunk_end as u64 + 0x10000;
-            }
+        if let Some(cb) = progress.as_deref_mut()
+            && chunk_end as u64 >= next_report
+        {
+            cb(chunk_end as u64, data.len() as u64);
+            next_report = chunk_end as u64 + 0x10000;
         }
     }
 
@@ -262,7 +262,7 @@ pub fn encode_with_filters(
     // 2. Match-find on the transformed data.
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
-    let dict_size = 128 * 1024 * (1usize << dict_size_log.max(0) as u32);
+    let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
 
     let mut finder = MatchFinder::new(&transformed, 2, max_match, chain_len, dict_size);
     let mut dist_cache = [0u32; DIST_CACHE_SIZE];
@@ -420,8 +420,9 @@ fn find_matches_in_range(
 fn find_block_end(symbols: &[Symbol], start: usize, max_uncompressed: usize) -> (usize, usize) {
     let mut count = 0usize;
     let mut last_len = 0u32;
-    for i in start..symbols.len() {
-        match &symbols[i] {
+    for (offset, symbol) in symbols[start..].iter().enumerate() {
+        let i = start + offset;
+        match symbol {
             Symbol::Literal(_) => {
                 count += 1;
                 last_len = 0;
@@ -632,8 +633,8 @@ fn build_block_header(
     flags |= bit_size & 7;
 
     let mut size_bytes = vec![0u8; byte_count as usize];
-    for i in 0..byte_count as usize {
-        size_bytes[i] = ((block_size >> (i * 8)) & 0xFF) as u8;
+    for (i, byte) in size_bytes.iter_mut().enumerate() {
+        *byte = ((block_size >> (i * 8)) & 0xFF) as u8;
     }
 
     let mut checksum = BLOCK_CHECKSUM_SEED ^ flags;
@@ -854,7 +855,7 @@ fn encode_distance_slot(dist: u32) -> (usize, u32, usize) {
     let dbits = high_bit - 1;
     let sub = (val >> dbits) & 1;
     let slot = 2 * (dbits + 1) + sub as usize;
-    let base = ((2 | sub) << dbits) as u32;
+    let base = (2 | sub) << dbits;
     let extra = val - base;
     (slot.min(HUFF_DC - 1), extra, dbits)
 }
@@ -958,15 +959,15 @@ fn write_filter_data(writer: &mut BitWriter, value: u32) {
         4
     };
     writer.write_bits((count - 1) as u32, 2);
-    for i in 0..count {
-        writer.write_bits(bytes[i] as u32, 8);
+    for &b in &bytes[..count] {
+        writer.write_bits(b as u32, 8);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::huffman::DecodeTable;
+    use super::*;
     use crate::codec::decoder::decode_to_writer;
 
     fn one_symbol_table(count: usize) -> Vec<u8> {
@@ -999,8 +1000,8 @@ mod tests {
 
         let nc_lengths = build_code_lengths_from_freqs(&nc_freq, MAX_CODE_LENGTH);
         let dc_lengths = build_code_lengths_from_freqs(&vec![1u32; HUFF_DC], MAX_CODE_LENGTH);
-        let ldc_lengths = build_code_lengths_from_freqs(&vec![1u32; HUFF_LDC], MAX_CODE_LENGTH);
-        let rc_lengths = build_code_lengths_from_freqs(&vec![1u32; HUFF_RC], MAX_CODE_LENGTH);
+        let ldc_lengths = build_code_lengths_from_freqs(&[1u32; HUFF_LDC], MAX_CODE_LENGTH);
+        let rc_lengths = build_code_lengths_from_freqs(&[1u32; HUFF_RC], MAX_CODE_LENGTH);
         let enc_nc = EncodeTable::new(&nc_lengths);
 
         let mut writer = BitWriter::new();
@@ -1028,8 +1029,8 @@ mod tests {
         let stream = build_block_header(&block_data, total_bits, true, true);
 
         let mut out = Vec::new();
-        let written = decode_to_writer(&stream, original.len() as u64, 0, None, &mut out)
-            .expect("decode");
+        let written =
+            decode_to_writer(&stream, original.len() as u64, 0, None, &mut out).expect("decode");
         assert_eq!(written as usize, original.len());
         assert_eq!(out, original);
     }

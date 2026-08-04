@@ -1,7 +1,5 @@
-/// RAR5 bitstream reader and writer (MSB-first bit ordering).
-
+//! RAR5 bitstream reader and writer (MSB-first bit ordering).
 // ── BitReader ──────────────────────────────────────────────────────────────
-
 pub struct BitReader<'a> {
     data: &'a [u8],
     pos: usize,
@@ -187,6 +185,12 @@ impl BitWriter {
             v.push(self.current_byte);
         }
         v
+    }
+}
+
+impl Default for BitWriter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

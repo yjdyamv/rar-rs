@@ -593,6 +593,7 @@ fn large_store_file_streams_roundtrip() {
 /// Official UNRAR (e.g. /home/yuan/下载/rar/unrar) validates archives
 /// produced by rar-rs with every new feature combination.
 #[test]
+#[allow(clippy::type_complexity)]
 fn official_unrar_validates_our_feature_archives() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
@@ -1384,17 +1385,13 @@ fn x86_like(size: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(size);
     let mut pos = 0u32;
     while out.len() < size {
-        for _ in 0..64 {
-            out.push(0x90); // NOP
-            pos += 1;
-        }
+        out.extend_from_slice(&[0x90; 64]); // NOP
+        pos += 64;
         out.push(0xe8); // CALL rel32
         out.extend_from_slice(&(pos.wrapping_mul(7) & 0x00FF_FFFF).to_le_bytes());
         pos += 5;
-        for _ in 0..16 {
-            out.push(0x41); // INC ECX
-            pos += 1;
-        }
+        out.extend_from_slice(&[0x41; 16]); // INC ECX
+        pos += 16;
     }
     out.truncate(size);
     out

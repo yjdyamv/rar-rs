@@ -18,7 +18,7 @@ pub mod window;
 pub mod x86_filter_scan;
 
 pub use decoder::{
-    MAX_STREAMING_FILTER_BUFFER, DecoderState, decode, decode_standalone,
+    DecoderState, MAX_STREAMING_FILTER_BUFFER, decode, decode_standalone,
     decode_standalone_to_writer, decode_to_writer,
 };
 pub use encoder::{

@@ -1,21 +1,18 @@
-/// RAR5 format constants and definitions.
-///
-/// RAR5 archive structure:
-/// ```text
-/// [Self-Extracting Module (optional)]
-/// [Archive Signature]          -- 8 bytes: magic number
-/// [Archive Encryption Header]  -- optional
-/// [Main Archive Header]        -- archive-level metadata
-/// [File Header] [File Data]    -- one per archived file
-/// ...
-/// [End of Archive Header]      -- marks archive end
-/// ```
-
+//! RAR5 format constants and definitions.
+//!
+//! RAR5 archive structure:
+//! ```text
+//! [Self-Extracting Module (optional)]
+//! [Archive Signature]          -- 8 bytes: magic number
+//! [Archive Encryption Header]  -- optional
+//! [Main Archive Header]        -- archive-level metadata
+//! [File Header] [File Data]    -- one per archived file
+//! ...
+//! [End of Archive Header]      -- marks archive end
+//! ```
 // ── Archive Signature ──────────────────────────────────────────────────────
-
 /// RAR5 magic number (8 bytes).
 pub const RAR5_SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";
-
 
 // ── Block Types ────────────────────────────────────────────────────────────
 

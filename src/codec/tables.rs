@@ -1,5 +1,4 @@
 /// RAR5 codec constants: symbol counts, table sizes, format constants.
-
 /// Huffman table symbol counts.
 pub const HUFF_BC: usize = 20;
 pub const HUFF_NC: usize = 306;

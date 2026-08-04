@@ -321,10 +321,10 @@ impl FileHeader {
         if eff_file_flags & FILE_FLAG_TIME_UNIX != 0 {
             body.extend(self.mtime.to_le_bytes());
         }
-        if eff_file_flags & FILE_FLAG_CRC32 != 0 {
-            if let Some(crc) = self.crc32_val {
-                body.extend(crc.to_le_bytes());
-            }
+        if eff_file_flags & FILE_FLAG_CRC32 != 0
+            && let Some(crc) = self.crc32_val
+        {
+            body.extend(crc.to_le_bytes());
         }
 
         // Compression info

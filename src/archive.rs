@@ -764,11 +764,10 @@ impl RarArchive {
         let mut body = Vec::new();
         body.extend(vint::encode(0x03u64)); // service header
         body.extend(vint::encode(
-            (BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_SKIP_IF_UNKNOWN) as u64,
+            BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_SKIP_IF_UNKNOWN,
         ));
         let subdata = {
-            let mut rec = Vec::new();
-            rec.push(percent as u8); // recovery percent (single byte, <= 100)
+            let rec = vec![percent as u8]; // recovery percent (single byte, <= 100)
             let mut extra = Vec::new();
             extra.extend(vint::encode((1 + rec.len()) as u64)); // record size: type + data
             extra.extend(vint::encode(0x07u64)); // service data record type
@@ -781,7 +780,7 @@ impl RarArchive {
         body.extend(vint::encode(rr_data.len() as u64)); // unpacked size
         body.extend(vint::encode(0u64)); // attributes
         body.extend(vint::encode(0u64)); // compression info (store)
-        body.extend(vint::encode(OS_UNIX as u64));
+        body.extend(vint::encode(OS_UNIX));
         body.extend(vint::encode(2u64)); // name length
         body.extend(b"RR");
         body.extend(subdata);
@@ -833,7 +832,7 @@ impl RarArchive {
         let mut body = Vec::new();
         body.extend(vint::encode(0x03u64)); // service header
         body.extend(vint::encode(
-            (BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_SKIP_IF_UNKNOWN) as u64,
+            BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_SKIP_IF_UNKNOWN,
         ));
         let mut extra = Vec::new();
         extra.extend(vint::encode(1u64)); // record size: type only
@@ -844,7 +843,7 @@ impl RarArchive {
         body.extend(vint::encode(payload.len() as u64)); // unpacked size
         body.extend(vint::encode(0u64)); // attributes
         body.extend(vint::encode(0u64)); // compression info (store)
-        body.extend(vint::encode(OS_UNIX as u64));
+        body.extend(vint::encode(OS_UNIX));
         body.extend(vint::encode(2u64)); // name length
         body.extend(b"QO");
         body.extend(extra);
@@ -902,7 +901,7 @@ impl RarArchive {
             let (hsize, vint_len) = vint::decode_from_slice(&first_pt, 4)
                 .map_err(|e| RarError::Format(format!("main header vint: {e}")))?;
             let total_raw = 4 + vint_len + hsize as usize;
-            let enc_size = ((total_raw + 15) / 16) * 16;
+            let enc_size = total_raw.div_ceil(16) * 16;
             let mut full_ct = vec![0u8; enc_size];
             full_ct[..16].copy_from_slice(&first);
             if enc_size > 16 {
@@ -1114,7 +1113,7 @@ impl RarArchive {
 
             // Total raw bytes = CRC(4) + vint + header_body, padded to 16B
             let total_raw = 4 + vint_len + hdr_size as usize;
-            let enc_size = ((total_raw + 15) / 16) * 16;
+            let enc_size = total_raw.div_ceil(16) * 16;
 
             // Read remaining encrypted blocks (we already have the first 16)
             let mut full_ct = vec![0u8; enc_size];
@@ -1378,7 +1377,7 @@ impl RarArchive {
 
         let body = [
             vint::encode(BLOCK_TYPE_ARCHIVE_HEADER),
-            vint::encode(BLOCK_FLAG_EXTRA_DATA as u64),
+            vint::encode(BLOCK_FLAG_EXTRA_DATA),
             vint::encode(extra.len() as u64),
             vint::encode(arch_flags),
         ]
@@ -1409,7 +1408,7 @@ impl RarArchive {
         let field_base = 4u64
             + size_bytes.len() as u64
             + vint::encoded_size(BLOCK_TYPE_ARCHIVE_HEADER) as u64
-            + vint::encoded_size(BLOCK_FLAG_EXTRA_DATA as u64) as u64
+            + vint::encoded_size(BLOCK_FLAG_EXTRA_DATA) as u64
             + vint::encoded_size(extra.len() as u64) as u64
             + vint::encoded_size(arch_flags) as u64
             + vint::encoded_size(locator.len() as u64) as u64
@@ -1538,16 +1537,16 @@ impl RarArchive {
                     limit: opts.max_total_unpacked_bytes.unwrap_or(u64::MAX),
                     context: "total unpacked size overflow".into(),
                 })?;
-            if let Some(limit) = opts.max_total_unpacked_bytes {
-                if total_unpacked > limit {
-                    return Err(RarError::LimitExceeded {
-                        limit,
-                        context: format!(
-                            "total unpacked size {total_unpacked} exceeds limit while extracting {}",
-                            entry.name()
-                        ),
-                    });
-                }
+            if let Some(limit) = opts.max_total_unpacked_bytes
+                && total_unpacked > limit
+            {
+                return Err(RarError::LimitExceeded {
+                    limit,
+                    context: format!(
+                        "total unpacked size {total_unpacked} exceeds limit while extracting {}",
+                        entry.name()
+                    ),
+                });
             }
             self.extract_entry(entry, dest)?;
         }
@@ -1560,13 +1559,13 @@ impl RarArchive {
     /// Eligible: at least [`PARALLEL_MIN_MEMBERS`] members, no solid chains,
     /// no split/multi-volume members, no progress callback, and total packed
     /// + unpacked sizes within a bounded memory budget. Packed payloads are
-    /// read sequentially, then decoded and integrity-checked with Rayon
-    /// workers (archive order preserved by replaying writes sequentially
-    /// afterwards). Ineligible archives fall back to the sequential path
-    /// unchanged. The codec's decode is memory-bandwidth-bound, so the
-    /// parallel path mainly helps on machines where decompression is
-    /// CPU-bound; it engages only for member counts and sizes where Rayon
-    /// overhead is amortized.
+    ///   read sequentially, then decoded and integrity-checked with Rayon
+    ///   workers (archive order preserved by replaying writes sequentially
+    ///   afterwards). Ineligible archives fall back to the sequential path
+    ///   unchanged. The codec's decode is memory-bandwidth-bound, so the
+    ///   parallel path mainly helps on machines where decompression is
+    ///   CPU-bound; it engages only for member counts and sizes where Rayon
+    ///   overhead is amortized.
     #[cfg(feature = "parallel")]
     fn extract_all_parallel(
         &mut self,
@@ -1595,13 +1594,13 @@ impl RarArchive {
         if total_unpacked < PARALLEL_MIN_UNPACKED {
             return Ok(false);
         }
-        if let Some(limit) = opts.max_total_unpacked_bytes {
-            if total_unpacked > limit {
-                return Err(RarError::LimitExceeded {
-                    limit,
-                    context: "total unpacked size exceeds limit".into(),
-                });
-            }
+        if let Some(limit) = opts.max_total_unpacked_bytes
+            && total_unpacked > limit
+        {
+            return Err(RarError::LimitExceeded {
+                limit,
+                context: "total unpacked size exceeds limit".into(),
+            });
         }
 
         // Phase 1: read + decrypt all payloads sequentially.
@@ -1630,16 +1629,16 @@ impl RarArchive {
                         ),
                     });
                 }
-                if let Some(limit) = opts.max_unpacked_bytes {
-                    if hdr.unpacked_size > limit {
-                        return Err(RarError::LimitExceeded {
-                            limit,
-                            context: format!(
-                                "{}: unpacked size {} exceeds limit",
-                                hdr.name, hdr.unpacked_size
-                            ),
-                        });
-                    }
+                if let Some(limit) = opts.max_unpacked_bytes
+                    && hdr.unpacked_size > limit
+                {
+                    return Err(RarError::LimitExceeded {
+                        limit,
+                        context: format!(
+                            "{}: unpacked size {} exceeds limit",
+                            hdr.name, hdr.unpacked_size
+                        ),
+                    });
                 }
 
                 let data = if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
@@ -1652,7 +1651,7 @@ impl RarArchive {
                         hdr.unpacked_size,
                         hdr.comp_dict_size,
                     )
-                    .map_err(|e| RarError::Unsupported(e))?
+                    .map_err(RarError::Unsupported)?
                 };
 
                 let crc = crc32fast::hash(&data);
@@ -1746,16 +1745,16 @@ impl RarArchive {
                 ),
             });
         }
-        if let Some(limit) = self.extract_options.max_unpacked_bytes {
-            if hdr.unpacked_size > limit {
-                return Err(RarError::LimitExceeded {
-                    limit,
-                    context: format!(
-                        "{}: unpacked size {} exceeds limit",
-                        hdr.name, hdr.unpacked_size
-                    ),
-                });
-            }
+        if let Some(limit) = self.extract_options.max_unpacked_bytes
+            && hdr.unpacked_size > limit
+        {
+            return Err(RarError::LimitExceeded {
+                limit,
+                context: format!(
+                    "{}: unpacked size {} exceeds limit",
+                    hdr.name, hdr.unpacked_size
+                ),
+            });
         }
         Ok(())
     }
@@ -1826,16 +1825,16 @@ impl RarArchive {
             name.replace('\\', "/")
         };
         let dest_path = dest_dir.join(&sanitized);
-        if self.extract_options.safe_paths {
-            if let Some(parent) = dest_path.parent() {
-                fs::create_dir_all(parent)?;
-                let canon_dest = dest_dir.canonicalize()?;
-                let canon_parent = parent.canonicalize()?;
-                if !canon_parent.starts_with(&canon_dest) {
-                    return Err(RarError::Security(format!(
-                        "entry {name:?} resolves outside the destination directory"
-                    )));
-                }
+        if self.extract_options.safe_paths
+            && let Some(parent) = dest_path.parent()
+        {
+            fs::create_dir_all(parent)?;
+            let canon_dest = dest_dir.canonicalize()?;
+            let canon_parent = parent.canonicalize()?;
+            if !canon_parent.starts_with(&canon_dest) {
+                return Err(RarError::Security(format!(
+                    "entry {name:?} resolves outside the destination directory"
+                )));
             }
         }
         Ok(dest_path)
@@ -1945,10 +1944,8 @@ impl RarArchive {
             && self.solid_decoded_through < target_idx as isize
         {
             // Continue from where we left off.
-        } else if self.solid_decoded_through >= target_idx as isize {
-            self.solid_state = None;
-            self.solid_decoded_through = -1;
         } else {
+            // Restart the chain when we need to go backwards or start fresh.
             self.solid_state = None;
             self.solid_decoded_through = -1;
         }
@@ -2042,16 +2039,16 @@ impl RarArchive {
             }
 
             // Verify intermediate chunk CRC (packed data CRC)
-            if !chunk.is_final {
-                if let Some(expected_crc) = chunk.crc32_val {
-                    let actual_crc = crc32fast::hash(&packed_data[chunk_start..]);
-                    if actual_crc != expected_crc {
-                        return Err(RarError::Crc {
-                            expected: expected_crc,
-                            actual: actual_crc,
-                            context: format!("{} vol {}", hdr.name, chunk.volume_index),
-                        });
-                    }
+            if !chunk.is_final
+                && let Some(expected_crc) = chunk.crc32_val
+            {
+                let actual_crc = crc32fast::hash(&packed_data[chunk_start..]);
+                if actual_crc != expected_crc {
+                    return Err(RarError::Crc {
+                        expected: expected_crc,
+                        actual: actual_crc,
+                        context: format!("{} vol {}", hdr.name, chunk.volume_index),
+                    });
                 }
             }
         }
@@ -2126,7 +2123,7 @@ impl RarArchive {
                 hdr.comp_dict_size,
                 state,
             )
-            .map_err(|e| RarError::Unsupported(e))?
+            .map_err(RarError::Unsupported)?
         };
 
         let crc = crc32fast::hash(&raw_data);
@@ -2163,7 +2160,7 @@ impl RarArchive {
         let mut sink = IntegritySink::new(writer, self.entries[idx].header.hash_value.is_some());
 
         let written = if hdr.comp_method == COMP_METHOD_STORE {
-            sink.write_all(&payload.data).map_err(|e| RarError::Io(e))?;
+            sink.write_all(&payload.data).map_err(RarError::Io)?;
             payload.data.len() as u64
         } else {
             crate::codec::decode_to_writer(
@@ -2173,7 +2170,7 @@ impl RarArchive {
                 state,
                 &mut sink,
             )
-            .map_err(|e| RarError::Unsupported(e))?
+            .map_err(RarError::Unsupported)?
         };
 
         let (crc, blake) = sink.finish();
@@ -2360,7 +2357,7 @@ impl RarArchive {
                 dsl,
                 self.filter_policy,
             )
-            .map_err(|e| RarError::Unsupported(e))?;
+            .map_err(RarError::Unsupported)?;
             let (header_crc, extra_data, stored_hash, encr_params) =
                 RarArchive::payload_extra_and_crc(
                     self.password.as_deref(),
@@ -2467,7 +2464,7 @@ impl RarArchive {
                     n < buf.len(),
                     progress,
                 )
-                .map_err(|e| RarError::Unsupported(e))?;
+                .map_err(RarError::Unsupported)?;
                 packed.extend(compressed);
                 if packed.len() as u64 >= file_size {
                     break;
@@ -2730,7 +2727,7 @@ impl RarArchive {
                     dsl,
                     self.filter_policy,
                 )
-                .map_err(|e| RarError::Unsupported(e))?
+                .map_err(RarError::Unsupported)?
             } else {
                 let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
                 if let Some(cb) = self.progress_callback.as_deref_mut() {
@@ -2746,7 +2743,7 @@ impl RarArchive {
                     true,
                     progress,
                 )
-                .map_err(|e| RarError::Unsupported(e))?
+                .map_err(RarError::Unsupported)?
             };
             if packed.len() >= data.len() {
                 self.reset_solid_chain();
@@ -3157,6 +3154,7 @@ impl RarArchive {
     }
 
     /// Write a file entry, splitting across volumes if needed.
+    #[allow(clippy::too_many_arguments)]
     fn write_file_entry(
         &mut self,
         name: &str,
@@ -3388,6 +3386,7 @@ impl RarArchive {
     /// to reuse for the actual payload encryption (one KDF/salt per
     /// member). For encrypted members the checksums are MAC'd with the
     /// hash key, matching WinRAR.
+    #[allow(clippy::type_complexity)]
     fn payload_extra_and_crc(
         password: Option<&str>,
         plain_crc: u32,
@@ -3441,6 +3440,7 @@ impl RarArchive {
     ///
     /// Handles single-volume and multi-volume splitting. The plaintext CRC
     /// must be supplied (it is part of the header, written before data).
+    #[allow(clippy::too_many_arguments)]
     fn write_stored_file(
         &mut self,
         name: &str,
@@ -3739,7 +3739,7 @@ fn dict_size_for_data(data_size: usize, level: u8) -> u8 {
     // large files find longer-range matches. The decoder accepts any
     // dictionary up to MAX_DICT_SIZE_LOG (1 GiB).
     let cap = match level {
-        1..=2 => 1 * 1024 * 1024,
+        1..=2 => 1024 * 1024,
         3 => 2 * 1024 * 1024,
         4 => 4 * 1024 * 1024,
         _ => 8 * 1024 * 1024, // 5
@@ -3778,10 +3778,11 @@ fn sample_is_incompressible(data: &[u8], method: u8) -> bool {
         bad += 1;
     }
     for &pos in &[data.len() / 4, data.len() / 2, data.len() * 3 / 4] {
-        if pos >= SAMPLE_PROBE_HEAD && pos + SAMPLE_PROBE_TAIL <= data.len() {
-            if incompressible_sample(&data[pos..pos + SAMPLE_PROBE_TAIL], method) {
-                bad += 1;
-            }
+        if pos >= SAMPLE_PROBE_HEAD
+            && pos + SAMPLE_PROBE_TAIL <= data.len()
+            && incompressible_sample(&data[pos..pos + SAMPLE_PROBE_TAIL], method)
+        {
+            bad += 1;
         }
     }
     bad >= 2
@@ -3993,13 +3994,13 @@ fn extract_volume_base(name: &str) -> Option<String> {
 fn vint_fixed5(value: u64) -> [u8; 5] {
     let mut out = [0x80u8; 5];
     let mut v = value;
-    for i in 0..5 {
+    for (i, byte) in out.iter_mut().enumerate() {
         let mut b = (v & 0x7F) as u8;
         v >>= 7;
         if i < 4 {
             b |= 0x80;
         }
-        out[i] = b;
+        *byte = b;
     }
     out
 }
@@ -4196,7 +4197,7 @@ mod tests {
 
         // The .rev must carry the REV5 signature, the volume table and a
         // payload whose CRC32 matches the header field.
-        let rev = std::fs::read(&revs[0]).unwrap();
+        let rev = std::fs::read(revs[0]).unwrap();
         assert!(rev.starts_with(b"Rar!\x1aRev"));
         let header_size = u32::from_le_bytes(rev[12..16].try_into().unwrap()) as usize;
         let body = &rev[16..16 + header_size];
@@ -4401,7 +4402,7 @@ mod tests {
         }
 
         let vols = discover_volumes(&path);
-        assert!(vols.len() >= 1);
+        assert!(!vols.is_empty());
 
         {
             let mut ar = RarArchive::open(&vols[0]).unwrap();

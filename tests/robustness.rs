@@ -109,7 +109,7 @@ fn exercise_crypto(data: &[u8]) {
     let with_checksum = data[0] & 1 != 0;
     // Cap the KDF exponent: full-strength PBKDF2 would dominate the test;
     // strength <= 8 exercises the same code paths.
-    let strength = (data[1] % 8) as u8;
+    let strength = data[1] % 8;
 
     let mut extra: Vec<u8> = Vec::new();
     extra.extend_from_slice(&rar5::vint::encode(1)); // version
@@ -141,10 +141,11 @@ fn exercise_crypto(data: &[u8]) {
         let ciphertext = &ciphertext[..ciphertext.len().min(1 << 16)];
         let _ = params.verify_password("");
         let _ = params.decrypt(ciphertext, "");
-        if let Ok(keys) = params.derive_keys("") {
-            if ciphertext.len() >= 16 && ciphertext.len() % 16 == 0 {
-                let _ = encryption::decrypt_data(ciphertext, &keys.key, &iv);
-            }
+        if let Ok(keys) = params.derive_keys("")
+            && ciphertext.len() >= 16
+            && ciphertext.len().is_multiple_of(16)
+        {
+            let _ = encryption::decrypt_data(ciphertext, &keys.key, &iv);
         }
     }
 }

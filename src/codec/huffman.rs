@@ -5,6 +5,9 @@
 use super::bitstream::{BitReader, BitWriter};
 use super::tables::{MAX_CODE_LENGTH, QUICK_BITS, QUICK_SIZE};
 
+/// Huffman tree node: (frequency, symbol/node id, children).
+type HuffNode = (u32, usize, Option<(usize, usize)>);
+
 // ── Decode Table ───────────────────────────────────────────────────────────
 
 pub struct DecodeTable {
@@ -47,8 +50,8 @@ impl DecodeTable {
 
         // Fill decode_num
         let mut pos_tracker = decode_pos;
-        for sym in 0..n {
-            let cl = code_lengths[sym] as usize;
+        for (sym, item) in code_lengths.iter().enumerate().take(n) {
+            let cl = *item as usize;
             if cl > 0 && cl <= MAX_CODE_LENGTH {
                 decode_num[pos_tracker[cl]] = sym as u16;
                 pos_tracker[cl] += 1;
@@ -207,15 +210,15 @@ pub fn build_code_lengths_from_freqs(freqs: &[u32], max_length: usize) -> Vec<u8
 
     // Build Huffman tree using sorted merge (no BinaryHeap needed for Node)
     // Two-queue approach: one for leaves, one for internal nodes
-    let mut leaves: Vec<(u32, usize, Option<(usize, usize)>)> = active
+    let mut leaves: Vec<HuffNode> = active
         .iter()
         .map(|&(freq, sym)| (freq, sym, None))
         .collect();
     leaves.sort_by_key(|&(f, s, _)| (f, s));
 
     // nodes stores: (freq, node_id, children)
-    let mut nodes: Vec<(u32, usize, Option<(usize, usize)>)> = Vec::new();
-    let mut all_nodes: Vec<(u32, usize, Option<(usize, usize)>)> = Vec::new();
+    let mut nodes: Vec<HuffNode> = Vec::new();
+    let mut all_nodes: Vec<HuffNode> = Vec::new();
     // Copy leaves into all_nodes
     for &(f, s, _) in &leaves {
         all_nodes.push((f, s, None));
@@ -226,9 +229,9 @@ pub fn build_code_lengths_from_freqs(freqs: &[u32], max_length: usize) -> Vec<u8
     let mut counter = n;
 
     fn pick_min(
-        leaves: &[(u32, usize, Option<(usize, usize)>)],
+        leaves: &[HuffNode],
         li: &mut usize,
-        nodes: &[(u32, usize, Option<(usize, usize)>)],
+        nodes: &[HuffNode],
         ni: &mut usize,
     ) -> (u32, usize) {
         let have_leaf = *li < leaves.len();
@@ -270,16 +273,10 @@ pub fn build_code_lengths_from_freqs(freqs: &[u32], max_length: usize) -> Vec<u8
     let mut lengths = vec![0u8; n];
 
     // Walk the tree to assign depths
-    fn walk(
-        all_nodes: &[(u32, usize, Option<(usize, usize)>)],
-        node_idx: usize,
-        depth: u8,
-        total_leaves: usize,
-        lengths: &mut Vec<u8>,
-    ) {
+    fn walk(all_nodes: &[HuffNode], node_idx: usize, depth: u8, lengths: &mut Vec<u8>) {
         if let Some((left, right)) = all_nodes[node_idx].2 {
-            walk(all_nodes, left, depth + 1, total_leaves, lengths);
-            walk(all_nodes, right, depth + 1, total_leaves, lengths);
+            walk(all_nodes, left, depth + 1, lengths);
+            walk(all_nodes, right, depth + 1, lengths);
         } else {
             // Leaf: all_nodes[node_idx].1 is the original symbol
             let sym = all_nodes[node_idx].1;
@@ -290,7 +287,7 @@ pub fn build_code_lengths_from_freqs(freqs: &[u32], max_length: usize) -> Vec<u8
     }
 
     let root_idx = all_nodes.len() - 1;
-    walk(&all_nodes, root_idx, 0, total_leaves, &mut lengths);
+    walk(&all_nodes, root_idx, 0, &mut lengths);
 
     // Enforce max_length and fix Kraft inequality.
     // Clamping depths > max_length to max_length makes the code overcomplete

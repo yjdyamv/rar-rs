@@ -172,6 +172,7 @@ fn checked_dict_size(dict_size_log: u8) -> Result<usize, String> {
 }
 
 /// Streaming decode core: writes decoded (and filtered) output to `writer`.
+#[allow(clippy::too_many_arguments)]
 fn decode_inner_streaming(
     reader: &mut BitReader,
     unpacked_size: u64,
@@ -258,7 +259,7 @@ fn decode_inner_streaming(
                 if *last_length > 0 && dist_cache[0] > 0 {
                     window.copy_match(dist_cache[0] as usize, *last_length as usize);
                 }
-            } else if sym >= SYM_CACHE_BASE && sym <= SYM_CACHE_BASE + 3 {
+            } else if (SYM_CACHE_BASE..=SYM_CACHE_BASE + 3).contains(&sym) {
                 let cache_idx = sym - SYM_CACHE_BASE;
                 let dist = dist_cache_touch(dist_cache, cache_idx);
                 let len_slot = decode_symbol(t_rc, reader).map_err(|e| e.to_string())?;
@@ -361,10 +362,7 @@ impl<'a> OutputSink<'a> {
         Ok(())
     }
 
-    fn apply_complete_filters(
-        &mut self,
-        pending: &mut Vec<PendingFilter>,
-    ) -> Result<(), String> {
+    fn apply_complete_filters(&mut self, pending: &mut [PendingFilter]) -> Result<(), String> {
         for filt in pending.iter_mut().filter(|f| !f.applied) {
             let staging_end = self.staging_start + (self.staging_len() as u64);
             if staging_end < filt.block_start + filt.block_length {
@@ -391,11 +389,7 @@ impl<'a> OutputSink<'a> {
         Ok(())
     }
 
-    fn drain_up_to(
-        &mut self,
-        written: u64,
-        pending: &[PendingFilter],
-    ) -> Result<(), String> {
+    fn drain_up_to(&mut self, written: u64, pending: &[PendingFilter]) -> Result<(), String> {
         let earliest_filter = pending
             .iter()
             .filter(|f| !f.applied)
@@ -466,6 +460,7 @@ pub fn decode_standalone(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_inner(
     reader: &mut BitReader,
     unpacked_size: u64,
@@ -549,7 +544,7 @@ fn decode_inner(
                 if *last_length > 0 && dist_cache[0] > 0 {
                     window.copy_match(dist_cache[0] as usize, *last_length as usize);
                 }
-            } else if sym >= SYM_CACHE_BASE && sym <= SYM_CACHE_BASE + 3 {
+            } else if (SYM_CACHE_BASE..=SYM_CACHE_BASE + 3).contains(&sym) {
                 let cache_idx = sym - SYM_CACHE_BASE;
                 let dist = dist_cache_touch(dist_cache, cache_idx);
                 let len_slot = decode_symbol(t_rc, reader).map_err(|e| e.to_string())?;
@@ -815,7 +810,10 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             let _ = decode_standalone(&stream, 78090, 0);
         });
-        assert!(result.is_ok(), "decode must not panic on reserved flag bits");
+        assert!(
+            result.is_ok(),
+            "decode must not panic on reserved flag bits"
+        );
     }
 
     /// Fuzz regression: a valid archive with a 3-byte block size field
@@ -845,7 +843,7 @@ mod tests {
                     let mut data = vec![0x90u8; size];
                     let mut pos = 0usize;
                     while pos + 5 <= size {
-                        data[pos] = if filter_type == FILTER_E8 || pos % 170 == 0 {
+                        data[pos] = if filter_type == FILTER_E8 || pos.is_multiple_of(170) {
                             0xE8
                         } else {
                             0xE9
@@ -889,13 +887,11 @@ mod tests {
                     decode_standalone_to_writer(&packed, size as u64, 0, &mut streamed).unwrap();
                 assert_eq!(written, size as u64);
                 assert_eq!(
-                    streamed,
-                    buffered,
+                    streamed, buffered,
                     "streaming != buffered for filter {filter_type:#x}, channels {channels}, size {size}"
                 );
                 assert_eq!(
-                    streamed,
-                    data,
+                    streamed, data,
                     "streaming != original for filter {filter_type:#x}, channels {channels}, size {size}"
                 );
             }

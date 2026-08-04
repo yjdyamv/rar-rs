@@ -84,10 +84,11 @@ fn auto_x86_filter_ranges_with_cluster_gap(
             None => span = Some((start, last, count)),
         }
     }
-    if let Some((span_start, span_last, span_opcodes)) = span {
-        if span_opcodes >= AUTO_X86_MIN_SPAN_OPCODES && span_count < AUTO_X86_MAX_SPAN_RANGES {
-            push_x86_filter_range(&mut ranges, data.len(), span_start, span_last);
-        }
+    if let Some((span_start, span_last, span_opcodes)) = span
+        && span_opcodes >= AUTO_X86_MIN_SPAN_OPCODES
+        && span_count < AUTO_X86_MAX_SPAN_RANGES
+    {
+        push_x86_filter_range(&mut ranges, data.len(), span_start, span_last);
     }
 
     clusters.sort_by(|a, b| {
@@ -143,24 +144,24 @@ fn next_x86_opcode(data: &[u8], start: usize, end: usize, cmp_mask: u8) -> Optio
     let mut pos = start;
     if pos >= end {
         return None;
+    }
+    // Fast path: process 8 bytes at a time. Each byte is matched when
+    // (byte & mask) == 0xE8; compute `(bytes & mask_repl) ^ 0xE8_repl`
+    // and look for zero bytes, which mark matching positions.
+    while pos + 8 <= end {
+        let bytes = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8-byte window"));
+        let mask_repl = u64::from_le_bytes([cmp_mask; 8]);
+        let e8_repl = u64::from_le_bytes([0xE8; 8]);
+        let xored = (bytes & mask_repl) ^ e8_repl;
+        if let Some(off) = has_zero_byte(xored) {
+            return Some(pos + off);
         }
-        // Fast path: process 8 bytes at a time. Each byte is matched when
-        // (byte & mask) == 0xE8; compute `(bytes & mask_repl) ^ 0xE8_repl`
-        // and look for zero bytes, which mark matching positions.
-        while pos + 8 <= end {
-            let bytes = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8-byte window"));
-            let mask_repl = u64::from_le_bytes([cmp_mask; 8]);
-            let e8_repl = u64::from_le_bytes([0xE8; 8]);
-            let xored = (bytes & mask_repl) ^ e8_repl;
-            if let Some(off) = has_zero_byte(xored) {
-                return Some(pos + off);
-            }
-            pos += 8;
-        }
-        // Scalar tail: at most 7 remaining bytes.
-        while pos < end {
-            if data[pos] & cmp_mask == 0xE8 {
-                return Some(pos);
+        pos += 8;
+    }
+    // Scalar tail: at most 7 remaining bytes.
+    while pos < end {
+        if data[pos] & cmp_mask == 0xE8 {
+            return Some(pos);
         }
         pos += 1;
     }

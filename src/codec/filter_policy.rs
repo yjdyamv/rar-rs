@@ -147,10 +147,10 @@ pub fn encode_member_with_policy(
             .iter()
             .map(|r| FilterSpec::new(FILTER_E8, 0, r.start as u32, r.len() as u32))
             .collect();
-        if let Ok(packed) = encode_with_filters(data, method, dict_size_log, &specs) {
-            if packed.len() < best.len() {
-                best = packed;
-            }
+        if let Ok(packed) = encode_with_filters(data, method, dict_size_log, &specs)
+            && packed.len() < best.len()
+        {
+            best = packed;
         }
     }
     let combined_e8e9 = disjoint_filter_ranges(e8e9_ranges);
@@ -159,10 +159,10 @@ pub fn encode_member_with_policy(
             .iter()
             .map(|r| FilterSpec::new(FILTER_E8E9, 0, r.start as u32, r.len() as u32))
             .collect();
-        if let Ok(packed) = encode_with_filters(data, method, dict_size_log, &specs) {
-            if packed.len() < best.len() {
-                best = packed;
-            }
+        if let Ok(packed) = encode_with_filters(data, method, dict_size_log, &specs)
+            && packed.len() < best.len()
+        {
+            best = packed;
         }
     }
 
@@ -203,11 +203,11 @@ pub fn disjoint_filter_ranges(
     ranges.sort_by_key(|range| (range.start, range.end));
     let mut disjoint: Vec<std::ops::Range<usize>> = Vec::new();
     for range in ranges {
-        if let Some(last) = disjoint.last_mut() {
-            if range.start <= last.end {
-                last.end = last.end.max(range.end);
-                continue;
-            }
+        if let Some(last) = disjoint.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+            continue;
         }
         disjoint.push(range);
     }

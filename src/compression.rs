@@ -21,7 +21,7 @@ pub fn compress_with_progress(
         }
         return Ok(data.to_vec());
     }
-    if method >= COMP_METHOD_FASTEST && method <= COMP_METHOD_BEST {
+    if (COMP_METHOD_FASTEST..=COMP_METHOD_BEST).contains(&method) {
         return compress_chunked(
             data,
             method,
@@ -53,7 +53,7 @@ pub fn compress_chunked(
         }
         return Ok(data.to_vec());
     }
-    if method >= COMP_METHOD_FASTEST && method <= COMP_METHOD_BEST {
+    if (COMP_METHOD_FASTEST..=COMP_METHOD_BEST).contains(&method) {
         return codec::encode_chunked(
             data,
             method,
@@ -78,7 +78,7 @@ pub fn decompress(
     if method == COMP_METHOD_STORE {
         return Ok(data.to_vec());
     }
-    if method >= COMP_METHOD_FASTEST && method <= COMP_METHOD_BEST {
+    if (COMP_METHOD_FASTEST..=COMP_METHOD_BEST).contains(&method) {
         let result = if let Some(st) = state {
             codec::decode(data, unpacked_size, dict_size_log, Some(st))?
         } else {

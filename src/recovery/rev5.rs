@@ -21,7 +21,7 @@ pub fn plan_recovery_volume_count(data_count: usize, rec_percent: u64) -> RarRes
     }
     let nd = data_count as u64;
     let pct = rec_percent.min(100);
-    let nr = ((pct * nd + 99) / 100).max(1).min(nd);
+    let nr = (pct * nd).div_ceil(100).max(1).min(nd);
     Ok(nr as usize)
 }
 

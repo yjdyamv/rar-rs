@@ -1,5 +1,4 @@
 /// RAR5 sliding window (circular buffer) for LZSS decompression.
-
 pub struct SlidingWindow {
     buf: Vec<u8>,
     mask: usize,

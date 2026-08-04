@@ -16,8 +16,8 @@ use crate::constants::*;
 use crate::error::{RarError, RarResult};
 use crate::vint;
 
-use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::Aes256;
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -63,9 +63,9 @@ impl DerivedKeys {
     /// MAC a CRC32 value with the hash key (RAR5 encrypted-file checksums).
     pub fn mac_crc32(&self, crc: u32) -> u32 {
         let digest = hmac_sha256(&self.hash_key, &crc.to_le_bytes());
-        digest
-            .chunks_exact(4)
-            .fold(0, |acc, chunk| acc ^ u32::from_le_bytes(chunk.try_into().unwrap()))
+        digest.chunks_exact(4).fold(0, |acc, chunk| {
+            acc ^ u32::from_le_bytes(chunk.try_into().unwrap())
+        })
     }
 
     /// MAC a 32-byte hash with the hash key (RAR5 encrypted-file hashes).
@@ -92,7 +92,11 @@ impl DerivedKeys {
 /// XOR-folded accumulators at `2^strength`, `2^strength + 16` and
 /// `2^strength + 32`, matching WinRAR's derivation of key, hash key and
 /// password check value.
-pub fn derive_keys(password: &str, salt: &[u8; ENCR_SALT_SIZE], strength: u8) -> RarResult<DerivedKeys> {
+pub fn derive_keys(
+    password: &str,
+    salt: &[u8; ENCR_SALT_SIZE],
+    strength: u8,
+) -> RarResult<DerivedKeys> {
     if strength > MAX_KDF_COUNT_LOG {
         return Err(RarError::Format(format!(
             "KDF strength {strength} exceeds maximum {MAX_KDF_COUNT_LOG}"
@@ -179,7 +183,7 @@ impl Aes256Cbc {
     }
 
     fn encrypt_in_place(&mut self, data: &mut [u8]) -> RarResult<()> {
-        if data.len() % 16 != 0 {
+        if !data.len().is_multiple_of(16) {
             return Err(RarError::Format(format!(
                 "plaintext length {} is not a multiple of 16",
                 data.len()
@@ -197,7 +201,7 @@ impl Aes256Cbc {
     }
 
     fn decrypt_in_place(&mut self, data: &mut [u8]) -> RarResult<()> {
-        if data.len() % 16 != 0 {
+        if !data.len().is_multiple_of(16) {
             return Err(RarError::Format(format!(
                 "ciphertext length {} is not a multiple of 16",
                 data.len()
@@ -219,7 +223,7 @@ impl Aes256Cbc {
 /// Encrypt `plaintext` with AES-256-CBC using zero-fill padding.
 pub fn encrypt_data(plaintext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> Vec<u8> {
     let block_size = 16;
-    let padded_len = ((plaintext.len() + block_size - 1) / block_size * block_size).max(block_size);
+    let padded_len = plaintext.len().div_ceil(block_size).max(1) * block_size;
     let mut buf = vec![0u8; padded_len];
     buf[..plaintext.len()].copy_from_slice(plaintext);
 
@@ -233,7 +237,7 @@ pub fn encrypt_data(plaintext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> Vec<u8> 
 /// Decrypt AES-256-CBC ciphertext. Returns decrypted bytes including any
 /// zero-fill padding; caller should truncate to the known unpacked size.
 pub fn decrypt_data(ciphertext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> RarResult<Vec<u8>> {
-    if ciphertext.len() % 16 != 0 {
+    if !ciphertext.len().is_multiple_of(16) {
         return Err(RarError::Format(format!(
             "ciphertext length {} is not a multiple of 16",
             ciphertext.len()
@@ -395,7 +399,7 @@ impl EncryptionParams {
         let keys = derive_keys(password, &salt, strength).expect("valid strength");
         let psw_check = keys.password_check;
 
-        let digest = sha2::Sha256::digest(&psw_check);
+        let digest = sha2::Sha256::digest(psw_check);
         let mut checksum = [0u8; 12];
         checksum[..8].copy_from_slice(&psw_check);
         checksum[8..12].copy_from_slice(&digest[..4]);
