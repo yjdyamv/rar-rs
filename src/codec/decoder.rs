@@ -372,10 +372,14 @@ impl<'a> OutputSink<'a> {
             }
             let start_off = (filt.block_start - self.staging_start) as usize;
             let end_off = start_off + filt.block_length as usize;
-            if end_off > self.staging.len() {
+            // `consumed` bytes were already written out but not yet
+            // compacted, so the staging slot for `staging_start` is at
+            // index `consumed`, not 0.
+            let base = self.consumed;
+            if base + end_off > self.staging.len() {
                 return Err("filter region out of staging bounds".into());
             }
-            let region = &mut self.staging[start_off..end_off];
+            let region = &mut self.staging[base + start_off..base + end_off];
             let filtered =
                 apply_filter_decode(filt.filter_type, region, filt.channels, filt.block_start);
             if filtered.len() != region.len() {

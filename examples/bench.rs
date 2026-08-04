@@ -77,8 +77,15 @@ fn bench(name: &str, data: &[u8]) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let batch_mode = args.iter().any(|a| a == "batch" || a == "--batch");
+    let extract_mode = args.iter().any(|a| a == "extract" || a == "--extract");
     let size_mb: usize = args.iter().find_map(|a| a.parse().ok()).unwrap_or(8);
-    let size = size_mb * 1024 * 1024;
+    // Extraction compares sequential vs parallel paths; the parallel path
+    // requires >= 4 members and >= 64 MiB unpacked, so bump the default.
+    let size = if extract_mode {
+        (size_mb * 1024 * 1024).max(64 * 1024 * 1024)
+    } else {
+        size_mb * 1024 * 1024
+    };
 
     let t = text_data(size);
     let r = binary_data(size);
@@ -92,6 +99,10 @@ fn main() {
     if batch_mode {
         bench_batch("text (8 members)", &t);
         bench_batch("x86 (8 members)", &x);
+    }
+    if extract_mode {
+        bench_extract("text (8 members)", &t);
+        bench_extract("x86 (8 members)", &x);
     }
 }
 
@@ -155,6 +166,85 @@ fn bench_batch(name: &str, data: &[u8]) {
             (_, Err(e)) => println!("  level {level}: batch ERROR {e}"),
         }
     }
+}
+
+/// Compare sequential vs parallel extraction of the same archive (8 equal
+/// members). A no-op progress callback disables the parallel path, so both
+/// measurements come from one binary; without the `parallel` feature both
+/// runs are sequential and should be roughly equal.
+fn bench_extract(name: &str, data: &[u8]) {
+    let dir = std::env::temp_dir().join("rar5-bench-extract");
+    std::fs::create_dir_all(&dir).unwrap();
+    let members: Vec<&[u8]> = data.chunks(data.len() / 8).collect();
+    let names: Vec<String> = (0..members.len()).map(|i| format!("m{i}.bin")).collect();
+    let archive_path = dir.join("bench-extract.rar");
+    {
+        let mut ar = rar5::RarArchive::create(&archive_path).unwrap();
+        let entries: Vec<rar5::BatchEntry<'_>> = members
+            .iter()
+            .enumerate()
+            .map(|(i, member)| rar5::BatchEntry::Bytes {
+                name: &names[i],
+                data: member,
+                level: 3,
+            })
+            .collect();
+        ar.add_batch(&entries).unwrap();
+        ar.close().unwrap();
+    }
+    let packed = std::fs::metadata(&archive_path).unwrap().len();
+
+    let seq_out = dir.join("seq");
+    let t0 = std::time::Instant::now();
+    {
+        let mut ar = rar5::RarArchive::open(&archive_path).unwrap();
+        ar.set_progress_callback(Some(Box::new(|_, _| {})));
+        ar.extract_all(&seq_out).unwrap();
+    }
+    let seq_elapsed = t0.elapsed();
+
+    let par_out = dir.join("par");
+    let t1 = std::time::Instant::now();
+    {
+        let mut ar = rar5::RarArchive::open(&archive_path).unwrap();
+        ar.extract_all(&par_out).unwrap();
+    }
+    let par_elapsed = t1.elapsed();
+
+    for (i, member) in members.iter().enumerate() {
+        assert_eq!(
+            std::fs::read(seq_out.join(&names[i])).unwrap(),
+            *member,
+            "sequential extraction mismatch for {}",
+            names[i]
+        );
+        assert_eq!(
+            std::fs::read(par_out.join(&names[i])).unwrap(),
+            *member,
+            "parallel extraction mismatch for {}",
+            names[i]
+        );
+    }
+
+    let mb = data.len() as f64 / 1048576.0;
+    println!(
+        "== extract {name}: {} bytes unpacked, packed {packed} ==",
+        data.len()
+    );
+    println!(
+        "  sequential: {:>6} ms  {:>7.1} MiB/s",
+        seq_elapsed.as_millis(),
+        mb / seq_elapsed.as_secs_f64()
+    );
+    println!(
+        "  parallel  : {:>6} ms  {:>7.1} MiB/s",
+        par_elapsed.as_millis(),
+        mb / par_elapsed.as_secs_f64()
+    );
+
+    let _ = std::fs::remove_file(&archive_path);
+    let _ = std::fs::remove_dir_all(&seq_out);
+    let _ = std::fs::remove_dir_all(&par_out);
 }
 
 /// A fake x86 binary: code bytes with many E8 call sites, for the

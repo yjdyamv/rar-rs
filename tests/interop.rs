@@ -1356,3 +1356,46 @@ fn batch_solid_falls_back_to_sequential() {
         "solid batch fallback must match the sequential archive"
     );
 }
+
+/// 8 MiB of x86-like code: AutoSize picks a whole-member E8 filter, which
+/// is split into multiple filter records (each capped at
+/// `MAX_FILTER_BLOCK_LENGTH`). The streaming `extract_all` path must apply
+/// them at the right staging offsets (regression: staging was indexed
+/// without the already-consumed prefix).
+#[test]
+fn streaming_extract_roundtrips_large_filtered_member() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("x86-large.rar");
+    let data = x86_like(8 * 1024 * 1024);
+    {
+        let mut ar = RarArchive::create(&path).unwrap();
+        ar.add_bytes("x86.bin", &data, 3).unwrap();
+        ar.close().unwrap();
+    }
+    let out = dir.path().join("out");
+    {
+        let mut ar = RarArchive::open(&path).unwrap();
+        ar.extract_all(&out).unwrap();
+    }
+    assert_eq!(std::fs::read(out.join("x86.bin")).unwrap(), data);
+}
+
+fn x86_like(size: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size);
+    let mut pos = 0u32;
+    while out.len() < size {
+        for _ in 0..64 {
+            out.push(0x90); // NOP
+            pos += 1;
+        }
+        out.push(0xe8); // CALL rel32
+        out.extend_from_slice(&(pos.wrapping_mul(7) & 0x00FF_FFFF).to_le_bytes());
+        pos += 5;
+        for _ in 0..16 {
+            out.push(0x41); // INC ECX
+            pos += 1;
+        }
+    }
+    out.truncate(size);
+    out
+}
