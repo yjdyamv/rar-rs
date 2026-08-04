@@ -36,8 +36,8 @@ const PARALLEL_MIN_MEMBERS: usize = 4;
 #[cfg(feature = "parallel")]
 const PARALLEL_MIN_UNPACKED: u64 = 64 * 1024 * 1024;
 /// Parallel batch compression (feature `parallel`): members up to this
-/// size are compressed in Rayon waves; larger members fall back to the
-/// sequential streaming path.
+/// size are compressed whole in Rayon waves; larger non-solid files are
+/// compressed in parallel chunks with bounded memory.
 #[cfg(feature = "parallel")]
 const PARALLEL_COMPRESS_MAX_MEMBER: u64 = 64 * 1024 * 1024;
 /// Total input bytes buffered per parallel compression wave (feature
@@ -66,6 +66,30 @@ fn compression_pool() -> &'static rayon::ThreadPool {
             .thread_name(|i| format!("rar5-compress-{i}"))
             .build()
             .expect("build rar5 compression pool")
+    })
+}
+
+/// Dedicated Rayon pool for large-file chunk compression.
+///
+/// Large members are CPU-bound and benefit from more cores, while the
+/// member-level wave pool stays at 4 threads to avoid regressions on many
+/// small members. Capped at 16 threads: beyond that, SMT oversubscription
+/// and per-task allocation overhead erode the gain.
+#[cfg(feature = "parallel")]
+fn large_file_pool() -> &'static rayon::ThreadPool {
+    use std::sync::OnceLock;
+
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(16);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("rar5-large-{i}"))
+            .build()
+            .expect("build rar5 large-file compression pool")
     })
 }
 
@@ -2767,9 +2791,11 @@ impl RarArchive {
     /// members (non-solid archives, file/bytes entries up to 64 MiB) in
     /// Rayon waves and writes them in the original order. For unencrypted
     /// archives the resulting archive is byte-identical to calling the
-    /// individual `add*` methods sequentially; larger members, directories
-    /// and solid archives fall back to the sequential path. Without the
-    /// feature this is a plain sequential loop over the same `add*` calls.
+    /// individual `add*` methods sequentially; files over
+    /// [`PARALLEL_COMPRESS_MAX_MEMBER`] are compressed in parallel chunks
+    /// (non-solid only), while directories and solid archives fall back to
+    /// the sequential path. Without the feature this is a plain sequential
+    /// loop over the same `add*` calls.
     pub fn add_batch(&mut self, entries: &[BatchEntry<'_>]) -> RarResult<()> {
         #[cfg(feature = "parallel")]
         {
@@ -2847,6 +2873,29 @@ impl RarArchive {
             }
 
             if i < entries.len() {
+                if let BatchEntry::File { path, name, level } = entries[i] {
+                    let size = fs::metadata(path)?.len();
+                    if size > PARALLEL_COMPRESS_MAX_MEMBER {
+                        if let Some(prepared) =
+                            self.prepare_large_file_parallel(path, name, level)?
+                        {
+                            let member_size = prepared.unpacked_size;
+                            if let Some(cb) = self.progress_callback.as_deref_mut() {
+                                cb(0, member_size);
+                            }
+                            self.write_prepared_entry(prepared)?;
+                            if let Some(cb) = self.progress_callback.as_deref_mut() {
+                                cb(member_size, member_size);
+                            }
+                        } else {
+                            // STORE / probe-incompressible fallback: the
+                            // sequential path streams the member directly.
+                            self.add_batch_entry_sequential(&entries[i])?;
+                        }
+                        i += 1;
+                        continue;
+                    }
+                }
                 self.add_batch_entry_sequential(&entries[i])?;
                 i += 1;
             }
@@ -3049,6 +3098,134 @@ impl RarArchive {
             )));
         }
         Self::prepare_data_entry(ctx, &name, &data, level, attrs, mtime, true)
+    }
+
+    /// Prepare a large file (over [`PARALLEL_COMPRESS_MAX_MEMBER`]) by
+    /// compressing its 4 MiB chunks in parallel and concatenating them in
+    /// file order.
+    ///
+    /// Non-solid archives encode each chunk with a fresh encoder window, so
+    /// the packed stream is byte-identical to the sequential `add_file`
+    /// path. Raw input is never buffered whole: each Rayon worker reads and
+    /// compresses one chunk at a time, bounding memory to roughly
+    /// `threads × chunk size + packed output`.
+    ///
+    /// Returns `None` when the member should go through the sequential
+    /// path instead (STORE / sample-probe incompressible, or compression
+    /// would not shrink the payload).
+    #[cfg(feature = "parallel")]
+    fn prepare_large_file_parallel(
+        &self,
+        path: &Path,
+        arcname: Option<&str>,
+        level: u8,
+    ) -> RarResult<Option<PreparedEntry>> {
+        use rayon::prelude::*;
+
+        let meta = fs::metadata(path)?;
+        if !meta.is_file() {
+            return Err(RarError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("not a file: {}", path.display()),
+            )));
+        }
+        let file_size = meta.len();
+        let mtime = meta
+            .modified()
+            .unwrap_or(SystemTime::now())
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
+
+        #[cfg(unix)]
+        let attrs = {
+            use std::os::unix::fs::MetadataExt;
+            meta.mode() as u64
+        };
+        #[cfg(not(unix))]
+        let attrs = 0o100644u64;
+
+        let name = arcname
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().into_owned());
+        let name = name.replace('\\', "/");
+        let name = name.trim_start_matches('/').to_string();
+
+        let method = level_to_method(level);
+        let probe_incompressible = method != COMP_METHOD_STORE
+            && file_size >= (SAMPLE_PROBE_HEAD as u64) * 4
+            && sample_is_incompressible_file(path, file_size, method)?;
+        if method == COMP_METHOD_STORE || probe_incompressible {
+            return Ok(None);
+        }
+
+        let dsl = dict_size_for_data(file_size as usize, method);
+        let (plain_crc, plain_blake) = hash_file(path, file_size, self.blake2)?;
+
+        let chunk_size = crate::codec::DEFAULT_CHUNK_SIZE as u64;
+        let chunk_count = file_size.div_ceil(chunk_size) as usize;
+        let results: Vec<RarResult<(usize, Vec<u8>)>> = large_file_pool().install(|| {
+            (0..chunk_count)
+                .into_par_iter()
+                .map(|idx| {
+                    let _guard = BatchWorkerGuard::new();
+                    let start = idx as u64 * chunk_size;
+                    let len = file_size.saturating_sub(start).min(chunk_size) as usize;
+                    let mut buf = vec![0u8; len];
+                    {
+                        use std::io::{Read, Seek, SeekFrom};
+                        let mut f = fs::File::open(path)?;
+                        f.seek(SeekFrom::Start(start))?;
+                        f.read_exact(&mut buf)?;
+                    }
+                    let is_final = len < chunk_size as usize;
+                    let packed = compression::compress_chunked(
+                        &buf,
+                        method,
+                        dsl,
+                        crate::codec::DEFAULT_CHUNK_SIZE,
+                        None,
+                        is_final,
+                        None,
+                    )
+                    .map_err(RarError::Unsupported)?;
+                    Ok((idx, packed))
+                })
+                .collect()
+        });
+
+        let mut packed = Vec::new();
+        for result in results {
+            let (_, chunk_packed) = result?;
+            packed.extend(chunk_packed);
+            if packed.len() as u64 >= file_size {
+                break;
+            }
+        }
+        if packed.len() as u64 >= file_size {
+            // Compression is a net loss; the sequential path streams STORE.
+            return Ok(None);
+        }
+
+        let (header_crc, extra_data, stored_hash, encr_params) =
+            RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
+        let payload = RarArchive::encrypt_payload_with(
+            self.password.as_deref(),
+            encr_params.as_ref(),
+            &packed,
+        )?;
+        Ok(Some(PreparedEntry {
+            name,
+            unpacked_size: file_size,
+            attrs,
+            mtime,
+            file_crc: header_crc,
+            method,
+            dict_size_log: dsl,
+            extra_data,
+            stored_hash,
+            payload,
+        }))
     }
 
     /// Turn a plaintext payload (raw data or compressed stream) into a

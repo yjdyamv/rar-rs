@@ -1415,6 +1415,44 @@ fn batch_large_member_uses_sequential_path() {
 
 #[cfg(feature = "parallel")]
 #[test]
+fn batch_large_file_matches_sequential_bytes() {
+    let dir = make_temp_dir();
+    let big = dir.path().join("huge.bin");
+    // Over the 64 MiB batch-member cap, so this exercises the large-file
+    // path (chunk-level parallel after the change, sequential before).
+    let big_payload = x86_like(70 * 1024 * 1024);
+    std::fs::write(&big, &big_payload).unwrap();
+
+    let seq_path = dir.path().join("seq.rar");
+    {
+        let mut ar = RarArchive::create(&seq_path).unwrap();
+        ar.add(&big, 3).unwrap();
+        ar.close().unwrap();
+    }
+    let batch_path = dir.path().join("batch.rar");
+    {
+        let mut ar = RarArchive::create(&batch_path).unwrap();
+        ar.add_batch(&[rar5::BatchEntry::File {
+            path: &big,
+            name: None,
+            level: 3,
+        }])
+        .unwrap();
+        ar.close().unwrap();
+    }
+
+    assert_eq!(
+        std::fs::read(&seq_path).unwrap(),
+        std::fs::read(&batch_path).unwrap(),
+        "large-file batch archive differs from sequential archive"
+    );
+
+    let mut ar = RarArchive::open(&batch_path).unwrap();
+    assert_eq!(ar.read("huge.bin").unwrap(), big_payload);
+}
+
+#[cfg(feature = "parallel")]
+#[test]
 fn batch_solid_falls_back_to_sequential() {
     let dir = make_temp_dir();
     let a_path = dir.path().join("a.bin");
