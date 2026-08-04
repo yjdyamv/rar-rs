@@ -71,10 +71,10 @@ fn compression_pool() -> &'static rayon::ThreadPool {
 
 /// Dedicated Rayon pool for large-file chunk compression.
 ///
-/// Large members are CPU-bound and benefit from more cores, while the
-/// member-level wave pool stays at 4 threads to avoid regressions on many
-/// small members. Capped at 16 threads: beyond that, SMT oversubscription
-/// and per-task allocation overhead erode the gain.
+/// Large members are CPU-bound and benefit from every available core,
+/// while the member-level wave pool stays at 4 threads to avoid regressions
+/// on many small members (measurement: 10k x 4 KiB files are ~3x slower at
+/// 16 threads than at 4).
 #[cfg(feature = "parallel")]
 fn large_file_pool() -> &'static rayon::ThreadPool {
     use std::sync::OnceLock;
@@ -83,8 +83,7 @@ fn large_file_pool() -> &'static rayon::ThreadPool {
     POOL.get_or_init(|| {
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
-            .unwrap_or(4)
-            .min(16);
+            .unwrap_or(4);
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("rar5-large-{i}"))
