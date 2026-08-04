@@ -1,6 +1,6 @@
 //! # rar5
 //!
-//! Pure-Rust RAR archive library. Creates, reads, and extracts RAR4/RAR5 archives
+//! Pure-Rust RAR5 archive library. Creates, reads, and extracts RAR5 archives
 //! with native LZSS+Huffman compression — no external binaries required.
 //!
 //! ## Quick Start
@@ -32,7 +32,6 @@ pub mod encryption;
 pub mod error;
 pub mod headers;
 pub mod options;
-pub mod rar4;
 pub mod recovery;
 pub mod write_progress;
 pub use write_progress::{WriteOperation, WriteProgressEvent};

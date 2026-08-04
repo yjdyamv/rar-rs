@@ -229,7 +229,7 @@ pub struct DataChunk {
 
 // ── File Header ────────────────────────────────────────────────────────────
 
-/// File Header (RAR4 block type 0x74, RAR5 block type 0x02).
+/// File Header (RAR5 block type 0x02).
 #[derive(Clone, Debug)]
 pub struct FileHeader {
     pub name: String,

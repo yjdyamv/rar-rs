@@ -40,10 +40,10 @@ fn random_bytes(rng: &mut Rng, max_len: usize) -> Vec<u8> {
     data
 }
 
-/// Former `archive_parse` fuzz target: parse a RAR5/RAR4 archive and read
-/// every member. Exercises signature detection, block scanning, vint
-/// decoding, header parsing, table decoding, decompression, filters and
-/// integrity checks.
+/// Former `archive_parse` fuzz target: parse a RAR5 archive and read every
+/// member. Exercises signature detection, block scanning, vint decoding,
+/// header parsing, table decoding, decompression, filters and integrity
+/// checks.
 #[test]
 fn archive_parse_random_inputs_do_not_panic() {
     let dir = tempfile::tempdir().expect("tempdir");

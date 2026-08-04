@@ -1,4 +1,4 @@
-//! unrar — extract and inspect RAR4/RAR5 archives.
+//! unrar — extract and inspect RAR5 archives.
 
 use std::env;
 use std::process;
@@ -54,7 +54,7 @@ fn main() {
 }
 
 fn usage() {
-    eprintln!("unrar-rs — extract RAR4/RAR5 archives");
+    eprintln!("unrar-rs — extract RAR5 archives");
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  unrar x <archive.rar> [dest/]    Extract with full paths");

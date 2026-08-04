@@ -16,8 +16,6 @@
 /// RAR5 magic number (8 bytes).
 pub const RAR5_SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";
 
-/// RAR4 (legacy) signature for detection.
-pub const RAR4_SIGNATURE: &[u8; 7] = b"Rar!\x1a\x07\x00";
 
 // ── Block Types ────────────────────────────────────────────────────────────
 
