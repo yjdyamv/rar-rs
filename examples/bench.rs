@@ -77,6 +77,7 @@ fn bench(name: &str, data: &[u8]) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let batch_mode = args.iter().any(|a| a == "batch" || a == "--batch");
+    let small_mode = args.iter().any(|a| a == "small" || a == "--small");
     let extract_mode = args.iter().any(|a| a == "extract" || a == "--extract");
     let size_mb: usize = args.iter().find_map(|a| a.parse().ok()).unwrap_or(8);
     // Extraction compares sequential vs parallel paths; the parallel path
@@ -100,10 +101,71 @@ fn main() {
         bench_batch("text (8 members)", &t);
         bench_batch("x86 (8 members)", &x);
     }
+    if small_mode {
+        bench_many("text (512 x 4 KiB)", &t, 512);
+        bench_many("x86 (256 x 32 KiB)", &x, 256);
+    }
     if extract_mode {
         bench_extract("text (8 members)", &t);
         bench_extract("x86 (8 members)", &x);
     }
+}
+
+/// Compare a sequential `add_bytes` loop against `add_batch` for many
+/// small members (the VS Code extension's typical workload).
+fn bench_many(name: &str, data: &[u8], member_count: usize) {
+    let dir = std::env::temp_dir().join("rar5-bench-many");
+    std::fs::create_dir_all(&dir).unwrap();
+    let member_size = data.len() / member_count;
+    let members: Vec<&[u8]> = data.chunks(member_size).collect();
+    let names: Vec<String> = (0..members.len()).map(|i| format!("m{i}.bin")).collect();
+    println!(
+        "== {name}: {} members x {member_size} bytes ==",
+        members.len()
+    );
+
+    let seq = dir.join("seq.rar");
+    let t0 = std::time::Instant::now();
+    {
+        let mut ar = rar5::RarArchive::create(&seq).unwrap();
+        for (i, member) in members.iter().enumerate() {
+            ar.add_bytes(&names[i], member, 3).unwrap();
+        }
+        ar.close().unwrap();
+    }
+    let seq_elapsed = t0.elapsed();
+    let _ = std::fs::remove_file(&seq);
+
+    let batch = dir.join("batch.rar");
+    let t1 = std::time::Instant::now();
+    {
+        let mut ar = rar5::RarArchive::create(&batch).unwrap();
+        let entries: Vec<rar5::BatchEntry<'_>> = members
+            .iter()
+            .enumerate()
+            .map(|(i, member)| rar5::BatchEntry::Bytes {
+                name: &names[i],
+                data: member,
+                level: 3,
+            })
+            .collect();
+        ar.add_batch(&entries).unwrap();
+        ar.close().unwrap();
+    }
+    let batch_elapsed = t1.elapsed();
+    let _ = std::fs::remove_file(&batch);
+
+    let mb = data.len() as f64 / 1048576.0;
+    println!(
+        "  seq   {:>6} ms  {:>7.1} MiB/s",
+        seq_elapsed.as_millis(),
+        mb / seq_elapsed.as_secs_f64()
+    );
+    println!(
+        "  batch {:>6} ms  {:>7.1} MiB/s",
+        batch_elapsed.as_millis(),
+        mb / batch_elapsed.as_secs_f64()
+    );
 }
 
 /// Compare a sequential `add_bytes` loop against `add_batch` for the same

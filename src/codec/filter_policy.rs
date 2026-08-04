@@ -111,12 +111,26 @@ pub fn encode_member_with_policy(
         // Encode every candidate in parallel; results are replayed in the
         // original candidate order so the winning packed stream (and any
         // tie-break) is identical to the sequential scan.
-        let results: Vec<Result<Vec<u8>, String>> = deduped
-            .par_iter()
-            .map(|spec| {
-                encode_with_filters(data, method, dict_size_log, std::slice::from_ref(spec))
-            })
-            .collect();
+        // Batch-compression workers already parallelize across members;
+        // small members probe candidates sequentially to avoid
+        // oversubscribing the pool, while large members keep the nested
+        // scan (their per-candidate work is long enough to amortize it).
+        let results: Vec<Result<Vec<u8>, String>> =
+            if crate::archive::in_batch_worker() && data.len() < 1024 * 1024 {
+                deduped
+                    .iter()
+                    .map(|spec| {
+                        encode_with_filters(data, method, dict_size_log, std::slice::from_ref(spec))
+                    })
+                    .collect()
+            } else {
+                deduped
+                    .par_iter()
+                    .map(|spec| {
+                        encode_with_filters(data, method, dict_size_log, std::slice::from_ref(spec))
+                    })
+                    .collect()
+            };
         for packed in results {
             let packed = packed?;
             if packed.len() < best.len() {

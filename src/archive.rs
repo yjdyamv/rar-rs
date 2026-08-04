@@ -45,6 +45,62 @@ const PARALLEL_COMPRESS_MAX_MEMBER: u64 = 64 * 1024 * 1024;
 #[cfg(feature = "parallel")]
 const PARALLEL_COMPRESS_WAVE_BUDGET: u64 = 256 * 1024 * 1024;
 
+/// Dedicated Rayon pool for batch compression.
+///
+/// The global pool (16 threads on this class of machine) makes many small
+/// members *slower*: per-task allocation contention and SMT scheduling
+/// overhead dominate tiny jobs. A small dedicated pool keeps the parallel
+/// win for medium/large members without the small-member regression.
+#[cfg(feature = "parallel")]
+fn compression_pool() -> &'static rayon::ThreadPool {
+    use std::sync::OnceLock;
+
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(4);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("rar5-compress-{i}"))
+            .build()
+            .expect("build rar5 compression pool")
+    })
+}
+
+// Set while a Rayon worker is preparing batch members. Nested parallelism
+// (filter candidate probing, BLAKE2sp leaves) is disabled for small members
+// on these threads: workers already parallelize across members, and nested
+// tasks oversubscribe the pool.
+#[cfg(feature = "parallel")]
+thread_local! {
+    static IN_BATCH_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(feature = "parallel")]
+pub(crate) fn in_batch_worker() -> bool {
+    IN_BATCH_WORKER.with(|flag| flag.get())
+}
+
+#[cfg(feature = "parallel")]
+struct BatchWorkerGuard;
+
+#[cfg(feature = "parallel")]
+impl BatchWorkerGuard {
+    fn new() -> Self {
+        IN_BATCH_WORKER.with(|flag| flag.set(true));
+        BatchWorkerGuard
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl Drop for BatchWorkerGuard {
+    fn drop(&mut self) {
+        IN_BATCH_WORKER.with(|flag| flag.set(false));
+    }
+}
+
 /// A single entry in the archive (public API).
 #[derive(Clone, Debug)]
 pub struct ArchiveEntry {
@@ -2910,27 +2966,31 @@ impl RarArchive {
             blake2: self.blake2,
             filter_policy: self.filter_policy,
         };
-        let results: Vec<RarResult<(usize, PreparedEntry)>> = wave
-            .par_iter()
-            .map(|&(idx, entry)| {
-                let prepared = match entry {
-                    BatchEntry::Bytes { name, data, level } => {
-                        let mtime = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as u32;
-                        Self::prepare_data_entry(&ctx, name, data, level, 0o100644, mtime, false)
-                    }
-                    BatchEntry::File { path, name, level } => {
-                        Self::prepare_file_entry(&ctx, path, name, level)
-                    }
-                    BatchEntry::Directory { .. } => {
-                        unreachable!("directories never enter a compression wave")
-                    }
-                };
-                prepared.map(|p| (idx, p))
-            })
-            .collect();
+        let results: Vec<RarResult<(usize, PreparedEntry)>> = compression_pool().install(|| {
+            wave.par_iter()
+                .map(|&(idx, entry)| {
+                    let _guard = BatchWorkerGuard::new();
+                    let prepared = match entry {
+                        BatchEntry::Bytes { name, data, level } => {
+                            let mtime = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as u32;
+                            Self::prepare_data_entry(
+                                &ctx, name, data, level, 0o100644, mtime, false,
+                            )
+                        }
+                        BatchEntry::File { path, name, level } => {
+                            Self::prepare_file_entry(&ctx, path, name, level)
+                        }
+                        BatchEntry::Directory { .. } => {
+                            unreachable!("directories never enter a compression wave")
+                        }
+                    };
+                    prepared.map(|p| (idx, p))
+                })
+                .collect()
+        });
 
         let mut out = Vec::with_capacity(results.len());
         for result in results {

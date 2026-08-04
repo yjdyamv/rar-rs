@@ -222,38 +222,47 @@ impl Hasher {
 pub(crate) fn hash(input: &[u8]) -> [u8; OUT_BYTES] {
     #[cfg(feature = "parallel")]
     {
-        use rayon::prelude::*;
+        if crate::archive::in_batch_worker() {
+            // Batch workers already parallelize across members; hash
+            // sequentially there to avoid nested pool oversubscription.
+            let mut hasher = Hasher::new();
+            hasher.update(input);
+            hasher.finalize()
+        } else {
+            use rayon::prelude::*;
 
-        // Each leaf owns every 512-byte group's `leaf_index`-th block and
-        // the matching slice of the final partial group, so the result is
-        // identical to the streaming Hasher below.
-        let group_bytes = BLOCK_BYTES * PARALLELISM;
-        let full_groups = input.len() / group_bytes;
-        let full_end = full_groups * group_bytes;
-        let leaf_digests: Vec<[u8; OUT_BYTES]> = (0..PARALLELISM)
-            .into_par_iter()
-            .map(|leaf_index| {
-                let mut leaf = Blake2s::new(leaf_index as u64, 0, leaf_index == PARALLELISM - 1);
-                let start = leaf_index * BLOCK_BYTES;
-                if full_end > 0 {
-                    for group in input[..full_end].chunks_exact(group_bytes) {
-                        leaf.update(&group[start..start + BLOCK_BYTES]);
+            // Each leaf owns every 512-byte group's `leaf_index`-th block and
+            // the matching slice of the final partial group, so the result is
+            // identical to the streaming Hasher below.
+            let group_bytes = BLOCK_BYTES * PARALLELISM;
+            let full_groups = input.len() / group_bytes;
+            let full_end = full_groups * group_bytes;
+            let leaf_digests: Vec<[u8; OUT_BYTES]> = (0..PARALLELISM)
+                .into_par_iter()
+                .map(|leaf_index| {
+                    let mut leaf =
+                        Blake2s::new(leaf_index as u64, 0, leaf_index == PARALLELISM - 1);
+                    let start = leaf_index * BLOCK_BYTES;
+                    if full_end > 0 {
+                        for group in input[..full_end].chunks_exact(group_bytes) {
+                            leaf.update(&group[start..start + BLOCK_BYTES]);
+                        }
                     }
-                }
-                let tail_start = full_end + start;
-                if tail_start < input.len() {
-                    let tail_end = (tail_start + BLOCK_BYTES).min(input.len());
-                    leaf.update(&input[tail_start..tail_end]);
-                }
-                leaf.finalize()
-            })
-            .collect();
+                    let tail_start = full_end + start;
+                    if tail_start < input.len() {
+                        let tail_end = (tail_start + BLOCK_BYTES).min(input.len());
+                        leaf.update(&input[tail_start..tail_end]);
+                    }
+                    leaf.finalize()
+                })
+                .collect();
 
-        let mut root = Blake2s::new(0, 1, true);
-        for digest in leaf_digests {
-            root.update(&digest);
+            let mut root = Blake2s::new(0, 1, true);
+            for digest in leaf_digests {
+                root.update(&digest);
+            }
+            root.finalize()
         }
-        root.finalize()
     }
     #[cfg(not(feature = "parallel"))]
     {
