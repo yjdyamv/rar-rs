@@ -53,15 +53,41 @@ const PARALLEL_COMPRESS_WAVE_BUDGET: u64 = 256 * 1024 * 1024;
 /// fewer on low-core machines) keeps the parallel win for medium/large
 /// members without the small-member regression.
 #[cfg(feature = "parallel")]
+fn pool_threads(default: usize) -> usize {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(default)
+    }
+    // WASM cannot query the host CPU count (WASI reports 1 core), so follow
+    // the emnapi worker-pool sizing and let the host override explicitly.
+    // Precedence: SA_RAR5_WASM_WORKERS > NAPI_RS_ASYNC_WORK_POOL_SIZE >
+    // UV_THREADPOOL_SIZE > `default`. The extension sets SA_RAR5_WASM_WORKERS
+    // from Node's os.availableParallelism() so the encoder uses every core.
+    #[cfg(target_family = "wasm")]
+    {
+        let from_env = |key: &str| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+        };
+        from_env("SA_RAR5_WASM_WORKERS")
+            .or_else(|| from_env("NAPI_RS_ASYNC_WORK_POOL_SIZE"))
+            .or_else(|| from_env("UV_THREADPOOL_SIZE"))
+            .unwrap_or(default)
+            .max(1)
+    }
+}
+
+/// Dedicated Rayon pool for batch compression.
+#[cfg(feature = "parallel")]
 fn compression_pool() -> &'static rayon::ThreadPool {
     use std::sync::OnceLock;
 
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .min(4);
+        let threads = pool_threads(4).min(4);
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("rar5-compress-{i}"))
@@ -82,9 +108,7 @@ fn large_file_pool() -> &'static rayon::ThreadPool {
 
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
+        let threads = pool_threads(4);
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("rar5-large-{i}"))
