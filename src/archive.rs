@@ -45,6 +45,22 @@ const PARALLEL_COMPRESS_MAX_MEMBER: u64 = 64 * 1024 * 1024;
 #[cfg(feature = "parallel")]
 const PARALLEL_COMPRESS_WAVE_BUDGET: u64 = 256 * 1024 * 1024;
 
+/// Compression thread count set with [`set_compression_threads`]
+/// (like `rar -mt`); 0 = automatic sizing.
+static COMPRESSION_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Set the compression thread count used by the `parallel` feature
+/// (like `rar -mt<N>`). `0` restores automatic sizing.
+pub fn set_compression_threads(threads: usize) {
+    COMPRESSION_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(feature = "parallel")]
+fn configured_threads() -> Option<usize> {
+    let n = COMPRESSION_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+    (n > 0).then_some(n)
+}
+
 /// Dedicated Rayon pool for batch compression.
 ///
 /// The global pool (16 threads on this class of machine) makes many small
@@ -87,7 +103,7 @@ fn compression_pool() -> &'static rayon::ThreadPool {
 
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        let threads = pool_threads(4).min(4);
+        let threads = configured_threads().unwrap_or_else(|| pool_threads(4).min(4));
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("rar5-compress-{i}"))
@@ -108,7 +124,7 @@ fn large_file_pool() -> &'static rayon::ThreadPool {
 
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        let threads = pool_threads(4);
+        let threads = configured_threads().unwrap_or_else(|| pool_threads(4));
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("rar5-large-{i}"))

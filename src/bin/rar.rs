@@ -54,7 +54,8 @@ fn usage() {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  rar a [-m0..-m5] [-p<password>] [-v<size>] [-s] [-htb] [-qo] [-hp]");
-    eprintln!("        [-rrN] [-rvN] <archive.rar> <files...>");
+    eprintln!("        [-rrN] [-rvN] [-mt<N>] [-ep] [-ep1] [-ap<path>]");
+    eprintln!("        [-x<mask>] [-n<mask>] <archive.rar> <files...>");
     eprintln!("  rar u [-p<password>] <archive.rar> <files...>  Update: add missing files,");
     eprintln!("                                                  replace newer ones");
     eprintln!("  rar f [-p<password>] <archive.rar> <files...>  Freshen: update existing");
@@ -112,10 +113,23 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
     let mut recovery_percent: Option<u8> = None;
     let mut recovery_volumes_percent: Option<u8> = None;
     let mut recovery_volume_count: Option<u32> = None;
+    let mut basename_only = false;
+    let mut strip_base = false;
+    let mut path_prefix: Option<String> = None;
+    let mut exclude_masks: Vec<String> = Vec::new();
+    let mut include_masks: Vec<String> = Vec::new();
     let mut positional = Vec::new();
 
     for arg in args {
-        if let Some(rest) = arg.strip_prefix("-m") {
+        if let Some(rest) = arg.strip_prefix("-mt") {
+            let threads = rest
+                .parse::<usize>()
+                .map_err(|_| format!("invalid thread count: {arg}"))?;
+            if threads == 0 {
+                return Err(format!("invalid thread count: {arg}"));
+            }
+            rar5::set_compression_threads(threads);
+        } else if let Some(rest) = arg.strip_prefix("-m") {
             level = rest
                 .parse::<u8>()
                 .map_err(|_| format!("invalid compression level: {arg}"))?;
@@ -156,6 +170,16 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
                         .map_err(|_| format!("invalid recovery volume count: {arg}"))?,
                 );
             }
+        } else if arg == "-ep" {
+            basename_only = true;
+        } else if arg == "-ep1" {
+            strip_base = true;
+        } else if let Some(p) = arg.strip_prefix("-ap") {
+            path_prefix = Some(p.to_string());
+        } else if let Some(p) = arg.strip_prefix("-x") {
+            exclude_masks.push(p.to_string());
+        } else if let Some(p) = arg.strip_prefix("-n") {
+            include_masks.push(p.to_string());
         } else {
             positional.push(arg.as_str());
         }
@@ -201,8 +225,16 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("create: {e}"))?
     };
 
+    let policy = NamePolicy {
+        path_prefix,
+        basename_only,
+        strip_base,
+        include_masks,
+        exclude_masks,
+    };
+    let mut added: std::collections::HashSet<String> = std::collections::HashSet::new();
     for file in files {
-        rar.add(file, level)
+        add_with_policy(&mut rar, file, level, &policy, &mut added)
             .map_err(|e| format!("add {file}: {e}"))?;
     }
 
@@ -287,11 +319,7 @@ fn cmd_update(args: &[String]) -> Result<(), String> {
     let mut to_add = Vec::new();
     for file in files {
         let path = std::path::Path::new(file);
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .ok_or_else(|| format!("not a file: {file}"))?
-            .replace('\\', "/");
+        let name = arg_to_name(file);
         if let Some(entry) = rar.get_entry(&name) {
             let src_mtime = std::fs::metadata(path)
                 .and_then(|m| m.modified())
@@ -340,7 +368,9 @@ fn cmd_update(args: &[String]) -> Result<(), String> {
         }
     };
     for file in &to_add {
-        rar.add(file, 3).map_err(|e| format!("add {file}: {e}"))?;
+        let name = arg_to_name(file);
+        rar.add_as(file, &name, 3)
+            .map_err(|e| format!("add {file}: {e}"))?;
     }
     rar.close().map_err(|e| format!("close: {e}"))?;
     println!("Updated {archive_path} ({} file(s))", to_add.len());
@@ -423,11 +453,7 @@ fn cmd_freshen(args: &[String]) -> Result<(), String> {
     let mut to_add = Vec::new();
     for file in files {
         let path = std::path::Path::new(file);
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .ok_or_else(|| format!("not a file: {file}"))?
-            .replace('\\', "/");
+        let name = arg_to_name(file);
         if let Some(entry) = rar.get_entry(&name) {
             let src_mtime = std::fs::metadata(path)
                 .and_then(|m| m.modified())
@@ -474,7 +500,9 @@ fn cmd_freshen(args: &[String]) -> Result<(), String> {
         }
     };
     for file in &to_add {
-        rar.add(file, 3).map_err(|e| format!("add {file}: {e}"))?;
+        let name = arg_to_name(file);
+        rar.add_as(file, &name, 3)
+            .map_err(|e| format!("add {file}: {e}"))?;
     }
     rar.close().map_err(|e| format!("close: {e}"))?;
     println!("Freshened {archive_path} ({} file(s))", to_add.len());
@@ -520,7 +548,9 @@ fn cmd_move(args: &[String]) -> Result<(), String> {
         }
     };
     for file in files {
-        rar.add(file, 3).map_err(|e| format!("add {file}: {e}"))?;
+        let name = arg_to_name(file);
+        rar.add_as(file, &name, 3)
+            .map_err(|e| format!("add {file}: {e}"))?;
     }
     rar.close().map_err(|e| format!("close: {e}"))?;
     for file in files {
@@ -941,6 +971,238 @@ fn split_password(args: &[String]) -> (Option<String>, Vec<&str>) {
         }
     }
     (password, positional)
+}
+
+/// Name and filter policy for the `a` command (`-ep`, `-ep1`, `-ap`,
+/// `-x`, `-n`).
+struct NamePolicy {
+    path_prefix: Option<String>,
+    basename_only: bool,
+    strip_base: bool,
+    include_masks: Vec<String>,
+    exclude_masks: Vec<String>,
+}
+
+impl NamePolicy {
+    /// Whether a file with the relative archive name should be added
+    /// (masks match the relative name, like `rar -x`/`-n`).
+    fn file_kept(&self, rel: &str) -> bool {
+        let included =
+            self.include_masks.is_empty() || self.include_masks.iter().any(|m| mask_match(m, rel));
+        let excluded = self.exclude_masks.iter().any(|m| mask_match(m, rel));
+        included && !excluded
+    }
+
+    /// Whether a directory entry should be written (dirs are skipped with
+    /// `-ep` and when include masks are present, like `rar -n`).
+    fn dir_entry_kept(&self, rel: &str) -> bool {
+        !self.basename_only
+            && self.include_masks.is_empty()
+            && !self.exclude_masks.iter().any(|m| mask_match(m, rel))
+    }
+
+    /// Whether the whole directory subtree should be skipped.
+    fn dir_subtree_skipped(&self, rel: &str) -> bool {
+        self.exclude_masks.iter().any(|m| mask_match(m, rel))
+    }
+
+    /// The stored archive name for a member with the relative name `rel`,
+    /// applying `-ep`, `-ep1` and `-ap` in that order.
+    fn stored_name(&self, rel: &str) -> String {
+        let mut name = rel.to_string();
+        if self.strip_base
+            && let Some((_, rest)) = name.split_once('/')
+            && !rest.is_empty()
+        {
+            name = rest.to_string();
+        }
+        if self.basename_only {
+            name = name.rsplit('/').next().unwrap_or(&name).to_string();
+        }
+        match &self.path_prefix {
+            Some(prefix) => format!("{prefix}/{name}"),
+            None => name,
+        }
+    }
+}
+
+/// Normalize a path argument into an archive name: relative paths stay as
+/// given, absolute paths drop the leading slash (like `rar`).
+fn arg_to_name(arg: &str) -> String {
+    arg.trim_start_matches('/')
+        .trim_end_matches('/')
+        .replace('\\', "/")
+}
+
+fn has_wildcards(arg: &str) -> bool {
+    arg.contains('*') || arg.contains('?')
+}
+
+/// Add a file or directory tree honoring the name/filter policy.
+fn add_with_policy(
+    rar: &mut rar5::RarArchive,
+    arg: &str,
+    level: u8,
+    policy: &NamePolicy,
+    added: &mut std::collections::HashSet<String>,
+) -> Result<(), String> {
+    if has_wildcards(arg) {
+        return add_wildcard_arg(rar, arg, level, policy, added);
+    }
+    let path = std::path::Path::new(arg);
+    if !path.exists() {
+        return Err(format!("path not found: {arg}"));
+    }
+    if path.is_file() {
+        // Relative path names, matching the official `rar a`; `-ep1`
+        // strips the parent directories (like the official tool).
+        let rel = arg_to_name(arg);
+        let name = if policy.basename_only || policy.strip_base {
+            let basename = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+            match &policy.path_prefix {
+                Some(prefix) => format!("{prefix}/{basename}"),
+                None => basename,
+            }
+        } else {
+            policy.stored_name(&rel)
+        };
+        if policy.file_kept(&rel) && added.insert(name.clone()) {
+            rar.add_as(path, &name, level)
+                .map_err(|e| format!("add {arg}: {e}"))?;
+        }
+        return Ok(());
+    }
+    // `-ep1` is ignored for plain directory arguments (the official tool
+    // applies it to wildcard paths only).
+    let plain = NamePolicy {
+        path_prefix: policy.path_prefix.clone(),
+        basename_only: policy.basename_only,
+        strip_base: false,
+        include_masks: policy.include_masks.clone(),
+        exclude_masks: policy.exclude_masks.clone(),
+    };
+    let rel = arg_to_name(arg);
+    if plain.dir_subtree_skipped(&rel) {
+        return Ok(());
+    }
+    if plain.dir_entry_kept(&rel) {
+        rar.add_directory_only(path, &plain.stored_name(&rel))
+            .map_err(|e| format!("add {arg}: {e}"))?;
+    }
+    walk_directory(rar, path, &rel, level, &plain, added)
+}
+
+/// Expand a wildcard argument (`sub/*.txt`, like the official `rar`, which
+/// performs its own pattern expansion). `-ep1` drops the pattern's base
+/// directory from the stored names.
+fn add_wildcard_arg(
+    rar: &mut rar5::RarArchive,
+    pattern: &str,
+    level: u8,
+    policy: &NamePolicy,
+    added: &mut std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let wc = pattern.find(['*', '?']).unwrap();
+    let prefix = &pattern[..wc];
+    let base_dir = match prefix.rfind('/') {
+        Some(i) => &prefix[..i],
+        None => ".",
+    };
+    if base_dir.is_empty() {
+        return Ok(());
+    }
+    let base_path = std::path::Path::new(base_dir);
+    if !base_path.is_dir() {
+        return Ok(());
+    }
+    let rel_base = arg_to_name(base_dir);
+    let mut children: Vec<_> = std::fs::read_dir(base_path)
+        .map_err(|e| format!("read dir {}: {e}", base_path.display()))?
+        .filter_map(|e| e.ok())
+        .collect();
+    children.sort_by_key(|e| e.file_name());
+    for child in children {
+        let rel = if rel_base.is_empty() {
+            child.file_name().to_string_lossy().into_owned()
+        } else {
+            format!("{rel_base}/{}", child.file_name().to_string_lossy())
+        };
+        if !mask_match(pattern, &rel) {
+            continue;
+        }
+        if child.path().is_dir() {
+            if policy.dir_subtree_skipped(&rel) {
+                continue;
+            }
+            if policy.dir_entry_kept(&rel) {
+                rar.add_directory_only(child.path(), &policy.stored_name(&rel))
+                    .map_err(|e| format!("add {rel}: {e}"))?;
+            }
+            walk_directory(rar, &child.path(), &rel, level, policy, added)?;
+        } else if policy.file_kept(&rel) && added.insert(policy.stored_name(&rel)) {
+            rar.add_as(child.path(), &policy.stored_name(&rel), level)
+                .map_err(|e| format!("add {rel}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_directory(
+    rar: &mut rar5::RarArchive,
+    dir: &std::path::Path,
+    rel_dir: &str,
+    level: u8,
+    policy: &NamePolicy,
+    added: &mut std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let mut children: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| format!("read dir {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .collect();
+    children.sort_by_key(|e| e.file_name());
+    for child in children {
+        let rel = format!("{rel_dir}/{}", child.file_name().to_string_lossy());
+        if child.path().is_dir() {
+            if policy.dir_subtree_skipped(&rel) {
+                continue;
+            }
+            if policy.dir_entry_kept(&rel) {
+                rar.add_directory_only(child.path(), &policy.stored_name(&rel))
+                    .map_err(|e| format!("add {rel}: {e}"))?;
+            }
+            walk_directory(rar, &child.path(), &rel, level, policy, added)?;
+        } else if policy.file_kept(&rel) && added.insert(policy.stored_name(&rel)) {
+            rar.add_as(child.path(), &policy.stored_name(&rel), level)
+                .map_err(|e| format!("add {rel}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Wildcard mask match: `*` matches any sequence (including `/`), `?`
+/// matches a single character, everything else is literal; matching is
+/// case-sensitive (like `rar -x`/`-n` on Unix).
+fn mask_match(mask: &str, name: &str) -> bool {
+    let m: Vec<char> = mask.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let mut prev = vec![false; n.len() + 1];
+    prev[0] = true;
+    for mc in &m {
+        let mut cur = vec![false; n.len() + 1];
+        for (i, nc) in n.iter().enumerate() {
+            let take = match mc {
+                '*' => prev[i] || cur[i],
+                '?' => prev[i],
+                c => *nc == *c && prev[i],
+            };
+            cur[i + 1] = take;
+        }
+        if *mc == '*' {
+            cur[0] = prev[0];
+        }
+        prev = cur;
+    }
+    prev[n.len()]
 }
 
 fn cmd_list(args: &[String]) -> Result<(), String> {

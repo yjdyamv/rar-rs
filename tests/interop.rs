@@ -3096,3 +3096,145 @@ fn official_redirection_cross_validation() {
     let link = std::fs::read_link(out2.join("lnk.txt")).unwrap();
     assert_eq!(link, std::path::Path::new("target.txt"));
 }
+
+// ── CLI path switches, filters, thread switch ───────────────────────────────
+
+/// The `rar` CLI binary under test (cargo provides its path to tests).
+const RAR_CLI: &str = env!("CARGO_BIN_EXE_rar");
+
+fn make_tree(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("f1.txt"), b"one").unwrap();
+    std::fs::write(dir.join("f2.tmp"), b"two").unwrap();
+    std::fs::write(dir.join("sub/f3.txt"), b"three").unwrap();
+    std::fs::write(dir.join("sub/f4.bin"), b"four").unwrap();
+}
+
+fn cli_names(archive: &std::path::Path) -> Vec<String> {
+    let rar = rar5::RarArchive::open(archive).unwrap();
+    let mut names: Vec<String> = rar
+        .namelist()
+        .into_iter()
+        .map(|n| n.trim_end_matches('/').to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn cli_path_switches_and_filters() {
+    let dir = make_temp_dir();
+    make_tree(dir.path());
+    let cases: Vec<(Vec<&str>, Vec<&str>)> = vec![
+        // (switches, expected members)
+        (
+            vec![],
+            vec!["f1.txt", "f2.tmp", "sub", "sub/f3.txt", "sub/f4.bin"],
+        ),
+        (vec!["-ep"], vec!["f1.txt", "f2.tmp", "f3.txt", "f4.bin"]),
+        (
+            vec!["-x*.tmp"],
+            vec!["f1.txt", "sub", "sub/f3.txt", "sub/f4.bin"],
+        ),
+        (vec!["-n*.txt"], vec!["f1.txt", "sub/f3.txt"]),
+        (vec!["-xsub/*"], vec!["f1.txt", "f2.tmp", "sub"]),
+        (vec!["-xsub"], vec!["f1.txt", "f2.tmp"]),
+        (
+            vec!["-appre/fix"],
+            vec![
+                "pre/fix/f1.txt",
+                "pre/fix/f2.tmp",
+                "pre/fix/sub",
+                "pre/fix/sub/f3.txt",
+                "pre/fix/sub/f4.bin",
+            ],
+        ),
+        (
+            vec!["-x*.bin"],
+            vec!["f1.txt", "f2.tmp", "sub", "sub/f3.txt"],
+        ),
+    ];
+    for (switches, expected) in cases {
+        let archive = dir.path().join("t.rar");
+        let mut cmd = std::process::Command::new(RAR_CLI);
+        cmd.arg("a").arg(&archive);
+        for sw in &switches {
+            cmd.arg(sw);
+        }
+        cmd.arg("f1.txt").arg("f2.tmp").arg("sub");
+        cmd.current_dir(dir.path());
+        let status = cmd.status().unwrap();
+        assert!(status.success(), "cli failed for {switches:?}");
+        let mut expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        assert_eq!(cli_names(&archive), expected, "switches {switches:?}");
+        std::fs::remove_file(&archive).unwrap();
+    }
+}
+
+#[test]
+fn cli_wildcard_args_and_ep1() {
+    let dir = make_temp_dir();
+    make_tree(dir.path());
+    let archive = dir.path().join("w.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a"])
+        .arg(&archive)
+        .arg("sub/*")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive), ["sub/f3.txt", "sub/f4.bin"]);
+    std::fs::remove_file(&archive).unwrap();
+
+    let archive2 = dir.path().join("w2.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ep1"])
+        .arg(&archive2)
+        .arg("sub/*")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive2), ["f3.txt", "f4.bin"]);
+    std::fs::remove_file(&archive2).unwrap();
+}
+
+/// The switch outputs must be readable by the official tools, and the
+/// thread switch must be accepted (env-gated).
+#[test]
+fn official_validates_cli_switch_archives() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let dir = make_temp_dir();
+    make_tree(dir.path());
+    let archive = dir.path().join("sw.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-mt4", "-x*.tmp", "-appre/fix"])
+        .arg(&archive)
+        .arg("f1.txt")
+        .arg("f2.tmp")
+        .arg("sub")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        cli_names(&archive),
+        [
+            "pre/fix/f1.txt",
+            "pre/fix/sub",
+            "pre/fix/sub/f3.txt",
+            "pre/fix/sub/f4.bin"
+        ]
+    );
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected the filtered archive");
+}
