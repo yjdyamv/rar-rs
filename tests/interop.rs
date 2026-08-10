@@ -2997,3 +2997,102 @@ fn official_sfx_cross_validation() {
         .unwrap();
     assert!(status.success(), "unrar rejected our stub-prefixed archive");
 }
+
+// ── Redirection records (symlinks / hardlinks) ──────────────────────────────
+
+#[test]
+fn symlink_and_hardlink_redirects_extract() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("links.rar");
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        rar.add_bytes("dir/target.txt", b"target content", 0)
+            .unwrap();
+        // Symlink entries: no data, redirect extra record only.
+        rar.add_redirect("dir/lnk.txt", 1, "target.txt").unwrap();
+        // Hardlink entry referencing the data member.
+        rar.add_redirect("dir/hard.txt", 4, "dir/target.txt")
+            .unwrap();
+        rar.close().unwrap();
+    }
+
+    let out = dir.path().join("out");
+    let mut rar = RarArchive::open(&path).unwrap();
+    rar.extract_all(&out).unwrap();
+    assert_eq!(
+        std::fs::read(out.join("dir/target.txt")).unwrap(),
+        b"target content"
+    );
+    #[cfg(unix)]
+    {
+        let target = std::fs::read_link(out.join("dir/lnk.txt")).unwrap();
+        assert_eq!(target, std::path::Path::new("target.txt"));
+        // The hardlink shares the inode of the target.
+        use std::os::unix::fs::MetadataExt;
+        let a = std::fs::metadata(out.join("dir/target.txt")).unwrap();
+        let b = std::fs::metadata(out.join("dir/hard.txt")).unwrap();
+        assert_eq!(a.ino(), b.ino(), "hardlink shares the target inode");
+    }
+}
+
+/// Redirect entries created by rar-rs must be readable by the official
+/// tools, and rar-created symlink archives must extract the same tree
+/// (env-gated).
+#[test]
+fn official_redirection_cross_validation() {
+    let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("target.txt"), b"target content").unwrap();
+    std::os::unix::fs::symlink("target.txt", src.join("lnk.txt")).unwrap();
+
+    // rar -ol stores the link; our extract recreates it.
+    let path = dir.path().join("links.rar");
+    let status = std::process::Command::new(&rar_bin)
+        .args(["a", "-m0", "-ol", "-idq"])
+        .arg(&path)
+        .arg("src/target.txt")
+        .arg("src/lnk.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let out = dir.path().join("out");
+    {
+        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        rar.extract_all(&out).unwrap();
+    }
+    let link = std::fs::read_link(out.join("src/lnk.txt")).unwrap();
+    assert_eq!(link, std::path::Path::new("target.txt"));
+
+    // rar-rs redirect entries must be valid for the official unrar.
+    let ours = dir.path().join("ours.rar");
+    {
+        let mut ar = rar5::RarArchive::create(&ours).unwrap();
+        ar.add_bytes("target.txt", b"target content", 0).unwrap();
+        ar.add_redirect("lnk.txt", 1, "target.txt").unwrap();
+        ar.close().unwrap();
+    }
+    let unrar = std::env::var_os("SA_OFFICIAL_UNRAR").unwrap_or(rar_bin.clone());
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&ours)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected our redirect archive");
+    let out2 = dir.path().join("out2");
+    std::fs::create_dir_all(&out2).unwrap();
+    let status = std::process::Command::new(&unrar)
+        .args(["x", "-ol", "-o+"])
+        .arg(&ours)
+        .arg(&out2)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar failed to extract our redirects");
+    let link = std::fs::read_link(out2.join("lnk.txt")).unwrap();
+    assert_eq!(link, std::path::Path::new("target.txt"));
+}

@@ -30,14 +30,21 @@ pub fn write<W: Write>(w: &mut W, value: u64) -> io::Result<usize> {
 }
 
 /// Decode a vint from an `io::Read`. Returns the decoded value.
+///
+/// The RAR5 format allows vints up to 10 bytes (the final byte may carry
+/// bits beyond bit 63, which are ignored); WinRAR 7.x writes size fields
+/// as non-canonical fixed-width vints, so short values can occupy 9 or 10
+/// bytes.
 pub fn read<R: Read>(r: &mut R) -> io::Result<u64> {
     let mut result: u64 = 0;
     let mut shift: u32 = 0;
-    for _ in 0..8 {
+    for _ in 0..10 {
         let mut buf = [0u8; 1];
         r.read_exact(&mut buf)?;
         let byte = buf[0];
-        result |= ((byte & 0x7F) as u64) << shift;
+        if shift < 64 {
+            result |= ((byte & 0x7F) as u64) << shift;
+        }
         shift += 7;
         if byte & 0x80 == 0 {
             return Ok(result);
@@ -45,7 +52,7 @@ pub fn read<R: Read>(r: &mut R) -> io::Result<u64> {
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        "vint exceeds 8 bytes",
+        "vint exceeds 10 bytes",
     ))
 }
 
@@ -55,7 +62,7 @@ pub fn decode_from_slice(data: &[u8], offset: usize) -> io::Result<(u64, usize)>
     let mut result: u64 = 0;
     let mut shift: u32 = 0;
     let mut pos = offset;
-    for _ in 0..8 {
+    for _ in 0..10 {
         if pos >= data.len() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -64,7 +71,9 @@ pub fn decode_from_slice(data: &[u8], offset: usize) -> io::Result<(u64, usize)>
         }
         let byte = data[pos];
         pos += 1;
-        result |= ((byte & 0x7F) as u64) << shift;
+        if shift < 64 {
+            result |= ((byte & 0x7F) as u64) << shift;
+        }
         shift += 7;
         if byte & 0x80 == 0 {
             return Ok((result, pos - offset));
@@ -72,7 +81,7 @@ pub fn decode_from_slice(data: &[u8], offset: usize) -> io::Result<(u64, usize)>
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        "vint exceeds 8 bytes",
+        "vint exceeds 10 bytes",
     ))
 }
 

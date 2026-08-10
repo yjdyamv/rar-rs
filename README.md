@@ -35,6 +35,8 @@ archives — no external binaries required.
 | Rebuild missing volumes (`rc`)       |   done |
 | Archive comments (`c`/`cw`)          |   done |
 | SFX archives (read + `s`/`s-`)       |   done |
+| Symlinks/hardlinks (redirects)       |   done |
+| RAR7 wide vints / `-si` streams      |   done |
 | Multi-volume member deletion/rename  |   done |
 | Parallel rewrite pipeline            |   done |
 | Quick-open records (`-qo+`)          |   done |

@@ -2296,6 +2296,10 @@ impl RarArchive {
                 fs::create_dir_all(&dest_path)?;
                 continue;
             }
+            if let Some(redir) = parse_redirect_record(&entry.header.extra_data) {
+                self.extract_redirection(dest, &dest_path, &redir)?;
+                continue;
+            }
             if let Some(parent) = dest_path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -2393,6 +2397,12 @@ impl RarArchive {
             return Ok(dest_path);
         }
 
+        // RAR5 redirect records (symlinks, hardlinks, file copies): the
+        // entry carries no data, only the target reference.
+        if let Some(redir) = parse_redirect_record(&entry.header.extra_data) {
+            return self.extract_redirection(dest_dir, &dest_path, &redir);
+        }
+
         if let Some(parent) = dest_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -2430,6 +2440,58 @@ impl RarArchive {
         }
 
         Ok(dest_path)
+    }
+
+    /// Materialize a RAR5 file redirection (symlink, hardlink or file
+    /// copy) at `dest_path`.
+    fn extract_redirection(
+        &self,
+        dest_dir: &Path,
+        dest_path: &Path,
+        redir: &RedirectSpec,
+    ) -> RarResult<PathBuf> {
+        const REDIR_UNIX_SYMLINK: u64 = 0x01;
+        const REDIR_WINDOWS_SYMLINK: u64 = 0x02;
+        const REDIR_WINDOWS_JUNCTION: u64 = 0x03;
+        const REDIR_HARDLINK: u64 = 0x04;
+        const REDIR_FILE_COPY: u64 = 0x05;
+        match redir.redir_type {
+            REDIR_UNIX_SYMLINK | REDIR_WINDOWS_SYMLINK | REDIR_WINDOWS_JUNCTION => {
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(&redir.target, dest_path)?;
+                }
+                #[cfg(not(unix))]
+                {
+                    return Err(RarError::Unsupported(
+                        "symbolic links are not supported on this platform".into(),
+                    ));
+                }
+            }
+            REDIR_HARDLINK | REDIR_FILE_COPY => {
+                let target_path = self.safe_dest_path(dest_dir, &redir.target)?;
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if redir.redir_type == REDIR_HARDLINK {
+                    fs::hard_link(&target_path, dest_path)?;
+                } else {
+                    fs::copy(&target_path, dest_path)?;
+                }
+            }
+            _ => {
+                // Unknown redirection type: fall back to an empty regular
+                // file so the archive remains extractable.
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(dest_path, [])?;
+            }
+        }
+        Ok(dest_path.to_path_buf())
     }
 
     /// Compute the destination path for an entry name, applying the safe
@@ -4743,6 +4805,37 @@ impl RarArchive {
         Ok(())
     }
 
+    /// Add a file redirection entry (symlink, hardlink or file copy) to
+    /// the archive (like `rar a -ol` / `-oh`).
+    ///
+    /// The entry carries no data; `redir_type` is 1 (Unix symlink),
+    /// 2 (Windows symlink), 3 (Windows junction), 4 (hardlink) or
+    /// 5 (file copy) and `target` is the referenced member name.
+    pub fn add_redirect(&mut self, name: &str, redir_type: u64, target: &str) -> RarResult<()> {
+        if self.mode != Mode::Write && self.mode != Mode::Append {
+            return Err(RarError::Format(
+                "add_redirect requires an archive being written".into(),
+            ));
+        }
+        self.reset_solid_chain();
+        let fh = FileHeader {
+            name: name.replace('\\', "/"),
+            unpacked_size: 0,
+            packed_size: 0,
+            crc32_val: Some(0),
+            file_flags: FILE_FLAG_CRC32,
+            extra_data: redirect_extra_bytes(redir_type, target),
+            ..Default::default()
+        };
+        let hdr_bytes = fh.to_bytes();
+        self.write_block_header(&hdr_bytes)?;
+        self.entries.push(ArchiveEntry {
+            header: fh,
+            chunks: Vec::new(),
+        });
+        Ok(())
+    }
+
     /// Add a directory entry only (no recursion).
     ///
     /// Writes the directory header without traversing children. Callers that
@@ -6167,6 +6260,63 @@ fn main_header_locator_fields(meta: &BlockMeta) -> RarResult<(Option<usize>, Opt
         e = rec_start + rec_size as usize;
     }
     Ok((None, None))
+}
+
+/// RAR5 file redirection (EXTRA_FILE_REDIRECT) record: symlink, hardlink
+/// or file copy target reference.
+struct RedirectSpec {
+    redir_type: u64,
+    target: String,
+}
+
+/// Serialize a file redirection (EXTRA_FILE_REDIRECT) extra record.
+fn redirect_extra_bytes(redir_type: u64, target: &str) -> Vec<u8> {
+    let mut record = Vec::new();
+    record.extend(vint::encode(redir_type));
+    record.extend(vint::encode(0u64)); // flags
+    record.extend(vint::encode(target.len() as u64));
+    record.extend_from_slice(target.as_bytes());
+    let mut out = Vec::new();
+    out.extend(vint::encode((1 + record.len()) as u64));
+    out.extend(vint::encode(0x05u64)); // EXTRA_FILE_REDIRECT
+    out.extend(record);
+    out
+}
+
+/// Parse the file redirection record out of an entry's extra area.
+fn parse_redirect_record(extra: &[u8]) -> Option<RedirectSpec> {
+    let mut offset = 0usize;
+    while offset < extra.len() {
+        let (rec_size, n) = vint::decode_from_slice(extra, offset).ok()?;
+        offset += n;
+        // The record size counts the type byte and everything after it.
+        let rec_end = offset.checked_add(rec_size as usize)?;
+        if rec_end > extra.len() {
+            return None;
+        }
+        let (rec_type, tn) = vint::decode_from_slice(extra, offset).ok()?;
+        let mut p = offset + tn;
+        if rec_type == EXTRA_FILE_REDIRECT {
+            let (redir_type, rn) = vint::decode_from_slice(extra, p).ok()?;
+            p += rn;
+            let (flags, fn_len) = vint::decode_from_slice(extra, p).ok()?;
+            p += fn_len;
+            let (name_len, nn) = vint::decode_from_slice(extra, p).ok()?;
+            p += nn;
+            let name_start = p;
+            let name_end = name_start.checked_add(name_len as usize)?;
+            if name_end != rec_end {
+                return None;
+            }
+            let _ = flags;
+            return Some(RedirectSpec {
+                redir_type,
+                target: String::from_utf8_lossy(&extra[name_start..name_end]).into_owned(),
+            });
+        }
+        offset = rec_end;
+    }
+    None
 }
 
 /// Serialize a "CMT" archive comment service block (type 3, name "CMT",
