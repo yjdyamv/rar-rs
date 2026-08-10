@@ -3096,7 +3096,7 @@ impl RarArchive {
         // Write to a temporary volume base and rename over the originals
         // only after every volume succeeded (a failure never destroys the
         // original set).
-        let tmp_base = format!(".{base}.rar5tmp-{}", std::process::id());
+        let tmp_base = format!(".{base}.rar5tmp-{}", temp_suffix());
         let tmp_base_path = parent.join(&tmp_base);
 
         // Write the new volume set. Swapping `self.path` makes
@@ -6689,15 +6689,26 @@ fn sanitize_archive_path(name: &str) -> RarResult<String> {
     Ok(out)
 }
 
+/// Unique suffix for temporary sibling files/volumes. WASI provides no
+/// `std::process::id`, so derive uniqueness from the monotonic counter and
+/// the system clock instead.
+fn temp_suffix() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    format!("{nanos:x}{counter:x}")
+}
+
 /// Build a unique temporary sibling path for atomic extraction.
 fn temp_sibling_path(dest_path: &Path) -> PathBuf {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let file_name = dest_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "entry".to_string());
-    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.rar5tmp-{}-{counter}", std::process::id());
+    let tmp_name = format!(".{file_name}.rar5tmp-{}", temp_suffix());
     dest_path.with_file_name(tmp_name)
 }
 
