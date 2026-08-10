@@ -893,6 +893,7 @@ impl RarArchive {
             &deleted,
             None,
             Some(percent.min(100)),
+            None,
             &src_path,
             &tmp_path,
         );
@@ -2867,7 +2868,7 @@ impl RarArchive {
             // The official `rar` CLI refuses to modify multi-volume
             // archives ("Cannot modify volume"); we re-split the volumes
             // instead (superset).
-            self.rewrite_multivolume(&deleted, chain)?;
+            self.rewrite_multivolume(&deleted, chain, None)?;
         } else {
             let src_path = self.path.clone();
             let tmp_path = temp_sibling_path(&src_path);
@@ -2878,8 +2879,15 @@ impl RarArchive {
             self.header_encryption = false;
             self.archive_encr = None;
 
-            let result =
-                self.rewrite_blocks(&mut reader, &deleted, chain, None, &src_path, &tmp_path);
+            let result = self.rewrite_blocks(
+                &mut reader,
+                &deleted,
+                chain,
+                None,
+                None,
+                &src_path,
+                &tmp_path,
+            );
 
             self.stream = None;
             match result {
@@ -2910,6 +2918,7 @@ impl RarArchive {
         &mut self,
         deleted: &[bool],
         chain: Option<(usize, usize)>,
+        rename_map: Option<&std::collections::HashMap<usize, String>>,
     ) -> RarResult<()> {
         if self.header_encryption {
             return Err(RarError::Unsupported(
@@ -2988,9 +2997,13 @@ impl RarArchive {
                 }
                 continue;
             }
+            let entry_name = rename_map
+                .and_then(|m| m.get(&idx))
+                .cloned()
+                .unwrap_or_else(|| entry.header.name.clone());
             if entry.is_dir() {
                 let fh = FileHeader {
-                    name: entry.header.name.clone(),
+                    name: entry_name.clone(),
                     attributes: entry.header.attributes,
                     mtime: entry.header.mtime,
                     host_os: OS_UNIX,
@@ -3003,9 +3016,10 @@ impl RarArchive {
                 continue;
             }
             if is_chain && entry.header.comp_method != COMP_METHOD_STORE {
-                self.recompress_chain_member_volumes(
+                self.recompress_chain_member_volumes_named(
                     &mut readers,
                     idx,
+                    &entry_name,
                     dec.as_mut().unwrap(),
                     enc.as_mut().unwrap(),
                     &mut enc_active,
@@ -3017,7 +3031,7 @@ impl RarArchive {
             let payload = self.read_packed_volumes(&mut readers, idx)?;
             let hdr = &entry.header;
             self.write_file_entry(
-                &hdr.name,
+                &entry_name,
                 hdr.unpacked_size,
                 &payload,
                 hdr.crc32_val.unwrap_or(0),
@@ -3193,11 +3207,12 @@ impl RarArchive {
     }
 
     /// Decode and recompress one member of the affected solid chain in a
-    /// multi-volume archive.
-    fn recompress_chain_member_volumes(
+    /// multi-volume archive. `name` overrides the entry name (rename).
+    fn recompress_chain_member_volumes_named(
         &mut self,
         readers: &mut VolumeReaders,
         idx: usize,
+        name: &str,
         dec: &mut DecoderState,
         enc: &mut crate::codec::EncoderState,
         enc_active: &mut bool,
@@ -3235,7 +3250,7 @@ impl RarArchive {
             &payload,
         )?;
         self.write_file_entry(
-            &hdr.name,
+            name,
             data.len() as u64,
             &payload,
             header_crc,
@@ -3248,6 +3263,109 @@ impl RarArchive {
             stored_hash,
         )?;
         Ok(())
+    }
+
+    /// Rename members in the archive (like `rar rn`).
+    ///
+    /// Each `(old, new)` pair renames the first member whose name equals
+    /// `old`; renaming a directory also renames the matching prefix of
+    /// every member beneath it. Kept members keep their exact compressed
+    /// payloads — only the file headers are re-emitted (the quick-open
+    /// record is rebuilt and, unlike the official `rar rn`, the recovery
+    /// record is rebuilt so `rar r` can still repair the archive).
+    ///
+    /// Multi-volume archives are re-split like [`Self::delete`] (the
+    /// official `rar rn` patches only the first chunk header in place).
+    ///
+    /// Returns the number of renamed members. Fails with
+    /// [`RarError::Format`] when any source name is not present, and with
+    /// [`RarError::Unsupported`] for locked archives.
+    pub fn rename(&mut self, renames: &[(&str, &str)]) -> RarResult<usize> {
+        if self.mode != Mode::Read {
+            return Err(RarError::Format(
+                "rename requires an archive opened for reading".into(),
+            ));
+        }
+        if self.main_header_is_locked()? {
+            return Err(RarError::Unsupported("archive is locked".into()));
+        }
+
+        // Resolve the pairs sequentially, honoring earlier renames in the
+        // same call and expanding directory renames to their descendants.
+        let mut map: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+        let mut count = 0usize;
+        for (old, new) in renames {
+            let old_norm = old.trim_end_matches('/').to_string();
+            let idx = self
+                .entries
+                .iter()
+                .enumerate()
+                .find(|(i, e)| {
+                    let name = map
+                        .get(i)
+                        .map(|n| n.as_str())
+                        .unwrap_or(e.name())
+                        .trim_end_matches('/');
+                    name == old_norm
+                })
+                .map(|(i, _)| i)
+                .ok_or_else(|| RarError::Format(format!("member not found: {old:?}")))?;
+            let is_dir = self.entries[idx].is_dir();
+            let new_norm = new.trim_end_matches('/').to_string();
+            if is_dir {
+                map.insert(idx, format!("{new_norm}/"));
+                let prefix = format!("{old_norm}/");
+                for (i, e) in self.entries.iter().enumerate() {
+                    if i == idx || map.contains_key(&i) {
+                        continue;
+                    }
+                    if let Some(rest) = e.name().strip_prefix(&prefix) {
+                        map.insert(i, format!("{new_norm}/{rest}"));
+                    }
+                }
+            } else {
+                map.insert(idx, new_norm.clone());
+            }
+            count += 1;
+        }
+
+        if self.volume_paths.len() > 1 {
+            let deleted = vec![false; self.entries.len()];
+            self.rewrite_multivolume(&deleted, None, Some(&map))?;
+        } else {
+            let src_path = self.path.clone();
+            let tmp_path = temp_sibling_path(&src_path);
+            let mut reader = File::open(&src_path)?;
+            self.stream = Some(File::create(&tmp_path)?);
+            self.quick_open_entries.clear();
+            self.header_encryption = false;
+            self.archive_encr = None;
+
+            let deleted = vec![false; self.entries.len()];
+            let result = self.rewrite_blocks(
+                &mut reader,
+                &deleted,
+                None,
+                None,
+                Some(&map),
+                &src_path,
+                &tmp_path,
+            );
+            self.stream = None;
+            match result {
+                Ok(()) => replace_file(&tmp_path, &src_path)?,
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(e);
+                }
+            }
+        }
+
+        self.mode = Mode::Read;
+        self.solid_state = None;
+        self.solid_decoded_through = -1;
+        self.open_read()?;
+        Ok(count)
     }
 
     /// Parse the main archive header and report whether the archive is
@@ -3316,16 +3434,18 @@ impl RarArchive {
     /// affected solid chain is recompressed while the tail is already
     /// being read. Inline recovery records are rebuilt when the original
     /// had one (the percentage is carried over).
+    #[allow(clippy::too_many_arguments)] // mirrors the delete() state machine
     fn rewrite_blocks(
         &mut self,
         reader: &mut File,
         deleted: &[bool],
         chain: Option<(usize, usize)>,
         force_rr: Option<u8>,
+        rename_map: Option<&std::collections::HashMap<usize, String>>,
         src_path: &Path,
         tmp_path: &Path,
     ) -> RarResult<()> {
-        let plan = self.plan_rewrite(reader, deleted, chain, force_rr)?;
+        let plan = self.plan_rewrite(reader, deleted, chain, force_rr, rename_map)?;
         self.execute_rewrite(&plan, src_path, tmp_path)?;
         Ok(())
     }
@@ -3340,6 +3460,7 @@ impl RarArchive {
         deleted: &[bool],
         chain: Option<(usize, usize)>,
         force_rr: Option<u8>,
+        rename_map: Option<&std::collections::HashMap<usize, String>>,
     ) -> RarResult<RewritePlan> {
         // Signature.
         let mut sig = [0u8; 8];
@@ -3437,13 +3558,21 @@ impl RarArchive {
                     } else if deleted[idx] {
                         prev_file_deleted = true;
                     } else {
+                        let header_bytes = match rename_map.and_then(|m| m.get(&idx)) {
+                            Some(new_name) => {
+                                let mut fh = self.entries[idx].header.clone();
+                                fh.name = new_name.clone();
+                                fh.to_bytes()
+                            }
+                            None => meta.header_bytes,
+                        };
                         ops.push(RewriteOp::CopyBlock {
                             qo_header: if capture_qo {
-                                Some(meta.header_bytes.clone())
+                                Some(header_bytes.clone())
                             } else {
                                 None
                             },
-                            header_bytes: meta.header_bytes,
+                            header_bytes,
                             src_data: meta.data_offset,
                             len: meta.raw.data_size,
                         });

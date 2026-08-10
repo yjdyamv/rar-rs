@@ -1583,6 +1583,16 @@ fn file_header_name(body: &[u8]) -> String {
     String::from_utf8_lossy(&body[q..q + name_len as usize]).into_owned()
 }
 
+/// Absolute offset where the data area of the given member starts.
+fn file_data_offset(data: &[u8], name: &str) -> usize {
+    for block in scan_blocks(data) {
+        if block.block_type == 0x02 && file_header_name(&block.body) == name {
+            return block.start + block.header_len + 4;
+        }
+    }
+    panic!("file block {name} not found");
+}
+
 /// Byte span `[start, end)` of the archive block (header + data) holding
 /// the given member name.
 fn file_block_span(data: &[u8], name: &str) -> (usize, usize) {
@@ -2438,4 +2448,226 @@ fn official_tools_validate_modified_archives() {
         .unwrap()
         .to_string();
     assert_eq!(rar.read(&big_name).unwrap(), payload);
+}
+
+// ── Rename ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn rename_preserves_payloads_and_rebuilds_records() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("rn.rar");
+    let a = compressible(41, 60_000);
+    let b = compressible(42, 60_000);
+    {
+        let mut rar = RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                quick_open: true,
+                recovery_percent: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add_bytes("a.bin", &a, 3).unwrap();
+        rar.add_bytes("b.bin", &b, 3).unwrap();
+        rar.close().unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+
+    let mut rar = RarArchive::open(&path).unwrap();
+    let n = rar.rename(&[("a.bin", "renamed.bin")]).unwrap();
+    assert_eq!(n, 1);
+
+    let after = std::fs::read(&path).unwrap();
+    assert_eq!(
+        member_names(&after),
+        ["renamed.bin", "b.bin"],
+        "renamed member listed"
+    );
+    // Payloads byte-identical (the header legitimately changes: the name).
+    let (s0, e0) = file_block_span(&before, "a.bin");
+    let (s1, e1) = file_block_span(&after, "renamed.bin");
+    let d0 = file_data_offset(&before, "a.bin");
+    let d1 = file_data_offset(&after, "renamed.bin");
+    assert_eq!(&before[d0..e0], &after[d1..e1], "payload changed");
+    let _ = (s0, s1);
+    // Quick-open and recovery records rebuilt with valid locators.
+    let qo_pos = service_offset(&after, "QO");
+    let (_, qo, rr) = main_header_locator(&after);
+    assert_eq!(qo.unwrap(), qo_pos as u64 - 8);
+    let rr_pos = service_offset(&after, "RR");
+    assert_eq!(rr.unwrap(), rr_pos as u64 - 8);
+    assert_eq!(qo_cached_names(&after), ["renamed.bin", "b.bin"]);
+
+    let mut rar = RarArchive::open(&path).unwrap();
+    assert_eq!(rar.read("renamed.bin").unwrap(), a);
+    assert_eq!(rar.read("b.bin").unwrap(), b);
+
+    // The rebuilt recovery record must still repair the archive.
+    if let (Some(unrar), Some(rar_bin)) = (
+        std::env::var_os("SA_OFFICIAL_UNRAR"),
+        std::env::var_os("SA_OFFICIAL_RAR"),
+    ) {
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            let data_off = first_file_data_offset(&bytes);
+            for (i, byte) in bytes[data_off + 5..data_off + 13].iter_mut().enumerate() {
+                *byte ^= (i as u8).wrapping_add(0xA5);
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            let status = std::process::Command::new(&rar_bin)
+                .args(["r", "-idq"])
+                .arg(&path)
+                .current_dir(dir.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "official rar could not repair");
+            let fixed = dir.path().join(format!(
+                "fixed.{}",
+                path.file_name().unwrap().to_string_lossy()
+            ));
+            let status = std::process::Command::new(&unrar)
+                .arg("t")
+                .arg(&fixed)
+                .status()
+                .unwrap();
+            assert!(status.success(), "repaired archive fails unrar test");
+        }
+    }
+}
+
+#[test]
+fn rename_directory_renames_descendants() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("rn-dir.rar");
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        rar.add_directory_only(dir.path(), "old").unwrap();
+        rar.add_bytes("old/sub/f.txt", b"hello", 0).unwrap();
+        rar.close().unwrap();
+    }
+    let mut rar = RarArchive::open(&path).unwrap();
+    assert_eq!(rar.namelist(), ["old/", "old/sub/f.txt"]);
+    let n = rar.rename(&[("old", "new")]).unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(
+        rar.namelist(),
+        ["new/", "new/sub/f.txt"],
+        "descendant prefix renamed"
+    );
+    let mut rar = RarArchive::open(&path).unwrap();
+    assert_eq!(rar.read("new/sub/f.txt").unwrap(), b"hello");
+}
+
+#[test]
+fn rename_multivolume_keeps_content() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("rn-mv.rar");
+    let payload: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+    {
+        let mut rar = rar5::RarArchive::create_multivolume(&path, 100_000).unwrap();
+        rar.add_bytes("big.bin", &payload, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let volumes = rar5::discover_volumes(&path);
+    assert!(volumes.len() > 1, "precondition: multi-volume set");
+    let mut rar = RarArchive::open(&volumes[0]).unwrap();
+    let n = rar.rename(&[("big.bin", "renamed.bin")]).unwrap();
+    assert_eq!(n, 1);
+    let volumes = rar5::discover_volumes(&path);
+    let mut rar = RarArchive::open(&volumes[0]).unwrap();
+    assert_eq!(rar.namelist(), ["renamed.bin"]);
+    assert_eq!(rar.read("renamed.bin").unwrap(), payload);
+}
+
+#[test]
+fn rename_rejects_missing_and_locked() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("rn-err.rar");
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        rar.add_bytes("a.bin", b"x", 0).unwrap();
+        rar.close().unwrap();
+    }
+    let mut rar = RarArchive::open(&path).unwrap();
+    match rar.rename(&[("nope", "x")]) {
+        Err(rar5::RarError::Format(msg)) => assert!(msg.contains("member not found")),
+        other => panic!("expected Format(member not found), got {other:?}"),
+    }
+    {
+        let mut rar = RarArchive::open(&path).unwrap();
+        rar.lock().unwrap();
+    }
+    let mut rar = RarArchive::open(&path).unwrap();
+    match rar.rename(&[("a.bin", "b.bin")]) {
+        Err(rar5::RarError::Unsupported(msg)) => assert!(msg.contains("locked")),
+        other => panic!("expected Unsupported(locked), got {other:?}"),
+    }
+}
+
+/// Official `rar rn` on rar-rs archives must stay readable, and rar-rs
+/// must read archives renamed by the official tool.
+#[test]
+fn official_rename_cross_validation() {
+    let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let a: Vec<u8> = b"rename interop payload ".repeat(2_000);
+    let b: Vec<u8> = b"second member ".repeat(1_500);
+    std::fs::write(src.join("a.bin"), &a).unwrap();
+    std::fs::write(src.join("b.bin"), &b).unwrap();
+
+    // Official rar renames our archive.
+    let path = dir.path().join("rn.rar");
+    {
+        let mut rar = rar5::RarArchive::create(&path).unwrap();
+        rar.add(src.join("a.bin"), 3).unwrap();
+        rar.add(src.join("b.bin"), 3).unwrap();
+        rar.close().unwrap();
+    }
+    let status = std::process::Command::new(&rar_bin)
+        .args(["rn", "-idq"])
+        .arg(&path)
+        .arg("a.bin")
+        .arg("z.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "official rar rn failed");
+    let mut rar = RarArchive::open(&path).unwrap();
+    assert_eq!(rar.namelist(), ["z.bin", "b.bin"]);
+    assert_eq!(rar.read("z.bin").unwrap(), a);
+
+    // Our rename on an official archive.
+    let path2 = dir.path().join("rn2.rar");
+    let status = std::process::Command::new(&rar_bin)
+        .args(["a", "-m3", "-idq"])
+        .arg(&path2)
+        .arg(src.join("a.bin"))
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = RarArchive::open(&path2).unwrap();
+    let a_name = rar
+        .namelist()
+        .iter()
+        .find(|n| n.ends_with("a.bin"))
+        .unwrap()
+        .to_string();
+    rar.rename(&[(&a_name, "w.bin")]).unwrap();
+    let unrar = std::env::var_os("SA_OFFICIAL_UNRAR").unwrap_or(rar_bin.clone());
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&path2)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected our renamed archive");
+    let mut rar = RarArchive::open(&path2).unwrap();
+    assert_eq!(rar.namelist(), ["w.bin"]);
+    assert_eq!(rar.read("w.bin").unwrap(), a);
 }

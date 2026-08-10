@@ -14,10 +14,15 @@ fn main() {
     let result = match args[1].as_str() {
         "a" | "create" => cmd_create(&args[2..]),
         "u" | "update" => cmd_update(&args[2..]),
+        "f" | "freshen" => cmd_freshen(&args[2..]),
+        "m" | "move" => cmd_move(&args[2..]),
         "d" | "delete" => cmd_delete(&args[2..]),
+        "rn" | "rename" => cmd_rename(&args[2..]),
+        rest if rest.len() > 1 && rest.starts_with('i') && args.len() >= 2 => cmd_find(&args[1..]),
         "k" | "lock" => cmd_lock(&args[2..]),
         "rr" => cmd_rr(&args[2..]),
         "l" | "list" => cmd_list(&args[2..]),
+        "v" => cmd_verbose_list(&args[2..]),
         "i" | "info" => cmd_info(&args[2..]),
         "-h" | "--help" | "help" => {
             usage();
@@ -40,14 +45,22 @@ fn usage() {
     eprintln!("rar-rs — create and modify RAR5 archives");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  rar a [-m0..-m5] [-p<password>] [-v<size>] <archive.rar> <files...>");
+    eprintln!("  rar a [-m0..-m5] [-p<password>] [-v<size>] [-s] [-htb] [-qo] [-hp]");
+    eprintln!("        [-rrN] [-rvN] <archive.rar> <files...>");
     eprintln!("  rar u [-p<password>] <archive.rar> <files...>  Update: add missing files,");
     eprintln!("                                                  replace newer ones");
+    eprintln!("  rar f [-p<password>] <archive.rar> <files...>  Freshen: update existing");
+    eprintln!("                                                  members only");
+    eprintln!("  rar m [-p<password>] <archive.rar> <files...>  Move: add, then delete the");
+    eprintln!("                                                  source files");
     eprintln!("  rar d [-p<password>] <archive.rar> <names...>  Delete members without");
     eprintln!("                                                  rebuilding the archive");
+    eprintln!("  rar rn <archive.rar> <old1> <new1> ...          Rename archived members");
     eprintln!("  rar k [-p<password>] <archive.rar>              Lock the archive");
     eprintln!("  rar rr [-p<password>] <archive.rar> [percent]   Add a recovery record");
+    eprintln!("  rar i<string> <archive.rar>                     Find string in members");
     eprintln!("  rar l [-p<password>] <archive.rar>              List archive contents");
+    eprintln!("  rar v [-p<password>] <archive.rar>              Verbose list");
     eprintln!("  rar i [-p<password>] <archive.rar>              Show archive info");
     eprintln!();
     eprintln!("Options:");
@@ -73,6 +86,13 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
     let mut level: u8 = 3;
     let mut password: Option<String> = None;
     let mut volume_size: Option<u64> = None;
+    let mut solid = false;
+    let mut blake2 = false;
+    let mut quick_open = false;
+    let mut header_encrypt = false;
+    let mut recovery_percent: Option<u8> = None;
+    let mut recovery_volumes_percent: Option<u8> = None;
+    let mut recovery_volume_count: Option<u32> = None;
     let mut positional = Vec::new();
 
     for arg in args {
@@ -87,6 +107,36 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
             password = Some(pw.to_string());
         } else if let Some(sz) = arg.strip_prefix("-v") {
             volume_size = Some(parse_size(sz)?);
+        } else if arg == "-s" {
+            solid = true;
+        } else if arg == "-htb" {
+            blake2 = true;
+        } else if arg == "-qo" {
+            quick_open = true;
+        } else if let Some(pw) = arg.strip_prefix("-hp") {
+            header_encrypt = true;
+            if !pw.is_empty() {
+                password = Some(pw.to_string());
+            }
+        } else if let Some(p) = arg.strip_prefix("-rr") {
+            recovery_percent = Some(
+                p.parse::<u8>()
+                    .map_err(|_| format!("invalid recovery percent: {arg}"))?
+                    .min(100),
+            );
+        } else if let Some(p) = arg.strip_prefix("-rv") {
+            if let Some(pct) = p.strip_suffix('%') {
+                recovery_volumes_percent = Some(
+                    pct.parse::<u8>()
+                        .map_err(|_| format!("invalid recovery percent: {arg}"))?
+                        .min(100),
+                );
+            } else {
+                recovery_volume_count = Some(
+                    p.parse::<u32>()
+                        .map_err(|_| format!("invalid recovery volume count: {arg}"))?,
+                );
+            }
         } else {
             positional.push(arg.as_str());
         }
@@ -94,11 +144,24 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
 
     if positional.len() < 2 {
         return Err(
-            "usage: rar a [-m0..-m5] [-p<password>] [-v<size>] <archive.rar> <files...>".into(),
+            "usage: rar a [-m0..-m5] [-p<password>] [-v<size>] [-s] [-htb] [-qo] [-hp] [-rrN] [-rvN] <archive.rar> <files...>"
+                .into(),
         );
     }
     let archive_path = positional[0];
     let files = &positional[1..];
+
+    let opts = rar5::CreateOptions {
+        solid,
+        quick_open,
+        blake2,
+        password: password.clone(),
+        encrypt_headers: header_encrypt,
+        recovery_percent,
+        recovery_volumes_percent,
+        recovery_volume_count,
+        volume_size,
+    };
 
     let existing = std::path::Path::new(archive_path).exists();
     let mut rar = if existing {
@@ -114,18 +177,9 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
                 rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
             }
         }
-    } else if let Some(vol_size) = volume_size {
-        let mut ar = rar5::RarArchive::create_multivolume(archive_path, vol_size)
-            .map_err(|e| format!("create: {e}"))?;
-        if let Some(ref pw) = password {
-            ar.set_password(pw);
-        }
-        ar
-    } else if let Some(ref pw) = password {
-        rar5::RarArchive::create_with_password(archive_path, pw)
-            .map_err(|e| format!("create: {e}"))?
     } else {
-        rar5::RarArchive::create(archive_path).map_err(|e| format!("create: {e}"))?
+        rar5::RarArchive::create_with_options(archive_path, opts)
+            .map_err(|e| format!("create: {e}"))?
     };
 
     for file in files {
@@ -133,7 +187,7 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("add {file}: {e}"))?;
     }
 
-    let was_existing = std::path::Path::new(archive_path).exists();
+    let was_existing = existing;
     rar.close().map_err(|e| format!("close: {e}"))?;
     if volume_size.is_some() {
         let vols = rar5::discover_volumes(std::path::Path::new(archive_path));
@@ -249,10 +303,22 @@ fn cmd_update(args: &[String]) -> Result<(), String> {
         println!("{archive_path}: no files to update");
         return Ok(());
     }
-    let mut rar = match &password {
-        Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        None => rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?,
+    // Deleting every member erases the archive file; recreate it when the
+    // updated members were the only ones.
+    let mut rar = if std::path::Path::new(archive_path).exists() {
+        match &password {
+            Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
+                .map_err(|e| format!("open: {e}"))?,
+            None => {
+                rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
+            }
+        }
+    } else {
+        match &password {
+            Some(pw) => rar5::RarArchive::create_with_password(archive_path, pw)
+                .map_err(|e| format!("create: {e}"))?,
+            None => rar5::RarArchive::create(archive_path).map_err(|e| format!("create: {e}"))?,
+        }
     };
     for file in &to_add {
         rar.add(file, 3).map_err(|e| format!("add {file}: {e}"))?;
@@ -289,6 +355,302 @@ fn cmd_rr(args: &[String]) -> Result<(), String> {
     println!(
         "Recovery record {percent}% added to {archive}",
         archive = args[0]
+    );
+    Ok(())
+}
+
+/// Rename archived members (like `rar rn`): pairs of old/new names.
+fn cmd_rename(args: &[String]) -> Result<(), String> {
+    if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
+        return Err("usage: rar rn <archive.rar> <old1> <new1> [<old2> <new2> ...]".into());
+    }
+    let archive_path = &args[0];
+    let pairs: Vec<(&str, &str)> = args[1..]
+        .chunks(2)
+        .map(|c| (c[0].as_str(), c[1].as_str()))
+        .collect();
+    let mut rar = rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?;
+    let n = rar.rename(&pairs).map_err(|e| format!("rename: {e}"))?;
+    println!("Renamed {n} file(s) in {archive_path}");
+    Ok(())
+}
+
+/// Freshen the archive (like `rar f`): update members that already exist
+/// when the source is newer; never add new members.
+fn cmd_freshen(args: &[String]) -> Result<(), String> {
+    let mut password: Option<String> = None;
+    let mut positional = Vec::new();
+    for arg in args {
+        if let Some(pw) = arg.strip_prefix("-p") {
+            password = Some(pw.to_string());
+        } else {
+            positional.push(arg.as_str());
+        }
+    }
+    if positional.len() < 2 {
+        return Err("usage: rar f [-p<password>] <archive.rar> <files...>".into());
+    }
+    let archive_path = positional[0];
+    let files = &positional[1..];
+    if !std::path::Path::new(archive_path).exists() {
+        return Err(format!("archive not found: {archive_path}"));
+    }
+    let rar = match password {
+        Some(ref pw) => rar5::RarArchive::open_with_password(archive_path, pw)
+            .map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
+    };
+    let mut to_delete = Vec::new();
+    let mut to_add = Vec::new();
+    for file in files {
+        let path = std::path::Path::new(file);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or_else(|| format!("not a file: {file}"))?
+            .replace('\\', "/");
+        if let Some(entry) = rar.get_entry(&name) {
+            let src_mtime = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as u32)
+                .unwrap_or(0);
+            if src_mtime > entry.header.mtime {
+                to_delete.push(name);
+                to_add.push(*file);
+            }
+        }
+        // Missing members are skipped by freshen.
+    }
+    drop(rar);
+    if to_delete.is_empty() {
+        println!("{archive_path}: no files to freshen");
+        return Ok(());
+    }
+    {
+        let mut rar = match &password {
+            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
+                .map_err(|e| format!("open: {e}"))?,
+            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
+        };
+        let names: Vec<&str> = to_delete.iter().map(|s| s.as_str()).collect();
+        rar.delete(&names).map_err(|e| format!("delete: {e}"))?;
+    }
+    // Deleting every member erases the archive file; recreate it when the
+    // freshened members were the only ones.
+    let mut rar = if std::path::Path::new(archive_path).exists() {
+        match &password {
+            Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
+                .map_err(|e| format!("open: {e}"))?,
+            None => {
+                rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
+            }
+        }
+    } else {
+        match &password {
+            Some(pw) => rar5::RarArchive::create_with_password(archive_path, pw)
+                .map_err(|e| format!("create: {e}"))?,
+            None => rar5::RarArchive::create(archive_path).map_err(|e| format!("create: {e}"))?,
+        }
+    };
+    for file in &to_add {
+        rar.add(file, 3).map_err(|e| format!("add {file}: {e}"))?;
+    }
+    rar.close().map_err(|e| format!("close: {e}"))?;
+    println!("Freshened {archive_path} ({} file(s))", to_add.len());
+    Ok(())
+}
+
+/// Move files into the archive (like `rar m`): add them, then erase the
+/// sources after a successful close.
+fn cmd_move(args: &[String]) -> Result<(), String> {
+    let mut password: Option<String> = None;
+    let mut positional = Vec::new();
+    for arg in args {
+        if let Some(pw) = arg.strip_prefix("-p") {
+            password = Some(pw.to_string());
+        } else {
+            positional.push(arg.as_str());
+        }
+    }
+    if positional.len() < 2 {
+        return Err("usage: rar m [-p<password>] <archive.rar> <files...>".into());
+    }
+    let archive_path = positional[0];
+    let files = &positional[1..];
+    for file in files {
+        let path = std::path::Path::new(file);
+        if !path.exists() {
+            return Err(format!("path not found: {file}"));
+        }
+    }
+    let mut rar = if std::path::Path::new(archive_path).exists() {
+        match &password {
+            Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
+                .map_err(|e| format!("open: {e}"))?,
+            None => {
+                rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
+            }
+        }
+    } else {
+        match &password {
+            Some(pw) => rar5::RarArchive::create_with_password(archive_path, pw)
+                .map_err(|e| format!("create: {e}"))?,
+            None => rar5::RarArchive::create(archive_path).map_err(|e| format!("create: {e}"))?,
+        }
+    };
+    for file in files {
+        rar.add(file, 3).map_err(|e| format!("add {file}: {e}"))?;
+    }
+    rar.close().map_err(|e| format!("close: {e}"))?;
+    for file in files {
+        let path = std::path::Path::new(file);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(path);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    println!("Moved {} file(s) to {archive_path}", files.len());
+    Ok(())
+}
+
+/// Find a string in member contents (like `rar i<string>`).
+///
+/// The search string is attached to the command: `rar i<str> archive.rar`,
+/// with optional modifiers `ic` (case sensitive) and `ih` (hex bytes).
+fn cmd_find(args: &[String]) -> Result<(), String> {
+    if args.len() < 2 {
+        return Err("usage: rar i<string> <archive.rar>".into());
+    }
+    let cmd = &args[0];
+    let mut rest = &cmd[1..];
+    let mut case_sensitive = false;
+    let mut hex = false;
+    if let Some(r) = rest.strip_prefix("c") {
+        case_sensitive = true;
+        rest = r;
+    } else if let Some(r) = rest.strip_prefix("h") {
+        hex = true;
+        rest = r;
+    } else if let Some(r) = rest.strip_prefix("i") {
+        rest = r;
+    }
+    rest = rest.strip_prefix('=').unwrap_or(rest);
+    if rest.is_empty() {
+        return Err("usage: rar i<string> <archive.rar>".into());
+    }
+    let archive_path = &args[1];
+    let needle: Vec<u8> = if hex {
+        let digits: String = rest.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        if !digits.len().is_multiple_of(2) {
+            return Err("hex search string must have an even number of digits".into());
+        }
+        (0..digits.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&digits[i..i + 2], 16).unwrap())
+            .collect()
+    } else {
+        rest.as_bytes().to_vec()
+    };
+    if needle.is_empty() {
+        return Err("empty search string".into());
+    }
+    let mut rar = rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?;
+    let entries: Vec<String> = rar
+        .list()
+        .iter()
+        .filter(|e| !e.is_dir())
+        .map(|e| e.name().to_string())
+        .collect();
+    let mut found = 0usize;
+    for name in entries {
+        let data = match rar.read(&name) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let (haystack, n) = if case_sensitive {
+            (data.clone(), needle.clone())
+        } else {
+            (data.to_ascii_lowercase(), needle.to_ascii_lowercase())
+        };
+        if !haystack.windows(n.len()).any(|w| w == n.as_slice()) {
+            continue;
+        }
+        found += 1;
+        println!("Found  {archive_path} / {name}");
+        for line in String::from_utf8_lossy(&data).split('\n') {
+            let (h, n2) = if case_sensitive {
+                (line.as_bytes().to_vec(), needle.clone())
+            } else {
+                (
+                    line.to_ascii_lowercase().into_bytes(),
+                    needle.to_ascii_lowercase(),
+                )
+            };
+            if h.windows(n2.len()).any(|w| w == n2.as_slice()) {
+                println!("{line}");
+            }
+        }
+    }
+    if found == 0 {
+        return Ok(());
+    }
+    Ok(())
+}
+
+/// Verbose list (like `rar v`): adds the packed size, ratio and checksum
+/// columns.
+fn cmd_verbose_list(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("usage: rar v <archive.rar>".into());
+    }
+    let rar = rar5::RarArchive::open(&args[0]).map_err(|e| format!("{e}"))?;
+    println!(
+        "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  Name",
+        "Size", "Packed", "Ratio", "Checksum", "Method"
+    );
+    println!("{}", "-".repeat(70));
+    let mut total_size = 0u64;
+    let mut total_packed = 0u64;
+    for entry in rar.list() {
+        let ratio = if entry.is_dir() {
+            "  dir".to_string()
+        } else if entry.size() > 0 {
+            format!(
+                "{:.1}%",
+                entry.compressed_size() as f64 / entry.size() as f64 * 100.0
+            )
+        } else {
+            " 0.0%".to_string()
+        };
+        let checksum = entry
+            .crc32()
+            .map(|c| format!("{c:08X}"))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {}",
+            entry.size(),
+            entry.compressed_size(),
+            ratio,
+            checksum,
+            entry.method_name(),
+            entry.name()
+        );
+        total_size += entry.size();
+        total_packed += entry.compressed_size();
+    }
+    println!("{}", "-".repeat(70));
+    let overall = if total_size > 0 {
+        format!("{:.1}%", total_packed as f64 / total_size as f64 * 100.0)
+    } else {
+        " 0.0%".to_string()
+    };
+    println!(
+        "{total_size:>10}  {total_packed:>10}  {overall:>6}  {:<10}  {} file(s)",
+        "",
+        rar.list().len()
     );
     Ok(())
 }

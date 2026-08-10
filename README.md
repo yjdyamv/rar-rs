@@ -23,11 +23,15 @@ archives — no external binaries required.
 | Solid archive decompression          |   done |
 | Solid archive creation               |   done |
 | Delete members without full rebuild  |   done |
+| Rename members (`rn`)                |   done |
 | Append members to existing archives  |   done |
 | Update members (newer only, `u`)     |   done |
+| Freshen members (existing only, `f`) |   done |
+| Move files into archive (`m`)        |   done |
+| Find string in members (`i`)         |   done |
 | Lock archives (`k`)                  |   done |
 | Add recovery record (`rr`)           |   done |
-| Multi-volume member deletion         |   done |
+| Multi-volume member deletion/rename  |   done |
 | Parallel rewrite pipeline            |   done |
 | Quick-open records (`-qo+`)          |   done |
 | BLAKE2sp hash records (`-htb`)       |   done |
