@@ -477,6 +477,9 @@ pub struct RarArchive {
     mode: Mode,
     entries: Vec<ArchiveEntry>,
     stream: Option<File>,
+    /// Byte offset where the RAR5 signature begins (0 for plain archives,
+    /// >0 for SFX archives whose stub precedes the archive).
+    sfx_offset: u64,
     /// Persistent decoder state for RAR5 solid archive chains.
     solid_state: Option<DecoderState>,
     /// Index of the last file decoded in the solid chain (-1 = none).
@@ -548,6 +551,7 @@ impl RarArchive {
             path,
             mode: Mode::Read,
             entries: Vec::new(),
+            sfx_offset: 0,
             stream: None,
             solid_state: None,
             solid_decoded_through: -1,
@@ -583,6 +587,7 @@ impl RarArchive {
             path,
             mode: Mode::Read,
             entries: Vec::new(),
+            sfx_offset: 0,
             stream: None,
             solid_state: None,
             solid_decoded_through: -1,
@@ -636,6 +641,7 @@ impl RarArchive {
             path,
             mode: Mode::Append,
             entries: Vec::new(),
+            sfx_offset: 0,
             stream: None,
             solid_state: None,
             solid_decoded_through: -1,
@@ -682,7 +688,7 @@ impl RarArchive {
         }
         let path = self.path.clone();
         let mut reader = File::open(&path)?;
-        reader.seek(SeekFrom::Start(8))?;
+        reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
 
         let first = self
             .read_next_block(&mut reader)?
@@ -791,7 +797,7 @@ impl RarArchive {
         }
         let path = self.path.clone();
         let mut reader = File::open(&path)?;
-        reader.seek(SeekFrom::Start(8))?;
+        reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         let first = self
             .read_next_block(&mut reader)?
             .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
@@ -962,6 +968,7 @@ impl RarArchive {
             path,
             mode: Mode::Write,
             entries: Vec::new(),
+            sfx_offset: 0,
             stream: None,
             solid_state: None,
             solid_decoded_through: -1,
@@ -1518,7 +1525,8 @@ impl RarArchive {
             let field = self.qo_offset_field_pos.ok_or_else(|| {
                 RarError::Format("quick-open locator field position unknown".into())
             })? as usize;
-            let patched = vint_fixed5(qo.saturating_sub(RAR5_SIGNATURE.len() as u64));
+            let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
+            let patched = vint_fixed5(qo.saturating_sub(base));
             if field + patched.len() > new_header.len() {
                 return Err(RarError::Format("locator field out of bounds".into()));
             }
@@ -1529,7 +1537,8 @@ impl RarArchive {
                 .rr_offset_field_pos
                 .ok_or_else(|| RarError::Format("recovery locator field position unknown".into()))?
                 as usize;
-            let patched = vint_fixed5(rr.saturating_sub(RAR5_SIGNATURE.len() as u64));
+            let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
+            let patched = vint_fixed5(rr.saturating_sub(base));
             if field + patched.len() > new_header.len() {
                 return Err(RarError::Format("locator field out of bounds".into()));
             }
@@ -1581,25 +1590,40 @@ impl RarArchive {
     // ── Signature ──────────────────────────────────────────────────────────
 
     fn verify_signature(&mut self) -> RarResult<()> {
+        // The signature must appear at the start for plain archives and
+        // after the embedded stub for SFX archives (scan up to 8 MiB,
+        // like the reference readers).
+        const SFX_SCAN_LIMIT: usize = 8 * 1024 * 1024;
         let stream = self.stream.as_mut().unwrap();
-        let mut sig = [0u8; 8];
-        let n = stream.read(&mut sig)?;
-        if n < 7 {
-            return Err(RarError::Format(format!(
-                "file too short to be a RAR archive ({n} bytes read)"
-            )));
-        }
-        if sig == *RAR5_SIGNATURE {
-            return Ok(());
-        }
-        if sig[..7] == *b"Rar!\x1a\x07\x00" {
-            return Err(RarError::Unsupported(
-                "RAR4 archives are not supported; use 7-Zip to read or extract them".into(),
-            ));
-        }
-        Err(RarError::Format(format!(
-            "not a RAR archive (bad signature: {sig:?})"
-        )))
+        let file_size = stream.seek(SeekFrom::End(0))?;
+        stream.seek(SeekFrom::Start(0))?;
+        let scan = file_size.min(SFX_SCAN_LIMIT as u64) as usize;
+        let mut buf = vec![0u8; scan];
+        let n = stream.read(&mut buf)?;
+        buf.truncate(n);
+        let rar5_pos = find_bytes(&buf, RAR5_SIGNATURE);
+        let rar4_pos = find_bytes(&buf, b"Rar!\x1a\x07\x00");
+        let sfx_offset = match (rar5_pos, rar4_pos) {
+            (Some(_), Some(r4)) if r4 < rar5_pos.unwrap() => {
+                return Err(RarError::Unsupported(
+                    "RAR4 archives are not supported; use 7-Zip to read or extract them".into(),
+                ));
+            }
+            (Some(r5), _) => r5 as u64,
+            (None, Some(_)) => {
+                return Err(RarError::Unsupported(
+                    "RAR4 archives are not supported; use 7-Zip to read or extract them".into(),
+                ));
+            }
+            (None, None) => {
+                return Err(RarError::Format(
+                    "not a RAR archive (signature not found)".into(),
+                ));
+            }
+        };
+        self.sfx_offset = sfx_offset;
+        stream.seek(SeekFrom::Start(sfx_offset + RAR5_SIGNATURE.len() as u64))?;
+        Ok(())
     }
 
     fn write_signature(&mut self) -> RarResult<()> {
@@ -3380,7 +3404,7 @@ impl RarArchive {
     /// requires the password and is not supported yet.
     pub fn get_comment(&mut self) -> RarResult<Option<Vec<u8>>> {
         let mut reader = File::open(&self.path)?;
-        reader.seek(SeekFrom::Start(8))?;
+        reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         while let Some(meta) = self.read_next_block(&mut reader)? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
@@ -3459,7 +3483,7 @@ impl RarArchive {
     /// erase-everything path is covered too.
     fn main_header_is_locked(&mut self) -> RarResult<bool> {
         let mut reader = File::open(&self.path)?;
-        reader.seek(SeekFrom::Start(8))?;
+        reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         self.header_encryption = false;
         self.archive_encr = None;
         let first = self
@@ -3550,8 +3574,9 @@ impl RarArchive {
         rename_map: Option<&std::collections::HashMap<usize, String>>,
         comment: Option<&[u8]>,
     ) -> RarResult<RewritePlan> {
-        // Signature.
+        // Signature (after any embedded SFX stub).
         let mut sig = [0u8; 8];
+        reader.seek(SeekFrom::Start(self.sfx_offset))?;
         reader.read_exact(&mut sig)?;
 
         // Leading blocks: optional archive encryption header (plaintext),
@@ -3716,7 +3741,15 @@ impl RarArchive {
         tmp_path: &Path,
     ) -> RarResult<()> {
         let out = self.stream.as_mut().unwrap();
-        out.write_all(RAR5_SIGNATURE)?;
+        if self.sfx_offset > 0 {
+            // Preserve the embedded SFX stub of the original archive.
+            let mut stub = File::open(src_path)?;
+            stub.seek(SeekFrom::Start(0))?;
+            let mut limited = stub.take(self.sfx_offset + RAR5_SIGNATURE.len() as u64);
+            io::copy(&mut limited, out)?;
+        } else {
+            out.write_all(RAR5_SIGNATURE)?;
+        }
         if let Some(ref enc) = plan.encrypt_header {
             out.write_all(enc)?;
         }
@@ -4141,7 +4174,8 @@ impl RarArchive {
         let mut hdr = main_hdr.to_vec();
         let mut patched = false;
         if let (Some(qo), Some(field)) = (qo_offset, qo_field_pos) {
-            let field_bytes = vint_fixed5(qo.saturating_sub(RAR5_SIGNATURE.len() as u64));
+            let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
+            let field_bytes = vint_fixed5(qo.saturating_sub(base));
             if field + field_bytes.len() > hdr.len() {
                 return Err(RarError::Format("locator field out of bounds".into()));
             }
@@ -4149,7 +4183,8 @@ impl RarArchive {
             patched = true;
         }
         if let (Some(rr), Some(field)) = (rr_offset, rr_field_pos) {
-            let field_bytes = vint_fixed5(rr.saturating_sub(RAR5_SIGNATURE.len() as u64));
+            let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
+            let field_bytes = vint_fixed5(rr.saturating_sub(base));
             if field + field_bytes.len() > hdr.len() {
                 return Err(RarError::Format("locator field out of bounds".into()));
             }
@@ -6027,6 +6062,20 @@ fn verify_integrity_for(
         }
     }
     Ok(())
+}
+
+/// Byte offset where the RAR5 archive begins inside an SFX file (the end
+/// of the embedded stub). Returns `None` when no signature is found.
+pub fn sfx_offset_of(input: &[u8]) -> Option<usize> {
+    find_bytes(input, RAR5_SIGNATURE)
+}
+
+/// Find the first occurrence of `needle` in `haystack`.
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Parse the type, flags and data size out of a plaintext block header

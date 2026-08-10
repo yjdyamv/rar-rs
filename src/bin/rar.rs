@@ -22,9 +22,13 @@ fn main() {
         "k" | "lock" => cmd_lock(&args[2..]),
         "rr" => cmd_rr(&args[2..]),
         "r" | "repair" => cmd_repair(&args[2..]),
+        "s" | "s-" | "sfx" => cmd_sfx(&args[1..]),
         "rc" => cmd_rebuild_volumes(&args[2..]),
         "c" => cmd_comment_set(&args[2..]),
         "cw" => cmd_comment_write(&args[2..]),
+        "x" | "extract" => cmd_extract(&args[2..]),
+        "e" => cmd_extract_flat(&args[2..]),
+        "t" | "test" => cmd_test(&args[2..]),
         "l" | "list" => cmd_list(&args[2..]),
         "v" => cmd_verbose_list(&args[2..]),
         "i" | "info" => cmd_info(&args[2..]),
@@ -68,6 +72,11 @@ fn usage() {
     eprintln!("                                                  the .rev files");
     eprintln!("  rar c <archive.rar> < comment.txt              Set the archive comment");
     eprintln!("  rar cw <archive.rar>                           Write the archive comment");
+    eprintln!("  rar s [-sfx<module>] <archive.rar>             Convert to SFX");
+    eprintln!("  rar s- <archive.sfx>                           Remove the SFX module");
+    eprintln!("  rar x [-p<password>] <archive.rar> [dest/]     Extract with full paths");
+    eprintln!("  rar e [-p<password>] <archive.rar> [dest/]     Extract without paths");
+    eprintln!("  rar t [-p<password>] <archive.rar>             Test archive contents");
     eprintln!("  rar i<string> <archive.rar>                     Find string in members");
     eprintln!("  rar l [-p<password>] <archive.rar>              List archive contents");
     eprintln!("  rar v [-p<password>] <archive.rar>              Verbose list");
@@ -747,6 +756,191 @@ fn cmd_comment_write(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("stdout: {e}"))?;
     }
     Ok(())
+}
+
+/// Convert an archive to or from SFX (like `rar s` / `rar s-`).
+fn cmd_sfx(args: &[String]) -> Result<(), String> {
+    let strip = args[0] == "s-";
+    let mut module: Option<String> = None;
+    let mut positional = Vec::new();
+    for arg in &args[1..] {
+        if let Some(m) = arg.strip_prefix("-sfx") {
+            module = Some(m.to_string());
+        } else {
+            positional.push(arg.as_str());
+        }
+    }
+    if positional.is_empty() {
+        return Err(if strip {
+            "usage: rar s- <archive.sfx>".into()
+        } else {
+            "usage: rar s [-sfx<module>] <archive.rar>".into()
+        });
+    }
+    let archive_path = positional[0];
+    let input = std::fs::read(archive_path).map_err(|e| format!("read: {e}"))?;
+    // Locate the archive start after any embedded stub.
+    let sfx_offset = rar5::sfx_offset_of(&input)
+        .ok_or_else(|| format!("{archive_path} is not an SFX archive"))?;
+    if strip {
+        let base = archive_path
+            .strip_suffix(".sfx")
+            .or_else(|| archive_path.strip_suffix(".SFX"))
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| format!("{archive_path}.plain"));
+        let out_path = format!("{base}.rar");
+        std::fs::write(&out_path, &input[sfx_offset..]).map_err(|e| format!("write: {e}"))?;
+        println!("Removed SFX module: {out_path}");
+        return Ok(());
+    }
+
+    // Creation: prepend the SFX module.
+    let module_path = match module {
+        Some(m) => m,
+        None => find_sfx_module()
+            .ok_or_else(|| "default.sfx not found (use -sfx<module>)".to_string())?,
+    };
+    let module_bytes = std::fs::read(&module_path).map_err(|e| format!("read module: {e}"))?;
+    let base = std::path::Path::new(archive_path)
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive".to_string());
+    let out_path = format!("{base}.sfx");
+    let mut out = Vec::with_capacity(module_bytes.len() + input.len());
+    out.extend_from_slice(&module_bytes);
+    out.extend_from_slice(&input);
+    std::fs::write(&out_path, &out).map_err(|e| format!("write: {e}"))?;
+    println!("Created {out_path}");
+    Ok(())
+}
+
+/// Locate a `default.sfx` module: `$HOME`, `/usr/lib`, `/usr/local/lib`.
+fn find_sfx_module() -> Option<String> {
+    let candidates = [
+        std::env::var("HOME")
+            .ok()
+            .map(|h| format!("{h}/default.sfx")),
+        Some("/usr/lib/default.sfx".to_string()),
+        Some("/usr/local/lib/default.sfx".to_string()),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|p| std::path::Path::new(p).exists())
+}
+
+/// Extract with full paths (like `rar x`).
+fn cmd_extract(args: &[String]) -> Result<(), String> {
+    let (password, positional) = split_password(args);
+    if positional.is_empty() {
+        return Err("usage: rar x [-p<password>] <archive.rar> [dest/]".into());
+    }
+    let dest = if positional.len() > 1 {
+        positional[1]
+    } else {
+        "."
+    };
+    let mut rar = match &password {
+        Some(pw) => rar5::RarArchive::open_with_password(positional[0], pw)
+            .map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(positional[0]).map_err(|e| format!("open: {e}"))?,
+    };
+    let mut count = 0usize;
+    let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
+    for name in &names {
+        rar.extract(name, dest)
+            .map_err(|e| format!("{name}: {e}"))?;
+        count += 1;
+    }
+    println!("Extracted {count} file(s) to {dest}");
+    Ok(())
+}
+
+/// Extract without archived paths (like `rar e`).
+fn cmd_extract_flat(args: &[String]) -> Result<(), String> {
+    let (password, positional) = split_password(args);
+    if positional.is_empty() {
+        return Err("usage: rar e [-p<password>] <archive.rar> [dest/]".into());
+    }
+    let dest = if positional.len() > 1 {
+        positional[1]
+    } else {
+        "."
+    };
+    let mut rar = match &password {
+        Some(pw) => rar5::RarArchive::open_with_password(positional[0], pw)
+            .map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(positional[0]).map_err(|e| format!("open: {e}"))?,
+    };
+    let mut count = 0usize;
+    let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
+    for name in &names {
+        let entry = rar.get_entry(name).unwrap();
+        if entry.is_dir() {
+            continue;
+        }
+        let data = rar.read(name).map_err(|e| format!("{name}: {e}"))?;
+        let file_name = std::path::Path::new(&name)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let out_path = std::path::Path::new(dest).join(file_name.as_ref());
+        std::fs::write(&out_path, &data).map_err(|e| format!("{}: {e}", out_path.display()))?;
+        count += 1;
+    }
+    println!("Extracted {count} file(s) to {dest}");
+    Ok(())
+}
+
+/// Test archive contents (like `rar t`).
+fn cmd_test(args: &[String]) -> Result<(), String> {
+    let (password, positional) = split_password(args);
+    if positional.is_empty() {
+        return Err("usage: rar t [-p<password>] <archive.rar>".into());
+    }
+    let mut rar = match &password {
+        Some(pw) => rar5::RarArchive::open_with_password(positional[0], pw)
+            .map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(positional[0]).map_err(|e| format!("open: {e}"))?,
+    };
+    let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
+    let mut ok = 0;
+    let mut fail = 0;
+    for name in &names {
+        let entry = rar.get_entry(name).unwrap();
+        if entry.is_dir() {
+            continue;
+        }
+        match rar.read(name) {
+            Ok(_) => {
+                println!("  OK  {name}");
+                ok += 1;
+            }
+            Err(e) => {
+                println!("  FAIL {name}: {e}");
+                fail += 1;
+            }
+        }
+    }
+    println!("{ok} OK, {fail} failed");
+    if fail > 0 {
+        return Err("test failed".into());
+    }
+    Ok(())
+}
+
+/// Split leading `-p<password>` switches from positional arguments.
+fn split_password(args: &[String]) -> (Option<String>, Vec<&str>) {
+    let mut password = None;
+    let mut positional = Vec::new();
+    for arg in args {
+        if let Some(pw) = arg.strip_prefix("-p") {
+            password = Some(pw.to_string());
+        } else {
+            positional.push(arg.as_str());
+        }
+    }
+    (password, positional)
 }
 
 fn cmd_list(args: &[String]) -> Result<(), String> {

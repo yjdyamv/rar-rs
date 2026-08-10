@@ -34,6 +34,7 @@ archives — no external binaries required.
 | Repair with recovery record (`r`)    |   done |
 | Rebuild missing volumes (`rc`)       |   done |
 | Archive comments (`c`/`cw`)          |   done |
+| SFX archives (read + `s`/`s-`)       |   done |
 | Multi-volume member deletion/rename  |   done |
 | Parallel rewrite pipeline            |   done |
 | Quick-open records (`-qo+`)          |   done |

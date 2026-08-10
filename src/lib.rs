@@ -37,6 +37,7 @@ pub mod write_progress;
 pub use write_progress::{WriteOperation, WriteProgressEvent};
 pub mod vint;
 
+pub use archive::sfx_offset_of;
 pub use archive::{ArchiveEntry, BatchEntry, RarArchive, discover_volumes};
 pub use constants::*;
 pub use encryption::EncryptionParams;

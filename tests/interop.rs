@@ -2864,3 +2864,136 @@ fn official_repair_and_rebuild_cross_validation() {
         .to_string();
     assert_eq!(rar.read(&big_name).unwrap(), payload);
 }
+
+// ── SFX ─────────────────────────────────────────────────────────────────────
+
+fn with_stub(data: &[u8], stub_len: usize) -> Vec<u8> {
+    let mut stub = vec![0u8; stub_len];
+    for (i, b) in stub.iter_mut().enumerate() {
+        *b = (i.wrapping_mul(31).wrapping_add(7) & 0xFF) as u8;
+    }
+    stub.extend_from_slice(data);
+    stub
+}
+
+#[test]
+fn sfx_archives_open_read_and_modify_with_stub_preserved() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("sfx.rar");
+    let payload = compressible(61, 30_000);
+    let payload2 = compressible(62, 20_000);
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        rar.add_bytes("a.bin", &payload, 3).unwrap();
+        rar.add_bytes("c.bin", &payload2, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let plain = std::fs::read(&path).unwrap();
+    let stub_len = 248_960usize;
+    let sfx_path = dir.path().join("sfx.sfx");
+    std::fs::write(&sfx_path, with_stub(&plain, stub_len)).unwrap();
+
+    // Reading an SFX archive.
+    let mut rar = RarArchive::open(&sfx_path).unwrap();
+    assert_eq!(rar.list().len(), 2);
+    assert_eq!(rar.read("a.bin").unwrap(), payload);
+
+    // Extracting from an SFX archive.
+    let out = dir.path().join("out");
+    rar.extract("a.bin", &out).unwrap();
+    assert_eq!(std::fs::read(out.join("a.bin")).unwrap(), payload);
+
+    // Deleting from an SFX archive preserves the stub.
+    let mut rar = RarArchive::open(&sfx_path).unwrap();
+    rar.delete(&["a.bin"]).unwrap();
+    let after = std::fs::read(&sfx_path).unwrap();
+    assert_eq!(&after[..stub_len], &with_stub(&[], stub_len)[..stub_len]);
+    let mut rar = RarArchive::open(&sfx_path).unwrap();
+    assert_eq!(rar.namelist(), ["c.bin"]);
+    assert_eq!(rar.read("c.bin").unwrap(), payload2);
+
+    // Renaming keeps the stub too.
+    let sfx2 = dir.path().join("sfx2.sfx");
+    std::fs::write(&sfx2, with_stub(&plain, stub_len)).unwrap();
+    let mut rar = RarArchive::open(&sfx2).unwrap();
+    rar.rename(&[("a.bin", "b.bin")]).unwrap();
+    let after2 = std::fs::read(&sfx2).unwrap();
+    assert_eq!(&after2[..stub_len], &with_stub(&[], stub_len)[..stub_len]);
+    let mut rar = RarArchive::open(&sfx2).unwrap();
+    assert!(rar.namelist().contains(&"b.bin"));
+    assert_eq!(rar.read("b.bin").unwrap(), payload);
+}
+
+/// Official SFX archives are readable, and the official tools validate our
+/// SFX output (env-gated).
+#[test]
+fn official_sfx_cross_validation() {
+    let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let unrar = std::env::var_os("SA_OFFICIAL_UNRAR").unwrap_or(rar_bin.clone());
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let payload: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(src.join("a.bin"), &payload).unwrap();
+
+    // Our reader on an official SFX archive.
+    let sfx = dir.path().join("off.sfx");
+    std::fs::write(src.join("c.bin"), b"second member").unwrap();
+    let status = std::process::Command::new(&rar_bin)
+        .args(["a", "-m3", "-idq"])
+        .arg(dir.path().join("off.rar"))
+        .arg(src.join("a.bin"))
+        .arg(src.join("c.bin"))
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let status = std::process::Command::new(&rar_bin)
+        .args(["s", "-sfx/home/yuan/下载/rar/default.sfx", "-idq"])
+        .arg(dir.path().join("off.rar"))
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "official rar s failed");
+    assert!(sfx.exists());
+    let mut rar = RarArchive::open(&sfx).unwrap();
+    let a_name = rar
+        .namelist()
+        .iter()
+        .find(|n| n.ends_with("a.bin"))
+        .unwrap()
+        .to_string();
+    assert_eq!(rar.read(&a_name).unwrap(), payload);
+    // Our delete on the official SFX archive keeps the stub.
+    let mut rar = RarArchive::open(&sfx).unwrap();
+    let name = rar
+        .namelist()
+        .iter()
+        .find(|n| n.ends_with("a.bin"))
+        .unwrap()
+        .to_string();
+    rar.delete(&[&name]).unwrap();
+    let data = std::fs::read(&sfx).unwrap();
+    let stub_len = rar5::sfx_offset_of(&data).unwrap();
+    assert!(stub_len > 0, "stub preserved");
+
+    // Official unrar validates a stub-prefixed rar-rs archive.
+    let ours = dir.path().join("ours.rar");
+    {
+        let mut ar = rar5::RarArchive::create(&ours).unwrap();
+        ar.add_bytes("b.bin", &payload, 3).unwrap();
+        ar.close().unwrap();
+    }
+    let plain = std::fs::read(&ours).unwrap();
+    let ours_sfx = dir.path().join("ours.sfx");
+    std::fs::write(&ours_sfx, with_stub(&plain, 8 * 1024)).unwrap();
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&ours_sfx)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected our stub-prefixed archive");
+}
