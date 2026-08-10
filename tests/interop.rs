@@ -1546,3 +1546,896 @@ fn x86_like(size: usize) -> Vec<u8> {
     out.truncate(size);
     out
 }
+
+// ── Deletion ────────────────────────────────────────────────────────────────
+
+/// Parse the member name out of a file header body (block type 2).
+fn file_header_name(body: &[u8]) -> String {
+    let (_, mut q) = read_vint(body, 0);
+    let (flags, n) = read_vint(body, q);
+    q = n;
+    if flags & 0x0001 != 0 {
+        let (_, n) = read_vint(body, q);
+        q = n;
+    }
+    if flags & 0x0002 != 0 {
+        let (_, n) = read_vint(body, q);
+        q = n;
+    }
+    let (file_flags, n) = read_vint(body, q);
+    q = n;
+    let (_, n) = read_vint(body, q); // unpacked size
+    q = n;
+    let (_, n) = read_vint(body, q); // attributes
+    q = n;
+    if file_flags & 0x0002 != 0 {
+        q += 4; // mtime
+    }
+    if file_flags & 0x0004 != 0 {
+        q += 4; // CRC32
+    }
+    let (_, n) = read_vint(body, q); // compression info
+    q = n;
+    let (_, n) = read_vint(body, q); // host OS
+    q = n;
+    let (name_len, n) = read_vint(body, q);
+    q = n;
+    String::from_utf8_lossy(&body[q..q + name_len as usize]).into_owned()
+}
+
+/// Byte span `[start, end)` of the archive block (header + data) holding
+/// the given member name.
+fn file_block_span(data: &[u8], name: &str) -> (usize, usize) {
+    // scan_blocks' header_len covers the size vint + body but not the
+    // 4-byte header CRC32.
+    for block in scan_blocks(data) {
+        if block.block_type == 0x02 && file_header_name(&block.body) == name {
+            return (
+                block.start,
+                block.start + block.header_len + 4 + block.data_size as usize,
+            );
+        }
+    }
+    panic!("file block {name} not found");
+}
+
+/// All members in archive order (skipping the main header).
+fn member_names(data: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    for block in scan_blocks(data) {
+        if block.block_type == 0x02 {
+            names.push(file_header_name(&block.body));
+        }
+    }
+    names
+}
+
+/// Names cached inside a quick-open record payload.
+fn qo_cached_names(data: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    for block in scan_blocks(data) {
+        if block.block_type == 0x03 && service_name(&block.body).as_deref() == Some("QO") {
+            // scan_blocks' header_len excludes the 4-byte header CRC32.
+            let data_start = block.start + block.header_len + 4;
+            let payload = &data[data_start..data_start + block.data_size as usize];
+            let mut p = 0;
+            while p < payload.len() {
+                p += 4; // entry CRC
+                let (body_len, n) = read_vint(payload, p);
+                p = n;
+                let entry = &payload[p..p + body_len as usize];
+                p += body_len as usize;
+                let (_, mut q) = read_vint(entry, 0); // entry flags
+                let (_, n) = read_vint(entry, q); // relative offset
+                q = n;
+                let (hdr_len, n) = read_vint(entry, q);
+                q = n;
+                let hdr = &entry[q..q + hdr_len as usize];
+                // The cached header is a full block: CRC32(4) + size vint
+                // + body.
+                let (hsize, n) = read_vint(hdr, 4);
+                let body = &hdr[n..n + hsize as usize];
+                names.push(file_header_name(body));
+            }
+        }
+    }
+    names
+}
+
+fn service_exists(data: &[u8], name: &str) -> bool {
+    scan_blocks(data)
+        .iter()
+        .any(|b| b.block_type == 0x03 && service_name(&b.body).as_deref() == Some(name))
+}
+
+/// Main header archive-level flags (parse the body manually so tests work
+/// with and without a locator record).
+fn archive_flags(data: &[u8]) -> u64 {
+    for block in scan_blocks(data) {
+        if block.block_type == 0x01 {
+            let (_, mut q) = read_vint(&block.body, 0);
+            let (flags, n) = read_vint(&block.body, q);
+            q = n;
+            if flags & 0x0001 != 0 {
+                let (_, n) = read_vint(&block.body, q);
+                q = n;
+            }
+            if flags & 0x0002 != 0 {
+                let (_, n) = read_vint(&block.body, q);
+                q = n;
+            }
+            let (arch_flags, _) = read_vint(&block.body, q);
+            return arch_flags;
+        }
+    }
+    panic!("no main header");
+}
+
+fn compressible(seed: u8, n: usize) -> Vec<u8> {
+    let pat: Vec<u8> = (0..64u8)
+        .map(|i| i.wrapping_mul(7).wrapping_add(seed))
+        .collect();
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        out.extend_from_slice(&pat);
+    }
+    out.truncate(n);
+    out
+}
+
+#[test]
+fn delete_kept_members_preserve_exact_bytes() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("del.rar");
+    let files: Vec<(String, Vec<u8>)> = vec![
+        ("a.txt".into(), compressible(1, 60_000)),
+        ("b.bin".into(), vec![0x5Au8; 40_000]), // STORE (level 0)
+        ("c.txt".into(), compressible(2, 80_000)),
+        ("d.txt".into(), compressible(3, 30_000)),
+        ("e.bin".into(), vec![0x3Cu8; 50_000]), // STORE (level 0)
+    ];
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        for (name, data) in &files {
+            let level = if name.ends_with(".bin") { 0 } else { 3 };
+            rar.add_bytes(name, data, level).unwrap();
+        }
+        rar.close().unwrap();
+    }
+    let orig = std::fs::read(&path).unwrap();
+
+    // Delete a middle member and the last member.
+    let mut rar = RarArchive::open(&path).unwrap();
+    let n = rar.delete(&["b.bin", "e.bin"]).unwrap();
+    assert_eq!(n, 2);
+    let kept: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
+    assert_eq!(kept, ["a.txt", "c.txt", "d.txt"]);
+    drop(rar);
+
+    // Remaining file blocks (headers + payloads) must be byte-identical.
+    let new = std::fs::read(&path).unwrap();
+    for name in ["a.txt", "c.txt", "d.txt"] {
+        let (s0, e0) = file_block_span(&orig, name);
+        let (s1, e1) = file_block_span(&new, name);
+        assert_eq!(&orig[s0..e0], &new[s1..e1], "block for {name} changed");
+    }
+    // The archive must not contain the deleted members anywhere.
+    let deleted_spans = ["b.bin", "e.bin"].map(|name| file_block_span(&orig, name));
+    for (_, e) in deleted_spans {
+        assert!(new.len() < e, "deleted member data still present");
+    }
+    // Content reads back.
+    for (name, data) in &files {
+        if *name == "b.bin" || *name == "e.bin" {
+            continue;
+        }
+        let mut rar = RarArchive::open(&path).unwrap();
+        assert_eq!(&rar.read(name).unwrap(), data);
+    }
+}
+
+#[test]
+fn delete_rebuilds_quick_open_record() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("del-qo.rar");
+    {
+        let mut rar = RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                quick_open: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add_bytes("f1.txt", &compressible(1, 50_000), 3)
+            .unwrap();
+        rar.add_bytes("f2.txt", &compressible(2, 50_000), 3)
+            .unwrap();
+        rar.add_bytes("f3.txt", &compressible(3, 50_000), 3)
+            .unwrap();
+        rar.close().unwrap();
+    }
+    let mut rar = RarArchive::open(&path).unwrap();
+    rar.delete(&["f2.txt"]).unwrap();
+
+    let bytes = std::fs::read(&path).unwrap();
+    let qo_pos = service_offset(&bytes, "QO");
+    let (loc_flags, qo, rr) = main_header_locator(&bytes);
+    assert_eq!(loc_flags & 0x0001, 0x0001, "QO locator flag missing");
+    assert_eq!(qo.unwrap(), qo_pos as u64 - 8, "QO offset out of date");
+    assert!(rr.is_none(), "no RR locator expected");
+    assert_eq!(qo_cached_names(&bytes), ["f1.txt", "f3.txt"]);
+}
+
+#[test]
+fn delete_rebuilds_recovery_record() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("del-rr.rar");
+    {
+        let mut rar = RarArchive::create_with_recovery(&path, 10).unwrap();
+        rar.add_bytes("f1.txt", &compressible(1, 50_000), 3)
+            .unwrap();
+        rar.add_bytes("f2.txt", &compressible(2, 50_000), 3)
+            .unwrap();
+        rar.close().unwrap();
+    }
+    let orig = std::fs::read(&path).unwrap();
+    assert!(
+        service_exists(&orig, "RR"),
+        "precondition: RR record present"
+    );
+    assert_eq!(archive_flags(&orig) & 0x0008, 0x0008, "RECOVERY flag set");
+
+    // Deleting must keep the archive recoverable: the recovery record is
+    // rebuilt over the rewritten archive (a superset of `rar d`, which
+    // drops it).
+    let mut rar = RarArchive::open(&path).unwrap();
+    rar.delete(&["f1.txt"]).unwrap();
+
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(service_exists(&bytes, "RR"), "RR record must be rebuilt");
+    assert_eq!(
+        archive_flags(&bytes) & 0x0008,
+        0x0008,
+        "RECOVERY archive flag must survive"
+    );
+    let rr_pos = service_offset(&bytes, "RR");
+    let (_, _, rr) = main_header_locator(&bytes);
+    assert_eq!(rr.unwrap(), rr_pos as u64 - 8, "RR offset out of date");
+    let rar = RarArchive::open(&path).unwrap();
+    assert_eq!(rar.namelist(), ["f2.txt"]);
+
+    // The rebuilt record must actually repair the archive (official rar).
+    if let (Some(unrar), Some(rar_bin)) = (
+        std::env::var_os("SA_OFFICIAL_UNRAR"),
+        std::env::var_os("SA_OFFICIAL_RAR"),
+    ) {
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            let data_off = first_file_data_offset(&bytes);
+            for (i, byte) in bytes[data_off + 5..data_off + 13].iter_mut().enumerate() {
+                *byte ^= (i as u8).wrapping_add(0xA5);
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            let status = std::process::Command::new(&rar_bin)
+                .args(["r", "-idq"])
+                .arg(&path)
+                .current_dir(dir.path())
+                .status()
+                .expect("run official rar r");
+            assert!(status.success(), "official rar could not repair");
+            let fixed = dir.path().join(format!(
+                "fixed.{}",
+                path.file_name().unwrap().to_string_lossy()
+            ));
+            let status = std::process::Command::new(&unrar)
+                .arg("t")
+                .arg(&fixed)
+                .status()
+                .unwrap();
+            assert!(status.success(), "repaired archive fails unrar test");
+        }
+    }
+}
+#[test]
+fn delete_from_solid_archive_recompresses_chain() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("del-solid.rar");
+    let files: Vec<(String, Vec<u8>)> = vec![
+        ("a.bin".into(), compressible(1, 100_000)),
+        ("b.bin".into(), compressible(2, 100_000)),
+        ("c.bin".into(), compressible(3, 100_000)),
+        ("d.bin".into(), compressible(4, 100_000)),
+        ("e.txt".into(), b"tail outside the chain ".repeat(3_000)),
+    ];
+    {
+        let mut rar = RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                solid: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (name, data) in &files {
+            // All compressible members join the same solid chain; the last
+            // one is stored and starts a fresh chain segment.
+            let level = if name == "e.txt" { 0 } else { 3 };
+            rar.add_bytes(name, data, level).unwrap();
+        }
+        rar.close().unwrap();
+    }
+    let orig = std::fs::read(&path).unwrap();
+
+    // Delete a mid-chain member: the chain is recompressed from its start,
+    // and the stored member after it is copied verbatim.
+    let mut rar = RarArchive::open(&path).unwrap();
+    rar.delete(&["b.bin"]).unwrap();
+    for (name, data) in &files {
+        if name == "b.bin" {
+            continue;
+        }
+        let mut rar = RarArchive::open(&path).unwrap();
+        assert_eq!(&rar.read(name).unwrap(), data, "content of {name} lost");
+    }
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(member_names(&bytes), ["a.bin", "c.bin", "d.bin", "e.txt"]);
+    // The stored member outside the chain keeps its exact bytes.
+    let (s0, e0) = file_block_span(&orig, "e.txt");
+    let (s1, e1) = file_block_span(&bytes, "e.txt");
+    assert_eq!(
+        &orig[s0..e0],
+        &bytes[s1..e1],
+        "stored tail must be verbatim"
+    );
+
+    // Deleting the last member of the chain must not recompress anything:
+    // the archive prefix is copied verbatim.
+    let bytes = std::fs::read(&path).unwrap();
+    let (s_del, _e_del) = file_block_span(&bytes, "d.bin");
+    let mut rar = RarArchive::open(&path).unwrap();
+    rar.delete(&["d.bin"]).unwrap();
+    let bytes2 = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[..s_del], &bytes2[..s_del], "prefix must be verbatim");
+    let rar = RarArchive::open(&path).unwrap();
+    assert_eq!(rar.namelist(), ["a.bin", "c.bin", "e.txt"]);
+}
+
+#[test]
+fn delete_from_encrypted_archives_roundtrips() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("del-enc.rar");
+    let payload = compressible(7, 60_000);
+    {
+        let mut rar = RarArchive::create_with_password(&path, "s3cret").unwrap();
+        rar.add_bytes("f1.txt", &payload, 3).unwrap();
+        rar.add_bytes("f2.txt", &payload, 3).unwrap();
+        rar.add_bytes("f3.txt", &payload, 3).unwrap();
+        rar.close().unwrap();
+    }
+    let mut rar = RarArchive::open_with_password(&path, "s3cret").unwrap();
+    rar.delete(&["f2.txt"]).unwrap();
+    let mut rar = RarArchive::open_with_password(&path, "s3cret").unwrap();
+    assert_eq!(rar.namelist(), ["f1.txt", "f3.txt"]);
+    assert_eq!(rar.read("f1.txt").unwrap(), payload);
+    assert_eq!(rar.read("f3.txt").unwrap(), payload);
+
+    // Header-encrypted archives.
+    let path2 = dir.path().join("del-hp.rar");
+    {
+        let mut rar = RarArchive::create_with_password_headers(&path2, "s3cret").unwrap();
+        rar.add_bytes("g1.txt", &payload, 3).unwrap();
+        rar.add_bytes("g2.txt", &payload, 3).unwrap();
+        rar.close().unwrap();
+    }
+    let mut rar = RarArchive::open_with_password(&path2, "s3cret").unwrap();
+    rar.delete(&["g1.txt"]).unwrap();
+    let mut rar = RarArchive::open_with_password(&path2, "s3cret").unwrap();
+    assert_eq!(rar.namelist(), ["g2.txt"]);
+    assert_eq!(rar.read("g2.txt").unwrap(), payload);
+}
+
+#[test]
+fn delete_all_members_erases_archive() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("del-all.rar");
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        rar.add_bytes("f1.txt", b"one", 0).unwrap();
+        rar.add_bytes("f2.txt", b"two", 0).unwrap();
+        rar.close().unwrap();
+    }
+    let mut rar = RarArchive::open(&path).unwrap();
+    let n = rar.delete(&["f1.txt", "f2.txt"]).unwrap();
+    assert_eq!(n, 2);
+    assert!(!path.exists(), "archive must be erased when empty");
+}
+
+#[test]
+fn delete_rejects_missing_members_and_multivolume() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("del-err.rar");
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        rar.add_bytes("f1.txt", b"one", 0).unwrap();
+        rar.close().unwrap();
+    }
+    let mut rar = RarArchive::open(&path).unwrap();
+    match rar.delete(&["nope.txt"]) {
+        Err(rar5::RarError::Format(msg)) => assert!(msg.contains("member not found")),
+        other => panic!("expected Format(member not found), got {other:?}"),
+    }
+    // Archive unchanged after a failed delete.
+    let rar = RarArchive::open(&path).unwrap();
+    assert_eq!(rar.namelist(), ["f1.txt"]);
+
+    // The official `rar` CLI refuses to modify multi-volume archives
+    // ("Cannot modify volume"); rar-rs re-splits the volumes instead.
+    let vol = dir.path().join("del-vol.rar");
+    let payload_a: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+    let payload_b: Vec<u8> = (0..40_000u32).map(|i| (i % 253) as u8).collect();
+    {
+        let mut rar = rar5::RarArchive::create_multivolume(&vol, 30_000).unwrap();
+        rar.add_bytes("a.bin", &payload_a, 0).unwrap();
+        rar.add_bytes("b.bin", &payload_b, 0).unwrap();
+        rar.add_bytes("c.bin", &payload_a, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let volumes = rar5::discover_volumes(&vol);
+    assert!(volumes.len() > 1, "precondition: multi-volume archive");
+    let mut rar = RarArchive::open(&volumes[0]).unwrap();
+    assert_eq!(rar.namelist(), ["a.bin", "b.bin", "c.bin"]);
+    let n = rar.delete(&["b.bin"]).unwrap();
+    assert_eq!(n, 1);
+
+    // Content survives and the volume set is readable again.
+    let volumes = rar5::discover_volumes(&vol);
+    let mut rar = RarArchive::open(&volumes[0]).unwrap();
+    assert_eq!(rar.namelist(), ["a.bin", "c.bin"]);
+    assert_eq!(rar.read("a.bin").unwrap(), payload_a);
+    assert_eq!(rar.read("c.bin").unwrap(), payload_a);
+}
+
+#[test]
+fn delete_rejects_locked_archive() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("del-locked.rar");
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        rar.add_bytes("f1.txt", b"one", 0).unwrap();
+        rar.close().unwrap();
+    }
+    // Hand-patch the ARCHIVE_FLAG_LOCKED (0x10) bit into the main header's
+    // archive-level flags and recompute the header CRC.
+    let bytes = std::fs::read(&path).unwrap();
+    let main = scan_blocks(&bytes)
+        .into_iter()
+        .find(|b| b.block_type == 0x01)
+        .unwrap();
+    let vint_len = main.header_len - main.body.len();
+    let mut header = bytes[main.start + 4..main.start + 4 + main.header_len].to_vec();
+    // Body layout: [type][block flags][extra size?][arch flags]. The
+    // default writer emits a single-byte arch flags vint (0x00).
+    let (_, mut q) = read_vint(&header, vint_len);
+    let (block_flags, n) = read_vint(&header, q);
+    q = n;
+    if block_flags & 0x0001 != 0 {
+        let (_, n) = read_vint(&header, q);
+        q = n;
+    }
+    header[q] |= 0x10;
+    let crc = crc32fast::hash(&header);
+    let mut out = bytes[..main.start].to_vec();
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&bytes[main.start + 4 + main.header_len..]);
+    std::fs::write(&path, &out).unwrap();
+
+    let mut rar = RarArchive::open(&path).unwrap();
+    match rar.delete(&["f1.txt"]) {
+        Err(rar5::RarError::Unsupported(msg)) => assert!(msg.contains("locked")),
+        other => panic!("expected Unsupported(locked), got {other:?}"),
+    }
+}
+
+/// Official UNRAR validates archives produced by `delete`, and rar-rs
+/// reads archives modified by the official `rar d`.
+#[test]
+fn official_unrar_validates_deleted_archives() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let rar_bin = std::env::var_os("SA_OFFICIAL_RAR");
+    let dir = make_temp_dir();
+    let a = compressible(11, 60_000);
+    let b = compressible(12, 60_000);
+    let c = compressible(13, 60_000);
+
+    let cases: Vec<(String, rar5::CreateOptions)> = vec![
+        ("plain".into(), rar5::CreateOptions::default()),
+        (
+            "solid-qo".into(),
+            rar5::CreateOptions {
+                solid: true,
+                quick_open: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "encrypted".into(),
+            rar5::CreateOptions {
+                password: Some("s3cret".into()),
+                ..Default::default()
+            },
+        ),
+        (
+            "headers".into(),
+            rar5::CreateOptions {
+                password: Some("s3cret".into()),
+                encrypt_headers: true,
+                ..Default::default()
+            },
+        ),
+    ];
+    for (name, opts) in cases {
+        let path = dir.path().join(format!("del-{name}.rar"));
+        {
+            let mut rar = rar5::RarArchive::create_with_options(&path, opts.clone()).unwrap();
+            rar.add_bytes("a.bin", &a, 3).unwrap();
+            rar.add_bytes("b.bin", &b, 3).unwrap();
+            rar.add_bytes("c.bin", &c, 3).unwrap();
+            rar.close().unwrap();
+        }
+        let password_flag = opts
+            .password
+            .as_ref()
+            .map(|pw| vec![format!("-p{pw}")])
+            .unwrap_or_default();
+        let mut rar = match &opts.password {
+            Some(pw) => rar5::RarArchive::open_with_password(&path, pw).unwrap(),
+            None => rar5::RarArchive::open(&path).unwrap(),
+        };
+        rar.delete(&["b.bin"]).unwrap();
+        let status = std::process::Command::new(&unrar)
+            .arg("t")
+            .args(&password_flag)
+            .arg(&path)
+            .status()
+            .expect("run official unrar");
+        assert!(status.success(), "official unrar rejected del-{name}");
+
+        // Content still correct through our own reader.
+        let mut rar = match &opts.password {
+            Some(pw) => rar5::RarArchive::open_with_password(&path, pw).unwrap(),
+            None => rar5::RarArchive::open(&path).unwrap(),
+        };
+        assert_eq!(rar.read("a.bin").unwrap(), a);
+        assert_eq!(rar.read("c.bin").unwrap(), c);
+    }
+
+    // Reverse direction: the official `rar d` modifies a rar-rs archive,
+    // and rar-rs reads the result.
+    if let Some(rar_bin) = &rar_bin {
+        let path = dir.path().join("del-by-official.rar");
+        {
+            let mut rar = rar5::RarArchive::create(&path).unwrap();
+            rar.add_bytes("a.bin", &a, 3).unwrap();
+            rar.add_bytes("b.bin", &b, 3).unwrap();
+            rar.add_bytes("c.bin", &c, 3).unwrap();
+            rar.close().unwrap();
+        }
+        let status = std::process::Command::new(rar_bin)
+            .args(["d", "-idq"])
+            .arg(&path)
+            .arg("b.bin")
+            .status()
+            .expect("run official rar d");
+        assert!(status.success(), "official rar d failed");
+        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        assert_eq!(rar.namelist(), ["a.bin", "c.bin"]);
+        assert_eq!(rar.read("a.bin").unwrap(), a);
+        assert_eq!(rar.read("c.bin").unwrap(), c);
+    }
+}
+
+// ── Append / lock / recovery-record commands ────────────────────────────────
+
+#[test]
+fn append_preserves_existing_members_and_rebuilds_records() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("app.rar");
+    let a = compressible(21, 60_000);
+    let b = compressible(22, 60_000);
+    let c = compressible(23, 60_000);
+    {
+        let mut rar = RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                quick_open: true,
+                recovery_percent: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add_bytes("a.bin", &a, 3).unwrap();
+        rar.close().unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+
+    {
+        let mut rar = rar5::RarArchive::open_append(&path).unwrap();
+        rar.add_bytes("b.bin", &b, 3).unwrap();
+        rar.add_bytes("c.bin", &c, 0).unwrap();
+        rar.close().unwrap();
+    }
+
+    // Existing member untouched (payload + header bytes verbatim).
+    let after = std::fs::read(&path).unwrap();
+    let (s0, e0) = file_block_span(&before, "a.bin");
+    let (s1, e1) = file_block_span(&after, "a.bin");
+    assert_eq!(&before[s0..e0], &after[s1..e1], "existing member changed");
+
+    // Quick-open record rebuilt at the end with a valid locator; recovery
+    // record rebuilt too.
+    let qo_pos = service_offset(&after, "QO");
+    let (loc_flags, qo, rr) = main_header_locator(&after);
+    assert_eq!(loc_flags & 0x0001, 0x0001);
+    assert_eq!(qo.unwrap(), qo_pos as u64 - 8);
+    let rr_pos = service_offset(&after, "RR");
+    assert_eq!(rr.unwrap(), rr_pos as u64 - 8);
+    assert_eq!(qo_cached_names(&after), ["a.bin", "b.bin", "c.bin"]);
+
+    let mut rar = RarArchive::open(&path).unwrap();
+    assert_eq!(rar.read("a.bin").unwrap(), a);
+    assert_eq!(rar.read("b.bin").unwrap(), b);
+    assert_eq!(rar.read("c.bin").unwrap(), c);
+}
+
+#[test]
+fn append_rejects_locked_archive() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("app-locked.rar");
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        rar.add_bytes("a.bin", b"x", 0).unwrap();
+        rar.close().unwrap();
+    }
+    {
+        let mut rar = RarArchive::open(&path).unwrap();
+        rar.lock().unwrap();
+    }
+    // Locked archives are read-only: both the official `rar d` and our
+    // append/delete refuse them.
+    match rar5::RarArchive::open_append(&path) {
+        Err(rar5::RarError::Unsupported(msg)) => assert!(msg.contains("locked")),
+        Err(e) => panic!("expected Unsupported(locked), got {e:?}"),
+        Ok(_) => panic!("expected Unsupported(locked)"),
+    }
+    let mut rar = RarArchive::open(&path).unwrap();
+    match rar.delete(&["a.bin"]) {
+        Err(rar5::RarError::Unsupported(msg)) => assert!(msg.contains("locked")),
+        other => panic!("expected Unsupported(locked), got {other:?}"),
+    }
+    // Content still readable after the lock.
+    let mut rar = RarArchive::open(&path).unwrap();
+    assert_eq!(rar.read("a.bin").unwrap(), b"x");
+}
+
+#[test]
+fn add_recovery_record_to_existing_archive() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("rr-new.rar");
+    let payload = compressible(31, 80_000);
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        rar.add_bytes("f1.bin", &payload, 3).unwrap();
+        rar.close().unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    assert!(!service_exists(&before, "RR"));
+
+    {
+        let mut rar = RarArchive::open(&path).unwrap();
+        rar.add_recovery_record(10).unwrap();
+    }
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(service_exists(&bytes, "RR"));
+    assert_eq!(archive_flags(&bytes) & 0x0008, 0x0008);
+    let rr_pos = service_offset(&bytes, "RR");
+    let (_, _, rr) = main_header_locator(&bytes);
+    assert_eq!(rr.unwrap(), rr_pos as u64 - 8);
+    // The member payload is untouched.
+    let (s0, e0) = file_block_span(&before, "f1.bin");
+    let (s1, e1) = file_block_span(&bytes, "f1.bin");
+    assert_eq!(&before[s0..e0], &bytes[s1..e1]);
+    let mut rar = RarArchive::open(&path).unwrap();
+    assert_eq!(rar.read("f1.bin").unwrap(), payload);
+
+    // The added record must repair the archive (official rar).
+    if let (Some(unrar), Some(rar_bin)) = (
+        std::env::var_os("SA_OFFICIAL_UNRAR"),
+        std::env::var_os("SA_OFFICIAL_RAR"),
+    ) {
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            let data_off = first_file_data_offset(&bytes);
+            for (i, byte) in bytes[data_off + 5..data_off + 13].iter_mut().enumerate() {
+                *byte ^= (i as u8).wrapping_add(0xA5);
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            let status = std::process::Command::new(&rar_bin)
+                .args(["r", "-idq"])
+                .arg(&path)
+                .current_dir(dir.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "official rar could not repair");
+            let fixed = dir.path().join(format!(
+                "fixed.{}",
+                path.file_name().unwrap().to_string_lossy()
+            ));
+            let status = std::process::Command::new(&unrar)
+                .arg("t")
+                .arg(&fixed)
+                .status()
+                .unwrap();
+            assert!(status.success(), "repaired archive fails unrar test");
+        }
+    }
+}
+
+#[test]
+fn delete_multivolume_rebuilds_recovery_volumes() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("mv-rev.rar");
+    let payload_a: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+    let payload_b: Vec<u8> = (0..40_000u32).map(|i| (i % 253) as u8).collect();
+    {
+        let mut rar =
+            rar5::RarArchive::create_multivolume_with_recovery_count(&path, 30_000, 1).unwrap();
+        rar.add_bytes("a.bin", &payload_a, 0).unwrap();
+        rar.add_bytes("b.bin", &payload_b, 0).unwrap();
+        rar.add_bytes("c.bin", &payload_a, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let rev = dir.path().join("mv-rev.part1.rev");
+    assert!(rev.exists(), "precondition: .rev files present");
+    let volumes_before = rar5::discover_volumes(&path);
+    assert!(volumes_before.len() > 1);
+
+    {
+        let mut rar = RarArchive::open(&volumes_before[0]).unwrap();
+        rar.delete(&["b.bin"]).unwrap();
+    }
+    // The .rev set is regenerated over the new volumes.
+    let volumes_after = rar5::discover_volumes(&path);
+    assert!(rev.exists(), ".rev files must be regenerated");
+    let mut rar = RarArchive::open(&volumes_after[0]).unwrap();
+    assert_eq!(rar.namelist(), ["a.bin", "c.bin"]);
+    assert_eq!(rar.read("a.bin").unwrap(), payload_a);
+
+    // Official `rar rc` must reconstruct a deleted volume from them.
+    if let (Some(unrar), Some(rar_bin)) = (
+        std::env::var_os("SA_OFFICIAL_UNRAR"),
+        std::env::var_os("SA_OFFICIAL_RAR"),
+    ) {
+        {
+            let vols = rar5::discover_volumes(&path);
+            let victim = vols[1].clone();
+            std::fs::remove_file(&victim).unwrap();
+            let status = std::process::Command::new(&rar_bin)
+                .args(["rc", "-idq"])
+                .arg(&vols[0])
+                .current_dir(dir.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "official rar rc failed");
+            let status = std::process::Command::new(&unrar)
+                .arg("t")
+                .arg(&vols[0])
+                .status()
+                .unwrap();
+            assert!(status.success(), "reconstructed set fails unrar test");
+            let mut rar = RarArchive::open(&vols[0]).unwrap();
+            assert_eq!(rar.read("a.bin").unwrap(), payload_a);
+            assert_eq!(rar.read("c.bin").unwrap(), payload_a);
+        }
+    }
+}
+
+/// Official `rar` creates archives for the modification commands, and the
+/// official tools validate every result.
+#[test]
+fn official_tools_validate_modified_archives() {
+    let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let unrar = std::env::var_os("SA_OFFICIAL_UNRAR").unwrap_or(rar_bin.clone());
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let a: Vec<u8> = b"append interop payload ".repeat(3_000);
+    let b: Vec<u8> = b"second interop member ".repeat(2_500);
+    std::fs::write(src.join("a.bin"), &a).unwrap();
+    std::fs::write(src.join("b.bin"), &b).unwrap();
+
+    // Our append on a rar-created archive (with a quick-open record).
+    let path = dir.path().join("append.rar");
+    let status = std::process::Command::new(&rar_bin)
+        .args(["a", "-m3", "-qo", "-idq"])
+        .arg(&path)
+        .arg(src.join("a.bin"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    {
+        let mut rar = rar5::RarArchive::open_append(&path).unwrap();
+        rar.add(src.join("b.bin"), 3).unwrap();
+        rar.close().unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected appended archive");
+    let mut rar = RarArchive::open(&path).unwrap();
+    // The official rar stored the first member with its relative path.
+    let a_name = rar
+        .namelist()
+        .iter()
+        .find(|n| n.ends_with("src/a.bin"))
+        .expect("first member")
+        .to_string();
+    assert!(rar.namelist().contains(&"b.bin"), "{:?}", rar.namelist());
+    assert_eq!(rar.read(&a_name).unwrap(), a);
+    assert_eq!(rar.read("b.bin").unwrap(), b);
+
+    // Our delete on a rar-created multi-volume archive (the official CLI
+    // refuses to modify multi-volume archives itself).
+    let mv = dir.path().join("mv.rar");
+    let payload: Vec<u8> = (0..120_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(src.join("big.bin"), &payload).unwrap();
+    let small = src.join("small.bin");
+    std::fs::write(&small, b"small member").unwrap();
+    let status = std::process::Command::new(&rar_bin)
+        .args(["a", "-m0", "-v100k", "-idq"])
+        .arg(&mv)
+        .arg(src.join("big.bin"))
+        .arg(&small)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let volumes = rar5::discover_volumes(&mv);
+    assert!(volumes.len() > 1, "precondition: multi-volume set");
+
+    // Delete the small member from the rar-created volumes (the official
+    // CLI refuses to modify multi-volume archives itself).
+    let mut rar = RarArchive::open(&volumes[0]).unwrap();
+    let delete_names: Vec<String> = rar
+        .namelist()
+        .iter()
+        .filter(|n| !n.ends_with("big.bin"))
+        .map(|s| s.to_string())
+        .collect();
+    assert!(!delete_names.is_empty(), "small member not found");
+    let delete_refs: Vec<&str> = delete_names.iter().map(|s| s.as_str()).collect();
+    rar.delete(&delete_refs).unwrap();
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&volumes[0])
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected rewritten volumes");
+    let mut rar = RarArchive::open(&volumes[0]).unwrap();
+    let big_name = rar
+        .namelist()
+        .iter()
+        .find(|n| n.ends_with("big.bin"))
+        .unwrap()
+        .to_string();
+    assert_eq!(rar.read(&big_name).unwrap(), payload);
+}

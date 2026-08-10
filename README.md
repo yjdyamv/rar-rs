@@ -22,6 +22,13 @@ archives — no external binaries required.
 | Timestamp preservation               |   done |
 | Solid archive decompression          |   done |
 | Solid archive creation               |   done |
+| Delete members without full rebuild  |   done |
+| Append members to existing archives  |   done |
+| Update members (newer only, `u`)     |   done |
+| Lock archives (`k`)                  |   done |
+| Add recovery record (`rr`)           |   done |
+| Multi-volume member deletion         |   done |
+| Parallel rewrite pipeline            |   done |
 | Quick-open records (`-qo+`)          |   done |
 | BLAKE2sp hash records (`-htb`)       |   done |
 | Streamed extraction (bounded memory) |   done |
@@ -51,11 +58,19 @@ tested, and extracted.
 
 ```
 rar a [-m0..-m5] [-p<password>] [-v<size>] archive.rar files...   Create archive
+rar d [-p<password>] archive.rar names...   Delete members without rebuilding
 rar l archive.rar                          List contents
 rar i archive.rar                          Show info
 ```
 
 The `-v` flag creates multi-volume archives (e.g. `-v1m` for 1 MB volumes, `-v100k` for 100 KB).
+
+`rar d` removes members without recompressing the rest: kept file blocks
+(header + compressed payload) are copied byte-for-byte, so the operation
+scales with the archive size — not with the remaining data. Solid archives
+recompress only the chain affected by the deletion; inline recovery
+records are dropped and the quick-open record is rebuilt, matching the
+official `rar d`.
 
 ### unrar
 
@@ -218,8 +233,12 @@ Binaries are at `target/release/rar` and `target/release/unrar`.
 The official RAR/UNRAR 7.x binaries are used as black-box references:
 UNRAR tests every feature combination we produce (solid, quick-open,
 BLAKE2sp, encryption, recovery records, `.rev` volumes), we read official
-archives byte-identically, `rar r` repairs our recovery records, and
-`rar rc` reconstructs deleted volumes from our `.rev` files.
+archives byte-identically, `rar r` repairs our recovery records,
+`rar rc` reconstructs deleted volumes from our `.rev` files, and every
+modification command is cross-validated: deleted archives (plain, solid,
+encrypted, header-encrypted, with quick-open, multi-volume), appended
+archives and locked archives are tested by UNRAR, while `rar d`, `rar a`
+and `rar k` on rar-rs archives must stay readable.
 
 ```bash
 SA_OFFICIAL_RAR=/path/to/rar SA_OFFICIAL_UNRAR=/path/to/unrar \
@@ -240,6 +259,9 @@ The tests skip automatically when these variables are not set.
   generation streams.
 - Quick-open stores headers for every file (WinRAR's default only caches
   large files); dictionaries are accepted up to 1 GiB (WinRAR 5.x max).
+- Appending to multi-volume archives is not supported (the official `rar`
+  refuses too); deleting from them is supported.
+- Solid archives cannot be combined with multi-volume output yet.
 
 ---
 
