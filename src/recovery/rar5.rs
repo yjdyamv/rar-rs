@@ -356,15 +356,62 @@ pub fn repair_inline_recovery_prefix(
     if damaged.is_empty() {
         return Ok(archive_prefix.to_vec());
     }
-    if damaged.len() > chunks.len() {
+
+    // Relocated phase: a damaged shard can also be repaired by copying an
+    // identical byte sequence that survives elsewhere in the archive, e.g.
+    // the data block of another file that was packed with identical content
+    // (WinRAR stores such blocks byte-identically in one run). The candidate
+    // copy is validated against the shard's expected CRC64, so a wrong or
+    // itself-damaged source can never corrupt the archive.
+    let file_blocks = parse_file_data_blocks(archive_prefix)?;
+    let mut remaining: Vec<usize> = Vec::with_capacity(damaged.len());
+    for &index in &damaged {
+        let range = &shard_ranges[index];
+        let Some((b1_start, _b1_end)) = file_blocks
+            .iter()
+            .filter(|&&(start, end)| range.start < end && start < range.end)
+            .max_by_key(|&&(start, end)| {
+                range.end.min(end).saturating_sub(range.start.max(start))
+            })
+            .copied()
+        else {
+            remaining.push(index);
+            continue;
+        };
+        let mut relocated = false;
+        for &(b2_start, b2_end) in &file_blocks {
+            if b2_start == b1_start && b2_end == _b1_end {
+                continue;
+            }
+            let off = b2_start as isize - b1_start as isize;
+            let cand_start = range.start as isize + off;
+            let cand_end = range.end as isize + off;
+            if cand_start < 0 || cand_end > archive_prefix.len() as isize {
+                continue;
+            }
+            let candidate = &archive_prefix[cand_start as usize..cand_end as usize];
+            if crc64_rar_state(candidate) == first.data_shard_states[index] {
+                data_shards[index] = candidate.to_vec();
+                relocated = true;
+                break;
+            }
+        }
+        if !relocated {
+            remaining.push(index);
+        }
+    }
+
+    if !remaining.is_empty() && remaining.len() > chunks.len() {
         return Err(Error::TooManyDamagedShards);
     }
 
-    let recovery_rows: Vec<_> = chunks[..damaged.len()]
-        .iter()
-        .map(|chunk| (chunk.shard_index, chunk.parity.as_slice()))
-        .collect();
-    recover_damaged_shards(&mut data_shards, &damaged, &recovery_rows)?;
+    if !remaining.is_empty() {
+        let recovery_rows: Vec<_> = chunks[..remaining.len()]
+            .iter()
+            .map(|chunk| (chunk.shard_index, chunk.parity.as_slice()))
+            .collect();
+        recover_damaged_shards(&mut data_shards, &remaining, &recovery_rows)?;
+    }
 
     let mut repaired = Vec::with_capacity(archive_prefix.len());
     for (shard, range) in data_shards.iter().zip(shard_ranges) {
@@ -372,6 +419,67 @@ pub fn repair_inline_recovery_prefix(
     }
     debug_assert_eq!(repaired.len(), archive_prefix.len());
     Ok(repaired)
+}
+
+/// Walk the RAR5 blocks inside a protected prefix and collect the data
+/// ranges of file blocks (header type 2). Ranges are absolute offsets
+/// within `prefix`. Block layout follows the RAR5 spec: 4-byte header
+/// CRC32, vint header size, then a vint stream of type/flags/extra/data
+/// sizes followed by the header body; the data area trails the header.
+fn parse_file_data_blocks(prefix: &[u8]) -> Result<Vec<(usize, usize)>> {
+    let mut blocks = Vec::new();
+    if prefix.len() < 8 || &prefix[..7] != b"Rar!\x1a\x07\x01" {
+        return Ok(blocks);
+    }
+    let mut pos = 8usize;
+    while pos + 4 < prefix.len() {
+        let (header_size, size_bytes) = crate::vint::decode_from_slice(prefix, pos + 4)
+            .map_err(|_| Error::BadRecoveryChunk)?;
+        if header_size == 0 || header_size > 2 * 1024 * 1024 {
+            break;
+        }
+        let body = pos + 4 + size_bytes;
+        let block_end = body.checked_add(header_size as usize).ok_or(Error::PlanOverflow)?;
+        if block_end > prefix.len() {
+            break;
+        }
+        let (block_type, t) = crate::vint::decode_from_slice(prefix, body)
+            .map_err(|_| Error::BadRecoveryChunk)?;
+        let (flags, f) = crate::vint::decode_from_slice(prefix, body + t)
+            .map_err(|_| Error::BadRecoveryChunk)?;
+        let mut p = body + t + f;
+        if flags & 0x1 != 0 {
+            let (_, n) = crate::vint::decode_from_slice(prefix, p)
+                .map_err(|_| Error::BadRecoveryChunk)?;
+            p += n;
+        }
+        let mut data_size = 0u64;
+        if flags & 0x2 != 0 {
+            let (v, _n) = crate::vint::decode_from_slice(prefix, p)
+                .map_err(|_| Error::BadRecoveryChunk)?;
+            data_size = v;
+        }
+        if block_type == 2 {
+            let data_start = block_end;
+            let data_end = data_start
+                .checked_add(data_size as usize)
+                .ok_or(Error::PlanOverflow)?;
+            if data_end <= prefix.len() {
+                blocks.push((data_start, data_end));
+            }
+        }
+        let next = block_end
+            .checked_add(data_size as usize)
+            .ok_or(Error::PlanOverflow)?;
+        if next <= pos {
+            break;
+        }
+        pos = next;
+        if block_type == 5 {
+            break;
+        }
+    }
+    Ok(blocks)
 }
 
 /// Repair damaged RAR5 inline-recovery data shards without materializing the

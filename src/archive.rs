@@ -7095,6 +7095,87 @@ mod tests {
     }
 
     #[test]
+    fn recovery_record_relocates_damaged_shards_from_twin_file_blocks() {
+        // Two members with identical content pack byte-identically, so a
+        // damaged shard inside one member's data block can be relocated
+        // from the twin block even when the damage spans more shards than
+        // the recovery record can correct (NR=1, damage covers 2 shards).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().with_extension("rar");
+        let data = b"twin payload for relocated repair ".repeat(1000);
+        {
+            let mut ar = RarArchive::create_with_recovery(&path, 5).unwrap();
+            ar.add_bytes("a.bin", &data, 0).unwrap();
+            ar.add_bytes("b.bin", &data, 0).unwrap();
+            ar.close().unwrap();
+        }
+        let raw = std::fs::read(&path).unwrap();
+        let m = raw
+            .windows(4)
+            .position(|w| w == b"{RB}")
+            .expect("recovery record present");
+        let ds = u16::from_le_bytes([raw[m + 0x3a], raw[m + 0x3b]]) as usize;
+        let gc = u64::from_le_bytes(raw[m + 0x2a..m + 0x32].try_into().unwrap()) as usize;
+        assert!(ds >= 4, "expected a multi-shard archive, got {ds}");
+        let b_name = raw
+            .windows(5)
+            .position(|w| w == b"b.bin")
+            .expect("second member header");
+
+        // Damage two complete shards that fall inside b.bin's data block
+        // (their byte-identical copies survive in a.bin's block). The last
+        // shard index is chosen so both damaged shards stay inside b.bin's
+        // data area and never touch file headers.
+        let last = (ds - 1).min(b_name + 5 + gc / 2);
+        let s1 = last.saturating_sub(2) * gc;
+        let s2 = (last.saturating_sub(1)) * gc;
+        assert!(s1 >= b_name, "damaged shards must sit in b.bin data block");
+        let mut damaged = raw.clone();
+        for i in s1..s2 + gc {
+            damaged[i] ^= 0xFF;
+        }
+        let repaired = crate::recovery::rar5::repair_inline_recovery_archive(&damaged).unwrap();
+        assert_eq!(repaired, raw, "relocated repair must restore the original bytes");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn recovery_record_refuses_damage_without_twin_or_parity_capacity() {
+        // Distinct member contents have no twin block; two damaged shards
+        // exceed the single parity shard, so repair must refuse instead of
+        // writing wrong bytes.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().with_extension("rar");
+        let a = b"alpha payload ".repeat(1000);
+        let b = b"beta payload differs ".repeat(1000);
+        {
+            let mut ar = RarArchive::create_with_recovery(&path, 5).unwrap();
+            ar.add_bytes("a.bin", &a, 0).unwrap();
+            ar.add_bytes("b.bin", &b, 0).unwrap();
+            ar.close().unwrap();
+        }
+        let raw = std::fs::read(&path).unwrap();
+        let m = raw
+            .windows(4)
+            .position(|w| w == b"{RB}")
+            .expect("recovery record present");
+        let ds = u16::from_le_bytes([raw[m + 0x3a], raw[m + 0x3b]]) as usize;
+        let gc = u64::from_le_bytes(raw[m + 0x2a..m + 0x32].try_into().unwrap()) as usize;
+        let last = (ds - 1).min(10);
+        let s1 = last.saturating_sub(2) * gc;
+        let s2 = (last.saturating_sub(1)) * gc;
+        let mut damaged = raw.clone();
+        for i in s1..s2 + gc {
+            damaged[i] ^= 0xFF;
+        }
+        assert!(
+            crate::recovery::rar5::repair_inline_recovery_archive(&damaged).is_err(),
+            "repair must refuse damage beyond parity capacity without a twin"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn recovery_record_with_password_and_headers() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().with_extension("rar");
