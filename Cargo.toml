@@ -5,6 +5,7 @@ edition = "2024"
 description = "Pure-Rust RAR5 archive library — create, read, and extract RAR5 archives with native LZSS+Huffman compression"
 license = "BSD-2-Clause"
 repository = "https://codeberg.org/librar/rar-rs"
+autobins = false
 
 [[bin]]
 name = "rar"
@@ -14,12 +15,14 @@ path = "src/bin/rar.rs"
 name = "unrar"
 path = "src/bin/unrar.rs"
 
+
 [dependencies]
 crc32fast = "1"
 aes = { version = "0.9", features = ["zeroize"] }
 hmac = "0.13"
 sha2 = "0.11"
 rand = "0.10"
+clap = { version = "4.6", features = ["derive", "wrap_help"] }
 zeroize = { version = "1.9", features = ["alloc", "derive"] }
 rayon = { version = "1.12", optional = true }
 wide = { version = "0.8", optional = true }

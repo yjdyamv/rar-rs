@@ -49,15 +49,31 @@ const PARALLEL_COMPRESS_WAVE_BUDGET: u64 = 256 * 1024 * 1024;
 /// (like `rar -mt`); 0 = automatic sizing.
 static COMPRESSION_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Extraction thread count set with [`set_extraction_threads`];
+/// 0 = automatic sizing.
+static EXTRACTION_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Set the compression thread count used by the `parallel` feature
 /// (like `rar -mt<N>`). `0` restores automatic sizing.
 pub fn set_compression_threads(threads: usize) {
     COMPRESSION_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Set the extraction thread count used by the `parallel` feature.
+/// `0` restores automatic sizing.
+pub fn set_extraction_threads(threads: usize) {
+    EXTRACTION_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[cfg(feature = "parallel")]
 fn configured_threads() -> Option<usize> {
     let n = COMPRESSION_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+    (n > 0).then_some(n)
+}
+
+#[cfg(feature = "parallel")]
+fn configured_extraction_threads() -> Option<usize> {
+    let n = EXTRACTION_THREADS.load(std::sync::atomic::Ordering::Relaxed);
     (n > 0).then_some(n)
 }
 
@@ -130,6 +146,23 @@ fn large_file_pool() -> &'static rayon::ThreadPool {
             .thread_name(|i| format!("rar5-large-{i}"))
             .build()
             .expect("build rar5 large-file compression pool")
+    })
+}
+
+/// Rayon pool for parallel extraction, sized with
+/// [`set_extraction_threads`] (default: all cores).
+#[cfg(feature = "parallel")]
+fn extraction_pool() -> &'static rayon::ThreadPool {
+    use std::sync::OnceLock;
+
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = configured_extraction_threads().unwrap_or_else(|| pool_threads(4));
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("rar5-extract-{i}"))
+            .build()
+            .expect("build rar5 extraction pool")
     })
 }
 
@@ -2248,60 +2281,62 @@ impl RarArchive {
         }
 
         // Phase 2: decode + integrity-check in parallel.
-        let results: Vec<RarResult<DecodedMember>> = payloads
-            .into_par_iter()
-            .map(|(i, payload)| {
-                let hdr = &headers[i];
-                if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
-                    return Err(RarError::LimitExceeded {
-                        limit: MAX_DICT_SIZE_LOG as u64,
-                        context: format!(
-                            "{}: dictionary size log {} exceeds supported maximum {}",
-                            hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
-                        ),
-                    });
-                }
-                if let Some(limit) = opts.max_unpacked_bytes
-                    && hdr.unpacked_size > limit
-                {
-                    return Err(RarError::LimitExceeded {
-                        limit,
-                        context: format!(
-                            "{}: unpacked size {} exceeds limit",
-                            hdr.name, hdr.unpacked_size
-                        ),
-                    });
-                }
+        let results: Vec<RarResult<DecodedMember>> = extraction_pool().install(|| {
+            payloads
+                .into_par_iter()
+                .map(|(i, payload)| {
+                    let hdr = &headers[i];
+                    if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
+                        return Err(RarError::LimitExceeded {
+                            limit: MAX_DICT_SIZE_LOG as u64,
+                            context: format!(
+                                "{}: dictionary size log {} exceeds supported maximum {}",
+                                hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
+                            ),
+                        });
+                    }
+                    if let Some(limit) = opts.max_unpacked_bytes
+                        && hdr.unpacked_size > limit
+                    {
+                        return Err(RarError::LimitExceeded {
+                            limit,
+                            context: format!(
+                                "{}: unpacked size {} exceeds limit",
+                                hdr.name, hdr.unpacked_size
+                            ),
+                        });
+                    }
 
-                let data = if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
-                    Vec::new()
-                } else if hdr.comp_method == COMP_METHOD_STORE {
-                    payload.data
-                } else {
-                    crate::codec::decode_standalone(
-                        &payload.data,
-                        hdr.unpacked_size,
-                        hdr.comp_dict_size,
-                    )
-                    .map_err(RarError::Unsupported)?
-                };
+                    let data = if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
+                        Vec::new()
+                    } else if hdr.comp_method == COMP_METHOD_STORE {
+                        payload.data
+                    } else {
+                        crate::codec::decode_standalone(
+                            &payload.data,
+                            hdr.unpacked_size,
+                            hdr.comp_dict_size,
+                        )
+                        .map_err(RarError::Unsupported)?
+                    };
 
-                let crc = crc32fast::hash(&data);
-                let blake = if hdr.hash_value.is_some() {
-                    Some(crate::blake2sp::hash(&data))
-                } else {
-                    None
-                };
-                verify_integrity_for(
-                    hdr,
-                    crc,
-                    blake,
-                    payload.params.as_ref(),
-                    payload.keys.as_ref(),
-                )?;
-                Ok(DecodedMember { idx: i, data })
-            })
-            .collect();
+                    let crc = crc32fast::hash(&data);
+                    let blake = if hdr.hash_value.is_some() {
+                        Some(crate::blake2sp::hash(&data))
+                    } else {
+                        None
+                    };
+                    verify_integrity_for(
+                        hdr,
+                        crc,
+                        blake,
+                        payload.params.as_ref(),
+                        payload.keys.as_ref(),
+                    )?;
+                    Ok(DecodedMember { idx: i, data })
+                })
+                .collect()
+        });
 
         // Phase 3: replay writes sequentially in archive order.
         for result in results {

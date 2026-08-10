@@ -38,7 +38,7 @@ pub use write_progress::{WriteOperation, WriteProgressEvent};
 pub mod vint;
 
 pub use archive::{ArchiveEntry, BatchEntry, RarArchive, discover_volumes};
-pub use archive::{set_compression_threads, sfx_offset_of};
+pub use archive::{set_compression_threads, set_extraction_threads, sfx_offset_of};
 pub use constants::*;
 pub use encryption::EncryptionParams;
 pub use error::{RarError, RarResult};
