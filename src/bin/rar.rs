@@ -21,6 +21,10 @@ fn main() {
         rest if rest.len() > 1 && rest.starts_with('i') && args.len() >= 2 => cmd_find(&args[1..]),
         "k" | "lock" => cmd_lock(&args[2..]),
         "rr" => cmd_rr(&args[2..]),
+        "r" | "repair" => cmd_repair(&args[2..]),
+        "rc" => cmd_rebuild_volumes(&args[2..]),
+        "c" => cmd_comment_set(&args[2..]),
+        "cw" => cmd_comment_write(&args[2..]),
         "l" | "list" => cmd_list(&args[2..]),
         "v" => cmd_verbose_list(&args[2..]),
         "i" | "info" => cmd_info(&args[2..]),
@@ -58,6 +62,12 @@ fn usage() {
     eprintln!("  rar rn <archive.rar> <old1> <new1> ...          Rename archived members");
     eprintln!("  rar k [-p<password>] <archive.rar>              Lock the archive");
     eprintln!("  rar rr [-p<password>] <archive.rar> [percent]   Add a recovery record");
+    eprintln!("  rar r <archive.rar>                            Repair with the recovery");
+    eprintln!("                                                  record (writes fixed.<name>)");
+    eprintln!("  rar rc <archive.part1.rar>                     Rebuild missing volumes from");
+    eprintln!("                                                  the .rev files");
+    eprintln!("  rar c <archive.rar> < comment.txt              Set the archive comment");
+    eprintln!("  rar cw <archive.rar>                           Write the archive comment");
     eprintln!("  rar i<string> <archive.rar>                     Find string in members");
     eprintln!("  rar l [-p<password>] <archive.rar>              List archive contents");
     eprintln!("  rar v [-p<password>] <archive.rar>              Verbose list");
@@ -652,6 +662,90 @@ fn cmd_verbose_list(args: &[String]) -> Result<(), String> {
         "",
         rar.list().len()
     );
+    Ok(())
+}
+
+/// Repair an archive with its inline recovery record (like `rar r`).
+/// Writes `fixed.<name>` when damage was found and repaired.
+fn cmd_repair(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("usage: rar r <archive.rar>".into());
+    }
+    let archive_path = &args[0];
+    let input = std::fs::read(archive_path).map_err(|e| format!("read: {e}"))?;
+    let repaired = rar5::repair_archive(&input).map_err(|e| format!("repair: {e}"))?;
+    if repaired == input {
+        println!("All OK");
+        return Ok(());
+    }
+    // The official tool refuses an obviously truncated archive with a
+    // clear error; validate the repaired bytes with our own reader.
+    let name = std::path::Path::new(archive_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive.rar".to_string());
+    let fixed_path = format!("fixed.{name}");
+    std::fs::write(&fixed_path, &repaired).map_err(|e| format!("write: {e}"))?;
+    if let Err(e) = rar5::RarArchive::open(&fixed_path) {
+        let _ = std::fs::remove_file(&fixed_path);
+        return Err(format!("repair produced an unreadable archive: {e}"));
+    }
+    println!("Repaired {archive_path} -> {fixed_path}");
+    Ok(())
+}
+
+/// Rebuild missing volumes from the `.rev` recovery volumes (like `rar rc`).
+fn cmd_rebuild_volumes(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("usage: rar rc <archive.part1.rar>".into());
+    }
+    let first = &args[0];
+    let rebuilt = rar5::rebuild_missing_volumes(std::path::Path::new(first))
+        .map_err(|e| format!("rc: {e}"))?;
+    if rebuilt.is_empty() {
+        println!("All volumes present");
+    } else {
+        for path in &rebuilt {
+            println!("Rebuilt {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// Set the archive comment from stdin (like `rar c`); empty input removes
+/// the comment.
+fn cmd_comment_set(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("usage: rar c <archive.rar> < comment.txt".into());
+    }
+    use std::io::Read;
+    let mut comment = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut comment)
+        .map_err(|e| format!("stdin: {e}"))?;
+    let mut rar = rar5::RarArchive::open(&args[0]).map_err(|e| format!("open: {e}"))?;
+    rar.set_comment(&comment)
+        .map_err(|e| format!("comment: {e}"))?;
+    if comment.is_empty() {
+        println!("Comment removed from {archive}", archive = args[0]);
+    } else {
+        println!("Comment added to {archive}", archive = args[0]);
+    }
+    Ok(())
+}
+
+/// Write the archive comment to stdout (like `rar cw`).
+fn cmd_comment_write(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("usage: rar cw <archive.rar>".into());
+    }
+    let mut rar = rar5::RarArchive::open(&args[0]).map_err(|e| format!("open: {e}"))?;
+    if let Some(comment) = rar.get_comment().map_err(|e| format!("cw: {e}"))? {
+        use std::io::Write;
+        std::io::stdout()
+            .write_all(&comment)
+            .map_err(|e| format!("stdout: {e}"))?;
+    }
     Ok(())
 }
 

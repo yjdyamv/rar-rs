@@ -271,6 +271,9 @@ struct RewritePlan {
     /// Recovery percentage from the dropped RR record; the record is
     /// rebuilt over the rewritten archive.
     rr_percent: Option<u8>,
+    /// New archive comment (CMT service block), written right after the
+    /// main header.
+    comment: Option<Vec<u8>>,
 }
 
 /// Lazily opened readers for every volume of the original archive.
@@ -893,6 +896,7 @@ impl RarArchive {
             &deleted,
             None,
             Some(percent.min(100)),
+            None,
             None,
             &src_path,
             &tmp_path,
@@ -2885,6 +2889,7 @@ impl RarArchive {
                 chain,
                 None,
                 None,
+                None,
                 &src_path,
                 &tmp_path,
             );
@@ -3348,6 +3353,7 @@ impl RarArchive {
                 None,
                 None,
                 Some(&map),
+                None,
                 &src_path,
                 &tmp_path,
             );
@@ -3366,6 +3372,86 @@ impl RarArchive {
         self.solid_decoded_through = -1;
         self.open_read()?;
         Ok(count)
+    }
+
+    /// Read the archive comment (the "CMT" service block), if any.
+    ///
+    /// Header-encrypted archives store the comment encrypted; reading it
+    /// requires the password and is not supported yet.
+    pub fn get_comment(&mut self) -> RarResult<Option<Vec<u8>>> {
+        let mut reader = File::open(&self.path)?;
+        reader.seek(SeekFrom::Start(8))?;
+        while let Some(meta) = self.read_next_block(&mut reader)? {
+            match meta.block_type {
+                BLOCK_TYPE_END_ARCHIVE => break,
+                BLOCK_TYPE_SERVICE_HEADER
+                    if self.service_block_name(&meta)?.as_deref() == Some("CMT") =>
+                {
+                    let mut data = vec![0u8; meta.raw.data_size as usize];
+                    reader.seek(SeekFrom::Start(meta.data_offset))?;
+                    reader.read_exact(&mut data)?;
+                    return Ok(Some(data));
+                }
+                _ => {}
+            }
+            // Advance past the data area.
+            reader.seek(SeekFrom::Start(meta.data_end))?;
+        }
+        Ok(None)
+    }
+
+    /// Set the archive comment (like `rar c`); an empty comment removes
+    /// the existing one.
+    ///
+    /// The comment is stored in a "CMT" service block right after the main
+    /// header; the quick-open and recovery records are rebuilt over the
+    /// rewritten archive. Multi-volume archives are not supported.
+    pub fn set_comment(&mut self, comment: &[u8]) -> RarResult<()> {
+        if self.mode != Mode::Read {
+            return Err(RarError::Format(
+                "set_comment requires an archive opened for reading".into(),
+            ));
+        }
+        if self.volume_paths.len() > 1 {
+            return Err(RarError::Unsupported(
+                "archive comments are not supported for multi-volume archives".into(),
+            ));
+        }
+        if self.main_header_is_locked()? {
+            return Err(RarError::Unsupported("archive is locked".into()));
+        }
+        let src_path = self.path.clone();
+        let tmp_path = temp_sibling_path(&src_path);
+        let mut reader = File::open(&src_path)?;
+        self.stream = Some(File::create(&tmp_path)?);
+        self.quick_open_entries.clear();
+        self.header_encryption = false;
+        self.archive_encr = None;
+
+        let deleted = vec![false; self.entries.len()];
+        // `Some(empty)` removes the existing comment: the plan drops CMT
+        // blocks and nothing new is written.
+        let result = self.rewrite_blocks(
+            &mut reader,
+            &deleted,
+            None,
+            None,
+            None,
+            Some(comment),
+            &src_path,
+            &tmp_path,
+        );
+        self.stream = None;
+        match result {
+            Ok(()) => replace_file(&tmp_path, &src_path)?,
+            Err(e) => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(e);
+            }
+        }
+        self.mode = Mode::Read;
+        self.open_read()?;
+        Ok(())
     }
 
     /// Parse the main archive header and report whether the archive is
@@ -3442,10 +3528,11 @@ impl RarArchive {
         chain: Option<(usize, usize)>,
         force_rr: Option<u8>,
         rename_map: Option<&std::collections::HashMap<usize, String>>,
+        comment: Option<&[u8]>,
         src_path: &Path,
         tmp_path: &Path,
     ) -> RarResult<()> {
-        let plan = self.plan_rewrite(reader, deleted, chain, force_rr, rename_map)?;
+        let plan = self.plan_rewrite(reader, deleted, chain, force_rr, rename_map, comment)?;
         self.execute_rewrite(&plan, src_path, tmp_path)?;
         Ok(())
     }
@@ -3461,6 +3548,7 @@ impl RarArchive {
         chain: Option<(usize, usize)>,
         force_rr: Option<u8>,
         rename_map: Option<&std::collections::HashMap<usize, String>>,
+        comment: Option<&[u8]>,
     ) -> RarResult<RewritePlan> {
         // Signature.
         let mut sig = [0u8; 8];
@@ -3586,6 +3674,7 @@ impl RarArchive {
                     }
                     let drops = name.as_deref() == Some("QO")
                         || name.as_deref() == Some("RR")
+                        || (comment.is_some() && name.as_deref() == Some("CMT"))
                         || (meta.flags & BLOCK_FLAG_DEPENDS_PREV != 0 && prev_file_deleted);
                     if !drops {
                         ops.push(RewriteOp::CopyBlock {
@@ -3612,6 +3701,7 @@ impl RarArchive {
             encrypt_header,
             main_meta,
             rr_percent: rr_percent.filter(|p| *p <= 100),
+            comment: comment.map(|c| c.to_vec()),
         })
     }
 
@@ -3632,6 +3722,12 @@ impl RarArchive {
         }
         let (main_start, qo_field_pos, rr_field_pos, main_hdr) =
             self.write_main_header(&plan.main_meta, plan.rr_percent)?;
+        if let Some(ref comment) = plan.comment
+            && !comment.is_empty()
+        {
+            let block = build_comment_block(comment);
+            self.write_block_header(&block)?;
+        }
 
         // Prefetch every verbatim block with a background reader when the
         // total volume justifies the thread (parallel feature).
@@ -4141,8 +4237,23 @@ impl RarArchive {
                 .map_err(|e| RarError::Format(format!("service block data size: {e}")))?;
             offset += n;
         }
-        // file flags, unpacked size, attributes, compression info, host OS
-        for _ in 0..5 {
+        // file flags, unpacked size, attributes, then fixed time/CRC32
+        // fields, then compression info and host OS.
+        let (file_flags, n) = vint::decode_from_slice(data, offset)
+            .map_err(|e| RarError::Format(format!("service block file flags: {e}")))?;
+        offset += n;
+        for _ in 0..2 {
+            let (_, n) = vint::decode_from_slice(data, offset)
+                .map_err(|e| RarError::Format(format!("service block field: {e}")))?;
+            offset += n;
+        }
+        if file_flags & FILE_FLAG_TIME_UNIX != 0 {
+            offset += 4;
+        }
+        if file_flags & FILE_FLAG_CRC32 != 0 {
+            offset += 4;
+        }
+        for _ in 0..2 {
             let (_, n) = vint::decode_from_slice(data, offset)
                 .map_err(|e| RarError::Format(format!("service block field: {e}")))?;
             offset += n;
@@ -6009,6 +6120,37 @@ fn main_header_locator_fields(meta: &BlockMeta) -> RarResult<(Option<usize>, Opt
     Ok((None, None))
 }
 
+/// Serialize a "CMT" archive comment service block (type 3, name "CMT",
+/// comment bytes in the data area), matching the official `rar c` format.
+fn build_comment_block(comment: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend(vint::encode(BLOCK_TYPE_SERVICE_HEADER));
+    body.extend(vint::encode(BLOCK_FLAG_DATA_AREA));
+    body.extend(vint::encode(comment.len() as u64));
+    body.extend(vint::encode(FILE_FLAG_CRC32));
+    body.extend(vint::encode(comment.len() as u64)); // unpacked size
+    body.extend(vint::encode(0u64)); // attributes
+    body.extend(crc32fast::hash(comment).to_le_bytes());
+    body.extend(vint::encode(0u64)); // compression info (store)
+    body.extend(vint::encode(OS_UNIX));
+    body.extend(vint::encode(3u64)); // name length
+    body.extend(b"CMT");
+
+    let size_bytes = vint::encode(body.len() as u64);
+    let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
+    header_content.extend(&size_bytes);
+    header_content.extend(&body);
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&header_content);
+    let crc = hasher.finalize();
+
+    let mut block = Vec::with_capacity(4 + header_content.len() + comment.len());
+    block.extend(crc.to_le_bytes());
+    block.extend(header_content);
+    block.extend_from_slice(comment);
+    block
+}
+
 /// Split a main archive header's extra area into the locator record
 /// contents (`had_qo`, `had_rr`) and the remaining records verbatim.
 fn split_main_extra(extra: &[u8]) -> RarResult<(bool, bool, Vec<u8>)> {
@@ -6332,7 +6474,26 @@ fn vint_fixed5(value: u64) -> [u8; 5] {
     out
 }
 
-fn get_volume_base(path: &Path) -> String {
+/// Volume base of an archive path, stripping `.partN.rar` or `.rar`
+/// suffixes (used by the recovery-volume machinery).
+pub(crate) fn volume_base_of(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("archive");
+    if let Some(base) = extract_volume_base(name) {
+        return base;
+    }
+    if let Some(stem) = name.strip_suffix(".rar") {
+        return stem.to_string();
+    }
+    if let Some(stem) = name.strip_suffix(".RAR") {
+        return stem.to_string();
+    }
+    name.to_string()
+}
+
+pub(crate) fn get_volume_base(path: &Path) -> String {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())

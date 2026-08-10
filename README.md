@@ -31,6 +31,9 @@ archives — no external binaries required.
 | Find string in members (`i`)         |   done |
 | Lock archives (`k`)                  |   done |
 | Add recovery record (`rr`)           |   done |
+| Repair with recovery record (`r`)    |   done |
+| Rebuild missing volumes (`rc`)       |   done |
+| Archive comments (`c`/`cw`)          |   done |
 | Multi-volume member deletion/rename  |   done |
 | Parallel rewrite pipeline            |   done |
 | Quick-open records (`-qo+`)          |   done |

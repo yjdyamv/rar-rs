@@ -43,3 +43,4 @@ pub use encryption::EncryptionParams;
 pub use error::{RarError, RarResult};
 pub use headers::DataChunk;
 pub use options::{CreateOptions, ExtractOptions};
+pub use recovery::{rebuild_missing_volumes, repair_archive};

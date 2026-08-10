@@ -2671,3 +2671,196 @@ fn official_rename_cross_validation() {
     assert_eq!(rar.namelist(), ["w.bin"]);
     assert_eq!(rar.read("w.bin").unwrap(), a);
 }
+
+// ── Repair / rebuild volumes / comments ─────────────────────────────────────
+
+#[test]
+fn repair_archive_restores_damaged_members() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("rep.rar");
+    // Large enough that the recovery record sits at the end and the damage
+    // below lands inside the protected member data.
+    let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    {
+        let mut rar = rar5::RarArchive::create_with_recovery(&path, 10).unwrap();
+        rar.add_bytes("a.bin", &payload, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let good = std::fs::read(&path).unwrap();
+
+    // Damage a few bytes inside the protected data.
+    let mut damaged = good.clone();
+    for pos in [300usize, 310, 320] {
+        damaged[pos] ^= 0xA5;
+    }
+    let repaired = rar5::repair_archive(&damaged).unwrap();
+    assert_eq!(repaired, good, "repair must restore the original bytes");
+
+    // An undamaged archive is returned unchanged.
+    assert_eq!(rar5::repair_archive(&good).unwrap(), good);
+
+    // An archive without a recovery record fails cleanly.
+    let plain = dir.path().join("plain.rar");
+    {
+        let mut rar = rar5::RarArchive::create(&plain).unwrap();
+        rar.add_bytes("a.bin", b"x", 0).unwrap();
+        rar.close().unwrap();
+    }
+    let bytes = std::fs::read(&plain).unwrap();
+    assert!(rar5::repair_archive(&bytes).is_err());
+}
+
+#[test]
+fn rebuild_missing_volumes_from_rev_files() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("rcv.rar");
+    let payload_a: Vec<u8> = (0..120_000u32).map(|i| (i % 251) as u8).collect();
+    let payload_b: Vec<u8> = (0..60_000u32).map(|i| (i % 253) as u8).collect();
+    {
+        let mut rar =
+            rar5::RarArchive::create_multivolume_with_recovery_count(&path, 60_000, 2).unwrap();
+        rar.add_bytes("a.bin", &payload_a, 0).unwrap();
+        rar.add_bytes("b.bin", &payload_b, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let volumes = rar5::discover_volumes(&path);
+    assert!(volumes.len() > 1, "precondition: multi-volume set");
+    let rev = dir.path().join("rcv.part1.rev");
+    assert!(rev.exists(), "precondition: .rev files present");
+
+    // Delete a middle volume and rebuild it from the .rev files.
+    let victim = volumes[1].clone();
+    std::fs::remove_file(&victim).unwrap();
+    let rebuilt = rar5::rebuild_missing_volumes(&volumes[0]).unwrap();
+    assert!(rebuilt.contains(&victim), "middle volume rebuilt");
+    let volumes = rar5::discover_volumes(&path);
+    let mut rar = rar5::RarArchive::open(&volumes[0]).unwrap();
+    assert_eq!(rar.namelist(), ["a.bin", "b.bin"]);
+    assert_eq!(rar.read("a.bin").unwrap(), payload_a);
+    assert_eq!(rar.read("b.bin").unwrap(), payload_b);
+
+    // Everything present -> nothing to rebuild.
+    assert!(
+        rar5::rebuild_missing_volumes(&volumes[0])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn comment_set_get_roundtrip() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("cmt.rar");
+    {
+        let mut rar = rar5::RarArchive::create(&path).unwrap();
+        rar.add_bytes("a.bin", b"x", 0).unwrap();
+        rar.close().unwrap();
+    }
+    {
+        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        assert_eq!(rar.get_comment().unwrap(), None);
+        rar.set_comment(b"my comment\n").unwrap();
+    }
+    {
+        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        assert_eq!(rar.get_comment().unwrap(), Some(b"my comment\n".to_vec()));
+        // The member survives the comment rewrite.
+        assert_eq!(rar.read("a.bin").unwrap(), b"x");
+        // An empty comment removes the existing one.
+        rar.set_comment(b"").unwrap();
+    }
+    {
+        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        assert_eq!(rar.get_comment().unwrap(), None);
+    }
+
+    // The comment must be readable by the official tool (env-gated).
+    if let Some(rar_bin) = std::env::var_os("SA_OFFICIAL_RAR") {
+        {
+            let mut rar = rar5::RarArchive::open(&path).unwrap();
+            rar.set_comment(b"interop comment").unwrap();
+        }
+        let out = std::process::Command::new(&rar_bin)
+            .arg("cw")
+            .arg(&path)
+            .output()
+            .expect("run official rar cw");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("interop comment"),
+            "official rar cw must read our comment"
+        );
+    }
+}
+
+/// Official `rar r` and `rar rc` produce/consume the same artifacts, and
+/// our repair/rebuild reads official archives.
+#[test]
+fn official_repair_and_rebuild_cross_validation() {
+    let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let unrar = std::env::var_os("SA_OFFICIAL_UNRAR").unwrap_or(rar_bin.clone());
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let payload: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(src.join("big.bin"), &payload).unwrap();
+
+    // Our repair on a rar-created damaged RR archive.
+    let path = dir.path().join("rep.rar");
+    // Stored (incompressible) so the protected member data dominates the
+    // archive and the damage below lands inside it, not in the parity.
+    let status = std::process::Command::new(&rar_bin)
+        .args(["a", "-m0", "-rr10", "-idq"])
+        .arg(&path)
+        .arg(src.join("big.bin"))
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let good = std::fs::read(&path).unwrap();
+    let mut damaged = good.clone();
+    for pos in [500usize, 520, 540] {
+        damaged[pos] ^= 0xA5;
+    }
+    let repaired = rar5::repair_archive(&damaged).unwrap();
+    assert_eq!(repaired, good, "byte-identical repair of rar archive");
+    std::fs::write(dir.path().join("repaired.rar"), &repaired).unwrap();
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(dir.path().join("repaired.rar"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected our repaired archive");
+
+    // Our rc on a rar-created volume set with .rev files.
+    let mv = dir.path().join("mv.rar");
+    let status = std::process::Command::new(&rar_bin)
+        .args(["a", "-m0", "-v100k", "-rv2", "-idq"])
+        .arg(&mv)
+        .arg(src.join("big.bin"))
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let volumes = rar5::discover_volumes(&mv);
+    assert!(volumes.len() > 1, "precondition: multi-volume set");
+    std::fs::remove_file(&volumes[1]).unwrap();
+    let rebuilt = rar5::rebuild_missing_volumes(&volumes[0]).unwrap();
+    assert_eq!(rebuilt.len(), 1);
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&volumes[0])
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected the rebuilt volume set");
+    let mut rar = rar5::RarArchive::open(&volumes[0]).unwrap();
+    let big_name = rar
+        .namelist()
+        .iter()
+        .find(|n| n.ends_with("big.bin"))
+        .unwrap()
+        .to_string();
+    assert_eq!(rar.read(&big_name).unwrap(), payload);
+}
