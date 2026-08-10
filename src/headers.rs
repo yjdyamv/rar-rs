@@ -255,6 +255,14 @@ pub struct FileHeader {
     pub data_offset: u64,
     /// Archive format version (4 or 5).
     pub format_version: u8,
+    /// Nanosecond fraction of the modification time (FILE_TIME extra
+    /// record); `None` when only the second-precision header time exists.
+    pub mtime_ns: Option<u32>,
+    /// Owner and group names (OWNER extra record).
+    pub owner: Option<String>,
+    pub group: Option<String>,
+    /// File version (VERSION extra record).
+    pub version: Option<u64>,
 }
 
 impl Default for FileHeader {
@@ -279,6 +287,10 @@ impl Default for FileHeader {
             is_directory: false,
             data_offset: 0,
             format_version: 5,
+            mtime_ns: None,
+            owner: None,
+            group: None,
+            version: None,
         }
     }
 }
@@ -443,6 +455,7 @@ impl FileHeader {
 
         let is_directory = file_flags & FILE_FLAG_DIRECTORY != 0;
         let (hash_type, hash_value) = parse_hash_record(&extra_data);
+        let (mtime_ns, owner, group, version) = parse_extra_records(&extra_data);
 
         Ok(FileHeader {
             name,
@@ -464,8 +477,102 @@ impl FileHeader {
             is_directory,
             data_offset: stream_pos,
             format_version: 5,
+            mtime_ns,
+            owner,
+            group,
+            version,
         })
     }
+}
+
+/// Parse the extra-area records that carry member metadata: nanosecond
+/// modification time (`EXTRA_FILE_TIME`), owner/group names
+/// (`EXTRA_FILE_OWNER`) and the file version (`EXTRA_FILE_VERSION`).
+fn parse_extra_records(
+    extra_data: &[u8],
+) -> (Option<u32>, Option<String>, Option<String>, Option<u64>) {
+    let mut mtime_ns = None;
+    let mut owner = None;
+    let mut group = None;
+    let mut version = None;
+    let mut offset = 0usize;
+    while offset < extra_data.len() {
+        let (rec_size, n) = match vint::decode_from_slice(extra_data, offset) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        offset += n;
+        let rec_end = match offset.checked_add(rec_size as usize) {
+            Some(end) if end <= extra_data.len() => end,
+            _ => break,
+        };
+        let (rec_type, tn) = match vint::decode_from_slice(extra_data, offset) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        let body_start = offset + tn;
+        match rec_type {
+            EXTRA_FILE_TIME => {
+                // [flags][per present time: sec u32 + ns u32]; the
+                // modification time is the first pair.
+                let mut p = body_start;
+                let (flags, fl) = match vint::decode_from_slice(extra_data, p) {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                p += fl;
+                if flags & 0x0001 != 0 && p + 8 <= rec_end {
+                    let sec = u32::from_le_bytes(extra_data[p..p + 4].try_into().unwrap());
+                    let ns = u32::from_le_bytes(extra_data[p + 4..p + 8].try_into().unwrap());
+                    if sec > 0 || ns > 0 {
+                        mtime_ns = Some(ns);
+                    }
+                }
+            }
+            EXTRA_FILE_OWNER => {
+                // [flags][owner len][owner][group len][group]
+                let mut p = body_start;
+                let (flags, fl) = match vint::decode_from_slice(extra_data, p) {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                p += fl;
+                if flags & 0x0001 != 0 {
+                    if let Some((name, np)) = read_extra_name(extra_data, p, rec_end) {
+                        owner = Some(name);
+                        p = np;
+                    } else {
+                        break;
+                    }
+                }
+                if flags & 0x0002 != 0
+                    && let Some((name, _)) = read_extra_name(extra_data, p, rec_end)
+                {
+                    group = Some(name);
+                }
+            }
+            EXTRA_FILE_VERSION => {
+                if let Ok((v, _)) = vint::decode_from_slice(extra_data, body_start) {
+                    version = Some(v);
+                }
+            }
+            _ => {}
+        }
+        offset = rec_end;
+    }
+    (mtime_ns, owner, group, version)
+}
+
+/// Read a length-prefixed name from an extra record body.
+fn read_extra_name(data: &[u8], mut p: usize, end: usize) -> Option<(String, usize)> {
+    let (len, n) = vint::decode_from_slice(data, p).ok()?;
+    p += n;
+    let name_end = p.checked_add(len as usize)?;
+    if name_end > end {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&data[p..name_end]).into_owned();
+    Some((name, name_end))
 }
 
 /// Parse the extra-area hash record (`EXTRA_FILE_HASH`).

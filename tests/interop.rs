@@ -3238,3 +3238,192 @@ fn official_validates_cli_switch_archives() {
         .unwrap();
     assert!(status.success(), "unrar rejected the filtered archive");
 }
+
+// ── Extra records: nanosecond time, owner/group, version ────────────────────
+
+#[test]
+fn nanosecond_mtime_roundtrip() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("ns.bin");
+    std::fs::write(&src, b"ns test").unwrap();
+    // A file with sub-second mtime precision.
+    let target = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_789);
+    let times = std::fs::FileTimes::new().set_modified(target);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
+
+    let path = dir.path().join("ns.rar");
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        rar.add(&src, 3).unwrap();
+        rar.close().unwrap();
+    }
+    // The writer emits the FILE_TIME extra record (byte-identical to the
+    // official `rar` format: flags 0x13 + seconds + nanoseconds).
+    let bytes = std::fs::read(&path).unwrap();
+    for block in scan_blocks(&bytes) {
+        if block.block_type == 0x02 {
+            let (_, mut q) = read_vint(&block.body, 0);
+            let (flags, n) = read_vint(&block.body, q);
+            q = n;
+            if flags & 0x0001 != 0 {
+                let (_, n) = read_vint(&block.body, q);
+                q = n;
+            }
+            if flags & 0x0002 != 0 {
+                let (_, n) = read_vint(&block.body, q);
+                q = n;
+            }
+            let (file_flags, n) = read_vint(&block.body, q);
+            q = n;
+            for _ in 0..2 {
+                let (_, n) = read_vint(&block.body, q);
+                q = n;
+            }
+            if file_flags & 0x0002 != 0 {
+                q += 4;
+            }
+            if file_flags & 0x0004 != 0 {
+                q += 4;
+            }
+            for _ in 0..2 {
+                let (_, n) = read_vint(&block.body, q);
+                q = n;
+            }
+            let (nl, n) = read_vint(&block.body, q);
+            q = n;
+            let name = &block.body[q..q + nl as usize];
+            assert_eq!(name, b"ns.bin");
+            let extra = &block.body[q + nl as usize..];
+            assert_eq!(
+                extra,
+                &[
+                    0x0a, 0x03, 0x13, 0x00, 0xf1, 0x53, 0x65, 0x15, 0xcd, 0x5b, 0x07
+                ][..],
+                "FILE_TIME record must match the official format"
+            );
+        }
+    }
+
+    // Reading it back restores the nanosecond mtime on extraction.
+    let out = dir.path().join("out");
+    {
+        let mut rar = RarArchive::open(&path).unwrap();
+        assert_eq!(
+            rar.get_entry("ns.bin").unwrap().header.mtime_ns,
+            Some(123_456_789)
+        );
+        rar.extract("ns.bin", &out).unwrap();
+    }
+    let extracted = std::fs::metadata(out.join("ns.bin")).unwrap();
+    let restored = extracted
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    assert_eq!(restored.as_secs(), 1_700_000_000);
+    assert_eq!(restored.subsec_nanos(), 123_456_789);
+}
+
+/// The official `rar` writes FILE_TIME and OWNER records that we parse;
+/// our FILE_TIME output must be readable by the official unrar (env-gated).
+#[test]
+fn official_time_and_owner_cross_validation() {
+    let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let unrar = std::env::var_os("SA_OFFICIAL_UNRAR").unwrap_or(rar_bin.clone());
+    let dir = make_temp_dir();
+    let src = dir.path().join("ns.bin");
+    std::fs::write(&src, b"ns").unwrap();
+    let target = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_789);
+    let times = std::fs::FileTimes::new().set_modified(target);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
+
+    // Official archive with -ow (owner record) and sub-second mtime.
+    let path = dir.path().join("off.rar");
+    let status = std::process::Command::new(&rar_bin)
+        .args(["a", "-m0", "-ow", "-idq"])
+        .arg(&path)
+        .arg("ns.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let rar = rar5::RarArchive::open(&path).unwrap();
+    let entry = rar.get_entry("ns.bin").unwrap();
+    assert_eq!(entry.header.mtime_ns, Some(123_456_789));
+    assert!(entry.header.owner.is_some(), "owner record must be parsed");
+
+    // Our ns-mtime archive must be readable by the official unrar.
+    let ours = dir.path().join("ours.rar");
+    {
+        let mut ar = rar5::RarArchive::create(&ours).unwrap();
+        ar.add(&src, 3).unwrap();
+        ar.close().unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&ours)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected our ns-mtime archive");
+}
+
+// ── CLI -r- / -cl / -cu ─────────────────────────────────────────────────────
+
+#[test]
+fn cli_recursion_and_case_switches() {
+    let dir = make_temp_dir();
+    std::fs::create_dir_all(dir.path().join("rdir/sub")).unwrap();
+    std::fs::write(dir.path().join("rdir/f1.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("rdir/sub/f2.txt"), b"b").unwrap();
+    std::fs::write(dir.path().join("MiXeD.TXT"), b"c").unwrap();
+
+    // -r-: directory arguments store only the directory entry.
+    let archive = dir.path().join("r.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-r-"])
+        .arg(&archive)
+        .arg("rdir")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive), ["rdir"]);
+    std::fs::remove_file(&archive).unwrap();
+
+    // -cl / -cu: name case conversion.
+    let archive = dir.path().join("c.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-cl"])
+        .arg(&archive)
+        .arg("MiXeD.TXT")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive), ["mixed.txt"]);
+    std::fs::remove_file(&archive).unwrap();
+
+    let archive = dir.path().join("c2.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-cu"])
+        .arg(&archive)
+        .arg("MiXeD.TXT")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive), ["MIXED.TXT"]);
+}

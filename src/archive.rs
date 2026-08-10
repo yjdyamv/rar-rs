@@ -2333,8 +2333,12 @@ impl RarArchive {
                     return Err(e);
                 }
             }
-            if entry.header.mtime != 0 {
-                let mtime = UNIX_EPOCH + std::time::Duration::from_secs(entry.header.mtime as u64);
+            if entry.header.mtime != 0 || entry.header.mtime_ns.is_some() {
+                let mut mtime =
+                    UNIX_EPOCH + std::time::Duration::from_secs(entry.header.mtime as u64);
+                if let Some(ns) = entry.header.mtime_ns {
+                    mtime += std::time::Duration::from_nanos(ns as u64);
+                }
                 let times = std::fs::FileTimes::new().set_modified(mtime);
                 let _ = std::fs::File::options()
                     .write(true)
@@ -2445,9 +2449,13 @@ impl RarArchive {
             }
         }
 
-        // Restore mtime (best-effort)
-        if entry.header.mtime != 0 {
-            let mtime = UNIX_EPOCH + std::time::Duration::from_secs(entry.header.mtime as u64);
+        // Restore mtime (best-effort), including the nanosecond fraction
+        // from the FILE_TIME extra record when present.
+        if entry.header.mtime != 0 || entry.header.mtime_ns.is_some() {
+            let mut mtime = UNIX_EPOCH + std::time::Duration::from_secs(entry.header.mtime as u64);
+            if let Some(ns) = entry.header.mtime_ns {
+                mtime += std::time::Duration::from_nanos(ns as u64);
+            }
             let times = std::fs::FileTimes::new().set_modified(mtime);
             let _ = std::fs::File::options()
                 .write(true)
@@ -4620,6 +4628,13 @@ impl RarArchive {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as u32;
+        let mtime_ns = meta
+            .modified()
+            .unwrap_or(SystemTime::now())
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let time_extra = (mtime_ns != 0).then(|| file_time_extra_record(mtime as u64, mtime_ns));
 
         #[cfg(unix)]
         let attrs = {
@@ -4649,12 +4664,15 @@ impl RarArchive {
             // buffered (CBC padding over the whole member).
             self.reset_solid_chain();
             let (plain_crc, plain_blake) = hash_file(path, file_size, self.blake2)?;
-            let (header_crc, extra_data, stored_hash, encr_params) =
+            let (header_crc, mut extra_data, stored_hash, encr_params) =
                 RarArchive::payload_extra_and_crc(
                     self.password.as_deref(),
                     plain_crc,
                     plain_blake,
                 )?;
+            if let Some(ref t) = time_extra {
+                extra_data.extend_from_slice(t);
+            }
             if self.password.is_some() {
                 let raw_data = fs::read(path)?;
                 let packed_data = RarArchive::encrypt_payload_with(
@@ -4749,12 +4767,15 @@ impl RarArchive {
         if packed.len() as u64 >= file_size {
             // Compression is a net loss: fall back to streaming STORE.
             self.reset_solid_chain();
-            let (header_crc, extra_data, stored_hash, encr_params) =
+            let (header_crc, mut extra_data, stored_hash, encr_params) =
                 RarArchive::payload_extra_and_crc(
                     self.password.as_deref(),
                     plain_crc,
                     plain_blake,
                 )?;
+            if let Some(ref t) = time_extra {
+                extra_data.extend_from_slice(t);
+            }
             if self.password.is_some() {
                 let raw_data = fs::read(path)?;
                 let packed_data = RarArchive::encrypt_payload_with(
@@ -4793,8 +4814,11 @@ impl RarArchive {
             return Ok(());
         }
 
-        let (header_crc, extra_data, stored_hash, encr_params) =
+        let (header_crc, mut extra_data, stored_hash, encr_params) =
             RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
+        if let Some(ref t) = time_extra {
+            extra_data.extend_from_slice(t);
+        }
         let packed_data = RarArchive::encrypt_payload_with(
             self.password.as_deref(),
             encr_params.as_ref(),
@@ -5239,7 +5263,7 @@ impl RarArchive {
                                 .unwrap_or_default()
                                 .as_secs() as u32;
                             Self::prepare_data_entry(
-                                &ctx, name, data, level, 0o100644, mtime, false,
+                                &ctx, name, data, level, 0o100644, mtime, None, false,
                             )
                         }
                         BatchEntry::File { path, name, level } => {
@@ -5274,6 +5298,7 @@ impl RarArchive {
         level: u8,
         attrs: u64,
         mtime: u32,
+        time_extra: Option<Vec<u8>>,
         file_origin: bool,
     ) -> RarResult<PreparedEntry> {
         let plain_crc = crc32fast::hash(data);
@@ -5291,6 +5316,7 @@ impl RarArchive {
                 data.len(),
                 attrs,
                 mtime,
+                time_extra,
                 plain_crc,
                 plain_blake,
                 COMP_METHOD_STORE,
@@ -5344,6 +5370,7 @@ impl RarArchive {
                 data.len(),
                 attrs,
                 mtime,
+                time_extra,
                 plain_crc,
                 plain_blake,
                 COMP_METHOD_STORE,
@@ -5357,6 +5384,7 @@ impl RarArchive {
             data.len(),
             attrs,
             mtime,
+            time_extra,
             plain_crc,
             plain_blake,
             method,
@@ -5386,6 +5414,13 @@ impl RarArchive {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as u32;
+        let mtime_ns = meta
+            .modified()
+            .unwrap_or(SystemTime::now())
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let time_extra = (mtime_ns != 0).then(|| file_time_extra_record(mtime as u64, mtime_ns));
 
         #[cfg(unix)]
         let attrs = {
@@ -5411,7 +5446,7 @@ impl RarArchive {
                 ),
             )));
         }
-        Self::prepare_data_entry(ctx, &name, &data, level, attrs, mtime, true)
+        Self::prepare_data_entry(ctx, &name, &data, level, attrs, mtime, time_extra, true)
     }
 
     /// Prepare a large file (over [`PARALLEL_COMPRESS_MAX_MEMBER`]) by
@@ -5475,6 +5510,13 @@ impl RarArchive {
 
         let dsl = dict_size_for_data(file_size as usize, method);
         let (plain_crc, plain_blake) = hash_file(path, file_size, self.blake2)?;
+        let mtime_ns = meta
+            .modified()
+            .unwrap_or(SystemTime::now())
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let time_extra = (mtime_ns != 0).then(|| file_time_extra_record(mtime as u64, mtime_ns));
 
         let chunk_size = crate::codec::DEFAULT_CHUNK_SIZE as u64;
         let chunk_count = file_size.div_ceil(chunk_size) as usize;
@@ -5521,8 +5563,11 @@ impl RarArchive {
             return Ok(None);
         }
 
-        let (header_crc, extra_data, stored_hash, encr_params) =
+        let (header_crc, mut extra_data, stored_hash, encr_params) =
             RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
+        if let Some(t) = time_extra {
+            extra_data.extend_from_slice(&t);
+        }
         let payload = RarArchive::encrypt_payload_with(
             self.password.as_deref(),
             encr_params.as_ref(),
@@ -5553,14 +5598,18 @@ impl RarArchive {
         data_len: usize,
         attrs: u64,
         mtime: u32,
+        time_extra: Option<Vec<u8>>,
         plain_crc: u32,
         plain_blake: Option<[u8; 32]>,
         method: u8,
         dict_size_log: u8,
         payload: Vec<u8>,
     ) -> RarResult<PreparedEntry> {
-        let (header_crc, extra_data, stored_hash, encr) =
+        let (header_crc, mut extra_data, stored_hash, encr) =
             RarArchive::payload_extra_and_crc(ctx.password, plain_crc, plain_blake)?;
+        if let Some(t) = time_extra {
+            extra_data.extend_from_slice(&t);
+        }
         let payload = RarArchive::encrypt_payload_with(ctx.password, encr.as_ref(), &payload)?;
         Ok(PreparedEntry {
             name: name.to_string(),
@@ -6333,6 +6382,21 @@ fn parse_redirect_record(extra: &[u8]) -> Option<RedirectSpec> {
         offset = rec_end;
     }
     None
+}
+
+/// Serialize a nanosecond modification time extra record
+/// (`EXTRA_FILE_TIME`), matching the official `rar` format:
+/// `[flags 0x13][seconds u32][nanoseconds u32]`.
+fn file_time_extra_record(secs: u64, ns: u32) -> Vec<u8> {
+    let mut record = Vec::with_capacity(10);
+    record.push(0x13); // flags: modification time with nanoseconds
+    record.extend_from_slice(&(secs as u32).to_le_bytes());
+    record.extend_from_slice(&ns.to_le_bytes());
+    let mut out = Vec::with_capacity(12);
+    out.extend(vint::encode((1 + record.len()) as u64));
+    out.extend(vint::encode(EXTRA_FILE_TIME));
+    out.extend(record);
+    out
 }
 
 /// Serialize a "CMT" archive comment service block (type 3, name "CMT",

@@ -54,8 +54,8 @@ fn usage() {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  rar a [-m0..-m5] [-p<password>] [-v<size>] [-s] [-htb] [-qo] [-hp]");
-    eprintln!("        [-rrN] [-rvN] [-mt<N>] [-ep] [-ep1] [-ap<path>]");
-    eprintln!("        [-x<mask>] [-n<mask>] <archive.rar> <files...>");
+    eprintln!("        [-rrN] [-rvN] [-mt<N>] [-ep] [-ep1] [-ap<path>] [-r-]");
+    eprintln!("        [-cl] [-cu] [-x<mask>] [-n<mask>] <archive.rar> <files...>");
     eprintln!("  rar u [-p<password>] <archive.rar> <files...>  Update: add missing files,");
     eprintln!("                                                  replace newer ones");
     eprintln!("  rar f [-p<password>] <archive.rar> <files...>  Freshen: update existing");
@@ -115,6 +115,8 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
     let mut recovery_volume_count: Option<u32> = None;
     let mut basename_only = false;
     let mut strip_base = false;
+    let mut no_recurse = false;
+    let mut case: Option<CaseKind> = None;
     let mut path_prefix: Option<String> = None;
     let mut exclude_masks: Vec<String> = Vec::new();
     let mut include_masks: Vec<String> = Vec::new();
@@ -174,6 +176,12 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
             basename_only = true;
         } else if arg == "-ep1" {
             strip_base = true;
+        } else if arg == "-r-" {
+            no_recurse = true;
+        } else if arg == "-cl" {
+            case = Some(CaseKind::Lower);
+        } else if arg == "-cu" {
+            case = Some(CaseKind::Upper);
         } else if let Some(p) = arg.strip_prefix("-ap") {
             path_prefix = Some(p.to_string());
         } else if let Some(p) = arg.strip_prefix("-x") {
@@ -229,6 +237,8 @@ fn cmd_create(args: &[String]) -> Result<(), String> {
         path_prefix,
         basename_only,
         strip_base,
+        no_recurse,
+        case,
         include_masks,
         exclude_masks,
     };
@@ -975,10 +985,18 @@ fn split_password(args: &[String]) -> (Option<String>, Vec<&str>) {
 
 /// Name and filter policy for the `a` command (`-ep`, `-ep1`, `-ap`,
 /// `-x`, `-n`).
+#[derive(Clone, Copy)]
+enum CaseKind {
+    Lower,
+    Upper,
+}
+
 struct NamePolicy {
     path_prefix: Option<String>,
     basename_only: bool,
     strip_base: bool,
+    no_recurse: bool,
+    case: Option<CaseKind>,
     include_masks: Vec<String>,
     exclude_masks: Vec<String>,
 }
@@ -1018,6 +1036,12 @@ impl NamePolicy {
         }
         if self.basename_only {
             name = name.rsplit('/').next().unwrap_or(&name).to_string();
+        }
+        if let Some(kind) = self.case {
+            name = match kind {
+                CaseKind::Lower => name.to_lowercase(),
+                CaseKind::Upper => name.to_uppercase(),
+            };
         }
         match &self.path_prefix {
             Some(prefix) => format!("{prefix}/{name}"),
@@ -1078,6 +1102,8 @@ fn add_with_policy(
         path_prefix: policy.path_prefix.clone(),
         basename_only: policy.basename_only,
         strip_base: false,
+        no_recurse: policy.no_recurse,
+        case: policy.case,
         include_masks: policy.include_masks.clone(),
         exclude_masks: policy.exclude_masks.clone(),
     };
@@ -1088,6 +1114,9 @@ fn add_with_policy(
     if plain.dir_entry_kept(&rel) {
         rar.add_directory_only(path, &plain.stored_name(&rel))
             .map_err(|e| format!("add {arg}: {e}"))?;
+    }
+    if plain.no_recurse {
+        return Ok(());
     }
     walk_directory(rar, path, &rel, level, &plain, added)
 }
@@ -1138,7 +1167,9 @@ fn add_wildcard_arg(
                 rar.add_directory_only(child.path(), &policy.stored_name(&rel))
                     .map_err(|e| format!("add {rel}: {e}"))?;
             }
-            walk_directory(rar, &child.path(), &rel, level, policy, added)?;
+            if !policy.no_recurse {
+                walk_directory(rar, &child.path(), &rel, level, policy, added)?;
+            }
         } else if policy.file_kept(&rel) && added.insert(policy.stored_name(&rel)) {
             rar.add_as(child.path(), &policy.stored_name(&rel), level)
                 .map_err(|e| format!("add {rel}: {e}"))?;
@@ -1170,7 +1201,9 @@ fn walk_directory(
                 rar.add_directory_only(child.path(), &policy.stored_name(&rel))
                     .map_err(|e| format!("add {rel}: {e}"))?;
             }
-            walk_directory(rar, &child.path(), &rel, level, policy, added)?;
+            if !policy.no_recurse {
+                walk_directory(rar, &child.path(), &rel, level, policy, added)?;
+            }
         } else if policy.file_kept(&rel) && added.insert(policy.stored_name(&rel)) {
             rar.add_as(child.path(), &policy.stored_name(&rel), level)
                 .map_err(|e| format!("add {rel}: {e}"))?;
