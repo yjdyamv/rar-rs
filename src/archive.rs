@@ -1096,6 +1096,43 @@ impl RarArchive {
         )
     }
 
+    /// Create a new encrypted multi-volume RAR5 archive (overwrites
+    /// existing file). File data is AES-256 encrypted; header encryption
+    /// is not supported for multi-volume archives.
+    pub fn create_multivolume_with_password(
+        path: impl AsRef<Path>,
+        volume_size: u64,
+        password: &str,
+    ) -> RarResult<Self> {
+        Self::create_with_options(
+            path,
+            crate::options::CreateOptions {
+                volume_size: Some(volume_size),
+                password: Some(password.to_string()),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Create a new encrypted multi-volume RAR5 archive with an exact
+    /// number of `.rev` recovery volumes.
+    pub fn create_multivolume_with_recovery_count_and_password(
+        path: impl AsRef<Path>,
+        volume_size: u64,
+        rec_count: u32,
+        password: &str,
+    ) -> RarResult<Self> {
+        Self::create_with_options(
+            path,
+            crate::options::CreateOptions {
+                volume_size: Some(volume_size),
+                recovery_volume_count: Some(rec_count),
+                password: Some(password.to_string()),
+                ..Default::default()
+            },
+        )
+    }
+
     /// Create a new encrypted RAR5 archive (overwrites existing file).
     pub fn create_with_password(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
         Self::create_with_options(
@@ -5780,6 +5817,32 @@ impl RarArchive {
         let mut chunks = Vec::new();
         let mut is_first = true;
 
+        // Encrypted members: every chunk header carries the encryption
+        // extra record (WinRAR repeats it on every volume). Non-final
+        // chunks verify with a plain crc32 of the ciphertext chunk, so
+        // their record must clear the hash-key MAC bit (flags=1); the
+        // final chunk keeps the full record (flags=3, MAC'd checksum).
+        let encr_params = if self.password.is_some() {
+            encryption::parse_encryption_extra(extra_data)?
+        } else {
+            None
+        };
+        let chunk_extra = |is_last: bool, is_first: bool| -> Vec<u8> {
+            if let Some(ref p) = encr_params {
+                if is_last {
+                    extra_data.to_vec()
+                } else {
+                    let mut np = p.clone();
+                    np.flags &= !0x02;
+                    np.to_extra_bytes()
+                }
+            } else if is_first {
+                extra_data.to_vec()
+            } else {
+                Vec::new()
+            }
+        };
+
         while offset < total_packed {
             let remaining_vol = volume_size.saturating_sub(self.volume_bytes_written);
 
@@ -5803,11 +5866,7 @@ impl RarArchive {
                 host_os: OS_UNIX,
                 flags: block_flags | BLOCK_FLAG_DATA_CONTINUE_TO,
                 file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
-                extra_data: if is_first {
-                    extra_data.to_vec()
-                } else {
-                    Vec::new()
-                },
+                extra_data: chunk_extra(false, is_first),
                 ..Default::default()
             };
             let hdr_size = chunk_fh.to_bytes().len() as u64;
@@ -5851,11 +5910,7 @@ impl RarArchive {
                 host_os: OS_UNIX,
                 flags: block_flags,
                 file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
-                extra_data: if is_first {
-                    extra_data.to_vec()
-                } else {
-                    Vec::new()
-                },
+                extra_data: chunk_extra(is_last, is_first),
                 ..Default::default()
             };
 

@@ -638,8 +638,14 @@ impl EndOfArchiveHeader {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend(vint::encode(BLOCK_TYPE_END_ARCHIVE));
+        // Block-level flags. This is a real block-flags field: 7-Zip
+        // parses it as such, so the endarc flags must NOT be placed here
+        // (a next-volume flag of 1 reads as HFL_EXTRA, making 7-Zip
+        // consume the endarc flags as an extra-area size and fail
+        // multi-volume sets with "data after the end of archive").
+        // WinRAR writes HFL_SKIP_IF_UNKNOWN (0x04) here.
+        body.extend(vint::encode(BLOCK_FLAG_SKIP_IF_UNKNOWN));
         body.extend(vint::encode(self.flags));
-        body.extend(vint::encode(self.flags & 0xFF));
 
         let size_bytes = vint::encode(body.len() as u64);
         let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
