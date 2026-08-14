@@ -990,11 +990,10 @@ impl RarArchive {
                 "header encryption requires a password".into(),
             ));
         }
-        if opts.encrypt_headers && opts.volume_size.is_some() {
-            return Err(RarError::Unsupported(
-                "header encryption is not supported for multi-volume archives".into(),
-            ));
-        }
+        // Header encryption is supported for multi-volume archives: every
+        // volume starts with the plaintext encryption header and all
+        // subsequent blocks are `[IV][AES-256-CBC header]` (WinRAR -hp
+        // convention).
         if opts.recovery_percent.is_some() && opts.volume_size.is_some() {
             return Err(RarError::Unsupported(
                 "recovery records are not supported for multi-volume archives".into(),
@@ -1109,6 +1108,25 @@ impl RarArchive {
             crate::options::CreateOptions {
                 volume_size: Some(volume_size),
                 password: Some(password.to_string()),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Create a new multi-volume RAR5 archive with header encryption
+    /// (WinRAR `-hp` equivalent): every volume starts with the plaintext
+    /// encryption header and all blocks are encrypted.
+    pub fn create_multivolume_with_password_headers(
+        path: impl AsRef<Path>,
+        volume_size: u64,
+        password: &str,
+    ) -> RarResult<Self> {
+        Self::create_with_options(
+            path,
+            crate::options::CreateOptions {
+                volume_size: Some(volume_size),
+                password: Some(password.to_string()),
+                encrypt_headers: true,
                 ..Default::default()
             },
         )
@@ -1236,6 +1254,7 @@ impl RarArchive {
             let f = File::create(&vol_path)?;
             self.stream = Some(f);
             self.write_signature()?;
+            self.write_archive_encryption_header_if_needed()?;
             self.write_archive_header_vol(None)?;
             self.volume_bytes_written = self.stream.as_ref().unwrap().stream_position()?;
             return Ok(());
@@ -1244,21 +1263,43 @@ impl RarArchive {
         let f = File::create(&self.path)?;
         self.stream = Some(f);
         self.write_signature()?;
-        if self.header_encryption {
-            // The archive-level encryption header precedes the main archive
-            // header; every header after it (main, file, end) is encrypted.
+        self.write_archive_encryption_header_if_needed()?;
+        self.write_archive_header()?;
+        Ok(())
+    }
+
+    /// Write the plaintext archive-level encryption header block (type 0x04)
+    /// when header encryption is on, generating the archive params once.
+    ///
+    /// WinRAR writes this header at the start of EVERY volume of a
+    /// header-encrypted multi-volume set (same salt/check on each volume);
+    /// every block after it is `[16-byte IV][AES-256-CBC encrypted header]`.
+    fn write_archive_encryption_header_if_needed(&mut self) -> RarResult<()> {
+        if !self.header_encryption {
+            return Ok(());
+        }
+        if self.archive_encr.is_none() {
             let password = self.password.as_ref().ok_or_else(|| {
                 RarError::Encrypted("header encryption requires a password".into())
             })?;
             let encr =
                 encryption::EncryptionParams::generate_for_password(password, ENCR_PBKDF2_ITER_LOG);
-            let block = encr.to_archive_header_block();
-            let stream = self.stream.as_mut().unwrap();
-            stream.write_all(&block)?;
             self.archive_encr = Some(encr);
         }
-        self.write_archive_header()?;
+        let block = self.archive_encr.as_ref().unwrap().to_archive_header_block();
+        let stream = self.stream.as_mut().unwrap();
+        stream.write_all(&block)?;
         Ok(())
+    }
+
+    /// On-disk size of a block header: header encryption wraps every header
+    /// in `[16-byte IV][PKCS7-padded ciphertext]`.
+    fn on_disk_header_len(&self, plain_len: u64) -> u64 {
+        if self.header_encryption {
+            16 + ((plain_len + 15) & !15)
+        } else {
+            plain_len
+        }
     }
 
     /// Write a block header, wrapping it in `[16-byte IV][AES-256-CBC
@@ -2130,9 +2171,8 @@ impl RarArchive {
             extra_data: Vec::new(),
             volume_number,
         };
-        let stream = self.stream.as_mut().unwrap();
-        stream.write_all(&hdr.to_bytes())?;
-        Ok(())
+        let hdr_bytes = hdr.to_bytes();
+        self.write_block_header(&hdr_bytes)
     }
 
     fn write_end_block(&mut self) -> RarResult<()> {
@@ -2158,6 +2198,10 @@ impl RarArchive {
         let f = File::create(&vol_path)?;
         self.stream = Some(f);
         self.write_signature()?;
+        // Header-encrypted multi-volume sets repeat the plaintext encryption
+        // header on every volume (WinRAR convention); the archive params are
+        // generated once and shared across volumes.
+        self.write_archive_encryption_header_if_needed()?;
         // Volume number: part2 → 1, part3 → 2, etc.
         let vol_num = (self.current_volume - 1) as u64;
         self.write_archive_header_vol(Some(vol_num))?;
@@ -4986,6 +5030,7 @@ impl RarArchive {
 
         let hdr_bytes = fh.to_bytes();
         self.write_block_header(&hdr_bytes)?;
+        self.volume_bytes_written += self.on_disk_header_len(hdr_bytes.len() as u64);
         self.entries.push(ArchiveEntry {
             header: fh,
             chunks: Vec::new(),
@@ -5035,6 +5080,7 @@ impl RarArchive {
 
         let hdr_bytes = fh.to_bytes();
         self.write_block_header(&hdr_bytes)?;
+        self.volume_bytes_written += self.on_disk_header_len(hdr_bytes.len() as u64);
         self.entries.push(ArchiveEntry {
             header: fh,
             chunks: Vec::new(),
@@ -5779,20 +5825,24 @@ impl RarArchive {
 
         // Multi-volume splitting
         let volume_size = self.volume_size.unwrap();
-        let eoa_size: u64 = 7; // approximate end-of-archive block size
+        // End-of-archive block: 8 plaintext bytes, or `[IV][padded]` when
+        // header encryption wraps every block.
+        let eoa_plain: u64 = 8;
+        let eoa_size: u64 = self.on_disk_header_len(eoa_plain);
         let total_packed = packed_data.len() as u64;
 
         // Check if it fits in current volume
         let hdr_bytes = fh_base.to_bytes();
-        let total_needed = hdr_bytes.len() as u64 + total_packed + eoa_size;
+        let hdr_on_disk = self.on_disk_header_len(hdr_bytes.len() as u64);
+        let total_needed = hdr_on_disk + total_packed + eoa_size;
         let remaining = volume_size.saturating_sub(self.volume_bytes_written);
 
         if total_needed <= remaining {
             // Fits entirely
+            self.write_block_header(&hdr_bytes)?;
             let stream = self.stream.as_mut().unwrap();
-            stream.write_all(&hdr_bytes)?;
             stream.write_all(packed_data)?;
-            self.volume_bytes_written += hdr_bytes.len() as u64 + total_packed;
+            self.volume_bytes_written += hdr_on_disk + total_packed;
             let data_offset = stream.stream_position()? - total_packed;
             let chunk = DataChunk {
                 volume_index: self.current_volume - 1,
@@ -5869,9 +5919,10 @@ impl RarArchive {
                 extra_data: chunk_extra(false, is_first),
                 ..Default::default()
             };
-            let hdr_size = chunk_fh.to_bytes().len() as u64;
+            let hdr_size = self.on_disk_header_len(chunk_fh.to_bytes().len() as u64);
 
             let bytes_for_data = remaining_vol.saturating_sub(hdr_size + eoa_size);
+            eprintln!("SPLIT vol_bytes={} remaining={} hdr_disk={} eoa={} bytes_for_data={} vol_size={}", self.volume_bytes_written, remaining_vol, hdr_size, eoa_size, bytes_for_data, volume_size);
             if bytes_for_data == 0 {
                 self.start_next_volume()?;
                 is_first = false;
@@ -5915,10 +5966,11 @@ impl RarArchive {
             };
 
             let final_hdr = final_fh.to_bytes();
+            let final_hdr_disk = self.on_disk_header_len(final_hdr.len() as u64);
+            self.write_block_header(&final_hdr)?;
             let stream = self.stream.as_mut().unwrap();
-            stream.write_all(&final_hdr)?;
             stream.write_all(chunk_packed)?;
-            self.volume_bytes_written += final_hdr.len() as u64 + chunk_size;
+            self.volume_bytes_written += final_hdr_disk + chunk_size;
 
             let data_offset = stream.stream_position()? - chunk_size;
             chunks.push(DataChunk {
@@ -6096,7 +6148,7 @@ impl RarArchive {
 
         // Multi-volume streaming split.
         let volume_size = self.volume_size.unwrap();
-        let eoa_size: u64 = 7; // approximate end-of-archive block size
+        let eoa_size: u64 = self.on_disk_header_len(8); // end-of-archive block
         let mut offset = 0u64;
         let mut chunks = Vec::new();
         let mut is_first = true;
@@ -6130,8 +6182,9 @@ impl RarArchive {
                 hash_value: if is_first { hash_value } else { None },
                 ..Default::default()
             };
-            let hdr_size = chunk_fh.to_bytes().len() as u64;
+            let hdr_size = self.on_disk_header_len(chunk_fh.to_bytes().len() as u64);
             let bytes_for_data = remaining_vol.saturating_sub(hdr_size + eoa_size);
+            eprintln!("SPLIT vol_bytes={} remaining={} hdr_disk={} eoa={} bytes_for_data={} vol_size={}", self.volume_bytes_written, remaining_vol, hdr_size, eoa_size, bytes_for_data, volume_size);
             if bytes_for_data == 0 {
                 self.start_next_volume()?;
                 is_first = false;
@@ -7435,3 +7488,5 @@ mod tests {
         assert_eq!(sanitize_archive_path("dir/").unwrap(), "dir");
     }
 }
+
+
