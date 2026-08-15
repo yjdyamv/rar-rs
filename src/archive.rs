@@ -510,7 +510,10 @@ pub struct RarArchive {
     path: PathBuf,
     mode: Mode,
     entries: Vec<ArchiveEntry>,
-    stream: Option<File>,
+    /// The archive stream: a file, or any caller-provided seekable
+    /// read/write sink (in-memory `Cursor` in tests, stdin/stdout for
+    /// future `-si` support).
+    stream: Option<Box<dyn ArchiveStream>>,
     /// Byte offset where the RAR5 signature begins (0 for plain archives,
     /// >0 for SFX archives whose stub precedes the archive).
     sfx_offset: u64,
@@ -567,6 +570,11 @@ pub struct RarArchive {
     /// Options for the current read/extract operation (set per call).
     extract_options: crate::options::ExtractOptions,
 }
+
+/// A seekable read/write sink for archive streams: `File` in production,
+/// `Cursor<Vec<u8>>` for in-memory archives (tests, future `-si` support).
+pub trait ArchiveStream: Read + Write + Seek {}
+impl<T: Read + Write + Seek> ArchiveStream for T {}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -806,7 +814,7 @@ impl RarArchive {
             .open(&path)?;
         f.set_len(truncate_pos)?;
         f.seek(SeekFrom::End(0))?;
-        self.stream = Some(f);
+        self.stream = Some(Box::new(f));
         Ok(())
     }
 
@@ -889,12 +897,12 @@ impl RarArchive {
         let crc = hasher.finalize();
         hdr[..4].copy_from_slice(&crc.to_le_bytes());
 
-        self.stream = Some(
+        self.stream = Some(Box::new(
             std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(&path)?,
-        );
+        ));
         let main_start = main_meta.block_start;
         self.stream
             .as_mut()
@@ -924,7 +932,7 @@ impl RarArchive {
         let src_path = self.path.clone();
         let tmp_path = temp_sibling_path(&src_path);
         let mut reader = File::open(&src_path)?;
-        self.stream = Some(File::create(&tmp_path)?);
+        self.stream = Some(Box::new(read_write_create(&tmp_path)?));
         self.quick_open_entries.clear();
         self.header_encryption = false;
         self.archive_encr = None;
@@ -963,6 +971,45 @@ impl RarArchive {
         path: impl AsRef<Path>,
         opts: crate::options::CreateOptions,
     ) -> RarResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut archive = Self::new_with_options(path, opts)?;
+        archive.open_write()?;
+        Ok(archive)
+    }
+
+    /// Create an archive writing into a caller-provided seekable sink
+    /// (test seam; `Cursor<Vec<u8>>` gives an in-memory archive). The sink
+    /// can be recovered with [`Self::finish_into_sink`] after closing.
+    #[cfg(test)]
+    pub(crate) fn create_with_sink(
+        path: PathBuf,
+        opts: crate::options::CreateOptions,
+        sink: Box<dyn ArchiveStream>,
+    ) -> RarResult<Self> {
+        if opts.volume_size.is_some() {
+            return Err(RarError::Unsupported(
+                "in-memory sinks are single-volume only".into(),
+            ));
+        }
+        if opts.recovery_volumes_percent.is_some() || opts.recovery_volume_count.is_some() {
+            return Err(RarError::Unsupported(
+                "recovery volumes require files on disk".into(),
+            ));
+        }
+        let mut archive = Self::new_with_options(path, opts)?;
+        archive.stream = Some(sink);
+        archive.write_signature()?;
+        archive.write_archive_encryption_header_if_needed()?;
+        archive.write_archive_header()?;
+        Ok(archive)
+    }
+
+    /// Validate options and build the archive state (without opening the
+    /// stream).
+    fn new_with_options(
+        path: PathBuf,
+        opts: crate::options::CreateOptions,
+    ) -> RarResult<Self> {
         if opts.solid && opts.volume_size.is_some() {
             return Err(RarError::Unsupported(
                 "solid archives with multiple volumes are not supported yet".into(),
@@ -994,8 +1041,7 @@ impl RarArchive {
         // reference writer behavior).
         let quick_open = opts.quick_open && !opts.encrypt_headers && opts.volume_size.is_none();
 
-        let path = path.as_ref().to_path_buf();
-        let mut archive = RarArchive {
+        let archive = RarArchive {
             path,
             mode: Mode::Write,
             entries: Vec::new(),
@@ -1024,7 +1070,6 @@ impl RarArchive {
             encoder_state: None,
             extract_options: crate::options::ExtractOptions::default(),
         };
-        archive.open_write()?;
         Ok(archive)
     }
 
@@ -1215,7 +1260,7 @@ impl RarArchive {
             self.scan_all_volumes()?;
         } else {
             let f = File::open(&self.path)?;
-            self.stream = Some(f);
+            self.stream = Some(Box::new(f));
             self.verify_signature()?;
             self.scan_blocks()?;
         }
@@ -1234,17 +1279,17 @@ impl RarArchive {
             let vol_path = volume_path(parent, &base, 1);
             self.volume_paths = vec![vol_path.clone()];
             self.current_volume = 1;
-            let f = File::create(&vol_path)?;
-            self.stream = Some(f);
+            let f = read_write_create(&vol_path)?;
+            self.stream = Some(Box::new(f));
             self.write_signature()?;
             self.write_archive_encryption_header_if_needed()?;
             self.write_archive_header_vol(None)?;
-            self.volume_bytes_written = self.stream.as_ref().unwrap().stream_position()?;
+            self.volume_bytes_written = self.stream.as_mut().unwrap().stream_position()?;
             return Ok(());
         }
 
-        let f = File::create(&self.path)?;
-        self.stream = Some(f);
+        let f = read_write_create(&self.path)?;
+        self.stream = Some(Box::new(f));
         self.write_signature()?;
         self.write_archive_encryption_header_if_needed()?;
         self.write_archive_header()?;
@@ -1308,6 +1353,18 @@ impl RarArchive {
 
     /// Finalize the archive (writes end-of-archive block in write mode).
     pub fn close(&mut self) -> RarResult<()> {
+        self.finish_writing()?;
+        self.stream = None;
+        if self.recovery_volumes_percent.is_some() || self.recovery_volumes_count.is_some() {
+            self.write_recovery_volumes()?;
+        }
+        Ok(())
+    }
+
+    /// Write the trailing service records (quick-open, recovery) and the
+    /// end-of-archive block. The stream is left open so a caller can take
+    /// it back afterwards (in-memory sink seam).
+    fn finish_writing(&mut self) -> RarResult<()> {
         if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
             let qo_offset = if self.quick_open {
                 Some(self.write_quick_open_record()?)
@@ -1315,7 +1372,7 @@ impl RarArchive {
                 None
             };
             let rr_offset = if self.recovery_percent.is_some() {
-                Some(self.stream.as_ref().unwrap().stream_position()?)
+                Some(self.stream.as_mut().unwrap().stream_position()?)
             } else {
                 None
             };
@@ -1331,11 +1388,17 @@ impl RarArchive {
             self.write_end_block()?;
             self.mode = Mode::Read; // prevent double-write
         }
-        self.stream = None;
-        if self.recovery_volumes_percent.is_some() || self.recovery_volumes_count.is_some() {
-            self.write_recovery_volumes()?;
-        }
         Ok(())
+    }
+
+    /// Finish writing and hand the underlying stream back (test seam for
+    /// in-memory archives; the caller owns the sink afterwards).
+    #[cfg(test)]
+    pub(crate) fn finish_into_sink(mut self) -> RarResult<Box<dyn ArchiveStream>> {
+        self.finish_writing()?;
+        self.stream
+            .take()
+            .ok_or_else(|| RarError::Format("no archive stream to take".into()))
     }
 
     /// Generate the `.rev` recovery-volume files for a completed
@@ -1538,7 +1601,8 @@ impl RarArchive {
             .main_header_start
             .ok_or_else(|| RarError::Format("main header position unknown".into()))?;
 
-        // Rebuild the main header: read it back (plaintext or decrypted).
+        // Rebuild the main header: read it back from the stream (plaintext
+        // or decrypted), so the patch also works for in-memory sinks.
         let plain = if self.header_encryption {
             let encr = self
                 .archive_encr
@@ -1549,13 +1613,13 @@ impl RarArchive {
                 .as_ref()
                 .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
             let key = encr.get_key(password);
-            let mut reader = std::fs::File::open(&self.path)?;
+            let stream = self.stream.as_mut().unwrap();
             let mut iv = [0u8; 16];
-            reader.seek(SeekFrom::Start(start))?;
-            reader.read_exact(&mut iv)?;
+            stream.seek(SeekFrom::Start(start))?;
+            stream.read_exact(&mut iv)?;
             // Decrypt the first block to learn the header size.
             let mut first = [0u8; 16];
-            reader.read_exact(&mut first)?;
+            stream.read_exact(&mut first)?;
             let first_pt = encryption::decrypt_data(&first, &key, &iv)?;
             let (hsize, vint_len) = vint::decode_from_slice(&first_pt, 4)
                 .map_err(|e| RarError::Format(format!("main header vint: {e}")))?;
@@ -1564,22 +1628,22 @@ impl RarArchive {
             let mut full_ct = vec![0u8; enc_size];
             full_ct[..16].copy_from_slice(&first);
             if enc_size > 16 {
-                reader.read_exact(&mut full_ct[16..])?;
+                stream.read_exact(&mut full_ct[16..])?;
             }
             let full_pt = encryption::decrypt_data(&full_ct, &key, &iv)?;
             full_pt[..total_raw].to_vec()
         } else {
-            let mut reader = std::fs::File::open(&self.path)?;
-            reader.seek(SeekFrom::Start(start))?;
+            let stream = self.stream.as_mut().unwrap();
+            stream.seek(SeekFrom::Start(start))?;
             // Read the whole header: parse the size first.
             let mut crc_hdr = [0u8; 5];
-            reader.read_exact(&mut crc_hdr)?;
+            stream.read_exact(&mut crc_hdr)?;
             let (hsize, vint_len) = vint::decode_from_slice(&crc_hdr, 4)
                 .map_err(|e| RarError::Format(format!("main header vint: {e}")))?;
             let total = 4 + vint_len + hsize as usize;
             let mut hdr = vec![0u8; total];
             hdr[..5].copy_from_slice(&crc_hdr);
-            reader.read_exact(&mut hdr[5..])?;
+            stream.read_exact(&mut hdr[5..])?;
             hdr
         };
 
@@ -1714,7 +1778,7 @@ impl RarArchive {
                 None => break,
             };
 
-            let stream_pos = self.stream.as_ref().unwrap().stream_position()?;
+            let stream_pos = self.stream.as_mut().unwrap().stream_position()?;
 
             match raw.block_type {
                 BLOCK_TYPE_ARCHIVE_HEADER => {
@@ -1882,7 +1946,7 @@ impl RarArchive {
         }
 
         // Keep the first volume open as the default stream
-        self.stream = Some(File::open(&self.volume_paths[0])?);
+        self.stream = Some(Box::new(File::open(&self.volume_paths[0])?));
         Ok(())
     }
 
@@ -1979,7 +2043,7 @@ impl RarArchive {
         out.extend(crc.to_le_bytes());
         out.extend(header_content);
 
-        let main_header_start = self.stream.as_ref().unwrap().stream_position()?;
+        let main_header_start = self.stream.as_mut().unwrap().stream_position()?;
         self.write_block_header(&out)?;
         self.main_header_start = Some(main_header_start);
         // Plaintext-relative index of the locator body (flags vint then
@@ -2033,8 +2097,8 @@ impl RarArchive {
         let base = get_volume_base(&self.path);
         let vol_path = volume_path(parent, &base, self.current_volume);
         self.volume_paths.push(vol_path.clone());
-        let f = File::create(&vol_path)?;
-        self.stream = Some(f);
+        let f = read_write_create(&vol_path)?;
+        self.stream = Some(Box::new(f));
         self.write_signature()?;
         // Header-encrypted multi-volume sets repeat the plaintext encryption
         // header on every volume (WinRAR convention); the archive params are
@@ -2043,7 +2107,7 @@ impl RarArchive {
         // Volume number: part2 → 1, part3 → 2, etc.
         let vol_num = (self.current_volume - 1) as u64;
         self.write_archive_header_vol(Some(vol_num))?;
-        self.volume_bytes_written = self.stream.as_ref().unwrap().stream_position()?;
+        self.volume_bytes_written = self.stream.as_mut().unwrap().stream_position()?;
         Ok(())
     }
 
@@ -2962,7 +3026,7 @@ impl RarArchive {
             let src_path = self.path.clone();
             let tmp_path = temp_sibling_path(&src_path);
             let mut reader = File::open(&src_path)?;
-            self.stream = Some(File::create(&tmp_path)?);
+            self.stream = Some(Box::new(read_write_create(&tmp_path)?));
             self.quick_open_entries.clear();
             // Rewriting rediscovers header encryption from the file itself.
             self.header_encryption = false;
@@ -3047,10 +3111,10 @@ impl RarArchive {
         self.volume_paths = Vec::new();
         self.current_volume = 1;
         self.volume_bytes_written = 0;
-        self.stream = Some(File::create(volume_path(&parent, &tmp_base, 1))?);
+        self.stream = Some(Box::new(read_write_create(&volume_path(&parent, &tmp_base, 1))?));
         self.write_signature()?;
         self.write_archive_header_vol(None)?;
-        self.volume_bytes_written = self.stream.as_ref().unwrap().stream_position()?;
+        self.volume_bytes_written = self.stream.as_mut().unwrap().stream_position()?;
 
         let mut readers = VolumeReaders::new(&orig_volumes);
         let (mut dec, mut enc, mut enc_active) = (None, None, false);
@@ -3426,7 +3490,7 @@ impl RarArchive {
             let src_path = self.path.clone();
             let tmp_path = temp_sibling_path(&src_path);
             let mut reader = File::open(&src_path)?;
-            self.stream = Some(File::create(&tmp_path)?);
+            self.stream = Some(Box::new(read_write_create(&tmp_path)?));
             self.quick_open_entries.clear();
             self.header_encryption = false;
             self.archive_encr = None;
@@ -3508,7 +3572,7 @@ impl RarArchive {
         let src_path = self.path.clone();
         let tmp_path = temp_sibling_path(&src_path);
         let mut reader = File::open(&src_path)?;
-        self.stream = Some(File::create(&tmp_path)?);
+        self.stream = Some(Box::new(read_write_create(&tmp_path)?));
         self.quick_open_entries.clear();
         self.header_encryption = false;
         self.archive_encr = None;
@@ -3938,7 +4002,7 @@ impl RarArchive {
             None
         };
         let rr_pos = if self.recovery_percent.is_some() {
-            Some(self.stream.as_ref().unwrap().stream_position()?)
+            Some(self.stream.as_mut().unwrap().stream_position()?)
         } else {
             None
         };
@@ -4214,7 +4278,7 @@ impl RarArchive {
         let qo_field_pos = qo_field_pos.map(|p| field_base + p);
         let rr_field_pos = rr_field_pos.map(|p| field_base + p);
 
-        let main_start = self.stream.as_ref().unwrap().stream_position()?;
+        let main_start = self.stream.as_mut().unwrap().stream_position()?;
         self.write_block_header(&hdr)?;
         Ok((main_start, qo_field_pos, rr_field_pos, hdr))
     }
@@ -5461,7 +5525,7 @@ impl RarArchive {
             // Single-volume
             let hdr_bytes = fh_base.to_bytes();
             if self.quick_open {
-                let pos = self.stream.as_ref().unwrap().stream_position()?;
+                let pos = self.stream.as_mut().unwrap().stream_position()?;
                 self.quick_open_entries.push((pos, hdr_bytes.clone()));
             }
             self.write_block_header(&hdr_bytes)?;
@@ -5839,7 +5903,7 @@ impl RarArchive {
             // ── Single-volume ──
             let hdr_bytes = fh_base.to_bytes();
             if self.quick_open {
-                let pos = self.stream.as_ref().unwrap().stream_position()?;
+                let pos = self.stream.as_mut().unwrap().stream_position()?;
                 self.quick_open_entries.push((pos, hdr_bytes.clone()));
             }
             self.write_block_header(&hdr_bytes)?;
@@ -6750,6 +6814,19 @@ fn temp_sibling_path(dest_path: &Path) -> PathBuf {
     dest_path.with_file_name(tmp_name)
 }
 
+/// Open a file for both reading and writing, truncating it. The archive
+/// stream is read back for locator patches and recovery records, and
+/// Windows `File::create` opens write-only (`GENERIC_WRITE`), so the
+/// write path uses a read+write handle.
+fn read_write_create(path: &Path) -> io::Result<File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
 /// Replace `dest` with `src` (atomic on Unix; falls back to remove+rename
 /// on platforms where rename over an existing file fails).
 fn replace_file(src: &Path, dest: &Path) -> RarResult<()> {
@@ -7268,6 +7345,55 @@ mod tests {
         // Opening without a password must fail: headers are encrypted.
         assert!(RarArchive::open(&path).is_err());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn in_memory_sink_archive_is_well_formed() {
+        // The stream seam: an archive written into a Cursor (no disk)
+        // must be byte-valid — same envelope, quick-open and end blocks a
+        // file archive would carry.
+        use std::io::{Cursor, Read, Seek, SeekFrom};
+
+        let opts = crate::options::CreateOptions {
+            quick_open: true,
+            ..Default::default()
+        };
+        let mut ar = RarArchive::create_with_sink(
+            PathBuf::from("mem.rar"),
+            opts,
+            Box::new(Cursor::new(Vec::new())),
+        )
+        .unwrap();
+        ar.add_bytes("a.txt", b"hello", 3).unwrap();
+        ar.add_bytes("b.bin", &vec![7u8; 1000], 0).unwrap();
+        let mut sink = ar.finish_into_sink().unwrap();
+        sink.seek(SeekFrom::Start(0)).unwrap();
+        let mut bytes = Vec::new();
+        sink.read_to_end(&mut bytes).unwrap();
+
+        // Structural scan through the same seam the archive scanner uses.
+        let mut cursor = Cursor::new(&bytes);
+        cursor.set_position(8); // skip signature
+        let mut types = Vec::new();
+        while let Ok(Some(meta)) = crate::headers::read_block(&mut cursor, None) {
+            types.push(meta.block_type);
+            cursor.set_position(meta.data_end);
+            if meta.block_type == BLOCK_TYPE_END_ARCHIVE {
+                break;
+            }
+        }
+        assert_eq!(types.first(), Some(&BLOCK_TYPE_ARCHIVE_HEADER));
+        assert!(types.contains(&BLOCK_TYPE_FILE_HEADER), "{types:?}");
+        assert!(types.contains(&BLOCK_TYPE_SERVICE_HEADER), "{types:?}");
+        assert_eq!(types.last(), Some(&BLOCK_TYPE_END_ARCHIVE), "{types:?}");
+
+        // Persisted, the in-memory archive must open and read back.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mem.rar");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut rar = RarArchive::open(&path).unwrap();
+        assert_eq!(rar.read("a.txt").unwrap(), b"hello");
+        assert_eq!(rar.read("b.bin").unwrap(), vec![7u8; 1000]);
     }
 
     #[test]
