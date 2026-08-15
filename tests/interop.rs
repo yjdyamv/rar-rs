@@ -1950,8 +1950,8 @@ fn delete_rejects_missing_members_and_multivolume() {
     }
     let mut rar = RarArchive::open(&path).unwrap();
     match rar.delete(&["nope.txt"]) {
-        Err(rar5::RarError::Format(msg)) => assert!(msg.contains("member not found")),
-        other => panic!("expected Format(member not found), got {other:?}"),
+        Err(rar5::RarError::MemberNotFound { name }) => assert_eq!(name, "nope.txt"),
+        other => panic!("expected MemberNotFound, got {other:?}"),
     }
     // Archive unchanged after a failed delete.
     let rar = RarArchive::open(&path).unwrap();
@@ -2021,8 +2021,8 @@ fn delete_rejects_locked_archive() {
 
     let mut rar = RarArchive::open(&path).unwrap();
     match rar.delete(&["f1.txt"]) {
-        Err(rar5::RarError::Unsupported(msg)) => assert!(msg.contains("locked")),
-        other => panic!("expected Unsupported(locked), got {other:?}"),
+        Err(rar5::RarError::ArchiveLocked) => {}
+        other => panic!("expected ArchiveLocked, got {other:?}"),
     }
 }
 
@@ -2196,14 +2196,14 @@ fn append_rejects_locked_archive() {
     // Locked archives are read-only: both the official `rar d` and our
     // append/delete refuse them.
     match rar5::RarArchive::open_append(&path) {
-        Err(rar5::RarError::Unsupported(msg)) => assert!(msg.contains("locked")),
-        Err(e) => panic!("expected Unsupported(locked), got {e:?}"),
-        Ok(_) => panic!("expected Unsupported(locked)"),
+        Err(rar5::RarError::ArchiveLocked) => {}
+        Err(e) => panic!("expected ArchiveLocked, got {e:?}"),
+        Ok(_) => panic!("expected ArchiveLocked"),
     }
     let mut rar = RarArchive::open(&path).unwrap();
     match rar.delete(&["a.bin"]) {
-        Err(rar5::RarError::Unsupported(msg)) => assert!(msg.contains("locked")),
-        other => panic!("expected Unsupported(locked), got {other:?}"),
+        Err(rar5::RarError::ArchiveLocked) => {}
+        other => panic!("expected ArchiveLocked, got {other:?}"),
     }
     // Content still readable after the lock.
     let mut rar = RarArchive::open(&path).unwrap();
@@ -2569,8 +2569,8 @@ fn rename_rejects_missing_and_locked() {
     }
     let mut rar = RarArchive::open(&path).unwrap();
     match rar.rename(&[("nope", "x")]) {
-        Err(rar5::RarError::Format(msg)) => assert!(msg.contains("member not found")),
-        other => panic!("expected Format(member not found), got {other:?}"),
+        Err(rar5::RarError::MemberNotFound { name }) => assert_eq!(name, "nope"),
+        other => panic!("expected MemberNotFound, got {other:?}"),
     }
     {
         let mut rar = RarArchive::open(&path).unwrap();
@@ -2578,8 +2578,8 @@ fn rename_rejects_missing_and_locked() {
     }
     let mut rar = RarArchive::open(&path).unwrap();
     match rar.rename(&[("a.bin", "b.bin")]) {
-        Err(rar5::RarError::Unsupported(msg)) => assert!(msg.contains("locked")),
-        other => panic!("expected Unsupported(locked), got {other:?}"),
+        Err(rar5::RarError::ArchiveLocked) => {}
+        other => panic!("expected ArchiveLocked, got {other:?}"),
     }
 }
 

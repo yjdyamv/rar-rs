@@ -733,7 +733,7 @@ impl RarArchive {
                     RarError::Encrypted("archive has encrypted headers; provide a password".into())
                 })?;
                 if !params.verify_password(password) {
-                    return Err(RarError::Encrypted("wrong password".into()));
+                    return Err(RarError::WrongPassword);
                 }
                 self.archive_encr = Some(params);
                 self.header_encryption = true;
@@ -749,7 +749,7 @@ impl RarArchive {
         };
         let ah = ArchiveHeader::from_raw(&main_meta.raw)?;
         if ah.flags & ARCHIVE_FLAG_LOCKED != 0 {
-            return Err(RarError::Unsupported("archive is locked".into()));
+            return Err(RarError::ArchiveLocked);
         }
         let (had_qo, had_rr, _) = split_main_extra(&ah.extra_data)?;
         let (qo_field_pos, rr_field_pos) = main_header_locator_fields(&main_meta)?;
@@ -840,7 +840,7 @@ impl RarArchive {
                     RarError::Encrypted("archive has encrypted headers; provide a password".into())
                 })?;
                 if !params.verify_password(password) {
-                    return Err(RarError::Encrypted("wrong password".into()));
+                    return Err(RarError::WrongPassword);
                 }
                 self.archive_encr = Some(params);
                 self.header_encryption = true;
@@ -1744,7 +1744,7 @@ impl RarArchive {
                     })?;
                     let params = parse_archive_encrypt_header(&raw)?;
                     if !params.verify_password(password) {
-                        return Err(RarError::Encrypted("wrong password".into()));
+                        return Err(RarError::WrongPassword);
                     }
                     encr_key = Some(params.get_key(password));
                 }
@@ -1868,7 +1868,7 @@ impl RarArchive {
                         })?;
                         let params = parse_archive_encrypt_header(&raw)?;
                         if !params.verify_password(password) {
-                            return Err(RarError::Encrypted("wrong password".into()));
+                            return Err(RarError::WrongPassword);
                         }
                         encr_key = Some(params.get_key(password));
                     }
@@ -2081,7 +2081,7 @@ impl RarArchive {
             .entries
             .iter()
             .position(|e| e.name() == name)
-            .ok_or_else(|| RarError::Format(format!("member not found: {name:?}")))?;
+            .ok_or_else(|| RarError::MemberNotFound { name: name.to_string() })?;
         self.extract_options = opts;
         self.validate_entry_limits(target_idx)?;
         if self.is_solid_chain_member(target_idx) {
@@ -2322,7 +2322,7 @@ impl RarArchive {
             .entries
             .iter()
             .position(|e| e.name() == name)
-            .ok_or_else(|| RarError::Format(format!("member not found: {name:?}")))?;
+            .ok_or_else(|| RarError::MemberNotFound { name: name.to_string() })?;
         self.validate_entry_limits(idx)?;
         self.extract_entry(&self.entries[idx].clone(), dest)
     }
@@ -2728,7 +2728,7 @@ impl RarArchive {
                 RarError::Encrypted(format!("{}: encrypted, no password set", hdr.name))
             })?;
             if !p.verify_password(password) {
-                return Err(RarError::Encrypted("wrong password".into()));
+                return Err(RarError::WrongPassword);
             }
             let keys = p.derive_keys(password)?;
             let mut data = encryption::decrypt_data(&packed_data, &keys.key, &p.iv)?;
@@ -2912,7 +2912,7 @@ impl RarArchive {
                 .enumerate()
                 .find(|(i, e)| e.name() == *name && !deleted[*i])
                 .map(|(i, _)| i)
-                .ok_or_else(|| RarError::Format(format!("member not found: {name:?}")))?;
+                .ok_or_else(|| RarError::MemberNotFound { name: name.to_string() })?;
             deleted[idx] = true;
             count += 1;
         }
@@ -2924,7 +2924,7 @@ impl RarArchive {
             // Matching `rar d`: an archive whose every member is deleted is
             // erased entirely (every volume for multi-volume archives).
             if self.main_header_is_locked()? {
-                return Err(RarError::Unsupported("archive is locked".into()));
+                return Err(RarError::ArchiveLocked);
             }
             for vol in &self.volume_paths {
                 let _ = fs::remove_file(vol);
@@ -3222,7 +3222,7 @@ impl RarArchive {
                 RarError::Encrypted(format!("{}: encrypted, no password set", hdr.name))
             })?;
             if !p.verify_password(password) {
-                return Err(RarError::Encrypted("wrong password".into()));
+                return Err(RarError::WrongPassword);
             }
             let keys = p.derive_keys(password)?;
             let mut data = encryption::decrypt_data(&packed, &keys.key, &p.iv)?;
@@ -3363,7 +3363,7 @@ impl RarArchive {
             ));
         }
         if self.main_header_is_locked()? {
-            return Err(RarError::Unsupported("archive is locked".into()));
+            return Err(RarError::ArchiveLocked);
         }
 
         // Resolve the pairs sequentially, honoring earlier renames in the
@@ -3385,7 +3385,7 @@ impl RarArchive {
                     name == old_norm
                 })
                 .map(|(i, _)| i)
-                .ok_or_else(|| RarError::Format(format!("member not found: {old:?}")))?;
+                .ok_or_else(|| RarError::MemberNotFound { name: old.to_string() })?;
             let is_dir = self.entries[idx].is_dir();
             let new_norm = new.trim_end_matches('/').to_string();
             if is_dir {
@@ -3489,7 +3489,7 @@ impl RarArchive {
             ));
         }
         if self.main_header_is_locked()? {
-            return Err(RarError::Unsupported("archive is locked".into()));
+            return Err(RarError::ArchiveLocked);
         }
         let src_path = self.path.clone();
         let tmp_path = temp_sibling_path(&src_path);
@@ -3542,7 +3542,7 @@ impl RarArchive {
                     RarError::Encrypted("archive has encrypted headers; provide a password".into())
                 })?;
                 if !params.verify_password(password) {
-                    return Err(RarError::Encrypted("wrong password".into()));
+                    return Err(RarError::WrongPassword);
                 }
                 self.archive_encr = Some(params);
                 self.header_encryption = true;
@@ -3638,7 +3638,7 @@ impl RarArchive {
                     RarError::Encrypted("archive has encrypted headers; provide a password".into())
                 })?;
                 if !params.verify_password(password) {
-                    return Err(RarError::Encrypted("wrong password".into()));
+                    return Err(RarError::WrongPassword);
                 }
                 self.archive_encr = Some(params);
                 self.header_encryption = true;
@@ -4084,7 +4084,7 @@ impl RarArchive {
                 RarError::Encrypted(format!("{}: encrypted, no password set", hdr.name))
             })?;
             if !p.verify_password(password) {
-                return Err(RarError::Encrypted("wrong password".into()));
+                return Err(RarError::WrongPassword);
             }
             let keys = p.derive_keys(password)?;
             let mut data = encryption::decrypt_data(&packed, &keys.key, &p.iv)?;
@@ -4117,7 +4117,7 @@ impl RarArchive {
     ) -> RarResult<(u64, Option<usize>, Option<usize>, Vec<u8>)> {
         let ah = ArchiveHeader::from_raw(&meta.raw)?;
         if ah.flags & ARCHIVE_FLAG_LOCKED != 0 {
-            return Err(RarError::Unsupported("archive is locked".into()));
+            return Err(RarError::ArchiveLocked);
         }
         let (had_qo, _had_rr, mut extra) = split_main_extra(&ah.extra_data)?;
         self.quick_open = had_qo && !self.header_encryption;
@@ -7235,8 +7235,10 @@ mod tests {
         // Wrong password must be rejected by the header check value.
         let err = RarArchive::open_with_password(&path, "nope").err();
         assert!(err.is_some());
-        let msg = err.unwrap().to_string();
-        assert!(msg.contains("password"), "unexpected error: {msg}");
+        assert!(
+            matches!(err, Some(RarError::WrongPassword)),
+            "unexpected error: {err:?}"
+        );
         std::fs::remove_file(&path).ok();
     }
 

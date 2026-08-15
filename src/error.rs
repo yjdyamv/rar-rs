@@ -32,6 +32,12 @@ pub enum RarError {
         /// What was being done when the limit was hit.
         context: String,
     },
+    /// The requested member does not exist in the archive.
+    MemberNotFound { name: String },
+    /// The archive is locked (read-only).
+    ArchiveLocked,
+    /// An encrypted archive was opened with the wrong password.
+    WrongPassword,
     /// Underlying I/O error.
     Io(io::Error),
 }
@@ -64,6 +70,9 @@ impl fmt::Display for RarError {
             RarError::LimitExceeded { limit, context } => {
                 write!(f, "limit exceeded ({limit}): {context}")
             }
+            RarError::MemberNotFound { name } => write!(f, "member not found: {name}"),
+            RarError::ArchiveLocked => write!(f, "archive is locked"),
+            RarError::WrongPassword => write!(f, "encrypted: wrong password"),
             RarError::Io(e) => write!(f, "I/O error: {e}"),
         }
     }
