@@ -140,6 +140,11 @@ fn main() {
         .skip(1)
         .map(|a| common::normalize_switch(a))
         .collect();
+    // `unrar -iver` prints the version and exits (no subcommand needed).
+    if args.iter().any(|a| a == "--version-info") {
+        println!("UNRAR 7.23 CLI parity (unrar-rs {})", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let cli = Cli::parse_from(std::iter::once("unrar".to_string()).chain(args));
     common::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
     common::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);

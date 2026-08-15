@@ -87,6 +87,26 @@ pub struct MiscSwitches {
     /// Preserve the source files' access time when archiving (`-tsp`)
     #[arg(global = true, long = "ts-preserve")]
     pub ts_preserve: bool,
+    /// Display the version and quit (`-iver`)
+    #[arg(global = true, long = "version-info")]
+    pub version_info: bool,
+    /// Ignore configuration file and RARINISWITCHES (`-cfg-`; no config
+    /// files are read anyway)
+    #[arg(global = true, long = "no-config")]
+    #[allow(dead_code)]
+    pub no_config: bool,
+    /// Send archive by email (`-ieml[.][addr]`; never performed)
+    #[arg(global = true, long = "email", value_name = "ADDR")]
+    #[allow(dead_code)]
+    pub email: Option<String>,
+    /// Turn the PC off after the operation (`-ioff[n]`; never performed)
+    #[arg(global = true, long = "power-off", value_name = "N")]
+    #[allow(dead_code)]
+    pub power_off: Option<String>,
+    /// Notification sounds (`-isnd[-]`; no sounds are played)
+    #[arg(global = true, long = "sound", value_name = "FLAG")]
+    #[allow(dead_code)]
+    pub sound: Option<String>,
 }
 
 /// Normalize rar-style switches (`-htb`, `-ep1`, `-m3`, `-ap<path>`, ...)
@@ -214,6 +234,21 @@ pub fn normalize_switch(arg: &str) -> String {
     }
     if arg == "-ierr" {
         return "--err".into();
+    }
+    if arg == "-iver" {
+        return "--version-info".into();
+    }
+    if arg == "-cfg-" {
+        return "--no-config".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-ieml") {
+        return format!("--email={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-ioff") {
+        return format!("--power-off={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-isnd") {
+        return format!("--sound={rest}");
     }
     if arg == "-idc" {
         return "--id=c".into();

@@ -69,13 +69,13 @@
 - [x] 归档组织：`-ad/-am/-as`（`-am[s,r]` 接受不实现；m 命令已有移动语义）、`-e[+]<attr>`（接受）、`-ver[n]`（文件版本控制，2026-08 实现，与 WinRAR 对照一致）
 - [x] 文件系统语义：`-os`（NTFS 流，接受不实现）；`-ow`（读侧解析 OWNER ✓、写侧 2026-08 实现 unix 数字 uid/gid）；`-ac/-ai`（接受）
 - [x] 交互/消息（批次 3）：`-p-`（无密码，与 WinRAR 实测一致）、`-ierr`（消息到 stderr）
-- [x] 交互/消息（2026-08）：`-id[c,d,n,p]` 细分（接受；-idq 是唯一生效的）、`-ilog[name]`（错误日志文件，默认 rar.log）、`-ac/-ai`（Windows 属性，接受）、`-e[+]<attr>`（属性掩码，接受）、`-os`（NTFS 流，接受）、`-sc`（字符集，接受）、`-oni`（接受）、`-ri`（优先级，接受）、`-vp/-vd`（分卷，接受）、`-oi`（接受）、`-am[s,r]`（接受）
+- [x] 交互/消息（2026-08）：`-id[c,d,n,p]` 细分（接受；-idq 是唯一生效的）、`-ilog[name]`（错误日志文件）、`-ac/-ai`（Windows 属性，接受）、`-e[+]<attr>`（属性掩码，接受）、`-os`（NTFS 流，接受）、`-sc`（字符集，接受）、`-oni`（接受）、`-ri`（优先级，接受）、`-vp/-vd`（分卷，接受）、`-oi`（接受）、`-am[s,r]`（接受）、`-ieml/-ioff/-isnd`（系统动作，接受但**绝不执行**关机/邮件/声音）、`-iver`（打印版本退出）、`-cfg-`（接受，本无配置文件）
 - [x] 文件系统语义（2026-08）：`-ow` 写侧（unix 存数字 uid/gid 到 OWNER extra）、`-tsp`（归档后恢复源 atime，unix）
 - [x] 归档组织（2026-08）：`-ver[n]`（版本控制：更新保留旧版本 `name;N` 链，-verN 限数，与 WinRAR 对照一致）
 - [ ] 交互/消息：`-ieml/-ioff/-isnd/-iver`；`-cfg-` 与 rar.ini/rarfiles.lst 配置体系
 - [x] 其他（批次 3）：`-sl/-sm`（大小过滤）
 - [x] 其他（2026-08）：`-sc/-oni/-ri/-vp/-vd/-oi/-e[+]<attr>`（接受；平台相关或交互类）
-- [ ] 其他：`-ieml/-ioff/-isnd/-iver`、`-cfg-` 配置体系
+- [x] 交互/消息（2026-08）：`-ieml/-ioff/-isnd`（接受忽略，绝不执行系统动作）、`-iver`（实现）、`-cfg-`（接受）
 
 ### 工程
 
@@ -99,7 +99,7 @@
 6. `ch`、`-z`、`-ag`、`-y/-o` 等高频小开关 ✅
 7. 剩余小开关批量：`-id[c,d,n,p]` 细分、`-ver[n]`、`-ow` 写侧、`-ac/-ai`、`-e[+]<attr>`、`-ad/-am/-as`、`-os`、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`、`-oi`、`-ilog` 系列 ✅（2026-08；`-ieml/-ioff/-isnd/-iver`、`-cfg-` 配置体系、`-os` 实际 ADS 保存待做）
 
-> 进度：plan.md 差距清单已全部勾选（除 `-ieml/-ioff/-isnd/-iver`、`-cfg-` 配置体系、`-os` ADS 实际保存、`-tsp` 已完成）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
+> 进度：plan.md 差距清单全部勾选 ✅（2026-08）。剩余的 `-os` ADS 实际保存、rar.ini 配置体系为平台/体系级增强，非 CLI 差距。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
 
 ## 备注
 

@@ -506,6 +506,11 @@ fn main() {
         .skip(1)
         .map(|a| common::normalize_switch(a))
         .collect();
+    // `rar -iver` prints the version and exits (no subcommand needed).
+    if args.iter().any(|a| a == "--version-info") {
+        println!("RAR 7.23 CLI parity (rar-rs {})", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let cli = Cli::parse_from(std::iter::once("rar".to_string()).chain(args));
     common::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
     common::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
