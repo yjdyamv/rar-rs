@@ -17,6 +17,78 @@ pub struct PasswordArgs {
     pub password: Option<String>,
 }
 
+/// Lower-value WinRAR switches accepted for CLI parity. Most are no-ops
+/// in this implementation (platform-specific or informational); a few
+/// are wired in `rar`/`unrar`:
+/// - `owner` (`-ow`): save owner/group on Unix (numeric ids)
+/// - `ts_preserve` (`-tsp`): restore source access times on Unix
+/// - `log_errors` (`-ilog`): append errors to a log file
+#[derive(Args, Default)]
+pub struct MiscSwitches {
+    /// Message detail flags (`-idc`/`-idd`/`-idn`/`-idp`; accepted,
+    /// `-idq` is the only effective message switch here)
+    #[arg(global = true, long = "id", value_name = "FLAG", action = clap::ArgAction::Append)]
+    #[allow(dead_code)]
+    pub id_flags: Vec<String>,
+    /// Clear the Archive attribute after archiving (`-ac`; Windows-only)
+    #[arg(global = true, long = "clear-attr")]
+    #[allow(dead_code)]
+    pub clear_attr: bool,
+    /// Ignore file attributes (`-ai`; we never set them on extract)
+    #[arg(global = true, long = "ignore-attr")]
+    #[allow(dead_code)]
+    pub ignore_attr: bool,
+    /// Exclude/include attribute mask (`-e[+]<attr>`; Windows-only)
+    #[arg(global = true, long = "exclude-attrs", value_name = "MASK")]
+    #[allow(dead_code)]
+    pub exclude_attrs: Option<String>,
+    /// Save NTFS streams (`-os`; not supported)
+    #[arg(global = true, long = "save-streams")]
+    #[allow(dead_code)]
+    pub save_streams: bool,
+    /// Charset for list files (`-sc<charset>l`; accepted)
+    #[arg(global = true, long = "charset", value_name = "SET")]
+    #[allow(dead_code)]
+    pub charset: Option<String>,
+    /// Allow potentially incompatible names (`-oni`; Windows-only)
+    #[arg(global = true, long = "allow-names")]
+    #[allow(dead_code)]
+    pub allow_names: bool,
+    /// Task priority and sleep (`-ri<P>[:<S>]`; Windows-only)
+    #[arg(global = true, long = "priority", value_name = "P[:S]")]
+    #[allow(dead_code)]
+    pub priority: Option<String>,
+    /// Pause before each volume (`-vp`; no interactive prompts here)
+    #[arg(global = true, long = "pause-volumes")]
+    #[allow(dead_code)]
+    pub pause_volumes: bool,
+    /// Erase disk contents before creating volume (`-vd`; removable
+    /// media only, never touched)
+    #[arg(global = true, long = "erase-disk")]
+    #[allow(dead_code)]
+    pub erase_disk: bool,
+    /// Stream options (`-oi[1|-]`; not supported)
+    #[arg(global = true, long = "stream-options", value_name = "OPTS")]
+    #[allow(dead_code)]
+    pub stream_options: Option<String>,
+    /// Archive metadata save/restore (`-am[s,r]`; accepted)
+    #[arg(global = true, long = "archive-meta", value_name = "SPEC")]
+    #[allow(dead_code)]
+    pub archive_meta: Option<String>,
+    /// Log errors to a file (`-ilog[name]`; default `rar.log`)
+    #[arg(global = true, long = "log-errors", num_args = 0..=1, default_missing_value = "")]
+    pub log_errors: Option<String>,
+    /// File version control (`-ver[n]`; keep old versions on update)
+    #[arg(global = true, long = "version-control", value_name = "N")]
+    pub version_control: Option<String>,
+    /// Save owner/group on Unix (`-ow`)
+    #[arg(global = true, long = "owner")]
+    pub owner: bool,
+    /// Preserve the source files' access time when archiving (`-tsp`)
+    #[arg(global = true, long = "ts-preserve")]
+    pub ts_preserve: bool,
+}
+
 /// Normalize rar-style switches (`-htb`, `-ep1`, `-m3`, `-ap<path>`, ...)
 /// into clap long options. clap short flags are single characters, so the
 /// multi-character rar forms are mapped here; the single-character forms
@@ -50,6 +122,15 @@ pub fn normalize_switch(arg: &str) -> String {
         } else {
             format!("--password={rest}")
         };
+    }
+    if let Some(rest) = arg.strip_prefix("-ver") {
+        return format!("--version-control={rest}");
+    }
+    if arg == "-vp" {
+        return "--pause-volumes".into();
+    }
+    if arg == "-vd" {
+        return "--erase-disk".into();
     }
     if let Some(rest) = arg.strip_prefix("-v") {
         return if rest.is_empty() {
@@ -134,6 +215,48 @@ pub fn normalize_switch(arg: &str) -> String {
     if arg == "-ierr" {
         return "--err".into();
     }
+    if arg == "-idc" {
+        return "--id=c".into();
+    }
+    if arg == "-idd" {
+        return "--id=d".into();
+    }
+    if arg == "-idn" {
+        return "--id=n".into();
+    }
+    if arg == "-idp" {
+        return "--id=p".into();
+    }
+    if arg == "-ac" {
+        return "--clear-attr".into();
+    }
+    if arg == "-ai" {
+        return "--ignore-attr".into();
+    }
+    if arg == "-os" {
+        return "--save-streams".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-sc") {
+        return format!("--charset={rest}");
+    }
+    if arg == "-oni" {
+        return "--allow-names".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-ri") {
+        return format!("--priority={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-oi") {
+        return format!("--stream-options={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-am") {
+        return format!("--archive-meta={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-ilog") {
+        return format!("--log-errors={rest}");
+    }
+    if arg == "-ow" {
+        return "--owner".into();
+    }
     if let Some(rest) = arg.strip_prefix("-w") {
         return format!("--work-dir={rest}");
     }
@@ -188,6 +311,9 @@ pub fn normalize_switch(arg: &str) -> String {
     }
     if arg == "-ed" {
         return "--no-empty-dirs".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-e") {
+        return format!("--exclude-attrs={rest}");
     }
     if arg == "-p-" {
         return "--password=".into();

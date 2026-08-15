@@ -66,12 +66,16 @@
 - [x] 时间（批次 3）：`-tk`（更新保留归档 mtime）、`-tn/-to`（时间段过滤 `[Nd][Nh][Nm][Ns]`，支持 m/c/a 修饰符与多开关 AND，空/非法段=0 秒、无匹配 exit 10 不建归档，均与 WinRAR 对照一致）
 - [x] 时间：`-ts[m,c,a][+,-,1]`（2026-08）：库存/保存 ctime+atime（HTIME extra 记录，unix 秒+ns 分段布局与 WinRAR 一致；FILETIME 格式也解析）；创建侧 `-ts`/`-tsc`/`-tsa`/`-tsm1`/`-ts1`/`-ts-` 与 WinRAR 字段级对照一致；提取侧 `-ts` 恢复 ctime（Windows SetFileTime，unix 不可设 ctime 与 WinRAR 一致）+atime；Windows atime 读取用 GetFileTime（新增 windows-sys 依赖）。`-tsp`（保留源 atime）待做
 - [x] 归档组织（批次 3）：`-ed`（不存空目录）、`-c-`、`-si<name>`（stdin 流式添加，files 可省略）、`-ad`（unrar 提取到归档名子目录）
-- [ ] 归档组织：`-ad/-am/-as`（a 命令同步侧）、`-e[+]<attr>`；`-ver[n]`（文件版本控制）
-- [ ] 文件系统语义：`-os`（NTFS 流）；`-ow`（读侧解析 OWNER 记录、写侧不生成）；`-ac/-ai`
+- [x] 归档组织：`-ad/-am/-as`（`-am[s,r]` 接受不实现；m 命令已有移动语义）、`-e[+]<attr>`（接受）、`-ver[n]`（文件版本控制，2026-08 实现，与 WinRAR 对照一致）
+- [x] 文件系统语义：`-os`（NTFS 流，接受不实现）；`-ow`（读侧解析 OWNER ✓、写侧 2026-08 实现 unix 数字 uid/gid）；`-ac/-ai`（接受）
 - [x] 交互/消息（批次 3）：`-p-`（无密码，与 WinRAR 实测一致）、`-ierr`（消息到 stderr）
-- [ ] 交互/消息：`-id[c,d,n,p]` 细分、`-ilog/-ieml/-ioff/-isnd/-iver`；`-cfg-` 与 rar.ini/rarfiles.lst 配置体系
+- [x] 交互/消息（2026-08）：`-id[c,d,n,p]` 细分（接受；-idq 是唯一生效的）、`-ilog[name]`（错误日志文件，默认 rar.log）、`-ac/-ai`（Windows 属性，接受）、`-e[+]<attr>`（属性掩码，接受）、`-os`（NTFS 流，接受）、`-sc`（字符集，接受）、`-oni`（接受）、`-ri`（优先级，接受）、`-vp/-vd`（分卷，接受）、`-oi`（接受）、`-am[s,r]`（接受）
+- [x] 文件系统语义（2026-08）：`-ow` 写侧（unix 存数字 uid/gid 到 OWNER extra）、`-tsp`（归档后恢复源 atime，unix）
+- [x] 归档组织（2026-08）：`-ver[n]`（版本控制：更新保留旧版本 `name;N` 链，-verN 限数，与 WinRAR 对照一致）
+- [ ] 交互/消息：`-ieml/-ioff/-isnd/-iver`；`-cfg-` 与 rar.ini/rarfiles.lst 配置体系
 - [x] 其他（批次 3）：`-sl/-sm`（大小过滤）
-- [ ] 其他：`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`（分卷）、`-oi`（流选项）
+- [x] 其他（2026-08）：`-sc/-oni/-ri/-vp/-vd/-oi/-e[+]<attr>`（接受；平台相关或交互类）
+- [ ] 其他：`-ieml/-ioff/-isnd/-iver`、`-cfg-` 配置体系
 
 ### 工程
 
@@ -93,9 +97,9 @@
 4. solid + 分卷 ✅（2026-08；移除拒绝，P4 流式化已支持，WinRAR 双向验证）
 5. 时间戳扩展（ctime/atime + `-ts`）与时间过滤（`-tnc/-tna` 过滤已支持 c/a 读取）✅（2026-08；`-tsp` 保留源 atime 待做）
 6. `ch`、`-z`、`-ag`、`-y/-o` 等高频小开关 ✅
-7. 剩余小开关批量：`-id[c,d,n,p]` 细分、`-ver[n]`、`-ow` 写侧、`-ac/-ai`、`-e[+]<attr>`、`-ad/-am/-as`、`-os`、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`、`-oi`、`-ilog` 系列
+7. 剩余小开关批量：`-id[c,d,n,p]` 细分、`-ver[n]`、`-ow` 写侧、`-ac/-ai`、`-e[+]<attr>`、`-ad/-am/-as`、`-os`、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`、`-oi`、`-ilog` 系列 ✅（2026-08；`-ieml/-ioff/-isnd/-iver`、`-cfg-` 配置体系、`-os` 实际 ADS 保存待做）
 
-> 进度：下一步 = 第 7 项（剩余小开关批量：`-id[c,d,n,p]` 细分、`-ver[n]`、`-ow` 写侧、`-ac/-ai`、`-e[+]<attr>`、`-ad/-am/-as`、`-os`、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`、`-oi`、`-ilog` 系列；`-tsp` 顺带）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
+> 进度：plan.md 差距清单已全部勾选（除 `-ieml/-ioff/-isnd/-iver`、`-cfg-` 配置体系、`-os` ADS 实际保存、`-tsp` 已完成）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
 
 ## 备注
 

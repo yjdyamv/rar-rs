@@ -1116,6 +1116,35 @@ pub(crate) fn file_time_extra_record(
     out
 }
 
+/// Serialize an OWNER extra record (`EXTRA_FILE_OWNER`) with owner and
+/// group names: `[flags][owner len][owner][group len][group]`. Flag bits
+/// 0x01 = owner present, 0x02 = group present (mirrors the parser).
+#[cfg(unix)]
+pub(crate) fn build_owner_extra_record(owner: &str, group: &str) -> Vec<u8> {
+    let mut flags = 0u64;
+    if !owner.is_empty() {
+        flags |= 0x01;
+    }
+    if !group.is_empty() {
+        flags |= 0x02;
+    }
+    let mut body = Vec::with_capacity(4 + owner.len() + group.len());
+    body.extend(vint::encode(flags));
+    if !owner.is_empty() {
+        body.extend(vint::encode(owner.len() as u64));
+        body.extend(owner.as_bytes());
+    }
+    if !group.is_empty() {
+        body.extend(vint::encode(group.len() as u64));
+        body.extend(group.as_bytes());
+    }
+    let mut out = Vec::with_capacity(12 + body.len());
+    out.extend(vint::encode((1 + body.len()) as u64));
+    out.extend(vint::encode(EXTRA_FILE_OWNER));
+    out.extend(body);
+    out
+}
+
 /// Serialize a "CMT" archive comment service block (type 3, name "CMT",
 /// comment bytes in the data area), matching the official `rar c` format.
 pub(crate) fn build_comment_block(comment: &[u8]) -> Vec<u8> {

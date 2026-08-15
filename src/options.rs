@@ -49,6 +49,9 @@ pub struct CreateOptions {
     /// Save the modification time (like WinRAR's `-tsm`; always on unless
     /// `-tsm-` / `-ts-` is given).
     pub save_mtime: bool,
+    /// Save the owner and group (numeric ids) in an OWNER extra record on
+    /// Unix (like WinRAR's `-ow`); no-op elsewhere.
+    pub save_owner: bool,
 }
 
 impl Default for CreateOptions {
@@ -68,6 +71,7 @@ impl Default for CreateOptions {
             save_atime: false,
             time_precision_seconds: false,
             save_mtime: true,
+            save_owner: false,
         }
     }
 }

@@ -39,6 +39,9 @@ struct Cli {
     #[arg(long = "ts", value_name = "SPEC", global = true, action = clap::ArgAction::Append)]
     #[allow(dead_code)]
     ts_specs: Vec<String>,
+    /// Misc switches (-ilog and accepted no-ops)
+    #[command(flatten)]
+    misc: common::MiscSwitches,
     #[command(subcommand)]
     command: Command,
 }
@@ -147,6 +150,24 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), String> {
+    let log_errors = cli.misc.log_errors.clone();
+    let result = run_inner(cli);
+    if let Err(e) = &result
+        && let Some(log) = &log_errors
+    {
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(format!("unrar: {e}\n").as_bytes())
+            });
+    }
+    result
+}
+
+fn run_inner(cli: Cli) -> Result<(), String> {
     let password = cli.password.password.as_deref();
     let ts = common::parse_ts_specs(&cli.ts_specs)?;
     match cli.command {

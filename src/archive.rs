@@ -586,6 +586,8 @@ pub struct RarArchive {
     save_atime: bool,
     /// Save the modification time (`-tsm`; false with `-tsm-`/`-ts-`).
     save_mtime: bool,
+    /// Save owner/group on Unix (`-ow`).
+    save_owner: bool,
     /// Store timestamps at 1-second precision (`-ts...1`).
     time_precision_seconds: bool,
     /// Options for the current read/extract operation (set per call).
@@ -641,6 +643,7 @@ impl RarArchive {
             save_ctime: false,
             save_atime: false,
             save_mtime: true,
+            save_owner: false,
             time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
         };
@@ -682,6 +685,7 @@ impl RarArchive {
             save_ctime: false,
             save_atime: false,
             save_mtime: true,
+            save_owner: false,
             time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
         };
@@ -745,6 +749,7 @@ impl RarArchive {
             save_ctime: false,
             save_atime: false,
             save_mtime: true,
+            save_owner: false,
             time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
         };
@@ -1103,6 +1108,7 @@ impl RarArchive {
             save_ctime: opts.save_ctime,
             save_atime: opts.save_atime,
             save_mtime: opts.save_mtime,
+            save_owner: opts.save_owner,
             time_precision_seconds: opts.time_precision_seconds,
             extract_options: crate::options::ExtractOptions::default(),
         };

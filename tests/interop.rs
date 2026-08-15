@@ -4404,4 +4404,113 @@ fn cli_ts_saves_and_restores_file_times() {
     assert!(!out.status.success(), "invalid -ts spec must be rejected");
 }
 
+// ── misc switches: -ver version control, accepted no-ops, -ilog ────────────
+
+#[test]
+fn cli_version_control_keeps_previous_versions() {
+    let dir = make_temp_dir();
+    let file = dir.path().join("ver.txt");
+    std::fs::write(&file, b"v1").unwrap();
+    let archive = dir.path().join("ver.rar");
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("ver.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // First update with -ver: old version kept as `ver.txt;1`.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&file, b"v2").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["u", "-ver", "-idq"])
+        .arg(&archive)
+        .arg("ver.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    {
+        let mut rar = rar5::RarArchive::open(&archive).unwrap();
+        assert_eq!(rar.read("ver.txt").unwrap(), b"v2");
+        assert_eq!(rar.read("ver.txt;1").unwrap(), b"v1");
+    }
+
+    // Second update: the chain shifts (ver.txt;1 -> ver.txt;2).
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&file, b"v3").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["u", "-ver", "-idq"])
+        .arg(&archive)
+        .arg("ver.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    {
+        let mut rar = rar5::RarArchive::open(&archive).unwrap();
+        assert_eq!(rar.read("ver.txt").unwrap(), b"v3");
+        assert_eq!(rar.read("ver.txt;1").unwrap(), b"v2");
+        assert_eq!(rar.read("ver.txt;2").unwrap(), b"v1");
+    }
+
+    // -ver1 caps the history at one previous version.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&file, b"v4").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["u", "-ver1", "-idq"])
+        .arg(&archive)
+        .arg("ver.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    {
+        let mut rar = rar5::RarArchive::open(&archive).unwrap();
+        assert_eq!(rar.read("ver.txt").unwrap(), b"v4");
+        assert_eq!(rar.read("ver.txt;1").unwrap(), b"v3");
+        assert!(!rar.namelist().contains(&"ver.txt;2"));
+    }
+}
+
+#[test]
+fn cli_misc_switches_are_accepted_and_ilog_logs_errors() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("m.txt"), b"m").unwrap();
+
+    // Platform-specific / informational switches are accepted.
+    let archive = dir.path().join("misc.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args([
+            "a", "-idc", "-idd", "-idn", "-idp", "-ac", "-ai", "-os", "-scu", "-oni",
+            "-ri5", "-vp", "-vd", "-oi1", "-ams", "-e1", "-ow", "-idq",
+        ])
+        .arg(&archive)
+        .arg("m.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "misc switches must be accepted");
+
+    // -ilog writes the error to the log file.
+    let log = dir.path().join("err.log");
+    let out = std::process::Command::new(RAR_CLI)
+        .arg("a")
+        .arg(format!("-ilog{}", log.display()))
+        .arg("-idq")
+        .arg(dir.path().join("bad.rar"))
+        .arg("missing.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        std::fs::read_to_string(&log).unwrap().contains("missing.txt"),
+        "-ilog must record the error"
+    );
+}
+
 

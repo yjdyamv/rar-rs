@@ -26,6 +26,9 @@ struct Cli {
     /// Work directory (like `-w<path>`)
     #[arg(long = "work-dir", global = true)]
     work_dir: Option<String>,
+    /// Misc switches (-ow, -tsp, -ilog, -ver, and accepted no-ops)
+    #[command(flatten)]
+    misc: common::MiscSwitches,
     #[command(subcommand)]
     command: Command,
 }
@@ -194,9 +197,6 @@ struct FilesArgs {
     /// Save/restore file times (like `-ts[m,c,a][+,-,1]`; repeatable)
     #[arg(long = "ts", value_name = "SPEC", action = clap::ArgAction::Append)]
     ts_specs: Vec<String>,
-    /// Preserve the source files' access time when archiving (like `-tsp`)
-    #[arg(long = "ts-preserve")]
-    ts_preserve: bool,
     /// Keep the archive's original modification time when updating
     /// (like `-tk`)
     #[arg(long = "keep-time")]
@@ -289,9 +289,6 @@ struct CreateArgs {
     /// Save/restore file times (like `-ts[m,c,a][+,-,1]`; repeatable)
     #[arg(long = "ts", value_name = "SPEC", action = clap::ArgAction::Append)]
     ts_specs: Vec<String>,
-    /// Preserve the source files' access time when archiving (like `-tsp`)
-    #[arg(long = "ts-preserve")]
-    ts_preserve: bool,
     /// Recovery record percentage
     #[arg(
         long = "recovery-percent",
@@ -519,18 +516,30 @@ fn main() {
         }
     }
     let _ = cli.yes; // no interactive prompts exist yet; accepted for parity
+    let log_errors = cli.misc.log_errors.clone();
     if let Err(e) = run(cli) {
         eprintln!("rar: {e}");
+        if let Some(log) = &log_errors {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+                .and_then(|mut f| {
+                    use std::io::Write;
+                    f.write_all(format!("rar: {e}\n").as_bytes())
+                });
+        }
         process::exit(1);
     }
 }
 
 fn run(cli: Cli) -> Result<(), String> {
+    let misc = &cli.misc;
     match cli.command {
-        Command::Create(args) => cmd_create(&args),
-        Command::Update(args) => cmd_update(&args),
-        Command::Freshen(args) => cmd_freshen(&args),
-        Command::Move(args) => cmd_move(&args),
+        Command::Create(args) => cmd_create(&args, misc),
+        Command::Update(args) => cmd_update(&args, misc),
+        Command::Freshen(args) => cmd_freshen(&args, misc),
+        Command::Move(args) => cmd_move(&args, misc),
         Command::Delete(args) => cmd_delete(&args),
         Command::Rename(args) => cmd_rename(&args),
         Command::Change(args) => cmd_change(&args),
@@ -561,7 +570,7 @@ fn run(cli: Cli) -> Result<(), String> {
     }
 }
 
-fn cmd_create(args: &CreateArgs) -> Result<(), String> {
+fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), String> {
     if let Some(threads) = args.threads {
         rar5::set_compression_threads(threads);
         rar5::set_extraction_threads(threads);
@@ -647,6 +656,7 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
         save_ctime: ts.save_ctime,
         save_atime: ts.save_atime,
         save_mtime: ts.save_mtime,
+        save_owner: misc.owner,
         time_precision_seconds: ts.precision_seconds,
     };
 
@@ -842,6 +852,29 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
         info!("WARNING: No files");
         process::exit(10);
     }
+    // -tsp: snapshot source access times before reading the files.
+    #[cfg(unix)]
+    let ts_preserve_atimes: Vec<(std::path::PathBuf, std::time::SystemTime)> = if misc.ts_preserve
+    {
+        use std::os::unix::fs::MetadataExt;
+        collected
+            .iter()
+            .filter(|c| !c.is_dir)
+            .filter_map(|c| {
+                let m = std::fs::metadata(&c.path).ok()?;
+                Some((
+                    c.path.clone(),
+                    std::time::UNIX_EPOCH
+                        + std::time::Duration::from_secs(m.atime() as u64)
+                        + std::time::Duration::from_nanos(m.atime_nsec() as u64),
+                ))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    #[cfg(not(unix))]
+    let ts_preserve_atimes: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
     let entries: Vec<rar5::BatchEntry<'_>> = collected
         .iter()
         .map(|c| {
@@ -881,6 +914,22 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
 
     let was_existing = existing;
     rar.close().map_err(|e| format!("close: {e}"))?;
+    // -tsp: restore the source files' access times that were recorded
+    // before archiving (reading the files may have refreshed them).
+    if misc.ts_preserve {
+        #[cfg(unix)]
+        for (path, atime) in &ts_preserve_atimes {
+            let _ = std::fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|f| f.set_times(std::fs::FileTimes::new().set_accessed(*atime)));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = misc;
+            let _ = &ts_preserve_atimes;
+        }
+    }
     // -tk: restore the archive's original modification time.
     if let Some(t) = orig_mtime {
         let _ = std::fs::File::options()
@@ -942,20 +991,25 @@ fn cmd_delete(args: &DeleteArgs) -> Result<(), String> {
 
 /// Update an archive: add files not present, replace files whose source
 /// is newer (like `rar u`).
-fn cmd_update(args: &FilesArgs) -> Result<(), String> {
-    cmd_update_freshen(args, false, "Updated")
+fn cmd_update(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String> {
+    cmd_update_freshen(args, false, "Updated", misc)
 }
 
 /// Freshen the archive (like `rar f`): update members that already exist
 /// when the source is newer; never add new members.
-fn cmd_freshen(args: &FilesArgs) -> Result<(), String> {
-    cmd_update_freshen(args, true, "Freshened")
+fn cmd_freshen(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String> {
+    cmd_update_freshen(args, true, "Freshened", misc)
 }
 
 /// Shared update/freshen implementation: members whose source mtime is
 /// newer than the archived one are deleted and re-added. With `freshen`,
 /// members missing from the archive are skipped; otherwise they are added.
-fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(), String> {
+fn cmd_update_freshen(
+    args: &FilesArgs,
+    freshen: bool,
+    verb: &str,
+    misc: &common::MiscSwitches,
+) -> Result<(), String> {
     let archive_path = &args.archive;
     let files = &args.files;
     let password = &args.password.password;
@@ -1010,8 +1064,65 @@ fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(),
                 .map_err(|e| format!("open: {e}"))?,
             None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
         };
-        let names: Vec<&str> = to_delete.iter().map(|s| s.as_str()).collect();
-        rar.delete(&names).map_err(|e| format!("delete: {e}"))?;
+        if let Some(ver_spec) = &misc.version_control {
+            // -ver[n]: keep previous versions on update. Existing members
+            // `name`, `name;1`, ... shift down the chain (`name;1` is the
+            // newest previous version); with a limit `n`, older versions
+            // beyond `name;n` are dropped.
+            let max_versions: Option<u32> = if ver_spec.is_empty() {
+                None
+            } else {
+                ver_spec.parse::<u32>().ok().filter(|n| *n > 0)
+            };
+            let mut renames: Vec<(String, String)> = Vec::new();
+            let mut to_drop: Vec<String> = Vec::new();
+            for name in &to_delete {
+                // Collect existing versions of `name`.
+                let mut versions: Vec<(u32, String)> = rar
+                    .namelist()
+                    .iter()
+                    .filter_map(|n| {
+                        if *n == name {
+                            Some((0, n.to_string()))
+                        } else if let Some(rest) = n.strip_prefix(&format!("{name};")) {
+                            rest.parse::<u32>().ok().map(|v| (v, n.to_string()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if versions.is_empty() {
+                    continue;
+                }
+                versions.sort_by_key(|(v, _)| *v);
+                // Shift the old versions up by one, dropping beyond the cap.
+                for (v, full) in versions.iter().rev() {
+                    let new_suffix = v + 1;
+                    if max_versions.is_some_and(|m| new_suffix > m) {
+                        to_drop.push(full.clone());
+                    } else {
+                        let new_name = if *v == 0 {
+                            format!("{name};1")
+                        } else {
+                            format!("{name};{new_suffix}")
+                        };
+                        renames.push((full.clone(), new_name));
+                    }
+                }
+            }
+            if !renames.is_empty() {
+                let pairs: Vec<(&str, &str)> =
+                    renames.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+                rar.rename(&pairs).map_err(|e| format!("rename: {e}"))?;
+            }
+            if !to_drop.is_empty() {
+                let names: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
+                rar.delete(&names).map_err(|e| format!("delete: {e}"))?;
+            }
+        } else {
+            let names: Vec<&str> = to_delete.iter().map(|s| s.as_str()).collect();
+            rar.delete(&names).map_err(|e| format!("delete: {e}"))?;
+        }
     }
     if to_add.is_empty() {
         info!("{archive_path}: no files to {verb}");
@@ -1039,6 +1150,7 @@ fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(),
             save_ctime: ts.save_ctime,
             save_atime: ts.save_atime,
             save_mtime: ts.save_mtime,
+        save_owner: misc.owner,
             time_precision_seconds: ts.precision_seconds,
             ..Default::default()
         };
@@ -1110,7 +1222,7 @@ fn cmd_rename(args: &RenameArgs) -> Result<(), String> {
 
 /// Move files into the archive (like `rar m`): add them, then erase the
 /// sources after a successful close.
-fn cmd_move(args: &FilesArgs) -> Result<(), String> {
+fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String> {
     let archive_path = &args.archive;
     let files = &args.files;
     let password = &args.password.password;
@@ -1140,6 +1252,7 @@ fn cmd_move(args: &FilesArgs) -> Result<(), String> {
             save_ctime: ts.save_ctime,
             save_atime: ts.save_atime,
             save_mtime: ts.save_mtime,
+        save_owner: misc.owner,
             time_precision_seconds: ts.precision_seconds,
             ..Default::default()
         };

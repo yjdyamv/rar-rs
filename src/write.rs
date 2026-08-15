@@ -172,6 +172,27 @@ impl RarArchive {
         present.then(|| file_time_extra_record(mtime, ctime, atime))
     }
 
+    /// Build the OWNER extra record (numeric uid/gid) when `-ow` is on;
+    /// `None` off-Unix or when disabled.
+    fn owner_extra_for(&self, meta: &fs::Metadata) -> Option<Vec<u8>> {
+        if !self.save_owner {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Some(build_owner_extra_record(
+                &meta.uid().to_string(),
+                &meta.gid().to_string(),
+            ))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = meta;
+            None
+        }
+    }
+
     /// Add a file from the filesystem to the archive.
     pub fn add(&mut self, path: impl AsRef<Path>, compression_level: u8) -> RarResult<()> {
         let path = path.as_ref();
@@ -239,6 +260,7 @@ impl RarArchive {
             .unwrap_or_default()
             .subsec_nanos();
         let time_extra = self.time_extra_for(&meta, path, mtime, mtime_ns);
+        let owner_extra = self.owner_extra_for(&meta);
 
         #[cfg(unix)]
         let attrs = {
@@ -277,6 +299,9 @@ impl RarArchive {
             if let Some(ref t) = time_extra {
                 extra_data.extend_from_slice(t);
             }
+            if let Some(ref t) = owner_extra {
+                extra_data.extend_from_slice(t);
+            }
             self.write_store_member(
                 path,
                 &name,
@@ -299,7 +324,16 @@ impl RarArchive {
         // streamed into the archive (bounded memory for any file size);
         // smaller files are compressed in memory.
         if file_size >= STREAM_COMPRESS_THRESHOLD {
-            return self.add_file_streaming(path, &name, file_size, attrs, mtime, time_extra, method);
+            return self.add_file_streaming(
+                path,
+                &name,
+                file_size,
+                attrs,
+                mtime,
+                time_extra,
+                owner_extra,
+                method,
+            );
         }
 
         // Compressed path: read and compress in bounded chunks with a
@@ -367,6 +401,9 @@ impl RarArchive {
             if let Some(ref t) = time_extra {
                 extra_data.extend_from_slice(t);
             }
+            if let Some(ref t) = owner_extra {
+                extra_data.extend_from_slice(t);
+            }
             self.write_store_member(
                 path,
                 &name,
@@ -387,6 +424,9 @@ impl RarArchive {
         let (header_crc, mut extra_data, stored_hash, encr_params) =
             RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
         if let Some(ref t) = time_extra {
+            extra_data.extend_from_slice(t);
+        }
+        if let Some(ref t) = owner_extra {
             extra_data.extend_from_slice(t);
         }
         let packed_data = RarArchive::encrypt_payload_with(
@@ -997,6 +1037,7 @@ impl RarArchive {
             .unwrap_or_default()
             .subsec_nanos();
         let time_extra = self.time_extra_for(&meta, path, mtime, mtime_ns);
+        let owner_extra = self.owner_extra_for(&meta);
 
         #[cfg(unix)]
         let attrs = {
@@ -1095,6 +1136,7 @@ impl RarArchive {
             .unwrap_or_default()
             .subsec_nanos();
         let time_extra = self.time_extra_for(&meta, path, mtime, mtime_ns);
+        let owner_extra = self.owner_extra_for(&meta);
 
         let chunk_size = crate::codec::DEFAULT_CHUNK_SIZE as u64;
         let chunk_count = file_size.div_ceil(chunk_size) as usize;
@@ -1938,6 +1980,7 @@ impl RarArchive {
         attrs: u64,
         mtime: u32,
         time_extra: Option<Vec<u8>>,
+        owner_extra: Option<Vec<u8>>,
         method: u8,
     ) -> RarResult<()> {
         let dsl = dict_log_for(file_size as usize, self.dict_size_log, method);
@@ -2007,6 +2050,9 @@ impl RarArchive {
             if let Some(ref t) = time_extra {
                 extra_data.extend_from_slice(t);
             }
+            if let Some(ref t) = owner_extra {
+                extra_data.extend_from_slice(t);
+            }
             self.write_store_member(
                 path,
                 name,
@@ -2027,6 +2073,9 @@ impl RarArchive {
         let (header_crc, mut extra_data, stored_hash, encr_params) =
             RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
         if let Some(ref t) = time_extra {
+            extra_data.extend_from_slice(t);
+        }
+        if let Some(ref t) = owner_extra {
             extra_data.extend_from_slice(t);
         }
         let mut spill = File::open(&spill_path)?;
