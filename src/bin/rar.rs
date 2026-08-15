@@ -20,6 +20,9 @@ struct Cli {
     /// Quiet mode: suppress informational messages (like `-idq` / `-inul`)
     #[arg(long, global = true)]
     quiet: bool,
+    /// Send informational messages to stderr (like `-ierr`)
+    #[arg(long, global = true)]
+    err: bool,
     /// Work directory (like `-w<path>`)
     #[arg(long = "work-dir", global = true)]
     work_dir: Option<String>,
@@ -160,6 +163,10 @@ struct ExtractArgs {
     /// Compression threads (like `-mt<N>`; also used for extraction)
     #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
     threads: Option<usize>,
+    /// Append the archive base name as a destination subdirectory
+    /// (like `-ad`)
+    #[arg(long = "append-dir")]
+    append_dir: bool,
     /// Overwrite mode (like `-o+` / `-o-`)
     #[arg(
         long = "overwrite",
@@ -178,6 +185,10 @@ struct FilesArgs {
     archive: String,
     #[arg(value_name = "FILES", required = true)]
     files: Vec<String>,
+    /// Keep the archive's original modification time when updating
+    /// (like `-tk`)
+    #[arg(long = "keep-time")]
+    keep_time: bool,
 }
 
 /// Archive path plus the members to delete.
@@ -318,9 +329,21 @@ struct CreateArgs {
     /// Only process files modified before this date (like `-tb<date>`)
     #[arg(long = "before", value_name = "DATE")]
     before: Option<String>,
+    /// Only process files newer than this period (like `-tn[mods]<time>`,
+    /// period is `[<ndays>d][<nhours>h][<nminutes>m][<nseconds>s]`;
+    /// may be repeated, all filters must match)
+    #[arg(long = "tn-filter", value_name = "PERIOD")]
+    tn_filters: Vec<String>,
+    /// Only process files older than this period (like `-to[mods]<time>`)
+    #[arg(long = "to-filter", value_name = "PERIOD")]
+    to_filters: Vec<String>,
     /// Set the archive time to the newest member (like `-tl`)
     #[arg(long = "set-latest-time")]
     latest_time: bool,
+    /// Keep the archive's original modification time when updating an
+    /// existing archive (like `-tk`)
+    #[arg(long = "keep-time")]
+    keep_time: bool,
     /// Generate the archive name from the current date (like `-ag[format]`;
     /// `*` in the name is replaced, `YYYY`/`MM`/`DD`/`HH`/`MM`/`SS` in the
     /// format are substituted)
@@ -332,9 +355,26 @@ struct CreateArgs {
     /// Save hard links as links instead of the file (like `-oh`)
     #[arg(long = "hardlinks")]
     store_hardlinks: bool,
+    /// Only process files smaller than this size (like `-sl<size>`, units
+    /// b/k/m/g)
+    #[arg(long = "size-less", value_name = "SIZE", value_parser = parse_size)]
+    size_less: Option<u64>,
+    /// Only process files larger than this size (like `-sm<size>`)
+    #[arg(long = "size-more", value_name = "SIZE", value_parser = parse_size)]
+    size_more: Option<u64>,
+    /// Do not add empty directories (like `-ed`)
+    #[arg(long = "no-empty-dirs")]
+    no_empty_dirs: bool,
+    /// Do not show the archive comment (like `-c-`; accepted, comments are
+    /// never displayed by this tool)
+    #[arg(long = "no-comment", global = true)]
+    no_comment: bool,
+    /// Read one member from stdin under this name (like `-si<name>`)
+    #[arg(long = "stdin-name", value_name = "NAME")]
+    stdin_name: Option<String>,
     #[arg(value_name = "ARCHIVE")]
     archive: String,
-    #[arg(value_name = "FILES", required = true)]
+    #[arg(value_name = "FILES", required_unless_present = "stdin_name")]
     files: Vec<String>,
 }
 
@@ -380,6 +420,10 @@ fn parse_size(s: &str) -> Result<u64, String> {
         num.parse::<u64>()
             .map(|n| n * 1024 * 1024)
             .map_err(|_| format!("invalid size: {s}"))
+    } else if let Some(num) = s.strip_suffix('g').or_else(|| s.strip_suffix('G')) {
+        num.parse::<u64>()
+            .map(|n| n * 1024 * 1024 * 1024)
+            .map_err(|_| format!("invalid size: {s}"))
     } else {
         s.parse::<u64>().map_err(|_| format!("invalid size: {s}"))
     }
@@ -394,6 +438,7 @@ fn main() {
         .collect();
     let cli = Cli::parse_from(std::iter::once("rar".to_string()).chain(args));
     common::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
+    common::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
     if let Some(dir) = &cli.work_dir {
         if let Err(e) = std::env::set_current_dir(dir) {
             eprintln!("rar: cannot change to work directory {dir}: {e}");
@@ -448,7 +493,13 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
         rar5::set_compression_threads(threads);
         rar5::set_extraction_threads(threads);
     }
-    let password = args.password.password.clone();
+    let mut password = args.password.password.clone();
+    // `-p-` (and bare `-p`, whose interactive prompt we do not simulate)
+    // normalizes to an empty password; treat it as "no password" like
+    // WinRAR, instead of encrypting with an empty key.
+    if password.as_deref() == Some("") {
+        password = None;
+    }
     let mut recovery_volumes_percent = None;
     let mut recovery_volume_count = None;
     if let Some(rv) = args.recovery_volumes {
@@ -463,7 +514,6 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
         _ => None,
     };
     let header_encrypt = args.header_encrypt.is_some();
-    let mut password = password;
     if let Some(pw) = &args.header_encrypt
         && !pw.is_empty()
     {
@@ -523,6 +573,14 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
     };
 
     let existing = std::path::Path::new(archive_path).exists();
+    // -tk: keep the archive's original modification time on update.
+    let orig_mtime = if args.keep_time && existing {
+        std::fs::metadata(archive_path)
+            .and_then(|m| m.modified())
+            .ok()
+    } else {
+        None
+    };
     let mut rar = if existing {
         // Append to an existing archive (like `rar a`): existing members
         // are preserved verbatim.
@@ -566,24 +624,84 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
     };
     let mut collected = rar5::name_policy::collect(&policy, files, args.level)
         .map_err(|e| format!("collect: {e}"))?;
-    // Time filters (-ta / -tb): only members whose mtime is after/before
-    // the given date are added (directories always pass).
-    if args.after.is_some() || args.before.is_some() {
+    // Never archive the archive itself (WinRAR skips the output file when
+    // a directory argument covers it, e.g. `rar a x.rar .`).
+    if let Ok(abs_archive) = std::fs::canonicalize(archive_path) {
+        collected.retain(|c| {
+            !matches!(std::fs::canonicalize(&c.path), Ok(p) if p == abs_archive)
+        });
+    }
+    // -sl / -sm / -ed: size filters and skip-empty-directories.
+    if args.size_less.is_some() || args.size_more.is_some() || args.no_empty_dirs {
+        collected.retain(|c| {
+            if c.is_dir {
+                if args.no_empty_dirs {
+                    return std::fs::read_dir(&c.path)
+                        .map(|mut it| it.next().is_some())
+                        .unwrap_or(true);
+                }
+                return true;
+            }
+            let size = std::fs::metadata(&c.path).map(|m| m.len()).unwrap_or(0);
+            let less_ok = args.size_less.is_none_or(|s| size < s);
+            let more_ok = args.size_more.is_none_or(|s| size > s);
+            less_ok && more_ok
+        });
+    }
+    // Time filters (-ta / -tb absolute dates, -tn / -to relative periods):
+    // only members whose time falls in the window are added (directories
+    // always pass). `-tn<period>` keeps files with time >= now - period
+    // (exact match included), `-to<period>` keeps time < now - period
+    // (exact match excluded); WinRAR treats an unparsable/empty period as 0
+    // seconds. Multiple -tn/-to switches combine with AND logic.
+    if args.after.is_some()
+        || args.before.is_some()
+        || !args.tn_filters.is_empty()
+        || !args.to_filters.is_empty()
+    {
         let after = args.after.as_deref().map(parse_rar_date).transpose()?;
         let before = args.before.as_deref().map(parse_rar_date).transpose()?;
+        // Compare in nanosecond precision (like WinRAR): whole-second
+        // truncation would wrongly drop files created within the same
+        // second as the run, e.g. `-to` with an empty period.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let filters: Vec<(TimeKind, u64, bool)> = args
+            .tn_filters
+            .iter()
+            .map(|s| {
+                let (k, p) = parse_period_filter(s);
+                (k, p, true)
+            })
+            .chain(args.to_filters.iter().map(|s| {
+                let (k, p) = parse_period_filter(s);
+                (k, p, false)
+            }))
+            .collect();
         collected.retain(|c| {
             if c.is_dir {
                 return true;
             }
-            let mtime = std::fs::metadata(&c.path)
-                .and_then(|m| m.modified())
+            let meta = match std::fs::metadata(&c.path) {
+                Ok(m) => m,
+                Err(_) => return false,
+            };
+            let mtime = meta
+                .modified()
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as u32)
+                .map(|d| d.as_nanos())
                 .unwrap_or(0);
-            let after_ok = after.is_none_or(|a| mtime > a);
-            let before_ok = before.is_none_or(|b| mtime < b);
-            after_ok && before_ok
+            let after_ok = after.is_none_or(|a| mtime > u128::from(a) * 1_000_000_000);
+            let before_ok = before.is_none_or(|b| mtime < u128::from(b) * 1_000_000_000);
+            let period_ok = filters.iter().all(|&(kind, period, is_tn)| {
+                let t = file_time(&meta, kind);
+                let bound = now.saturating_sub(u128::from(period) * 1_000_000_000);
+                if is_tn { t >= bound } else { t < bound }
+            });
+            after_ok && before_ok && period_ok
         });
     }
     // -ol / -oh: symbolic links and hard links are stored as redirect
@@ -611,6 +729,7 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
         collected = keep;
     }
     if args.store_hardlinks {
+        #[cfg(unix)]
         let mut seen: std::collections::HashMap<(u64, u64), String> = std::collections::HashMap::new();
         let mut keep = Vec::with_capacity(collected.len());
         for c in collected.drain(..) {
@@ -633,6 +752,17 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
             keep.push(c);
         }
         collected = keep;
+    }
+    // WinRAR aborts with "WARNING: No files" (exit code 10) and leaves the
+    // archive untouched when every candidate was filtered out; a newly
+    // created archive file is removed again.
+    if collected.is_empty() && args.stdin_name.is_none() && redirects.is_empty() {
+        drop(rar);
+        if !existing {
+            let _ = std::fs::remove_file(archive_path);
+        }
+        info!("WARNING: No files");
+        process::exit(10);
     }
     let entries: Vec<rar5::BatchEntry<'_>> = collected
         .iter()
@@ -659,8 +789,27 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
             .map_err(|e| format!("link {name}: {e}"))?;
     }
 
+    // -si<name>: one member read from stdin.
+    if let Some(name) = &args.stdin_name {
+        use std::io::Read;
+        let mut data = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut data)
+            .map_err(|e| format!("stdin: {e}"))?;
+        let name = name.replace('\\', "/");
+        rar.add_bytes(&name, &data, args.level)
+            .map_err(|e| format!("add stdin: {e}"))?;
+    }
+
     let was_existing = existing;
     rar.close().map_err(|e| format!("close: {e}"))?;
+    // -tk: restore the archive's original modification time.
+    if let Some(t) = orig_mtime {
+        let _ = std::fs::File::options()
+            .write(true)
+            .open(archive_path)
+            .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(t)));
+    }
     // -tl: set the archive's modification time to the newest member.
     if args.latest_time && !collected.is_empty() {
         let latest = collected
@@ -735,6 +884,14 @@ fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(),
     if !std::path::Path::new(archive_path).exists() {
         return Err(format!("archive not found: {archive_path}"));
     }
+    // -tk: keep the archive's original modification time.
+    let orig_mtime = if args.keep_time {
+        std::fs::metadata(archive_path)
+            .and_then(|m| m.modified())
+            .ok()
+    } else {
+        None
+    };
 
     // Decide per file: skip (unchanged), delete + re-add (newer), add.
     let rar = match password {
@@ -806,6 +963,13 @@ fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(),
             .map_err(|e| format!("add {file}: {e}"))?;
     }
     rar.close().map_err(|e| format!("close: {e}"))?;
+    // -tk: restore the original archive mtime after the rewrite.
+    if let Some(t) = orig_mtime {
+        let _ = std::fs::File::options()
+            .write(true)
+            .open(archive_path)
+            .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(t)));
+    }
     info!("{verb} {archive_path} ({} file(s))", to_add.len());
     Ok(())
 }
@@ -1208,7 +1372,7 @@ fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
     if let Some(threads) = args.threads {
         rar5::set_extraction_threads(threads);
     }
-    let dest = &args.dest;
+    let dest = extract_dest(args)?;
     let mut rar = match &args.password.password {
         Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
@@ -1216,15 +1380,20 @@ fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
     };
     let count = rar.list().len();
     rar.extract_all_with_options(
-        dest,
+        &dest,
         rar5::ExtractOptions {
             skip_existing: args.overwrite.as_deref() == Some("never"),
             ..Default::default()
         },
     )
     .map_err(|e| format!("{e}"))?;
-    info!("Extracted {count} file(s) to {dest}");
+    info!("Extracted {count} file(s) to {}", dest.display());
     Ok(())
+}
+
+/// Destination directory, honoring `-ad` (append the archive base name).
+fn extract_dest(args: &ExtractArgs) -> Result<std::path::PathBuf, String> {
+    Ok(common::extract_dest(&args.dest, &args.archive, args.append_dir))
 }
 
 /// Extract without archived paths (like `rar e`).
@@ -1232,7 +1401,7 @@ fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
     if let Some(threads) = args.threads {
         rar5::set_extraction_threads(threads);
     }
-    let dest = &args.dest;
+    let dest = extract_dest(args)?;
     let mut rar = match &args.password.password {
         Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
@@ -1240,7 +1409,7 @@ fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
     };
     let count = rar.list().len();
     rar.extract_all_with_options(
-        dest,
+        &dest,
         rar5::ExtractOptions {
             flat_paths: true,
             skip_existing: args.overwrite.as_deref() == Some("never"),
@@ -1248,7 +1417,7 @@ fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
         },
     )
     .map_err(|e| format!("{e}"))?;
-    println!("Extracted {count} file(s) to {dest}");
+    info!("Extracted {count} file(s) to {}", dest.display());
     Ok(())
 }
 
@@ -1359,6 +1528,90 @@ fn parse_rar_date(s: &str) -> Result<u32, String> {
     let days = days_from_civil(y, m, d);
     let secs = days * 86400 + i64::from(hh) * 3600 + i64::from(mm) * 60 + i64::from(ss);
     u32::try_from(secs).map_err(|_| format!("date out of range: {s}"))
+}
+
+/// Which file timestamp a `-tn`/`-to` filter compares (`m`/`c`/`a`
+/// modifiers; `m` is the default, `o` is accepted but has no effect since
+/// every filter here uses a single time kind).
+#[derive(Clone, Copy)]
+enum TimeKind {
+    Modified,
+    Created,
+    Accessed,
+}
+
+/// Parse a WinRAR `-tn`/`-to` filter: optional leading `m`/`c`/`a`/`o`
+/// modifiers followed by a period `[<ndays>d][<nhours>h][<nminutes>m][<nseconds>s]`.
+/// Returns the time kind and the period in seconds. Like WinRAR, an empty
+/// or unparsable period is treated as 0 seconds.
+fn parse_period_filter(s: &str) -> (TimeKind, u64) {
+    let mut kind = TimeKind::Modified;
+    let mut idx = 0;
+    for ch in s.chars() {
+        match ch {
+            'm' => kind = TimeKind::Modified,
+            'c' => kind = TimeKind::Created,
+            'a' => kind = TimeKind::Accessed,
+            'o' => {} // OR logic: no effect with a single time kind
+            _ => break,
+        }
+        idx += 1;
+    }
+    (kind, parse_period(&s[idx..]))
+}
+
+/// Parse a period string `[<ndays>d][<nhours>h][<nminutes>m][<nseconds>s]`
+/// into seconds. Anything that does not parse (including a bare number or
+/// an empty string) yields 0, matching WinRAR.
+fn parse_period(s: &str) -> u64 {
+    let mut secs: u64 = 0;
+    let mut num = String::new();
+    let mut seen_unit = false;
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
+            continue;
+        }
+        let mult = match ch {
+            'd' => 86400,
+            'h' => 3600,
+            'm' => 60,
+            's' => 1,
+            _ => return 0,
+        };
+        seen_unit = true;
+        let n: u64 = num.parse().unwrap_or(0);
+        secs = secs.saturating_add(n.saturating_mul(mult));
+        num.clear();
+    }
+    if !num.is_empty() || !seen_unit {
+        return 0; // trailing digits without a unit, or no unit at all
+    }
+    secs
+}
+
+/// Read one of the three file timestamps as unix nanoseconds. Access time
+/// is not exposed by std on Windows, so it falls back to the mtime there.
+fn file_time(meta: &std::fs::Metadata, kind: TimeKind) -> u128 {
+    let t = match kind {
+        TimeKind::Modified => meta.modified(),
+        TimeKind::Created => meta.created(),
+        TimeKind::Accessed => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                Ok(std::time::UNIX_EPOCH + std::time::Duration::from_secs(meta.atime() as u64))
+            }
+            #[cfg(not(unix))]
+            {
+                meta.modified()
+            }
+        }
+    };
+    t.ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 /// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).

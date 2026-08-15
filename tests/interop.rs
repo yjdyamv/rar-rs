@@ -3840,3 +3840,291 @@ fn cli_links_ol_stores_symlink_redirects() {
     let link = std::fs::read_link(out.join("lnk/lnk.txt")).unwrap();
     assert_eq!(link, std::path::Path::new("target.txt"));
 }
+
+// ── WinRAR CLI parity batch 3: -sl/-sm/-ed, -tn/-to, -si, -tk, -p-/-c-, ──
+// ── -ierr, -ad ────────────────────────────────────────────────────────────
+
+/// Set a file's mtime to `secs_ago` seconds in the past.
+fn set_mtime_ago(path: &Path, secs_ago: u64) {
+    let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(t))
+        .unwrap();
+}
+
+#[test]
+fn cli_size_and_empty_dir_filters() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("small.txt"), b"12345").unwrap();
+    std::fs::write(dir.path().join("big.txt"), vec![b'x'; 5000]).unwrap();
+    std::fs::create_dir_all(dir.path().join("emptydir")).unwrap();
+    std::fs::create_dir_all(dir.path().join("fulldir")).unwrap();
+    std::fs::write(dir.path().join("fulldir").join("inner.txt"), b"i").unwrap();
+
+    // -sl1k: only files smaller than 1 KiB (directories always pass).
+    let archive = dir.path().join("sl.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-sl1k", "-idq"])
+        .arg(&archive)
+        .args(["emptydir", "fulldir", "small.txt", "big.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        cli_names(&archive),
+        ["emptydir", "fulldir", "fulldir/inner.txt", "small.txt"]
+    );
+
+    // -sm1k: only files larger than 1 KiB.
+    let archive = dir.path().join("sm.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-sm1k", "-idq"])
+        .arg(&archive)
+        .args(["emptydir", "fulldir", "small.txt", "big.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        cli_names(&archive),
+        ["big.txt", "emptydir", "fulldir"]
+    );
+
+    // -ed: empty directories are not stored.
+    let archive = dir.path().join("ed.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ed", "-idq"])
+        .arg(&archive)
+        .args(["emptydir", "fulldir", "small.txt", "big.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        cli_names(&archive),
+        ["big.txt", "fulldir", "fulldir/inner.txt", "small.txt"]
+    );
+}
+
+#[test]
+fn cli_period_filters_tn_to_match_winrar() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("new.txt"), b"n").unwrap();
+    std::fs::write(dir.path().join("old.txt"), b"o").unwrap();
+    set_mtime_ago(&dir.path().join("old.txt"), 5400); // 1.5 hours ago
+
+    // -tn1h: only files newer than 1 hour.
+    let archive = dir.path().join("tn.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-tn1h", "-idq"])
+        .arg(&archive)
+        .args(["new.txt", "old.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive), ["new.txt"]);
+
+    // -to1h: only files older than 1 hour.
+    let archive = dir.path().join("to.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-to1h", "-idq"])
+        .arg(&archive)
+        .args(["new.txt", "old.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive), ["old.txt"]);
+
+    // Multiple filters combine with AND: 1h < age <= 2h.
+    let archive = dir.path().join("tnandto.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-tn2h", "-to1h", "-idq"])
+        .arg(&archive)
+        .args(["new.txt", "old.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive), ["old.txt"]);
+
+    // Compound period and modifier: -tnc1h30m parses and filters on the
+    // creation time (both files were just created, so both match).
+    let archive = dir.path().join("tnc.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-tnc1h30m", "-idq"])
+        .arg(&archive)
+        .args(["new.txt", "old.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive), ["new.txt", "old.txt"]);
+
+    // -to with an empty period matches everything (age >= 0).
+    let archive = dir.path().join("to0.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-to", "-idq"])
+        .arg(&archive)
+        .args(["new.txt", "old.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive), ["new.txt", "old.txt"]);
+
+    // No match: WinRAR exits 10 and does not create the archive. old.txt
+    // (1.5 h old) deterministically fails the 1 s filter.
+    let archive = dir.path().join("none.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-tn1s", "-idq"])
+        .arg(&archive)
+        .arg("old.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(10), "no-match must exit with code 10");
+    assert!(!archive.exists(), "no-match must not create the archive");
+}
+
+#[test]
+fn cli_stdin_name_reads_stdin() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("si.rar");
+    let mut child = std::process::Command::new(RAR_CLI)
+        .args(["a", "-siin.txt", "-idq"])
+        .arg(&archive)
+        .stdin(std::process::Stdio::piped())
+        .current_dir(dir.path())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"hello-stdin")
+        .unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success());
+
+    let mut rar = RarArchive::open(&archive).unwrap();
+    assert_eq!(rar.namelist(), ["in.txt"]);
+    assert_eq!(rar.read("in.txt").unwrap(), b"hello-stdin");
+}
+
+#[test]
+fn cli_keep_time_preserves_archive_mtime() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+    let archive = dir.path().join("tk.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let before = std::fs::metadata(&archive).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-tk", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let after = std::fs::metadata(&archive).unwrap().modified().unwrap();
+    let kept = after.duration_since(before).unwrap_or_default();
+    assert!(
+        kept < std::time::Duration::from_secs(1),
+        "-tk must keep the archive mtime, changed by {kept:?}"
+    );
+}
+
+#[test]
+fn cli_clear_password_and_no_comment_switches() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+
+    // -p- creates an unencrypted archive (readable without a password).
+    let archive = dir.path().join("pm.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-p-", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = RarArchive::open(&archive).unwrap();
+    assert_eq!(rar.read("f.txt").unwrap(), b"x");
+
+    // -c- is accepted on create.
+    let archive = dir.path().join("nc.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-c-", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive), ["f.txt"]);
+}
+
+#[test]
+fn cli_err_switch_routes_messages_to_stderr() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+    let archive = dir.path().join("ierr.rar");
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ierr"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "-ierr must send messages to stderr, stdout had: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Created"),
+        "-ierr must send the status message to stderr, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cli_append_dir_extracts_under_archive_name() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("ad.rar");
+    {
+        let mut rar = RarArchive::create(&archive).unwrap();
+        rar.add_bytes("f.txt", b"x", 0).unwrap();
+        rar.close().unwrap();
+    }
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "-ad", "-idq"])
+        .arg(&archive)
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        out.join("ad").join("f.txt").exists(),
+        "-ad must extract under a subdirectory named after the archive"
+    );
+}
+

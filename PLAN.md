@@ -63,11 +63,15 @@
 - [x] 时间（批次 2）：`-ta/-tb`（按 mtime 过滤，与 WinRAR 对照一致）、`-tl`（归档时间=最新成员）
 - [x] 归档组织（批次 2）：`-ag`（自动命名，YYYYMMDDHHMMSS 插入扩展名前，与 WinRAR 一致）
 - [x] 文件系统语义（批次 2）：`-ol`（符号链接存 redirect 记录；unix 测试）、`-oh`（硬链接去重；unix cfg）
-- [ ] 时间：`-tk`、`-ts[m,c,a]`（现在只存 mtime 秒+ns，不存 ctime/atime）
-- [ ] 归档组织：`-ad/-am/-as`（同步）、`-ed`（不存空目录）、`-e[+]<attr>`；`-c-`；`-ver[n]`（文件版本控制）；`-si`（stdin 流式添加）
-- [ ] 文件系统语义：`-os`（NTFS 流）；`-ow`（读侧解析 OWNER 记录、写侧不生成）；`-ac/-ad/-ai`
-- [ ] 交互/消息：`-p-`；`-id[c,d,n,p]` 细分、`-ierr/-ilog/-ieml/-ioff/-isnd/-iver`；`-cfg-` 与 rar.ini/rarfiles.lst 配置体系
-- [ ] 其他：`-sl/-sm`（大小过滤）、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`（分卷）、`-oi`（流选项）
+- [x] 时间（批次 3）：`-tk`（更新保留归档 mtime）、`-tn/-to`（时间段过滤 `[Nd][Nh][Nm][Ns]`，支持 m/c/a 修饰符与多开关 AND，空/非法段=0 秒、无匹配 exit 10 不建归档，均与 WinRAR 对照一致）
+- [ ] 时间：`-ts[m,c,a]`（库存不存 ctime/atime；`-tnc/-tna` 过滤已支持 c/a 读取）
+- [x] 归档组织（批次 3）：`-ed`（不存空目录）、`-c-`、`-si<name>`（stdin 流式添加，files 可省略）、`-ad`（unrar 提取到归档名子目录）
+- [ ] 归档组织：`-ad/-am/-as`（a 命令同步侧）、`-e[+]<attr>`；`-ver[n]`（文件版本控制）
+- [ ] 文件系统语义：`-os`（NTFS 流）；`-ow`（读侧解析 OWNER 记录、写侧不生成）；`-ac/-ai`
+- [x] 交互/消息（批次 3）：`-p-`（无密码，与 WinRAR 实测一致）、`-ierr`（消息到 stderr）
+- [ ] 交互/消息：`-id[c,d,n,p]` 细分、`-ilog/-ieml/-ioff/-isnd/-iver`；`-cfg-` 与 rar.ini/rarfiles.lst 配置体系
+- [x] 其他（批次 3）：`-sl/-sm`（大小过滤）
+- [ ] 其他：`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`（分卷）、`-oi`（流选项）
 
 ### 工程
 
@@ -85,7 +89,7 @@
 
 1. RAR5 过滤器补齐（ARMT/IA64/PPC/SPARC）
 2. `-md` 字典选择 + 放宽读侧上限（至少 4 GB / 非 2 幂）
-3. CLI 接 `-ol/-oh`（库已就绪）+ `-si`
+3. CLI 接 `-ol/-oh`（库已就绪）+ `-si` ✅（批次 2/3 完成）
 4. solid + 分卷
 5. 时间戳扩展（ctime/atime + `-ts`）与时间过滤
 6. `ch`、`-z`、`-ag`、`-y/-o` 等高频小开关

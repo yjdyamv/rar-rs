@@ -37,6 +37,10 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-p") {
         return if rest.is_empty() {
             "--password".into()
+        } else if rest == "-" {
+            // `-p-` means "no password" in WinRAR (unlike bare `-p`, which
+            // encrypts with an empty/prompted password).
+            "--password=".into()
         } else {
             format!("--password={rest}")
         };
@@ -121,6 +125,9 @@ pub fn normalize_switch(arg: &str) -> String {
     if arg == "-idq" || arg == "-inul" {
         return "--quiet".into();
     }
+    if arg == "-ierr" {
+        return "--err".into();
+    }
     if let Some(rest) = arg.strip_prefix("-w") {
         return format!("--work-dir={rest}");
     }
@@ -135,6 +142,15 @@ pub fn normalize_switch(arg: &str) -> String {
     }
     if let Some(rest) = arg.strip_prefix("-tb") {
         return format!("--before={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-tn") {
+        return format!("--tn-filter={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-to") {
+        return format!("--to-filter={rest}");
+    }
+    if arg == "-tk" {
+        return "--keep-time".into();
     }
     if arg == "-tl" {
         return "--set-latest-time".into();
@@ -152,6 +168,27 @@ pub fn normalize_switch(arg: &str) -> String {
     if arg == "-oh" {
         return "--hardlinks".into();
     }
+    if let Some(rest) = arg.strip_prefix("-sl") {
+        return format!("--size-less={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-sm") {
+        return format!("--size-more={rest}");
+    }
+    if arg == "-ed" {
+        return "--no-empty-dirs".into();
+    }
+    if arg == "-p-" {
+        return "--password=".into();
+    }
+    if arg == "-c-" {
+        return "--no-comment".into();
+    }
+    if arg == "-ad" {
+        return "--append-dir".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-si") {
+        return format!("--stdin-name={rest}");
+    }
     if let Some(rest) = arg.strip_prefix("-z") {
         return format!("--comment-file={rest}");
     }
@@ -161,13 +198,22 @@ pub fn normalize_switch(arg: &str) -> String {
 /// Suppresses informational messages when `-idq` / `-inul` is given.
 pub static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Sends informational messages to stderr instead of stdout when `-ierr`
+/// is given.
+pub static ERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Print an informational message unless quiet mode is on (errors and
-/// requested output — listings, prints — always print).
+/// requested output — listings, prints — always print). With `-ierr` the
+/// message goes to stderr.
 #[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => {
         if !$crate::common::QUIET.load(std::sync::atomic::Ordering::Relaxed) {
-            println!($($arg)*);
+            if $crate::common::ERR.load(std::sync::atomic::Ordering::Relaxed) {
+                eprintln!($($arg)*);
+            } else {
+                println!($($arg)*);
+            }
         }
     };
 }
@@ -184,6 +230,26 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Destination directory, honoring `-ad` (append the archive base name as
+/// a subdirectory; `.partN` volume suffixes are stripped).
+pub fn extract_dest(dest: &str, archive: &str, append_dir: bool) -> std::path::PathBuf {
+    let dest = std::path::PathBuf::from(dest);
+    if !append_dir {
+        return dest;
+    }
+    let mut base = std::path::Path::new(archive)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    if let Some(idx) = base.to_lowercase().find(".part")
+        && base[idx + 5..].chars().all(|c| c.is_ascii_digit())
+    {
+        base.truncate(idx);
+    }
+    dest.join(base)
 }
 
 /// Print a verbose listing (like `rar v` / `unrar v`).

@@ -17,6 +17,9 @@ struct Cli {
     /// Quiet mode: suppress informational messages (like `-idq` / `-inul`)
     #[arg(long, global = true)]
     quiet: bool,
+    /// Send informational messages to stderr (like `-ierr`)
+    #[arg(long, global = true)]
+    err: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -68,6 +71,10 @@ struct ExtractArgs {
     /// Extraction threads (like `rar -mt<N>`)
     #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
     threads: Option<usize>,
+    /// Append the archive base name as a destination subdirectory
+    /// (like `-ad`)
+    #[arg(long = "append-dir")]
+    append_dir: bool,
     /// Overwrite mode (like `-o+` / `-o-`)
     #[arg(
         long = "overwrite",
@@ -113,6 +120,7 @@ fn main() {
         .collect();
     let cli = Cli::parse_from(std::iter::once("unrar".to_string()).chain(args));
     common::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
+    common::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
     if let Err(e) = run(cli) {
         eprintln!("unrar: {e}");
         process::exit(1);
@@ -196,7 +204,7 @@ fn format_unix_time(secs: u32) -> String {
     // Simple UTC rendering of a unix timestamp (no chrono dependency).
     let days = secs as i64 / 86400;
     let secs_of_day = secs % 86400;
-    let (y, m, d) = civil_from_days(days);
+    let (y, m, d) = common::civil_from_days(days);
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         y,
@@ -206,20 +214,6 @@ fn format_unix_time(secs: u32) -> String {
         (secs_of_day % 3600) / 60,
         secs_of_day % 60
     )
-}
-
-/// Days-to-civil-date conversion (Howard Hinnant's algorithm).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 fn open_archive(path: &str, password: Option<&str>) -> Result<rar5::RarArchive, String> {
@@ -234,27 +228,29 @@ fn cmd_extract(args: &ExtractArgs, password: Option<&str>) -> Result<(), String>
     if let Some(threads) = args.threads {
         rar5::set_extraction_threads(threads);
     }
-    let dest = args.dest.as_deref().unwrap_or(".");
+    let base = args.dest.as_deref().unwrap_or(".");
+    let dest = common::extract_dest(base, &args.archive, args.append_dir);
     let mut rar = open_archive(&args.archive, password)?;
 
     let count = rar.list().len();
     rar.extract_all_with_options(
-        dest,
+        &dest,
         rar5::ExtractOptions {
             skip_existing: args.overwrite.as_deref() == Some("never"),
             ..Default::default()
         },
     )
     .map_err(|e| format!("{e}"))?;
-    info!("Extracted {count} entries to {dest}");
+    info!("Extracted {count} entries to {}", dest.display());
     Ok(())
 }
 
 fn cmd_extract_flat(args: &ExtractArgs, password: Option<&str>) -> Result<(), String> {
-    let dest = args.dest.as_deref().unwrap_or(".");
+    let base = args.dest.as_deref().unwrap_or(".");
+    let dest = common::extract_dest(base, &args.archive, args.append_dir);
     let mut rar = open_archive(&args.archive, password)?;
     rar.extract_all_with_options(
-        dest,
+        &dest,
         rar5::ExtractOptions {
             flat_paths: true,
             skip_existing: args.overwrite.as_deref() == Some("never"),
