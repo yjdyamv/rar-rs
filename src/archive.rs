@@ -1467,11 +1467,6 @@ impl RarArchive {
                 .map_err(|e| RarError::Format(format!("recovery record encode: {e}")))?;
 
         // RR service header: type 3, name "RR", SubData = percent byte.
-        let mut body = Vec::new();
-        body.extend(vint::encode(0x03u64)); // service header
-        body.extend(vint::encode(
-            BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_SKIP_IF_UNKNOWN,
-        ));
         let subdata = {
             let rec = vec![percent as u8]; // recovery percent (single byte, <= 100)
             let mut extra = Vec::new();
@@ -1480,27 +1475,7 @@ impl RarArchive {
             extra.extend(rec);
             extra
         };
-        body.extend(vint::encode(subdata.len() as u64)); // extra area size
-        body.extend(vint::encode(rr_data.len() as u64)); // data size
-        body.extend(vint::encode(0u64)); // file flags
-        body.extend(vint::encode(rr_data.len() as u64)); // unpacked size
-        body.extend(vint::encode(0u64)); // attributes
-        body.extend(vint::encode(0u64)); // compression info (store)
-        body.extend(vint::encode(OS_UNIX));
-        body.extend(vint::encode(2u64)); // name length
-        body.extend(b"RR");
-        body.extend(subdata);
-
-        let size_bytes = vint::encode(body.len() as u64);
-        let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
-        header_content.extend(&size_bytes);
-        header_content.extend(&body);
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&header_content);
-        let crc = hasher.finalize();
-        let mut hdr = Vec::with_capacity(4 + header_content.len());
-        hdr.extend(crc.to_le_bytes());
-        hdr.extend(header_content);
+        let hdr = crate::headers::build_service_block("RR", &subdata, rr_data.len() as u64);
 
         self.write_block_header(&hdr)?;
         let stream = self.stream.as_mut().unwrap();
@@ -1535,35 +1510,13 @@ impl RarArchive {
 
         // Service header: type 3, name "QO", with an empty service-data
         // extra record (type 0x07) and the payload as its data area.
-        let mut body = Vec::new();
-        body.extend(vint::encode(0x03u64)); // service header
-        body.extend(vint::encode(
-            BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_SKIP_IF_UNKNOWN,
-        ));
-        let mut extra = Vec::new();
-        extra.extend(vint::encode(1u64)); // record size: type only
-        extra.extend(vint::encode(0x07u64)); // service data record type
-        body.extend(vint::encode(extra.len() as u64)); // extra area size
-        body.extend(vint::encode(payload.len() as u64)); // data size
-        body.extend(vint::encode(0u64)); // file flags
-        body.extend(vint::encode(payload.len() as u64)); // unpacked size
-        body.extend(vint::encode(0u64)); // attributes
-        body.extend(vint::encode(0u64)); // compression info (store)
-        body.extend(vint::encode(OS_UNIX));
-        body.extend(vint::encode(2u64)); // name length
-        body.extend(b"QO");
-        body.extend(extra);
-
-        let size_bytes = vint::encode(body.len() as u64);
-        let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
-        header_content.extend(&size_bytes);
-        header_content.extend(&body);
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&header_content);
-        let crc = hasher.finalize();
-        let mut hdr = Vec::with_capacity(4 + header_content.len());
-        hdr.extend(crc.to_le_bytes());
-        hdr.extend(header_content);
+        let subdata = {
+            let mut extra = Vec::new();
+            extra.extend(vint::encode(1u64)); // record size: type only
+            extra.extend(vint::encode(0x07u64)); // service data record type
+            extra
+        };
+        let hdr = crate::headers::build_service_block("QO", &subdata, payload.len() as u64);
 
         self.write_block_header(&hdr)?;
         let stream = self.stream.as_mut().unwrap();
@@ -6586,224 +6539,6 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Locate the quick-open and recovery offset fields inside an existing
-/// main archive header (plaintext-relative offsets, used to patch the
-/// locator in place when appending).
-fn main_header_locator_fields(meta: &BlockMeta) -> RarResult<(Option<usize>, Option<usize>)> {
-    const LOCATOR_TYPE: u64 = 0x01;
-    const LOCATOR_FLAG_QUICK_OPEN: u64 = 0x0001;
-    const LOCATOR_FLAG_RECOVERY: u64 = 0x0002;
-    let data = &meta.raw.header_data;
-    let mut offset = 0usize;
-    let (_, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("block type: {e}")))?;
-    offset += n;
-    let (flags, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
-    offset += n;
-    let mut extra_size = 0usize;
-    if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
-        let (v, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("extra size: {e}")))?;
-        extra_size = v as usize;
-        offset += n;
-    }
-    if flags & BLOCK_FLAG_DATA_AREA != 0 {
-        let (_, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("data size: {e}")))?;
-        offset += n;
-    }
-    let (_, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("archive flags: {e}")))?;
-    offset += n;
-    let extra = &data[offset..offset + extra_size];
-    // Header layout: [crc 4][size vint][body ...][extra area].
-    let extra_base = 4 + meta.hsize_vint_len + offset;
-
-    let mut e = 0usize;
-    while e < extra.len() {
-        let (rec_size, n) = vint::decode_from_slice(extra, e)
-            .map_err(|e| RarError::Format(format!("extra record: {e}")))?;
-        e += n;
-        let rec_start = e;
-        let (rec_type, n) = vint::decode_from_slice(extra, e)
-            .map_err(|e| RarError::Format(format!("extra record type: {e}")))?;
-        e += n;
-        if rec_type == LOCATOR_TYPE {
-            let (loc_flags, n) = vint::decode_from_slice(extra, e)
-                .map_err(|e| RarError::Format(format!("locator flags: {e}")))?;
-            e += n;
-            let mut qo = None;
-            if loc_flags & LOCATOR_FLAG_QUICK_OPEN != 0 {
-                qo = Some(extra_base + e);
-                let (_, qn) = vint::decode_from_slice(extra, e)
-                    .map_err(|e| RarError::Format(format!("quick-open offset: {e}")))?;
-                e += qn;
-            }
-            let mut rr = None;
-            if loc_flags & LOCATOR_FLAG_RECOVERY != 0 {
-                rr = Some(extra_base + e);
-            }
-            return Ok((qo, rr));
-        }
-        e = rec_start + rec_size as usize;
-    }
-    Ok((None, None))
-}
-
-/// RAR5 file redirection (EXTRA_FILE_REDIRECT) record: symlink, hardlink
-/// or file copy target reference.
-struct RedirectSpec {
-    redir_type: u64,
-    target: String,
-}
-
-/// Serialize a file redirection (EXTRA_FILE_REDIRECT) extra record.
-fn redirect_extra_bytes(redir_type: u64, target: &str) -> Vec<u8> {
-    let mut record = Vec::new();
-    record.extend(vint::encode(redir_type));
-    record.extend(vint::encode(0u64)); // flags
-    record.extend(vint::encode(target.len() as u64));
-    record.extend_from_slice(target.as_bytes());
-    let mut out = Vec::new();
-    out.extend(vint::encode((1 + record.len()) as u64));
-    out.extend(vint::encode(0x05u64)); // EXTRA_FILE_REDIRECT
-    out.extend(record);
-    out
-}
-
-/// Parse the file redirection record out of an entry's extra area.
-fn parse_redirect_record(extra: &[u8]) -> Option<RedirectSpec> {
-    let mut offset = 0usize;
-    while offset < extra.len() {
-        let (rec_size, n) = vint::decode_from_slice(extra, offset).ok()?;
-        offset += n;
-        // The record size counts the type byte and everything after it.
-        let rec_end = offset.checked_add(rec_size as usize)?;
-        if rec_end > extra.len() {
-            return None;
-        }
-        let (rec_type, tn) = vint::decode_from_slice(extra, offset).ok()?;
-        let mut p = offset + tn;
-        if rec_type == EXTRA_FILE_REDIRECT {
-            let (redir_type, rn) = vint::decode_from_slice(extra, p).ok()?;
-            p += rn;
-            let (flags, fn_len) = vint::decode_from_slice(extra, p).ok()?;
-            p += fn_len;
-            let (name_len, nn) = vint::decode_from_slice(extra, p).ok()?;
-            p += nn;
-            let name_start = p;
-            let name_end = name_start.checked_add(name_len as usize)?;
-            if name_end != rec_end {
-                return None;
-            }
-            let _ = flags;
-            return Some(RedirectSpec {
-                redir_type,
-                target: String::from_utf8_lossy(&extra[name_start..name_end]).into_owned(),
-            });
-        }
-        offset = rec_end;
-    }
-    None
-}
-
-/// Serialize a nanosecond modification time extra record
-/// (`EXTRA_FILE_TIME`), matching the official `rar` format:
-/// `[flags 0x13][seconds u32][nanoseconds u32]`.
-fn file_time_extra_record(secs: u64, ns: u32) -> Vec<u8> {
-    let mut record = Vec::with_capacity(10);
-    record.push(0x13); // flags: modification time with nanoseconds
-    record.extend_from_slice(&(secs as u32).to_le_bytes());
-    record.extend_from_slice(&ns.to_le_bytes());
-    let mut out = Vec::with_capacity(12);
-    out.extend(vint::encode((1 + record.len()) as u64));
-    out.extend(vint::encode(EXTRA_FILE_TIME));
-    out.extend(record);
-    out
-}
-
-/// Serialize a "CMT" archive comment service block (type 3, name "CMT",
-/// comment bytes in the data area), matching the official `rar c` format.
-fn build_comment_block(comment: &[u8]) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend(vint::encode(BLOCK_TYPE_SERVICE_HEADER));
-    body.extend(vint::encode(BLOCK_FLAG_DATA_AREA));
-    body.extend(vint::encode(comment.len() as u64));
-    body.extend(vint::encode(FILE_FLAG_CRC32));
-    body.extend(vint::encode(comment.len() as u64)); // unpacked size
-    body.extend(vint::encode(0u64)); // attributes
-    body.extend(crc32fast::hash(comment).to_le_bytes());
-    body.extend(vint::encode(0u64)); // compression info (store)
-    body.extend(vint::encode(OS_UNIX));
-    body.extend(vint::encode(3u64)); // name length
-    body.extend(b"CMT");
-
-    let size_bytes = vint::encode(body.len() as u64);
-    let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
-    header_content.extend(&size_bytes);
-    header_content.extend(&body);
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&header_content);
-    let crc = hasher.finalize();
-
-    let mut block = Vec::with_capacity(4 + header_content.len() + comment.len());
-    block.extend(crc.to_le_bytes());
-    block.extend(header_content);
-    block.extend_from_slice(comment);
-    block
-}
-
-/// Split a main archive header's extra area into the locator record
-/// contents (`had_qo`, `had_rr`) and the remaining records verbatim.
-fn split_main_extra(extra: &[u8]) -> RarResult<(bool, bool, Vec<u8>)> {
-    const LOCATOR_TYPE: u64 = 0x01;
-    const LOCATOR_FLAG_QUICK_OPEN: u64 = 0x0001;
-    const LOCATOR_FLAG_RECOVERY: u64 = 0x0002;
-    let mut had_qo = false;
-    let mut had_rr = false;
-    let mut rest = Vec::new();
-    let mut off = 0usize;
-    while off < extra.len() {
-        let (rec_size, n) = vint::decode_from_slice(extra, off)
-            .map_err(|e| RarError::Format(format!("main header extra record: {e}")))?;
-        let rec_start = off + n;
-        let (rec_type, tn) = vint::decode_from_slice(extra, rec_start)
-            .map_err(|e| RarError::Format(format!("main header extra record type: {e}")))?;
-        if rec_type == LOCATOR_TYPE {
-            // The locator record size convention differs between writers
-            // (WinRAR counts the type byte, rar-rs does not), so the record
-            // boundary is derived from the parsed fields instead.
-            let mut p = rec_start + tn;
-            let (loc_flags, ln) = vint::decode_from_slice(extra, p)
-                .map_err(|e| RarError::Format(format!("locator flags: {e}")))?;
-            p += ln;
-            if loc_flags & LOCATOR_FLAG_QUICK_OPEN != 0 {
-                had_qo = true;
-                let (_, qn) = vint::decode_from_slice(extra, p)
-                    .map_err(|e| RarError::Format(format!("quick-open offset: {e}")))?;
-                p += qn;
-            }
-            if loc_flags & LOCATOR_FLAG_RECOVERY != 0 {
-                had_rr = true;
-                let (_, rn) = vint::decode_from_slice(extra, p)
-                    .map_err(|e| RarError::Format(format!("recovery offset: {e}")))?;
-                p += rn;
-            }
-            off = p;
-        } else {
-            let rec_end = rec_start.checked_add(rec_size as usize).ok_or_else(|| {
-                RarError::Format("main header extra record size overflows".into())
-            })?;
-            if rec_end > extra.len() || rec_end <= rec_start {
-                return Err(RarError::Format("malformed main header extra area".into()));
-            }
-            rest.extend_from_slice(&extra[off..rec_end]);
-            off = rec_end;
-        }
-    }
-    Ok((had_qo, had_rr, rest))
-}
 
 fn dict_size_for_data(data_size: usize, level: u8) -> u8 {
     // Window caps per compression level (WinRAR-like, kept conservative for
@@ -7070,22 +6805,6 @@ fn extract_volume_base(name: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Encode `value` as a fixed 5-byte RAR5 vint (LSB-first, continuation bit
-/// on every byte except the last). Valid for values < 2^35.
-fn vint_fixed5(value: u64) -> [u8; 5] {
-    let mut out = [0x80u8; 5];
-    let mut v = value;
-    for (i, byte) in out.iter_mut().enumerate() {
-        let mut b = (v & 0x7F) as u8;
-        v >>= 7;
-        if i < 4 {
-            b |= 0x80;
-        }
-        *byte = b;
-    }
-    out
 }
 
 /// Volume base of an archive path, stripping `.partN.rar` or `.rar`
