@@ -36,7 +36,7 @@ archives — no external binaries required.
 | Archive comments (`c`/`cw`)          |   done |
 | SFX archives (read + `s`/`s-`)       |   done |
 | Symlinks/hardlinks (redirects)       |   done |
-| RAR7 wide vints / `-si` streams      |   done |
+| RAR7 wide vints (large dictionary fields) |   done |
 | Multi-volume member deletion/rename  |   done |
 | Parallel rewrite pipeline            |   done |
 | Quick-open records (`-qo+`)          |   done |
@@ -257,21 +257,34 @@ SA_OFFICIAL_RAR=/path/to/rar SA_OFFICIAL_UNRAR=/path/to/unrar \
 
 The tests skip automatically when these variables are not set.
 
+On Windows, `tests/winrar_interop.rs` locates an installed WinRAR (default
+`C:\Program Files\WinRAR`, override with `SA_WINRAR_DIR`) and drives its
+console binaries directly: `UnRAR t`/`UnRAR x` validate every streaming
+archive variant (compressed, encrypted, header-encrypted, multi-volume,
+solid, >4 GiB sparse files), and rar-rs reads back WinRAR-created
+archives byte-identically. The >4 GiB cases are `#[ignore]`d:
+
+```bash
+cargo test --release --test winrar_interop
+cargo test --release --test winrar_interop -- --ignored   # >4 GiB cases
+```
+
 ## Known limitations
 
 - RAR4 PPMd and RAR4 encryption are not implemented (read-only LZSS +
   filters, no compression).
 - Solid archives cannot be combined with multi-volume output yet.
-- Encrypted STORE members are buffered (CBC padding is applied to the
-  whole member); encrypted compressed members only buffer the packed
-  output.
+- `-si` (add files from stdin) is not implemented; the archive comment
+  (`rar c`) is the only stdin input.
+- Large-file compression streams through a temporary spill file (memory
+  stays bounded for any file size); encrypted members (STORE and
+  compressed) are encrypted on the fly with a chained CBC state.
 - Inline recovery records buffer the archive prefix (max 32 GiB); `.rev`
   generation streams.
 - Quick-open stores headers for every file (WinRAR's default only caches
   large files); dictionaries are accepted up to 1 GiB (WinRAR 5.x max).
 - Appending to multi-volume archives is not supported (the official `rar`
   refuses too); deleting from them is supported.
-- Solid archives cannot be combined with multi-volume output yet.
 
 ---
 
