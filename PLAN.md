@@ -53,16 +53,19 @@
 - [x] `ch`（修改归档参数：-cl/-cu 成员名大小写转换，与 Rar.exe ch 对照一致）
 - [x] `p`（rar 侧打印文件到 stdout；unrar 已有 p）
 - [x] unrar 列表变体：`lt/lb/vt/vb`（技术/裸列表）
-- [ ] unrar `s`（转 SFX）
+- [ ] unrar `s`（转 SFX）—— 官方 UnRAR 7.23 无此命令，非差距，取消
 
 ### 开关
 
 - [x] 交互/消息（批次 1）：`-y`、`-o+/-o-`（提取覆盖/跳过，与 UnRAR 对照一致）、`-w<p>`（工作目录）、`-idq/-inul`（安静模式）
 - [x] 归档组织：`-z<file>`（注释从文件读）
-- [ ] 路径/掩码：`-ep2/-ep3/-ep4`；`-x@lf/-n@lf`（掩码列表文件，`-x/-n` 本身已有）；`-r/-r0`（rar-rs 目录默认递归，只有 `-r-`）
-- [ ] 时间：`-ta/-tb/-tn/-to`（时间过滤）、`-tk/-tl`、`-ts[m,c,a]`（现在只存 mtime 秒+ns，不存 ctime/atime）
-- [ ] 归档组织：`-ag`（日期自动命名）、`-ad/-am/-as`（同步）、`-ed`（不存空目录）、`-e[+]<attr>`；`-c-`；`-ver[n]`（文件版本控制）；`-si`（stdin 流式添加——CLI 没有，README 曾宣称 done 需纠正）
-- [ ] 文件系统语义：`-ol/-oh`（库 API `add_redirect` 已支持类型 1/2/4/5，CLI 未接线）；`-os`（NTFS 流）；`-ow`（读侧解析 OWNER 记录、写侧不生成）；`-ac/-ad/-ai`
+- [x] 路径/掩码（批次 2）：`-x@/-n@<lf>`（掩码列表文件）、`-r/-r0`（-r0 通配符不递归子目录）、`-ep2/-ep3`（完整路径，`C:`→`C_` 与 WinRAR 一致）
+- [x] 时间（批次 2）：`-ta/-tb`（按 mtime 过滤，与 WinRAR 对照一致）、`-tl`（归档时间=最新成员）
+- [x] 归档组织（批次 2）：`-ag`（自动命名，YYYYMMDDHHMMSS 插入扩展名前，与 WinRAR 一致）
+- [x] 文件系统语义（批次 2）：`-ol`（符号链接存 redirect 记录；unix 测试）、`-oh`（硬链接去重；unix cfg）
+- [ ] 时间：`-tk`、`-ts[m,c,a]`（现在只存 mtime 秒+ns，不存 ctime/atime）
+- [ ] 归档组织：`-ad/-am/-as`（同步）、`-ed`（不存空目录）、`-e[+]<attr>`；`-c-`；`-ver[n]`（文件版本控制）；`-si`（stdin 流式添加）
+- [ ] 文件系统语义：`-os`（NTFS 流）；`-ow`（读侧解析 OWNER 记录、写侧不生成）；`-ac/-ad/-ai`
 - [ ] 交互/消息：`-p-`；`-id[c,d,n,p]` 细分、`-ierr/-ilog/-ieml/-ioff/-isnd/-iver`；`-cfg-` 与 rar.ini/rarfiles.lst 配置体系
 - [ ] 其他：`-sl/-sm`（大小过滤）、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`（分卷）、`-oi`（流选项）
 

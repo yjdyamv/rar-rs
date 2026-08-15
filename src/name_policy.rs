@@ -23,8 +23,16 @@ pub struct NamePolicy {
     pub basename_only: bool,
     /// Exclude the base directory from names (`-ep1`, wildcard paths).
     pub strip_base: bool,
+    /// Store full paths without the drive letter (`-ep2`).
+    pub full_paths: bool,
+    /// Store full paths including the drive letter, `C:` written as `C_`
+    /// (`-ep3`, WinRAR's convention).
+    pub full_paths_drive: bool,
     /// Do not recurse into directories (`-r-`).
     pub no_recurse: bool,
+    /// Wildcard expansion matches names without path separators only and
+    /// does not descend into matched directories (`-r0`).
+    pub wildcard_top_only: bool,
     pub case: Option<CaseKind>,
     pub include_masks: Vec<String>,
     pub exclude_masks: Vec<String>,
@@ -96,6 +104,37 @@ pub fn arg_to_name(arg: &str) -> String {
         .replace('\\', "/")
 }
 
+/// Full-path stored name for `-ep2` / `-ep3`: the absolute path with the
+/// drive letter dropped (`-ep2`) or with `:` replaced by `_` (`-ep3`,
+/// WinRAR's convention, e.g. `C:\dir\f` → `C_/dir/f`).
+fn full_path_name(arg: &str, keep_drive: bool) -> String {
+    let abs = std::path::absolute(arg)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| arg.replace('\\', "/"));
+    #[cfg(windows)]
+    {
+        let bytes = abs.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            if keep_drive {
+                return format!("{}_{}", &abs[..1], &abs[2..]);
+            }
+            return abs[2..].trim_start_matches('/').to_string();
+        }
+        if keep_drive {
+            return abs;
+        }
+        abs.trim_start_matches('/').to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        if keep_drive {
+            abs
+        } else {
+            abs.trim_start_matches('/').to_string()
+        }
+    }
+}
+
 fn has_wildcards(arg: &str) -> bool {
     arg.contains('*') || arg.contains('?')
 }
@@ -129,8 +168,13 @@ fn add_with_policy(
     }
     if path.is_file() {
         // Relative path names, matching the official `rar a`; `-ep1`
-        // strips the parent directories (like the official tool).
-        let rel = arg_to_name(arg);
+        // strips the parent directories, `-ep2`/`-ep3` store full paths
+        // (like the official tool).
+        let rel = if policy.full_paths || policy.full_paths_drive {
+            full_path_name(arg, policy.full_paths_drive)
+        } else {
+            arg_to_name(arg)
+        };
         let name = if policy.basename_only || policy.strip_base {
             let basename = rel.rsplit('/').next().unwrap_or(&rel).to_string();
             match &policy.path_prefix {
@@ -156,12 +200,19 @@ fn add_with_policy(
         path_prefix: policy.path_prefix.clone(),
         basename_only: policy.basename_only,
         strip_base: false,
+        full_paths: policy.full_paths,
+        full_paths_drive: policy.full_paths_drive,
         no_recurse: policy.no_recurse,
+        wildcard_top_only: policy.wildcard_top_only,
         case: policy.case,
         include_masks: policy.include_masks.clone(),
         exclude_masks: policy.exclude_masks.clone(),
     };
-    let rel = arg_to_name(arg);
+    let rel = if plain.full_paths || plain.full_paths_drive {
+        full_path_name(arg, plain.full_paths_drive)
+    } else {
+        arg_to_name(arg)
+    };
     if plain.dir_subtree_skipped(&rel) {
         return Ok(());
     }
@@ -229,7 +280,8 @@ fn add_wildcard_arg(
                     level,
                 });
             }
-            if !policy.no_recurse {
+            // -r0: wildcard expansion does not descend into directories.
+            if !policy.no_recurse && !policy.wildcard_top_only {
                 walk_directory(pending, &child.path(), &rel, level, policy, added)?;
             }
         } else if policy.file_kept(&rel) && added.insert(policy.stored_name(&rel)) {

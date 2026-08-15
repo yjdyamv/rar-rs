@@ -76,6 +76,18 @@ pub fn normalize_switch(arg: &str) -> String {
     if arg == "-ep1" {
         return "--exclude-base-dir".into();
     }
+    if arg == "-ep2" {
+        return "--full-paths".into();
+    }
+    if arg == "-ep3" {
+        return "--full-paths-drive".into();
+    }
+    if arg == "-r" {
+        return "--recurse".into();
+    }
+    if arg == "-r0" {
+        return "--recurse-zero".into();
+    }
     if arg == "-r-" {
         return "--no-recurse".into();
     }
@@ -87,6 +99,12 @@ pub fn normalize_switch(arg: &str) -> String {
     }
     if let Some(rest) = arg.strip_prefix("-ap") {
         return format!("--archive-path={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-x@") {
+        return format!("--exclude-list={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-n@") {
+        return format!("--include-list={rest}");
     }
     if let Some(rest) = arg.strip_prefix("-x") {
         return format!("--exclude={rest}");
@@ -112,6 +130,28 @@ pub fn normalize_switch(arg: &str) -> String {
     if arg == "-o-" {
         return "--overwrite=never".into();
     }
+    if let Some(rest) = arg.strip_prefix("-ta") {
+        return format!("--after={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-tb") {
+        return format!("--before={rest}");
+    }
+    if arg == "-tl" {
+        return "--set-latest-time".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-ag") {
+        return if rest.is_empty() {
+            "--auto-name".into()
+        } else {
+            format!("--auto-name={rest}")
+        };
+    }
+    if arg == "-ol" {
+        return "--links".into();
+    }
+    if arg == "-oh" {
+        return "--hardlinks".into();
+    }
     if let Some(rest) = arg.strip_prefix("-z") {
         return format!("--comment-file={rest}");
     }
@@ -130,6 +170,20 @@ macro_rules! info {
             println!($($arg)*);
         }
     };
+}
+
+/// Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// Print a verbose listing (like `rar v` / `unrar v`).

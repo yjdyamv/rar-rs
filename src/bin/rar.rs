@@ -274,9 +274,22 @@ struct CreateArgs {
     /// Exclude the base directory from names (wildcard paths)
     #[arg(long = "exclude-base-dir")]
     strip_base: bool,
+    /// Store full paths without the drive letter (like `-ep2`)
+    #[arg(long = "full-paths")]
+    full_paths: bool,
+    /// Store full paths including the drive letter (like `-ep3`)
+    #[arg(long = "full-paths-drive")]
+    full_paths_drive: bool,
     /// Do not recurse into directories
     #[arg(long = "no-recurse")]
     no_recurse: bool,
+    /// Recurse subdirectories (like `-r`; the default for directory args)
+    #[arg(long = "recurse")]
+    recurse: bool,
+    /// Recurse, but wildcards only match names without path separators
+    /// (like `-r0`)
+    #[arg(long = "recurse-zero")]
+    recurse_zero: bool,
     /// Convert stored names to lowercase
     #[arg(long = "lowercase")]
     lowercase: bool,
@@ -292,6 +305,33 @@ struct CreateArgs {
     /// Include mask (repeatable)
     #[arg(long = "include", value_name = "MASK", action = clap::ArgAction::Append)]
     include_masks: Vec<String>,
+    /// Exclude masks read from a list file (repeatable, like `-x@listfile`)
+    #[arg(long = "exclude-list", value_name = "FILE", action = clap::ArgAction::Append)]
+    exclude_list_files: Vec<String>,
+    /// Include masks read from a list file (repeatable, like `-n@listfile`)
+    #[arg(long = "include-list", value_name = "FILE", action = clap::ArgAction::Append)]
+    include_list_files: Vec<String>,
+    /// Only process files modified after this date (like `-ta<date>`,
+    /// YYYYMMDDHHMMSS, trailing parts optional)
+    #[arg(long = "after", value_name = "DATE")]
+    after: Option<String>,
+    /// Only process files modified before this date (like `-tb<date>`)
+    #[arg(long = "before", value_name = "DATE")]
+    before: Option<String>,
+    /// Set the archive time to the newest member (like `-tl`)
+    #[arg(long = "set-latest-time")]
+    latest_time: bool,
+    /// Generate the archive name from the current date (like `-ag[format]`;
+    /// `*` in the name is replaced, `YYYY`/`MM`/`DD`/`HH`/`MM`/`SS` in the
+    /// format are substituted)
+    #[arg(long = "auto-name", num_args = 0..=1, default_missing_value = "")]
+    auto_name: Option<String>,
+    /// Save symbolic links as links instead of the file (like `-ol`)
+    #[arg(long = "links")]
+    store_links: bool,
+    /// Save hard links as links instead of the file (like `-oh`)
+    #[arg(long = "hardlinks")]
+    store_hardlinks: bool,
     #[arg(value_name = "ARCHIVE")]
     archive: String,
     #[arg(value_name = "FILES", required = true)]
@@ -430,7 +470,44 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
         password = Some(pw.clone());
     }
 
-    let archive_path = &args.archive;
+    let mut archive_path = args.archive.clone();
+    // -ag: generate the archive name from the current date (default format
+    // YYYYMMDDHHMMSS, like WinRAR): `*` in the name is replaced, otherwise
+    // the stamp is inserted before the extension.
+    if let Some(fmt) = &args.auto_name {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let days = (now / 86400) as i64;
+        let (y, mo, d) = common::civil_from_days(days);
+        let tod = now % 86400;
+        let stamp = if fmt.is_empty() {
+            format!(
+                "{y:04}{mo:02}{d:02}{:02}{:02}{:02}",
+                tod / 3600,
+                (tod % 3600) / 60,
+                tod % 60
+            )
+        } else {
+            fmt.replace("YYYY", &format!("{y:04}"))
+                .replace("MM", &format!("{mo:02}"))
+                .replace("DD", &format!("{d:02}"))
+                .replace("HH", &format!("{:02}", tod / 3600))
+                .replace("mm", &format!("{:02}", (tod % 3600) / 60))
+                .replace("SS", &format!("{:02}", tod % 60))
+        };
+        archive_path = if archive_path.contains('*') {
+            archive_path.replace('*', &stamp)
+        } else if let Some(dot) = archive_path.rfind('.') {
+            archive_path.insert_str(dot, &stamp);
+            archive_path
+        } else {
+            archive_path.push_str(&stamp);
+            archive_path
+        };
+    }
+    let archive_path = &archive_path;
     let files = &args.files;
 
     let opts = rar5::CreateOptions {
@@ -464,20 +541,99 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
             .map_err(|e| format!("create: {e}"))?
     };
 
+    let mut include_masks = args.include_masks.clone();
+    let mut exclude_masks = args.exclude_masks.clone();
+    for file in &args.include_list_files {
+        include_masks.extend(read_mask_file(file)?);
+    }
+    for file in &args.exclude_list_files {
+        exclude_masks.extend(read_mask_file(file)?);
+    }
     let policy = rar5::name_policy::NamePolicy {
         path_prefix: args.path_prefix.clone(),
         basename_only: args.basename_only,
         strip_base: args.strip_base,
+        full_paths: args.full_paths,
+        full_paths_drive: args.full_paths_drive,
         no_recurse: args.no_recurse,
+        wildcard_top_only: args.recurse_zero,
         case: case.map(|c| match c {
             rar5::name_policy::CaseKind::Lower => rar5::name_policy::CaseKind::Lower,
             rar5::name_policy::CaseKind::Upper => rar5::name_policy::CaseKind::Upper,
         }),
-        include_masks: args.include_masks.clone(),
-        exclude_masks: args.exclude_masks.clone(),
+        include_masks,
+        exclude_masks,
     };
-    let collected = rar5::name_policy::collect(&policy, files, args.level)
+    let mut collected = rar5::name_policy::collect(&policy, files, args.level)
         .map_err(|e| format!("collect: {e}"))?;
+    // Time filters (-ta / -tb): only members whose mtime is after/before
+    // the given date are added (directories always pass).
+    if args.after.is_some() || args.before.is_some() {
+        let after = args.after.as_deref().map(parse_rar_date).transpose()?;
+        let before = args.before.as_deref().map(parse_rar_date).transpose()?;
+        collected.retain(|c| {
+            if c.is_dir {
+                return true;
+            }
+            let mtime = std::fs::metadata(&c.path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as u32)
+                .unwrap_or(0);
+            let after_ok = after.is_none_or(|a| mtime > a);
+            let before_ok = before.is_none_or(|b| mtime < b);
+            after_ok && before_ok
+        });
+    }
+    // -ol / -oh: symbolic links and hard links are stored as redirect
+    // records instead of their data. The data member of a hard-link group
+    // (first occurrence) is archived normally; the rest reference it.
+    let mut redirects: Vec<(String, u64, String)> = Vec::new();
+    if args.store_links {
+        let mut keep = Vec::with_capacity(collected.len());
+        for c in collected.drain(..) {
+            if c.is_dir {
+                keep.push(c);
+                continue;
+            }
+            match std::fs::symlink_metadata(&c.path) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    if let Ok(target) = std::fs::read_link(&c.path) {
+                        redirects.push((c.name.clone(), 1, target.to_string_lossy().into_owned()));
+                        continue;
+                    }
+                    keep.push(c);
+                }
+                _ => keep.push(c),
+            }
+        }
+        collected = keep;
+    }
+    if args.store_hardlinks {
+        let mut seen: std::collections::HashMap<(u64, u64), String> = std::collections::HashMap::new();
+        let mut keep = Vec::with_capacity(collected.len());
+        for c in collected.drain(..) {
+            if c.is_dir {
+                keep.push(c);
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if let Ok(m) = std::fs::metadata(&c.path) {
+                    let key = (m.dev(), m.ino());
+                    if let Some(first) = seen.get(&key) {
+                        redirects.push((c.name.clone(), 4, first.clone()));
+                        continue;
+                    }
+                    seen.insert(key, c.name.clone());
+                }
+            }
+            keep.push(c);
+        }
+        collected = keep;
+    }
     let entries: Vec<rar5::BatchEntry<'_>> = collected
         .iter()
         .map(|c| {
@@ -496,9 +652,29 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
         })
         .collect();
     rar.add_batch(&entries).map_err(|e| format!("add: {e}"))?;
+    // Link redirects are recorded after their data members (the reference
+    // target name is what matters, not the order).
+    for (name, redir_type, target) in &redirects {
+        rar.add_redirect(name, *redir_type, target)
+            .map_err(|e| format!("link {name}: {e}"))?;
+    }
 
     let was_existing = existing;
     rar.close().map_err(|e| format!("close: {e}"))?;
+    // -tl: set the archive's modification time to the newest member.
+    if args.latest_time && !collected.is_empty() {
+        let latest = collected
+            .iter()
+            .filter(|c| !c.is_dir)
+            .filter_map(|c| std::fs::metadata(&c.path).ok()?.modified().ok())
+            .max();
+        if let Some(t) = latest {
+            let _ = std::fs::File::options()
+                .write(true)
+                .open(archive_path)
+                .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(t)));
+        }
+    }
     if args.volume_size.is_some() {
         let vols = rar5::discover_volumes(std::path::Path::new(archive_path));
         info!(
@@ -1113,6 +1289,87 @@ fn cmd_test(args: &ArchiveArgs) -> Result<(), String> {
 /// given, absolute paths drop the leading slash (like `rar`).
 fn arg_to_name(arg: &str) -> String {
     rar5::name_policy::arg_to_name(arg)
+}
+
+/// Read one mask per line from a filter list file (like `-x@listfile`);
+/// blank lines are skipped.
+fn read_mask_file(path: &str) -> Result<Vec<String>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("read mask list {path}: {e}"))?;
+    Ok(content
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect())
+}
+
+/// Parse a WinRAR date (`-ta`/`-tb`) into unix seconds. Accepts
+/// `YYYY[MM[DD[HH[MM[SS]]]]]`; missing trailing parts default to their
+/// minimum (month/day 01, time 00:00:00).
+fn parse_rar_date(s: &str) -> Result<u32, String> {
+    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+    let (y, m, d, hh, mm, ss) = match digits.len() {
+        4 => (digits.parse::<i64>().unwrap(), 1, 1, 0, 0, 0),
+        6 => (
+            digits[0..4].parse().unwrap(),
+            digits[4..6].parse().unwrap(),
+            1,
+            0,
+            0,
+            0,
+        ),
+        8 => (
+            digits[0..4].parse().unwrap(),
+            digits[4..6].parse().unwrap(),
+            digits[6..8].parse().unwrap(),
+            0,
+            0,
+            0,
+        ),
+        10 => (
+            digits[0..4].parse().unwrap(),
+            digits[4..6].parse().unwrap(),
+            digits[6..8].parse().unwrap(),
+            digits[8..10].parse().unwrap(),
+            0,
+            0,
+        ),
+        12 => (
+            digits[0..4].parse().unwrap(),
+            digits[4..6].parse().unwrap(),
+            digits[6..8].parse().unwrap(),
+            digits[8..10].parse().unwrap(),
+            digits[10..12].parse().unwrap(),
+            0,
+        ),
+        14 => (
+            digits[0..4].parse().unwrap(),
+            digits[4..6].parse().unwrap(),
+            digits[6..8].parse().unwrap(),
+            digits[8..10].parse().unwrap(),
+            digits[10..12].parse().unwrap(),
+            digits[12..14].parse().unwrap(),
+        ),
+        _ => return Err(format!("invalid date: {s} (use YYYYMMDDHHMMSS)")),
+    };
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 59 {
+        return Err(format!("invalid date: {s}"));
+    }
+    let days = days_from_civil(y, m, d);
+    let secs = days * 86400 + i64::from(hh) * 3600 + i64::from(mm) * 60 + i64::from(ss);
+    u32::try_from(secs).map_err(|_| format!("date out of range: {s}"))
+}
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (i64::from(m) + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 
