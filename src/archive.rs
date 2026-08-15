@@ -588,10 +588,30 @@ pub struct RarArchive {
     save_mtime: bool,
     /// Save owner/group on Unix (`-ow`).
     save_owner: bool,
+    /// Save NTFS alternate data streams (`-os`; Windows only).
+    save_streams: bool,
+    /// NTFS alternate data streams ("STM" service records) attached to
+    /// members, in archive order.
+    streams: Vec<StreamRecord>,
     /// Store timestamps at 1-second precision (`-ts...1`).
     time_precision_seconds: bool,
     /// Options for the current read/extract operation (set per call).
     extract_options: crate::options::ExtractOptions,
+}
+
+/// An NTFS alternate data stream ("STM" service record) attached to an
+/// archive member: the member index, the stream name (with the leading
+/// colon, e.g. `:Zone.Identifier`), the stream payload location and its
+/// compression parameters (the payload may be RAR5-compressed).
+#[derive(Clone)]
+pub(crate) struct StreamRecord {
+    pub owner_index: usize,
+    pub name: String,
+    pub data_offset: u64,
+    pub data_size: u64,
+    pub unpacked_size: u64,
+    pub method: u8,
+    pub dict_size_log: u8,
 }
 
 /// A seekable read/write sink for archive streams: `File` in production,
@@ -644,6 +664,8 @@ impl RarArchive {
             save_atime: false,
             save_mtime: true,
             save_owner: false,
+            save_streams: false,
+            streams: Vec::new(),
             time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
         };
@@ -686,6 +708,8 @@ impl RarArchive {
             save_atime: false,
             save_mtime: true,
             save_owner: false,
+            save_streams: false,
+            streams: Vec::new(),
             time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
         };
@@ -750,6 +774,8 @@ impl RarArchive {
             save_atime: false,
             save_mtime: true,
             save_owner: false,
+            save_streams: false,
+            streams: Vec::new(),
             time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
         };
@@ -1109,6 +1135,8 @@ impl RarArchive {
             save_atime: opts.save_atime,
             save_mtime: opts.save_mtime,
             save_owner: opts.save_owner,
+            save_streams: opts.save_streams,
+            streams: Vec::new(),
             time_precision_seconds: opts.time_precision_seconds,
             extract_options: crate::options::ExtractOptions::default(),
         };
@@ -1593,7 +1621,7 @@ impl RarArchive {
             extra.extend(rec);
             extra
         };
-        let hdr = crate::headers::build_service_block("RR", &subdata, rr_data.len() as u64);
+        let hdr = crate::headers::build_service_block("RR", &subdata, rr_data.len() as u64, crate::constants::BLOCK_FLAG_SKIP_IF_UNKNOWN);
 
         self.write_block_header(&hdr)?;
         let stream = self.stream.as_mut().unwrap();
@@ -1634,7 +1662,7 @@ impl RarArchive {
             extra.extend(vint::encode(0x07u64)); // service data record type
             extra
         };
-        let hdr = crate::headers::build_service_block("QO", &subdata, payload.len() as u64);
+        let hdr = crate::headers::build_service_block("QO", &subdata, payload.len() as u64, crate::constants::BLOCK_FLAG_SKIP_IF_UNKNOWN);
 
         self.write_block_header(&hdr)?;
         let stream = self.stream.as_mut().unwrap();
@@ -1818,21 +1846,23 @@ impl RarArchive {
 
     fn scan_blocks(&mut self) -> RarResult<()> {
         self.entries.clear();
+        self.streams.clear();
 
         // None until the plaintext archive-level encryption header arrives
         // (header-encrypted archives: every block after it is `[IV][AES-256-
         // CBC header]`).
         let mut encr_key: Option<[u8; 32]> = None;
+        let mut last_file_index: Option<usize> = None;
 
         loop {
-            let raw = match crate::headers::read_block(
+            let meta = match crate::headers::read_block(
                 self.stream.as_mut().unwrap(),
                 encr_key.as_ref(),
             )? {
-                Some(meta) => meta.raw,
+                Some(meta) => meta,
                 None => break,
             };
-
+            let raw = &meta.raw;
             let stream_pos = self.stream.as_mut().unwrap().stream_position()?;
 
             match raw.block_type {
@@ -1853,6 +1883,33 @@ impl RarArchive {
                         header: fh,
                         chunks: vec![chunk],
                     });
+                    last_file_index = Some(self.entries.len() - 1);
+                }
+                BLOCK_TYPE_SERVICE_HEADER
+                    if raw.flags & crate::constants::BLOCK_FLAG_DEPENDS_PREV != 0 =>
+                {
+                    // NTFS stream record ("STM"): the SUBDATA extra holds
+                    // the stream name (":name"), the data area the content.
+                    let name = self.service_block_name(&meta)?;
+                    if name.as_deref() == Some("STM")
+                        && let Some(owner_index) = last_file_index
+                        && let Some(stream_name) = crate::headers::parse_service_subdata(
+                            &crate::headers::block_extra_area(&raw.header_data),
+                        )
+                        && !stream_name.is_empty()
+                        && let Some((unpacked_size, method, dict_size_log)) =
+                            crate::headers::parse_stream_params(&raw.header_data)
+                    {
+                        self.streams.push(StreamRecord {
+                            owner_index,
+                            name: String::from_utf8_lossy(&stream_name).into_owned(),
+                            data_offset: raw.data_offset,
+                            data_size: raw.data_size,
+                            unpacked_size,
+                            method,
+                            dict_size_log,
+                        });
+                    }
                 }
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_ENCRYPT_HEADER => {
@@ -2412,6 +2469,7 @@ impl RarArchive {
             if entry.header.mtime != 0 || entry.header.mtime_ns.is_some() {
                 self.apply_member_times(&entry.header, &dest_path);
             }
+            self.extract_member_streams(member.idx, &dest_path)?;
         }
         Ok(true)
     }
@@ -2541,8 +2599,47 @@ impl RarArchive {
         if entry.header.mtime != 0 || entry.header.mtime_ns.is_some() {
             self.apply_member_times(&entry.header, &dest_path);
         }
+        // Restore NTFS alternate data streams attached to this member
+        // (no-op on non-Windows, like the reference extractor).
+        self.extract_member_streams(idx, &dest_path)?;
 
         Ok(dest_path)
+    }
+
+    /// Write the "STM" stream records attached to member `idx` onto the
+    /// extracted file (`file:name`); Windows only.
+    fn extract_member_streams(&mut self, idx: usize, dest_path: &Path) -> RarResult<()> {
+        #[cfg(windows)]
+        {
+            use std::io::Read;
+            let owned: Vec<StreamRecord> = self
+                .streams
+                .iter()
+                .filter(|s| s.owner_index == idx)
+                .cloned()
+                .collect();
+            for s in owned {
+                // Read the stream payload (possibly RAR5-compressed).
+                let mut packed = vec![0u8; s.data_size as usize];
+                {
+                    let stream = self.stream.as_mut().unwrap();
+                    stream.seek(SeekFrom::Start(s.data_offset))?;
+                    stream.read_exact(&mut packed)?;
+                }
+                let data = if s.method == crate::constants::COMP_METHOD_STORE {
+                    packed
+                } else {
+                    crate::codec::decode_standalone(&packed, s.unpacked_size, s.dict_size_log)
+                        .map_err(|e| RarError::Format(format!("stream decode: {e}")))?
+                };
+                write::write_windows_stream(dest_path, &s.name, &data)?;
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (idx, dest_path);
+        }
+        Ok(())
     }
 
     /// Restore a member's stored timestamps on the extracted file: the

@@ -4,6 +4,55 @@
 
 use super::*;
 
+/// Write an NTFS alternate data stream (`path` + `stream_name` like
+/// `:custom1`) on Windows.
+#[cfg(windows)]
+pub(crate) fn write_windows_stream(path: &Path, stream_name: &str, data: &[u8]) -> RarResult<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_ALWAYS,
+    };
+    let mut full: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    for unit in stream_name.encode_utf16() {
+        full.insert(full.len() - 1, unit);
+    }
+    let handle = unsafe {
+        CreateFileW(
+            full.as_ptr(),
+            0x4000_0000 | 0x8000_0000, // GENERIC_WRITE | GENERIC_READ
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(RarError::Io(std::io::Error::last_os_error()));
+    }
+    let mut written = 0u32;
+    let ok = unsafe {
+        WriteFile(
+            handle,
+            data.as_ptr() as *const _,
+            data.len().min(u32::MAX as usize) as u32,
+            &mut written,
+            std::ptr::null_mut(),
+        )
+    };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return Err(RarError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
 /// Set a file's creation time (Windows only) via `SetFileTime`.
 #[cfg(windows)]
 pub(crate) fn windows_set_creation_time(path: &Path, secs: u64, ns: u32) -> std::io::Result<()> {
@@ -415,6 +464,7 @@ impl RarArchive {
                 attrs,
                 mtime,
             )?;
+            self.write_member_streams(path)?;
             if let Some(cb) = self.progress_callback.as_deref_mut() {
                 cb(file_size, file_size);
             }
@@ -447,6 +497,7 @@ impl RarArchive {
             chain_solid,
             stored_hash,
         )?;
+        self.write_member_streams(path)?;
 
         if let Some(cb) = self.progress_callback.as_deref_mut() {
             cb(file_size, file_size);
@@ -2098,10 +2149,114 @@ impl RarArchive {
             password.as_deref(),
             false,
         )?;
+        self.write_member_streams(path)?;
         if let Some(cb) = self.progress_callback.as_deref_mut() {
             cb(file_size, file_size);
         }
         Ok(())
     }
 
+    /// Write the NTFS alternate data streams of `path` as "STM" service
+    /// records right after the member's file block (WinRAR `-os`).
+    fn write_member_streams(&mut self, path: &Path) -> RarResult<()> {
+        if !self.save_streams {
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            for stream in enumerate_windows_streams(path)? {
+                // FindFirstStreamW returns names like "file:stream:$DATA"
+                // (and "::$DATA" for the default stream); normalize to the
+                // archive form ":stream".
+                let raw_name = stream.0;
+                if raw_name == "::$DATA" {
+                    continue; // the default unnamed stream
+                }
+                let trimmed = raw_name
+                    .strip_suffix(":$DATA")
+                    .unwrap_or(&raw_name);
+                let stream_part = trimmed.rsplit_once(':').map(|(_, s)| s).unwrap_or(trimmed);
+                let name = format!(":{stream_part}");
+                // Read the stream payload through the `file:stream` path.
+                let mut full = path.as_os_str().to_os_string();
+                full.push(&name);
+                let data = match std::fs::read(std::path::PathBuf::from(&full)) {
+                    Ok(d) => d,
+                    Err(_) => continue, // stream vanished mid-run
+                };
+                let subdata = {
+                    let mut extra = Vec::new();
+                    extra.extend(vint::encode((1 + name.len()) as u64));
+                    extra.extend(vint::encode(crate::constants::EXTRA_SERVICE_SUBDATA));
+                    extra.extend(name.as_bytes());
+                    extra
+                };
+                let hdr = crate::headers::build_service_block(
+                    "STM",
+                    &subdata,
+                    data.len() as u64,
+                    crate::constants::BLOCK_FLAG_DEPENDS_PREV,
+                );
+                self.write_block_header(&hdr)?;
+                let stream = self.stream.as_mut().unwrap();
+                stream.write_all(&data)?;
+                self.volume_bytes_written =
+                    self.volume_bytes_written.saturating_add(data.len() as u64);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = path;
+        }
+        Ok(())
+    }
+
+}
+
+/// Enumerate the NTFS alternate data streams of `path` on Windows:
+/// `(stream_name_with_leading_colon, size)` pairs.
+#[cfg(windows)]
+fn enumerate_windows_streams(path: &Path) -> RarResult<Vec<(String, u64)>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, WIN32_FIND_STREAM_DATA,
+    };
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut data = WIN32_FIND_STREAM_DATA {
+        cStreamName: [0u16; 296],
+        StreamSize: 0,
+    };
+    let handle = unsafe {
+        FindFirstStreamW(
+            wide.as_ptr(),
+            FindStreamInfoStandard,
+            &mut data as *mut _ as *mut core::ffi::c_void,
+            0,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Ok(Vec::new()); // no streams (or not NTFS)
+    }
+    let mut out = Vec::new();
+    loop {
+        let mut len = 0usize;
+        while len < data.cStreamName.len() && data.cStreamName[len] != 0 {
+            len += 1;
+        }
+        let name = String::from_utf16_lossy(&data.cStreamName[..len]);
+        if !name.is_empty() {
+            out.push((name, data.StreamSize as u64));
+        }
+        let ok = unsafe { FindNextStreamW(handle, &mut data as *mut _ as *mut core::ffi::c_void) };
+        if ok == 0 {
+            break;
+        }
+    }
+    unsafe { CloseHandle(handle) };
+    Ok(out)
 }

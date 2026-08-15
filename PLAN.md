@@ -67,7 +67,7 @@
 - [x] 时间：`-ts[m,c,a][+,-,1]`（2026-08）：库存/保存 ctime+atime（HTIME extra 记录，unix 秒+ns 分段布局与 WinRAR 一致；FILETIME 格式也解析）；创建侧 `-ts`/`-tsc`/`-tsa`/`-tsm1`/`-ts1`/`-ts-` 与 WinRAR 字段级对照一致；提取侧 `-ts` 恢复 ctime（Windows SetFileTime，unix 不可设 ctime 与 WinRAR 一致）+atime；Windows atime 读取用 GetFileTime（新增 windows-sys 依赖）。`-tsp`（保留源 atime）待做
 - [x] 归档组织（批次 3）：`-ed`（不存空目录）、`-c-`、`-si<name>`（stdin 流式添加，files 可省略）、`-ad`（unrar 提取到归档名子目录）
 - [x] 归档组织：`-ad/-am/-as`（`-am[s,r]` 接受不实现；m 命令已有移动语义）、`-e[+]<attr>`（接受）、`-ver[n]`（文件版本控制，2026-08 实现，与 WinRAR 对照一致）
-- [x] 文件系统语义：`-os`（NTFS 流，接受不实现）；`-ow`（读侧解析 OWNER ✓、写侧 2026-08 实现 unix 数字 uid/gid）；`-ac/-ai`（接受）
+- [x] 文件系统语义（2026-08）：`-os`（NTFS 备用数据流保存/提取：写侧枚举流 → "STM" 服务块（SUBDATA extra 存流名 + DEPENDS_PREV + 压缩载荷）；读侧解析 STM 块并解压恢复流；WinRAR 7.23 双向互操作验证）；`-ow`（读侧解析 OWNER ✓、写侧 unix 数字 uid/gid）；`-ac/-ai`（接受）
 - [x] 交互/消息（批次 3）：`-p-`（无密码，与 WinRAR 实测一致）、`-ierr`（消息到 stderr）
 - [x] 交互/消息（2026-08）：`-id[c,d,n,p]` 细分（接受；-idq 是唯一生效的）、`-ilog[name]`（错误日志文件）、`-ac/-ai`（Windows 属性，接受）、`-e[+]<attr>`（属性掩码，接受）、`-os`（NTFS 流，接受）、`-sc`（字符集，接受）、`-oni`（接受）、`-ri`（优先级，接受）、`-vp/-vd`（分卷，接受）、`-oi`（接受）、`-am[s,r]`（接受）、`-ieml/-ioff/-isnd`（系统动作，接受但**绝不执行**关机/邮件/声音）、`-iver`（打印版本退出）、`-cfg-`（接受，本无配置文件）
 - [x] 文件系统语义（2026-08）：`-ow` 写侧（unix 存数字 uid/gid 到 OWNER extra）、`-tsp`（归档后恢复源 atime，unix）
@@ -99,7 +99,7 @@
 6. `ch`、`-z`、`-ag`、`-y/-o` 等高频小开关 ✅
 7. 剩余小开关批量：`-id[c,d,n,p]` 细分、`-ver[n]`、`-ow` 写侧、`-ac/-ai`、`-e[+]<attr>`、`-ad/-am/-as`、`-os`、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`、`-oi`、`-ilog` 系列 ✅（2026-08；`-ieml/-ioff/-isnd/-iver`、`-cfg-` 配置体系、`-os` 实际 ADS 保存待做）
 
-> 进度：plan.md 差距清单全部勾选 ✅（2026-08）。剩余的 `-os` ADS 实际保存、rar.ini 配置体系为平台/体系级增强，非 CLI 差距。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
+> 进度：plan.md 差距清单全部勾选 ✅（2026-08，含 `-os` ADS 实际保存）。剩余的 rar.ini 配置体系为体系级增强（下一步：② rar.ini / RARINISWITCHES / rarfiles.lst）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
 
 ## 备注
 

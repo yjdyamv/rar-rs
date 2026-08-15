@@ -107,6 +107,10 @@ pub const EXTRA_FILE_VERSION: u64 = 0x04;
 pub const EXTRA_FILE_REDIRECT: u64 = 0x05;
 pub const EXTRA_FILE_OWNER: u64 = 0x06;
 pub const EXTRA_FILE_SERVICE: u64 = 0x07;
+/// Extra record inside a service block ("service data"): the payload is
+/// the service-specific data (recovery percent for "RR", the NTFS stream
+/// name for "STM").
+pub const EXTRA_SERVICE_SUBDATA: u64 = 0x07;
 
 // ── Encryption Parameters ──────────────────────────────────────────────────
 

@@ -766,6 +766,92 @@ fn parse_extra_records(
     (mtime_override, mtime_ns, ctime, atime, owner, group, version)
 }
 
+/// Extract the extra area of a block body (`[type][flags][extra_size?]
+/// [data_size?][...][name][extra at end]`): the last `extra_size` bytes,
+/// like the reference reader does.
+pub(crate) fn block_extra_area(body: &[u8]) -> Vec<u8> {
+    let mut offset = 0usize;
+    let (_, n) = match vint::decode_from_slice(body, offset) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    offset += n;
+    let (flags, n) = match vint::decode_from_slice(body, offset) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    offset += n;
+    let mut extra_size = 0usize;
+    if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
+        let (v, n) = match vint::decode_from_slice(body, offset) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        offset += n;
+        extra_size = v as usize;
+    }
+    let _ = offset;
+    let start = body.len().saturating_sub(extra_size);
+    body[start..].to_vec()
+}
+
+/// Extract the service-data (SUBDATA) record payload from a service
+/// block's extra area: the payload of the record whose type is
+/// `EXTRA_SERVICE_SUBDATA` (recovery percent for "RR", NTFS stream name
+/// for "STM"). `extra_data` is the block's extra area.
+pub(crate) fn parse_service_subdata(extra_data: &[u8]) -> Option<Vec<u8>> {
+    let mut offset = 0usize;
+    while offset + 2 <= extra_data.len() {
+        let (rec_size, n) = vint::decode_from_slice(extra_data, offset).ok()?;
+        offset += n;
+        let rec_end = offset.checked_add(rec_size as usize)?;
+        if rec_end > extra_data.len() {
+            return None;
+        }
+        let (rec_type, tn) = vint::decode_from_slice(extra_data, offset).ok()?;
+        if rec_type == EXTRA_SERVICE_SUBDATA {
+            return Some(extra_data[offset + tn..rec_end].to_vec());
+        }
+        offset = rec_end;
+    }
+    None
+}
+
+/// Parse the compression parameters of a service block ("STM" stream
+/// records carry a compressed payload): `(unpacked_size, method, dict_log)`.
+pub(crate) fn parse_stream_params(body: &[u8]) -> Option<(u64, u8, u8)> {
+    let mut offset = 0usize;
+    let (_, n) = vint::decode_from_slice(body, offset).ok()?;
+    offset += n;
+    let (flags, n) = vint::decode_from_slice(body, offset).ok()?;
+    offset += n;
+    if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
+        let (_, n) = vint::decode_from_slice(body, offset).ok()?;
+        offset += n;
+    }
+    if flags & BLOCK_FLAG_DATA_AREA != 0 {
+        let (_, n) = vint::decode_from_slice(body, offset).ok()?;
+        offset += n;
+    }
+    let (file_flags, n) = vint::decode_from_slice(body, offset).ok()?;
+    offset += n;
+    let (unpacked_size, n) = vint::decode_from_slice(body, offset).ok()?;
+    offset += n;
+    let (_, n) = vint::decode_from_slice(body, offset).ok()?; // attributes
+    offset += n;
+    if file_flags & FILE_FLAG_TIME_UNIX != 0 {
+        offset += 4;
+    }
+    if file_flags & FILE_FLAG_CRC32 != 0 {
+        offset += 4;
+    }
+    let (comp_info, n) = vint::decode_from_slice(body, offset).ok()?;
+    let method = ((comp_info >> 7) & 7) as u8;
+    let dict_log = ((comp_info >> 10) & 0x0F) as u8;
+    let _ = n;
+    Some((unpacked_size, method, dict_log))
+}
+
 /// Read a length-prefixed name from an extra record body.
 fn read_extra_name(data: &[u8], mut p: usize, end: usize) -> Option<(String, usize)> {
     let (len, n) = vint::decode_from_slice(data, p).ok()?;
@@ -1176,14 +1262,21 @@ pub(crate) fn build_comment_block(comment: &[u8]) -> Vec<u8> {
     block
 }
 
-/// Serialize a "QO"/"RR"-style service block: type 3, the given name, an
-/// extra area holding the service-data record (`subdata`), and `data_size`
-/// bytes of payload following the header.
-pub(crate) fn build_service_block(name: &str, subdata: &[u8], data_size: u64) -> Vec<u8> {
+/// Serialize a "QO"/"RR"/"STM"-style service block: type 3, the given
+/// name, an extra area holding the service-data record (`subdata`),
+/// `data_size` bytes of payload following the header, plus extra block
+/// flags (`BLOCK_FLAG_SKIP_IF_UNKNOWN` for "QO"/"RR",
+/// `BLOCK_FLAG_DEPENDS_PREV` for "STM" stream records).
+pub(crate) fn build_service_block(
+    name: &str,
+    subdata: &[u8],
+    data_size: u64,
+    extra_flags: u64,
+) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend(vint::encode(BLOCK_TYPE_SERVICE_HEADER));
     body.extend(vint::encode(
-        BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_SKIP_IF_UNKNOWN,
+        BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | extra_flags,
     ));
     body.extend(vint::encode(subdata.len() as u64)); // extra area size
     body.extend(vint::encode(data_size)); // data size

@@ -662,6 +662,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         save_atime: ts.save_atime,
         save_mtime: ts.save_mtime,
         save_owner: misc.owner,
+        save_streams: misc.save_streams,
         time_precision_seconds: ts.precision_seconds,
     };
 
@@ -1156,6 +1157,7 @@ fn cmd_update_freshen(
             save_atime: ts.save_atime,
             save_mtime: ts.save_mtime,
         save_owner: misc.owner,
+        save_streams: misc.save_streams,
             time_precision_seconds: ts.precision_seconds,
             ..Default::default()
         };
@@ -1258,6 +1260,7 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
             save_atime: ts.save_atime,
             save_mtime: ts.save_mtime,
         save_owner: misc.owner,
+        save_streams: misc.save_streams,
             time_precision_seconds: ts.precision_seconds,
             ..Default::default()
         };

@@ -52,6 +52,9 @@ pub struct CreateOptions {
     /// Save the owner and group (numeric ids) in an OWNER extra record on
     /// Unix (like WinRAR's `-ow`); no-op elsewhere.
     pub save_owner: bool,
+    /// Save NTFS alternate data streams as "STM" service records (like
+    /// WinRAR's `-os`); no-op off Windows.
+    pub save_streams: bool,
 }
 
 impl Default for CreateOptions {
@@ -72,6 +75,7 @@ impl Default for CreateOptions {
             time_precision_seconds: false,
             save_mtime: true,
             save_owner: false,
+            save_streams: false,
         }
     }
 }
