@@ -4513,4 +4513,63 @@ fn cli_misc_switches_are_accepted_and_ilog_logs_errors() {
     );
 }
 
+// ── configuration sources: RARINISWITCHES / -cfg- / command-line priority ──
+
+#[test]
+fn cli_config_sources_apply_with_winrar_priority() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+
+    // RARINISWITCHES supplies default switches (here: quiet mode).
+    let archive = dir.path().join("env.rar");
+    let out = std::process::Command::new(RAR_CLI)
+        .env("RARINISWITCHES", "-idq")
+        .args(["a"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "RARINISWITCHES=-idq must suppress output, got {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // Command line wins over the environment for single-value switches
+    // (no duplicate-argument error, -m5 applied).
+    let archive = dir.path().join("prio.rar");
+    let out = std::process::Command::new(RAR_CLI)
+        .env("RARINISWITCHES", "-m1 -md128k")
+        .args(["a", "-m5", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "CLI must override RARINISWITCHES without errors: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // -cfg- ignores RARINISWITCHES entirely.
+    let archive = dir.path().join("cfg.rar");
+    let out = std::process::Command::new(RAR_CLI)
+        .env("RARINISWITCHES", "-idq")
+        .args(["a", "-cfg-"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Created"),
+        "-cfg- must ignore RARINISWITCHES, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 

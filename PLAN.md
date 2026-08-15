@@ -75,7 +75,8 @@
 - [ ] 交互/消息：`-ieml/-ioff/-isnd/-iver`；`-cfg-` 与 rar.ini/rarfiles.lst 配置体系
 - [x] 其他（批次 3）：`-sl/-sm`（大小过滤）
 - [x] 其他（2026-08）：`-sc/-oni/-ri/-vp/-vd/-oi/-e[+]<attr>`（接受；平台相关或交互类）
-- [x] 交互/消息（2026-08）：`-ieml/-ioff/-isnd`（接受忽略，绝不执行系统动作）、`-iver`（实现）、`-cfg-`（接受）
+- [x] 交互/消息（2026-08）：`-ieml/-ioff/-isnd`（接受忽略，绝不执行系统动作）、`-iver`（实现）、`-cfg-`（实现：禁用配置文件与 RARINISWITCHES）
+- [x] 配置体系（2026-08）：rar.ini（Windows exe 同目录）/ `.rarrc`（Unix HOME）/ `RARINISWITCHES` 环境变量；`switches=` 与 `switches_<cmd>=`；优先级 命令行 > RARINISWITCHES > 配置文件（单值开关去重，命令行覆盖）
 
 ### 工程
 
@@ -99,7 +100,7 @@
 6. `ch`、`-z`、`-ag`、`-y/-o` 等高频小开关 ✅
 7. 剩余小开关批量：`-id[c,d,n,p]` 细分、`-ver[n]`、`-ow` 写侧、`-ac/-ai`、`-e[+]<attr>`、`-ad/-am/-as`、`-os`、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`、`-oi`、`-ilog` 系列 ✅（2026-08；`-ieml/-ioff/-isnd/-iver`、`-cfg-` 配置体系、`-os` 实际 ADS 保存待做）
 
-> 进度：plan.md 差距清单全部勾选 ✅（2026-08，含 `-os` ADS 实际保存）。剩余的 rar.ini 配置体系为体系级增强（下一步：② rar.ini / RARINISWITCHES / rarfiles.lst）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
+> 进度：plan.md 差距清单全部勾选 ✅（2026-08，含 `-os` ADS 与 rar.ini 配置体系）。剩余：`rarfiles.lst`（solid 排序调整，未实现）、release 大文件回归。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
 
 ## 备注
 

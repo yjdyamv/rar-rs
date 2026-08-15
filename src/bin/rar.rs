@@ -501,11 +501,20 @@ mod dict_log_tests {
 
 fn main() {
     let raw: Vec<String> = std::env::args().collect();
-    let args: Vec<String> = raw
+    // Configuration sources (priority: command line > RARINISWITCHES >
+    // rar.ini); `-cfg-` disables the file and the environment variable.
+    let no_config = raw.iter().skip(1).any(|a| a == "-cfg-");
+    let command = common::command_name(&raw);
+    let defaults: Vec<String> = common::default_switches(command.as_deref(), no_config)
+        .iter()
+        .map(|a| common::normalize_switch(a))
+        .collect();
+    let cli_args: Vec<String> = raw
         .iter()
         .skip(1)
         .map(|a| common::normalize_switch(a))
         .collect();
+    let args = common::merge_default_switches(defaults, cli_args);
     // `rar -iver` prints the version and exits (no subcommand needed).
     if args.iter().any(|a| a == "--version-info") {
         println!("RAR 7.23 CLI parity (rar-rs {})", env!("CARGO_PKG_VERSION"));

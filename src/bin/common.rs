@@ -1,6 +1,137 @@
 //! Shared helpers for the `rar` and `unrar` binaries.
 
 use clap::Args;
+use std::collections::HashSet;
+
+/// Long options that may legitimately repeat (kept out of the default
+/// switch deduplication).
+const REPEATABLE_LONG: &[&str] = &[
+    "ts",
+    "exclude",
+    "include",
+    "exclude-list",
+    "include-list",
+    "tn-filter",
+    "to-filter",
+    "id",
+    "priority",
+];
+
+/// Long-option key of a normalized argument (`--name=value` -> `name`).
+fn long_key(arg: &str) -> Option<String> {
+    let rest = arg.strip_prefix("--")?;
+    Some(rest.split('=').next().unwrap_or(rest).to_string())
+}
+
+/// Merge lower-priority default switches (configuration file, then
+/// `RARINISWITCHES`) with the command line: single-value options given
+/// on the command line suppress the same default option (WinRAR
+/// priority: command line > RARINISWITCHES > configuration file).
+/// The defaults are inserted right after the subcommand token (clap
+/// subcommand-scoped options must not appear before the subcommand).
+pub fn merge_default_switches(defaults: Vec<String>, cli_args: Vec<String>) -> Vec<String> {
+    let cli_keys: HashSet<String> = cli_args
+        .iter()
+        .filter_map(|a| long_key(a))
+        .filter(|k| !REPEATABLE_LONG.contains(&k.as_str()))
+        .collect();
+    let defaults: Vec<String> = defaults
+        .into_iter()
+        .filter(|a| match long_key(a) {
+            Some(k) if !REPEATABLE_LONG.contains(&k.as_str()) => !cli_keys.contains(&k),
+            _ => true,
+        })
+        .collect();
+    if defaults.is_empty() {
+        return cli_args;
+    }
+    let pos = cli_args
+        .iter()
+        .position(|a| !a.starts_with('-'))
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let mut merged = Vec::with_capacity(defaults.len() + cli_args.len());
+    merged.extend(cli_args[..pos].iter().cloned());
+    merged.extend(defaults);
+    merged.extend(cli_args[pos..].iter().cloned());
+    merged
+}
+
+/// The subcommand name of a raw argument list (the first token that does
+/// not start with `-`), used to select `switches_<command>` entries.
+pub fn command_name(raw: &[String]) -> Option<String> {
+    raw.iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .cloned()
+}
+
+/// Read the configuration file (`rar.ini` next to the executable on
+/// Windows, `~/.rarrc` on Unix) and return the `switches` /
+/// `switches_<command>` entries (raw, unnormalized).
+fn config_file_switches(command: Option<&str>) -> Vec<String> {
+    let path: Option<std::path::PathBuf> = {
+        #[cfg(windows)]
+        {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|d| d.join("rar.ini")))
+        }
+        #[cfg(unix)]
+        {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".rarrc"))
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            None
+        }
+    };
+    let Some(path) = path else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut global = Vec::new();
+    let mut specific = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let switches: Vec<String> = value
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
+        if key.trim() == "switches" {
+            global = switches;
+        } else if let Some(rest) = key.trim().strip_prefix("switches_")
+            && Some(rest) == command.as_deref()
+        {
+            specific = switches;
+        }
+    }
+    global.into_iter().chain(specific).collect()
+}
+
+/// Default switches for a run: configuration file entries plus the
+/// `RARINISWITCHES` environment variable (raw, unnormalized), with
+/// `-cfg-` disabling both.
+pub fn default_switches(command: Option<&str>, no_config: bool) -> Vec<String> {
+    if no_config {
+        return Vec::new();
+    }
+    let mut out = config_file_switches(command);
+    if let Some(env) = std::env::var_os("RARINISWITCHES") {
+        out.extend(
+            env.to_string_lossy()
+                .split_whitespace()
+                .map(|s| s.to_string()),
+        );
+    }
+    out
+}
 
 /// Common `-p<password>` argument shared by every command.
 #[derive(Args)]
