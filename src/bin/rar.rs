@@ -867,6 +867,21 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         info!("WARNING: No files");
         process::exit(10);
     }
+    // Directory entries always come after the files, like WinRAR.
+    let (file_entries, dir_entries): (Vec<_>, Vec<_>) =
+        collected.into_iter().partition(|c| !c.is_dir);
+    let mut collected: Vec<_> = file_entries;
+    // rarfiles.lst: user-defined add order for solid archives (mask list
+    // with optional `$default`); matched files are grouped by the
+    // highest-priority mask, where a mask whose matches are a subset of
+    // another mask's wins regardless of position (WinRAR semantics).
+    if args.solid {
+        let masks = common::read_rarfiles_lst();
+        if !masks.is_empty() {
+            apply_rarfiles_order(&mut collected, &masks);
+        }
+    }
+    collected.extend(dir_entries);
     // -tsp: snapshot source access times before reading the files.
     #[cfg(unix)]
     let ts_preserve_atimes: Vec<(std::path::PathBuf, std::time::SystemTime)> = if misc.ts_preserve
@@ -1935,4 +1950,80 @@ fn cmd_info(args: &ArchiveArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Reorder `collected` according to a rarfiles.lst mask list (`None` =
+/// `$default` position). Each file is placed in the group of its
+/// highest-priority matching mask: the earliest mask wins, except that a
+/// mask whose match set is a subset of another's takes priority over it
+/// regardless of position (WinRAR rule). Files matching nothing go to
+/// `$default`, or to the end when there is no `$default`. The sort is
+/// stable, so files inside a group keep their collection order.
+fn apply_rarfiles_order(
+    collected: &mut Vec<rar5::name_policy::Collected>,
+    masks: &[Option<String>],
+) {
+    use std::cmp::Ordering;
+
+    // Match set of each mask over the current file set (the subset rule
+    // is evaluated against these sets). Masks match the archive name
+    // with any leading `./` component stripped.
+    let match_sets: Vec<Vec<usize>> = masks
+        .iter()
+        .map(|m| {
+            let pat = m.as_deref();
+            collected
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    pat.is_some_and(|p| {
+                        rar5::name_policy::mask_match(p, c.name.trim_start_matches("./"))
+                    })
+                })
+                .map(|(i, _)| i)
+                .collect()
+        })
+        .collect();
+    let default_pos = masks.iter().position(|m| m.is_none());
+
+    // Highest-priority mask per file.
+    let best: Vec<usize> = collected
+        .iter()
+        .enumerate()
+        .map(|(_, c)| {
+            let matched: Vec<usize> = masks
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| {
+                    m.as_deref().is_some_and(|p| {
+                        rar5::name_policy::mask_match(p, c.name.trim_start_matches("./"))
+                    })
+                })
+                .map(|(mi, _)| mi)
+                .collect();
+            if matched.is_empty() {
+                return default_pos.unwrap_or(masks.len());
+            }
+            matched
+                .into_iter()
+                .min_by(|&a, &b| {
+                    let a_sub =
+                        match_sets[a].iter().all(|x| match_sets[b].contains(x));
+                    let b_sub =
+                        match_sets[b].iter().all(|x| match_sets[a].contains(x));
+                    match (a_sub, b_sub) {
+                        (true, false) => Ordering::Less,
+                        (false, true) => Ordering::Greater,
+                        _ => a.cmp(&b),
+                    }
+                })
+                .unwrap()
+        })
+        .collect();
+
+    let mut order: Vec<usize> = (0..collected.len()).collect();
+    order.sort_by_key(|&i| best[i]);
+    let reordered: Vec<rar5::name_policy::Collected> =
+        order.into_iter().map(|i| collected[i].clone()).collect();
+    *collected = reordered;
 }
