@@ -386,7 +386,7 @@ impl<'a> OutputSink<'a> {
             }
             let region = &mut self.staging[base + start_off..base + end_off];
             let filtered =
-                apply_filter_decode(filt.filter_type, region, filt.channels, filt.block_start);
+                apply_filter_decode(filt.filter_type, region, filt.channels, filt.block_start)?;
             if filtered.len() != region.len() {
                 return Err("RAR5 filter changed output length".into());
             }
@@ -594,7 +594,7 @@ fn decode_inner(
         }
         let region = &mut output[start..end];
         let filtered =
-            apply_filter_decode(filt.filter_type, region, filt.channels, filt.block_start);
+            apply_filter_decode(filt.filter_type, region, filt.channels, filt.block_start)?;
         output[start..start + filtered.len()].copy_from_slice(&filtered);
     }
 

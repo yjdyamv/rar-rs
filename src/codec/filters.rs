@@ -5,18 +5,26 @@
 use super::tables::*;
 
 /// Apply the inverse filter (for decompression).
+///
+/// Filter types 4-7 (ARMT/IA64/PPC/SPARC) are defined in the RAR5 format
+/// notes but are never produced by any implementation (WinRAR 7.23 only
+/// emits Delta/E8/E8E9; ARM was disabled in 5.80; unrar 5.9.4/7.23 and
+/// 7-Zip implement and produce nothing beyond type 3). We refuse them
+/// explicitly instead of silently returning unfiltered data, so a
+/// hypothetical archive using them fails with a clear error rather than a
+/// CRC mismatch.
 pub fn apply_filter_decode(
     filter_type: u8,
     data: &mut [u8],
     channels: u8,
     file_offset: u64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, String> {
     match filter_type {
-        FILTER_DELTA => delta_decode(data, channels),
-        FILTER_E8 => e8_decode(data, file_offset, true),
-        FILTER_E8E9 => e8_decode(data, file_offset, false),
-        FILTER_ARM => arm_decode(data, file_offset),
-        _ => data.to_vec(),
+        FILTER_DELTA => Ok(delta_decode(data, channels)),
+        FILTER_E8 => Ok(e8_decode(data, file_offset, true)),
+        FILTER_E8E9 => Ok(e8_decode(data, file_offset, false)),
+        FILTER_ARM => Ok(arm_decode(data, file_offset)),
+        other => Err(format!("unsupported RAR5 filter type {other}")),
     }
 }
 
@@ -332,7 +340,7 @@ mod tests {
             );
 
             let mut dec_input = encoded.clone();
-            let decoded = apply_filter_decode(FILTER_DELTA, &mut dec_input, channels, 0);
+            let decoded = apply_filter_decode(FILTER_DELTA, &mut dec_input, channels, 0).unwrap();
             assert_eq!(
                 decoded, data,
                 "delta roundtrip failed for channels={channels}"
@@ -343,5 +351,15 @@ mod tests {
                 "delta decode mismatch for channels={channels}"
             );
         }
+    }
+
+    #[test]
+    fn unknown_filter_type_is_rejected_not_silently_skipped() {
+        // Types 4-7 (ARMT/IA64/PPC/SPARC) are never produced by WinRAR 7.23
+        // or any other implementation; they must fail loudly, not return
+        // the raw data (which would corrupt output without a clear error).
+        let mut data = vec![0xAB; 64];
+        let err = apply_filter_decode(4, &mut data, 1, 0).unwrap_err();
+        assert!(err.contains("unsupported RAR5 filter type 4"), "{err}");
     }
 }

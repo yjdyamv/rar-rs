@@ -42,9 +42,9 @@
 
 ### 格式 / 编解码（互操作硬伤，优先）
 
-- [ ] **RAR5 过滤器缺 4 种**：只实现 Delta/E8/E8E9/ARM（`src/codec/filters.rs`；`parse_filter` 只读 3-bit 类型 0-7）。缺 ARMT(4)/IA64(5)/PPC(6)/SPARC(7)。影响：WinRAR 用这 4 种过滤器压的归档（IA64/PPC/SPARC 代码、ARM64 固件等）解压数据错误 → CRC 校验失败（不静默损坏，但读不了）。unrar 开源实现可参考
-- [ ] **字典大小**：写侧无 `-md`，窗口按等级固定（最大 8 MiB）；读侧 `MAX_DICT_SIZE_LOG=13`（1 GiB）硬上限。WinRAR 7.x 支持到 64 GB、>4 GB 可非 2 幂（RAR7 大字典归档目前直接拒读）
-- [ ] **RAR4 创建**（`-ma4`）：现只读不建
+- [x] **RAR5 过滤器：与 WinRAR 7.23 对齐，不实现类型 4-7**（2026-08 核实）：RAR5 规范定义了 3-bit 过滤器类型（0=Delta/1=E8/2=E8E9/3=ARM/4=ARMT/5=IA64/6=PPC/7=SPARC），但 WinRAR 7.23 压缩**只产生 Delta/E8/E8E9**（ARM 自 5.80 起默认关闭）；unrar 5.9.4/7.23、7-Zip ZS、rars 均只实现 0-3 且不产生 4-7 → 现实归档中不存在类型 4-7，无互操作价值。我们已把未知过滤器类型从"静默返回原数据"改为**显式报错**（`unsupported RAR5 filter type N`，与 unrar/7-Zip 的拒绝行为方向一致，避免静默损坏），并新增测试
+- [ ] **字典大小**：写侧无 `-md`，窗口按等级固定（最大 8 MiB）；读侧 `MAX_DICT_SIZE_LOG=13`（1 GiB）硬上限（`src/archive.rs:35`，两处检查 `hdr.comp_dict_size > MAX_DICT_SIZE_LOG` 直接拒读）。WinRAR 7.x 支持到 64 GB、>4 GB 可非 2 幂（RAR7 大字典归档目前直接拒读）
+- [x] **RAR4 创建**（`-ma4`）：不做（2026-08 决定：rar-rs 定位 RAR5-only，用户不需要 RAR4 创建；`rar4_archives_are_rejected_with_clear_error` 已确保 RAR4 归档被明确拒绝）
 - [ ] **RAR4 PPMd / RAR4 加密解压**：不支持（RAR4 只读 LZSS+VM）
 - [ ] **solid + 分卷创建**：现拒绝（`opts.solid && volume_size`）。WinRAR 支持；P4 流式化后 encoder_state 跨卷保持是最后一步
 
@@ -87,12 +87,15 @@
 
 ### 建议实施顺序
 
-1. RAR5 过滤器补齐（ARMT/IA64/PPC/SPARC）
+1. RAR5 过滤器：核实后与 WinRAR 7.23 对齐——不实现类型 4-7，未知类型显式报错 ✅（2026-08）
 2. `-md` 字典选择 + 放宽读侧上限（至少 4 GB / 非 2 幂）
 3. CLI 接 `-ol/-oh`（库已就绪）+ `-si` ✅（批次 2/3 完成）
 4. solid + 分卷
-5. 时间戳扩展（ctime/atime + `-ts`）与时间过滤
-6. `ch`、`-z`、`-ag`、`-y/-o` 等高频小开关
+5. 时间戳扩展（ctime/atime + `-ts`）与时间过滤（`-tnc/-tna` 过滤已支持 c/a 读取）
+6. `ch`、`-z`、`-ag`、`-y/-o` 等高频小开关 ✅
+7. 剩余小开关批量：`-id[c,d,n,p]` 细分、`-ver[n]`、`-ow` 写侧、`-ac/-ai`、`-e[+]<attr>`、`-ad/-am/-as`、`-os`、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`、`-oi`、`-ilog` 系列
+
+> 进度：下一步 = 第 2 项（`-md` 字典选择 + 放宽读侧上限）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
 
 ## 备注
 
