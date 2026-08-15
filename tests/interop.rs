@@ -3001,6 +3001,7 @@ fn official_sfx_cross_validation() {
 // ── Redirection records (symlinks / hardlinks) ──────────────────────────────
 
 #[test]
+#[cfg(unix)]
 fn symlink_and_hardlink_redirects_extract() {
     let dir = make_temp_dir();
     let path = dir.path().join("links.rar");
@@ -3037,8 +3038,9 @@ fn symlink_and_hardlink_redirects_extract() {
 
 /// Redirect entries created by rar-rs must be readable by the official
 /// tools, and rar-created symlink archives must extract the same tree
-/// (env-gated).
+/// (env-gated). Unix-only: creating the source symlink needs `symlink(2)`.
 #[test]
+#[cfg(unix)]
 fn official_redirection_cross_validation() {
     let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
         Some(p) => p,
@@ -3246,7 +3248,10 @@ fn nanosecond_mtime_roundtrip() {
     let dir = make_temp_dir();
     let src = dir.path().join("ns.bin");
     std::fs::write(&src, b"ns test").unwrap();
-    // A file with sub-second mtime precision.
+    // A file with sub-second mtime precision. NTFS stores 100 ns units, so
+    // the value read back from disk is platform-quantized; everything below
+    // compares against the *actual* on-disk timestamp instead of the
+    // requested one, keeping the format check exact on every platform.
     let target = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_789);
     let times = std::fs::FileTimes::new().set_modified(target);
     std::fs::File::options()
@@ -3255,6 +3260,9 @@ fn nanosecond_mtime_roundtrip() {
         .unwrap()
         .set_times(times)
         .unwrap();
+    let disk_mtime = std::fs::metadata(&src).unwrap().modified().unwrap();
+    let disk_secs = disk_mtime.duration_since(std::time::UNIX_EPOCH).unwrap();
+    let disk_ns = disk_secs.subsec_nanos();
 
     let path = dir.path().join("ns.rar");
     {
@@ -3299,13 +3307,21 @@ fn nanosecond_mtime_roundtrip() {
             let name = &block.body[q..q + nl as usize];
             assert_eq!(name, b"ns.bin");
             let extra = &block.body[q + nl as usize..];
+            let mut expected = vec![0x0a, 0x03, 0x13];
+            expected.extend_from_slice(&(disk_secs.as_secs() as u32).to_le_bytes());
+            expected.extend_from_slice(&disk_ns.to_le_bytes());
             assert_eq!(
-                extra,
-                &[
-                    0x0a, 0x03, 0x13, 0x00, 0xf1, 0x53, 0x65, 0x15, 0xcd, 0x5b, 0x07
-                ][..],
+                extra, &expected[..],
                 "FILE_TIME record must match the official format"
             );
+            #[cfg(unix)]
+            assert_eq!(
+                disk_secs.as_secs(),
+                1_700_000_000,
+                "ext4 keeps the exact requested timestamp"
+            );
+            #[cfg(unix)]
+            assert_eq!(disk_ns, 123_456_789, "ext4 keeps exact nanoseconds");
         }
     }
 
@@ -3315,7 +3331,7 @@ fn nanosecond_mtime_roundtrip() {
         let mut rar = RarArchive::open(&path).unwrap();
         assert_eq!(
             rar.get_entry("ns.bin").unwrap().header.mtime_ns,
-            Some(123_456_789)
+            Some(disk_ns)
         );
         rar.extract("ns.bin", &out).unwrap();
     }
@@ -3325,8 +3341,8 @@ fn nanosecond_mtime_roundtrip() {
         .unwrap()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap();
-    assert_eq!(restored.as_secs(), 1_700_000_000);
-    assert_eq!(restored.subsec_nanos(), 123_456_789);
+    assert_eq!(restored.as_secs(), disk_secs.as_secs());
+    assert_eq!(restored.subsec_nanos(), disk_ns);
 }
 
 /// The official `rar` writes FILE_TIME and OWNER records that we parse;
@@ -3362,7 +3378,16 @@ fn official_time_and_owner_cross_validation() {
     assert!(status.success());
     let rar = rar5::RarArchive::open(&path).unwrap();
     let entry = rar.get_entry("ns.bin").unwrap();
-    assert_eq!(entry.header.mtime_ns, Some(123_456_789));
+    // The official rar stores the on-disk timestamp, which NTFS quantizes
+    // to 100 ns; compare against the actual disk value, not the request.
+    let disk_ns = std::fs::metadata(&src)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    assert_eq!(entry.header.mtime_ns, Some(disk_ns));
     assert!(entry.header.owner.is_some(), "owner record must be parsed");
 
     // Our ns-mtime archive must be readable by the official unrar.
