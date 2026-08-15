@@ -24,16 +24,17 @@ struct PendingFilter {
 /// Persistent decoder state for solid archive support.
 ///
 /// In a solid archive, the sliding window, distance cache, and Huffman
-/// tables carry over between files.
+/// tables carry over between files. The fields are codec-private; the
+/// archive layer only creates and holds the state.
 pub struct DecoderState {
-    pub window: SlidingWindow,
-    pub dist_cache: [u32; DIST_CACHE_SIZE],
-    pub last_length: u32,
-    pub prev_low_dist: u32,
-    pub table_nc: Option<DecodeTable>,
-    pub table_dc: Option<DecodeTable>,
-    pub table_ldc: Option<DecodeTable>,
-    pub table_rc: Option<DecodeTable>,
+    window: SlidingWindow,
+    dist_cache: [u32; DIST_CACHE_SIZE],
+    last_length: u32,
+    prev_low_dist: u32,
+    table_nc: Option<DecodeTable>,
+    table_dc: Option<DecodeTable>,
+    table_ldc: Option<DecodeTable>,
+    table_rc: Option<DecodeTable>,
 }
 
 impl DecoderState {
@@ -51,23 +52,30 @@ impl DecoderState {
     }
 }
 
-// ── Public decode function ─────────────────────────────────────────────────
+// ── Public decode entry points ─────────────────────────────────────────────
 
-/// Decode RAR5 compressed data.
+/// Options for decoding one member.
+///
+/// `dict_size_log` sizes the window for standalone members only: when
+/// `state` is carried (solid chains), the state owns its window and the
+/// log is ignored by construction.
+pub struct DecodeOptions<'a> {
+    /// Dictionary size as log2(size/128KB), 0 = 128KB. Used when `state`
+    /// is `None`.
+    pub dict_size_log: u8,
+    /// Shared decoder state for solid-chain continuity (`None` for
+    /// standalone members).
+    pub state: Option<&'a mut DecoderState>,
+}
+
+/// Decode RAR5 compressed data into a buffer.
 ///
 /// - `data`: raw compressed bytes (the data area from the file block)
 /// - `unpacked_size`: expected decompressed size in bytes
-/// - `dict_size_log`: dictionary size as log2(size/128KB), 0 = 128KB
-/// - `state`: optional DecoderState for solid archive continuity
-pub fn decode(
-    data: &[u8],
-    unpacked_size: u64,
-    dict_size_log: u8,
-    state: Option<&mut DecoderState>,
-) -> Result<Vec<u8>, String> {
+pub fn decode(data: &[u8], unpacked_size: u64, opts: DecodeOptions<'_>) -> Result<Vec<u8>, String> {
     let mut reader = BitReader::new(data);
 
-    match state {
+    match opts.state {
         Some(st) => decode_inner(
             &mut reader,
             unpacked_size,
@@ -80,7 +88,7 @@ pub fn decode(
             &mut st.table_ldc,
             &mut st.table_rc,
         ),
-        None => decode_standalone(data, unpacked_size, dict_size_log),
+        None => decode_standalone(data, unpacked_size, opts.dict_size_log),
     }
 }
 
@@ -97,14 +105,13 @@ pub const MAX_STREAMING_FILTER_BUFFER: u64 = 64 * 1024 * 1024;
 pub fn decode_to_writer(
     data: &[u8],
     unpacked_size: u64,
-    dict_size_log: u8,
-    state: Option<&mut DecoderState>,
+    opts: DecodeOptions<'_>,
     writer: &mut dyn std::io::Write,
 ) -> Result<u64, String> {
     if unpacked_size == 0 {
         return Ok(0);
     }
-    match state {
+    match opts.state {
         Some(st) => decode_inner_streaming(
             &mut BitReader::new(data),
             unpacked_size,
@@ -118,7 +125,7 @@ pub fn decode_to_writer(
             &mut st.table_rc,
             writer,
         ),
-        None => decode_standalone_to_writer(data, unpacked_size, dict_size_log, writer),
+        None => decode_standalone_to_writer(data, unpacked_size, opts.dict_size_log, writer),
     }
 }
 

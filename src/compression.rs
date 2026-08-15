@@ -79,11 +79,14 @@ pub fn decompress(
         return Ok(data.to_vec());
     }
     if (COMP_METHOD_FASTEST..=COMP_METHOD_BEST).contains(&method) {
-        let result = if let Some(st) = state {
-            codec::decode(data, unpacked_size, dict_size_log, Some(st))?
-        } else {
-            codec::decode_standalone(data, unpacked_size, dict_size_log)?
-        };
+        let result = codec::decode(
+            data,
+            unpacked_size,
+            codec::DecodeOptions {
+                dict_size_log,
+                state,
+            },
+        )?;
         if result.len() != unpacked_size as usize {
             return Err(format!(
                 "decompressed size mismatch: expected {unpacked_size}, got {}",

@@ -1029,8 +1029,16 @@ mod tests {
         let stream = build_block_header(&block_data, total_bits, true, true);
 
         let mut out = Vec::new();
-        let written =
-            decode_to_writer(&stream, original.len() as u64, 0, None, &mut out).expect("decode");
+        let written = decode_to_writer(
+            &stream,
+            original.len() as u64,
+            crate::codec::DecodeOptions {
+                dict_size_log: 0,
+                state: None,
+            },
+            &mut out,
+        )
+        .expect("decode");
         assert_eq!(written as usize, original.len());
         assert_eq!(out, original);
     }

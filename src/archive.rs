@@ -2295,10 +2295,13 @@ impl RarArchive {
                     } else if hdr.comp_method == COMP_METHOD_STORE {
                         payload.data
                     } else {
-                        crate::codec::decode_standalone(
+                        crate::codec::decode(
                             &payload.data,
                             hdr.unpacked_size,
-                            hdr.comp_dict_size,
+                            crate::codec::DecodeOptions {
+                                dict_size_log: hdr.comp_dict_size,
+                                state: None,
+                            },
                         )
                         .map_err(RarError::Unsupported)?
                     };
@@ -2907,8 +2910,10 @@ impl RarArchive {
             crate::codec::decode_to_writer(
                 &payload.data,
                 hdr.unpacked_size,
-                hdr.comp_dict_size,
-                state,
+                crate::codec::DecodeOptions {
+                    dict_size_log: hdr.comp_dict_size,
+                    state,
+                },
                 &mut sink,
             )
             .map_err(RarError::Unsupported)?

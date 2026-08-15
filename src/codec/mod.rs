@@ -16,7 +16,7 @@ pub mod tables;
 pub mod window;
 
 pub use decoder::{
-    DecoderState, MAX_STREAMING_FILTER_BUFFER, decode, decode_standalone,
+    DecodeOptions, DecoderState, MAX_STREAMING_FILTER_BUFFER, decode, decode_standalone,
     decode_standalone_to_writer, decode_to_writer,
 };
 pub use encoder::{
