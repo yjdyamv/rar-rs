@@ -106,46 +106,24 @@ struct BlockInfo {
 }
 
 fn scan_blocks(data: &[u8]) -> Vec<BlockInfo> {
+    // Cross the library's block-envelope seam (the same reader the archive
+    // scanner uses) instead of re-implementing the envelope format.
     let mut blocks = Vec::new();
-    let mut pos = 8; // skip signature
-    while pos + 4 < data.len() {
-        let hsize_start = pos + 4;
-        let (hsize, p) = read_vint(data, hsize_start);
-        if hsize == 0 || hsize > data.len() as u64 {
-            break;
-        }
-        let body_end = p + hsize as usize;
-        if body_end > data.len() {
-            break;
-        }
-        let body = data[p..body_end].to_vec();
-        let (block_type, q) = read_vint(&body, 0);
-        let (flags, q) = read_vint(&body, q);
-        let mut extra_size = 0u64;
-        let mut data_size = 0u64;
-        let mut q = q;
-        if flags & 0x0001 != 0 {
-            let (v, n) = read_vint(&body, q);
-            extra_size = v;
-            q = n;
-        }
-        if flags & 0x0002 != 0 {
-            let (v, n) = read_vint(&body, q);
-            data_size = v;
-            q = n;
-        }
-        let _ = q;
+    let mut cursor = std::io::Cursor::new(data);
+    cursor.set_position(8); // skip the RAR5 signature
+    while let Ok(Some(meta)) = rar5::headers::read_block(&mut cursor, None) {
         blocks.push(BlockInfo {
-            start: pos,
-            header_len: body_end - hsize_start,
-            block_type,
-            flags,
-            extra_size,
-            data_size,
-            body,
+            start: meta.block_start as usize,
+            header_len: (meta.data_offset - meta.block_start - 4) as usize,
+            block_type: meta.block_type,
+            flags: meta.flags,
+            extra_size: 0,
+            data_size: meta.raw.data_size,
+            body: meta.raw.header_data,
         });
-        pos = body_end + data_size as usize;
-        if block_type == 0x05 {
+        let last = meta.block_type == 0x05;
+        cursor.set_position(meta.data_end);
+        if last {
             break;
         }
     }

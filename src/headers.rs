@@ -29,83 +29,209 @@ pub struct RawBlock {
     pub flags: u64,
 }
 
-impl RawBlock {
-    /// Read the next raw block from the stream.
-    /// Validates the header CRC32.
-    pub fn read_from<R: Read + Seek>(r: &mut R) -> RarResult<Self> {
-        // Read 4-byte header CRC32
-        let mut crc_buf = [0u8; 4];
-        r.read_exact(&mut crc_buf).map_err(|_| {
-            RarError::Io(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "stream ended reading block CRC",
-            ))
-        })?;
-        let stored_crc = u32::from_le_bytes(crc_buf);
+/// Byte span of one block in an archive being read or rewritten, with its
+/// parsed (plaintext) header and the exact on-disk header bytes.
+pub struct BlockMeta {
+    pub block_type: u64,
+    pub flags: u64,
+    /// Absolute offset where the block starts (the CRC32 field; for
+    /// header-encrypted archives, the IV).
+    pub block_start: u64,
+    /// Absolute offset where the data area starts (right after the header;
+    /// for header-encrypted archives after the IV + ciphertext).
+    pub data_offset: u64,
+    /// Absolute offset one past the end of the block.
+    pub data_end: u64,
+    /// Exact bytes of the header as stored on disk: `[CRC32][size vint]
+    /// [body]`, or `[IV][ciphertext]` for header-encrypted archives.
+    pub header_bytes: Vec<u8>,
+    /// Length of the size vint inside the plaintext header.
+    pub hsize_vint_len: usize,
+    pub raw: RawBlock,
+}
 
-        // Read header size (vint)
-        let header_size = vint::read(r).map_err(|e| RarError::Format(format!("bad vint: {e}")))?;
-        if header_size == 0 || header_size > 2 * 1024 * 1024 {
-            return Err(RarError::Format(format!(
-                "implausible header size: {header_size}"
-            )));
-        }
+/// The decrypted/plaintext pieces of one block header plus its exact
+/// on-disk bytes.
+struct RawHeader {
+    stored_crc: u32,
+    vint_bytes: Vec<u8>,
+    body: Vec<u8>,
+    on_disk: Vec<u8>,
+}
 
-        // Read the entire header body
-        let mut header_data = vec![0u8; header_size as usize];
-        r.read_exact(&mut header_data)?;
+/// Read the next RAR5 block envelope from `reader`, optionally decrypting
+/// `[IV][AES-256-CBC header]` envelopes with `key` (header-encrypted
+/// archives). Returns `None` at EOF.
+///
+/// The header CRC is verified over the **stored** size-vint bytes plus the
+/// body. This matters: WinRAR 7.x writes size fields as non-canonical
+/// fixed-width vints, so re-encoding the decoded size and hashing that
+/// would reject valid archives.
+pub fn read_block<R: Read + Seek>(
+    reader: &mut R,
+    key: Option<&[u8; 32]>,
+) -> RarResult<Option<BlockMeta>> {
+    let block_start = reader.stream_position()?;
+    let header = match key {
+        Some(key) => match read_encrypted_header(reader, key)? {
+            Some(h) => h,
+            None => return Ok(None),
+        },
+        None => match read_plain_header(reader)? {
+            Some(h) => h,
+            None => return Ok(None),
+        },
+    };
 
-        // Validate CRC over size_bytes + header_body
-        let size_bytes = vint::encode(header_size);
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&size_bytes);
-        hasher.update(&header_data);
-        let computed_crc = hasher.finalize();
-        if computed_crc != stored_crc {
-            return Err(RarError::Crc {
-                expected: stored_crc,
-                actual: computed_crc,
-                context: "block header".into(),
-            });
-        }
-
-        // Parse type and flags
-        let mut offset = 0usize;
-        let (block_type, n) = vint::decode_from_slice(&header_data, offset)
-            .map_err(|e| RarError::Format(format!("block type: {e}")))?;
-        offset += n;
-        let (flags, n) = vint::decode_from_slice(&header_data, offset)
-            .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
-        offset += n;
-
-        // Extra area and data area sizes
-        let mut _extra_size = 0u64;
-        let mut data_size = 0u64;
-        if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
-            let (v, n) = vint::decode_from_slice(&header_data, offset)
-                .map_err(|e| RarError::Format(format!("extra size: {e}")))?;
-            _extra_size = v;
-            offset += n;
-        }
-        if flags & BLOCK_FLAG_DATA_AREA != 0 {
-            let (v, n) = vint::decode_from_slice(&header_data, offset)
-                .map_err(|e| RarError::Format(format!("data size: {e}")))?;
-            data_size = v;
-            offset += n;
-        }
-        let _ = offset; // remaining header_data parsed by typed header
-
-        let data_offset = r.stream_position()?;
-
-        Ok(RawBlock {
-            header_crc: stored_crc,
-            header_data,
-            data_size,
-            data_offset,
-            block_type,
-            flags,
-        })
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&header.vint_bytes);
+    hasher.update(&header.body);
+    let computed = hasher.finalize();
+    if computed != header.stored_crc {
+        return Err(RarError::Crc {
+            expected: header.stored_crc,
+            actual: computed,
+            context: "block header".into(),
+        });
     }
+
+    let (block_type, flags, data_size) = parse_block_fields(&header.body)?;
+    let data_offset = reader.stream_position()?;
+    let data_end = data_offset + data_size;
+    let raw = RawBlock {
+        header_crc: header.stored_crc,
+        header_data: header.body,
+        data_size,
+        data_offset,
+        block_type,
+        flags,
+    };
+    Ok(Some(BlockMeta {
+        block_type,
+        flags,
+        block_start,
+        data_offset,
+        data_end,
+        header_bytes: header.on_disk,
+        hsize_vint_len: header.vint_bytes.len(),
+        raw,
+    }))
+}
+
+/// Read a plaintext block envelope: `[CRC32][size vint][body]`.
+fn read_plain_header<R: Read>(reader: &mut R) -> RarResult<Option<RawHeader>> {
+    let mut crc_buf = [0u8; 4];
+    match reader.read_exact(&mut crc_buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    let stored_crc = u32::from_le_bytes(crc_buf);
+
+    let mut vint_bytes = Vec::with_capacity(2);
+    let hsize = loop {
+        let mut b = [0u8; 1];
+        reader.read_exact(&mut b)?;
+        vint_bytes.push(b[0]);
+        if b[0] & 0x80 == 0 {
+            break vint::decode_from_slice(&vint_bytes, 0)
+                .map_err(|e| RarError::Format(format!("bad vint: {e}")))?
+                .0;
+        }
+    };
+    if hsize == 0 || hsize > 2 * 1024 * 1024 {
+        return Err(RarError::Format(format!(
+            "implausible header size: {hsize}"
+        )));
+    }
+
+    let mut body = vec![0u8; hsize as usize];
+    reader.read_exact(&mut body)?;
+
+    let mut on_disk = Vec::with_capacity(4 + vint_bytes.len() + body.len());
+    on_disk.extend_from_slice(&crc_buf);
+    on_disk.extend_from_slice(&vint_bytes);
+    on_disk.extend_from_slice(&body);
+    Ok(Some(RawHeader {
+        stored_crc,
+        vint_bytes,
+        body,
+        on_disk,
+    }))
+}
+
+/// Read an encrypted block envelope: `[16-byte IV][AES-256-CBC header
+/// padded to 16 bytes]`.
+fn read_encrypted_header<R: Read>(reader: &mut R, key: &[u8; 32]) -> RarResult<Option<RawHeader>> {
+    let mut iv = [0u8; crate::constants::ENCR_IV_SIZE];
+    match reader.read_exact(&mut iv) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+
+    let mut first_ct = [0u8; 16];
+    reader.read_exact(&mut first_ct)?;
+    let first_pt = crate::encryption::decrypt_data(&first_ct, key, &iv)?;
+    let (stored_crc, vint_len, hsize) = {
+        let stored_crc = u32::from_le_bytes(first_pt[..4].try_into().unwrap());
+        let (hsize, vint_len) = vint::decode_from_slice(&first_pt, 4)
+            .map_err(|e| RarError::Format(format!("encrypted block vint: {e}")))?;
+        (stored_crc, vint_len, hsize)
+    };
+    if hsize == 0 || hsize > 2 * 1024 * 1024 {
+        return Err(RarError::Format(format!(
+            "implausible encrypted header size: {hsize}"
+        )));
+    }
+
+    // Total raw bytes = CRC(4) + vint + body, padded to 16 bytes.
+    let total_raw = 4 + vint_len + hsize as usize;
+    let enc_size = total_raw.div_ceil(16) * 16;
+    let mut full_ct = vec![0u8; enc_size];
+    full_ct[..16].copy_from_slice(&first_ct);
+    if enc_size > 16 {
+        reader.read_exact(&mut full_ct[16..])?;
+    }
+    let full_pt = crate::encryption::decrypt_data(&full_ct, key, &iv)?;
+
+    let vint_bytes = full_pt[4..4 + vint_len].to_vec();
+    let body = full_pt[4 + vint_len..total_raw].to_vec();
+    let mut on_disk = Vec::with_capacity(16 + enc_size);
+    on_disk.extend_from_slice(&iv);
+    on_disk.extend_from_slice(&full_ct);
+    Ok(Some(RawHeader {
+        stored_crc,
+        vint_bytes,
+        body,
+        on_disk,
+    }))
+}
+
+/// Parse block type, flags and data size out of a plaintext header body
+/// (the fields after the header size vint).
+fn parse_block_fields(body: &[u8]) -> RarResult<(u64, u64, u64)> {
+    let mut offset = 0usize;
+    let (block_type, n) = vint::decode_from_slice(body, offset)
+        .map_err(|e| RarError::Format(format!("block type: {e}")))?;
+    offset += n;
+    let (flags, n) = vint::decode_from_slice(body, offset)
+        .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
+    offset += n;
+    if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
+        let (_, n) = vint::decode_from_slice(body, offset)
+            .map_err(|e| RarError::Format(format!("extra size: {e}")))?;
+        offset += n;
+    }
+    let mut data_size = 0u64;
+    if flags & BLOCK_FLAG_DATA_AREA != 0 {
+        let (v, n) = vint::decode_from_slice(body, offset)
+            .map_err(|e| RarError::Format(format!("data size: {e}")))?;
+        data_size = v;
+        offset += n;
+    }
+    let _ = offset;
+    Ok((block_type, flags, data_size))
 }
 
 // ── Archive Header ─────────────────────────────────────────────────────────

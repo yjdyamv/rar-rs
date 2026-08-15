@@ -277,26 +277,6 @@ struct DecryptedPayload {
     keys: Option<encryption::DerivedKeys>,
 }
 
-/// Byte span of one block in the archive being rewritten, with its parsed
-/// (plaintext) header and the exact on-disk header bytes.
-struct BlockMeta {
-    block_type: u64,
-    flags: u64,
-    /// Absolute offset where the block starts (the CRC32 field).
-    block_start: u64,
-    /// Absolute offset where the data area starts (right after the header;
-    /// for header-encrypted archives after the IV + ciphertext).
-    data_offset: u64,
-    /// Absolute offset one past the end of the block.
-    data_end: u64,
-    /// Exact bytes of the header as stored on disk: `[CRC32][size vint]
-    /// [body]`, or `[IV][ciphertext]` for header-encrypted archives.
-    header_bytes: Vec<u8>,
-    /// Length of the size vint inside the plaintext header.
-    hsize_vint_len: usize,
-    raw: RawBlock,
-}
-
 /// One step of a surgical archive rewrite.
 enum RewriteOp {
     /// Copy one block verbatim: `header_bytes` followed by `len` bytes of
@@ -744,8 +724,7 @@ impl RarArchive {
         let mut reader = File::open(&path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
 
-        let first = self
-            .read_next_block(&mut reader)?
+        let first = crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
             .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
         let main_meta = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
@@ -758,7 +737,7 @@ impl RarArchive {
                 }
                 self.archive_encr = Some(params);
                 self.header_encryption = true;
-                self.read_next_block(&mut reader)?
+                crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
                     .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
             }
             BLOCK_TYPE_ARCHIVE_HEADER => first,
@@ -785,7 +764,7 @@ impl RarArchive {
         let mut truncate_pos = None;
         let mut last_file_end = 0u64;
         let mut rr_percent = None;
-        while let Some(meta) = self.read_next_block(&mut reader)? {
+        while let Some(meta) = crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => {
                     if truncate_pos.is_none() {
@@ -852,8 +831,7 @@ impl RarArchive {
         let path = self.path.clone();
         let mut reader = File::open(&path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
-        let first = self
-            .read_next_block(&mut reader)?
+        let first = crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
             .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
         let main_meta = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
@@ -866,7 +844,7 @@ impl RarArchive {
                 }
                 self.archive_encr = Some(params);
                 self.header_encryption = true;
-                self.read_next_block(&mut reader)?
+                crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
                     .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
             }
             BLOCK_TYPE_ARCHIVE_HEADER => first,
@@ -1769,16 +1747,21 @@ impl RarArchive {
     fn scan_blocks(&mut self) -> RarResult<()> {
         self.entries.clear();
 
-        let stream = self.stream.as_mut().unwrap();
+        // None until the plaintext archive-level encryption header arrives
+        // (header-encrypted archives: every block after it is `[IV][AES-256-
+        // CBC header]`).
+        let mut encr_key: Option<[u8; 32]> = None;
 
         loop {
-            let raw = match RawBlock::read_from(stream) {
-                Ok(b) => b,
-                Err(RarError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e),
+            let raw = match crate::headers::read_block(
+                self.stream.as_mut().unwrap(),
+                encr_key.as_ref(),
+            )? {
+                Some(meta) => meta.raw,
+                None => break,
             };
 
-            let stream_pos = stream.stream_position()?;
+            let stream_pos = self.stream.as_ref().unwrap().stream_position()?;
 
             match raw.block_type {
                 BLOCK_TYPE_ARCHIVE_HEADER => {
@@ -1801,156 +1784,25 @@ impl RarArchive {
                 }
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_ENCRYPT_HEADER => {
-                    return self.scan_encrypted_blocks(&raw);
+                    let password = self.password.as_ref().ok_or_else(|| {
+                        RarError::Encrypted(
+                            "archive has encrypted headers; provide a password".into(),
+                        )
+                    })?;
+                    let params = parse_archive_encrypt_header(&raw)?;
+                    if !params.verify_password(password) {
+                        return Err(RarError::Encrypted("wrong password".into()));
+                    }
+                    encr_key = Some(params.get_key(password));
                 }
                 _ => {}
             }
 
             if raw.data_size > 0 {
-                stream.seek(SeekFrom::Start(raw.data_offset + raw.data_size))?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Parse the archive-level encryption header and scan all encrypted blocks.
-    ///
-    /// In header-encrypted archives, each block after the encryption header is:
-    /// `[16-byte IV] [AES-256-CBC encrypted header, padded to 16B] [file data if any]`
-    fn scan_encrypted_blocks(&mut self, encrypt_raw: &RawBlock) -> RarResult<()> {
-        let password = self.password.as_ref().ok_or_else(|| {
-            RarError::Encrypted("archive has encrypted headers; provide a password".into())
-        })?;
-
-        // Parse the encryption header to get salt, strength, etc.
-        let encr_params = parse_archive_encrypt_header(encrypt_raw)?;
-
-        if !encr_params.verify_password(password) {
-            return Err(RarError::Encrypted("wrong password".into()));
-        }
-
-        let key = encr_params.get_key(password);
-        let stream = self.stream.as_mut().unwrap();
-
-        loop {
-            // Each encrypted block: [16-byte IV] [encrypted header padded to 16B]
-            let mut iv = [0u8; 16];
-            match stream.read_exact(&mut iv) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            }
-
-            // Read first 16 encrypted bytes to determine header size
-            let mut first_block = [0u8; 16];
-            stream.read_exact(&mut first_block)?;
-
-            let first_pt = encryption::decrypt_data(&first_block, &key, &iv)?;
-
-            // Parse CRC and header size from decrypted data
-            let _crc = u32::from_le_bytes(first_pt[0..4].try_into().unwrap());
-            let (hdr_size, vint_len) = vint::decode_from_slice(&first_pt, 4)
-                .map_err(|e| RarError::Format(format!("encrypted block vint: {e}")))?;
-
-            if hdr_size == 0 || hdr_size > 2 * 1024 * 1024 {
-                return Err(RarError::Format(format!(
-                    "implausible encrypted header size: {hdr_size}"
-                )));
-            }
-
-            // Total raw bytes = CRC(4) + vint + header_body, padded to 16B
-            let total_raw = 4 + vint_len + hdr_size as usize;
-            let enc_size = total_raw.div_ceil(16) * 16;
-
-            // Read remaining encrypted blocks (we already have the first 16)
-            let mut full_ct = vec![0u8; enc_size];
-            full_ct[..16].copy_from_slice(&first_block);
-            if enc_size > 16 {
-                stream.read_exact(&mut full_ct[16..])?;
-            }
-
-            // Decrypt the full header
-            let full_pt = encryption::decrypt_data(&full_ct, &key, &iv)?;
-
-            // Extract just the header data (skip CRC + vint)
-            let header_data = full_pt[4 + vint_len..4 + vint_len + hdr_size as usize].to_vec();
-
-            // Verify CRC
-            let size_bytes = vint::encode(hdr_size);
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(&size_bytes);
-            hasher.update(&header_data);
-            let computed_crc = hasher.finalize();
-            if computed_crc != _crc {
-                return Err(RarError::Crc {
-                    expected: _crc,
-                    actual: computed_crc,
-                    context: "encrypted block header".into(),
-                });
-            }
-
-            // Parse block type and flags from header_data
-            let mut offset = 0;
-            let (block_type, n) = vint::decode_from_slice(&header_data, offset)
-                .map_err(|e| RarError::Format(format!("block type: {e}")))?;
-            offset += n;
-            let (flags, n) = vint::decode_from_slice(&header_data, offset)
-                .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
-            offset += n;
-
-            let mut _extra_size = 0u64;
-            let mut data_size = 0u64;
-            if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
-                let (v, n) = vint::decode_from_slice(&header_data, offset)
-                    .map_err(|e| RarError::Format(format!("extra size: {e}")))?;
-                _extra_size = v;
-                offset += n;
-            }
-            if flags & BLOCK_FLAG_DATA_AREA != 0 {
-                let (v, n) = vint::decode_from_slice(&header_data, offset)
-                    .map_err(|e| RarError::Format(format!("data size: {e}")))?;
-                data_size = v;
-                offset += n;
-            }
-            let _ = offset;
-
-            // Build a RawBlock so we can reuse existing header parsers
-            let raw = RawBlock {
-                header_crc: _crc,
-                header_data,
-                data_size,
-                data_offset: stream.stream_position()?,
-                block_type,
-                flags,
-            };
-
-            match block_type {
-                BLOCK_TYPE_ARCHIVE_HEADER => {
-                    let _ah = ArchiveHeader::from_raw(&raw)?;
-                }
-                BLOCK_TYPE_FILE_HEADER => {
-                    let fh = FileHeader::from_raw(&raw, raw.data_offset)?;
-                    let chunk = DataChunk {
-                        volume_index: 0,
-                        data_offset: fh.data_offset,
-                        packed_size: fh.packed_size,
-                        crc32_val: fh.crc32_val,
-                        is_final: true,
-                        extra_data: fh.extra_data.clone(),
-                    };
-                    self.entries.push(ArchiveEntry {
-                        header: fh,
-                        chunks: vec![chunk],
-                    });
-                }
-                BLOCK_TYPE_END_ARCHIVE => break,
-                _ => {}
-            }
-
-            // Skip file data area if present
-            if data_size > 0 {
-                stream.seek(SeekFrom::Current(data_size as i64))?;
+                self.stream
+                    .as_mut()
+                    .unwrap()
+                    .seek(SeekFrom::Start(raw.data_offset + raw.data_size))?;
             }
         }
 
@@ -1985,17 +1837,9 @@ impl RarArchive {
             let mut encr_key: Option<[u8; 32]> = None;
 
             loop {
-                let raw = if let Some(key) = encr_key {
-                    match Self::read_encrypted_block(&mut stream, &key)? {
-                        Some(meta) => meta.raw,
-                        None => break,
-                    }
-                } else {
-                    match RawBlock::read_from(&mut stream) {
-                        Ok(b) => b,
-                        Err(RarError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                        Err(e) => return Err(e),
-                    }
+                let raw = match crate::headers::read_block(&mut stream, encr_key.as_ref())? {
+                    Some(meta) => meta.raw,
+                    None => break,
                 };
 
                 let stream_pos = stream.stream_position()?;
@@ -3655,7 +3499,7 @@ impl RarArchive {
     pub fn get_comment(&mut self) -> RarResult<Option<Vec<u8>>> {
         let mut reader = File::open(&self.path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
-        while let Some(meta) = self.read_next_block(&mut reader)? {
+        while let Some(meta) = crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_SERVICE_HEADER
@@ -3736,8 +3580,7 @@ impl RarArchive {
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         self.header_encryption = false;
         self.archive_encr = None;
-        let first = self
-            .read_next_block(&mut reader)?
+        let first = crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
             .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
         let main = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
@@ -3750,7 +3593,7 @@ impl RarArchive {
                 }
                 self.archive_encr = Some(params);
                 self.header_encryption = true;
-                self.read_next_block(&mut reader)?
+                crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
                     .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
             }
             BLOCK_TYPE_ARCHIVE_HEADER => first,
@@ -3833,8 +3676,7 @@ impl RarArchive {
         // then the main archive header (rebuilt so the locator stays
         // consistent with the rewritten archive).
         let mut encrypt_header = None;
-        let first = self
-            .read_next_block(reader)?
+        let first = crate::headers::read_block(reader, self.archive_block_key().as_ref())?
             .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
         let main_meta = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
@@ -3848,9 +3690,11 @@ impl RarArchive {
                 self.archive_encr = Some(params);
                 self.header_encryption = true;
                 encrypt_header = Some(first.header_bytes);
-                let main = self
-                    .read_next_block(reader)?
-                    .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
+                let main =
+                    crate::headers::read_block(reader, self.archive_block_key().as_ref())?
+                        .ok_or_else(|| {
+                            RarError::Format("archive is missing the main header".into())
+                        })?;
                 if main.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
                     return Err(RarError::Format(
                         "archive is missing the main header".into(),
@@ -3882,7 +3726,7 @@ impl RarArchive {
         // was deleted.
         let mut prev_file_deleted = false;
 
-        while let Some(meta) = self.read_next_block(reader)? {
+        while let Some(meta) = crate::headers::read_block(reader, self.archive_block_key().as_ref())? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_FILE_HEADER => {
@@ -4552,192 +4396,14 @@ impl RarArchive {
         ))
     }
 
-    /// Read the next block from the original archive, decrypting the header
-    /// when archive header encryption is active, and capture the exact
-    /// on-disk header bytes (needed for verbatim copies and the quick-open
-    /// cache). Returns `None` at EOF. The reader must be positioned at the
-    /// block start and is left at the data area start.
-    fn read_next_block(&mut self, reader: &mut File) -> RarResult<Option<BlockMeta>> {
-        if !self.header_encryption {
-            let block_start = reader.stream_position()?;
-            let mut header_bytes = Vec::with_capacity(32);
-            let mut crc_buf = [0u8; 4];
-            match reader.read_exact(&mut crc_buf) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(e.into()),
-            }
-            header_bytes.extend_from_slice(&crc_buf);
-            let mut vint_bytes = Vec::with_capacity(2);
-            let hsize = loop {
-                let mut b = [0u8; 1];
-                reader.read_exact(&mut b)?;
-                vint_bytes.push(b[0]);
-                if b[0] & 0x80 == 0 {
-                    break vint::decode_from_slice(&vint_bytes, 0)
-                        .map_err(|e| RarError::Format(format!("bad vint: {e}")))?
-                        .0;
-                }
-            };
-            if hsize == 0 || hsize > 2 * 1024 * 1024 {
-                return Err(RarError::Format(format!(
-                    "implausible header size: {hsize}"
-                )));
-            }
-            let hsize_vint_len = vint_bytes.len();
-            header_bytes.extend_from_slice(&vint_bytes);
-            let mut body = vec![0u8; hsize as usize];
-            reader.read_exact(&mut body)?;
-            header_bytes.extend_from_slice(&body);
-
-            // Validate the header CRC over the size vint + body.
-            let stored_crc = u32::from_le_bytes(crc_buf);
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(&vint_bytes);
-            hasher.update(&body);
-            let computed = hasher.finalize();
-            if computed != stored_crc {
-                return Err(RarError::Crc {
-                    expected: stored_crc,
-                    actual: computed,
-                    context: "block header".into(),
-                });
-            }
-
-            let (block_type, flags, data_size) = parse_raw_block_fields(&body)?;
-            let data_offset = reader.stream_position()?;
-            let data_end = data_offset + data_size;
-            let raw = RawBlock {
-                header_crc: stored_crc,
-                header_data: body,
-                data_size,
-                data_offset,
-                block_type,
-                flags,
-            };
-            return Ok(Some(BlockMeta {
-                block_type,
-                flags,
-                block_start,
-                data_offset,
-                data_end,
-                header_bytes,
-                hsize_vint_len,
-                raw,
-            }));
-        }
-        self.read_next_encrypted_block(reader)
-    }
-
-    /// Read the next `[IV][AES-256-CBC encrypted header][data area]` block,
-    /// deriving the archive key from the stored parameters and password.
-    fn read_next_encrypted_block(&mut self, reader: &mut File) -> RarResult<Option<BlockMeta>> {
-        let encr = self
-            .archive_encr
-            .as_ref()
-            .ok_or_else(|| RarError::Format("archive encryption parameters missing".into()))?;
-        let password = self.password.as_ref().ok_or_else(|| {
-            RarError::Encrypted("archive has encrypted headers; provide a password".into())
-        })?;
-        let key = encr.get_key(password);
-        Self::read_encrypted_block(reader, &key)
-    }
-
-    /// Read one `[IV][AES-256-CBC encrypted header][data area]` block with
-    /// a pre-derived archive key. Returns `None` at EOF.
-    fn read_encrypted_block(
-        reader: &mut File,
-        key: &[u8; 32],
-    ) -> RarResult<Option<BlockMeta>> {
-        let block_start = reader.stream_position()?;
-        let mut iv = [0u8; ENCR_IV_SIZE];
-        match reader.read_exact(&mut iv) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
-        }
-
-        let mut first_ct = [0u8; 16];
-        reader.read_exact(&mut first_ct)?;
-        let first_pt = encryption::decrypt_data(&first_ct, key, &iv)?;
-        let (_crc, vint_len, hsize) = {
-            let stored_crc = u32::from_le_bytes(first_pt[..4].try_into().unwrap());
-            let (hsize, vint_len) = vint::decode_from_slice(&first_pt, 4)
-                .map_err(|e| RarError::Format(format!("encrypted block vint: {e}")))?;
-            (stored_crc, vint_len, hsize)
-        };
-        if hsize == 0 || hsize > 2 * 1024 * 1024 {
-            return Err(RarError::Format(format!(
-                "implausible encrypted header size: {hsize}"
-            )));
-        }
-        let total_raw = 4 + vint_len + hsize as usize;
-        let enc_size = total_raw.div_ceil(16) * 16;
-        let mut full_ct = vec![0u8; enc_size];
-        full_ct[..16].copy_from_slice(&first_ct);
-        if enc_size > 16 {
-            reader.read_exact(&mut full_ct[16..])?;
-        }
-        let full_pt = encryption::decrypt_data(&full_ct, key, &iv)?;
-
-        let stored_crc = u32::from_le_bytes(full_pt[..4].try_into().unwrap());
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&full_pt[4..total_raw]);
-        let computed = hasher.finalize();
-        if computed != stored_crc {
-            return Err(RarError::Crc {
-                expected: stored_crc,
-                actual: computed,
-                context: "encrypted block header".into(),
-            });
-        }
-
-        let mut offset = 4 + vint_len;
-        let (block_type, n) = vint::decode_from_slice(&full_pt, offset)
-            .map_err(|e| RarError::Format(format!("block type: {e}")))?;
-        offset += n;
-        let (flags, n) = vint::decode_from_slice(&full_pt, offset)
-            .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
-        offset += n;
-        let mut extra_size = 0u64;
-        if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
-            let (v, n) = vint::decode_from_slice(&full_pt, offset)
-                .map_err(|e| RarError::Format(format!("extra size: {e}")))?;
-            extra_size = v;
-            offset += n;
-        }
-        let mut data_size = 0u64;
-        if flags & BLOCK_FLAG_DATA_AREA != 0 {
-            let (v, n) = vint::decode_from_slice(&full_pt, offset)
-                .map_err(|e| RarError::Format(format!("data size: {e}")))?;
-            data_size = v;
-            offset += n;
-        }
-        let _ = (extra_size, offset);
-
-        let data_offset = block_start + 16 + enc_size as u64;
-        let data_end = data_offset + data_size;
-        let mut header_bytes = Vec::with_capacity(16 + enc_size);
-        header_bytes.extend_from_slice(&iv);
-        header_bytes.extend_from_slice(&full_ct);
-        let raw = RawBlock {
-            header_crc: stored_crc,
-            header_data: full_pt[4 + vint_len..total_raw].to_vec(),
-            data_size,
-            data_offset,
-            block_type,
-            flags,
-        };
-        Ok(Some(BlockMeta {
-            block_type,
-            flags,
-            block_start,
-            data_offset,
-            data_end,
-            header_bytes,
-            hsize_vint_len: vint_len,
-            raw,
-        }))
+    /// Archive-level decryption key when header encryption is active
+    /// (derived once per call; `None` for plaintext archives). Used to read
+    /// `[IV][AES-256-CBC header]` block envelopes via
+    /// [`crate::headers::read_block`].
+    fn archive_block_key(&self) -> Option<[u8; 32]> {
+        let encr = self.archive_encr.as_ref()?;
+        let password = self.password.as_ref()?;
+        Some(encr.get_key(password))
     }
 
     // ── Public API: creation ───────────────────────────────────────────────
@@ -6918,32 +6584,6 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-/// Parse the type, flags and data size out of a plaintext block header
-/// body (the fields after the header size vint).
-fn parse_raw_block_fields(body: &[u8]) -> RarResult<(u64, u64, u64)> {
-    let mut offset = 0usize;
-    let (block_type, n) = vint::decode_from_slice(body, offset)
-        .map_err(|e| RarError::Format(format!("block type: {e}")))?;
-    offset += n;
-    let (flags, n) = vint::decode_from_slice(body, offset)
-        .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
-    offset += n;
-    if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
-        let (_, n) = vint::decode_from_slice(body, offset)
-            .map_err(|e| RarError::Format(format!("extra size: {e}")))?;
-        offset += n;
-    }
-    let mut data_size = 0u64;
-    if flags & BLOCK_FLAG_DATA_AREA != 0 {
-        let (v, n) = vint::decode_from_slice(body, offset)
-            .map_err(|e| RarError::Format(format!("data size: {e}")))?;
-        data_size = v;
-        offset += n;
-    }
-    let _ = offset;
-    Ok((block_type, flags, data_size))
 }
 
 /// Locate the quick-open and recovery offset fields inside an existing
