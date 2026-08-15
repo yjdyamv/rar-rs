@@ -220,10 +220,16 @@ impl Aes256Cbc {
     }
 }
 
+/// RAR5 zero-fill padding length for `plain_len` plaintext bytes: padded
+/// to a 16-byte AES block boundary, with a minimum of one block (empty
+/// members still produce 16 ciphertext bytes).
+pub fn zero_padded_len(plain_len: u64) -> u64 {
+    plain_len.div_ceil(16).max(1) * 16
+}
+
 /// Encrypt `plaintext` with AES-256-CBC using zero-fill padding.
 pub fn encrypt_data(plaintext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> Vec<u8> {
-    let block_size = 16;
-    let padded_len = plaintext.len().div_ceil(block_size).max(1) * block_size;
+    let padded_len = zero_padded_len(plaintext.len() as u64) as usize;
     let mut buf = vec![0u8; padded_len];
     buf[..plaintext.len()].copy_from_slice(plaintext);
 
@@ -232,6 +238,30 @@ pub fn encrypt_data(plaintext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> Vec<u8> 
         .encrypt_in_place(&mut buf)
         .expect("padded length is a multiple of 16");
     buf
+}
+
+/// Streaming AES-256-CBC encryptor for one RAR5 member.
+///
+/// The IV chain carries across `encrypt_in_place` calls, so a member's
+/// ciphertext can be produced in bounded chunks (multi-volume archives
+/// split the continuous ciphertext stream at arbitrary byte boundaries).
+/// Callers must handle the zero-fill padding of the final block.
+pub struct Aes256CbcStream {
+    inner: Aes256Cbc,
+}
+
+impl Aes256CbcStream {
+    pub fn new(key: &[u8; 32], iv: &[u8; 16]) -> Self {
+        Self {
+            inner: Aes256Cbc::new(key, iv),
+        }
+    }
+
+    /// Encrypt `data` in place and advance the IV chain. `data.len()` must
+    /// be a multiple of 16 (the RAR5 block size).
+    pub fn encrypt_in_place(&mut self, data: &mut [u8]) -> RarResult<()> {
+        self.inner.encrypt_in_place(data)
+    }
 }
 
 /// Decrypt AES-256-CBC ciphertext. Returns decrypted bytes including any

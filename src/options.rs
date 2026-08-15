@@ -39,6 +39,11 @@ pub struct CreateOptions {
 /// The defaults are deliberately safe: unsafe member names are rejected,
 /// and per-file / total output sizes are bounded. Relax them only for
 /// trusted archives.
+///
+/// Note: extraction to disk (`extract` / `extract_all`) is fully
+/// streaming, so arbitrarily large members (multi-GiB) only need
+/// `max_unpacked_bytes: None`. The 4 GiB default primarily guards the
+/// in-memory `read` API, which materializes whole members in a `Vec`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtractOptions {
     /// Reject member names that could escape the destination directory

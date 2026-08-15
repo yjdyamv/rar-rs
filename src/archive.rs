@@ -40,6 +40,11 @@ const PARALLEL_MIN_UNPACKED: u64 = 64 * 1024 * 1024;
 /// compressed in parallel chunks with bounded memory.
 #[cfg(feature = "parallel")]
 const PARALLEL_COMPRESS_MAX_MEMBER: u64 = 64 * 1024 * 1024;
+/// Members at least this large take the streaming compressed path in
+/// [`RarArchive::add_file`]: input is compressed in bounded chunks into a
+/// temporary spill file and then streamed into the archive, so memory
+/// stays bounded for any file size (P4: >4 GiB single-file creation).
+const STREAM_COMPRESS_THRESHOLD: u64 = 64 * 1024 * 1024;
 /// Total input bytes buffered per parallel compression wave (feature
 /// `parallel`).
 #[cfg(feature = "parallel")]
@@ -1953,6 +1958,12 @@ impl RarArchive {
     }
 
     /// Scan all volumes of a multi-volume archive.
+    ///
+    /// Header-encrypted volume sets repeat the plaintext archive-level
+    /// encryption header at the start of EVERY volume (WinRAR convention);
+    /// every block after it is `[16-byte IV][AES-256-CBC encrypted
+    /// header]`. The archive key is derived once per volume and reused for
+    /// all of its blocks.
     fn scan_all_volumes(&mut self) -> RarResult<()> {
         self.entries.clear();
         let mut pending: Option<ArchiveEntry> = None;
@@ -1970,11 +1981,21 @@ impl RarArchive {
                 )));
             }
 
+            // None until this volume's plaintext encryption header arrives.
+            let mut encr_key: Option<[u8; 32]> = None;
+
             loop {
-                let raw = match RawBlock::read_from(&mut stream) {
-                    Ok(b) => b,
-                    Err(RarError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                    Err(e) => return Err(e),
+                let raw = if let Some(key) = encr_key {
+                    match Self::read_encrypted_block(&mut stream, &key)? {
+                        Some(meta) => meta.raw,
+                        None => break,
+                    }
+                } else {
+                    match RawBlock::read_from(&mut stream) {
+                        Ok(b) => b,
+                        Err(RarError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                        Err(e) => return Err(e),
+                    }
                 };
 
                 let stream_pos = stream.stream_position()?;
@@ -2001,11 +2022,27 @@ impl RarArchive {
                             if let Some(ref mut entry) = pending {
                                 entry.chunks.push(chunk);
                                 if !continues_to {
-                                    // Final chunk
+                                    // Final chunk: total packed size and the
+                                    // final chunk's CRC (MAC'd when
+                                    // encrypted). For encrypted members the
+                                    // final chunk also carries the full extra
+                                    // records (encryption with the hash-key
+                                    // MAC bit, BLAKE2sp hash, time); the
+                                    // reader must verify with those, so merge
+                                    // them in when present.
                                     let total_packed: u64 =
                                         entry.chunks.iter().map(|c| c.packed_size).sum();
                                     entry.header.packed_size = total_packed;
                                     entry.header.crc32_val = fh.crc32_val;
+                                    if !fh.extra_data.is_empty() {
+                                        entry.header.extra_data = fh.extra_data.clone();
+                                        entry.header.hash_type = fh.hash_type;
+                                        entry.header.hash_value = fh.hash_value;
+                                        entry.header.mtime_ns = fh.mtime_ns;
+                                        entry.header.owner = fh.owner.clone();
+                                        entry.header.group = fh.group.clone();
+                                        entry.header.version = fh.version;
+                                    }
                                     self.entries.push(pending.take().unwrap());
                                 }
                             }
@@ -2023,16 +2060,20 @@ impl RarArchive {
                     }
                     BLOCK_TYPE_END_ARCHIVE => {
                         let eoa = EndOfArchiveHeader::from_raw(&raw)?;
-                        if eoa.flags & END_FLAG_NEXT_VOLUME == 0 {
-                            break;
-                        } else {
-                            break; // continue to next volume
-                        }
+                        let _ = eoa;
+                        break; // continue to next volume
                     }
                     BLOCK_TYPE_ENCRYPT_HEADER => {
-                        return Err(RarError::Unsupported(
-                            "header-encrypted multi-volume archives not yet supported".into(),
-                        ));
+                        let password = self.password.as_ref().ok_or_else(|| {
+                            RarError::Encrypted(
+                                "archive has encrypted headers; provide a password".into(),
+                            )
+                        })?;
+                        let params = parse_archive_encrypt_header(&raw)?;
+                        if !params.verify_password(password) {
+                            return Err(RarError::Encrypted("wrong password".into()));
+                        }
+                        encr_key = Some(params.get_key(password));
                     }
                     _ => {}
                 }
@@ -2714,9 +2755,16 @@ impl RarArchive {
                 continue;
             }
 
-            // RAR5 solid: temporarily take state to satisfy borrow checker
+            // Solid members decode through the streaming decoder (bounded by
+            // the dictionary, not the member size): the buffered decoder
+            // reconstructs the whole member in the sliding window, which
+            // cannot hold more than the dictionary size. Intermediate
+            // members are decoded into a discard sink so the shared window
+            // advances.
             let mut state = self.solid_state.take().unwrap();
-            let data = self.decode_file_at(i, Some(&mut state))?;
+            let mut data = Vec::new();
+            let written = self.decode_file_to(i, &mut data, Some(&mut state))?;
+            let _ = written;
             self.solid_state = Some(state);
 
             self.solid_decoded_through = i as isize;
@@ -4581,15 +4629,9 @@ impl RarArchive {
         self.read_next_encrypted_block(reader)
     }
 
-    /// Read the next `[IV][AES-256-CBC encrypted header][data area]` block.
+    /// Read the next `[IV][AES-256-CBC encrypted header][data area]` block,
+    /// deriving the archive key from the stored parameters and password.
     fn read_next_encrypted_block(&mut self, reader: &mut File) -> RarResult<Option<BlockMeta>> {
-        let block_start = reader.stream_position()?;
-        let mut iv = [0u8; ENCR_IV_SIZE];
-        match reader.read_exact(&mut iv) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
-        }
         let encr = self
             .archive_encr
             .as_ref()
@@ -4598,10 +4640,26 @@ impl RarArchive {
             RarError::Encrypted("archive has encrypted headers; provide a password".into())
         })?;
         let key = encr.get_key(password);
+        Self::read_encrypted_block(reader, &key)
+    }
+
+    /// Read one `[IV][AES-256-CBC encrypted header][data area]` block with
+    /// a pre-derived archive key. Returns `None` at EOF.
+    fn read_encrypted_block(
+        reader: &mut File,
+        key: &[u8; 32],
+    ) -> RarResult<Option<BlockMeta>> {
+        let block_start = reader.stream_position()?;
+        let mut iv = [0u8; ENCR_IV_SIZE];
+        match reader.read_exact(&mut iv) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
 
         let mut first_ct = [0u8; 16];
         reader.read_exact(&mut first_ct)?;
-        let first_pt = encryption::decrypt_data(&first_ct, &key, &iv)?;
+        let first_pt = encryption::decrypt_data(&first_ct, key, &iv)?;
         let (_crc, vint_len, hsize) = {
             let stored_crc = u32::from_le_bytes(first_pt[..4].try_into().unwrap());
             let (hsize, vint_len) = vint::decode_from_slice(&first_pt, 4)
@@ -4620,7 +4678,7 @@ impl RarArchive {
         if enc_size > 16 {
             reader.read_exact(&mut full_ct[16..])?;
         }
-        let full_pt = encryption::decrypt_data(&full_ct, &key, &iv)?;
+        let full_pt = encryption::decrypt_data(&full_ct, key, &iv)?;
 
         let stored_crc = u32::from_le_bytes(full_pt[..4].try_into().unwrap());
         let mut hasher = crc32fast::Hasher::new();
@@ -4776,8 +4834,8 @@ impl RarArchive {
 
         if method == COMP_METHOD_STORE || probe_incompressible {
             // STORE is written by streaming the file directly: bounded
-            // memory regardless of file size. Encrypted STORE stays
-            // buffered (CBC padding over the whole member).
+            // memory regardless of file size. Encrypted STORE is encrypted
+            // on the fly with a chained CBC state (also bounded memory).
             self.reset_solid_chain();
             let (plain_crc, plain_blake) = hash_file(path, file_size, self.blake2)?;
             let (header_crc, mut extra_data, stored_hash, encr_params) =
@@ -4789,42 +4847,29 @@ impl RarArchive {
             if let Some(ref t) = time_extra {
                 extra_data.extend_from_slice(t);
             }
-            if self.password.is_some() {
-                let raw_data = fs::read(path)?;
-                let packed_data = RarArchive::encrypt_payload_with(
-                    self.password.as_deref(),
-                    encr_params.as_ref(),
-                    &raw_data,
-                )?;
-                self.write_file_entry(
-                    &name,
-                    file_size,
-                    &packed_data,
-                    header_crc,
-                    COMP_METHOD_STORE,
-                    0,
-                    &extra_data,
-                    attrs,
-                    mtime,
-                    false,
-                    stored_hash,
-                )?;
-            } else {
-                self.write_stored_file(
-                    &name,
-                    file_size,
-                    header_crc,
-                    attrs,
-                    mtime,
-                    File::open(path)?,
-                    &extra_data,
-                    stored_hash,
-                )?;
-            }
+            self.write_store_member(
+                path,
+                &name,
+                file_size,
+                header_crc,
+                &extra_data,
+                stored_hash,
+                encr_params.as_ref(),
+                attrs,
+                mtime,
+            )?;
             if let Some(cb) = self.progress_callback.as_deref_mut() {
                 cb(file_size, file_size);
             }
             return Ok(());
+        }
+
+        // Compressed path: files at or above the streaming threshold are
+        // compressed in bounded chunks to a temporary spill file and then
+        // streamed into the archive (bounded memory for any file size);
+        // smaller files are compressed in memory.
+        if file_size >= STREAM_COMPRESS_THRESHOLD {
+            return self.add_file_streaming(path, &name, file_size, attrs, mtime, time_extra, method);
         }
 
         // Compressed path: read and compress in bounded chunks with a
@@ -4892,38 +4937,17 @@ impl RarArchive {
             if let Some(ref t) = time_extra {
                 extra_data.extend_from_slice(t);
             }
-            if self.password.is_some() {
-                let raw_data = fs::read(path)?;
-                let packed_data = RarArchive::encrypt_payload_with(
-                    self.password.as_deref(),
-                    encr_params.as_ref(),
-                    &raw_data,
-                )?;
-                self.write_file_entry(
-                    &name,
-                    file_size,
-                    &packed_data,
-                    header_crc,
-                    COMP_METHOD_STORE,
-                    0,
-                    &extra_data,
-                    attrs,
-                    mtime,
-                    false,
-                    stored_hash,
-                )?;
-            } else {
-                self.write_stored_file(
-                    &name,
-                    file_size,
-                    header_crc,
-                    attrs,
-                    mtime,
-                    File::open(path)?,
-                    &extra_data,
-                    stored_hash,
-                )?;
-            }
+            self.write_store_member(
+                path,
+                &name,
+                file_size,
+                header_crc,
+                &extra_data,
+                stored_hash,
+                encr_params.as_ref(),
+                attrs,
+                mtime,
+            )?;
             if let Some(cb) = self.progress_callback.as_deref_mut() {
                 cb(file_size, file_size);
             }
@@ -5331,7 +5355,7 @@ impl RarArchive {
             if i < entries.len() {
                 if let BatchEntry::File { path, name, level } = entries[i] {
                     let size = fs::metadata(path)?.len();
-                    if size > PARALLEL_COMPRESS_MAX_MEMBER {
+                    if size > PARALLEL_COMPRESS_MAX_MEMBER && size <= PARALLEL_BUFFER_LIMIT {
                         if let Some(prepared) =
                             self.prepare_large_file_parallel(path, name, level)?
                         {
@@ -5343,13 +5367,17 @@ impl RarArchive {
                             if let Some(cb) = self.progress_callback.as_deref_mut() {
                                 cb(member_size, member_size);
                             }
-                        } else {
-                            // STORE / probe-incompressible fallback: the
-                            // sequential path streams the member directly.
-                            self.add_batch_entry_sequential(&entries[i])?;
+                            i += 1;
+                            continue;
                         }
-                        i += 1;
-                        continue;
+                        // STORE / probe-incompressible fallback: the
+                        // sequential path streams the member directly.
+                    } else if size > PARALLEL_BUFFER_LIMIT {
+                        // Members beyond the parallel buffer budget stream
+                        // through the sequential path: the compressed
+                        // output is spilled to a temporary file instead of
+                        // being buffered in memory (bounded memory for any
+                        // file size).
                     }
                 }
                 self.add_batch_entry_sequential(&entries[i])?;
@@ -5567,9 +5595,11 @@ impl RarArchive {
         Self::prepare_data_entry(ctx, &name, &data, level, attrs, mtime, time_extra, true)
     }
 
-    /// Prepare a large file (over [`PARALLEL_COMPRESS_MAX_MEMBER`]) by
-    /// compressing its 4 MiB chunks in parallel and concatenating them in
-    /// file order.
+    /// Prepare a large file (over [`PARALLEL_COMPRESS_MAX_MEMBER`], up to
+    /// [`PARALLEL_BUFFER_LIMIT`]) by compressing its 4 MiB chunks in
+    /// parallel and concatenating them in file order. Members beyond the
+    /// buffer limit stream through the sequential path instead (bounded
+    /// memory for any file size).
     ///
     /// Non-solid archives encode each chunk with a fresh encoder window, so
     /// the packed stream is byte-identical to the sequential `add_file`
@@ -6071,6 +6101,8 @@ impl RarArchive {
     ///
     /// Handles single-volume and multi-volume splitting. The plaintext CRC
     /// must be supplied (it is part of the header, written before data).
+    /// Progress is reported per chunk (`bytes_written, unpacked_size`),
+    /// matching the historical streaming behavior.
     #[allow(clippy::too_many_arguments)]
     fn write_stored_file(
         &mut self,
@@ -6079,56 +6111,141 @@ impl RarArchive {
         file_crc: u32,
         attrs: u64,
         mtime: u32,
-        mut reader: impl Read + Seek,
+        reader: &mut File,
         extra_data: &[u8],
         hash_value: Option<[u8; 32]>,
+    ) -> RarResult<()> {
+        self.write_streamed_payload(
+            name,
+            unpacked_size,
+            unpacked_size,
+            file_crc,
+            attrs,
+            mtime,
+            COMP_METHOD_STORE,
+            0,
+            extra_data,
+            hash_value,
+            false,
+            reader,
+            unpacked_size,
+            None,
+            None,
+            true,
+        )
+    }
+
+    /// Stream a member payload (compressed data or STORE bytes) from a
+    /// seekable reader into the archive with bounded memory, splitting
+    /// across volumes when needed.
+    ///
+    /// When `encr` is set the payload is AES-256-CBC encrypted on the fly
+    /// (the IV chain carries across chunk boundaries), the header checksum
+    /// is MAC'd, and non-final volume chunks carry the CRC32 of their
+    /// on-disk ciphertext bytes — matching WinRAR's per-volume records.
+    /// `plain_len` is the number of plaintext bytes available in `reader`;
+    /// `packed_size` is the total on-disk data size (the zero-padded
+    /// ciphertext length when encrypted). `progress` enables per-chunk
+    /// progress callbacks (historical STORE-path behavior); the compressed
+    /// path reports progress during its compression pass instead.
+    #[allow(clippy::too_many_arguments)]
+    fn write_streamed_payload(
+        &mut self,
+        name: &str,
+        unpacked_size: u64,
+        packed_size: u64,
+        file_crc: u32,
+        attrs: u64,
+        mtime: u32,
+        method: u8,
+        dict_size_log: u8,
+        extra_data: &[u8],
+        hash_value: Option<[u8; 32]>,
+        solid: bool,
+        reader: &mut File,
+        plain_len: u64,
+        encr: Option<&encryption::EncryptionParams>,
+        password: Option<&str>,
+        progress: bool,
     ) -> RarResult<()> {
         let fh_base = FileHeader {
             name: name.to_string(),
             unpacked_size,
-            packed_size: unpacked_size,
+            packed_size,
             attributes: attrs,
             mtime,
             crc32_val: Some(file_crc),
             hash_type: if hash_value.is_some() { 0 } else { u8::MAX },
             hash_value,
-            comp_method: COMP_METHOD_STORE,
+            comp_method: method,
+            comp_solid: solid,
+            comp_dict_size: dict_size_log,
             host_os: OS_UNIX,
             file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
             extra_data: extra_data.to_vec(),
             ..Default::default()
         };
 
+        // Derive the AES key once per member. Two independent encryptors
+        // are seeded with it: the probe pass (chunk CRC over the on-disk
+        // ciphertext) and the write pass must produce identical bytes, so
+        // they run separate chains from the same key and IV.
+        let key_iv = match (encr, password) {
+            (Some(params), Some(password)) => Some((params.get_key(password), params.iv)),
+            (None, None) => None,
+            _ => {
+                return Err(RarError::Format(
+                    "internal error: encryption parameters mismatch".into(),
+                ))
+            }
+        };
+        let mut write_src = payload_stream(&key_iv);
+        let mut probe_src = payload_stream(&key_iv);
+
         if self.volume_size.is_none() {
+            // ── Single-volume ──
             let hdr_bytes = fh_base.to_bytes();
             if self.quick_open {
                 let pos = self.stream.as_ref().unwrap().stream_position()?;
                 self.quick_open_entries.push((pos, hdr_bytes.clone()));
             }
             self.write_block_header(&hdr_bytes)?;
-            let stream = self.stream.as_mut().unwrap();
-            let mut buf = vec![0u8; 1 << 20];
-            let mut written = 0u64;
-            loop {
-                let n = reader.read(&mut buf)?;
-                if n == 0 {
-                    break;
+            let written = {
+                let stream = self.stream.as_mut().unwrap();
+                if progress {
+                    match self.progress_callback.as_deref_mut() {
+                        Some(cb) => {
+                            let mut sink = ProgressWriter {
+                                inner: stream,
+                                total: unpacked_size,
+                                written: 0,
+                                cb,
+                            };
+                            write_src.emit_to(reader, plain_len, 0, packed_size, &mut sink)?;
+                            sink.written
+                        }
+                        None => {
+                            let mut counting = CountingWriter::new(stream);
+                            write_src.emit_to(reader, plain_len, 0, packed_size, &mut counting)?;
+                            counting.written()
+                        }
+                    }
+                } else {
+                    let mut counting = CountingWriter::new(stream);
+                    write_src.emit_to(reader, plain_len, 0, packed_size, &mut counting)?;
+                    counting.written()
                 }
-                stream.write_all(&buf[..n])?;
-                written += n as u64;
-                if let Some(cb) = self.progress_callback.as_deref_mut() {
-                    cb(written, unpacked_size);
-                }
-            }
-            if written != unpacked_size {
+            };
+            if written != packed_size {
                 return Err(RarError::Io(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     format!(
-                        "file changed size while being archived: expected {unpacked_size} bytes, read {written}"
+                        "file changed size while being archived: expected {packed_size} bytes, wrote {written}"
                     ),
                 )));
             }
-            let data_offset = stream.stream_position()? - unpacked_size;
+            let stream = self.stream.as_mut().unwrap();
+            let data_offset = stream.stream_position()? - packed_size;
             self.entries.push(ArchiveEntry {
                 header: FileHeader {
                     data_offset,
@@ -6137,7 +6254,7 @@ impl RarArchive {
                 chunks: vec![DataChunk {
                     volume_index: 0,
                     data_offset,
-                    packed_size: unpacked_size,
+                    packed_size,
                     crc32_val: Some(file_crc),
                     is_final: true,
                     extra_data: extra_data.to_vec(),
@@ -6146,18 +6263,51 @@ impl RarArchive {
             return Ok(());
         }
 
-        // Multi-volume streaming split.
+        // ── Multi-volume splitting ──
         let volume_size = self.volume_size.unwrap();
-        let eoa_size: u64 = self.on_disk_header_len(8); // end-of-archive block
+        // End-of-archive block: 8 plaintext bytes, or `[IV][padded]` when
+        // header encryption wraps every block.
+        let eoa_size: u64 = self.on_disk_header_len(8);
         let mut offset = 0u64;
         let mut chunks = Vec::new();
         let mut is_first = true;
-        while offset < unpacked_size {
+
+        // Encrypted members: every chunk header carries the encryption
+        // extra record (WinRAR repeats it on every volume). Non-final
+        // chunks verify with a plain crc32 of the ciphertext chunk, so
+        // their record must clear the hash-key MAC bit (flags=1); the
+        // final chunk keeps the full record (flags=3, MAC'd checksum).
+        let encr_params = if self.password.is_some() {
+            encryption::parse_encryption_extra(extra_data)?
+        } else {
+            None
+        };
+        let chunk_extra = |is_last: bool, is_first: bool| -> Vec<u8> {
+            if let Some(ref p) = encr_params {
+                if is_last {
+                    extra_data.to_vec()
+                } else {
+                    let mut np = p.clone();
+                    np.flags &= !0x02;
+                    np.to_extra_bytes()
+                }
+            } else if is_first {
+                extra_data.to_vec()
+            } else {
+                Vec::new()
+            }
+        };
+
+        while offset < packed_size {
             let remaining_vol = volume_size.saturating_sub(self.volume_bytes_written);
+
+            // Build chunk flags
             let mut block_flags: u64 = 0;
             if !is_first {
                 block_flags |= BLOCK_FLAG_DATA_CONTINUES;
             }
+
+            // Estimate header size
             let chunk_fh = FileHeader {
                 name: name.to_string(),
                 unpacked_size,
@@ -6165,33 +6315,28 @@ impl RarArchive {
                 attributes: attrs,
                 mtime,
                 crc32_val: Some(0),
-                comp_method: COMP_METHOD_STORE,
+                comp_method: method,
+                comp_solid: solid,
+                comp_dict_size: dict_size_log,
                 host_os: OS_UNIX,
                 flags: block_flags | BLOCK_FLAG_DATA_CONTINUE_TO,
                 file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
-                extra_data: if is_first {
-                    extra_data.to_vec()
-                } else {
-                    Vec::new()
-                },
-                hash_type: if is_first && hash_value.is_some() {
-                    0
-                } else {
-                    u8::MAX
-                },
-                hash_value: if is_first { hash_value } else { None },
+                extra_data: chunk_extra(false, is_first),
                 ..Default::default()
             };
             let hdr_size = self.on_disk_header_len(chunk_fh.to_bytes().len() as u64);
+
             let bytes_for_data = remaining_vol.saturating_sub(hdr_size + eoa_size);
-            eprintln!("SPLIT vol_bytes={} remaining={} hdr_disk={} eoa={} bytes_for_data={} vol_size={}", self.volume_bytes_written, remaining_vol, hdr_size, eoa_size, bytes_for_data, volume_size);
             if bytes_for_data == 0 {
                 self.start_next_volume()?;
                 is_first = false;
                 continue;
             }
-            let chunk_size = bytes_for_data.min(unpacked_size - offset);
-            let is_last = offset + chunk_size >= unpacked_size;
+
+            let chunk_size = bytes_for_data.min(packed_size - offset);
+            let is_last = offset + chunk_size >= packed_size;
+
+            // Set final flags
             if is_last {
                 block_flags &= !BLOCK_FLAG_DATA_CONTINUE_TO;
             } else {
@@ -6199,28 +6344,15 @@ impl RarArchive {
             }
 
             // For non-final chunks the header carries the CRC of this
-            // chunk's on-disk bytes. Compute it in a first pass and seek
-            // back before the copy pass (bounded memory).
+            // chunk's on-disk bytes (the ciphertext when encrypted),
+            // computed in a probe pass with an independent encryptor
+            // chain so the write pass below is not disturbed.
             let chunk_crc = if is_last {
                 file_crc
             } else {
-                let chunk_start = reader.stream_position()?;
                 let mut h = crc32fast::Hasher::new();
-                let mut remaining = chunk_size;
-                let mut probe = vec![0u8; 1 << 20];
-                while remaining > 0 {
-                    let want = probe.len().min(remaining as usize);
-                    let n = reader.read(&mut probe[..want])?;
-                    if n == 0 {
-                        return Err(RarError::Io(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "file changed size while being archived (CRC pass)",
-                        )));
-                    }
-                    h.update(&probe[..n]);
-                    remaining -= n as u64;
-                }
-                reader.seek(SeekFrom::Start(chunk_start))?;
+                let mut sink = CrcSink(&mut h);
+                probe_src.emit_to(reader, plain_len, offset, offset + chunk_size, &mut sink)?;
                 h.finalize()
             };
 
@@ -6231,49 +6363,49 @@ impl RarArchive {
                 attributes: attrs,
                 mtime,
                 crc32_val: Some(chunk_crc),
-                comp_method: COMP_METHOD_STORE,
+                comp_method: method,
+                comp_solid: solid,
+                comp_dict_size: dict_size_log,
                 host_os: OS_UNIX,
                 flags: block_flags,
                 file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
-                extra_data: if is_first {
-                    extra_data.to_vec()
-                } else {
-                    Vec::new()
-                },
-                hash_type: if is_first && hash_value.is_some() {
-                    0
-                } else {
-                    u8::MAX
-                },
-                hash_value: if is_first { hash_value } else { None },
+                extra_data: chunk_extra(is_last, is_first),
                 ..Default::default()
             };
-            let final_hdr = final_fh.to_bytes();
-            let stream = self.stream.as_mut().unwrap();
-            stream.write_all(&final_hdr)?;
 
-            // Copy exactly `chunk_size` bytes.
-            let mut remaining = chunk_size;
-            let mut buf = vec![0u8; 1 << 20];
-            while remaining > 0 {
-                let want = buf.len().min(remaining as usize);
-                let n = reader.read(&mut buf[..want])?;
-                if n == 0 {
-                    return Err(RarError::Io(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        format!(
-                            "file changed size while being archived: still missing {remaining} bytes"
-                        ),
-                    )));
-                }
-                stream.write_all(&buf[..n])?;
-                remaining -= n as u64;
-                if let Some(cb) = self.progress_callback.as_deref_mut() {
-                    cb(unpacked_size - remaining, unpacked_size);
+            let final_hdr = final_fh.to_bytes();
+            let final_hdr_disk = self.on_disk_header_len(final_hdr.len() as u64);
+            self.write_block_header(&final_hdr)?;
+            {
+                let stream = self.stream.as_mut().unwrap();
+                if progress {
+                    match self.progress_callback.as_deref_mut() {
+                        Some(cb) => {
+                            let mut sink = ProgressWriter {
+                                inner: stream,
+                                total: unpacked_size,
+                                written: offset,
+                                cb,
+                            };
+                            write_src
+                                .emit_to(reader, plain_len, offset, offset + chunk_size, &mut sink)?;
+                        }
+                        None => {
+                            write_src.emit_to(
+                                reader,
+                                plain_len,
+                                offset,
+                                offset + chunk_size,
+                                &mut *stream,
+                            )?;
+                        }
+                    }
+                } else {
+                    write_src.emit_to(reader, plain_len, offset, offset + chunk_size, &mut *stream)?;
                 }
             }
-
-            self.volume_bytes_written += final_hdr.len() as u64 + chunk_size;
+            self.volume_bytes_written += final_hdr_disk + chunk_size;
+            let stream = self.stream.as_mut().unwrap();
             let data_offset = stream.stream_position()? - chunk_size;
             chunks.push(DataChunk {
                 volume_index: self.current_volume - 1,
@@ -6287,8 +6419,10 @@ impl RarArchive {
                     Vec::new()
                 },
             });
+
             offset += chunk_size;
             is_first = false;
+
             if !is_last {
                 self.start_next_volume()?;
             }
@@ -6296,13 +6430,420 @@ impl RarArchive {
 
         self.entries.push(ArchiveEntry {
             header: FileHeader {
-                packed_size: unpacked_size,
+                packed_size,
                 ..fh_base
             },
             chunks,
         });
+
         Ok(())
     }
+
+    /// Stream a STORE member directly from disk (bounded memory),
+    /// encrypting on the fly when a password is set.
+    #[allow(clippy::too_many_arguments)]
+    fn write_store_member(
+        &mut self,
+        path: &Path,
+        name: &str,
+        file_size: u64,
+        header_crc: u32,
+        extra_data: &[u8],
+        stored_hash: Option<[u8; 32]>,
+        encr_params: Option<&encryption::EncryptionParams>,
+        attrs: u64,
+        mtime: u32,
+    ) -> RarResult<()> {
+        let mut reader = File::open(path)?;
+        let password = self.password.clone();
+        match (password.as_deref(), encr_params) {
+            (Some(password), Some(params)) => self.write_streamed_payload(
+                name,
+                file_size,
+                encryption::zero_padded_len(file_size),
+                header_crc,
+                attrs,
+                mtime,
+                COMP_METHOD_STORE,
+                0,
+                extra_data,
+                stored_hash,
+                false,
+                &mut reader,
+                file_size,
+                Some(params),
+                Some(password),
+                false,
+            ),
+            (None, None) => self.write_stored_file(
+                name,
+                file_size,
+                header_crc,
+                attrs,
+                mtime,
+                &mut reader,
+                extra_data,
+                stored_hash,
+            ),
+            _ => Err(RarError::Format(
+                "internal error: encryption parameters mismatch".into(),
+            )),
+        }
+    }
+
+    /// Compress a large file (≥ [`STREAM_COMPRESS_THRESHOLD`]) with bounded
+    /// memory: the input is read and compressed in bounded chunks (with the
+    /// persistent encoder state), spilling the compressed stream to a
+    /// temporary file; once the packed size and plaintext checksums are
+    /// known, the member header is written and the spill is streamed into
+    /// the archive — encrypting on the fly when a password is set. Falls
+    /// back to streaming STORE when compression does not shrink the
+    /// payload.
+    #[allow(clippy::too_many_arguments)]
+    fn add_file_streaming(
+        &mut self,
+        path: &Path,
+        name: &str,
+        file_size: u64,
+        attrs: u64,
+        mtime: u32,
+        time_extra: Option<Vec<u8>>,
+        method: u8,
+    ) -> RarResult<()> {
+        let dsl = dict_size_for_data(file_size as usize, method);
+        let chain_solid = self.solid_mode && self.encoder_state.is_some();
+        if self.solid_mode {
+            self.encoder_state.get_or_insert_with(Default::default);
+        }
+
+        let mut crc_hasher = crc32fast::Hasher::new();
+        let mut blake_hasher = if self.blake2 {
+            Some(crate::blake2sp::Hasher::new())
+        } else {
+            None
+        };
+        let mut bytes_read = 0u64;
+        let mut packed_size = 0u64;
+        let spill_path = spill_path_for(&self.path);
+        let _spill_guard = SpillGuard(spill_path.clone());
+        {
+            let mut spill = File::create(&spill_path)?;
+            let mut file = io::BufReader::with_capacity(1 << 20, File::open(path)?);
+            let mut buf = vec![0u8; crate::codec::DEFAULT_CHUNK_SIZE];
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                bytes_read += n as u64;
+                crc_hasher.update(&buf[..n]);
+                if let Some(h) = blake_hasher.as_mut() {
+                    h.update(&buf[..n]);
+                }
+                let state = self.encoder_state.as_mut();
+                let compressed = compression::compress_chunked(
+                    &buf[..n],
+                    method,
+                    dsl,
+                    crate::codec::DEFAULT_CHUNK_SIZE,
+                    state,
+                    n < buf.len(),
+                    None,
+                )
+                .map_err(RarError::Unsupported)?;
+                spill.write_all(&compressed)?;
+                packed_size += compressed.len() as u64;
+                if let Some(cb) = self.progress_callback.as_deref_mut() {
+                    cb(bytes_read, file_size);
+                }
+                if packed_size >= file_size {
+                    break;
+                }
+            }
+        }
+
+        let plain_crc = crc_hasher.finalize();
+        let plain_blake = blake_hasher.map(|h| h.finalize());
+
+        if packed_size >= file_size {
+            // Compression is a net loss: fall back to streaming STORE.
+            self.reset_solid_chain();
+            let (header_crc, mut extra_data, stored_hash, encr_params) =
+                RarArchive::payload_extra_and_crc(
+                    self.password.as_deref(),
+                    plain_crc,
+                    plain_blake,
+                )?;
+            if let Some(ref t) = time_extra {
+                extra_data.extend_from_slice(t);
+            }
+            self.write_store_member(
+                path,
+                name,
+                file_size,
+                header_crc,
+                &extra_data,
+                stored_hash,
+                encr_params.as_ref(),
+                attrs,
+                mtime,
+            )?;
+            if let Some(cb) = self.progress_callback.as_deref_mut() {
+                cb(file_size, file_size);
+            }
+            return Ok(());
+        }
+
+        let (header_crc, mut extra_data, stored_hash, encr_params) =
+            RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
+        if let Some(ref t) = time_extra {
+            extra_data.extend_from_slice(t);
+        }
+        let mut spill = File::open(&spill_path)?;
+        let password = self.password.clone();
+        self.write_streamed_payload(
+            name,
+            file_size,
+            packed_size,
+            header_crc,
+            attrs,
+            mtime,
+            method,
+            dsl,
+            &extra_data,
+            stored_hash,
+            chain_solid,
+            &mut spill,
+            packed_size,
+            encr_params.as_ref(),
+            password.as_deref(),
+            false,
+        )?;
+        if let Some(cb) = self.progress_callback.as_deref_mut() {
+            cb(file_size, file_size);
+        }
+        Ok(())
+    }
+}
+
+/// Wraps a writer and counts the bytes written through it.
+struct CountingWriter<'a> {
+    inner: &'a mut dyn Write,
+    written: u64,
+}
+
+impl<'a> CountingWriter<'a> {
+    fn new(inner: &'a mut dyn Write) -> Self {
+        Self { inner, written: 0 }
+    }
+
+    fn written(&self) -> u64 {
+        self.written
+    }
+}
+
+impl Write for CountingWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Wraps a writer and reports `(bytes_written, total)` through a progress
+/// callback after every write.
+struct ProgressWriter<'a> {
+    inner: &'a mut dyn Write,
+    total: u64,
+    written: u64,
+    cb: &'a mut dyn FnMut(u64, u64),
+}
+
+impl Write for ProgressWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        (self.cb)(self.written, self.total);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// CRC32 sink for the streaming probe pass.
+struct CrcSink<'a>(&'a mut crc32fast::Hasher);
+
+impl Write for CrcSink<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A member's payload in transit: plaintext passthrough or on-the-fly
+/// AES-256-CBC encryption.
+#[allow(clippy::large_enum_variant)] // the emitter holds an AES cipher + carry buffer
+enum PayloadStream {
+    Plain,
+    Encrypted(CbcRangeEmitter),
+}
+
+fn payload_stream(key_iv: &Option<([u8; 32], [u8; 16])>) -> PayloadStream {
+    match key_iv {
+        Some((key, iv)) => PayloadStream::Encrypted(CbcRangeEmitter::new(key, iv)),
+        None => PayloadStream::Plain,
+    }
+}
+
+impl PayloadStream {
+    /// Stream the payload bytes for plaintext range `[start, end)` of a
+    /// member with `plain_len` plaintext bytes to `sink`. The bytes
+    /// emitted are the member's on-disk data (the ciphertext when
+    /// encrypted). Ranges must be issued in ascending order covering
+    /// `[0, packed_len)` exactly.
+    fn emit_to(
+        &mut self,
+        reader: &mut File,
+        plain_len: u64,
+        start: u64,
+        end: u64,
+        sink: &mut dyn Write,
+    ) -> RarResult<()> {
+        match self {
+            PayloadStream::Plain => {
+                reader.seek(SeekFrom::Start(start))?;
+                let mut remaining = end - start;
+                let mut buf = vec![0u8; 1 << 20];
+                while remaining > 0 {
+                    let want = buf.len().min(remaining as usize);
+                    let mut filled = 0usize;
+                    while filled < want {
+                        let n = reader.read(&mut buf[filled..want])?;
+                        if n == 0 {
+                            return Err(RarError::Io(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                format!(
+                                    "file changed size while being archived: still missing {remaining} bytes"
+                                ),
+                            )));
+                        }
+                        filled += n;
+                    }
+                    sink.write_all(&buf[..want]).map_err(RarError::Io)?;
+                    remaining -= want as u64;
+                }
+                Ok(())
+            }
+            PayloadStream::Encrypted(emitter) => {
+                emitter.emit_to(reader, plain_len, start, end, sink)
+            }
+        }
+    }
+}
+
+/// Emits one member's continuous AES-256-CBC ciphertext in arbitrary byte
+/// ranges. RAR5 volume chunks split the member's ciphertext at arbitrary
+/// boundaries (WinRAR's volumes are byte-exact), so the encryptor — which
+/// only produces complete 16-byte blocks — reads the plaintext ahead to
+/// the next block boundary and carries the produced-but-unemitted tail
+/// bytes (≤ 15) over to the following range.
+struct CbcRangeEmitter {
+    enc: encryption::Aes256CbcStream,
+    /// Ciphertext bytes already produced but belonging to a later range.
+    carry: Vec<u8>,
+    /// Plaintext position consumed by the encryptor (block-aligned).
+    consumed: u64,
+}
+
+impl CbcRangeEmitter {
+    fn new(key: &[u8; 32], iv: &[u8; 16]) -> Self {
+        Self {
+            enc: encryption::Aes256CbcStream::new(key, iv),
+            carry: Vec::new(),
+            consumed: 0,
+        }
+    }
+
+    /// Emit the ciphertext for plaintext range `[start, end)` of a member
+    /// with `plain_len` plaintext bytes, zero-padding the member's final
+    /// partial block (RAR5 padding). Emits exactly `end - start` bytes.
+    fn emit_to(
+        &mut self,
+        reader: &mut File,
+        plain_len: u64,
+        start: u64,
+        end: u64,
+        sink: &mut dyn Write,
+    ) -> RarResult<()> {
+        // Bounded sub-ranges keep the read-ahead buffer at ~1 MiB even for
+        // multi-GiB volume chunks; the carry keeps the stream continuous.
+        const SUB: u64 = 1 << 20;
+        let mut pos = start;
+        while pos < end {
+            let sub_end = (pos + SUB).min(end);
+            let read_end = sub_end.div_ceil(16) * 16;
+            let mut out = std::mem::take(&mut self.carry);
+            if self.consumed < read_end {
+                let total = (read_end - self.consumed) as usize;
+                let mut buf = vec![0u8; total];
+                let want = plain_len.saturating_sub(self.consumed).min(total as u64) as usize;
+                if want > 0 {
+                    reader.seek(SeekFrom::Start(self.consumed))?;
+                    let mut filled = 0usize;
+                    while filled < want {
+                        let n = reader.read(&mut buf[filled..want])?;
+                        if n == 0 {
+                            return Err(RarError::Io(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                format!(
+                                    "file changed size while being archived: expected {plain_len} plaintext bytes"
+                                ),
+                            )));
+                        }
+                        filled += n;
+                    }
+                }
+                self.enc.encrypt_in_place(&mut buf)?;
+                out.extend_from_slice(&buf);
+                self.consumed = read_end;
+            }
+            let keep = (read_end - sub_end) as usize;
+            let split = out.len() - keep;
+            self.carry = out.split_off(split);
+            sink.write_all(&out).map_err(RarError::Io)?;
+            pos = sub_end;
+        }
+        Ok(())
+    }
+}
+
+/// Removes a temporary spill file on drop (covers every error path).
+struct SpillGuard(PathBuf);
+
+impl Drop for SpillGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Temporary spill file for the streaming compressed path, kept next to
+/// the archive being written.
+fn spill_path_for(archive_path: &Path) -> PathBuf {
+    let name = archive_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive".to_string());
+    archive_path.with_file_name(format!(".{name}.rar5spill-{}", temp_suffix()))
 }
 
 impl Drop for RarArchive {
@@ -7411,6 +7952,38 @@ mod tests {
             assert_eq!(ar.read("data.txt").unwrap(), data);
             assert_eq!(ar.read("small.txt").unwrap(), small.to_vec());
         }
+    }
+
+    #[test]
+    fn header_encrypted_multivolume_self_roundtrip() {
+        // Read-side support for -hp volume sets (WinRAR repeats the
+        // plaintext encryption header on every volume; every block after it
+        // is IV + AES-CBC). Covers both STORE and compressed members.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mvhp.rar");
+
+        let store_data = (0..120_000u32).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let comp_data = b"header encrypted volume payload ".repeat(4_000);
+
+        {
+            let mut ar = RarArchive::create_multivolume_with_password_headers(&path, 30_000, "pw")
+                .unwrap();
+            ar.add_bytes("store.bin", &store_data, 0).unwrap();
+            ar.add_bytes("comp.bin", &comp_data, 3).unwrap();
+            ar.close().unwrap();
+        }
+
+        let vols = discover_volumes(&path);
+        assert!(vols.len() > 1, "precondition: multiple volumes");
+
+        {
+            let mut ar = RarArchive::open_with_password(&vols[0], "pw").unwrap();
+            assert_eq!(ar.namelist(), ["store.bin", "comp.bin"]);
+            assert_eq!(ar.read("store.bin").unwrap(), store_data);
+            assert_eq!(ar.read("comp.bin").unwrap(), comp_data);
+        }
+        // Wrong password must be rejected.
+        assert!(RarArchive::open_with_password(&vols[0], "nope").is_err());
     }
 
     #[test]
