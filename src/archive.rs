@@ -3076,6 +3076,12 @@ impl RarArchive {
     ) -> RarResult<u64> {
         self.validate_entry_limits(idx)?;
         let hdr = &self.entries[idx].header;
+        if hdr.comp_version > 0 {
+            return Err(RarError::Unsupported(format!(
+                "{}: RAR7 compression (version {}) is not supported by rar-rs (RAR5 only)",
+                hdr.name, hdr.comp_version
+            )));
+        }
         if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
             return Ok(0);
         }
