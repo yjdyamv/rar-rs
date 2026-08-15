@@ -350,6 +350,79 @@ fn opts_password(name: &str) -> Option<&'static str> {
     }
 }
 
+// ── Solid multi-volume (WinRAR 7.23 aligned) ────────────────────────────────
+
+/// Solid + multi-volume creation: the LZ window carries across volume
+/// boundaries; WinRAR must be able to test/extract both directions.
+#[test]
+fn solid_multivolume_interops_with_winrar() {
+    let dir = temp_dir();
+    let src = dir.path().join("rand8.bin");
+    let mut data = vec![0u8; 8 * 1024 * 1024];
+    for chunk in data.chunks_mut(4096) {
+        let mut seed = (chunk.as_ptr() as usize) as u64;
+        for b in chunk.iter_mut() {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *b = (seed >> 33) as u8;
+        }
+    }
+    std::fs::write(&src, &data).unwrap();
+    let small = dir.path().join("s.txt");
+    std::fs::write(&small, b"solid volume second member ".repeat(500)).unwrap();
+
+    // Ours -> WinRAR.
+    let ours = dir.path().join("ours_sv.rar");
+    {
+        let mut rar = rar5::RarArchive::create_with_options(
+            &ours,
+            rar5::CreateOptions {
+                solid: true,
+                volume_size: Some(2 * 1024 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&src, 3).unwrap();
+        rar.add(&small, 3).unwrap();
+        rar.close().unwrap();
+    }
+    let volumes = rar5::discover_volumes(&ours);
+    assert!(volumes.len() >= 3, "expected several volumes, got {}", volumes.len());
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&volumes[0], None);
+        assert!(ok, "WinRAR rejected our solid volume set:\n{out}");
+        let win = dir.path().join("win_ours_sv");
+        std::fs::create_dir_all(&win).unwrap();
+        let (ok, out) = unrar_extract(&volumes[0], &win, None);
+        assert!(ok, "WinRAR failed to extract our solid volume set:\n{out}");
+        assert_eq!(file_sha256(&win.join("rand8.bin")), file_sha256(&src));
+    }
+
+    // WinRAR -> ours.
+    if let Some(rar) = rar_bin() {
+        let theirs = dir.path().join("theirs_sv.rar");
+        let (ok, out) = run(
+            Command::new(&rar)
+                .args(["a", "-s", "-v2m", "-idq"])
+                .arg(&theirs)
+                .arg(&src)
+                .arg(&small),
+        );
+        assert!(ok, "WinRAR solid volumes failed:\n{out}");
+        let volumes = rar5::discover_volumes(&theirs);
+        assert!(volumes.len() >= 3, "expected several volumes, got {}", volumes.len());
+        let mut ar = RarArchive::open(&volumes[0]).unwrap();
+        let names: Vec<String> = ar.namelist().into_iter().map(|s| s.to_string()).collect();
+        let bin_name = names
+            .iter()
+            .find(|n| n.ends_with("rand8.bin"))
+            .unwrap_or_else(|| panic!("rand8.bin not found in {names:?}"))
+            .clone();
+        let data = ar.read(&bin_name).unwrap();
+        assert_eq!(data, std::fs::read(&src).unwrap());
+    }
+}
+
 // ── rar-rs reads, WinRAR creates ────────────────────────────────────────────
 
 #[test]

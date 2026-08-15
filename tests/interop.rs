@@ -557,18 +557,64 @@ fn extract_limits_reject_oversized_members() {
 }
 
 #[test]
-fn solid_with_multivolume_is_rejected() {
-    let err = rar5::RarArchive::create_with_options(
-        "solid-vol.rar",
-        rar5::CreateOptions {
-            solid: true,
-            volume_size: Some(1024),
-            ..Default::default()
-        },
-    )
-    .err()
-    .expect("solid multivolume must be rejected");
-    assert!(matches!(err, rar5::RarError::Unsupported(_)), "{err}");
+fn solid_multivolume_roundtrips_with_exact_volumes() {
+    // Solid + multi-volume: the encoder state (LZ window) carries across
+    // member and volume boundaries; non-final volumes stay byte-exact.
+    // Pseudorandom (incompressible) data guarantees several volumes.
+    let dir = make_temp_dir();
+    let a = dir.path().join("a.bin");
+    let b = dir.path().join("b.bin");
+    let mut seed = 0x9E3779B97F4A7C15u64;
+    let mut rng = |buf: &mut [u8]| {
+        for byte in buf.iter_mut() {
+            seed ^= seed >> 12;
+            seed ^= seed << 25;
+            seed ^= seed >> 27;
+            *byte = (seed.wrapping_mul(0x2545F4914F6CDD1D) >> 32) as u8;
+        }
+    };
+    let mut data_a = vec![0u8; 512 * 1024];
+    rng(&mut data_a);
+    let mut data_b = vec![0u8; 256 * 1024];
+    rng(&mut data_b);
+    std::fs::write(&a, &data_a).unwrap();
+    std::fs::write(&b, &data_b).unwrap();
+    let arc = dir.path().join("sv.rar");
+    {
+        let mut rar = rar5::RarArchive::create_with_options(
+            &arc,
+            rar5::CreateOptions {
+                solid: true,
+                volume_size: Some(128 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&a, 3).unwrap();
+        rar.add(&b, 3).unwrap();
+        rar.close().unwrap();
+    }
+    let volumes = rar5::discover_volumes(&arc);
+    assert!(volumes.len() >= 3, "expected several volumes, got {}", volumes.len());
+    for vol in &volumes[..volumes.len() - 1] {
+        assert_eq!(
+            std::fs::metadata(vol).unwrap().len(),
+            128 * 1024,
+            "non-final volume must be byte-exact"
+        );
+    }
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let mut rar = rar5::RarArchive::open(&volumes[0]).unwrap();
+    rar.extract_all(&out).unwrap();
+    assert_eq!(
+        std::fs::read(out.join("a.bin")).unwrap(),
+        data_a
+    );
+    assert_eq!(
+        std::fs::read(out.join("b.bin")).unwrap(),
+        data_b
+    );
 }
 
 #[test]

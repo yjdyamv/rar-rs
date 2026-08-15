@@ -30,6 +30,10 @@ struct Cli {
     #[arg(long = "dict-extract", value_name = "SIZE", global = true)]
     #[allow(dead_code)]
     dict_extract: Option<String>,
+    /// Assume Yes on all queries (like `-y`; accepted, no prompts exist)
+    #[arg(long, global = true)]
+    #[allow(dead_code)]
+    yes: bool,
     #[command(subcommand)]
     command: Command,
 }

@@ -1026,11 +1026,6 @@ impl RarArchive {
         path: PathBuf,
         opts: crate::options::CreateOptions,
     ) -> RarResult<Self> {
-        if opts.solid && opts.volume_size.is_some() {
-            return Err(RarError::Unsupported(
-                "solid archives with multiple volumes are not supported yet".into(),
-            ));
-        }
         if opts.encrypt_headers && opts.password.as_deref().is_none_or(|pw| pw.is_empty()) {
             return Err(RarError::Encrypted(
                 "header encryption requires a password".into(),
@@ -3283,10 +3278,6 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-
-fn dict_size_for_data(data_size: usize, level: u8) -> u8 {
-    dict_log_for(data_size, None, level)
-}
 
 /// WinRAR 7.23 dictionary selection for a non-solid member: the requested
 /// dictionary (`-md`, or the default 32 MiB at every compression level) is

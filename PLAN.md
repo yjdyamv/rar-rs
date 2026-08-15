@@ -46,7 +46,7 @@
 - [x] **字典大小**（2026-08）：写侧支持 `-md<size>[k|m|g]`（128K..4G 2 幂，无单位=MB，非法值报 `Unknown option: md...` 与 WinRAR 一致）；默认字典改为 WinRAR 7.23 语义（32 MiB，所有压缩等级一致），并按 `min(-md, 2×floor_pow2(文件大小))` 裁剪（16MB 文件→32MB、200MB 文件→256MB，实测与 Rar.exe 字段级一致）；读侧上限 1 GiB → **4 GiB**（`MAX_DICT_SIZE_LOG` 13→15，RAR5 格式上限，与 WinRAR 7.23 接受范围一致；>4G/非 2 幂只存在于 RAR7，不支持）。unrar 接受 `-md/-mdx`（无效果，RAR5 ≤4G 恒可解）
 - [x] **RAR4 创建**（`-ma4`）：不做（2026-08 决定：rar-rs 定位 RAR5-only，用户不需要 RAR4 创建；`rar4_archives_are_rejected_with_clear_error` 已确保 RAR4 归档被明确拒绝）
 - [x] **RAR4 PPMd / RAR4 加密解压**：不做（2026-08 决定：RAR4 保持只读 LZSS+VM，遇到 PPMd/加密的 RAR4 归档明确报错即可）
-- [ ] **solid + 分卷创建**：现拒绝（`opts.solid && volume_size`）。WinRAR 支持；P4 流式化后 encoder_state 跨卷保持是最后一步
+- [x] **solid + 分卷创建**（2026-08）：移除 `solid && volume_size` 拒绝——P4 流式化后 encoder_state 跨成员/跨卷保持已天然支持（WinRAR 7.23 双向验证：我们创建 solid 分卷 → WinRAR t/x 通过；WinRAR 创建 → 我们解压字节一致；非末卷字节精确）
 
 ### 命令
 
@@ -90,12 +90,12 @@
 1. RAR5 过滤器：核实后与 WinRAR 7.23 对齐——不实现类型 4-7，未知类型显式报错 ✅（2026-08）
 2. `-md` 字典选择 + 放宽读侧上限（至少 4 GB / 非 2 幂）✅（2026-08；RAR5 上限 4 GB，非 2 幂属 RAR7 不做）
 3. CLI 接 `-ol/-oh`（库已就绪）+ `-si` ✅（批次 2/3 完成）
-4. solid + 分卷
+4. solid + 分卷 ✅（2026-08；移除拒绝，P4 流式化已支持，WinRAR 双向验证）
 5. 时间戳扩展（ctime/atime + `-ts`）与时间过滤（`-tnc/-tna` 过滤已支持 c/a 读取）
 6. `ch`、`-z`、`-ag`、`-y/-o` 等高频小开关 ✅
 7. 剩余小开关批量：`-id[c,d,n,p]` 细分、`-ver[n]`、`-ow` 写侧、`-ac/-ai`、`-e[+]<attr>`、`-ad/-am/-as`、`-os`、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`、`-oi`、`-ilog` 系列
 
-> 进度：下一步 = 第 4 项（solid + 分卷创建）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
+> 进度：下一步 = 第 5 项（`-ts` 时间戳扩展：库存 ctime/atime + 保存/恢复）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
 
 ## 备注
 
