@@ -54,6 +54,7 @@ fn archive_parse_random_inputs_do_not_panic() {
         safe_paths: true,
         max_unpacked_bytes: Some(64 * 1024 * 1024),
         max_total_unpacked_bytes: Some(128 * 1024 * 1024),
+        ..Default::default()
     };
 
     for _ in 0..100 {

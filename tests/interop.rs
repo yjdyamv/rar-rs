@@ -461,6 +461,65 @@ fn extract_with_safe_paths_false_preserves_legacy_behavior() {
 }
 
 #[test]
+fn flat_extraction_flattens_names_and_never_escapes() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("flat.rar");
+    {
+        let mut rar = rar5::RarArchive::create(&path).unwrap();
+        rar.add_bytes("dir/sub/file.txt", b"flat", 0).unwrap();
+        rar.add_bytes("top.txt", b"top", 0).unwrap();
+        rar.close().unwrap();
+    }
+    // Flat extraction writes every member under its basename, no tree.
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    {
+        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        rar.extract_all_with_options(
+            &out,
+            rar5::ExtractOptions {
+                flat_paths: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(std::fs::read(out.join("file.txt")).unwrap(), b"flat");
+    assert_eq!(std::fs::read(out.join("top.txt")).unwrap(), b"top");
+    assert!(!out.join("dir").exists(), "flat mode must not create dirs");
+
+    // A traversal-shaped member name is rejected even in flat mode: the
+    // safe-path policy applies before the basename is used.
+    let evil = dir.path().join("evil.rar");
+    {
+        let mut rar = rar5::RarArchive::create(&evil).unwrap();
+        rar.add_bytes("good.txt", b"ok", 0).unwrap();
+        rar.add_bytes("..", b"escape", 0).unwrap();
+        rar.close().unwrap();
+    }
+    let out2 = dir.path().join("out2");
+    std::fs::create_dir_all(&out2).unwrap();
+    {
+        let mut rar = rar5::RarArchive::open(&evil).unwrap();
+        let err = rar
+            .extract_all_with_options(
+                &out2,
+                rar5::ExtractOptions {
+                    flat_paths: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("security"), "{err}");
+    }
+    assert!(
+        !dir.path().join("escape").exists(),
+        "traversal member must not escape the destination"
+    );
+    assert_eq!(std::fs::read(out2.join("good.txt")).unwrap(), b"ok");
+}
+
+#[test]
 fn extract_limits_reject_oversized_members() {
     let dir = make_temp_dir();
     let path = dir.path().join("lim.rar");

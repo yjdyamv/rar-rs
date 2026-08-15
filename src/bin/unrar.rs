@@ -136,22 +136,14 @@ fn cmd_extract(args: &ExtractArgs, password: Option<&str>) -> Result<(), String>
 fn cmd_extract_flat(args: &ExtractArgs, password: Option<&str>) -> Result<(), String> {
     let dest = args.dest.as_deref().unwrap_or(".");
     let mut rar = open_archive(&args.archive, password)?;
-
-    let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
-    for name in &names {
-        let entry = rar.get_entry(name).unwrap();
-        if entry.is_dir() {
-            continue;
-        }
-        let data = rar.read(name).map_err(|e| format!("{name}: {e}"))?;
-        let file_name = std::path::Path::new(name)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        let out_path = std::path::Path::new(dest).join(file_name.as_ref());
-        std::fs::write(&out_path, &data).map_err(|e| format!("{}: {e}", out_path.display()))?;
-    }
-
+    rar.extract_all_with_options(
+        dest,
+        rar5::ExtractOptions {
+            flat_paths: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| format!("{e}"))?;
     Ok(())
 }
 

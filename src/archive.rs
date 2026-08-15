@@ -2364,7 +2364,21 @@ impl RarArchive {
             .unwrap_or(0);
         self.validate_entry_limits(idx)?;
 
-        let dest_path = self.safe_dest_path(dest_dir, &entry.header.name)?;
+        // Flat extraction (`rar e` / `unrar e`): members land in the
+        // destination directory under their basename. The safe-path policy
+        // always applies here — the full member name is sanitized (which
+        // rejects `..`/absolute/drive names) before its basename is used,
+        // so traversal-shaped names cannot escape the destination.
+        let dest_path = if self.extract_options.flat_paths {
+            if entry.is_dir() {
+                return Ok(dest_dir.to_path_buf());
+            }
+            let safe_name = sanitize_archive_path(&entry.header.name)?;
+            let base = safe_name.rsplit('/').next().unwrap_or(&safe_name);
+            dest_dir.join(base)
+        } else {
+            self.safe_dest_path(dest_dir, &entry.header.name)?
+        };
 
         if entry.is_dir() {
             fs::create_dir_all(&dest_path)?;

@@ -56,6 +56,11 @@ pub struct ExtractOptions {
     /// Maximum total uncompressed bytes allowed across one extraction
     /// (`None` = unlimited).
     pub max_total_unpacked_bytes: Option<u64>,
+    /// Extract members flat: each member is written to the destination
+    /// directory under its basename (no directory tree), like `rar e` /
+    /// `unrar e`. The safe-path policy still applies — the member name is
+    /// sanitized and contained before its basename is used.
+    pub flat_paths: bool,
 }
 
 impl Default for ExtractOptions {
@@ -64,6 +69,7 @@ impl Default for ExtractOptions {
             safe_paths: true,
             max_unpacked_bytes: Some(4 * 1024 * 1024 * 1024),
             max_total_unpacked_bytes: Some(32 * 1024 * 1024 * 1024),
+            flat_paths: false,
         }
     }
 }

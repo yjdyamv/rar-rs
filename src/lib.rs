@@ -31,6 +31,7 @@ pub mod constants;
 pub mod encryption;
 pub mod error;
 pub mod headers;
+pub mod name_policy;
 pub mod options;
 pub mod recovery;
 pub mod write_progress;
