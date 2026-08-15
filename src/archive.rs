@@ -580,6 +580,14 @@ pub struct RarArchive {
     /// Requested dictionary log for compression (WinRAR `-md`);
     /// `None` = default selection.
     dict_size_log: Option<u8>,
+    /// Save creation/change time in the FILE_TIME extra record (`-tsc`).
+    save_ctime: bool,
+    /// Save last access time in the FILE_TIME extra record (`-tsa`).
+    save_atime: bool,
+    /// Save the modification time (`-tsm`; false with `-tsm-`/`-ts-`).
+    save_mtime: bool,
+    /// Store timestamps at 1-second precision (`-ts...1`).
+    time_precision_seconds: bool,
     /// Options for the current read/extract operation (set per call).
     extract_options: crate::options::ExtractOptions,
 }
@@ -630,6 +638,10 @@ impl RarArchive {
             qo_offset_field_pos: None,
             encoder_state: None,
             dict_size_log: None,
+            save_ctime: false,
+            save_atime: false,
+            save_mtime: true,
+            time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
@@ -667,6 +679,10 @@ impl RarArchive {
             qo_offset_field_pos: None,
             encoder_state: None,
             dict_size_log: None,
+            save_ctime: false,
+            save_atime: false,
+            save_mtime: true,
+            time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
@@ -726,6 +742,10 @@ impl RarArchive {
             qo_offset_field_pos: None,
             encoder_state: None,
             dict_size_log: None,
+            save_ctime: false,
+            save_atime: false,
+            save_mtime: true,
+            time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
@@ -1080,6 +1100,10 @@ impl RarArchive {
             qo_offset_field_pos: None,
             encoder_state: None,
             dict_size_log: opts.dict_size_log,
+            save_ctime: opts.save_ctime,
+            save_atime: opts.save_atime,
+            save_mtime: opts.save_mtime,
+            time_precision_seconds: opts.time_precision_seconds,
             extract_options: crate::options::ExtractOptions::default(),
         };
         Ok(archive)
@@ -2380,16 +2404,7 @@ impl RarArchive {
                 }
             }
             if entry.header.mtime != 0 || entry.header.mtime_ns.is_some() {
-                let mut mtime =
-                    UNIX_EPOCH + std::time::Duration::from_secs(entry.header.mtime as u64);
-                if let Some(ns) = entry.header.mtime_ns {
-                    mtime += std::time::Duration::from_nanos(ns as u64);
-                }
-                let times = std::fs::FileTimes::new().set_modified(mtime);
-                let _ = std::fs::File::options()
-                    .write(true)
-                    .open(&dest_path)
-                    .and_then(|f| f.set_times(times));
+                self.apply_member_times(&entry.header, &dest_path);
             }
         }
         Ok(true)
@@ -2518,18 +2533,50 @@ impl RarArchive {
         // Restore mtime (best-effort), including the nanosecond fraction
         // from the FILE_TIME extra record when present.
         if entry.header.mtime != 0 || entry.header.mtime_ns.is_some() {
-            let mut mtime = UNIX_EPOCH + std::time::Duration::from_secs(entry.header.mtime as u64);
-            if let Some(ns) = entry.header.mtime_ns {
-                mtime += std::time::Duration::from_nanos(ns as u64);
-            }
-            let times = std::fs::FileTimes::new().set_modified(mtime);
-            let _ = std::fs::File::options()
-                .write(true)
-                .open(&dest_path)
-                .and_then(|f| f.set_times(times));
+            self.apply_member_times(&entry.header, &dest_path);
         }
 
         Ok(dest_path)
+    }
+
+    /// Restore a member's stored timestamps on the extracted file: the
+    /// modification time always (when nonzero), plus access time when
+    /// requested via [`ExtractOptions`]. The creation time is set through
+    /// `SetFileTime` on Windows (std has no creation-time setter) and is a
+    /// no-op on Unix, where the change time cannot be set (matching
+    /// WinRAR's behavior).
+    fn apply_member_times(&self, hdr: &crate::headers::FileHeader, dest_path: &Path) {
+        let mut times = std::fs::FileTimes::new();
+        let mut any = false;
+        if hdr.mtime != 0 || hdr.mtime_ns.is_some() {
+            let mut mtime = UNIX_EPOCH + std::time::Duration::from_secs(hdr.mtime as u64);
+            if let Some(ns) = hdr.mtime_ns {
+                mtime += std::time::Duration::from_nanos(ns as u64);
+            }
+            times = times.set_modified(mtime);
+            any = true;
+        }
+        if self.extract_options.set_access_time
+            && let Some((secs, ns)) = hdr.atime
+        {
+            let t = UNIX_EPOCH
+                + std::time::Duration::from_secs(secs)
+                + std::time::Duration::from_nanos(ns as u64);
+            times = times.set_accessed(t);
+            any = true;
+        }
+        if any {
+            let _ = std::fs::File::options()
+                .write(true)
+                .open(dest_path)
+                .and_then(|f| f.set_times(times));
+        }
+        #[cfg(windows)]
+        if self.extract_options.set_creation_time
+            && let Some((secs, ns)) = hdr.ctime
+        {
+            let _ = write::windows_set_creation_time(dest_path, secs, ns);
+        }
     }
 
     /// Materialize a RAR5 file redirection (symlink, hardlink or file

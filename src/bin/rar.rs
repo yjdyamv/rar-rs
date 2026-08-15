@@ -191,6 +191,12 @@ struct FilesArgs {
     /// Extraction dictionary cap (like `-mdx<size>`; accepted, no effect)
     #[arg(long = "dict-extract", value_name = "SIZE")]
     dict_extract: Option<String>,
+    /// Save/restore file times (like `-ts[m,c,a][+,-,1]`; repeatable)
+    #[arg(long = "ts", value_name = "SPEC", action = clap::ArgAction::Append)]
+    ts_specs: Vec<String>,
+    /// Preserve the source files' access time when archiving (like `-tsp`)
+    #[arg(long = "ts-preserve")]
+    ts_preserve: bool,
     /// Keep the archive's original modification time when updating
     /// (like `-tk`)
     #[arg(long = "keep-time")]
@@ -280,6 +286,12 @@ struct CreateArgs {
     /// for RAR5 which is capped at 4 GiB)
     #[arg(long = "dict-extract", value_name = "SIZE")]
     dict_extract: Option<String>,
+    /// Save/restore file times (like `-ts[m,c,a][+,-,1]`; repeatable)
+    #[arg(long = "ts", value_name = "SPEC", action = clap::ArgAction::Append)]
+    ts_specs: Vec<String>,
+    /// Preserve the source files' access time when archiving (like `-tsp`)
+    #[arg(long = "ts-preserve")]
+    ts_preserve: bool,
     /// Recovery record percentage
     #[arg(
         long = "recovery-percent",
@@ -467,6 +479,7 @@ fn parse_dict_log(s: &str) -> Result<u8, String> {
     Ok((bytes.trailing_zeros() - 17) as u8)
 }
 
+/// Parsed `-ts` settings: which times to save and at what precision.
 #[cfg(test)]
 mod dict_log_tests {
     #[test]
@@ -579,6 +592,7 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
     {
         password = Some(pw.clone());
     }
+    let ts = common::parse_ts_specs(&args.ts_specs)?;
 
     let mut archive_path = args.archive.clone();
     // -ag: generate the archive name from the current date (default format
@@ -621,8 +635,7 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
     let files = &args.files;
 
     let opts = rar5::CreateOptions {
-        solid: args.solid,
-        quick_open: args.quick_open,
+        solid: args.solid,        quick_open: args.quick_open,
         blake2: args.blake2,
         password: password.clone(),
         encrypt_headers: header_encrypt,
@@ -631,6 +644,10 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
         recovery_volume_count,
         volume_size: args.volume_size,
         dict_size_log: args.dict_size.as_deref().map(parse_dict_log).transpose()?,
+        save_ctime: ts.save_ctime,
+        save_atime: ts.save_atime,
+        save_mtime: ts.save_mtime,
+        time_precision_seconds: ts.precision_seconds,
     };
 
     let existing = std::path::Path::new(archive_path).exists();
@@ -1011,6 +1028,7 @@ fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(),
             }
         }
     } else {
+        let ts = common::parse_ts_specs(&args.ts_specs)?;
         let create_opts = rar5::CreateOptions {
             password: password.clone(),
             dict_size_log: args
@@ -1018,6 +1036,10 @@ fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(),
                 .as_deref()
                 .map(parse_dict_log)
                 .transpose()?,
+            save_ctime: ts.save_ctime,
+            save_atime: ts.save_atime,
+            save_mtime: ts.save_mtime,
+            time_precision_seconds: ts.precision_seconds,
             ..Default::default()
         };
         rar5::RarArchive::create_with_options(archive_path, create_opts)
@@ -1107,6 +1129,7 @@ fn cmd_move(args: &FilesArgs) -> Result<(), String> {
             }
         }
     } else {
+        let ts = common::parse_ts_specs(&args.ts_specs)?;
         let create_opts = rar5::CreateOptions {
             password: password.clone(),
             dict_size_log: args
@@ -1114,6 +1137,10 @@ fn cmd_move(args: &FilesArgs) -> Result<(), String> {
                 .as_deref()
                 .map(parse_dict_log)
                 .transpose()?,
+            save_ctime: ts.save_ctime,
+            save_atime: ts.save_atime,
+            save_mtime: ts.save_mtime,
+            time_precision_seconds: ts.precision_seconds,
             ..Default::default()
         };
         rar5::RarArchive::create_with_options(archive_path, create_opts)

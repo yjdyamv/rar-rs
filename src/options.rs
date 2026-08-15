@@ -4,7 +4,7 @@
 ///
 /// All fields default to the same behavior as the existing `create*`
 /// constructors; enable only the features you need.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateOptions {
     /// Create a solid archive: consecutive compressed members share one
     /// LZ window (better ratio, slower random access). Single-volume only.
@@ -37,6 +37,39 @@ pub struct CreateOptions {
     /// size rounded down to a power of two). Valid logs: 0..=15
     /// (128 KiB .. 4 GiB).
     pub dict_size_log: Option<u8>,
+    /// Save the creation time (Windows) / ctime (Unix inode change time)
+    /// in the FILE_TIME extra record, like WinRAR's `-tsc`.
+    pub save_ctime: bool,
+    /// Save the last access time in the FILE_TIME extra record, like
+    /// WinRAR's `-tsa`.
+    pub save_atime: bool,
+    /// Store timestamps at 1-second precision instead of nanoseconds,
+    /// like WinRAR's `-ts...1` (all times of a member share one precision).
+    pub time_precision_seconds: bool,
+    /// Save the modification time (like WinRAR's `-tsm`; always on unless
+    /// `-tsm-` / `-ts-` is given).
+    pub save_mtime: bool,
+}
+
+impl Default for CreateOptions {
+    fn default() -> Self {
+        Self {
+            solid: false,
+            quick_open: false,
+            blake2: false,
+            password: None,
+            encrypt_headers: false,
+            recovery_percent: None,
+            recovery_volumes_percent: None,
+            recovery_volume_count: None,
+            volume_size: None,
+            dict_size_log: None,
+            save_ctime: false,
+            save_atime: false,
+            time_precision_seconds: false,
+            save_mtime: true,
+        }
+    }
 }
 
 /// Options controlling extraction and buffered reads.
@@ -69,6 +102,13 @@ pub struct ExtractOptions {
     /// Skip members whose destination already exists (like `-o-`): no
     /// overwrites, and existing files are left untouched.
     pub skip_existing: bool,
+    /// Also restore the creation time (Windows) from the FILE_TIME extra
+    /// record (like WinRAR's `-tsc` on extraction). Ignored on Unix,
+    /// where the change time cannot be set.
+    pub set_creation_time: bool,
+    /// Also restore the last access time from the FILE_TIME extra record
+    /// (like WinRAR's `-tsa` on extraction).
+    pub set_access_time: bool,
 }
 
 impl Default for ExtractOptions {
@@ -79,6 +119,8 @@ impl Default for ExtractOptions {
             max_total_unpacked_bytes: Some(32 * 1024 * 1024 * 1024),
             flat_paths: false,
             skip_existing: false,
+            set_creation_time: false,
+            set_access_time: false,
         }
     }
 }

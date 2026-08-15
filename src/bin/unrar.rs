@@ -34,6 +34,11 @@ struct Cli {
     #[arg(long, global = true)]
     #[allow(dead_code)]
     yes: bool,
+    /// Save/restore file times (like `-ts[m,c,a][+,-,1]`; repeatable —
+    /// on extraction, sets creation/access times in addition to mtime)
+    #[arg(long = "ts", value_name = "SPEC", global = true, action = clap::ArgAction::Append)]
+    #[allow(dead_code)]
+    ts_specs: Vec<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -143,9 +148,10 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), String> {
     let password = cli.password.password.as_deref();
+    let ts = common::parse_ts_specs(&cli.ts_specs)?;
     match cli.command {
-        Command::Extract(args) => cmd_extract(&args, password),
-        Command::ExtractFlat(args) => cmd_extract_flat(&args, password),
+        Command::Extract(args) => cmd_extract(&args, password, ts),
+        Command::ExtractFlat(args) => cmd_extract_flat(&args, password, ts),
         Command::List(args) => cmd_list(&args.archive, password),
         Command::ListBare(args) => cmd_list_bare(&args.archive, password),
         Command::ListTechnical(args) => cmd_list_technical(&args.archive, password),
@@ -238,7 +244,7 @@ fn open_archive(path: &str, password: Option<&str>) -> Result<rar5::RarArchive, 
     }
 }
 
-fn cmd_extract(args: &ExtractArgs, password: Option<&str>) -> Result<(), String> {
+fn cmd_extract(args: &ExtractArgs, password: Option<&str>, ts: common::TsSettings) -> Result<(), String> {
     if let Some(threads) = args.threads {
         rar5::set_extraction_threads(threads);
     }
@@ -251,6 +257,8 @@ fn cmd_extract(args: &ExtractArgs, password: Option<&str>) -> Result<(), String>
         &dest,
         rar5::ExtractOptions {
             skip_existing: args.overwrite.as_deref() == Some("never"),
+            set_creation_time: ts.save_ctime,
+            set_access_time: ts.save_atime,
             ..Default::default()
         },
     )
@@ -259,7 +267,11 @@ fn cmd_extract(args: &ExtractArgs, password: Option<&str>) -> Result<(), String>
     Ok(())
 }
 
-fn cmd_extract_flat(args: &ExtractArgs, password: Option<&str>) -> Result<(), String> {
+fn cmd_extract_flat(
+    args: &ExtractArgs,
+    password: Option<&str>,
+    ts: common::TsSettings,
+) -> Result<(), String> {
     let base = args.dest.as_deref().unwrap_or(".");
     let dest = common::extract_dest(base, &args.archive, args.append_dir);
     let mut rar = open_archive(&args.archive, password)?;
@@ -268,6 +280,8 @@ fn cmd_extract_flat(args: &ExtractArgs, password: Option<&str>) -> Result<(), St
         rar5::ExtractOptions {
             flat_paths: true,
             skip_existing: args.overwrite.as_deref() == Some("never"),
+            set_creation_time: ts.save_ctime,
+            set_access_time: ts.save_atime,
             ..Default::default()
         },
     )

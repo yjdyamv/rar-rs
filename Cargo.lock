@@ -401,6 +401,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "wide",
+ "windows-sys",
  "zeroize",
 ]
 

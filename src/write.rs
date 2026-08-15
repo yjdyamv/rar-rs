@@ -4,9 +4,173 @@
 
 use super::*;
 
+/// Set a file's creation time (Windows only) via `SetFileTime`.
+#[cfg(windows)]
+pub(crate) fn windows_set_creation_time(path: &Path, secs: u64, ns: u32) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, SetFileTime, FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_WRITE_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let ft_100ns = (secs + 11_644_473_600) * 10_000_000 + u64::from(ns) / 100;
+    let creation = FILETIME {
+        dwLowDateTime: (ft_100ns & 0xFFFF_FFFF) as u32,
+        dwHighDateTime: (ft_100ns >> 32) as u32,
+    };
+    let ok = unsafe { SetFileTime(handle, &creation, std::ptr::null(), std::ptr::null()) };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Read a Windows file timestamp via `GetFileTime` (std exposes no
+/// access/creation-time reader). `want_access` selects the last-access
+/// time, otherwise the creation time. Returns unix (seconds, ns).
+#[cfg(windows)]
+fn windows_file_time(path: &Path, want_access: bool) -> Option<(u64, u32)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileTime, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let mut creation = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut access = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut write = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let ok = unsafe { GetFileTime(handle, &mut creation, &mut access, &mut write) };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return None;
+    }
+    let ft = if want_access {
+        ((access.dwHighDateTime as u64) << 32) | access.dwLowDateTime as u64
+    } else {
+        ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64
+    };
+    Some((
+        (ft / 10_000_000).saturating_sub(11_644_473_600),
+        ((ft % 10_000_000) * 100) as u32,
+    ))
+}
+
 impl RarArchive {
 
     // ── Public API: creation ───────────────────────────────────────────────
+
+    /// Collect the extra-record timestamps (ctime/atime) per `-tsc`/`-tsa`,
+    /// honoring 1-second precision. On Windows the access time is read
+    /// through `GetFileTime` (std exposes no access-time API).
+    fn extra_file_times(
+        &self,
+        meta: &fs::Metadata,
+        path: &Path,
+    ) -> (Option<(u64, u32)>, Option<(u64, u32)>) {
+        let ns = |v: u32| if self.time_precision_seconds { 0 } else { v };
+        let ctime = if self.save_ctime {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                Some((meta.ctime() as u64, ns(meta.ctime_nsec() as u32)))
+            }
+            #[cfg(windows)]
+            {
+                let _ = meta;
+                windows_file_time(path, false).map(|(s, n)| (s, ns(n)))
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = meta;
+                let _ = path;
+                None
+            }
+        } else {
+            None
+        };
+        let atime = if self.save_atime {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                Some((meta.atime() as u64, ns(meta.atime_nsec() as u32)))
+            }
+            #[cfg(windows)]
+            {
+                let _ = meta;
+                windows_file_time(path, true).map(|(s, n)| (s, ns(n)))
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                None
+            }
+        } else {
+            None
+        };
+        (ctime, atime)
+    }
+
+    /// Build the FILE_TIME extra record for `meta`, per the current
+    /// `-ts` settings; `None` when no time needs the extra record.
+    fn time_extra_for(&self, meta: &fs::Metadata, path: &Path, mtime: u32, mtime_ns: u32) -> Option<Vec<u8>> {
+        let (ctime, atime) = self.extra_file_times(meta, path);
+        let mtime = self
+            .save_mtime
+            .then_some((
+                mtime as u64,
+                if self.time_precision_seconds { 0 } else { mtime_ns },
+            ));
+        let present = mtime.is_some() || ctime.is_some() || atime.is_some();
+        present.then(|| file_time_extra_record(mtime, ctime, atime))
+    }
 
     /// Add a file from the filesystem to the archive.
     pub fn add(&mut self, path: impl AsRef<Path>, compression_level: u8) -> RarResult<()> {
@@ -74,7 +238,7 @@ impl RarArchive {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
-        let time_extra = (mtime_ns != 0).then(|| file_time_extra_record(mtime as u64, mtime_ns));
+        let time_extra = self.time_extra_for(&meta, path, mtime, mtime_ns);
 
         #[cfg(unix)]
         let attrs = {
@@ -832,7 +996,7 @@ impl RarArchive {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
-        let time_extra = (mtime_ns != 0).then(|| file_time_extra_record(mtime as u64, mtime_ns));
+        let time_extra = self.time_extra_for(&meta, path, mtime, mtime_ns);
 
         #[cfg(unix)]
         let attrs = {
@@ -930,7 +1094,7 @@ impl RarArchive {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
-        let time_extra = (mtime_ns != 0).then(|| file_time_extra_record(mtime as u64, mtime_ns));
+        let time_extra = self.time_extra_for(&meta, path, mtime, mtime_ns);
 
         let chunk_size = crate::codec::DEFAULT_CHUNK_SIZE as u64;
         let chunk_count = file_size.div_ceil(chunk_size) as usize;

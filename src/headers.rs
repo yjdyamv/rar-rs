@@ -384,6 +384,13 @@ pub struct FileHeader {
     /// Nanosecond fraction of the modification time (FILE_TIME extra
     /// record); `None` when only the second-precision header time exists.
     pub mtime_ns: Option<u32>,
+    /// Creation/change time from the FILE_TIME extra record (seconds,
+    /// nanoseconds); `None` when absent. Windows creation time, or ctime
+    /// (inode change time) on Unix, matching WinRAR's `-tsc`.
+    pub ctime: Option<(u64, u32)>,
+    /// Last access time from the FILE_TIME extra record (seconds,
+    /// nanoseconds); `None` when absent (WinRAR `-tsa`).
+    pub atime: Option<(u64, u32)>,
     /// Owner and group names (OWNER extra record).
     pub owner: Option<String>,
     pub group: Option<String>,
@@ -414,6 +421,8 @@ impl Default for FileHeader {
             data_offset: 0,
             format_version: 5,
             mtime_ns: None,
+            ctime: None,
+            atime: None,
             owner: None,
             group: None,
             version: None,
@@ -581,14 +590,15 @@ impl FileHeader {
 
         let is_directory = file_flags & FILE_FLAG_DIRECTORY != 0;
         let (hash_type, hash_value) = parse_hash_record(&extra_data);
-        let (mtime_ns, owner, group, version) = parse_extra_records(&extra_data);
+        let (mtime_override, mtime_ns, ctime, atime, owner, group, version) =
+            parse_extra_records(&extra_data);
 
         Ok(FileHeader {
             name,
             unpacked_size,
             packed_size: data_size,
             attributes,
-            mtime,
+            mtime: mtime_override.map(|s| s as u32).unwrap_or(mtime),
             crc32_val,
             hash_type,
             hash_value,
@@ -604,6 +614,8 @@ impl FileHeader {
             data_offset: stream_pos,
             format_version: 5,
             mtime_ns,
+            ctime,
+            atime,
             owner,
             group,
             version,
@@ -614,10 +626,22 @@ impl FileHeader {
 /// Parse the extra-area records that carry member metadata: nanosecond
 /// modification time (`EXTRA_FILE_TIME`), owner/group names
 /// (`EXTRA_FILE_OWNER`) and the file version (`EXTRA_FILE_VERSION`).
+#[allow(clippy::type_complexity)]
 fn parse_extra_records(
     extra_data: &[u8],
-) -> (Option<u32>, Option<String>, Option<String>, Option<u64>) {
+) -> (
+    Option<u64>,
+    Option<u32>,
+    Option<(u64, u32)>,
+    Option<(u64, u32)>,
+    Option<String>,
+    Option<String>,
+    Option<u64>,
+) {
+    let mut mtime_override = None;
     let mut mtime_ns = None;
+    let mut ctime = None;
+    let mut atime = None;
     let mut owner = None;
     let mut group = None;
     let mut version = None;
@@ -639,20 +663,73 @@ fn parse_extra_records(
         let body_start = offset + tn;
         match rec_type {
             EXTRA_FILE_TIME => {
-                // [flags][per present time: sec u32 + ns u32]; the
-                // modification time is the first pair.
+                // FILE_TIME (HTIME): [flags vint][per present time: 4-byte
+                // unix seconds or 8-byte FILETIME][if UNIX_NS: same order,
+                // 4-byte nanosecond fields]. Flag bits: 0x01 unix format,
+                // 0x02 mtime, 0x04 ctime, 0x08 atime, 0x10 unix ns.
                 let mut p = body_start;
                 let (flags, fl) = match vint::decode_from_slice(extra_data, p) {
                     Ok(v) => v,
                     Err(_) => break,
                 };
                 p += fl;
-                if flags & 0x0001 != 0 && p + 8 <= rec_end {
-                    let sec = u32::from_le_bytes(extra_data[p..p + 4].try_into().unwrap());
-                    let ns = u32::from_le_bytes(extra_data[p + 4..p + 8].try_into().unwrap());
-                    if sec > 0 || ns > 0 {
-                        mtime_ns = Some(ns);
+                let unix_format = flags & 0x0001 != 0;
+                let have = [
+                    flags & 0x0002 != 0, // mtime
+                    flags & 0x0004 != 0, // ctime
+                    flags & 0x0008 != 0, // atime
+                ];
+                let mut secs = [0u64; 3];
+                let mut nss = [0u32; 3];
+                for (i, present) in have.iter().enumerate() {
+                    if !*present {
+                        continue;
                     }
+                    if unix_format {
+                        if p + 4 > rec_end {
+                            break;
+                        }
+                        secs[i] = u32::from_le_bytes(extra_data[p..p + 4].try_into().unwrap())
+                            as u64;
+                        p += 4;
+                    } else {
+                        if p + 8 > rec_end {
+                            break;
+                        }
+                        // FILETIME: 100 ns units since 1601-01-01; the
+                        // sub-second remainder becomes the nanosecond field.
+                        let ft = u64::from_le_bytes(extra_data[p..p + 8].try_into().unwrap());
+                        secs[i] = (ft / 10_000_000).saturating_sub(11_644_473_600);
+                        nss[i] = ((ft % 10_000_000) * 100) as u32;
+                        p += 8;
+                    }
+                }
+                if unix_format && flags & 0x0010 != 0 {
+                    for (i, present) in have.iter().enumerate() {
+                        if !*present {
+                            continue;
+                        }
+                        if p + 4 > rec_end {
+                            break;
+                        }
+                        let ns =
+                            u32::from_le_bytes(extra_data[p..p + 4].try_into().unwrap())
+                                & 0x3fff_ffff;
+                        nss[i] = if ns < 1_000_000_000 { ns } else { 0 };
+                        p += 4;
+                    }
+                }
+                if have[0] {
+                    mtime_override = Some(secs[0]);
+                    if secs[0] > 0 || nss[0] > 0 {
+                        mtime_ns = Some(nss[0]);
+                    }
+                }
+                if have[1] {
+                    ctime = Some((secs[1], nss[1]));
+                }
+                if have[2] {
+                    atime = Some((secs[2], nss[2]));
                 }
             }
             EXTRA_FILE_OWNER => {
@@ -686,7 +763,7 @@ fn parse_extra_records(
         }
         offset = rec_end;
     }
-    (mtime_ns, owner, group, version)
+    (mtime_override, mtime_ns, ctime, atime, owner, group, version)
 }
 
 /// Read a length-prefixed name from an extra record body.
@@ -989,15 +1066,50 @@ pub(crate) fn parse_redirect_record(extra: &[u8]) -> Option<RedirectSpec> {
     None
 }
 
-/// Serialize a nanosecond modification time extra record
-/// (`EXTRA_FILE_TIME`), matching the official `rar` format:
-/// `[flags 0x13][seconds u32][nanoseconds u32]`.
-pub(crate) fn file_time_extra_record(secs: u64, ns: u32) -> Vec<u8> {
-    let mut record = Vec::with_capacity(10);
-    record.push(0x13); // flags: modification time with nanoseconds
-    record.extend_from_slice(&(secs as u32).to_le_bytes());
-    record.extend_from_slice(&ns.to_le_bytes());
-    let mut out = Vec::with_capacity(12);
+/// Serialize a FILE_TIME (HTIME) extra record, matching the official `rar`
+/// format: `[flags vint][per present time: sec u32][if ns: per present
+/// time: ns u32]`. Flag bits: 0x01 unix format, 0x02 mtime, 0x04 ctime,
+/// 0x08 atime, 0x10 nanosecond precision. All present times share one
+/// precision, so all-zero ns selects the 1-second form.
+pub(crate) fn file_time_extra_record(
+    mtime: Option<(u64, u32)>,
+    ctime: Option<(u64, u32)>,
+    atime: Option<(u64, u32)>,
+) -> Vec<u8> {
+    let ns_precision = mtime.is_some_and(|(_, ns)| ns != 0)
+        || ctime.is_some_and(|(_, ns)| ns != 0)
+        || atime.is_some_and(|(_, ns)| ns != 0);
+    let mut flags = 0x0001u64; // unix format
+    if ns_precision {
+        flags |= 0x0010;
+    }
+    if mtime.is_some() {
+        flags |= 0x0002;
+    }
+    if ctime.is_some() {
+        flags |= 0x0004;
+    }
+    if atime.is_some() {
+        flags |= 0x0008;
+    }
+    let mut record = Vec::with_capacity(13);
+    record.extend(vint::encode(flags));
+    // Segment layout (like WinRAR): all second fields first, then all
+    // nanosecond fields, in mtime/ctime/atime order.
+    for t in [mtime, ctime, atime] {
+        if let Some((secs, _)) = t {
+            record.extend_from_slice(&(secs as u32).to_le_bytes());
+        }
+    }
+    if ns_precision {
+        for t in [mtime, ctime, atime] {
+            if let Some((_, ns)) = t {
+                record.extend_from_slice(&ns.to_le_bytes());
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(12 + record.len());
     out.extend(vint::encode((1 + record.len()) as u64));
     out.extend(vint::encode(EXTRA_FILE_TIME));
     out.extend(record);

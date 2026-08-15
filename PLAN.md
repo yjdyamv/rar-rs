@@ -64,7 +64,7 @@
 - [x] 归档组织（批次 2）：`-ag`（自动命名，YYYYMMDDHHMMSS 插入扩展名前，与 WinRAR 一致）
 - [x] 文件系统语义（批次 2）：`-ol`（符号链接存 redirect 记录；unix 测试）、`-oh`（硬链接去重；unix cfg）
 - [x] 时间（批次 3）：`-tk`（更新保留归档 mtime）、`-tn/-to`（时间段过滤 `[Nd][Nh][Nm][Ns]`，支持 m/c/a 修饰符与多开关 AND，空/非法段=0 秒、无匹配 exit 10 不建归档，均与 WinRAR 对照一致）
-- [ ] 时间：`-ts[m,c,a]`（库存不存 ctime/atime；`-tnc/-tna` 过滤已支持 c/a 读取）
+- [x] 时间：`-ts[m,c,a][+,-,1]`（2026-08）：库存/保存 ctime+atime（HTIME extra 记录，unix 秒+ns 分段布局与 WinRAR 一致；FILETIME 格式也解析）；创建侧 `-ts`/`-tsc`/`-tsa`/`-tsm1`/`-ts1`/`-ts-` 与 WinRAR 字段级对照一致；提取侧 `-ts` 恢复 ctime（Windows SetFileTime，unix 不可设 ctime 与 WinRAR 一致）+atime；Windows atime 读取用 GetFileTime（新增 windows-sys 依赖）。`-tsp`（保留源 atime）待做
 - [x] 归档组织（批次 3）：`-ed`（不存空目录）、`-c-`、`-si<name>`（stdin 流式添加，files 可省略）、`-ad`（unrar 提取到归档名子目录）
 - [ ] 归档组织：`-ad/-am/-as`（a 命令同步侧）、`-e[+]<attr>`；`-ver[n]`（文件版本控制）
 - [ ] 文件系统语义：`-os`（NTFS 流）；`-ow`（读侧解析 OWNER 记录、写侧不生成）；`-ac/-ai`
@@ -91,11 +91,11 @@
 2. `-md` 字典选择 + 放宽读侧上限（至少 4 GB / 非 2 幂）✅（2026-08；RAR5 上限 4 GB，非 2 幂属 RAR7 不做）
 3. CLI 接 `-ol/-oh`（库已就绪）+ `-si` ✅（批次 2/3 完成）
 4. solid + 分卷 ✅（2026-08；移除拒绝，P4 流式化已支持，WinRAR 双向验证）
-5. 时间戳扩展（ctime/atime + `-ts`）与时间过滤（`-tnc/-tna` 过滤已支持 c/a 读取）
+5. 时间戳扩展（ctime/atime + `-ts`）与时间过滤（`-tnc/-tna` 过滤已支持 c/a 读取）✅（2026-08；`-tsp` 保留源 atime 待做）
 6. `ch`、`-z`、`-ag`、`-y/-o` 等高频小开关 ✅
 7. 剩余小开关批量：`-id[c,d,n,p]` 细分、`-ver[n]`、`-ow` 写侧、`-ac/-ai`、`-e[+]<attr>`、`-ad/-am/-as`、`-os`、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`、`-oi`、`-ilog` 系列
 
-> 进度：下一步 = 第 5 项（`-ts` 时间戳扩展：库存 ctime/atime + 保存/恢复）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
+> 进度：下一步 = 第 7 项（剩余小开关批量：`-id[c,d,n,p]` 细分、`-ver[n]`、`-ow` 写侧、`-ac/-ai`、`-e[+]<attr>`、`-ad/-am/-as`、`-os`、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`、`-oi`、`-ilog` 系列；`-tsp` 顺带）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
 
 ## 备注
 
