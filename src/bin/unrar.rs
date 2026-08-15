@@ -14,6 +14,9 @@ use std::process;
 struct Cli {
     #[command(flatten)]
     password: common::PasswordArgs,
+    /// Quiet mode: suppress informational messages (like `-idq` / `-inul`)
+    #[arg(long, global = true)]
+    quiet: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -29,9 +32,21 @@ enum Command {
     /// List contents
     #[command(visible_alias = "l")]
     List(ArchiveArgs),
+    /// List bare (names only, like `lb`)
+    #[command(visible_alias = "lb")]
+    ListBare(ArchiveArgs),
+    /// List technical (like `lt`)
+    #[command(visible_alias = "lt")]
+    ListTechnical(ArchiveArgs),
     /// Verbosely list contents
     #[command(visible_alias = "v")]
     VerboseList(ArchiveArgs),
+    /// Verbosely list bare (like `vb`)
+    #[command(visible_alias = "vb")]
+    VerboseListBare(ArchiveArgs),
+    /// Verbosely list technical (like `vt`)
+    #[command(visible_alias = "vt")]
+    VerboseListTechnical(ArchiveArgs),
     /// Test integrity
     #[command(visible_alias = "t")]
     Test(ArchiveArgs),
@@ -53,6 +68,13 @@ struct ExtractArgs {
     /// Extraction threads (like `rar -mt<N>`)
     #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
     threads: Option<usize>,
+    /// Overwrite mode (like `-o+` / `-o-`)
+    #[arg(
+        long = "overwrite",
+        value_name = "MODE",
+        value_parser = ["always", "never"]
+    )]
+    overwrite: Option<String>,
 }
 
 fn parse_threads(s: &str) -> Result<usize, String> {
@@ -83,7 +105,14 @@ struct PrintArgs {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let raw: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = raw
+        .iter()
+        .skip(1)
+        .map(|a| common::normalize_switch(a))
+        .collect();
+    let cli = Cli::parse_from(std::iter::once("unrar".to_string()).chain(args));
+    common::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
     if let Err(e) = run(cli) {
         eprintln!("unrar: {e}");
         process::exit(1);
@@ -96,9 +125,13 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Extract(args) => cmd_extract(&args, password),
         Command::ExtractFlat(args) => cmd_extract_flat(&args, password),
         Command::List(args) => cmd_list(&args.archive, password),
+        Command::ListBare(args) => cmd_list_bare(&args.archive, password),
+        Command::ListTechnical(args) => cmd_list_technical(&args.archive, password),
         Command::VerboseList(args) => {
             common::print_verbose_list(&open_archive(&args.archive, password)?)
         }
+        Command::VerboseListBare(args) => cmd_list_bare(&args.archive, password),
+        Command::VerboseListTechnical(args) => cmd_list_technical(&args.archive, password),
         Command::Test(args) => cmd_test(&args.archive, password),
         Command::Print(args) => cmd_print(&args, password),
         Command::External(ext) => {
@@ -110,6 +143,83 @@ fn run(cli: Cli) -> Result<(), String> {
             }
         }
     }
+}
+
+/// Bare list (`lb` / `vb`): member names only.
+fn cmd_list_bare(archive: &str, password: Option<&str>) -> Result<(), String> {
+    let rar = open_archive(archive, password)?;
+    for entry in rar.list() {
+        println!("{}", entry.name());
+    }
+    Ok(())
+}
+
+/// Technical list (`lt` / `vt`): mtime, attributes, sizes, ratio, CRC and
+/// method per member, in the spirit of UnRAR's `lt`.
+fn cmd_list_technical(archive: &str, password: Option<&str>) -> Result<(), String> {
+    let rar = open_archive(archive, password)?;
+    println!(
+        "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {:<19}  Name",
+        "Size", "Packed", "Ratio", "Checksum", "Method", "Modified"
+    );
+    println!("{}", "-".repeat(86));
+    for entry in rar.list() {
+        let ratio = if entry.is_dir() {
+            "  dir".to_string()
+        } else if entry.size() > 0 {
+            format!(
+                "{:.1}%",
+                entry.compressed_size() as f64 / entry.size() as f64 * 100.0
+            )
+        } else {
+            " 0.0%".to_string()
+        };
+        let checksum = entry
+            .crc32()
+            .map(|c| format!("{c:08X}"))
+            .unwrap_or_else(|| "-".to_string());
+        let modified = format_unix_time(entry.header.mtime);        println!(
+            "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {:<19}  {}",
+            entry.size(),
+            entry.compressed_size(),
+            ratio,
+            checksum,
+            entry.method_name(),
+            modified,
+            entry.name()
+        );
+    }
+    Ok(())
+}
+
+fn format_unix_time(secs: u32) -> String {
+    // Simple UTC rendering of a unix timestamp (no chrono dependency).
+    let days = secs as i64 / 86400;
+    let secs_of_day = secs % 86400;
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        y,
+        m,
+        d,
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60
+    )
+}
+
+/// Days-to-civil-date conversion (Howard Hinnant's algorithm).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 fn open_archive(path: &str, password: Option<&str>) -> Result<rar5::RarArchive, String> {
@@ -128,8 +238,15 @@ fn cmd_extract(args: &ExtractArgs, password: Option<&str>) -> Result<(), String>
     let mut rar = open_archive(&args.archive, password)?;
 
     let count = rar.list().len();
-    rar.extract_all(dest).map_err(|e| format!("{e}"))?;
-    println!("Extracted {count} entries to {dest}");
+    rar.extract_all_with_options(
+        dest,
+        rar5::ExtractOptions {
+            skip_existing: args.overwrite.as_deref() == Some("never"),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| format!("{e}"))?;
+    info!("Extracted {count} entries to {dest}");
     Ok(())
 }
 
@@ -140,6 +257,7 @@ fn cmd_extract_flat(args: &ExtractArgs, password: Option<&str>) -> Result<(), St
         dest,
         rar5::ExtractOptions {
             flat_paths: true,
+            skip_existing: args.overwrite.as_deref() == Some("never"),
             ..Default::default()
         },
     )
@@ -195,19 +313,19 @@ fn cmd_test(archive: &str, password: Option<&str>) -> Result<(), String> {
         }
         match rar.read(name) {
             Ok(_) => {
-                println!("  OK  {name}");
+                info!("  OK  {name}");
                 ok += 1;
             }
             Err(e) => {
-                println!("  FAIL  {name}: {e}");
+                info!("  FAIL  {name}: {e}");
                 fail += 1;
             }
         }
     }
 
-    println!();
+    info!();
     if fail == 0 {
-        println!("All {ok} files OK");
+        info!("All {ok} files OK");
         Ok(())
     } else {
         Err(format!("{fail} file(s) failed, {ok} OK"))

@@ -2469,6 +2469,12 @@ impl RarArchive {
             self.safe_dest_path(dest_dir, &entry.header.name)?
         };
 
+        // `-o-` (skip existing): members whose destination already exists
+        // are left untouched.
+        if self.extract_options.skip_existing && dest_path.exists() {
+            return Ok(dest_path);
+        }
+
         if entry.is_dir() {
             fs::create_dir_all(&dest_path)?;
             return Ok(dest_path);

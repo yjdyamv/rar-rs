@@ -3490,3 +3490,160 @@ fn cli_recursion_and_case_switches() {
     assert!(status.success());
     assert_eq!(cli_names(&archive), ["MIXED.TXT"]);
 }
+
+// ── WinRAR CLI parity: quiet mode, ch/p commands, -o-, -z, list variants ──
+
+const UNRAR_CLI: &str = env!("CARGO_BIN_EXE_unrar");
+
+#[test]
+fn cli_quiet_mode_suppresses_informational_output() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+    let archive = dir.path().join("q.rar");
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).is_empty(),
+        "-idq must suppress status output, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // Without -idq the status line appears.
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a"])
+        .arg(dir.path().join("q2.rar"))
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Created"));
+}
+
+#[test]
+fn cli_ch_converts_member_case_like_winrar() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("MiXeD.TXT"), b"x").unwrap();
+    let archive = dir.path().join("ch.rar");
+    {
+        let mut rar = RarArchive::create(&archive).unwrap();
+        rar.add(dir.path().join("MiXeD.TXT"), 3).unwrap();
+        rar.close().unwrap();
+    }
+    assert_eq!(cli_names(&archive), ["MiXeD.TXT"]);
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["ch", "-cl"])
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&archive), ["mixed.txt"]);
+    let mut rar = RarArchive::open(&archive).unwrap();
+    assert_eq!(rar.read("mixed.txt").unwrap(), b"x");
+}
+
+#[test]
+fn cli_print_writes_member_to_stdout() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("p.rar");
+    {
+        let mut rar = RarArchive::create(&archive).unwrap();
+        rar.add_bytes("a.txt", b"hello p", 0).unwrap();
+        rar.close().unwrap();
+    }
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["p"])
+        .arg(&archive)
+        .arg("a.txt")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"hello p");
+}
+
+#[test]
+fn cli_overwrite_never_skips_existing_files() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("o.rar");
+    {
+        let mut rar = RarArchive::create(&archive).unwrap();
+        rar.add_bytes("f.txt", b"new", 0).unwrap();
+        rar.close().unwrap();
+    }
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("f.txt"), b"OLD").unwrap();
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "-o-"])
+        .arg(&archive)
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read(out.join("f.txt")).unwrap(),
+        b"OLD",
+        "-o- must leave existing files untouched"
+    );
+}
+
+#[test]
+fn cli_comment_file_sets_comment() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("z.rar");
+    {
+        let mut rar = RarArchive::create(&archive).unwrap();
+        rar.add_bytes("f.txt", b"x", 0).unwrap();
+        rar.close().unwrap();
+    }
+    std::fs::write(dir.path().join("note.txt"), b"file comment").unwrap();
+    // `-z<file>` is a single token (like WinRAR's `-zfile`).
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["c"])
+        .arg(format!("-z{}", dir.path().join("note.txt").display()))
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["cw"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert_eq!(out.stdout, b"file comment");
+}
+
+#[test]
+fn unrar_list_variants_bare_and_technical() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("lt.rar");
+    {
+        let mut rar = RarArchive::create(&archive).unwrap();
+        rar.add_bytes("a.txt", b"aaa", 0).unwrap();
+        rar.add_bytes("b.bin", b"bbbb", 0).unwrap();
+        rar.close().unwrap();
+    }
+    let bare = std::process::Command::new(UNRAR_CLI)
+        .arg("lb")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&bare.stdout), "a.txt\nb.bin\n");
+
+    let tech = std::process::Command::new(UNRAR_CLI)
+        .arg("lt")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&tech.stdout);
+    assert!(text.contains("a.txt") && text.contains("Checksum"), "{text}");
+    // Technical rows carry a CRC column value.
+    let row = text.lines().find(|l| l.ends_with("a.txt")).unwrap();
+    assert!(!row.trim_start().starts_with("-"), "{row}");
+}

@@ -14,6 +14,15 @@ use std::process;
     propagate_version = true
 )]
 struct Cli {
+    /// Assume yes on all queries (like `-y`)
+    #[arg(short = 'y', long, global = true)]
+    yes: bool,
+    /// Quiet mode: suppress informational messages (like `-idq` / `-inul`)
+    #[arg(long, global = true)]
+    quiet: bool,
+    /// Work directory (like `-w<path>`)
+    #[arg(long = "work-dir", global = true)]
+    work_dir: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -38,6 +47,10 @@ enum Command {
     /// Rename archived members
     #[command(visible_alias = "rn")]
     Rename(RenameArgs),
+    /// Change archive parameters (like `rar ch`; currently `-cl`/`-cu`
+    /// member name case conversion)
+    #[command(visible_alias = "ch")]
+    Change(ChangeArgs),
     /// Lock the archive
     #[command(visible_alias = "k")]
     Lock(ArchiveArgs),
@@ -56,12 +69,15 @@ enum Command {
     /// Remove the SFX module from an SFX archive
     #[command(visible_alias = "s-")]
     SfxStrip(ArchiveArgs),
-    /// Set the archive comment (from stdin)
+    /// Set the archive comment (from stdin, or `-z<file>`)
     #[command(visible_alias = "c")]
-    CommentSet(ArchiveArgs),
+    CommentSet(CommentArgs),
     /// Write the archive comment to stdout
     #[command(visible_alias = "cw")]
     CommentWrite(ArchiveArgs),
+    /// Print file to stdout (like `rar p`)
+    #[command(visible_alias = "p")]
+    Print(PrintArgs),
     /// Extract with full paths
     #[command(visible_alias = "x")]
     Extract(ExtractArgs),
@@ -94,6 +110,44 @@ struct ArchiveArgs {
     archive: String,
 }
 
+/// `rar ch` parameters: member name case conversion (-cl / -cu).
+#[derive(Args)]
+struct ChangeArgs {
+    #[command(flatten)]
+    password: common::PasswordArgs,
+    #[arg(value_name = "ARCHIVE")]
+    archive: String,
+    /// Convert stored names to lowercase (-cl)
+    #[arg(long = "lowercase")]
+    lowercase: bool,
+    /// Convert stored names to uppercase (-cu)
+    #[arg(long = "uppercase")]
+    uppercase: bool,
+}
+
+/// Archive path plus an optional member to print.
+#[derive(Args)]
+struct PrintArgs {
+    #[command(flatten)]
+    password: common::PasswordArgs,
+    #[arg(value_name = "ARCHIVE")]
+    archive: String,
+    #[arg(value_name = "FILE")]
+    file: Option<String>,
+}
+
+/// Comment setting: stdin by default, or `-z<file>`.
+#[derive(Args)]
+struct CommentArgs {
+    #[command(flatten)]
+    password: common::PasswordArgs,
+    #[arg(value_name = "ARCHIVE")]
+    archive: String,
+    /// Read the comment from a file (like `-z<file>`)
+    #[arg(long = "comment-file")]
+    comment_file: Option<String>,
+}
+
 /// Archive path plus an optional destination directory.
 #[derive(Args)]
 struct ExtractArgs {
@@ -106,6 +160,13 @@ struct ExtractArgs {
     /// Compression threads (like `-mt<N>`; also used for extraction)
     #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
     threads: Option<usize>,
+    /// Overwrite mode (like `-o+` / `-o-`)
+    #[arg(
+        long = "overwrite",
+        value_name = "MODE",
+        value_parser = ["always", "never"]
+    )]
+    overwrite: Option<String>,
 }
 
 /// Archive path plus one or more source files.
@@ -292,6 +353,14 @@ fn main() {
         .map(|a| common::normalize_switch(a))
         .collect();
     let cli = Cli::parse_from(std::iter::once("rar".to_string()).chain(args));
+    common::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
+    if let Some(dir) = &cli.work_dir {
+        if let Err(e) = std::env::set_current_dir(dir) {
+            eprintln!("rar: cannot change to work directory {dir}: {e}");
+            process::exit(1);
+        }
+    }
+    let _ = cli.yes; // no interactive prompts exist yet; accepted for parity
     if let Err(e) = run(cli) {
         eprintln!("rar: {e}");
         process::exit(1);
@@ -306,6 +375,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Move(args) => cmd_move(&args),
         Command::Delete(args) => cmd_delete(&args),
         Command::Rename(args) => cmd_rename(&args),
+        Command::Change(args) => cmd_change(&args),
         Command::Lock(args) => cmd_lock(&args),
         Command::Recovery(args) => cmd_rr(&args),
         Command::Repair(args) => cmd_repair(&args),
@@ -314,6 +384,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::SfxStrip(args) => cmd_sfx_strip(&args),
         Command::CommentSet(args) => cmd_comment_set(&args),
         Command::CommentWrite(args) => cmd_comment_write(&args),
+        Command::Print(args) => cmd_print(&args),
         Command::Extract(args) => cmd_extract(&args),
         Command::ExtractFlat(args) => cmd_extract_flat(&args),
         Command::Test(args) => cmd_test(&args),
@@ -430,20 +501,20 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
     rar.close().map_err(|e| format!("close: {e}"))?;
     if args.volume_size.is_some() {
         let vols = rar5::discover_volumes(std::path::Path::new(archive_path));
-        println!(
+        info!(
             "Created {} volume(s) ({} file(s), level {})",
             vols.len(),
             files.len(),
             args.level
         );
     } else if was_existing {
-        println!(
+        info!(
             "Updated {archive_path} ({} file(s), level {})",
             files.len(),
             args.level
         );
     } else {
-        println!(
+        info!(
             "Created {archive_path} ({} file(s), level {})",
             files.len(),
             args.level
@@ -462,7 +533,7 @@ fn cmd_delete(args: &DeleteArgs) -> Result<(), String> {
     };
     let names: Vec<&str> = args.names.iter().map(|s| s.as_str()).collect();
     let n = rar.delete(&names).map_err(|e| format!("delete: {e}"))?;
-    println!("Deleted {n} file(s) from {archive_path}");
+    info!("Deleted {n} file(s) from {archive_path}");
     Ok(())
 }
 
@@ -519,7 +590,7 @@ fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(),
     }
     drop(rar);
     if to_delete.is_empty() {
-        println!("{archive_path}: no files to {verb}");
+        info!("{archive_path}: no files to {verb}");
         return Ok(());
     }
     {
@@ -532,7 +603,7 @@ fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(),
         rar.delete(&names).map_err(|e| format!("delete: {e}"))?;
     }
     if to_add.is_empty() {
-        println!("{archive_path}: no files to {verb}");
+        info!("{archive_path}: no files to {verb}");
         return Ok(());
     }
     // Deleting every member erases the archive file; recreate it when the
@@ -559,7 +630,7 @@ fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(),
             .map_err(|e| format!("add {file}: {e}"))?;
     }
     rar.close().map_err(|e| format!("close: {e}"))?;
-    println!("{verb} {archive_path} ({} file(s))", to_add.len());
+    info!("{verb} {archive_path} ({} file(s))", to_add.len());
     Ok(())
 }
 
@@ -571,7 +642,7 @@ fn cmd_lock(args: &ArchiveArgs) -> Result<(), String> {
         None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
     rar.lock().map_err(|e| format!("lock: {e}"))?;
-    println!("Locked {archive}", archive = args.archive);
+    info!("Locked {archive}", archive = args.archive);
     Ok(())
 }
 
@@ -584,7 +655,7 @@ fn cmd_rr(args: &RecoveryArgs) -> Result<(), String> {
     };
     rar.add_recovery_record(args.percent)
         .map_err(|e| format!("rr: {e}"))?;
-    println!(
+    info!(
         "Recovery record {}% added to {archive}",
         args.percent,
         archive = args.archive
@@ -605,7 +676,7 @@ fn cmd_rename(args: &RenameArgs) -> Result<(), String> {
         .collect();
     let mut rar = rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?;
     let n = rar.rename(&pairs).map_err(|e| format!("rename: {e}"))?;
-    println!("Renamed {n} file(s) in {archive_path}");
+    info!("Renamed {n} file(s) in {archive_path}");
     Ok(())
 }
 
@@ -651,7 +722,7 @@ fn cmd_move(args: &FilesArgs) -> Result<(), String> {
             let _ = std::fs::remove_file(path);
         }
     }
-    println!("Moved {} file(s) to {archive_path}", files.len());
+    info!("Moved {} file(s) to {archive_path}", files.len());
     Ok(())
 }
 
@@ -756,7 +827,7 @@ fn cmd_repair(args: &ArchiveArgs) -> Result<(), String> {
     let input = std::fs::read(archive_path).map_err(|e| format!("read: {e}"))?;
     let repaired = rar5::repair_archive(&input).map_err(|e| format!("repair: {e}"))?;
     if repaired == input {
-        println!("All OK");
+        info!("All OK");
         return Ok(());
     }
     // The official tool refuses an obviously truncated archive with a
@@ -771,7 +842,7 @@ fn cmd_repair(args: &ArchiveArgs) -> Result<(), String> {
         let _ = std::fs::remove_file(&fixed_path);
         return Err(format!("repair produced an unreadable archive: {e}"));
     }
-    println!("Repaired {archive_path} -> {fixed_path}");
+    info!("Repaired {archive_path} -> {fixed_path}");
     Ok(())
 }
 
@@ -781,23 +852,29 @@ fn cmd_rebuild_volumes(args: &ArchiveArgs) -> Result<(), String> {
     let rebuilt = rar5::rebuild_missing_volumes(std::path::Path::new(first))
         .map_err(|e| format!("rc: {e}"))?;
     if rebuilt.is_empty() {
-        println!("All volumes present");
+        info!("All volumes present");
     } else {
         for path in &rebuilt {
-            println!("Rebuilt {}", path.display());
+            info!("Rebuilt {}", path.display());
         }
     }
     Ok(())
 }
 
-/// Set the archive comment from stdin (like `rar c`); empty input removes
-/// the comment.
-fn cmd_comment_set(args: &ArchiveArgs) -> Result<(), String> {
+/// Set the archive comment (like `rar c`), from stdin or `-z<file>`;
+/// empty input removes the comment.
+fn cmd_comment_set(args: &CommentArgs) -> Result<(), String> {
     use std::io::Read;
     let mut comment = Vec::new();
-    std::io::stdin()
-        .read_to_end(&mut comment)
-        .map_err(|e| format!("stdin: {e}"))?;
+    if let Some(file) = &args.comment_file {
+        std::fs::File::open(file)
+            .and_then(|mut f| f.read_to_end(&mut comment))
+            .map_err(|e| format!("read comment file {file}: {e}"))?;
+    } else {
+        std::io::stdin()
+            .read_to_end(&mut comment)
+            .map_err(|e| format!("stdin: {e}"))?;
+    }
     let mut rar = match &args.password.password {
         Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
@@ -806,9 +883,9 @@ fn cmd_comment_set(args: &ArchiveArgs) -> Result<(), String> {
     rar.set_comment(&comment)
         .map_err(|e| format!("comment: {e}"))?;
     if comment.is_empty() {
-        println!("Comment removed from {archive}", archive = args.archive);
+        info!("Comment removed from {archive}", archive = args.archive);
     } else {
-        println!("Comment added to {archive}", archive = args.archive);
+        info!("Comment added to {archive}", archive = args.archive);
     }
     Ok(())
 }
@@ -842,7 +919,7 @@ fn cmd_sfx_strip(args: &ArchiveArgs) -> Result<(), String> {
         .unwrap_or_else(|| format!("{archive_path}.plain"));
     let out_path = format!("{base}.rar");
     std::fs::write(&out_path, &input[sfx_offset..]).map_err(|e| format!("write: {e}"))?;
-    println!("Removed SFX module: {out_path}");
+    info!("Removed SFX module: {out_path}");
     Ok(())
 }
 
@@ -867,7 +944,7 @@ fn cmd_sfx(args: &SfxArgs) -> Result<(), String> {
     out.extend_from_slice(&module_bytes);
     out.extend_from_slice(&input);
     std::fs::write(&out_path, &out).map_err(|e| format!("write: {e}"))?;
-    println!("Created {out_path}");
+    info!("Created {out_path}");
     Ok(())
 }
 
@@ -886,6 +963,70 @@ fn find_sfx_module() -> Option<String> {
         .find(|p| std::path::Path::new(p).exists())
 }
 
+/// Change archive parameters (like `rar ch`): member name case conversion
+/// with `-cl` / `-cu`.
+fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
+    let kind = match (args.lowercase, args.uppercase) {
+        (true, false) => rar5::name_policy::CaseKind::Lower,
+        (false, true) => rar5::name_policy::CaseKind::Upper,
+        _ => return Err("usage: rar ch [-cl | -cu] <archive.rar>".into()),
+    };
+    let mut rar = match &args.password.password {
+        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
+            .map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+    };
+    let names: Vec<String> = rar.namelist().into_iter().map(|s| s.to_string()).collect();
+    let mut pairs = Vec::new();
+    for name in names {
+        let converted = match kind {
+            rar5::name_policy::CaseKind::Lower => name.to_lowercase(),
+            rar5::name_policy::CaseKind::Upper => name.to_uppercase(),
+        };
+        if converted != name {
+            pairs.push((name, converted));
+        }
+    }
+    if pairs.is_empty() {
+        info!("{archive}: no names to convert", archive = args.archive);
+        return Ok(());
+    }
+    let pairs_ref: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let n = rar
+        .rename(&pairs_ref)
+        .map_err(|e| format!("ch: {e}"))?;
+    info!("Converted {n} name(s) in {archive}", archive = args.archive);
+    Ok(())
+}
+
+/// Print a member to stdout (like `rar p`).
+fn cmd_print(args: &PrintArgs) -> Result<(), String> {
+    use std::io::Write;
+    let mut rar = match &args.password.password {
+        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
+            .map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+    };
+    if let Some(file) = &args.file {
+        let data = rar.read(file).map_err(|e| format!("{e}"))?;
+        std::io::stdout()
+            .write_all(&data)
+            .map_err(|e| format!("stdout: {e}"))?;
+    } else {
+        let names: Vec<String> = rar.namelist().into_iter().map(|s| s.to_string()).collect();
+        for name in names {
+            let data = rar.read(&name).map_err(|e| format!("{name}: {e}"))?;
+            std::io::stdout()
+                .write_all(&data)
+                .map_err(|e| format!("stdout: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Extract with full paths (like `rar x`).
 fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
     if let Some(threads) = args.threads {
@@ -898,8 +1039,15 @@ fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
         None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
     let count = rar.list().len();
-    rar.extract_all(dest).map_err(|e| format!("{e}"))?;
-    println!("Extracted {count} file(s) to {dest}");
+    rar.extract_all_with_options(
+        dest,
+        rar5::ExtractOptions {
+            skip_existing: args.overwrite.as_deref() == Some("never"),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| format!("{e}"))?;
+    info!("Extracted {count} file(s) to {dest}");
     Ok(())
 }
 
@@ -919,6 +1067,7 @@ fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
         dest,
         rar5::ExtractOptions {
             flat_paths: true,
+            skip_existing: args.overwrite.as_deref() == Some("never"),
             ..Default::default()
         },
     )
@@ -944,16 +1093,16 @@ fn cmd_test(args: &ArchiveArgs) -> Result<(), String> {
         }
         match rar.read(name) {
             Ok(_) => {
-                println!("  OK  {name}");
+                info!("  OK  {name}");
                 ok += 1;
             }
             Err(e) => {
-                println!("  FAIL {name}: {e}");
+                info!("  FAIL {name}: {e}");
                 fail += 1;
             }
         }
     }
-    println!("{ok} OK, {fail} failed");
+    info!("{ok} OK, {fail} failed");
     if fail > 0 {
         return Err("test failed".into());
     }

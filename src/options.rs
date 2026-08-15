@@ -61,6 +61,9 @@ pub struct ExtractOptions {
     /// `unrar e`. The safe-path policy still applies — the member name is
     /// sanitized and contained before its basename is used.
     pub flat_paths: bool,
+    /// Skip members whose destination already exists (like `-o-`): no
+    /// overwrites, and existing files are left untouched.
+    pub skip_existing: bool,
 }
 
 impl Default for ExtractOptions {
@@ -70,6 +73,7 @@ impl Default for ExtractOptions {
             max_unpacked_bytes: Some(4 * 1024 * 1024 * 1024),
             max_total_unpacked_bytes: Some(32 * 1024 * 1024 * 1024),
             flat_paths: false,
+            skip_existing: false,
         }
     }
 }

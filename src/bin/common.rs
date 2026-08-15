@@ -97,7 +97,39 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-sfx") {
         return format!("--sfx-module={rest}");
     }
+    if arg == "-y" {
+        return "--yes".into();
+    }
+    if arg == "-idq" || arg == "-inul" {
+        return "--quiet".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-w") {
+        return format!("--work-dir={rest}");
+    }
+    if arg == "-o+" {
+        return "--overwrite=always".into();
+    }
+    if arg == "-o-" {
+        return "--overwrite=never".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-z") {
+        return format!("--comment-file={rest}");
+    }
     arg.to_string()
+}
+
+/// Suppresses informational messages when `-idq` / `-inul` is given.
+pub static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Print an informational message unless quiet mode is on (errors and
+/// requested output — listings, prints — always print).
+#[macro_export]
+macro_rules! info {
+    ($($arg:tt)*) => {
+        if !$crate::common::QUIET.load(std::sync::atomic::Ordering::Relaxed) {
+            println!($($arg)*);
+        }
+    };
 }
 
 /// Print a verbose listing (like `rar v` / `unrar v`).
