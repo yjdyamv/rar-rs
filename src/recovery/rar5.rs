@@ -9,7 +9,7 @@ const KIB: u64 = 1024;
 const RAR5_RECOVERY_CHUNK_FIXED_HEADER_SIZE: u64 = 0x48;
 
 use crate::write_progress::ProgressReporter;
-use crate::{WriteOperation, WriteProgressEvent};
+use crate::write_progress::{WriteOperation, WriteProgressEvent};
 
 pub fn shared_gf16() -> &'static Gf16 {
     static GF16: std::sync::OnceLock<Gf16> = std::sync::OnceLock::new();

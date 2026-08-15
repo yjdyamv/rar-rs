@@ -34,8 +34,7 @@ pub mod headers;
 pub mod name_policy;
 pub mod options;
 pub mod recovery;
-pub mod write_progress;
-pub use write_progress::{WriteOperation, WriteProgressEvent};
+mod write_progress;
 pub mod vint;
 
 pub use archive::{ArchiveEntry, BatchEntry, RarArchive, discover_volumes};

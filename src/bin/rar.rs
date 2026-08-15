@@ -546,11 +546,12 @@ fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(),
             }
         }
     } else {
-        match &password {
-            Some(pw) => rar5::RarArchive::create_with_password(archive_path, pw)
-                .map_err(|e| format!("create: {e}"))?,
-            None => rar5::RarArchive::create(archive_path).map_err(|e| format!("create: {e}"))?,
-        }
+        let create_opts = rar5::CreateOptions {
+            password: password.clone(),
+            ..Default::default()
+        };
+        rar5::RarArchive::create_with_options(archive_path, create_opts)
+            .map_err(|e| format!("create: {e}"))?
     };
     for file in &to_add {
         let name = arg_to_name(file);
@@ -629,11 +630,12 @@ fn cmd_move(args: &FilesArgs) -> Result<(), String> {
             }
         }
     } else {
-        match &password {
-            Some(pw) => rar5::RarArchive::create_with_password(archive_path, pw)
-                .map_err(|e| format!("create: {e}"))?,
-            None => rar5::RarArchive::create(archive_path).map_err(|e| format!("create: {e}"))?,
-        }
+        let create_opts = rar5::CreateOptions {
+            password: password.clone(),
+            ..Default::default()
+        };
+        rar5::RarArchive::create_with_options(archive_path, create_opts)
+            .map_err(|e| format!("create: {e}"))?
     };
     for file in files {
         let name = arg_to_name(file);

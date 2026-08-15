@@ -1083,11 +1083,13 @@ impl RarArchive {
     }
 
     /// Create a new RAR5 archive (overwrites existing file).
+    #[deprecated(note = "use create_with_options instead")]
     pub fn create(path: impl AsRef<Path>) -> RarResult<Self> {
         Self::create_with_options(path, crate::options::CreateOptions::default())
     }
 
     /// Create a new multi-volume RAR5 archive.
+    #[deprecated(note = "use create_with_options instead")]
     pub fn create_multivolume(path: impl AsRef<Path>, volume_size: u64) -> RarResult<Self> {
         Self::create_with_options(
             path,
@@ -1100,6 +1102,7 @@ impl RarArchive {
 
     /// Create a new multi-volume RAR5 archive with recovery volumes
     /// (`-rv`): `percent` of `.rev` files relative to the volume count.
+    #[deprecated(note = "use create_with_options instead")]
     pub fn create_multivolume_with_recovery(
         path: impl AsRef<Path>,
         volume_size: u64,
@@ -1117,6 +1120,7 @@ impl RarArchive {
 
     /// Create a new multi-volume RAR5 archive with an exact number of
     /// recovery volumes. The count is auto-capped at the data volume count.
+    #[deprecated(note = "use create_with_options instead")]
     pub fn create_multivolume_with_recovery_count(
         path: impl AsRef<Path>,
         volume_size: u64,
@@ -1135,6 +1139,7 @@ impl RarArchive {
     /// Create a new encrypted multi-volume RAR5 archive (overwrites
     /// existing file). File data is AES-256 encrypted; header encryption
     /// is not supported for multi-volume archives.
+    #[deprecated(note = "use create_with_options instead")]
     pub fn create_multivolume_with_password(
         path: impl AsRef<Path>,
         volume_size: u64,
@@ -1153,6 +1158,7 @@ impl RarArchive {
     /// Create a new multi-volume RAR5 archive with header encryption
     /// (WinRAR `-hp` equivalent): every volume starts with the plaintext
     /// encryption header and all blocks are encrypted.
+    #[deprecated(note = "use create_with_options instead")]
     pub fn create_multivolume_with_password_headers(
         path: impl AsRef<Path>,
         volume_size: u64,
@@ -1171,6 +1177,7 @@ impl RarArchive {
 
     /// Create a new encrypted multi-volume RAR5 archive with an exact
     /// number of `.rev` recovery volumes.
+    #[deprecated(note = "use create_with_options instead")]
     pub fn create_multivolume_with_recovery_count_and_password(
         path: impl AsRef<Path>,
         volume_size: u64,
@@ -1189,6 +1196,7 @@ impl RarArchive {
     }
 
     /// Create a new encrypted RAR5 archive (overwrites existing file).
+    #[deprecated(note = "use create_with_options instead")]
     pub fn create_with_password(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
         Self::create_with_options(
             path,
@@ -1205,6 +1213,7 @@ impl RarArchive {
     /// every subsequent block header is AES-256-CBC encrypted.
     ///
     /// Not supported for multi-volume archives.
+    #[deprecated(note = "use create_with_options instead")]
     pub fn create_with_password_headers(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
         Self::create_with_options(
             path,
@@ -1219,11 +1228,14 @@ impl RarArchive {
     /// Create a new RAR5 archive with an inline recovery record
     /// (overwrites existing file). `percent` is the recovery percentage
     /// (0-100), matching WinRAR's `-rr` switch.
+    #[deprecated(note = "use create_with_options instead")]
+    #[allow(deprecated)] // legacy constructor delegating to its sibling
     pub fn create_with_recovery(path: impl AsRef<Path>, percent: u8) -> RarResult<Self> {
         Self::create_with_password_recovery(path, "", percent)
     }
 
     /// Create a new encrypted RAR5 archive with an inline recovery record.
+    #[deprecated(note = "use create_with_options instead")]
     pub fn create_with_password_recovery(
         path: impl AsRef<Path>,
         password: &str,
@@ -1245,6 +1257,7 @@ impl RarArchive {
 
     /// Create a new RAR5 archive with header encryption and an inline
     /// recovery record.
+    #[deprecated(note = "use create_with_options instead")]
     pub fn create_with_password_headers_recovery(
         path: impl AsRef<Path>,
         password: &str,
@@ -3579,6 +3592,7 @@ fn volume_path(parent: &Path, base: &str, part_num: usize) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)] // tests exercise the legacy constructor family
     use super::*;
 
     #[test]

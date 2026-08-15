@@ -1,3 +1,4 @@
+#![allow(deprecated)] // legacy constructor family; use create_with_options
 //! Integration tests for archive creation, extraction, and WinRAR interop.
 //!
 //! `tests/fixtures/winrar5_multiple_files.rar` is a RAR5 archive created by

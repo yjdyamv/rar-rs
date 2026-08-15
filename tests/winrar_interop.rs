@@ -1,3 +1,4 @@
+#![allow(deprecated)] // legacy constructor family; use create_with_options
 //! WinRAR interoperability tests (Windows-friendly).
 //!
 //! Unlike `tests/interop.rs` (which uses the Linux `rar`/`unrar` console

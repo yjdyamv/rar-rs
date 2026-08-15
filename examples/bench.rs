@@ -1,3 +1,4 @@
+#![allow(deprecated)] // legacy constructor family; use create_with_options
 //! Compression benchmark — full archive-creation path (sample-probe + codec).
 //!
 //! Run:  cargo run --release --example bench [size_mb]
