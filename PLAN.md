@@ -11,6 +11,17 @@
 - **P4：>4 GiB 单文件创建 RAR**：压缩路径流式化（≥64 MiB 走 spill 临时文件：分块读 → 压缩（encoder state 跨块保持）→ 加密（CBC 跨块续链）→ 按 volume_size 切分）；加密 STORE 也流式化；非末块密文 CRC 边写边算；卷大小仍精确（加密分块边界任意、与 WinRAR 一致，靠 read-ahead + ≤15B carry 实现）
 - **读取端支持 -hp 分卷**：`scan_all_volumes` 每卷解析明文加密头并解密后续块；顺带修了加密分卷读取时条目元数据取自首块（flags=1 无 MAC 位）导致校验失败的潜在 bug——末块携带完整 extra 记录，读侧合并之
 - **Windows 互操作测试**：`tests/interop.rs` 现在 Windows 可编译（symlink 测试加 `#[cfg(unix)]`，mtime 量化测试改为按磁盘实际值断言）；新增 `tests/winrar_interop.rs`（自动定位已安装的 WinRAR，Rar.exe/UnRAR.exe 双向验证，含 >4 GiB 稀疏文件用例，慢测 `#[ignore]`）
+- **架构审查 + 9 项 deep-module 重构**（依据 mattpocock/skills，装到 `.claude/skills/`）：
+  1. 块信封读取统一为 `headers::read_block`（5 份副本 → 1，修 CRC 分歧 bug，测试扫描器改走库 seam）
+  2. extra/服务块序列化归位 `headers.rs`（含统一 `build_service_block`）
+  3. 错误模型结构化（`MemberNotFound`/`ArchiveLocked`/`WrongPassword` 变体）
+  4. CLI 平面提取 `..` 逃逸漏洞修复 + `-ep` 等命名策略归库（`rar5::name_policy`）+ update/freshen 合并
+  5. 内存 stream seam（`Box<dyn ArchiveStream>`，`create_with_sink`/`finish_into_sink`；顺带修 Windows `File::create` 只写句柄读回失败）
+  6. 解码器入口收窄（`DecodeOptions`，`DecoderState` 字段私有）
+  7. 写管线提取 `src/write.rs`（~1900 行）
+  8. 重写子系统提取 `src/rewrite.rs`（~1500 行）；archive.rs 7500 → 4200 行
+  9. 公开面收窄（write_progress 转私有、删死变体、13 个 create* 构造器 `#[deprecated]`）
+- 新增 `CONTEXT.md`（领域词汇）+ `docs/agents/issue-tracker.md`
 
 ## P4：>4 GiB 单文件创建 RAR（最大的一块）✅
 
