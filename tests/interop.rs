@@ -4128,3 +4128,88 @@ fn cli_append_dir_extracts_under_archive_name() {
     );
 }
 
+// ── -md dictionary size (aligned with WinRAR 7.23) ─────────────────────────
+
+/// Write a 32 MiB file of repeated text (compressible, uniform head so the
+/// incompressibility probe does not misfire).
+fn write_rep_text(path: &Path, size: usize) {
+    let block = b"The quick brown fox jumps over the lazy dog 0123456789.\r\n";
+    let mut data = Vec::with_capacity(size);
+    while data.len() < size {
+        data.extend_from_slice(block);
+    }
+    data.truncate(size);
+    std::fs::write(path, data).unwrap();
+}
+
+fn entry_dict_log(archive: &Path, name: &str) -> u8 {
+    let rar = rar5::RarArchive::open(archive).unwrap();
+    rar.get_entry(name).unwrap().header.comp_dict_size
+}
+
+#[test]
+fn cli_dict_size_switch_matches_winrar() {
+    let dir = make_temp_dir();
+    let file = dir.path().join("rep32t.bin");
+    write_rep_text(&file, 32 * 1024 * 1024);
+
+    // Default: 32 MiB (log 8) — WinRAR 7.23's default at every level.
+    let archive = dir.path().join("def.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("rep32t.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(entry_dict_log(&archive, "rep32t.bin"), 8);
+
+    // -md64m on a 32 MiB file: 2x file size caps it at 64 MiB (log 9).
+    let archive = dir.path().join("md64.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-md64m", "-idq"])
+        .arg(&archive)
+        .arg("rep32t.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(entry_dict_log(&archive, "rep32t.bin"), 9);
+
+    // -md128k is honored (log 0) even for a large file.
+    let archive = dir.path().join("md128.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-md128k", "-idq"])
+        .arg(&archive)
+        .arg("rep32t.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(entry_dict_log(&archive, "rep32t.bin"), 0);
+
+    // The archive with the larger dictionary round-trips.
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    let data = rar.read("rep32t.bin").unwrap();
+    assert_eq!(data, std::fs::read(&file).unwrap());
+
+    // Invalid sizes are rejected with WinRAR's wording.
+    for bad in ["-md3m", "-md", "-md100k", "-md5g"] {
+        let out = std::process::Command::new(RAR_CLI)
+            .args(["a", bad, "-idq"])
+            .arg(dir.path().join(format!("bad_{}.rar", bad.trim_start_matches('-'))))
+            .arg("rep32t.bin")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{bad} must be rejected");
+        let msg = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            msg.contains("Unknown option") && msg.contains(bad.trim_start_matches('-')),
+            "{bad}: unexpected message {msg}"
+        );
+    }
+}
+
+

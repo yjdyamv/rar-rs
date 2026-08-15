@@ -43,9 +43,9 @@
 ### 格式 / 编解码（互操作硬伤，优先）
 
 - [x] **RAR5 过滤器：与 WinRAR 7.23 对齐，不实现类型 4-7**（2026-08 核实）：RAR5 规范定义了 3-bit 过滤器类型（0=Delta/1=E8/2=E8E9/3=ARM/4=ARMT/5=IA64/6=PPC/7=SPARC），但 WinRAR 7.23 压缩**只产生 Delta/E8/E8E9**（ARM 自 5.80 起默认关闭）；unrar 5.9.4/7.23、7-Zip ZS、rars 均只实现 0-3 且不产生 4-7 → 现实归档中不存在类型 4-7，无互操作价值。我们已把未知过滤器类型从"静默返回原数据"改为**显式报错**（`unsupported RAR5 filter type N`，与 unrar/7-Zip 的拒绝行为方向一致，避免静默损坏），并新增测试
-- [ ] **字典大小**：写侧无 `-md`，窗口按等级固定（最大 8 MiB）；读侧 `MAX_DICT_SIZE_LOG=13`（1 GiB）硬上限（`src/archive.rs:35`，两处检查 `hdr.comp_dict_size > MAX_DICT_SIZE_LOG` 直接拒读）。WinRAR 7.x 支持到 64 GB、>4 GB 可非 2 幂（RAR7 大字典归档目前直接拒读）
+- [x] **字典大小**（2026-08）：写侧支持 `-md<size>[k|m|g]`（128K..4G 2 幂，无单位=MB，非法值报 `Unknown option: md...` 与 WinRAR 一致）；默认字典改为 WinRAR 7.23 语义（32 MiB，所有压缩等级一致），并按 `min(-md, 2×floor_pow2(文件大小))` 裁剪（16MB 文件→32MB、200MB 文件→256MB，实测与 Rar.exe 字段级一致）；读侧上限 1 GiB → **4 GiB**（`MAX_DICT_SIZE_LOG` 13→15，RAR5 格式上限，与 WinRAR 7.23 接受范围一致；>4G/非 2 幂只存在于 RAR7，不支持）。unrar 接受 `-md/-mdx`（无效果，RAR5 ≤4G 恒可解）
 - [x] **RAR4 创建**（`-ma4`）：不做（2026-08 决定：rar-rs 定位 RAR5-only，用户不需要 RAR4 创建；`rar4_archives_are_rejected_with_clear_error` 已确保 RAR4 归档被明确拒绝）
-- [ ] **RAR4 PPMd / RAR4 加密解压**：不支持（RAR4 只读 LZSS+VM）
+- [x] **RAR4 PPMd / RAR4 加密解压**：不做（2026-08 决定：RAR4 保持只读 LZSS+VM，遇到 PPMd/加密的 RAR4 归档明确报错即可）
 - [ ] **solid + 分卷创建**：现拒绝（`opts.solid && volume_size`）。WinRAR 支持；P4 流式化后 encoder_state 跨卷保持是最后一步
 
 ### 命令
@@ -88,14 +88,14 @@
 ### 建议实施顺序
 
 1. RAR5 过滤器：核实后与 WinRAR 7.23 对齐——不实现类型 4-7，未知类型显式报错 ✅（2026-08）
-2. `-md` 字典选择 + 放宽读侧上限（至少 4 GB / 非 2 幂）
+2. `-md` 字典选择 + 放宽读侧上限（至少 4 GB / 非 2 幂）✅（2026-08；RAR5 上限 4 GB，非 2 幂属 RAR7 不做）
 3. CLI 接 `-ol/-oh`（库已就绪）+ `-si` ✅（批次 2/3 完成）
 4. solid + 分卷
 5. 时间戳扩展（ctime/atime + `-ts`）与时间过滤（`-tnc/-tna` 过滤已支持 c/a 读取）
 6. `ch`、`-z`、`-ag`、`-y/-o` 等高频小开关 ✅
 7. 剩余小开关批量：`-id[c,d,n,p]` 细分、`-ver[n]`、`-ow` 写侧、`-ac/-ai`、`-e[+]<attr>`、`-ad/-am/-as`、`-os`、`-sc/-oni/-ri/-mlp`、`-vp/-vd/-vn`、`-oi`、`-ilog` 系列
 
-> 进度：下一步 = 第 2 项（`-md` 字典选择 + 放宽读侧上限）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
+> 进度：下一步 = 第 4 项（solid + 分卷创建）。每项对照本机 WinRAR/UnRAR 验证、跑全测试、提交、同步勾选。
 
 ## 备注
 

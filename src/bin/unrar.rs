@@ -20,6 +20,16 @@ struct Cli {
     /// Send informational messages to stderr (like `-ierr`)
     #[arg(long, global = true)]
     err: bool,
+    /// Dictionary size (like `-md<size>`; accepted for CLI parity, no
+    /// effect on extraction — RAR5 dictionaries up to 4 GiB are always
+    /// supported)
+    #[arg(long = "dict-size", value_name = "SIZE", global = true)]
+    #[allow(dead_code)]
+    dict_size: Option<String>,
+    /// Extraction dictionary cap (like `-mdx<size>`; accepted, no effect)
+    #[arg(long = "dict-extract", value_name = "SIZE", global = true)]
+    #[allow(dead_code)]
+    dict_extract: Option<String>,
     #[command(subcommand)]
     command: Command,
 }

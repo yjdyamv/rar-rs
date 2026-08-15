@@ -164,13 +164,13 @@ pub fn decode_standalone_to_writer(
 
 /// Compute and validate a decoder dictionary size from its log field.
 ///
-/// Rejects values that would overflow the host `usize` or exceed the
-/// RAR5 v5.0 maximum (1 GiB, `log` 13); WinRAR 5.x never emits larger
-/// dictionaries.
+/// Rejects values that would overflow the host `usize` or exceed the RAR5
+/// v5.0 maximum (4 GiB, `log` 15, the same range WinRAR 7.23 accepts for
+/// RAR5 archives).
 fn checked_dict_size(dict_size_log: u8) -> Result<usize, String> {
-    if dict_size_log > 13 {
+    if dict_size_log > 15 {
         return Err(format!(
-            "dictionary size log {dict_size_log} exceeds supported maximum 13"
+            "dictionary size log {dict_size_log} exceeds supported maximum 15"
         ));
     }
     (128usize * 1024)
@@ -432,9 +432,9 @@ pub fn decode_standalone(
     let mut dict_size = checked_dict_size(dict_size_log)?;
     // The decoder reconstructs the whole file in the sliding window before
     // extracting it (see `get_output`), so the window must be at least as
-    // large as the unpacked output. The encoder caps its dictionary at 1 MiB
-    // for compression performance, so grow the decode buffer here instead of
-    // reverting that cap.
+    // large as the unpacked output. The encoder sizes its dictionary to the
+    // input (WinRAR-style, capped at 2x the file size), so grow the decode
+    // buffer here instead of reverting that cap.
     let unpacked = usize::try_from(unpacked_size)
         .map_err(|_| "unpacked size overflows host address space".to_string())?;
     if unpacked > dict_size {
@@ -806,6 +806,17 @@ fn parse_filter_data(reader: &mut BitReader) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The RAR5 format ceiling is 4 GiB (log 15), the same range WinRAR
+    /// 7.23 accepts for RAR5 archives; larger values are rejected.
+    #[test]
+    fn checked_dict_size_accepts_rars5_range_and_rejects_larger() {
+        assert_eq!(checked_dict_size(0).unwrap(), 128 * 1024);
+        assert_eq!(checked_dict_size(13).unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(checked_dict_size(15).unwrap(), 4 * 1024 * 1024 * 1024);
+        let err = checked_dict_size(16).unwrap_err();
+        assert!(err.contains("maximum 15"), "{err}");
+    }
 
     /// Fuzz regression: block flags with the reserved bit 5 set previously
     /// produced a byte_count of 8, overflowing the u32 block-size shift in

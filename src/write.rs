@@ -140,7 +140,7 @@ impl RarArchive {
 
         // Compressed path: read and compress in bounded chunks with a
         // persistent encoder state (solid archives share the LZ window).
-        let dsl = dict_size_for_data(file_size as usize, method);
+        let dsl = dict_log_for(file_size as usize, self.dict_size_log, method);
         let chain_solid = self.solid_mode && self.encoder_state.is_some();
         if self.solid_mode {
             self.encoder_state.get_or_insert_with(Default::default);
@@ -448,7 +448,7 @@ impl RarArchive {
                 stored_hash,
             )?;
         } else {
-            let dsl = dict_size_for_data(data.len(), method);
+            let dsl = dict_log_for(data.len(), self.dict_size_log, method);
             let chain_solid = self.solid_mode && self.encoder_state.is_some();
             if self.solid_mode {
                 self.encoder_state.get_or_insert_with(Default::default);
@@ -737,7 +737,7 @@ impl RarArchive {
             );
         }
 
-        let dsl = dict_size_for_data(data.len(), method);
+        let dsl = dict_log_for(data.len(), self.dict_size_log, method);
         let packed = if file_origin {
             // Mirror add_file's streaming loop exactly: each chunk is
             // compressed with a fresh encoder window (non-solid archives),
@@ -922,7 +922,7 @@ impl RarArchive {
             return Ok(None);
         }
 
-        let dsl = dict_size_for_data(file_size as usize, method);
+        let dsl = dict_log_for(file_size as usize, self.dict_size_log, method);
         let (plain_crc, plain_blake) = hash_file(path, file_size, self.blake2)?;
         let mtime_ns = meta
             .modified()
@@ -1776,7 +1776,7 @@ impl RarArchive {
         time_extra: Option<Vec<u8>>,
         method: u8,
     ) -> RarResult<()> {
-        let dsl = dict_size_for_data(file_size as usize, method);
+        let dsl = dict_log_for(file_size as usize, self.dict_size_log, method);
         let chain_solid = self.solid_mode && self.encoder_state.is_some();
         if self.solid_mode {
             self.encoder_state.get_or_insert_with(Default::default);

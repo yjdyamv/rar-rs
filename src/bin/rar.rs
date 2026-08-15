@@ -185,6 +185,12 @@ struct FilesArgs {
     archive: String,
     #[arg(value_name = "FILES", required = true)]
     files: Vec<String>,
+    /// Dictionary size for compression (like `-md<size>`)
+    #[arg(long = "dict-size", value_name = "SIZE")]
+    dict_size: Option<String>,
+    /// Extraction dictionary cap (like `-mdx<size>`; accepted, no effect)
+    #[arg(long = "dict-extract", value_name = "SIZE")]
+    dict_extract: Option<String>,
     /// Keep the archive's original modification time when updating
     /// (like `-tk`)
     #[arg(long = "keep-time")]
@@ -266,6 +272,14 @@ struct CreateArgs {
     /// Header encryption (optionally with a password)
     #[arg(long = "header-encrypt", num_args = 0..=1, default_missing_value = "")]
     header_encrypt: Option<String>,
+    /// Dictionary size for compression (like `-md<size>[k|m|g]`; no unit
+    /// means MiB, valid values 128K..4G powers of two)
+    #[arg(long = "dict-size", value_name = "SIZE")]
+    dict_size: Option<String>,
+    /// Extraction dictionary cap (like `-mdx<size>`; accepted, no effect
+    /// for RAR5 which is capped at 4 GiB)
+    #[arg(long = "dict-extract", value_name = "SIZE")]
+    dict_extract: Option<String>,
     /// Recovery record percentage
     #[arg(
         long = "recovery-percent",
@@ -429,6 +443,52 @@ fn parse_size(s: &str) -> Result<u64, String> {
     }
 }
 
+/// Parse a WinRAR `-md<size>[k|m|g]` dictionary size into a RAR5 dict log
+/// (`128 KiB << log`). No unit means MiB. Only the RAR5 power-of-two
+/// range 128 KiB .. 4 GiB is valid; anything else is rejected with
+/// WinRAR's wording (`Unknown option: md...`).
+fn parse_dict_log(s: &str) -> Result<u8, String> {
+    if s.is_empty() {
+        return Err("Unknown option: md".into());
+    }
+    let (num, mult) = match s.chars().last() {
+        Some('k') | Some('K') => (&s[..s.len() - 1], 1024u64),
+        Some('m') | Some('M') => (&s[..s.len() - 1], 1024 * 1024),
+        Some('g') | Some('G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        _ => (s, 1024 * 1024),
+    };
+    let bytes = num
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(mult))
+        .filter(|b| *b >= 128 * 1024 && *b <= 4 * 1024 * 1024 * 1024 && b.is_power_of_two())
+        .ok_or_else(|| format!("Unknown option: md{s}"))?;
+    // 128 KiB = 2^17, so log = trailing_zeros - 17 (0..=15).
+    Ok((bytes.trailing_zeros() - 17) as u8)
+}
+
+#[cfg(test)]
+mod dict_log_tests {
+    #[test]
+    fn parse_dict_log_accepts_rar5_range() {
+        assert_eq!(super::parse_dict_log("128k").unwrap(), 0);
+        assert_eq!(super::parse_dict_log("128K").unwrap(), 0);
+        assert_eq!(super::parse_dict_log("1m").unwrap(), 3);
+        assert_eq!(super::parse_dict_log("64").unwrap(), 9); // no unit = MiB
+        assert_eq!(super::parse_dict_log("1g").unwrap(), 13);
+        assert_eq!(super::parse_dict_log("2g").unwrap(), 14);
+        assert_eq!(super::parse_dict_log("4G").unwrap(), 15);
+    }
+
+    #[test]
+    fn parse_dict_log_rejects_invalid_values() {
+        for bad in ["", "3m", "0", "100k", "5g", "64m1", "abc", "1t"] {
+            let err = super::parse_dict_log(bad).unwrap_err();
+            assert!(err.starts_with("Unknown option: md"), "{bad}: {err}");
+        }
+    }
+}
+
 fn main() {
     let raw: Vec<String> = std::env::args().collect();
     let args: Vec<String> = raw
@@ -570,6 +630,7 @@ fn cmd_create(args: &CreateArgs) -> Result<(), String> {
         recovery_volumes_percent,
         recovery_volume_count,
         volume_size: args.volume_size,
+        dict_size_log: args.dict_size.as_deref().map(parse_dict_log).transpose()?,
     };
 
     let existing = std::path::Path::new(archive_path).exists();
@@ -952,6 +1013,11 @@ fn cmd_update_freshen(args: &FilesArgs, freshen: bool, verb: &str) -> Result<(),
     } else {
         let create_opts = rar5::CreateOptions {
             password: password.clone(),
+            dict_size_log: args
+                .dict_size
+                .as_deref()
+                .map(parse_dict_log)
+                .transpose()?,
             ..Default::default()
         };
         rar5::RarArchive::create_with_options(archive_path, create_opts)
@@ -1043,6 +1109,11 @@ fn cmd_move(args: &FilesArgs) -> Result<(), String> {
     } else {
         let create_opts = rar5::CreateOptions {
             password: password.clone(),
+            dict_size_log: args
+                .dict_size
+                .as_deref()
+                .map(parse_dict_log)
+                .transpose()?,
             ..Default::default()
         };
         rar5::RarArchive::create_with_options(archive_path, create_opts)

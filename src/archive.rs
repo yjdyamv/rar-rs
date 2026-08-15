@@ -29,10 +29,11 @@ mod rewrite;
 /// create recovery records without `recovery_percent`.
 const MAX_RECOVERY_PREFIX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
-/// Maximum accepted RAR5 dictionary-size log (1 GiB, the WinRAR 5.x
-/// maximum). Larger values are rejected at decode time to bound window
-/// allocations.
-const MAX_DICT_SIZE_LOG: u8 = 13;
+/// Maximum accepted RAR5 dictionary-size log (4 GiB, the RAR5 format
+/// ceiling; WinRAR 7.23 accepts the same range — larger, non-power-of-two
+/// dictionaries only exist in the RAR7 format, which is out of scope).
+/// Larger values are rejected at decode time to bound window allocations.
+const MAX_DICT_SIZE_LOG: u8 = 15;
 
 /// Memory budget (packed + unpacked) for the optional parallel extraction
 /// path; larger archives stream sequentially to stay bounded.
@@ -576,6 +577,9 @@ pub struct RarArchive {
     qo_offset_field_pos: Option<u64>,
     /// Persistent RAR5 encoder state for solid archives.
     encoder_state: Option<crate::codec::EncoderState>,
+    /// Requested dictionary log for compression (WinRAR `-md`);
+    /// `None` = default selection.
+    dict_size_log: Option<u8>,
     /// Options for the current read/extract operation (set per call).
     extract_options: crate::options::ExtractOptions,
 }
@@ -625,6 +629,7 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
+            dict_size_log: None,
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
@@ -661,6 +666,7 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
+            dict_size_log: None,
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
@@ -719,6 +725,7 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
+            dict_size_log: None,
             extract_options: crate::options::ExtractOptions::default(),
         };
         archive.open_read()?;
@@ -1077,6 +1084,7 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
+            dict_size_log: opts.dict_size_log,
             extract_options: crate::options::ExtractOptions::default(),
         };
         Ok(archive)
@@ -3277,20 +3285,21 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 
 fn dict_size_for_data(data_size: usize, level: u8) -> u8 {
-    // Window caps per compression level (WinRAR-like, kept conservative for
-    // speed): faster levels stay at 1 MiB; higher levels grow the window so
-    // large files find longer-range matches. The decoder accepts any
-    // dictionary up to MAX_DICT_SIZE_LOG (1 GiB).
-    let cap = match level {
-        1..=2 => 1024 * 1024,
-        3 => 2 * 1024 * 1024,
-        4 => 4 * 1024 * 1024,
-        _ => 8 * 1024 * 1024, // 5
-    };
+    dict_log_for(data_size, None, level)
+}
+
+/// WinRAR 7.23 dictionary selection for a non-solid member: the requested
+/// dictionary (`-md`, or the default 32 MiB at every compression level) is
+/// capped at twice the file size rounded down to a power of two, floored at
+/// 128 KiB, and clamped to the RAR5 range (128 KiB .. 4 GiB, log 0..15).
+fn dict_log_for(data_size: usize, requested: Option<u8>, _level: u8) -> u8 {
     let base = 128 * 1024;
-    let target = data_size.min(cap);
+    let file_pow2 = 1usize << (usize::BITS - 1 - data_size.max(1).leading_zeros());
+    let auto_cap = (file_pow2 * 2).max(base);
+    let requested_bytes = requested.map_or(32 * 1024 * 1024, |log| base << log);
+    let target = auto_cap.min(requested_bytes);
     let mut log = 0u8;
-    while (base << log) < target && log < 6 {
+    while (base << log) < target && log < 15 {
         log += 1;
     }
     log

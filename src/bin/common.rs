@@ -27,6 +27,12 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-mt") {
         return format!("--threads={rest}");
     }
+    if let Some(rest) = arg.strip_prefix("-mdx") {
+        return format!("--dict-extract={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-md") {
+        return format!("--dict-size={rest}");
+    }
     if let Some(rest) = arg.strip_prefix("-m") {
         return if rest.is_empty() {
             "--level".into()

@@ -32,6 +32,11 @@ pub struct CreateOptions {
     pub recovery_volume_count: Option<u32>,
     /// Volume size in bytes; when set, produces a multi-volume archive.
     pub volume_size: Option<u64>,
+    /// Dictionary size as a RAR5 log (`128 KiB << log`), like WinRAR's
+    /// `-md`; `None` = WinRAR's default (32 MiB, capped at 2x the file
+    /// size rounded down to a power of two). Valid logs: 0..=15
+    /// (128 KiB .. 4 GiB).
+    pub dict_size_log: Option<u8>,
 }
 
 /// Options controlling extraction and buffered reads.

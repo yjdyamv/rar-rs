@@ -572,3 +572,68 @@ fn huge_sparse_file_streamed_encrypted_multivolume_roundtrips() {
         );
     }
 }
+
+/// 32 MiB of repeated text: compressible, uniform head (the incompressible
+/// probe must not misfire), large enough to exercise dictionary selection.
+fn write_rep_text(path: &Path, size: usize) {
+    let block = b"The quick brown fox jumps over the lazy dog 0123456789.\r\n";
+    let mut data = Vec::with_capacity(size);
+    while data.len() < size {
+        data.extend_from_slice(block);
+    }
+    data.truncate(size);
+    std::fs::write(path, data).unwrap();
+}
+
+/// `-md` dictionaries interoperate with WinRAR in both directions.
+#[test]
+fn dictionary_size_md_interops_with_winrar() {
+    let dir = temp_dir();
+    let src = dir.path().join("rep32t.bin");
+    write_rep_text(&src, 32 * 1024 * 1024);
+
+    // Our -md64m archive (dict log 9): WinRAR must test and extract it.
+    let ours = dir.path().join("ours_md.rar");
+    {
+        let mut rar = rar5::RarArchive::create_with_options(
+            &ours,
+            rar5::CreateOptions {
+                dict_size_log: Some(9),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&src, 3).unwrap();
+        rar.close().unwrap();
+    }
+    let ar = RarArchive::open(&ours).unwrap();
+    let entry = ar.get_entry("rep32t.bin").unwrap();
+    assert_eq!(entry.header.comp_dict_size, 9);
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&ours, None);
+        assert!(ok, "WinRAR rejected our -md64m archive:\n{out}");
+        let win = dir.path().join("win_ours");
+        std::fs::create_dir_all(&win).unwrap();
+        let (ok, out) = unrar_extract(&ours, &win, None);
+        assert!(ok, "WinRAR failed to extract our -md64m archive:\n{out}");
+        assert_eq!(file_sha256(&win.join("rep32t.bin")), file_sha256(&src));
+    }
+
+    // WinRAR's -md64m archive: we must read it back byte-identically.
+    if let Some(rar) = rar_bin() {
+        let theirs = dir.path().join("theirs_md.rar");
+        let (ok, out) = run(Command::new(&rar).args(["a", "-md64m", "-idq"]).arg(&theirs).arg(&src));
+        assert!(ok, "WinRAR -md64m failed:\n{out}");
+        let ar = RarArchive::open(&theirs).unwrap();
+        // WinRAR may store the member under a path-derived name; find it.
+        let name = ar.namelist()[0].to_string();
+        let entry = ar.get_entry(&name).unwrap();
+        assert_eq!(
+            entry.header.comp_dict_size, 9,
+            "WinRAR -md64m should record a 64 MiB dictionary"
+        );
+        let mut ar = RarArchive::open(&theirs).unwrap();
+        let data = ar.read(&name).unwrap();
+        assert_eq!(data, std::fs::read(&src).unwrap());
+    }
+}
