@@ -37,6 +37,12 @@ pub struct CreateOptions {
     /// size rounded down to a power of two). Valid logs: 0..=15
     /// (128 KiB .. 4 GiB).
     pub dict_size_log: Option<u8>,
+    /// Actual dictionary size in bytes for RAR7 (v70) members (WinRAR's
+    /// `-md` above 4 GiB). Any value > 4 GiB is accepted (it need not be
+    /// a power of two); the header encodes it as a 5-bit power-of-two
+    /// base plus a 1/32 increment. Mutually exclusive with
+    /// `dict_size_log` in practice (one `-md` switch only).
+    pub dict_size_bytes: Option<u64>,
     /// Save the creation time (Windows) / ctime (Unix inode change time)
     /// in the FILE_TIME extra record, like WinRAR's `-tsc`.
     pub save_ctime: bool,
@@ -70,6 +76,7 @@ impl Default for CreateOptions {
             recovery_volume_count: None,
             volume_size: None,
             dict_size_log: None,
+            dict_size_bytes: None,
             save_ctime: false,
             save_atime: false,
             time_precision_seconds: false,

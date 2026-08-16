@@ -486,7 +486,22 @@ impl FileHeader {
             comp_info |= COMP_INFO_SOLID_BIT;
         }
         comp_info |= ((self.comp_method as u64) & 0x07) << COMP_INFO_METHOD_SHIFT;
-        comp_info |= ((self.comp_dict_size as u64) & 0x0F) << COMP_INFO_DICT_SHIFT;
+        if let Some(bytes) = self.dict_size_bytes {
+            // RAR7 (v70): 5-bit dict field (bits 10-14) + 1/32 increment
+            // (bits 15-19) encode non-power-of-two sizes up to 64 GiB;
+            // the compression version is forced to 1.
+            let mut n = 0u32;
+            while (0x20000u64 << (n + 1)) <= bytes && n < 19 {
+                n += 1;
+            }
+            let base = 0x20000u64 << n;
+            let inc = ((bytes - base) * 32 / base).min(31);
+            comp_info |= 1;
+            comp_info |= (n as u64 & 0x1F) << COMP_INFO_DICT_SHIFT;
+            comp_info |= (inc as u64 & 0x1F) << 15;
+        } else {
+            comp_info |= ((self.comp_dict_size as u64) & 0x0F) << COMP_INFO_DICT_SHIFT;
+        }
         body.extend(vint::encode(comp_info));
         body.extend(vint::encode(self.host_os));
 

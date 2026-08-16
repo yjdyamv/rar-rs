@@ -265,6 +265,7 @@ struct PreparedEntry {
     file_crc: u32,
     method: u8,
     dict_size_log: u8,
+    dict_size_bytes: Option<u64>,
     extra_data: Vec<u8>,
     stored_hash: Option<[u8; 32]>,
     payload: Vec<u8>,
@@ -277,6 +278,13 @@ struct PreparedEntry {
 struct BatchPrepareCtx<'a> {
     password: Option<&'a str>,
     blake2: bool,
+    dict_size_log: Option<u8>,
+    dict_size_bytes: Option<u64>,
+    save_ctime: bool,
+    save_atime: bool,
+    save_mtime: bool,
+    save_owner: bool,
+    time_precision_seconds: bool,
 }
 
 /// Decrypted member payload plus the key material needed for integrity
@@ -580,6 +588,9 @@ pub struct RarArchive {
     /// Requested dictionary log for compression (WinRAR `-md`);
     /// `None` = default selection.
     dict_size_log: Option<u8>,
+    /// Requested dictionary size in bytes for RAR7 (v70) members
+    /// (WinRAR `-md` above 4 GiB, any value > 4 GiB accepted).
+    dict_size_bytes: Option<u64>,
     /// Save creation/change time in the FILE_TIME extra record (`-tsc`).
     save_ctime: bool,
     /// Save last access time in the FILE_TIME extra record (`-tsa`).
@@ -660,6 +671,7 @@ impl RarArchive {
             qo_offset_field_pos: None,
             encoder_state: None,
             dict_size_log: None,
+            dict_size_bytes: None,
             save_ctime: false,
             save_atime: false,
             save_mtime: true,
@@ -704,6 +716,7 @@ impl RarArchive {
             qo_offset_field_pos: None,
             encoder_state: None,
             dict_size_log: None,
+            dict_size_bytes: None,
             save_ctime: false,
             save_atime: false,
             save_mtime: true,
@@ -732,6 +745,15 @@ impl RarArchive {
     /// never recompressed.
     pub fn open_append(path: impl AsRef<Path>) -> RarResult<Self> {
         Self::open_append_with_password(path, "")
+    }
+
+    /// Set the dictionary used for members added to an already-open
+    /// archive (WinRAR's `-md`; `None` = default selection). Applies to
+    /// archives opened with `open_append*`, where the create options are
+    /// not available.
+    pub fn set_dictionary(&mut self, dict_size_log: Option<u8>, dict_size_bytes: Option<u64>) {
+        self.dict_size_log = dict_size_log;
+        self.dict_size_bytes = dict_size_bytes;
     }
 
     /// Open an existing archive for appending, with a password for
@@ -770,6 +792,7 @@ impl RarArchive {
             qo_offset_field_pos: None,
             encoder_state: None,
             dict_size_log: None,
+            dict_size_bytes: None,
             save_ctime: false,
             save_atime: false,
             save_mtime: true,
@@ -1131,6 +1154,7 @@ impl RarArchive {
             qo_offset_field_pos: None,
             encoder_state: None,
             dict_size_log: opts.dict_size_log,
+            dict_size_bytes: opts.dict_size_bytes,
             save_ctime: opts.save_ctime,
             save_atime: opts.save_atime,
             save_mtime: opts.save_mtime,
@@ -2412,6 +2436,8 @@ impl RarArchive {
                             hdr.unpacked_size,
                             crate::codec::DecodeOptions {
                                 dict_size_log: hdr.comp_dict_size,
+                                dict_size_bytes: hdr.dict_size_bytes,
+                                extra_dist: hdr.dict_size_bytes.is_some(),
                                 state: None,
                             },
                         )
@@ -3473,6 +3499,52 @@ fn dict_log_for(data_size: usize, requested: Option<u8>, _level: u8) -> u8 {
         log += 1;
     }
     log
+}
+
+/// WinRAR 7.23 dictionary selection for one member, covering both RAR5
+/// (v50) and RAR7 (v70) creation. Returns `(encoder_window_log,
+/// header_dict_bytes)`:
+///
+/// - `header_dict_bytes = None`: a plain RAR5 member; the log drives both
+///   the header `comp_dict_size` field and the encoder window.
+/// - `header_dict_bytes = Some(b)`: a RAR7 member whose header declares an
+///   actual dictionary of `b` bytes (possibly not a power of two, WinRAR's
+///   `-md` above 4 GiB). The encoder window stays bounded — match
+///   distances are chunk-limited anyway — only the header declares the
+///   large dictionary.
+///
+/// Like WinRAR, a > 4 GiB request is still capped at twice the file size
+/// rounded down to a power of two; when the cap lands in the RAR5 range
+/// the member is written as plain v50 with the capped log.
+fn dict_params_for(
+    data_size: usize,
+    requested_log: Option<u8>,
+    requested_bytes: Option<u64>,
+    level: u8,
+) -> (u8, Option<u64>) {
+    let Some(requested) = requested_bytes else {
+        return (dict_log_for(data_size, requested_log, level), None);
+    };
+    let base = 128 * 1024;
+    let file_pow2 = 1usize << (usize::BITS - 1 - data_size.max(1).leading_zeros());
+    let auto_cap = file_pow2.saturating_mul(2).max(base);
+    let capped = (requested as usize).min(auto_cap);
+    if capped > 4 * 1024 * 1024 * 1024 {
+        // RAR7 (v70): the header declares the big dictionary; the encoder
+        // window follows the plain RAR5 selection rules.
+        (
+            dict_log_for(data_size, requested_log, level),
+            Some(capped as u64),
+        )
+    } else {
+        // The 2x-file-size cap fell into the RAR5 range: plain v50 member
+        // with the capped dictionary.
+        let mut log = 0u8;
+        while (base << log) < capped && log < 15 {
+            log += 1;
+        }
+        (log, None)
+    }
 }
 
 /// Sample-probe large inputs for incompressibility.

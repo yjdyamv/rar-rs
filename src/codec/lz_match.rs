@@ -50,8 +50,13 @@ impl<'a> MatchFinder<'a> {
         // safely aliased because the finder is rebuilt per chunk and every
         // chained candidate is strictly older than the current position.
         // Keeping the ring at window size keeps it hot in cache.
-        let prev_bits = window.next_power_of_two().max(1 << 17);
-        let prev_size = prev_bits;
+        //
+        // The ring is capped at the input length so a huge declared
+        // dictionary (RAR7 `-md` up to 64 GiB) can never allocate a
+        // multi-GiB `prev` array (or overflow its i32 slots) — with
+        // chunked compression the match finder only ever sees one
+        // chunk + tail anyway.
+        let prev_size = window.min(data.len()).next_power_of_two().max(1 << 17);
         MatchFinder {
             data,
             size: data.len(),

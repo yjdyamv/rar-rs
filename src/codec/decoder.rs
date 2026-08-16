@@ -894,7 +894,7 @@ mod tests {
     #[test]
     fn three_byte_block_size_field_decodes() {
         let data = b"rar5 three-byte block size regression test data ".repeat(64);
-        let packed = crate::codec::encode(&data, 3, 3);
+        let packed = crate::codec::encode(&data, 3, 3, false);
         let back = decode_standalone(&packed, data.len() as u64, 3, None, false).unwrap();
         assert_eq!(back, data);
     }
@@ -953,7 +953,7 @@ mod tests {
             for &size in &[MAX_FILTER_BLOCK_LENGTH as usize + 1, 300_000usize] {
                 let data = pattern(filter_type, size);
                 let spec = FilterSpec::new(filter_type, channels, 0, size as u32);
-                let packed = encode_with_filters(&data, 3, 0, &[spec]).unwrap();
+                let packed = encode_with_filters(&data, 3, 0, &[spec], false).unwrap();
                 let buffered = decode_standalone(&packed, size as u64, 0, None, false).unwrap();
                 let mut streamed = Vec::new();
                 let written = decode_standalone_to_writer(&packed, size as u64, 0, None, false, &mut streamed)

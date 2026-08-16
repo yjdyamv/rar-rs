@@ -258,6 +258,7 @@ impl RarArchive {
                 hdr.crc32_val.unwrap_or(0),
                 hdr.comp_method,
                 hdr.comp_dict_size,
+                hdr.dict_size_bytes,
                 &hdr.extra_data,
                 hdr.attributes,
                 hdr.mtime,
@@ -444,6 +445,7 @@ impl RarArchive {
 
         let plain_crc = crc32fast::hash(&data);
         let plain_blake = hdr.hash_value.map(|_| crate::blake2sp::hash(&data));
+        let extra_dist = hdr.dict_size_bytes.is_some();
         let packed = compression::compress_chunked(
             &data,
             hdr.comp_method,
@@ -452,16 +454,22 @@ impl RarArchive {
             Some(enc),
             true,
             None,
+            extra_dist,
         )
         .map_err(RarError::Unsupported)?;
 
-        let (method, dsl, payload) = if packed.len() >= data.len() {
+        let (method, dsl, dict_bytes, payload) = if packed.len() >= data.len() {
             enc.reset();
             *enc_active = false;
-            (COMP_METHOD_STORE, 0u8, data.clone())
+            (COMP_METHOD_STORE, 0u8, None, data.clone())
         } else {
             *enc_active = true;
-            (hdr.comp_method, hdr.comp_dict_size, packed)
+            (
+                hdr.comp_method,
+                hdr.comp_dict_size,
+                hdr.dict_size_bytes,
+                packed,
+            )
         };
         let (header_crc, extra_data, stored_hash, encr_params) =
             RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
@@ -477,6 +485,7 @@ impl RarArchive {
             header_crc,
             method,
             dsl,
+            dict_bytes,
             &extra_data,
             hdr.attributes,
             hdr.mtime,
@@ -1114,6 +1123,7 @@ impl RarArchive {
 
         let plain_crc = crc32fast::hash(&data);
         let plain_blake = hdr.hash_value.map(|_| crate::blake2sp::hash(&data));
+        let extra_dist = hdr.dict_size_bytes.is_some();
         let packed = compression::compress_chunked(
             &data,
             hdr.comp_method,
@@ -1122,18 +1132,24 @@ impl RarArchive {
             Some(enc),
             true,
             None,
+            extra_dist,
         )
         .map_err(RarError::Unsupported)?;
 
-        let (method, dsl, payload) = if packed.len() >= data.len() {
+        let (method, dsl, dict_bytes, payload) = if packed.len() >= data.len() {
             // Compression is a net loss: STORE resets the chain, matching
             // the sequential add_file path.
             enc.reset();
             *enc_active = false;
-            (COMP_METHOD_STORE, 0u8, data.clone())
+            (COMP_METHOD_STORE, 0u8, None, data.clone())
         } else {
             *enc_active = true;
-            (hdr.comp_method, hdr.comp_dict_size, packed)
+            (
+                hdr.comp_method,
+                hdr.comp_dict_size,
+                hdr.dict_size_bytes,
+                packed,
+            )
         };
         let (header_crc, extra_data, stored_hash, encr_params) =
             RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
@@ -1149,6 +1165,7 @@ impl RarArchive {
             header_crc,
             method,
             dsl,
+            dict_bytes,
             &extra_data,
             hdr.attributes,
             hdr.mtime,

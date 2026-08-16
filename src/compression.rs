@@ -30,6 +30,7 @@ pub fn compress_with_progress(
             None,
             true,
             progress,
+            false,
         );
     }
     Err(format!("unknown compression method: {method}"))
@@ -38,6 +39,10 @@ pub fn compress_with_progress(
 /// Compress `data` in bounded chunks, optionally carrying encoder state
 /// across files (solid archives). The symbol table and match finder stay
 /// proportional to `chunk_size` instead of the whole file.
+///
+/// `extra_dist` selects the RAR7 (v70) distance code table (80 entries
+/// instead of 64); set it when the member header declares a dictionary
+/// above 4 GiB.
 pub fn compress_chunked(
     data: &[u8],
     method: u8,
@@ -46,6 +51,7 @@ pub fn compress_chunked(
     state: Option<&mut codec::EncoderState>,
     is_final: bool,
     progress: Option<&mut dyn FnMut(u64, u64)>,
+    extra_dist: bool,
 ) -> Result<Vec<u8>, String> {
     if method == COMP_METHOD_STORE {
         if let Some(cb) = progress {
@@ -62,6 +68,7 @@ pub fn compress_chunked(
             state,
             is_final,
             progress,
+            extra_dist,
         );
     }
     Err(format!("unknown compression method: {method}"))

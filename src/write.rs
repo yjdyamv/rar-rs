@@ -153,93 +153,108 @@ fn windows_file_time(path: &Path, want_access: bool) -> Option<(u64, u32)> {
     ))
 }
 
+/// Build the FILE_TIME extra record per explicit `-ts` settings (the
+/// off-thread parallel batch path has no `&RarArchive`); `None` when no
+/// time needs the extra record. On Windows the access/creation times are
+/// read through `GetFileTime` (std exposes no access-time API).
+fn time_extra_cfg(
+    save_ctime: bool,
+    save_atime: bool,
+    save_mtime: bool,
+    precision_seconds: bool,
+    meta: &fs::Metadata,
+    path: &Path,
+    mtime: u32,
+    mtime_ns: u32,
+) -> Option<Vec<u8>> {
+    let ns = |v: u32| if precision_seconds { 0 } else { v };
+    let ctime = if save_ctime {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Some((meta.ctime() as u64, ns(meta.ctime_nsec() as u32)))
+        }
+        #[cfg(windows)]
+        {
+            let _ = meta;
+            windows_file_time(path, false).map(|(s, n)| (s, ns(n)))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = meta;
+            let _ = path;
+            None
+        }
+    } else {
+        None
+    };
+    let atime = if save_atime {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Some((meta.atime() as u64, ns(meta.atime_nsec() as u32)))
+        }
+        #[cfg(windows)]
+        {
+            let _ = meta;
+            windows_file_time(path, true).map(|(s, n)| (s, ns(n)))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            None
+        }
+    } else {
+        None
+    };
+    let mtime = save_mtime.then_some((mtime as u64, if precision_seconds { 0 } else { mtime_ns }));
+    let present = mtime.is_some() || ctime.is_some() || atime.is_some();
+    present.then(|| file_time_extra_record(mtime, ctime, atime))
+}
+
+/// Build the OWNER extra record (numeric uid/gid) per `-ow`; `None`
+/// off-Unix or when disabled. Off-thread variant of `owner_extra_for`.
+fn owner_extra_cfg(save_owner: bool, meta: &fs::Metadata) -> Option<Vec<u8>> {
+    if !save_owner {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(build_owner_extra_record(
+            &meta.uid().to_string(),
+            &meta.gid().to_string(),
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
 impl RarArchive {
 
     // ── Public API: creation ───────────────────────────────────────────────
 
-    /// Collect the extra-record timestamps (ctime/atime) per `-tsc`/`-tsa`,
-    /// honoring 1-second precision. On Windows the access time is read
-    /// through `GetFileTime` (std exposes no access-time API).
-    fn extra_file_times(
-        &self,
-        meta: &fs::Metadata,
-        path: &Path,
-    ) -> (Option<(u64, u32)>, Option<(u64, u32)>) {
-        let ns = |v: u32| if self.time_precision_seconds { 0 } else { v };
-        let ctime = if self.save_ctime {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                Some((meta.ctime() as u64, ns(meta.ctime_nsec() as u32)))
-            }
-            #[cfg(windows)]
-            {
-                let _ = meta;
-                windows_file_time(path, false).map(|(s, n)| (s, ns(n)))
-            }
-            #[cfg(not(any(unix, windows)))]
-            {
-                let _ = meta;
-                let _ = path;
-                None
-            }
-        } else {
-            None
-        };
-        let atime = if self.save_atime {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                Some((meta.atime() as u64, ns(meta.atime_nsec() as u32)))
-            }
-            #[cfg(windows)]
-            {
-                let _ = meta;
-                windows_file_time(path, true).map(|(s, n)| (s, ns(n)))
-            }
-            #[cfg(not(any(unix, windows)))]
-            {
-                None
-            }
-        } else {
-            None
-        };
-        (ctime, atime)
-    }
-
     /// Build the FILE_TIME extra record for `meta`, per the current
     /// `-ts` settings; `None` when no time needs the extra record.
     fn time_extra_for(&self, meta: &fs::Metadata, path: &Path, mtime: u32, mtime_ns: u32) -> Option<Vec<u8>> {
-        let (ctime, atime) = self.extra_file_times(meta, path);
-        let mtime = self
-            .save_mtime
-            .then_some((
-                mtime as u64,
-                if self.time_precision_seconds { 0 } else { mtime_ns },
-            ));
-        let present = mtime.is_some() || ctime.is_some() || atime.is_some();
-        present.then(|| file_time_extra_record(mtime, ctime, atime))
+        time_extra_cfg(
+            self.save_ctime,
+            self.save_atime,
+            self.save_mtime,
+            self.time_precision_seconds,
+            meta,
+            path,
+            mtime,
+            mtime_ns,
+        )
     }
 
     /// Build the OWNER extra record (numeric uid/gid) when `-ow` is on;
     /// `None` off-Unix or when disabled.
     fn owner_extra_for(&self, meta: &fs::Metadata) -> Option<Vec<u8>> {
-        if !self.save_owner {
-            return None;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            Some(build_owner_extra_record(
-                &meta.uid().to_string(),
-                &meta.gid().to_string(),
-            ))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = meta;
-            None
-        }
+        owner_extra_cfg(self.save_owner, meta)
     }
 
     /// Add a file from the filesystem to the archive.
@@ -332,6 +347,12 @@ impl RarArchive {
         let probe_incompressible = method != COMP_METHOD_STORE
             && file_size >= (SAMPLE_PROBE_HEAD as u64) * 4
             && sample_is_incompressible_file(path, file_size, method)?;
+        let (dsl, dict_bytes) = dict_params_for(
+            file_size as usize,
+            self.dict_size_log,
+            self.dict_size_bytes,
+            method,
+        );
 
         if method == COMP_METHOD_STORE || probe_incompressible {
             // STORE is written by streaming the file directly: bounded
@@ -361,6 +382,7 @@ impl RarArchive {
                 encr_params.as_ref(),
                 attrs,
                 mtime,
+                dict_bytes,
             )?;
             if let Some(cb) = self.progress_callback.as_deref_mut() {
                 cb(file_size, file_size);
@@ -382,12 +404,13 @@ impl RarArchive {
                 time_extra,
                 owner_extra,
                 method,
+                dsl,
+                dict_bytes,
             );
         }
 
         // Compressed path: read and compress in bounded chunks with a
         // persistent encoder state (solid archives share the LZ window).
-        let dsl = dict_log_for(file_size as usize, self.dict_size_log, method);
         let chain_solid = self.solid_mode && self.encoder_state.is_some();
         if self.solid_mode {
             self.encoder_state.get_or_insert_with(Default::default);
@@ -423,6 +446,7 @@ impl RarArchive {
                     state,
                     n < buf.len(),
                     None,
+                    dict_bytes.is_some(),
                 )
                 .map_err(RarError::Unsupported)?;
                 packed.extend(compressed);
@@ -463,6 +487,7 @@ impl RarArchive {
                 encr_params.as_ref(),
                 attrs,
                 mtime,
+                dict_bytes,
             )?;
             self.write_member_streams(path)?;
             if let Some(cb) = self.progress_callback.as_deref_mut() {
@@ -491,6 +516,7 @@ impl RarArchive {
             header_crc,
             method,
             dsl,
+            dict_bytes,
             &extra_data,
             attrs,
             mtime,
@@ -696,6 +722,7 @@ impl RarArchive {
                 header_crc,
                 COMP_METHOD_STORE,
                 0,
+                None,
                 &extra_data,
                 0o100644,
                 mtime,
@@ -703,7 +730,12 @@ impl RarArchive {
                 stored_hash,
             )?;
         } else {
-            let dsl = dict_log_for(data.len(), self.dict_size_log, method);
+            let (dsl, dict_bytes) = dict_params_for(
+                data.len(),
+                self.dict_size_log,
+                self.dict_size_bytes,
+                method,
+            );
             let chain_solid = self.solid_mode && self.encoder_state.is_some();
             if self.solid_mode {
                 self.encoder_state.get_or_insert_with(Default::default);
@@ -721,6 +753,7 @@ impl RarArchive {
                 self.encoder_state.as_mut(),
                 true,
                 progress,
+                dict_bytes.is_some(),
             )
             .map_err(RarError::Unsupported)?;
             if packed.len() >= data.len() {
@@ -743,6 +776,7 @@ impl RarArchive {
                     header_crc,
                     COMP_METHOD_STORE,
                     0,
+                    None,
                     &extra_data,
                     0o100644,
                     mtime,
@@ -768,6 +802,7 @@ impl RarArchive {
                     header_crc,
                     method,
                     dsl,
+                    dict_bytes,
                     &extra_data,
                     0o100644,
                     mtime,
@@ -918,6 +953,13 @@ impl RarArchive {
         let ctx = BatchPrepareCtx {
             password: self.password.as_deref(),
             blake2: self.blake2,
+            dict_size_log: self.dict_size_log,
+            dict_size_bytes: self.dict_size_bytes,
+            save_ctime: self.save_ctime,
+            save_atime: self.save_atime,
+            save_mtime: self.save_mtime,
+            save_owner: self.save_owner,
+            time_precision_seconds: self.time_precision_seconds,
         };
         let results: Vec<RarResult<(usize, PreparedEntry)>> = compression_pool().install(|| {
             wave.par_iter()
@@ -988,11 +1030,17 @@ impl RarArchive {
                 plain_blake,
                 COMP_METHOD_STORE,
                 0,
+                None,
                 data.to_vec(),
             );
         }
 
-        let dsl = dict_log_for(data.len(), self.dict_size_log, method);
+        let (dsl, dict_bytes) = dict_params_for(
+            data.len(),
+            ctx.dict_size_log,
+            ctx.dict_size_bytes,
+            method,
+        );
         let packed = if file_origin {
             // Mirror add_file's streaming loop exactly: each chunk is
             // compressed with a fresh encoder window (non-solid archives),
@@ -1009,6 +1057,7 @@ impl RarArchive {
                     None,
                     is_final,
                     None,
+                    dict_bytes.is_some(),
                 )
                 .map_err(RarError::Unsupported)?;
                 packed.extend(compressed);
@@ -1026,6 +1075,7 @@ impl RarArchive {
                 None,
                 true,
                 None,
+                dict_bytes.is_some(),
             )
             .map_err(RarError::Unsupported)?
         };
@@ -1042,6 +1092,7 @@ impl RarArchive {
                 plain_blake,
                 COMP_METHOD_STORE,
                 0,
+                None,
                 data.to_vec(),
             );
         }
@@ -1056,6 +1107,7 @@ impl RarArchive {
             plain_blake,
             method,
             dsl,
+            dict_bytes,
             packed,
         )
     }
@@ -1087,8 +1139,17 @@ impl RarArchive {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
-        let time_extra = self.time_extra_for(&meta, path, mtime, mtime_ns);
-        let owner_extra = self.owner_extra_for(&meta);
+        let time_extra = time_extra_cfg(
+            ctx.save_ctime,
+            ctx.save_atime,
+            ctx.save_mtime,
+            ctx.time_precision_seconds,
+            &meta,
+            path,
+            mtime,
+            mtime_ns,
+        );
+        let owner_extra = owner_extra_cfg(ctx.save_owner, &meta);
 
         #[cfg(unix)]
         let attrs = {
@@ -1178,7 +1239,12 @@ impl RarArchive {
             return Ok(None);
         }
 
-        let dsl = dict_log_for(file_size as usize, self.dict_size_log, method);
+        let (dsl, dict_bytes) = dict_params_for(
+            file_size as usize,
+            self.dict_size_log,
+            self.dict_size_bytes,
+            method,
+        );
         let (plain_crc, plain_blake) = hash_file(path, file_size, self.blake2)?;
         let mtime_ns = meta
             .modified()
@@ -1214,6 +1280,7 @@ impl RarArchive {
                         None,
                         is_final,
                         None,
+                        dict_bytes.is_some(),
                     )
                     .map_err(RarError::Unsupported)?;
                     Ok((idx, packed))
@@ -1252,6 +1319,7 @@ impl RarArchive {
             file_crc: header_crc,
             method,
             dict_size_log: dsl,
+            dict_size_bytes: dict_bytes,
             extra_data,
             stored_hash,
             payload,
@@ -1274,6 +1342,7 @@ impl RarArchive {
         plain_blake: Option<[u8; 32]>,
         method: u8,
         dict_size_log: u8,
+        dict_size_bytes: Option<u64>,
         payload: Vec<u8>,
     ) -> RarResult<PreparedEntry> {
         let (header_crc, mut extra_data, stored_hash, encr) =
@@ -1290,6 +1359,7 @@ impl RarArchive {
             file_crc: header_crc,
             method,
             dict_size_log,
+            dict_size_bytes,
             extra_data,
             stored_hash,
             payload,
@@ -1305,6 +1375,7 @@ impl RarArchive {
             entry.file_crc,
             entry.method,
             entry.dict_size_log,
+            entry.dict_size_bytes,
             &entry.extra_data,
             entry.attrs,
             entry.mtime,
@@ -1323,6 +1394,7 @@ impl RarArchive {
         file_crc: u32,
         method: u8,
         dict_size_log: u8,
+        dict_size_bytes: Option<u64>,
         extra_data: &[u8],
         attrs: u64,
         mtime: u32,
@@ -1341,6 +1413,7 @@ impl RarArchive {
             comp_method: method,
             comp_solid: solid,
             comp_dict_size: dict_size_log,
+            dict_size_bytes,
             host_os: OS_UNIX,
             file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
             extra_data: extra_data.to_vec(),
@@ -1466,6 +1539,7 @@ impl RarArchive {
                 comp_method: method,
                 comp_solid: solid,
                 comp_dict_size: dict_size_log,
+                dict_size_bytes,
                 host_os: OS_UNIX,
                 flags: block_flags | BLOCK_FLAG_DATA_CONTINUE_TO,
                 file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
@@ -1511,6 +1585,7 @@ impl RarArchive {
                 comp_method: method,
                 comp_solid: solid,
                 comp_dict_size: dict_size_log,
+                dict_size_bytes,
                 host_os: OS_UNIX,
                 flags: block_flags,
                 file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
@@ -1647,6 +1722,7 @@ impl RarArchive {
             mtime,
             COMP_METHOD_STORE,
             0,
+            None,
             extra_data,
             hash_value,
             false,
@@ -1682,6 +1758,7 @@ impl RarArchive {
         mtime: u32,
         method: u8,
         dict_size_log: u8,
+        dict_size_bytes: Option<u64>,
         extra_data: &[u8],
         hash_value: Option<[u8; 32]>,
         solid: bool,
@@ -1703,6 +1780,7 @@ impl RarArchive {
             comp_method: method,
             comp_solid: solid,
             comp_dict_size: dict_size_log,
+            dict_size_bytes,
             host_os: OS_UNIX,
             file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
             extra_data: extra_data.to_vec(),
@@ -1841,6 +1919,7 @@ impl RarArchive {
                 comp_method: method,
                 comp_solid: solid,
                 comp_dict_size: dict_size_log,
+                dict_size_bytes,
                 host_os: OS_UNIX,
                 flags: block_flags | BLOCK_FLAG_DATA_CONTINUE_TO,
                 file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
@@ -1889,6 +1968,7 @@ impl RarArchive {
                 comp_method: method,
                 comp_solid: solid,
                 comp_dict_size: dict_size_log,
+                dict_size_bytes,
                 host_os: OS_UNIX,
                 flags: block_flags,
                 file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
@@ -1976,6 +2056,7 @@ impl RarArchive {
         encr_params: Option<&encryption::EncryptionParams>,
         attrs: u64,
         mtime: u32,
+        dict_size_bytes: Option<u64>,
     ) -> RarResult<()> {
         let mut reader = File::open(path)?;
         let password = self.password.clone();
@@ -1989,6 +2070,7 @@ impl RarArchive {
                 mtime,
                 COMP_METHOD_STORE,
                 0,
+                dict_size_bytes,
                 extra_data,
                 stored_hash,
                 false,
@@ -2033,8 +2115,9 @@ impl RarArchive {
         time_extra: Option<Vec<u8>>,
         owner_extra: Option<Vec<u8>>,
         method: u8,
+        dsl: u8,
+        dict_bytes: Option<u64>,
     ) -> RarResult<()> {
-        let dsl = dict_log_for(file_size as usize, self.dict_size_log, method);
         let chain_solid = self.solid_mode && self.encoder_state.is_some();
         if self.solid_mode {
             self.encoder_state.get_or_insert_with(Default::default);
@@ -2073,6 +2156,7 @@ impl RarArchive {
                     state,
                     n < buf.len(),
                     None,
+                    dict_bytes.is_some(),
                 )
                 .map_err(RarError::Unsupported)?;
                 spill.write_all(&compressed)?;
@@ -2114,6 +2198,7 @@ impl RarArchive {
                 encr_params.as_ref(),
                 attrs,
                 mtime,
+                dict_bytes,
             )?;
             if let Some(cb) = self.progress_callback.as_deref_mut() {
                 cb(file_size, file_size);
@@ -2140,6 +2225,7 @@ impl RarArchive {
             mtime,
             method,
             dsl,
+            dict_bytes,
             &extra_data,
             stored_hash,
             chain_solid,

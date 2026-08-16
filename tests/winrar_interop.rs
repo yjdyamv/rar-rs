@@ -958,3 +958,77 @@ fn rar7_v70_archives_decode_with_mdx() {
     .unwrap();
     assert_eq!(file_sha256(&out_dir.join("big.bin")), file_sha256(&src));
 }
+
+/// We create RAR7 (v70) archives ourselves: `-md8g` with a >4 GiB source
+/// selects the v70 header (compression version 1) with the dictionary
+/// capped at 2x the file size (8 GiB here), and the member payload is
+/// encoded with the extended 80-entry distance table. Both our extractor
+/// and WinRAR's UnRAR must decode it byte-identically.
+#[test]
+#[ignore] // slow: >4 GiB source and an 8 GiB dictionary window
+fn we_create_v70_archives_decode_everywhere() {
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    let size = 4 * 1024 * 1024 * 1024u64 + 4096; // > 4 GiB triggers v70 with -md8g
+    write_pattern_file(&src, size, 7);
+
+    // Create with our rar CLI (relative member name, like WinRAR).
+    let arc = dir.path().join("v70.rar");
+    let (ok, out) = run(
+        Command::new(env!("CARGO_BIN_EXE_rar"))
+            .args(["a", "-md8g", "-m3", "-idq"])
+            .arg(&arc)
+            .arg("big.bin")
+            .current_dir(dir.path()),
+    );
+    assert!(ok, "our rar -md8g failed:\n{out}");
+
+    // Confirm the member is v70 with a >4 GiB dictionary.
+    {
+        let mut ar = RarArchive::open(&arc).unwrap();
+        let name = ar.namelist()[0].to_string();
+        let e = ar.get_entry(&name).unwrap();
+        assert_eq!(e.header.comp_version, 1, "expected RAR7 (v70) member");
+        let bytes = e
+            .header
+            .dict_size_bytes
+            .expect("v70 must carry the byte count");
+        assert!(
+            bytes > 4 * 1024 * 1024 * 1024,
+            "expected a >4 GiB dictionary, got {bytes}"
+        );
+    }
+
+    // Our extractor decodes it byte-identically.
+    let out_dir = dir.path().join("out_ours");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    {
+        let mut ar = RarArchive::open(&arc).unwrap();
+        ar.extract_all_with_options(
+            &out_dir,
+            rar5::ExtractOptions {
+                max_unpacked_bytes: None,
+                max_total_unpacked_bytes: None,
+                max_dict_size: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(file_sha256(&out_dir.join("big.bin")), file_sha256(&src));
+
+    // WinRAR's UnRAR decodes it byte-identically too (it needs `-mdx8g`
+    // to allow the >4 GiB dictionary).
+    if let Some(unrar) = unrar_bin() {
+        let out_dir = dir.path().join("out_unrar");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(
+            Command::new(unrar)
+                .args(["x", "-idq", "-o+", "-y", "-mdx8g"])
+                .arg(&arc)
+                .arg(&out_dir),
+        );
+        assert!(ok, "UnRAR -mdx8g failed:\n{out}");
+        assert_eq!(file_sha256(&out_dir.join("big.bin")), file_sha256(&src));
+    }
+}

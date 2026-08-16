@@ -104,8 +104,9 @@ impl EncoderState {
     }
 }
 
-/// Encode raw data into RAR5 compressed format.
-pub fn encode(data: &[u8], method: u8, dict_size_log: u8) -> Vec<u8> {
+/// Encode raw data into RAR5/RAR7 compressed format. `extra_dist` selects
+/// the RAR7 (v70) 80-entry distance code table (RAR5 uses 64).
+pub fn encode(data: &[u8], method: u8, dict_size_log: u8, extra_dist: bool) -> Vec<u8> {
     encode_chunked(
         data,
         method,
@@ -114,17 +115,19 @@ pub fn encode(data: &[u8], method: u8, dict_size_log: u8) -> Vec<u8> {
         None,
         true,
         None,
+        extra_dist,
     )
     .unwrap_or_default()
 }
 
-/// Encode raw data into RAR5 compressed format, reporting match-finder
+/// Encode raw data into RAR5/RAR7 compressed format, reporting match-finder
 /// progress as `(bytes_processed, total_bytes)`.
 pub fn encode_with_progress(
     data: &[u8],
     method: u8,
     dict_size_log: u8,
     progress: Option<&mut dyn FnMut(u64, u64)>,
+    extra_dist: bool,
 ) -> Vec<u8> {
     encode_chunked(
         data,
@@ -134,6 +137,7 @@ pub fn encode_with_progress(
         None,
         true,
         progress,
+        extra_dist,
     )
     .unwrap_or_default()
 }
@@ -143,6 +147,8 @@ pub fn encode_with_progress(
 /// the last call of one member so only its final block carries the
 /// end-of-stream flag. Returns the compressed stream; callers fall back to
 /// STORE when the result is not smaller than the input.
+///
+/// `extra_dist` selects the RAR7 (v70) distance code table.
 pub fn encode_chunked(
     data: &[u8],
     method: u8,
@@ -151,9 +157,10 @@ pub fn encode_chunked(
     state: Option<&mut EncoderState>,
     is_final: bool,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
+    extra_dist: bool,
 ) -> Result<Vec<u8>, String> {
     if data.is_empty() {
-        return Ok(encode_empty_block());
+        return Ok(encode_empty_block(extra_dist));
     }
 
     let level = (method as usize).clamp(1, 5);
@@ -178,7 +185,7 @@ pub fn encode_chunked(
         while block_start < symbols.len() {
             let (block_end, _) = find_block_end(&symbols, block_start, MAX_BLOCK_SIZE);
             let is_last = is_final && chunk_end >= data.len() && block_end >= symbols.len();
-            let block_data = encode_block(&symbols[block_start..block_end], is_last);
+            let block_data = encode_block(&symbols[block_start..block_end], is_last, extra_dist);
             output.extend(block_data);
             // Early bail-out: once the compressed stream already exceeds
             // the input size it can never beat STORE — stop before wasting
@@ -217,12 +224,22 @@ pub fn encode_with_filters(
     method: u8,
     dict_size_log: u8,
     filters: &[FilterSpec],
+    extra_dist: bool,
 ) -> Result<Vec<u8>, String> {
     if data.is_empty() {
-        return Ok(encode_empty_block());
+        return Ok(encode_empty_block(extra_dist));
     }
     if filters.is_empty() {
-        return encode_chunked(data, method, dict_size_log, data.len(), None, true, None);
+        return encode_chunked(
+            data,
+            method,
+            dict_size_log,
+            data.len(),
+            None,
+            true,
+            None,
+            extra_dist,
+        );
     }
 
     // Split over-long regions: RARLAB readers reject filter blocks above
@@ -292,7 +309,7 @@ pub fn encode_with_filters(
     while block_start < symbols.len() {
         let (block_end, _) = find_block_end(&symbols, block_start, MAX_BLOCK_SIZE);
         let is_last = block_end >= symbols.len();
-        let block_data = encode_block(&symbols[block_start..block_end], is_last);
+        let block_data = encode_block(&symbols[block_start..block_end], is_last, extra_dist);
         output.extend(block_data);
         if !is_last && output.len() > data.len() {
             break;
@@ -449,10 +466,11 @@ fn find_block_end(symbols: &[Symbol], start: usize, max_uncompressed: usize) -> 
 
 // ── Block encoding ─────────────────────────────────────────────────────────
 
-fn encode_block(symbols: &[Symbol], is_last: bool) -> Vec<u8> {
+fn encode_block(symbols: &[Symbol], is_last: bool, extra_dist: bool) -> Vec<u8> {
     // Collect frequencies
+    let dc_count = if extra_dist { HUFF_DCX } else { HUFF_DC };
     let mut nc_freq = vec![0u32; HUFF_NC];
-    let mut dc_freq = vec![0u32; HUFF_DC];
+    let mut dc_freq = vec![0u32; dc_count];
     let mut ldc_freq = vec![0u32; HUFF_LDC];
     let mut rc_freq = vec![0u32; HUFF_RC];
 
@@ -462,7 +480,7 @@ fn encode_block(symbols: &[Symbol], is_last: bool) -> Vec<u8> {
             Symbol::Match { distance, length } => {
                 let len_slot = encode_length_slot(*length);
                 nc_freq[SYM_MATCH_BASE + len_slot] += 1;
-                let (dist_slot, _, _) = encode_distance_slot(*distance);
+                let (dist_slot, _, _) = encode_distance_slot(*distance, extra_dist);
                 dc_freq[dist_slot] += 1;
                 if dist_slot >= 4 {
                     let dbits = dist_slot / 2 - 1;
@@ -523,7 +541,15 @@ fn encode_block(symbols: &[Symbol], is_last: bool) -> Vec<u8> {
         match sym {
             Symbol::Literal(b) => encode_symbol(&enc_nc, &mut writer, *b as usize),
             Symbol::Match { distance, length } => {
-                write_match(&mut writer, &enc_nc, &enc_dc, &enc_ldc, *distance, *length);
+                write_match(
+                    &mut writer,
+                    &enc_nc,
+                    &enc_dc,
+                    &enc_ldc,
+                    *distance,
+                    *length,
+                    extra_dist,
+                );
             }
             Symbol::CacheRef { index, length } => {
                 write_cache_ref(&mut writer, &enc_nc, &enc_rc, *index, *length);
@@ -558,7 +584,7 @@ fn encode_block(symbols: &[Symbol], is_last: bool) -> Vec<u8> {
     build_block_header(&block_data, total_bits, is_last, true)
 }
 
-fn encode_empty_block() -> Vec<u8> {
+fn encode_empty_block(extra_dist: bool) -> Vec<u8> {
     let mut writer = BitWriter::new();
     let nc_lengths = {
         let mut v = vec![0u8; HUFF_NC];
@@ -566,7 +592,7 @@ fn encode_empty_block() -> Vec<u8> {
         v
     };
     let dc_lengths = {
-        let mut v = vec![0u8; HUFF_DC];
+        let mut v = vec![0u8; if extra_dist { HUFF_DCX } else { HUFF_DC }];
         v[0] = 1;
         v
     };
@@ -791,12 +817,13 @@ fn write_match(
     enc_ldc: &EncodeTable,
     dist: u32,
     length: u32,
+    extra_dist: bool,
 ) {
     let len_slot = encode_length_slot(length);
     encode_symbol(enc_nc, writer, SYM_MATCH_BASE + len_slot);
     write_length_extra(writer, length, len_slot);
 
-    let (dist_slot, extra, dbits) = encode_distance_slot(dist);
+    let (dist_slot, extra, dbits) = encode_distance_slot(dist, extra_dist);
     encode_symbol(enc_dc, writer, dist_slot);
     write_distance_extra(writer, enc_ldc, dist_slot, extra, dbits);
 }
@@ -843,7 +870,13 @@ fn write_length_extra(writer: &mut BitWriter, length: u32, slot: usize) {
     }
 }
 
-fn encode_distance_slot(dist: u32) -> (usize, u32, usize) {
+/// Map a match distance to its distance-code slot.
+///
+/// RAR5 caps the table at 64 entries (`HUFF_DC`), RAR7 (v70) at 80
+/// (`HUFF_DCX`), which covers distances up to 1 TiB. `dbits >= 4` slots
+/// split their extra bits between a raw prefix and the low nibble encoded
+/// through the LDC table.
+fn encode_distance_slot(dist: u32, extra_dist: bool) -> (usize, u32, usize) {
     if dist <= 4 {
         return ((dist - 1) as usize, 0, 0);
     }
@@ -857,7 +890,8 @@ fn encode_distance_slot(dist: u32) -> (usize, u32, usize) {
     let slot = 2 * (dbits + 1) + sub as usize;
     let base = (2 | sub) << dbits;
     let extra = val - base;
-    (slot.min(HUFF_DC - 1), extra, dbits)
+    let max_slot = if extra_dist { HUFF_DCX - 1 } else { HUFF_DC - 1 };
+    (slot.min(max_slot), extra, dbits)
 }
 
 fn write_distance_extra(
@@ -1061,6 +1095,7 @@ mod tests {
                     Some(&mut state),
                     i + 1 == chunks.len(),
                     None,
+                    false,
                 )
                 .unwrap(),
             );
@@ -1080,5 +1115,24 @@ mod tests {
     fn one_symbol_tables_are_valid() {
         let table = DecodeTable::new(&one_symbol_table(4));
         assert_eq!(table.num_symbols, 4);
+    }
+
+    #[test]
+    fn v70_extra_dist_self_roundtrip() {
+        use crate::codec::decode_standalone;
+        // Varied data (literal-heavy) at several sizes.
+        for size in [1usize, 100, 1000, 100_000, 300_000] {
+            let data: Vec<u8> = (0..size)
+                .map(|i| (i.wrapping_mul(31) >> 3) as u8)
+                .collect();
+            let packed = encode(&data, 3, 0, true);
+            let back = decode_standalone(&packed, size as u64, 0, Some(128 * 1024), true).unwrap();
+            assert_eq!(back, data, "size {size}");
+        }
+        // Repeated data (match/cache-heavy).
+        let data = vec![0xABu8; 300_000];
+        let packed = encode(&data, 3, 0, true);
+        let back = decode_standalone(&packed, data.len() as u64, 0, Some(128 * 1024), true).unwrap();
+        assert_eq!(back, data);
     }
 }

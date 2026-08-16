@@ -4240,8 +4240,31 @@ fn cli_dict_size_switch_matches_winrar() {
     let data = rar.read("rep32t.bin").unwrap();
     assert_eq!(data, std::fs::read(&file).unwrap());
 
+    // -md above 4 GiB is accepted (WinRAR 7.23 accepts arbitrary values,
+    // e.g. -md6g/-md65g). For a small file the 2x-file-size cap lands in
+    // the RAR5 range, so the member stays a plain v50 with the capped log.
+    for md in ["6g", "8g", "65g"] {
+        let archive = dir.path().join(format!("md{md}.rar"));
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", &format!("-md{md}"), "-idq"])
+            .arg(&archive)
+            .arg("rep32t.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "-md{md} must be accepted");
+        let mut rar = rar5::RarArchive::open(&archive).unwrap();
+        let e = rar.get_entry("rep32t.bin").unwrap();
+        assert_eq!(e.header.comp_version, 0, "-md{md} small file stays v50");
+        assert_eq!(e.header.dict_size_bytes, None, "-md{md}");
+        // 2x floor_pow2(32 MiB) = 64 MiB -> log 9.
+        assert_eq!(e.header.comp_dict_size, 9, "-md{md} cap");
+        let data = rar.read("rep32t.bin").unwrap();
+        assert_eq!(data, std::fs::read(&file).unwrap(), "-md{md} roundtrip");
+    }
+
     // Invalid sizes are rejected with WinRAR's wording.
-    for bad in ["-md3m", "-md", "-md100k", "-md5g"] {
+    for bad in ["-md3m", "-md", "-md100k", "-md129g"] {
         let out = std::process::Command::new(RAR_CLI)
             .args(["a", bad, "-idq"])
             .arg(dir.path().join(format!("bad_{}.rar", bad.trim_start_matches('-'))))
