@@ -101,6 +101,21 @@ pub fn read_rarfiles_lst() -> Vec<Option<String>> {
     Vec::new()
 }
 
+/// Parse a WinRAR `-mdx<size>[k|m|g]` extraction dictionary cap: unlike
+/// `-md`, no unit means **GiB** (`-mdx8` = 8 GiB, per the WinRAR docs).
+#[allow(dead_code)] // used by the `unrar` binary only
+pub fn parse_mdx_size(s: &str) -> Result<u64, String> {
+    let (num, mult) = match s.chars().last() {
+        Some('k') | Some('K') => (&s[..s.len() - 1], 1024u64),
+        Some('m') | Some('M') => (&s[..s.len() - 1], 1024 * 1024),
+        Some('g') | Some('G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        _ => (s, 1024 * 1024 * 1024),
+    };
+    num.parse::<u64>()
+        .map(|n| n * mult)
+        .map_err(|_| format!("invalid dictionary size: {s}"))
+}
+
 /// The subcommand name of a raw argument list (the first token that does
 /// not start with `-`), used to select `switches_<command>` entries.
 pub fn command_name(raw: &[String]) -> Option<String> {

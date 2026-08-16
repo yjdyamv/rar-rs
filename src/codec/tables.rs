@@ -3,6 +3,9 @@
 pub const HUFF_BC: usize = 20;
 pub const HUFF_NC: usize = 306;
 pub const HUFF_DC: usize = 64;
+/// RAR7 (v70) extended distance codes: 80 codes cover distances up to
+/// ~1 TB (the RAR5 table stops at 4 GB).
+pub const HUFF_DCX: usize = 80;
 pub const HUFF_LDC: usize = 16;
 pub const HUFF_RC: usize = 44;
 

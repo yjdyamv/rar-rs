@@ -883,3 +883,78 @@ fn os_streams_interop_with_winrar() {
         assert_eq!(restored.unwrap(), stream_data, "we must restore WinRAR's stream");
     }
 }
+
+// ── RAR7 (v70) archives: dictionary > 4 GiB ────────────────────────────────
+
+/// WinRAR switches to the RAR7 compression algorithm (v70) when the
+/// dictionary exceeds 4 GiB (here: `-md8g` with a >4 GiB source). We must
+/// refuse such members by default (WinRAR's 4 GiB dictionary cap) and
+/// decode them byte-identically once `-mdx` raises the cap.
+#[test]
+#[ignore] // slow: >4 GiB source and an 8 GiB dictionary window
+fn rar7_v70_archives_decode_with_mdx() {
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    let size = 4 * 1024 * 1024 * 1024u64 + 4096; // > 4 GiB triggers v70 with -md8g
+    write_pattern_file(&src, size, 3);
+
+    let Some(rar) = rar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let arc = dir.path().join("v70.rar");
+    let (ok, out) = run(
+        Command::new(&rar)
+            .args(["a", "-md8g", "-m3", "-idq"])
+            .arg(&arc)
+            .arg("big.bin")
+            .current_dir(dir.path()),
+    );
+    assert!(ok, "WinRAR -md8g failed:\n{out}");
+    // Confirm the member really is v70 with a >4 GiB dictionary (WinRAR
+    // encodes the exact size, possibly non-power-of-two).
+    {
+        let mut ar = RarArchive::open(&arc).unwrap();
+        let name = ar.namelist()[0].to_string();
+        let e = ar.get_entry(&name).unwrap();
+        assert_eq!(e.header.comp_version, 1, "expected RAR7 (v70) member");
+        let bytes = e.header.dict_size_bytes.expect("v70 must carry the byte count");
+        assert!(bytes > 4 * 1024 * 1024 * 1024, "expected a >4 GiB dictionary, got {bytes}");
+    }
+
+    // Default extraction cap (4 GiB dictionary) refuses it (unpacked-size
+    // limits raised so the dictionary cap is the one that trips).
+    let out_dir = dir.path().join("out_default");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let mut ar = RarArchive::open(&arc).unwrap();
+    let err = ar
+        .extract_all_with_options(
+            &out_dir,
+            rar5::ExtractOptions {
+                max_unpacked_bytes: None,
+                max_total_unpacked_bytes: None,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("dictionary size"),
+        "default cap must refuse the >4 GiB dictionary, got: {err}"
+    );
+
+    // -mdx semantics: raising the cap decodes it byte-identically.
+    let out_dir = dir.path().join("out_mdx");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let mut ar = RarArchive::open(&arc).unwrap();
+    ar.extract_all_with_options(
+        &out_dir,
+        rar5::ExtractOptions {
+            max_unpacked_bytes: None,
+            max_total_unpacked_bytes: None,
+            max_dict_size: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(file_sha256(&out_dir.join("big.bin")), file_sha256(&src));
+}

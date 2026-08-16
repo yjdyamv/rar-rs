@@ -184,9 +184,14 @@ fn run(cli: Cli) -> Result<(), String> {
 fn run_inner(cli: Cli) -> Result<(), String> {
     let password = cli.password.password.as_deref();
     let ts = common::parse_ts_specs(&cli.ts_specs)?;
+    let max_dict_size = cli
+        .dict_extract
+        .as_deref()
+        .map(common::parse_mdx_size)
+        .transpose()?;
     match cli.command {
-        Command::Extract(args) => cmd_extract(&args, password, ts),
-        Command::ExtractFlat(args) => cmd_extract_flat(&args, password, ts),
+        Command::Extract(args) => cmd_extract(&args, password, ts, max_dict_size),
+        Command::ExtractFlat(args) => cmd_extract_flat(&args, password, ts, max_dict_size),
         Command::List(args) => cmd_list(&args.archive, password),
         Command::ListBare(args) => cmd_list_bare(&args.archive, password),
         Command::ListTechnical(args) => cmd_list_technical(&args.archive, password),
@@ -279,7 +284,12 @@ fn open_archive(path: &str, password: Option<&str>) -> Result<rar5::RarArchive, 
     }
 }
 
-fn cmd_extract(args: &ExtractArgs, password: Option<&str>, ts: common::TsSettings) -> Result<(), String> {
+fn cmd_extract(
+    args: &ExtractArgs,
+    password: Option<&str>,
+    ts: common::TsSettings,
+    max_dict_size: Option<u64>,
+) -> Result<(), String> {
     if let Some(threads) = args.threads {
         rar5::set_extraction_threads(threads);
     }
@@ -291,9 +301,16 @@ fn cmd_extract(args: &ExtractArgs, password: Option<&str>, ts: common::TsSetting
     rar.extract_all_with_options(
         &dest,
         rar5::ExtractOptions {
+            // Extraction is fully streaming: no per-member or total
+            // size caps (WinRAR's UnRAR extracts any size).
+            max_unpacked_bytes: None,
+            max_total_unpacked_bytes: None,
             skip_existing: args.overwrite.as_deref() == Some("never"),
             set_creation_time: ts.save_ctime,
             set_access_time: ts.save_atime,
+            // WinRAR refuses dictionaries above 4 GiB unless -mdx raises
+            // the cap; None here means "use the default cap".
+            max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),
             ..Default::default()
         },
     )
@@ -306,6 +323,7 @@ fn cmd_extract_flat(
     args: &ExtractArgs,
     password: Option<&str>,
     ts: common::TsSettings,
+    max_dict_size: Option<u64>,
 ) -> Result<(), String> {
     let base = args.dest.as_deref().unwrap_or(".");
     let dest = common::extract_dest(base, &args.archive, args.append_dir);
@@ -314,9 +332,12 @@ fn cmd_extract_flat(
         &dest,
         rar5::ExtractOptions {
             flat_paths: true,
+            max_unpacked_bytes: None,
+            max_total_unpacked_bytes: None,
             skip_existing: args.overwrite.as_deref() == Some("never"),
             set_creation_time: ts.save_ctime,
             set_access_time: ts.save_atime,
+            max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),
             ..Default::default()
         },
     )

@@ -381,6 +381,11 @@ pub struct FileHeader {
     pub data_offset: u64,
     /// Archive format version (4 or 5).
     pub format_version: u8,
+    /// Actual dictionary size in bytes for RAR7 members (`comp_version`
+    /// 1): the 5-bit dict field plus the 1/32 increment allow
+    /// non-power-of-two sizes up to 64 GB. `None` for RAR5 members, whose
+    /// dictionary is `128 KiB << comp_dict_size`.
+    pub dict_size_bytes: Option<u64>,
     /// Nanosecond fraction of the modification time (FILE_TIME extra
     /// record); `None` when only the second-precision header time exists.
     pub mtime_ns: Option<u32>,
@@ -420,6 +425,7 @@ impl Default for FileHeader {
             is_directory: false,
             data_offset: 0,
             format_version: 5,
+            dict_size_bytes: None,
             mtime_ns: None,
             ctime: None,
             atime: None,
@@ -569,6 +575,16 @@ impl FileHeader {
         let comp_solid = comp_info & COMP_INFO_SOLID_BIT != 0;
         let comp_method = ((comp_info & COMP_INFO_METHOD_MASK) >> COMP_INFO_METHOD_SHIFT) as u8;
         let comp_dict_size = ((comp_info & COMP_INFO_DICT_MASK) >> COMP_INFO_DICT_SHIFT) as u8;
+        // RAR7 (compression version 1): dictionary = 128 KiB << (5-bit
+        // field at bits 10-14), plus a 1/32 increment from bits 15-19
+        // (WinRAR encodes up to 64 GB, non-power-of-two allowed).
+        let dict_size_bytes = if comp_version == 1 {
+            let base = 0x20000u64 << ((comp_info >> 10) & 0x1F);
+            let inc = (comp_info >> 15) & 0x1F;
+            Some(base + base / 32 * inc)
+        } else {
+            None
+        };
 
         let (host_os, n) =
             vint::decode_from_slice(data, offset).map_err(|e| RarError::Format(e.to_string()))?;
@@ -613,6 +629,7 @@ impl FileHeader {
             is_directory,
             data_offset: stream_pos,
             format_version: 5,
+            dict_size_bytes,
             mtime_ns,
             ctime,
             atime,

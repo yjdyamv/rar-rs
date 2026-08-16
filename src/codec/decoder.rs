@@ -28,7 +28,7 @@ struct PendingFilter {
 /// archive layer only creates and holds the state.
 pub struct DecoderState {
     window: SlidingWindow,
-    dist_cache: [u32; DIST_CACHE_SIZE],
+    dist_cache: [u64; DIST_CACHE_SIZE],
     last_length: u32,
     prev_low_dist: u32,
     table_nc: Option<DecodeTable>,
@@ -63,9 +63,25 @@ pub struct DecodeOptions<'a> {
     /// Dictionary size as log2(size/128KB), 0 = 128KB. Used when `state`
     /// is `None`.
     pub dict_size_log: u8,
+    /// Actual dictionary size in bytes (RAR7, `comp_version` 1): may be
+    /// non-power-of-two; the window rounds up to a power of two.
+    pub dict_size_bytes: Option<u64>,
+    /// RAR7 algorithm variant (extended distance codes, `v70`).
+    pub extra_dist: bool,
     /// Shared decoder state for solid-chain continuity (`None` for
     /// standalone members).
     pub state: Option<&'a mut DecoderState>,
+}
+
+impl Default for DecodeOptions<'_> {
+    fn default() -> Self {
+        Self {
+            dict_size_log: 0,
+            dict_size_bytes: None,
+            extra_dist: false,
+            state: None,
+        }
+    }
 }
 
 /// Decode RAR5 compressed data into a buffer.
@@ -87,8 +103,15 @@ pub fn decode(data: &[u8], unpacked_size: u64, opts: DecodeOptions<'_>) -> Resul
             &mut st.table_dc,
             &mut st.table_ldc,
             &mut st.table_rc,
+            opts.extra_dist,
         ),
-        None => decode_standalone(data, unpacked_size, opts.dict_size_log),
+        None => decode_standalone(
+            data,
+            unpacked_size,
+            opts.dict_size_log,
+            opts.dict_size_bytes,
+            opts.extra_dist,
+        ),
     }
 }
 
@@ -123,9 +146,17 @@ pub fn decode_to_writer(
             &mut st.table_dc,
             &mut st.table_ldc,
             &mut st.table_rc,
+            opts.extra_dist,
             writer,
         ),
-        None => decode_standalone_to_writer(data, unpacked_size, opts.dict_size_log, writer),
+        None => decode_standalone_to_writer(
+            data,
+            unpacked_size,
+            opts.dict_size_log,
+            opts.dict_size_bytes,
+            opts.extra_dist,
+            writer,
+        ),
     }
 }
 
@@ -134,12 +165,14 @@ pub fn decode_standalone_to_writer(
     data: &[u8],
     unpacked_size: u64,
     dict_size_log: u8,
+    dict_size_bytes: Option<u64>,
+    extra_dist: bool,
     writer: &mut dyn std::io::Write,
 ) -> Result<u64, String> {
-    let dict_size = checked_dict_size(dict_size_log)?;
+    let dict_size = checked_dict_size(dict_size_log, dict_size_bytes)?;
     let mut reader = BitReader::new(data);
     let mut window = SlidingWindow::new(dict_size);
-    let mut dist_cache = [0u32; DIST_CACHE_SIZE];
+    let mut dist_cache = [0u64; DIST_CACHE_SIZE];
     let mut last_length = 0u32;
     let mut prev_low_dist = 0u32;
     let mut table_nc: Option<DecodeTable> = None;
@@ -158,24 +191,34 @@ pub fn decode_standalone_to_writer(
         &mut table_dc,
         &mut table_ldc,
         &mut table_rc,
+        extra_dist,
         writer,
     )
 }
 
-/// Compute and validate a decoder dictionary size from its log field.
+/// Compute and validate a decoder dictionary size.
 ///
-/// Rejects values that would overflow the host `usize` or exceed the RAR5
-/// v5.0 maximum (4 GiB, `log` 15, the same range WinRAR 7.23 accepts for
-/// RAR5 archives).
-fn checked_dict_size(dict_size_log: u8) -> Result<usize, String> {
-    if dict_size_log > 15 {
-        return Err(format!(
-            "dictionary size log {dict_size_log} exceeds supported maximum 15"
-        ));
-    }
-    (128usize * 1024)
-        .checked_shl(dict_size_log as u32)
-        .ok_or_else(|| format!("dictionary size log {dict_size_log} overflows usize"))
+/// For RAR5 (`dict_size_bytes == None`) the size comes from the 4-bit log
+/// field (up to 4 GiB); for RAR7 the actual byte count is given (up to
+/// 64 GiB, possibly non-power-of-two — the window rounds up to a power of
+/// two so the circular buffer keeps its fast mask arithmetic).
+fn checked_dict_size(dict_size_log: u8, dict_size_bytes: Option<u64>) -> Result<usize, String> {
+    let bytes = match dict_size_bytes {
+        Some(bytes) => bytes,
+        None => {
+            if dict_size_log > 15 {
+                return Err(format!(
+                    "dictionary size log {dict_size_log} exceeds supported maximum 15"
+                ));
+            }
+            (128u64 * 1024) << dict_size_log
+        }
+    };
+    let bytes_usize = usize::try_from(bytes)
+        .map_err(|_| format!("dictionary size {bytes} overflows host address space"))?;
+    bytes_usize
+        .checked_next_power_of_two()
+        .ok_or_else(|| format!("dictionary size {bytes} overflows host address space"))
 }
 
 /// Streaming decode core: writes decoded (and filtered) output to `writer`.
@@ -184,13 +227,14 @@ fn decode_inner_streaming(
     reader: &mut BitReader,
     unpacked_size: u64,
     window: &mut SlidingWindow,
-    dist_cache: &mut [u32; DIST_CACHE_SIZE],
+    dist_cache: &mut [u64; DIST_CACHE_SIZE],
     last_length: &mut u32,
     prev_low_dist: &mut u32,
     table_nc: &mut Option<DecodeTable>,
     table_dc: &mut Option<DecodeTable>,
     table_ldc: &mut Option<DecodeTable>,
     table_rc: &mut Option<DecodeTable>,
+    extra_dist: bool,
     writer: &mut dyn std::io::Write,
 ) -> Result<u64, String> {
     const COPY_THRESHOLD: u64 = 64 * 1024;
@@ -236,7 +280,7 @@ fn decode_inner_streaming(
         let block_start_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
 
         if table_present {
-            let (nc, dc, ldc, rc) = read_tables(reader)?;
+            let (nc, dc, ldc, rc) = read_tables(reader, extra_dist)?;
             *table_nc = Some(nc);
             *table_dc = Some(dc);
             *table_ldc = Some(ldc);
@@ -272,7 +316,7 @@ fn decode_inner_streaming(
                 let len_slot = decode_symbol(t_rc, reader).map_err(|e| e.to_string())?;
                 let length = decode_length(len_slot, reader)?;
                 *last_length = length;
-                *prev_low_dist = dist & 0xF;
+                *prev_low_dist = (dist & 0xF) as u32;
                 window.copy_match(dist as usize, length as usize);
             } else if sym >= SYM_MATCH_BASE {
                 let len_slot = sym - SYM_MATCH_BASE;
@@ -281,7 +325,7 @@ fn decode_inner_streaming(
                 let dist = decode_distance(dist_slot, reader, t_ldc)?;
                 length = apply_length_bonus(length, dist);
                 *last_length = length;
-                *prev_low_dist = dist & 0xF;
+                *prev_low_dist = (dist & 0xF) as u32;
                 dist_cache_push(dist_cache, dist);
                 window.copy_match(dist as usize, length as usize);
             }
@@ -423,13 +467,15 @@ impl<'a> OutputSink<'a> {
     }
 }
 
-/// Decode RAR5 compressed data (standalone, no solid state).
+/// Decode RAR5/RAR7 compressed data (standalone, no solid state).
 pub fn decode_standalone(
     data: &[u8],
     unpacked_size: u64,
     dict_size_log: u8,
+    dict_size_bytes: Option<u64>,
+    extra_dist: bool,
 ) -> Result<Vec<u8>, String> {
-    let mut dict_size = checked_dict_size(dict_size_log)?;
+    let mut dict_size = checked_dict_size(dict_size_log, dict_size_bytes)?;
     // The decoder reconstructs the whole file in the sliding window before
     // extracting it (see `get_output`), so the window must be at least as
     // large as the unpacked output. The encoder sizes its dictionary to the
@@ -445,7 +491,7 @@ pub fn decode_standalone(
 
     let mut reader = BitReader::new(data);
     let mut window = SlidingWindow::new(dict_size);
-    let mut dist_cache = [0u32; DIST_CACHE_SIZE];
+    let mut dist_cache = [0u64; DIST_CACHE_SIZE];
     let mut last_length = 0u32;
     let mut prev_low_dist = 0u32;
     let mut table_nc: Option<DecodeTable> = None;
@@ -464,6 +510,7 @@ pub fn decode_standalone(
         &mut table_dc,
         &mut table_ldc,
         &mut table_rc,
+        extra_dist,
     )
 }
 
@@ -472,13 +519,14 @@ fn decode_inner(
     reader: &mut BitReader,
     unpacked_size: u64,
     window: &mut SlidingWindow,
-    dist_cache: &mut [u32; DIST_CACHE_SIZE],
+    dist_cache: &mut [u64; DIST_CACHE_SIZE],
     last_length: &mut u32,
     prev_low_dist: &mut u32,
     table_nc: &mut Option<DecodeTable>,
     table_dc: &mut Option<DecodeTable>,
     table_ldc: &mut Option<DecodeTable>,
     table_rc: &mut Option<DecodeTable>,
+    extra_dist: bool,
 ) -> Result<Vec<u8>, String> {
     let mut pending_filters: Vec<PendingFilter> = Vec::new();
     let output_start = window.total_written();
@@ -521,7 +569,7 @@ fn decode_inner(
 
         // ── Read Huffman tables if present ──────────────────────────────
         if table_present {
-            let (nc, dc, ldc, rc) = read_tables(reader)?;
+            let (nc, dc, ldc, rc) = read_tables(reader, extra_dist)?;
             *table_nc = Some(nc);
             *table_dc = Some(dc);
             *table_ldc = Some(ldc);
@@ -557,7 +605,7 @@ fn decode_inner(
                 let len_slot = decode_symbol(t_rc, reader).map_err(|e| e.to_string())?;
                 let length = decode_length(len_slot, reader)?;
                 *last_length = length;
-                *prev_low_dist = dist & 0xF;
+                *prev_low_dist = (dist & 0xF) as u32;
                 window.copy_match(dist as usize, length as usize);
             } else if sym >= SYM_MATCH_BASE {
                 let len_slot = sym - SYM_MATCH_BASE;
@@ -566,7 +614,7 @@ fn decode_inner(
                 let dist = decode_distance(dist_slot, reader, t_ldc)?;
                 length = apply_length_bonus(length, dist);
                 *last_length = length;
-                *prev_low_dist = dist & 0xF;
+                *prev_low_dist = (dist & 0xF) as u32;
                 dist_cache_push(dist_cache, dist);
                 window.copy_match(dist as usize, length as usize);
             }
@@ -606,7 +654,10 @@ fn decode_inner(
 
 fn read_tables(
     reader: &mut BitReader,
+    extra_dist: bool,
 ) -> Result<(DecodeTable, DecodeTable, DecodeTable, DecodeTable), String> {
+    // RAR7 (v70) extends the distance code table from 64 to 80 codes.
+    let dc_count = if extra_dist { HUFF_DCX } else { HUFF_DC };
     // Read BC table: 20 code lengths as nibbles with escape mechanism
     let mut bc_lengths = Vec::with_capacity(HUFF_BC);
     while bc_lengths.len() < HUFF_BC {
@@ -629,13 +680,13 @@ fn read_tables(
 
     let table_bc = DecodeTable::new(&bc_lengths);
 
-    let total = HUFF_NC + HUFF_DC + HUFF_LDC + HUFF_RC;
+    let total = HUFF_NC + dc_count + HUFF_LDC + HUFF_RC;
     let all_lengths = read_code_lengths(reader, &table_bc, total)?;
 
     let nc_len = &all_lengths[..HUFF_NC];
-    let dc_len = &all_lengths[HUFF_NC..HUFF_NC + HUFF_DC];
-    let ldc_len = &all_lengths[HUFF_NC + HUFF_DC..HUFF_NC + HUFF_DC + HUFF_LDC];
-    let rc_len = &all_lengths[HUFF_NC + HUFF_DC + HUFF_LDC..];
+    let dc_len = &all_lengths[HUFF_NC..HUFF_NC + dc_count];
+    let ldc_len = &all_lengths[HUFF_NC + dc_count..HUFF_NC + dc_count + HUFF_LDC];
+    let rc_len = &all_lengths[HUFF_NC + dc_count + HUFF_LDC..];
 
     Ok((
         DecodeTable::new(nc_len),
@@ -713,24 +764,26 @@ fn decode_distance(
     dist_slot: usize,
     reader: &mut BitReader,
     table_ldc: &DecodeTable,
-) -> Result<u32, String> {
+) -> Result<u64, String> {
+    // RAR7's extended table (80 codes) reaches dist slots up to 79, i.e.
+    // DBits up to 38 and distances beyond 4 GB — hence u64 arithmetic.
     if dist_slot < 4 {
-        Ok(1 + dist_slot as u32)
+        Ok(1 + dist_slot as u64)
     } else {
         let dbits = (dist_slot / 2 - 1) as u8;
-        let mut dist = 1 + ((2 | (dist_slot & 1)) << dbits) as u32;
+        let mut dist = 1u64 + (((2 | (dist_slot & 1)) as u64) << dbits);
 
         if dbits > 0 {
             if dbits >= 4 {
                 if dbits > 4 {
                     let upper = reader.read_bits(dbits - 4).map_err(|e| e.to_string())?;
-                    dist = dist.wrapping_add(upper << 4);
+                    dist = dist.wrapping_add((upper as u64) << 4);
                 }
                 let low_dist = decode_symbol(table_ldc, reader).map_err(|e| e.to_string())?;
-                dist = dist.wrapping_add(low_dist as u32);
+                dist = dist.wrapping_add(low_dist as u64);
             } else {
                 let extra = reader.read_bits(dbits).map_err(|e| e.to_string())?;
-                dist = dist.wrapping_add(extra);
+                dist = dist.wrapping_add(extra as u64);
             }
         }
         Ok(dist)
@@ -739,14 +792,14 @@ fn decode_distance(
 
 // ── Distance Cache ─────────────────────────────────────────────────────────
 
-fn dist_cache_push(cache: &mut [u32; DIST_CACHE_SIZE], value: u32) {
+fn dist_cache_push(cache: &mut [u64; DIST_CACHE_SIZE], value: u64) {
     cache[3] = cache[2];
     cache[2] = cache[1];
     cache[1] = cache[0];
     cache[0] = value;
 }
 
-fn dist_cache_touch(cache: &mut [u32; DIST_CACHE_SIZE], idx: usize) -> u32 {
+fn dist_cache_touch(cache: &mut [u64; DIST_CACHE_SIZE], idx: usize) -> u64 {
     let value = cache[idx];
     for i in (1..=idx).rev() {
         cache[i] = cache[i - 1];
@@ -757,7 +810,7 @@ fn dist_cache_touch(cache: &mut [u32; DIST_CACHE_SIZE], idx: usize) -> u32 {
 
 // ── Length Bonus ────────────────────────────────────────────────────────────
 
-fn apply_length_bonus(length: u32, dist: u32) -> u32 {
+fn apply_length_bonus(length: u32, dist: u64) -> u32 {
     let mut l = length;
     if dist > 0x100 {
         l += 1;
@@ -807,15 +860,17 @@ fn parse_filter_data(reader: &mut BitReader) -> Result<u32, String> {
 mod tests {
     use super::*;
 
-    /// The RAR5 format ceiling is 4 GiB (log 15), the same range WinRAR
-    /// 7.23 accepts for RAR5 archives; larger values are rejected.
+    /// The RAR5 format ceiling is 4 GiB (log 15); RAR7 sizes come from
+    /// the byte count. Larger values are rejected.
     #[test]
-    fn checked_dict_size_accepts_rars5_range_and_rejects_larger() {
-        assert_eq!(checked_dict_size(0).unwrap(), 128 * 1024);
-        assert_eq!(checked_dict_size(13).unwrap(), 1024 * 1024 * 1024);
-        assert_eq!(checked_dict_size(15).unwrap(), 4 * 1024 * 1024 * 1024);
-        let err = checked_dict_size(16).unwrap_err();
+    fn checked_dict_size_accepts_range_and_rejects_larger() {
+        assert_eq!(checked_dict_size(0, None).unwrap(), 128 * 1024);
+        assert_eq!(checked_dict_size(13, None).unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(checked_dict_size(15, None).unwrap(), 4 * 1024 * 1024 * 1024);
+        let err = checked_dict_size(16, None).unwrap_err();
         assert!(err.contains("maximum 15"), "{err}");
+        // RAR7: byte count, non-power-of-two rounds the window up.
+        assert_eq!(checked_dict_size(0, Some(6 * 1024 * 1024 * 1024)).unwrap(), 8 * 1024 * 1024 * 1024);
     }
 
     /// Fuzz regression: block flags with the reserved bit 5 set previously
@@ -826,7 +881,7 @@ mod tests {
     fn block_flags_with_reserved_bit_do_not_overflow() {
         let stream = [0xe4u8, 0x00, 0xe0, 0x00, 0xe0, 0x00, 0x00];
         let result = std::panic::catch_unwind(|| {
-            let _ = decode_standalone(&stream, 78090, 0);
+            let _ = decode_standalone(&stream, 78090, 0, None, false);
         });
         assert!(
             result.is_ok(),
@@ -840,7 +895,7 @@ mod tests {
     fn three_byte_block_size_field_decodes() {
         let data = b"rar5 three-byte block size regression test data ".repeat(64);
         let packed = crate::codec::encode(&data, 3, 3);
-        let back = decode_standalone(&packed, data.len() as u64, 3).unwrap();
+        let back = decode_standalone(&packed, data.len() as u64, 3, None, false).unwrap();
         assert_eq!(back, data);
     }
 
@@ -899,10 +954,10 @@ mod tests {
                 let data = pattern(filter_type, size);
                 let spec = FilterSpec::new(filter_type, channels, 0, size as u32);
                 let packed = encode_with_filters(&data, 3, 0, &[spec]).unwrap();
-                let buffered = decode_standalone(&packed, size as u64, 0).unwrap();
+                let buffered = decode_standalone(&packed, size as u64, 0, None, false).unwrap();
                 let mut streamed = Vec::new();
-                let written =
-                    decode_standalone_to_writer(&packed, size as u64, 0, &mut streamed).unwrap();
+                let written = decode_standalone_to_writer(&packed, size as u64, 0, None, false, &mut streamed)
+                    .unwrap();
                 assert_eq!(written, size as u64);
                 assert_eq!(
                     streamed, buffered,

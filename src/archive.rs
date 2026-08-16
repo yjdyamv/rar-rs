@@ -2629,8 +2629,14 @@ impl RarArchive {
                 let data = if s.method == crate::constants::COMP_METHOD_STORE {
                     packed
                 } else {
-                    crate::codec::decode_standalone(&packed, s.unpacked_size, s.dict_size_log)
-                        .map_err(|e| RarError::Format(format!("stream decode: {e}")))?
+                    crate::codec::decode_standalone(
+                        &packed,
+                        s.unpacked_size,
+                        s.dict_size_log,
+                        None,
+                        false,
+                    )
+                    .map_err(|e| RarError::Format(format!("stream decode: {e}")))?
                 };
                 write::write_windows_stream(dest_path, &s.name, &data)?;
             }
@@ -2645,6 +2651,7 @@ impl RarArchive {
     /// Restore a member's stored timestamps on the extracted file: the
     /// modification time always (when nonzero), plus access time when
     /// requested via [`ExtractOptions`]. The creation time is set through
+    /// `SetFileTime` on Windows (std has no creation-time setter) and is a
     /// `SetFileTime` on Windows (std has no creation-time setter) and is a
     /// no-op on Unix, where the change time cannot be set (matching
     /// WinRAR's behavior).
@@ -2796,12 +2803,7 @@ impl RarArchive {
 
         // Determine dict_size from the first compressed entry in the chain
         if self.solid_state.is_none() {
-            let dict_log = self.entries[chain_start].header.comp_dict_size;
-            let dict_size = (128usize * 1024)
-                .checked_shl(dict_log as u32)
-                .ok_or_else(|| {
-                    RarError::Format("dictionary size overflows host address space".into())
-                })?;
+            let dict_size = self.member_dict_window(chain_start)?;
             self.solid_state = Some(DecoderState::new(dict_size));
         }
 
@@ -2876,12 +2878,7 @@ impl RarArchive {
         }
 
         if self.solid_state.is_none() {
-            let dict_log = self.entries[chain_start].header.comp_dict_size;
-            let dict_size = (128usize * 1024)
-                .checked_shl(dict_log as u32)
-                .ok_or_else(|| {
-                    RarError::Format("dictionary size overflows host address space".into())
-                })?;
+            let dict_size = self.member_dict_window(chain_start)?;
             self.solid_state = Some(DecoderState::new(dict_size));
         }
 
@@ -3068,6 +3065,35 @@ impl RarArchive {
 
     /// Decode a single file, streaming output to `writer` (bounded memory),
     /// verifying CRC32/BLAKE2sp over the written bytes.
+    /// Actual dictionary size of a member in bytes: RAR5 uses
+    /// `128 KiB << comp_dict_size`, RAR7 carries the byte count directly
+    /// (possibly non-power-of-two). The sliding window rounds up to a
+    /// power of two. Enforces the extraction dictionary cap
+    /// (`ExtractOptions::max_dict_size`, WinRAR's `-mdx`).
+    fn member_dict_window(&self, idx: usize) -> RarResult<usize> {
+        let hdr = &self.entries[idx].header;
+        let bytes = match hdr.dict_size_bytes {
+            Some(b) => b,
+            None => (128u64 * 1024) << hdr.comp_dict_size,
+        };
+        if let Some(cap) = self.extract_options.max_dict_size
+            && bytes > cap
+        {
+            return Err(RarError::LimitExceeded {
+                limit: cap,
+                context: format!(
+                    "{}: dictionary size {bytes} bytes exceeds the extraction cap (use -mdx to raise it)",
+                    hdr.name
+                ),
+            });
+        }
+        let bytes = usize::try_from(bytes)
+            .map_err(|_| RarError::Format("dictionary size overflows host address space".into()))?;
+        bytes
+            .checked_next_power_of_two()
+            .ok_or_else(|| RarError::Format("dictionary size overflows host address space".into()))
+    }
+
     fn decode_file_to(
         &mut self,
         idx: usize,
@@ -3076,12 +3102,7 @@ impl RarArchive {
     ) -> RarResult<u64> {
         self.validate_entry_limits(idx)?;
         let hdr = &self.entries[idx].header;
-        if hdr.comp_version > 0 {
-            return Err(RarError::Unsupported(format!(
-                "{}: RAR7 compression (version {}) is not supported by rar-rs (RAR5 only)",
-                hdr.name, hdr.comp_version
-            )));
-        }
+        let _ = self.member_dict_window(idx)?; // enforces the -mdx cap
         if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
             return Ok(0);
         }
@@ -3099,6 +3120,8 @@ impl RarArchive {
                 hdr.unpacked_size,
                 crate::codec::DecodeOptions {
                     dict_size_log: hdr.comp_dict_size,
+                    dict_size_bytes: hdr.dict_size_bytes,
+                    extra_dist: hdr.comp_version == 1,
                     state,
                 },
                 &mut sink,

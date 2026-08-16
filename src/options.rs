@@ -117,6 +117,11 @@ pub struct ExtractOptions {
     /// Also restore the last access time from the FILE_TIME extra record
     /// (like WinRAR's `-tsa` on extraction).
     pub set_access_time: bool,
+    /// Maximum dictionary size accepted when decoding a member
+    /// (`None` = unlimited). Defaults to 4 GiB, like WinRAR, which
+    /// refuses archives whose dictionary exceeds 4 GiB (RAR7) unless
+    /// `-mdx<size>` raises the cap.
+    pub max_dict_size: Option<u64>,
 }
 
 impl Default for ExtractOptions {
@@ -129,6 +134,7 @@ impl Default for ExtractOptions {
             skip_existing: false,
             set_creation_time: false,
             set_access_time: false,
+            max_dict_size: Some(4 * 1024 * 1024 * 1024),
         }
     }
 }

@@ -85,6 +85,7 @@ pub fn decompress(
             codec::DecodeOptions {
                 dict_size_log,
                 state,
+                ..Default::default()
             },
         )?;
         if result.len() != unpacked_size as usize {

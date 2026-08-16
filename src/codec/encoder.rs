@@ -1034,7 +1034,7 @@ mod tests {
             original.len() as u64,
             crate::codec::DecodeOptions {
                 dict_size_log: 0,
-                state: None,
+                ..Default::default()
             },
             &mut out,
         )
@@ -1071,7 +1071,8 @@ mod tests {
             packed.len(),
             data.len()
         );
-        let roundtrip = crate::codec::decode_standalone(&packed, data.len() as u64, 3).unwrap();
+        let roundtrip = crate::codec::decode_standalone(&packed, data.len() as u64, 3, None, false)
+            .unwrap();
         assert_eq!(roundtrip, data);
     }
 
