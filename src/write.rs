@@ -410,11 +410,13 @@ impl RarArchive {
         }
 
         // Compressed path: read and compress in bounded chunks with a
-        // persistent encoder state (solid archives share the LZ window).
+        // persistent encoder state (solid archives share the LZ window;
+        // non-solid members keep one window within the member, reset
+        // between members). The persistent state also carries the
+        // long-range match history across chunk boundaries (WinRAR's
+        // `-mcl` long range search).
         let chain_solid = self.solid_mode && self.encoder_state.is_some();
-        if self.solid_mode {
-            self.encoder_state.get_or_insert_with(Default::default);
-        }
+        self.encoder_state.get_or_insert_with(Default::default);
 
         let mut crc_hasher = crc32fast::Hasher::new();
         let mut blake_hasher = if self.blake2 {
@@ -524,6 +526,11 @@ impl RarArchive {
             stored_hash,
         )?;
         self.write_member_streams(path)?;
+        // Non-solid members use an independent LZ window: drop the
+        // encoder state so the next member starts fresh.
+        if !self.solid_mode {
+            self.reset_solid_chain();
+        }
 
         if let Some(cb) = self.progress_callback.as_deref_mut() {
             cb(file_size, file_size);
@@ -911,30 +918,14 @@ impl RarArchive {
             if i < entries.len() {
                 if let BatchEntry::File { path, name, level } = entries[i] {
                     let size = fs::metadata(path)?.len();
-                    if size > PARALLEL_COMPRESS_MAX_MEMBER && size <= PARALLEL_BUFFER_LIMIT {
-                        if let Some(prepared) =
-                            self.prepare_large_file_parallel(path, name, level)?
-                        {
-                            let member_size = prepared.unpacked_size;
-                            if let Some(cb) = self.progress_callback.as_deref_mut() {
-                                cb(0, member_size);
-                            }
-                            self.write_prepared_entry(prepared)?;
-                            if let Some(cb) = self.progress_callback.as_deref_mut() {
-                                cb(member_size, member_size);
-                            }
-                            i += 1;
-                            continue;
-                        }
-                        // STORE / probe-incompressible fallback: the
-                        // sequential path streams the member directly.
-                    } else if size > PARALLEL_BUFFER_LIMIT {
-                        // Members beyond the parallel buffer budget stream
-                        // through the sequential path: the compressed
-                        // output is spilled to a temporary file instead of
-                        // being buffered in memory (bounded memory for any
-                        // file size).
-                    }
+                    // Members over the parallel wave budget stream through
+                    // the sequential path: the compressed output is spilled
+                    // to a temporary file instead of being buffered in
+                    // memory (bounded memory for any file size), and the
+                    // persistent encoder state keeps the LZ window (tail +
+                    // long-range history) across chunks — byte-identical
+                    // to `add_file` and with the same compression ratio.
+                    let _ = (path, name, level, size);
                 }
                 self.add_batch_entry_sequential(&entries[i])?;
                 i += 1;
@@ -1041,11 +1032,14 @@ impl RarArchive {
             ctx.dict_size_bytes,
             method,
         );
+        // One encoder state per member: the sequential path keeps the LZ
+        // window (tail + long-range history) within a member and resets
+        // between members, so the batch archive stays byte-identical to
+        // it while remaining parallel across members.
+        let mut state = crate::codec::EncoderState::default();
         let packed = if file_origin {
-            // Mirror add_file's streaming loop exactly: each chunk is
-            // compressed with a fresh encoder window (non-solid archives),
-            // so the batch archive stays byte-identical to the sequential
-            // path.
+            // Mirror add_file's streaming loop exactly (shared state
+            // across chunks within the member).
             let mut packed = Vec::new();
             for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
                 let is_final = chunk.len() < crate::codec::DEFAULT_CHUNK_SIZE;
@@ -1054,7 +1048,7 @@ impl RarArchive {
                     method,
                     dsl,
                     crate::codec::DEFAULT_CHUNK_SIZE,
-                    None,
+                    Some(&mut state),
                     is_final,
                     None,
                     dict_bytes.is_some(),
@@ -1072,7 +1066,7 @@ impl RarArchive {
                 method,
                 dsl,
                 crate::codec::DEFAULT_CHUNK_SIZE,
-                None,
+                Some(&mut state),
                 true,
                 None,
                 dict_bytes.is_some(),
@@ -1176,154 +1170,6 @@ impl RarArchive {
             )));
         }
         Self::prepare_data_entry(ctx, &name, &data, level, attrs, mtime, time_extra, true)
-    }
-
-    /// Prepare a large file (over [`PARALLEL_COMPRESS_MAX_MEMBER`], up to
-    /// [`PARALLEL_BUFFER_LIMIT`]) by compressing its 4 MiB chunks in
-    /// parallel and concatenating them in file order. Members beyond the
-    /// buffer limit stream through the sequential path instead (bounded
-    /// memory for any file size).
-    ///
-    /// Non-solid archives encode each chunk with a fresh encoder window, so
-    /// the packed stream is byte-identical to the sequential `add_file`
-    /// path. Raw input is never buffered whole: each Rayon worker reads and
-    /// compresses one chunk at a time, bounding memory to roughly
-    /// `threads × chunk size + packed output`.
-    ///
-    /// Returns `None` when the member should go through the sequential
-    /// path instead (STORE / sample-probe incompressible, or compression
-    /// would not shrink the payload).
-    #[cfg(feature = "parallel")]
-    fn prepare_large_file_parallel(
-        &self,
-        path: &Path,
-        arcname: Option<&str>,
-        level: u8,
-    ) -> RarResult<Option<PreparedEntry>> {
-        use rayon::prelude::*;
-
-        let meta = fs::metadata(path)?;
-        if !meta.is_file() {
-            return Err(RarError::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("not a file: {}", path.display()),
-            )));
-        }
-        let file_size = meta.len();
-        let mtime = meta
-            .modified()
-            .unwrap_or(SystemTime::now())
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as u32;
-
-        #[cfg(unix)]
-        let attrs = {
-            use std::os::unix::fs::MetadataExt;
-            meta.mode() as u64
-        };
-        #[cfg(not(unix))]
-        let attrs = 0o100644u64;
-
-        let name = arcname
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().into_owned());
-        let name = name.replace('\\', "/");
-        let name = name.trim_start_matches('/').to_string();
-
-        let method = level_to_method(level);
-        let probe_incompressible = method != COMP_METHOD_STORE
-            && file_size >= (SAMPLE_PROBE_HEAD as u64) * 4
-            && sample_is_incompressible_file(path, file_size, method)?;
-        if method == COMP_METHOD_STORE || probe_incompressible {
-            return Ok(None);
-        }
-
-        let (dsl, dict_bytes) = dict_params_for(
-            file_size as usize,
-            self.dict_size_log,
-            self.dict_size_bytes,
-            method,
-        );
-        let (plain_crc, plain_blake) = hash_file(path, file_size, self.blake2)?;
-        let mtime_ns = meta
-            .modified()
-            .unwrap_or(SystemTime::now())
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
-        let time_extra = self.time_extra_for(&meta, path, mtime, mtime_ns);
-        let owner_extra = self.owner_extra_for(&meta);
-
-        let chunk_size = crate::codec::DEFAULT_CHUNK_SIZE as u64;
-        let chunk_count = file_size.div_ceil(chunk_size) as usize;
-        let results: Vec<RarResult<(usize, Vec<u8>)>> = large_file_pool().install(|| {
-            (0..chunk_count)
-                .into_par_iter()
-                .map(|idx| {
-                    let _guard = BatchWorkerGuard::new();
-                    let start = idx as u64 * chunk_size;
-                    let len = file_size.saturating_sub(start).min(chunk_size) as usize;
-                    let mut buf = vec![0u8; len];
-                    {
-                        use std::io::{Read, Seek, SeekFrom};
-                        let mut f = fs::File::open(path)?;
-                        f.seek(SeekFrom::Start(start))?;
-                        f.read_exact(&mut buf)?;
-                    }
-                    let is_final = len < chunk_size as usize;
-                    let packed = compression::compress_chunked(
-                        &buf,
-                        method,
-                        dsl,
-                        crate::codec::DEFAULT_CHUNK_SIZE,
-                        None,
-                        is_final,
-                        None,
-                        dict_bytes.is_some(),
-                    )
-                    .map_err(RarError::Unsupported)?;
-                    Ok((idx, packed))
-                })
-                .collect()
-        });
-
-        let mut packed = Vec::new();
-        for result in results {
-            let (_, chunk_packed) = result?;
-            packed.extend(chunk_packed);
-            if packed.len() as u64 >= file_size {
-                break;
-            }
-        }
-        if packed.len() as u64 >= file_size {
-            // Compression is a net loss; the sequential path streams STORE.
-            return Ok(None);
-        }
-
-        let (header_crc, mut extra_data, stored_hash, encr_params) =
-            RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
-        if let Some(t) = time_extra {
-            extra_data.extend_from_slice(&t);
-        }
-        let payload = RarArchive::encrypt_payload_with(
-            self.password.as_deref(),
-            encr_params.as_ref(),
-            &packed,
-        )?;
-        Ok(Some(PreparedEntry {
-            name,
-            unpacked_size: file_size,
-            attrs,
-            mtime,
-            file_crc: header_crc,
-            method,
-            dict_size_log: dsl,
-            dict_size_bytes: dict_bytes,
-            extra_data,
-            stored_hash,
-            payload,
-        }))
     }
 
     /// Turn a plaintext payload (raw data or compressed stream) into a
@@ -2118,10 +1964,13 @@ impl RarArchive {
         dsl: u8,
         dict_bytes: Option<u64>,
     ) -> RarResult<()> {
+        // A persistent encoder state carries the LZ window (tail and the
+        // long-range match history) across chunks of one member — even in
+        // non-solid archives, where the window is reset between members.
+        // This is what makes >64 KiB match distances (WinRAR `-mcl`
+        // long range search) work for large files.
         let chain_solid = self.solid_mode && self.encoder_state.is_some();
-        if self.solid_mode {
-            self.encoder_state.get_or_insert_with(Default::default);
-        }
+        self.encoder_state.get_or_insert_with(Default::default);
 
         let mut crc_hasher = crc32fast::Hasher::new();
         let mut blake_hasher = if self.blake2 {
@@ -2216,6 +2065,13 @@ impl RarArchive {
         }
         let mut spill = File::open(&spill_path)?;
         let password = self.password.clone();
+        // Encrypted members store the zero-padded ciphertext length in
+        // the header and on disk (the streaming encryptor pads the final
+        // partial block); plain members store the packed length as-is.
+        let (packed_size, plain_len) = match encr_params {
+            Some(_) => (encryption::zero_padded_len(packed_size), packed_size),
+            None => (packed_size, packed_size),
+        };
         self.write_streamed_payload(
             name,
             file_size,
@@ -2230,12 +2086,17 @@ impl RarArchive {
             stored_hash,
             chain_solid,
             &mut spill,
-            packed_size,
+            plain_len,
             encr_params.as_ref(),
             password.as_deref(),
             false,
         )?;
         self.write_member_streams(path)?;
+        // Non-solid members use an independent LZ window: drop the
+        // encoder state so the next member starts fresh.
+        if !self.solid_mode {
+            self.reset_solid_chain();
+        }
         if let Some(cb) = self.progress_callback.as_deref_mut() {
             cb(file_size, file_size);
         }

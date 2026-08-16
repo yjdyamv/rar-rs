@@ -6,7 +6,7 @@
 use super::bitstream::BitWriter;
 use super::filters::apply_filter_encode;
 use super::huffman::{EncodeTable, build_code_lengths_from_freqs, encode_symbol};
-use super::lz_match::MatchFinder;
+use super::lz_match::{self, MatchFinder};
 use super::tables::*;
 
 // ── Compression level parameters ───────────────────────────────────────────
@@ -85,12 +85,17 @@ enum Symbol {
 ///
 /// Carries the lookbehind window tail, distance cache and last length
 /// across files (and across chunks within a file) so consecutive
-/// compressed members share one LZ window.
+/// compressed members share one LZ window. Also carries the long-range
+/// match history (WinRAR `-mcl` style sampled table over the recent
+/// input) so distant repeated blocks compress across chunk boundaries.
 #[derive(Default)]
 pub struct EncoderState {
     tail: Vec<u8>,
     dist_cache: [u32; DIST_CACHE_SIZE],
     last_length: u32,
+    /// Long-range match history; `None` for compression levels where the
+    /// long range search is disabled (method 1, like WinRAR).
+    long_range: Option<lz_match::LongRange>,
 }
 
 impl EncoderState {
@@ -101,6 +106,9 @@ impl EncoderState {
         self.tail.clear();
         self.dist_cache = [0; DIST_CACHE_SIZE];
         self.last_length = 0;
+        if let Some(lr) = self.long_range.as_mut() {
+            lr.reset();
+        }
     }
 }
 
@@ -166,6 +174,10 @@ pub fn encode_chunked(
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
+    // WinRAR applies the long range search to -m2..-m5 and ignores it
+    // for -m1 (fastest); it is automatic (no -mcl switch needed) and
+    // mandatory for v70 dictionaries.
+    let long_range = level >= 2;
 
     let mut local_state = EncoderState::default();
     let state = state.unwrap_or(&mut local_state);
@@ -178,8 +190,15 @@ pub fn encode_chunked(
     while chunk_start < data.len() {
         let chunk_end = (chunk_start + chunk_size).min(data.len());
         let chunk = &data[chunk_start..chunk_end];
-        let symbols =
-            find_matches_with_tail(state, chunk, chain_len, lazy_thresh, max_match, dict_size);
+        let symbols = find_matches_with_tail(
+            state,
+            chunk,
+            chain_len,
+            lazy_thresh,
+            max_match,
+            dict_size,
+            long_range,
+        );
 
         let mut block_start = 0usize;
         while block_start < symbols.len() {
@@ -301,6 +320,8 @@ pub fn encode_with_filters(
         lazy_thresh,
         &mut dist_cache,
         &mut last_length,
+        max_match,
+        None,
     ));
 
     // 3. Emit blocks (filters live in the first block).
@@ -323,6 +344,8 @@ pub fn encode_with_filters(
 
 /// Find matches for `chunk`, searching against `state.tail` as lookbehind.
 /// Advances `state` so a following chunk/file continues the LZ window.
+/// When `long_range` is set, distances beyond the near window are found
+/// through the sampled long-range history (WinRAR `-mcl` semantics).
 fn find_matches_with_tail(
     state: &mut EncoderState,
     chunk: &[u8],
@@ -330,6 +353,7 @@ fn find_matches_with_tail(
     lazy_thresh: usize,
     max_match: usize,
     window: usize,
+    long_range: bool,
 ) -> Vec<Symbol> {
     let tail_len = state.tail.len();
     let mut combined = Vec::with_capacity(tail_len + chunk.len());
@@ -341,6 +365,20 @@ fn find_matches_with_tail(
         finder.insert(pos);
     }
 
+    // Borrow the long-range state read-only for the search; the history
+    // is only updated (mutably) after the symbol stream is produced.
+    let lr = if long_range {
+        let lr = state
+            .long_range
+            .get_or_insert_with(|| lz_match::LongRange::new(window));
+        // The near finder covers distances up to tail + chunk; long-range
+        // candidates only matter beyond that.
+        let near_max = tail_len + chunk.len();
+        Some((&*lr, near_max))
+    } else {
+        None
+    };
+
     let mut dist_cache = state.dist_cache;
     let mut last_length = state.last_length;
     let symbols = find_matches_in_range(
@@ -351,9 +389,22 @@ fn find_matches_with_tail(
         lazy_thresh,
         &mut dist_cache,
         &mut last_length,
+        max_match,
+        lr,
     );
 
-    let keep = window.min(combined.len());
+    if long_range {
+        if let Some(lr) = state.long_range.as_mut() {
+            lr.push(chunk);
+        }
+    }
+
+    // The near window (tail) only needs to cover short-distance matches:
+    // longer distances come from the sampled long-range history. Capping
+    // the tail keeps the per-chunk rebuild cost (inserting the whole
+    // tail into the hash chain) bounded instead of O(window) per chunk.
+    const NEAR_WINDOW_MAX: usize = 8 * 1024 * 1024;
+    let keep = window.min(NEAR_WINDOW_MAX).min(combined.len());
     state.tail = combined[combined.len() - keep..].to_vec();
     state.dist_cache = dist_cache;
     state.last_length = last_length;
@@ -361,6 +412,10 @@ fn find_matches_with_tail(
 }
 
 /// Match-finding loop over `data[start..end]` with a distance cache.
+/// `lr` (when present) adds long-range candidates from the sampled
+/// history: `(long_range, near_max)` where `near_max` is the largest
+/// distance the near finder can produce (tail + chunk), so long-range
+/// hits are only considered beyond it.
 fn find_matches_in_range(
     data: &[u8],
     finder: &mut MatchFinder<'_>,
@@ -369,12 +424,69 @@ fn find_matches_in_range(
     lazy_thresh: usize,
     dist_cache: &mut [u32; DIST_CACHE_SIZE],
     last_length: &mut u32,
+    max_match: usize,
+    lr: Option<(&lz_match::LongRange, usize)>,
 ) -> Vec<Symbol> {
     let mut symbols = Vec::with_capacity(end - start);
     let mut pos = start;
 
+    // After this many consecutive non-matching positions the finder
+    // switches to fast mode: every position is still inserted into the
+    // hash chain (the window stays complete for later matches), the
+    // literal is emitted directly, and only the sampled long-range table
+    // is probed (on its 16-byte grid). Incompressible runs (random data,
+    // media) then cost one hash insertion per byte instead of a full
+    // match attempt with its cache-missing random accesses, while the
+    // distant repeats that justify the compression pass are still found.
+    const FAST_MODE_AFTER: usize = 64 * 1024;
+    let mut no_match_run = 0usize;
+    let mut fast = false;
+
     while pos < end {
-        let (mut dist, mut length) = finder.find_match_cached(pos, dist_cache);
+        let (mut dist, mut length) = if fast {
+            finder.insert(pos);
+            let mut d = 0usize;
+            let mut l = 0usize;
+            if let Some((long_range, near_max)) = lr
+                && pos + 4 <= end
+                && (pos & (lz_match::LONG_RANGE_STEP - 1)) == 0
+            {
+                let chunk_off = pos - start;
+                if let Some((ld, ll)) = long_range.find(
+                    &data[start..end],
+                    chunk_off,
+                    near_max + 1,
+                    max_match,
+                ) {
+                    d = ld as usize;
+                    l = ll;
+                }
+            }
+            (d, l)
+        } else {
+            let (mut d, mut l) = finder.find_match_cached(pos, dist_cache);
+
+            // Long-range candidate: only when the near window found
+            // nothing useful (a good near match is never worse than a
+            // far one).
+            if let Some((long_range, near_max)) = lr
+                && l < 64
+                && pos + 4 <= end
+            {
+                let chunk_off = pos - start;
+                if let Some((ld, ll)) = long_range.find(
+                    &data[start..end],
+                    chunk_off,
+                    near_max + 1,
+                    max_match,
+                ) && ll > l
+                {
+                    d = ld as usize;
+                    l = ll;
+                }
+            }
+            (d, l)
+        };
 
         if dist > 0 && lazy_thresh > 0 && length < lazy_thresh && pos + 1 < end {
             let (dist2, length2) = finder.find_match_cached(pos + 1, dist_cache);
@@ -388,6 +500,11 @@ fn find_matches_in_range(
         }
 
         if dist > 0 {
+            if fast {
+                // A match (long-range) resumes full matching.
+                fast = false;
+                no_match_run = 0;
+            }
             let cache_idx = cache_find(dist_cache, dist as u32);
             if let Some(idx) = cache_idx {
                 if idx == 0 && length as u32 == *last_length && *last_length > 0 {
@@ -427,6 +544,10 @@ fn find_matches_in_range(
         } else {
             symbols.push(Symbol::Literal(data[pos]));
             *last_length = 0;
+            no_match_run += 1;
+            if !fast && no_match_run >= FAST_MODE_AFTER {
+                fast = true;
+            }
             pos += 1;
         }
     }
@@ -1134,5 +1255,140 @@ mod tests {
         let packed = encode(&data, 3, 0, true);
         let back = decode_standalone(&packed, data.len() as u64, 0, Some(128 * 1024), true).unwrap();
         assert_eq!(back, data);
+    }
+
+    /// Deterministic pseudo-random bytes (LCG) — incompressible.
+    fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    /// Long-range matches (WinRAR `-mcl` semantics): a repeated block far
+    /// beyond the near window (tail + chunk) must still compress, and the
+    /// stream must round-trip byte-identically.
+    #[test]
+    fn long_range_matches_compress_distant_repeats() {
+        use crate::codec::decode_standalone;
+        // 2 MiB random + 2 MiB exact copy: distance 2 MiB, far beyond the
+        // 128 KiB near window of a 64 KiB chunk encoder.
+        let half = 2 * 1024 * 1024usize;
+        let mut data = pseudo_random(half, 42);
+        data.extend_from_slice(&data[..half].to_vec());
+        let packed = encode_chunked(&data, 3, 8, 64 * 1024, None, true, None, false).unwrap();
+        // The copy half must compress to a small fraction; the random half
+        // stores at ~1:1. Well below 1.5 MiB total proves the 2 MiB
+        // repeat was matched.
+        assert!(
+            packed.len() < half + half / 4,
+            "distant repeat must compress: {} vs {}",
+            packed.len(),
+            data.len()
+        );
+        // Byte-identical round-trip (dictionary 32 MiB covers the 2 MiB
+        // distance; unpacked size over the RAR5 4 GiB cap is irrelevant).
+        let back =
+            decode_standalone(&packed, data.len() as u64, 8, None, false).unwrap();
+        assert_eq!(back, data);
+    }
+
+    /// Long-range matches respect the dictionary window: repeats beyond
+    /// the declared dictionary must NOT be encoded as matches (the decoder
+    /// window could not reach them). With a 128 KiB dictionary the 2 MiB
+    /// copy is incompressible, so the encoder must store it.
+    #[test]
+    fn long_range_respects_dictionary_window() {
+        // Same distant repeat as above, but with dict_size_log = 0
+        // (128 KiB): the 2 MiB distance exceeds the window.
+        let half = 2 * 1024 * 1024usize;
+        let mut data = pseudo_random(half, 7);
+        data.extend_from_slice(&data[..half].to_vec());
+        let packed = encode_chunked(&data, 3, 0, 64 * 1024, None, true, None, false).unwrap();
+        // Random half ~1:1 + copy half ~1:1 → near 4 MiB. Bail-out may
+        // truncate; either way it must not shrink below ~half.
+        assert!(
+            packed.len() > half,
+            "beyond-window repeats must not match: {} vs {}",
+            packed.len(),
+            data.len()
+        );
+    }
+
+    /// The long-range history slides: after more than LONG_RANGE_MAX
+    /// bytes, the oldest bytes drop out and the table is rebuilt; the
+    /// newest candidates keep matching.
+    #[test]
+    fn long_range_slides_window_and_finds() {        use super::lz_match::{LONG_RANGE_MAX, LongRange};
+        let mut lr = LongRange::new(128 * 1024 * 1024);
+        let chunk = pseudo_random(64 * 1024, 11);
+        // Push enough identical 64 KiB chunks to slide the 64 MiB window
+        // several times over.
+        for _ in 0..(LONG_RANGE_MAX / chunk.len() + 8) {
+            lr.push(&chunk);
+        }
+        assert!(lr.hist_len() <= LONG_RANGE_MAX);
+        // The chunk still matches against the (rebuilt) history; max_len
+        // caps the match at 4096 bytes. (All blocks are identical, so the
+        // table keeps only the most recent candidate — near the window
+        // end; min_dist 1 accepts it.)
+        let (dist, len) = lr.find(&chunk, 0, 1, 4096).expect("must find");
+        assert_eq!(len, 4096, "full match must be found after sliding");
+        assert!(dist as usize > 0 && dist as usize <= LONG_RANGE_MAX);
+    }
+
+    /// Debug reproduction: a distant copy of a random block must be found
+    /// through the long-range table (the pair.bin scenario).
+    #[test]
+    fn long_range_debug_distant_copy() {
+        use super::lz_match::LongRange;
+        let half = 2 * 1024 * 1024usize;
+        let first = pseudo_random(half, 42);
+        let mut lr = LongRange::new(32 * 1024 * 1024);
+        for c in first.chunks(64 * 1024) {
+            lr.push(c);
+        }
+        let r = lr.find(&first, 0, 128 * 1024, 4096);
+        assert!(
+            matches!(r, Some((_, l)) if l > 1000),
+            "distant copy must be found, got {r:?}"
+        );
+    }
+
+    /// Simulates the streaming write path: one `encode_chunked` call per
+    /// 4 MiB buffer with a shared encoder state. A 64 MiB distant copy
+    /// must compress (WinRAR `-mcl` semantics for large files).
+    #[test]
+    fn long_range_streaming_simulation() {
+        let half = 4 * 1024 * 1024usize;
+        let first = pseudo_random(half, 42);
+        let mut data = first.clone();
+        data.extend_from_slice(&first);
+        let mut state = EncoderState::default();
+        let mut packed = Vec::new();
+        for chunk in data.chunks(DEFAULT_CHUNK_SIZE) {
+            let is_final = chunk.len() < DEFAULT_CHUNK_SIZE;
+            packed.extend(
+                encode_chunked(
+                    chunk,
+                    3,
+                    8,
+                    DEFAULT_CHUNK_SIZE,
+                    Some(&mut state),
+                    is_final,
+                    None,
+                    false,
+                )
+                .unwrap(),
+            );
+        }
+        assert!(
+            packed.len() < half + half / 4,
+            "streaming long-range must compress the distant copy: {}",
+            packed.len()
+        );
     }
 }

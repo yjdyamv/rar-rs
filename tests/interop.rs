@@ -4281,6 +4281,65 @@ fn cli_dict_size_switch_matches_winrar() {
     }
 }
 
+// ── Long-range matching (WinRAR -mcl semantics) ────────────────────────────
+
+/// A 32 MiB file whose second half is an exact copy of its (random)
+/// first half: the 16 MiB match distance is far beyond the near match
+/// window, so only the long-range search can compress it. WinRAR applies
+/// this automatically for -m2..-m5; we must too.
+#[test]
+fn long_range_compresses_distant_copies() {
+    let dir = make_temp_dir();
+    let file = dir.path().join("pair32.bin");
+    let half = 16 * 1024 * 1024usize;
+    let mut data = pseudo_random_bytes(half, 42);
+    data.extend_from_slice(&data.clone());
+    std::fs::write(&file, &data).unwrap();
+
+    let archive = dir.path().join("pair.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-md32m", "-idq"])
+        .arg(&archive)
+        .arg("pair32.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    // The 16 MiB copy must compress to a small fraction: well below
+    // 1.25x the random half (16 MiB + small overhead + tiny copy).
+    let packed = std::fs::metadata(&archive).unwrap().len();
+    assert!(
+        packed < 20 * 1024 * 1024,
+        "distant copy must compress: {packed} bytes"
+    );
+    // And it must round-trip byte-identically through our extractor.
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    rar.extract_all_with_options(
+        &out_dir,
+        rar5::ExtractOptions {
+            max_unpacked_bytes: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(out_dir.join("pair32.bin")).unwrap(), data);
+}
+
+/// Deterministic pseudo-random bytes (LCG) — incompressible.
+fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed;
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u8
+        })
+        .collect()
+}
+
 // ── -ts file time save/restore (WinRAR 7.23 aligned) ───────────────────────
 
 fn created_time(path: &Path) -> Option<std::time::SystemTime> {
