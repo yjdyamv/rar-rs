@@ -963,7 +963,7 @@ impl RarArchive {
                                 .unwrap_or_default()
                                 .as_secs() as u32;
                             Self::prepare_data_entry(
-                                &ctx, name, data, level, 0o100644, mtime, None, false,
+                                &ctx, name, data, level, 0o100644, mtime, None, None, false,
                             )
                         }
                         BatchEntry::File { path, name, level } => {
@@ -999,6 +999,7 @@ impl RarArchive {
         attrs: u64,
         mtime: u32,
         time_extra: Option<Vec<u8>>,
+        owner_extra: Option<Vec<u8>>,
         file_origin: bool,
     ) -> RarResult<PreparedEntry> {
         let plain_crc = crc32fast::hash(data);
@@ -1017,6 +1018,7 @@ impl RarArchive {
                 attrs,
                 mtime,
                 time_extra,
+                owner_extra,
                 plain_crc,
                 plain_blake,
                 COMP_METHOD_STORE,
@@ -1082,6 +1084,7 @@ impl RarArchive {
                 attrs,
                 mtime,
                 time_extra,
+                owner_extra,
                 plain_crc,
                 plain_blake,
                 COMP_METHOD_STORE,
@@ -1097,6 +1100,7 @@ impl RarArchive {
             attrs,
             mtime,
             time_extra,
+            owner_extra,
             plain_crc,
             plain_blake,
             method,
@@ -1169,7 +1173,17 @@ impl RarArchive {
                 ),
             )));
         }
-        Self::prepare_data_entry(ctx, &name, &data, level, attrs, mtime, time_extra, true)
+        Self::prepare_data_entry(
+            ctx,
+            &name,
+            &data,
+            level,
+            attrs,
+            mtime,
+            time_extra,
+            owner_extra,
+            true,
+        )
     }
 
     /// Turn a plaintext payload (raw data or compressed stream) into a
@@ -1184,6 +1198,7 @@ impl RarArchive {
         attrs: u64,
         mtime: u32,
         time_extra: Option<Vec<u8>>,
+        owner_extra: Option<Vec<u8>>,
         plain_crc: u32,
         plain_blake: Option<[u8; 32]>,
         method: u8,
@@ -1194,6 +1209,9 @@ impl RarArchive {
         let (header_crc, mut extra_data, stored_hash, encr) =
             RarArchive::payload_extra_and_crc(ctx.password, plain_crc, plain_blake)?;
         if let Some(t) = time_extra {
+            extra_data.extend_from_slice(&t);
+        }
+        if let Some(t) = owner_extra {
             extra_data.extend_from_slice(&t);
         }
         let payload = RarArchive::encrypt_payload_with(ctx.password, encr.as_ref(), &payload)?;

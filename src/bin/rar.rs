@@ -1828,10 +1828,8 @@ fn find_sfx_module() -> Option<String> {
     ];
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::System::Registry::{
-            HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyW,
-            RegQueryValueExW, REG_SZ,
+            HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegCloseKey, RegOpenKeyW, RegQueryValueExW,
         };
         let mut reg_paths: Vec<String> = Vec::new();
         for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
