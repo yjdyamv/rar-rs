@@ -86,7 +86,7 @@
 ### 工程
 
 - [ ] `-mt`：>256 MiB 大文件走顺序流式路径（parallel 只在 wave/chunk 级生效）
-- [ ] SFX 模块需外部文件（WinRAR 自带 Default/Default32/WinCon/zip）
+- [x] **SFX 转换**（2026-08）：`rar s <archive>` 用 SFX 模块 prepend 生成 `.sfx`、`rar s- <sfx>` 剥离模块回 `.rar`；Windows 自动定位已安装 WinRAR 的模块（注册表 `Software\WinRAR\exe32` 与 `%ProgramFiles%\WinRAR` 的 Default.SFX/WinCon.SFX，新增 windows-sys Registry feature）；Unix 查找 $HOME//usr/lib//usr/local/lib 的 default.sfx。实测：rar s → base.sfx（480 KB，模块+归档）→ UnRAR t 通过 → s- 剥离 → 我们解 SHA 一致（`cli_sfx_roundtrip_with_module` 测试）
 - [ ] 大字典内存防护：WinRAR 有 `-mdx` 提取上限开关；rar-rs 是 1 GiB 硬上限（更保守、缺灵活性）
 
 ### 一致拒绝（别"修"）

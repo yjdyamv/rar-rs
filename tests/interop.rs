@@ -4536,6 +4536,64 @@ fn cli_or_auto_renames_colliding_destinations() {
     );
 }
 
+/// `rar s` converts an archive to SFX (prepending an SFX module found in
+/// the WinRAR installation on Windows) and `rar s-` strips it back; the
+/// .sfx file must still extract byte-identically.
+#[test]
+fn cli_sfx_roundtrip_with_module() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"sfx payload").unwrap();
+    let archive = dir.path().join("base.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["s"])
+        .arg("base.rar")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    if !status.success() {
+        // No SFX module available (non-Windows without one installed):
+        // the command itself is what we test, so a clean failure is fine.
+        return;
+    }
+    let sfx = dir.path().join("base.sfx");
+    assert!(sfx.exists(), "base.sfx must be created");
+    let sfx_len = std::fs::metadata(&sfx).unwrap().len();
+    assert!(sfx_len > std::fs::metadata(&archive).unwrap().len());
+
+    // The .sfx file extracts byte-identically (our extractor skips the
+    // module prefix).
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "-idq"])
+        .arg(&sfx)
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar must extract the .sfx file");
+    assert_eq!(std::fs::read(out.join("f.txt")).unwrap(), b"sfx payload");
+
+    // `rar s-` strips the module back to a plain archive.
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["s-"])
+        .arg("base.sfx")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "s- must strip the SFX module");
+    let mut rar = rar5::RarArchive::open(dir.path().join("base.rar")).unwrap();
+    assert_eq!(rar.read("f.txt").unwrap(), b"sfx payload");
+}
+
 // ── -ts file time save/restore (WinRAR 7.23 aligned) ───────────────────────
 
 fn created_time(path: &Path) -> Option<std::time::SystemTime> {

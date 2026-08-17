@@ -1817,15 +1817,68 @@ fn cmd_sfx(args: &SfxArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Locate a `default.sfx` module: `$HOME`, `/usr/lib`, `/usr/local/lib`.
+/// Locate a `default.sfx` module: `$HOME`, `/usr/lib`, `/usr/local/lib`,
+/// or the installed WinRAR directory (Windows: `%ProgramFiles%\WinRAR`,
+/// `%ProgramFiles(x86)%\WinRAR`, or the registry-installed path).
 fn find_sfx_module() -> Option<String> {
-    let candidates = [
-        std::env::var("HOME")
-            .ok()
-            .map(|h| format!("{h}/default.sfx")),
+    let mut candidates: Vec<Option<String>> = vec![
+        std::env::var("HOME").ok().map(|h| format!("{h}/default.sfx")),
         Some("/usr/lib/default.sfx".to_string()),
         Some("/usr/local/lib/default.sfx".to_string()),
     ];
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::Registry::{
+            HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyW,
+            RegQueryValueExW, REG_SZ,
+        };
+        let mut reg_paths: Vec<String> = Vec::new();
+        for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+            let mut hkey = std::ptr::null_mut();
+            let key: Vec<u16> = "Software\\WinRAR"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let status = unsafe { RegOpenKeyW(root, key.as_ptr(), &mut hkey) };
+            if status == 0 {
+                let mut buf = [0u16; 1024];
+                let mut size = (buf.len() * 2) as u32;
+                let value: Vec<u16> = "exe32"
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let status = unsafe {
+                    RegQueryValueExW(
+                        hkey,
+                        value.as_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        buf.as_mut_ptr() as *mut u8,
+                        &mut size,
+                    )
+                };
+                if status == 0 {
+                    let len = (size / 2) as usize;
+                    let dir = String::from_utf16_lossy(&buf[..len.min(buf.len())]);
+                    reg_paths.push(format!("{dir}\\Default.SFX"));
+                    reg_paths.push(format!("{dir}\\WinCon.SFX"));
+                }
+                unsafe { RegCloseKey(hkey) };
+            }
+        }
+        for pf in [
+            std::env::var("ProgramFiles").ok(),
+            std::env::var("ProgramFiles(x86)").ok(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            reg_paths.push(format!("{pf}\\WinRAR\\Default.SFX"));
+            reg_paths.push(format!("{pf}\\WinRAR\\WinCon.SFX"));
+        }
+        candidates.extend(reg_paths.into_iter().map(Some));
+    }
     candidates
         .into_iter()
         .flatten()
