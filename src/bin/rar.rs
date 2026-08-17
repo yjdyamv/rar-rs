@@ -850,7 +850,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     // same-named members are replaced (deleted) first, so the append
     // handle is only opened after that rewrite; a new archive is created
     // immediately.
-    let mut rar: Option<rar5::RarArchive> = if existing {
+    let rar: Option<rar5::RarArchive> = if existing {
         None
     } else {
         Some(

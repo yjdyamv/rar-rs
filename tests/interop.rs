@@ -3715,7 +3715,7 @@ fn cli_mask_list_file_excludes_loaded_masks() {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut rar = RarArchive::open(&archive).unwrap();
+    let rar = RarArchive::open(&archive).unwrap();
     let names = rar.namelist();
     assert!(names.contains(&"src/keep.txt"), "{names:?}");
     assert!(!names.contains(&"src/drop.tmp"), "mask list must exclude *.tmp: {names:?}");
@@ -4448,7 +4448,7 @@ fn cli_sync_archive_as_drops_stale_members() {
     };
     assert!(run(&["a.txt", "keep.txt"]));
     assert!(run(&["a.txt"])); // keep.txt is stale now
-    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    let rar = rar5::RarArchive::open(&archive).unwrap();
     assert_eq!(rar.namelist(), ["a.txt"]);
 }
 

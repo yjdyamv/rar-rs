@@ -388,7 +388,7 @@ fn solid_multivolume_interops_with_winrar() {
     }
     let volumes = rar5::discover_volumes(&ours);
     assert!(volumes.len() >= 3, "expected several volumes, got {}", volumes.len());
-    if let Some(unrar) = unrar_bin() {
+    if let Some(_unrar) = unrar_bin() {
         let (ok, out) = unrar_test(&volumes[0], None);
         assert!(ok, "WinRAR rejected our solid volume set:\n{out}");
         let win = dir.path().join("win_ours_sv");
@@ -682,7 +682,7 @@ fn dictionary_size_md_interops_with_winrar() {
     let ar = RarArchive::open(&ours).unwrap();
     let entry = ar.get_entry("rep32t.bin").unwrap();
     assert_eq!(entry.header.comp_dict_size, 9);
-    if let Some(unrar) = unrar_bin() {
+    if let Some(_unrar) = unrar_bin() {
         let (ok, out) = unrar_test(&ours, None);
         assert!(ok, "WinRAR rejected our -md64m archive:\n{out}");
         let win = dir.path().join("win_ours");
@@ -914,7 +914,7 @@ fn rar7_v70_archives_decode_with_mdx() {
     // Confirm the member really is v70 with a >4 GiB dictionary (WinRAR
     // encodes the exact size, possibly non-power-of-two).
     {
-        let mut ar = RarArchive::open(&arc).unwrap();
+        let ar = RarArchive::open(&arc).unwrap();
         let name = ar.namelist()[0].to_string();
         let e = ar.get_entry(&name).unwrap();
         assert_eq!(e.header.comp_version, 1, "expected RAR7 (v70) member");
@@ -985,7 +985,7 @@ fn we_create_v70_archives_decode_everywhere() {
 
     // Confirm the member is v70 with a >4 GiB dictionary.
     {
-        let mut ar = RarArchive::open(&arc).unwrap();
+        let ar = RarArchive::open(&arc).unwrap();
         let name = ar.namelist()[0].to_string();
         let e = ar.get_entry(&name).unwrap();
         assert_eq!(e.header.comp_version, 1, "expected RAR7 (v70) member");
