@@ -2583,6 +2583,25 @@ impl RarArchive {
             return Ok(dest_path);
         }
 
+        // `-or` (auto rename): when the destination exists, insert `(N)`
+        // before the extension (like WinRAR: a.txt -> a(1).txt).
+        let mut dest_path = dest_path;
+        if self.extract_options.auto_rename && !entry.is_dir() {
+            let mut n = 1;
+            while dest_path.exists() {
+                let file_name = dest_path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let (stem, ext) = match file_name.rfind('.') {
+                    Some(dot) if dot > 0 => (&file_name[..dot], &file_name[dot..]),
+                    _ => (file_name.as_str(), ""),
+                };
+                dest_path = dest_path.with_file_name(format!("{stem}({n}){ext}"));
+                n += 1;
+            }
+        }
+
         if entry.is_dir() {
             fs::create_dir_all(&dest_path)?;
             return Ok(dest_path);
@@ -2615,7 +2634,12 @@ impl RarArchive {
                 replace_file(&tmp_path, &dest_path)?;
             }
             Err(e) => {
-                let _ = fs::remove_file(&tmp_path);
+                if self.extract_options.keep_broken {
+                    // `-kb`: keep the partially extracted file.
+                    let _ = replace_file(&tmp_path, &dest_path);
+                } else {
+                    let _ = fs::remove_file(&tmp_path);
+                }
                 return Err(e);
             }
         }

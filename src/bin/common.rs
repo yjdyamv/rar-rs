@@ -309,6 +309,54 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-mt") {
         return format!("--threads={rest}");
     }
+    if let Some(rest) = arg.strip_prefix("-ms") {
+        return format!("--store-types={rest}");
+    }
+    if arg == "-df" {
+        return "--delete-after".into();
+    }
+    if arg == "-t" {
+        return "--test-after".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-ep4") {
+        return format!("--exclude-prefix={rest}");
+    }
+    if arg == "-as" {
+        return "--sync-archive".into();
+    }
+    if arg == "-ds" {
+        return "--no-sort".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-s=") {
+        return format!("--solid-params={rest}");
+    }
+    if arg == "-htc" {
+        return "--hash-crc".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-mc") {
+        return format!("--mc={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-me") {
+        return format!("--me={rest}");
+    }
+    if arg == "-ao" {
+        return "--archive-attr".into();
+    }
+    if arg == "-oc" {
+        return "--ntfs-compressed".into();
+    }
+    if arg == "-mlp" {
+        return "--large-pages".into();
+    }
+    if arg == "-dh" {
+        return "--shared-files".into();
+    }
+    if arg == "-dr" {
+        return "--recycle-bin".into();
+    }
+    if arg == "-dw" {
+        return "--wipe".into();
+    }
     if let Some(rest) = arg.strip_prefix("-mdx") {
         return format!("--dict-extract={rest}");
     }
@@ -490,6 +538,15 @@ pub fn normalize_switch(arg: &str) -> String {
     }
     if arg == "-o-" {
         return "--overwrite=never".into();
+    }
+    if arg == "-or" {
+        return "--auto-rename".into();
+    }
+    if arg == "-kb" {
+        return "--keep-broken".into();
+    }
+    if let Some(rest) = arg.strip_prefix("-op") {
+        return format!("--output-path={rest}");
     }
     if let Some(rest) = arg.strip_prefix("-ta") {
         return format!("--after={rest}");

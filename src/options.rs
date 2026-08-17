@@ -117,6 +117,12 @@ pub struct ExtractOptions {
     /// Skip members whose destination already exists (like `-o-`): no
     /// overwrites, and existing files are left untouched.
     pub skip_existing: bool,
+    /// Rename the destination automatically when it already exists
+    /// (like `-or`): `name.ext` becomes `name(1).ext`, `name(2).ext`, ...
+    pub auto_rename: bool,
+    /// Keep partially extracted files when a member fails to decode
+    /// (like `-kb`): the incomplete output is left on disk.
+    pub keep_broken: bool,
     /// Also restore the creation time (Windows) from the FILE_TIME extra
     /// record (like WinRAR's `-tsc` on extraction). Ignored on Unix,
     /// where the change time cannot be set.
@@ -139,6 +145,8 @@ impl Default for ExtractOptions {
             max_total_unpacked_bytes: Some(32 * 1024 * 1024 * 1024),
             flat_paths: false,
             skip_existing: false,
+            auto_rename: false,
+            keep_broken: false,
             set_creation_time: false,
             set_access_time: false,
             max_dict_size: Some(4 * 1024 * 1024 * 1024),

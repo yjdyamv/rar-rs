@@ -90,6 +90,20 @@ struct ExtractArgs {
     archive: String,
     #[arg(value_name = "DEST")]
     dest: Option<String>,
+    /// Output path for extracted files (like `-op<path>`; overrides
+    /// the DEST argument when both are given)
+    #[arg(long = "output-path", value_name = "PATH")]
+    output_path: Option<String>,
+    /// Extract without stored paths (like `-ep`; same as the `e` command)
+    #[arg(long)]
+    flat: bool,
+    /// Rename existing destination files automatically (like `-or`):
+    /// `name.ext` becomes `name(1).ext`
+    #[arg(long = "auto-rename")]
+    auto_rename: bool,
+    /// Keep broken extracted files (like `-kb`)
+    #[arg(long = "keep-broken")]
+    keep_broken: bool,
     /// Extraction threads (like `rar -mt<N>`)
     #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
     threads: Option<usize>,
@@ -146,7 +160,16 @@ fn main() {
     let cli_args: Vec<String> = raw
         .iter()
         .skip(1)
-        .map(|a| common::normalize_switch(a))
+        .map(|a| {
+            // `-ep` means "exclude paths" here (like the `e` command);
+            // the shared normalize maps it to the rar-side `-ep`
+            // (basename-only add), which does not exist in unrar.
+            if a == "-ep" {
+                "--flat".to_string()
+            } else {
+                common::normalize_switch(a)
+            }
+        })
         .collect();
     let args = common::merge_default_switches(defaults, cli_args);
     // `unrar -iver` prints the version and exits (no subcommand needed).
@@ -293,8 +316,12 @@ fn cmd_extract(
     if let Some(threads) = args.threads {
         rar5::set_extraction_threads(threads);
     }
-    let base = args.dest.as_deref().unwrap_or(".");
-    let dest = common::extract_dest(base, &args.archive, args.append_dir);
+    let base = args
+        .output_path
+        .clone()
+        .or_else(|| args.dest.clone())
+        .unwrap_or_else(|| ".".to_string());
+    let dest = common::extract_dest(&base, &args.archive, args.append_dir);
     let mut rar = open_archive(&args.archive, password)?;
 
     let count = rar.list().len();
@@ -305,7 +332,10 @@ fn cmd_extract(
             // size caps (WinRAR's UnRAR extracts any size).
             max_unpacked_bytes: None,
             max_total_unpacked_bytes: None,
+            flat_paths: args.flat,
             skip_existing: args.overwrite.as_deref() == Some("never"),
+            auto_rename: args.auto_rename,
+            keep_broken: args.keep_broken,
             set_creation_time: ts.save_ctime,
             set_access_time: ts.save_atime,
             // WinRAR refuses dictionaries above 4 GiB unless -mdx raises
@@ -325,8 +355,12 @@ fn cmd_extract_flat(
     ts: common::TsSettings,
     max_dict_size: Option<u64>,
 ) -> Result<(), String> {
-    let base = args.dest.as_deref().unwrap_or(".");
-    let dest = common::extract_dest(base, &args.archive, args.append_dir);
+    let base = args
+        .output_path
+        .clone()
+        .or_else(|| args.dest.clone())
+        .unwrap_or_else(|| ".".to_string());
+    let dest = common::extract_dest(&base, &args.archive, args.append_dir);
     let mut rar = open_archive(&args.archive, password)?;
     rar.extract_all_with_options(
         &dest,
@@ -335,6 +369,8 @@ fn cmd_extract_flat(
             max_unpacked_bytes: None,
             max_total_unpacked_bytes: None,
             skip_existing: args.overwrite.as_deref() == Some("never"),
+            auto_rename: args.auto_rename,
+            keep_broken: args.keep_broken,
             set_creation_time: ts.save_ctime,
             set_access_time: ts.save_atime,
             max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),

@@ -15,10 +15,12 @@ pub enum CaseKind {
 }
 
 /// Name and filter policy for the `a` command (`-ep`, `-ep1`, `-ap`,
-/// `-x`, `-n`, `-cl`, `-cu`, `-r-`).
+/// `-ep4`, `-x`, `-n`, `-cl`, `-cu`, `-r-`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NamePolicy {
     pub path_prefix: Option<String>,
+    /// Exclude this path prefix from stored names (`-ep4<path>`).
+    pub exclude_prefix: Option<String>,
     /// Store basename-only names, no directory entries (`-ep`).
     pub basename_only: bool,
     /// Exclude the base directory from names (`-ep1`, wildcard paths).
@@ -62,7 +64,7 @@ impl NamePolicy {
     }
 
     /// The stored archive name for a member with the relative name `rel`,
-    /// applying `-ep`, `-ep1` and `-ap` in that order.
+    /// applying `-ep`, `-ep1`, `-ep4` and `-ap` in that order.
     fn stored_name(&self, rel: &str) -> String {
         let mut name = rel.to_string();
         if self.strip_base
@@ -73,6 +75,15 @@ impl NamePolicy {
         }
         if self.basename_only {
             name = name.rsplit('/').next().unwrap_or(&name).to_string();
+        }
+        if let Some(prefix) = &self.exclude_prefix {
+            let prefix = prefix.trim_end_matches('/');
+            let with_slash = format!("{prefix}/");
+            if name.starts_with(&with_slash) {
+                name = name[with_slash.len()..].to_string();
+            } else if name == prefix {
+                name.clear();
+            }
         }
         if let Some(kind) = self.case {
             name = match kind {
@@ -199,6 +210,7 @@ fn add_with_policy(
     // applies it to wildcard paths only).
     let plain = NamePolicy {
         path_prefix: policy.path_prefix.clone(),
+        exclude_prefix: policy.exclude_prefix.clone(),
         basename_only: policy.basename_only,
         strip_base: false,
         full_paths: policy.full_paths,

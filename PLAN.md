@@ -81,6 +81,7 @@
 - [x] 交互/消息（2026-08）：`-ieml/-ioff/-isnd`（接受忽略，绝不执行系统动作）、`-iver`（实现）、`-cfg-`（实现：禁用配置文件与 RARINISWITCHES）
 - [x] 配置体系（2026-08）：rar.ini（Windows exe 同目录）/ `.rarrc`（Unix HOME）/ `RARINISWITCHES` 环境变量；`switches=` 与 `switches_<cmd>=`；优先级 命令行 > RARINISWITCHES > 配置文件（单值开关去重，命令行覆盖）
 - [x] rarfiles.lst（2026-08）：solid 文件顺序列表（掩码 + `$default`，`;` 注释；Windows exe 目录/%APPDATA%\WinRAR，Unix HOME//etc）；子集规则（f*.cpp ⊂ *.cpp → f*.cpp 优先，与 WinRAR 一致）；目录条目统一后置（WinRAR 行为）；实测与 Rar.exe 7.23 成员顺序一致
+- [x] 开关补齐批次（2026-08，WinRAR 7.23 对照）：**真功能**：`-ms[list]`（指定扩展名/掩码文件 STORE 不压缩，实测 b.bin → -m0 与 WinRAR 字段级一致）、`-df`（压缩后删除源文件）、`-t`（创建后测试归档）、`-ep4<path>`（排除路径前缀，实测 `sub\dir\f.txt` + `-ep4sub` → `dir\f.txt` 与 WinRAR 一致）、`-as`（同步归档：删除文件列表外的成员，实测与 WinRAR 一致）、`-or`（提取冲突自动重命名 `a.txt` → `a(1).txt`，与 WinRAR 命名一致）、`-kb`（保留损坏提取文件）、`-op<path>`（提取输出路径）、unrar `-ep`（排除路径 = flat 提取）；**`rar a` 更新语义对齐**：同名成员替换（WinRAR `rar a` 行为，删旧加新；全部成员被替换时归档被擦除则重建）；**接受类**：`-ds`（solid 禁 rarfiles.lst 排序）、`-s=<par>`、`-htc`、`-mc<par>`、`-me[par]`、`-ao`、`-oc`、`-mlp`、`-dh`、`-dr`、`-dw`。限制：同名替换后成员移到归档末尾（WinRAR 保持原位置，solid 顺序略差）
 
 ### 工程
 

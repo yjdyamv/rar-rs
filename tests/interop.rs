@@ -4340,6 +4340,202 @@ fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
         .collect()
 }
 
+// ── -ms / -df / -t / -ep4 / -as / -or and `rar a` replace (WinRAR 7.23) ──
+
+/// `-ms<list>` stores matching files without compression (WinRAR: level 0
+/// for the listed extensions/masks, everything else compresses).
+#[test]
+fn cli_store_types_ms_stores_matching_files() {
+    let dir = make_temp_dir();
+    let txt = dir.path().join("a.txt");
+    let bin = dir.path().join("b.bin");
+    std::fs::write(&txt, b"aaaa".repeat(200)).unwrap();
+    std::fs::write(&bin, pseudo_random_bytes(8 * 1024, 3)).unwrap();
+
+    let archive = dir.path().join("ms.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-msbin", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .arg("b.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    let b = rar.get_entry("b.bin").unwrap();
+    assert_eq!(b.header.comp_method, 0, "-msbin must store b.bin");
+    let a = rar.get_entry("a.txt").unwrap();
+    assert_eq!(a.header.comp_method, 3, "a.txt must still compress");
+    assert_eq!(rar.read("b.bin").unwrap(), std::fs::read(&bin).unwrap());
+    assert_eq!(rar.read("a.txt").unwrap(), std::fs::read(&txt).unwrap());
+}
+
+/// `-df` deletes the source files after archiving (the archive keeps them).
+#[test]
+fn cli_delete_after_df_removes_sources() {
+    let dir = make_temp_dir();
+    let file = dir.path().join("gone.txt");
+    std::fs::write(&file, b"will be deleted").unwrap();
+    let archive = dir.path().join("df.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-df", "-idq"])
+        .arg(&archive)
+        .arg("gone.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(!file.exists(), "-df must delete the source");
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    assert_eq!(rar.read("gone.txt").unwrap(), b"will be deleted");
+}
+
+/// `-t` tests the archive right after creating it.
+#[test]
+fn cli_test_after_t_validates_new_archive() {
+    let dir = make_temp_dir();
+    let file = dir.path().join("t.txt");
+    std::fs::write(&file, b"test after payload").unwrap();
+    let archive = dir.path().join("t.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-t", "-idq"])
+        .arg(&archive)
+        .arg("t.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "-t must succeed on a healthy archive");
+}
+
+/// `-ep4<path>` excludes the path prefix from stored names.
+#[test]
+fn cli_exclude_prefix_ep4_strips_prefix() {
+    let dir = make_temp_dir();
+    std::fs::create_dir_all(dir.path().join("sub/dir")).unwrap();
+    std::fs::write(dir.path().join("sub/dir/f.txt"), b"data").unwrap();
+    let archive = dir.path().join("ep4.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ep4sub", "-idq"])
+        .arg(&archive)
+        .arg("sub/dir/f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    assert_eq!(rar.namelist(), ["dir/f.txt"]);
+    assert_eq!(rar.read("dir/f.txt").unwrap(), b"data");
+}
+
+/// `-as` synchronizes an existing archive: members not in the file list
+/// are dropped.
+#[test]
+fn cli_sync_archive_as_drops_stale_members() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("keep.txt"), b"keep").unwrap();
+    let archive = dir.path().join("as.rar");
+    let run = |files: &[&str]| {
+        std::process::Command::new(RAR_CLI)
+            .args(["a", "-as", "-idq"])
+            .arg(&archive)
+            .args(files)
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(run(&["a.txt", "keep.txt"]));
+    assert!(run(&["a.txt"])); // keep.txt is stale now
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    assert_eq!(rar.namelist(), ["a.txt"]);
+}
+
+/// `rar a` on an existing archive replaces same-named members (WinRAR
+/// update semantics) and preserves the others.
+#[test]
+fn cli_a_replaces_same_named_members() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"old version").unwrap();
+    std::fs::write(dir.path().join("keep.txt"), b"keep").unwrap();
+    let archive = dir.path().join("upd.rar");
+    let run = |files: &[&str]| {
+        std::process::Command::new(RAR_CLI)
+            .args(["a", "-idq"])
+            .arg(&archive)
+            .args(files)
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(run(&["a.txt", "keep.txt"]));
+    std::fs::write(dir.path().join("a.txt"), b"new version").unwrap();
+    assert!(run(&["a.txt"]));
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    // Note: the replaced member moves to the end (delete + re-add);
+    // WinRAR keeps the original position. Member sets must match.
+    let mut names = rar.namelist();
+    names.sort();
+    assert_eq!(names, ["a.txt", "keep.txt"]);
+    assert_eq!(rar.read("a.txt").unwrap(), b"new version");
+}
+
+/// The accepted-for-parity switches (`-ds`, `-s=g`, `-htc`, `-mcx`, `-me`,
+/// `-oc`, `-mlp`, `-dh`) must be accepted without changing the outcome.
+#[test]
+fn cli_accepts_parity_switches() {
+    let dir = make_temp_dir();
+    let file = dir.path().join("p.txt");
+    std::fs::write(&file, b"parity switch payload").unwrap();
+    let archive = dir.path().join("par.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args([
+            "a", "-ds", "-s=g", "-htc", "-mcx", "-me", "-oc", "-mlp", "-dh", "-idq",
+        ])
+        .arg(&archive)
+        .arg("p.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    assert_eq!(rar.read("p.txt").unwrap(), b"parity switch payload");
+}
+
+/// `unrar x -or` renames colliding destinations like WinRAR: `a.txt`
+/// becomes `a(1).txt`.
+#[test]
+fn cli_or_auto_renames_colliding_destinations() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"archive content").unwrap();
+    let archive = dir.path().join("or.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("a.txt"), b"old file").unwrap();
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "-or", "-idq"])
+        .arg(&archive)
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"old file");
+    assert_eq!(
+        std::fs::read(out.join("a(1).txt")).unwrap(),
+        b"archive content"
+    );
+}
+
 // ── -ts file time save/restore (WinRAR 7.23 aligned) ───────────────────────
 
 fn created_time(path: &Path) -> Option<std::time::SystemTime> {

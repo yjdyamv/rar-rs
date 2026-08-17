@@ -392,6 +392,70 @@ struct CreateArgs {
     /// never displayed by this tool)
     #[arg(long = "no-comment", global = true)]
     no_comment: bool,
+    /// Store files matching these types without compression (like
+    /// `-ms[list]`; semicolon-separated extensions or wildcard masks,
+    /// repeatable)
+    #[arg(long = "store-types", value_name = "LIST", action = clap::ArgAction::Append)]
+    store_types: Vec<String>,
+    /// Delete source files after archiving (like `-df`)
+    #[arg(long = "delete-after")]
+    delete_after: bool,
+    /// Test the archive after creating it (like `-t`)
+    #[arg(long = "test-after")]
+    test_after: bool,
+    /// Exclude this path prefix from stored names (like `-ep4<path>`)
+    #[arg(long = "exclude-prefix", value_name = "PATH")]
+    exclude_prefix: Option<String>,
+    /// Synchronize archive contents: delete members not present in the
+    /// file list (like `-as`)
+    #[arg(long = "sync-archive")]
+    sync_archive: bool,
+    /// Disable name sorting for solid archives (like `-ds`)
+    #[arg(long = "no-sort")]
+    no_sort: bool,
+    /// Solid archive parameters (like `-s<par>`; accepted, `-s` alone
+    /// already enables solid mode)
+    #[arg(long = "solid-params", value_name = "PAR")]
+    #[allow(dead_code)]
+    solid_params: Option<String>,
+    /// CRC32 file checksums (like `-htc`; the default)
+    #[arg(long = "hash-crc")]
+    #[allow(dead_code)]
+    hash_crc: bool,
+    /// Advanced compression parameters (like `-mc<par>`; accepted)
+    #[arg(long = "mc", value_name = "PAR")]
+    #[allow(dead_code)]
+    mc_params: Option<String>,
+    /// Encryption parameters (like `-me<par>`; accepted)
+    #[arg(long = "me", value_name = "PAR")]
+    #[allow(dead_code)]
+    me_params: Option<String>,
+    /// Only add files with the Archive attribute set (like `-ao`;
+    /// Windows-only, accepted)
+    #[arg(long = "archive-attr")]
+    #[allow(dead_code)]
+    archive_attr: bool,
+    /// Set the NTFS Compressed attribute on extracted files (like `-oc`;
+    /// accepted)
+    #[arg(long = "ntfs-compressed")]
+    #[allow(dead_code)]
+    ntfs_compressed: bool,
+    /// Use large memory pages (like `-mlp`; accepted)
+    #[arg(long = "large-pages")]
+    #[allow(dead_code)]
+    large_pages: bool,
+    /// Open shared files (like `-dh`; accepted)
+    #[arg(long = "shared-files")]
+    #[allow(dead_code)]
+    shared_files: bool,
+    /// Move deleted files to the Recycle Bin (like `-dr`; accepted)
+    #[arg(long = "recycle-bin")]
+    #[allow(dead_code)]
+    recycle_bin: bool,
+    /// Wipe files after archiving (like `-dw`; accepted)
+    #[arg(long = "wipe")]
+    #[allow(dead_code)]
+    wipe: bool,
     /// Read one member from stdin under this name (like `-si<name>`)
     #[arg(long = "stdin-name", value_name = "NAME")]
     stdin_name: Option<String>,
@@ -508,6 +572,34 @@ fn md_to_options(md: Option<MdSetting>) -> (Option<u8>, Option<u64>) {
         Some(MdSetting::Log(l)) => (Some(l), None),
         Some(MdSetting::Bytes(b)) => (None, Some(b)),
     }
+}
+
+/// Whether an archive member name matches one `-ms<list>` entry: a bare
+/// extension (`bin` matches `*.bin`) or a wildcard mask (`*.bin`, `a?c`)
+/// matched against the basename.
+fn store_type_matches(mask: &str, name: &str) -> bool {
+    if mask.contains('*') || mask.contains('?') {
+        let base = name.rsplit('/').next().unwrap_or(name);
+        return wildcard_match(mask, base);
+    }
+    name.ends_with(&format!(".{mask}"))
+}
+
+/// Simple `*`/`?` wildcard match (case-insensitive, like WinRAR's masks).
+fn wildcard_match(mask: &str, name: &str) -> bool {
+    fn inner(m: &[u8], n: &[u8]) -> bool {
+        match (m.first(), n.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => {
+                inner(&m[1..], n) || (!n.is_empty() && inner(m, &n[1..]))
+            }
+            (Some(&c), Some(&nc)) if c == b'?' || c.eq_ignore_ascii_case(&nc) => {
+                inner(&m[1..], &n[1..])
+            }
+            _ => false,
+        }
+    }
+    inner(mask.as_bytes(), name.as_bytes())
 }
 
 /// Parsed `-md` settings.
@@ -724,7 +816,8 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     let (dict_size_log, dict_size_bytes) =
         md_to_options(args.dict_size.as_deref().map(parse_md).transpose()?);
     let opts = rar5::CreateOptions {
-        solid: args.solid,        quick_open: args.quick_open,
+        solid: args.solid || args.solid_params.is_some(),
+        quick_open: args.quick_open,
         blake2: args.blake2,
         password: password.clone(),
         encrypt_headers: header_encrypt,
@@ -753,24 +846,18 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     };
     let dict_size_log = opts.dict_size_log;
     let dict_size_bytes = opts.dict_size_bytes;
-    let mut rar = if existing {
-        // Append to an existing archive (like `rar a`): existing members
-        // are preserved verbatim.
-        if args.volume_size.is_some() {
-            return Err("appending to multi-volume archives is not supported".into());
-        }
-        match password {
-            Some(ref pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
-                .map_err(|e| format!("open: {e}"))?,
-            None => {
-                rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
-            }
-        }
+    // The archive is opened lazily: for an existing archive the
+    // same-named members are replaced (deleted) first, so the append
+    // handle is only opened after that rewrite; a new archive is created
+    // immediately.
+    let mut rar: Option<rar5::RarArchive> = if existing {
+        None
     } else {
-        rar5::RarArchive::create_with_options(archive_path, opts)
-            .map_err(|e| format!("create: {e}"))?
+        Some(
+            rar5::RarArchive::create_with_options(archive_path, opts.clone())
+                .map_err(|e| format!("create: {e}"))?,
+        )
     };
-    rar.set_dictionary(dict_size_log, dict_size_bytes);
 
     let mut include_masks = args.include_masks.clone();
     let mut exclude_masks = args.exclude_masks.clone();
@@ -782,6 +869,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     }
     let policy = rar5::name_policy::NamePolicy {
         path_prefix: args.path_prefix.clone(),
+        exclude_prefix: args.exclude_prefix.clone(),
         basename_only: args.basename_only,
         strip_base: args.strip_base,
         full_paths: args.full_paths,
@@ -797,6 +885,23 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     };
     let mut collected = rar5::name_policy::collect(&policy, files, args.level)
         .map_err(|e| format!("collect: {e}"))?;
+    // -ms<list>: files matching one of the listed types (extensions or
+    // wildcard masks, semicolon-separated, repeatable) are stored without
+    // compression (level 0), like WinRAR.
+    if !args.store_types.is_empty() {
+        let masks: Vec<String> = args
+            .store_types
+            .iter()
+            .flat_map(|l| l.split(';'))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        for c in collected.iter_mut() {
+            if !c.is_dir && masks.iter().any(|m| store_type_matches(m, &c.name)) {
+                c.level = 0;
+            }
+        }
+    }
     // Never archive the archive itself (WinRAR skips the output file when
     // a directory argument covers it, e.g. `rar a x.rar .`).
     if let Ok(abs_archive) = std::fs::canonicalize(archive_path) {
@@ -945,7 +1050,8 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     // with optional `$default`); matched files are grouped by the
     // highest-priority mask, where a mask whose matches are a subset of
     // another mask's wins regardless of position (WinRAR semantics).
-    if args.solid {
+    // `-ds` disables the sorting (like WinRAR).
+    if (args.solid || args.solid_params.is_some()) && !args.no_sort {
         let masks = common::read_rarfiles_lst();
         if !masks.is_empty() {
             apply_rarfiles_order(&mut collected, &masks);
@@ -992,6 +1098,56 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
             }
         })
         .collect();
+    // WinRAR `rar a` semantics on an existing archive: members with the
+    // same name as an incoming file are replaced — deleted first, then
+    // re-added below; every other member is preserved verbatim. The
+    // append handle is opened only after the replacement rewrite.
+    let mut rar = if existing {
+        use std::collections::HashSet;
+        if args.volume_size.is_some() {
+            return Err("appending to multi-volume archives is not supported".into());
+        }
+        let incoming: HashSet<String> = collected
+            .iter()
+            .map(|c| c.name.clone())
+            .chain(args.stdin_name.iter().cloned())
+            .collect();
+        let mut ar = match &password {
+            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
+                .map_err(|e| format!("open: {e}"))?,
+            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
+        };
+        let to_drop: Vec<String> = ar
+            .namelist()
+            .into_iter()
+            .filter(|n| incoming.contains(*n))
+            .map(|s| s.to_string())
+            .collect();
+        if !to_drop.is_empty() {
+            let refs: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
+            ar.delete(&refs).map_err(|e| format!("replace: {e}"))?;
+        }
+        ar.close().map_err(|e| format!("close: {e}"))?;
+        // Deleting every member erases the archive file (like `rar d`);
+        // when the replacement removed the only members, recreate it
+        // instead of appending to a file that no longer exists.
+        let mut r = if std::path::Path::new(archive_path).exists() {
+            match &password {
+                Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
+                    .map_err(|e| format!("open: {e}"))?,
+                None => {
+                    rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
+                }
+            }
+        } else {
+            rar5::RarArchive::create_with_options(archive_path, opts)
+                .map_err(|e| format!("create: {e}"))?
+        };
+        r.set_dictionary(dict_size_log, dict_size_bytes);
+        r
+    } else {
+        rar.expect("new archive opened above")
+    };
     rar.add_batch(&entries).map_err(|e| format!("add: {e}"))?;
     // Link redirects are recorded after their data members (the reference
     // target name is what matters, not the order).
@@ -1050,6 +1206,66 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
                 .open(archive_path)
                 .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(t)));
         }
+    }
+    // -df: delete the source files after archiving (the archive keeps
+    // them; directories are left in place, like WinRAR).
+    if args.delete_after {
+        for c in &collected {
+            if !c.is_dir {
+                let _ = std::fs::remove_file(&c.path);
+            }
+        }
+    }
+    // -t: test the archive right after creating it.
+    if args.test_after {
+        let mut ar = match &password {
+            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
+                .map_err(|e| format!("open: {e}"))?,
+            None => {
+                rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?
+            }
+        };
+        let tmp = std::env::temp_dir().join(format!("rar5-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).map_err(|e| format!("test dir: {e}"))?;
+        let result = ar.extract_all_with_options(
+            &tmp,
+            rar5::ExtractOptions {
+                max_unpacked_bytes: None,
+                max_total_unpacked_bytes: None,
+                ..Default::default()
+            },
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+        result.map_err(|e| format!("test failed: {e}"))?;
+    }
+    // -as: synchronize the archive contents — drop members that are not
+    // part of the file list (only meaningful when appending to an
+    // existing archive; a freshly created archive only holds the list).
+    if args.sync_archive && was_existing {
+        use std::collections::HashSet;
+        let keep: HashSet<String> = collected
+            .iter()
+            .map(|c| c.name.clone())
+            .chain(args.stdin_name.iter().cloned())
+            .collect();
+        let mut ar = match &password {
+            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
+                .map_err(|e| format!("open: {e}"))?,
+            None => {
+                rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?
+            }
+        };
+        let stale: Vec<String> = ar
+            .namelist()
+            .into_iter()
+            .filter(|n| !keep.contains(*n))
+            .map(|n| n.to_string())
+            .collect();
+        if !stale.is_empty() {
+            let refs: Vec<&str> = stale.iter().map(|s| s.as_str()).collect();
+            ar.delete(&refs).map_err(|e| format!("sync: {e}"))?;
+        }
+        ar.close().map_err(|e| format!("close: {e}"))?;
     }
     if args.volume_size.is_some() {
         let vols = rar5::discover_volumes(std::path::Path::new(archive_path));
