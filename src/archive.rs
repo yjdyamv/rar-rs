@@ -14,15 +14,16 @@ use crate::encryption::{self, parse_archive_encrypt_header};
 use crate::error::{RarError, RarResult};
 use crate::headers::*;
 use crate::vint;
+use crate::write_progress::ProgressTracker;
 
-/// Write pipeline (member creation, batch addition, streaming payload
-/// writer) in a sibling impl block.
-#[path = "write.rs"]
-mod write;
 /// Surgical rewrite pipeline (delete/rename/comment/recovery mutation) in
 /// a sibling impl block.
 #[path = "rewrite.rs"]
 mod rewrite;
+/// Write pipeline (member creation, batch addition, streaming payload
+/// writer) in a sibling impl block.
+#[path = "write.rs"]
+mod write;
 
 /// Maximum archive prefix buffered for inline recovery-record parity.
 /// Streamed recovery records are not implemented yet; larger archives must
@@ -548,9 +549,17 @@ pub struct RarArchive {
     current_volume: usize,
     /// Bytes written in the current volume during creation.
     volume_bytes_written: u64,
-    /// Optional progress callback invoked during compression:
-    /// `(bytes_processed_in_file, total_bytes_in_file)`.
-    progress_callback: Option<Box<dyn FnMut(u64, u64) + Send>>,
+    /// Optional progress callback invoked during compression. Since the
+    /// `parallel` feature compresses waves of members concurrently, the
+    /// tracker behind this field aggregates every member's deltas into one
+    /// monotonic stream; the callback observes `(committed, total)` where
+    /// `total` is the whole write operation's input byte count. See
+    /// [`write_progress::ProgressTracker`].
+    progress: Option<std::sync::Arc<std::sync::Mutex<crate::write_progress::ProgressTracker>>>,
+    /// Index (into the current batch) of the member being written. Set by
+    /// `add_batch` before each sequential member so its per-member progress
+    /// is routed to the right tracker slot.
+    progress_member: usize,
     /// Create a solid archive (shared LZ window across compressed members).
     solid_mode: bool,
     /// Write a quick-open ("QO") service record at close time.
@@ -642,7 +651,8 @@ impl RarArchive {
             volume_size: None,
             current_volume: 0,
             volume_bytes_written: 0,
-            progress_callback: None,
+            progress: None,
+            progress_member: 0,
             solid_mode: false,
             quick_open: false,
             blake2: false,
@@ -687,7 +697,8 @@ impl RarArchive {
             volume_size: None,
             current_volume: 0,
             volume_bytes_written: 0,
-            progress_callback: None,
+            progress: None,
+            progress_member: 0,
             solid_mode: false,
             quick_open: false,
             blake2: false,
@@ -763,7 +774,8 @@ impl RarArchive {
             volume_size: None,
             current_volume: 0,
             volume_bytes_written: 0,
-            progress_callback: None,
+            progress: None,
+            progress_member: 0,
             solid_mode: false,
             quick_open: false,
             blake2: false,
@@ -841,7 +853,9 @@ impl RarArchive {
         let mut truncate_pos = None;
         let mut last_file_end = 0u64;
         let mut rr_percent = None;
-        while let Some(meta) = crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())? {
+        while let Some(meta) =
+            crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
+        {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => {
                     if truncate_pos.is_none() {
@@ -1075,10 +1089,7 @@ impl RarArchive {
 
     /// Validate options and build the archive state (without opening the
     /// stream).
-    fn new_with_options(
-        path: PathBuf,
-        opts: crate::options::CreateOptions,
-    ) -> RarResult<Self> {
+    fn new_with_options(path: PathBuf, opts: crate::options::CreateOptions) -> RarResult<Self> {
         if opts.encrypt_headers && opts.password.as_deref().is_none_or(|pw| pw.is_empty()) {
             return Err(RarError::Encrypted(
                 "header encryption requires a password".into(),
@@ -1125,7 +1136,8 @@ impl RarArchive {
             volume_size: opts.volume_size,
             current_volume: 0,
             volume_bytes_written: 0,
-            progress_callback: None,
+            progress: None,
+            progress_member: 0,
             solid_mode: opts.solid,
             quick_open,
             blake2: opts.blake2,
@@ -1400,7 +1412,11 @@ impl RarArchive {
                 encryption::EncryptionParams::generate_for_password(password, ENCR_PBKDF2_ITER_LOG);
             self.archive_encr = Some(encr);
         }
-        let block = self.archive_encr.as_ref().unwrap().to_archive_header_block();
+        let block = self
+            .archive_encr
+            .as_ref()
+            .unwrap()
+            .to_archive_header_block();
         let stream = self.stream.as_mut().unwrap();
         stream.write_all(&block)?;
         Ok(())
@@ -1624,7 +1640,12 @@ impl RarArchive {
             extra.extend(rec);
             extra
         };
-        let hdr = crate::headers::build_service_block("RR", &subdata, rr_data.len() as u64, crate::constants::BLOCK_FLAG_SKIP_IF_UNKNOWN);
+        let hdr = crate::headers::build_service_block(
+            "RR",
+            &subdata,
+            rr_data.len() as u64,
+            crate::constants::BLOCK_FLAG_SKIP_IF_UNKNOWN,
+        );
 
         self.write_block_header(&hdr)?;
         let stream = self.stream.as_mut().unwrap();
@@ -1665,7 +1686,12 @@ impl RarArchive {
             extra.extend(vint::encode(0x07u64)); // service data record type
             extra
         };
-        let hdr = crate::headers::build_service_block("QO", &subdata, payload.len() as u64, crate::constants::BLOCK_FLAG_SKIP_IF_UNKNOWN);
+        let hdr = crate::headers::build_service_block(
+            "QO",
+            &subdata,
+            payload.len() as u64,
+            crate::constants::BLOCK_FLAG_SKIP_IF_UNKNOWN,
+        );
 
         self.write_block_header(&hdr)?;
         let stream = self.stream.as_mut().unwrap();
@@ -1790,14 +1816,42 @@ impl RarArchive {
 
     /// Set an optional progress callback for archive creation.
     ///
-    /// The callback receives `(bytes_processed, bytes_total)` for the file
-    /// currently being added. Every file entry starts with a `(0, total)`
-    /// event, then reports absolute bytes processed while the member is
-    /// compressed, and ends with `(total, total)` once the entry has been
-    /// written, so callers can accumulate per-file deltas into a global
-    /// percent-done UI without double-counting.
+    /// The callback receives `(bytes_committed, bytes_total)` where
+    /// `bytes_total` is the total input byte count of the whole write
+    /// operation (a single member, or the full batch passed to
+    /// [`RarArchive::add_batch`]) and `bytes_committed` is the monotonic,
+    /// operation-global number of input bytes processed so far. Events are
+    /// delivered serially even when members compress concurrently on the
+    /// Rayon pool, and `bytes_committed` never moves backwards.
+    ///
+    /// Callers no longer need to stitch per-file deltas together: the
+    /// reported percentage is `bytes_committed / bytes_total` directly.
     pub fn set_progress_callback(&mut self, callback: Option<Box<dyn FnMut(u64, u64) + Send>>) {
-        self.progress_callback = callback;
+        self.progress = callback
+            .map(|cb| std::sync::Arc::new(std::sync::Mutex::new(ProgressTracker::new(Some(cb)))));
+        self.progress_member = 0;
+    }
+
+    /// Override the progress denominator. `add_batch` sets this automatically
+    /// to the sum of its members' sizes; single-member `add_*` calls fall back
+    /// to the member's own size when this is left unset.
+    pub fn set_progress_total(&mut self, total: u64) {
+        if let Some(progress) = &self.progress {
+            progress.lock().expect("progress lock").set_total(total);
+        }
+    }
+
+    /// Report `done` bytes of the current member (identified by
+    /// `progress_member`) against `member_total` through the shared tracker.
+    /// Safe to call from the single-threaded write paths.
+    fn report_progress(&mut self, done: u64, member_total: u64) {
+        if let Some(progress) = self.progress.clone() {
+            let member = self.progress_member;
+            progress
+                .lock()
+                .expect("progress lock")
+                .report(member, done, member_total);
+        }
     }
 
     // ── Signature ──────────────────────────────────────────────────────────
@@ -1858,13 +1912,12 @@ impl RarArchive {
         let mut last_file_index: Option<usize> = None;
 
         loop {
-            let meta = match crate::headers::read_block(
-                self.stream.as_mut().unwrap(),
-                encr_key.as_ref(),
-            )? {
-                Some(meta) => meta,
-                None => break,
-            };
+            let meta =
+                match crate::headers::read_block(self.stream.as_mut().unwrap(), encr_key.as_ref())?
+                {
+                    Some(meta) => meta,
+                    None => break,
+                };
             let raw = &meta.raw;
             let stream_pos = self.stream.as_mut().unwrap().stream_position()?;
 
@@ -2260,7 +2313,9 @@ impl RarArchive {
             .entries
             .iter()
             .position(|e| e.name() == name)
-            .ok_or_else(|| RarError::MemberNotFound { name: name.to_string() })?;
+            .ok_or_else(|| RarError::MemberNotFound {
+                name: name.to_string(),
+            })?;
         self.extract_options = opts;
         self.validate_entry_limits(target_idx)?;
         if self.is_solid_chain_member(target_idx) {
@@ -2337,7 +2392,7 @@ impl RarArchive {
     ) -> RarResult<bool> {
         use rayon::prelude::*;
 
-        if self.progress_callback.is_some() || self.entries.len() < PARALLEL_MIN_MEMBERS {
+        if self.progress.is_some() || self.entries.len() < PARALLEL_MIN_MEMBERS {
             return Ok(false);
         }
         for (i, e) in self.entries.iter().enumerate() {
@@ -2498,7 +2553,9 @@ impl RarArchive {
             .entries
             .iter()
             .position(|e| e.name() == name)
-            .ok_or_else(|| RarError::MemberNotFound { name: name.to_string() })?;
+            .ok_or_else(|| RarError::MemberNotFound {
+                name: name.to_string(),
+            })?;
         self.validate_entry_limits(idx)?;
         self.extract_entry(&self.entries[idx].clone(), dest)
     }
@@ -3189,7 +3246,6 @@ impl RarArchive {
         let password = self.password.as_ref()?;
         Some(encr.get_key(password))
     }
-
 }
 
 /// Wraps a writer and counts the bytes written through it.
@@ -3220,20 +3276,29 @@ impl Write for CountingWriter<'_> {
     }
 }
 
-/// Wraps a writer and reports `(bytes_written, total)` through a progress
-/// callback after every write.
+/// Wraps a writer and reports the member's written bytes through the shared
+/// progress tracker after every write. `written` may be seeded with a
+/// non-zero offset (multi-volume members resume their counter across volume
+/// boundaries).
 struct ProgressWriter<'a> {
     inner: &'a mut dyn Write,
     total: u64,
     written: u64,
-    cb: &'a mut dyn FnMut(u64, u64),
+    member: usize,
+    progress: Option<std::sync::Arc<std::sync::Mutex<ProgressTracker>>>,
 }
 
 impl Write for ProgressWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let n = self.inner.write(buf)?;
         self.written += n as u64;
-        (self.cb)(self.written, self.total);
+        if let Some(progress) = &self.progress {
+            let member = self.member;
+            progress
+                .lock()
+                .expect("progress lock")
+                .report(member, self.written, self.total);
+        }
         Ok(n)
     }
 
@@ -3486,7 +3551,6 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-
 /// WinRAR 7.23 dictionary selection for a non-solid member: the requested
 /// dictionary (`-md`, or the default 32 MiB at every compression level) is
 /// capped at twice the file size rounded down to a power of two, floored at
@@ -3532,7 +3596,7 @@ fn dict_params_for(
     let file_pow2 = 1usize << (usize::BITS - 1 - data_size.max(1).leading_zeros());
     let auto_cap = file_pow2.saturating_mul(2).max(base);
     let capped = (requested as usize).min(auto_cap);
-    if capped > 4 * 1024 * 1024 * 1024 {
+    if capped as u64 > 4 * 1024 * 1024 * 1024u64 {
         // RAR7 (v70): the header declares the big dictionary; the encoder
         // window follows the plain RAR5 selection rules.
         (
@@ -3647,8 +3711,7 @@ fn samples_have_distant_repeats(head: &[u8], samples: &[&[u8]]) -> bool {
             continue;
         }
         // Hash every SAMPLE_REPEAT_STEP-th 4-byte window of region a.
-        let mut hashes: HashMap<u32, usize> =
-            HashMap::with_capacity(a.len() / SAMPLE_REPEAT_STEP);
+        let mut hashes: HashMap<u32, usize> = HashMap::with_capacity(a.len() / SAMPLE_REPEAT_STEP);
         let mut off = 0;
         while off + 4 <= a.len() {
             let h = (a[off] as u32)
@@ -4290,7 +4353,10 @@ mod tests {
             damaged[i] ^= 0xFF;
         }
         let repaired = crate::recovery::rar5::repair_inline_recovery_archive(&damaged).unwrap();
-        assert_eq!(repaired, raw, "relocated repair must restore the original bytes");
+        assert_eq!(
+            repaired, raw,
+            "relocated repair must restore the original bytes"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -4512,8 +4578,8 @@ mod tests {
         let comp_data = b"header encrypted volume payload ".repeat(4_000);
 
         {
-            let mut ar = RarArchive::create_multivolume_with_password_headers(&path, 30_000, "pw")
-                .unwrap();
+            let mut ar =
+                RarArchive::create_multivolume_with_password_headers(&path, 30_000, "pw").unwrap();
             ar.add_bytes("store.bin", &store_data, 0).unwrap();
             ar.add_bytes("comp.bin", &comp_data, 3).unwrap();
             ar.close().unwrap();
@@ -4607,5 +4673,3 @@ mod tests {
         assert_eq!(sanitize_archive_path("dir/").unwrap(), "dir");
     }
 }
-
-

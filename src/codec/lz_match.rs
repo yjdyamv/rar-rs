@@ -155,9 +155,7 @@ impl LongRange {
         if dist < min_dist || dist > self.window {
             return None;
         }
-        let limit = max_len
-            .min(self.hist.len() - cand)
-            .min(chunk.len() - pos);
+        let limit = max_len.min(self.hist.len() - cand).min(chunk.len() - pos);
         if limit < 2 {
             return None;
         }
@@ -188,8 +186,7 @@ impl LongRange {
             return;
         }
         if self.hist.len() + chunk.len() > self.max_hist {
-            let drop = (self.hist.len() + chunk.len() - self.max_hist / 2)
-                .min(self.hist.len());
+            let drop = (self.hist.len() + chunk.len() - self.max_hist / 2).min(self.hist.len());
             self.hist.drain(0..drop);
             self.table.clear();
             self.rebuild_table();
@@ -217,13 +214,7 @@ impl LongRange {
 /// Compare `hist[cand..]` against `chunk[pos..]`, capped at `limit`
 /// (both slices' remaining lengths included), using 64-bit word compares
 /// with a scalar tail.
-fn long_match_len(
-    hist: &[u8],
-    chunk: &[u8],
-    cand: usize,
-    pos: usize,
-    limit: usize,
-) -> usize {
+fn long_match_len(hist: &[u8], chunk: &[u8], cand: usize, pos: usize, limit: usize) -> usize {
     let mut l = 0;
     while l + 8 <= limit {
         let a = u64::from_le_bytes(hist[cand + l..cand + l + 8].try_into().unwrap());

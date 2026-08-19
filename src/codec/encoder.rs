@@ -452,12 +452,9 @@ fn find_matches_in_range(
                 && (pos & (lz_match::LONG_RANGE_STEP - 1)) == 0
             {
                 let chunk_off = pos - start;
-                if let Some((ld, ll)) = long_range.find(
-                    &data[start..end],
-                    chunk_off,
-                    near_max + 1,
-                    max_match,
-                ) {
+                if let Some((ld, ll)) =
+                    long_range.find(&data[start..end], chunk_off, near_max + 1, max_match)
+                {
                     d = ld as usize;
                     l = ll;
                 }
@@ -474,12 +471,9 @@ fn find_matches_in_range(
                 && pos + 4 <= end
             {
                 let chunk_off = pos - start;
-                if let Some((ld, ll)) = long_range.find(
-                    &data[start..end],
-                    chunk_off,
-                    near_max + 1,
-                    max_match,
-                ) && ll > l
+                if let Some((ld, ll)) =
+                    long_range.find(&data[start..end], chunk_off, near_max + 1, max_match)
+                    && ll > l
                 {
                     d = ld as usize;
                     l = ll;
@@ -1011,7 +1005,11 @@ fn encode_distance_slot(dist: u32, extra_dist: bool) -> (usize, u32, usize) {
     let slot = 2 * (dbits + 1) + sub as usize;
     let base = (2 | sub) << dbits;
     let extra = val - base;
-    let max_slot = if extra_dist { HUFF_DCX - 1 } else { HUFF_DC - 1 };
+    let max_slot = if extra_dist {
+        HUFF_DCX - 1
+    } else {
+        HUFF_DC - 1
+    };
     (slot.min(max_slot), extra, dbits)
 }
 
@@ -1227,8 +1225,8 @@ mod tests {
             packed.len(),
             data.len()
         );
-        let roundtrip = crate::codec::decode_standalone(&packed, data.len() as u64, 3, None, false)
-            .unwrap();
+        let roundtrip =
+            crate::codec::decode_standalone(&packed, data.len() as u64, 3, None, false).unwrap();
         assert_eq!(roundtrip, data);
     }
 
@@ -1243,9 +1241,7 @@ mod tests {
         use crate::codec::decode_standalone;
         // Varied data (literal-heavy) at several sizes.
         for size in [1usize, 100, 1000, 100_000, 300_000] {
-            let data: Vec<u8> = (0..size)
-                .map(|i| (i.wrapping_mul(31) >> 3) as u8)
-                .collect();
+            let data: Vec<u8> = (0..size).map(|i| (i.wrapping_mul(31) >> 3) as u8).collect();
             let packed = encode(&data, 3, 0, true);
             let back = decode_standalone(&packed, size as u64, 0, Some(128 * 1024), true).unwrap();
             assert_eq!(back, data, "size {size}");
@@ -1253,7 +1249,8 @@ mod tests {
         // Repeated data (match/cache-heavy).
         let data = vec![0xABu8; 300_000];
         let packed = encode(&data, 3, 0, true);
-        let back = decode_standalone(&packed, data.len() as u64, 0, Some(128 * 1024), true).unwrap();
+        let back =
+            decode_standalone(&packed, data.len() as u64, 0, Some(128 * 1024), true).unwrap();
         assert_eq!(back, data);
     }
 
@@ -1262,7 +1259,9 @@ mod tests {
         let mut state = seed;
         (0..len)
             .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (state >> 33) as u8
             })
             .collect()
@@ -1291,8 +1290,7 @@ mod tests {
         );
         // Byte-identical round-trip (dictionary 32 MiB covers the 2 MiB
         // distance; unpacked size over the RAR5 4 GiB cap is irrelevant).
-        let back =
-            decode_standalone(&packed, data.len() as u64, 8, None, false).unwrap();
+        let back = decode_standalone(&packed, data.len() as u64, 8, None, false).unwrap();
         assert_eq!(back, data);
     }
 
@@ -1322,7 +1320,8 @@ mod tests {
     /// bytes, the oldest bytes drop out and the table is rebuilt; the
     /// newest candidates keep matching.
     #[test]
-    fn long_range_slides_window_and_finds() {        use super::lz_match::{LONG_RANGE_MAX, LongRange};
+    fn long_range_slides_window_and_finds() {
+        use super::lz_match::{LONG_RANGE_MAX, LongRange};
         let mut lr = LongRange::new(128 * 1024 * 1024);
         let chunk = pseudo_random(64 * 1024, 11);
         // Push enough identical 64 KiB chunks to slide the 64 MiB window

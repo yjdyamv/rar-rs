@@ -370,9 +370,7 @@ pub fn repair_inline_recovery_prefix(
         let Some((b1_start, _b1_end)) = file_blocks
             .iter()
             .filter(|&&(start, end)| range.start < end && start < range.end)
-            .max_by_key(|&&(start, end)| {
-                range.end.min(end).saturating_sub(range.start.max(start))
-            })
+            .max_by_key(|&&(start, end)| range.end.min(end).saturating_sub(range.start.max(start)))
             .copied()
         else {
             remaining.push(index);
@@ -433,30 +431,32 @@ fn parse_file_data_blocks(prefix: &[u8]) -> Result<Vec<(usize, usize)>> {
     }
     let mut pos = 8usize;
     while pos + 4 < prefix.len() {
-        let (header_size, size_bytes) = crate::vint::decode_from_slice(prefix, pos + 4)
-            .map_err(|_| Error::BadRecoveryChunk)?;
+        let (header_size, size_bytes) =
+            crate::vint::decode_from_slice(prefix, pos + 4).map_err(|_| Error::BadRecoveryChunk)?;
         if header_size == 0 || header_size > 2 * 1024 * 1024 {
             break;
         }
         let body = pos + 4 + size_bytes;
-        let block_end = body.checked_add(header_size as usize).ok_or(Error::PlanOverflow)?;
+        let block_end = body
+            .checked_add(header_size as usize)
+            .ok_or(Error::PlanOverflow)?;
         if block_end > prefix.len() {
             break;
         }
-        let (block_type, t) = crate::vint::decode_from_slice(prefix, body)
-            .map_err(|_| Error::BadRecoveryChunk)?;
+        let (block_type, t) =
+            crate::vint::decode_from_slice(prefix, body).map_err(|_| Error::BadRecoveryChunk)?;
         let (flags, f) = crate::vint::decode_from_slice(prefix, body + t)
             .map_err(|_| Error::BadRecoveryChunk)?;
         let mut p = body + t + f;
         if flags & 0x1 != 0 {
-            let (_, n) = crate::vint::decode_from_slice(prefix, p)
-                .map_err(|_| Error::BadRecoveryChunk)?;
+            let (_, n) =
+                crate::vint::decode_from_slice(prefix, p).map_err(|_| Error::BadRecoveryChunk)?;
             p += n;
         }
         let mut data_size = 0u64;
         if flags & 0x2 != 0 {
-            let (v, _n) = crate::vint::decode_from_slice(prefix, p)
-                .map_err(|_| Error::BadRecoveryChunk)?;
+            let (v, _n) =
+                crate::vint::decode_from_slice(prefix, p).map_err(|_| Error::BadRecoveryChunk)?;
             data_size = v;
         }
         if block_type == 2 {

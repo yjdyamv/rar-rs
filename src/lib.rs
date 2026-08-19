@@ -34,8 +34,8 @@ pub mod headers;
 pub mod name_policy;
 pub mod options;
 pub mod recovery;
-mod write_progress;
 pub mod vint;
+mod write_progress;
 
 pub use archive::{ArchiveEntry, BatchEntry, RarArchive, discover_volumes};
 pub use archive::{set_compression_threads, set_extraction_threads, sfx_offset_of};

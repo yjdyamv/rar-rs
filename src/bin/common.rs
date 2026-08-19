@@ -72,7 +72,11 @@ pub fn read_rarfiles_lst() -> Vec<Option<String>> {
             candidates.push(dir.join("rarfiles.lst"));
         }
         if let Some(appdata) = std::env::var_os("APPDATA") {
-            candidates.push(std::path::PathBuf::from(appdata).join("WinRAR").join("rarfiles.lst"));
+            candidates.push(
+                std::path::PathBuf::from(appdata)
+                    .join("WinRAR")
+                    .join("rarfiles.lst"),
+            );
         }
     }
     #[cfg(unix)]
@@ -92,7 +96,11 @@ pub fn read_rarfiles_lst() -> Vec<Option<String>> {
             if line.is_empty() {
                 continue;
             }
-            out.push(if line == "$default" { None } else { Some(line.to_string()) });
+            out.push(if line == "$default" {
+                None
+            } else {
+                Some(line.to_string())
+            });
         }
         if !out.is_empty() {
             return out;
@@ -119,10 +127,7 @@ pub fn parse_mdx_size(s: &str) -> Result<u64, String> {
 /// The subcommand name of a raw argument list (the first token that does
 /// not start with `-`), used to select `switches_<command>` entries.
 pub fn command_name(raw: &[String]) -> Option<String> {
-    raw.iter()
-        .skip(1)
-        .find(|a| !a.starts_with('-'))
-        .cloned()
+    raw.iter().skip(1).find(|a| !a.starts_with('-')).cloned()
 }
 
 /// Read the configuration file (`rar.ini` next to the executable on
@@ -159,10 +164,7 @@ fn config_file_switches(command: Option<&str>) -> Vec<String> {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let switches: Vec<String> = value
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
+        let switches: Vec<String> = value.split_whitespace().map(|s| s.to_string()).collect();
         if key.trim() == "switches" {
             global = switches;
         } else if let Some(rest) = key.trim().strip_prefix("switches_")

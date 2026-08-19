@@ -99,8 +99,7 @@ impl NamePolicy {
 }
 
 /// One collected add target, ready to convert into a [`crate::BatchEntry`].
-#[derive(Debug)]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Collected {
     pub path: PathBuf,
     pub name: String,

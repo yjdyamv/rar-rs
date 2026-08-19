@@ -721,8 +721,8 @@ fn parse_extra_records(
                         if p + 4 > rec_end {
                             break;
                         }
-                        secs[i] = u32::from_le_bytes(extra_data[p..p + 4].try_into().unwrap())
-                            as u64;
+                        secs[i] =
+                            u32::from_le_bytes(extra_data[p..p + 4].try_into().unwrap()) as u64;
                         p += 4;
                     } else {
                         if p + 8 > rec_end {
@@ -744,9 +744,8 @@ fn parse_extra_records(
                         if p + 4 > rec_end {
                             break;
                         }
-                        let ns =
-                            u32::from_le_bytes(extra_data[p..p + 4].try_into().unwrap())
-                                & 0x3fff_ffff;
+                        let ns = u32::from_le_bytes(extra_data[p..p + 4].try_into().unwrap())
+                            & 0x3fff_ffff;
                         nss[i] = if ns < 1_000_000_000 { ns } else { 0 };
                         p += 4;
                     }
@@ -795,7 +794,15 @@ fn parse_extra_records(
         }
         offset = rec_end;
     }
-    (mtime_override, mtime_ns, ctime, atime, owner, group, version)
+    (
+        mtime_override,
+        mtime_ns,
+        ctime,
+        atime,
+        owner,
+        group,
+        version,
+    )
 }
 
 /// Extract the extra area of a block body (`[type][flags][extra_size?]

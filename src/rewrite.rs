@@ -5,7 +5,6 @@
 use super::*;
 
 impl RarArchive {
-
     // ── Public API: deletion ───────────────────────────────────────────────
 
     /// Delete members from a RAR5 archive without rebuilding the whole
@@ -57,7 +56,9 @@ impl RarArchive {
                 .enumerate()
                 .find(|(i, e)| e.name() == *name && !deleted[*i])
                 .map(|(i, _)| i)
-                .ok_or_else(|| RarError::MemberNotFound { name: name.to_string() })?;
+                .ok_or_else(|| RarError::MemberNotFound {
+                    name: name.to_string(),
+                })?;
             deleted[idx] = true;
             count += 1;
         }
@@ -178,7 +179,9 @@ impl RarArchive {
         self.volume_paths = Vec::new();
         self.current_volume = 1;
         self.volume_bytes_written = 0;
-        self.stream = Some(Box::new(read_write_create(&volume_path(&parent, &tmp_base, 1))?));
+        self.stream = Some(Box::new(read_write_create(&volume_path(
+            &parent, &tmp_base, 1,
+        ))?));
         self.write_signature()?;
         self.write_archive_header_vol(None)?;
         self.volume_bytes_written = self.stream.as_mut().unwrap().stream_position()?;
@@ -539,7 +542,9 @@ impl RarArchive {
                     name == old_norm
                 })
                 .map(|(i, _)| i)
-                .ok_or_else(|| RarError::MemberNotFound { name: old.to_string() })?;
+                .ok_or_else(|| RarError::MemberNotFound {
+                    name: old.to_string(),
+                })?;
             let is_dir = self.entries[idx].is_dir();
             let new_norm = new.trim_end_matches('/').to_string();
             if is_dir {
@@ -606,7 +611,9 @@ impl RarArchive {
     pub fn get_comment(&mut self) -> RarResult<Option<Vec<u8>>> {
         let mut reader = File::open(&self.path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
-        while let Some(meta) = crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())? {
+        while let Some(meta) =
+            crate::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
+        {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_SERVICE_HEADER
@@ -797,11 +804,10 @@ impl RarArchive {
                 self.archive_encr = Some(params);
                 self.header_encryption = true;
                 encrypt_header = Some(first.header_bytes);
-                let main =
-                    crate::headers::read_block(reader, self.archive_block_key().as_ref())?
-                        .ok_or_else(|| {
-                            RarError::Format("archive is missing the main header".into())
-                        })?;
+                let main = crate::headers::read_block(reader, self.archive_block_key().as_ref())?
+                    .ok_or_else(|| {
+                    RarError::Format("archive is missing the main header".into())
+                })?;
                 if main.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
                     return Err(RarError::Format(
                         "archive is missing the main header".into(),
@@ -833,7 +839,9 @@ impl RarArchive {
         // was deleted.
         let mut prev_file_deleted = false;
 
-        while let Some(meta) = crate::headers::read_block(reader, self.archive_block_key().as_ref())? {
+        while let Some(meta) =
+            crate::headers::read_block(reader, self.archive_block_key().as_ref())?
+        {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_FILE_HEADER => {
@@ -1510,5 +1518,4 @@ impl RarArchive {
             String::from_utf8_lossy(&data[offset..end]).into_owned(),
         ))
     }
-
 }

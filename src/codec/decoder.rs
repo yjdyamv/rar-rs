@@ -870,7 +870,10 @@ mod tests {
         let err = checked_dict_size(16, None).unwrap_err();
         assert!(err.contains("maximum 15"), "{err}");
         // RAR7: byte count, non-power-of-two rounds the window up.
-        assert_eq!(checked_dict_size(0, Some(6 * 1024 * 1024 * 1024)).unwrap(), 8 * 1024 * 1024 * 1024);
+        assert_eq!(
+            checked_dict_size(0, Some(6 * 1024 * 1024 * 1024)).unwrap(),
+            8 * 1024 * 1024 * 1024
+        );
     }
 
     /// Fuzz regression: block flags with the reserved bit 5 set previously
@@ -956,8 +959,15 @@ mod tests {
                 let packed = encode_with_filters(&data, 3, 0, &[spec], false).unwrap();
                 let buffered = decode_standalone(&packed, size as u64, 0, None, false).unwrap();
                 let mut streamed = Vec::new();
-                let written = decode_standalone_to_writer(&packed, size as u64, 0, None, false, &mut streamed)
-                    .unwrap();
+                let written = decode_standalone_to_writer(
+                    &packed,
+                    size as u64,
+                    0,
+                    None,
+                    false,
+                    &mut streamed,
+                )
+                .unwrap();
                 assert_eq!(written, size as u64);
                 assert_eq!(
                     streamed, buffered,

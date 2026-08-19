@@ -73,3 +73,60 @@ impl ProgressReporter<'_> {
         self.0.is_cancelled()
     }
 }
+
+/// Aggregates per-member progress into a single monotonic, operation-global
+/// stream for the user callback.
+///
+/// The historical per-member contract reported `(done, file_total)` restarting
+/// at `0` for every member, which forced consumers to stitch deltas together
+/// themselves and made the delta bookkeeping break the moment multiple members
+/// compressed concurrently (the `parallel` wave path). This tracker keeps a
+/// per-member baseline internally so the user callback always observes
+/// `(committed, total)` where `committed` only ever increases and `total` is
+/// the operation's whole input byte count. It is `Sync` through the enclosing
+/// mutex, so the same instance can be shared by the Rayon workers that
+/// compress a wave and by the single-threaded write-back loop.
+pub(crate) struct ProgressTracker {
+    callback: Option<Box<dyn FnMut(u64, u64) + Send>>,
+    total: u64,
+    committed: u64,
+    per_member: std::collections::HashMap<usize, u64>,
+}
+
+impl ProgressTracker {
+    pub(crate) fn new(callback: Option<Box<dyn FnMut(u64, u64) + Send>>) -> Self {
+        Self {
+            callback,
+            total: 0,
+            committed: 0,
+            per_member: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Set the operation-wide total (sum of every member's input size). When
+    /// left at 0 the tracker adopts the first reported member size.
+    pub(crate) fn set_total(&mut self, total: u64) {
+        self.total = total;
+    }
+
+    /// Report `done` bytes of member `member` (member sizes are counted
+    /// against `member_total`). Deltas are clamped so the emitted stream stays
+    /// monotonic even when a member's progress temporarily goes backwards
+    /// (e.g. the compress-pass spill of a member that later falls back to
+    /// STORE and re-copies from the start).
+    pub(crate) fn report(&mut self, member: usize, done: u64, member_total: u64) {
+        if self.total == 0 {
+            self.total = member_total;
+        }
+        let prev = self.per_member.get(&member).copied().unwrap_or(0);
+        let delta = done.saturating_sub(prev);
+        if delta == 0 {
+            return;
+        }
+        self.per_member.insert(member, done);
+        self.committed = self.committed.saturating_add(delta);
+        if let Some(cb) = self.callback.as_mut() {
+            cb(self.committed.min(self.total), self.total);
+        }
+    }
+}

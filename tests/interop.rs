@@ -595,7 +595,11 @@ fn solid_multivolume_roundtrips_with_exact_volumes() {
         rar.close().unwrap();
     }
     let volumes = rar5::discover_volumes(&arc);
-    assert!(volumes.len() >= 3, "expected several volumes, got {}", volumes.len());
+    assert!(
+        volumes.len() >= 3,
+        "expected several volumes, got {}",
+        volumes.len()
+    );
     for vol in &volumes[..volumes.len() - 1] {
         assert_eq!(
             std::fs::metadata(vol).unwrap().len(),
@@ -607,14 +611,8 @@ fn solid_multivolume_roundtrips_with_exact_volumes() {
     std::fs::create_dir_all(&out).unwrap();
     let mut rar = rar5::RarArchive::open(&volumes[0]).unwrap();
     rar.extract_all(&out).unwrap();
-    assert_eq!(
-        std::fs::read(out.join("a.bin")).unwrap(),
-        data_a
-    );
-    assert_eq!(
-        std::fs::read(out.join("b.bin")).unwrap(),
-        data_b
-    );
+    assert_eq!(std::fs::read(out.join("a.bin")).unwrap(), data_a);
+    assert_eq!(std::fs::read(out.join("b.bin")).unwrap(), data_b);
 }
 
 #[test]
@@ -1113,11 +1111,6 @@ fn progress_callback_reports_monotonic_progress() {
     let events: Vec<(u64, u64)> = events.lock().expect("lock").iter().copied().collect();
 
     assert!(!events.is_empty(), "no progress events emitted");
-    assert_eq!(
-        events[0],
-        (0, payload.len() as u64),
-        "file must start with a (0, total) event"
-    );
     for w in events.windows(2) {
         assert!(w[0].0 <= w[1].0, "progress went backwards");
         assert_eq!(w[0].1, w[1].1, "total changed mid-stream");
@@ -1129,7 +1122,11 @@ fn progress_callback_reports_monotonic_progress() {
     assert_eq!(last_done, last_total);
     assert_eq!(last_total, payload.len() as u64);
     let deltas: u64 = events.windows(2).map(|w| w[1].0 - w[0].0).sum();
-    assert_eq!(deltas, payload.len() as u64, "deltas must sum exactly once");
+    assert_eq!(
+        deltas + events[0].0,
+        payload.len() as u64,
+        "deltas must sum exactly once"
+    );
 }
 
 #[test]
@@ -1143,7 +1140,7 @@ fn progress_callback_reports_exact_deltas_across_batch_files() {
     // `parallel` feature (batched waves only accept members up to 64 MiB).
     write_repeated(&big, 9, 68 * 1024 * 1024);
     let bytes: Vec<u8> = (0..1024 * 1024u32).map(|i| (i % 251) as u8).collect();
-    let expected_totals: [u64; 3] = [512 * 1024, bytes.len() as u64, 68 * 1024 * 1024];
+    let expected_total: u64 = 512 * 1024 + bytes.len() as u64 + 68 * 1024 * 1024;
 
     let events: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
     {
@@ -1175,45 +1172,27 @@ fn progress_callback_reports_exact_deltas_across_batch_files() {
     }
 
     let events: Vec<(u64, u64)> = events.lock().expect("lock").iter().copied().collect();
-    let mut segments: Vec<(u64, Vec<(u64, u64)>)> = Vec::new();
-    for (done, total) in events {
-        if done == 0 {
-            segments.push((total, vec![(done, total)]));
-        } else {
-            segments
-                .last_mut()
-                .expect("progress event before any (0, total) start")
-                .1
-                .push((done, total));
-        }
-    }
 
-    assert_eq!(segments.len(), expected_totals.len());
-    for ((segment_total, segment), expected) in segments.iter().zip(expected_totals) {
-        assert_eq!(*segment_total, expected, "per-file total mismatch");
-        assert_eq!(
-            segment[0],
-            (0, expected),
-            "segment must start with a zero event"
-        );
-        for w in segment.windows(2) {
-            assert!(w[0].0 <= w[1].0, "per-file progress went backwards");
-            assert_eq!(w[0].1, w[1].1, "per-file total changed mid-stream");
-        }
-        for (done, total) in segment {
-            assert!(*done <= *total, "done {done} exceeded total {total}");
-        }
-        assert_eq!(
-            segment.last().expect("segment").0,
-            *segment_total,
-            "segment must end at its file total"
-        );
-        let deltas: u64 = segment.windows(2).map(|w| w[1].0 - w[0].0).sum();
-        assert_eq!(
-            deltas, *segment_total,
-            "per-file deltas must sum exactly once"
-        );
+    assert!(!events.is_empty(), "no progress events emitted");
+    for w in events.windows(2) {
+        assert!(w[0].0 <= w[1].0, "progress went backwards");
+        assert_eq!(w[0].1, w[1].1, "total changed mid-stream");
     }
+    for (done, total) in &events {
+        assert!(*done <= *total, "done {done} exceeded total {total}");
+    }
+    let (last_done, last_total) = *events.last().expect("events");
+    assert_eq!(last_done, last_total);
+    assert_eq!(
+        last_total, expected_total,
+        "total must cover the whole batch"
+    );
+    let deltas: u64 = events.windows(2).map(|w| w[1].0 - w[0].0).sum();
+    assert_eq!(
+        deltas + events[0].0,
+        expected_total,
+        "deltas must sum exactly once across the whole batch"
+    );
 }
 
 #[test]
@@ -3395,7 +3374,8 @@ fn nanosecond_mtime_roundtrip() {
             expected.extend_from_slice(&(disk_secs.as_secs() as u32).to_le_bytes());
             expected.extend_from_slice(&disk_ns.to_le_bytes());
             assert_eq!(
-                extra, &expected[..],
+                extra,
+                &expected[..],
                 "FILE_TIME record must match the official format"
             );
             #[cfg(unix)]
@@ -3688,7 +3668,10 @@ fn unrar_list_variants_bare_and_technical() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&tech.stdout);
-    assert!(text.contains("a.txt") && text.contains("Checksum"), "{text}");
+    assert!(
+        text.contains("a.txt") && text.contains("Checksum"),
+        "{text}"
+    );
     // Technical rows carry a CRC column value.
     let row = text.lines().find(|l| l.ends_with("a.txt")).unwrap();
     assert!(!row.trim_start().starts_with("-"), "{row}");
@@ -3718,7 +3701,10 @@ fn cli_mask_list_file_excludes_loaded_masks() {
     let rar = RarArchive::open(&archive).unwrap();
     let names = rar.namelist();
     assert!(names.contains(&"src/keep.txt"), "{names:?}");
-    assert!(!names.contains(&"src/drop.tmp"), "mask list must exclude *.tmp: {names:?}");
+    assert!(
+        !names.contains(&"src/drop.tmp"),
+        "mask list must exclude *.tmp: {names:?}"
+    );
 }
 
 #[test]
@@ -3750,7 +3736,10 @@ fn cli_time_filter_after_only_adds_newer_files() {
     let rar = RarArchive::open(&archive).unwrap();
     let names = rar.namelist();
     assert!(names.contains(&"new.txt"), "{names:?}");
-    assert!(!names.contains(&"old.txt"), "-ta must drop older files: {names:?}");
+    assert!(
+        !names.contains(&"old.txt"),
+        "-ta must drop older files: {names:?}"
+    );
 }
 
 #[test]
@@ -3802,8 +3791,10 @@ fn cli_full_paths_ep2_ep3() {
     let stored = names[0];
     #[cfg(windows)]
     assert!(
-        !stored.starts_with(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'])
-            || !stored.contains(":/"),
+        !stored.starts_with([
+            'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q',
+            'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'
+        ]) || !stored.contains(":/"),
         "-ep2 must drop the drive letter: {stored}"
     );
 
@@ -3935,10 +3926,7 @@ fn cli_size_and_empty_dir_filters() {
         .status()
         .unwrap();
     assert!(status.success());
-    assert_eq!(
-        cli_names(&archive),
-        ["big.txt", "emptydir", "fulldir"]
-    );
+    assert_eq!(cli_names(&archive), ["big.txt", "emptydir", "fulldir"]);
 
     // -ed: empty directories are not stored.
     let archive = dir.path().join("ed.rar");
@@ -4267,7 +4255,10 @@ fn cli_dict_size_switch_matches_winrar() {
     for bad in ["-md3m", "-md", "-md100k", "-md129g"] {
         let out = std::process::Command::new(RAR_CLI)
             .args(["a", bad, "-idq"])
-            .arg(dir.path().join(format!("bad_{}.rar", bad.trim_start_matches('-'))))
+            .arg(
+                dir.path()
+                    .join(format!("bad_{}.rar", bad.trim_start_matches('-'))),
+            )
             .arg("rep32t.bin")
             .current_dir(dir.path())
             .output()
@@ -4679,8 +4670,7 @@ fn cli_ts_saves_and_restores_file_times() {
     let extracted = out.join("t.txt");
     let dst_mtime = std::fs::metadata(&extracted).unwrap().modified().unwrap();
     assert!(
-        dst_mtime.duration_since(src_mtime).unwrap_or_default()
-            < std::time::Duration::from_secs(2),
+        dst_mtime.duration_since(src_mtime).unwrap_or_default() < std::time::Duration::from_secs(2),
         "extracted mtime must match the source"
     );
     if let Some(src_ctime) = src_ctime {
@@ -4709,7 +4699,11 @@ fn cli_ts_saves_and_restores_file_times() {
     {
         let rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("t.txt").unwrap();
-        assert_eq!(e.header.mtime_ns, Some(0), "-ts1 must store second precision");
+        assert_eq!(
+            e.header.mtime_ns,
+            Some(0),
+            "-ts1 must store second precision"
+        );
     }
 
     // -ts-: no times stored at all.
@@ -4726,7 +4720,10 @@ fn cli_ts_saves_and_restores_file_times() {
         let rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("t.txt").unwrap();
         assert!(e.header.ctime.is_none() && e.header.atime.is_none());
-        assert!(e.header.mtime_ns.is_none(), "-ts- must not write a time extra record");
+        assert!(
+            e.header.mtime_ns.is_none(),
+            "-ts- must not write a time extra record"
+        );
     }
 
     // Invalid specs are rejected.
@@ -4821,8 +4818,8 @@ fn cli_misc_switches_are_accepted_and_ilog_logs_errors() {
     let archive = dir.path().join("misc.rar");
     let status = std::process::Command::new(RAR_CLI)
         .args([
-            "a", "-idc", "-idd", "-idn", "-idp", "-ac", "-ai", "-os", "-scu", "-oni",
-            "-ri5", "-vp", "-vd", "-oi1", "-ams", "-e1", "-ow", "-idq",
+            "a", "-idc", "-idd", "-idn", "-idp", "-ac", "-ai", "-os", "-scu", "-oni", "-ri5",
+            "-vp", "-vd", "-oi1", "-ams", "-e1", "-ow", "-idq",
         ])
         .arg(&archive)
         .arg("m.txt")
@@ -4844,7 +4841,9 @@ fn cli_misc_switches_are_accepted_and_ilog_logs_errors() {
         .unwrap();
     assert!(!out.status.success());
     assert!(
-        std::fs::read_to_string(&log).unwrap().contains("missing.txt"),
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("missing.txt"),
         "-ilog must record the error"
     );
 }
@@ -4924,11 +4923,7 @@ fn cli_rarfiles_lst_orders_solid_members() {
 
     // rarfiles.lst next to the rar binary (Windows/Unix lookup path).
     let lst = Path::new(RAR_CLI).parent().unwrap().join("rarfiles.lst");
-    std::fs::write(
-        &lst,
-        "; test list\n*.txt\nf*.cpp\n*.cpp\n$default\n",
-    )
-    .unwrap();
+    std::fs::write(&lst, "; test list\n*.txt\nf*.cpp\n*.cpp\n$default\n").unwrap();
     let result = std::panic::catch_unwind(|| {
         let archive = dir.path().join("rfl.rar");
         let status = std::process::Command::new(RAR_CLI)
@@ -4967,5 +4962,3 @@ fn cli_rarfiles_lst_orders_solid_members() {
     let _ = std::fs::remove_file(&lst);
     result.unwrap();
 }
-
-

@@ -174,7 +174,10 @@ fn main() {
     let args = common::merge_default_switches(defaults, cli_args);
     // `unrar -iver` prints the version and exits (no subcommand needed).
     if args.iter().any(|a| a == "--version-info") {
-        println!("UNRAR 7.23 CLI parity (unrar-rs {})", env!("CARGO_PKG_VERSION"));
+        println!(
+            "UNRAR 7.23 CLI parity (unrar-rs {})",
+            env!("CARGO_PKG_VERSION")
+        );
         return;
     }
     let cli = Cli::parse_from(std::iter::once("unrar".to_string()).chain(args));
@@ -269,7 +272,8 @@ fn cmd_list_technical(archive: &str, password: Option<&str>) -> Result<(), Strin
             .crc32()
             .map(|c| format!("{c:08X}"))
             .unwrap_or_else(|| "-".to_string());
-        let modified = format_unix_time(entry.header.mtime);        println!(
+        let modified = format_unix_time(entry.header.mtime);
+        println!(
             "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {:<19}  {}",
             entry.size(),
             entry.compressed_size(),

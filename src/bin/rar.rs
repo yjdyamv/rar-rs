@@ -590,9 +590,7 @@ fn wildcard_match(mask: &str, name: &str) -> bool {
     fn inner(m: &[u8], n: &[u8]) -> bool {
         match (m.first(), n.first()) {
             (None, None) => true,
-            (Some(b'*'), _) => {
-                inner(&m[1..], n) || (!n.is_empty() && inner(m, &n[1..]))
-            }
+            (Some(b'*'), _) => inner(&m[1..], n) || (!n.is_empty() && inner(m, &n[1..])),
             (Some(&c), Some(&nc)) if c == b'?' || c.eq_ignore_ascii_case(&nc) => {
                 inner(&m[1..], &n[1..])
             }
@@ -905,9 +903,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     // Never archive the archive itself (WinRAR skips the output file when
     // a directory argument covers it, e.g. `rar a x.rar .`).
     if let Ok(abs_archive) = std::fs::canonicalize(archive_path) {
-        collected.retain(|c| {
-            !matches!(std::fs::canonicalize(&c.path), Ok(p) if p == abs_archive)
-        });
+        collected.retain(|c| !matches!(std::fs::canonicalize(&c.path), Ok(p) if p == abs_archive));
     }
     // -sl / -sm / -ed: size filters and skip-empty-directories.
     if args.size_less.is_some() || args.size_more.is_some() || args.no_empty_dirs {
@@ -1008,7 +1004,8 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     }
     if args.store_hardlinks {
         #[cfg(unix)]
-        let mut seen: std::collections::HashMap<(u64, u64), String> = std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<(u64, u64), String> =
+            std::collections::HashMap::new();
         let mut keep = Vec::with_capacity(collected.len());
         for c in collected.drain(..) {
             if c.is_dir {
@@ -1060,8 +1057,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     collected.extend(dir_entries);
     // -tsp: snapshot source access times before reading the files.
     #[cfg(unix)]
-    let ts_preserve_atimes: Vec<(std::path::PathBuf, std::time::SystemTime)> = if misc.ts_preserve
-    {
+    let ts_preserve_atimes: Vec<(std::path::PathBuf, std::time::SystemTime)> = if misc.ts_preserve {
         use std::os::unix::fs::MetadataExt;
         collected
             .iter()
@@ -1221,9 +1217,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         let mut ar = match &password {
             Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
                 .map_err(|e| format!("open: {e}"))?,
-            None => {
-                rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?
-            }
+            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
         };
         let tmp = std::env::temp_dir().join(format!("rar5-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).map_err(|e| format!("test dir: {e}"))?;
@@ -1251,9 +1245,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         let mut ar = match &password {
             Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
                 .map_err(|e| format!("open: {e}"))?,
-            None => {
-                rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?
-            }
+            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
         };
         let stale: Vec<String> = ar
             .namelist()
@@ -1427,8 +1419,10 @@ fn cmd_update_freshen(
                 }
             }
             if !renames.is_empty() {
-                let pairs: Vec<(&str, &str)> =
-                    renames.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+                let pairs: Vec<(&str, &str)> = renames
+                    .iter()
+                    .map(|(a, b)| (a.as_str(), b.as_str()))
+                    .collect();
                 rar.rename(&pairs).map_err(|e| format!("rename: {e}"))?;
             }
             if !to_drop.is_empty() {
@@ -1465,8 +1459,8 @@ fn cmd_update_freshen(
             save_ctime: ts.save_ctime,
             save_atime: ts.save_atime,
             save_mtime: ts.save_mtime,
-        save_owner: misc.owner,
-        save_streams: misc.save_streams,
+            save_owner: misc.owner,
+            save_streams: misc.save_streams,
             time_precision_seconds: ts.precision_seconds,
             ..Default::default()
         };
@@ -1568,8 +1562,8 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
             save_ctime: ts.save_ctime,
             save_atime: ts.save_atime,
             save_mtime: ts.save_mtime,
-        save_owner: misc.owner,
-        save_streams: misc.save_streams,
+            save_owner: misc.owner,
+            save_streams: misc.save_streams,
             time_precision_seconds: ts.precision_seconds,
             ..Default::default()
         };
@@ -1682,8 +1676,9 @@ fn cmd_find(cmd: &str, args: &[String]) -> Result<(), String> {
 /// columns.
 fn cmd_verbose_list(args: &ArchiveArgs) -> Result<(), String> {
     let rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("{e}"))?,
+        Some(pw) => {
+            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
+        }
         None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
     };
     common::print_verbose_list(&rar)
@@ -1822,7 +1817,9 @@ fn cmd_sfx(args: &SfxArgs) -> Result<(), String> {
 /// `%ProgramFiles(x86)%\WinRAR`, or the registry-installed path).
 fn find_sfx_module() -> Option<String> {
     let mut candidates: Vec<Option<String>> = vec![
-        std::env::var("HOME").ok().map(|h| format!("{h}/default.sfx")),
+        std::env::var("HOME")
+            .ok()
+            .map(|h| format!("{h}/default.sfx")),
         Some("/usr/lib/default.sfx".to_string()),
         Some("/usr/local/lib/default.sfx".to_string()),
     ];
@@ -1842,10 +1839,7 @@ fn find_sfx_module() -> Option<String> {
             if status == 0 {
                 let mut buf = [0u16; 1024];
                 let mut size = (buf.len() * 2) as u32;
-                let value: Vec<u16> = "exe32"
-                    .encode_utf16()
-                    .chain(std::iter::once(0))
-                    .collect();
+                let value: Vec<u16> = "exe32".encode_utf16().chain(std::iter::once(0)).collect();
                 let status = unsafe {
                     RegQueryValueExW(
                         hkey,
@@ -1915,9 +1909,7 @@ fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
         .iter()
         .map(|(a, b)| (a.as_str(), b.as_str()))
         .collect();
-    let n = rar
-        .rename(&pairs_ref)
-        .map_err(|e| format!("ch: {e}"))?;
+    let n = rar.rename(&pairs_ref).map_err(|e| format!("ch: {e}"))?;
     info!("Converted {n} name(s) in {archive}", archive = args.archive);
     Ok(())
 }
@@ -1973,7 +1965,11 @@ fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
 
 /// Destination directory, honoring `-ad` (append the archive base name).
 fn extract_dest(args: &ExtractArgs) -> Result<std::path::PathBuf, String> {
-    Ok(common::extract_dest(&args.dest, &args.archive, args.append_dir))
+    Ok(common::extract_dest(
+        &args.dest,
+        &args.archive,
+        args.append_dir,
+    ))
 }
 
 /// Extract without archived paths (like `rar e`).
@@ -2043,8 +2039,8 @@ fn arg_to_name(arg: &str) -> String {
 /// Read one mask per line from a filter list file (like `-x@listfile`);
 /// blank lines are skipped.
 fn read_mask_file(path: &str) -> Result<Vec<String>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("read mask list {path}: {e}"))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("read mask list {path}: {e}"))?;
     Ok(content
         .lines()
         .map(|l| l.trim())
@@ -2205,11 +2201,11 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-
 fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
     let rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("{e}"))?,
+        Some(pw) => {
+            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
+        }
         None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
     };
 
@@ -2264,8 +2260,9 @@ fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
 
 fn cmd_info(args: &ArchiveArgs) -> Result<(), String> {
     let rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("{e}"))?,
+        Some(pw) => {
+            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
+        }
         None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
     };
 
@@ -2344,10 +2341,8 @@ fn apply_rarfiles_order(
             matched
                 .into_iter()
                 .min_by(|&a, &b| {
-                    let a_sub =
-                        match_sets[a].iter().all(|x| match_sets[b].contains(x));
-                    let b_sub =
-                        match_sets[b].iter().all(|x| match_sets[a].contains(x));
+                    let a_sub = match_sets[a].iter().all(|x| match_sets[b].contains(x));
+                    let b_sub = match_sets[b].iter().all(|x| match_sets[a].contains(x));
                     match (a_sub, b_sub) {
                         (true, false) => Ordering::Less,
                         (false, true) => Ordering::Greater,

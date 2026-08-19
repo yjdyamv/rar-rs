@@ -11,8 +11,8 @@ pub(crate) fn write_windows_stream(path: &Path, stream_name: &str, data: &[u8]) 
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_ALWAYS,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_ALWAYS, WriteFile,
     };
     let mut full: Vec<u16> = path
         .as_os_str()
@@ -59,8 +59,8 @@ pub(crate) fn windows_set_creation_time(path: &Path, secs: u64, ns: u32) -> std:
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, SetFileTime, FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING, SetFileTime,
     };
     let wide: Vec<u16> = path
         .as_os_str()
@@ -103,8 +103,8 @@ fn windows_file_time(path: &Path, want_access: bool) -> Option<(u64, u32)> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileTime, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileTime, OPEN_EXISTING,
     };
     let wide: Vec<u16> = path
         .as_os_str()
@@ -233,12 +233,17 @@ fn owner_extra_cfg(save_owner: bool, meta: &fs::Metadata) -> Option<Vec<u8>> {
 }
 
 impl RarArchive {
-
     // ── Public API: creation ───────────────────────────────────────────────
 
     /// Build the FILE_TIME extra record for `meta`, per the current
     /// `-ts` settings; `None` when no time needs the extra record.
-    fn time_extra_for(&self, meta: &fs::Metadata, path: &Path, mtime: u32, mtime_ns: u32) -> Option<Vec<u8>> {
+    fn time_extra_for(
+        &self,
+        meta: &fs::Metadata,
+        path: &Path,
+        mtime: u32,
+        mtime_ns: u32,
+    ) -> Option<Vec<u8>> {
         time_extra_cfg(
             self.save_ctime,
             self.save_atime,
@@ -339,8 +344,8 @@ impl RarArchive {
             .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().into_owned());
         let name = name.replace('\\', "/");
 
-        if let Some(cb) = self.progress_callback.as_deref_mut() {
-            cb(0, file_size);
+        if self.progress.is_some() {
+            self.report_progress(0, file_size);
         }
 
         let method = level_to_method(level);
@@ -384,9 +389,7 @@ impl RarArchive {
                 mtime,
                 dict_bytes,
             )?;
-            if let Some(cb) = self.progress_callback.as_deref_mut() {
-                cb(file_size, file_size);
-            }
+            self.report_progress(file_size, file_size);
             return Ok(());
         }
 
@@ -452,9 +455,7 @@ impl RarArchive {
                 )
                 .map_err(RarError::Unsupported)?;
                 packed.extend(compressed);
-                if let Some(cb) = self.progress_callback.as_deref_mut() {
-                    cb(bytes_read, file_size);
-                }
+                self.report_progress(bytes_read, file_size);
                 if packed.len() as u64 >= file_size {
                     break;
                 }
@@ -492,9 +493,7 @@ impl RarArchive {
                 dict_bytes,
             )?;
             self.write_member_streams(path)?;
-            if let Some(cb) = self.progress_callback.as_deref_mut() {
-                cb(file_size, file_size);
-            }
+            self.report_progress(file_size, file_size);
             return Ok(());
         }
 
@@ -532,9 +531,7 @@ impl RarArchive {
             self.reset_solid_chain();
         }
 
-        if let Some(cb) = self.progress_callback.as_deref_mut() {
-            cb(file_size, file_size);
-        }
+        self.report_progress(file_size, file_size);
 
         Ok(())
     }
@@ -706,9 +703,7 @@ impl RarArchive {
             .as_secs() as u32;
 
         let method = level_to_method(compression_level);
-        if let Some(cb) = self.progress_callback.as_deref_mut() {
-            cb(0, data.len() as u64);
-        }
+        self.report_progress(0, data.len() as u64);
         if method == COMP_METHOD_STORE || sample_is_incompressible(data, method) {
             self.reset_solid_chain();
             let (header_crc, extra_data, stored_hash, encr_params) =
@@ -737,21 +732,23 @@ impl RarArchive {
                 stored_hash,
             )?;
         } else {
-            let (dsl, dict_bytes) = dict_params_for(
-                data.len(),
-                self.dict_size_log,
-                self.dict_size_bytes,
-                method,
-            );
+            let (dsl, dict_bytes) =
+                dict_params_for(data.len(), self.dict_size_log, self.dict_size_bytes, method);
             let chain_solid = self.solid_mode && self.encoder_state.is_some();
             if self.solid_mode {
                 self.encoder_state.get_or_insert_with(Default::default);
             }
-            let mut progress: Option<&mut dyn FnMut(u64, u64)> = None;
-            if let Some(cb) = self.progress_callback.as_deref_mut() {
-                let cb: &mut dyn FnMut(u64, u64) = cb;
-                progress = Some(cb);
-            }
+            let shared = self.progress.clone();
+            let member = self.progress_member;
+            let mut cb = move |done: u64, total: u64| {
+                if let Some(shared) = &shared {
+                    shared
+                        .lock()
+                        .expect("progress lock")
+                        .report(member, done, total);
+                }
+            };
+            let progress: Option<&mut dyn FnMut(u64, u64)> = Some(&mut cb);
             let packed = compression::compress_chunked(
                 data,
                 method,
@@ -819,9 +816,7 @@ impl RarArchive {
             }
         }
 
-        if let Some(cb) = self.progress_callback.as_deref_mut() {
-            cb(data.len() as u64, data.len() as u64);
-        }
+        self.report_progress(data.len() as u64, data.len() as u64);
 
         Ok(())
     }
@@ -846,8 +841,28 @@ impl RarArchive {
                 return self.add_batch_parallel(entries);
             }
         }
-        for entry in entries {
+        self.progress_set_batch_total(entries)?;
+        for (i, entry) in entries.iter().enumerate() {
+            self.progress_member = i;
             self.add_batch_entry_sequential(entry)?;
+        }
+        Ok(())
+    }
+
+    /// Sum every member's input size so the progress denominator covers the
+    /// whole batch (parallel waves and sequential members alike).
+    fn progress_set_batch_total(&mut self, entries: &[BatchEntry<'_>]) -> RarResult<()> {
+        let mut total = 0u64;
+        for e in entries {
+            let size = match e {
+                BatchEntry::Bytes { data, .. } => data.len() as u64,
+                BatchEntry::File { path, .. } => fs::metadata(path)?.len(),
+                BatchEntry::Directory { .. } => 0,
+            };
+            total = total.saturating_add(size);
+        }
+        if let Some(progress) = &self.progress {
+            progress.lock().expect("progress lock").set_total(total);
         }
         Ok(())
     }
@@ -875,6 +890,8 @@ impl RarArchive {
 
     #[cfg(feature = "parallel")]
     fn add_batch_parallel(&mut self, entries: &[BatchEntry<'_>]) -> RarResult<()> {
+        self.progress_set_batch_total(entries)?;
+        let progress = self.progress.clone();
         let mut i = 0usize;
         while i < entries.len() {
             // Collect a consecutive run of eligible members into one wave
@@ -902,16 +919,15 @@ impl RarArchive {
             }
 
             if !wave.is_empty() {
-                let prepared = self.prepare_batch_wave(&wave)?;
-                for (_, entry) in prepared {
-                    let size = entry.unpacked_size;
-                    if let Some(cb) = self.progress_callback.as_deref_mut() {
-                        cb(0, size);
-                    }
+                // The whole wave compresses concurrently; the shared tracker
+                // turns each member's per-chunk events (and its completion,
+                // reported inside `prepare_batch_wave`) into a monotonic
+                // global stream, so the bar moves while the CPU-heavy pass
+                // runs instead of freezing until every member is done.
+                let prepared = self.prepare_batch_wave(&wave, progress.as_ref())?;
+                for (idx, entry) in prepared {
+                    self.progress_member = idx;
                     self.write_prepared_entry(entry)?;
-                    if let Some(cb) = self.progress_callback.as_deref_mut() {
-                        cb(size, size);
-                    }
                 }
             }
 
@@ -927,6 +943,7 @@ impl RarArchive {
                     // to `add_file` and with the same compression ratio.
                     let _ = (path, name, level, size);
                 }
+                self.progress_member = i;
                 self.add_batch_entry_sequential(&entries[i])?;
                 i += 1;
             }
@@ -938,6 +955,7 @@ impl RarArchive {
     fn prepare_batch_wave(
         &self,
         wave: &[(usize, BatchEntry<'_>)],
+        progress: Option<&std::sync::Arc<std::sync::Mutex<ProgressTracker>>>,
     ) -> RarResult<Vec<(usize, PreparedEntry)>> {
         use rayon::prelude::*;
 
@@ -963,17 +981,33 @@ impl RarArchive {
                                 .unwrap_or_default()
                                 .as_secs() as u32;
                             Self::prepare_data_entry(
-                                &ctx, name, data, level, 0o100644, mtime, None, None, false,
+                                &ctx, name, data, level, 0o100644, mtime, None, None, false, idx,
+                                progress,
                             )
                         }
                         BatchEntry::File { path, name, level } => {
-                            Self::prepare_file_entry(&ctx, path, name, level)
+                            Self::prepare_file_entry(&ctx, path, name, level, idx, progress)
                         }
                         BatchEntry::Directory { .. } => {
                             unreachable!("directories never enter a compression wave")
                         }
                     };
-                    prepared.map(|p| (idx, p))
+                    prepared.map(|p| {
+                        if let Some(progress) = progress {
+                            let total = match entry {
+                                BatchEntry::Bytes { data, .. } => data.len() as u64,
+                                BatchEntry::File { path, .. } => {
+                                    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+                                }
+                                BatchEntry::Directory { .. } => 0,
+                            };
+                            progress
+                                .lock()
+                                .expect("progress lock")
+                                .report(idx, total, total);
+                        }
+                        (idx, p)
+                    })
                 })
                 .collect()
         });
@@ -990,6 +1024,8 @@ impl RarArchive {
     /// without touching the archive stream. `file_origin` selects the exact
     /// sequential encoding used by [`Self::add_file`] (fresh encoder window
     /// per chunk) instead of [`Self::add_bytes`] (one shared window pass).
+    /// `member` and `progress` route per-chunk deltas into the shared tracker
+    /// so the parallel wave reports live progress.
     #[cfg(feature = "parallel")]
     fn prepare_data_entry(
         ctx: &BatchPrepareCtx<'_>,
@@ -1001,6 +1037,8 @@ impl RarArchive {
         time_extra: Option<Vec<u8>>,
         owner_extra: Option<Vec<u8>>,
         file_origin: bool,
+        member: usize,
+        progress: Option<&std::sync::Arc<std::sync::Mutex<ProgressTracker>>>,
     ) -> RarResult<PreparedEntry> {
         let plain_crc = crc32fast::hash(data);
         let plain_blake = if ctx.blake2 {
@@ -1028,21 +1066,19 @@ impl RarArchive {
             );
         }
 
-        let (dsl, dict_bytes) = dict_params_for(
-            data.len(),
-            ctx.dict_size_log,
-            ctx.dict_size_bytes,
-            method,
-        );
+        let (dsl, dict_bytes) =
+            dict_params_for(data.len(), ctx.dict_size_log, ctx.dict_size_bytes, method);
         // One encoder state per member: the sequential path keeps the LZ
         // window (tail + long-range history) within a member and resets
         // between members, so the batch archive stays byte-identical to
         // it while remaining parallel across members.
         let mut state = crate::codec::EncoderState::default();
+        let total = data.len() as u64;
         let packed = if file_origin {
             // Mirror add_file's streaming loop exactly (shared state
             // across chunks within the member).
             let mut packed = Vec::new();
+            let mut processed = 0u64;
             for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
                 let is_final = chunk.len() < crate::codec::DEFAULT_CHUNK_SIZE;
                 let compressed = compression::compress_chunked(
@@ -1057,6 +1093,13 @@ impl RarArchive {
                 )
                 .map_err(RarError::Unsupported)?;
                 packed.extend(compressed);
+                processed += chunk.len() as u64;
+                if let Some(progress) = progress {
+                    progress
+                        .lock()
+                        .expect("progress lock")
+                        .report(member, processed, total);
+                }
                 if packed.len() >= data.len() {
                     break;
                 }
@@ -1116,6 +1159,8 @@ impl RarArchive {
         path: &Path,
         arcname: Option<&str>,
         level: u8,
+        member: usize,
+        progress: Option<&std::sync::Arc<std::sync::Mutex<ProgressTracker>>>,
     ) -> RarResult<PreparedEntry> {
         let meta = fs::metadata(path)?;
         if !meta.is_file() {
@@ -1183,6 +1228,8 @@ impl RarArchive {
             time_extra,
             owner_extra,
             true,
+            member,
+            progress,
         )
     }
 
@@ -1413,7 +1460,15 @@ impl RarArchive {
             let hdr_size = self.on_disk_header_len(chunk_fh.to_bytes().len() as u64);
 
             let bytes_for_data = remaining_vol.saturating_sub(hdr_size + eoa_size);
-            eprintln!("SPLIT vol_bytes={} remaining={} hdr_disk={} eoa={} bytes_for_data={} vol_size={}", self.volume_bytes_written, remaining_vol, hdr_size, eoa_size, bytes_for_data, volume_size);
+            eprintln!(
+                "SPLIT vol_bytes={} remaining={} hdr_disk={} eoa={} bytes_for_data={} vol_size={}",
+                self.volume_bytes_written,
+                remaining_vol,
+                hdr_size,
+                eoa_size,
+                bytes_for_data,
+                volume_size
+            );
             if bytes_for_data == 0 {
                 self.start_next_volume()?;
                 is_first = false;
@@ -1661,7 +1716,7 @@ impl RarArchive {
             _ => {
                 return Err(RarError::Format(
                     "internal error: encryption parameters mismatch".into(),
-                ))
+                ));
             }
         };
         let mut write_src = payload_stream(&key_iv);
@@ -1678,23 +1733,15 @@ impl RarArchive {
             let written = {
                 let stream = self.stream.as_mut().unwrap();
                 if progress {
-                    match self.progress_callback.as_deref_mut() {
-                        Some(cb) => {
-                            let mut sink = ProgressWriter {
-                                inner: stream,
-                                total: unpacked_size,
-                                written: 0,
-                                cb,
-                            };
-                            write_src.emit_to(reader, plain_len, 0, packed_size, &mut sink)?;
-                            sink.written
-                        }
-                        None => {
-                            let mut counting = CountingWriter::new(stream);
-                            write_src.emit_to(reader, plain_len, 0, packed_size, &mut counting)?;
-                            counting.written()
-                        }
-                    }
+                    let mut sink = ProgressWriter {
+                        inner: stream,
+                        total: unpacked_size,
+                        written: 0,
+                        member: self.progress_member,
+                        progress: self.progress.clone(),
+                    };
+                    write_src.emit_to(reader, plain_len, 0, packed_size, &mut sink)?;
+                    sink.written
                 } else {
                     let mut counting = CountingWriter::new(stream);
                     write_src.emit_to(reader, plain_len, 0, packed_size, &mut counting)?;
@@ -1846,29 +1893,22 @@ impl RarArchive {
             {
                 let stream = self.stream.as_mut().unwrap();
                 if progress {
-                    match self.progress_callback.as_deref_mut() {
-                        Some(cb) => {
-                            let mut sink = ProgressWriter {
-                                inner: stream,
-                                total: unpacked_size,
-                                written: offset,
-                                cb,
-                            };
-                            write_src
-                                .emit_to(reader, plain_len, offset, offset + chunk_size, &mut sink)?;
-                        }
-                        None => {
-                            write_src.emit_to(
-                                reader,
-                                plain_len,
-                                offset,
-                                offset + chunk_size,
-                                &mut *stream,
-                            )?;
-                        }
-                    }
+                    let mut sink = ProgressWriter {
+                        inner: stream,
+                        total: unpacked_size,
+                        written: offset,
+                        member: self.progress_member,
+                        progress: self.progress.clone(),
+                    };
+                    write_src.emit_to(reader, plain_len, offset, offset + chunk_size, &mut sink)?;
                 } else {
-                    write_src.emit_to(reader, plain_len, offset, offset + chunk_size, &mut *stream)?;
+                    write_src.emit_to(
+                        reader,
+                        plain_len,
+                        offset,
+                        offset + chunk_size,
+                        &mut *stream,
+                    )?;
                 }
             }
             self.volume_bytes_written += final_hdr_disk + chunk_size;
@@ -2028,9 +2068,7 @@ impl RarArchive {
                 .map_err(RarError::Unsupported)?;
                 spill.write_all(&compressed)?;
                 packed_size += compressed.len() as u64;
-                if let Some(cb) = self.progress_callback.as_deref_mut() {
-                    cb(bytes_read, file_size);
-                }
+                self.report_progress(bytes_read, file_size);
                 if packed_size >= file_size {
                     break;
                 }
@@ -2067,9 +2105,7 @@ impl RarArchive {
                 mtime,
                 dict_bytes,
             )?;
-            if let Some(cb) = self.progress_callback.as_deref_mut() {
-                cb(file_size, file_size);
-            }
+            self.report_progress(file_size, file_size);
             return Ok(());
         }
 
@@ -2115,9 +2151,7 @@ impl RarArchive {
         if !self.solid_mode {
             self.reset_solid_chain();
         }
-        if let Some(cb) = self.progress_callback.as_deref_mut() {
-            cb(file_size, file_size);
-        }
+        self.report_progress(file_size, file_size);
         Ok(())
     }
 
@@ -2137,9 +2171,7 @@ impl RarArchive {
                 if raw_name == "::$DATA" {
                     continue; // the default unnamed stream
                 }
-                let trimmed = raw_name
-                    .strip_suffix(":$DATA")
-                    .unwrap_or(&raw_name);
+                let trimmed = raw_name.strip_suffix(":$DATA").unwrap_or(&raw_name);
                 let stream_part = trimmed.rsplit_once(':').map(|(_, s)| s).unwrap_or(trimmed);
                 let name = format!(":{stream_part}");
                 // Read the stream payload through the `file:stream` path.
@@ -2175,7 +2207,6 @@ impl RarArchive {
         }
         Ok(())
     }
-
 }
 
 /// Enumerate the NTFS alternate data streams of `path` on Windows:
