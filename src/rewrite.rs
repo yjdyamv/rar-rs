@@ -171,14 +171,20 @@ impl RarArchive {
         let tmp_base = format!(".{base}.rar5tmp-{}", temp_suffix());
         let tmp_base_path = parent.join(&tmp_base);
 
-        // Write the new volume set. Swapping `self.path` makes
-        // start_next_volume create the temporary volume names.
+        // Write the new volume set. Swapping `self.path` makes the
+        // streamed payload spill file land next to the temporary volumes;
+        // volume naming itself comes from the staged `pending` set.
         let saved_path = self.path.clone();
         self.path = tmp_base_path;
         self.volume_size = Some(volume_size);
-        self.volume_paths = Vec::new();
+        self.volume_paths = vec![volume_path(&parent, &base, 1)];
         self.current_volume = 1;
         self.volume_bytes_written = 0;
+        self.pending = Some(PendingCommit::Volumes {
+            parent: parent.clone(),
+            tmp_base: tmp_base.clone(),
+            final_base: base.clone(),
+        });
         self.stream = Some(Box::new(read_write_create(&volume_path(
             &parent, &tmp_base, 1,
         ))?));
@@ -315,6 +321,9 @@ impl RarArchive {
             }
             Ok(())
         })();
+        // The staged volumes were renamed/cleaned above (or on error below),
+        // so the drop guard must not touch them again.
+        self.pending = None;
         if result.is_err() {
             for n in 1..=orig_volumes.len() {
                 let _ = fs::remove_file(volume_path(&parent, &tmp_base, n));

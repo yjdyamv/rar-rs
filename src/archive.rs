@@ -596,6 +596,11 @@ pub struct RarArchive {
     time_precision_seconds: bool,
     /// Options for the current read/extract operation (set per call).
     extract_options: crate::options::ExtractOptions,
+    /// Staged write target during an uncommitted create/append: the data
+    /// goes to temporary sibling files and is moved over the final paths
+    /// only after [`Self::close`] succeeds, so a failed or interrupted
+    /// operation never leaves a partial archive at the final path.
+    pending: Option<PendingCommit>,
 }
 
 /// An NTFS alternate data stream ("STM" service record) attached to an
@@ -623,6 +628,36 @@ enum Mode {
     Read,
     Write,
     Append,
+}
+
+/// Staged write target: new archive data is written to temporary sibling
+/// files first and moved over the final paths on successful close.
+enum PendingCommit {
+    /// Single-volume write: the temporary file staged for the final path.
+    Single(PathBuf),
+    /// Multi-volume write: volumes are staged as `{tmp_base}.partN.rar`
+    /// (in `parent`) and moved to `{final_base}.partN.rar` on close.
+    Volumes {
+        parent: PathBuf,
+        tmp_base: String,
+        final_base: String,
+    },
+}
+
+impl PendingCommit {
+    /// Remove staged files that were never committed.
+    fn cleanup(&self, volume_count: usize) {
+        match self {
+            PendingCommit::Single(tmp) => {
+                let _ = fs::remove_file(tmp);
+            }
+            PendingCommit::Volumes { parent, tmp_base, .. } => {
+                for n in 1..=volume_count {
+                    let _ = fs::remove_file(volume_path(parent, tmp_base, n));
+                }
+            }
+        }
+    }
 }
 
 impl RarArchive {
@@ -669,6 +704,7 @@ impl RarArchive {
             streams: Vec::new(),
             time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
+            pending: None,
         };
         archive.open_read()?;
         Ok(archive)
@@ -715,6 +751,7 @@ impl RarArchive {
             streams: Vec::new(),
             time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
+            pending: None,
         };
         archive.open_read()?;
         Ok(archive)
@@ -733,6 +770,11 @@ impl RarArchive {
     /// existing blocks, and [`Self::close`] rebuilds the quick-open record
     /// and the recovery record over the whole archive. Existing members are
     /// never recompressed.
+    ///
+    /// The append is staged in a temporary sibling file (the surviving
+    /// prefix is copied over) and moved to the archive path only when
+    /// [`Self::close`] succeeds, so a failed or interrupted append never
+    /// truncates or corrupts the original archive.
     pub fn open_append(path: impl AsRef<Path>) -> RarResult<Self> {
         Self::open_append_with_password(path, "")
     }
@@ -792,6 +834,7 @@ impl RarArchive {
             streams: Vec::new(),
             time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
+            pending: None,
         };
         archive.open_read()?;
         archive.prepare_append()?;
@@ -891,13 +934,16 @@ impl RarArchive {
 
         self.recovery_percent = if had_rr { rr_percent } else { None };
 
-        let mut f = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)?;
-        f.set_len(truncate_pos)?;
-        f.seek(SeekFrom::End(0))?;
-        self.stream = Some(Box::new(f));
+        // Stage the append: copy the surviving prefix into a temporary
+        // sibling file and append the new members there. The temp is moved
+        // over the archive on close, so a failed or interrupted append
+        // never truncates or corrupts the original archive.
+        let tmp_path = temp_sibling_path(&path);
+        let mut src = File::open(&path)?;
+        let mut dst = read_write_create(&tmp_path)?;
+        copy_prefix(&mut src, &mut dst, truncate_pos)?;
+        self.pending = Some(PendingCommit::Single(tmp_path));
+        self.stream = Some(Box::new(dst));
         Ok(())
     }
 
@@ -1050,6 +1096,10 @@ impl RarArchive {
     /// `blake2` options can be combined with passwords, header encryption,
     /// recovery records and volume sizes. The dedicated `create*`
     /// constructors are thin wrappers around it.
+    ///
+    /// The archive data is staged in a temporary sibling file and moved to
+    /// `path` only when [`Self::close`] succeeds, so an aborted or failed
+    /// write never leaves a partial archive at `path`.
     pub fn create_with_options(
         path: impl AsRef<Path>,
         opts: crate::options::CreateOptions,
@@ -1154,6 +1204,7 @@ impl RarArchive {
             streams: Vec::new(),
             time_precision_seconds: opts.time_precision_seconds,
             extract_options: crate::options::ExtractOptions::default(),
+            pending: None,
         };
         Ok(archive)
     }
@@ -1373,11 +1424,18 @@ impl RarArchive {
                 ));
             }
             let base = get_volume_base(&self.path);
-            let parent = self.path.parent().unwrap_or(Path::new("."));
-            let vol_path = volume_path(parent, &base, 1);
-            self.volume_paths = vec![vol_path.clone()];
+            let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+            // Stage the volumes under a temporary volume base; they are
+            // moved over the final `{base}.partN.rar` names on close.
+            let tmp_base = format!(".{base}.rar5tmp-{}", temp_suffix());
+            self.volume_paths = vec![volume_path(&parent, &base, 1)];
             self.current_volume = 1;
-            let f = read_write_create(&vol_path)?;
+            self.pending = Some(PendingCommit::Volumes {
+                parent: parent.clone(),
+                tmp_base: tmp_base.clone(),
+                final_base: base,
+            });
+            let f = read_write_create(&volume_path(&parent, &tmp_base, 1))?;
             self.stream = Some(Box::new(f));
             self.write_signature()?;
             self.write_archive_encryption_header_if_needed()?;
@@ -1386,7 +1444,12 @@ impl RarArchive {
             return Ok(());
         }
 
-        let f = read_write_create(&self.path)?;
+        // Stage the archive under a temporary sibling name; it is moved
+        // over the final path on close, so a failed or interrupted
+        // creation never leaves a partial archive at the target path.
+        let tmp_path = temp_sibling_path(&self.path);
+        self.pending = Some(PendingCommit::Single(tmp_path.clone()));
+        let f = read_write_create(&tmp_path)?;
         self.stream = Some(Box::new(f));
         self.write_signature()?;
         self.write_archive_encryption_header_if_needed()?;
@@ -1457,6 +1520,10 @@ impl RarArchive {
     pub fn close(&mut self) -> RarResult<()> {
         self.finish_writing()?;
         self.stream = None;
+        // Move the staged files over their final paths: only now does the
+        // archive become visible at the target path. On failure the staged
+        // files are left for [`Drop`] to clean up.
+        self.commit_pending()?;
         if self.recovery_volumes_percent.is_some() || self.recovery_volumes_count.is_some() {
             self.write_recovery_volumes()?;
         }
@@ -1599,8 +1666,54 @@ impl RarArchive {
     /// and append the `"RR"` service header. The main header locator was
     /// already patched by [`Self::close`].
     fn write_recovery_record(&mut self) -> RarResult<()> {
-        let path = self.path.clone();
+        let path = self.write_file_path().to_path_buf();
         self.write_recovery_record_from(&path)
+    }
+
+    /// The file currently being written: the staged temporary sibling
+    /// during an uncommitted create/append, the final path otherwise.
+    fn write_file_path(&self) -> &Path {
+        match &self.pending {
+            Some(PendingCommit::Single(tmp)) => tmp,
+            _ => &self.path,
+        }
+    }
+
+    /// Move the staged write files over their final paths. Called on
+    /// successful close only; on failure the staged files are left in
+    /// place for [`Drop`] to clean up.
+    fn commit_pending(&mut self) -> RarResult<()> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
+        };
+        let result = match &pending {
+            PendingCommit::Single(tmp) => replace_file(tmp, &self.path),
+            PendingCommit::Volumes {
+                parent,
+                tmp_base,
+                final_base,
+            } => {
+                let mut last = Ok(());
+                for n in 1..=self.volume_paths.len() {
+                    let tmp = volume_path(parent, tmp_base, n);
+                    let final_path = volume_path(parent, final_base, n);
+                    if let Err(e) = replace_file(&tmp, &final_path) {
+                        last = Err(e);
+                        break;
+                    }
+                }
+                last
+            }
+        };
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Keep the pending state so the drop guard removes any
+                // staged files that were not committed.
+                self.pending = Some(pending);
+                Err(e)
+            }
+        }
     }
 
     /// Append the `"RR"` service header with parity over the archive
@@ -2261,11 +2374,26 @@ impl RarArchive {
         // Close current volume
         self.stream = None;
         self.current_volume += 1;
-        let parent = self.path.parent().unwrap_or(Path::new("."));
-        let base = get_volume_base(&self.path);
-        let vol_path = volume_path(parent, &base, self.current_volume);
-        self.volume_paths.push(vol_path.clone());
-        let f = read_write_create(&vol_path)?;
+        let (parent, tmp_base, final_base) = match &self.pending {
+            Some(PendingCommit::Volumes {
+                parent,
+                tmp_base,
+                final_base,
+            }) => (parent.clone(), tmp_base.clone(), final_base.clone()),
+            // Volume creation only happens in multivolume mode, where
+            // `open_write` (or `rewrite_multivolume`) has staged the set.
+            _ => {
+                return Err(RarError::Format(
+                    "internal error: volume created without a staged volume set".into(),
+                ));
+            }
+        };
+        // The volume is staged under the temporary base and moved over its
+        // final name on close.
+        let tmp_vol = volume_path(&parent, &tmp_base, self.current_volume);
+        let final_vol = volume_path(&parent, &final_base, self.current_volume);
+        self.volume_paths.push(final_vol);
+        let f = read_write_create(&tmp_vol)?;
         self.stream = Some(Box::new(f));
         self.write_signature()?;
         // Header-encrypted multi-volume sets repeat the plaintext encryption
@@ -3480,6 +3608,13 @@ fn spill_path_for(archive_path: &Path) -> PathBuf {
 impl Drop for RarArchive {
     fn drop(&mut self) {
         let _ = self.close();
+        // `close` may have failed (or never been reached); remove any
+        // staged files that were not committed so a failed or interrupted
+        // write leaves no garbage behind and never a partial archive at
+        // the final path.
+        if let Some(pending) = self.pending.take() {
+            pending.cleanup(self.volume_paths.len());
+        }
     }
 }
 
@@ -3932,6 +4067,30 @@ fn read_write_create(path: &Path) -> io::Result<File> {
         .create(true)
         .truncate(true)
         .open(path)
+}
+
+/// Copy exactly `limit` bytes from `reader` to `writer`.
+fn copy_prefix(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    mut remaining: u64,
+) -> io::Result<u64> {
+    let mut buf = [0u8; 256 * 1024];
+    let mut total = 0u64;
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        let n = reader.read(&mut buf[..want])?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "source shrank while staging the write",
+            ));
+        }
+        writer.write_all(&buf[..n])?;
+        total += n as u64;
+        remaining -= n as u64;
+    }
+    Ok(total)
 }
 
 /// Replace `dest` with `src` (atomic on Unix; falls back to remove+rename
@@ -4671,5 +4830,105 @@ mod tests {
             "a/b/c.txt"
         );
         assert_eq!(sanitize_archive_path("dir/").unwrap(), "dir");
+    }
+
+    /// Names of leftover staging files (`.rar5tmp-*`) in `dir`.
+    fn temp_leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("rar5tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn create_is_not_visible_until_close_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.rar");
+        let mut ar = RarArchive::create(&path).unwrap();
+        ar.add_bytes("a.txt", b"data", 0).unwrap();
+        // Creation is staged: nothing appears at the target path until close.
+        assert!(!path.exists());
+        ar.close().unwrap();
+        assert!(path.exists());
+        assert!(temp_leftovers(dir.path()).is_empty());
+        let mut rar = RarArchive::open(&path).unwrap();
+        assert_eq!(rar.read("a.txt").unwrap(), b"data");
+    }
+
+    #[test]
+    fn dropped_write_is_finalized_and_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.rar");
+        {
+            let mut ar = RarArchive::create(&path).unwrap();
+            ar.add_bytes("a.txt", b"data", 0).unwrap();
+        }
+        assert!(path.exists());
+        assert!(temp_leftovers(dir.path()).is_empty());
+        let mut rar = RarArchive::open(&path).unwrap();
+        assert_eq!(rar.read("a.txt").unwrap(), b"data");
+    }
+
+    #[test]
+    fn failed_commit_leaves_no_archive_or_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory at the target path: the final rename must fail.
+        let target = dir.path().join("t.rar");
+        std::fs::create_dir(&target).unwrap();
+        {
+            let mut ar = RarArchive::create(&target).unwrap();
+            ar.add_bytes("a.txt", b"data", 0).unwrap();
+            assert!(ar.close().is_err());
+        }
+        // The target is untouched and the staged temp file was cleaned up.
+        assert!(target.is_dir());
+        assert!(temp_leftovers(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn append_keeps_original_untouched_until_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.rar");
+        let original = {
+            let mut ar = RarArchive::create(&path).unwrap();
+            ar.add_bytes("a.txt", b"original", 0).unwrap();
+            ar.close().unwrap();
+            std::fs::read(&path).unwrap()
+        };
+        {
+            let mut ar = RarArchive::open_append(&path).unwrap();
+            // The append is staged: the original file stays byte-identical
+            // while the append is in progress.
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            ar.add_bytes("b.txt", b"appended", 0).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            ar.close().unwrap();
+        }
+        assert_ne!(std::fs::read(&path).unwrap(), original);
+        assert!(temp_leftovers(dir.path()).is_empty());
+        let mut rar = RarArchive::open(&path).unwrap();
+        assert_eq!(rar.read("a.txt").unwrap(), b"original");
+        assert_eq!(rar.read("b.txt").unwrap(), b"appended");
+    }
+
+    #[test]
+    fn multivolume_creation_stages_volumes_until_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mv.rar");
+        let data = vec![42u8; 80000];
+        let mut ar = RarArchive::create_multivolume(&path, 30000).unwrap();
+        ar.add_bytes("data.bin", &data, 0).unwrap();
+        // Volumes are staged under a temporary base: no final volume exists
+        // until close.
+        assert!(!dir.path().join("mv.part1.rar").exists());
+        assert!(!temp_leftovers(dir.path()).is_empty());
+        ar.close().unwrap();
+        assert!(dir.path().join("mv.part1.rar").exists());
+        assert!(dir.path().join("mv.part2.rar").exists());
+        assert!(temp_leftovers(dir.path()).is_empty());
+        let mut rar = RarArchive::open(&path).unwrap();
+        assert_eq!(rar.read("data.bin").unwrap(), data);
     }
 }
