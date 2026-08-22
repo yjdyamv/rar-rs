@@ -135,3 +135,11 @@ impl Drop for BatchWorkerGuard {
         IN_BATCH_WORKER.with(|flag| flag.set(false));
     }
 }
+
+/// Number of worker threads the compression pool runs with (the explicit
+/// `-mt` override when set, otherwise the automatic sizing). Callers use
+/// it to size per-member work splits.
+#[cfg(feature = "parallel")]
+pub(crate) fn compression_worker_count() -> usize {
+    compression_pool().current_num_threads()
+}

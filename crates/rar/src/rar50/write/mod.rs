@@ -2067,35 +2067,112 @@ impl RarArchive {
         let _spill_guard = SpillGuard(spill_path.clone());
         {
             let mut spill = File::create(&spill_path)?;
+
+            /// Encode one buffered window to the spill file. With the
+            /// `parallel` feature and enough data, the window is split
+            /// across the compression pool's workers; otherwise it falls
+            /// back to the byte-for-byte sequential chunk loop.
+            #[allow(clippy::too_many_arguments)]
+            fn flush_window(
+                work: &mut Vec<u8>,
+                is_final: bool,
+                chain_solid: bool,
+                method: u8,
+                dsl: u8,
+                dict_bytes: Option<u64>,
+                state: &mut Option<crate::codec::EncoderState>,
+                spill: &mut File,
+                packed_size: &mut u64,
+            ) -> RarResult<()> {
+                if work.is_empty() {
+                    return Ok(());
+                }
+                #[cfg(not(feature = "parallel"))]
+                let _ = chain_solid;
+                #[cfg(feature = "parallel")]
+                const MT_MIN: usize = 3 * crate::codec::DEFAULT_CHUNK_SIZE;
+                #[cfg(feature = "parallel")]
+                if !chain_solid
+                    && work.len() >= MT_MIN
+                    && crate::parallel::compression_worker_count() > 1
+                {
+                    let packed = crate::codec::rar50::encode_chunked_mt(
+                        work,
+                        method,
+                        dsl,
+                        crate::codec::DEFAULT_CHUNK_SIZE,
+                        state.get_or_insert_with(Default::default),
+                        crate::parallel::compression_worker_count(),
+                        is_final,
+                        dict_bytes.is_some(),
+                    );
+                    spill.write_all(&packed)?;
+                    *packed_size += packed.len() as u64;
+                    work.clear();
+                    return Ok(());
+                }
+                let mut offset = 0usize;
+                while offset < work.len() {
+                    let end = (offset + crate::codec::DEFAULT_CHUNK_SIZE).min(work.len());
+                    let compressed = compression::compress_chunked(
+                        &work[offset..end],
+                        method,
+                        dsl,
+                        crate::codec::DEFAULT_CHUNK_SIZE,
+                        state.as_mut(),
+                        is_final && end >= work.len(),
+                        None,
+                        dict_bytes.is_some(),
+                    )
+                    .map_err(RarError::Unsupported)?;
+                    spill.write_all(&compressed)?;
+                    *packed_size += compressed.len() as u64;
+                    offset = end;
+                }
+                work.clear();
+                Ok(())
+            }
+
+            #[cfg(feature = "parallel")]
+            let mt_window = (crate::parallel::compression_worker_count()
+                .max(2)
+                * 8 * 1024 * 1024)
+                .clamp(24 * 1024 * 1024, 64 * 1024 * 1024);
+            #[cfg(not(feature = "parallel"))]
+            let mt_window = 0usize;
+
+            let mut work: Vec<u8> = Vec::new();
+            let mut eof = false;
             let mut file = io::BufReader::with_capacity(1 << 20, File::open(path)?);
             let mut buf = vec![0u8; crate::codec::DEFAULT_CHUNK_SIZE];
-            loop {
+            while !eof {
                 let n = file.read(&mut buf)?;
                 if n == 0 {
-                    break;
+                    eof = true;
+                } else {
+                    bytes_read += n as u64;
+                    crc_hasher.update(&buf[..n]);
+                    if let Some(h) = blake_hasher.as_mut() {
+                        h.update(&buf[..n]);
+                    }
+                    work.extend_from_slice(&buf[..n]);
+                    self.report_progress(bytes_read, file_size);
                 }
-                bytes_read += n as u64;
-                crc_hasher.update(&buf[..n]);
-                if let Some(h) = blake_hasher.as_mut() {
-                    h.update(&buf[..n]);
-                }
-                let state = self.encoder_state.as_mut();
-                let compressed = compression::compress_chunked(
-                    &buf[..n],
-                    method,
-                    dsl,
-                    crate::codec::DEFAULT_CHUNK_SIZE,
-                    state,
-                    n < buf.len(),
-                    None,
-                    dict_bytes.is_some(),
-                )
-                .map_err(RarError::Unsupported)?;
-                spill.write_all(&compressed)?;
-                packed_size += compressed.len() as u64;
-                self.report_progress(bytes_read, file_size);
-                if packed_size >= file_size {
-                    break;
+                if eof || work.len() >= mt_window {
+                    flush_window(
+                        &mut work,
+                        eof,
+                        chain_solid,
+                        method,
+                        dsl,
+                        dict_bytes,
+                        &mut self.encoder_state,
+                        &mut spill,
+                        &mut packed_size,
+                    )?;
+                    if packed_size >= file_size {
+                        break;
+                    }
                 }
             }
         }

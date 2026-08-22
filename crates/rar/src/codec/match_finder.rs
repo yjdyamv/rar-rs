@@ -95,6 +95,9 @@ pub struct LongRange {
     window: usize,
     /// History bound: `LONG_RANGE_MAX.min(window)`.
     max_hist: usize,
+    /// Total bytes ever pushed (absolute stream length covered). `base()`
+    /// derives the absolute offset of `hist[0]` after window slides.
+    total_pushed: usize,
 }
 
 impl LongRange {
@@ -105,6 +108,7 @@ impl LongRange {
             table: LongRangeTable::new(max_hist),
             window,
             max_hist,
+            total_pushed: 0,
         }
     }
 
@@ -143,24 +147,9 @@ impl LongRange {
         min_dist: usize,
         max_len: usize,
     ) -> Option<(u32, usize)> {
-        if pos + 4 > chunk.len() {
-            return None;
-        }
-        let key = self.hash4(chunk, pos);
-        let cand = self.table.get(key)? as usize;
-        if cand >= self.hist.len() {
-            return None;
-        }
-        let dist = self.hist.len() + pos - cand;
-        if dist < min_dist || dist > self.window {
-            return None;
-        }
-        let limit = max_len.min(self.hist.len() - cand).min(chunk.len() - pos);
-        if limit < 2 {
-            return None;
-        }
-        let len = long_match_len(&self.hist, chunk, cand, pos, limit);
-        (len >= 2).then_some((dist as u32, len))
+        // The query chunk directly abuts the history end, so its anchor
+        // (absolute stream position) is simply total pushed bytes.
+        self.find_from(chunk, pos, self.total_pushed, min_dist, max_len)
     }
 
     /// Append `chunk` to the history, sliding the window and rebuilding
@@ -175,6 +164,7 @@ impl LongRange {
         if chunk.is_empty() {
             return;
         }
+        self.total_pushed += chunk.len();
         if chunk.len() >= self.max_hist {
             // A single chunk fills (or exceeds) the whole window: keep
             // only its tail and rebuild the table from scratch.
@@ -208,6 +198,63 @@ impl LongRange {
             self.table.insert(key, off as i32);
             off += LONG_RANGE_STEP;
         }
+    }
+
+    /// Absolute stream offset of `hist[0]` (total pushed minus what the
+    /// sliding window still holds).
+    pub(crate) fn hist_base(&self) -> usize {
+        self.total_pushed - self.hist.len()
+    }
+
+    /// Total bytes ever pushed (the absolute stream position of the
+    /// history end).
+    pub(crate) fn total_pushed(&self) -> usize {
+        self.total_pushed
+    }
+
+    /// Read-only view of the retained history bytes (callers seed a fresh
+    /// table for parallel workers with the same content).
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn hist_bytes(&self) -> &[u8] {
+        &self.hist
+    }
+
+    /// Like [`Self::find`], but the query chunk starts at absolute stream
+    /// position `anchor` (history may cover more than just the bytes right
+    /// before it, e.g. when several slices of one buffer are encoded in
+    /// parallel against a shared table). Candidates at or after `anchor`
+    /// are rejected; distances are measured from the true absolute
+    /// positions, so emitted matches stay valid LZ.
+    pub(crate) fn find_from(
+        &self,
+        chunk: &[u8],
+        pos: usize,
+        anchor: usize,
+        min_dist: usize,
+        max_len: usize,
+    ) -> Option<(u32, usize)> {
+        if pos + 4 > chunk.len() {
+            return None;
+        }
+        let key = self.hash4(chunk, pos);
+        let cand = self.table.get(key)? as usize;
+        let cand_abs = self.hist_base() + cand;
+        if cand_abs >= anchor {
+            return None;
+        }
+        let dist = anchor + pos - cand_abs;
+        if dist < min_dist || dist > self.window {
+            return None;
+        }
+        // Comparisons may read past `anchor` into later slices' plaintext:
+        // those are real input bytes, and overlap semantics keep every
+        // referenced source strictly behind the destination.
+        let limit = max_len.min(self.hist.len() - cand).min(chunk.len() - pos);
+        if limit < 2 {
+            return None;
+        }
+        let len = long_match_len(&self.hist, chunk, cand, pos, limit);
+        (len >= 2).then_some((dist as u32, len))
     }
 }
 

@@ -78,6 +78,11 @@ pub const MAX_FILTER_BLOCK_LENGTH: u32 = 0x3FFFF;
 /// the chunk size instead of the whole file.
 pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
+/// Near-window (tail) context cap shared by the sequential and parallel
+/// encoders: the hash-chain matcher only needs short distances, longer
+/// ones come from the sampled long-range history.
+const NEAR_WINDOW_MAX: usize = 8 * 1024 * 1024;
+
 /// A RAR5 output filter applied to a region of the decompressed member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FilterSpec {
@@ -272,6 +277,224 @@ pub fn encode_chunked(
     Ok(output)
 }
 
+/// Multi-threaded encoding of one contiguous window of a member.
+///
+/// Splits `data` into per-worker slices (chunk-size aligned) and encodes
+/// them concurrently on the compression pool. Each worker matches against
+/// the preceding plaintext — up to [`NEAR_WINDOW_MAX`] bytes ending at its
+/// slice start, seeded with the entry tail for the first slice — plus a
+/// shared long-range table built once over the entry history and this
+/// window, so distant repeats across slices and across windows still
+/// compress. Repeat-distance state starts fresh in every slice: valid
+/// output, with slightly worse ratios when matches lean heavily on
+/// repeat-distance symbols.
+///
+/// On success `seed` is updated to continue after this window: its tail
+/// becomes the last `min(window, NEAR_WINDOW_MAX)` bytes of the window,
+/// the long-range history absorbs the whole window, and the repeat-distance
+/// cache resets.
+#[cfg(feature = "parallel")]
+pub fn encode_chunked_mt(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    chunk_size: usize,
+    seed: &mut EncoderState,
+    threads: usize,
+    is_final: bool,
+    extra_dist: bool,
+) -> Vec<u8> {
+    let level = (method as usize).clamp(1, 5);
+    let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
+    let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
+    let long_range = level >= 2;
+    let cs = chunk_size.max(1);
+
+    // Shared long-range table over entry history plus this window; built
+    // once, read-only afterwards (workers query with absolute anchors).
+    let entry_hist = seed
+        .long_range
+        .as_ref()
+        .map(|l| l.hist_bytes().to_vec())
+        .unwrap_or_default();
+    let mut lr_shared = match_finder::LongRange::new(dict_size);
+    lr_shared.push(&entry_hist);
+    lr_shared.push(data);
+    let entry_len = entry_hist.len();
+    let seed_tail = std::mem::take(&mut seed.tail);
+
+    // Slice boundaries: one fixed chunk per slice keeps the near-window
+    // reach (tail + slice) identical to the sequential path, so the
+    // long-range band stays live; slices run in waves of `threads` with
+    // results appended wave-by-wave (bounded memory, deterministic output
+    // independent of completion order).
+    let total_chunks = data.len().div_ceil(cs).max(1);
+    let n_workers = threads.clamp(1, 16);
+    let mut bounds = vec![0usize];
+    let mut c = 0usize;
+    while c < total_chunks {
+        c += 1;
+        let b = (c * cs).min(data.len());
+        if b <= *bounds.last().unwrap() {
+            break;
+        }
+        bounds.push(b);
+    }
+    if *bounds.last().unwrap() != data.len() {
+        bounds.push(data.len());
+    }
+    let n = bounds.len() - 1;
+
+    let pool = crate::parallel::compression_pool();
+    // Rayon's Scope::spawn returns nothing; each worker deposits its
+    // packed bytes into its own slot and we collect them wave-by-wave in
+    // order after the scope joins everything.
+    let slots = std::sync::Mutex::new(vec![None::<Vec<u8>>; n]);
+    let outputs = {
+        // Shared read-only handles for the worker closures.
+        let tail_ref = &seed_tail;
+        let lr_ref = &lr_shared;
+        let slots_ref = &slots;
+        pool.scope(|scope| {
+            let mut first = 0usize;
+            while first < n {
+                let last = (first + n_workers).min(n);
+                for k in first..last {
+                    let (s0, e0) = (bounds[k], bounds[k + 1]);
+                    scope.spawn(move |_| {
+                        let blocks = encode_mt_slice(
+                            data,
+                            s0,
+                            e0,
+                            tail_ref,
+                            lr_ref,
+                            entry_len,
+                            chain_len,
+                            lazy_thresh,
+                            max_match,
+                            dict_size,
+                            long_range,
+                            is_final && k + 1 == n,
+                            extra_dist,
+                        );
+                        slots_ref.lock().unwrap()[k] = Some(blocks);
+                    });
+                }
+                first = last;
+            }
+        });
+        slots.into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.expect("worker slot filled"))
+            .collect::<Vec<Vec<u8>>>()
+    };
+
+    let mut output = Vec::new();
+    for o in outputs {
+        output.extend(o);
+    }
+
+    // Continue the chain after this window: tail = suffix of the window
+    // (seeded with the entry tail so it spans windows like sequential
+    // mode), long-range state swaps in the shared table, repeat-distance
+    // cache resets (documented divergence from the sequential path).
+    let keep = dict_size.min(NEAR_WINDOW_MAX);
+    if keep <= data.len() {
+        seed.tail = data[data.len() - keep..].to_vec();
+    } else {
+        let take = (keep - data.len()).min(seed_tail.len());
+        let st = seed_tail.len();
+        let mut t = Vec::with_capacity(take + data.len());
+        t.extend_from_slice(&seed_tail[st - take..]);
+        t.extend_from_slice(data);
+        seed.tail = t;
+    }
+    seed.dist_cache = [0u32; DIST_CACHE_SIZE];
+    seed.last_length = 0;
+    seed.long_range = Some(lr_shared);
+    output
+}
+
+/// Encode one worker slice `[s0, e0)` of [`encode_chunked_mt`].
+#[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)]
+fn encode_mt_slice(
+    data: &[u8],
+    s0: usize,
+    e0: usize,
+    seed_tail: &[u8],
+    lr_shared: &match_finder::LongRange,
+    entry_len: usize,
+    chain_len: usize,
+    lazy_thresh: usize,
+    max_match: usize,
+    dict_size: usize,
+    long_range: bool,
+    is_last_block_of_member: bool,
+    extra_dist: bool,
+) -> Vec<u8> {
+    // Near-window context: the closest bytes before this slice, seeded
+    // with the entry tail when the slice starts at the buffer head.
+    let want = NEAR_WINDOW_MAX.min(dict_size);
+    let tail_ctx: Vec<u8> = if s0 >= want {
+        data[s0 - want..s0].to_vec()
+    } else {
+        let need = want - s0;
+        let take = need.min(seed_tail.len());
+        let st = seed_tail.len();
+        let mut v = Vec::with_capacity(take + s0);
+        v.extend_from_slice(&seed_tail[st - take..]);
+        v.extend_from_slice(&data[..s0]);
+        v
+    };
+    let tl = tail_ctx.len();
+    let mut combined = Vec::with_capacity(tl + (e0 - s0));
+    combined.extend_from_slice(&tail_ctx);
+    combined.extend_from_slice(&data[s0..e0]);
+
+    let mut finder = MatchFinder::new(&combined, 2, max_match, chain_len, dict_size);
+    for pos in 0..tl {
+        finder.insert(pos);
+    }
+
+    // Long-range candidates only beyond what the near finder covers; the
+    // anchor places this slice's start in absolute stream coordinates.
+    let lr_q = if long_range {
+        Some((
+            lr_shared,
+            tl + (e0 - s0),
+            entry_len + s0,
+        ))
+    } else {
+        None
+    };
+
+    let mut dist_cache = [0u32; DIST_CACHE_SIZE];
+    let mut last_length = 0u32;
+    let symbols = find_matches_in_range(
+        &combined,
+        &mut finder,
+        tl,
+        combined.len(),
+        lazy_thresh,
+        &mut dist_cache,
+        &mut last_length,
+        max_match,
+        lr_q,
+    );
+
+    let mut out = Vec::new();
+    let mut bs = 0usize;
+    while bs < symbols.len() {
+        let (be, _) = find_block_end(&symbols, bs, MAX_BLOCK_SIZE);
+        let is_last = is_last_block_of_member && be >= symbols.len();
+        out.extend(encode_block(&symbols[bs..be], is_last, extra_dist));
+        bs = be;
+    }
+    out
+}
+
 /// Encode `data` as a single RAR5 member with output filters applied.
 ///
 /// The filters are recorded at the start of the symbol stream (the decoder
@@ -416,7 +639,7 @@ fn find_matches_with_tail(
         // The near finder covers distances up to tail + chunk; long-range
         // candidates only matter beyond that.
         let near_max = tail_len + chunk.len();
-        Some((&*lr, near_max))
+        Some((&*lr, near_max, lr.total_pushed()))
     } else {
         None
     };
@@ -445,7 +668,6 @@ fn find_matches_with_tail(
     // longer distances come from the sampled long-range history. Capping
     // the tail keeps the per-chunk rebuild cost (inserting the whole
     // tail into the hash chain) bounded instead of O(window) per chunk.
-    const NEAR_WINDOW_MAX: usize = 8 * 1024 * 1024;
     let keep = window.min(NEAR_WINDOW_MAX).min(combined.len());
     state.tail = combined[combined.len() - keep..].to_vec();
     state.dist_cache = dist_cache;
@@ -467,7 +689,10 @@ fn find_matches_in_range(
     dist_cache: &mut [u32; DIST_CACHE_SIZE],
     last_length: &mut u32,
     max_match: usize,
-    lr: Option<(&match_finder::LongRange, usize)>,
+    // Long-range probe: (table, near_max, anchor). Anchor is the absolute
+    // stream position of data[start]; sequential callers pass the history total
+    // total pushed length, parallel workers pass their slice's absolute start.
+    lr: Option<(&match_finder::LongRange, usize, usize)>,
 ) -> Vec<Symbol> {
     let mut symbols = Vec::with_capacity(end - start);
     let mut pos = start;
@@ -489,13 +714,13 @@ fn find_matches_in_range(
             finder.insert(pos);
             let mut d = 0usize;
             let mut l = 0usize;
-            if let Some((long_range, near_max)) = lr
+            if let Some((long_range, near_max, anchor)) = lr
                 && pos + 4 <= end
                 && (pos & (match_finder::LONG_RANGE_STEP - 1)) == 0
             {
                 let chunk_off = pos - start;
                 if let Some((ld, ll)) =
-                    long_range.find(&data[start..end], chunk_off, near_max + 1, max_match)
+                    long_range.find_from(&data[start..end], chunk_off, anchor, near_max + 1, max_match)
                 {
                     d = ld as usize;
                     l = ll;
@@ -508,13 +733,13 @@ fn find_matches_in_range(
             // Long-range candidate: only when the near window found
             // nothing useful (a good near match is never worse than a
             // far one).
-            if let Some((long_range, near_max)) = lr
+            if let Some((long_range, near_max, anchor)) = lr
                 && l < 64
                 && pos + 4 <= end
             {
                 let chunk_off = pos - start;
                 if let Some((ld, ll)) =
-                    long_range.find(&data[start..end], chunk_off, near_max + 1, max_match)
+                    long_range.find_from(&data[start..end], chunk_off, anchor, near_max + 1, max_match)
                     && ll > l
                 {
                     d = ld as usize;
@@ -2517,4 +2742,107 @@ pub fn decompress(
         return Ok(result);
     }
     Err(format!("unknown compression method: {method}"))
+}
+#[cfg(all(test, feature = "parallel"))]
+mod mt_tests {
+    use super::*;
+
+    /// Deterministic pseudo-random block (xorshift64), so runs repeat.
+    fn prng_block(len: usize, seed: u64) -> Vec<u8> {
+        let mut s = seed | 1;
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                s as u8
+            })
+            .collect()
+    }
+
+    /// Data spanning several chunks with a far copy of the head plus
+    /// text-like filler: exercises tail context and the shared long-range
+    /// table across slice boundaries.
+    fn mixed_data() -> Vec<u8> {
+        let mut data = prng_block(300_000, 7);
+        let far_copy = data[..300_000].to_vec();
+        data.extend(far_copy);
+        data.extend(b"hello world ".repeat(40_000));
+        data
+    }
+
+    #[test]
+    fn roundtrips_across_dictionary_sizes() {
+        // Includes tiny dictionaries where the long-range band is empty
+        // (near reach exceeds the window) and mid-size ones where it is
+        // live — every variant must decode to the original bytes.
+        for &log in &[0u8, 3, 6] {
+            let data = mixed_data();
+            let packed = encode_chunked_mt(
+                &data,
+                3,
+                log,
+                DEFAULT_CHUNK_SIZE,
+                &mut EncoderState::default(),
+                4,
+                true,
+                false,
+            );
+            let out = decode_standalone(&packed, data.len() as u64, log, None, false).unwrap();
+            assert_eq!(out, data, "dict log {log}");
+        }
+    }
+
+    #[test]
+    fn v70_extra_dist_roundtrip() {
+        let data = mixed_data();
+        let packed = encode_chunked_mt(
+            &data,
+            3,
+            6,
+            DEFAULT_CHUNK_SIZE,
+            &mut EncoderState::default(),
+            3,
+            true,
+            true,
+        );
+        let out = decode_standalone(
+            &packed,
+            data.len() as u64,
+            6,
+            Some(48 * 1024 * 1024),
+            true,
+        )
+        .unwrap();
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn windows_continue_the_chain_like_sequential() {
+        // Two windows through one shared state must form a single valid
+        // member: only the last window carries the end-of-stream flag, and
+        // window 2 still matches into window 1 via tail + long range.
+        let w1 = prng_block(2 * DEFAULT_CHUNK_SIZE + 777, 11);
+        let mut w2 = prng_block(DEFAULT_CHUNK_SIZE + 123, 22);
+        w2[1000..2000].copy_from_slice(&w1[1000..2000]);
+        let mut st = EncoderState::default();
+        let mut packed = encode_chunked_mt(&w1, 3, 6, DEFAULT_CHUNK_SIZE, &mut st, 3, false, false);
+        packed.extend(encode_chunked_mt(&w2, 3, 6, DEFAULT_CHUNK_SIZE, &mut st, 3, true, false));
+        let mut full = w1;
+        full.extend(&w2);
+        let out = decode_standalone(&packed, full.len() as u64, 6, None, false).unwrap();
+        assert_eq!(out, full);
+    }
+
+    #[test]
+    fn deterministic_across_runs() {
+        let data = mixed_data();
+        let a = encode_chunked_mt(
+            &data, 3, 6, DEFAULT_CHUNK_SIZE, &mut EncoderState::default(), 4, true, false,
+        );
+        let b = encode_chunked_mt(
+            &data, 3, 6, DEFAULT_CHUNK_SIZE, &mut EncoderState::default(), 4, true, false,
+        );
+        assert_eq!(a, b);
+    }
 }
