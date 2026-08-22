@@ -1,7 +1,7 @@
 # rar-rs
 
-Pure-Rust RAR archive library and tools. Creates, reads, and extracts RAR5
-archives with native LZSS+Huffman compression, and reads/extracts RAR4
+Pure-Rust RAR5 archive library and tools. Creates, reads, and extracts RAR5
+archives with native LZSS+Huffman compression - no external binaries required.
 archives — no external binaries required.
 
 **License:** BSD-2-Clause — see [NOTICE](NOTICE) for legal details.
@@ -49,16 +49,11 @@ archives — no external binaries required.
 | Multi-volume archive reading         |   done |
 | Multi-volume archive creation        |   done |
 | Recovery volumes (`.rev`, WinRAR-compatible) | done |
-| **RAR4 (v1.5–v3.x)**                |        |
-| Extract RAR4 archives               |   done |
-| LZSS+Huffman decompression (m3)      |   done |
-| VM filters (E8, E8E9, Delta, RGB, Audio) | done |
-| Unicode filename support             |   done |
-| Large file support (>2 GB)           |   done |
-
+| **RAR4 (v1.5-v3.x)**                |        |
+| Extract RAR4 archives               | rejected with a clear error (deliberate; use 7-Zip) |
 RAR5 archives produced by rar-rs are fully interoperable with WinRAR and unrar.
-RAR4 archives created by other tools (WinRAR, 7-Zip, etc.) can be listed,
-tested, and extracted.
+RAR4 archives are deliberately out of scope: they are rejected with a clear
+"unsupported" error (`rar4_archives_are_rejected_with_clear_error` locks this in).
 
 ---
 
@@ -97,7 +92,7 @@ unrar p [-p<password>] archive.rar [file]     Print to stdout
 ## Library Usage
 
 ```rust
-use rar5::RarArchive;
+use rar::RarArchive;
 
 // Create
 let mut rar = RarArchive::create("backup.rar")?;
@@ -138,7 +133,7 @@ rar.extract_all("/tmp/output/")?;
 dedicated `create*` constructors are thin wrappers around it:
 
 ```rust
-use rar5::{CreateOptions, RarArchive};
+use rar::{CreateOptions, RarArchive};
 
 // Solid + quick-open + BLAKE2sp + password + recovery record.
 let mut rar = RarArchive::create_with_options(
@@ -172,7 +167,7 @@ only after integrity checks pass. Encrypted members verify their MAC'd
 checksums, so corrupted ciphertext is always detected.
 
 ```rust
-use rar5::{ExtractOptions, RarArchive};
+use rar::{ExtractOptions, RarArchive};
 
 let opts = ExtractOptions {
     max_unpacked_bytes: Some(4 * 1024 * 1024 * 1024), // 4 GiB per file
@@ -198,37 +193,41 @@ table proportional to the whole file.
 
 ## Module Layout
 
-```
-src/
-+-- lib.rs              Public API
-+-- archive.rs          RarArchive high-level interface
-+-- headers.rs          Block/header structs
-+-- compression.rs      Compress/decompress dispatch
-+-- encryption.rs       AES-256-CBC + PBKDF2 key derivation
-+-- constants.rs        RAR5 format constants
-+-- vint.rs             Variable-length integer codec
-+-- error.rs            Error types
-+-- codec/              RAR5 compression codec
-|   +-- mod.rs          Codec public API
-|   +-- decoder.rs      Block decoder + symbol stream
-|   +-- encoder.rs      Block encoder + match finder
-|   +-- bitstream.rs    MSB-first bit reader/writer
-|   +-- huffman.rs      Canonical Huffman tables
-|   +-- window.rs       Sliding window buffer
-|   +-- filters.rs      Delta, E8, E8E9, ARM filters
-|   +-- lz_match.rs     Hash-chain match finder
-|   +-- tables.rs       Symbol/table constants
-+-- rar4/               RAR4 read/extract support
-|   +-- mod.rs          Module root
-|   +-- constants.rs    RAR4 header types and flags
-|   +-- headers.rs      RAR4 header parsing
-|   +-- decoder.rs      LZSS+Huffman decompressor + VM filters
-+-- bin/
-    +-- rar.rs          CLI archive creator
-    +-- unrar.rs        CLI archive extractor
-```
+Cargo workspace with a library crate and a CLI crate:
 
----
+```
+crates/
++-- rar/                        library crate (public API)
+|   +-- src/lib.rs              facade: RarArchive + re-exports
+|   +-- src/archive.rs          RarArchive shared state + constructors/lifecycle
+|   +-- src/rar50/              RAR5 container layer
+|   |   +-- mod.rs              constants + block/header types and parsing
+|   |   +-- vint.rs             variable-length integer codec
+|   |   +-- blake2sp.rs         BLAKE2sp member hash
+|   |   +-- extract.rs          read path: scan/list/read/extract/solid chain
+|   |   +-- write/
+|   |       +-- mod.rs          writer facade: create/add/close pipeline
+|   |       +-- engine.rs       payload/CBC emission machinery
+|   |       +-- layout.rs       dictionary sizing + STORE-fallback probes
+|   +-- src/codec/              compression codecs (one file per family)
+|   |   +-- rar50.rs            LZSS+Huffman encoder + decoder + dispatch
+|   |   +-- bitstream.rs huffman.rs filters.rs match_finder.rs window.rs
+|   +-- src/crypto/             encryption layer
+|   |   +-- mod.rs  rar50.rs    AES-256-CBC + PBKDF2 + hash-key MAC
+|   +-- src/recovery/           recovery records (rar5.rs) + volumes (rev5.rs)
+|   +-- src/detect.rs           signature/SFX scanning
+|   +-- src/parallel.rs         Rayon pools for the `parallel` feature
+|   +-- src/io_util.rs          atomic staging + bounded reads
+|   +-- src/version.rs features.rs options.rs error.rs
+|   +-- examples/bench.rs
+|   +-- tests/                  themed integration suites + fixtures/rar50/
++-- rar-cli/                    binary crate
+    +-- src/rar.rs              `rar` - create/modify/extract
+    +-- src/unrar.rs            `unrar` - extract/list/test/print
+    +-- src/common.rs           WinRAR switch/config-file compatibility core
+    +-- src/input.rs password.rs output.rs time.rs
+    +-- tests/cli_behavior.rs winrar_interop.rs
+```
 
 ## Building
 
@@ -271,8 +270,8 @@ cargo test --release --test winrar_interop -- --ignored   # >4 GiB cases
 
 ## Known limitations
 
-- RAR4 PPMd and RAR4 encryption are not implemented (read-only LZSS +
-  filters, no compression).
+- No RAR4 support at all: RAR4 archives (including PPMd/encrypted ones)
+  are rejected with an explicit "unsupported" error.
 - Solid archives cannot be combined with multi-volume output yet.
 - `-si` (add files from stdin) is not implemented; the archive comment
   (`rar c`) is the only stdin input.

@@ -1,0 +1,27 @@
+[package]
+name = "rar-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WinRAR-compatible command-line tools (rar, unrar)"
+
+[[bin]]
+name = "rar"
+path = "src/rar.rs"
+
+[[bin]]
+name = "unrar"
+path = "src/unrar.rs"
+
+[dependencies]
+rar = { workspace = true }
+clap = { workspace = true }
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+sha2.workspace = true
+
+[lints]
+workspace = true

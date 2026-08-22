@@ -1,22 +1,14 @@
-[package]
-name = "rar5"
-version = "0.1.0"
+[workspace]
+members = ["crates/rar", "crates/rar-cli"]
+resolver = "2"
+
+[workspace.package]
 edition = "2024"
-description = "Pure-Rust RAR5 archive library — create, read, and extract RAR5 archives with native LZSS+Huffman compression"
 license = "BSD-2-Clause"
 repository = "https://codeberg.org/librar/rar-rs"
-autobins = false
+description = "Pure-Rust RAR5 archive library — create, read, and extract RAR5 archives with native LZSS+Huffman compression"
 
-[[bin]]
-name = "rar"
-path = "src/bin/rar.rs"
-
-[[bin]]
-name = "unrar"
-path = "src/bin/unrar.rs"
-
-
-[dependencies]
+[workspace.dependencies]
 crc32fast = "1"
 aes = { version = "0.9", features = ["zeroize"] }
 hmac = "0.13"
@@ -24,14 +16,15 @@ sha2 = "0.11"
 rand = "0.10"
 clap = { version = "4.6", features = ["derive", "wrap_help"] }
 zeroize = { version = "1.9", features = ["alloc", "derive"] }
-rayon = { version = "1.12", optional = true }
-wide = { version = "0.8", optional = true }
+rayon = "1.12"
+wide = "0.8"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_IO", "Win32_System_Registry"] }
+rar = { path = "crates/rar" }
 
-[features]
-default = []
-parallel = ["dep:rayon"]
-simd = ["dep:wide"]
+[workspace.lints.rust]
+unused_must_use = "deny"
 
-[dev-dependencies]
-tempfile = "3"
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

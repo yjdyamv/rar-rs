@@ -22,6 +22,7 @@
   8. 重写子系统提取 `src/rewrite.rs`（~1500 行）；archive.rs 7500 → 4200 行
   9. 公开面收窄（write_progress 转私有、删死变体、13 个 create* 构造器 `#[deprecated]`）
 - 新增 `CONTEXT.md`（领域词汇）+ `docs/agents/issue-tracker.md`
+- **仿 rars 架构重构**（2026-08 完成）：workspace 拆分（`crates/rar` 库 + `crates/rar-cli` 双二进制）+ 库内按 rars 分层（`rar50/{mod,extract,write/{mod,engine,layout}}`、`codec/rar50.rs` 一族一文件、`crypto/`、`detect.rs`、`parallel.rs`、`io_util.rs`、`version.rs`、`features.rs`）+ 测试按主题拆分（roundtrip/format_assertions/rewrite/official_interop/rar4_rejection + cli_behavior 随二进制）+ fixtures 目录化 + README/CONTEXT 修正。完整计划与决策记录见 `docs/REFACTOR_MIRROR_RARS.md`
 
 ## P4：>4 GiB 单文件创建 RAR（最大的一块）✅
 

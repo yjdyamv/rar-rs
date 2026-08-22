@@ -8,23 +8,33 @@
 - **Member（成员）** — 归档中的一个条目（文件 / 目录 / 重定向），对应一个文件头 + 数据区。
 - **Volume（分卷）** — 多卷归档的单个 `.partN.rar` 文件；成员数据按卷切成 Chunk。
 - **Chunk（分块）** — 跨卷成员在某卷中的数据段。非末块头携带该块密文 CRC32；末块携带（hash-key MAC 过的）明文 CRC，并携带完整 extra 记录。
-- **Solid chain（固态链）** — 连续压缩成员共享一个 LZ 窗口；EncoderState/DecoderState 跨成员保持。单卷专属（分卷 + solid 尚未支持）。
-- **EncoderState / DecoderState** — 跨块/跨成员保持的编解码状态（lookbehind tail、dist cache、last length、Huffman 表）。
+- **Solid chain（固态链）** — 连续压缩成员共享一个 LZ 窗口；EncoderState/DecoderState 跨成员保持。单卷与分卷均已支持。
+- **EncoderState / DecoderState** — 跨块/跨成员保持的编解码状态（lookbehind tail、dist cache、last length、Huffman 表），定义在 `codec/rar50.rs`。
 - **Spill file（溢出文件）** — 大文件（≥ `STREAM_COMPRESS_THRESHOLD`，64 MiB）压缩路径的临时落盘文件：压缩流先溢出，头写出后再流式进归档，保证内存有界。
-- **Streaming payload（流式负载）** — `write_streamed_payload`：统一流式写路径（单卷/分卷 + 可选流式 AES-256-CBC），`write_stored_file` 是其 STORE 特例。
-- **CbcRangeEmitter** — 连续 CBC 密文按任意字节区间发出的机制（read-ahead 到块边界 + ≤15B carry），使加密分块边界任意、卷大小仍精确（与 WinRAR 字节级一致）。
+- **Streaming payload（流式负载）** — `write_streamed_payload`（`rar50/write/mod.rs`）：统一流式写路径（单卷/分卷 + 可选流式 AES-256-CBC），`write_stored_file` 是其 STORE 特例。
+- **CbcRangeEmitter** — `rar50/write/engine.rs` 中连续 CBC 密文按任意字节区间发出的机制（read-ahead 到块边界 + ≤15B carry），使加密分块边界任意、卷大小仍精确（与 WinRAR 字节级一致）。
 - **Header encryption（-hp）** — 归档级加密头（每卷开头明文），其后所有块为 `[IV][AES-256-CBC 加密头]`。
-- **Recovery record（恢复记录）** — 单卷内联 "RR" 服务块，奇偶校验保护归档前缀。
-- **Recovery volumes（.rev 恢复卷）** — 分卷集的 Reed-Solomon 奇偶校验卷，可重建缺失卷。
+- **Recovery record（恢复记录）** — 单卷内联 "RR" 服务块，奇偶校验保护归档前缀（GF(2^16) Cauchy 矩阵，见 `recovery/rar5.rs`）。
+- **Recovery volumes（.rev 恢复卷）** — 分卷集的 Reed-Solomon 奇偶校验卷，可重建缺失卷（`recovery/rev5.rs`）。
 - **Quick-open（QO）** — 主头 locator + 末尾 "QO" 服务块，缓存文件头副本加速列表。
-- **BLAKE2sp / hash-key MAC** — 成员哈希记录（`-htb`）；加密成员的校验和用 hash key MAC 保护。
+- **BLAKE2sp / hash-key MAC** — 成员哈希记录（`-htb`）；加密成员的校验和用 hash key MAC 保护（`rar50/blake2sp.rs`、`crypto/rar50.rs`）。
 - **Redirect（重定向）** — symlink / hardlink / file-copy 成员（无数据区，仅 extra 记录）。
-- **SFX** — 归档前带 stub 的自解压文件；`sfx_offset_of` 定位归档起点。
+- **SFX** — 归档前带 stub 的自解压文件；`detect::sfx_offset_of` 定位归档起点。
 - **Locator（定位器）** — 主头中的 QO/RR 偏移记录，close 时回填。
+
+## 分层结构（镜像参考架构 rars）
+
+- **格式层 `rar50/`**：容器常量 + 头类型/解析（mod.rs）、读路径（extract.rs）、写管线（write/{mod,engine,layout}.rs）、vint/blake2sp。将来低版本格式加 `rar40/` 等兄弟模块。
+- **编解码层 `codec/`**：一族一文件（codec/rar50.rs = 编码器+解码器+compress/decompress 分发）；bitstream/huffman/filters/match_finder/window 为共享原语。
+- **加密层 `crypto/`**：一族一文件（crypto/rar50.rs）。
+- **恢复层 `recovery/`**：rar5.rs（内联 RR）+ rev5.rs（.rev 卷）。
+- **基础设施**：detect.rs（签名/SFX 扫描）、parallel.rs（Rayon 池）、io_util.rs（原子暂存/有界读）、version.rs/features.rs（薄词汇模块）、options.rs/error.rs/write_progress.rs。
+- **CLI 层 `crates/rar-cli`**：rar/unrar 两二进制；common.rs（WinRAR 开关/配置兼容核心）+ input/password/output/time 模块。
 
 ## 项目事实
 
-- 库 crate：`rar5`，RAR5 创建/读取 + RAR4 读取；两个 CLI：`rar`（创建/修改/提取）、`unrar`（提取/列表）。
-- 热点：`src/archive.rs`（~7500 行，几乎所有提交都动它）。
-- 互操作：`tests/winrar_interop.rs`（Windows 本机 WinRAR 双向验证）、`tests/interop.rs`（官方 rar/unrar，env 门控）。
+- Cargo workspace：库 crate `rar`（RAR5-only 创建/读取，明确拒绝 RAR4）+ CLI crate `rar-cli`（`rar` 创建/修改/提取、`unrar` 提取/列表）。
+- 库热点已拆解：archive.rs 仅存 facade 结构体 + 构造器/生命周期；读写路径分别在 `rar50/extract.rs` 与 `rar50/write/`。
+- 互操作测试：`crates/rar/tests/{rar50_roundtrip,format_assertions,rewrite_tests,official_interop,rar4_rejection}.rs`（官方 rar/unrar 用 SA_OFFICIAL_RAR/UNRAR env 门控）、`crates/rar-cli/tests/cli_behavior.rs`（CARGO_BIN_EXE 需随二进制所在 crate）、`crates/rar-cli/tests/winrar_interop.rs`（Windows 本机 WinRAR 双向验证）。
+- 迁移记录：`docs/REFACTOR_MIRROR_RARS.md`（仿 rars 架构重构的完整计划与决策）。
 - 计划：`PLAN.md`（已完成记录 + WinRAR 7.23 差距清单）。
