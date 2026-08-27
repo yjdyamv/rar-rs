@@ -86,6 +86,88 @@ impl RarArchive {
         Ok(())
     }
 
+    /// Open without a full block scan: read only the main archive header,
+    /// resolve the quick-open record through the locator, and parse the
+    /// cached file headers. Falls back to a full scan when the archive
+    /// has no usable quick-open record (multi-volume, header-encrypted,
+    /// no QO written, or a corrupt record).
+    pub(crate) fn open_read_quick(&mut self) -> RarResult<()> {
+        self.volume_paths = discover_volumes(&self.path);
+        if self.volume_paths.len() > 1 {
+            self.scan_all_volumes()?;
+            return Ok(());
+        }
+        let f = File::open(&self.path)?;
+        self.stream = Some(Box::new(f));
+        self.verify_signature()?;
+        if !self.try_quick_open_entries()? {
+            // `try_quick_open_entries` may have consumed the leading
+            // plaintext blocks (e.g. a -hp encryption header); rewind to
+            // the archive start so the full scan sees them again.
+            let stream = self.stream.as_mut().unwrap();
+            stream.seek(SeekFrom::Start(
+                self.sfx_offset + RAR5_SIGNATURE.len() as u64,
+            ))?;
+            self.scan_blocks()?;
+        }
+        Ok(())
+    }
+
+    /// Try to populate [`Self::entries`] from the quick-open record.
+    /// Returns `Ok(false)` when the archive has no usable record (the
+    /// caller falls back to the full scan). QO-specific corruption falls
+    /// back too; only genuine I/O errors propagate.
+    fn try_quick_open_entries(&mut self) -> RarResult<bool> {
+        // Header-encrypted archives never carry a QO record, and reading
+        // their main header would need the derived key — bail out early.
+        let first = match crate::rar50::headers::read_block(self.stream.as_mut().unwrap(), None)? {
+            Some(meta) => meta,
+            None => return Ok(false),
+        };
+        if first.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
+            return Ok(false);
+        }
+        let ah = ArchiveHeader::from_raw(&first.raw)?;
+        let Some(qo_rel) = crate::rar50::headers::locator_quick_open_offset(&ah.extra_data) else {
+            return Ok(false);
+        };
+        let qo_abs = self
+            .sfx_offset
+            .checked_add(RAR5_SIGNATURE.len() as u64)
+            .and_then(|base| base.checked_add(qo_rel))
+            .unwrap_or(u64::MAX);
+        let stream = self.stream.as_mut().unwrap();
+        stream.seek(SeekFrom::Start(qo_abs))?;
+        let Some(qo) = crate::rar50::headers::read_block(stream, None)? else {
+            return Ok(false);
+        };
+        if qo.block_type != BLOCK_TYPE_SERVICE_HEADER {
+            return Ok(false);
+        }
+        // The QO payload must fit entirely in memory; cap at 64 MiB like
+        // the reader's other bounded buffers.
+        const QO_PAYLOAD_CAP: u64 = 64 * 1024 * 1024;
+        if qo.raw.data_size > QO_PAYLOAD_CAP {
+            return Ok(false);
+        }
+        stream.seek(SeekFrom::Start(qo.data_offset))?;
+        let mut payload = Vec::with_capacity(qo.raw.data_size as usize);
+        stream
+            .take(qo.raw.data_size)
+            .read_to_end(&mut payload)
+            .map_err(RarError::Io)?;
+        if payload.len() as u64 != qo.raw.data_size {
+            return Ok(false);
+        }
+        match parse_quick_open_payload(&payload, qo_abs) {
+            Ok(entries) if !entries.is_empty() => {
+                self.entries = entries;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     // ── Signature ──────────────────────────────────────────────────────────
 
     fn verify_signature(&mut self) -> RarResult<()> {
@@ -1409,4 +1491,94 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
         )));
     }
     Ok(out)
+}
+
+// ── Quick-open payload ─────────────────────────────────────────────────────
+
+/// Parse a quick-open record payload into archive entries.
+///
+/// Payload layout (mirrors the writer):
+/// ```text
+/// repeat:
+///   [entry CRC32] 4 bytes LE, over [body]
+///   [body size] vint
+///   [body] = [flags vint] [relative offset vint] [header size vint]
+///            [complete file-header block bytes]
+/// ```
+///
+/// `qo_abs` is the absolute position of the QO record; each entry's
+/// `relative offset` points back to its original file header, from which
+/// the data-area offset follows. Returns an error for any structural or
+/// CRC violation (the caller falls back to a full scan).
+fn parse_quick_open_payload(payload: &[u8], qo_abs: u64) -> RarResult<Vec<ArchiveEntry>> {
+    let mut entries = Vec::new();
+    let mut off = 0usize;
+    while off < payload.len() {
+        if off + 4 > payload.len() {
+            return Err(RarError::Format("quick-open: truncated entry CRC".into()));
+        }
+        let stored_crc = u32::from_le_bytes(payload[off..off + 4].try_into().unwrap());
+        off += 4;
+        let (body_size, n) = vint::decode_from_slice(payload, off)
+            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
+        off += n;
+        let body_end = off
+            .checked_add(body_size as usize)
+            .ok_or_else(|| RarError::Format("quick-open: body size overflow".into()))?;
+        if body_end > payload.len() {
+            return Err(RarError::Format("quick-open: truncated entry body".into()));
+        }
+        let actual = crc32fast::hash(&payload[off..body_end]);
+        if actual != stored_crc {
+            return Err(RarError::Crc {
+                expected: stored_crc,
+                actual,
+                context: "quick-open entry".into(),
+            });
+        }
+        let mut p = off;
+        // flags vint (writer always emits 0 = file header)
+        let (flags, fn_) = vint::decode_from_slice(payload, p)
+            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
+        p += fn_;
+        let (rel, rn) = vint::decode_from_slice(payload, p)
+            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
+        p += rn;
+        let (hdr_size, hn) = vint::decode_from_slice(payload, p)
+            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
+        p += hn;
+        let hdr_end = p
+            .checked_add(hdr_size as usize)
+            .ok_or_else(|| RarError::Format("quick-open: header size overflow".into()))?;
+        if hdr_end > body_end {
+            return Err(RarError::Format("quick-open: truncated file header".into()));
+        }
+        let raw = crate::rar50::headers::parse_block_bytes(&payload[p..hdr_end])?;
+        if raw.block_type != BLOCK_TYPE_FILE_HEADER {
+            return Err(RarError::Format("quick-open: unexpected block type".into()));
+        }
+        // The original file header sat `rel` bytes before the QO record;
+        // its data area starts right after the header envelope.
+        let header_abs = qo_abs.checked_sub(rel).ok_or_else(|| {
+            RarError::Format("quick-open: relative offset points past the archive start".into())
+        })?;
+        let data_offset = header_abs + (hdr_end - p) as u64;
+        // `stream_pos` carries the data-area offset, matching scan_blocks.
+        let fh = FileHeader::from_raw(&raw, data_offset)?;
+        let chunk = DataChunk {
+            volume_index: 0,
+            data_offset,
+            packed_size: fh.packed_size,
+            crc32_val: fh.crc32_val,
+            is_final: true,
+            extra_data: fh.extra_data.clone(),
+        };
+        let _ = flags;
+        entries.push(ArchiveEntry {
+            header: fh,
+            chunks: vec![chunk],
+        });
+        off = body_end;
+    }
+    Ok(entries)
 }

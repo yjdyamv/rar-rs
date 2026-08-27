@@ -1083,6 +1083,75 @@ pub(crate) fn main_header_locator_fields(
     Ok((None, None))
 }
 
+/// Read the quick-open offset out of a main archive header's extra area
+/// (locator record type 0x01, flag 0x0001). The value is relative to the
+/// archive start (after the 8-byte signature), matching how the writer
+/// patches the field at close time.
+pub(crate) fn locator_quick_open_offset(extra: &[u8]) -> Option<u64> {
+    const LOCATOR_TYPE: u64 = 0x01;
+    const LOCATOR_FLAG_QUICK_OPEN: u64 = 0x0001;
+    let mut e = 0usize;
+    while e < extra.len() {
+        let (rec_size, n) = vint::decode_from_slice(extra, e).ok()?;
+        e += n;
+        let rec_end = e.checked_add(rec_size as usize)?;
+        if rec_end > extra.len() {
+            return None;
+        }
+        let (rec_type, tn) = vint::decode_from_slice(extra, e).ok()?;
+        e += tn;
+        if rec_type == LOCATOR_TYPE {
+            let (flags, fn_) = vint::decode_from_slice(extra, e).ok()?;
+            e += fn_;
+            if flags & LOCATOR_FLAG_QUICK_OPEN != 0 {
+                let (qo, _) = vint::decode_from_slice(extra, e).ok()?;
+                return Some(qo);
+            }
+            return None;
+        }
+        e = rec_end;
+    }
+    None
+}
+
+/// Parse the block envelope out of a complete in-memory block
+/// (`[CRC32][size vint][body]`), verifying the header CRC over the stored
+/// size vint bytes plus the body (non-canonical vints included).
+pub(crate) fn parse_block_bytes(data: &[u8]) -> RarResult<RawBlock> {
+    if data.len() < 5 {
+        return Err(RarError::Format("truncated block envelope".into()));
+    }
+    let stored_crc = u32::from_le_bytes(data[..4].try_into().unwrap());
+    let (hsize, vint_len) =
+        vint::decode_from_slice(data, 4).map_err(|e| RarError::Format(e.to_string()))?;
+    let body_start = 4 + vint_len;
+    let body_end = body_start
+        .checked_add(hsize as usize)
+        .ok_or_else(|| RarError::Format("header size overflow".into()))?;
+    if body_end > data.len() {
+        return Err(RarError::Format("truncated block body".into()));
+    }
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&data[4..body_end]);
+    let computed = hasher.finalize();
+    if computed != stored_crc {
+        return Err(RarError::Crc {
+            expected: stored_crc,
+            actual: computed,
+            context: "block header".into(),
+        });
+    }
+    let (block_type, flags, data_size) = parse_block_fields(&data[body_start..body_end])?;
+    Ok(RawBlock {
+        header_crc: stored_crc,
+        header_data: data[body_start..body_end].to_vec(),
+        data_size,
+        data_offset: body_end as u64,
+        block_type,
+        flags,
+    })
+}
+
 /// Split a main archive header's extra area into the locator record
 /// contents (`had_qo`, `had_rr`) and the remaining records verbatim.
 pub(crate) fn split_main_extra(extra: &[u8]) -> RarResult<(bool, bool, Vec<u8>)> {

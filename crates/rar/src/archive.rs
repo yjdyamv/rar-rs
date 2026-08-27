@@ -613,6 +613,21 @@ impl RarArchive {
         Ok(archive)
     }
 
+    /// Open an existing RAR5 archive for reading without a full block
+    /// scan, using the quick-open record when present.
+    ///
+    /// Archives written with `quick_open` carry a cached copy of every
+    /// file header; this opener reads only the main header + the QO
+    /// record, so listing (`list` / `namelist`) is O(QO size) instead of
+    /// O(archive size). Archives without a usable record (multi-volume,
+    /// header-encrypted, or `-qo-`) transparently fall back to the full
+    /// scan, and reading/extraction work identically either way.
+    pub fn open_quick(path: impl AsRef<Path>) -> RarResult<Self> {
+        let mut archive = Self::new_for_mode(path.as_ref().to_path_buf(), Mode::Read, None);
+        archive.open_read_quick()?;
+        Ok(archive)
+    }
+
     /// Open an existing RAR5 archive with a password for encrypted content.
     pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
         let mut archive = Self::new_for_mode(
@@ -621,6 +636,18 @@ impl RarArchive {
             Some(password.to_string()),
         );
         archive.open_read()?;
+        Ok(archive)
+    }
+
+    /// Password variant of [`Self::open_quick`] (falls back to the full
+    /// scan for header-encrypted archives, which never carry a QO record).
+    pub fn open_quick_with_password(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
+        let mut archive = Self::new_for_mode(
+            path.as_ref().to_path_buf(),
+            Mode::Read,
+            Some(password.to_string()),
+        );
+        archive.open_read_quick()?;
         Ok(archive)
     }
 
