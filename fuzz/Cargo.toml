@@ -1,0 +1,45 @@
+[package]
+name = "rar5-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+description = "Fuzz targets for the rar5 library — libFuzzer-compatible, runnable standalone on stable Rust"
+
+# Standalone package (not a workspace member): the fuzz crate must build
+# without the `fuzzing` feature and must not be caught by workspace-wide
+# `--all-features` runs (which would pull in libfuzzer-sys).
+[workspace]
+
+[lints.rust]
+# cargo-fuzz sets `--cfg fuzzing` through RUSTFLAGS; declare it so stable
+# builds don't warn about the unexpected cfg name.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[dependencies]
+rar5 = { path = "../crates/rar", features = ["parallel", "simd"] }
+tempfile = "3"
+libfuzzer-sys = { version = "0.4", optional = true }
+
+[features]
+# cargo-fuzz mode: `cargo fuzz run <target> --features fuzzing` on
+# nightly/Linux. Without this feature the same targets run standalone on
+# stable (see README.md).
+fuzzing = ["dep:libfuzzer-sys"]
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "crypto"
+path = "fuzz_targets/crypto.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "recovery"
+path = "fuzz_targets/recovery.rs"
+test = false
+bench = false

@@ -1,7 +1,10 @@
 # Woodpecker CI for Codeberg (https://codeberg.org/yjdyamv/rar-rs).
 #
-# Hard gates: formatting, clippy (deny), and the full test suite with
-# every feature (`parallel` + `simd` — the smart-archive-rar feature set).
+# Stable toolchain gates: formatting, clippy (deny), and the full test
+# suite with every feature (`parallel` + `simd` — the smart-archive-rar
+# feature set). The stable fuzz smoke runs the three rar5-fuzz targets
+# in the standalone mutation loop; a nightly job runs them under
+# libFuzzer with ASAN/UBSAN (the strongest gate, best-effort).
 #
 # The WinRAR interop tests self-skip when no WinRAR installation is found,
 # so this Linux pipeline runs them harmlessly; run them for real on a
@@ -27,3 +30,34 @@ steps:
     image: rust:1.87
     commands:
       - cargo test --workspace --all-features
+
+  # Fuzz smoke: the three rar5-fuzz targets, standalone mutation loop
+  # (stable Rust, no libFuzzer needed). A panic fails the pipeline and
+  # the crashing input is written under fuzz/crashes/.
+  fuzz:
+    image: rust:1.87
+    commands:
+      - cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+      - |
+        for t in parse crypto recovery; do
+          FUZZ_ITERATIONS=20000 cargo run --release --manifest-path fuzz/Cargo.toml --bin $t || exit 1
+        done
+
+  # Real coverage-guided fuzzing needs nightly (cargo-fuzz requires
+  # `-Z sanitizer` for ASAN/UBSAN, which stable cannot provide). This is
+  # the strongest gate: memory errors that the standalone loop cannot
+  # catch (it only sees panics) are caught here. `failure: ignore` keeps
+  # a toolchain hiccup from blocking the pipeline — the stable fuzz
+  # smoke above remains the hard gate.
+  fuzz-libfuzzer:
+    image: rust:1.87
+    failure: ignore
+    commands:
+      - apt-get update && apt-get install -y --no-install-recommends clang
+      - rustup toolchain install nightly --profile minimal
+      - cargo install cargo-fuzz
+      - cd fuzz
+      - |
+        for t in parse crypto recovery; do
+          cargo +nightly fuzz run $t --features fuzzing -- -runs=3000 || exit 1
+        done
