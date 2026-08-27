@@ -7,7 +7,9 @@
 
 use super::rar5::encode_parity_shards;
 use crate::error::{RarError, RarResult};
-use std::io::{Read, Seek};
+use crate::io_util::read_up_to;
+use std::fs;
+use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
 
 /// REV5 file signature, distinct from the RAR archive marker.
@@ -128,14 +130,26 @@ pub fn rebuild_missing_volumes(first_volume: &Path) -> RarResult<Vec<PathBuf>> {
         .unwrap_or(Path::new("."))
         .to_path_buf();
 
-    // Parse the first `.rev` file for the set parameters.
-    let rev1 = parent.join(format!("{base}.part1.rev"));
-    if !rev1.exists() {
+    // Parse the first `.rev` file for the set parameters. WinRAR (and
+    // `build_recovery_volumes_for_set`) pad the part number to the digit
+    // count of the volume count (part01.rev .. part15.rev), so probe the
+    // padding width from 1 to 4 digits.
+    let mut rev1: Option<PathBuf> = None;
+    let mut width = 1usize;
+    for w in 1..=4 {
+        let probe = parent.join(format!("{base}.part{:0w$}.rev", 1, w = w));
+        if probe.exists() {
+            rev1 = Some(probe);
+            width = w;
+            break;
+        }
+    }
+    let Some(rev1) = rev1 else {
         return Err(RarError::Format(format!(
             "{}: no recovery volumes found",
             first_volume.display()
         )));
-    }
+    };
     let rev_data = std::fs::read(&rev1)?;
     if rev_data.len() < 8 + 4 + 4 + 1 + 2 + 2 + 2 + 4 || &rev_data[..8] != REV5_SIGNATURE {
         return Err(RarError::Format(format!(
@@ -157,7 +171,7 @@ pub fn rebuild_missing_volumes(first_volume: &Path) -> RarResult<Vec<PathBuf>> {
     off += 2; // rev number
     let payload_crc = u32::from_le_bytes(rev_data[off..off + 4].try_into().unwrap());
     off += 4;
-    if data_count == 0 || data_count > 65535 || rec_count == 0 || rec_count > data_count {
+    if data_count == 0 || data_count > 65535 || rec_count == 0 || rec_count > 65535 - data_count {
         return Err(RarError::Format(
             "implausible recovery volume parameters".into(),
         ));
@@ -200,7 +214,7 @@ pub fn rebuild_missing_volumes(first_volume: &Path) -> RarResult<Vec<PathBuf>> {
     let mut survivors: Vec<Option<PathBuf>> = Vec::with_capacity(data_count);
     let mut missing: Vec<usize> = Vec::new();
     for i in 0..data_count {
-        let vol = parent.join(format!("{base}.part{}.rar", i + 1));
+        let vol = parent.join(format!("{base}.part{:0width$}.rar", i + 1, width = width));
         if vol.exists() {
             survivors.push(Some(vol));
         } else {
@@ -223,7 +237,7 @@ pub fn rebuild_missing_volumes(first_volume: &Path) -> RarResult<Vec<PathBuf>> {
     let mut rebuilt: Vec<Vec<u8>> = vec![Vec::new(); missing.len()];
     let mut rev_payloads: Vec<Vec<u8>> = Vec::with_capacity(rec_count);
     for k in 0..rec_count {
-        let rev_path = parent.join(format!("{base}.part{}.rev", k + 1));
+        let rev_path = parent.join(format!("{base}.part{:0width$}.rev", k + 1, width = width));
         let data = std::fs::read(&rev_path)?;
         if data.len() < 8 + 4 + 4 || &data[..8] != REV5_SIGNATURE {
             return Err(RarError::Format(format!(
@@ -289,9 +303,109 @@ pub fn rebuild_missing_volumes(first_volume: &Path) -> RarResult<Vec<PathBuf>> {
                 context: format!("reconstructed volume {}", i + 1),
             });
         }
-        let vol_path = parent.join(format!("{base}.part{}.rar", i + 1));
+        let vol_path = parent.join(format!("{base}.part{:0width$}.rar", i + 1, width = width));
         std::fs::write(&vol_path, &rebuilt[j])?;
         rebuilt_paths.push(vol_path);
     }
     Ok(rebuilt_paths)
+}
+
+/// Build `.rev` recovery volumes for an existing multi-volume set,
+/// streaming all volumes in lockstep chunks (memory stays bounded at
+/// O(chunk × volume count)).
+///
+/// `rec_count` is the exact number of `.rev` files to produce; it is
+/// clamped to `10 × volume count` (WinRAR's `rv[N]` cap) and to the
+/// 65535 total-volume limit of the format. The `.rev` files are named
+/// after the set with the same zero-padding as the volumes
+/// (`<base>.partNN.rev`), matching WinRAR. Returns the written paths.
+pub fn build_recovery_volumes_for_set(
+    volume_paths: &[PathBuf],
+    rec_count: usize,
+) -> RarResult<Vec<PathBuf>> {
+    let nd = volume_paths.len();
+    if nd == 0 {
+        return Err(RarError::Format("no volumes for recovery volumes".into()));
+    }
+    if nd > 65535 {
+        return Err(RarError::Format(format!(
+            "too many volumes ({nd}) for recovery volumes; maximum is 65535"
+        )));
+    }
+    let rec_count = rec_count.min(nd * 10).max(1);
+    if nd + rec_count > 65535 {
+        return Err(RarError::Format(format!(
+            "data ({nd}) + recovery ({rec_count}) volumes exceed the 65535 limit"
+        )));
+    }
+
+    // Stream all volumes in lockstep chunks: per-chunk Reed-Solomon
+    // parity keeps memory bounded at O(chunk x volumes) and CRCs are
+    // computed in the same pass.
+    const CHUNK: u64 = 1024 * 1024;
+    let mut volume_sizes = Vec::with_capacity(nd);
+    let mut readers = Vec::with_capacity(nd);
+    let mut crcs = Vec::with_capacity(nd);
+    for vol in volume_paths {
+        let size = fs::metadata(vol)?.len();
+        volume_sizes.push(size);
+        readers.push(fs::File::open(vol)?);
+        crcs.push(crc32fast::Hasher::new());
+    }
+    let max_len = *volume_sizes.iter().max().unwrap_or(&0);
+    let padded_max = if max_len % 2 == 0 {
+        max_len
+    } else {
+        max_len + 1
+    };
+
+    let mut payloads: Vec<Vec<u8>> = vec![Vec::new(); rec_count];
+    let mut offset = 0u64;
+    while offset < padded_max {
+        let want = (padded_max - offset).min(CHUNK) as usize;
+        let mut chunk_bufs: Vec<Vec<u8>> = Vec::with_capacity(nd);
+        for (i, reader) in readers.iter_mut().enumerate() {
+            let mut buf = vec![0u8; want];
+            if offset < volume_sizes[i] {
+                let to_read = (volume_sizes[i] - offset).min(want as u64) as usize;
+                let n = read_up_to(reader, &mut buf[..to_read])?;
+                if n != to_read {
+                    return Err(RarError::Io(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "volume {} shrank while building recovery volumes",
+                            volume_paths[i].display()
+                        ),
+                    )));
+                }
+                crcs[i].update(&buf[..to_read]);
+                buf[to_read..].fill(0); // zero-pad to the chunk length
+            }
+            chunk_bufs.push(buf);
+        }
+        let refs: Vec<&[u8]> = chunk_bufs.iter().map(|b| b.as_slice()).collect();
+        let parity = encode_parity_shards(&refs, rec_count)
+            .map_err(|e| RarError::Format(format!("recovery volumes encode: {e}")))?;
+        for (k, p) in parity.into_iter().enumerate() {
+            payloads[k].extend(p);
+        }
+        offset += want as u64;
+    }
+    let volume_crcs: Vec<u32> = crcs.into_iter().map(|h| h.finalize()).collect();
+
+    let base = crate::archive::volume_base_of(&volume_paths[0]);
+    let parent = volume_paths[0].parent().unwrap_or(Path::new("."));
+    // `.rev` names must carry the same padding as the volume set (which
+    // comes from the file names, not the discovered count: a set with a
+    // missing middle volume is discovered as a prefix but keeps its
+    // original padding).
+    let pad = crate::archive::volume_part_width(&volume_paths[0]).max(1);
+    let mut written = Vec::with_capacity(rec_count);
+    for (k, payload) in payloads.iter().enumerate() {
+        let rev_path = parent.join(format!("{base}.part{:0pad$}.rev", k + 1, pad = pad));
+        let file = build_recovery_volume_file(k, rec_count, &volume_sizes, &volume_crcs, payload);
+        fs::write(&rev_path, &file)?;
+        written.push(rev_path);
+    }
+    Ok(written)
 }

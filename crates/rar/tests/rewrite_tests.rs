@@ -921,3 +921,58 @@ fn symlink_and_hardlink_redirects_extract() {
         assert_eq!(a.ino(), b.ino(), "hardlink shares the target inode");
     }
 }
+
+/// WinRAR zero-pads volume part numbers to the digit count of the total
+/// volume count (part01..part15). Discovery, `.rev` naming and rebuild
+/// must handle padded sets.
+#[test]
+fn zero_padded_volume_sets_discover_and_rebuild() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("pad.rar");
+    let payload: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
+    {
+        let mut rar =
+            rar5::RarArchive::create_multivolume_with_recovery_count(&path, 20_000, 3).unwrap();
+        rar.add_bytes("a.bin", &payload, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let volumes = rar5::discover_volumes(&path);
+    assert!(volumes.len() >= 10, "precondition: >= 10 volumes");
+
+    // Rename every volume and .rev file to the zero-padded form WinRAR
+    // uses (two digits for >= 10 volumes).
+    let parent = dir.path();
+    for vol in &volumes {
+        let name = vol.file_name().unwrap().to_string_lossy();
+        let num: u32 = name["pad.part".len()..name.len() - 4].parse().unwrap();
+        let padded = format!("pad.part{num:02}.rar");
+        std::fs::rename(vol, parent.join(&padded)).unwrap();
+    }
+    let revs: Vec<_> = (1..=3u32)
+        .map(|k| parent.join(format!("pad.part{k}.rev")))
+        .collect();
+    for rev in &revs {
+        assert!(rev.exists(), "precondition: {rev:?} present");
+        let name = rev.file_name().unwrap().to_string_lossy();
+        let num: u32 = name["pad.part".len()..name.len() - 4].parse().unwrap();
+        let padded = format!("pad.part{num:02}.rev");
+        std::fs::rename(rev, parent.join(&padded)).unwrap();
+    }
+
+    // Discovery must now find the padded set.
+    let padded_first = parent.join("pad.part01.rar");
+    let discovered = rar5::discover_volumes(&padded_first);
+    assert_eq!(
+        discovered.len(),
+        volumes.len(),
+        "padded set must be fully discovered"
+    );
+
+    // Delete a padded middle volume and rebuild it from the padded .rev.
+    let victim = parent.join("pad.part07.rar");
+    std::fs::remove_file(&victim).unwrap();
+    let rebuilt = rar5::rebuild_missing_volumes(&padded_first).unwrap();
+    assert!(rebuilt.contains(&victim), "padded middle volume rebuilt");
+    let mut rar = rar5::RarArchive::open(&padded_first).unwrap();
+    assert_eq!(rar.read("a.bin").unwrap(), payload);
+}

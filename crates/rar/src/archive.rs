@@ -7,7 +7,7 @@ use crate::codec::rar50 as compression;
 use crate::crypto::{self, parse_archive_encrypt_header};
 use crate::error::{RarError, RarResult};
 use crate::io_util::{
-    copy_prefix, read_up_to, read_write_create, replace_file, temp_sibling_path, temp_suffix,
+    copy_prefix, read_write_create, replace_file, temp_sibling_path, temp_suffix,
 };
 use crate::rar50::headers::*;
 use crate::rar50::vint;
@@ -1420,16 +1420,8 @@ impl RarArchive {
     /// Generate the `.rev` recovery-volume files for a completed
     /// multi-volume archive set (WinRAR `-rv` equivalent).
     fn write_recovery_volumes(&mut self) -> RarResult<()> {
-        let nd = self.volume_paths.len();
-        if nd == 0 {
-            return Err(RarError::Format("no volumes for recovery volumes".into()));
-        }
-        if nd > 65535 {
-            return Err(RarError::Format(format!(
-                "too many volumes ({nd}) for recovery volumes; maximum is 65535"
-            )));
-        }
         // Exact count wins; the percent variant is converted at close time.
+        let nd = self.volume_paths.len();
         let rec_count = if let Some(count) = self.recovery_volumes_count {
             (count as usize).min(nd)
         } else if let Some(percent) = self.recovery_volumes_percent {
@@ -1438,73 +1430,9 @@ impl RarArchive {
             return Ok(());
         };
 
-        // Stream all volumes in lockstep chunks: per-chunk Reed-Solomon
-        // parity keeps memory bounded at O(chunk x volumes) and CRCs are
-        // computed in the same pass.
-        const CHUNK: u64 = 1024 * 1024;
-        let mut volume_sizes = Vec::with_capacity(self.volume_paths.len());
-        let mut readers = Vec::with_capacity(self.volume_paths.len());
-        let mut crcs = Vec::with_capacity(self.volume_paths.len());
-        for vol in &self.volume_paths {
-            let size = fs::metadata(vol)?.len();
-            volume_sizes.push(size);
-            readers.push(File::open(vol)?);
-            crcs.push(crc32fast::Hasher::new());
-        }
-        let max_len = *volume_sizes.iter().max().unwrap_or(&0);
-        let padded_max = if max_len % 2 == 0 {
-            max_len
-        } else {
-            max_len + 1
-        };
-
-        let mut payloads: Vec<Vec<u8>> = vec![Vec::new(); rec_count];
-        let mut offset = 0u64;
-        while offset < padded_max {
-            let want = (padded_max - offset).min(CHUNK) as usize;
-            let mut chunk_bufs: Vec<Vec<u8>> = Vec::with_capacity(nd);
-            for (i, reader) in readers.iter_mut().enumerate() {
-                let mut buf = vec![0u8; want];
-                if offset < volume_sizes[i] {
-                    let to_read = (volume_sizes[i] - offset).min(want as u64) as usize;
-                    let n = read_up_to(reader, &mut buf[..to_read])?;
-                    if n != to_read {
-                        return Err(RarError::Io(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            format!(
-                                "volume {} shrank while building recovery volumes",
-                                self.volume_paths[i].display()
-                            ),
-                        )));
-                    }
-                    crcs[i].update(&buf[..to_read]);
-                    buf[to_read..].fill(0); // zero-pad to the chunk length
-                }
-                chunk_bufs.push(buf);
-            }
-            let refs: Vec<&[u8]> = chunk_bufs.iter().map(|b| b.as_slice()).collect();
-            let parity = crate::recovery::rar5::encode_parity_shards(&refs, rec_count)
-                .map_err(|e| RarError::Format(format!("recovery volumes encode: {e}")))?;
-            for (k, p) in parity.into_iter().enumerate() {
-                payloads[k].extend(p);
-            }
-            offset += want as u64;
-        }
-        let volume_crcs: Vec<u32> = crcs.into_iter().map(|h| h.finalize()).collect();
-
-        let base = get_volume_base(&self.path);
-        let parent = self.path.parent().unwrap_or(Path::new("."));
-        for (k, payload) in payloads.iter().enumerate() {
-            let rev_path = parent.join(format!("{base}.part{}.rev", k + 1));
-            let file = crate::recovery::rev5::build_recovery_volume_file(
-                k,
-                rec_count,
-                &volume_sizes,
-                &volume_crcs,
-                payload,
-            );
-            std::fs::write(&rev_path, &file)?;
-        }
+        let written =
+            crate::recovery::rev5::build_recovery_volumes_for_set(&self.volume_paths, rec_count)?;
+        let _ = written;
         self.recovery_volumes_percent = None;
         Ok(())
     }
@@ -2022,11 +1950,30 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
         None => return vec![path.to_path_buf()],
     };
 
-    // Match .partN.rar naming
-    if let Some(base) = extract_volume_base(&name) {
+    // Match .partN.rar naming (zero-padded or not; WinRAR pads to the
+    // digit count of the total volume count, e.g. part01..part15).
+    if let Some((base, width)) = extract_volume_base(&name) {
         let parent = path.parent().unwrap_or(Path::new("."));
         let mut volumes = Vec::new();
-        let mut n = 1;
+        let mut n = 1u64;
+        loop {
+            let vol = parent.join(if width > 1 {
+                format!("{base}.part{:0width$}.rar", n, width = width)
+            } else {
+                format!("{base}.part{n}.rar")
+            });
+            if vol.exists() {
+                volumes.push(vol);
+                n += 1;
+            } else {
+                break;
+            }
+        }
+        if !volumes.is_empty() {
+            return volumes;
+        }
+        // Fall back to the unpadded enumeration (mixed/odd sets).
+        let mut n = 1u64;
         loop {
             let vol = parent.join(format!("{base}.part{n}.rar"));
             if vol.exists() {
@@ -2054,7 +2001,12 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
 }
 
 /// Extract volume base from a filename like `archive.part3.rar` → `archive`.
-fn extract_volume_base(name: &str) -> Option<String> {
+/// Extract the volume base and the zero-padding width of the part number
+/// from a name like `archive.part3.rar` → `("archive", 1)` or
+/// `archive.part03.rar` → `("archive", 2)`. WinRAR pads the number to the
+/// digit count of the total volume count (part01..part15), so both forms
+/// must be discoverable.
+fn extract_volume_base(name: &str) -> Option<(String, usize)> {
     // Case-insensitive match for .partN.rar
     let lower = name.to_lowercase();
     if let Some(idx) = lower.find(".part") {
@@ -2062,7 +2014,7 @@ fn extract_volume_base(name: &str) -> Option<String> {
         if let Some(rar_idx) = after.find(".rar") {
             let num_str = &after[..rar_idx];
             if num_str.chars().all(|c| c.is_ascii_digit()) && !num_str.is_empty() {
-                return Some(name[..idx].to_string());
+                return Some((name[..idx].to_string(), num_str.len()));
             }
         }
     }
@@ -2076,7 +2028,7 @@ pub(crate) fn volume_base_of(path: &Path) -> String {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("archive");
-    if let Some(base) = extract_volume_base(name) {
+    if let Some((base, _)) = extract_volume_base(name) {
         return base;
     }
     if let Some(stem) = name.strip_suffix(".rar") {
@@ -2088,12 +2040,23 @@ pub(crate) fn volume_base_of(path: &Path) -> String {
     name.to_string()
 }
 
+/// Zero-padding width of the part number in a volume name
+/// (`archive.part03.rar` → 2, `archive.part3.rar` → 1). Used to name
+/// `.rev` files identically to their volume set.
+pub(crate) fn volume_part_width(path: &Path) -> usize {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(extract_volume_base)
+        .map(|(_, w)| w)
+        .unwrap_or(1)
+}
+
 pub(crate) fn get_volume_base(path: &Path) -> String {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("archive");
-    if let Some(base) = extract_volume_base(name) {
+    if let Some((base, _)) = extract_volume_base(name) {
         return base;
     }
     if let Some(stem) = name.strip_suffix(".rar") {

@@ -69,6 +69,9 @@ enum Command {
     /// Add a recovery record
     #[command(visible_alias = "rr")]
     Recovery(RecoveryArgs),
+    /// Create recovery volumes for an existing volume set
+    #[command(visible_alias = "rv")]
+    RecoveryVolumes(RecoveryVolumesArgs),
     /// Repair the archive with its recovery record
     #[command(visible_alias = "r")]
     Repair(ArchiveArgs),
@@ -147,6 +150,19 @@ struct ChangeArgs {
     /// Convert stored names to uppercase (-cu)
     #[arg(long = "uppercase")]
     uppercase: bool,
+}
+
+/// `rar rv` parameters: the first volume of the set plus an optional
+/// recovery-volume count (`rv3`) or percent (`rv10%`); defaults to 10%.
+#[derive(Args)]
+struct RecoveryVolumesArgs {
+    #[command(flatten)]
+    password: password::PasswordArgs,
+    #[arg(value_name = "ARCHIVE")]
+    archive: String,
+    /// Recovery volumes: a count (`3`) or percent (`10%`); default 10%
+    #[arg(value_name = "COUNT|PCT%", default_value = "10%")]
+    count_spec: String,
 }
 
 /// Archive path plus an optional member to print.
@@ -731,6 +747,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Change(args) => cmd_change(&args),
         Command::Lock(args) => cmd_lock(&args),
         Command::Recovery(args) => cmd_rr(&args),
+        Command::RecoveryVolumes(args) => cmd_recovery_volumes(&args),
         Command::Repair(args) => cmd_repair(&args),
         Command::RebuildVolumes(args) => cmd_rebuild_volumes(&args),
         Command::Sfx(args) => cmd_sfx(&args),
@@ -753,6 +770,18 @@ fn run(cli: Cli) -> Result<(), String> {
             // `i<string>` (and `ic`/`ih` variants) find strings in members.
             if name.len() > 1 && name.starts_with('i') {
                 cmd_find(&name, &ext[1..])
+            // WinRAR's canonical `rv[N]` embeds the count in the command
+            // token (`rar rv3 data.part01.rar`); route those here.
+            } else if name.len() > 2
+                && name.starts_with("rv")
+                && name[2..].chars().all(|c| c.is_ascii_digit() || c == '%')
+            {
+                let spec = name[2..].to_string();
+                cmd_recovery_volumes(&RecoveryVolumesArgs {
+                    password: password::PasswordArgs { password: None },
+                    archive: ext.get(1).cloned().unwrap_or_default(),
+                    count_spec: if spec.is_empty() { "10%".into() } else { spec },
+                })
             } else {
                 Err(format!("unknown command: {name}"))
             }
@@ -1533,6 +1562,45 @@ fn cmd_rr(args: &RecoveryArgs) -> Result<(), String> {
         args.percent,
         archive = args.archive
     );
+    Ok(())
+}
+
+/// Create recovery volumes for an existing multi-volume set (like
+/// `rar rv[N]`): `N` is the number of `.rev` files, or `N%` the percent
+/// of data volumes (default 10%). The count is capped at 10x the data
+/// volume count and the `.rev` files are named with the set's padding,
+/// matching WinRAR. Only the raw volume bytes are read, so encrypted
+/// sets need no password.
+fn cmd_recovery_volumes(args: &RecoveryVolumesArgs) -> Result<(), String> {
+    let first = std::path::Path::new(&args.archive);
+    let volumes = rar5::discover_volumes(first);
+    let nd = volumes.len();
+    if nd <= 1 {
+        return Err(format!(
+            "rv: {} is not part of a multi-volume set",
+            first.display()
+        ));
+    }
+    let spec = args.count_spec.trim();
+    let rec_count = if let Some(pct) = spec.strip_suffix('%') {
+        let pct: u64 = pct
+            .parse()
+            .map_err(|_| format!("invalid recovery percent: {spec}"))?;
+        if pct > 1000 {
+            return Err(format!("invalid recovery percent: {spec}"));
+        }
+        rar5::recovery::rev5::plan_recovery_volume_count(nd, pct).map_err(|e| format!("rv: {e}"))?
+    } else {
+        spec.parse::<usize>()
+            .map_err(|_| format!("invalid recovery volume count: {spec}"))?
+    };
+
+    let written = rar5::recovery::rev5::build_recovery_volumes_for_set(&volumes, rec_count)
+        .map_err(|e| format!("rv: {e}"))?;
+    for path in &written {
+        info!("Creating {}", path.display());
+    }
+    info!("{} recovery volume(s) created", written.len());
     Ok(())
 }
 
