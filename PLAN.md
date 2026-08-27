@@ -5,7 +5,7 @@
 ## 现状
 
 - RAR5 创建/读取全功能对齐 WinRAR 7.23：压缩、`-hp` 头加密、分卷、solid、内联恢复记录、`.rev` 恢复卷、quick-open、NTFS ADS、三时间戳、owner。
-- 架构：workspace `crates/rar`（库）+ `crates/rar-cli`（rar/unrar），按 rars 分层——词汇见 `CONTEXT.md`，迁移决策见 `docs/REFACTOR_MIRROR_RARS.md`。
+- 架构：workspace `crates/rar`（库 crate `rar5`）+ `crates/rar-cli`（rar/unrar），按 rars 分层——词汇见 `CONTEXT.md`，迁移决策见 `docs/REFACTOR_MIRROR_RARS.md`。
 
 ## 待办
 

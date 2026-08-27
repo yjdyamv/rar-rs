@@ -293,28 +293,72 @@ impl CopyPipeline {
 }
 
 impl ArchiveEntry {
+    /// Archive member name (forward-slash separated, UTF-8).
     pub fn name(&self) -> &str {
         &self.header.name
     }
 
+    /// Uncompressed size in bytes.
     pub fn size(&self) -> u64 {
         self.header.unpacked_size
     }
 
+    /// On-disk (packed) size in bytes.
     pub fn compressed_size(&self) -> u64 {
         self.header.packed_size
     }
 
+    /// Whether this entry is a directory.
     pub fn is_dir(&self) -> bool {
         self.header.is_directory
     }
 
+    /// CRC32 of the uncompressed content, if present.
     pub fn crc32(&self) -> Option<u32> {
         self.header.crc32_val
     }
 
+    /// Human-readable compression method name ("Store", "Normal", etc.).
     pub fn method_name(&self) -> &'static str {
         method_name(self.header.comp_method)
+    }
+
+    /// Numeric compression method (0 = store, 1..=5 = level).
+    pub fn method(&self) -> u8 {
+        self.header.comp_method
+    }
+
+    /// Modification time as a Unix timestamp (seconds since epoch).
+    pub fn mtime(&self) -> u32 {
+        self.header.mtime
+    }
+
+    /// Modification time nanosecond component (`None` when stored at
+    /// 1-second precision or when the archive has no FILE_TIME record).
+    pub fn mtime_ns(&self) -> Option<u32> {
+        self.header.mtime_ns
+    }
+
+    /// Creation time (seconds, nanoseconds) from the FILE_TIME extra
+    /// record (`None` when absent).
+    pub fn ctime(&self) -> Option<(u64, u32)> {
+        self.header.ctime
+    }
+
+    /// Last access time (seconds, nanoseconds) from the FILE_TIME extra
+    /// record (`None` when absent).
+    pub fn atime(&self) -> Option<(u64, u32)> {
+        self.header.atime
+    }
+
+    /// Host OS identifier (0 = Windows, 1 = Unix).
+    pub fn host_os(&self) -> u64 {
+        self.header.host_os
+    }
+
+    /// File attributes (OS-specific).
+    pub fn attributes(&self) -> u64 {
+        self.header.attributes
     }
 }
 
@@ -481,18 +525,19 @@ impl PendingCommit {
 impl RarArchive {
     // ── Constructors ───────────────────────────────────────────────────────
 
-    /// Open an existing RAR5 archive for reading.
-    pub fn open(path: impl AsRef<Path>) -> RarResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut archive = RarArchive {
+    /// Build a default `RarArchive` shell for a given mode and password.
+    /// Every field is at its zero/default; the caller must call the
+    /// appropriate open/prepare method afterward.
+    fn new_for_mode(path: PathBuf, mode: Mode, password: Option<String>) -> Self {
+        RarArchive {
             path,
-            mode: Mode::Read,
+            mode,
             entries: Vec::new(),
             sfx_offset: 0,
             stream: None,
             solid_state: None,
             solid_decoded_through: -1,
-            password: None,
+            password,
             header_encryption: false,
             archive_encr: None,
             recovery_percent: None,
@@ -523,54 +568,23 @@ impl RarArchive {
             time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
             pending: None,
-        };
+        }
+    }
+
+    /// Open an existing RAR5 archive for reading.
+    pub fn open(path: impl AsRef<Path>) -> RarResult<Self> {
+        let mut archive = Self::new_for_mode(path.as_ref().to_path_buf(), Mode::Read, None);
         archive.open_read()?;
         Ok(archive)
     }
 
     /// Open an existing RAR5 archive with a password for encrypted content.
     pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut archive = RarArchive {
-            path,
-            mode: Mode::Read,
-            entries: Vec::new(),
-            sfx_offset: 0,
-            stream: None,
-            solid_state: None,
-            solid_decoded_through: -1,
-            password: Some(password.to_string()),
-            header_encryption: false,
-            archive_encr: None,
-            recovery_percent: None,
-            recovery_volumes_percent: None,
-            recovery_volumes_count: None,
-            main_header_start: None,
-            rr_offset_field_pos: None,
-            volume_paths: Vec::new(),
-            volume_size: None,
-            current_volume: 0,
-            volume_bytes_written: 0,
-            progress: None,
-            progress_member: 0,
-            solid_mode: false,
-            quick_open: false,
-            blake2: false,
-            quick_open_entries: Vec::new(),
-            qo_offset_field_pos: None,
-            encoder_state: None,
-            dict_size_log: None,
-            dict_size_bytes: None,
-            save_ctime: false,
-            save_atime: false,
-            save_mtime: true,
-            save_owner: false,
-            save_streams: false,
-            streams: Vec::new(),
-            time_precision_seconds: false,
-            extract_options: crate::options::ExtractOptions::default(),
-            pending: None,
-        };
+        let mut archive = Self::new_for_mode(
+            path.as_ref().to_path_buf(),
+            Mode::Read,
+            Some(password.to_string()),
+        );
         archive.open_read()?;
         Ok(archive)
     }
@@ -609,51 +623,12 @@ impl RarArchive {
     /// Open an existing archive for appending, with a password for
     /// encrypted content.
     pub fn open_append_with_password(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut archive = RarArchive {
-            path,
-            mode: Mode::Append,
-            entries: Vec::new(),
-            sfx_offset: 0,
-            stream: None,
-            solid_state: None,
-            solid_decoded_through: -1,
-            password: if password.is_empty() {
-                None
-            } else {
-                Some(password.to_string())
-            },
-            header_encryption: false,
-            archive_encr: None,
-            recovery_percent: None,
-            recovery_volumes_percent: None,
-            recovery_volumes_count: None,
-            main_header_start: None,
-            rr_offset_field_pos: None,
-            volume_paths: Vec::new(),
-            volume_size: None,
-            current_volume: 0,
-            volume_bytes_written: 0,
-            progress: None,
-            progress_member: 0,
-            solid_mode: false,
-            quick_open: false,
-            blake2: false,
-            quick_open_entries: Vec::new(),
-            qo_offset_field_pos: None,
-            encoder_state: None,
-            dict_size_log: None,
-            dict_size_bytes: None,
-            save_ctime: false,
-            save_atime: false,
-            save_mtime: true,
-            save_owner: false,
-            save_streams: false,
-            streams: Vec::new(),
-            time_precision_seconds: false,
-            extract_options: crate::options::ExtractOptions::default(),
-            pending: None,
+        let pw = if password.is_empty() {
+            None
+        } else {
+            Some(password.to_string())
         };
+        let mut archive = Self::new_for_mode(path.as_ref().to_path_buf(), Mode::Append, pw);
         archive.open_read()?;
         archive.prepare_append()?;
         Ok(archive)

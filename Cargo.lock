@@ -389,7 +389,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
-name = "rar"
+name = "rar-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rar5",
+ "sha2",
+ "tempfile",
+ "windows-sys",
+]
+
+[[package]]
+name = "rar5"
 version = "0.1.0"
 dependencies = [
  "aes",
@@ -402,17 +413,6 @@ dependencies = [
  "wide",
  "windows-sys",
  "zeroize",
-]
-
-[[package]]
-name = "rar-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "rar",
- "sha2",
- "tempfile",
- "windows-sys",
 ]
 
 [[package]]

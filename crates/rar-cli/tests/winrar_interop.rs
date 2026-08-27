@@ -15,7 +15,7 @@
 //! and multiple GiB of disk. Run them explicitly with
 //! `cargo test --release --test winrar_interop -- --ignored`.
 
-use rar::RarArchive;
+use rar5::RarArchive;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -144,13 +144,13 @@ fn winrar_validates_streamed_compressed_archives() {
     let src = dir.path().join("stream.bin");
     write_pattern_file(&src, STREAM_SIZE, 3);
 
-    let cases: Vec<(&str, rar::CreateOptions)> = vec![
+    let cases: Vec<(&str, rar5::CreateOptions)> = vec![
         // Single-volume compressed streaming (spill file path).
-        ("stream.rar", rar::CreateOptions::default()),
+        ("stream.rar", rar5::CreateOptions::default()),
         // Multi-volume compressed streaming (chunk splits mid-stream).
         (
             "stream-vol.rar",
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 volume_size: Some(16 * 1024 * 1024),
                 ..Default::default()
             },
@@ -158,7 +158,7 @@ fn winrar_validates_streamed_compressed_archives() {
         // Encrypted streaming (single-volume, chained CBC).
         (
             "stream-enc.rar",
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 password: Some("s3cret".into()),
                 ..Default::default()
             },
@@ -167,7 +167,7 @@ fn winrar_validates_streamed_compressed_archives() {
         // per-chunk encryption records.
         (
             "stream-enc-vol.rar",
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 password: Some("s3cret".into()),
                 volume_size: Some(16 * 1024 * 1024),
                 ..Default::default()
@@ -177,7 +177,7 @@ fn winrar_validates_streamed_compressed_archives() {
         // on-disk header accounting in the streaming writer.
         (
             "stream-hp-vol.rar",
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 password: Some("s3cret".into()),
                 encrypt_headers: true,
                 volume_size: Some(16 * 1024 * 1024),
@@ -187,7 +187,7 @@ fn winrar_validates_streamed_compressed_archives() {
         // Header-encrypted multi-volume + compressed.
         (
             "stream-hp-vol-comp.rar",
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 password: Some("s3cret".into()),
                 encrypt_headers: true,
                 volume_size: Some(16 * 1024 * 1024),
@@ -213,7 +213,7 @@ fn winrar_validates_streamed_compressed_archives() {
         let password = opts.password.as_deref();
         // Multi-volume archives live in `name.partN.rar` files; the base
         // path itself never exists.
-        let first = rar::discover_volumes(&arc)[0].clone();
+        let first = rar5::discover_volumes(&arc)[0].clone();
         let (ok, out) = unrar_test(&first, password);
         assert!(ok, "WinRAR rejected {name}:\n{out}");
 
@@ -260,9 +260,9 @@ fn winrar_validates_streamed_solid_archive() {
     write_pattern_file(&b, STREAM_SIZE, 7);
     let arc = dir.path().join("solid.rar");
     {
-        let mut rar = rar::RarArchive::create_with_options(
+        let mut rar = rar5::RarArchive::create_with_options(
             &arc,
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 solid: true,
                 blake2: true,
                 quick_open: true,
@@ -300,14 +300,14 @@ fn streamed_volumes_are_byte_exact() {
     for (name, opts) in [
         (
             "plain.rar",
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 volume_size: Some(vol_size),
                 ..Default::default()
             },
         ),
         (
             "hp.rar",
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 password: Some("pw".into()),
                 encrypt_headers: true,
                 volume_size: Some(vol_size),
@@ -316,7 +316,7 @@ fn streamed_volumes_are_byte_exact() {
         ),
         (
             "enc.rar",
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 password: Some("pw".into()),
                 volume_size: Some(vol_size),
                 ..Default::default()
@@ -331,7 +331,7 @@ fn streamed_volumes_are_byte_exact() {
             rar.add(&src, 0).unwrap();
             rar.close().unwrap();
         }
-        let volumes = rar::discover_volumes(&arc);
+        let volumes = rar5::discover_volumes(&arc);
         assert!(volumes.len() > 2, "{name}: expected several volumes");
         for vol in &volumes[..volumes.len() - 1] {
             let len = std::fs::metadata(vol).unwrap().len();
@@ -384,9 +384,9 @@ fn solid_multivolume_interops_with_winrar() {
     // Ours -> WinRAR.
     let ours = dir.path().join("ours_sv.rar");
     {
-        let mut rar = rar::RarArchive::create_with_options(
+        let mut rar = rar5::RarArchive::create_with_options(
             &ours,
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 solid: true,
                 volume_size: Some(2 * 1024 * 1024),
                 ..Default::default()
@@ -397,7 +397,7 @@ fn solid_multivolume_interops_with_winrar() {
         rar.add(&small, 3).unwrap();
         rar.close().unwrap();
     }
-    let volumes = rar::discover_volumes(&ours);
+    let volumes = rar5::discover_volumes(&ours);
     assert!(
         volumes.len() >= 3,
         "expected several volumes, got {}",
@@ -422,7 +422,7 @@ fn solid_multivolume_interops_with_winrar() {
             .arg(&src)
             .arg(&small));
         assert!(ok, "WinRAR solid volumes failed:\n{out}");
-        let volumes = rar::discover_volumes(&theirs);
+        let volumes = rar5::discover_volumes(&theirs);
         assert!(
             volumes.len() >= 3,
             "expected several volumes, got {}",
@@ -480,7 +480,7 @@ fn we_read_winrar_created_archives() {
 
         // Read back with rar-rs (password when the switches set one).
         let password = switches.iter().any(|s| s.starts_with("-p")).then_some("pw");
-        let first = rar::discover_volumes(&arc)[0].clone();
+        let first = rar5::discover_volumes(&arc)[0].clone();
         let mut rar = match password {
             Some(pw) => RarArchive::open_with_password(&first, pw).unwrap(),
             None => RarArchive::open(&first).unwrap(),
@@ -565,7 +565,7 @@ fn huge_sparse_file_streamed_compression_roundtrips() {
         rar.extract_with_options(
             "huge.bin",
             &ours,
-            rar::ExtractOptions {
+            rar5::ExtractOptions {
                 max_unpacked_bytes: None,
                 max_total_unpacked_bytes: None,
                 ..Default::default()
@@ -611,9 +611,9 @@ fn huge_sparse_file_streamed_encrypted_multivolume_roundtrips() {
     // across volume boundaries).
     let arc = dir.path().join("huge.rar");
     {
-        let mut rar = rar::RarArchive::create_with_options(
+        let mut rar = rar5::RarArchive::create_with_options(
             &arc,
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 password: Some("s3cret".into()),
                 volume_size: Some(256 * 1024 * 1024),
                 ..Default::default()
@@ -625,7 +625,7 @@ fn huge_sparse_file_streamed_encrypted_multivolume_roundtrips() {
     }
     // Many exact-sized volumes; each carries a ciphertext CRC and an
     // encryption record on every chunk.
-    let volumes = rar::discover_volumes(&arc);
+    let volumes = rar5::discover_volumes(&arc);
     assert!(
         volumes.len() >= 4,
         "expected several volumes, got {}",
@@ -647,7 +647,7 @@ fn huge_sparse_file_streamed_encrypted_multivolume_roundtrips() {
         rar.extract_with_options(
             "huge.bin",
             &ours,
-            rar::ExtractOptions {
+            rar5::ExtractOptions {
                 max_unpacked_bytes: None,
                 max_total_unpacked_bytes: None,
                 ..Default::default()
@@ -703,9 +703,9 @@ fn dictionary_size_md_interops_with_winrar() {
     // Our -md64m archive (dict log 9): WinRAR must test and extract it.
     let ours = dir.path().join("ours_md.rar");
     {
-        let mut rar = rar::RarArchive::create_with_options(
+        let mut rar = rar5::RarArchive::create_with_options(
             &ours,
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 dict_size_log: Some(9),
                 ..Default::default()
             },
@@ -776,9 +776,9 @@ fn ts_file_times_interop_with_winrar() {
     // creation time from our FILE_TIME extra record.
     let ours = dir.path().join("ours_ts.rar");
     {
-        let mut rar = rar::RarArchive::create_with_options(
+        let mut rar = rar5::RarArchive::create_with_options(
             &ours,
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 save_ctime: true,
                 save_atime: true,
                 ..Default::default()
@@ -839,7 +839,7 @@ fn ts_file_times_interop_with_winrar() {
         let mut ar = RarArchive::open(&theirs).unwrap();
         ar.extract_all_with_options(
             &out_dir,
-            rar::ExtractOptions {
+            rar5::ExtractOptions {
                 set_creation_time: true,
                 set_access_time: true,
                 ..Default::default()
@@ -882,9 +882,9 @@ fn os_streams_interop_with_winrar() {
     // Ours -> WinRAR: `UnRAR x -os` must restore the stream.
     let ours = dir.path().join("ours_os.rar");
     {
-        let mut rar = rar::RarArchive::create_with_options(
+        let mut rar = rar5::RarArchive::create_with_options(
             &ours,
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 save_streams: true,
                 ..Default::default()
             },
@@ -986,7 +986,7 @@ fn rar7_v70_archives_decode_with_mdx() {
     let err = ar
         .extract_all_with_options(
             &out_dir,
-            rar::ExtractOptions {
+            rar5::ExtractOptions {
                 max_unpacked_bytes: None,
                 max_total_unpacked_bytes: None,
                 ..Default::default()
@@ -1004,7 +1004,7 @@ fn rar7_v70_archives_decode_with_mdx() {
     let mut ar = RarArchive::open(&arc).unwrap();
     ar.extract_all_with_options(
         &out_dir,
-        rar::ExtractOptions {
+        rar5::ExtractOptions {
             max_unpacked_bytes: None,
             max_total_unpacked_bytes: None,
             max_dict_size: None,
@@ -1060,7 +1060,7 @@ fn we_create_v70_archives_decode_everywhere() {
         let mut ar = RarArchive::open(&arc).unwrap();
         ar.extract_all_with_options(
             &out_dir,
-            rar::ExtractOptions {
+            rar5::ExtractOptions {
                 max_unpacked_bytes: None,
                 max_total_unpacked_bytes: None,
                 max_dict_size: None,
@@ -1143,7 +1143,7 @@ fn long_range_matches_winrar_compression_ratio() {
     let mut ar = RarArchive::open(&our_arc).unwrap();
     ar.extract_all_with_options(
         &out_dir,
-        rar::ExtractOptions {
+        rar5::ExtractOptions {
             max_unpacked_bytes: None,
             max_total_unpacked_bytes: None,
             ..Default::default()

@@ -744,8 +744,8 @@ fn run(cli: Cli) -> Result<(), String> {
 
 fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), String> {
     if let Some(threads) = args.threads {
-        rar::set_compression_threads(threads);
-        rar::set_extraction_threads(threads);
+        rar5::set_compression_threads(threads);
+        rar5::set_extraction_threads(threads);
     }
     let mut password = args.password.password.clone();
     // `-p-` (and bare `-p`, whose interactive prompt we do not simulate)
@@ -763,8 +763,8 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         }
     }
     let case = match (args.lowercase, args.uppercase) {
-        (true, false) => Some(rar::name_policy::CaseKind::Lower),
-        (false, true) => Some(rar::name_policy::CaseKind::Upper),
+        (true, false) => Some(rar5::name_policy::CaseKind::Lower),
+        (false, true) => Some(rar5::name_policy::CaseKind::Upper),
         _ => None,
     };
     let header_encrypt = args.header_encrypt.is_some();
@@ -817,7 +817,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
 
     let (dict_size_log, dict_size_bytes) =
         md_to_options(args.dict_size.as_deref().map(parse_md).transpose()?);
-    let opts = rar::CreateOptions {
+    let opts = rar5::CreateOptions {
         solid: args.solid || args.solid_params.is_some(),
         quick_open: args.quick_open,
         blake2: args.blake2,
@@ -852,11 +852,11 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     // same-named members are replaced (deleted) first, so the append
     // handle is only opened after that rewrite; a new archive is created
     // immediately.
-    let rar: Option<rar::RarArchive> = if existing {
+    let rar: Option<rar5::RarArchive> = if existing {
         None
     } else {
         Some(
-            rar::RarArchive::create_with_options(archive_path, opts.clone())
+            rar5::RarArchive::create_with_options(archive_path, opts.clone())
                 .map_err(|e| format!("create: {e}"))?,
         )
     };
@@ -869,7 +869,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     for file in &args.exclude_list_files {
         exclude_masks.extend(read_mask_file(file)?);
     }
-    let policy = rar::name_policy::NamePolicy {
+    let policy = rar5::name_policy::NamePolicy {
         path_prefix: args.path_prefix.clone(),
         exclude_prefix: args.exclude_prefix.clone(),
         basename_only: args.basename_only,
@@ -879,13 +879,13 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         no_recurse: args.no_recurse,
         wildcard_top_only: args.recurse_zero,
         case: case.map(|c| match c {
-            rar::name_policy::CaseKind::Lower => rar::name_policy::CaseKind::Lower,
-            rar::name_policy::CaseKind::Upper => rar::name_policy::CaseKind::Upper,
+            rar5::name_policy::CaseKind::Lower => rar5::name_policy::CaseKind::Lower,
+            rar5::name_policy::CaseKind::Upper => rar5::name_policy::CaseKind::Upper,
         }),
         include_masks,
         exclude_masks,
     };
-    let mut collected = rar::name_policy::collect(&policy, files, args.level)
+    let mut collected = rar5::name_policy::collect(&policy, files, args.level)
         .map_err(|e| format!("collect: {e}"))?;
     // -ms<list>: files matching one of the listed types (extensions or
     // wildcard masks, semicolon-separated, repeatable) are stored without
@@ -1081,16 +1081,16 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     };
     #[cfg(not(unix))]
     let ts_preserve_atimes: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
-    let entries: Vec<rar::BatchEntry<'_>> = collected
+    let entries: Vec<rar5::BatchEntry<'_>> = collected
         .iter()
         .map(|c| {
             if c.is_dir {
-                rar::BatchEntry::Directory {
+                rar5::BatchEntry::Directory {
                     path: &c.path,
                     name: Some(&c.name),
                 }
             } else {
-                rar::BatchEntry::File {
+                rar5::BatchEntry::File {
                     path: &c.path,
                     name: Some(&c.name),
                     level: c.level,
@@ -1113,9 +1113,9 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
             .chain(args.stdin_name.iter().cloned())
             .collect();
         let mut ar = match &password {
-            Some(pw) => rar::RarArchive::open_with_password(archive_path, pw)
+            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
                 .map_err(|e| format!("open: {e}"))?,
-            None => rar::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
+            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
         };
         let to_drop: Vec<String> = ar
             .namelist()
@@ -1133,14 +1133,14 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         // instead of appending to a file that no longer exists.
         let mut r = if std::path::Path::new(archive_path).exists() {
             match &password {
-                Some(pw) => rar::RarArchive::open_append_with_password(archive_path, pw)
+                Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
                     .map_err(|e| format!("open: {e}"))?,
                 None => {
-                    rar::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
+                    rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
                 }
             }
         } else {
-            rar::RarArchive::create_with_options(archive_path, opts)
+            rar5::RarArchive::create_with_options(archive_path, opts)
                 .map_err(|e| format!("create: {e}"))?
         };
         r.set_dictionary(dict_size_log, dict_size_bytes);
@@ -1219,15 +1219,15 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     // -t: test the archive right after creating it.
     if args.test_after {
         let mut ar = match &password {
-            Some(pw) => rar::RarArchive::open_with_password(archive_path, pw)
+            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
                 .map_err(|e| format!("open: {e}"))?,
-            None => rar::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
+            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
         };
         let tmp = std::env::temp_dir().join(format!("rar5-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).map_err(|e| format!("test dir: {e}"))?;
         let result = ar.extract_all_with_options(
             &tmp,
-            rar::ExtractOptions {
+            rar5::ExtractOptions {
                 max_unpacked_bytes: None,
                 max_total_unpacked_bytes: None,
                 ..Default::default()
@@ -1247,9 +1247,9 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
             .chain(args.stdin_name.iter().cloned())
             .collect();
         let mut ar = match &password {
-            Some(pw) => rar::RarArchive::open_with_password(archive_path, pw)
+            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
                 .map_err(|e| format!("open: {e}"))?,
-            None => rar::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
+            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
         };
         let stale: Vec<String> = ar
             .namelist()
@@ -1264,7 +1264,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         ar.close().map_err(|e| format!("close: {e}"))?;
     }
     if args.volume_size.is_some() {
-        let vols = rar::discover_volumes(std::path::Path::new(archive_path));
+        let vols = rar5::discover_volumes(std::path::Path::new(archive_path));
         info!(
             "Created {} volume(s) ({} file(s), level {})",
             vols.len(),
@@ -1291,9 +1291,9 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
 fn cmd_delete(args: &DeleteArgs) -> Result<(), String> {
     let archive_path = &args.archive;
     let mut rar = match &args.password.password {
-        Some(pw) => rar::RarArchive::open_with_password(archive_path, pw)
+        Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
     };
     let names: Vec<&str> = args.names.iter().map(|s| s.as_str()).collect();
     let n = rar.delete(&names).map_err(|e| format!("delete: {e}"))?;
@@ -1339,9 +1339,9 @@ fn cmd_update_freshen(
 
     // Decide per file: skip (unchanged), delete + re-add (newer), add.
     let rar = match password {
-        Some(pw) => rar::RarArchive::open_with_password(archive_path, pw)
+        Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
     };
     let mut to_delete = Vec::new();
     let mut to_add = Vec::new();
@@ -1372,9 +1372,9 @@ fn cmd_update_freshen(
     }
     {
         let mut rar = match &password {
-            Some(pw) => rar::RarArchive::open_with_password(archive_path, pw)
+            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
                 .map_err(|e| format!("open: {e}"))?,
-            None => rar::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
+            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
         };
         if let Some(ver_spec) = &misc.version_control {
             // -ver[n]: keep previous versions on update. Existing members
@@ -1448,15 +1448,15 @@ fn cmd_update_freshen(
         md_to_options(args.dict_size.as_deref().map(parse_md).transpose()?);
     let mut rar = if std::path::Path::new(archive_path).exists() {
         match &password {
-            Some(pw) => rar::RarArchive::open_append_with_password(archive_path, pw)
+            Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
                 .map_err(|e| format!("open: {e}"))?,
             None => {
-                rar::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
+                rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
             }
         }
     } else {
         let ts = time::parse_ts_specs(&args.ts_specs)?;
-        let create_opts = rar::CreateOptions {
+        let create_opts = rar5::CreateOptions {
             password: password.clone(),
             dict_size_log,
             dict_size_bytes,
@@ -1468,7 +1468,7 @@ fn cmd_update_freshen(
             time_precision_seconds: ts.precision_seconds,
             ..Default::default()
         };
-        rar::RarArchive::create_with_options(archive_path, create_opts)
+        rar5::RarArchive::create_with_options(archive_path, create_opts)
             .map_err(|e| format!("create: {e}"))?
     };
     rar.set_dictionary(dict_size_log, dict_size_bytes);
@@ -1492,9 +1492,9 @@ fn cmd_update_freshen(
 /// Lock the archive (like `rar k`).
 fn cmd_lock(args: &ArchiveArgs) -> Result<(), String> {
     let mut rar = match &args.password.password {
-        Some(pw) => rar::RarArchive::open_with_password(&args.archive, pw)
+        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
     rar.lock().map_err(|e| format!("lock: {e}"))?;
     info!("Locked {archive}", archive = args.archive);
@@ -1504,9 +1504,9 @@ fn cmd_lock(args: &ArchiveArgs) -> Result<(), String> {
 /// Add an inline recovery record (like `rar rr`).
 fn cmd_rr(args: &RecoveryArgs) -> Result<(), String> {
     let mut rar = match &args.password.password {
-        Some(pw) => rar::RarArchive::open_with_password(&args.archive, pw)
+        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
     rar.add_recovery_record(args.percent)
         .map_err(|e| format!("rr: {e}"))?;
@@ -1529,7 +1529,7 @@ fn cmd_rename(args: &RenameArgs) -> Result<(), String> {
         .chunks(2)
         .map(|c| (c[0].as_str(), c[1].as_str()))
         .collect();
-    let mut rar = rar::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?;
+    let mut rar = rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?;
     let n = rar.rename(&pairs).map_err(|e| format!("rename: {e}"))?;
     info!("Renamed {n} file(s) in {archive_path}");
     Ok(())
@@ -1551,15 +1551,15 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
         md_to_options(args.dict_size.as_deref().map(parse_md).transpose()?);
     let mut rar = if std::path::Path::new(archive_path).exists() {
         match &password {
-            Some(pw) => rar::RarArchive::open_append_with_password(archive_path, pw)
+            Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
                 .map_err(|e| format!("open: {e}"))?,
             None => {
-                rar::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
+                rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
             }
         }
     } else {
         let ts = time::parse_ts_specs(&args.ts_specs)?;
-        let create_opts = rar::CreateOptions {
+        let create_opts = rar5::CreateOptions {
             password: password.clone(),
             dict_size_log,
             dict_size_bytes,
@@ -1571,7 +1571,7 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
             time_precision_seconds: ts.precision_seconds,
             ..Default::default()
         };
-        rar::RarArchive::create_with_options(archive_path, create_opts)
+        rar5::RarArchive::create_with_options(archive_path, create_opts)
             .map_err(|e| format!("create: {e}"))?
     };
     rar.set_dictionary(dict_size_log, dict_size_bytes);
@@ -1633,7 +1633,7 @@ fn cmd_find(cmd: &str, args: &[String]) -> Result<(), String> {
     if needle.is_empty() {
         return Err("empty search string".into());
     }
-    let mut rar = rar::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?;
+    let mut rar = rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?;
     let entries: Vec<String> = rar
         .list()
         .iter()
@@ -1681,9 +1681,9 @@ fn cmd_find(cmd: &str, args: &[String]) -> Result<(), String> {
 fn cmd_verbose_list(args: &ArchiveArgs) -> Result<(), String> {
     let rar = match &args.password.password {
         Some(pw) => {
-            rar::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
+            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
         }
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
     };
     output::print_verbose_list(&rar)
 }
@@ -1693,7 +1693,7 @@ fn cmd_verbose_list(args: &ArchiveArgs) -> Result<(), String> {
 fn cmd_repair(args: &ArchiveArgs) -> Result<(), String> {
     let archive_path = &args.archive;
     let input = std::fs::read(archive_path).map_err(|e| format!("read: {e}"))?;
-    let repaired = rar::repair_archive(&input).map_err(|e| format!("repair: {e}"))?;
+    let repaired = rar5::repair_archive(&input).map_err(|e| format!("repair: {e}"))?;
     if repaired == input {
         info!("All OK");
         return Ok(());
@@ -1706,7 +1706,7 @@ fn cmd_repair(args: &ArchiveArgs) -> Result<(), String> {
         .unwrap_or_else(|| "archive.rar".to_string());
     let fixed_path = format!("fixed.{name}");
     std::fs::write(&fixed_path, &repaired).map_err(|e| format!("write: {e}"))?;
-    if let Err(e) = rar::RarArchive::open(&fixed_path) {
+    if let Err(e) = rar5::RarArchive::open(&fixed_path) {
         let _ = std::fs::remove_file(&fixed_path);
         return Err(format!("repair produced an unreadable archive: {e}"));
     }
@@ -1717,7 +1717,7 @@ fn cmd_repair(args: &ArchiveArgs) -> Result<(), String> {
 /// Rebuild missing volumes from the `.rev` recovery volumes (like `rar rc`).
 fn cmd_rebuild_volumes(args: &ArchiveArgs) -> Result<(), String> {
     let first = &args.archive;
-    let rebuilt = rar::rebuild_missing_volumes(std::path::Path::new(first))
+    let rebuilt = rar5::rebuild_missing_volumes(std::path::Path::new(first))
         .map_err(|e| format!("rc: {e}"))?;
     if rebuilt.is_empty() {
         info!("All volumes present");
@@ -1744,9 +1744,9 @@ fn cmd_comment_set(args: &CommentArgs) -> Result<(), String> {
             .map_err(|e| format!("stdin: {e}"))?;
     }
     let mut rar = match &args.password.password {
-        Some(pw) => rar::RarArchive::open_with_password(&args.archive, pw)
+        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
     rar.set_comment(&comment)
         .map_err(|e| format!("comment: {e}"))?;
@@ -1761,9 +1761,9 @@ fn cmd_comment_set(args: &CommentArgs) -> Result<(), String> {
 /// Write the archive comment to stdout (like `rar cw`).
 fn cmd_comment_write(args: &ArchiveArgs) -> Result<(), String> {
     let mut rar = match &args.password.password {
-        Some(pw) => rar::RarArchive::open_with_password(&args.archive, pw)
+        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
     if let Some(comment) = rar.get_comment().map_err(|e| format!("cw: {e}"))? {
         use std::io::Write;
@@ -1778,7 +1778,7 @@ fn cmd_comment_write(args: &ArchiveArgs) -> Result<(), String> {
 fn cmd_sfx_strip(args: &ArchiveArgs) -> Result<(), String> {
     let archive_path = &args.archive;
     let input = std::fs::read(archive_path).map_err(|e| format!("read: {e}"))?;
-    let sfx_offset = rar::sfx_offset_of(&input)
+    let sfx_offset = rar5::sfx_offset_of(&input)
         .ok_or_else(|| format!("{archive_path} is not an SFX archive"))?;
     let base = archive_path
         .strip_suffix(".sfx")
@@ -1885,21 +1885,21 @@ fn find_sfx_module() -> Option<String> {
 /// with `-cl` / `-cu`.
 fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
     let kind = match (args.lowercase, args.uppercase) {
-        (true, false) => rar::name_policy::CaseKind::Lower,
-        (false, true) => rar::name_policy::CaseKind::Upper,
+        (true, false) => rar5::name_policy::CaseKind::Lower,
+        (false, true) => rar5::name_policy::CaseKind::Upper,
         _ => return Err("usage: rar ch [-cl | -cu] <archive.rar>".into()),
     };
     let mut rar = match &args.password.password {
-        Some(pw) => rar::RarArchive::open_with_password(&args.archive, pw)
+        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
     let names: Vec<String> = rar.namelist().into_iter().map(|s| s.to_string()).collect();
     let mut pairs = Vec::new();
     for name in names {
         let converted = match kind {
-            rar::name_policy::CaseKind::Lower => name.to_lowercase(),
-            rar::name_policy::CaseKind::Upper => name.to_uppercase(),
+            rar5::name_policy::CaseKind::Lower => name.to_lowercase(),
+            rar5::name_policy::CaseKind::Upper => name.to_uppercase(),
         };
         if converted != name {
             pairs.push((name, converted));
@@ -1922,9 +1922,9 @@ fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
 fn cmd_print(args: &PrintArgs) -> Result<(), String> {
     use std::io::Write;
     let mut rar = match &args.password.password {
-        Some(pw) => rar::RarArchive::open_with_password(&args.archive, pw)
+        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
     if let Some(file) = &args.file {
         let data = rar.read(file).map_err(|e| format!("{e}"))?;
@@ -1946,18 +1946,18 @@ fn cmd_print(args: &PrintArgs) -> Result<(), String> {
 /// Extract with full paths (like `rar x`).
 fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
     if let Some(threads) = args.threads {
-        rar::set_extraction_threads(threads);
+        rar5::set_extraction_threads(threads);
     }
     let dest = extract_dest(args)?;
     let mut rar = match &args.password.password {
-        Some(pw) => rar::RarArchive::open_with_password(&args.archive, pw)
+        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
     let count = rar.list().len();
     rar.extract_all_with_options(
         &dest,
-        rar::ExtractOptions {
+        rar5::ExtractOptions {
             skip_existing: args.overwrite.as_deref() == Some("never"),
             ..Default::default()
         },
@@ -1979,18 +1979,18 @@ fn extract_dest(args: &ExtractArgs) -> Result<std::path::PathBuf, String> {
 /// Extract without archived paths (like `rar e`).
 fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
     if let Some(threads) = args.threads {
-        rar::set_extraction_threads(threads);
+        rar5::set_extraction_threads(threads);
     }
     let dest = extract_dest(args)?;
     let mut rar = match &args.password.password {
-        Some(pw) => rar::RarArchive::open_with_password(&args.archive, pw)
+        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
     let count = rar.list().len();
     rar.extract_all_with_options(
         &dest,
-        rar::ExtractOptions {
+        rar5::ExtractOptions {
             flat_paths: true,
             skip_existing: args.overwrite.as_deref() == Some("never"),
             ..Default::default()
@@ -2004,9 +2004,9 @@ fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
 /// Test archive contents (like `rar t`).
 fn cmd_test(args: &ArchiveArgs) -> Result<(), String> {
     let mut rar = match &args.password.password {
-        Some(pw) => rar::RarArchive::open_with_password(&args.archive, pw)
+        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
     let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
     let mut ok = 0;
@@ -2037,7 +2037,7 @@ fn cmd_test(args: &ArchiveArgs) -> Result<(), String> {
 /// Normalize a path argument into an archive name: relative paths stay as
 /// given, absolute paths drop the leading slash (like `rar`).
 fn arg_to_name(arg: &str) -> String {
-    rar::name_policy::arg_to_name(arg)
+    rar5::name_policy::arg_to_name(arg)
 }
 
 /// Read one mask per line from a filter list file (like `-x@listfile`);
@@ -2208,9 +2208,9 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
     let rar = match &args.password.password {
         Some(pw) => {
-            rar::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
+            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
         }
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
     };
 
     println!(
@@ -2265,9 +2265,9 @@ fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
 fn cmd_info(args: &ArchiveArgs) -> Result<(), String> {
     let rar = match &args.password.password {
         Some(pw) => {
-            rar::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
+            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
         }
-        None => rar::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
     };
 
     let files: Vec<_> = rar.list().iter().filter(|e| !e.is_dir()).collect();
@@ -2298,7 +2298,7 @@ fn cmd_info(args: &ArchiveArgs) -> Result<(), String> {
 /// `$default`, or to the end when there is no `$default`. The sort is
 /// stable, so files inside a group keep their collection order.
 fn apply_rarfiles_order(
-    collected: &mut Vec<rar::name_policy::Collected>,
+    collected: &mut Vec<rar5::name_policy::Collected>,
     masks: &[Option<String>],
 ) {
     use std::cmp::Ordering;
@@ -2315,7 +2315,7 @@ fn apply_rarfiles_order(
                 .enumerate()
                 .filter(|(_, c)| {
                     pat.is_some_and(|p| {
-                        rar::name_policy::mask_match(p, c.name.trim_start_matches("./"))
+                        rar5::name_policy::mask_match(p, c.name.trim_start_matches("./"))
                     })
                 })
                 .map(|(i, _)| i)
@@ -2334,7 +2334,7 @@ fn apply_rarfiles_order(
                 .enumerate()
                 .filter(|(_, m)| {
                     m.as_deref().is_some_and(|p| {
-                        rar::name_policy::mask_match(p, c.name.trim_start_matches("./"))
+                        rar5::name_policy::mask_match(p, c.name.trim_start_matches("./"))
                     })
                 })
                 .map(|(mi, _)| mi)
@@ -2359,7 +2359,7 @@ fn apply_rarfiles_order(
 
     let mut order: Vec<usize> = (0..collected.len()).collect();
     order.sort_by_key(|&i| best[i]);
-    let reordered: Vec<rar::name_policy::Collected> =
+    let reordered: Vec<rar5::name_policy::Collected> =
         order.into_iter().map(|i| collected[i].clone()).collect();
     *collected = reordered;
 }

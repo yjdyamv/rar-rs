@@ -19,7 +19,7 @@ zeroize = { version = "1.9", features = ["alloc", "derive"] }
 rayon = "1.12"
 wide = "0.8"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_IO", "Win32_System_Registry"] }
-rar = { path = "crates/rar" }
+rar5 = { path = "crates/rar" }
 
 [workspace.lints.rust]
 unused_must_use = "deny"

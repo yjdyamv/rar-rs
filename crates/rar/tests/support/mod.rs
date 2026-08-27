@@ -89,7 +89,7 @@ pub fn scan_blocks(data: &[u8]) -> Vec<BlockInfo> {
     let mut blocks = Vec::new();
     let mut cursor = std::io::Cursor::new(data);
     cursor.set_position(8); // skip the rar signature
-    while let Ok(Some(meta)) = rar::headers::read_block(&mut cursor, None) {
+    while let Ok(Some(meta)) = rar5::headers::read_block(&mut cursor, None) {
         blocks.push(BlockInfo {
             start: meta.block_start as usize,
             header_len: (meta.data_offset - meta.block_start - 4) as usize,

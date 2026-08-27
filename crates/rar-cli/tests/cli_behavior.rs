@@ -4,7 +4,7 @@
 //! `CARGO_BIN_EXE_*` env vars are only defined for the package that builds
 //! the binaries (moved here from the library's interop.rs).
 
-use rar::RarArchive;
+use rar5::RarArchive;
 use std::io::Write;
 use std::path::Path;
 
@@ -22,7 +22,7 @@ fn make_tree(dir: &std::path::Path) {
 }
 
 fn cli_names(archive: &std::path::Path) -> Vec<String> {
-    let rar = rar::RarArchive::open(archive).unwrap();
+    let rar = rar5::RarArchive::open(archive).unwrap();
     let mut names: Vec<String> = rar
         .namelist()
         .into_iter()
@@ -857,7 +857,7 @@ fn write_rep_text(path: &Path, size: usize) {
 }
 
 fn entry_dict_log(archive: &Path, name: &str) -> u8 {
-    let rar = rar::RarArchive::open(archive).unwrap();
+    let rar = rar5::RarArchive::open(archive).unwrap();
     rar.get_entry(name).unwrap().header.comp_dict_size
 }
 
@@ -904,7 +904,7 @@ fn cli_dict_size_switch_matches_winrar() {
     assert_eq!(entry_dict_log(&archive, "rep32t.bin"), 0);
 
     // The archive with the larger dictionary round-trips.
-    let mut rar = rar::RarArchive::open(&archive).unwrap();
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
     let data = rar.read("rep32t.bin").unwrap();
     assert_eq!(data, std::fs::read(&file).unwrap());
 
@@ -921,7 +921,7 @@ fn cli_dict_size_switch_matches_winrar() {
             .status()
             .unwrap();
         assert!(status.success(), "-md{md} must be accepted");
-        let mut rar = rar::RarArchive::open(&archive).unwrap();
+        let mut rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("rep32t.bin").unwrap();
         assert_eq!(e.header.comp_version, 0, "-md{md} small file stays v50");
         assert_eq!(e.header.dict_size_bytes, None, "-md{md}");
@@ -986,10 +986,10 @@ fn long_range_compresses_distant_copies() {
     // And it must round-trip byte-identically through our extractor.
     let out_dir = dir.path().join("out");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let mut rar = rar::RarArchive::open(&archive).unwrap();
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
     rar.extract_all_with_options(
         &out_dir,
-        rar::ExtractOptions {
+        rar5::ExtractOptions {
             max_unpacked_bytes: None,
             ..Default::default()
         },
@@ -1033,7 +1033,7 @@ fn cli_store_types_ms_stores_matching_files() {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut rar = rar::RarArchive::open(&archive).unwrap();
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
     let b = rar.get_entry("b.bin").unwrap();
     assert_eq!(b.header.comp_method, 0, "-msbin must store b.bin");
     let a = rar.get_entry("a.txt").unwrap();
@@ -1058,7 +1058,7 @@ fn cli_delete_after_df_removes_sources() {
         .unwrap();
     assert!(status.success());
     assert!(!file.exists(), "-df must delete the source");
-    let mut rar = rar::RarArchive::open(&archive).unwrap();
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
     assert_eq!(rar.read("gone.txt").unwrap(), b"will be deleted");
 }
 
@@ -1094,7 +1094,7 @@ fn cli_exclude_prefix_ep4_strips_prefix() {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut rar = rar::RarArchive::open(&archive).unwrap();
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
     assert_eq!(rar.namelist(), ["dir/f.txt"]);
     assert_eq!(rar.read("dir/f.txt").unwrap(), b"data");
 }
@@ -1119,7 +1119,7 @@ fn cli_sync_archive_as_drops_stale_members() {
     };
     assert!(run(&["a.txt", "keep.txt"]));
     assert!(run(&["a.txt"])); // keep.txt is stale now
-    let rar = rar::RarArchive::open(&archive).unwrap();
+    let rar = rar5::RarArchive::open(&archive).unwrap();
     assert_eq!(rar.namelist(), ["a.txt"]);
 }
 
@@ -1144,7 +1144,7 @@ fn cli_a_replaces_same_named_members() {
     assert!(run(&["a.txt", "keep.txt"]));
     std::fs::write(dir.path().join("a.txt"), b"new version").unwrap();
     assert!(run(&["a.txt"]));
-    let mut rar = rar::RarArchive::open(&archive).unwrap();
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
     // Note: the replaced member moves to the end (delete + re-add);
     // WinRAR keeps the original position. Member sets must match.
     let mut names = rar.namelist();
@@ -1171,7 +1171,7 @@ fn cli_accepts_parity_switches() {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut rar = rar::RarArchive::open(&archive).unwrap();
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
     assert_eq!(rar.read("p.txt").unwrap(), b"parity switch payload");
 }
 
@@ -1261,7 +1261,7 @@ fn cli_sfx_roundtrip_with_module() {
         .status()
         .unwrap();
     assert!(status.success(), "s- must strip the SFX module");
-    let mut rar = rar::RarArchive::open(dir.path().join("base.rar")).unwrap();
+    let mut rar = rar5::RarArchive::open(dir.path().join("base.rar")).unwrap();
     assert_eq!(rar.read("f.txt").unwrap(), b"sfx payload");
 }
 
@@ -1301,7 +1301,7 @@ fn cli_ts_saves_and_restores_file_times() {
         .unwrap();
     assert!(status.success());
     {
-        let rar = rar::RarArchive::open(&archive).unwrap();
+        let rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("t.txt").unwrap();
         assert!(e.header.ctime.is_none(), "default must not store ctime");
         assert!(e.header.atime.is_none(), "default must not store atime");
@@ -1318,7 +1318,7 @@ fn cli_ts_saves_and_restores_file_times() {
         .unwrap();
     assert!(status.success());
     {
-        let rar = rar::RarArchive::open(&archive).unwrap();
+        let rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("t.txt").unwrap();
         assert!(e.header.ctime.is_some(), "-ts must store ctime");
         if let Some(src_ctime) = src_ctime {
@@ -1377,7 +1377,7 @@ fn cli_ts_saves_and_restores_file_times() {
         .unwrap();
     assert!(status.success());
     {
-        let rar = rar::RarArchive::open(&archive).unwrap();
+        let rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("t.txt").unwrap();
         assert_eq!(
             e.header.mtime_ns,
@@ -1397,7 +1397,7 @@ fn cli_ts_saves_and_restores_file_times() {
         .unwrap();
     assert!(status.success());
     {
-        let rar = rar::RarArchive::open(&archive).unwrap();
+        let rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("t.txt").unwrap();
         assert!(e.header.ctime.is_none() && e.header.atime.is_none());
         assert!(
@@ -1447,7 +1447,7 @@ fn cli_version_control_keeps_previous_versions() {
         .unwrap();
     assert!(status.success());
     {
-        let mut rar = rar::RarArchive::open(&archive).unwrap();
+        let mut rar = rar5::RarArchive::open(&archive).unwrap();
         assert_eq!(rar.read("ver.txt").unwrap(), b"v2");
         assert_eq!(rar.read("ver.txt;1").unwrap(), b"v1");
     }
@@ -1464,7 +1464,7 @@ fn cli_version_control_keeps_previous_versions() {
         .unwrap();
     assert!(status.success());
     {
-        let mut rar = rar::RarArchive::open(&archive).unwrap();
+        let mut rar = rar5::RarArchive::open(&archive).unwrap();
         assert_eq!(rar.read("ver.txt").unwrap(), b"v3");
         assert_eq!(rar.read("ver.txt;1").unwrap(), b"v2");
         assert_eq!(rar.read("ver.txt;2").unwrap(), b"v1");
@@ -1482,7 +1482,7 @@ fn cli_version_control_keeps_previous_versions() {
         .unwrap();
     assert!(status.success());
     {
-        let mut rar = rar::RarArchive::open(&archive).unwrap();
+        let mut rar = rar5::RarArchive::open(&archive).unwrap();
         assert_eq!(rar.read("ver.txt").unwrap(), b"v4");
         assert_eq!(rar.read("ver.txt;1").unwrap(), b"v3");
         assert!(!rar.namelist().contains(&"ver.txt;2"));
@@ -1615,7 +1615,7 @@ fn cli_rarfiles_lst_orders_solid_members() {
             .unwrap();
         assert!(status.success());
 
-        let rar = rar::RarArchive::open(&archive).unwrap();
+        let rar = rar5::RarArchive::open(&archive).unwrap();
         let names: Vec<String> = rar
             .namelist()
             .into_iter()

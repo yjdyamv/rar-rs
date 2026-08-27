@@ -307,11 +307,11 @@ fn format_unix_time(secs: u32) -> String {
     )
 }
 
-fn open_archive(path: &str, password: Option<&str>) -> Result<rar::RarArchive, String> {
+fn open_archive(path: &str, password: Option<&str>) -> Result<rar5::RarArchive, String> {
     if let Some(pw) = password {
-        rar::RarArchive::open_with_password(path, pw).map_err(|e| format!("{e}"))
+        rar5::RarArchive::open_with_password(path, pw).map_err(|e| format!("{e}"))
     } else {
-        rar::RarArchive::open(path).map_err(|e| format!("{e}"))
+        rar5::RarArchive::open(path).map_err(|e| format!("{e}"))
     }
 }
 
@@ -322,7 +322,7 @@ fn cmd_extract(
     max_dict_size: Option<u64>,
 ) -> Result<(), String> {
     if let Some(threads) = args.threads {
-        rar::set_extraction_threads(threads);
+        rar5::set_extraction_threads(threads);
     }
     let base = args
         .output_path
@@ -335,7 +335,7 @@ fn cmd_extract(
     let count = rar.list().len();
     rar.extract_all_with_options(
         &dest,
-        rar::ExtractOptions {
+        rar5::ExtractOptions {
             // Extraction is fully streaming: no per-member or total
             // size caps (WinRAR's UnRAR extracts any size).
             max_unpacked_bytes: None,
@@ -372,7 +372,7 @@ fn cmd_extract_flat(
     let mut rar = open_archive(&args.archive, password)?;
     rar.extract_all_with_options(
         &dest,
-        rar::ExtractOptions {
+        rar5::ExtractOptions {
             flat_paths: true,
             max_unpacked_bytes: None,
             max_total_unpacked_bytes: None,

@@ -6,7 +6,7 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar::RarArchive;
+use rar5::RarArchive;
 
 #[test]
 fn quick_open_record_written_with_correct_relative_locator() {
@@ -14,9 +14,9 @@ fn quick_open_record_written_with_correct_relative_locator() {
     let path = dir.path().join("qo.rar");
     let payload = b"quick open payload ".repeat(1000);
     {
-        let mut rar = rar::RarArchive::create_with_options(
+        let mut rar = rar5::RarArchive::create_with_options(
             &path,
-            rar::CreateOptions {
+            rar5::CreateOptions {
                 quick_open: true,
                 ..Default::default()
             },
@@ -27,7 +27,7 @@ fn quick_open_record_written_with_correct_relative_locator() {
         rar.close().unwrap();
     }
 
-    let mut rar = rar::RarArchive::open(&path).unwrap();
+    let mut rar = rar5::RarArchive::open(&path).unwrap();
     assert_eq!(rar.read("f1.bin").unwrap(), payload);
     assert_eq!(rar.read("f2.bin").unwrap(), vec![7u8; 4096]);
 
@@ -47,7 +47,7 @@ fn recovery_locator_offset_is_relative_to_archive_start() {
     let dir = make_temp_dir();
     let path = dir.path().join("rr.rar");
     {
-        let mut rar = rar::RarArchive::create_with_recovery(&path, 10).unwrap();
+        let mut rar = rar5::RarArchive::create_with_recovery(&path, 10).unwrap();
         rar.add_bytes("a.bin", &b"recovery test payload ".repeat(1000), 3)
             .unwrap();
         rar.close().unwrap();

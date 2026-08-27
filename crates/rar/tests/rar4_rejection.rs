@@ -6,7 +6,7 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar::RarArchive;
+use rar5::RarArchive;
 
 #[test]
 fn rar4_archives_are_rejected_with_clear_error() {
@@ -19,7 +19,7 @@ fn rar4_archives_are_rejected_with_clear_error() {
     std::fs::write(&path, &data).unwrap();
 
     match RarArchive::open(&path) {
-        Err(rar::RarError::Unsupported(msg)) => assert!(
+        Err(rar5::RarError::Unsupported(msg)) => assert!(
             msg.contains("RAR4"),
             "expected a RAR4-specific message, got: {msg}"
         ),

@@ -6,8 +6,8 @@
 //! errors are expected and swallowed, and the goal is only to catch panics,
 //! overflows, OOM aborts and unbounded loops.
 
-use rar::crypto;
-use rar::recovery::rar5 as recovery;
+use rar5::crypto;
+use rar5::recovery::rar5 as recovery;
 
 /// xorshift64* PRNG with a fixed seed, matching `tests/interop.rs`.
 struct Rng(u64);
@@ -50,7 +50,7 @@ fn archive_parse_random_inputs_do_not_panic() {
     let path = dir.path().join("fuzz-archive.rar");
     let mut rng = Rng::new(0x5EED_0001);
 
-    let opts = rar::ExtractOptions {
+    let opts = rar5::ExtractOptions {
         safe_paths: true,
         max_unpacked_bytes: Some(64 * 1024 * 1024),
         max_total_unpacked_bytes: Some(128 * 1024 * 1024),
@@ -61,7 +61,7 @@ fn archive_parse_random_inputs_do_not_panic() {
         let data = random_bytes(&mut rng, 256 * 1024);
         std::fs::write(&path, &data).expect("write archive input");
 
-        let mut archive = match rar::RarArchive::open(&path) {
+        let mut archive = match rar5::RarArchive::open(&path) {
             Ok(a) => a,
             Err(_) => continue,
         };
@@ -97,7 +97,7 @@ fn unpack50_decode_random_inputs_do_not_panic() {
             continue;
         }
         let stream = random_bytes(&mut rng, 1024 * 1024);
-        let _ = rar::codec::decode_standalone(&stream, unpacked, dict.min(13), None, false);
+        let _ = rar5::codec::decode_standalone(&stream, unpacked, dict.min(13), None, false);
     }
 }
 
@@ -113,8 +113,8 @@ fn exercise_crypto(data: &[u8]) {
     let strength = data[1] % 8;
 
     let mut extra: Vec<u8> = Vec::new();
-    extra.extend_from_slice(&rar::rar50::vint::encode(1)); // version
-    extra.extend_from_slice(&rar::rar50::vint::encode(if with_checksum { 0x02 } else { 0x00 })); // flags
+    extra.extend_from_slice(&rar5::rar50::vint::encode(1)); // version
+    extra.extend_from_slice(&rar5::rar50::vint::encode(if with_checksum { 0x02 } else { 0x00 })); // flags
     extra.push(strength);
     let mut salt = [0x42u8; 16];
     let mut iv = [0x24u8; 16];

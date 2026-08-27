@@ -92,7 +92,7 @@ unrar p [-p<password>] archive.rar [file]     Print to stdout
 ## Library Usage
 
 ```rust
-use rar::RarArchive;
+use rar5::RarArchive;
 
 // Create
 let mut rar = RarArchive::create("backup.rar")?;
@@ -133,7 +133,7 @@ rar.extract_all("/tmp/output/")?;
 dedicated `create*` constructors are thin wrappers around it:
 
 ```rust
-use rar::{CreateOptions, RarArchive};
+use rar5::{CreateOptions, RarArchive};
 
 // Solid + quick-open + BLAKE2sp + password + recovery record.
 let mut rar = RarArchive::create_with_options(
@@ -167,7 +167,7 @@ only after integrity checks pass. Encrypted members verify their MAC'd
 checksums, so corrupted ciphertext is always detected.
 
 ```rust
-use rar::{ExtractOptions, RarArchive};
+use rar5::{ExtractOptions, RarArchive};
 
 let opts = ExtractOptions {
     max_unpacked_bytes: Some(4 * 1024 * 1024 * 1024), // 4 GiB per file

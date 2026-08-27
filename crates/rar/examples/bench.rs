@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use rar::RarArchive;
+use rar5::RarArchive;
 
 fn text_data(size: usize) -> Vec<u8> {
     let lorem = b"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam.\n";
@@ -43,7 +43,7 @@ fn bench(name: &str, data: &[u8]) {
     for level in 1..=5u8 {
         let out = dir.join(format!("{name}-l{level}.rar"));
         let t0 = Instant::now();
-        let result = (|| -> rar::RarResult<()> {
+        let result = (|| -> rar5::RarResult<()> {
             let mut rar = RarArchive::create(&out)?;
             rar.add_bytes("data.bin", data, level)?;
             rar.close()?;
@@ -120,7 +120,7 @@ fn bench_many(name: &str, data: &[u8], member_count: usize) {
     let seq = dir.join("seq.rar");
     let t0 = std::time::Instant::now();
     {
-        let mut ar = rar::RarArchive::create(&seq).unwrap();
+        let mut ar = rar5::RarArchive::create(&seq).unwrap();
         for (i, member) in members.iter().enumerate() {
             ar.add_bytes(&names[i], member, 3).unwrap();
         }
@@ -132,11 +132,11 @@ fn bench_many(name: &str, data: &[u8], member_count: usize) {
     let batch = dir.join("batch.rar");
     let t1 = std::time::Instant::now();
     {
-        let mut ar = rar::RarArchive::create(&batch).unwrap();
-        let entries: Vec<rar::BatchEntry<'_>> = members
+        let mut ar = rar5::RarArchive::create(&batch).unwrap();
+        let entries: Vec<rar5::BatchEntry<'_>> = members
             .iter()
             .enumerate()
-            .map(|(i, member)| rar::BatchEntry::Bytes {
+            .map(|(i, member)| rar5::BatchEntry::Bytes {
                 name: &names[i],
                 data: member,
                 level: 3,
@@ -172,8 +172,8 @@ fn bench_batch(name: &str, data: &[u8]) {
     for level in [1u8, 3, 5] {
         let seq = dir.join(format!("seq-l{level}.rar"));
         let t0 = std::time::Instant::now();
-        let seq_bytes = (|| -> rar::RarResult<usize> {
-            let mut ar = rar::RarArchive::create(&seq)?;
+        let seq_bytes = (|| -> rar5::RarResult<usize> {
+            let mut ar = rar5::RarArchive::create(&seq)?;
             for (i, member) in members.iter().enumerate() {
                 ar.add_bytes(&format!("m{i}.bin"), member, level)?;
             }
@@ -185,13 +185,13 @@ fn bench_batch(name: &str, data: &[u8]) {
 
         let batch = dir.join(format!("batch-l{level}.rar"));
         let t1 = std::time::Instant::now();
-        let batch_bytes = (|| -> rar::RarResult<usize> {
-            let mut ar = rar::RarArchive::create(&batch)?;
+        let batch_bytes = (|| -> rar5::RarResult<usize> {
+            let mut ar = rar5::RarArchive::create(&batch)?;
             let names: Vec<String> = (0..members.len()).map(|i| format!("m{i}.bin")).collect();
-            let entries: Vec<rar::BatchEntry<'_>> = members
+            let entries: Vec<rar5::BatchEntry<'_>> = members
                 .iter()
                 .enumerate()
-                .map(|(i, member)| rar::BatchEntry::Bytes {
+                .map(|(i, member)| rar5::BatchEntry::Bytes {
                     name: &names[i],
                     data: member,
                     level,
@@ -234,11 +234,11 @@ fn bench_extract(name: &str, data: &[u8]) {
     let names: Vec<String> = (0..members.len()).map(|i| format!("m{i}.bin")).collect();
     let archive_path = dir.join("bench-extract.rar");
     {
-        let mut ar = rar::RarArchive::create(&archive_path).unwrap();
-        let entries: Vec<rar::BatchEntry<'_>> = members
+        let mut ar = rar5::RarArchive::create(&archive_path).unwrap();
+        let entries: Vec<rar5::BatchEntry<'_>> = members
             .iter()
             .enumerate()
-            .map(|(i, member)| rar::BatchEntry::Bytes {
+            .map(|(i, member)| rar5::BatchEntry::Bytes {
                 name: &names[i],
                 data: member,
                 level: 3,
@@ -252,7 +252,7 @@ fn bench_extract(name: &str, data: &[u8]) {
     let seq_out = dir.join("seq");
     let t0 = std::time::Instant::now();
     {
-        let mut ar = rar::RarArchive::open(&archive_path).unwrap();
+        let mut ar = rar5::RarArchive::open(&archive_path).unwrap();
         ar.set_progress_callback(Some(Box::new(|_, _| {})));
         ar.extract_all(&seq_out).unwrap();
     }
@@ -261,7 +261,7 @@ fn bench_extract(name: &str, data: &[u8]) {
     let par_out = dir.join("par");
     let t1 = std::time::Instant::now();
     {
-        let mut ar = rar::RarArchive::open(&archive_path).unwrap();
+        let mut ar = rar5::RarArchive::open(&archive_path).unwrap();
         ar.extract_all(&par_out).unwrap();
     }
     let par_elapsed = t1.elapsed();
