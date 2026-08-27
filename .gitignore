@@ -1,4 +1,2 @@
 /target
 /.claude
-/fuzz/target
-fuzz/crashes/

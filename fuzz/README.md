@@ -40,12 +40,20 @@ cargo +nightly fuzz run recovery --features fuzzing
 ```
 
 The `fuzzing` feature pulls in `libfuzzer-sys`; the same `fn(&[u8])`
-runners are reused so both modes fuzz identical code. Seed inputs live
-in `fuzz/corpus/<target>/` (cargo-fuzz picks them up automatically) and
-are the same fixtures the standalone loop embeds. Nightly is required
-here — cargo-fuzz passes `-Z sanitizer` (ASAN/UBSAN) which stable
-cannot provide; the standalone loop only observes panics, so run
-libFuzzer before relying on parser robustness against hostile input.
+runners are reused so both modes fuzz identical code. `fuzz/corpus/` is
+**gitignored** (libFuzzer grows it with new inputs); seed it from the
+vendored fixtures before the first run:
+
+```sh
+mkdir -p fuzz/corpus/parse
+cp crates/rar/tests/fixtures/rar50/winrar5_multiple_files.rar fuzz/corpus/parse/
+cp crates/rar/tests/fixtures/rar50/tail-match-362.bin fuzz/corpus/parse/
+```
+
+Nightly is required here — cargo-fuzz passes `-Z sanitizer` (ASAN/UBSAN)
+which stable cannot provide; the standalone loop only observes panics,
+so run libFuzzer before relying on parser robustness against hostile
+input.
 
 ## Notes
 
