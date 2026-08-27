@@ -1778,20 +1778,24 @@ fn cmd_verbose_list(args: &ArchiveArgs) -> Result<(), String> {
 /// Writes `fixed.<name>` when damage was found and repaired.
 fn cmd_repair(args: &ArchiveArgs) -> Result<(), String> {
     let archive_path = &args.archive;
-    let input = std::fs::read(archive_path).map_err(|e| format!("read: {e}"))?;
-    let repaired = rar5::repair_archive(&input).map_err(|e| format!("repair: {e}"))?;
-    if repaired == input {
-        info!("All OK");
-        return Ok(());
-    }
-    // The official tool refuses an obviously truncated archive with a
-    // clear error; validate the repaired bytes with our own reader.
     let name = std::path::Path::new(archive_path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "archive.rar".to_string());
     let fixed_path = format!("fixed.{name}");
-    std::fs::write(&fixed_path, &repaired).map_err(|e| format!("write: {e}"))?;
+    // Streaming repair: bounded memory regardless of archive size; the
+    // repaired archive is staged and renamed atomically by the library.
+    let repaired = rar5::repair_archive_path(
+        std::path::Path::new(archive_path),
+        std::path::Path::new(&fixed_path),
+    )
+    .map_err(|e| format!("repair: {e}"))?;
+    if !repaired {
+        info!("All OK");
+        return Ok(());
+    }
+    // The official tool refuses an obviously truncated archive with a
+    // clear error; validate the repaired bytes with our own reader.
     if let Err(e) = rar5::RarArchive::open(&fixed_path) {
         let _ = std::fs::remove_file(&fixed_path);
         return Err(format!("repair produced an unreadable archive: {e}"));

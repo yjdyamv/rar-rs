@@ -51,5 +51,5 @@ pub use features::{Feature, FeatureSet};
 pub use options::{CreateOptions, ExtractOptions};
 pub use parallel::{set_compression_threads, set_extraction_threads};
 pub use rar50::*;
-pub use recovery::{rebuild_missing_volumes, repair_archive};
+pub use recovery::{rebuild_missing_volumes, repair_archive, repair_archive_path};
 pub use version::ArchiveVersion;

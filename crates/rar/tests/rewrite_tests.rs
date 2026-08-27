@@ -976,3 +976,63 @@ fn zero_padded_volume_sets_discover_and_rebuild() {
     let mut rar = rar5::RarArchive::open(&padded_first).unwrap();
     assert_eq!(rar.read("a.bin").unwrap(), payload);
 }
+
+/// Streaming path repair (`repair_archive_path`) must agree with the
+/// in-memory repair byte-for-byte and stream without materializing the
+/// whole archive.
+#[test]
+fn repair_archive_path_streams_and_matches_in_memory() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("rep-path.rar");
+    // Large member so the recovery record sits at the end and damage
+    // below lands inside the protected data.
+    let payload: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
+    {
+        let mut rar = rar5::RarArchive::create_with_recovery(&path, 10).unwrap();
+        rar.add_bytes("a.bin", &payload, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let good = std::fs::read(&path).unwrap();
+
+    // Damage several bytes inside the protected data.
+    let mut damaged = good.clone();
+    for pos in [400usize, 410, 420, 900] {
+        damaged[pos] ^= 0x5A;
+    }
+    std::fs::write(&path, &damaged).unwrap();
+
+    let out = dir.path().join("fixed.rar");
+    let repaired = rar5::repair_archive_path(&path, &out).unwrap();
+    assert!(repaired, "damage must be reported as repaired");
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        good,
+        "streaming repair must restore the original bytes"
+    );
+
+    // Undamaged archive -> no output written (like `rar r`'s "All OK"),
+    // reported as not repaired.
+    let out2 = dir.path().join("fixed2.rar");
+    std::fs::write(&path, &good).unwrap();
+    let repaired = rar5::repair_archive_path(&path, &out2).unwrap();
+    assert!(!repaired, "intact archive must report no repair");
+    assert!(
+        !out2.exists(),
+        "intact repair must not write an output file"
+    );
+
+    // The repaired archive must open and extract byte-identically.
+    let mut rar = rar5::RarArchive::open(&out).unwrap();
+    assert_eq!(rar.read("a.bin").unwrap(), payload);
+
+    // No recovery record -> clean error, and the output stays absent.
+    let plain = dir.path().join("plain.rar");
+    {
+        let mut rar = rar5::RarArchive::create(&plain).unwrap();
+        rar.add_bytes("a.bin", b"x", 0).unwrap();
+        rar.close().unwrap();
+    }
+    let out3 = dir.path().join("fixed3.rar");
+    assert!(rar5::repair_archive_path(&plain, &out3).is_err());
+    assert!(!out3.exists());
+}
