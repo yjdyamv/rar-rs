@@ -204,6 +204,7 @@ pub fn encode_with_progress(
 /// STORE when the result is not smaller than the input.
 ///
 /// `extra_dist` selects the RAR7 (v70) distance code table.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_chunked(
     data: &[u8],
     method: u8,
@@ -294,6 +295,7 @@ pub fn encode_chunked(
 /// the long-range history absorbs the whole window, and the repeat-distance
 /// cache resets.
 #[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)]
 pub fn encode_chunked_mt(
     data: &[u8],
     method: u8,
@@ -383,7 +385,8 @@ pub fn encode_chunked_mt(
                 first = last;
             }
         });
-        slots.into_inner()
+        slots
+            .into_inner()
             .unwrap()
             .into_iter()
             .map(|s| s.expect("worker slot filled"))
@@ -461,11 +464,7 @@ fn encode_mt_slice(
     // Long-range candidates only beyond what the near finder covers; the
     // anchor places this slice's start in absolute stream coordinates.
     let lr_q = if long_range {
-        Some((
-            lr_shared,
-            tl + (e0 - s0),
-            entry_len + s0,
-        ))
+        Some((lr_shared, tl + (e0 - s0), entry_len + s0))
     } else {
         None
     };
@@ -658,11 +657,10 @@ fn find_matches_with_tail(
         lr,
     );
 
-    if long_range {
-        if let Some(lr) = state.long_range.as_mut() {
+    if long_range
+        && let Some(lr) = state.long_range.as_mut() {
             lr.push(chunk);
         }
-    }
 
     // The near window (tail) only needs to cover short-distance matches:
     // longer distances come from the sampled long-range history. Capping
@@ -680,6 +678,7 @@ fn find_matches_with_tail(
 /// history: `(long_range, near_max)` where `near_max` is the largest
 /// distance the near finder can produce (tail + chunk), so long-range
 /// hits are only considered beyond it.
+#[allow(clippy::too_many_arguments)]
 fn find_matches_in_range(
     data: &[u8],
     finder: &mut MatchFinder<'_>,
@@ -719,9 +718,13 @@ fn find_matches_in_range(
                 && (pos & (match_finder::LONG_RANGE_STEP - 1)) == 0
             {
                 let chunk_off = pos - start;
-                if let Some((ld, ll)) =
-                    long_range.find_from(&data[start..end], chunk_off, anchor, near_max + 1, max_match)
-                {
+                if let Some((ld, ll)) = long_range.find_from(
+                    &data[start..end],
+                    chunk_off,
+                    anchor,
+                    near_max + 1,
+                    max_match,
+                ) {
                     d = ld as usize;
                     l = ll;
                 }
@@ -738,9 +741,13 @@ fn find_matches_in_range(
                 && pos + 4 <= end
             {
                 let chunk_off = pos - start;
-                if let Some((ld, ll)) =
-                    long_range.find_from(&data[start..end], chunk_off, anchor, near_max + 1, max_match)
-                    && ll > l
+                if let Some((ld, ll)) = long_range.find_from(
+                    &data[start..end],
+                    chunk_off,
+                    anchor,
+                    near_max + 1,
+                    max_match,
+                ) && ll > l
                 {
                     d = ld as usize;
                     l = ll;
@@ -1387,8 +1394,8 @@ fn write_filter_data(writer: &mut BitWriter, value: u32) {
 #[cfg(test)]
 mod encode_tests {
     use super::super::huffman::DecodeTable;
-    use super::*;
     use super::decode_to_writer;
+    use super::*;
 
     fn one_symbol_table(count: usize) -> Vec<u8> {
         let mut v = vec![0u8; count];
@@ -1714,6 +1721,7 @@ impl DecoderState {
 /// `dict_size_log` sizes the window for standalone members only: when
 /// `state` is carried (solid chains), the state owns its window and the
 /// log is ignored by construction.
+#[derive(Default)]
 pub struct DecodeOptions<'a> {
     /// Dictionary size as log2(size/128KB), 0 = 128KB. Used when `state`
     /// is `None`.
@@ -1728,16 +1736,6 @@ pub struct DecodeOptions<'a> {
     pub state: Option<&'a mut DecoderState>,
 }
 
-impl Default for DecodeOptions<'_> {
-    fn default() -> Self {
-        Self {
-            dict_size_log: 0,
-            dict_size_bytes: None,
-            extra_dist: false,
-            state: None,
-        }
-    }
-}
 
 /// Decode RAR5 compressed data into a buffer.
 ///
@@ -2565,8 +2563,8 @@ mod decode_tests {
     /// buffered path for every filter type.
     #[test]
     fn streaming_decode_matches_buffered_for_split_filter_records() {
-        use super::{FilterSpec, MAX_FILTER_BLOCK_LENGTH, encode_with_filters};
         use super::{FILTER_ARM, FILTER_DELTA, FILTER_E8, FILTER_E8E9};
+        use super::{FilterSpec, MAX_FILTER_BLOCK_LENGTH, encode_with_filters};
 
         fn pattern(filter_type: u8, size: usize) -> Vec<u8> {
             match filter_type {
@@ -2681,6 +2679,7 @@ pub fn compress_with_progress(
 /// `extra_dist` selects the RAR7 (v70) distance code table (80 entries
 /// instead of 64); set it when the member header declares a dictionary
 /// above 4 GiB.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_chunked(
     data: &[u8],
     method: u8,
@@ -2806,14 +2805,8 @@ mod mt_tests {
             true,
             true,
         );
-        let out = decode_standalone(
-            &packed,
-            data.len() as u64,
-            6,
-            Some(48 * 1024 * 1024),
-            true,
-        )
-        .unwrap();
+        let out =
+            decode_standalone(&packed, data.len() as u64, 6, Some(48 * 1024 * 1024), true).unwrap();
         assert_eq!(out, data);
     }
 
@@ -2827,7 +2820,16 @@ mod mt_tests {
         w2[1000..2000].copy_from_slice(&w1[1000..2000]);
         let mut st = EncoderState::default();
         let mut packed = encode_chunked_mt(&w1, 3, 6, DEFAULT_CHUNK_SIZE, &mut st, 3, false, false);
-        packed.extend(encode_chunked_mt(&w2, 3, 6, DEFAULT_CHUNK_SIZE, &mut st, 3, true, false));
+        packed.extend(encode_chunked_mt(
+            &w2,
+            3,
+            6,
+            DEFAULT_CHUNK_SIZE,
+            &mut st,
+            3,
+            true,
+            false,
+        ));
         let mut full = w1;
         full.extend(&w2);
         let out = decode_standalone(&packed, full.len() as u64, 6, None, false).unwrap();
@@ -2838,10 +2840,24 @@ mod mt_tests {
     fn deterministic_across_runs() {
         let data = mixed_data();
         let a = encode_chunked_mt(
-            &data, 3, 6, DEFAULT_CHUNK_SIZE, &mut EncoderState::default(), 4, true, false,
+            &data,
+            3,
+            6,
+            DEFAULT_CHUNK_SIZE,
+            &mut EncoderState::default(),
+            4,
+            true,
+            false,
         );
         let b = encode_chunked_mt(
-            &data, 3, 6, DEFAULT_CHUNK_SIZE, &mut EncoderState::default(), 4, true, false,
+            &data,
+            3,
+            6,
+            DEFAULT_CHUNK_SIZE,
+            &mut EncoderState::default(),
+            4,
+            true,
+            false,
         );
         assert_eq!(a, b);
     }

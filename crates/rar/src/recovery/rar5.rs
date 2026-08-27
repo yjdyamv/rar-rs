@@ -431,8 +431,8 @@ fn parse_file_data_blocks(prefix: &[u8]) -> Result<Vec<(usize, usize)>> {
     }
     let mut pos = 8usize;
     while pos + 4 < prefix.len() {
-        let (header_size, size_bytes) =
-            crate::rar50::vint::decode_from_slice(prefix, pos + 4).map_err(|_| Error::BadRecoveryChunk)?;
+        let (header_size, size_bytes) = crate::rar50::vint::decode_from_slice(prefix, pos + 4)
+            .map_err(|_| Error::BadRecoveryChunk)?;
         if header_size == 0 || header_size > 2 * 1024 * 1024 {
             break;
         }
@@ -443,20 +443,20 @@ fn parse_file_data_blocks(prefix: &[u8]) -> Result<Vec<(usize, usize)>> {
         if block_end > prefix.len() {
             break;
         }
-        let (block_type, t) =
-            crate::rar50::vint::decode_from_slice(prefix, body).map_err(|_| Error::BadRecoveryChunk)?;
+        let (block_type, t) = crate::rar50::vint::decode_from_slice(prefix, body)
+            .map_err(|_| Error::BadRecoveryChunk)?;
         let (flags, f) = crate::rar50::vint::decode_from_slice(prefix, body + t)
             .map_err(|_| Error::BadRecoveryChunk)?;
         let mut p = body + t + f;
         if flags & 0x1 != 0 {
-            let (_, n) =
-                crate::rar50::vint::decode_from_slice(prefix, p).map_err(|_| Error::BadRecoveryChunk)?;
+            let (_, n) = crate::rar50::vint::decode_from_slice(prefix, p)
+                .map_err(|_| Error::BadRecoveryChunk)?;
             p += n;
         }
         let mut data_size = 0u64;
         if flags & 0x2 != 0 {
-            let (v, _n) =
-                crate::rar50::vint::decode_from_slice(prefix, p).map_err(|_| Error::BadRecoveryChunk)?;
+            let (v, _n) = crate::rar50::vint::decode_from_slice(prefix, p)
+                .map_err(|_| Error::BadRecoveryChunk)?;
             data_size = v;
         }
         if block_type == 2 {

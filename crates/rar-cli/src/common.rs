@@ -57,11 +57,6 @@ pub fn merge_default_switches(defaults: Vec<String>, cli_args: Vec<String>) -> V
     merged
 }
 
-/// Read the rarfiles.lst solid-ordering list (`None` entry = `$default`):
-/// Windows looks next to the executable and in `%APPDATA%\WinRAR`, Unix
-/// in the home directory and `/etc`. Independent of `-cfg-` (verified
-/// against WinRAR 7.23).
-#[allow(dead_code)] // used by the `rar` binary only
 /// Parse a WinRAR `-mdx<size>[k|m|g]` extraction dictionary cap: unlike
 /// `-md`, no unit means **GiB** (`-mdx8` = 8 GiB, per the WinRAR docs).
 #[allow(dead_code)] // used by the `unrar` binary only
@@ -121,7 +116,7 @@ fn config_file_switches(command: Option<&str>) -> Vec<String> {
         if key.trim() == "switches" {
             global = switches;
         } else if let Some(rest) = key.trim().strip_prefix("switches_")
-            && Some(rest) == command.as_deref()
+            && Some(rest) == command
         {
             specific = switches;
         }

@@ -38,6 +38,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// clap command enums carry large variant payloads by design.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Add files to the archive (creates it when missing)
     #[command(visible_alias = "a")]
@@ -103,6 +105,18 @@ enum Command {
     /// List archive contents
     #[command(visible_alias = "l")]
     List(ArchiveArgs),
+    /// List bare (names only, like `lb`)
+    #[command(visible_alias = "lb")]
+    ListBare(ArchiveArgs),
+    /// List technical (like `lt`)
+    #[command(visible_alias = "lt")]
+    ListTechnical(ArchiveArgs),
+    /// Verbosely list bare (like `vb`)
+    #[command(visible_alias = "vb")]
+    VerboseListBare(ArchiveArgs),
+    /// Verbosely list technical (like `vt`)
+    #[command(visible_alias = "vt")]
+    VerboseListTechnical(ArchiveArgs),
     /// Show archive info
     #[command(visible_alias = "i")]
     Info(ArchiveArgs),
@@ -681,12 +695,11 @@ fn main() {
     let cli = Cli::parse_from(std::iter::once("rar".to_string()).chain(args));
     output::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
     output::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
-    if let Some(dir) = &cli.work_dir {
-        if let Err(e) = std::env::set_current_dir(dir) {
+    if let Some(dir) = &cli.work_dir
+        && let Err(e) = std::env::set_current_dir(dir) {
             eprintln!("rar: cannot change to work directory {dir}: {e}");
             process::exit(1);
         }
-    }
     let _ = cli.yes; // no interactive prompts exist yet; accepted for parity
     let log_errors = cli.misc.log_errors.clone();
     if let Err(e) = run(cli) {
@@ -729,6 +742,10 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Test(args) => cmd_test(&args),
         Command::VerboseList(args) => cmd_verbose_list(&args),
         Command::List(args) => cmd_list(&args),
+        Command::ListBare(args) => cmd_list_bare(&args),
+        Command::ListTechnical(args) => cmd_list_technical(&args),
+        Command::VerboseListBare(args) => cmd_list_bare(&args),
+        Command::VerboseListTechnical(args) => cmd_list_technical(&args),
         Command::Info(args) => cmd_info(&args),
         Command::External(ext) => {
             let name = ext.first().cloned().unwrap_or_default();
@@ -2262,6 +2279,76 @@ fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// Bare list (`lb` / `vb`): member names only.
+fn cmd_list_bare(args: &ArchiveArgs) -> Result<(), String> {
+    let rar = match &args.password.password {
+        Some(pw) => {
+            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
+        }
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
+    };
+    for entry in rar.list() {
+        println!("{}", entry.name());
+    }
+    Ok(())
+}
+
+/// Technical list (`lt` / `vt`): mtime, attributes, sizes, ratio, CRC and
+/// method per member, in the spirit of the official `rar lt`.
+fn cmd_list_technical(args: &ArchiveArgs) -> Result<(), String> {
+    let rar = match &args.password.password {
+        Some(pw) => {
+            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
+        }
+        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
+    };
+    println!(
+        "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {:<19}  Name",
+        "Size", "Packed", "Ratio", "Checksum", "Method", "Modified"
+    );
+    println!("{}", "-".repeat(86));
+    for entry in rar.list() {
+        let ratio = if entry.is_dir() {
+            "  dir".to_string()
+        } else if entry.size() > 0 {
+            format!(
+                "{:.1}%",
+                entry.compressed_size() as f64 / entry.size() as f64 * 100.0
+            )
+        } else {
+            " 0.0%".to_string()
+        };
+        let checksum = entry
+            .crc32()
+            .map(|c| format!("{c:08X}"))
+            .unwrap_or_else(|| "-".to_string());
+        let secs = entry.mtime();
+        let days = (secs as i64) / 86400;
+        let tod = secs % 86400;
+        let (y, mo, d) = time::civil_from_days(days);
+        let modified = format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            y,
+            mo,
+            d,
+            tod / 3600,
+            (tod % 3600) / 60,
+            tod % 60
+        );
+        println!(
+            "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {:<19}  {}",
+            entry.size(),
+            entry.compressed_size(),
+            ratio,
+            checksum,
+            entry.method_name(),
+            modified,
+            entry.name()
+        );
+    }
+    Ok(())
+}
+
 fn cmd_info(args: &ArchiveArgs) -> Result<(), String> {
     let rar = match &args.password.password {
         Some(pw) => {
@@ -2327,8 +2414,8 @@ fn apply_rarfiles_order(
     // Highest-priority mask per file.
     let best: Vec<usize> = collected
         .iter()
-        .enumerate()
-        .map(|(_, c)| {
+        
+        .map(|c| {
             let matched: Vec<usize> = masks
                 .iter()
                 .enumerate()

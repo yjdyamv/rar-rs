@@ -14,7 +14,7 @@ pub mod rar50;
 pub mod window;
 
 pub use rar50::{
-    DecodeOptions, DecoderState, DEFAULT_CHUNK_SIZE, EncoderState, FilterSpec,
+    DEFAULT_CHUNK_SIZE, DecodeOptions, DecoderState, EncoderState, FilterSpec,
     MAX_FILTER_BLOCK_LENGTH, MAX_STREAMING_FILTER_BUFFER, compress, compress_chunked,
     compress_with_progress, decode, decode_standalone, decode_standalone_to_writer,
     decode_to_writer, decompress, encode, encode_chunked, encode_with_filters,

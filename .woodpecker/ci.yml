@@ -1,0 +1,29 @@
+# Woodpecker CI for Codeberg (https://codeberg.org/yjdyamv/rar-rs).
+#
+# Hard gates: formatting, clippy (deny), and the full test suite with
+# every feature (`parallel` + `simd` — the smart-archive-rar feature set).
+#
+# The WinRAR interop tests self-skip when no WinRAR installation is found,
+# so this Linux pipeline runs them harmlessly; run them for real on a
+# Windows machine (`cargo test --test winrar_interop`).
+
+when:
+  event: [push, pull_request, tag]
+
+steps:
+  fmt:
+    image: rust:1.87
+    commands:
+      - rustup component add rustfmt
+      - cargo fmt --check
+
+  clippy:
+    image: rust:1.87
+    commands:
+      - rustup component add clippy
+      - cargo clippy --workspace --all-features -- -D warnings
+
+  test:
+    image: rust:1.87
+    commands:
+      - cargo test --workspace --all-features

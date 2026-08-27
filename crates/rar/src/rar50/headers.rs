@@ -13,9 +13,9 @@
 /// ```
 use std::io::{self, Read, Seek};
 
-use crate::rar50::*;
 use crate::error::{RarError, RarResult};
 use crate::rar50::vint;
+use crate::rar50::*;
 
 // ── Raw Block ──────────────────────────────────────────────────────────────
 
@@ -498,7 +498,7 @@ impl FileHeader {
             let inc = ((bytes - base) * 32 / base).min(31);
             comp_info |= 1;
             comp_info |= (n as u64 & 0x1F) << COMP_INFO_DICT_SHIFT;
-            comp_info |= (inc as u64 & 0x1F) << 15;
+            comp_info |= (inc & 0x1F) << 15;
         } else {
             comp_info |= ((self.comp_dict_size as u64) & 0x0F) << COMP_INFO_DICT_SHIFT;
         }
@@ -1221,16 +1221,12 @@ pub(crate) fn file_time_extra_record(
     record.extend(vint::encode(flags));
     // Segment layout (like WinRAR): all second fields first, then all
     // nanosecond fields, in mtime/ctime/atime order.
-    for t in [mtime, ctime, atime] {
-        if let Some((secs, _)) = t {
-            record.extend_from_slice(&(secs as u32).to_le_bytes());
-        }
+    for (secs, _) in [mtime, ctime, atime].into_iter().flatten() {
+        record.extend_from_slice(&(secs as u32).to_le_bytes());
     }
     if ns_precision {
-        for t in [mtime, ctime, atime] {
-            if let Some((_, ns)) = t {
-                record.extend_from_slice(&ns.to_le_bytes());
-            }
+        for (_, ns) in [mtime, ctime, atime].into_iter().flatten() {
+            record.extend_from_slice(&ns.to_le_bytes());
         }
     }
 

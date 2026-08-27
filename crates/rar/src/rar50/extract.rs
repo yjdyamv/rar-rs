@@ -9,20 +9,20 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-#[cfg(feature = "parallel")]
-use crate::parallel::extraction_pool;
 use crate::archive::{
-    discover_volumes, ArchiveEntry, DecryptedPayload, RarArchive, StreamRecord, MAX_DICT_SIZE_LOG,
+    ArchiveEntry, DecryptedPayload, MAX_DICT_SIZE_LOG, RarArchive, StreamRecord, discover_volumes,
 };
 use crate::codec::DecoderState;
 use crate::codec::rar50 as compression;
 use crate::crypto::{self, parse_archive_encrypt_header};
-use crate::detect::{find_bytes, SFX_SCAN_LIMIT};
+use crate::detect::{SFX_SCAN_LIMIT, find_bytes};
 use crate::error::{RarError, RarResult};
-use crate::rar50::write as archive_write;
 use crate::io_util::{replace_file, temp_sibling_path};
-use crate::rar50::*;
+#[cfg(feature = "parallel")]
+use crate::parallel::extraction_pool;
 use crate::rar50::headers::*;
+use crate::rar50::write as archive_write;
+use crate::rar50::*;
 
 /// Memory budget (packed + unpacked) for the optional parallel extraction
 /// path; larger archives stream sequentially to stay bounded.
@@ -86,7 +86,7 @@ impl RarArchive {
         Ok(())
     }
 
-// ── Signature ──────────────────────────────────────────────────────────
+    // ── Signature ──────────────────────────────────────────────────────────
 
     fn verify_signature(&mut self) -> RarResult<()> {
         // The signature must appear at the start for plain archives and
@@ -136,22 +136,19 @@ impl RarArchive {
         let mut encr_key: Option<[u8; 32]> = None;
         let mut last_file_index: Option<usize> = None;
 
-        loop {
-            let meta =
-                match crate::rar50::headers::read_block(self.stream.as_mut().unwrap(), encr_key.as_ref())?
-                {
-                    Some(meta) => meta,
-                    None => break,
-                };
+        while let Some(meta) = crate::rar50::headers::read_block(
+            self.stream.as_mut().unwrap(),
+            encr_key.as_ref(),
+        )? {
             let raw = &meta.raw;
             let stream_pos = self.stream.as_mut().unwrap().stream_position()?;
 
             match raw.block_type {
                 BLOCK_TYPE_ARCHIVE_HEADER => {
-                    let _ah = ArchiveHeader::from_raw(&raw)?;
+                    let _ah = ArchiveHeader::from_raw(raw)?;
                 }
                 BLOCK_TYPE_FILE_HEADER => {
-                    let fh = FileHeader::from_raw(&raw, stream_pos)?;
+                    let fh = FileHeader::from_raw(raw, stream_pos)?;
                     let chunk = DataChunk {
                         volume_index: 0,
                         data_offset: fh.data_offset,
@@ -199,7 +196,7 @@ impl RarArchive {
                             "archive has encrypted headers; provide a password".into(),
                         )
                     })?;
-                    let params = parse_archive_encrypt_header(&raw)?;
+                    let params = parse_archive_encrypt_header(raw)?;
                     if !params.verify_password(password) {
                         return Err(RarError::WrongPassword);
                     }
@@ -246,11 +243,10 @@ impl RarArchive {
             // None until this volume's plaintext encryption header arrives.
             let mut encr_key: Option<[u8; 32]> = None;
 
-            loop {
-                let raw = match crate::rar50::headers::read_block(&mut stream, encr_key.as_ref())? {
-                    Some(meta) => meta.raw,
-                    None => break,
-                };
+            while let Some(meta) =
+                crate::rar50::headers::read_block(&mut stream, encr_key.as_ref())?
+            {
+                let raw = meta.raw;
 
                 let stream_pos = stream.stream_position()?;
 
@@ -1310,7 +1306,7 @@ impl RarArchive {
         let password = self.password.as_ref()?;
         Some(encr.get_key(password))
     }
-} 
+}
 
 /// Verify CRC32 and BLAKE2sp integrity against a file header. Encrypted
 /// members use the hash-key MAC when the encryption record requests it.

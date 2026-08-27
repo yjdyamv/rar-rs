@@ -238,4 +238,3 @@ pub(crate) fn spill_path_for(archive_path: &Path) -> PathBuf {
         .unwrap_or_else(|| "archive".to_string());
     archive_path.with_file_name(format!(".{name}.rar5spill-{}", temp_suffix()))
 }
-

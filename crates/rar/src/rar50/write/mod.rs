@@ -7,27 +7,31 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub(crate) use self::engine::{
+    CountingWriter, CrcSink, ProgressWriter, SpillGuard, payload_stream, spill_path_for,
+};
 use crate::archive::{ArchiveEntry, BatchEntry, Mode, RarArchive, STREAM_COMPRESS_THRESHOLD};
 #[cfg(feature = "parallel")]
-use crate::archive::{BatchPrepareCtx, PreparedEntry, PARALLEL_COMPRESS_MAX_MEMBER, PARALLEL_COMPRESS_WAVE_BUDGET};
-use crate::crypto;
+use crate::archive::{
+    BatchPrepareCtx, PARALLEL_COMPRESS_MAX_MEMBER, PARALLEL_COMPRESS_WAVE_BUDGET, PreparedEntry,
+};
 use crate::codec::rar50 as compression;
+use crate::crypto;
 use crate::error::{RarError, RarResult};
+use crate::rar50::write::layout::{
+    SAMPLE_PROBE_HEAD, dict_params_for, hash_file, sample_is_incompressible,
+    sample_is_incompressible_file,
+};
 #[cfg(feature = "parallel")]
 use crate::write_progress::ProgressTracker;
-pub(crate) use self::engine::{CountingWriter, CrcSink, payload_stream, ProgressWriter, SpillGuard, spill_path_for};
-use crate::rar50::write::layout::{
-    dict_params_for, hash_file, sample_is_incompressible, sample_is_incompressible_file,
-    SAMPLE_PROBE_HEAD,
-};
 
-use crate::rar50::*;
 use crate::rar50::headers::*;
 use crate::rar50::vint;
+use crate::rar50::*;
 pub(crate) mod engine;
 pub(crate) mod layout;
 #[cfg(feature = "parallel")]
-use crate::parallel::{compression_pool, BatchWorkerGuard};
+use crate::parallel::{BatchWorkerGuard, compression_pool};
 
 /// Write an NTFS alternate data stream (`path` + `stream_name` like
 /// `:custom1`) on Windows.
@@ -182,6 +186,7 @@ fn windows_file_time(path: &Path, want_access: bool) -> Option<(u64, u32)> {
 /// off-thread parallel batch path has no `&RarArchive`); `None` when no
 /// time needs the extra record. On Windows the access/creation times are
 /// read through `GetFileTime` (std exposes no access-time API).
+#[allow(clippy::too_many_arguments)]
 fn time_extra_cfg(
     save_ctime: bool,
     save_atime: bool,
@@ -1052,6 +1057,7 @@ impl RarArchive {
     /// `member` and `progress` route per-chunk deltas into the shared tracker
     /// so the parallel wave reports live progress.
     #[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)]
     fn prepare_data_entry(
         ctx: &BatchPrepareCtx<'_>,
         name: &str,
@@ -2134,9 +2140,7 @@ impl RarArchive {
             }
 
             #[cfg(feature = "parallel")]
-            let mt_window = (crate::parallel::compression_worker_count()
-                .max(2)
-                * 8 * 1024 * 1024)
+            let mt_window = (crate::parallel::compression_worker_count().max(2) * 8 * 1024 * 1024)
                 .clamp(24 * 1024 * 1024, 64 * 1024 * 1024);
             #[cfg(not(feature = "parallel"))]
             let mt_window = 0usize;

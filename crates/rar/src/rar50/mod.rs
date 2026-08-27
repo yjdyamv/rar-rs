@@ -18,10 +18,10 @@
 
 pub mod blake2sp;
 pub(crate) mod extract;
-pub(crate) mod write;
 #[doc(hidden)]
 pub mod headers;
 pub mod vint;
+pub(crate) mod write;
 
 pub use headers::*;
 

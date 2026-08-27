@@ -1,3 +1,5 @@
+use crate::error::{RarError, RarResult};
+use crate::rar50::vint;
 /// RAR5 Encryption Support
 ///
 /// RAR5 uses AES-256 in CBC mode with keys derived from a password via a
@@ -13,8 +15,6 @@
 ///    present, all subsequent blocks (including file headers) are also
 ///    encrypted.
 use crate::rar50::*;
-use crate::error::{RarError, RarResult};
-use crate::rar50::vint;
 
 use aes::Aes256;
 use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
@@ -510,7 +510,9 @@ impl EncryptionParams {
 /// The block body (after block_type and flags vints) contains:
 /// `[vint encr_version] [vint encr_flags] [u8 strength] [16-byte salt]`
 /// Optionally followed by a 12-byte password check value if encr_flags & 0x01.
-pub fn parse_archive_encrypt_header(raw: &crate::rar50::headers::RawBlock) -> RarResult<EncryptionParams> {
+pub fn parse_archive_encrypt_header(
+    raw: &crate::rar50::headers::RawBlock,
+) -> RarResult<EncryptionParams> {
     let data = &raw.header_data;
     let mut offset = 0;
 

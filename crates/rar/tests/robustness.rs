@@ -114,7 +114,11 @@ fn exercise_crypto(data: &[u8]) {
 
     let mut extra: Vec<u8> = Vec::new();
     extra.extend_from_slice(&rar5::rar50::vint::encode(1)); // version
-    extra.extend_from_slice(&rar5::rar50::vint::encode(if with_checksum { 0x02 } else { 0x00 })); // flags
+    extra.extend_from_slice(&rar5::rar50::vint::encode(if with_checksum {
+        0x02
+    } else {
+        0x00
+    })); // flags
     extra.push(strength);
     let mut salt = [0x42u8; 16];
     let mut iv = [0x24u8; 16];

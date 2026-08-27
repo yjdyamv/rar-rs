@@ -271,7 +271,11 @@ mod probe_tests {
 
 /// Compute the plaintext CRC32 (and optional BLAKE2sp) of a file in a
 /// single streaming pass.
-pub(crate) fn hash_file(path: &Path, size: u64, want_blake: bool) -> RarResult<(u32, Option<[u8; 32]>)> {
+pub(crate) fn hash_file(
+    path: &Path,
+    size: u64,
+    want_blake: bool,
+) -> RarResult<(u32, Option<[u8; 32]>)> {
     let mut crc = crc32fast::Hasher::new();
     let mut blake = want_blake.then(crate::blake2sp::Hasher::new);
     let mut f = File::open(path)?;

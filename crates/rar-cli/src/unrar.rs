@@ -131,7 +131,7 @@ fn parse_threads(s: &str) -> Result<usize, String> {
     if (1..=64).contains(&n) {
         Ok(n)
     } else {
-        Err(format!("thread count must be between 1 and 64"))
+        Err("thread count must be between 1 and 64".to_string())
     }
 }
 

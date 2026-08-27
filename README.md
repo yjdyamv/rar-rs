@@ -272,9 +272,6 @@ cargo test --release --test winrar_interop -- --ignored   # >4 GiB cases
 
 - No RAR4 support at all: RAR4 archives (including PPMd/encrypted ones)
   are rejected with an explicit "unsupported" error.
-- Solid archives cannot be combined with multi-volume output yet.
-- `-si` (add files from stdin) is not implemented; the archive comment
-  (`rar c`) is the only stdin input.
 - Large-file compression streams through a temporary spill file (memory
   stays bounded for any file size); encrypted members (STORE and
   compressed) are encrypted on the fly with a chained CBC state.

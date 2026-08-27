@@ -1642,4 +1642,3 @@ fn cli_rarfiles_lst_orders_solid_members() {
     let _ = std::fs::remove_file(&lst);
     result.unwrap();
 }
-

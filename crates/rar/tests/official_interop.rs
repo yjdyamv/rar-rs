@@ -731,7 +731,6 @@ fn official_redirection_cross_validation() {
     assert_eq!(link, std::path::Path::new("target.txt"));
 }
 
-
 // ── CLI behavior tests moved to the `rar-cli` crate ─────────────────────
 // (tests/cli_behavior.rs): everything that drives the built `rar`/`unrar`
 // binaries via `CARGO_BIN_EXE_*` now lives next to them.
