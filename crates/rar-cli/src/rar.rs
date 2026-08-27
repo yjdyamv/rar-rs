@@ -696,10 +696,11 @@ fn main() {
     output::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
     output::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
     if let Some(dir) = &cli.work_dir
-        && let Err(e) = std::env::set_current_dir(dir) {
-            eprintln!("rar: cannot change to work directory {dir}: {e}");
-            process::exit(1);
-        }
+        && let Err(e) = std::env::set_current_dir(dir)
+    {
+        eprintln!("rar: cannot change to work directory {dir}: {e}");
+        process::exit(1);
+    }
     let _ = cli.yes; // no interactive prompts exist yet; accepted for parity
     let log_errors = cli.misc.log_errors.clone();
     if let Err(e) = run(cli) {
@@ -2414,7 +2415,6 @@ fn apply_rarfiles_order(
     // Highest-priority mask per file.
     let best: Vec<usize> = collected
         .iter()
-        
         .map(|c| {
             let matched: Vec<usize> = masks
                 .iter()

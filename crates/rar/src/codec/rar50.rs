@@ -657,10 +657,9 @@ fn find_matches_with_tail(
         lr,
     );
 
-    if long_range
-        && let Some(lr) = state.long_range.as_mut() {
-            lr.push(chunk);
-        }
+    if long_range && let Some(lr) = state.long_range.as_mut() {
+        lr.push(chunk);
+    }
 
     // The near window (tail) only needs to cover short-distance matches:
     // longer distances come from the sampled long-range history. Capping
@@ -1735,7 +1734,6 @@ pub struct DecodeOptions<'a> {
     /// standalone members).
     pub state: Option<&'a mut DecoderState>,
 }
-
 
 /// Decode RAR5 compressed data into a buffer.
 ///

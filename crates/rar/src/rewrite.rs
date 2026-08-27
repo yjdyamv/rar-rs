@@ -1021,6 +1021,7 @@ impl RarArchive {
         let mut enc_active = false;
 
         for op in &plan.ops {
+            self.check_cancel()?;
             match op {
                 RewriteOp::CopyBlock {
                     header_bytes,

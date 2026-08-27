@@ -117,6 +117,9 @@ pub(crate) struct BatchPrepareCtx<'a> {
     pub(crate) save_mtime: bool,
     pub(crate) save_owner: bool,
     pub(crate) time_precision_seconds: bool,
+    /// Caller-owned cancellation flag, checked per chunk in the parallel
+    /// prepare loop; `None` = never cancelled.
+    pub(crate) cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Decrypted member payload plus the key material needed for integrity
@@ -461,6 +464,11 @@ pub struct RarArchive {
     /// only after [`Self::close`] succeeds, so a failed or interrupted
     /// operation never leaves a partial archive at the final path.
     pub(crate) pending: Option<PendingCommit>,
+    /// Caller-owned cancellation flag: when set to true, long-running
+    /// create/extract/repair operations abort at their next check point
+    /// with [`crate::RarError::Cancelled`]. Installed with
+    /// [`Self::set_cancel_flag`]; `None` = never cancelled.
+    pub(crate) cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// An NTFS alternate data stream ("STM" service record) attached to an
@@ -568,7 +576,34 @@ impl RarArchive {
             time_precision_seconds: false,
             extract_options: crate::options::ExtractOptions::default(),
             pending: None,
+            cancel: None,
         }
+    }
+
+    /// Install a cancellation flag. The flag is an `Arc<AtomicBool>` the
+    /// caller owns: set it to `true` from any thread and the current
+    /// create / append / extract / read / repair operation returns
+    /// [`crate::RarError::Cancelled`] at its next per-member or per-chunk
+    /// check point (at most one chunk or member later). Pass `None` to
+    /// disable cancellation.
+    ///
+    /// The binding layer uses this to honor an `AbortSignal`: wrap the
+    /// signal in a shared flag before starting the `AsyncTask`.
+    pub fn set_cancel_flag(&mut self, flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+        self.cancel = flag;
+    }
+
+    /// Check the cancellation flag; returns [`crate::RarError::Cancelled`]
+    /// when the caller requested an abort.
+    pub(crate) fn check_cancel(&self) -> RarResult<()> {
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            return Err(RarError::Cancelled);
+        }
+        Ok(())
     }
 
     /// Open an existing RAR5 archive for reading.
@@ -976,6 +1011,7 @@ impl RarArchive {
             recovery_volumes_percent: opts.recovery_volumes_percent.map(|p| p.min(100)),
             recovery_volumes_count: opts.recovery_volume_count,
             main_header_start: None,
+            cancel: None,
             rr_offset_field_pos: None,
             volume_paths: Vec::new(),
             volume_size: opts.volume_size,
@@ -1300,6 +1336,7 @@ impl RarArchive {
 
     /// Finalize the archive (writes end-of-archive block in write mode).
     pub fn close(&mut self) -> RarResult<()> {
+        self.check_cancel()?;
         self.finish_writing()?;
         self.stream = None;
         // Move the staged files over their final paths: only now does the
@@ -1307,6 +1344,7 @@ impl RarArchive {
         // files are left for [`Drop`] to clean up.
         self.commit_pending()?;
         if self.recovery_volumes_percent.is_some() || self.recovery_volumes_count.is_some() {
+            self.check_cancel()?;
             self.write_recovery_volumes()?;
         }
         Ok(())

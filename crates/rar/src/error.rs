@@ -36,6 +36,9 @@ pub enum RarError {
     MemberNotFound { name: String },
     /// The archive is locked (read-only).
     ArchiveLocked,
+    /// The operation was cancelled through the caller's cancellation flag
+    /// (see [`crate::RarArchive::set_cancel_flag`]).
+    Cancelled,
     /// An encrypted archive was opened with the wrong password.
     WrongPassword,
     /// Underlying I/O error.
@@ -72,6 +75,7 @@ impl fmt::Display for RarError {
             }
             RarError::MemberNotFound { name } => write!(f, "member not found: {name}"),
             RarError::ArchiveLocked => write!(f, "archive is locked"),
+            RarError::Cancelled => write!(f, "operation cancelled"),
             RarError::WrongPassword => write!(f, "encrypted: wrong password"),
             RarError::Io(e) => write!(f, "I/O error: {e}"),
         }

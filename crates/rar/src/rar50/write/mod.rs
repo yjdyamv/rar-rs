@@ -294,6 +294,7 @@ impl RarArchive {
 
     /// Add a file from the filesystem to the archive.
     pub fn add(&mut self, path: impl AsRef<Path>, compression_level: u8) -> RarResult<()> {
+        self.check_cancel()?;
         let path = path.as_ref();
         if !path.exists() {
             return Err(RarError::Io(io::Error::new(
@@ -319,6 +320,7 @@ impl RarArchive {
         arcname: &str,
         compression_level: u8,
     ) -> RarResult<()> {
+        self.check_cancel()?;
         let path = path.as_ref();
         if !path.exists() {
             return Err(RarError::Io(io::Error::new(
@@ -338,6 +340,7 @@ impl RarArchive {
     }
 
     fn add_file(&mut self, path: &Path, arcname: Option<&str>, level: u8) -> RarResult<()> {
+        self.check_cancel()?;
         let meta = fs::metadata(path)?;
         if !meta.is_file() {
             return Err(RarError::Io(io::Error::new(
@@ -463,6 +466,7 @@ impl RarArchive {
             let mut file = io::BufReader::with_capacity(1 << 20, File::open(path)?);
             let mut buf = vec![0u8; crate::codec::DEFAULT_CHUNK_SIZE];
             loop {
+                self.check_cancel()?;
                 let n = file.read(&mut buf)?;
                 if n == 0 {
                     break;
@@ -603,6 +607,7 @@ impl RarArchive {
     /// enumerate files themselves (e.g. with exclusion filtering) use this to
     /// keep empty directories and the directory structure in the archive.
     pub fn add_directory_only(&mut self, path: impl AsRef<Path>, arcname: &str) -> RarResult<()> {
+        self.check_cancel()?;
         let path = path.as_ref();
         self.reset_solid_chain();
         let name = arcname.replace('\\', "/").trim_end_matches('/').to_string() + "/";
@@ -716,6 +721,7 @@ impl RarArchive {
         data: &[u8],
         compression_level: u8,
     ) -> RarResult<()> {
+        self.check_cancel()?;
         let name = arcname.replace('\\', "/");
         let plain_crc = {
             let mut h = crc32fast::Hasher::new();
@@ -865,6 +871,7 @@ impl RarArchive {
     /// the sequential path. Without the feature this is a plain sequential
     /// loop over the same `add*` calls.
     pub fn add_batch(&mut self, entries: &[BatchEntry<'_>]) -> RarResult<()> {
+        self.check_cancel()?;
         #[cfg(feature = "parallel")]
         {
             if !self.solid_mode && !entries.is_empty() {
@@ -898,6 +905,7 @@ impl RarArchive {
     }
 
     fn add_batch_entry_sequential(&mut self, entry: &BatchEntry<'_>) -> RarResult<()> {
+        self.check_cancel()?;
         match *entry {
             BatchEntry::Bytes { name, data, level } => self.add_bytes(name, data, level),
             BatchEntry::File { path, name, level } => match name {
@@ -924,6 +932,7 @@ impl RarArchive {
         let progress = self.progress.clone();
         let mut i = 0usize;
         while i < entries.len() {
+            self.check_cancel()?;
             // Collect a consecutive run of eligible members into one wave
             // (bounded total input). Directories and oversized files break
             // the wave and are handled sequentially at their original
@@ -955,6 +964,7 @@ impl RarArchive {
                 // global stream, so the bar moves while the CPU-heavy pass
                 // runs instead of freezing until every member is done.
                 let prepared = self.prepare_batch_wave(&wave, progress.as_ref())?;
+                self.check_cancel()?;
                 for (idx, entry) in prepared {
                     self.progress_member = idx;
                     self.write_prepared_entry(entry)?;
@@ -999,6 +1009,7 @@ impl RarArchive {
             save_mtime: self.save_mtime,
             save_owner: self.save_owner,
             time_precision_seconds: self.time_precision_seconds,
+            cancel: self.cancel.clone(),
         };
         let results: Vec<RarResult<(usize, PreparedEntry)>> = compression_pool().install(|| {
             wave.par_iter()
@@ -1057,7 +1068,7 @@ impl RarArchive {
     /// `member` and `progress` route per-chunk deltas into the shared tracker
     /// so the parallel wave reports live progress.
     #[cfg(feature = "parallel")]
-#[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn prepare_data_entry(
         ctx: &BatchPrepareCtx<'_>,
         name: &str,
@@ -1111,6 +1122,13 @@ impl RarArchive {
             let mut packed = Vec::new();
             let mut processed = 0u64;
             for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
+                if ctx
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+                {
+                    return Err(RarError::Cancelled);
+                }
                 let is_final = chunk.len() < crate::codec::DEFAULT_CHUNK_SIZE;
                 let compressed = compression::compress_chunked(
                     chunk,

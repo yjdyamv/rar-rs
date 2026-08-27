@@ -136,10 +136,10 @@ impl RarArchive {
         let mut encr_key: Option<[u8; 32]> = None;
         let mut last_file_index: Option<usize> = None;
 
-        while let Some(meta) = crate::rar50::headers::read_block(
-            self.stream.as_mut().unwrap(),
-            encr_key.as_ref(),
-        )? {
+        while let Some(meta) =
+            crate::rar50::headers::read_block(self.stream.as_mut().unwrap(), encr_key.as_ref())?
+        {
+            self.check_cancel()?;
             let raw = &meta.raw;
             let stream_pos = self.stream.as_mut().unwrap().stream_position()?;
 
@@ -246,6 +246,7 @@ impl RarArchive {
             while let Some(meta) =
                 crate::rar50::headers::read_block(&mut stream, encr_key.as_ref())?
             {
+                self.check_cancel()?;
                 let raw = meta.raw;
 
                 let stream_pos = stream.stream_position()?;
@@ -409,6 +410,7 @@ impl RarArchive {
         let mut total_unpacked = 0u64;
         let entries: Vec<_> = self.entries.clone();
         for entry in &entries {
+            self.check_cancel()?;
             total_unpacked = total_unpacked
                 .checked_add(entry.header.unpacked_size)
                 .ok_or_else(|| RarError::LimitExceeded {
@@ -1093,6 +1095,7 @@ impl RarArchive {
             })?;
 
         for chunk in chunks {
+            self.check_cancel()?;
             let chunk_start = packed_data.len();
             if chunk.volume_index == 0 {
                 let stream = self.stream.as_mut().unwrap();
