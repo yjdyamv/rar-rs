@@ -4,8 +4,10 @@
 
 ## 现状
 
-- RAR5 创建/读取全功能对齐 WinRAR 7.23：压缩、`-hp` 头加密、分卷、solid、内联恢复记录、`.rev` 恢复卷、quick-open、NTFS ADS、三时间戳、owner。
-- 架构：workspace `crates/rar`（库 crate `rar5`）+ `crates/rar-cli`（rar/unrar），按 rars 分层——词汇见 `CONTEXT.md`，迁移决策见 `docs/REFACTOR_MIRROR_RARS.md`。
+- RAR5 创建/读取全功能对齐 WinRAR 7.23：压缩、`-hp` 头加密、分卷、solid、内联恢复记录、`.rev` 恢复卷、quick-open、NTFS ADS、三时间戳、owner；另含 RAR7 (v70) 读写、`-mt` 多线程压缩、长距离匹配。
+- 命令面：官方 rar 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt` 列表变体）；开关矩阵见 `docs/SWITCH_MATRIX.md`（对照本机 RAR 7.23 实测）。
+- 工程：fmt/clippy `-D warnings` 双门、Codeberg Woodpecker CI、三目标 fuzz（`fuzz/`）、取消钩子、QO 快路径 `open_quick`、流式修复 `repair_archive_path`、零填充分卷集支持。
+- 架构：workspace `crates/rar`（库 crate `rar5`）+ `crates/rar-cli`（rar/unrar），按 rars 分层——词汇见 `CONTEXT.md`，迁移决策见 `docs/REFACTOR_MIRROR_RARS.md`，格式细节见 `docs/FORMAT_RAR5_RAR7.md`。
 
 ## 待办
 
@@ -34,7 +36,9 @@
 
 ### 命令
 
-- [x] `ch`（大小写转换）、`p`（打印）、SFX 转换 `s`/`s-`、unrar 列表变体 `lt/lb/vt/vb`
+- [x] `ch`（大小写转换）、`p`（打印）、SFX 转换 `s`/`s-`、列表变体 `lt/lb/vt/vb`（`rar` 与 `unrar` 均已支持）
+- [x] `rv[N]` 补恢复卷：对**已存在**分卷集生成 .rev；计数/百分比/默认 10%、封顶 10×ND，官方语义逐项实测；`.rev` 命名跟随卷集零填充
+- [x] `r` 修复改流式（`repair_archive_path`）：只驻留恢复数据，超大归档可修复；完好不写输出
 
 ### 开关（批次 1–3 完成，均与 WinRAR 实测对照）
 
@@ -48,6 +52,13 @@
 | 交互/消息 | `-y -o± -idq -ierr -ilog -iver -cfg-` 等；系统动作类（-ieml/-ioff/-isnd）只接受不执行 |
 
 ### 工程里程碑
+
+- [x] fmt/clippy 双门：workspace 全量 `cargo fmt --check` + `cargo clippy --all-features -- -D warnings`（codec 热路径的 `too_many_arguments` 用针对性 allow，不做风险重构）
+- [x] Codeberg Woodpecker CI：stable 五步（fmt/clippy/test/fuzz smoke）+ nightly libFuzzer job（ASAN/UBSAN，best-effort）
+- [x] fuzz：`fuzz/` 独立 crate 三目标（parse/crypto/recovery），standalone 变异循环 + libFuzzer 双模式；种子语料嵌入真实 WinRAR fixture
+- [x] 取消钩子 `RarArchive::set_cancel_flag(Arc<AtomicBool>)`：创建/提取/重写/分卷全检查点，`RarError::Cancelled`；binding 的 AbortSignal 接上
+- [x] QO 快路径 `RarArchive::open_quick`：只读主头 + QO 记录即可列出（无 QO 回退全扫）；binding `listEntriesQuick`
+- [x] 零填充分卷集：`discover_volumes`/`rebuild_missing_volumes`/`.rev` 命名识别 WinRAR `part01` 填充；修复 `rec_count > data_count` 误拒
 
 - [x] atomic create/append：temp sibling 暂存，close 原子提交
 - [x] 加密分卷每块加密记录（flags=1/3）+ `-hp` 分卷读取 + ENDARC flags 修复

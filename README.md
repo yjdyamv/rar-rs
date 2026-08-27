@@ -49,6 +49,12 @@ archives — no external binaries required.
 | Multi-volume archive reading         |   done |
 | Multi-volume archive creation        |   done |
 | Recovery volumes (`.rev`, WinRAR-compatible) | done |
+| Create recovery volumes for an existing set (`rv`) | done |
+| Zero-padded WinRAR volume sets (`part01`) | done |
+| Multi-threaded compression (`-mt`)   |   done |
+| Quick-open fast-path listing (`open_quick`) | done |
+| Streaming repair (`repair_archive_path`) | done |
+| Cooperative cancellation (`set_cancel_flag`) | done |
 | **RAR4 (v1.5-v3.x)**                |        |
 | Extract RAR4 archives               | rejected with a clear error (deliberate; use 7-Zip) |
 RAR5 archives produced by rar-rs are fully interoperable with WinRAR and unrar.
@@ -65,10 +71,20 @@ RAR4 archives are deliberately out of scope: they are rejected with a clear
 rar a [-m0..-m5] [-p<password>] [-v<size>] archive.rar files...   Create archive
 rar d [-p<password>] archive.rar names...   Delete members without rebuilding
 rar l archive.rar                          List contents
+rar lb archive.rar                         Bare list (names only)
+rar lt archive.rar                         Technical list (sizes/CRC/mtime)
 rar i archive.rar                          Show info
+rar r archive.rar                          Repair with the recovery record
+rar rv[N] archive.part1.rar                Create .rev recovery volumes
+rar rc archive.part1.rar                   Rebuild missing volumes
 ```
 
-The `-v` flag creates multi-volume archives (e.g. `-v1m` for 1 MB volumes, `-v100k` for 100 KB).
+All official commands are implemented: `a c ch cw d e f i k l[t][b] m p r rc rn
+rr rv s s- t u v[t][b] x` (list variants `lb/lt/vb/vt` are shared with
+`unrar`).
+
+The `-v` flag creates multi-volume archives (e.g. `-v1m` for 1 MB volumes,
+`-v100k` for 100 KB); `-si<name>` reads one member from stdin.
 
 `rar d` removes members without recompressing the rest: kept file blocks
 (header + compressed payload) are copied byte-for-byte, so the operation
@@ -76,6 +92,12 @@ scales with the archive size — not with the remaining data. Solid archives
 recompress only the chain affected by the deletion; inline recovery
 records are dropped and the quick-open record is rebuilt, matching the
 official `rar d`.
+
+`rar rv[N]` creates `.rev` recovery volumes for an existing volume set
+(`N` = count, `N%` = percent, default 10%, capped at 10x the volume
+count — WinRAR semantics, byte-verified). `rar r` repairs streaming,
+holding only the recovery data in memory, so huge archives can be
+repaired.
 
 ### unrar
 
@@ -180,6 +202,46 @@ rar.extract_all_with_options("/tmp/output/", opts)?;
 
 Relax these defaults only for trusted archives.
 
+### Fast listing and cancellation
+
+Archives written with `quick_open` carry a cached copy of every file
+header; `open_quick` reads only the main header + the quick-open record,
+so listing is O(QO) instead of O(archive):
+
+```rust
+let mut rar = RarArchive::open_quick("backup.rar")?; // falls back to a full scan without QO
+for entry in rar.list() {
+    println!("{} ({})", entry.name(), entry.size());
+}
+```
+
+Long-running create/extract/repair operations can be aborted
+cooperatively through a shared flag — the operation returns
+`RarError::Cancelled` at its next per-member/per-chunk check point:
+
+```rust
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+let cancel = Arc::new(AtomicBool::new(false));
+let mut rar = RarArchive::create("backup.rar")?;
+rar.set_cancel_flag(Some(cancel.clone()));
+// ... from another thread: cancel.store(true, Ordering::Relaxed);
+rar.close()?; // Err(RarError::Cancelled) once the flag is set
+```
+
+### Streaming repair
+
+`repair_archive_path` repairs a damaged archive on disk while holding
+only the recovery data (not the whole archive) in memory:
+
+```rust
+let repaired = rar5::repair_archive_path(
+    std::path::Path::new("damaged.rar"),
+    std::path::Path::new("fixed.rar"),
+)?; // true = damage repaired, false = already intact (no output)
+```
+
 ### Streaming and memory
 
 Large members are processed in bounded chunks: STORE members stream from
@@ -200,6 +262,8 @@ crates/
 +-- rar/                        library crate (public API)
 |   +-- src/lib.rs              facade: RarArchive + re-exports
 |   +-- src/archive.rs          RarArchive shared state + constructors/lifecycle
+|   +-- src/rewrite.rs          surgical delete/rename rewrite
+|   +-- src/name_policy.rs      path collection + masks
 |   +-- src/rar50/              RAR5 container layer
 |   |   +-- mod.rs              constants + block/header types and parsing
 |   |   +-- vint.rs             variable-length integer codec
@@ -213,12 +277,12 @@ crates/
 |   |   +-- rar50.rs            LZSS+Huffman encoder + decoder + dispatch
 |   |   +-- bitstream.rs huffman.rs filters.rs match_finder.rs window.rs
 |   +-- src/crypto/             encryption layer
-|   |   +-- mod.rs  rar50.rs    AES-256-CBC + PBKDF2 + hash-key MAC
+|   |   +-- mod.rs  rar50.rs    AES-256-CBC + KDF + hash-key MAC
 |   +-- src/recovery/           recovery records (rar5.rs) + volumes (rev5.rs)
 |   +-- src/detect.rs           signature/SFX scanning
 |   +-- src/parallel.rs         Rayon pools for the `parallel` feature
 |   +-- src/io_util.rs          atomic staging + bounded reads
-|   +-- src/version.rs features.rs options.rs error.rs
+|   +-- src/version.rs features.rs options.rs error.rs write_progress.rs
 |   +-- examples/bench.rs
 |   +-- tests/                  themed integration suites + fixtures/rar50/
 +-- rar-cli/                    binary crate
@@ -227,6 +291,9 @@ crates/
     +-- src/common.rs           WinRAR switch/config-file compatibility core
     +-- src/input.rs password.rs output.rs time.rs
     +-- tests/cli_behavior.rs winrar_interop.rs
+fuzz/                            cargo-fuzz targets (standalone crate)
+    +-- fuzz_targets/           parse / crypto / recovery
+    +-- corpus/ (gitignored)    seeded from tests/fixtures/rar50/
 ```
 
 ## Building
@@ -243,11 +310,12 @@ The official RAR/UNRAR 7.x binaries are used as black-box references:
 UNRAR tests every feature combination we produce (solid, quick-open,
 BLAKE2sp, encryption, recovery records, `.rev` volumes), we read official
 archives byte-identically, `rar r` repairs our recovery records,
-`rar rc` reconstructs deleted volumes from our `.rev` files, and every
-modification command is cross-validated: deleted archives (plain, solid,
-encrypted, header-encrypted, with quick-open, multi-volume), appended
-archives and locked archives are tested by UNRAR, while `rar d`, `rar a`
-and `rar k` on rar-rs archives must stay readable.
+`rar rc` reconstructs deleted volumes from our `.rev` files (and from
+WinRAR-created `.rev` files, zero-padded `part01` sets included), and
+every modification command is cross-validated: deleted archives (plain,
+solid, encrypted, header-encrypted, with quick-open, multi-volume),
+appended archives and locked archives are tested by UNRAR, while
+`rar d`, `rar a` and `rar k` on rar-rs archives must stay readable.
 
 ```bash
 SA_OFFICIAL_RAR=/path/to/rar SA_OFFICIAL_UNRAR=/path/to/unrar \
@@ -275,12 +343,29 @@ cargo test --release --test winrar_interop -- --ignored   # >4 GiB cases
 - Large-file compression streams through a temporary spill file (memory
   stays bounded for any file size); encrypted members (STORE and
   compressed) are encrypted on the fly with a chained CBC state.
-- Inline recovery records buffer the archive prefix (max 32 GiB); `.rev`
-  generation streams.
+- Inline recovery records buffer the archive prefix when repaired in
+  memory (`repair_archive`); `repair_archive_path` streams instead.
+  `.rev` generation streams either way.
 - Quick-open stores headers for every file (WinRAR's default only caches
-  large files); dictionaries are accepted up to 1 GiB (WinRAR 5.x max).
+  large files). Dictionaries go up to 4 GiB (RAR5) and beyond (RAR7
+  v70, WinRAR `-md` semantics).
 - Appending to multi-volume archives is not supported (the official `rar`
   refuses too); deleting from them is supported.
+- The writer emits unpadded volume names (`part1.rar`); WinRAR sets with
+  `part01` padding are read, rebuilt and `.rev`'d correctly, and WinRAR
+  reads rar-rs sets fine.
+
+## Fuzzing
+
+Three cargo-fuzz targets (`fuzz/`, standalone-runnable on stable Rust)
+cover the read, crypto and recovery surfaces; see `fuzz/README.md`.
+
+## Continuous integration
+
+Codeberg Woodpecker CI (`.woodpecker/ci.yml`): fmt, clippy (`-D
+warnings`), the full test suite, a stable fuzz smoke, and a best-effort
+nightly libFuzzer job with ASAN/UBSAN. The WinRAR interop tests run
+against an installed WinRAR on Windows.
 
 ---
 

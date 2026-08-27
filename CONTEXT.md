@@ -21,6 +21,10 @@
 - **Redirect（重定向）** — symlink / hardlink / file-copy 成员（无数据区，仅 extra 记录）。
 - **SFX** — 归档前带 stub 的自解压文件；`detect::sfx_offset_of` 定位归档起点。
 - **Locator（定位器）** — 主头中的 QO/RR 偏移记录，close 时回填。
+- **Quick-open fast path（QO 快路径）** — `RarArchive::open_quick`：只读主头 locator + QO 记录即得成员列表（O(QO) 而非 O(归档)）；无 QO 时透明回退全扫。
+- **Streaming repair（流式修复）** — `repair_archive_path(src, dst)`：文件版 `{RB}` 扫描 + shard 级按需读取，只驻留恢复数据与损坏分片；完好不写输出、失败不残留。
+- **Cancel flag（取消钩子）** — `set_cancel_flag(Arc<AtomicBool>)`：长操作在逐成员/逐块检查点返回 `RarError::Cancelled`；binding 映射 AbortSignal。
+- **Zero-padded volumes（零填充卷）** — WinRAR 把卷号填充到总卷数位数（`part01..part15`）；发现/重建/.rev 命名均识别。
 
 ## 分层结构（镜像参考架构 rars）
 
@@ -35,7 +39,9 @@
 
 - Cargo workspace：库 crate `rar5`（RAR5-only 创建/读取，明确拒绝 RAR4）+ CLI crate `rar-cli`（`rar` 创建/修改/提取、`unrar` 提取/列表）。
 - 库热点已拆解：archive.rs 仅存 facade 结构体 + 构造器/生命周期；读写路径分别在 `rar50/extract.rs` 与 `rar50/write/`。
-- 互操作测试：`crates/rar/tests/{rar50_roundtrip,format_assertions,rewrite_tests,official_interop,rar4_rejection}.rs`（官方 rar/unrar 用 SA_OFFICIAL_RAR/UNRAR env 门控）、`crates/rar-cli/tests/cli_behavior.rs`（CARGO_BIN_EXE 需随二进制所在 crate）、`crates/rar-cli/tests/winrar_interop.rs`（Windows 本机 WinRAR 双向验证）。
+- 互操作测试：`crates/rar/tests/{rar50_roundtrip,format_assertions,rewrite_tests,official_interop,rar4_rejection,cancel_flag,quick_open_listing}.rs`（官方 rar/unrar 用 SA_OFFICIAL_RAR/UNRAR env 门控）、`crates/rar-cli/tests/cli_behavior.rs`（CARGO_BIN_EXE 需随二进制所在 crate）、`crates/rar-cli/tests/winrar_interop.rs`（Windows 本机 WinRAR 双向验证）。
+- fuzz：`fuzz/` 独立 crate（不在 workspace），三目标 parse/crypto/recovery，standalone 变异循环 + `cargo +nightly fuzz run <t> --features fuzzing` 双模式；语料嵌入真实 WinRAR fixture。
+- CI：`.woodpecker/ci.yml`（Codeberg）——stable 硬门槛（fmt/clippy/test/fuzz smoke）+ nightly libFuzzer（best-effort）。
 - 迁移记录：`docs/REFACTOR_MIRROR_RARS.md`（仿 rars 架构重构的完整计划与决策）。
 - 格式参考：`docs/FORMAT_RAR5_RAR7.md`（RAR5/RAR7 完整格式文档，以本实现为准，冲突处对照 rars）。
 - 计划：`PLAN.md`（已完成记录 + WinRAR 7.23 差距清单）。
