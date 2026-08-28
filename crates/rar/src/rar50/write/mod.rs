@@ -446,59 +446,109 @@ impl RarArchive {
             );
         }
 
-        // Compressed path: read and compress in bounded chunks with a
-        // persistent encoder state (solid archives share the LZ window;
-        // non-solid members keep one window within the member, reset
-        // between members). The persistent state also carries the
-        // long-range match history across chunk boundaries (WinRAR's
-        // `-mcl` long range search).
-        let chain_solid = self.solid_mode && self.encoder_state.is_some();
-        self.encoder_state.get_or_insert_with(Default::default);
-
+        // Compressed path: read the member whole (bounded by the streaming
+        // threshold), hash it, and try the automatic x86 (E8/E8E9) filter
+        // first — WinRAR applies it to x86 code and it is worth several
+        // percent on real binaries. A filtered member is written standalone
+        // (non-solid): the decoder's window holds transformed bytes and the
+        // filter positions are member-relative, so it cannot share the LZ
+        // window with its neighbours.
+        let mut whole = Vec::with_capacity(file_size as usize);
+        {
+            let mut file = io::BufReader::with_capacity(1 << 20, File::open(path)?);
+            file.read_to_end(&mut whole)?;
+        }
         let mut crc_hasher = crc32fast::Hasher::new();
         let mut blake_hasher = if self.blake2 {
             Some(crate::rar50::blake2sp::Hasher::new())
         } else {
             None
         };
-        let mut packed = Vec::new();
-        let mut bytes_read = 0u64;
-        {
-            let mut file = io::BufReader::with_capacity(1 << 20, File::open(path)?);
-            let mut buf = vec![0u8; crate::codec::DEFAULT_CHUNK_SIZE];
-            loop {
-                self.check_cancel()?;
-                let n = file.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                bytes_read += n as u64;
-                crc_hasher.update(&buf[..n]);
-                if let Some(h) = blake_hasher.as_mut() {
-                    h.update(&buf[..n]);
-                }
-                let state = self.encoder_state.as_mut();
-                let compressed = compression::compress_chunked(
-                    &buf[..n],
-                    method,
-                    dsl,
-                    crate::codec::DEFAULT_CHUNK_SIZE,
-                    state,
-                    n < buf.len(),
-                    None,
-                    dict_bytes.is_some(),
-                )
-                .map_err(RarError::Unsupported)?;
-                packed.extend(compressed);
-                self.report_progress(bytes_read, file_size);
-                if packed.len() as u64 >= file_size {
-                    break;
-                }
-            }
+        crc_hasher.update(&whole);
+        if let Some(h) = blake_hasher.as_mut() {
+            h.update(&whole);
         }
-
         let plain_crc = crc_hasher.finalize();
         let plain_blake = blake_hasher.map(|h| h.finalize());
+
+        if let Some(filtered) = compression::encode_with_auto_x86_filter(
+            &whole,
+            method,
+            dsl,
+            dict_bytes.is_some(),
+        )
+        .map_err(RarError::Unsupported)?
+        && (filtered.len() as u64) < file_size
+        {
+            self.reset_solid_chain();
+            let (header_crc, mut extra_data, stored_hash, encr_params) =
+                RarArchive::payload_extra_and_crc(
+                    self.password.as_deref(),
+                    plain_crc,
+                    plain_blake,
+                )?;
+            if let Some(ref t) = time_extra {
+                extra_data.extend_from_slice(t);
+            }
+            if let Some(ref t) = owner_extra {
+                extra_data.extend_from_slice(t);
+            }
+            let packed_data = RarArchive::encrypt_payload_with(
+                self.password.as_deref(),
+                encr_params.as_ref(),
+                &filtered,
+            )?;
+            self.write_file_entry(
+                &name,
+                file_size,
+                &packed_data,
+                header_crc,
+                method,
+                dsl,
+                dict_bytes,
+                &extra_data,
+                attrs,
+                mtime,
+                false,
+                stored_hash,
+            )?;
+            self.write_member_streams(path)?;
+            self.report_progress(file_size, file_size);
+            return Ok(());
+        }
+
+        // Unfiltered path: compress in bounded chunks with a persistent
+        // encoder state (solid archives share the LZ window; non-solid
+        // members keep one window within the member, reset between
+        // members). The persistent state also carries the long-range match
+        // history across chunk boundaries (WinRAR's `-mcl` long range
+        // search).
+        let chain_solid = self.solid_mode && self.encoder_state.is_some();
+        self.encoder_state.get_or_insert_with(Default::default);
+
+        let mut packed = Vec::new();
+        let mut bytes_read = 0u64;
+        for chunk in whole.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
+            self.check_cancel()?;
+            bytes_read += chunk.len() as u64;
+            let state = self.encoder_state.as_mut();
+            let compressed = compression::compress_chunked(
+                chunk,
+                method,
+                dsl,
+                crate::codec::DEFAULT_CHUNK_SIZE,
+                state,
+                bytes_read >= whole.len() as u64,
+                None,
+                dict_bytes.is_some(),
+            )
+            .map_err(RarError::Unsupported)?;
+            packed.extend(compressed);
+            self.report_progress(bytes_read, file_size);
+            if packed.len() as u64 >= file_size {
+                break;
+            }
+        }
 
         if packed.len() as u64 >= file_size {
             // Compression is a net loss: fall back to streaming STORE.

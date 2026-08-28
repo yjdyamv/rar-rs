@@ -170,6 +170,11 @@ fn delta_decode_simd_ch1(data: &[u8]) -> Vec<u8> {
 // (https://github.com/bitplane/rars, MIT OR Apache-2.0) `codec/filters.rs`:
 // encode keeps `addr + offset` when it stays below the 16 MB model and
 // otherwise folds negative wraparound targets; decode is the exact inverse.
+// Both normalize the file position modulo the 16 MB virtual size, matching
+// WinRAR's unpack.cpp (`Offset = (CurPos + FileOffset) % 0x1000000`).
+
+/// Virtual file size for the x86 address normalisation model.
+const X86_FILTER_FILE_SIZE: u32 = 0x0100_0000;
 
 fn e8_decode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
     let n = data.len();
@@ -183,7 +188,8 @@ fn e8_decode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
         let opcode = data[i];
         if opcode & cmp_mask == 0xE8 {
             let cur_pos = i + 1;
-            let offset = file_offset.wrapping_add(cur_pos as u64) as u32;
+            let offset =
+                file_offset.wrapping_add(cur_pos as u64) as u32 % X86_FILTER_FILE_SIZE;
             let addr = u32::from_le_bytes(data[cur_pos..cur_pos + 4].try_into().unwrap());
 
             let new_addr = if addr < 0x0100_0000 {
@@ -216,7 +222,8 @@ fn e8_encode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
         let opcode = data[i];
         if opcode & cmp_mask == 0xE8 {
             let cur_pos = i + 1;
-            let offset = file_offset.wrapping_add(cur_pos as u64) as u32;
+            let offset =
+                file_offset.wrapping_add(cur_pos as u64) as u32 % X86_FILTER_FILE_SIZE;
             let addr = u32::from_le_bytes(data[cur_pos..cur_pos + 4].try_into().unwrap());
 
             let candidate = addr.wrapping_add(offset);
@@ -224,7 +231,8 @@ fn e8_encode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
                 data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
             } else {
                 let candidate = addr.wrapping_sub(0x0100_0000);
-                if candidate & 0x8000_0000 != 0 && candidate.wrapping_add(offset) & 0x8000_0000 == 0
+                if candidate & 0x8000_0000 != 0
+                    && candidate.wrapping_add(offset) & 0x8000_0000 == 0
                 {
                     data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
                 }
@@ -279,6 +287,219 @@ fn arm_encode(data: &mut [u8], file_offset: u64) -> Vec<u8> {
         i += 4;
     }
     data.to_vec()
+}
+
+// ── Automatic x86 filter detection ─────────────────────────────────────────
+//
+// Structural scan for x86 code regions (ported from the `rars` project
+// `x86_filter_scan.rs`, MIT OR Apache-2.0). E8 (CALL) / E9 (JMP) opcodes are
+// clustered by proximity; clusters that meet a minimum density become filter
+// regions (with padding). Isolated opcodes never form a cluster, so data that
+// merely contains a few 0xE8/0xE9 bytes is not filtered.
+
+/// Maximum gap between two opcodes that still belong to one cluster.
+const AUTO_X86_CLUSTER_GAP: usize = 4096;
+/// Tighter clustering pass: catches dense code inside sparse spans.
+const AUTO_X86_TIGHT_CLUSTER_GAP: usize = 512;
+/// Maximum gap between clusters that still belong to one broad span.
+const AUTO_X86_SPAN_CLUSTER_GAP: usize = 32768;
+/// Padding added around each detected region.
+const AUTO_X86_RANGE_PADDING: usize = 16;
+/// Maximum number of individual cluster ranges kept.
+const AUTO_X86_MAX_RANGES: usize = 8;
+/// Maximum number of broad span ranges kept.
+const AUTO_X86_MAX_SPAN_RANGES: usize = 4;
+/// Minimum total opcodes in a span for it to be filtered.
+const AUTO_X86_MIN_SPAN_OPCODES: usize = 4;
+
+/// Find the next x86 E8 (or E9 when `cmp_mask == 0xFE`) opcode at or after
+/// `start`, scanning up to `end_exclusive`.
+fn next_x86_opcode(data: &[u8], start: usize, end_exclusive: usize, cmp_mask: u8) -> Option<usize> {
+    let end = end_exclusive.min(data.len());
+    if start >= end {
+        return None;
+    }
+    data[start..end]
+        .iter()
+        .position(|&byte| byte & cmp_mask == 0xE8)
+        .map(|offset| start + offset)
+}
+
+/// Detect regions of x86 code in `data`, returning `[start, end)` ranges.
+/// `include_e9` selects the E8-only (0xFF mask) or E8+E9 (0xFE mask) scan.
+///
+/// Mirrors the reference scanner: opcode clusters are formed with both a
+/// wide and a tight gap; clusters become padded ranges (capped at
+/// [`AUTO_X86_MAX_RANGES`]) and broad spans become additional ranges
+/// (capped at [`AUTO_X86_MAX_SPAN_RANGES`]).
+pub fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<std::ops::Range<usize>> {
+    let mut ranges =
+        auto_x86_filter_ranges_with_cluster_gap(data, include_e9, AUTO_X86_CLUSTER_GAP);
+    for range in auto_x86_filter_ranges_with_cluster_gap(data, include_e9, AUTO_X86_TIGHT_CLUSTER_GAP)
+    {
+        if !ranges.contains(&range) {
+            ranges.push(range);
+        }
+    }
+    ranges
+}
+
+fn auto_x86_filter_ranges_with_cluster_gap(
+    data: &[u8],
+    include_e9: bool,
+    cluster_gap: usize,
+) -> Vec<std::ops::Range<usize>> {
+    if data.len() <= 5 {
+        return Vec::new();
+    }
+
+    let cmp_mask = if include_e9 { 0xFE } else { 0xFF };
+    let mut clusters: Vec<(usize, usize, usize)> = Vec::new();
+    let mut current: Option<(usize, usize, usize)> = None;
+    let mut scan_pos = 0usize;
+    while let Some(pos) = next_x86_opcode(data, scan_pos, data.len() - 4, cmp_mask) {
+        match current {
+            Some((start, last, count)) if pos - last <= cluster_gap => {
+                current = Some((start, pos, count + 1));
+            }
+            Some(cluster) => {
+                clusters.push(cluster);
+                current = Some((pos, pos, 1));
+            }
+            None => current = Some((pos, pos, 1)),
+        }
+        scan_pos = pos + 1;
+    }
+    if let Some(cluster) = current {
+        clusters.push(cluster);
+    }
+
+    clusters.retain(|&(_, _, count)| count >= 2);
+    let mut ranges = Vec::new();
+    let mut span_count = 0;
+    let mut span: Option<(usize, usize, usize)> = None;
+    for &(start, last, count) in &clusters {
+        match span {
+            Some((span_start, span_last, span_opcodes))
+                if start.saturating_sub(span_last) <= AUTO_X86_SPAN_CLUSTER_GAP =>
+            {
+                span = Some((span_start, last, span_opcodes + count));
+            }
+            Some((span_start, span_last, span_opcodes)) => {
+                if span_opcodes >= AUTO_X86_MIN_SPAN_OPCODES && span_count < AUTO_X86_MAX_SPAN_RANGES
+                {
+                    push_x86_filter_range(&mut ranges, data.len(), span_start, span_last);
+                    span_count += 1;
+                }
+                span = Some((start, last, count));
+            }
+            None => span = Some((start, last, count)),
+        }
+    }
+    if let Some((span_start, span_last, span_opcodes)) = span
+        && span_opcodes >= AUTO_X86_MIN_SPAN_OPCODES
+        && span_count < AUTO_X86_MAX_SPAN_RANGES
+    {
+        push_x86_filter_range(&mut ranges, data.len(), span_start, span_last);
+    }
+
+    // Keep the densest individual clusters as additional (smaller) ranges.
+    clusters.sort_by(|a, b| {
+        let a_len = a.1 - a.0 + 5;
+        let b_len = b.1 - b.0 + 5;
+        b.2.cmp(&a.2).then_with(|| a_len.cmp(&b_len))
+    });
+    clusters.truncate(AUTO_X86_MAX_RANGES);
+
+    for (start, last, _) in clusters {
+        push_x86_filter_range(&mut ranges, data.len(), start, last);
+    }
+    ranges
+}
+
+fn push_x86_filter_range(
+    ranges: &mut Vec<std::ops::Range<usize>>,
+    data_len: usize,
+    start: usize,
+    last: usize,
+) {
+    let range_start = start.saturating_sub(AUTO_X86_RANGE_PADDING);
+    let range_end = (last + 5 + AUTO_X86_RANGE_PADDING).min(data_len);
+    let range = range_start..range_end;
+    if range.start < range.end && !ranges.contains(&range) {
+        ranges.push(range);
+    }
+}
+
+#[cfg(test)]
+mod x86_tests {
+    use super::*;
+
+    #[test]
+    fn auto_x86_detects_clusters_but_not_isolated_opcodes() {
+        // Two isolated opcodes never form a cluster.
+        let mut data = vec![0x41u8; 20_000];
+        data[100] = 0xE8;
+        data[10_000] = 0xE8;
+        assert!(auto_x86_filter_ranges(&data, false).is_empty());
+
+        // A dense cluster does.
+        let mut data = vec![0x41u8; 20_000];
+        for pos in [1024, 1050, 1090, 1130] {
+            data[pos] = 0xE8;
+        }
+        let ranges = auto_x86_filter_ranges(&data, false);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], 1008..1151);
+    }
+
+    #[test]
+    fn auto_x86_clamps_ranges_to_buffer_bounds() {
+        let mut data = vec![0x41u8; 30];
+        for pos in [0, 4, 8, 12] {
+            data[pos] = 0xE8;
+        }
+        let ranges = auto_x86_filter_ranges(&data, false);
+        assert_eq!(ranges, vec![0..30]);
+    }
+
+    #[test]
+    fn e8e9_scan_finds_jumps_too() {
+        let mut data = vec![0x41u8; 8000];
+        data[1024] = 0xE8;
+        data[1088] = 0xE9; // JMP — only found when include_e9
+        assert!(auto_x86_filter_ranges(&data, false).is_empty());
+        assert!(!auto_x86_filter_ranges(&data, true).is_empty());
+    }
+
+    /// Independent scalar reimplementation of the cluster logic, used to
+    /// cross-check the scanner at chunk boundaries.
+    fn scalar_ranges(data: &[u8], include_e9: bool) -> Vec<std::ops::Range<usize>> {
+        let mut out = auto_x86_filter_ranges_with_cluster_gap(data, include_e9, 4096);
+        for r in auto_x86_filter_ranges_with_cluster_gap(data, include_e9, 512) {
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn matches_reference_scanner() {
+        let mut data = vec![0x41u8; 150_000];
+        for pos in [31usize, 32, 33, 1024, 1088, 4096, 4160, 80_000, 80_032, 80_064] {
+            data[pos] = 0xE8;
+        }
+        data[80_096] = 0xE9;
+        assert_eq!(
+            auto_x86_filter_ranges(&data, false),
+            scalar_ranges(&data, false)
+        );
+        assert_eq!(
+            auto_x86_filter_ranges(&data, true),
+            scalar_ranges(&data, true)
+        );
+    }
 }
 
 #[cfg(all(test, feature = "simd"))]

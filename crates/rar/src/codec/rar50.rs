@@ -502,6 +502,11 @@ fn encode_mt_slice(
 /// forward-transformed per filter spec before match finding. The caller is
 /// responsible for comparing the packed size against unfiltered output and
 /// falling back to STORE.
+///
+/// The filter region positions are member-relative and the E8/ARM transform
+/// offsets are member-relative too (WinRAR's `WrittenFileSize` is per-file);
+/// a member written through this path must be marked non-solid so the
+/// decoder's filter positions stay member-relative.
 pub fn encode_with_filters(
     data: &[u8],
     method: u8,
@@ -517,7 +522,7 @@ pub fn encode_with_filters(
             data,
             method,
             dict_size_log,
-            data.len(),
+            DEFAULT_CHUNK_SIZE,
             None,
             true,
             None,
@@ -542,7 +547,7 @@ pub fn encode_with_filters(
 
     // 1. Forward-transform each region. Regions must be disjoint; the
     //    transform reads only its own slice, and E8/ARM file offsets are
-    //    absolute member positions.
+    //    member-relative positions.
     let mut transformed = data.to_vec();
     for f in &specs {
         let start = f.block_start as usize;
@@ -559,15 +564,16 @@ pub fn encode_with_filters(
         transformed[start..end].copy_from_slice(&t);
     }
 
-    // 2. Match-find on the transformed data.
+    // 2. Match-find on the transformed data in bounded chunks with a
+    //    persistent window, mirroring the unfiltered chunked path. The
+    //    filter records lead the first chunk's symbol stream.
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
+    let long_range = level >= 2;
 
-    let mut finder = MatchFinder::new(&transformed, 2, max_match, chain_len, dict_size);
-    let mut dist_cache = [0u32; DIST_CACHE_SIZE];
-    let mut last_length = 0u32;
-    let mut symbols: Vec<Symbol> = specs
+    let mut state = EncoderState::default();
+    let mut filter_symbols: Vec<Symbol> = specs
         .iter()
         .map(|f| Symbol::Filter {
             block_start: f.block_start,
@@ -576,32 +582,132 @@ pub fn encode_with_filters(
             channels: f.channels,
         })
         .collect();
-    symbols.extend(find_matches_in_range(
-        &transformed,
-        &mut finder,
-        0,
-        transformed.len(),
-        lazy_thresh,
-        &mut dist_cache,
-        &mut last_length,
-        max_match,
-        None,
-    ));
-
-    // 3. Emit blocks (filters live in the first block).
     let mut output = Vec::new();
-    let mut block_start = 0usize;
-    while block_start < symbols.len() {
-        let (block_end, _) = find_block_end(&symbols, block_start, MAX_BLOCK_SIZE);
-        let is_last = block_end >= symbols.len();
-        let block_data = encode_block(&symbols[block_start..block_end], is_last, extra_dist);
-        output.extend(block_data);
-        if !is_last && output.len() > data.len() {
+    let mut chunk_start = 0usize;
+    let mut first_chunk = true;
+    while chunk_start < transformed.len() {
+        let chunk_end = (chunk_start + DEFAULT_CHUNK_SIZE).min(transformed.len());
+        let chunk = &transformed[chunk_start..chunk_end];
+        let is_final = chunk_end >= transformed.len();
+        let mut symbols = find_matches_with_tail(
+            &mut state,
+            chunk,
+            chain_len,
+            lazy_thresh,
+            max_match,
+            dict_size,
+            long_range,
+        );
+        // The filter records lead the first chunk's symbol stream so they
+        // are read before any output is produced (write_pos = the member
+        // start), keeping the recorded positions member-relative.
+        if first_chunk {
+            let mut filters = std::mem::take(&mut filter_symbols);
+            filters.append(&mut symbols);
+            symbols = filters;
+            first_chunk = false;
+        }
+
+        let mut block_start = 0usize;
+        while block_start < symbols.len() {
+            let (block_end, _) = find_block_end(&symbols, block_start, MAX_BLOCK_SIZE);
+            let is_last = is_final && block_end >= symbols.len();
+            let block_data = encode_block(&symbols[block_start..block_end], is_last, extra_dist);
+            output.extend(block_data);
+            // Early bail-out: a filtered stream already larger than the
+            // input cannot beat STORE (callers fall back to STORE).
+            if !is_last && output.len() > data.len() {
+                break;
+            }
+            block_start = block_end;
+        }
+        if output.len() > data.len() {
             break;
         }
-        block_start = block_end;
+        chunk_start = chunk_end;
     }
     Ok(output)
+}
+
+/// Merge overlapping or adjacent ranges (the x86 scan can return a broad
+/// span plus tighter clusters inside it; overlapping filter records would
+/// double-transform the overlap).
+fn merge_ranges(ranges: &mut Vec<std::ops::Range<usize>>) {
+    if ranges.len() < 2 {
+        return;
+    }
+    ranges.sort_by_key(|r| r.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges.drain(..) {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => {
+                if range.end > last.end {
+                    last.end = range.end;
+                }
+            }
+            _ => merged.push(range),
+        }
+    }
+    *ranges = merged;
+}
+
+/// Encode `data` with automatic x86 output filtering.
+///
+/// Scans `data` for x86 code regions and encodes with the E8/E8E9 filter
+/// variant that packed smallest. Returns `None` when the scan found no
+/// regions worth filtering (the caller then uses the unfiltered path). The
+/// caller is responsible for comparing the packed size against unfiltered
+/// output and falling back to STORE, and for writing the member as
+/// non-solid.
+pub fn encode_with_auto_x86_filter(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    extra_dist: bool,
+) -> Result<Option<Vec<u8>>, String> {
+    if data.len() <= 5 {
+        return Ok(None);
+    }
+    let mut ranges_e9 = super::filters::auto_x86_filter_ranges(data, true);
+    if ranges_e9.is_empty() {
+        return Ok(None);
+    }
+    merge_ranges(&mut ranges_e9);
+    let specs_e9: Vec<FilterSpec> = ranges_e9
+        .iter()
+        .map(|r| {
+            FilterSpec::new(
+                FILTER_E8E9,
+                0,
+                r.start.min(u32::MAX as usize) as u32,
+                (r.len()).min(u32::MAX as usize) as u32,
+            )
+        })
+        .collect();
+    let packed_e9 = encode_with_filters(data, method, dict_size_log, &specs_e9, extra_dist)?;
+
+    let mut ranges_e8 = super::filters::auto_x86_filter_ranges(data, false);
+    if ranges_e8.is_empty() || ranges_e8 == ranges_e9 {
+        return Ok(Some(packed_e9));
+    }
+    merge_ranges(&mut ranges_e8);
+    let specs_e8: Vec<FilterSpec> = ranges_e8
+        .iter()
+        .map(|r| {
+            FilterSpec::new(
+                FILTER_E8,
+                0,
+                r.start.min(u32::MAX as usize) as u32,
+                (r.len()).min(u32::MAX as usize) as u32,
+            )
+        })
+        .collect();
+    let packed_e8 = encode_with_filters(data, method, dict_size_log, &specs_e8, extra_dist)?;
+    Ok(Some(if packed_e8.len() < packed_e9.len() {
+        packed_e8
+    } else {
+        packed_e9
+    }))
 }
 
 // ── Match finding ──────────────────────────────────────────────────────────
@@ -2045,6 +2151,9 @@ struct OutputSink<'a> {
     writer: &'a mut dyn std::io::Write,
     staging: Vec<u8>,
     staging_start: u64,
+    /// Absolute stream position where this member's output starts; the
+    /// base for member-relative filter transform offsets.
+    member_start: u64,
     consumed: usize,
 }
 
@@ -2054,6 +2163,7 @@ impl<'a> OutputSink<'a> {
             writer,
             staging: Vec::new(),
             staging_start: start,
+            member_start: start,
             consumed: 0,
         }
     }
@@ -2093,8 +2203,17 @@ impl<'a> OutputSink<'a> {
                 return Err("filter region out of staging bounds".into());
             }
             let region = &mut self.staging[base + start_off..base + end_off];
-            let filtered =
-                apply_filter_decode(filt.filter_type, region, filt.channels, filt.block_start)?;
+            // The E8/ARM inverse transforms read a file-relative position
+            // (WinRAR's `WrittenFileSize` is per-file), while `block_start`
+            // is stream-absolute for solid chains — subtract the member
+            // start to get the member-relative offset. `staging_start`
+            // advances as data drains, so it is not a valid base here.
+            let filtered = apply_filter_decode(
+                filt.filter_type,
+                region,
+                filt.channels,
+                filt.block_start - self.member_start,
+            )?;
             if filtered.len() != region.len() {
                 return Err("RAR5 filter changed output length".into());
             }
@@ -2297,7 +2416,11 @@ fn decode_inner(
     let written = (window.total_written() - output_start).min(unpacked_size);
     let mut output = window.get_output(output_start, written as usize);
 
-    // Apply pending filters
+    // Apply pending filters. RAR5 filter positions are stream-absolute
+    // (relative to the solid chain), but the E8/ARM transforms read a
+    // position relative to the current file's output (WinRAR's
+    // `WrittenFileSize`, reset per file), so the offset passed to the
+    // inverse filter is member-relative: `block_start - output_start`.
     for filt in &pending_filters {
         let start = (filt.block_start - output_start) as usize;
         let end = (start + filt.block_length as usize).min(output.len());
@@ -2305,8 +2428,12 @@ fn decode_inner(
             continue;
         }
         let region = &mut output[start..end];
-        let filtered =
-            apply_filter_decode(filt.filter_type, region, filt.channels, filt.block_start)?;
+        let filtered = apply_filter_decode(
+            filt.filter_type,
+            region,
+            filt.channels,
+            filt.block_start - output_start,
+        )?;
         output[start..start + filtered.len()].copy_from_slice(&filtered);
     }
 
@@ -2643,6 +2770,109 @@ mod decode_tests {
                 );
             }
         }
+    }
+
+    /// Synthetic x86 code: E8/E9 opcodes with plausible relative targets,
+    /// dense enough that the automatic scan finds a region. The auto-filter
+    /// path must pick it up, pack it, and decode back to the original.
+    #[test]
+    fn auto_x86_filter_roundtrips_and_packs_smaller() {
+        use super::encode_with_auto_x86_filter;
+
+        fn x86ish(size: usize) -> Vec<u8> {
+            let mut data = vec![0x90u8; size]; // NOP padding
+            let mut pos = 0usize;
+            while pos + 5 <= size {
+                data[pos] = if pos.is_multiple_of(170) { 0xE8 } else { 0xE9 };
+                let addr = ((pos as u32).wrapping_mul(7)) & 0x00FF_FFFF;
+                data[pos + 1..pos + 5].copy_from_slice(&addr.to_le_bytes());
+                pos += 85;
+            }
+            data
+        }
+
+        let data = x86ish(400_000);
+        let packed = encode_with_auto_x86_filter(&data, 3, 0, false)
+            .unwrap()
+            .expect("x86 scan must find regions");
+        assert!(
+            packed.len() < data.len(),
+            "filtered encoding should compress: {} vs {}",
+            packed.len(),
+            data.len()
+        );
+        let back = decode_standalone(&packed, data.len() as u64, 0, None, false).unwrap();
+        assert_eq!(back, data);
+
+        // Non-code data with isolated opcodes must NOT be filtered.
+        let mut sparse = vec![0x41u8; 20_000];
+        sparse[100] = 0xE8;
+        sparse[10_000] = 0xE8;
+        assert!(encode_with_auto_x86_filter(&sparse, 3, 0, false)
+            .unwrap()
+            .is_none());
+    }
+
+    /// Regression: filter positions and E8 transform offsets are
+    /// member-relative even when the member sits at a non-zero offset of a
+    /// solid chain (WinRAR's `WrittenFileSize` is per-file while the filter
+    /// record positions are stream-absolute). Decoding a filtered member
+    /// with shared decoder state must reproduce the original bytes.
+    #[test]
+    fn filtered_member_at_solid_offset_decodes_member_relative() {
+        use super::encode_with_auto_x86_filter;
+
+        fn x86ish(size: usize) -> Vec<u8> {
+            let mut data = vec![0x90u8; size];
+            let mut pos = 0usize;
+            while pos + 5 <= size {
+                data[pos] = if pos.is_multiple_of(170) { 0xE8 } else { 0xE9 };
+                let addr = ((pos as u32).wrapping_mul(7)) & 0x00FF_FFFF;
+                data[pos + 1..pos + 5].copy_from_slice(&addr.to_le_bytes());
+                pos += 85;
+            }
+            data
+        }
+
+        // A first plain member fills the shared window; the filtered member
+        // then decodes at a non-zero stream offset.
+        let first = b"solid chain prefix data padding padding padding".repeat(64);
+        let member = x86ish(120_000);
+
+        let packed_first = crate::codec::encode(&first, 3, 3, false);
+        let packed_member = encode_with_auto_x86_filter(&member, 3, 0, false)
+            .unwrap()
+            .expect("x86 scan must find regions");
+
+        let mut state = DecoderState::new(128 * 1024);
+        let decoded_first = decode(
+            &packed_first,
+            first.len() as u64,
+            DecodeOptions {
+                dict_size_log: 3,
+                dict_size_bytes: None,
+                extra_dist: false,
+                state: Some(&mut state),
+            },
+        )
+        .unwrap();
+        assert_eq!(decoded_first, first);
+
+        let decoded_member = decode(
+            &packed_member,
+            member.len() as u64,
+            DecodeOptions {
+                dict_size_log: 0,
+                dict_size_bytes: None,
+                extra_dist: false,
+                state: Some(&mut state),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            decoded_member, member,
+            "filtered member must decode member-relative at a solid offset"
+        );
     }
 }
 // ── High-level dispatch ────────────────────────────────────────────────────use crate::rar50::*;
