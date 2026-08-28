@@ -1164,3 +1164,261 @@ fn long_range_matches_winrar_compression_ratio() {
         assert_eq!(file_sha256(&out_dir.join("pair.bin")), file_sha256(&src));
     }
 }
+
+// ── rv/rc recovery-volume cross-validation (Phase 2.1) ─────────────────────
+
+/// Phase 2.1 cross-validation, direction 1: WinRAR builds the volume set
+/// and its `.rev` recovery volumes — both `-rv2` at create time and the
+/// standalone `rv` command — we delete a middle volume, and OUR `rc` must
+/// rebuild it byte-identically. Both sets use >= 10 volumes, so WinRAR
+/// zero-pads the part numbers (part01..partNN); discovery, `.rev`
+/// probing and rebuild must handle WinRAR's real naming.
+#[test]
+fn winrar_rv_then_our_rc_rebuilds_byte_identical() {
+    let Some(rar) = rar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    write_pattern_file(&src, 1_400_000, 7); // STORE: spans ~14 x 100k volumes
+
+    // (a) Recovery volumes created at archive time with `-rv2`.
+    let set_a = dir.path().join("seta.rar");
+    let (ok, out) = run(Command::new(&rar)
+        .args(["a", "-m0", "-v100k", "-rv2", "-idq"])
+        .arg(&set_a)
+        .arg("big.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "WinRAR -rv2 creation failed:\n{out}");
+    let first_a = dir.path().join("seta.part01.rar");
+    let volumes_a = rar5::discover_volumes(&first_a);
+    assert!(
+        volumes_a.len() >= 10,
+        "precondition: >= 10 volumes so WinRAR zero-pads, got {}",
+        volumes_a.len()
+    );
+    assert!(
+        dir.path().join("seta.part01.rev").exists(),
+        "WinRAR -rv2 must create padded .rev files"
+    );
+
+    // Delete a middle volume; our `rc` rebuilds it byte-identically.
+    let victim_a = dir.path().join("seta.part07.rar");
+    let victim_bytes_a = std::fs::read(&victim_a).unwrap();
+    std::fs::remove_file(&victim_a).unwrap();
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["rc", "-idq"])
+        .arg(&first_a));
+    assert!(ok, "our rar rc failed on WinRAR's padded set:\n{out}");
+    assert_eq!(
+        std::fs::read(&victim_a).unwrap(),
+        victim_bytes_a,
+        "our rc must rebuild the WinRAR volume byte-identically"
+    );
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&first_a, None);
+        assert!(ok, "UnRAR rejected the set rebuilt by our rc:\n{out}");
+    }
+
+    // (b) Standalone `rv` command on an existing set (default 10%).
+    let set_b = dir.path().join("setb.rar");
+    let (ok, out) = run(Command::new(&rar)
+        .args(["a", "-m0", "-v100k", "-idq"])
+        .arg(&set_b)
+        .arg("big.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "WinRAR creation failed:\n{out}");
+    let first_b = dir.path().join("setb.part01.rar");
+    let (ok, out) = run(Command::new(&rar).args(["rv", "-idq"]).arg(&first_b));
+    assert!(ok, "WinRAR rv failed:\n{out}");
+    assert!(
+        dir.path().join("setb.part01.rev").exists(),
+        "WinRAR rv must create padded .rev files"
+    );
+    let victim_b = dir.path().join("setb.part05.rar");
+    let victim_bytes_b = std::fs::read(&victim_b).unwrap();
+    std::fs::remove_file(&victim_b).unwrap();
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["rc", "-idq"])
+        .arg(&first_b));
+    assert!(ok, "our rar rc failed on WinRAR's rv set:\n{out}");
+    assert_eq!(
+        std::fs::read(&victim_b).unwrap(),
+        victim_bytes_b,
+        "our rc must rebuild byte-identically"
+    );
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&first_b, None);
+        assert!(ok, "UnRAR rejected the second rebuilt set:\n{out}");
+    }
+
+    // Both rebuilt sets must also read back with our own reader.
+    for first in [&first_a, &first_b] {
+        let mut ar = RarArchive::open(first).unwrap();
+        let name = ar
+            .namelist()
+            .into_iter()
+            .find(|n| n.ends_with("big.bin"))
+            .unwrap()
+            .to_string();
+        assert_eq!(ar.read(&name).unwrap(), std::fs::read(&src).unwrap());
+    }
+}
+
+/// Phase 2.1 cross-validation, direction 2: we build the volume set and
+/// its `.rev` recovery volumes with our own `rv`, then WinRAR's `rc` must
+/// reconstruct a deleted volume byte-identically (unpadded set: fewer
+/// than 10 volumes).
+#[test]
+fn our_rv_then_winrar_rc_rebuilds_byte_identical() {
+    let Some(rar) = rar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    write_pattern_file(&src, 700_000, 11); // STORE: 4 x 200k volumes
+
+    // Our volume set (unpadded part1..part4).
+    let set = dir.path().join("ours.rar");
+    {
+        let mut rar = rar5::RarArchive::create_with_options(
+            &set,
+            rar5::CreateOptions {
+                volume_size: Some(200_000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&src, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let volumes = rar5::discover_volumes(&set);
+    assert!(
+        (3..10).contains(&volumes.len()),
+        "precondition: a small unpadded set, got {}",
+        volumes.len()
+    );
+
+    // Our `rv` command adds the .rev files (exact count 2).
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["rv", "-idq"])
+        .arg(&set)
+        .arg("2"));
+    assert!(ok, "our rar rv failed:\n{out}");
+    assert!(dir.path().join("ours.part1.rev").exists());
+    assert!(dir.path().join("ours.part2.rev").exists());
+
+    // Delete a middle volume; WinRAR `rc` rebuilds it byte-identically.
+    let victim = volumes[1].clone();
+    let victim_bytes = std::fs::read(&victim).unwrap();
+    std::fs::remove_file(&victim).unwrap();
+    let (ok, out) = run(Command::new(&rar).args(["rc", "-idq"]).arg(&volumes[0]));
+    assert!(ok, "WinRAR rc failed on our set:\n{out}");
+    assert_eq!(
+        std::fs::read(&victim).unwrap(),
+        victim_bytes,
+        "WinRAR rc must rebuild our volume byte-identically"
+    );
+
+    // Both tools must read the rebuilt set.
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&volumes[0], None);
+        assert!(ok, "UnRAR rejected the rebuilt set:\n{out}");
+    }
+    let mut ar = RarArchive::open(&volumes[0]).unwrap();
+    let name = ar
+        .namelist()
+        .into_iter()
+        .find(|n| n.ends_with("big.bin"))
+        .unwrap()
+        .to_string();
+    assert_eq!(ar.read(&name).unwrap(), std::fs::read(&src).unwrap());
+}
+
+/// Phase 2.1 cross-validation, direction 3: zero-padded volume sets.
+/// WinRAR creates a >= 10 volume set (part01..partNN); our `rv` adds
+/// `.rev` files named with the set's zero-padding; then both WinRAR's and
+/// our `rc` rebuild deleted volumes byte-identically from the same
+/// `.rev` files.
+#[test]
+fn zero_padded_volume_sets_rv_rc_cross_validate() {
+    let Some(rar) = rar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    write_pattern_file(&src, 1_500_000, 13); // STORE: ~15 x 100k volumes
+
+    // WinRAR creates the padded set (>= 10 volumes -> part01..partNN).
+    let set = dir.path().join("pad.rar");
+    let (ok, out) = run(Command::new(&rar)
+        .args(["a", "-m0", "-v100k", "-idq"])
+        .arg(&set)
+        .arg("big.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "WinRAR creation failed:\n{out}");
+    let first = dir.path().join("pad.part01.rar");
+    let volumes = rar5::discover_volumes(&first);
+    assert!(
+        volumes.len() >= 10,
+        "precondition: >= 10 volumes so WinRAR zero-pads, got {}",
+        volumes.len()
+    );
+
+    // Our `rv` adds .rev files with the set's zero-padding.
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["rv", "-idq"])
+        .arg(&first));
+    assert!(ok, "our rar rv failed on the padded set:\n{out}");
+    assert!(
+        dir.path().join("pad.part01.rev").exists() && dir.path().join("pad.part02.rev").exists(),
+        "our .rev names must follow the set's zero-padding"
+    );
+    assert!(
+        !dir.path().join("pad.part1.rev").exists(),
+        "no unpadded .rev name may be created"
+    );
+
+    // WinRAR `rc` rebuilds a deleted volume from our .rev files.
+    let victim = dir.path().join("pad.part09.rar");
+    let victim_bytes = std::fs::read(&victim).unwrap();
+    std::fs::remove_file(&victim).unwrap();
+    let (ok, out) = run(Command::new(&rar).args(["rc", "-idq"]).arg(&first));
+    assert!(ok, "WinRAR rc failed on our padded .rev files:\n{out}");
+    assert_eq!(
+        std::fs::read(&victim).unwrap(),
+        victim_bytes,
+        "WinRAR rc must rebuild from our padded .rev byte-identically"
+    );
+
+    // Our `rc` rebuilds a different volume from the same .rev files.
+    let victim2 = dir.path().join("pad.part12.rar");
+    let victim2_bytes = std::fs::read(&victim2).unwrap();
+    std::fs::remove_file(&victim2).unwrap();
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["rc", "-idq"])
+        .arg(&first));
+    assert!(ok, "our rar rc failed on the padded set:\n{out}");
+    assert_eq!(
+        std::fs::read(&victim2).unwrap(),
+        victim2_bytes,
+        "our rc must rebuild from the same .rev files byte-identically"
+    );
+
+    // Both tools validate the final set.
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&first, None);
+        assert!(ok, "UnRAR rejected the rebuilt padded set:\n{out}");
+    }
+    let mut ar = RarArchive::open(&first).unwrap();
+    let name = ar
+        .namelist()
+        .into_iter()
+        .find(|n| n.ends_with("big.bin"))
+        .unwrap()
+        .to_string();
+    assert_eq!(ar.read(&name).unwrap(), std::fs::read(&src).unwrap());
+}
