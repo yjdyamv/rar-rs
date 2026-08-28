@@ -19,7 +19,8 @@
 | 开关 | 状态 | 备注 |
 |---|---|---|
 | -m0..5 | ✅ | 压缩级别 |
-| -md<size> | ✅ | 含 RAR7 >4 GiB（v70） |
+| -ma<ver> | ✅/— | 归档格式：`-ma5` 默认（no-op，同 WinRAR）；`-ma7` 强制 RAR7/v70（**扩展**，WinRAR 7.23 无此开关、仅 >4 GiB 才写 v70）；`-ma4` 报 Unknown option（同 WinRAR） |
+| -md<size> | ✅ | 含 RAR7 >4 GiB（v70）；`-ma7` 时把 -md 声明进 v70 头 |
 | -mdx<size> | ✅ | 解压字典上限（默认 4 GiB） |
 | -mc<par> / -me<par> | ◐ | 接受 |
 | -ms<list> | ✅ | 指定类型不压缩 |

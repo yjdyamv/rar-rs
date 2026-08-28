@@ -1503,3 +1503,91 @@ fn our_padded_volume_sets_validate_with_winrar() {
         .to_string();
     assert_eq!(ar.read(&name).unwrap(), std::fs::read(&src).unwrap());
 }
+
+/// The `force_v70` seam writes legal RAR7 (v70) archives at small scale
+/// (the real trigger needs a > 4 GiB source). WinRAR must test and
+/// extract them byte-identically — no `-mdx` needed below the 4 GiB cap.
+#[test]
+fn our_small_dict_v70_archives_decode_with_winrar() {
+    let Some(_unrar) = unrar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("v70.bin");
+    write_pattern_file(&src, 4 * 1024 * 1024, 17);
+
+    let arc = dir.path().join("v70.rar");
+    {
+        let mut rar = rar5::RarArchive::create_with_options(
+            &arc,
+            rar5::CreateOptions {
+                dict_size_bytes: Some(6 * 1024 * 1024), // non-power: exercises the 1/32 bits
+                force_v70: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&src, 3).unwrap();
+        rar.close().unwrap();
+    }
+    // Confirm the member really is v70.
+    let mut ar = RarArchive::open(&arc).unwrap();
+    let name = ar
+        .namelist()
+        .into_iter()
+        .find(|n| n.ends_with("v70.bin"))
+        .unwrap()
+        .to_string();
+    let e = ar.get_entry(&name).unwrap();
+    assert_eq!(e.header.comp_version, 1, "expected a v70 member");
+    assert_eq!(e.header.dict_size_bytes, Some(6 * 1024 * 1024));
+
+    // WinRAR tests and extracts it byte-identically.
+    let (ok, out) = unrar_test(&arc, None);
+    assert!(ok, "UnRAR rejected our small-dict v70 archive:\n{out}");
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let (ok, out) = unrar_extract(&arc, &dest, None);
+    assert!(ok, "UnRAR failed to extract our v70 archive:\n{out}");
+    assert_eq!(
+        file_sha256(&dest.join(&name)),
+        file_sha256(&src),
+        "WinRAR extracted different bytes from our v70 archive"
+    );
+}
+
+/// `rar a -ma7` (our extension: force RAR7/v70 at any dictionary size)
+/// must produce archives WinRAR tests and extracts byte-identically.
+#[test]
+fn cli_ma7_archives_decode_with_winrar() {
+    let Some(_unrar) = unrar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("ma7.bin");
+    write_pattern_file(&src, 4 * 1024 * 1024, 19);
+    let arc = dir.path().join("ma7.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma7", "-idq"])
+        .arg(&arc)
+        .arg("ma7.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "rar a -ma7 failed:\n{out}");
+    // The member really is v70 (per-member 2x-file cap floors the dict).
+    let mut ar = RarArchive::open(&arc).unwrap();
+    let e = ar.get_entry("ma7.bin").unwrap();
+    assert_eq!(e.header.comp_version, 1, "-ma7 must force v70");
+    let (ok, out) = unrar_test(&arc, None);
+    assert!(ok, "UnRAR rejected our -ma7 archive:\n{out}");
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let (ok, out) = unrar_extract(&arc, &dest, None);
+    assert!(ok, "UnRAR failed to extract our -ma7 archive:\n{out}");
+    assert_eq!(
+        file_sha256(&dest.join("ma7.bin")),
+        file_sha256(&src),
+        "WinRAR extracted different bytes"
+    );
+}

@@ -390,6 +390,7 @@ impl RarArchive {
             self.dict_size_log,
             self.dict_size_bytes,
             method,
+            self.force_v70,
         );
 
         if method == COMP_METHOD_STORE || probe_incompressible {
@@ -768,8 +769,13 @@ impl RarArchive {
                 stored_hash,
             )?;
         } else {
-            let (dsl, dict_bytes) =
-                dict_params_for(data.len(), self.dict_size_log, self.dict_size_bytes, method);
+            let (dsl, dict_bytes) = dict_params_for(
+                data.len(),
+                self.dict_size_log,
+                self.dict_size_bytes,
+                method,
+                self.force_v70,
+            );
             let chain_solid = self.solid_mode && self.encoder_state.is_some();
             if self.solid_mode {
                 self.encoder_state.get_or_insert_with(Default::default);
@@ -1004,6 +1010,7 @@ impl RarArchive {
             blake2: self.blake2,
             dict_size_log: self.dict_size_log,
             dict_size_bytes: self.dict_size_bytes,
+            force_v70: self.force_v70,
             save_ctime: self.save_ctime,
             save_atime: self.save_atime,
             save_mtime: self.save_mtime,
@@ -1108,8 +1115,13 @@ impl RarArchive {
             );
         }
 
-        let (dsl, dict_bytes) =
-            dict_params_for(data.len(), ctx.dict_size_log, ctx.dict_size_bytes, method);
+        let (dsl, dict_bytes) = dict_params_for(
+            data.len(),
+            ctx.dict_size_log,
+            ctx.dict_size_bytes,
+            method,
+            ctx.force_v70,
+        );
         // One encoder state per member: the sequential path keeps the LZ
         // window (tail + long-range history) within a member and resets
         // between members, so the batch archive stays byte-identical to

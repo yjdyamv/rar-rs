@@ -40,12 +40,15 @@ fn dict_log_for(data_size: usize, requested: Option<u8>, _level: u8) -> u8 {
 ///
 /// Like WinRAR, a > 4 GiB request is still capped at twice the file size
 /// rounded down to a power of two; when the cap lands in the RAR5 range
-/// the member is written as plain v50 with the capped log.
+/// the member is written as plain v50 with the capped log. `force_v70`
+/// overrides that downgrade (the format allows v70 with any dictionary;
+/// it is the test seam that runs the v70 paths at small scale).
 pub(crate) fn dict_params_for(
     data_size: usize,
     requested_log: Option<u8>,
     requested_bytes: Option<u64>,
     level: u8,
+    force_v70: bool,
 ) -> (u8, Option<u64>) {
     let Some(requested) = requested_bytes else {
         return (dict_log_for(data_size, requested_log, level), None);
@@ -54,13 +57,19 @@ pub(crate) fn dict_params_for(
     let file_pow2 = 1usize << (usize::BITS - 1 - data_size.max(1).leading_zeros());
     let auto_cap = file_pow2.saturating_mul(2).max(base);
     let capped = (requested as usize).min(auto_cap);
-    if capped as u64 > 4 * 1024 * 1024 * 1024u64 {
-        // RAR7 (v70): the header declares the big dictionary; the encoder
-        // window follows the plain RAR5 selection rules.
-        (
-            dict_log_for(data_size, requested_log, level),
-            Some(capped as u64),
-        )
+    if force_v70 || capped as u64 > 4 * 1024 * 1024 * 1024u64 {
+        // RAR7 (v70): the header declares the (capped) dictionary — floored
+        // at 128 KiB, the smallest the 5+5-bit encoding can represent. The
+        // encoder window follows the plain RAR5 selection rules but is
+        // clamped to the declared dictionary: the decoder window IS the
+        // declared dict, so emitting a longer distance would be
+        // undecodable. (The > 4 GiB path never tripped this because the
+        // RAR5 log ceiling of 4 GiB is already below any v70 dict; the
+        // clamp matters for force_v70's small dicts.)
+        let declared = capped.max(base) as u64;
+        let window_log = dict_log_for(data_size, requested_log, level)
+            .min((63 - (declared / base as u64).leading_zeros()) as u8);
+        (window_log, Some(declared))
     } else {
         // The 2x-file-size cap fell into the RAR5 range: plain v50 member
         // with the capped dictionary.

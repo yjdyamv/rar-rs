@@ -43,6 +43,15 @@ pub struct CreateOptions {
     /// base plus a 1/32 increment. Mutually exclusive with
     /// `dict_size_log` in practice (one `-md` switch only).
     pub dict_size_bytes: Option<u64>,
+    /// Write RAR7 (v70) members (`comp_version` 1, DCX distance table)
+    /// even when `dict_size_bytes` is at or below the 4 GiB threshold
+    /// that normally selects v70 (WinRAR's `-md` semantics). The header
+    /// is legal v70 — the format does not require a > 4 GiB dictionary —
+    /// but WinRAR compatibility at this scale is not part of the
+    /// validated surface, so this is mainly a test seam that runs the
+    /// v70 code paths at small scale. Requires `dict_size_bytes`; no-op
+    /// without it.
+    pub force_v70: bool,
     /// Save the creation time (Windows) / ctime (Unix inode change time)
     /// in the FILE_TIME extra record, like WinRAR's `-tsc`.
     pub save_ctime: bool,
@@ -77,6 +86,7 @@ impl Default for CreateOptions {
             volume_size: None,
             dict_size_log: None,
             dict_size_bytes: None,
+            force_v70: false,
             save_ctime: false,
             save_atime: false,
             time_precision_seconds: false,

@@ -23,7 +23,7 @@
 - [x] 过滤器只实现 0–3（Delta/E8/E8E9/ARM），未知类型显式报错——类型 4–7 现实归档中不存在
 - [x] 大字典内存防护：读侧上限改为可配置 `ExtractOptions::max_dict_size`（默认 4 GiB，`-mdx` 语义；`None` = 不限），RAR7 v70 >4 GiB 字典按上限拒绝
 - [x] 字典：`-md` 全量语义（非法值报 Unknown option 与 WinRAR 一致）；默认 32 MiB；按 `min(-md, 2×floor_pow2(文件大小))` 裁剪；读侧上限 4 GiB（RAR5 格式上限）
-- [x] RAR7 (v70) 读+写：>4 GiB 字典（5 位+1/32 非幂编码）、DCX=80 扩展距离表、u64 距离；裁剪落回 ≤4 GiB 自动降级 v50
+- [x] RAR7 (v70) 读+写：>4 GiB 字典（5 位+1/32 非幂编码）、DCX=80 扩展距离表、u64 距离；裁剪落回 ≤4 GiB 自动降级 v50；`CreateOptions::force_v70` 测试缝 + CLI `-ma7`（扩展：任意字典大小强制 v70，WinRAR 7.23 无此开关）——小字典 v70 已由真 WinRAR 验证可解（含修复 read() 路径丢失 dict_size_bytes/DCX 的 bug）
 - [x] 长距离匹配（`-mcl` 语义）：采样哈希表覆盖 ≤ min(128 MiB, 字典) 历史；匹配距离受字典窗口限制（与 WinRAR 一致——实测默认/`-md32m` 下 32 MiB 远端副本双方都不压缩，`-md128m` 才压缩）；内存按实际数据惰性增长（历史 + 表，不再按字典预分配 ~2×）；128 MiB 副本实测压缩率差 0.3%、速度持平
 - [x] solid + 分卷创建（encoder state 跨成员/跨卷保持，双向字节级验证）
 - [x] >4 GiB 单文件创建（spill 流式管线：分块压缩 + 链式 CBC + 精确切卷，内存与文件大小无关）

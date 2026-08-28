@@ -215,7 +215,7 @@ fn fill_tile(seed: &[u8], need: usize) -> Vec<u8> {
 /// paths: build `.rev` for an existing set, delete a middle volume,
 /// rebuild it and require byte-identical reconstruction.
 pub fn write_roundtrip(data: &[u8]) {
-    if data.len() < 16 {
+    if data.len() < 17 {
         return;
     }
     let h = &data[8..]; // control bytes double as payload seeds
@@ -236,6 +236,19 @@ pub fn write_roundtrip(data: &[u8]) {
     } else {
         None
     };
+    // RAR7 (v70) via the force_v70 test seam: legal v70 headers (version
+    // 1, 5+5-bit dict, DCX) with a small declared dictionary. The
+    // per-member 2x-file cap floors the declared dict at 128 KiB for the
+    // small fuzz members, which is fine — the header, DCX table and the
+    // v70-aware read path all get exercised.
+    let (dict_size_bytes, force_v70) = if h[8] % 4 == 3 {
+        (
+            Some([512 * 1024, 1024 * 1024, 4 * 1024 * 1024][(h[8] as usize / 4) % 3] as u64),
+            true,
+        )
+    } else {
+        (None, false)
+    };
     let opts = rar5::CreateOptions {
         solid: h[3].is_multiple_of(2),
         blake2: h[4].is_multiple_of(2),
@@ -248,6 +261,8 @@ pub fn write_roundtrip(data: &[u8]) {
         recovery_volume_count: create_rev,
         volume_size,
         dict_size_log: Some(7 + h[7] % 3), // 128K/256K/512K windows
+        dict_size_bytes,
+        force_v70,
         ..Default::default()
     };
 

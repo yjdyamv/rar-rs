@@ -293,6 +293,9 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-mdx") {
         return format!("--dict-extract={rest}");
     }
+    if let Some(rest) = arg.strip_prefix("-ma") {
+        return format!("--archive-format={rest}");
+    }
     if let Some(rest) = arg.strip_prefix("-md") {
         return format!("--dict-size={rest}");
     }

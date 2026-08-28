@@ -1746,3 +1746,105 @@ fn cli_rv_creates_recovery_volumes_and_rc_rebuilds() {
         !std::path::Path::new(&format!("{}.part{:02}.rev", base.display(), expected + 1)).exists()
     );
 }
+
+// ── -ma archive format version (extension: -ma7 forces RAR7/v70) ───────────
+
+/// `-ma7` forces RAR7 (v70) members at any dictionary size (an extension
+/// beyond WinRAR 7.23, which only writes v70 above 4 GiB); `-ma5` is the
+/// default RAR5 format (a no-op, like WinRAR's inert `-ma5`); `-ma4` is
+/// rejected with WinRAR's wording.
+#[test]
+fn cli_archive_format_ma_switch() {
+    let dir = make_temp_dir();
+    let file = dir.path().join("f.bin");
+    write_rep_text(&file, 32 * 1024 * 1024);
+
+    // -ma7: v70 headers (comp_version 1, declared dict) even for a small
+    // file, and the round trip stays byte-identical.
+    let archive = dir.path().join("ma7.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma7", "-idq"])
+        .arg(&archive)
+        .arg("f.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "-ma7 must be accepted");
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    let e = rar.get_entry("f.bin").unwrap();
+    assert_eq!(e.header.comp_version, 1, "-ma7 forces v70");
+    assert_eq!(
+        e.header.dict_size_bytes,
+        Some(32 * 1024 * 1024),
+        "default 32 MiB declared"
+    );
+    assert_eq!(rar.read("f.bin").unwrap(), std::fs::read(&file).unwrap());
+
+    // -ma7 with -md: the -md dictionary is declared.
+    let archive = dir.path().join("ma7md.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma7", "-md16m", "-idq"])
+        .arg(&archive)
+        .arg("f.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    let e = rar.get_entry("f.bin").unwrap();
+    assert_eq!(e.header.comp_version, 1);
+    assert_eq!(
+        e.header.dict_size_bytes,
+        Some(16 * 1024 * 1024),
+        "-md16m declared"
+    );
+
+    // -ma5 equals the default output byte-for-byte.
+    let ma5 = dir.path().join("ma5.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma5", "-idq"])
+        .arg(&ma5)
+        .arg("f.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let def = dir.path().join("def.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&def)
+        .arg("f.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read(&ma5).unwrap(),
+        std::fs::read(&def).unwrap(),
+        "-ma5 is the default format"
+    );
+    let mut rar = rar5::RarArchive::open(&ma5).unwrap();
+    let e = rar.get_entry("f.bin").unwrap();
+    assert_eq!(e.header.comp_version, 0, "-ma5 stays v50");
+
+    // -ma4 (and other versions) are rejected with WinRAR's wording.
+    for bad in ["4", "6", "8"] {
+        let out = std::process::Command::new(RAR_CLI)
+            .args(["a", &format!("-ma{bad}"), "-idq"])
+            .arg(dir.path().join(format!("bad{bad}.rar")))
+            .arg("f.bin")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "-ma{bad} must be rejected");
+        let msg = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            msg.contains("Unknown option") && msg.contains(&format!("ma{bad}")),
+            "-ma{bad}: unexpected message {msg}"
+        );
+    }
+}

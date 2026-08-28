@@ -225,6 +225,9 @@ struct FilesArgs {
     /// Dictionary size for compression (like `-md<size>`)
     #[arg(long = "dict-size", value_name = "SIZE")]
     dict_size: Option<String>,
+    /// Archive format version (like `-ma5`; `-ma7` forces RAR7/v70)
+    #[arg(long = "archive-format", value_name = "VER", hide = true)]
+    archive_format: Option<String>,
     /// Extraction dictionary cap (like `-mdx<size>`; accepted, no effect)
     #[arg(long = "dict-extract", value_name = "SIZE")]
     dict_extract: Option<String>,
@@ -316,6 +319,10 @@ struct CreateArgs {
     /// means MiB, valid values 128K..4G powers of two)
     #[arg(long = "dict-size", value_name = "SIZE")]
     dict_size: Option<String>,
+    /// Archive format version (like `-ma5`; `-ma7` forces RAR7/v70 — an
+    /// extension beyond WinRAR 7.23, which has no such switch)
+    #[arg(long = "archive-format", value_name = "VER", hide = true)]
+    archive_format: Option<String>,
     /// Extraction dictionary cap (like `-mdx<size>`; accepted, no effect
     /// for RAR5 which is capped at 4 GiB)
     #[arg(long = "dict-extract", value_name = "SIZE")]
@@ -608,6 +615,30 @@ fn md_to_options(md: Option<MdSetting>) -> (Option<u8>, Option<u64>) {
     }
 }
 
+/// Resolve a `-ma<ver>` archive-format request into the v70 forcing
+/// options. `-ma5` is the default RAR5 format (a no-op, like WinRAR's
+/// accepted-but-inert `-ma5`); `-ma7` forces RAR7 (v70) members with the
+/// `-md` dictionary (default 32 MiB) declared in the header — an
+/// extension beyond WinRAR 7.23, which only writes v70 above 4 GiB. Any
+/// other version is rejected like WinRAR rejects unknown options
+/// (`-ma4` -> `Unknown option: ma4`). Returns `(force_v70, dict_bytes)`.
+fn archive_format_force_v70(
+    ma: Option<&str>,
+    dict_size_log: Option<u8>,
+    dict_size_bytes: Option<u64>,
+) -> Result<(bool, Option<u64>), String> {
+    match ma {
+        None | Some("5") => Ok((false, dict_size_bytes)),
+        Some("7") => {
+            let bytes = dict_size_bytes
+                .or_else(|| dict_size_log.map(|l| (128u64 * 1024) << l))
+                .unwrap_or(32 * 1024 * 1024);
+            Ok((true, Some(bytes)))
+        }
+        Some(other) => Err(format!("Unknown option: ma{other}")),
+    }
+}
+
 /// Whether an archive member name matches one `-ms<list>` entry: a bare
 /// extension (`bin` matches `*.bin`) or a wildcard mask (`*.bin`, `a?c`)
 /// matched against the basename.
@@ -864,6 +895,11 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
 
     let (dict_size_log, dict_size_bytes) =
         md_to_options(args.dict_size.as_deref().map(parse_md).transpose()?);
+    let (force_v70, v70_dict_bytes) = archive_format_force_v70(
+        args.archive_format.as_deref(),
+        dict_size_log,
+        dict_size_bytes,
+    )?;
     let opts = rar5::CreateOptions {
         solid: args.solid || args.solid_params.is_some(),
         quick_open: args.quick_open,
@@ -875,12 +911,13 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         recovery_volume_count,
         volume_size: args.volume_size,
         dict_size_log,
-        dict_size_bytes,
+        dict_size_bytes: v70_dict_bytes,
         save_ctime: ts.save_ctime,
         save_atime: ts.save_atime,
         save_mtime: ts.save_mtime,
         save_owner: misc.owner,
         save_streams: misc.save_streams,
+        force_v70,
         time_precision_seconds: ts.precision_seconds,
     };
 
@@ -1493,6 +1530,11 @@ fn cmd_update_freshen(
     // updated members were the only ones.
     let (dict_size_log, dict_size_bytes) =
         md_to_options(args.dict_size.as_deref().map(parse_md).transpose()?);
+    let (force_v70, v70_dict_bytes) = archive_format_force_v70(
+        args.archive_format.as_deref(),
+        dict_size_log,
+        dict_size_bytes,
+    )?;
     let mut rar = if std::path::Path::new(archive_path).exists() {
         match &password {
             Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
@@ -1506,7 +1548,8 @@ fn cmd_update_freshen(
         let create_opts = rar5::CreateOptions {
             password: password.clone(),
             dict_size_log,
-            dict_size_bytes,
+            dict_size_bytes: v70_dict_bytes,
+            force_v70,
             save_ctime: ts.save_ctime,
             save_atime: ts.save_atime,
             save_mtime: ts.save_mtime,
@@ -1635,6 +1678,11 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
     }
     let (dict_size_log, dict_size_bytes) =
         md_to_options(args.dict_size.as_deref().map(parse_md).transpose()?);
+    let (force_v70, v70_dict_bytes) = archive_format_force_v70(
+        args.archive_format.as_deref(),
+        dict_size_log,
+        dict_size_bytes,
+    )?;
     let mut rar = if std::path::Path::new(archive_path).exists() {
         match &password {
             Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
@@ -1648,7 +1696,8 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
         let create_opts = rar5::CreateOptions {
             password: password.clone(),
             dict_size_log,
-            dict_size_bytes,
+            dict_size_bytes: v70_dict_bytes,
+            force_v70,
             save_ctime: ts.save_ctime,
             save_atime: ts.save_atime,
             save_mtime: ts.save_mtime,

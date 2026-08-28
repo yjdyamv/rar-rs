@@ -68,7 +68,7 @@ RAR4 archives are deliberately out of scope: they are rejected with a clear
 ### rar
 
 ```
-rar a [-m0..-m5] [-p<password>] [-v<size>] archive.rar files...   Create archive
+rar a [-m0..-m5] [-ma5|-ma7] [-p<password>] [-v<size>] archive.rar files...   Create archive
 rar d [-p<password>] archive.rar names...   Delete members without rebuilding
 rar l archive.rar                          List contents
 rar lb archive.rar                         Bare list (names only)
@@ -98,6 +98,15 @@ official `rar d`.
 count — WinRAR semantics, byte-verified). `rar r` repairs streaming,
 holding only the recovery data in memory, so huge archives can be
 repaired.
+
+`-ma7` forces RAR7 (v70) members at any dictionary size — an extension
+beyond WinRAR 7.23, which only switches to v70 above a 4 GiB dictionary
+(the format itself allows v70 at any size; WinRAR's UnRAR decodes our
+small-dict v70 output, verified). `-ma5` is the default RAR5 format
+(accepted no-op, like WinRAR's own inert `-ma5`); `-ma4` is rejected
+with `Unknown option`, matching WinRAR 7.23. The declared dictionary
+follows `-md` (default 32 MiB), capped at twice the member size like
+WinRAR.
 
 ### unrar
 

@@ -112,6 +112,7 @@ pub(crate) struct BatchPrepareCtx<'a> {
     pub(crate) blake2: bool,
     pub(crate) dict_size_log: Option<u8>,
     pub(crate) dict_size_bytes: Option<u64>,
+    pub(crate) force_v70: bool,
     pub(crate) save_ctime: bool,
     pub(crate) save_atime: bool,
     pub(crate) save_mtime: bool,
@@ -442,6 +443,9 @@ pub struct RarArchive {
     /// Requested dictionary size in bytes for RAR7 (v70) members
     /// (WinRAR `-md` above 4 GiB, any value > 4 GiB accepted).
     pub(crate) dict_size_bytes: Option<u64>,
+    /// Force RAR7 (v70) member headers even below the 4 GiB threshold
+    /// (test seam; see `CreateOptions::force_v70`).
+    pub(crate) force_v70: bool,
     /// Save creation/change time in the FILE_TIME extra record (`-tsc`).
     pub(crate) save_ctime: bool,
     /// Save last access time in the FILE_TIME extra record (`-tsa`).
@@ -567,6 +571,7 @@ impl RarArchive {
             encoder_state: None,
             dict_size_log: None,
             dict_size_bytes: None,
+            force_v70: false,
             save_ctime: false,
             save_atime: false,
             save_mtime: true,
@@ -1054,6 +1059,7 @@ impl RarArchive {
             encoder_state: None,
             dict_size_log: opts.dict_size_log,
             dict_size_bytes: opts.dict_size_bytes,
+            force_v70: opts.force_v70,
             save_ctime: opts.save_ctime,
             save_atime: opts.save_atime,
             save_mtime: opts.save_mtime,
