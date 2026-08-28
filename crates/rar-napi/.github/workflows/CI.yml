@@ -1,0 +1,333 @@
+name: CI
+env:
+  DEBUG: napi:*
+  APP_NAME: smart-archive-rar
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
+  CARGO_INCREMENTAL: '1'
+'on':
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
+      - NOTICE
+      - '**/*.gitignore'
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The rar-rs workspace ships a pure-Rust library (crates/rar), CLI
+# (crates/rar-cli) and the smart-archive-rar napi-rs binding
+# (crates/rar-napi, native .node + wasm32-wasip1-threads). No npm package
+# is published: the VS Code consumer downloads the compiled artifacts from
+# the GitHub Release assets (tag v*), SHA-256 pinned in its installer.
+# The binding's JS tests run with `node --test` under crates/rar-napi.
+jobs:
+  lint:
+    name: Lint + workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/rar-napi/package-lock.json
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-wasip1-threads
+      - name: Cargo fmt (workspace)
+        run: cargo fmt --all --check
+      - name: Clippy (workspace, all features)
+        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: Cargo test (workspace)
+        run: cargo test --workspace --all-features
+      - name: Install binding dependencies
+        working-directory: crates/rar-napi
+        run: npm ci
+      - name: Build addon (native)
+        working-directory: crates/rar-napi
+        run: npx napi build --platform --release
+      - name: Test addon (native)
+        working-directory: crates/rar-napi
+        run: npm test
+      - name: Build WASM addon
+        working-directory: crates/rar-napi
+        run: npx napi build --platform --release --target wasm32-wasip1-threads
+      - name: Patch WASI loader for Windows host paths
+        working-directory: crates/rar-napi
+        run: node scripts/patch-wasi-loader.mjs
+      - name: Test addon (WASI forced)
+        working-directory: crates/rar-napi
+        run: NAPI_RS_FORCE_WASI=error npm test
+  build:
+    name: build - ${{ matrix.settings.target }} - node@22
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: npx napi build --platform --release --target aarch64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: npx napi build --platform --release --target x86_64-pc-windows-msvc
+          - host: windows-latest
+            target: i686-pc-windows-msvc
+            build: npx napi build --platform --release --target i686-pc-windows-msvc
+          - host: windows-latest
+            target: aarch64-pc-windows-msvc
+            build: npx napi build --platform --release --target aarch64-pc-windows-msvc
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: npx napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build: npx napi build --platform --release --target x86_64-unknown-linux-musl -x
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build: npx napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            build: npx napi build --platform --release --target aarch64-unknown-linux-musl -x
+          - host: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            build: npx napi build --platform --release --target armv7-unknown-linux-gnueabihf --use-napi-cross
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          architecture: x64
+          cache: npm
+          cache-dependency-path: crates/rar-napi/package-lock.json
+      - name: Install
+        run: rustup update stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git/db/
+            ~/.cargo/registry/
+            target/
+          key: ${{ runner.os }}-${{ matrix.settings.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install zig (musl cross builds)
+        if: contains(matrix.settings.target, 'musl')
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+      - name: Install cargo-zigbuild
+        if: contains(matrix.settings.target, 'musl')
+        run: |
+          cargo install cargo-zigbuild
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install dependencies
+        working-directory: crates/rar-napi
+        run: npm ci
+      - name: Build
+        working-directory: crates/rar-napi
+        run: ${{ matrix.settings.build }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: |
+            crates/rar-napi/*.node
+            crates/rar-napi/index.js
+            crates/rar-napi/index.d.ts
+          if-no-files-found: error
+  build-wasm:
+    name: build - wasm32-wasip1-threads
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/rar-napi/package-lock.json
+      - name: Install
+        run: rustup update stable && rustup target add wasm32-wasip1-threads
+      - name: Install dependencies
+        working-directory: crates/rar-napi
+        run: npm ci
+      - name: Build WASM
+        working-directory: crates/rar-napi
+        run: npx napi build --platform --release --target wasm32-wasip1-threads
+        shell: bash
+      - name: Patch WASI loader for Windows host paths
+        working-directory: crates/rar-napi
+        run: node scripts/patch-wasi-loader.mjs
+        shell: bash
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bindings-wasm32-wasip1-threads
+          path: |
+            crates/rar-napi/smart-archive-rar.wasm32-wasi.wasm
+            crates/rar-napi/smart-archive-rar.wasm32-wasi.debug.wasm
+            crates/rar-napi/smart-archive-rar.wasi.cjs
+            crates/rar-napi/wasi-path-map.cjs
+            crates/rar-napi/wasi-worker.mjs
+          if-no-files-found: error
+  test-bindings:
+    name: Test bindings on ${{ matrix.settings.host }} (${{ matrix.settings.target }})
+    needs:
+      - build
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            triple: win32-x64-msvc
+            architecture: x64
+          - host: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            triple: win32-arm64-msvc
+            architecture: arm64
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            triple: darwin-arm64
+            architecture: arm64
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            triple: linux-x64-gnu
+            architecture: x64
+          - host: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            triple: linux-arm64-gnu
+            architecture: arm64
+    runs-on: ${{ matrix.settings.host }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          architecture: ${{ matrix.settings.architecture }}
+          cache: npm
+          cache-dependency-path: crates/rar-napi/package-lock.json
+      - name: Install dependencies
+        working-directory: crates/rar-napi
+        run: npm ci
+      - name: Download artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: crates/rar-napi
+      - name: Verify addon filename matches loader expectation
+        working-directory: crates/rar-napi
+        run: |
+          node -e "
+          const fs = require('fs');
+          const f = fs.readdirSync('.').find((n) => n.endsWith('.node'));
+          if (!f) { console.error('no .node artifact'); process.exit(1); }
+          const expect = 'smart-archive-rar.${{ matrix.settings.triple }}.node';
+          if (f !== expect) { console.error('expected', expect, 'got', f); process.exit(1); }
+          console.log('ok:', f);
+          "
+        shell: bash
+      - name: Test addon
+        working-directory: crates/rar-napi
+        run: npm test
+        shell: bash
+  test-wasm:
+    name: Test WASI binding on ${{ matrix.os }}
+    needs:
+      - build-wasm
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/rar-napi/package-lock.json
+      - name: Install dependencies
+        working-directory: crates/rar-napi
+        run: npm ci
+      - name: Download WASI artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: bindings-wasm32-wasip1-threads
+          path: crates/rar-napi
+      - name: Test addon (WASI forced)
+        working-directory: crates/rar-napi
+        run: NAPI_RS_FORCE_WASI=error npm test
+        shell: bash
+  release:
+    name: Release (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - lint
+      - build
+      - test-bindings
+      - build-wasm
+      - test-wasm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Verify tag matches package.json version
+        working-directory: crates/rar-napi
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag v$TAG does not match package.json version $VERSION"
+            exit 1
+          fi
+          echo "releasing v$VERSION"
+        shell: bash
+      - name: Download all bindings
+        uses: actions/download-artifact@v8
+        with:
+          path: bindings
+      - name: Download WASI bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: bindings-wasm32-wasip1-threads
+          path: wasm
+      - name: Collect native addons
+        run: |
+          mkdir -p release
+          find bindings -name '*.node' -exec cp -f {} release/ \;
+          cp wasm/smart-archive-rar.wasm32-wasi.wasm \
+             wasm/smart-archive-rar.wasm32-wasi.debug.wasm \
+             wasm/smart-archive-rar.wasi.cjs \
+             wasm/wasi-path-map.cjs \
+             wasm/wasi-worker.mjs release/ 2>/dev/null || true
+          find bindings -name 'index.js' -o -name 'index.d.ts' | while read f; do cp -f "$f" release/; done
+          ls -la release/
+        shell: bash
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            release/* 2>&1 || \
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber

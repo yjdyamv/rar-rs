@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rar", "crates/rar-cli"]
+members = ["crates/rar", "crates/rar-cli", "crates/rar-napi"]
 resolver = "2"
 
 [workspace.package]
@@ -28,3 +28,9 @@ unused_must_use = "deny"
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+
+# Shared release profile (binding .node binaries and CLI releases): LTO +
+# symbol stripping keep artifacts small; overridden per-crate if needed.
+[profile.release]
+lto = true
+strip = "symbols"

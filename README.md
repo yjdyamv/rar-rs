@@ -264,7 +264,7 @@ table proportional to the whole file.
 
 ## Module Layout
 
-Cargo workspace with a library crate and a CLI crate:
+Cargo workspace with a library crate, a CLI crate, and the napi-rs binding:
 
 ```
 crates/
@@ -300,10 +300,21 @@ crates/
     +-- src/common.rs           WinRAR switch/config-file compatibility core
     +-- src/input.rs password.rs output.rs time.rs
     +-- tests/cli_behavior.rs winrar_interop.rs
++-- rar-napi/                   napi-rs binding (`smart-archive-rar`)
+    +-- src/lib.rs              Node/WASI API (create/append/extract/...)
+    +-- package.json            napi build config (no npm publish)
+    +-- __test__/               node --test suites
+    +-- scripts/                WASI loader path-map patching
 fuzz/                            cargo-fuzz targets (standalone crate)
     +-- fuzz_targets/           parse / crypto / recovery
     +-- corpus/ (gitignored)    seeded from tests/fixtures/rar50/
 ```
+
+The napi-rs binding (`crates/rar-napi`) builds native `.node` addons for
+Windows/macOS/Linux and a `wasm32-wasip1-threads` bundle. No npm package is
+published: the GitHub Actions CI (`.github/workflows/CI.yml`, tag `v*`)
+attaches the compiled artifacts to the Release; the VS Code extension
+`vscode-smart-archive` downloads them SHA-256 pinned.
 
 ## Building
 

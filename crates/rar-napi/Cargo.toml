@@ -1,0 +1,17 @@
+[package]
+name = "smart-archive-rar"
+version = "0.4.0"
+edition = "2021"
+description = "RAR5 archive creation for Smart Archive — napi-rs binding around the rar5 library"
+license = "BSD-2-Clause"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = "3"
+napi-derive = "3"
+rar5 = { path = "../rar", features = ["parallel", "simd"] }
+
+[build-dependencies]
+napi-build = "2"

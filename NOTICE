@@ -76,6 +76,17 @@ RAR and WinRAR are registered trademarks of Alexander Roshal and RARLAB.
 This project is not affiliated with, endorsed by, or connected to RARLAB
 in any way.
 
+napi-rs binding (`crates/rar-napi`)
+-------------------------------------
+
+The `smart-archive-rar` napi-rs binding under `crates/rar-napi` wraps the
+`rar5` library for Node.js (native `.node` addons) and WASM
+(`wasm32-wasip1-threads`). Its code, tests, and scripts originate from the
+`smart-archive-rar` project (yjdyamv/smart-archive-rar) and remain
+BSD-2-Clause. The napi-rs / emnapi machinery is third-party and carries its
+own licenses. The binding does not ship via npm: compiled artifacts are
+produced by CI and attached to GitHub Releases.
+
 License
 --------
 
