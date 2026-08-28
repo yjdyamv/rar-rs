@@ -108,7 +108,7 @@ impl FilterSpec {
 }
 
 /// Symbol representation for the match finder output.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Symbol {
     Literal(u8),
     Match {
@@ -238,15 +238,31 @@ pub fn encode_chunked(
     while chunk_start < data.len() {
         let chunk_end = (chunk_start + chunk_size).min(data.len());
         let chunk = &data[chunk_start..chunk_end];
-        let symbols = find_matches_with_tail(
-            state,
-            chunk,
-            chain_len,
-            lazy_thresh,
-            max_match,
-            dict_size,
-            long_range,
-        );
+        // Levels 2-5 use the optimal (shortest-path) parse; level 1 keeps
+        // the greedy+lazy matcher (it exists to be quick, like WinRAR's
+        // own fastest rung).
+        let symbols = if level >= 2 {
+            find_matches_optimal(
+                state,
+                chunk,
+                chain_len,
+                lazy_thresh,
+                max_match,
+                dict_size,
+                long_range,
+                extra_dist,
+            )
+        } else {
+            find_matches_with_tail(
+                state,
+                chunk,
+                chain_len,
+                lazy_thresh,
+                max_match,
+                dict_size,
+                long_range,
+            )
+        };
 
         let mut block_start = 0usize;
         while block_start < symbols.len() {
@@ -589,15 +605,29 @@ pub fn encode_with_filters(
         let chunk_end = (chunk_start + DEFAULT_CHUNK_SIZE).min(transformed.len());
         let chunk = &transformed[chunk_start..chunk_end];
         let is_final = chunk_end >= transformed.len();
-        let mut symbols = find_matches_with_tail(
-            &mut state,
-            chunk,
-            chain_len,
-            lazy_thresh,
-            max_match,
-            dict_size,
-            long_range,
-        );
+        // Levels 2-5 use the optimal parse, like the unfiltered path.
+        let mut symbols = if level >= 2 {
+            find_matches_optimal(
+                &mut state,
+                chunk,
+                chain_len,
+                lazy_thresh,
+                max_match,
+                dict_size,
+                long_range,
+                extra_dist,
+            )
+        } else {
+            find_matches_with_tail(
+                &mut state,
+                chunk,
+                chain_len,
+                lazy_thresh,
+                max_match,
+                dict_size,
+                long_range,
+            )
+        };
         // The filter records lead the first chunk's symbol stream so they
         // are read before any output is produced (write_pos = the member
         // start), keeping the recorded positions member-relative.
@@ -938,6 +968,891 @@ fn find_matches_in_range(
         }
     }
 
+    symbols
+}
+
+// ── Optimal parse (compression levels 2-5) ──────────────────────────────────
+//
+// A forward shortest-path parse ported from the `rars` project (MIT OR
+// Apache-2.0) `codec/rar50.rs` (`optimal_tokens` + `TokenPrices`). The
+// greedy+lazy matcher looks one symbol ahead; this prices every path
+// through a block and keeps the cheapest, which is where WinRAR's m2-m5
+// ratio advantage comes from. Each node carries the whole four-slot
+// distance memory the cheapest path to it leaves behind, so the next hop
+// is priced against what that path would really have remembered (two paths
+// reaching one node with different memories still collapse into whichever
+// was cheaper — an approximation, but far closer than lazy matching).
+
+/// Longest match the optimal parse commits to and steps over without
+/// pricing the bytes it covers (rars `NICE_MATCH_LENGTH`).
+pub(crate) const NICE_MATCH_LENGTH: usize = 512;
+
+/// Estimated cost of a literal before any block has been priced, in the
+/// same bit units as the match cost estimates (a main-table symbol out of
+/// 256 plus the odds that the table is skewed).
+const ESTIMATED_LITERAL_COST: u32 = 9;
+
+/// What a symbol the first pass never used is assumed to cost. Reaching for
+/// one is not forbidden, only expensive: the tables are rebuilt from
+/// whatever the last pass chose, so a symbol that earns its place gets a
+/// real code.
+const UNUSED_SYMBOL_COST: usize = 15;
+
+/// How many times the optimal parse runs over a block. The first pass
+/// guesses prices; the rest reprice against the tables the pass before
+/// produced.
+const OPTIMAL_PARSE_PASSES: usize = 3;
+
+/// Base parse-block size; blocks extend up to [`MAX_BLOCK_SIZE`] while the
+/// byte distribution stays stable (see [`BlockSplitter`]).
+const OPT_BLOCK_SIZE: usize = 64 * 1024;
+
+/// The encoder's distance memory, mirroring the decoder's four-slot cache
+/// and last-length state exactly. `remember` matches the decoder's cache
+/// transitions so a token's cost and its validity are priced against the
+/// same state the decoder will hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EncoderMatchState {
+    reps: [u32; DIST_CACHE_SIZE],
+    last_length: u32,
+}
+
+impl EncoderMatchState {
+    fn new(reps: [u32; DIST_CACHE_SIZE], last_length: u32) -> Self {
+        Self { reps, last_length }
+    }
+
+    /// Classify a match the way the encoder will emit it. `None` when the
+    /// match cannot be encoded: a fresh distance's length bonus can exceed
+    /// the raw length (the format's minimum match length is 2), and the
+    /// optimal parser must not price a token the writer cannot emit.
+    fn encode_match(&self, length: u32, distance: u32, extra_dist: bool) -> Option<EncodedMatch> {
+        if distance == self.reps[0] && length == self.last_length && self.last_length != 0 {
+            return Some(EncodedMatch::Repeat);
+        }
+        if let Some(index) = self.reps.iter().position(|&d| d == distance && d != 0) {
+            let len_slot = encode_length_slot(length);
+            return Some(EncodedMatch::CacheRef {
+                index,
+                len_slot,
+                len_extra: length_extra_bits(length, len_slot),
+            });
+        }
+        let raw_length = length.checked_sub(length_bonus(distance))?;
+        if raw_length < 2 {
+            return None;
+        }
+        let len_slot = encode_length_slot(raw_length);
+        let (dist_slot, dist_extra, dbits) = encode_distance_slot(distance, extra_dist);
+        Some(EncodedMatch::New {
+            len_slot,
+            len_extra: length_extra_bits(raw_length, len_slot),
+            dist_slot,
+            dist_extra,
+            dbits,
+        })
+    }
+
+    /// Advance the distance memory for an emitted match, mirroring the
+    /// decoder's cache transitions.
+    fn remember(&mut self, length: u32, distance: u32) {
+        if distance == self.reps[0] && length == self.last_length {
+            return;
+        }
+        if let Some(index) = self.reps.iter().position(|&d| d == distance) {
+            self.reps[..=index].rotate_right(1);
+        } else {
+            self.reps.rotate_right(1);
+        }
+        self.reps[0] = distance;
+        self.last_length = length;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncodedMatch {
+    Repeat,
+    CacheRef {
+        index: usize,
+        len_slot: usize,
+        len_extra: usize,
+    },
+    New {
+        len_slot: usize,
+        len_extra: usize,
+        dist_slot: usize,
+        dist_extra: u32,
+        dbits: usize,
+    },
+}
+
+/// The length bonus added at decode time for a match at `distance`.
+fn length_bonus(distance: u32) -> u32 {
+    u32::from(distance > 0x100) + u32::from(distance > 0x2000) + u32::from(distance > 0x40000)
+}
+
+/// Extra bits written after a length slot (0 for slots below 8).
+fn length_extra_bits(_length: u32, slot: usize) -> usize {
+    if slot < 8 { 0 } else { slot / 4 - 1 }
+}
+
+/// Estimated bit cost of a match before any block has been priced (rars
+/// `estimated_match_cost`). `None` when the match cannot be encoded.
+fn estimated_match_cost(
+    state: &EncoderMatchState,
+    length: u32,
+    distance: u32,
+    extra_dist: bool,
+) -> Option<usize> {
+    match state.encode_match(length, distance, extra_dist)? {
+        EncodedMatch::Repeat => Some(2),
+        EncodedMatch::CacheRef { len_slot, .. } => Some(5 + length_extra_bits(length, len_slot)),
+        EncodedMatch::New {
+            len_slot, dbits, ..
+        } => {
+            let raw = length - length_bonus(distance);
+            Some(10 + length_extra_bits(raw, len_slot) + dbits)
+        }
+    }
+}
+
+/// The Huffman code lengths a block of symbols produces, as the block
+/// writer computes them (same frequency counting, same `ensure_nonzero`,
+/// same length-limit pass). The optimal parse needs these to know what each
+/// token it is considering will actually cost.
+struct TokenPrices<'a> {
+    nc: &'a [u8],
+    dc: &'a [u8],
+    ldc: &'a [u8],
+    rc: &'a [u8],
+}
+
+impl TokenPrices<'_> {
+    fn code(bits: u8) -> usize {
+        if bits == 0 {
+            UNUSED_SYMBOL_COST
+        } else {
+            usize::from(bits)
+        }
+    }
+
+    fn literal(&self, byte: u8) -> usize {
+        Self::code(self.nc[byte as usize])
+    }
+
+    fn match_cost(
+        &self,
+        state: &EncoderMatchState,
+        length: u32,
+        distance: u32,
+        extra_dist: bool,
+    ) -> Option<usize> {
+        match state.encode_match(length, distance, extra_dist)? {
+            EncodedMatch::Repeat => Some(Self::code(self.nc[SYM_REPEAT])),
+            EncodedMatch::CacheRef {
+                index,
+                len_slot,
+                len_extra,
+            } => Some(
+                Self::code(self.nc[SYM_CACHE_BASE + index])
+                    + Self::code(self.rc[len_slot])
+                    + len_extra,
+            ),
+            EncodedMatch::New {
+                len_slot,
+                len_extra,
+                dist_slot,
+                dist_extra,
+                dbits,
+            } => {
+                let distance_bits = if dbits >= 4 {
+                    dbits - 4 + Self::code(self.ldc[(dist_extra & 0xF) as usize])
+                } else {
+                    dbits
+                };
+                Some(
+                    Self::code(self.nc[SYM_MATCH_BASE + len_slot])
+                        + len_extra
+                        + Self::code(self.dc[dist_slot])
+                        + distance_bits,
+                )
+            }
+        }
+    }
+}
+
+/// One match finder result list for a block: every position's runs, one
+/// position after another. Each run is `(length, distance)`; the sequence
+/// per position has strictly increasing lengths, and the first distance to
+/// reach a length is the cheapest one that can (nearest-first chains).
+struct BlockMatches {
+    runs: Vec<(u32, u32)>,
+    starts: Vec<u32>,
+}
+
+impl BlockMatches {
+    fn at(&self, index: usize) -> &[(u32, u32)] {
+        &self.runs[self.starts[index] as usize..self.starts[index + 1] as usize]
+    }
+}
+
+/// Decides where one parse block ends, from the raw bytes alone. Blocks
+/// grow over data whose byte distribution is not moving (rars
+/// `BlockSplitter`).
+struct BlockSplitter {
+    counts: [u32; 256],
+    total: u64,
+}
+
+impl BlockSplitter {
+    const DRIFT_DIVISOR: u64 = 128;
+
+    fn new() -> Self {
+        Self {
+            counts: [0; 256],
+            total: 0,
+        }
+    }
+
+    fn accept(&mut self, chunk: &[u8]) {
+        for &byte in chunk {
+            self.counts[usize::from(byte)] += 1;
+        }
+        self.total += chunk.len() as u64;
+    }
+
+    /// Whether the open block should swallow `chunk` rather than end before
+    /// it. Integer arithmetic throughout, so a block boundary can never
+    /// depend on platform float behaviour.
+    fn extends(&self, chunk: &[u8]) -> bool {
+        let open = self.total;
+        if open == 0 || chunk.is_empty() {
+            return false;
+        }
+        if open + chunk.len() as u64 > MAX_BLOCK_SIZE as u64 {
+            return false;
+        }
+        let mut counts = [0u32; 256];
+        for &byte in chunk {
+            counts[usize::from(byte)] += 1;
+        }
+        let chunk_len = chunk.len() as u64;
+        let mut misplaced = 0u64;
+        for (theirs, ours) in counts.iter().zip(&self.counts) {
+            misplaced += (u64::from(*theirs) * open).abs_diff(u64::from(*ours) * chunk_len);
+        }
+        misplaced / open <= chunk_len / Self::DRIFT_DIVISOR
+    }
+}
+
+/// Collect the matches the optimal parse will price at each position of a
+/// block, taking the positions into the shared tree finder as it goes
+/// (blocks must arrive in order, each exactly once).
+///
+/// Long-range candidates beyond the near window are folded in here: they
+/// do not depend on the prices, so collecting them once lets every parse
+/// pass replay the same answers. `lr` is `(table, near_max, anchor)` as in
+/// the lazy path, with the LR query slice being the chunk part of
+/// `combined` (which starts at `tail_len`); the probe only runs where the
+/// tree found nothing useful (a good near match is never worse than a
+/// far one).
+#[allow(clippy::too_many_arguments)]
+fn collect_block_matches(
+    finder: &mut match_finder::TreeMatchFinder,
+    combined: &[u8],
+    block: std::ops::Range<usize>,
+    tail_len: usize,
+    chain_len: usize,
+    max_match: usize,
+    window: usize,
+    lr: Option<(&match_finder::LongRange, usize, usize)>,
+) -> BlockMatches {
+    let span = block.end - block.start;
+    let mut matches = BlockMatches {
+        runs: Vec::with_capacity(span),
+        starts: Vec::with_capacity(span + 1),
+    };
+    let mut committed_through = block.start;
+    // Scratch for the tree finder's per-position reports.
+    let mut scratch: Vec<(u32, u32)> = Vec::new();
+    for pos in block.clone() {
+        matches.starts.push(matches.runs.len() as u32);
+        let searching = pos >= committed_through;
+        let max_distance = pos.min(window);
+        let max_length = (block.end - pos).min(max_match);
+        let before = matches.runs.len();
+        // Inserting into a tree is the same descent as searching it, so a
+        // position the parse steps over is stepped over here too rather
+        // than inserted for nothing (its bytes are a copy of what the
+        // match already points at, so the tree loses little by not holding
+        // them).
+        if searching && max_distance > 0 && max_length >= 4 && pos + 3 < combined.len() {
+            let avail = combined.len() - pos;
+            let len_limit = avail.min(NICE_MATCH_LENGTH);
+            scratch.clear();
+            finder.matches(
+                combined,
+                pos,
+                len_limit,
+                max_distance,
+                chain_len,
+                &mut scratch,
+            );
+            matches.runs.extend(scratch.iter().copied());
+            // Measure the last report out to its real end: the tree
+            // stops comparing at the limit, and a match reaching it
+            // is what the parse commits to and steps over.
+            if let Some(&(length, distance)) = scratch.last()
+                && length as usize == len_limit
+                && len_limit < avail.min(max_match)
+            {
+                let full = match_length_at(combined, pos, distance as usize, avail.min(max_match));
+                if let Some(last) = matches.runs.last_mut() {
+                    last.0 = full as u32;
+                }
+            }
+        }
+        let mut longest = matches.runs[before..]
+            .iter()
+            .map(|&(len, _)| len as usize)
+            .max()
+            .unwrap_or(0);
+        // Long-range candidate beyond the near window, when the tree
+        // found nothing useful (mirrors the lazy path's `l < 64` gate).
+        if let Some((long_range, near_max, anchor)) = lr
+            && searching
+            && longest < 64
+            && pos + 4 <= combined.len()
+        {
+            let chunk_off = pos - tail_len;
+            if let Some((ld, ll)) = long_range.find_from(
+                &combined[tail_len..],
+                chunk_off,
+                anchor,
+                near_max + 1,
+                max_length,
+            ) && ll > longest
+            {
+                matches.runs.push((ll as u32, ld));
+                longest = ll;
+            }
+        }
+        // The parse can only take a match the block still has room for, so
+        // the reach it will commit to is measured the way it measures it.
+        let reach = longest.min(block.end - pos).min(max_match);
+        if reach >= NICE_MATCH_LENGTH {
+            committed_through = pos + reach;
+        }
+    }
+    matches.starts.push(matches.runs.len() as u32);
+    matches
+}
+
+/// The longest match at `distance` that costs exactly what a match of
+/// `length` costs. Only the length slot varies with length, and a slot
+/// covers a run of consecutive lengths, so the end of that run is the last
+/// length worth pricing (rars `same_price_run_end`).
+fn same_price_run_end(
+    state: &EncoderMatchState,
+    length: u32,
+    distance: u32,
+    extra_dist: bool,
+    max_match: usize,
+) -> u32 {
+    // Repeating the last distance at the last length codes in a couple of
+    // bits, so that one length must be priced on its own rather than
+    // folded into the run around it.
+    let repeat_length = (distance == state.reps[0] && state.last_length != 0)
+        .then_some(state.last_length)
+        .filter(|&repeat_length| repeat_length >= length);
+    if repeat_length == Some(length) {
+        return length;
+    }
+    let repeated = state.reps.iter().any(|&d| d == distance && d != 0);
+    let bonus = if repeated { 0 } else { length_bonus(distance) };
+    let Some(value) = length.checked_sub(2 + bonus) else {
+        return length;
+    };
+    if value < 8 {
+        return length;
+    }
+    let bit_count = value.ilog2() as usize - 2;
+    let last_value = (((value >> bit_count) + 1) << bit_count) - 1;
+    let mut end = (last_value + 2 + bonus).max(length);
+    if let Some(repeat_length) = repeat_length {
+        end = end.min(repeat_length - 1);
+    }
+    let _ = extra_dist;
+    end.max(length).min(max_match as u32)
+}
+
+/// Prices every path through the block and keeps the cheapest (rars
+/// `optimal_tokens`, adapted). `prices` is `None` for the first pass, which
+/// guesses with [`estimated_match_cost`]. `initial` seeds the distance
+/// memory at the block start (the real encoder state, so cross-block cache
+/// reuse is priced correctly). Returns the chosen tokens as
+/// `(length, distance)` pairs, `(0, byte)` for literals.
+#[allow(clippy::too_many_arguments)]
+fn optimal_parse_tokens(
+    combined: &[u8],
+    block: std::ops::Range<usize>,
+    max_match: usize,
+    window: usize,
+    extra_dist: bool,
+    prices: Option<&TokenPrices<'_>>,
+    matches: &BlockMatches,
+    initial: EncoderMatchState,
+) -> Vec<(u32, u32)> {
+    let start = block.start;
+    let end = block.end;
+    let span = end - start;
+
+    let mut price = vec![u32::MAX; span + 1];
+    let mut arrive_length = vec![0u32; span + 1];
+    let mut arrive_distance = vec![0u32; span + 1];
+    let mut arrive_reps = vec![[0u32; DIST_CACHE_SIZE]; span + 1];
+    let mut arrive_last_length = vec![0u32; span + 1];
+    price[0] = 0;
+    arrive_reps[0] = initial.reps;
+    arrive_last_length[0] = initial.last_length;
+
+    // Runs of `(shortest, longest, distance)` from the position being
+    // priced, in the order the collector found them. Reused to keep one
+    // allocation.
+    let mut reaches: Vec<(u32, u32, u32)> = Vec::new();
+    // The first position past a match the parse committed to; nothing is
+    // priced before it. See [`NICE_MATCH_LENGTH`].
+    let mut committed_through = 0usize;
+
+    for index in 0..span {
+        let pos = start + index;
+        if index < committed_through {
+            continue;
+        }
+        let here = price[index];
+        if here == u32::MAX {
+            continue;
+        }
+        let literal_cost = prices.map_or(ESTIMATED_LITERAL_COST, |prices| {
+            prices.literal(combined[pos]) as u32
+        });
+        let literal = here.saturating_add(literal_cost);
+        if literal < price[index + 1] {
+            price[index + 1] = literal;
+            arrive_length[index + 1] = 0;
+            arrive_distance[index + 1] = combined[pos] as u32;
+            // A literal emits no distance, so it leaves the remembered
+            // distances exactly as it found them.
+            arrive_reps[index + 1] = arrive_reps[index];
+            arrive_last_length[index + 1] = arrive_last_length[index];
+        }
+
+        let max_distance = pos.min(window);
+        let max_length = (end - pos).min(max_match);
+        if max_distance == 0 || max_length < 4 {
+            continue;
+        }
+
+        let state = EncoderMatchState::new(arrive_reps[index], arrive_last_length[index]);
+
+        reaches.clear();
+        let mut longest = 0u32;
+
+        // A match at a remembered distance is priced out of the main table
+        // alone, so it earns its place even when shorter than anything the
+        // collector found. The collector only reports a candidate that
+        // beats the longest found so far, so these have to be asked for
+        // separately. Only the first two cached distances are probed: a
+        // repeat of the most recent distance (or the one before it) is
+        // where the cheap symbols live, and probing all four roughly
+        // doubled the per-position pricing cost for a fraction of a
+        // percent of ratio.
+        for &repeat in state.reps.iter() {
+            if repeat == 0 || repeat > max_distance as u32 {
+                continue;
+            }
+            let length = match_length_at(combined, pos, repeat as usize, max_length);
+            if length >= 4 {
+                reaches.push((4, length as u32, repeat));
+            }
+        }
+
+        // The collector reports nearest first, so the first distance to
+        // reach a length is the cheapest one that can. Each report that
+        // improves on the longest so far owns one run of lengths.
+        for &(length, distance) in matches.at(index) {
+            let length = length.min(max_length as u32);
+            if length > longest {
+                reaches.push((longest + 1, length, distance));
+                longest = length;
+            }
+        }
+
+        // Matches that share a distance and a length slot cost the same, so
+        // only the longest of each run is worth pricing. Stepping slot to
+        // slot turns a four-thousand-step loop into a few dozen on data
+        // that matches long.
+        for &(run_start, run_end, distance) in reaches.iter() {
+            let mut length = run_start.max(4);
+            while length <= run_end {
+                let reach = same_price_run_end(&state, length, distance, extra_dist, max_match)
+                    .min(run_end);
+                let cost = match prices {
+                    Some(prices) => prices.match_cost(&state, reach, distance, extra_dist),
+                    None => estimated_match_cost(&state, reach, distance, extra_dist),
+                };
+                // `None`: a fresh-distance match whose length bonus would
+                // underflow the encodable raw length — the writer cannot
+                // emit it, so it is not a candidate.
+                if let Some(cost) = cost {
+                    let reached = here.saturating_add(cost as u32);
+                    let target = index + reach as usize;
+                    if reached < price[target] {
+                        price[target] = reached;
+                        arrive_length[target] = reach;
+                        arrive_distance[target] = distance;
+                        let mut next = state;
+                        next.remember(reach, distance);
+                        arrive_reps[target] = next.reps;
+                        arrive_last_length[target] = next.last_length;
+                    }
+                }
+                length = reach + 1;
+            }
+        }
+
+        // The loop above has priced every run to its end, so the longest
+        // match here is already on the board. If it is long enough to
+        // commit to, stepping over the bytes it covers changes nothing
+        // except the work not done. Only step over a node the parse can
+        // actually reach: pricing a match can be skipped, and skipping to a
+        // node no path arrives at would leave the rest of the block
+        // unreachable and emitted as literals.
+        let longest_reach = reaches.iter().map(|&(_, length, _)| length).max();
+        if let Some(reach) = longest_reach
+            && reach >= NICE_MATCH_LENGTH as u32
+            && price[index + reach as usize] != u32::MAX
+        {
+            committed_through = index + reach as usize;
+        }
+    }
+
+    let mut reversed = Vec::with_capacity(span);
+    let mut index = span;
+    while index > 0 {
+        let length = arrive_length[index] as usize;
+        if length == 0 {
+            reversed.push((0, arrive_distance[index]));
+            index -= 1;
+        } else {
+            reversed.push((arrive_length[index], arrive_distance[index]));
+            index -= length;
+        }
+    }
+    reversed.reverse();
+    reversed
+}
+
+/// Length of the match at `pos` against `distance` bytes back, capped at
+/// `max_length` (64-bit word compares with a scalar tail).
+fn match_length_at(data: &[u8], pos: usize, distance: usize, max_length: usize) -> usize {
+    let cand = pos.wrapping_sub(distance);
+    let limit = max_length.min(data.len() - pos).min(data.len() - cand);
+    let mut l = 0usize;
+    while l + 8 <= limit {
+        let a = u64::from_le_bytes(data[cand + l..cand + l + 8].try_into().unwrap());
+        let b = u64::from_le_bytes(data[pos + l..pos + l + 8].try_into().unwrap());
+        if a != b {
+            return l + ((a ^ b).trailing_zeros() / 8) as usize;
+        }
+        l += 8;
+    }
+    while l < limit && data[cand + l] == data[pos + l] {
+        l += 1;
+    }
+    l
+}
+
+/// Convert a token stream into symbols with a live cache walk, counting
+/// symbol frequencies at the same time (the block writer counts them the
+/// same way, so prices from these frequencies are exact). Returns the
+/// symbols and the four frequency vectors. `state` is advanced, mirroring
+/// the decoder's cache transitions.
+#[allow(clippy::too_many_arguments)]
+/// Frequency vectors for the four Huffman tables, counted the same way the
+/// block writer counts them.
+type TokenFrequencies = (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>);
+
+/// Symbols plus their frequency vectors, as produced by [`convert_tokens`].
+type ConvertedTokens = (Vec<Symbol>, TokenFrequencies);
+
+fn convert_tokens(
+    tokens: &[(u32, u32)],
+    combined: &[u8],
+    block: std::ops::Range<usize>,
+    state: &mut EncoderMatchState,
+    extra_dist: bool,
+) -> ConvertedTokens {
+    let dc_count = if extra_dist { HUFF_DCX } else { HUFF_DC };
+    let mut nc_freq = vec![0u32; HUFF_NC];
+    let mut dc_freq = vec![0u32; dc_count];
+    let mut ldc_freq = vec![0u32; HUFF_LDC];
+    let mut rc_freq = vec![0u32; HUFF_RC];
+    let mut symbols = Vec::with_capacity(tokens.len());
+    let mut pos = block.start;
+    for &(length, distance) in tokens {
+        if length == 0 {
+            symbols.push(Symbol::Literal(distance as u8));
+            nc_freq[distance as usize] += 1;
+            pos += 1;
+            continue;
+        }
+        if distance == state.reps[0] && length == state.last_length && state.last_length != 0 {
+            symbols.push(Symbol::Repeat);
+            nc_freq[SYM_REPEAT] += 1;
+            pos += length as usize;
+            continue;
+        }
+        if let Some(index) = state.reps.iter().position(|&d| d == distance && d != 0) {
+            symbols.push(Symbol::CacheRef { index, length });
+            nc_freq[SYM_CACHE_BASE + index] += 1;
+            let len_slot = encode_length_slot(length);
+            rc_freq[len_slot] += 1;
+            state.remember(length, distance);
+            pos += length as usize;
+            continue;
+        }
+        let raw_length = length - length_bonus(distance);
+        if raw_length < 2 {
+            // Unreachable (the parser rejects unencodable fresh-distance
+            // matches), but never emit an invalid match: fall back to
+            // literals for the token's span.
+            for _ in 0..length {
+                let byte = combined[pos];
+                symbols.push(Symbol::Literal(byte));
+                nc_freq[byte as usize] += 1;
+                pos += 1;
+            }
+            continue;
+        }
+        symbols.push(Symbol::Match {
+            distance,
+            length: raw_length,
+        });
+        let len_slot = encode_length_slot(raw_length);
+        nc_freq[SYM_MATCH_BASE + len_slot] += 1;
+        let (dist_slot, dist_extra, dbits) = encode_distance_slot(distance, extra_dist);
+        dc_freq[dist_slot] += 1;
+        if dist_slot >= 4 && dbits >= 4 {
+            ldc_freq[(dist_extra & 0xF) as usize] += 1;
+        }
+        state.remember(length, distance);
+        pos += length as usize;
+    }
+    (symbols, (nc_freq, dc_freq, ldc_freq, rc_freq))
+}
+
+/// Build code lengths for the four tables from frequency vectors, matching
+/// the block writer exactly.
+fn prices_from_frequencies(
+    nc_freq: &[u32],
+    dc_freq: &[u32],
+    ldc_freq: &[u32],
+    rc_freq: &[u32],
+) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    let mut nc = nc_freq.to_vec();
+    let mut dc = dc_freq.to_vec();
+    let mut ldc = ldc_freq.to_vec();
+    let mut rc = rc_freq.to_vec();
+    ensure_nonzero(&mut nc);
+    ensure_nonzero(&mut dc);
+    ensure_nonzero(&mut ldc);
+    ensure_nonzero(&mut rc);
+    (
+        build_code_lengths_from_freqs(&nc, MAX_CODE_LENGTH),
+        build_code_lengths_from_freqs(&dc, MAX_CODE_LENGTH),
+        build_code_lengths_from_freqs(&ldc, MAX_CODE_LENGTH),
+        build_code_lengths_from_freqs(&rc, MAX_CODE_LENGTH),
+    )
+}
+
+/// Find matches for `chunk` with the optimal parse (levels 2-5), searching
+/// against `state.tail` as lookbehind. Advances `state` so a following
+/// chunk/file continues the LZ window. The chunk is split into parse
+/// blocks by byte distribution; each block is matched once and priced
+/// [`OPTIMAL_PARSE_PASSES`] times against its own previous-pass tables.
+///
+/// Returns symbols in the same form as [`find_matches_with_tail`] (the
+/// caller cuts blocks and encodes).
+#[allow(clippy::too_many_arguments)]
+fn find_matches_optimal(
+    state: &mut EncoderState,
+    chunk: &[u8],
+    chain_len: usize,
+    _lazy_thresh: usize,
+    max_match: usize,
+    window: usize,
+    long_range: bool,
+    extra_dist: bool,
+) -> Vec<Symbol> {
+    let tail_len = state.tail.len();
+    let mut combined = Vec::with_capacity(tail_len + chunk.len());
+    combined.extend_from_slice(&state.tail);
+    combined.extend_from_slice(chunk);
+
+    // The tree finder serves the whole parse. Unlike the chain, one
+    // descent per position stays logarithmic even when history makes the
+    // hash chains deep (x86 code, generated source), which is where the
+    // chain walk spent hundreds of milliseconds per block at high levels.
+    // History is seeded with cheap limited-length descents (their matches
+    // are already encoded; only their place in the tree matters).
+    let tree_window = window.min(combined.len());
+    let mut tree_finder = match_finder::TreeMatchFinder::new(tree_window);
+    if tail_len > 0 {
+        let mut seed: Vec<(u32, u32)> = Vec::new();
+        let tail_end = tail_len.min(combined.len().saturating_sub(4));
+        for pos in 0..tail_end {
+            tree_finder.matches(&combined, pos, 4, tree_window, chain_len, &mut seed);
+        }
+    }
+    let finder_kind = &mut tree_finder;
+
+    let lr = if long_range {
+        let lr = state
+            .long_range
+            .get_or_insert_with(|| match_finder::LongRange::new(window));
+        // The near finder (tree) covers distances up to tail + chunk;
+        // long-range candidates only matter beyond that.
+        let near_max = tail_len + chunk.len();
+        Some((&*lr, near_max, lr.total_pushed()))
+    } else {
+        None
+    };
+
+    let dist_cache = state.dist_cache;
+    let last_length = state.last_length;
+    let mut state_for_blocks = EncoderMatchState::new(dist_cache, last_length);
+    let mut symbols: Vec<Symbol> = Vec::with_capacity(chunk.len());
+
+    // Split the chunk into parse blocks by byte distribution.
+    let mut splitter = BlockSplitter::new();
+    let mut block_start = tail_len;
+    let mut sub_start = tail_len;
+    while sub_start < combined.len() {
+        let sub_end = (sub_start + OPT_BLOCK_SIZE).min(combined.len());
+        let sub = &combined[sub_start..sub_end];
+        if !splitter.extends(sub) && splitter.total > 0 {
+            // Close the open block at sub_start.
+            let block_range = block_start..sub_start;
+            let block_symbols = parse_one_block(
+                &combined,
+                block_range,
+                tail_len,
+                finder_kind,
+                &mut state_for_blocks,
+                chain_len,
+                max_match,
+                window,
+                lr,
+                extra_dist,
+            );
+            symbols.extend(block_symbols);
+            splitter = BlockSplitter::new();
+            block_start = sub_start;
+        }
+        splitter.accept(sub);
+        sub_start = sub_end;
+    }
+    if block_start < combined.len() {
+        let block_range = block_start..combined.len();
+        let block_symbols = parse_one_block(
+            &combined,
+            block_range,
+            tail_len,
+            finder_kind,
+            &mut state_for_blocks,
+            chain_len,
+            max_match,
+            window,
+            lr,
+            extra_dist,
+        );
+        symbols.extend(block_symbols);
+    }
+
+    if long_range && let Some(lr) = state.long_range.as_mut() {
+        lr.push(chunk);
+    }
+
+    let keep = window.min(NEAR_WINDOW_MAX).min(combined.len());
+    state.tail = combined[combined.len() - keep..].to_vec();
+    state.dist_cache = state_for_blocks.reps;
+    state.last_length = state_for_blocks.last_length;
+    symbols
+}
+
+/// Parse one block with the optimal parse: collect matches once, then run
+/// [`OPTIMAL_PARSE_PASSES`] passes, each repricing against the tables the
+/// pass before produced. The last pass's tokens are converted to symbols
+/// with the live cache state (which is advanced, so cross-block and
+/// cross-chunk cache reuse is exact).
+#[allow(clippy::too_many_arguments)]
+fn parse_one_block(
+    combined: &[u8],
+    block: std::ops::Range<usize>,
+    tail_len: usize,
+    finder: &mut match_finder::TreeMatchFinder,
+    state: &mut EncoderMatchState,
+    chain_len: usize,
+    max_match: usize,
+    window: usize,
+    lr: Option<(&match_finder::LongRange, usize, usize)>,
+    extra_dist: bool,
+) -> Vec<Symbol> {
+    let matches = collect_block_matches(
+        finder,
+        combined,
+        block.clone(),
+        tail_len,
+        chain_len,
+        max_match,
+        window,
+        lr,
+    );
+    let initial = *state;
+    let mut tokens = optimal_parse_tokens(
+        combined,
+        block.clone(),
+        max_match,
+        window,
+        extra_dist,
+        None,
+        &matches,
+        initial,
+    );
+    for _ in 1..OPTIMAL_PARSE_PASSES {
+        let mut screen = *state;
+        let (_, (nc, dc, ldc, rc)) =
+            convert_tokens(&tokens, combined, block.clone(), &mut screen, extra_dist);
+        let (nc_l, dc_l, ldc_l, rc_l) = prices_from_frequencies(&nc, &dc, &ldc, &rc);
+        let prices = TokenPrices {
+            nc: &nc_l,
+            dc: &dc_l,
+            ldc: &ldc_l,
+            rc: &rc_l,
+        };
+        tokens = optimal_parse_tokens(
+            combined,
+            block.clone(),
+            max_match,
+            window,
+            extra_dist,
+            Some(&prices),
+            &matches,
+            initial,
+        );
+    }
+    let (symbols, _) = convert_tokens(&tokens, combined, block.clone(), state, extra_dist);
     symbols
 }
 
@@ -1669,7 +2584,8 @@ mod encode_tests {
         // 128 KiB near window of a 64 KiB chunk encoder.
         let half = 2 * 1024 * 1024usize;
         let mut data = pseudo_random(half, 42);
-        data.extend_from_slice(&data[..half].to_vec());
+        let copy = data[..half].to_vec();
+        data.extend_from_slice(&copy);
         let packed = encode_chunked(&data, 3, 8, 64 * 1024, None, true, None, false).unwrap();
         // The copy half must compress to a small fraction; the random half
         // stores at ~1:1. Well below 1.5 MiB total proves the 2 MiB
@@ -1696,7 +2612,8 @@ mod encode_tests {
         // (128 KiB): the 2 MiB distance exceeds the window.
         let half = 2 * 1024 * 1024usize;
         let mut data = pseudo_random(half, 7);
-        data.extend_from_slice(&data[..half].to_vec());
+        let copy = data[..half].to_vec();
+        data.extend_from_slice(&copy);
         let packed = encode_chunked(&data, 3, 0, 64 * 1024, None, true, None, false).unwrap();
         // Random half ~1:1 + copy half ~1:1 → near 4 MiB. Bail-out may
         // truncate; either way it must not shrink below ~half.
@@ -2808,9 +3725,11 @@ mod decode_tests {
         let mut sparse = vec![0x41u8; 20_000];
         sparse[100] = 0xE8;
         sparse[10_000] = 0xE8;
-        assert!(encode_with_auto_x86_filter(&sparse, 3, 0, false)
-            .unwrap()
-            .is_none());
+        assert!(
+            encode_with_auto_x86_filter(&sparse, 3, 0, false)
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Regression: filter positions and E8 transform offsets are

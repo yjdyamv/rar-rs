@@ -188,8 +188,7 @@ fn e8_decode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
         let opcode = data[i];
         if opcode & cmp_mask == 0xE8 {
             let cur_pos = i + 1;
-            let offset =
-                file_offset.wrapping_add(cur_pos as u64) as u32 % X86_FILTER_FILE_SIZE;
+            let offset = file_offset.wrapping_add(cur_pos as u64) as u32 % X86_FILTER_FILE_SIZE;
             let addr = u32::from_le_bytes(data[cur_pos..cur_pos + 4].try_into().unwrap());
 
             let new_addr = if addr < 0x0100_0000 {
@@ -222,8 +221,7 @@ fn e8_encode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
         let opcode = data[i];
         if opcode & cmp_mask == 0xE8 {
             let cur_pos = i + 1;
-            let offset =
-                file_offset.wrapping_add(cur_pos as u64) as u32 % X86_FILTER_FILE_SIZE;
+            let offset = file_offset.wrapping_add(cur_pos as u64) as u32 % X86_FILTER_FILE_SIZE;
             let addr = u32::from_le_bytes(data[cur_pos..cur_pos + 4].try_into().unwrap());
 
             let candidate = addr.wrapping_add(offset);
@@ -231,8 +229,7 @@ fn e8_encode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
                 data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
             } else {
                 let candidate = addr.wrapping_sub(0x0100_0000);
-                if candidate & 0x8000_0000 != 0
-                    && candidate.wrapping_add(offset) & 0x8000_0000 == 0
+                if candidate & 0x8000_0000 != 0 && candidate.wrapping_add(offset) & 0x8000_0000 == 0
                 {
                     data[cur_pos..cur_pos + 4].copy_from_slice(&candidate.to_le_bytes());
                 }
@@ -335,7 +332,8 @@ fn next_x86_opcode(data: &[u8], start: usize, end_exclusive: usize, cmp_mask: u8
 pub fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<std::ops::Range<usize>> {
     let mut ranges =
         auto_x86_filter_ranges_with_cluster_gap(data, include_e9, AUTO_X86_CLUSTER_GAP);
-    for range in auto_x86_filter_ranges_with_cluster_gap(data, include_e9, AUTO_X86_TIGHT_CLUSTER_GAP)
+    for range in
+        auto_x86_filter_ranges_with_cluster_gap(data, include_e9, AUTO_X86_TIGHT_CLUSTER_GAP)
     {
         if !ranges.contains(&range) {
             ranges.push(range);
@@ -386,7 +384,8 @@ fn auto_x86_filter_ranges_with_cluster_gap(
                 span = Some((span_start, last, span_opcodes + count));
             }
             Some((span_start, span_last, span_opcodes)) => {
-                if span_opcodes >= AUTO_X86_MIN_SPAN_OPCODES && span_count < AUTO_X86_MAX_SPAN_RANGES
+                if span_opcodes >= AUTO_X86_MIN_SPAN_OPCODES
+                    && span_count < AUTO_X86_MAX_SPAN_RANGES
                 {
                     push_x86_filter_range(&mut ranges, data.len(), span_start, span_last);
                     span_count += 1;
@@ -487,7 +486,9 @@ mod x86_tests {
     #[test]
     fn matches_reference_scanner() {
         let mut data = vec![0x41u8; 150_000];
-        for pos in [31usize, 32, 33, 1024, 1088, 4096, 4160, 80_000, 80_032, 80_064] {
+        for pos in [
+            31usize, 32, 33, 1024, 1088, 4096, 4160, 80_000, 80_032, 80_064,
+        ] {
             data[pos] = 0xE8;
         }
         data[80_096] = 0xE9;

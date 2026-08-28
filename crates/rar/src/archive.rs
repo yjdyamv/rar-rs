@@ -2410,8 +2410,8 @@ mod tests {
         let s2 = (last.saturating_sub(1)) * gc;
         assert!(s1 >= b_name, "damaged shards must sit in b.bin data block");
         let mut damaged = raw.clone();
-        for i in s1..s2 + gc {
-            damaged[i] ^= 0xFF;
+        for byte in damaged.iter_mut().take(s2 + gc).skip(s1) {
+            *byte ^= 0xFF;
         }
         let repaired = crate::recovery::rar5::repair_inline_recovery_archive(&damaged).unwrap();
         assert_eq!(
@@ -2447,8 +2447,8 @@ mod tests {
         let s1 = last.saturating_sub(2) * gc;
         let s2 = (last.saturating_sub(1)) * gc;
         let mut damaged = raw.clone();
-        for i in s1..s2 + gc {
-            damaged[i] ^= 0xFF;
+        for byte in damaged.iter_mut().take(s2 + gc).skip(s1) {
+            *byte ^= 0xFF;
         }
         assert!(
             crate::recovery::rar5::repair_inline_recovery_archive(&damaged).is_err(),

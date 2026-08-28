@@ -9,7 +9,6 @@
 //! default suite still catches regressions in them.
 
 use rar5::RarArchive;
-use std::io::Write;
 use std::path::Path;
 
 #[path = "support/mod.rs"]
@@ -53,7 +52,8 @@ fn large_sparse_streamed_compression_roundtrips() {
 
     let arc = dir.path().join("big.rar");
     {
-        let mut rar = RarArchive::create(&arc).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&arc, rar5::CreateOptions::default()).unwrap();
         rar.add(&src, 3).unwrap();
         rar.close().unwrap();
     }

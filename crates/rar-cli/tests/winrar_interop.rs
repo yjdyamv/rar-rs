@@ -1461,7 +1461,7 @@ fn our_padded_volume_sets_validate_with_winrar() {
         "the writer must not emit unpadded volume names"
     );
 
-    if let Some(unrar) = unrar_bin() {
+    if let Some(_unrar) = unrar_bin() {
         let (ok, out) = unrar_test(&first, None);
         assert!(ok, "UnRAR rejected our padded volume set:\n{out}");
     }
@@ -1490,7 +1490,7 @@ fn our_padded_volume_sets_validate_with_winrar() {
         "our rc must rebuild our padded volume byte-identically"
     );
 
-    if let Some(unrar) = unrar_bin() {
+    if let Some(_unrar) = unrar_bin() {
         let (ok, out) = unrar_test(&first, None);
         assert!(ok, "UnRAR rejected the rebuilt padded set:\n{out}");
     }
@@ -1532,7 +1532,7 @@ fn our_small_dict_v70_archives_decode_with_winrar() {
         rar.close().unwrap();
     }
     // Confirm the member really is v70.
-    let mut ar = RarArchive::open(&arc).unwrap();
+    let ar = RarArchive::open(&arc).unwrap();
     let name = ar
         .namelist()
         .into_iter()
@@ -1576,7 +1576,7 @@ fn cli_ma7_archives_decode_with_winrar() {
         .current_dir(dir.path()));
     assert!(ok, "rar a -ma7 failed:\n{out}");
     // The member really is v70 (per-member 2x-file cap floors the dict).
-    let mut ar = RarArchive::open(&arc).unwrap();
+    let ar = RarArchive::open(&arc).unwrap();
     let e = ar.get_entry("ma7.bin").unwrap();
     assert_eq!(e.header.comp_version, 1, "-ma7 must force v70");
     let (ok, out) = unrar_test(&arc, None);

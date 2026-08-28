@@ -36,6 +36,13 @@ The RAR5 recovery-record codec (`src/recovery/rar5.rs`), the BLAKE2sp hash
 MIT OR Apache-2.0. Those portions retain their upstream license; the rest
 of this project remains BSD-2-Clause.
 
+Further `rars` portions ported later (same MIT OR Apache-2.0 terms): the
+automatic x86 filter scan (`src/codec/filters.rs`, `auto_x86_filter_ranges`),
+the binary-tree match finder (`src/codec/match_finder.rs`, LZMA-style BT4),
+the optimal parse (`src/codec/rar50.rs`, `optimal_parse_tokens` +
+`TokenPrices` + `BlockSplitter`), and the E8/E8E9 x86 transform modulo
+normalization. Each carries a note at its definition site.
+
 Official RAR/UNRAR binaries are used strictly as black-box interoperability
 references for testing (set `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` to run
 the `official_*` interop tests); their code is not used or referenced, and

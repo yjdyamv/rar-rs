@@ -400,14 +400,14 @@ mod tests {
 
         let cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
-        let result = (|| -> Result<Vec<Collected>, String> {
+        let result: Result<Vec<Collected>, String> = {
             let args: Vec<String> = vec!["sub".into()];
             let policy = NamePolicy {
                 exclude_masks: vec!["*.tmp".into()],
                 ..Default::default()
             };
             collect(&policy, &args, 3)
-        })();
+        };
         std::env::set_current_dir(cwd).unwrap();
         let collected = result.unwrap();
         let names: Vec<String> = collected.iter().map(|c| c.name.clone()).collect();
@@ -415,14 +415,14 @@ mod tests {
 
         let cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
-        let flat = (|| -> Result<Vec<Collected>, String> {
+        let flat: Result<Vec<Collected>, String> = {
             let args: Vec<String> = vec!["sub/f3.txt".into()];
             let policy = NamePolicy {
                 basename_only: true,
                 ..Default::default()
             };
             collect(&policy, &args, 3)
-        })();
+        };
         std::env::set_current_dir(cwd).unwrap();
         let flat = flat.unwrap();
         assert_eq!(flat.len(), 1);

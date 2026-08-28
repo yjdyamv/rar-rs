@@ -558,6 +558,157 @@ impl<'a> MatchFinder<'a> {
     }
 }
 
+/// Sentinel for "no position" in `head`/`son` links.
+const NO_LINK: u32 = u32::MAX;
+
+/// Reads a truncated link back as a position, given the newest position
+/// (always the one being searched for).
+fn resolve(newest: usize, link: u32) -> usize {
+    if link == NO_LINK {
+        return usize::MAX;
+    }
+    newest - (newest as u32).wrapping_sub(link) as usize
+}
+
+/// A binary-tree match finder, after LZMA's BT4 (ported from the `rars`
+/// project `codec/match_finder.rs`, MIT OR Apache-2.0).
+///
+/// Positions sharing a hash of their first four bytes form a binary search
+/// tree ordered by the bytes at them, newest position at the root. One
+/// descent finds every improving match and re-hangs the tree under the new
+/// position, and each node on the way down narrows a proven-prefix bound,
+/// so the descent never re-reads bytes it has already matched. That is
+/// what a deep chain walk cannot avoid, and why the tree serves the
+/// optimal parse, which searches at every position anyway. The price is
+/// that inserting *is* a descent, so history cannot be seeded cheaply, and
+/// the tree costs eight bytes per byte of window against the chain's four.
+pub struct TreeMatchFinder {
+    head: Vec<u32>,
+    /// Two links per window slot: the child whose bytes compare lesser
+    /// first, then the greater-or-equal one, in LZMA's layout.
+    son: Vec<u32>,
+    mask: usize,
+}
+
+impl TreeMatchFinder {
+    const HASH_BITS: u32 = 17;
+    const MIN_MATCH: usize = 4;
+
+    /// Builds a finder that remembers the last `window` positions, at
+    /// eight bytes of links per byte of window.
+    pub fn new(window: usize) -> Self {
+        let window = window.max(1).next_power_of_two();
+        Self {
+            head: vec![NO_LINK; 1 << Self::HASH_BITS],
+            // Zero rather than the sentinel: a slot is always written
+            // during its position's own insertion before any link can lead
+            // to it, and untouched zeroes let the allocator defer the
+            // pages.
+            son: vec![0; window * 2],
+            mask: window - 1,
+        }
+    }
+
+    #[inline]
+    fn hash4(input: &[u8], pos: usize) -> usize {
+        let value =
+            u32::from_le_bytes([input[pos], input[pos + 1], input[pos + 2], input[pos + 3]]);
+        (value.wrapping_mul(0x9E37_79B1) >> (32 - Self::HASH_BITS)) as usize
+    }
+
+    /// Finds the matches at `pos` and inserts `pos`, in one descent.
+    ///
+    /// Pushes `(length, distance)` pairs onto `out` with both strictly
+    /// increasing, so each pair is the nearest distance found that reaches
+    /// its length; nothing shorter than four bytes or further than
+    /// `max_distance` is reported. Comparing stops at `len_limit`, which
+    /// must leave `pos + len_limit` readable; a pair whose length equals it
+    /// may really extend further, which the caller measures if it cares. A
+    /// node that matches the whole limit gives its place to the new
+    /// position, since the two are interchangeable prefixes and the new one
+    /// is nearer everything to come. `cut` bounds the nodes visited.
+    pub fn matches(
+        &mut self,
+        input: &[u8],
+        pos: usize,
+        len_limit: usize,
+        max_distance: usize,
+        cut: usize,
+        out: &mut Vec<(u32, u32)>,
+    ) {
+        if pos + Self::MIN_MATCH > input.len() {
+            return;
+        }
+        let hash = Self::hash4(input, pos);
+        let mut current = resolve(pos, self.head[hash]);
+        self.head[hash] = pos as u32;
+        // The two attachment points still waiting for a subtree, starting
+        // as the new position's own child slots. Each step down hangs the
+        // node just compared on one of them and moves that side into the
+        // node's matching child slot.
+        let mut ptr0 = ((pos & self.mask) << 1) + 1;
+        let mut ptr1 = (pos & self.mask) << 1;
+        // How much of the prefix is proven to match on each side of the
+        // descent. Everything below a node compares the same way the node
+        // did up to its recorded length, so bytes before the smaller of the
+        // two never need reading again.
+        let mut len0 = 0usize;
+        let mut len1 = 0usize;
+        let mut longest = Self::MIN_MATCH - 1;
+        let mut budget = cut;
+        let mut floor = pos;
+        loop {
+            // A candidate that does not step back is a reused slot or the
+            // sentinel; one further back than the window has fallen out of
+            // it. Either ends the descent, sealing both attachment points
+            // so no stale link survives below them. A spent budget ends it
+            // the same way, dropping whatever subtree the budget could not
+            // reach.
+            if current >= floor || pos - current > self.mask || budget == 0 {
+                self.son[ptr0] = NO_LINK;
+                self.son[ptr1] = NO_LINK;
+                return;
+            }
+            budget -= 1;
+            floor = current;
+            let pair = (current & self.mask) << 1;
+            let mut len = len0.min(len1);
+            if input[current + len] == input[pos + len] {
+                len += 1;
+                while len < len_limit && input[current + len] == input[pos + len] {
+                    len += 1;
+                }
+                if len > longest {
+                    if pos - current <= max_distance {
+                        out.push((len as u32, (pos - current) as u32));
+                    }
+                    longest = len;
+                    if len == len_limit {
+                        // The node's whole comparable prefix is the new
+                        // position's prefix, so the new position adopts its
+                        // children and the node drops out as the farther of
+                        // two interchangeable candidates.
+                        self.son[ptr1] = self.son[pair];
+                        self.son[ptr0] = self.son[pair + 1];
+                        return;
+                    }
+                }
+            }
+            if input[current + len] < input[pos + len] {
+                self.son[ptr1] = current as u32;
+                ptr1 = pair + 1;
+                len1 = len;
+                current = resolve(pos, self.son[ptr1]);
+            } else {
+                self.son[ptr0] = current as u32;
+                ptr0 = pair;
+                len0 = len;
+                current = resolve(pos, self.son[ptr0]);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,8 +726,6 @@ mod tests {
         }
         out
     }
-
-    /// Memory must track the actual history: a fresh long-range finder
     /// allocates nothing for the history and only a small initial table,
     /// growing as data is pushed (was: ~2x the declared dictionary up
     /// front — 64 MiB at the default 32 MiB dict, even for 1-byte files).

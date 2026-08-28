@@ -461,7 +461,7 @@ fn cli_full_paths_ep2_ep3() {
     let status = std::process::Command::new(RAR_CLI)
         .args(["a", "-ep2", "-idq"])
         .arg(&archive)
-        .arg(&src.join("f.txt"))
+        .arg(src.join("f.txt"))
         .status()
         .unwrap();
     assert!(status.success());
@@ -482,7 +482,7 @@ fn cli_full_paths_ep2_ep3() {
     let status = std::process::Command::new(RAR_CLI)
         .args(["a", "-ep3", "-idq"])
         .arg(&archive3)
-        .arg(&src.join("f.txt"))
+        .arg(src.join("f.txt"))
         .status()
         .unwrap();
     assert!(status.success());
@@ -1790,7 +1790,7 @@ fn cli_archive_format_ma_switch() {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    let rar = rar5::RarArchive::open(&archive).unwrap();
     let e = rar.get_entry("f.bin").unwrap();
     assert_eq!(e.header.comp_version, 1);
     assert_eq!(
@@ -1823,7 +1823,7 @@ fn cli_archive_format_ma_switch() {
         std::fs::read(&def).unwrap(),
         "-ma5 is the default format"
     );
-    let mut rar = rar5::RarArchive::open(&ma5).unwrap();
+    let rar = rar5::RarArchive::open(&ma5).unwrap();
     let e = rar.get_entry("f.bin").unwrap();
     assert_eq!(e.header.comp_version, 0, "-ma5 stays v50");
 

@@ -224,6 +224,37 @@ fn incompressible_sample(sample: &[u8], method: u8) -> bool {
     packed.len() >= sample.len() * 9 / 10
 }
 
+/// Compute the plaintext CRC32 (and optional BLAKE2sp) of a file in a
+/// single streaming pass.
+pub(crate) fn hash_file(
+    path: &Path,
+    size: u64,
+    want_blake: bool,
+) -> RarResult<(u32, Option<[u8; 32]>)> {
+    let mut crc = crc32fast::Hasher::new();
+    let mut blake = want_blake.then(crate::blake2sp::Hasher::new);
+    let mut f = File::open(path)?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut total = 0u64;
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        crc.update(&buf[..n]);
+        if let Some(h) = blake.as_mut() {
+            h.update(&buf[..n]);
+        }
+    }
+    if total != size {
+        return Err(RarError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("file changed size while being hashed: expected {size} bytes, read {total}"),
+        )));
+    }
+    Ok((crc.finalize(), blake.map(|h| h.finalize())))
+}
 #[cfg(test)]
 mod probe_tests {
     use super::*;
@@ -276,36 +307,4 @@ mod probe_tests {
         data.extend_from_slice(&data.clone());
         assert!(!sample_is_incompressible(&data, 3));
     }
-}
-
-/// Compute the plaintext CRC32 (and optional BLAKE2sp) of a file in a
-/// single streaming pass.
-pub(crate) fn hash_file(
-    path: &Path,
-    size: u64,
-    want_blake: bool,
-) -> RarResult<(u32, Option<[u8; 32]>)> {
-    let mut crc = crc32fast::Hasher::new();
-    let mut blake = want_blake.then(crate::blake2sp::Hasher::new);
-    let mut f = File::open(path)?;
-    let mut buf = vec![0u8; 1 << 20];
-    let mut total = 0u64;
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        crc.update(&buf[..n]);
-        if let Some(h) = blake.as_mut() {
-            h.update(&buf[..n]);
-        }
-    }
-    if total != size {
-        return Err(RarError::Io(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            format!("file changed size while being hashed: expected {size} bytes, read {total}"),
-        )));
-    }
-    Ok((crc.finalize(), blake.map(|h| h.finalize())))
 }

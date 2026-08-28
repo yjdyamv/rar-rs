@@ -471,14 +471,10 @@ impl RarArchive {
         let plain_crc = crc_hasher.finalize();
         let plain_blake = blake_hasher.map(|h| h.finalize());
 
-        if let Some(filtered) = compression::encode_with_auto_x86_filter(
-            &whole,
-            method,
-            dsl,
-            dict_bytes.is_some(),
-        )
-        .map_err(RarError::Unsupported)?
-        && (filtered.len() as u64) < file_size
+        if let Some(filtered) =
+            compression::encode_with_auto_x86_filter(&whole, method, dsl, dict_bytes.is_some())
+                .map_err(RarError::Unsupported)?
+            && (filtered.len() as u64) < file_size
         {
             self.reset_solid_chain();
             let (header_crc, mut extra_data, stored_hash, encr_params) =
