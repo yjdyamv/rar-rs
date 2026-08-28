@@ -704,6 +704,13 @@ fn find_matches_in_range(
     // match attempt with its cache-missing random accesses, while the
     // distant repeats that justify the compression pass are still found.
     const FAST_MODE_AFTER: usize = 64 * 1024;
+    /// Full-search cadence inside fast mode (power of two): every this
+    /// many literal positions a real match search runs, so the mode
+    /// recovers when compressible data returns. Without it, fast mode
+    /// locked in after the first 64 KiB incompressible run and the rest
+    /// of the member was emitted as literals (~30% ratio loss on files
+    /// with mixed content; level 1 has no long range to recover with).
+    const FAST_RECOVER_INTERVAL: usize = 128;
     let mut no_match_run = 0usize;
     let mut fast = false;
 
@@ -712,6 +719,11 @@ fn find_matches_in_range(
             finder.insert(pos);
             let mut d = 0usize;
             let mut l = 0usize;
+            // Periodic recovery: a full search every FAST_RECOVER_INTERVAL
+            // positions even in fast mode.
+            if (pos & (FAST_RECOVER_INTERVAL - 1)) == 0 {
+                (d, l) = finder.find_match_cached(pos, dist_cache);
+            }
             if let Some((long_range, near_max, anchor)) = lr
                 && pos + 4 <= end
                 && (pos & (match_finder::LONG_RANGE_STEP - 1)) == 0
@@ -723,7 +735,8 @@ fn find_matches_in_range(
                     anchor,
                     near_max + 1,
                     max_match,
-                ) {
+                ) && ll > l
+                {
                     d = ld as usize;
                     l = ll;
                 }
