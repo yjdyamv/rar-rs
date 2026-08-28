@@ -1108,3 +1108,89 @@ fn x86_like(size: usize) -> Vec<u8> {
 }
 
 // ── Deletion ────────────────────────────────────────────────────────────────
+
+// ── Per-archive compression threads (CreateOptions::threads) ────────────────
+
+/// A >= 64 MiB member goes through the streaming path whose flush_window
+/// uses the per-archive thread count. CreateOptions::threads must produce a
+/// valid MT archive that decodes byte-identically, independent of the
+/// process-global setting.
+#[cfg(feature = "parallel")]
+#[test]
+fn create_options_threads_produces_valid_archive() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("threads.rar");
+    let payload: Vec<u8> = b"per-archive threads payload 0123456789abcdef\n"
+        .iter()
+        .cycle()
+        .take(70 * 1024 * 1024)
+        .copied()
+        .collect();
+    {
+        let mut ar = rar5::RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                threads: Some(4),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ar.add_bytes("m.bin", &payload, 3).unwrap();
+        ar.close().unwrap();
+    }
+    let mut ar = rar5::RarArchive::open(&path).unwrap();
+    assert_eq!(ar.read("m.bin").unwrap(), payload);
+}
+
+/// Concurrent creates with different thread counts must not interfere: each
+/// archive runs on its own pool (the pools are cached per thread count) and
+/// every output decodes byte-identically.
+#[cfg(feature = "parallel")]
+#[test]
+fn concurrent_creates_with_different_threads_are_isolated() {
+    use std::sync::Arc;
+    let dir = Arc::new(make_temp_dir());
+    let payload = Arc::new(
+        b"isolated concurrent threads payload ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+            .iter()
+            .cycle()
+            .take(70 * 1024 * 1024)
+            .copied()
+            .collect::<Vec<u8>>(),
+    );
+
+    let handles: Vec<_> = [2usize, 8usize]
+        .into_iter()
+        .map(|threads| {
+            let dir = dir.clone();
+            let payload = payload.clone();
+            std::thread::spawn(move || {
+                let path = dir.path().join(format!("t{threads}.rar"));
+                {
+                    let mut ar = rar5::RarArchive::create_with_options(
+                        &path,
+                        rar5::CreateOptions {
+                            threads: Some(threads),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    ar.add_bytes("m.bin", &payload, 3).unwrap();
+                    ar.close().unwrap();
+                }
+                let mut ar = rar5::RarArchive::open(&path).unwrap();
+                (threads, ar.read("m.bin").unwrap())
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        let (threads, out) = handle.join().unwrap();
+        assert_eq!(
+            out.len(),
+            payload.len(),
+            "threads={threads} length mismatch"
+        );
+        assert_eq!(out, *payload, "threads={threads} payload mismatch");
+    }
+}

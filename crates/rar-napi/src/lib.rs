@@ -399,12 +399,10 @@ impl Task for CreateArchiveTask {
         .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
     }
 
-    if let Some(threads) = self.opts.threads {
-      let threads = threads.clamp(1, 64) as usize;
-      rar5::set_compression_threads(threads);
-      rar5::set_extraction_threads(threads);
-    }
-
+    // Per-archive thread count (scoped, so concurrent creates with
+    // different `threads` never interfere); extraction stays on the global
+    // default pool.
+    let threads = self.opts.threads.map(|t| t.clamp(1, 64) as usize);
     let rec = self.opts.recovery_percent.unwrap_or(0).min(100);
     let rec = if rec == 0 { None } else { Some(rec) };
     let rev_count = self.opts.recovery_volume_count.unwrap_or(0);
@@ -431,6 +429,7 @@ impl Task for CreateArchiveTask {
       time_precision_seconds: self.opts.time_precision_seconds.unwrap_or(false),
       save_owner: self.opts.save_owner.unwrap_or(false),
       save_streams: self.opts.save_streams.unwrap_or(false),
+      threads,
       ..Default::default()
     };
     let mut archive =

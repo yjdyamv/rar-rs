@@ -919,6 +919,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         save_streams: misc.save_streams,
         force_v70,
         time_precision_seconds: ts.precision_seconds,
+        threads: args.threads,
     };
 
     let existing = std::path::Path::new(archive_path).exists();

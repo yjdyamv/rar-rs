@@ -70,6 +70,13 @@ pub struct CreateOptions {
     /// Save NTFS alternate data streams as "STM" service records (like
     /// WinRAR's `-os`); no-op off Windows.
     pub save_streams: bool,
+    /// Compression threads for this archive (like `-mt<N>`); `None` uses
+    /// the process-global [`set_compression_threads`] setting (automatic
+    /// sizing when that is 0). Scoped to the archive: concurrent archives
+    /// with different thread counts each run on their own pool and never
+    /// interfere. This field is only consulted when the `parallel` feature
+    /// is enabled; without it compression is sequential regardless.
+    pub threads: Option<usize>,
 }
 
 impl Default for CreateOptions {
@@ -93,6 +100,7 @@ impl Default for CreateOptions {
             save_mtime: true,
             save_owner: false,
             save_streams: false,
+            threads: None,
         }
     }
 }

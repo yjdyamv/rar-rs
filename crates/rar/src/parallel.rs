@@ -36,7 +36,13 @@ pub(crate) fn configured_extraction_threads() -> Option<usize> {
     (n > 0).then_some(n)
 }
 
-/// Dedicated Rayon pool for batch compression.
+/// Dedicated Rayon pools for batch compression, one per thread count.
+///
+/// Pools are cached by worker count so concurrent archives with different
+/// `-mt` settings each run on their own pool (a single resizable pool would
+/// make them stomp each other: one archive's `set_compression_threads`
+/// would resize the pool out from under another in flight). The global
+/// default setting selects the pool for archives without an override.
 ///
 /// The global pool (16 threads on this class of machine) makes many small
 /// members *slower*: per-task allocation contention and SMT scheduling
@@ -71,31 +77,38 @@ pub(crate) fn pool_threads(default: usize) -> usize {
     }
 }
 
-/// Dedicated Rayon pool for batch compression, honoring the current
-/// `-mt` override. Rebuilt when [`set_compression_threads`] changes the
-/// requested count, so callers may size the pool per archive/run; the
-/// returned handle keeps the pool alive even if a newer one replaces it
-/// mid-flight (in-flight jobs hold their own `Arc`).
+/// Default compression worker count: the `-mt` override when set,
+/// otherwise automatic sizing (capped small so many-small-member batches
+/// stay fast).
+#[cfg(feature = "parallel")]
+pub(crate) fn default_compression_threads() -> usize {
+    configured_threads().unwrap_or_else(|| pool_threads(4).min(4))
+}
+
+/// Pool with exactly `threads` workers, cached per thread count (see the
+/// module docs on why the pools are keyed by size).
+#[cfg(feature = "parallel")]
+pub(crate) fn compression_pool_for(threads: usize) -> std::sync::Arc<rayon::ThreadPool> {
+    use std::sync::{Mutex, OnceLock};
+    static POOLS: OnceLock<
+        Mutex<std::collections::HashMap<usize, std::sync::Arc<rayon::ThreadPool>>>,
+    > = OnceLock::new();
+    let pools = POOLS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut map = pools.lock().expect("compression pools lock");
+    map.entry(threads)
+        .or_insert_with(|| std::sync::Arc::new(build_compression_pool(threads)))
+        .clone()
+}
+
+/// The pool for the process-global default thread count (what
+/// [`set_compression_threads`] selects for archives without an override).
 #[cfg(feature = "parallel")]
 pub(crate) fn compression_pool() -> std::sync::Arc<rayon::ThreadPool> {
-    use std::sync::{OnceLock, RwLock};
-    static POOL: OnceLock<RwLock<std::sync::Arc<rayon::ThreadPool>>> = OnceLock::new();
-    let lock = POOL.get_or_init(|| RwLock::new(std::sync::Arc::new(build_compression_pool())));
-    let current = lock.read().expect("pool lock").clone();
-    let want = configured_threads().unwrap_or_else(|| pool_threads(4).min(4));
-    if current.current_num_threads() != want {
-        let mut guard = lock.write().expect("pool lock");
-        if guard.current_num_threads() != want {
-            *guard = std::sync::Arc::new(build_compression_pool());
-        }
-        return guard.clone();
-    }
-    current
+    compression_pool_for(default_compression_threads())
 }
 
 #[cfg(feature = "parallel")]
-fn build_compression_pool() -> rayon::ThreadPool {
-    let threads = configured_threads().unwrap_or_else(|| pool_threads(4).min(4));
+fn build_compression_pool(threads: usize) -> rayon::ThreadPool {
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|i| format!("rar5-compress-{i}"))
@@ -163,12 +176,4 @@ impl Drop for BatchWorkerGuard {
     fn drop(&mut self) {
         IN_BATCH_WORKER.with(|flag| flag.set(false));
     }
-}
-
-/// Number of worker threads the compression pool runs with (the explicit
-/// `-mt` override when set, otherwise the automatic sizing). Callers use
-/// it to size per-member work splits.
-#[cfg(feature = "parallel")]
-pub(crate) fn compression_worker_count() -> usize {
-    compression_pool().current_num_threads()
 }

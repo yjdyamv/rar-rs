@@ -437,6 +437,10 @@ pub struct RarArchive {
     pub(crate) qo_offset_field_pos: Option<u64>,
     /// Persistent RAR5 encoder state for solid archives.
     pub(crate) encoder_state: Option<crate::codec::EncoderState>,
+    /// Per-archive compression thread count (`-mt`); `None` = process-global
+    /// default. The compression pool is selected per thread count, so
+    /// concurrent archives with different values never interfere.
+    pub(crate) compression_threads: Option<usize>,
     /// Requested dictionary log for compression (WinRAR `-md`);
     /// `None` = default selection.
     pub(crate) dict_size_log: Option<u8>,
@@ -569,6 +573,7 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
+            compression_threads: None,
             dict_size_log: None,
             dict_size_bytes: None,
             force_v70: false,
@@ -596,6 +601,30 @@ impl RarArchive {
     /// signal in a shared flag before starting the `AsyncTask`.
     pub fn set_cancel_flag(&mut self, flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
         self.cancel = flag;
+    }
+
+    /// Set the compression thread count for this archive (like `-mt<N>`),
+    /// overriding the process-global default. `None` restores the global
+    /// default. The pool is chosen per thread count, so concurrent archives
+    /// with different settings each run on their own pool and never
+    /// interfere. Requires the `parallel` feature; without it compression
+    /// stays sequential.
+    pub fn set_compression_threads(&mut self, threads: Option<usize>) {
+        self.compression_threads = threads;
+    }
+
+    /// Effective compression worker count for this archive: the per-archive
+    /// override when set, otherwise the process-global default.
+    pub(crate) fn effective_threads(&self) -> usize {
+        #[cfg(feature = "parallel")]
+        {
+            self.compression_threads
+                .unwrap_or_else(crate::parallel::default_compression_threads)
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            1
+        }
     }
 
     /// Check the cancellation flag; returns [`crate::RarError::Cancelled`]
@@ -1057,6 +1086,7 @@ impl RarArchive {
             quick_open_entries: Vec::new(),
             qo_offset_field_pos: None,
             encoder_state: None,
+            compression_threads: opts.threads,
             dict_size_log: opts.dict_size_log,
             dict_size_bytes: opts.dict_size_bytes,
             force_v70: opts.force_v70,

@@ -31,7 +31,7 @@ use crate::rar50::*;
 pub(crate) mod engine;
 pub(crate) mod layout;
 #[cfg(feature = "parallel")]
-use crate::parallel::{BatchWorkerGuard, compression_pool};
+use crate::parallel::BatchWorkerGuard;
 
 /// Write an NTFS alternate data stream (`path` + `stream_name` like
 /// `:custom1`) on Windows.
@@ -1015,7 +1015,8 @@ impl RarArchive {
                 // reported inside `prepare_batch_wave`) into a monotonic
                 // global stream, so the bar moves while the CPU-heavy pass
                 // runs instead of freezing until every member is done.
-                let prepared = self.prepare_batch_wave(&wave, progress.as_ref())?;
+                let prepared =
+                    self.prepare_batch_wave(&wave, progress.as_ref(), self.effective_threads())?;
                 self.check_cancel()?;
                 for (idx, entry) in prepared {
                     self.progress_member = idx;
@@ -1048,6 +1049,7 @@ impl RarArchive {
         &self,
         wave: &[(usize, BatchEntry<'_>)],
         progress: Option<&std::sync::Arc<std::sync::Mutex<ProgressTracker>>>,
+        threads: usize,
     ) -> RarResult<Vec<(usize, PreparedEntry)>> {
         use rayon::prelude::*;
 
@@ -1064,47 +1066,48 @@ impl RarArchive {
             time_precision_seconds: self.time_precision_seconds,
             cancel: self.cancel.clone(),
         };
-        let results: Vec<RarResult<(usize, PreparedEntry)>> = compression_pool().install(|| {
-            wave.par_iter()
-                .map(|&(idx, entry)| {
-                    let _guard = BatchWorkerGuard::new();
-                    let prepared = match entry {
-                        BatchEntry::Bytes { name, data, level } => {
-                            let mtime = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as u32;
-                            Self::prepare_data_entry(
-                                &ctx, name, data, level, 0o100644, mtime, None, None, false, idx,
-                                progress,
-                            )
-                        }
-                        BatchEntry::File { path, name, level } => {
-                            Self::prepare_file_entry(&ctx, path, name, level, idx, progress)
-                        }
-                        BatchEntry::Directory { .. } => {
-                            unreachable!("directories never enter a compression wave")
-                        }
-                    };
-                    prepared.map(|p| {
-                        if let Some(progress) = progress {
-                            let total = match entry {
-                                BatchEntry::Bytes { data, .. } => data.len() as u64,
-                                BatchEntry::File { path, .. } => {
-                                    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-                                }
-                                BatchEntry::Directory { .. } => 0,
-                            };
-                            progress
-                                .lock()
-                                .expect("progress lock")
-                                .report(idx, total, total);
-                        }
-                        (idx, p)
+        let results: Vec<RarResult<(usize, PreparedEntry)>> =
+            crate::parallel::compression_pool_for(threads).install(|| {
+                wave.par_iter()
+                    .map(|&(idx, entry)| {
+                        let _guard = BatchWorkerGuard::new();
+                        let prepared = match entry {
+                            BatchEntry::Bytes { name, data, level } => {
+                                let mtime = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as u32;
+                                Self::prepare_data_entry(
+                                    &ctx, name, data, level, 0o100644, mtime, None, None, false,
+                                    idx, progress,
+                                )
+                            }
+                            BatchEntry::File { path, name, level } => {
+                                Self::prepare_file_entry(&ctx, path, name, level, idx, progress)
+                            }
+                            BatchEntry::Directory { .. } => {
+                                unreachable!("directories never enter a compression wave")
+                            }
+                        };
+                        prepared.map(|p| {
+                            if let Some(progress) = progress {
+                                let total = match entry {
+                                    BatchEntry::Bytes { data, .. } => data.len() as u64,
+                                    BatchEntry::File { path, .. } => {
+                                        fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+                                    }
+                                    BatchEntry::Directory { .. } => 0,
+                                };
+                                progress
+                                    .lock()
+                                    .expect("progress lock")
+                                    .report(idx, total, total);
+                            }
+                            (idx, p)
+                        })
                     })
-                })
-                .collect()
-        });
+                    .collect()
+            });
 
         let mut out = Vec::with_capacity(results.len());
         for result in results {
@@ -2150,6 +2153,7 @@ impl RarArchive {
         };
         let mut bytes_read = 0u64;
         let mut packed_size = 0u64;
+        let threads = self.effective_threads();
         let spill_path = spill_path_for(&self.path);
         let _spill_guard = SpillGuard(spill_path.clone());
         {
@@ -2164,6 +2168,7 @@ impl RarArchive {
                 work: &mut Vec<u8>,
                 is_final: bool,
                 chain_solid: bool,
+                threads: usize,
                 method: u8,
                 dsl: u8,
                 dict_bytes: Option<u64>,
@@ -2175,21 +2180,18 @@ impl RarArchive {
                     return Ok(());
                 }
                 #[cfg(not(feature = "parallel"))]
-                let _ = chain_solid;
+                let _ = (chain_solid, threads);
                 #[cfg(feature = "parallel")]
                 const MT_MIN: usize = 3 * crate::codec::DEFAULT_CHUNK_SIZE;
                 #[cfg(feature = "parallel")]
-                if !chain_solid
-                    && work.len() >= MT_MIN
-                    && crate::parallel::compression_worker_count() > 1
-                {
+                if !chain_solid && work.len() >= MT_MIN && threads > 1 {
                     let packed = crate::codec::rar50::encode_chunked_mt(
                         work,
                         method,
                         dsl,
                         crate::codec::DEFAULT_CHUNK_SIZE,
                         state.get_or_insert_with(Default::default),
-                        crate::parallel::compression_worker_count(),
+                        threads,
                         is_final,
                         dict_bytes.is_some(),
                     );
@@ -2221,8 +2223,8 @@ impl RarArchive {
             }
 
             #[cfg(feature = "parallel")]
-            let mt_window = (crate::parallel::compression_worker_count().max(2) * 8 * 1024 * 1024)
-                .clamp(24 * 1024 * 1024, 64 * 1024 * 1024);
+            let mt_window =
+                (threads.max(2) * 8 * 1024 * 1024).clamp(24 * 1024 * 1024, 64 * 1024 * 1024);
             #[cfg(not(feature = "parallel"))]
             let mt_window = 0usize;
 
@@ -2248,6 +2250,7 @@ impl RarArchive {
                         &mut work,
                         eof,
                         chain_solid,
+                        threads,
                         method,
                         dsl,
                         dict_bytes,
