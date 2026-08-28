@@ -351,9 +351,9 @@ cargo test --release --test winrar_interop -- --ignored   # >4 GiB cases
   v70, WinRAR `-md` semantics).
 - Appending to multi-volume archives is not supported (the official `rar`
   refuses too); deleting from them is supported.
-- The writer emits unpadded volume names (`part1.rar`); WinRAR sets with
-  `part01` padding are read, rebuilt and `.rev`'d correctly, and WinRAR
-  reads rar-rs sets fine.
+- The writer emits zero-padded volume names (`part01.rar`) for sets of
+  10+ volumes, matching WinRAR; sets under 10 volumes are unpadded.
+  Both forms are read, rebuilt and `.rev`'d on either side.
 
 ## Fuzzing
 

@@ -58,7 +58,7 @@
 - [x] CI 移除（`.woodpecker/ci.yml` 删除，2026-08）：回归验证回归本地 fmt/clippy + fuzz，官方互操作测试继续由 `SA_OFFICIAL_*`/本机 WinRAR 门控手动跑
 - [x] 取消钩子 `RarArchive::set_cancel_flag(Arc<AtomicBool>)`：创建/提取/重写/分卷全检查点，`RarError::Cancelled`；binding 的 AbortSignal 接上
 - [x] QO 快路径 `RarArchive::open_quick`：只读主头 + QO 记录即可列出（无 QO 回退全扫）；binding `listEntriesQuick`
-- [x] 零填充分卷集：`discover_volumes`/`rebuild_missing_volumes`/`.rev` 命名识别 WinRAR `part01` 填充；修复 `rec_count > data_count` 误拒
+- [x] 零填充分卷集：写侧对齐——≥10 卷时 writer 直接输出 `part01..partNN`（与 WinRAR 一致，close 收尾 rename）；`discover_volumes` 增加从基名探测 padded 首卷；`.rev` 命名跟随卷集填充；`rec_count > data_count` 误拒已修
 
 - [x] atomic create/append：temp sibling 暂存，close 原子提交
 - [x] 加密分卷每块加密记录（flags=1/3）+ `-hp` 分卷读取 + ENDARC flags 修复

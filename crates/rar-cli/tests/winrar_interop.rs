@@ -535,7 +535,7 @@ fn create_sparse(path: &Path, size: u64) {
 }
 
 #[test]
-#[ignore = "slow: compresses >4 GiB and needs >4 GiB of temp space; run with cargo test --release -- --ignored"]
+#[ignore = "slow: compresses >4 GiB and needs >4 GiB of temp space; the 512 MiB sibling runs in the default suite (crates/rar/tests/large_paths.rs)"]
 fn huge_sparse_file_streamed_compression_roundtrips() {
     let dir = temp_dir();
     let size = 4 * 1024 * 1024 * 1024u64 + 4096; // > 4 GiB
@@ -596,7 +596,7 @@ fn huge_sparse_file_streamed_compression_roundtrips() {
 }
 
 #[test]
-#[ignore = "slow: stores >4 GiB; run with cargo test --release -- --ignored"]
+#[ignore = "slow: stores >4 GiB; the 256 MiB encrypted multi-volume sibling runs in the default suite (crates/rar/tests/large_paths.rs)"]
 fn huge_sparse_file_streamed_encrypted_multivolume_roundtrips() {
     let dir = temp_dir();
     let size = 4 * 1024 * 1024 * 1024u64 + 8192; // > 4 GiB
@@ -1089,6 +1089,9 @@ fn we_create_v70_archives_decode_everywhere() {
 /// -m2..-m5): a 128 MiB file whose second half copies its random first
 /// half must compress almost as well as WinRAR's archive (the 64 MiB
 /// match distance is far beyond the near window) and decode everywhere.
+/// Correctness at reduced scale is locked into the default suite
+/// (`crates/rar/tests/large_paths.rs`); this one gates the compression
+/// ratio against WinRAR itself.
 #[test]
 #[ignore] // slow: 128 MiB source, compression + two extractions
 fn long_range_matches_winrar_compression_ratio() {
@@ -1410,6 +1413,84 @@ fn zero_padded_volume_sets_rv_rc_cross_validate() {
 
     // Both tools validate the final set.
     if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&first, None);
+        assert!(ok, "UnRAR rejected the rebuilt padded set:\n{out}");
+    }
+    let mut ar = RarArchive::open(&first).unwrap();
+    let name = ar
+        .namelist()
+        .into_iter()
+        .find(|n| n.ends_with("big.bin"))
+        .unwrap()
+        .to_string();
+    assert_eq!(ar.read(&name).unwrap(), std::fs::read(&src).unwrap());
+}
+
+/// The writer zero-pads volume names for sets of 10+ volumes (like
+/// WinRAR). WinRAR must test our padded set, our `rc` must rebuild a
+/// deleted volume byte-identically, and both tools must read it back.
+#[test]
+fn our_padded_volume_sets_validate_with_winrar() {
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    write_pattern_file(&src, 600_000, 21); // STORE: ~12 x 50k volumes
+
+    // Our 12-volume set: the writer emits part01..part12.
+    let arc = dir.path().join("p.rar");
+    {
+        let mut rar = rar5::RarArchive::create_with_options(
+            &arc,
+            rar5::CreateOptions {
+                volume_size: Some(50_000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&src, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let first = dir.path().join("p.part01.rar");
+    let volumes = rar5::discover_volumes(&first);
+    assert!(
+        volumes.len() >= 10,
+        "precondition: >= 10 volumes so the writer zero-pads, got {}",
+        volumes.len()
+    );
+    assert!(
+        !dir.path().join("p.part1.rar").exists(),
+        "the writer must not emit unpadded volume names"
+    );
+
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&first, None);
+        assert!(ok, "UnRAR rejected our padded volume set:\n{out}");
+    }
+
+    // Our `rv` adds .rev files with the set's padding, then our `rc`
+    // rebuilds a deleted padded volume byte-identically.
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .arg("rv")
+        .arg(&first)
+        .args(["2", "-idq"]));
+    assert!(ok, "our rar rv failed on our padded set:\n{out}");
+    assert!(
+        dir.path().join("p.part01.rev").exists(),
+        "our .rev names must follow the set's padding"
+    );
+    let victim = dir.path().join("p.part05.rar");
+    let victim_bytes = std::fs::read(&victim).unwrap();
+    std::fs::remove_file(&victim).unwrap();
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["rc", "-idq"])
+        .arg(&first));
+    assert!(ok, "our rar rc failed on our padded set:\n{out}");
+    assert_eq!(
+        std::fs::read(&victim).unwrap(),
+        victim_bytes,
+        "our rc must rebuild our padded volume byte-identically"
+    );
+
+    if let Some(unrar) = unrar_bin() {
         let (ok, out) = unrar_test(&first, None);
         assert!(ok, "UnRAR rejected the rebuilt padded set:\n{out}");
     }

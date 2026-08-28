@@ -1649,11 +1649,11 @@ fn cli_rarfiles_lst_orders_solid_members() {
 fn cli_rv_creates_recovery_volumes_and_rc_rebuilds() {
     let dir = tempfile::tempdir().expect("tempdir");
     let base = dir.path().join("mv");
-    let first = format!("{}.part1.rar", base.display());
 
-    // A 6+ volume set (writer emits unpadded names) covering both the
-    // default-percent and the count forms of `rv`; pseudo-random bytes so
-    // the member actually spans the -v100k volumes.
+    // A 10+ volume set (the writer zero-pads names to part01..partNN,
+    // like WinRAR) covering both the default-percent and the count forms
+    // of `rv`; pseudo-random bytes so the member actually spans the
+    // -v100k volumes.
     let mut big = Vec::with_capacity(2_500_000);
     let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
     for _ in 0..2_500_000 {
@@ -1666,11 +1666,12 @@ fn cli_rv_creates_recovery_volumes_and_rc_rebuilds() {
     std::fs::write(&src, &big).unwrap();
     let status = std::process::Command::new(RAR_CLI)
         .args(["a", "-v100k", "-y"])
-        .arg(&first)
+        .arg(&base)
         .arg(&src)
         .status()
         .unwrap();
     assert!(status.success());
+    let first = format!("{}.part01.rar", base.display());
     assert!(std::path::Path::new(&first).exists());
 
     // Default rv = 10% of the volume count (ceil).
@@ -1693,11 +1694,15 @@ fn cli_rv_creates_recovery_volumes_and_rc_rebuilds() {
     assert!(status.success());
     let default_count = (nd * 10).div_ceil(100); // ceil(10%)
     assert!(
-        std::path::Path::new(&format!("{}.part{}.rev", base.display(), default_count)).exists()
+        std::path::Path::new(&format!("{}.part{default_count:02}.rev", base.display())).exists()
     );
     assert!(
-        !std::path::Path::new(&format!("{}.part{}.rev", base.display(), default_count + 1))
-            .exists()
+        !std::path::Path::new(&format!(
+            "{}.part{:02}.rev",
+            base.display(),
+            default_count + 1
+        ))
+        .exists()
     );
 
     // Count form, embedded token (`rv3`) -> 3 .rev files.
@@ -1707,11 +1712,11 @@ fn cli_rv_creates_recovery_volumes_and_rc_rebuilds() {
         .status()
         .unwrap();
     assert!(status.success());
-    assert!(std::path::Path::new(&format!("{}.part3.rev", base.display())).exists());
-    assert!(!std::path::Path::new(&format!("{}.part4.rev", base.display())).exists());
+    assert!(std::path::Path::new(&format!("{}.part03.rev", base.display())).exists());
+    assert!(!std::path::Path::new(&format!("{}.part04.rev", base.display())).exists());
 
     // Delete a volume and rebuild it with `rc`; the archive must test OK.
-    let vol3 = format!("{}.part3.rar", base.display());
+    let vol3 = format!("{}.part03.rar", base.display());
     std::fs::remove_file(&vol3).unwrap();
     let status = std::process::Command::new(RAR_CLI)
         .args(["rc"])
@@ -1736,8 +1741,8 @@ fn cli_rv_creates_recovery_volumes_and_rc_rebuilds() {
         .unwrap();
     assert!(status.success());
     let expected = (nd as u32 * 50).div_ceil(100) as usize;
-    assert!(std::path::Path::new(&format!("{}.part{expected}.rev", base.display())).exists());
+    assert!(std::path::Path::new(&format!("{}.part{expected:02}.rev", base.display())).exists());
     assert!(
-        !std::path::Path::new(&format!("{}.part{}.rev", expected + 1, base.display())).exists()
+        !std::path::Path::new(&format!("{}.part{:02}.rev", base.display(), expected + 1)).exists()
     );
 }

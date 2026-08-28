@@ -1468,14 +1468,25 @@ impl RarArchive {
                 tmp_base,
                 final_base,
             } => {
+                // WinRAR zero-pads the part number to the digit count of
+                // the total volume count (part01..part15 for 10+ volumes);
+                // the final names carry the same padding, and the staged
+                // `.rev` naming (write_recovery_volumes) follows it.
+                let nd = self.volume_paths.len();
+                let width = nd.to_string().len().max(1);
                 let mut last = Ok(());
-                for n in 1..=self.volume_paths.len() {
+                let mut final_paths = Vec::with_capacity(nd);
+                for n in 1..=nd {
                     let tmp = volume_path(parent, tmp_base, n);
-                    let final_path = volume_path(parent, final_base, n);
+                    let final_path = volume_path_padded(parent, final_base, n, width);
                     if let Err(e) = replace_file(&tmp, &final_path) {
                         last = Err(e);
                         break;
                     }
+                    final_paths.push(final_path);
+                }
+                if last.is_ok() {
+                    self.volume_paths = final_paths;
                 }
                 last
             }
@@ -1995,6 +2006,15 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
         if part1.exists() && part1 != path {
             return discover_volumes(&part1);
         }
+        // Also probe zero-padded first volumes ({stem}.part01.rar ..
+        // part0001.rar): sets written with 10+ volumes now carry the
+        // padding themselves, and a caller may pass the base name.
+        for width in 2..=4 {
+            let probe = parent.join(format!("{stem}.part{:0width$}.rar", 1, width = width));
+            if probe.exists() && probe != path {
+                return discover_volumes(&probe);
+            }
+        }
     }
 
     vec![path.to_path_buf()]
@@ -2070,6 +2090,13 @@ pub(crate) fn get_volume_base(path: &Path) -> String {
 
 fn volume_path(parent: &Path, base: &str, part_num: usize) -> PathBuf {
     parent.join(format!("{base}.part{part_num}.rar"))
+}
+
+/// Volume path with the part number zero-padded to `width` digits
+/// (`part01.rar` for width 2), matching WinRAR's naming for sets of 10
+/// or more volumes.
+fn volume_path_padded(parent: &Path, base: &str, part_num: usize, width: usize) -> PathBuf {
+    parent.join(format!("{base}.part{part_num:0width$}.rar"))
 }
 
 #[cfg(test)]
