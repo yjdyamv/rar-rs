@@ -7,6 +7,8 @@ Fuzz targets for the `rar5` library, covering the three attack surfaces:
 | `parse` | RAR5/RAR7 block envelope, vints, headers, extra records, solid chains, encryption-header scan, extraction (bounded) |
 | `crypto` | key derivation (bounded strength), encryption-parameter parsing, AES-256-CBC round trips |
 | `recovery` | inline `{RB}` chunk build/parse/repair, GF(2^16) parity + reconstruct, CRC64-XZ, `.rev` serialization |
+| `write` | create from fuzzed options/members: single/multi-volume, solid, encrypted, header-encrypted, quick-open, BLAKE2sp, inline RR, `.rev`; round-trip byte checks + rv/rc rebuild |
+| `rewrite` | create then delete/rename/append/comment/lock mutations with byte-for-byte survivor verification |
 
 Seed corpus embeds genuine WinRAR output
 (`crates/rar/tests/fixtures/rar50/winrar5_multiple_files.rar`) and the
@@ -23,10 +25,17 @@ non-zero — usable both as a quick local smoke and as CI:
 cargo run --release --bin parse      # 200k iterations
 cargo run --release --bin crypto
 cargo run --release --bin recovery
+cargo run --release --bin write      # 20k iterations (real file I/O each)
+cargo run --release --bin rewrite    # 20k iterations (real file I/O each)
 
 FUZZ_ITERATIONS=50000 cargo run --release --bin parse   # override count
 FUZZ_SEED=0xC0FFEE cargo run --release --bin recovery   # override seed
 ```
+
+The write-side targets (`write`, `rewrite`) create and rewrite archives
+on disk every iteration, so they default to 20k iterations (Windows file
+churn makes them slow there; Linux is ~10x faster) — raise the count
+with `FUZZ_ITERATIONS` for longer runs.
 
 ## libFuzzer (nightly + clang, e.g. Linux CI)
 

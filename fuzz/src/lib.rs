@@ -102,15 +102,22 @@ pub fn mutate(rng: &mut Rng, seeds: &[&[u8]]) -> Vec<u8> {
 /// Standalone driver: run `runner` over `iterations` mutated inputs,
 /// catching panics. A panic saves the crashing input to
 /// `fuzz/crashes/<name>-crash-<n>.bin` and exits non-zero, so the loop
-/// doubles as a CI smoke fuzzer.
+/// doubles as a smoke fuzzer.
 ///
 /// Overrides: `FUZZ_ITERATIONS` (default 200_000), `FUZZ_SEED`
 /// (default 0x5EED_0001).
 pub fn standalone(name: &str, seeds: &[&[u8]], runner: fn(&[u8])) {
+    standalone_with(name, seeds, runner, 200_000);
+}
+
+/// Like [`standalone`], with a target-specific default iteration count
+/// (write-side targets do real file I/O per iteration and default lower;
+/// `FUZZ_ITERATIONS` always overrides).
+pub fn standalone_with(name: &str, seeds: &[&[u8]], runner: fn(&[u8]), default_iterations: usize) {
     let iterations: usize = std::env::var("FUZZ_ITERATIONS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(200_000);
+        .unwrap_or(default_iterations);
     let seed: u64 = std::env::var("FUZZ_SEED")
         .ok()
         .and_then(|v| {
@@ -179,6 +186,261 @@ pub fn parse(data: &[u8]) {
 
     let _ = rar5::sfx_offset_of(data);
     let _ = rar5::discover_volumes(&path);
+}
+
+/// Produce a deterministic `need`-byte payload from a seed slice (bounded
+/// work: a 4 KiB tile is built once, then copied in tile-sized blocks).
+fn fill_tile(seed: &[u8], need: usize) -> Vec<u8> {
+    let seed = if seed.is_empty() {
+        &[0x5A][..]
+    } else {
+        &seed[..seed.len().min(256)]
+    };
+    let mut tile = Vec::new();
+    while tile.len() < 4096 {
+        tile.extend_from_slice(seed);
+    }
+    tile.truncate(4096);
+    let mut out = Vec::with_capacity(need);
+    while out.len() < need {
+        out.extend_from_slice(&tile[..(need - out.len()).min(tile.len())]);
+    }
+    out
+}
+
+/// Write surface: create archives from fuzzed options and member bytes —
+/// single and multi-volume, solid, encrypted, header-encrypted,
+/// quick-open, BLAKE2sp, inline recovery record, create-time `.rev` —
+/// then verify the round trip byte-for-byte and exercise the rv/rc
+/// paths: build `.rev` for an existing set, delete a middle volume,
+/// rebuild it and require byte-identical reconstruction.
+pub fn write_roundtrip(data: &[u8]) {
+    if data.len() < 16 {
+        return;
+    }
+    let h = &data[8..]; // control bytes double as payload seeds
+    let n_members = 1 + (h[0] % 3) as usize; // 1..=3
+    // Multi-volume sets are exactly two volumes per member (member =
+    // 2x volume) so chunk splits, per-chunk records and CBC chains get
+    // exercised with minimal per-iteration file churn (Windows per-file
+    // overhead dominates the loop cost).
+    let member_bytes: usize = match h[1] % 3 {
+        0 => 2048, // single volume
+        1 => 4096, // two 2 KiB volumes
+        _ => 8192, // two 4 KiB volumes
+    };
+    let volume_size = (member_bytes >= 4096).then_some((member_bytes / 2) as u64);
+    let multivolume = volume_size.is_some();
+    let create_rev = if multivolume && h[6].is_multiple_of(3) {
+        Some(1 + (h[6] as u32 % 3)) // create-time .rev (rv during create)
+    } else {
+        None
+    };
+    let opts = rar5::CreateOptions {
+        solid: h[3].is_multiple_of(2),
+        blake2: h[4].is_multiple_of(2),
+        quick_open: h[4] % 4 < 3,
+        password: h[5].is_multiple_of(2).then(|| "fuzz".into()),
+        // h[5] % 4 == 2 is even, so header encryption always carries a
+        // password here; -hp works for single- and multi-volume alike.
+        encrypt_headers: h[5] % 4 == 2,
+        recovery_percent: (!multivolume && h[6].is_multiple_of(4)).then(|| h[6] % 15),
+        recovery_volume_count: create_rev,
+        volume_size,
+        dict_size_log: Some(7 + h[7] % 3), // 128K/256K/512K windows
+        ..Default::default()
+    };
+
+    // Member payloads: deterministic tiles (bounded work — the fuzzer
+    // targets code paths, not allocation sizes).
+    let mut members: Vec<(String, Vec<u8>)> = Vec::with_capacity(n_members);
+    for i in 0..n_members {
+        let start = (i * h.len()) / n_members;
+        let end = ((i + 1) * h.len()) / n_members;
+        members.push((format!("f{i}.bin"), fill_tile(&h[start..end], member_bytes)));
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let arc = dir.path().join("w.rar");
+    let created = (|| -> rar5::RarResult<()> {
+        let mut rar = rar5::RarArchive::create_with_options(&arc, opts.clone())?;
+        for (i, (name, payload)) in members.iter().enumerate() {
+            // Multi-volume members are STORED (level 0): the compressible
+            // tile pattern would otherwise collapse below one volume and
+            // the split paths would never run. Single-volume members
+            // exercise the compression levels.
+            let level = if multivolume {
+                0
+            } else {
+                ((h[0] as usize + i) % 6) as u8
+            };
+            rar.add_bytes(name, payload, level)?;
+        }
+        rar.close()?;
+        Ok(())
+    })();
+    if created.is_err() {
+        return; // derived option combos may legitimately be rejected
+    }
+
+    // Round trip: read every member back and compare byte-for-byte.
+    let volumes = rar5::discover_volumes(&arc);
+    let pw = opts.password.as_deref();
+    let opened = match pw {
+        Some(pw) => rar5::RarArchive::open_with_password(&volumes[0], pw),
+        None => rar5::RarArchive::open(&volumes[0]),
+    };
+    if let Ok(mut ar) = opened {
+        for (name, payload) in &members {
+            if let Ok(got) = ar.read(name) {
+                assert_eq!(
+                    &got[..],
+                    &payload[..],
+                    "write round trip mismatch for {name}"
+                );
+            }
+        }
+    }
+
+    // rv/rc: multi-volume sets get .rev (either from create time or the
+    // standalone rv path), a middle volume is deleted, rebuild must
+    // reproduce it byte-for-byte. Bounded to modest sets — huge volume
+    // counts would make the loop file-churn bound explode.
+    if multivolume && (2..=8).contains(&volumes.len()) {
+        let rev_ok = if create_rev.is_some() {
+            true // create-time .rev already on disk
+        } else {
+            rar5::recovery::rev5::build_recovery_volumes_for_set(&volumes, 1 + (h[7] as usize % 2))
+                .is_ok()
+        };
+        if rev_ok {
+            let victim = volumes[volumes.len() / 2].clone();
+            let orig = std::fs::read(&victim).ok();
+            let _ = std::fs::remove_file(&victim);
+            if let (Some(orig), Ok(rebuilt)) = (&orig, rar5::rebuild_missing_volumes(&volumes[0]))
+                && rebuilt.contains(&victim)
+                && let Ok(bytes) = std::fs::read(&victim)
+            {
+                assert_eq!(
+                    &bytes[..],
+                    &orig[..],
+                    "rc rebuild mismatch for {}",
+                    victim.display()
+                );
+            }
+        }
+    }
+}
+
+/// Rewrite surface: create a base archive, then apply surgical
+/// mutations (delete, rename, append, comment, lock) driven by the
+/// input, verifying the surviving members byte-for-byte after every
+/// step.
+pub fn rewrite(data: &[u8]) {
+    if data.len() < 24 {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("r.rar");
+    let a = &data[..data.len() / 4];
+    let b = &data[data.len() / 4..data.len() / 2];
+    let c = &data[data.len() / 2..3 * data.len() / 4];
+    let d = &data[3 * data.len() / 4..];
+    let solid = data[0].is_multiple_of(2);
+
+    {
+        let mut rar = rar5::RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                solid,
+                quick_open: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add_bytes("a.bin", a, 3).unwrap();
+        rar.add_bytes("b.bin", b, 3).unwrap();
+        rar.add_bytes("c.bin", c, 3).unwrap();
+        rar.close().unwrap();
+    }
+
+    let mut expected: Vec<(&str, &[u8])> = vec![("a.bin", a), ("b.bin", b), ("c.bin", c)];
+
+    // 1. Delete b.bin.
+    {
+        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        rar.delete(&["b.bin"]).unwrap();
+    }
+    expected.retain(|(n, _)| *n != "b.bin");
+    verify_members(&path, &expected);
+
+    // 2. Rename a.bin -> z.bin.
+    if data[1].is_multiple_of(2) {
+        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        rar.rename(&[("a.bin", "z.bin")]).unwrap();
+        for e in &mut expected {
+            if e.0 == "a.bin" {
+                e.0 = "z.bin";
+            }
+        }
+        verify_members(&path, &expected);
+    }
+
+    // 3. Append d.bin.
+    if data[2].is_multiple_of(3) {
+        let mut rar = rar5::RarArchive::open_append(&path).unwrap();
+        rar.add_bytes("d.bin", d, 0).unwrap();
+        rar.close().unwrap();
+        expected.push(("d.bin", d));
+        verify_members(&path, &expected);
+    }
+
+    // 4. Comment round trip.
+    if data[3].is_multiple_of(2) {
+        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        rar.set_comment(b"fuzz comment").unwrap();
+        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        assert_eq!(
+            rar.get_comment().unwrap().as_deref(),
+            Some(b"fuzz comment".as_slice()),
+            "comment round trip mismatch"
+        );
+        verify_members(&path, &expected);
+    }
+
+    // 5. Lock (irreversible — must be last): further rewrites refuse.
+    if data[4].is_multiple_of(2) {
+        {
+            let mut rar = rar5::RarArchive::open(&path).unwrap();
+            rar.lock().unwrap();
+        }
+        verify_members(&path, &expected);
+        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        match rar.rename(&[(expected[0].0, "locked-check.bin")]) {
+            Err(rar5::RarError::ArchiveLocked) => {}
+            other => panic!("expected ArchiveLocked, got {other:?}"),
+        }
+    }
+}
+
+/// Open `path` and assert that exactly the `expected` members exist with
+/// byte-identical content.
+fn verify_members(path: &std::path::Path, expected: &[(&str, &[u8])]) {
+    let mut ar = rar5::RarArchive::open(path).unwrap();
+    let names: Vec<String> = ar.namelist().into_iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        names.len(),
+        expected.len(),
+        "member count changed: {names:?}"
+    );
+    for (name, bytes) in expected {
+        assert!(
+            names.iter().any(|n| n == name),
+            "member {name} missing after rewrite: {names:?}"
+        );
+        let got = ar.read(name).unwrap();
+        assert_eq!(&got[..], *bytes, "member {name} changed after rewrite");
+    }
 }
 
 /// Crypto surface: KDF with bounded strength, encryption-parameter

@@ -43,3 +43,15 @@ name = "recovery"
 path = "fuzz_targets/recovery.rs"
 test = false
 bench = false
+
+[[bin]]
+name = "write"
+path = "fuzz_targets/write.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "rewrite"
+path = "fuzz_targets/rewrite.rs"
+test = false
+bench = false

@@ -1509,15 +1509,6 @@ impl RarArchive {
             let hdr_size = self.on_disk_header_len(chunk_fh.to_bytes().len() as u64);
 
             let bytes_for_data = remaining_vol.saturating_sub(hdr_size + eoa_size);
-            eprintln!(
-                "SPLIT vol_bytes={} remaining={} hdr_disk={} eoa={} bytes_for_data={} vol_size={}",
-                self.volume_bytes_written,
-                remaining_vol,
-                hdr_size,
-                eoa_size,
-                bytes_for_data,
-                volume_size
-            );
             if bytes_for_data == 0 {
                 self.start_next_volume()?;
                 is_first = false;
