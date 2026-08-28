@@ -81,13 +81,15 @@ fn main() {
         size_mb * 1024 * 1024
     };
 
+    // Three cases keep the default run short: compressible text, a
+    // text/random mix, and x86 filter-friendly code (the case that used to
+    // dominate the runtime). The batch/small/extract modes are still
+    // available for the parallel-batch and many-member workloads.
     let t = text_data(size);
-    let r = binary_data(size);
     let m = mixed_data(size);
     let x = x86_data(size);
 
     bench("text (compressible)", &t);
-    bench("random (incompressible)", &r);
     bench("mixed", &m);
     bench("x86 (filter-friendly)", &x);
     if batch_mode {

@@ -609,6 +609,51 @@ impl TreeMatchFinder {
         }
     }
 
+    /// Grow the window in place, keeping every existing link (positions
+    /// below the old mask map identically under a larger one). Grows the
+    /// `son` array when the window grew; shrinking keeps the larger
+    /// allocation (the mask bounds the reachable window either way). Used
+    /// by the persistent-finder path, where the finder spans chunks of one
+    /// member instead of being rebuilt (and the tail re-seeded) each chunk.
+    pub fn grow_to(&mut self, window: usize) {
+        let window = window.max(1).next_power_of_two();
+        if window * 2 > self.son.len() {
+            self.son = vec![0; window * 2];
+        }
+        self.mask = window - 1;
+    }
+
+    /// Clear the head table, keeping the `son` array (a slot is always
+    /// written during its own position's insertion before any link can
+    /// lead to it, so stale links are unreachable once the head is empty).
+    /// Used when a reused finder starts a fresh frame (multi-threaded
+    /// worker slices) instead of rebasing a continued one.
+    pub fn clear_head(&mut self) {
+        self.head.fill(NO_LINK);
+    }
+
+    /// Shift every stored link back by `sub`, dropping positions below it:
+    /// a link whose value underflows wraps to a huge value, which `resolve`
+    /// turns into a self-terminating descent (the `current >= floor` guard)
+    /// — so dropped entries cost nothing and can never resolve to a live
+    /// in-window position. Used when the persistent finder's frame slides.
+    pub fn rebase(&mut self, sub: usize) {
+        if sub == 0 {
+            return;
+        }
+        let sub = sub as u32;
+        for slot in self.head.iter_mut() {
+            if *slot != NO_LINK {
+                *slot = slot.wrapping_sub(sub);
+            }
+        }
+        for slot in self.son.iter_mut() {
+            if *slot != NO_LINK {
+                *slot = slot.wrapping_sub(sub);
+            }
+        }
+    }
+
     #[inline]
     fn hash4(input: &[u8], pos: usize) -> usize {
         let value =

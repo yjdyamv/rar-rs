@@ -143,6 +143,15 @@ pub struct EncoderState {
     /// Long-range match history; `None` for compression levels where the
     /// long range search is disabled (method 1, like WinRAR).
     long_range: Option<match_finder::LongRange>,
+    /// BT4 tree finder reused across chunks of a member. Rebuilding it per
+    /// chunk cost a full 32 MiB son-array memset plus page faults (and the
+    /// tail re-seed walked the cold array); persisting it keeps the array
+    /// warm, with links rebased by the frame slide instead of re-seeding.
+    tree: Option<match_finder::TreeMatchFinder>,
+    /// Length of the previous chunk's `combined` frame; the persistent
+    /// finder's links are rebased by `combined_len - keep` when the frame
+    /// slides.
+    combined_len: usize,
 }
 
 impl EncoderState {
@@ -156,6 +165,8 @@ impl EncoderState {
         if let Some(lr) = self.long_range.as_mut() {
             lr.reset();
         }
+        self.tree = None;
+        self.combined_len = 0;
     }
 }
 
@@ -250,7 +261,10 @@ pub fn encode_chunked(
                 max_match,
                 dict_size,
                 long_range,
+                None,
+                0,
                 extra_dist,
+                OPTIMAL_PARSE_PASSES[level],
             )
         } else {
             find_matches_with_tail(
@@ -323,7 +337,7 @@ pub fn encode_chunked_mt(
     extra_dist: bool,
 ) -> Vec<u8> {
     let level = (method as usize).clamp(1, 5);
-    let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
+    let (chain_len, _lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     let long_range = level >= 2;
     let cs = chunk_size.max(1);
@@ -367,17 +381,27 @@ pub fn encode_chunked_mt(
     // Rayon's Scope::spawn returns nothing; each worker deposits its
     // packed bytes into its own slot and we collect them wave-by-wave in
     // order after the scope joins everything.
-    let slots = std::sync::Mutex::new(vec![None::<Vec<u8>>; n]);
-    let outputs = {
-        // Shared read-only handles for the worker closures.
-        let tail_ref = &seed_tail;
-        let lr_ref = &lr_shared;
-        let slots_ref = &slots;
-        pool.scope(|scope| {
-            let mut first = 0usize;
-            while first < n {
-                let last = (first + n_workers).min(n);
-                for k in first..last {
+    // One persistent encoder state per worker, reused across waves: the
+    // BT4 tree's son array stays warm (a fresh 16 MiB allocation per slice
+    // cost page faults and cold-tree parse time — 6x slower per byte than
+    // the sequential path's rebased tree). Waves run sequentially so each
+    // state is used by exactly one thread at a time.
+    let mut worker_states: Vec<EncoderState> =
+        (0..n_workers).map(|_| EncoderState::default()).collect();
+    let mut output = Vec::new();
+    let mut first = 0usize;
+    while first < n {
+        let last = (first + n_workers).min(n);
+        let wave = &mut worker_states[..last - first];
+        let results = std::sync::Mutex::new(vec![None::<Vec<u8>>; last - first]);
+        {
+            // Shared read-only handles for the worker closures.
+            let tail_ref = &seed_tail;
+            let lr_ref = &lr_shared;
+            let results_ref = &results;
+            pool.scope(|scope| {
+                for (i, state) in wave.iter_mut().enumerate() {
+                    let k = first + i;
                     let (s0, e0) = (bounds[k], bounds[k + 1]);
                     scope.spawn(move |_| {
                         let blocks = encode_mt_slice(
@@ -388,30 +412,23 @@ pub fn encode_chunked_mt(
                             lr_ref,
                             entry_len,
                             chain_len,
-                            lazy_thresh,
                             max_match,
                             dict_size,
                             long_range,
+                            OPTIMAL_PARSE_PASSES[level],
                             is_final && k + 1 == n,
                             extra_dist,
+                            state,
                         );
-                        slots_ref.lock().unwrap()[k] = Some(blocks);
+                        results_ref.lock().unwrap()[i] = Some(blocks);
                     });
                 }
-                first = last;
-            }
-        });
-        slots
-            .into_inner()
-            .unwrap()
-            .into_iter()
-            .map(|s| s.expect("worker slot filled"))
-            .collect::<Vec<Vec<u8>>>()
-    };
-
-    let mut output = Vec::new();
-    for o in outputs {
-        output.extend(o);
+            });
+        }
+        for r in results.into_inner().unwrap() {
+            output.extend(r.expect("worker slot filled"));
+        }
+        first = last;
     }
 
     // Continue the chain after this window: tail = suffix of the window
@@ -436,6 +453,11 @@ pub fn encode_chunked_mt(
 }
 
 /// Encode one worker slice `[s0, e0)` of [`encode_chunked_mt`].
+///
+/// Each worker runs the same optimal parse as the sequential path (per-slice
+/// tree over its tail context, shared read-only long-range table), so the
+/// multi-threaded output matches the sequential parse quality instead of the
+/// old greedy+lazy fallback.
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
 fn encode_mt_slice(
@@ -446,16 +468,22 @@ fn encode_mt_slice(
     lr_shared: &match_finder::LongRange,
     entry_len: usize,
     chain_len: usize,
-    lazy_thresh: usize,
     max_match: usize,
     dict_size: usize,
     long_range: bool,
+    passes: usize,
     is_last_block_of_member: bool,
     extra_dist: bool,
+    state: &mut EncoderState,
 ) -> Vec<u8> {
     // Near-window context: the closest bytes before this slice, seeded
     // with the entry tail when the slice starts at the buffer head.
-    let want = NEAR_WINDOW_MAX.min(dict_size);
+    // Multi-threaded workers seed a fresh tree per slice, so the near
+    // window is capped well below the sequential path: distant matches
+    // come from the shared long-range table, and a shorter seed keeps
+    // the per-slice tree warm (the sequential path persists its tree and
+    // keeps the full 8 MiB window without re-seeding).
+    let want = (2 * 1024 * 1024).min(dict_size);
     let tail_ctx: Vec<u8> = if s0 >= want {
         data[s0 - want..s0].to_vec()
     } else {
@@ -467,36 +495,29 @@ fn encode_mt_slice(
         v.extend_from_slice(&data[..s0]);
         v
     };
-    let tl = tail_ctx.len();
-    let mut combined = Vec::with_capacity(tl + (e0 - s0));
-    combined.extend_from_slice(&tail_ctx);
-    combined.extend_from_slice(&data[s0..e0]);
 
-    let mut finder = MatchFinder::new(&combined, 2, max_match, chain_len, dict_size);
-    for pos in 0..tl {
-        finder.insert(pos);
-    }
-
-    // Long-range candidates only beyond what the near finder covers; the
-    // anchor places this slice's start in absolute stream coordinates.
-    let lr_q = if long_range {
-        Some((lr_shared, tl + (e0 - s0), entry_len + s0))
-    } else {
-        None
-    };
-
-    let mut dist_cache = [0u32; DIST_CACHE_SIZE];
-    let mut last_length = 0u32;
-    let symbols = find_matches_in_range(
-        &combined,
-        &mut finder,
-        tl,
-        combined.len(),
-        lazy_thresh,
-        &mut dist_cache,
-        &mut last_length,
+    // The worker state is reused across waves; each slice is a fresh
+    // frame (tail context as lookbehind, empty repeat-distance cache — a
+    // documented divergence from the sequential path — and the tree
+    // re-armed via `combined_len = 0` so `find_matches_optimal` clears
+    // the head and seeds the new tail). The shared long-range table is
+    // queried with this slice's absolute anchor but never extended here.
+    state.tail = tail_ctx;
+    state.dist_cache = [0u32; DIST_CACHE_SIZE];
+    state.last_length = 0;
+    state.combined_len = 0;
+    let symbols = find_matches_optimal(
+        state,
+        &data[s0..e0],
+        chain_len,
+        0,
         max_match,
-        lr_q,
+        dict_size,
+        long_range,
+        long_range.then_some(lr_shared),
+        entry_len + s0,
+        extra_dist,
+        passes,
     );
 
     let mut out = Vec::new();
@@ -615,7 +636,10 @@ pub fn encode_with_filters(
                 max_match,
                 dict_size,
                 long_range,
+                None,
+                0,
                 extra_dist,
+                OPTIMAL_PARSE_PASSES[level],
             )
         } else {
             find_matches_with_tail(
@@ -839,14 +863,6 @@ fn find_matches_in_range(
     // media) then cost one hash insertion per byte instead of a full
     // match attempt with its cache-missing random accesses, while the
     // distant repeats that justify the compression pass are still found.
-    const FAST_MODE_AFTER: usize = 64 * 1024;
-    /// Full-search cadence inside fast mode (power of two): every this
-    /// many literal positions a real match search runs, so the mode
-    /// recovers when compressible data returns. Without it, fast mode
-    /// locked in after the first 64 KiB incompressible run and the rest
-    /// of the member was emitted as literals (~30% ratio loss on files
-    /// with mixed content; level 1 has no long range to recover with).
-    const FAST_RECOVER_INTERVAL: usize = 128;
     let mut no_match_run = 0usize;
     let mut fast = false;
 
@@ -985,12 +1001,35 @@ fn find_matches_in_range(
 
 /// Longest match the optimal parse commits to and steps over without
 /// pricing the bytes it covers (rars `NICE_MATCH_LENGTH`).
-pub(crate) const NICE_MATCH_LENGTH: usize = 512;
+pub(crate) const NICE_MATCH_LENGTH: usize = 64;
+
+/// After this many consecutive positions with no match found, the optimal
+/// parse's match collection stops probing the long-range table on every
+/// position and drops to a [`FAST_RECOVER_INTERVAL`] cadence (incompressible
+/// runs then cost the tree search instead of a cache-missing probe per byte;
+/// the lazy matcher fast mode does the same).
+const FAST_MODE_AFTER: usize = 64 * 1024;
+
+/// Full-search cadence inside fast mode (power of two): every this many
+/// literal positions a real long-range probe runs, so the mode recovers
+/// when compressible data returns (without it the first 64 KiB
+/// incompressible run would lock the probe off for the whole member).
+const FAST_RECOVER_INTERVAL: usize = 128;
 
 /// Estimated cost of a literal before any block has been priced, in the
 /// same bit units as the match cost estimates (a main-table symbol out of
 /// 256 plus the odds that the table is skewed).
 const ESTIMATED_LITERAL_COST: u32 = 9;
+
+/// How many length-slot prices the optimal parse computes per position, at
+/// most. A run spans every length slot between its endpoints, and the parse
+/// prices each slot's endpoint (longer in the same slot is always strictly
+/// better, so the slot ends are the only lengths worth a look); a position in
+/// repetitive data can span a dozen slots across its runs. The cheapest path
+/// through a position only ever relaxes a handful of targets, so stepping
+/// the slot loop is the parse's hot inner step and the whole pricing pass
+/// stops after this many.
+const MAX_PARSE_STEPS_PER_POSITION: usize = 12;
 
 /// What a symbol the first pass never used is assumed to cost. Reaching for
 /// one is not forbidden, only expensive: the tables are rebuilt from
@@ -1000,8 +1039,10 @@ const UNUSED_SYMBOL_COST: usize = 15;
 
 /// How many times the optimal parse runs over a block. The first pass
 /// guesses prices; the rest reprice against the tables the pass before
-/// produced.
-const OPTIMAL_PARSE_PASSES: usize = 3;
+/// produced. Fewer passes is proportionally cheaper, so the ladder
+/// trades ratio for speed here: m2/m3 (fast/normal) do one reprice,
+/// m4 two and m5 three.
+const OPTIMAL_PARSE_PASSES: [usize; 6] = [0, 0, 2, 2, 3, 4];
 
 /// Base parse-block size; blocks extend up to [`MAX_BLOCK_SIZE`] while the
 /// byte distribution stays stable (see [`BlockSplitter`]).
@@ -1275,6 +1316,10 @@ fn collect_block_matches(
     let mut committed_through = block.start;
     // Scratch for the tree finder's per-position reports.
     let mut scratch: Vec<(u32, u32)> = Vec::new();
+    let mut lr_fast = false;
+    let mut lr_misses = 0usize;
+    let mut tree_misses = 0usize;
+    let mut fast_tree = false;
     for pos in block.clone() {
         matches.starts.push(matches.runs.len() as u32);
         let searching = pos >= committed_through;
@@ -1286,7 +1331,20 @@ fn collect_block_matches(
         // than inserted for nothing (its bytes are a copy of what the
         // match already points at, so the tree loses little by not holding
         // them).
-        if searching && max_distance > 0 && max_length >= 4 && pos + 3 < combined.len() {
+        //
+        // Fast mode: once the tree has found nothing for a long run of
+        // positions (incompressible data), the descent stops paying — it
+        // walks links through a multi-MiB son array that every probe
+        // misses in. Skip the search (and with it the insertion) except
+        // for a full recovery search every FAST_RECOVER_INTERVAL
+        // positions, and resume when any real match (>= 16 bytes, past
+        // spurious 4-byte hash coincidences) shows up.
+        if searching
+            && max_distance > 0
+            && max_length >= 4
+            && pos + 3 < combined.len()
+            && (!fast_tree || (pos & (FAST_RECOVER_INTERVAL - 1)) == 0)
+        {
             let avail = combined.len() - pos;
             let len_limit = avail.min(NICE_MATCH_LENGTH);
             scratch.clear();
@@ -1317,14 +1375,29 @@ fn collect_block_matches(
             .map(|&(len, _)| len as usize)
             .max()
             .unwrap_or(0);
-        // Long-range candidate beyond the near window, when the tree
-        // found nothing useful (mirrors the lazy path's `l < 64` gate).
+        if longest < 16 {
+            tree_misses += 1;
+            if !fast_tree && tree_misses >= 4096 {
+                fast_tree = true;
+            }
+        } else {
+            tree_misses = 0;
+            fast_tree = false;
+        }
+        // Long-range probe gating: the probe misses in a multi-MiB
+        // random-access table, so once it has failed for a long run of
+        // positions (incompressible data) it drops to the
+        // FAST_RECOVER_INTERVAL cadence. Any hit resumes full probing —
+        // a spurious short tree match must not reset this, only an actual
+        // long-range hit pays for the probe.
         if let Some((long_range, near_max, anchor)) = lr
             && searching
             && longest < 64
             && pos + 4 <= combined.len()
+            && (!lr_fast || (pos & (FAST_RECOVER_INTERVAL - 1)) == 0)
         {
             let chunk_off = pos - tail_len;
+            let before = matches.runs.len();
             if let Some((ld, ll)) = long_range.find_from(
                 &combined[tail_len..],
                 chunk_off,
@@ -1335,6 +1408,20 @@ fn collect_block_matches(
             {
                 matches.runs.push((ll as u32, ld));
                 longest = ll;
+            }
+            if matches.runs.len() > before {
+                lr_fast = false;
+                lr_misses = 0;
+            } else {
+                lr_misses += 1;
+                // A 64 KiB parse block holds 64 K positions, so a
+                // 64 K-probe threshold would only fire at the last
+                // position of the block and never pay off; 4 K failed
+                // probes (16 KiB of incompressible data) is already
+                // definitive and leaves room to act within the block.
+                if !lr_fast && lr_misses >= 4096 {
+                    lr_fast = true;
+                }
             }
         }
         // The parse can only take a match the block still has room for, so
@@ -1467,7 +1554,7 @@ fn optimal_parse_tokens(
         // where the cheap symbols live, and probing all four roughly
         // doubled the per-position pricing cost for a fraction of a
         // percent of ratio.
-        for &repeat in state.reps.iter() {
+        for &repeat in state.reps.iter().take(2) {
             if repeat == 0 || repeat > max_distance as u32 {
                 continue;
             }
@@ -1492,9 +1579,36 @@ fn optimal_parse_tokens(
         // only the longest of each run is worth pricing. Stepping slot to
         // slot turns a four-thousand-step loop into a few dozen on data
         // that matches long.
-        for &(run_start, run_end, distance) in reaches.iter() {
+        //
+        // The collector lists nearest first, so the tail of reaches is the
+        // longest end; a position buried in repetitive data can span a
+        // dozen length slots across its runs, and the cheapest path almost
+        // never wants the short tail of that list. Pricing stops after
+        // MAX_PARSE_STEPS_PER_POSITION slot endpoints, which bounds the
+        // hot inner loop without dropping the candidates that actually
+        // win (the longest runs are priced first).
+        // The longest run must always be priced to its end: its reach
+        // feeds the committed_through skip below, which is what keeps the
+        // parse sublinear on highly repetitive data (a position covered by
+        // a long match is never priced again). The remaining runs share
+        // MAX_PARSE_STEPS_PER_POSITION, so a position buried in runs of
+        // overlapping length slots cannot blow the budget.
+        let mut longest_idx = 0usize;
+        for (i, &(_, run_end, _)) in reaches.iter().enumerate() {
+            if run_end > reaches[longest_idx].1 {
+                longest_idx = i;
+            }
+        }
+        let mut steps_left = MAX_PARSE_STEPS_PER_POSITION;
+        for (i, &(run_start, run_end, distance)) in reaches.iter().enumerate().rev() {
             let mut length = run_start.max(4);
             while length <= run_end {
+                if i != longest_idx {
+                    if steps_left == 0 {
+                        break;
+                    }
+                    steps_left -= 1;
+                }
                 let reach = same_price_run_end(&state, length, distance, extra_dist, max_match)
                     .min(run_end);
                 let cost = match prices {
@@ -1693,7 +1807,14 @@ fn find_matches_optimal(
     max_match: usize,
     window: usize,
     long_range: bool,
+    // Multi-threaded path: a read-only shared long-range table plus the
+    // absolute stream anchor of `chunk` (workers query one shared table
+    // and never extend it). `None` uses (and extends) the state's own
+    // table, the sequential behaviour.
+    lr_shared: Option<&match_finder::LongRange>,
+    lr_anchor: usize,
     extra_dist: bool,
+    passes: usize,
 ) -> Vec<Symbol> {
     let tail_len = state.tail.len();
     let mut combined = Vec::with_capacity(tail_len + chunk.len());
@@ -1704,27 +1825,59 @@ fn find_matches_optimal(
     // descent per position stays logarithmic even when history makes the
     // hash chains deep (x86 code, generated source), which is where the
     // chain walk spent hundreds of milliseconds per block at high levels.
-    // History is seeded with cheap limited-length descents (their matches
+    // The finder persists across chunks of a member: its links are frame
+    // offsets into `combined`, so as the frame slides (the tail drops its
+    // oldest bytes) the links are rebased by the slide amount instead of
+    // rebuilding the tree and re-seeding the tail — re-seeding cost
+    // hundreds of milliseconds per chunk on dense data. Only a fresh
+    // finder (multi-threaded workers parse one slice against a brand-new
+    // tree) seeds its tail, with budget-limited descents (their matches
     // are already encoded; only their place in the tree matters).
     let tree_window = window.min(combined.len());
-    let mut tree_finder = match_finder::TreeMatchFinder::new(tree_window);
-    if tail_len > 0 {
-        let mut seed: Vec<(u32, u32)> = Vec::new();
-        let tail_end = tail_len.min(combined.len().saturating_sub(4));
-        for pos in 0..tail_end {
-            tree_finder.matches(&combined, pos, 4, tree_window, chain_len, &mut seed);
+    let mut tree_finder = state
+        .tree
+        .get_or_insert_with(|| match_finder::TreeMatchFinder::new(tree_window));
+    tree_finder.grow_to(tree_window);
+    let keep = window.min(NEAR_WINDOW_MAX).min(combined.len());
+    // `combined_len == 0` marks a fresh frame: the first chunk of a member
+    // (or a multi-threaded worker slice, whose state is reused across
+    // waves with the tree re-armed per slice). In that case the head must
+    // be cleared — the tree may hold links from an earlier frame — and the
+    // tail seeded. A continued frame instead rebases the links by the
+    // slide amount, keeping the tail's positions valid without re-seeding.
+    if state.combined_len == 0 {
+        tree_finder.clear_head();
+        if tail_len > 0 {
+            // Budget-limited descents: a fresh finder only ever occurs in the
+            // multi-threaded path, where the tree is built once per slice.
+            // Full-depth seeding would walk every dense bucket (tens of
+            // thousands of cache misses); 4 nodes per position keeps the
+            // newest candidates reachable and the long-range table covers
+            // the rest.
+            let mut seed: Vec<(u32, u32)> = Vec::new();
+            let tail_end = tail_len.min(combined.len().saturating_sub(4));
+            for pos in 0..tail_end {
+                tree_finder.matches(&combined, pos, 4, tree_window, chain_len.min(4), &mut seed);
+            }
         }
+    } else if state.combined_len > keep {
+        tree_finder.rebase(state.combined_len - keep);
     }
     let finder_kind = &mut tree_finder;
 
     let lr = if long_range {
-        let lr = state
-            .long_range
-            .get_or_insert_with(|| match_finder::LongRange::new(window));
         // The near finder (tree) covers distances up to tail + chunk;
         // long-range candidates only matter beyond that.
         let near_max = tail_len + chunk.len();
-        Some((&*lr, near_max, lr.total_pushed()))
+        match lr_shared {
+            Some(table) => Some((table, near_max, lr_anchor)),
+            None => {
+                let own = state
+                    .long_range
+                    .get_or_insert_with(|| match_finder::LongRange::new(window));
+                Some((&*own, near_max, own.total_pushed()))
+            }
+        }
     } else {
         None
     };
@@ -1755,6 +1908,7 @@ fn find_matches_optimal(
                 window,
                 lr,
                 extra_dist,
+                passes,
             );
             symbols.extend(block_symbols);
             splitter = BlockSplitter::new();
@@ -1776,11 +1930,15 @@ fn find_matches_optimal(
             window,
             lr,
             extra_dist,
+            passes,
         );
         symbols.extend(block_symbols);
     }
 
-    if long_range && let Some(lr) = state.long_range.as_mut() {
+    if long_range
+        && lr_shared.is_none()
+        && let Some(lr) = state.long_range.as_mut()
+    {
         lr.push(chunk);
     }
 
@@ -1788,6 +1946,7 @@ fn find_matches_optimal(
     state.tail = combined[combined.len() - keep..].to_vec();
     state.dist_cache = state_for_blocks.reps;
     state.last_length = state_for_blocks.last_length;
+    state.combined_len = combined.len();
     symbols
 }
 
@@ -1808,6 +1967,7 @@ fn parse_one_block(
     window: usize,
     lr: Option<(&match_finder::LongRange, usize, usize)>,
     extra_dist: bool,
+    passes: usize,
 ) -> Vec<Symbol> {
     let matches = collect_block_matches(
         finder,
@@ -1830,7 +1990,7 @@ fn parse_one_block(
         &matches,
         initial,
     );
-    for _ in 1..OPTIMAL_PARSE_PASSES {
+    for _ in 1..passes {
         let mut screen = *state;
         let (_, (nc, dc, ldc, rc)) =
             convert_tokens(&tokens, combined, block.clone(), &mut screen, extra_dist);

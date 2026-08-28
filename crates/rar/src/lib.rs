@@ -43,6 +43,8 @@ pub mod version;
 mod write_progress;
 
 pub use archive::{ArchiveEntry, BatchEntry, RarArchive, discover_volumes};
+#[cfg(feature = "parallel")]
+pub use codec::rar50::{EncoderState, encode_chunked_mt};
 pub use codec::rar50::{compress, compress_chunked, compress_with_progress, decompress};
 pub use crypto::EncryptionParams;
 pub use detect::sfx_offset_of;

@@ -13,7 +13,8 @@
 
 ## 待办
 
-- **最优解析速度/等级梯子**（记录，未做）：当前 m2-m5 均为 rars 级速度（中大型可压缩文件约 8-48× 慢于 WinRAR，~1.5× rars 参考实现）。方向：按等级降 pass 数（m2/m3 用 1-2 次）、树窗口上限、快速提交阈值、链长调优——均已试验过（见 git 历史），留待系统性调优。
+- **MT 路径已切最优解析但扩展性差（记录，未做）**：`encode_mt_slice` 已从贪心+lazy 换到 `find_matches_optimal`（每片独立最优解析 + 共享只读 LR），实测 64 MiB mixed：seq 17 MiB/s、mt8 21 MiB/s（仅 1.24x）；x86 合成 26→50 MiB/s（1.9x）。压缩率与 seq 完全一致（mixed 50.02%）。扩展差的根因（已插桩定位）：每个 slice 的树是新建/重种（随机数据片 610-680ms vs 文本片 90ms，播种占大头）；worker 状态跨 wave 复用后仍 2 线程=8 线程（瓶颈在片内播种，不在 LR 构建——LR 构建仅 ~50ms）。方向：片内播种 budget 再降/跳过不可压缩段播种、或复用顺序路径的重定基树；WinRAR 同参 1.80s@308MiB 已远超，但那是旧 lazy 路径
+- **`batch_archive_matches_sequential_bytes` 测试在 `--features parallel` 下失败（预先存在，非本次引入）**：seq 参考的 `add` 对 ≥12 MiB 成员走 `flush_window` MT（worker_count>1），而 `add_batch` 的成员准备固定走顺序 `compress_chunked`——两者字节不同（-mt 功能提交时遗留，原始代码同样失败）。方向：batch 大成员改用同一 MT 路径，或顺序 `add` 大成员禁用 MT 保持统一
 
 ## 已取消 / 不做
 
@@ -22,6 +23,10 @@
 
 ## 已完成（要点）
 
+- [x] **最优解析速度/等级梯子（2026-08）**：m2/m3 降为 2 次 pass、m4 3 次、m5 4 次（此前全 3 次，梯子是假的）；定价预算 `MAX_PARSE_STEPS_PER_POSITION=12`/位置（最长 run 恒完整定价以保住 committed_through 跳步——砍掉它会让 text 变慢 44x）；快速提交阈值 NICE 512→64（x86 案例 m3 提速 37x 且压缩率 4.06%→2.85%）；缓存距离探测仅前两个。实测 m3：text 32 MiB/s、mixed 12.7 MiB/s、x86 合成 19 MiB/s、真实 DLL ~3.5 MiB/s（原 2.1）
+- [x] **大文件多 chunk 退化修复（2026-08）**：插桩定位三个根因——每 chunk 重建 32 MiB 树（memset+页错误）、随机段每位置 LR 探测（12 MB 表缓存 miss）、随机段每位置树下降（32 MiB son 全 miss）。修复：树跨 chunk 持久化（只清 head 表）、LR 探测失败 4096 次后降频 1/128、树 fast mode（4096 位置无匹配跳过搜索、每 128 恢复一次）。实测 16 MiB mixed 6300→1245ms（5.1x），32 MiB 线性 10.1 MiB/s，全部解码字节级一致，压缩率 50.04%→50.02%
+- [x] **多线程路径切换最优解析（2026-08）**：`encode_mt_slice` 由贪心+lazy 换为 `find_matches_optimal`（每片：新树 + budget-4 播种 2 MiB 近窗 + 共享只读 LR 绝对锚点查询；worker 状态跨 wave 复用保 son 数组暖）。实测 64 MiB mixed m3：seq 17 MiB/s、mt8 21 MiB/s，压缩率与 seq 字节级同（50.02%）；x86 合成 mt8 50 MiB/s。所有 MT 输出解码字节级一致。导出 `encode_chunked_mt`/`EncoderState`（lib.rs，parallel feature）供基准
+- [x] **顺序路径大字典提速（2026-08）**：树跨 chunk 真持久化——链接按帧滑动量重定基（`TreeMatchFinder::grow_to`/`rebase`），不再每 chunk 重建树 + 重播种 8 MiB 尾部（重播种在稠密桶数据上每 chunk 3.4s）。实测 64 MiB mixed（32 MiB dict）：26.6s→3.8s（16.6 MiB/s，7x），32 MiB 线性 10 MiB/s+；压缩率不变，解码字节级一致。多线程 worker（新树）保留 budget 4 播种
 - [x] 过滤器只实现 0–3（Delta/E8/E8E9/ARM），未知类型显式报错——类型 4–7 现实归档中不存在
 - [x] **自动 x86 (E8/E8E9) 过滤器**：rars `x86_filter_scan` 移植（簇/跨度聚类 + 填充边界）；`encode_with_auto_x86_filter` 试 E8E9 与 E8 取小；内存路径成员（<64 MiB）自动应用；过滤器成员按非 solid 写出。实测 m5 DLL 差距从 21-23% 降到 6-14%（后由最优解析进一步收窄）
 - [x] **最优解析（m2-m5）**：rars `optimal_tokens`/`TokenPrices`/`BlockSplitter`/BT4 tree finder 移植；每块收集一次 + 3 次定价（首次估计、后两次用上一 pass 的真实表）；不可编码匹配（距离 bonus 使 raw < 2）在定价期拒绝；过滤器路径同样启用。实测 m3 默认级：code -52%、xml -24%、text -13%、DLL +2-6%

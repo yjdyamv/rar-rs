@@ -27,3 +27,7 @@ tempfile = "3"
 
 [lints]
 workspace = true
+
+[[example]]
+name = "mtbench"
+required-features = ["parallel"]
