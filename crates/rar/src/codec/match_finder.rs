@@ -9,36 +9,84 @@ pub const LONG_RANGE_STEP: usize = 16;
 
 /// Long-range history window: match distances beyond the near window
 /// (tail + chunk, a few MiB) are found through a sampled hash table over
-/// the most recent `LONG_RANGE_MAX` bytes of input. This bounds both the
-/// history copy (we never rebuild the combined buffer) and the table
-/// memory (~2x history in open addressing). WinRAR's `-mcl` long range
-/// search works the same way (sampled, bounded memory), though its
-/// window scales with the dictionary (up to 64 GiB); we cap at 128 MiB
-/// so a full 128 MiB of history fits before the window slides (distant
-/// copies up to that distance compress whole), at a peak cost of ~256
-/// MiB (history + table) for multi-GiB inputs.
+/// the most recent input. Match distances are inherently bounded by the
+/// dictionary (the decoder window can only reach `dict_size` back —
+/// WinRAR 7.23 also refuses to compress a beyond-dictionary distant copy
+/// at default or `-md32m`, and only does so with a dictionary that covers
+/// the distance), so the retained history never needs to exceed
+/// `LONG_RANGE_MAX.min(dictionary)`. The 128 MiB cap additionally bounds
+/// table memory for huge dictionaries: history + table stay under ~256
+/// MiB even for multi-GiB (or RAR7) dictionaries. WinRAR's `-mcl` long
+/// range search works the same way (sampled, bounded memory).
 pub const LONG_RANGE_MAX: usize = 128 * 1024 * 1024;
 
 /// Open-addressing hash table mapping a 4-byte sample hash to its most
 /// recent position inside the long-range history (a relative offset).
 ///
 /// Keys are stored as `hash + 1` so 0 marks an empty slot; values are
-/// i32 because the history is bounded by [`LONG_RANGE_MAX`].
+/// i32 because the history is bounded by [`LONG_RANGE_MAX`]. The table
+/// starts small and grows geometrically as history is pushed, so memory
+/// tracks the actual data size instead of the declared dictionary.
 struct LongRangeTable {
     keys: Vec<u32>,
     vals: Vec<i32>,
     mask: usize,
 }
 
+/// Smallest initial capacity (entries); grows on demand up to the size
+/// needed for [`LONG_RANGE_MAX`] of history.
+const TABLE_MIN_CAP: usize = 1024;
+
 impl LongRangeTable {
-    /// Allocate a table sized for `history_max` bytes.
-    fn new(history_max: usize) -> Self {
+    /// Largest table capacity needed for `history_max` bytes of history
+    /// (one sample per [`LONG_RANGE_STEP`] bytes, kept at <= 50% load).
+    fn max_cap_for(history_max: usize) -> usize {
         let samples = history_max / LONG_RANGE_STEP;
-        let cap = (samples * 2).max(1024).next_power_of_two();
+        (samples * 2).max(TABLE_MIN_CAP).next_power_of_two()
+    }
+
+    /// Allocate a table with exactly `cap` entries (a power of two).
+    fn with_capacity(cap: usize) -> Self {
         Self {
             keys: vec![0; cap],
             vals: vec![0; cap],
             mask: cap - 1,
+        }
+    }
+
+    fn cap(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Grow the table so it can hold `samples` samples (<= 50% load),
+    /// rehashing the existing entries; never exceeds `max_cap`.
+    fn grow_to(&mut self, samples: usize, max_cap: usize) {
+        let want = (samples * 2)
+            .max(TABLE_MIN_CAP)
+            .next_power_of_two()
+            .min(max_cap);
+        if want <= self.cap() {
+            return;
+        }
+        let mut grown = LongRangeTable::with_capacity(want);
+        for (k, v) in self.keys.iter().zip(self.vals.iter()) {
+            if *k != 0 {
+                grown.insert(*k - 1, *v);
+            }
+        }
+        *self = grown;
+    }
+
+    /// Ensure capacity for the current history, then rebuild the sample
+    /// table from scratch (used when the window slides).
+    fn clear_and_rebuild(&mut self, hist: &[u8], max_cap: usize) {
+        self.grow_to(hist.len() / LONG_RANGE_STEP, max_cap);
+        self.keys.fill(0);
+        let mut off = 0usize;
+        while off + 4 <= hist.len() {
+            let key = long_hash4(hist, off);
+            self.insert(key, off as i32);
+            off += LONG_RANGE_STEP;
         }
     }
 
@@ -81,6 +129,15 @@ impl LongRangeTable {
     }
 }
 
+/// 4-byte sample hash used by both the long-range table and the finder.
+fn long_hash4(data: &[u8], pos: usize) -> u32 {
+    let h = (data[pos] as u32)
+        | ((data[pos + 1] as u32) << 8)
+        | ((data[pos + 2] as u32) << 16)
+        | ((data[pos + 3] as u32) << 24);
+    h.wrapping_mul(0x9E3779B1)
+}
+
 /// Long-range match history: a sliding window of input bytes plus a
 /// sampled hash table over it. Matches found here have distances up to
 /// the history length; the history itself is bounded by both
@@ -91,6 +148,8 @@ impl LongRangeTable {
 pub struct LongRange {
     hist: Vec<u8>,
     table: LongRangeTable,
+    /// Largest table capacity needed for `max_hist` bytes of history.
+    max_cap: usize,
     /// Maximum match distance (the encoder's dictionary window).
     window: usize,
     /// History bound: `LONG_RANGE_MAX.min(window)`.
@@ -104,8 +163,13 @@ impl LongRange {
     pub fn new(window: usize) -> Self {
         let max_hist = LONG_RANGE_MAX.min(window.max(LONG_RANGE_STEP));
         Self {
-            hist: Vec::with_capacity(max_hist),
-            table: LongRangeTable::new(max_hist),
+            // Memory tracks the actual history: the buffer and the sample
+            // table start small and grow on demand, instead of paying
+            // ~2x the declared dictionary up front (64 MiB at the default
+            // 32 MiB dict, even for a one-byte archive).
+            hist: Vec::new(),
+            table: LongRangeTable::with_capacity(TABLE_MIN_CAP),
+            max_cap: LongRangeTable::max_cap_for(max_hist),
             window,
             max_hist,
             total_pushed: 0,
@@ -129,11 +193,7 @@ impl LongRange {
 
     #[inline]
     fn hash4(&self, data: &[u8], pos: usize) -> u32 {
-        let h = (data[pos] as u32)
-            | ((data[pos + 1] as u32) << 8)
-            | ((data[pos + 2] as u32) << 16)
-            | ((data[pos + 3] as u32) << 24);
-        h.wrapping_mul(0x9E3779B1)
+        long_hash4(data, pos)
     }
 
     /// Find the longest match for `chunk[pos..]` against the history.
@@ -170,7 +230,6 @@ impl LongRange {
             // only its tail and rebuild the table from scratch.
             let tail = &chunk[chunk.len() - self.max_hist..];
             self.hist.clear();
-            self.table.clear();
             self.hist.extend_from_slice(tail);
             self.rebuild_table();
             return;
@@ -178,11 +237,14 @@ impl LongRange {
         if self.hist.len() + chunk.len() > self.max_hist {
             let drop = (self.hist.len() + chunk.len() - self.max_hist / 2).min(self.hist.len());
             self.hist.drain(0..drop);
-            self.table.clear();
             self.rebuild_table();
         }
         let base = self.hist.len();
         self.hist.extend_from_slice(chunk);
+        // Grow the table for the new sample count, then index the new
+        // region only (existing entries stay valid).
+        self.table
+            .grow_to(self.hist.len() / LONG_RANGE_STEP, self.max_cap);
         let mut off = base;
         while off + 4 <= self.hist.len() {
             let key = self.hash4(&self.hist, off);
@@ -192,12 +254,7 @@ impl LongRange {
     }
 
     fn rebuild_table(&mut self) {
-        let mut off = 0usize;
-        while off + 4 <= self.hist.len() {
-            let key = self.hash4(&self.hist, off);
-            self.table.insert(key, off as i32);
-            off += LONG_RANGE_STEP;
-        }
+        self.table.clear_and_rebuild(&self.hist, self.max_cap);
     }
 
     /// Absolute stream offset of `hist[0]` (total pushed minus what the
@@ -498,5 +555,108 @@ impl<'a> MatchFinder<'a> {
         } else {
             (normal_dist, normal_len)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn random_bytes(seed: u64, n: usize) -> Vec<u8> {
+        let mut state = seed
+            .wrapping_mul(0x2545_F491_4F6C_DD1D)
+            .wrapping_add(0x9E37_79B9);
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            out.push((state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8);
+        }
+        out
+    }
+
+    /// Memory must track the actual history: a fresh long-range finder
+    /// allocates nothing for the history and only a small initial table,
+    /// growing as data is pushed (was: ~2x the declared dictionary up
+    /// front — 64 MiB at the default 32 MiB dict, even for 1-byte files).
+    #[test]
+    fn long_range_memory_tracks_pushed_data() {
+        let mut lr = LongRange::new(32 * 1024 * 1024); // default-like dict
+        assert_eq!(lr.hist.capacity(), 0, "no upfront history allocation");
+        assert_eq!(lr.table.cap(), TABLE_MIN_CAP, "small initial table");
+
+        let data = random_bytes(42, 4 * 1024 * 1024);
+        for chunk in data.chunks(64 * 1024) {
+            lr.push(chunk);
+        }
+        assert_eq!(
+            lr.hist_len(),
+            4 * 1024 * 1024,
+            "history retains pushed bytes"
+        );
+        assert!(
+            lr.table.cap() > TABLE_MIN_CAP,
+            "table must grow with the data"
+        );
+        // Growing to the 4 MiB history, not the 32 MiB dict.
+        assert!(
+            lr.table.cap() < LongRangeTable::max_cap_for(32 * 1024 * 1024),
+            "table must not reach the full-dictionary size"
+        );
+    }
+
+    /// Distant matches are found through the sampled table, but only up
+    /// to the dictionary window: a copy at exactly window distance is
+    /// emitted, one beyond it is rejected (the decoder window could not
+    /// reach it — matches WinRAR, which also cannot compress beyond the
+    /// dictionary).
+    #[test]
+    fn long_range_reach_is_bounded_by_the_dictionary() {
+        // 32 KiB window: the history is capped at the window.
+        let mut lr = LongRange::new(32 * 1024);
+        let data = random_bytes(7, 32 * 1024);
+        lr.push(&data);
+
+        // Copy from hist[24 KiB..] (an aligned sample): distance ~8 KiB,
+        // within the window — must be found.
+        let chunk: Vec<u8> = data[24 * 1024..24 * 1024 + 64]
+            .iter()
+            .copied()
+            .cycle()
+            .take(256)
+            .collect();
+        let found = lr.find(&chunk, 0, 1024, 256);
+        let (dist, len) = found.expect("in-window distant match must be found");
+        assert!(
+            (8192..8320).contains(&(dist as usize)),
+            "expected ~8 KiB distance, got {dist}"
+        );
+        assert!(len >= 64, "expected a long match, got {len}");
+
+        // Copy from hist[0..64] (aligned sample at offset 0) queried at
+        // pos 2048: distance = 32 KiB + 2048, beyond the window — must be
+        // rejected even though the bytes exist in the history.
+        let beyond: Vec<u8> = data[..64].iter().copied().cycle().take(4096).collect();
+        assert!(
+            lr.find(&beyond, 2048, 1024, 256).is_none(),
+            "beyond-window match must be rejected"
+        );
+    }
+
+    /// Sliding: once more than the window is pushed, the history drops
+    /// the oldest bytes and stays bounded while still finding matches in
+    /// the retained range.
+    #[test]
+    fn long_range_window_slides_and_stays_bounded() {
+        let mut lr = LongRange::new(64 * 1024);
+        for i in 0..8u64 {
+            lr.push(&random_bytes(i, 32 * 1024));
+        }
+        assert_eq!(lr.hist_len(), 64 * 1024, "history capped at the window");
+        assert_eq!(lr.total_pushed(), 256 * 1024);
+        // The oldest data slid out: the retained history starts at
+        // 256 KiB - 64 KiB.
+        assert_eq!(lr.hist_base(), 256 * 1024 - 64 * 1024);
     }
 }
