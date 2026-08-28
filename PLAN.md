@@ -13,8 +13,8 @@
 
 ## 待办
 
-- **MT 路径已切最优解析但扩展性差（记录，未做）**：`encode_mt_slice` 已从贪心+lazy 换到 `find_matches_optimal`（每片独立最优解析 + 共享只读 LR），实测 64 MiB mixed：seq 17 MiB/s、mt8 21 MiB/s（仅 1.24x）；x86 合成 26→50 MiB/s（1.9x）。压缩率与 seq 完全一致（mixed 50.02%）。扩展差的根因（已插桩定位）：每个 slice 的树是新建/重种（随机数据片 610-680ms vs 文本片 90ms，播种占大头）；worker 状态跨 wave 复用后仍 2 线程=8 线程（瓶颈在片内播种，不在 LR 构建——LR 构建仅 ~50ms）。方向：片内播种 budget 再降/跳过不可压缩段播种、或复用顺序路径的重定基树；WinRAR 同参 1.80s@308MiB 已远超，但那是旧 lazy 路径
-- **`batch_archive_matches_sequential_bytes` 测试在 `--features parallel` 下失败（预先存在，非本次引入）**：seq 参考的 `add` 对 ≥12 MiB 成员走 `flush_window` MT（worker_count>1），而 `add_batch` 的成员准备固定走顺序 `compress_chunked`——两者字节不同（-mt 功能提交时遗留，原始代码同样失败）。方向：batch 大成员改用同一 MT 路径，或顺序 `add` 大成员禁用 MT 保持统一
+- **MT 扩展性（已大幅改善，剩余瓶颈记录）**：mt2≈mt8 的主因已修——`compression_pool` 是 OnceLock，首次使用时的线程数被永久缓存（mtbench 先设 2 后测 4/8，实际全跑在 2 线程池）。改为配置变化时重建池（RwLock+Arc，在飞任务持 Arc 不受影响）；extraction 池同步修。另按 PLAN 方向砍掉不可压缩 slice 的片内播种：`mt_tail_is_incompressible` 按 stride-16 采样 256 KiB 尾部、4 字节窗去重率 ≥95% 判随机，跳过 2 MiB 树播种（head 仍清，chunk 自身插入 + LR 不变）。实测 64 MiB mixed m3：seq 17.5 / mt2 36.8 / mt4 62.1 / mt8 84.0 MiB/s（旧 mt8 21），ratio 与 seq 字节级同（50.02%）；text mt8 179 MiB/s；x86 mt8 125 MiB/s（ratio +8.2% 为既有 MT 分歧）。剩余瓶颈：随机 slice 的 collect（每 64 KiB 块 4096 位置快模式预热）+ DP 仍 ~450ms/片，且 mt8 后因内存带宽饱和不再扩展
+- **batch 测试已修（原诊断有误，正确根因见下）**：`batch_archive_matches_sequential_bytes` 三处分歧：① `add` 对 <64 MiB 成员走内存路径先试 x86 过滤器，`add_batch` 的 `prepare_data_entry` 从不试过滤器（i%251 这类含规则 E8 字节的非代码数据会误触发，seq 351B vs batch 338B）；② 末 chunk 的 `is_final`：seq 用 `bytes_read >= len`（整 4 MiB 末块也标终），batch 用 `chunk.len() < DEFAULT_CHUNK_SIZE`（整倍长成员永不标终，末块 flags 差 0x40 位）；③ 非整倍长数据无分歧，20 MiB 文本成员对齐后字节全同。修复：`prepare_data_entry(file_origin=true)` 完整镜像 `add_file`（先试过滤器且胜 STORE 时用之，末块 finality 同 seq），seq 与 batch 输出字节级一致（4130==4130）。与 MT/flush_window 无关——PLAN 旧诊断（≥12 MiB 走 flush_window MT）不成立：64 MiB 阈值下 20 MiB 成员走内存路径
 
 ## 已取消 / 不做
 
@@ -23,6 +23,8 @@
 
 ## 已完成（要点）
 
+- [x] **MT 扩展性（2026-08）**：`compression_pool` OnceLock 永久缓存首用线程数（mtbench 里 mt4/mt8 实际跑 2 线程）→ 改为配置变化时重建池（RwLock<Arc>，在飞任务持 Arc 安全）；`extraction_pool` 同步修。不可压缩 slice 跳过片内 2 MiB 树播种（`mt_tail_is_incompressible`：stride-16 采样 256 KiB、4 字节窗去重率 ≥95% 判随机；head 仍清、chunk 自身插入与共享 LR 不变）。实测 64 MiB mixed m3：seq 17.5、mt2 36.8、mt4 62.1、mt8 84.0 MiB/s（此前 mt2=mt8≈20）；text mt8 179 MiB/s；ratio mixed 与 seq 字节级同、x86 +8.2%（既有分歧）。另修持久树 `resolve` 下溢（`rebase` 的环绕链接在非环绕减法下 panic）——`long_range_respects_dictionary_window` 测试由此从失败转绿
+- [x] **batch 与 seq 字节统一（2026-08）**：`prepare_data_entry(file_origin=true)` 完整镜像 `add_file`——补上 x86 过滤器尝试（胜 STORE 时用之）与末 chunk finality 语义（`processed+len >= total`，整 4 MiB 末块也标终）。`batch_archive_matches_sequential_bytes` 全绿，seq/batch 输出 4130==4130 字节级一致
 - [x] **最优解析速度/等级梯子（2026-08）**：m2/m3 降为 2 次 pass、m4 3 次、m5 4 次（此前全 3 次，梯子是假的）；定价预算 `MAX_PARSE_STEPS_PER_POSITION=12`/位置（最长 run 恒完整定价以保住 committed_through 跳步——砍掉它会让 text 变慢 44x）；快速提交阈值 NICE 512→64（x86 案例 m3 提速 37x 且压缩率 4.06%→2.85%）；缓存距离探测仅前两个。实测 m3：text 32 MiB/s、mixed 12.7 MiB/s、x86 合成 19 MiB/s、真实 DLL ~3.5 MiB/s（原 2.1）
 - [x] **大文件多 chunk 退化修复（2026-08）**：插桩定位三个根因——每 chunk 重建 32 MiB 树（memset+页错误）、随机段每位置 LR 探测（12 MB 表缓存 miss）、随机段每位置树下降（32 MiB son 全 miss）。修复：树跨 chunk 持久化（只清 head 表）、LR 探测失败 4096 次后降频 1/128、树 fast mode（4096 位置无匹配跳过搜索、每 128 恢复一次）。实测 16 MiB mixed 6300→1245ms（5.1x），32 MiB 线性 10.1 MiB/s，全部解码字节级一致，压缩率 50.04%→50.02%
 - [x] **多线程路径切换最优解析（2026-08）**：`encode_mt_slice` 由贪心+lazy 换为 `find_matches_optimal`（每片：新树 + budget-4 播种 2 MiB 近窗 + 共享只读 LR 绝对锚点查询；worker 状态跨 wave 复用保 son 数组暖）。实测 64 MiB mixed m3：seq 17 MiB/s、mt8 21 MiB/s，压缩率与 seq 字节级同（50.02%）；x86 合成 mt8 50 MiB/s。所有 MT 输出解码字节级一致。导出 `encode_chunked_mt`/`EncoderState`（lib.rs，parallel feature）供基准

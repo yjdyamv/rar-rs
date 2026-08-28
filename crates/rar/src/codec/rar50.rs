@@ -265,6 +265,7 @@ pub fn encode_chunked(
                 0,
                 extra_dist,
                 OPTIMAL_PARSE_PASSES[level],
+                true,
             )
         } else {
             find_matches_with_tail(
@@ -452,6 +453,36 @@ pub fn encode_chunked_mt(
     output
 }
 
+/// Cheap per-slice probe: would seeding this tail ever pay off? Samples
+/// 4-byte windows every [`MT_SEED_PROBE_STRIDE`] bytes over the tail's
+/// head. A tail whose sampled windows are (almost) all distinct has no
+/// long repeats, so the fresh-tree seeding of it is wasted work — random
+/// media, compressed/encrypted data — while text, code and structured
+/// binary keep their repeated windows and seed normally.
+///
+/// The 4-byte windows are compared raw (no hash), so the distinct count
+/// is exact: random input measures ~100%, any input with real repeats
+/// (including base64/hex text, whose alphabet still cycles within a
+/// window) stays well below the threshold.
+#[cfg(feature = "parallel")]
+fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
+    const STRIDE: usize = 16;
+    const PROBE_LEN: usize = 256 * 1024;
+    const MIN_WINDOWS: usize = 4096; // 64 KiB of sampled windows
+    const DISTINCT_PERCENT: usize = 95;
+    let probe = &tail[..tail.len().min(PROBE_LEN)];
+    let mut seen = std::collections::HashSet::with_capacity(probe.len() / STRIDE + 1);
+    let mut windows = 0usize;
+    let mut off = 0usize;
+    while off + 4 <= probe.len() {
+        let v = u32::from_le_bytes([probe[off], probe[off + 1], probe[off + 2], probe[off + 3]]);
+        seen.insert(v);
+        windows += 1;
+        off += STRIDE;
+    }
+    windows >= MIN_WINDOWS && seen.len() * 100 >= windows * DISTINCT_PERCENT
+}
+
 /// Encode one worker slice `[s0, e0)` of [`encode_chunked_mt`].
 ///
 /// Each worker runs the same optimal parse as the sequential path (per-slice
@@ -506,6 +537,12 @@ fn encode_mt_slice(
     state.dist_cache = [0u32; DIST_CACHE_SIZE];
     state.last_length = 0;
     state.combined_len = 0;
+    // Seeding a fresh tree over the tail costs a random-access descent per
+    // position into the multi-MiB son array (hundreds of ms on random
+    // data, tens on text). Skip it when the tail probes incompressible:
+    // no match into it would be found anyway, and the parse's own
+    // insertions plus the shared long-range table cover everything else.
+    let seed_tail = !mt_tail_is_incompressible(&state.tail);
     let symbols = find_matches_optimal(
         state,
         &data[s0..e0],
@@ -518,6 +555,7 @@ fn encode_mt_slice(
         entry_len + s0,
         extra_dist,
         passes,
+        seed_tail,
     );
 
     let mut out = Vec::new();
@@ -640,6 +678,7 @@ pub fn encode_with_filters(
                 0,
                 extra_dist,
                 OPTIMAL_PARSE_PASSES[level],
+                true,
             )
         } else {
             find_matches_with_tail(
@@ -1798,6 +1837,13 @@ fn prices_from_frequencies(
 ///
 /// Returns symbols in the same form as [`find_matches_with_tail`] (the
 /// caller cuts blocks and encodes).
+///
+/// `seed_tail` is `false` only when the caller proved the tail holds no
+/// useful matches (a multi-threaded worker whose tail probes as
+/// incompressible): the tree head is still cleared, the parse inserts the
+/// chunk's own positions, and within-chunk plus long-range matches are
+/// unaffected — only the wasted fresh-tree seeding of a random tail is
+/// skipped.
 #[allow(clippy::too_many_arguments)]
 fn find_matches_optimal(
     state: &mut EncoderState,
@@ -1815,6 +1861,7 @@ fn find_matches_optimal(
     lr_anchor: usize,
     extra_dist: bool,
     passes: usize,
+    seed_tail: bool,
 ) -> Vec<Symbol> {
     let tail_len = state.tail.len();
     let mut combined = Vec::with_capacity(tail_len + chunk.len());
@@ -1847,7 +1894,7 @@ fn find_matches_optimal(
     // slide amount, keeping the tail's positions valid without re-seeding.
     if state.combined_len == 0 {
         tree_finder.clear_head();
-        if tail_len > 0 {
+        if seed_tail && tail_len > 0 {
             // Budget-limited descents: a fresh finder only ever occurs in the
             // multi-threaded path, where the tree is built once per slice.
             // Full-depth seeding would walk every dense bucket (tens of

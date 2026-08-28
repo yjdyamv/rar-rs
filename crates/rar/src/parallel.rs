@@ -71,37 +71,66 @@ pub(crate) fn pool_threads(default: usize) -> usize {
     }
 }
 
-/// Dedicated Rayon pool for batch compression.
+/// Dedicated Rayon pool for batch compression, honoring the current
+/// `-mt` override. Rebuilt when [`set_compression_threads`] changes the
+/// requested count, so callers may size the pool per archive/run; the
+/// returned handle keeps the pool alive even if a newer one replaces it
+/// mid-flight (in-flight jobs hold their own `Arc`).
 #[cfg(feature = "parallel")]
-pub(crate) fn compression_pool() -> &'static rayon::ThreadPool {
-    use std::sync::OnceLock;
+pub(crate) fn compression_pool() -> std::sync::Arc<rayon::ThreadPool> {
+    use std::sync::{OnceLock, RwLock};
+    static POOL: OnceLock<RwLock<std::sync::Arc<rayon::ThreadPool>>> = OnceLock::new();
+    let lock = POOL.get_or_init(|| RwLock::new(std::sync::Arc::new(build_compression_pool())));
+    let current = lock.read().expect("pool lock").clone();
+    let want = configured_threads().unwrap_or_else(|| pool_threads(4).min(4));
+    if current.current_num_threads() != want {
+        let mut guard = lock.write().expect("pool lock");
+        if guard.current_num_threads() != want {
+            *guard = std::sync::Arc::new(build_compression_pool());
+        }
+        return guard.clone();
+    }
+    current
+}
 
-    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
-    POOL.get_or_init(|| {
-        let threads = configured_threads().unwrap_or_else(|| pool_threads(4).min(4));
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|i| format!("rar5-compress-{i}"))
-            .build()
-            .expect("build rar5 compression pool")
-    })
+#[cfg(feature = "parallel")]
+fn build_compression_pool() -> rayon::ThreadPool {
+    let threads = configured_threads().unwrap_or_else(|| pool_threads(4).min(4));
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|i| format!("rar5-compress-{i}"))
+        .build()
+        .expect("build rar5 compression pool")
 }
 
 /// Rayon pool for parallel extraction, sized with
-/// [`set_extraction_threads`] (default: all cores).
+/// [`set_extraction_threads`] (default: all cores). Rebuilt when the
+/// requested count changes, like the compression pool.
 #[cfg(feature = "parallel")]
-pub(crate) fn extraction_pool() -> &'static rayon::ThreadPool {
-    use std::sync::OnceLock;
+pub(crate) fn extraction_pool() -> std::sync::Arc<rayon::ThreadPool> {
+    use std::sync::{OnceLock, RwLock};
+    static POOL: OnceLock<RwLock<std::sync::Arc<rayon::ThreadPool>>> = OnceLock::new();
+    let lock = POOL.get_or_init(|| RwLock::new(std::sync::Arc::new(build_extraction_pool())));
+    let current = lock.read().expect("pool lock").clone();
+    let want = configured_extraction_threads().unwrap_or_else(|| pool_threads(4));
+    if current.current_num_threads() != want {
+        let mut guard = lock.write().expect("pool lock");
+        if guard.current_num_threads() != want {
+            *guard = std::sync::Arc::new(build_extraction_pool());
+        }
+        return guard.clone();
+    }
+    current
+}
 
-    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
-    POOL.get_or_init(|| {
-        let threads = configured_extraction_threads().unwrap_or_else(|| pool_threads(4));
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|i| format!("rar5-extract-{i}"))
-            .build()
-            .expect("build rar5 extraction pool")
-    })
+#[cfg(feature = "parallel")]
+fn build_extraction_pool() -> rayon::ThreadPool {
+    let threads = configured_extraction_threads().unwrap_or_else(|| pool_threads(4));
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|i| format!("rar5-extract-{i}"))
+        .build()
+        .expect("build rar5 extraction pool")
 }
 
 // Set while a Rayon worker is preparing batch members. Nested parallelism

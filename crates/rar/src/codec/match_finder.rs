@@ -563,11 +563,17 @@ const NO_LINK: u32 = u32::MAX;
 
 /// Reads a truncated link back as a position, given the newest position
 /// (always the one being searched for).
+///
+/// The final subtraction is wrapping: [`TreeMatchFinder::rebase`] drops
+/// out-of-window links by letting them wrap to huge values, and a wrapped
+/// link must resolve to a huge position (past every real floor) so the
+/// descent's `current >= floor` guard ends it — never a subtraction
+/// underflow.
 fn resolve(newest: usize, link: u32) -> usize {
     if link == NO_LINK {
         return usize::MAX;
     }
-    newest - (newest as u32).wrapping_sub(link) as usize
+    newest.wrapping_sub((newest as u32).wrapping_sub(link) as usize)
 }
 
 /// A binary-tree match finder, after LZMA's BT4 (ported from the `rars`

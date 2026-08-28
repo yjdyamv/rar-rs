@@ -1175,43 +1175,57 @@ impl RarArchive {
         let mut state = crate::codec::EncoderState::default();
         let total = data.len() as u64;
         let packed = if file_origin {
-            // Mirror add_file's streaming loop exactly (shared state
-            // across chunks within the member).
-            let mut packed = Vec::new();
-            let mut processed = 0u64;
-            for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
-                if ctx
-                    .cancel
-                    .as_ref()
-                    .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
-                {
-                    return Err(RarError::Cancelled);
-                }
-                let is_final = chunk.len() < crate::codec::DEFAULT_CHUNK_SIZE;
-                let compressed = compression::compress_chunked(
-                    chunk,
-                    method,
-                    dsl,
-                    crate::codec::DEFAULT_CHUNK_SIZE,
-                    Some(&mut state),
-                    is_final,
-                    None,
-                    dict_bytes.is_some(),
-                )
-                .map_err(RarError::Unsupported)?;
-                packed.extend(compressed);
-                processed += chunk.len() as u64;
-                if let Some(progress) = progress {
-                    progress
-                        .lock()
-                        .expect("progress lock")
-                        .report(member, processed, total);
-                }
-                if packed.len() >= data.len() {
-                    break;
+            // Mirror add_file's member encoding exactly: the automatic
+            // x86 (E8/E8E9) filter runs first and wins when its stream
+            // beats STORE (a filtered member is written standalone,
+            // non-solid); otherwise the member is compressed in bounded
+            // chunks with one shared encoder state across chunks.
+            match compression::encode_with_auto_x86_filter(data, method, dsl, dict_bytes.is_some())
+                .map_err(RarError::Unsupported)?
+            {
+                Some(filtered) if filtered.len() < data.len() => filtered,
+                _ => {
+                    let mut packed = Vec::new();
+                    let mut processed = 0u64;
+                    for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
+                        if ctx
+                            .cancel
+                            .as_ref()
+                            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+                        {
+                            return Err(RarError::Cancelled);
+                        }
+                        // Same finality rule as add_file's streaming loop:
+                        // the last chunk is final even when it fills the
+                        // whole 4 MiB slice (an exact-multiple member must
+                        // still mark its closing block).
+                        let is_final = processed + chunk.len() as u64 >= total;
+                        let compressed = compression::compress_chunked(
+                            chunk,
+                            method,
+                            dsl,
+                            crate::codec::DEFAULT_CHUNK_SIZE,
+                            Some(&mut state),
+                            is_final,
+                            None,
+                            dict_bytes.is_some(),
+                        )
+                        .map_err(RarError::Unsupported)?;
+                        packed.extend(compressed);
+                        processed += chunk.len() as u64;
+                        if let Some(progress) = progress {
+                            progress
+                                .lock()
+                                .expect("progress lock")
+                                .report(member, processed, total);
+                        }
+                        if packed.len() >= data.len() {
+                            break;
+                        }
+                    }
+                    packed
                 }
             }
-            packed
         } else {
             compression::compress_chunked(
                 data,
