@@ -358,14 +358,9 @@ cargo test --release --test winrar_interop -- --ignored   # >4 GiB cases
 ## Fuzzing
 
 Three cargo-fuzz targets (`fuzz/`, standalone-runnable on stable Rust)
-cover the read, crypto and recovery surfaces; see `fuzz/README.md`.
-
-## Continuous integration
-
-Codeberg Woodpecker CI (`.woodpecker/ci.yml`): fmt, clippy (`-D
-warnings`), the full test suite, a stable fuzz smoke, and a best-effort
-nightly libFuzzer job with ASAN/UBSAN. The WinRAR interop tests run
-against an installed WinRAR on Windows.
+cover the read, crypto and recovery surfaces; two write-side targets
+(`write`, `rewrite`) create archives from fuzzed inputs and verify the
+round trip byte-for-byte; see `fuzz/README.md`.
 
 ---
 

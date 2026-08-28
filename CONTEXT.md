@@ -41,7 +41,7 @@
 - 库热点已拆解：archive.rs 仅存 facade 结构体 + 构造器/生命周期；读写路径分别在 `rar50/extract.rs` 与 `rar50/write/`。
 - 互操作测试：`crates/rar/tests/{rar50_roundtrip,format_assertions,rewrite_tests,official_interop,rar4_rejection,cancel_flag,quick_open_listing}.rs`（官方 rar/unrar 用 SA_OFFICIAL_RAR/UNRAR env 门控）、`crates/rar-cli/tests/cli_behavior.rs`（CARGO_BIN_EXE 需随二进制所在 crate）、`crates/rar-cli/tests/winrar_interop.rs`（Windows 本机 WinRAR 双向验证）。
 - fuzz：`fuzz/` 独立 crate（不在 workspace），三目标 parse/crypto/recovery，standalone 变异循环 + `cargo +nightly fuzz run <t> --features fuzzing` 双模式；语料嵌入真实 WinRAR fixture。
-- CI：`.woodpecker/ci.yml`（Codeberg）——stable 硬门槛（fmt/clippy/test/fuzz smoke）+ nightly libFuzzer（best-effort）。
+- 回归验证：fmt/clippy `-D warnings` 双门（本地手动跑）+ fuzz（`fuzz/` 五目标，standalone 变异循环 + libFuzzer 双模式）。
 - 迁移记录：`docs/REFACTOR_MIRROR_RARS.md`（仿 rars 架构重构的完整计划与决策）。
 - 格式参考：`docs/FORMAT_RAR5_RAR7.md`（RAR5/RAR7 完整格式文档，以本实现为准，冲突处对照 rars）。
 - 计划：`PLAN.md`（已完成记录 + WinRAR 7.23 差距清单）。

@@ -6,7 +6,7 @@
 
 - RAR5 创建/读取全功能对齐 WinRAR 7.23：压缩、`-hp` 头加密、分卷、solid、内联恢复记录、`.rev` 恢复卷、quick-open、NTFS ADS、三时间戳、owner；另含 RAR7 (v70) 读写、`-mt` 多线程压缩、长距离匹配。
 - 命令面：官方 rar 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt` 列表变体）；开关矩阵见 `docs/SWITCH_MATRIX.md`（对照本机 RAR 7.23 实测）。
-- 工程：fmt/clippy `-D warnings` 双门、Codeberg Woodpecker CI、三目标 fuzz（`fuzz/`）、取消钩子、QO 快路径 `open_quick`、流式修复 `repair_archive_path`、零填充分卷集支持。
+- 工程：fmt/clippy `-D warnings` 双门（本地）、五目标 fuzz（`fuzz/`：parse/crypto/recovery/write/rewrite）、取消钩子、QO 快路径 `open_quick`、流式修复 `repair_archive_path`、零填充分卷集支持。
 - 架构：workspace `crates/rar`（库 crate `rar5`）+ `crates/rar-cli`（rar/unrar），按 rars 分层——词汇见 `CONTEXT.md`，迁移决策见 `docs/REFACTOR_MIRROR_RARS.md`，格式细节见 `docs/FORMAT_RAR5_RAR7.md`。
 
 ## 待办
@@ -54,8 +54,8 @@
 ### 工程里程碑
 
 - [x] fmt/clippy 双门：workspace 全量 `cargo fmt --check` + `cargo clippy --all-features -- -D warnings`（codec 热路径的 `too_many_arguments` 用针对性 allow，不做风险重构）
-- [x] Codeberg Woodpecker CI：stable 五步（fmt/clippy/test/fuzz smoke）+ nightly libFuzzer job（ASAN/UBSAN，best-effort）
-- [x] fuzz：`fuzz/` 独立 crate 三目标（parse/crypto/recovery），standalone 变异循环 + libFuzzer 双模式；种子语料嵌入真实 WinRAR fixture
+- [x] fuzz：`fuzz/` 独立 crate 五目标（parse/crypto/recovery 读侧 + write/rewrite 写侧），standalone 变异循环 + libFuzzer 双模式；种子语料嵌入真实 WinRAR fixture
+- [x] CI 移除（`.woodpecker/ci.yml` 删除，2026-08）：回归验证回归本地 fmt/clippy + fuzz，官方互操作测试继续由 `SA_OFFICIAL_*`/本机 WinRAR 门控手动跑
 - [x] 取消钩子 `RarArchive::set_cancel_flag(Arc<AtomicBool>)`：创建/提取/重写/分卷全检查点，`RarError::Cancelled`；binding 的 AbortSignal 接上
 - [x] QO 快路径 `RarArchive::open_quick`：只读主头 + QO 记录即可列出（无 QO 回退全扫）；binding `listEntriesQuick`
 - [x] 零填充分卷集：`discover_volumes`/`rebuild_missing_volumes`/`.rev` 命名识别 WinRAR `part01` 填充；修复 `rec_count > data_count` 误拒
