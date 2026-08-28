@@ -13,7 +13,6 @@ use crate::archive::{
     ArchiveEntry, DecryptedPayload, MAX_DICT_SIZE_LOG, RarArchive, StreamRecord, discover_volumes,
 };
 use crate::codec::DecoderState;
-use crate::codec::rar50 as compression;
 use crate::crypto::{self, parse_archive_encrypt_header};
 use crate::detect::{SFX_SCAN_LIMIT, find_bytes};
 use crate::error::{RarError, RarResult};
@@ -1269,14 +1268,24 @@ impl RarArchive {
         let raw_data = if hdr.comp_method == COMP_METHOD_STORE {
             payload.data
         } else {
-            compression::decompress(
+            // v70-aware decode: the in-memory `read` path must carry the
+            // declared dictionary and the DCX flag (comp_version 1), like
+            // the disk-extract path — otherwise v70 members fail with an
+            // invalid Huffman code (the DCX table has 80 codes, RAR5 64).
+            let mut raw = Vec::new();
+            crate::codec::decode_to_writer(
                 &payload.data,
-                hdr.comp_method,
                 hdr.unpacked_size,
-                hdr.comp_dict_size,
-                state,
+                crate::codec::DecodeOptions {
+                    dict_size_log: hdr.comp_dict_size,
+                    dict_size_bytes: hdr.dict_size_bytes,
+                    extra_dist: hdr.comp_version == 1,
+                    state,
+                },
+                &mut raw,
             )
-            .map_err(RarError::Unsupported)?
+            .map_err(RarError::Unsupported)?;
+            raw
         };
 
         let crc = crc32fast::hash(&raw_data);

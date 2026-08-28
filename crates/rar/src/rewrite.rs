@@ -410,14 +410,20 @@ impl RarArchive {
         let raw_data = if hdr.comp_method == COMP_METHOD_STORE {
             payload
         } else {
-            compression::decompress(
+            let mut raw = Vec::new();
+            crate::codec::decode_to_writer(
                 &payload,
-                hdr.comp_method,
                 hdr.unpacked_size,
-                hdr.comp_dict_size,
-                Some(state),
+                crate::codec::DecodeOptions {
+                    dict_size_log: hdr.comp_dict_size,
+                    dict_size_bytes: hdr.dict_size_bytes,
+                    extra_dist: hdr.comp_version == 1,
+                    state: Some(state),
+                },
+                &mut raw,
             )
-            .map_err(RarError::Unsupported)?
+            .map_err(RarError::Unsupported)?;
+            raw
         };
         let crc = crc32fast::hash(&raw_data);
         let blake = self.entries[idx]
@@ -1214,14 +1220,20 @@ impl RarArchive {
         let raw_data = if hdr.comp_method == COMP_METHOD_STORE {
             payload.data
         } else {
-            compression::decompress(
+            let mut raw = Vec::new();
+            crate::codec::decode_to_writer(
                 &payload.data,
-                hdr.comp_method,
                 hdr.unpacked_size,
-                hdr.comp_dict_size,
-                Some(state),
+                crate::codec::DecodeOptions {
+                    dict_size_log: hdr.comp_dict_size,
+                    dict_size_bytes: hdr.dict_size_bytes,
+                    extra_dist: hdr.comp_version == 1,
+                    state: Some(state),
+                },
+                &mut raw,
             )
-            .map_err(RarError::Unsupported)?
+            .map_err(RarError::Unsupported)?;
+            raw
         };
         let crc = crc32fast::hash(&raw_data);
         let blake = self.entries[idx]
