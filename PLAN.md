@@ -5,13 +5,15 @@
 ## 现状
 
 - RAR5 创建/读取全功能对齐 WinRAR 7.23：压缩、`-hp` 头加密、分卷、solid、内联恢复记录、`.rev` 恢复卷、quick-open、NTFS ADS、三时间戳、owner；另含 RAR7 (v70) 读写、`-mt` 多线程压缩、长距离匹配。
+- **最优解析**（m2-m5 全部）：rars 移植的 forward shortest-path DP（每块收集一次匹配、按上一 pass 的 Huffman 表重新定价 3 次、LZMA BT4 tree finder 全程 + 历史种子、BlockSplitter 按字节分布切 64-128 KiB 块、每块独立表）。m3（默认）vs WinRAR 7.23：生成代码 -52%、XML -24%、文本 -13%、DLL +2-6%（此前 +3-23%）；m2 在 DLL 上已反超 WinRAR。所有输出 WinRAR 字节级可解。
+- **自动 x86 过滤器**：rars 移植的结构扫描（E8/E8E9 簇/跨度检测）自动应用于内存路径成员；过滤器成员按非 solid 写出。修复了 solid 链中过滤器位置的流式绝对/成员相对语义（unrar `WrittenFileSize` 为成员相对、区域定位为流绝对、E8 偏移按 16 MiB 取模）。
 - 命令面：官方 rar 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt` 列表变体）；开关矩阵见 `docs/SWITCH_MATRIX.md`（对照本机 RAR 7.23 实测）。
-- 工程：fmt/clippy `-D warnings` 双门（本地）、五目标 fuzz（`fuzz/`：parse/crypto/recovery/write/rewrite）、取消钩子、QO 快路径 `open_quick`、流式修复 `repair_archive_path`、零填充分卷集支持。
+- 工程：fmt/clippy `-D warnings` 双门（本地，含测试目标）、五目标 fuzz（`fuzz/`）、取消钩子、QO 快路径 `open_quick`、流式修复 `repair_archive_path`、零填充分卷集支持。
 - 架构：workspace `crates/rar`（库 crate `rar5`）+ `crates/rar-cli`（rar/unrar），按 rars 分层——词汇见 `CONTEXT.md`，迁移决策见 `docs/REFACTOR_MIRROR_RARS.md`，格式细节见 `docs/FORMAT_RAR5_RAR7.md`。
 
 ## 待办
 
-- （无）
+- **最优解析速度/等级梯子**（记录，未做）：当前 m2-m5 均为 rars 级速度（中大型可压缩文件约 8-48× 慢于 WinRAR，~1.5× rars 参考实现）。方向：按等级降 pass 数（m2/m3 用 1-2 次）、树窗口上限、快速提交阈值、链长调优——均已试验过（见 git 历史），留待系统性调优。
 
 ## 已取消 / 不做
 
@@ -21,6 +23,9 @@
 ## 已完成（要点）
 
 - [x] 过滤器只实现 0–3（Delta/E8/E8E9/ARM），未知类型显式报错——类型 4–7 现实归档中不存在
+- [x] **自动 x86 (E8/E8E9) 过滤器**：rars `x86_filter_scan` 移植（簇/跨度聚类 + 填充边界）；`encode_with_auto_x86_filter` 试 E8E9 与 E8 取小；内存路径成员（<64 MiB）自动应用；过滤器成员按非 solid 写出。实测 m5 DLL 差距从 21-23% 降到 6-14%（后由最优解析进一步收窄）
+- [x] **最优解析（m2-m5）**：rars `optimal_tokens`/`TokenPrices`/`BlockSplitter`/BT4 tree finder 移植；每块收集一次 + 3 次定价（首次估计、后两次用上一 pass 的真实表）；不可编码匹配（距离 bonus 使 raw < 2）在定价期拒绝；过滤器路径同样启用。实测 m3 默认级：code -52%、xml -24%、text -13%、DLL +2-6%
+- [x] 解码器修复：RAR5 过滤器位置为流绝对（solid 链），但 E8/ARM 变换偏移为成员相对（unrar `WrittenFileSize`），且 x86 偏移按 16 MiB 取模——此前 solid+filter 归档跨成员引用会 CRC 错（已用真实 WinRAR 归档验证）
 - [x] 大字典内存防护：读侧上限改为可配置 `ExtractOptions::max_dict_size`（默认 4 GiB，`-mdx` 语义；`None` = 不限），RAR7 v70 >4 GiB 字典按上限拒绝
 - [x] 字典：`-md` 全量语义（非法值报 Unknown option 与 WinRAR 一致）；默认 32 MiB；按 `min(-md, 2×floor_pow2(文件大小))` 裁剪；读侧上限 4 GiB（RAR5 格式上限）
 - [x] RAR7 (v70) 读+写：>4 GiB 字典（5 位+1/32 非幂编码）、DCX=80 扩展距离表、u64 距离；裁剪落回 ≤4 GiB 自动降级 v50；`CreateOptions::force_v70` 测试缝 + CLI `-ma7`（扩展：任意字典大小强制 v70，WinRAR 7.23 无此开关）——小字典 v70 已由真 WinRAR 验证可解（含修复 read() 路径丢失 dict_size_bytes/DCX 的 bug）
