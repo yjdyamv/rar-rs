@@ -472,14 +472,14 @@ fn cli_full_paths_ep2_ep3() {
     let rar = RarArchive::open(&archive).unwrap();
     let names = rar.namelist();
     assert_eq!(names.len(), 1, "{names:?}");
-    let stored = names[0];
+    let _stored = names[0];
     #[cfg(windows)]
     assert!(
-        !stored.starts_with([
+        !_stored.starts_with([
             'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q',
             'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'
-        ]) || !stored.contains(":/"),
-        "-ep2 must drop the drive letter: {stored}"
+        ]) || !_stored.contains(":/"),
+        "-ep2 must drop the drive letter: {_stored}"
     );
 
     let archive3 = dir.path().join("ep3.rar");
@@ -491,11 +491,11 @@ fn cli_full_paths_ep2_ep3() {
         .unwrap();
     assert!(status.success());
     let rar = RarArchive::open(&archive3).unwrap();
-    let stored = rar.namelist()[0];
+    let _stored = rar.namelist()[0];
     #[cfg(windows)]
     assert!(
-        stored.contains("_/") || stored.contains("_/"),
-        "-ep3 must keep the drive as X_: {stored}"
+        _stored.contains("_/") || _stored.contains("_/"),
+        "-ep3 must keep the drive as X_: {_stored}"
     );
 }
 

@@ -31,6 +31,10 @@ const LOADER_EXPORT_LINES = [
   'module.exports.repairArchive = __napiModule.exports.repairArchive',
   'module.exports.extractArchive = __napiModule.exports.extractArchive',
   'module.exports.listEntriesDetailed = __napiModule.exports.listEntriesDetailed',
+  'module.exports.listEntriesQuick = __napiModule.exports.listEntriesQuick',
+  'module.exports.readMember = __napiModule.exports.readMember',
+  'module.exports.rebuildMissingVolumes = __napiModule.exports.rebuildMissingVolumes',
+  'module.exports.testArchive = __napiModule.exports.testArchive',
 ]
 const LOADER_EXPORTS_CREATE_NEW = `const __wasiCreateArchive = __napiModule.exports.createArchive
 module.exports.createArchive = function __wasiCreateArchiveWrapper(
@@ -104,6 +108,48 @@ module.exports.listEntriesDetailed = function __wasiListEntriesDetailedWrapper(
     ...__wasiPathMap.mapListArgs(archivePath, password),
   )
 }`
+const LOADER_EXPORTS_LIST_QUICK_NEW = `const __wasiListEntriesQuick = __napiModule.exports.listEntriesQuick
+module.exports.listEntriesQuick = function __wasiListEntriesQuickWrapper(
+  archivePath,
+  password,
+) {
+  return __wasiListEntriesQuick(
+    ...__wasiPathMap.mapListArgs(archivePath, password),
+  )
+}`
+const LOADER_EXPORTS_READ_MEMBER_NEW = `const __wasiReadMember = __napiModule.exports.readMember
+module.exports.readMember = function __wasiReadMemberWrapper(
+  archivePath,
+  name,
+  password,
+) {
+  return __wasiReadMember(
+    __wasiPathMap.toGuestPath(archivePath),
+    name,
+    password,
+  )
+}`
+const LOADER_EXPORTS_REBUILD_NEW = `const __wasiRebuildMissingVolumes = __napiModule.exports.rebuildMissingVolumes
+module.exports.rebuildMissingVolumes = function __wasiRebuildMissingVolumesWrapper(
+  firstVolume,
+  onProgress,
+  signal,
+) {
+  return __wasiRebuildMissingVolumes(
+    __wasiPathMap.toGuestPath(firstVolume),
+    onProgress,
+    signal,
+  )
+}`
+const LOADER_EXPORTS_TEST_ARCHIVE_NEW = `const __wasiTestArchive = __napiModule.exports.testArchive
+module.exports.testArchive = function __wasiTestArchiveWrapper(
+  archivePath,
+  password,
+) {
+  return __wasiTestArchive(
+    ...__wasiPathMap.mapListArgs(archivePath, password),
+  )
+}`
 
 const WORKER_PREOPEN_OLD = `      preopens: {
         [__rootDir]: __rootDir,
@@ -141,6 +187,13 @@ function patchLoader(source) {
     LOADER_EXPORT_LINES[6],
     LOADER_EXPORTS_LIST_DETAILED_NEW,
   )
+  source = source.replace(LOADER_EXPORT_LINES[7], LOADER_EXPORTS_LIST_QUICK_NEW)
+  source = source.replace(LOADER_EXPORT_LINES[8], LOADER_EXPORTS_READ_MEMBER_NEW)
+  source = source.replace(
+    LOADER_EXPORT_LINES[9],
+    LOADER_EXPORTS_REBUILD_NEW,
+  )
+  source = source.replace(LOADER_EXPORT_LINES[10], LOADER_EXPORTS_TEST_ARCHIVE_NEW)
   return source
 }
 

@@ -3,13 +3,15 @@
 #[allow(dead_code)] // used by the `rar` binary only
 pub fn read_rarfiles_lst() -> Vec<Option<String>> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    // Next to the executable, like the official rar/winrar lookup
+    // (Windows and Unix alike; the test writes it next to the binary).
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("rarfiles.lst"));
+    }
     #[cfg(windows)]
     {
-        if let Ok(exe) = std::env::current_exe()
-            && let Some(dir) = exe.parent()
-        {
-            candidates.push(dir.join("rarfiles.lst"));
-        }
         if let Some(appdata) = std::env::var_os("APPDATA") {
             candidates.push(
                 std::path::PathBuf::from(appdata)
