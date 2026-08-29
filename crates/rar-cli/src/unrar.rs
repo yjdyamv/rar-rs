@@ -94,6 +94,12 @@ struct ExtractArgs {
     archive: String,
     #[arg(value_name = "DEST")]
     dest: Option<String>,
+    /// One or more member names to extract; when omitted, every file member
+    /// is extracted (or, with `-so`, written to stdout). WinRAR matches the
+    /// full stored path, so a basename also selects the member. Member names
+    /// follow the optional destination directory, like `x archive dest name`.
+    #[arg(value_name = "NAMES", trailing_var_arg = true)]
+    names: Vec<String>,
     /// Output path for extracted files (like `-op<path>`; overrides
     /// the DEST argument when both are given)
     #[arg(long = "output-path", value_name = "PATH")]
@@ -122,6 +128,11 @@ struct ExtractArgs {
         value_parser = ["always", "never"]
     )]
     overwrite: Option<String>,
+    /// Extract to stdout instead of writing files (like `-so`); convenient
+    /// for piping a member's contents. All file members are concatenated to
+    /// stdout (directories are skipped).
+    #[arg(long = "stdout")]
+    stdout: bool,
 }
 
 fn parse_threads(s: &str) -> Result<usize, String> {
@@ -332,6 +343,12 @@ fn cmd_extract(
     let dest = output::extract_dest(&base, &args.archive, args.append_dir);
     let mut rar = open_archive(&args.archive, password)?;
 
+    // `-so`: write the extracted members to stdout (one stream) instead of
+    // to disk — handy for piping. Directories carry no data.
+    if args.stdout {
+        return extract_to_stdout(&mut rar, &args.names);
+    }
+
     let count = rar.list().len();
     rar.extract_all_with_options(
         &dest,
@@ -357,6 +374,49 @@ fn cmd_extract(
     Ok(())
 }
 
+/// Extract every file member of an archive to stdout, concatenated, like
+/// `rar/unrar x -so`. Informational messages are suppressed so the stream
+/// stays clean.
+fn extract_to_stdout(rar: &mut rar5::RarArchive, names: &[String]) -> Result<(), String> {
+    use std::io::Write;
+    let members: Vec<String> = rar
+        .list()
+        .iter()
+        .filter(|e| !e.is_dir())
+        .map(|e| e.name().to_string())
+        .collect();
+    let mut wanted: Vec<String> = Vec::new();
+    if names.is_empty() {
+        wanted = members;
+    } else {
+        for m in &members {
+            if names
+                .iter()
+                .any(|n| m == n || m.ends_with(&format!("/{n}")) || n.ends_with(m))
+            {
+                wanted.push(m.clone());
+            }
+        }
+    }
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for name in &wanted {
+        let data = rar
+            .read_with_options(
+                name,
+                rar5::ExtractOptions {
+                    max_unpacked_bytes: None,
+                    max_total_unpacked_bytes: None,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| format!("read {name}: {e}"))?;
+        out.write_all(&data).map_err(|e| format!("stdout: {e}"))?;
+    }
+    out.flush().map_err(|e| format!("stdout: {e}"))?;
+    Ok(())
+}
+
 fn cmd_extract_flat(
     args: &ExtractArgs,
     password: Option<&str>,
@@ -370,6 +430,9 @@ fn cmd_extract_flat(
         .unwrap_or_else(|| ".".to_string());
     let dest = output::extract_dest(&base, &args.archive, args.append_dir);
     let mut rar = open_archive(&args.archive, password)?;
+    if args.stdout {
+        return extract_to_stdout(&mut rar, &args.names);
+    }
     rar.extract_all_with_options(
         &dest,
         rar5::ExtractOptions {

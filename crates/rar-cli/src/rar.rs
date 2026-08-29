@@ -197,6 +197,12 @@ struct ExtractArgs {
     archive: String,
     #[arg(value_name = "DEST", default_value = ".")]
     dest: String,
+    /// One or more member names to extract; when omitted, every file member
+    /// is extracted (or, with `-so`, written to stdout). WinRAR matches the
+    /// full stored path, so a basename also selects the member. Member names
+    /// follow the optional destination directory, like `x archive dest name`.
+    #[arg(value_name = "NAMES", trailing_var_arg = true)]
+    names: Vec<String>,
     /// Compression threads (like `-mt<N>`; also used for extraction)
     #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
     threads: Option<usize>,
@@ -211,6 +217,11 @@ struct ExtractArgs {
         value_parser = ["always", "never"]
     )]
     overwrite: Option<String>,
+    /// Extract to stdout instead of writing files (like `-so`); convenient
+    /// for piping a member's contents. All file members are concatenated to
+    /// stdout (directories are skipped).
+    #[arg(long = "stdout")]
+    stdout: bool,
 }
 
 /// Archive path plus one or more source files.
@@ -306,6 +317,18 @@ struct CreateArgs {
     /// Solid archive
     #[arg(short = 's', long)]
     solid: bool,
+    /// Split the solid chain (WinRAR `-s` modifiers `-sd`/`-sv`/`-se`).
+    /// `continuous` (default, like `-sd`) keeps the statistics across the
+    /// whole archive; `volume` resets them at each volume boundary (like
+    /// `-sv`); `extension` resets when the member's file extension changes
+    /// (like `-se`). Implies `-s`.
+    #[arg(
+        long = "solid-reset",
+        value_name = "MODE",
+        default_value = "continuous",
+        value_parser = ["continuous", "volume", "extension"]
+    )]
+    solid_reset: String,
     /// BLAKE2sp hash records
     #[arg(long = "blake2")]
     blake2: bool,
@@ -797,8 +820,16 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         dict_size_log,
         dict_size_bytes,
     )?;
+    let solid_reset = match args.solid_reset.as_str() {
+        "volume" => rar5::SolidReset::PerVolume,
+        "extension" => rar5::SolidReset::PerExtension,
+        _ => rar5::SolidReset::Continuous,
+    };
     let opts = rar5::CreateOptions {
-        solid: args.solid || args.solid_params.is_some(),
+        solid: args.solid
+            || args.solid_params.is_some()
+            || solid_reset != rar5::SolidReset::Continuous,
+        solid_reset,
         quick_open: args.quick_open,
         blake2: args.blake2,
         password: password.clone(),
@@ -1029,6 +1060,17 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     let (file_entries, dir_entries): (Vec<_>, Vec<_>) =
         collected.into_iter().partition(|c| !c.is_dir);
     let mut collected: Vec<_> = file_entries;
+    // WinRAR `-se`: group the solid chain by file extension (the dominant
+    // compression-parity effect of resetting the statistics on an
+    // extension change). `maybe_reset_solid_for_extension` in the writer
+    // performs the actual reset as members of a new extension are added.
+    if solid_reset == rar5::SolidReset::PerExtension {
+        collected.sort_by_key(|c| {
+            let base = c.name.trim_end_matches('/');
+            let ext = base.rsplit('.').next().unwrap_or("");
+            ext.to_ascii_lowercase()
+        });
+    }
     // rarfiles.lst: user-defined add order for solid archives (mask list
     // with optional `$default`); matched files are grouped by the
     // highest-priority mask, where a mask whose matches are a subset of
@@ -1996,6 +2038,11 @@ fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
             .map_err(|e| format!("open: {e}"))?,
         None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
+    // `-so`: write the extracted members to stdout (one stream) instead of
+    // to disk — handy for piping. Directories carry no data.
+    if args.stdout {
+        return extract_to_stdout(&mut rar, &args.names);
+    }
     let count = rar.list().len();
     rar.extract_all_with_options(
         &dest,
@@ -2006,6 +2053,49 @@ fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
     )
     .map_err(|e| format!("{e}"))?;
     info!("Extracted {count} file(s) to {}", dest.display());
+    Ok(())
+}
+
+/// Extract every file member of an archive to stdout, concatenated, like
+/// `rar/unrar x -so`. Informational messages are suppressed so the stream
+/// stays clean.
+fn extract_to_stdout(rar: &mut rar5::RarArchive, names: &[String]) -> Result<(), String> {
+    use std::io::Write;
+    let members: Vec<String> = rar
+        .list()
+        .iter()
+        .filter(|e| !e.is_dir())
+        .map(|e| e.name().to_string())
+        .collect();
+    let mut wanted: Vec<String> = Vec::new();
+    if names.is_empty() {
+        wanted = members;
+    } else {
+        for m in &members {
+            if names
+                .iter()
+                .any(|n| m == n || m.ends_with(&format!("/{n}")) || n.ends_with(m))
+            {
+                wanted.push(m.clone());
+            }
+        }
+    }
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for name in &wanted {
+        let data = rar
+            .read_with_options(
+                name,
+                rar5::ExtractOptions {
+                    max_unpacked_bytes: None,
+                    max_total_unpacked_bytes: None,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| format!("read {name}: {e}"))?;
+        out.write_all(&data).map_err(|e| format!("stdout: {e}"))?;
+    }
+    out.flush().map_err(|e| format!("stdout: {e}"))?;
     Ok(())
 }
 
@@ -2029,6 +2119,9 @@ fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
             .map_err(|e| format!("open: {e}"))?,
         None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
+    if args.stdout {
+        return extract_to_stdout(&mut rar, &args.names);
+    }
     let count = rar.list().len();
     rar.extract_all_with_options(
         &dest,

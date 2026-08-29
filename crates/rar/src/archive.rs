@@ -426,6 +426,11 @@ pub struct RarArchive {
     pub(crate) progress_member: usize,
     /// Create a solid archive (shared LZ window across compressed members).
     pub(crate) solid_mode: bool,
+    /// How the solid chain is split (WinRAR `-s` modifiers `-sd`/`-sv`/`-se`).
+    pub(crate) solid_reset: crate::options::SolidReset,
+    /// File extension of the last member added to the solid chain; used by
+    /// `SolidReset::PerExtension` to detect when to reset the statistics.
+    pub(crate) last_solid_ext: Option<String>,
     /// Write a quick-open ("QO") service record at close time.
     pub(crate) quick_open: bool,
     /// Write BLAKE2sp hash records for members.
@@ -573,6 +578,8 @@ impl RarArchive {
             progress: None,
             progress_member: 0,
             solid_mode: false,
+            solid_reset: crate::options::SolidReset::Continuous,
+            last_solid_ext: None,
             quick_open: false,
             blake2: false,
             quick_open_entries: Vec::new(),
@@ -1085,6 +1092,8 @@ impl RarArchive {
             progress: None,
             progress_member: 0,
             solid_mode: opts.solid,
+            solid_reset: opts.solid_reset,
+            last_solid_ext: None,
             quick_open,
             blake2: opts.blake2,
             quick_open_entries: Vec::new(),
@@ -1748,6 +1757,12 @@ impl RarArchive {
     }
 
     pub(crate) fn start_next_volume(&mut self) -> RarResult<()> {
+        // WinRAR `-sv`: always reset the solid statistics at the start of a
+        // new volume so each volume is an independent solid group.
+        if self.solid_mode && self.solid_reset == crate::options::SolidReset::PerVolume {
+            self.encoder_state = None;
+            self.last_solid_ext = None;
+        }
         self.write_end_block_flags(true)?;
         // Close current volume
         self.stream = None;

@@ -4,11 +4,39 @@
 ///
 /// All fields default to the plain unencrypted single-volume create
 /// behavior; enable only the features you need.
+/// How the solid compression chain is split (WinRAR `-s` modifiers).
+///
+/// A solid archive packs several consecutive members as one continuous LZ
+/// stream. Resetting the statistics (clearing the shared window / Huffman
+/// tables) between groups typically lowers compression but speeds access to
+/// individual members and improves damage resistance. `Continuous` matches
+/// this implementation's default (and WinRAR's `-sd`): the statistics are
+/// kept across the whole archive, including volume boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SolidReset {
+    /// Keep the solid statistics across the whole archive (WinRAR `-sd`).
+    #[default]
+    Continuous,
+    /// Always reset the solid statistics at the start of each new volume
+    /// (WinRAR `-sv`). Single-volume archives are unaffected.
+    PerVolume,
+    /// Reset the solid statistics whenever the file extension of the next
+    /// member changes (WinRAR `-se`); members sharing an extension stay in
+    /// one group.
+    PerExtension,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateOptions {
     /// Create a solid archive: consecutive compressed members share one
     /// LZ window (better ratio, slower random access). Single-volume only.
     pub solid: bool,
+    /// How the solid chain is split (WinRAR `-s` modifiers `-sd`/`-sv`/`-se`).
+    /// `Continuous` keeps the statistics across the whole archive (the
+    /// default); `PerVolume` resets at every volume boundary; `PerExtension`
+    /// resets when the member's file extension changes. Non-solid archives
+    /// ignore this.
+    pub solid_reset: SolidReset,
     /// Add a RAR5 quick-open ("QO") service record containing a copy of
     /// every file header. Only effective for single-volume archives
     /// without header encryption.
@@ -83,6 +111,7 @@ impl Default for CreateOptions {
     fn default() -> Self {
         Self {
             solid: false,
+            solid_reset: SolidReset::Continuous,
             quick_open: false,
             blake2: false,
             password: None,

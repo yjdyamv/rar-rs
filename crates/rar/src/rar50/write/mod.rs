@@ -494,13 +494,10 @@ impl RarArchive {
         .map_err(RarError::Unsupported)?
         {
             Some(f) => Some(f),
-            None => compression::encode_with_auto_x86_filter(
-                &whole,
-                method,
-                dsl,
-                dict_bytes.is_some(),
-            )
-            .map_err(RarError::Unsupported)?,
+            None => {
+                compression::encode_with_auto_x86_filter(&whole, method, dsl, dict_bytes.is_some())
+                    .map_err(RarError::Unsupported)?
+            }
         };
         if let Some(filtered) = filtered
             && (filtered.len() as u64) < file_size
@@ -548,6 +545,8 @@ impl RarArchive {
         // members). The persistent state also carries the long-range match
         // history across chunk boundaries (WinRAR's `-mcl` long range
         // search).
+        // WinRAR `-se`: reset the solid statistics when the extension changes.
+        self.maybe_reset_solid_for_extension(&name);
         let chain_solid = self.solid_mode && self.encoder_state.is_some();
         self.encoder_state.get_or_insert_with(Default::default);
 
@@ -851,6 +850,8 @@ impl RarArchive {
                 method,
                 self.force_v70,
             );
+            // WinRAR `-se`: reset the solid statistics when the extension changes.
+            self.maybe_reset_solid_for_extension(&name);
             let chain_solid = self.solid_mode && self.encoder_state.is_some();
             if self.solid_mode {
                 self.encoder_state.get_or_insert_with(Default::default);
@@ -1234,45 +1235,45 @@ impl RarArchive {
                     Some(filtered) if filtered.len() < data.len() => filtered,
                     _ => {
                         let mut packed = Vec::new();
-                    let mut processed = 0u64;
-                    for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
-                        if ctx
-                            .cancel
-                            .as_ref()
-                            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
-                        {
-                            return Err(RarError::Cancelled);
+                        let mut processed = 0u64;
+                        for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
+                            if ctx
+                                .cancel
+                                .as_ref()
+                                .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+                            {
+                                return Err(RarError::Cancelled);
+                            }
+                            // Same finality rule as add_file's streaming loop:
+                            // the last chunk is final even when it fills the
+                            // whole 4 MiB slice (an exact-multiple member must
+                            // still mark its closing block).
+                            let is_final = processed + chunk.len() as u64 >= total;
+                            let compressed = compression::compress_chunked(
+                                chunk,
+                                method,
+                                dsl,
+                                crate::codec::DEFAULT_CHUNK_SIZE,
+                                Some(&mut state),
+                                is_final,
+                                None,
+                                dict_bytes.is_some(),
+                            )
+                            .map_err(RarError::Unsupported)?;
+                            packed.extend(compressed);
+                            processed += chunk.len() as u64;
+                            if let Some(progress) = progress {
+                                progress
+                                    .lock()
+                                    .expect("progress lock")
+                                    .report(member, processed, total);
+                            }
+                            if packed.len() >= data.len() {
+                                break;
+                            }
                         }
-                        // Same finality rule as add_file's streaming loop:
-                        // the last chunk is final even when it fills the
-                        // whole 4 MiB slice (an exact-multiple member must
-                        // still mark its closing block).
-                        let is_final = processed + chunk.len() as u64 >= total;
-                        let compressed = compression::compress_chunked(
-                            chunk,
-                            method,
-                            dsl,
-                            crate::codec::DEFAULT_CHUNK_SIZE,
-                            Some(&mut state),
-                            is_final,
-                            None,
-                            dict_bytes.is_some(),
-                        )
-                        .map_err(RarError::Unsupported)?;
-                        packed.extend(compressed);
-                        processed += chunk.len() as u64;
-                        if let Some(progress) = progress {
-                            progress
-                                .lock()
-                                .expect("progress lock")
-                                .report(member, processed, total);
-                        }
-                        if packed.len() >= data.len() {
-                            break;
-                        }
+                        packed
                     }
-                    packed
-                }
                 },
             }
         } else {
@@ -1718,6 +1719,27 @@ impl RarArchive {
     /// files, or when compression fell back to STORE).
     fn reset_solid_chain(&mut self) {
         self.encoder_state = None;
+        self.last_solid_ext = None;
+    }
+
+    /// Reset the solid chain when the next member's file extension differs
+    /// from the previous one (WinRAR `-se`). No-op unless solid mode is on
+    /// and `solid_reset` is `PerExtension`. Directories and STORE members
+    /// break the chain through `reset_solid_chain`, which also clears
+    /// `last_solid_ext`, so this only needs to run for compressed members.
+    pub(crate) fn maybe_reset_solid_for_extension(&mut self, name: &str) {
+        if !self.solid_mode || self.solid_reset != crate::options::SolidReset::PerExtension {
+            return;
+        }
+        let base = name.trim_end_matches('/');
+        let ext = base.rsplit('.').next().unwrap_or("");
+        match &self.last_solid_ext {
+            Some(prev) if prev == ext => {}
+            _ => {
+                self.encoder_state = None;
+                self.last_solid_ext = Some(ext.to_string());
+            }
+        }
     }
 
     /// Build the header CRC, extra-area records (encryption + BLAKE2sp)
@@ -2188,6 +2210,8 @@ impl RarArchive {
         // non-solid archives, where the window is reset between members.
         // This is what makes >64 KiB match distances (WinRAR `-mcl`
         // long range search) work for large files.
+        // WinRAR `-se`: reset the solid statistics when the extension changes.
+        self.maybe_reset_solid_for_extension(name);
         let chain_solid = self.solid_mode && self.encoder_state.is_some();
         self.encoder_state.get_or_insert_with(Default::default);
 

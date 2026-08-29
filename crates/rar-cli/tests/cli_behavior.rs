@@ -1853,3 +1853,161 @@ fn cli_archive_format_ma_switch() {
         );
     }
 }
+
+// ── -so (extract to stdout), -se/-sv/-sd (solid split), -mct/-mcd ──────────
+
+/// `-so` writes the extracted member(s) to stdout instead of to disk, which
+/// is convenient for piping. All file members are concatenated in archive
+/// order; directories carry no data and are skipped.
+#[test]
+fn cli_stdout_extract_writes_members_to_stdout() {
+    let dir = make_temp_dir();
+    let f = dir.path().join("f.txt");
+    let g = dir.path().join("g.bin");
+    std::fs::write(&f, b"stdout payload one").unwrap();
+    std::fs::write(&g, vec![0x5u8; 128]).unwrap();
+    let archive = dir.path().join("so.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .arg("g.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // Single member is extracted byte-for-byte to stdout. With a destination
+    // directory given first (WinRAR semantics: `x archive dest name`), the
+    // trailing token is treated as a member name rather than a destination.
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["x", "-so"])
+        .arg(&archive)
+        .arg(".")
+        .arg("f.txt")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"stdout payload one");
+
+    // All members concatenated to stdout with `unrar x -so`.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_unrar"))
+        .args(["x", "-so", "-idq"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    // Archive order is f.txt then g.bin; the stream is their concatenation.
+    let mut expected = b"stdout payload one".to_vec();
+    expected.extend_from_slice(&[0x5u8; 128]);
+    assert_eq!(out.stdout, expected, "-so must concatenate all members");
+}
+
+/// `-se` / `-sv` / `-sd` (WinRAR `-s` modifiers that split the solid chain)
+/// are accepted and behave: `-sd` keeps the statistics across the archive
+/// (default), `-sv` resets them at every volume boundary, `-se` resets on a
+/// file-extension change. All must round-trip byte-identically.
+#[test]
+fn cli_solid_reset_switches_accepted_and_roundtrip() {
+    let dir = make_temp_dir();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.bin");
+    let c = dir.path().join("c.txt");
+    std::fs::write(&a, b"alpha text block ".repeat(20_000)).unwrap();
+    std::fs::write(&b, vec![0xABu8; 2_000_000]).unwrap();
+    std::fs::write(&c, b"gamma text block ".repeat(20_000)).unwrap();
+
+    // `-sd` (continuous, the default) solid archive: accepted, round-trips.
+    let sd = dir.path().join("sd.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-s", "-sd", "-idq"])
+        .arg(&sd)
+        .arg("a.txt")
+        .arg("b.bin")
+        .arg("c.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "-sd must be accepted");
+    let mut rar = rar5::RarArchive::open(&sd).unwrap();
+    assert_eq!(rar.read("a.txt").unwrap(), std::fs::read(&a).unwrap());
+    assert_eq!(rar.read("b.bin").unwrap(), std::fs::read(&b).unwrap());
+    assert_eq!(rar.read("c.txt").unwrap(), std::fs::read(&c).unwrap());
+
+    // `-se` (reset on extension change): accepted, round-trips.
+    let se = dir.path().join("se.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-s", "-se", "-idq"])
+        .arg(&se)
+        .arg("a.txt")
+        .arg("b.bin")
+        .arg("c.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "-se must be accepted");
+    let mut rar = rar5::RarArchive::open(&se).unwrap();
+    assert_eq!(rar.read("a.txt").unwrap(), std::fs::read(&a).unwrap());
+    assert_eq!(rar.read("b.bin").unwrap(), std::fs::read(&b).unwrap());
+    assert_eq!(rar.read("c.txt").unwrap(), std::fs::read(&c).unwrap());
+
+    // `-sv` (reset at each volume boundary): multi-volume, byte-exact
+    // non-final volumes, and a full round-trip.
+    let sv = dir.path().join("sv.rar");
+    let vol = 1024 * 1024u64;
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-s", "-sv", "-m0", "--volume-size=1m", "-idq"])
+        .arg(&sv)
+        .arg("a.txt")
+        .arg("b.bin")
+        .arg("c.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "-sv must be accepted");
+    let volumes = rar5::discover_volumes(&sv);
+    assert!(
+        volumes.len() >= 3,
+        "expected several volumes, got {}",
+        volumes.len()
+    );
+    for v in &volumes[..volumes.len() - 1] {
+        assert_eq!(
+            std::fs::metadata(v).unwrap().len(),
+            vol,
+            "-sv non-final volume {} must be exactly {vol} bytes",
+            v.display()
+        );
+    }
+    let mut rar = rar5::RarArchive::open(&volumes[0]).unwrap();
+    assert_eq!(rar.read("a.txt").unwrap(), std::fs::read(&a).unwrap());
+    assert_eq!(rar.read("b.bin").unwrap(), std::fs::read(&b).unwrap());
+    assert_eq!(rar.read("c.txt").unwrap(), std::fs::read(&c).unwrap());
+}
+
+/// `-mct` / `-mcd` (advanced compression sub-switches) are accepted without
+/// changing the outcome. WinRAR recognizes them; mapping them through the
+/// existing `-mc` no-op keeps our CLI parity-complete.
+#[test]
+fn cli_mct_mcd_accepted_as_noops() {
+    let dir = make_temp_dir();
+    let file = dir.path().join("p.txt");
+    std::fs::write(&file, b"advanced compression switch payload").unwrap();
+    for sw in ["-mct", "-mcd"] {
+        let archive = dir.path().join(format!("mc{sw}.rar"));
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", sw, "-idq"])
+            .arg(&archive)
+            .arg("p.txt")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{sw} must be accepted");
+        let mut rar = rar5::RarArchive::open(&archive).unwrap();
+        assert_eq!(
+            rar.read("p.txt").unwrap(),
+            b"advanced compression switch payload",
+            "{sw} must not alter the payload"
+        );
+    }
+}

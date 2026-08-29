@@ -251,12 +251,12 @@ fn write_correlated_pcm(path: &Path, channels: usize, samples: usize) {
     let mut state = 0xABCDEF01u64;
     let mut buf = Vec::with_capacity(channels * samples * 2);
     for _ in 0..samples {
-        for c in 0..channels {
+        for v in &mut val {
             state ^= state >> 12;
             state ^= state << 25;
             state ^= state >> 27;
-            val[c] += ((state >> 33) as u32 % 8) as i32 - 4;
-            buf.extend_from_slice(&(val[c] as i16).to_le_bytes());
+            *v += ((state >> 33) as u32 % 8) as i32 - 4;
+            buf.extend_from_slice(&(*v as i16).to_le_bytes());
         }
     }
     std::fs::write(path, &buf).unwrap();
@@ -317,7 +317,10 @@ fn unrar_reads_our_delta_filtered_output() {
     let dest = dir.path().join("out");
     std::fs::create_dir_all(&dest).unwrap();
     let (ok, out) = unrar_extract(&arc, &dest, None);
-    assert!(ok, "UnRAR failed to extract our delta-filtered archive:\n{out}");
+    assert!(
+        ok,
+        "UnRAR failed to extract our delta-filtered archive:\n{out}"
+    );
     assert_eq!(
         file_sha256(&dest.join("audio.bin")),
         file_sha256(&src),
@@ -349,15 +352,13 @@ fn rar_rs_reads_winrar_delta_filtered_wav() {
     write_wav(&src, 2, 120_000);
 
     let arc = dir.path().join("winrar-delta.rar");
-    let (ok, out) = run(
-        Command::new(rar_bin().unwrap())
-            .arg("a")
-            .arg("-m5")
-            .arg("-idq")
-            .arg(&arc)
-            .arg("sample.wav")
-            .current_dir(dir.path()),
-    );
+    let (ok, out) = run(Command::new(rar_bin().unwrap())
+        .arg("a")
+        .arg("-m5")
+        .arg("-idq")
+        .arg(&arc)
+        .arg("sample.wav")
+        .current_dir(dir.path()));
     assert!(ok, "WinRAR failed to create the archive:\n{out}");
 
     // Our reader must extract WinRAR's delta-filtered WAV byte-for-byte. Look
@@ -1724,4 +1725,617 @@ fn cli_ma7_archives_decode_with_winrar() {
         file_sha256(&src),
         "WinRAR extracted different bytes"
     );
+}
+
+// ── Phase 2.2: extended interaction matrix ───────────────────────────────
+//
+// Combinations called out as "untested but cheap to expose real byte-level
+// deviations": filter + encrypted header, filter + multi-volume, RAR5 vs
+// RAR7, recovery record + encryption, symlinks / ADS streams, >4 GiB single
+// file, and the solid + filter boundary. Every direction is gated on a real
+// WinRAR install so the default `cargo test` suite still runs anywhere.
+
+/// Filter (delta/x86) + encrypted header (`-hp`): both directions.
+///
+/// WinRAR creates a delta-filtered WAV under a `-hp` archive; rar-rs must
+/// decrypt the headers and decode the delta filter byte-for-byte. rar-rs
+/// creates a delta-filtered member under header encryption; WinRAR's
+/// `UnRAR` must test and extract it byte-for-byte (it needs the password).
+#[test]
+fn filtered_member_with_encrypted_header_interops() {
+    let dir = temp_dir();
+    let src = dir.path().join("audio.wav");
+    write_wav(&src, 2, 120_000);
+
+    // WinRAR -> ours (header-encrypted, delta-filtered).
+    if let Some(rar) = rar_bin() {
+        let arc = dir.path().join("win_hp.rar");
+        let (ok, out) = run(Command::new(&rar)
+            .args(["a", "-hpsecret", "-m5", "-idq"])
+            .arg(&arc)
+            .arg("audio.wav")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR -hp delta failed:\n{out}");
+        let mut ar = RarArchive::open_with_password(&arc, "secret").unwrap();
+        let name = ar.namelist()[0].to_string();
+        assert_eq!(
+            ar.read(&name).unwrap(),
+            std::fs::read(&src).unwrap(),
+            "rar-rs read a different WAV from WinRAR's -hp archive"
+        );
+    }
+
+    // Ours -> WinRAR (header-encrypted, auto-delta-filtered).
+    let arc = dir.path().join("ours_hp.rar");
+    {
+        let mut rar = RarArchive::create_with_options(
+            &arc,
+            rar5::CreateOptions {
+                password: Some("secret".into()),
+                encrypt_headers: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&src, 5).unwrap();
+        rar.close().unwrap();
+    }
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&arc, Some("secret"));
+        assert!(ok, "UnRAR rejected our -hp delta archive:\n{out}");
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        let (ok, out) = unrar_extract(&arc, &dest, Some("secret"));
+        assert!(ok, "UnRAR failed to extract our -hp delta archive:\n{out}");
+        assert_eq!(
+            file_sha256(&dest.join("audio.wav")),
+            file_sha256(&src),
+            "WinRAR extracted different bytes from our -hp delta archive"
+        );
+    }
+}
+
+/// Filter (delta/x86) + multi-volume (`-v`): both directions.
+#[test]
+fn filtered_member_with_multivolume_interops() {
+    let dir = temp_dir();
+    // A 20 MiB correlated-PCM WAV: compresses hard (delta filter) and spans
+    // several 4 MiB volumes, exercising the filter + volume-boundary path.
+    let src = dir.path().join("big.wav");
+    write_wav(&src, 2, 2_500_000);
+    let vol_size = 4 * 1024 * 1024;
+
+    // WinRAR -> ours (delta-filtered, multi-volume).
+    if let Some(rar) = rar_bin() {
+        let arc = dir.path().join("win_fv.rar");
+        let (ok, out) = run(Command::new(&rar)
+            .args(["a", "-m5", "-v4m", "-idq"])
+            .arg(&arc)
+            .arg("big.wav")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR -v delta failed:\n{out}");
+        let volumes = rar5::discover_volumes(&arc);
+        let mut ar = RarArchive::open(&volumes[0]).unwrap();
+        let name = ar.namelist()[0].to_string();
+        assert_eq!(
+            ar.read(&name).unwrap(),
+            std::fs::read(&src).unwrap(),
+            "rar-rs read a different WAV from WinRAR's multi-volume delta archive"
+        );
+    }
+
+    // Ours -> WinRAR (auto-delta-filtered, multi-volume).
+    let arc = dir.path().join("ours_fv.rar");
+    {
+        let mut rar = RarArchive::create_with_options(
+            &arc,
+            rar5::CreateOptions {
+                volume_size: Some(vol_size),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&src, 5).unwrap();
+        rar.close().unwrap();
+    }
+    let volumes = rar5::discover_volumes(&arc);
+    assert!(
+        volumes.len() >= 3,
+        "expected several volumes, got {}",
+        volumes.len()
+    );
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&volumes[0], None);
+        assert!(ok, "UnRAR rejected our multi-volume delta archive:\n{out}");
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        let (ok, out) = unrar_extract(&volumes[0], &dest, None);
+        assert!(
+            ok,
+            "UnRAR failed to extract our multi-volume delta archive:\n{out}"
+        );
+        assert_eq!(
+            file_sha256(&dest.join("big.wav")),
+            file_sha256(&src),
+            "WinRAR extracted different bytes from our multi-volume delta archive"
+        );
+    }
+}
+
+/// RAR5 (v50) vs RAR7 (v70) for the *same* data: both must decode
+/// byte-for-byte with WinRAR, and the v70 member must carry `comp_version`
+/// 1. This is the byte-level guarantee behind the "RAR5 vs RAR7" parity claim.
+#[test]
+fn rar5_vs_rar7_same_data_decode_everywhere() {
+    let Some(_unrar) = unrar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("cmp.bin");
+    write_pattern_file(&src, 6 * 1024 * 1024, 23);
+
+    // RAR5 (default).
+    let v50 = dir.path().join("v50.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-idq"])
+        .arg(&v50)
+        .arg("cmp.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "rar a (v50) failed:\n{out}");
+    // RAR7 (v70) forced at small scale.
+    let v70 = dir.path().join("v70.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma7", "-idq"])
+        .arg(&v70)
+        .arg("cmp.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "rar a -ma7 failed:\n{out}");
+
+    let e50 = {
+        let mut ar = RarArchive::open(&v50).unwrap();
+        let n = ar.namelist()[0].to_string();
+        let e = ar.get_entry(&n).unwrap();
+        assert_eq!(e.header.comp_version, 0, "v50 must stay comp_version 0");
+        ar.read(&n).unwrap()
+    };
+    let e70 = {
+        let mut ar = RarArchive::open(&v70).unwrap();
+        let n = ar.namelist()[0].to_string();
+        let e = ar.get_entry(&n).unwrap();
+        assert_eq!(e.header.comp_version, 1, "v70 must be comp_version 1");
+        ar.read(&n).unwrap()
+    };
+    // Both encode the same source; decoded bytes must match the source.
+    assert_eq!(e50, std::fs::read(&src).unwrap(), "v50 decoded mismatch");
+    assert_eq!(e70, std::fs::read(&src).unwrap(), "v70 decoded mismatch");
+
+    // WinRAR must decode both byte-for-byte.
+    let v50_out = dir.path().join("out_v50");
+    let v70_out = dir.path().join("out_v70");
+    std::fs::create_dir_all(&v50_out).unwrap();
+    std::fs::create_dir_all(&v70_out).unwrap();
+    for (arc, dest) in [(&v50, &v50_out), (&v70, &v70_out)] {
+        let (ok, out) = unrar_extract(arc, dest, None);
+        assert!(ok, "UnRAR failed on {arc:?}:\n{out}");
+        // The member is stored flat as `cmp.bin`, so it extracts directly.
+        let extracted = dest.join("cmp.bin");
+        assert_eq!(
+            file_sha256(&extracted),
+            file_sha256(&src),
+            "WinRAR extracted different bytes from {arc:?}"
+        );
+    }
+}
+
+/// Recovery record (`-rr`) + encryption (`-p`): both directions. Single
+/// volume only (WinRAR forbids inline recovery records on multi-volume
+/// sets, which use `.rev` instead).
+#[test]
+fn recovery_record_with_encryption_interops() {
+    let dir = temp_dir();
+    let src = dir.path().join("rr.bin");
+    write_pattern_file(&src, 3 * 1024 * 1024, 31);
+
+    // WinRAR -> ours: -rr + -p, then we read with the password.
+    if let Some(rar) = rar_bin() {
+        let arc = dir.path().join("win_rr.rar");
+        let (ok, out) = run(Command::new(&rar)
+            .args(["a", "-rr", "-psecret", "-idq"])
+            .arg(&arc)
+            .arg("rr.bin")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR -rr -p failed:\n{out}");
+        let mut ar = RarArchive::open_with_password(&arc, "secret").unwrap();
+        let name = ar.namelist()[0].to_string();
+        assert_eq!(
+            ar.read(&name).unwrap(),
+            std::fs::read(&src).unwrap(),
+            "rar-rs read a different file from WinRAR's -rr -p archive"
+        );
+    }
+
+    // Ours -> WinRAR: recovery_percent + password.
+    let arc = dir.path().join("ours_rr.rar");
+    {
+        let mut rar = RarArchive::create_with_options(
+            &arc,
+            rar5::CreateOptions {
+                password: Some("secret".into()),
+                recovery_percent: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&src, 3).unwrap();
+        rar.close().unwrap();
+    }
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&arc, Some("secret"));
+        assert!(ok, "UnRAR rejected our -rr -p archive:\n{out}");
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        let (ok, out) = unrar_extract(&arc, &dest, Some("secret"));
+        assert!(ok, "UnRAR failed to extract our -rr -p archive:\n{out}");
+        assert_eq!(
+            file_sha256(&dest.join("rr.bin")),
+            file_sha256(&src),
+            "WinRAR extracted different bytes from our -rr -p archive"
+        );
+    }
+}
+
+/// Solid chain with a filtered (delta/x86) member at the boundary: both
+/// directions. A filtered member must be written standalone (non-solid)
+/// even inside a solid archive, so the neighbours must still decode
+/// byte-for-byte.
+#[test]
+fn solid_chain_with_filtered_boundary_interops() {
+    let dir = temp_dir();
+    let code = dir.path().join("lib.dll");
+    // Synthetic x86-ish code with E8/E8E9 patterns so our auto-x86 filter
+    // (and WinRAR's) fires.
+    let mut dll = Vec::with_capacity(2 * 1024 * 1024);
+    let mut x = 0x1234_5678u32;
+    while dll.len() < 2 * 1024 * 1024 {
+        x = x.wrapping_mul(2654435761).wrapping_add(0x9E37_79B9);
+        dll.push((x & 0xFF) as u8);
+        if dll.len() % 37 == 0 {
+            dll.push(0xE8); // CALL rel32
+            dll.extend_from_slice(&(0x0010_2000u32).to_le_bytes());
+        }
+    }
+    std::fs::write(&code, &dll).unwrap();
+    let text = dir.path().join("doc.txt");
+    std::fs::write(
+        &text,
+        b"plain text neighbour in the solid chain ".repeat(40_000),
+    )
+    .unwrap();
+
+    // WinRAR -> ours: -s with mixed code + text.
+    if let Some(rar) = rar_bin() {
+        let arc = dir.path().join("win_solid.rar");
+        let (ok, out) = run(Command::new(&rar)
+            .args(["a", "-s", "-m5", "-idq"])
+            .arg(&arc)
+            .arg("lib.dll")
+            .arg("doc.txt")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR -s mixed failed:\n{out}");
+        let mut ar = RarArchive::open(&arc).unwrap();
+        let names: Vec<String> = ar.namelist().into_iter().map(|s| s.to_string()).collect();
+        let code_name = names
+            .iter()
+            .find(|n| n.ends_with("lib.dll"))
+            .unwrap()
+            .clone();
+        let text_name = names
+            .iter()
+            .find(|n| n.ends_with("doc.txt"))
+            .unwrap()
+            .clone();
+        assert_eq!(
+            ar.read(&code_name).unwrap(),
+            std::fs::read(&code).unwrap(),
+            "rar-rs read a different dll from WinRAR's solid archive"
+        );
+        assert_eq!(
+            ar.read(&text_name).unwrap(),
+            std::fs::read(&text).unwrap(),
+            "rar-rs read a different txt from WinRAR's solid archive"
+        );
+    }
+
+    // Ours -> WinRAR: -s with a filtered (.dll) member.
+    let arc = dir.path().join("ours_solid.rar");
+    {
+        let mut rar = RarArchive::create_with_options(
+            &arc,
+            rar5::CreateOptions {
+                solid: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&code, 5).unwrap();
+        rar.add(&text, 5).unwrap();
+        rar.close().unwrap();
+    }
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&arc, None);
+        assert!(
+            ok,
+            "UnRAR rejected our solid archive with a filtered member:\n{out}"
+        );
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        let (ok, out) = unrar_extract(&arc, &dest, None);
+        assert!(ok, "UnRAR failed to extract our solid archive:\n{out}");
+        let code_out = std::fs::read_dir(&dest)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().ends_with("lib.dll"))
+            .unwrap()
+            .path();
+        assert_eq!(
+            file_sha256(&code_out),
+            file_sha256(&code),
+            "WinRAR extracted a different dll from our solid archive"
+        );
+    }
+}
+
+/// Solid chain split modifiers (`-sv` / `-se`) interoperate with WinRAR in
+/// both directions. `-sv` resets the solid statistics at every volume
+/// boundary; `-se` resets them when the file extension changes.
+#[test]
+fn solid_reset_volume_interops_with_winrar() {
+    let dir = temp_dir();
+    let src = dir.path().join("rand8.bin");
+    let mut data = vec![0u8; 8 * 1024 * 1024];
+    for chunk in data.chunks_mut(4096) {
+        let mut seed = (chunk.as_ptr() as usize) as u64;
+        for b in chunk.iter_mut() {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *b = (seed >> 33) as u8;
+        }
+    }
+    std::fs::write(&src, &data).unwrap();
+    let small = dir.path().join("s.txt");
+    std::fs::write(&small, b"solid volume second member ".repeat(500)).unwrap();
+
+    // WinRAR -> ours: -s -sv multi-volume.
+    if let Some(rar) = rar_bin() {
+        let theirs = dir.path().join("theirs_sv.rar");
+        let (ok, out) = run(Command::new(&rar)
+            .args(["a", "-s", "-sv", "-v2m", "-idq"])
+            .arg(&theirs)
+            .arg("rand8.bin")
+            .arg("s.txt")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR -s -sv failed:\n{out}");
+        let volumes = rar5::discover_volumes(&theirs);
+        assert!(
+            volumes.len() >= 3,
+            "expected several volumes, got {}",
+            volumes.len()
+        );
+        let mut ar = RarArchive::open(&volumes[0]).unwrap();
+        let names: Vec<String> = ar.namelist().into_iter().map(|s| s.to_string()).collect();
+        let bin = names
+            .iter()
+            .find(|n| n.ends_with("rand8.bin"))
+            .unwrap()
+            .clone();
+        assert_eq!(ar.read(&bin).unwrap(), std::fs::read(&src).unwrap());
+    }
+
+    // Ours -> WinRAR: -sv multi-volume.
+    let ours = dir.path().join("ours_sv.rar");
+    {
+        let mut rar = RarArchive::create_with_options(
+            &ours,
+            rar5::CreateOptions {
+                solid: true,
+                solid_reset: rar5::SolidReset::PerVolume,
+                volume_size: Some(2 * 1024 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&src, 3).unwrap();
+        rar.add(&small, 3).unwrap();
+        rar.close().unwrap();
+    }
+    let volumes = rar5::discover_volumes(&ours);
+    assert!(
+        volumes.len() >= 3,
+        "expected several volumes, got {}",
+        volumes.len()
+    );
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&volumes[0], None);
+        assert!(ok, "UnRAR rejected our -sv volume set:\n{out}");
+        let win = dir.path().join("win_ours_sv");
+        std::fs::create_dir_all(&win).unwrap();
+        let (ok, out) = unrar_extract(&volumes[0], &win, None);
+        assert!(ok, "UnRAR failed to extract our -sv volume set:\n{out}");
+        assert_eq!(file_sha256(&win.join("rand8.bin")), file_sha256(&src));
+    }
+}
+
+#[test]
+fn solid_reset_extension_interops_with_winrar() {
+    let dir = temp_dir();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.bin");
+    let c = dir.path().join("c.txt");
+    std::fs::write(&a, b"alpha text block ".repeat(20_000)).unwrap();
+    std::fs::write(&b, vec![0xABu8; 1_000_000]).unwrap();
+    std::fs::write(&c, b"gamma text block ".repeat(20_000)).unwrap();
+
+    // WinRAR -> ours: -s -se multi-volume (groups reset on extension).
+    if let Some(rar) = rar_bin() {
+        let theirs = dir.path().join("theirs_se.rar");
+        let (ok, out) = run(Command::new(&rar)
+            .args(["a", "-s", "-se", "-v1m", "-idq"])
+            .arg(&theirs)
+            .arg("a.txt")
+            .arg("b.bin")
+            .arg("c.txt")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR -s -se failed:\n{out}");
+        let volumes = rar5::discover_volumes(&theirs);
+        let mut ar = RarArchive::open(&volumes[0]).unwrap();
+        let names: Vec<String> = ar.namelist().into_iter().map(|s| s.to_string()).collect();
+        for (name, src) in [("a.txt", &a), ("b.bin", &b), ("c.txt", &c)] {
+            let n = names.iter().find(|m| m.ends_with(name)).unwrap().clone();
+            assert_eq!(
+                ar.read(&n).unwrap(),
+                std::fs::read(src).unwrap(),
+                "rar-rs read a different {name} from WinRAR's -se archive"
+            );
+        }
+    }
+
+    // Ours -> WinRAR: -se (we sort by extension and reset on change).
+    let ours = dir.path().join("ours_se.rar");
+    {
+        let mut rar = RarArchive::create_with_options(
+            &ours,
+            rar5::CreateOptions {
+                solid: true,
+                solid_reset: rar5::SolidReset::PerExtension,
+                volume_size: Some(1024 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&a, 3).unwrap();
+        rar.add(&b, 3).unwrap();
+        rar.add(&c, 3).unwrap();
+        rar.close().unwrap();
+    }
+    let volumes = rar5::discover_volumes(&ours);
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&volumes[0], None);
+        assert!(ok, "UnRAR rejected our -se archive:\n{out}");
+        let win = dir.path().join("win_ours_se");
+        std::fs::create_dir_all(&win).unwrap();
+        let (ok, out) = unrar_extract(&volumes[0], &win, None);
+        assert!(ok, "UnRAR failed to extract our -se archive:\n{out}");
+        for (name, src) in [("a.txt", &a), ("b.bin", &b), ("c.txt", &c)] {
+            assert_eq!(
+                file_sha256(&win.join(name)),
+                file_sha256(src),
+                "WinRAR extracted a different {name} from our -se archive"
+            );
+        }
+    }
+}
+
+/// Symlink members (`-ol`) round-trip with rar-rs and decode through WinRAR
+/// as redirects (no data). Unix-only source symlinks; Windows runs WinRAR
+/// to confirm the redirect archive validates (the symlink target is not
+/// recreated by WinRAR, but the member must test cleanly with an empty
+/// data stream).
+#[cfg(unix)]
+#[test]
+fn symlink_member_roundtrips_and_winrar_reads_redirect() {
+    let dir = temp_dir();
+    let src = dir.path().join("lnk");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("target.txt"), b"target").unwrap();
+    std::os::unix::fs::symlink("target.txt", src.join("lnk.txt")).unwrap();
+
+    let arc = dir.path().join("ol.rar");
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ol", "-idq"])
+        .arg(&arc)
+        .arg("lnk")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // rar-rs restores the symlink on extract.
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let mut rar = RarArchive::open(&arc).unwrap();
+    rar.extract_all(&out).unwrap();
+    assert_eq!(
+        std::fs::read_link(out.join("lnk/lnk.txt")).unwrap(),
+        std::path::Path::new("target.txt")
+    );
+
+    // WinRAR must test the redirect archive (empty data stream).
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out_log) = unrar_test(&arc, None);
+        assert!(ok, "UnRAR rejected our -ol symlink archive:\n{out_log}");
+    }
+}
+
+/// RAR5 creation of a >4 GiB single file: an all-zero source compresses to a few
+/// MiB but the encoder must stream all 4 GiB through the spill file. WinRAR
+/// must test and extract byte-for-byte. `#[ignore]`d: needs >4 GiB of temp
+/// space and a few minutes.
+#[test]
+#[ignore = "slow: compresses >4 GiB and needs >4 GiB of temp space"]
+fn rar5_huge_single_file_decodes_with_winrar() {
+    let dir = temp_dir();
+    let size = 4 * 1024 * 1024 * 1024u64 + 4096; // > 4 GiB
+    let src = dir.path().join("huge.bin");
+    create_sparse(&src, size);
+
+    let arc = dir.path().join("huge.rar");
+    {
+        let mut rar =
+            RarArchive::create_with_options(&arc, rar5::CreateOptions::default()).unwrap();
+        rar.add(&src, 3).unwrap();
+        rar.close().unwrap();
+    }
+    assert!(
+        std::fs::metadata(&arc).unwrap().len() < 64 * 1024 * 1024,
+        "all-zero input must compress well"
+    );
+
+    // rar-rs round-trip (streamed extraction, raised limits).
+    let ours = dir.path().join("ours");
+    std::fs::create_dir_all(&ours).unwrap();
+    {
+        let mut rar = RarArchive::open(&arc).unwrap();
+        rar.extract_with_options(
+            "huge.bin",
+            &ours,
+            rar5::ExtractOptions {
+                max_unpacked_bytes: None,
+                max_total_unpacked_bytes: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        std::fs::metadata(ours.join("huge.bin")).unwrap().len(),
+        size
+    );
+    assert_eq!(file_sha256(&ours.join("huge.bin")), file_sha256(&src));
+
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&arc, None);
+        assert!(ok, "WinRAR rejected the >4 GiB archive:\n{out}");
+        let win = dir.path().join("win");
+        std::fs::create_dir_all(&win).unwrap();
+        let (ok, out) = unrar_extract(&arc, &win, None);
+        assert!(ok, "WinRAR failed to extract the >4 GiB archive:\n{out}");
+        assert_eq!(std::fs::metadata(win.join("huge.bin")).unwrap().len(), size);
+        assert_eq!(
+            file_sha256(&win.join("huge.bin")),
+            file_sha256(&src),
+            "WinRAR extracted different bytes"
+        );
+    }
 }

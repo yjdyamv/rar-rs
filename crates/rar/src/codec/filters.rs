@@ -695,13 +695,28 @@ mod tests {
     #[test]
     fn picks_correct_channel_count_for_interleaved_streams() {
         // 8/16/24-bit interleaved streams map to delta channels 1/2/3.
-        assert_eq!(auto_delta_filter_channels(&correlated_samples(1, 1, 4096)), Some(1));
-        assert_eq!(auto_delta_filter_channels(&correlated_samples(2, 2, 4096)), Some(2));
-        assert_eq!(auto_delta_filter_channels(&correlated_samples(3, 3, 4096)), Some(3));
+        assert_eq!(
+            auto_delta_filter_channels(&correlated_samples(1, 1, 4096)),
+            Some(1)
+        );
+        assert_eq!(
+            auto_delta_filter_channels(&correlated_samples(2, 2, 4096)),
+            Some(2)
+        );
+        assert_eq!(
+            auto_delta_filter_channels(&correlated_samples(3, 3, 4096)),
+            Some(3)
+        );
         // Two interleaved 8-bit channels (stereo u8) is a 2-channel delta.
-        assert_eq!(auto_delta_filter_channels(&correlated_samples(1, 2, 4096)), Some(2));
+        assert_eq!(
+            auto_delta_filter_channels(&correlated_samples(1, 2, 4096)),
+            Some(2)
+        );
         // A 4-lane (32-bit) layout aligns to channel 4.
-        assert_eq!(auto_delta_filter_channels(&correlated_samples(2, 4, 4096)), Some(4));
+        assert_eq!(
+            auto_delta_filter_channels(&correlated_samples(2, 4, 4096)),
+            Some(4)
+        );
     }
 
     #[test]
@@ -729,4 +744,3 @@ mod tests {
         assert_eq!(auto_delta_filter_channels(&[0xABu8; 8192]), None);
     }
 }
-

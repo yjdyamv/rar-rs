@@ -263,6 +263,19 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-s=") {
         return format!("--solid-params={rest}");
     }
+    // WinRAR `-s` modifiers that split the solid compression chain.
+    if arg == "-se" {
+        return "--solid-reset=extension".into();
+    }
+    if arg == "-sv" {
+        return "--solid-reset=volume".into();
+    }
+    if arg == "-sd" {
+        return "--solid-reset=continuous".into();
+    }
+    if arg == "-so" {
+        return "--stdout".into();
+    }
     if arg == "-htc" {
         return "--hash-crc".into();
     }

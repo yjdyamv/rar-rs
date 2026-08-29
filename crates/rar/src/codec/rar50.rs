@@ -3967,12 +3967,12 @@ mod decode_tests {
             let mut val = vec![0i32; channels];
             let mut state = 0xABCDEF01u64;
             for _ in 0..n {
-                for c in 0..channels {
+                for v in &mut val {
                     state ^= state >> 12;
                     state ^= state << 25;
                     state ^= state >> 27;
-                    val[c] += ((state >> 33) as u32 % 8) as i32 - 4;
-                    out.extend_from_slice(&(val[c] as i32).to_le_bytes());
+                    *v += ((state >> 33) as u32 % 8) as i32 - 4;
+                    out.extend_from_slice(&(*v).to_le_bytes());
                 }
             }
             out
@@ -4002,9 +4002,11 @@ mod decode_tests {
             state ^= state >> 27;
             *b = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8;
         }
-        assert!(encode_with_auto_delta_filter(&random, 3, 0, false)
-            .unwrap()
-            .is_none());
+        assert!(
+            encode_with_auto_delta_filter(&random, 3, 0, false)
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Synthetic x86 code: E8/E9 opcodes with plausible relative targets,
