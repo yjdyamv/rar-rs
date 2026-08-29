@@ -483,6 +483,11 @@ pub struct RarArchive {
 /// archive member: the member index, the stream name (with the leading
 /// colon, e.g. `:Zone.Identifier`), the stream payload location and its
 /// compression parameters (the payload may be RAR5-compressed).
+///
+/// Fields are only read back on Windows (extraction restores streams via
+/// `file:name`); on other platforms they are parsed and stored but never
+/// consumed, so dead-code linting is relaxed there.
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone)]
 pub(crate) struct StreamRecord {
     pub owner_index: usize,

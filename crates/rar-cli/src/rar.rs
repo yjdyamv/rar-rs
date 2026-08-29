@@ -1855,6 +1855,7 @@ fn cmd_sfx(args: &SfxArgs) -> Result<(), String> {
 /// or the installed WinRAR directory (Windows: `%ProgramFiles%\WinRAR`,
 /// `%ProgramFiles(x86)%\WinRAR`, or the registry-installed path).
 fn find_sfx_module() -> Option<String> {
+    #[cfg_attr(not(windows), allow(unused_mut))] // mut only for the Windows registry candidates
     let mut candidates: Vec<Option<String>> = vec![
         std::env::var("HOME")
             .ok()

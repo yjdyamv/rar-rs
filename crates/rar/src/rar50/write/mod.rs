@@ -26,6 +26,7 @@ use crate::rar50::write::layout::{
 use crate::write_progress::ProgressTracker;
 
 use crate::rar50::headers::*;
+#[cfg(windows)]
 use crate::rar50::vint;
 use crate::rar50::*;
 pub(crate) mod engine;
@@ -193,7 +194,7 @@ fn time_extra_cfg(
     save_mtime: bool,
     precision_seconds: bool,
     meta: &fs::Metadata,
-    path: &Path,
+    _path: &Path,
     mtime: u32,
     mtime_ns: u32,
 ) -> Option<Vec<u8>> {
@@ -207,12 +208,12 @@ fn time_extra_cfg(
         #[cfg(windows)]
         {
             let _ = meta;
-            windows_file_time(path, false).map(|(s, n)| (s, ns(n)))
+            windows_file_time(_path, false).map(|(s, n)| (s, ns(n)))
         }
         #[cfg(not(any(unix, windows)))]
         {
             let _ = meta;
-            let _ = path;
+            let _ = _path;
             None
         }
     } else {
@@ -227,7 +228,7 @@ fn time_extra_cfg(
         #[cfg(windows)]
         {
             let _ = meta;
-            windows_file_time(path, true).map(|(s, n)| (s, ns(n)))
+            windows_file_time(_path, true).map(|(s, n)| (s, ns(n)))
         }
         #[cfg(not(any(unix, windows)))]
         {

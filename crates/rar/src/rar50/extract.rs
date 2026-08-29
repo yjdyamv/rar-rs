@@ -20,6 +20,7 @@ use crate::io_util::{replace_file, temp_sibling_path};
 #[cfg(feature = "parallel")]
 use crate::parallel::extraction_pool;
 use crate::rar50::headers::*;
+#[cfg(windows)]
 use crate::rar50::write as archive_write;
 use crate::rar50::*;
 

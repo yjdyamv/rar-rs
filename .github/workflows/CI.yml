@@ -116,10 +116,13 @@ jobs:
           architecture: x64
           cache: npm
           cache-dependency-path: crates/rar-napi/package-lock.json
-      - name: Install
-        run: rustup update stable
+      - name: Install rust toolchain (nightly + cross target)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.settings.target }}
       - name: Cache cargo
         uses: actions/cache@v4
+        continue-on-error: true # transient service outages must not fail builds
         with:
           path: |
             ~/.cargo/git/db/
@@ -162,8 +165,10 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: crates/rar-napi/package-lock.json
-      - name: Install
-        run: rustup update stable && rustup target add wasm32-wasip1-threads
+      - name: Install rust toolchain (nightly + wasm target)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-wasip1-threads
       - name: Install dependencies
         working-directory: crates/rar-napi
         run: npm ci
@@ -188,6 +193,8 @@ jobs:
             crates/rar-napi/wasi-path-map.cjs
             crates/rar-napi/wasi-worker.mjs
             crates/rar-napi/wasi-worker-browser.mjs
+            crates/rar-napi/index.js
+            crates/rar-napi/index.d.ts
           if-no-files-found: error
   test-bindings:
     name: Test bindings on ${{ matrix.settings.host }} (${{ matrix.settings.target }})
