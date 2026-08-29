@@ -362,7 +362,7 @@ pub fn encode_chunked_mt(
     // results appended wave-by-wave (bounded memory, deterministic output
     // independent of completion order).
     let total_chunks = data.len().div_ceil(cs).max(1);
-    let n_workers = threads.clamp(1, 16);
+    let n_workers = threads.clamp(1, 64);
     let mut bounds = vec![0usize];
     let mut c = 0usize;
     while c < total_chunks {

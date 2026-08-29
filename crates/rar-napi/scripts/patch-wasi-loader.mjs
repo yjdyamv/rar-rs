@@ -18,6 +18,22 @@ const loaderPath = join(root, 'smart-archive-rar.wasi.cjs')
 const workerPath = join(root, 'wasi-worker.mjs')
 const helperMarker = 'wasi-path-map.cjs'
 
+const LOADER_ENV_INJECT = `
+// Expose the host's real core count to the RAR5 encoder so the WASM build
+// uses maximum parallelism by default. WASI reports only 1 core, so the Rust
+// side would otherwise fall back to a small default pool. Honor an explicit
+// override from the consumer if already set.
+const __nodeOs = require('node:os')
+if (!process.env.SA_RAR5_WASM_WORKERS) {
+  try {
+    const __cores = typeof __nodeOs.availableParallelism === 'function'
+      ? __nodeOs.availableParallelism()
+      : __nodeOs.cpus().length
+    if (__cores > 0) process.env.SA_RAR5_WASM_WORKERS = String(__cores)
+  } catch (_) { /* leave unset; Rust falls back to its default */ }
+}
+`
+
 const LOADER_PREOPEN_OLD = `  preopens: {
     [__rootDir]: __rootDir,
   }`
@@ -166,7 +182,8 @@ function patchLoader(source) {
   }
   source = source.replace(
     requireInsert,
-    `${requireInsert}\nconst __wasiPathMap = require('./wasi-path-map.cjs')`,
+    `${requireInsert}\nconst __wasiPathMap = require('./wasi-path-map.cjs')` +
+      LOADER_ENV_INJECT,
   )
   if (!source.includes(LOADER_PREOPEN_OLD)) {
     throw new Error('loader template changed: expected default preopens block')
