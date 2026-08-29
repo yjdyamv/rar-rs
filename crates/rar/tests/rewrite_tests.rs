@@ -1079,7 +1079,6 @@ fn repair_archive_path_with_reports_progress_and_cancels() {
     assert_eq!(total, good.len() as u64 * 2, "scan+copy total");
     let mut last = 0u64;
     let mut reached_end = false;
-    eprintln!("reports: {:?}", reports);
     for (done, t) in &reports {
         assert_eq!(*t, total);
         assert!(*done >= last, "progress must be non-decreasing");
@@ -1162,4 +1161,59 @@ fn rebuild_missing_volumes_with_reports_progress_and_cancels() {
     let err = rar5::rebuild_missing_volumes_with(&volumes[0], Some(&cancel), None).unwrap_err();
     assert!(matches!(err, rar5::RarError::Cancelled));
     assert!(!victim.exists(), "cancelled rebuild must not write volumes");
+}
+
+/// `delete_with_progress` reports monotonic rewrite progress reaching the
+/// archive size, and the deleted archive is byte-correct.
+#[test]
+fn delete_with_progress_reports_monotonic_progress() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("del-prog.rar");
+    {
+        let mut rar = RarArchive::create(&path).unwrap();
+        for i in 0..4u8 {
+            let data: Vec<u8> = (0..60_000u32).map(|k| (k % 251) as u8).collect();
+            rar.add_bytes(&format!("m{i}.bin"), &data, 3).unwrap();
+        }
+        rar.close().unwrap();
+    }
+    let orig = std::fs::read(&path).unwrap();
+
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(u64, u64)>::new()));
+    let mut rar = RarArchive::open(&path).unwrap();
+    let cb_reports = reports.clone();
+    let n = rar
+        .delete_with_progress(
+            &["m1.bin", "m2.bin"],
+            Some(Box::new(move |done, total| {
+                cb_reports.lock().unwrap().push((done, total));
+            })),
+        )
+        .unwrap();
+    assert_eq!(n, 2);
+    let kept: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
+    assert_eq!(kept, ["m0.bin", "m3.bin"]);
+    drop(rar);
+
+    let reports = reports.lock().unwrap();
+    let mut last = 0u64;
+    let mut total = 0u64;
+    let mut reached_end = false;
+    for (done, t) in reports.iter() {
+        total = *t;
+        assert!(total > 0);
+        assert!(*done >= last, "progress must be non-decreasing");
+        last = *done;
+        if *done == total {
+            reached_end = true;
+        }
+    }
+    assert!(reached_end, "progress must reach the total");
+
+    // Content reads back.
+    for name in ["m0.bin", "m3.bin"] {
+        let mut rar = RarArchive::open(&path).unwrap();
+        let data: Vec<u8> = (0..60_000u32).map(|k| (k % 251) as u8).collect();
+        assert_eq!(rar.read(name).unwrap(), data);
+    }
 }

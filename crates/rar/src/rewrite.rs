@@ -39,9 +39,38 @@ impl RarArchive {
     ///   a background thread, overlapping reads with writes and with the
     ///   solid-chain recompression.
     ///
-    /// Returns the number of deleted members. Fails with
-    /// [`RarError::Format`] when any requested name is not present, and
-    /// with [`RarError::Unsupported`] for locked archives.
+    /// [`RarArchive::delete`] with rewrite progress reporting: `progress`
+    /// receives `(written_bytes, total_bytes)`, monotonic, covering the
+    /// whole rewrite (verbatim copies plus any solid-chain recompression)
+    /// and reaching `total` on success.
+    pub fn delete_with_progress(
+        &mut self,
+        names: &[&str],
+        progress: Option<Box<dyn FnMut(u64, u64) + Send>>,
+    ) -> RarResult<usize> {
+        let saved = self.progress.take();
+        self.progress_member = 0;
+        if let Some(cb) = progress {
+            // The total is left unset: the rewrite loop reports the exact
+            // work byte count (kept payloads + recompressed input), which
+            // the tracker adopts as its denominator.
+            let tracker = crate::write_progress::ProgressTracker::new(Some(cb));
+            self.progress = Some(std::sync::Arc::new(std::sync::Mutex::new(tracker)));
+        }
+        let result = self.delete(names);
+        self.progress = saved;
+        result
+    }
+
+    /// Delete members without rebuilding the archive (like `rar d`);
+    /// returns the number of deleted members.
+    ///
+    /// Kept members keep their exact compressed bytes (never recompressed)
+    /// and the archive is rewritten surgically; the solid chain that loses
+    /// a member is decoded and recompressed from its start. Multi-volume
+    /// archives are re-split at the volume size limit and `.rev` recovery
+    /// volumes are regenerated. Fails when any requested name is not
+    /// present, and with [`RarError::Unsupported`] for locked archives.
     pub fn delete(&mut self, names: &[&str]) -> RarResult<usize> {
         if self.mode != Mode::Read {
             return Err(RarError::Format(
@@ -197,7 +226,18 @@ impl RarArchive {
         let (mut dec, mut enc, mut enc_active) = (None, None, false);
         let mut in_chain = false;
         let mut chain_end = usize::MAX;
+        let total_bytes: u64 = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !deleted[*i])
+            .map(|(_, e)| e.header.packed_size)
+            .sum();
+        let mut processed = 0u64;
         for (idx, entry) in self.entries.clone().iter().enumerate() {
+            if self.progress.is_some() {
+                self.report_progress(processed, total_bytes);
+            }
             if !in_chain
                 && let Some((s, e)) = chain
                 && s == idx
@@ -255,11 +295,13 @@ impl RarArchive {
                     enc.as_mut().unwrap(),
                     &mut enc_active,
                 )?;
+                processed += entry.header.unpacked_size;
                 continue;
             }
 
             // Verbatim payload, re-split across the new volumes.
             let payload = self.read_packed_volumes(&mut readers, idx)?;
+            processed += payload.len() as u64;
             let hdr = &entry.header;
             self.write_file_entry(
                 &entry_name,
@@ -275,6 +317,9 @@ impl RarArchive {
                 hdr.comp_solid,
                 hdr.hash_value,
             )?;
+        }
+        if self.progress.is_some() {
+            self.report_progress(processed, total_bytes);
         }
         self.write_end_block()?;
         self.stream = None;
@@ -1025,9 +1070,25 @@ impl RarArchive {
         let mut dec = None;
         let mut enc = None;
         let mut enc_active = false;
+        // Rewrite progress: `(processed_input_bytes, total_bytes)` where
+        // total is the rewrite work (kept payload bytes + recompressed
+        // input) and `processed` counts input bytes consumed, so the
+        // fraction reaches 100% even when deletion shrinks the output.
+        let total_bytes: u64 = plan
+            .ops
+            .iter()
+            .map(|op| match op {
+                RewriteOp::CopyBlock { len, .. } => *len,
+                RewriteOp::Recompress { idx, .. } => self.entries[*idx].header.unpacked_size,
+            })
+            .sum();
+        let mut processed = 0u64;
 
         for op in &plan.ops {
             self.check_cancel()?;
+            if self.progress.is_some() {
+                self.report_progress(processed, total_bytes);
+            }
             match op {
                 RewriteOp::CopyBlock {
                     header_bytes,
@@ -1041,6 +1102,7 @@ impl RarArchive {
                         self.quick_open_entries.push((out_pos, qh.clone()));
                     }
                     stream.write_all(header_bytes)?;
+                    processed += len;
                     #[cfg_attr(not(feature = "parallel"), allow(unused_mut))]
                     let mut left = *len;
                     #[cfg(feature = "parallel")]
@@ -1087,6 +1149,7 @@ impl RarArchive {
                         enc.as_mut().unwrap(),
                         &mut enc_active,
                     )?;
+                    processed += self.entries[*idx].header.unpacked_size;
                 }
             }
         }
@@ -1096,6 +1159,10 @@ impl RarArchive {
         }
         #[cfg(not(feature = "parallel"))]
         let _ = pipeline;
+
+        if self.progress.is_some() {
+            self.report_progress(processed, total_bytes);
+        }
 
         // Quick-open record (rebuilt from the kept headers), locator patch
         // (with the recovery offset), recovery record and end block.
