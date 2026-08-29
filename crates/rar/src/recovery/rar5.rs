@@ -29,6 +29,8 @@ pub enum Error {
     ShardSizeMismatch,
     TooManyShards,
     SingularElement,
+    /// Operation aborted by the caller's cancellation flag.
+    Cancelled,
     /// I/O failure while streaming a repair (source read / destination
     /// write); carries the underlying error message.
     Io(String),
@@ -49,6 +51,7 @@ impl std::fmt::Display for Error {
             Self::ShardSizeMismatch => f.write_str("RAR 5 recovery shard sizes differ"),
             Self::TooManyShards => f.write_str("RAR 5 recovery shard count is invalid"),
             Self::SingularElement => f.write_str("RAR 5 recovery matrix is singular"),
+            Self::Cancelled => f.write_str("operation cancelled"),
             Self::Io(msg) => write!(f, "recovery I/O: {msg}"),
         }
     }
@@ -498,6 +501,7 @@ pub fn repair_inline_recovery_prefix_shards<F>(
     protected_size: usize,
     recovery_data: &[u8],
     mut read_range: F,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<(std::ops::Range<usize>, Vec<u8>)>>
 where
     F: FnMut(std::ops::Range<usize>) -> Result<Vec<u8>>,
@@ -522,6 +526,7 @@ where
     let shard_ranges = split_prefix_shard_ranges(protected_size, plan)?;
     let mut damaged = Vec::new();
     for (index, range) in shard_ranges.iter().enumerate() {
+        check_cancel(cancel)?;
         let shard = read_range(range.clone())?;
         if crc64_rar_state(&shard) != first.data_shard_states[index] {
             damaged.push(index);
@@ -569,6 +574,7 @@ where
     let damaged_lookup = damaged_lookup(shard_ranges.len(), &damaged)?;
 
     for (data_index, range) in shard_ranges.iter().enumerate() {
+        check_cancel(cancel)?;
         if damaged_lookup[data_index] {
             continue;
         }
@@ -590,6 +596,9 @@ where
         .map(|&index| vec![0; shard_ranges[index].len()])
         .collect::<Vec<_>>();
     for word_index in 0..word_count {
+        if (word_index & 0x3FFF) == 0 {
+            check_cancel(cancel)?;
+        }
         let rhs = rhs_by_row
             .iter()
             .map(|row| row[word_index])
@@ -651,10 +660,23 @@ where
 pub fn repair_inline_recovery_archive_path(
     src: &mut File,
     dst: &mut impl io::Write,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Result<bool> {
     let file_size = src.seek(io::SeekFrom::End(0)).map_err(io_err)?;
     src.seek(io::SeekFrom::Start(0)).map_err(io_err)?;
-    let found = find_inline_recovery_chunks_in_file(src, file_size)?;
+    // Total work is read-once (scan) + write-once (copy), so the progress
+    // denominator is ~2x the file size; the per-phase reports below are
+    // then strictly non-decreasing.
+    let total = file_size.saturating_mul(2);
+    let mut report = |done: u64, _: u64| {
+        if let Some(p) = progress.as_deref_mut() {
+            p(done, total);
+        }
+    };
+    let found = find_inline_recovery_chunks_in_file(src, file_size, cancel, &mut |pos, _| {
+        report(pos, total)
+    })?;
     let first = found.first().ok_or(Error::BadRecoveryChunk)?;
     let protected_size =
         usize::try_from(first.1.protected_size).map_err(|_| Error::PlanOverflow)?;
@@ -678,7 +700,12 @@ pub fn repair_inline_recovery_archive_path(
             src.read_exact(&mut buf).map_err(io_err)?;
             Ok(buf)
         };
-        repair_inline_recovery_prefix_shards(protected_size, &recovery_data, &mut read_prefix)?
+        repair_inline_recovery_prefix_shards(
+            protected_size,
+            &recovery_data,
+            &mut read_prefix,
+            cancel,
+        )?
     };
 
     // Intact archive: nothing to write. `dst` is left untouched (like
@@ -689,21 +716,36 @@ pub fn repair_inline_recovery_archive_path(
 
     // Copy the whole archive to dst, substituting the repaired bytes for
     // the damaged prefix ranges (bounded streaming I/O either way).
+    // Progress runs from the scan result (the whole file) through the
+    // copy phase, so it never moves backwards.
+    report(file_size, total);
     src.seek(io::SeekFrom::Start(0)).map_err(io_err)?;
     let mut damaged = damaged;
     damaged.sort_by_key(|(range, _)| range.start);
     let mut next = 0usize;
+    let mut copied = 0u64;
     for (range, repaired) in &damaged {
-        copy_range(src, dst, next as u64, range.start as u64)?;
+        copy_range(src, dst, next as u64, range.start as u64, cancel)?;
+        copied += (range.start - next) as u64;
+        report(file_size + copied, total);
         dst.write_all(repaired).map_err(io_err)?;
+        copied += (range.end - range.start) as u64;
+        report(file_size + copied, total);
         next = range.end;
     }
-    copy_range(src, dst, next as u64, file_size)?;
+    copy_range(src, dst, next as u64, file_size, cancel)?;
+    report(total, total);
     Ok(!damaged.is_empty())
 }
 
 /// Stream a byte range of `src` into `dst` in bounded blocks.
-fn copy_range(src: &mut File, dst: &mut impl io::Write, start: u64, end: u64) -> Result<()> {
+fn copy_range(
+    src: &mut File,
+    dst: &mut impl io::Write,
+    start: u64,
+    end: u64,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<()> {
     if end <= start {
         return Ok(());
     }
@@ -711,6 +753,7 @@ fn copy_range(src: &mut File, dst: &mut impl io::Write, start: u64, end: u64) ->
     let mut left = end - start;
     let mut buf = vec![0u8; 1 << 20];
     while left > 0 {
+        check_cancel(cancel)?;
         let want = left.min(buf.len() as u64) as usize;
         let n = src.read(&mut buf[..want]).map_err(io_err)?;
         if n == 0 {
@@ -718,6 +761,14 @@ fn copy_range(src: &mut File, dst: &mut impl io::Write, start: u64, end: u64) ->
         }
         dst.write_all(&buf[..n]).map_err(io_err)?;
         left -= n as u64;
+    }
+    Ok(())
+}
+
+#[inline]
+fn check_cancel(cancel: Option<&std::sync::atomic::AtomicBool>) -> Result<()> {
+    if cancel.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err(Error::Cancelled);
     }
     Ok(())
 }
@@ -732,6 +783,8 @@ fn io_err(e: io::Error) -> Error {
 fn find_inline_recovery_chunks_in_file(
     src: &mut File,
     file_size: u64,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    progress: &mut dyn FnMut(u64, u64),
 ) -> Result<Vec<(u64, InlineRecoveryChunk, Vec<u8>)>> {
     const SCAN: usize = 64 * 1024;
     let mut found = Vec::new();
@@ -741,6 +794,7 @@ fn find_inline_recovery_chunks_in_file(
     let mut pos = 0u64;
     let mut buf = vec![0u8; SCAN];
     loop {
+        check_cancel(cancel)?;
         let n = crate::io_util::read_up_to(src, &mut buf).map_err(io_err)?;
         if n == 0 {
             break;
@@ -784,6 +838,12 @@ fn find_inline_recovery_chunks_in_file(
                     skip_until = abs.saturating_add(shard_size);
                     found.push((abs, chunk, raw));
                 }
+                // `try_parse_chunk_at` seeks the stream to probe a
+                // candidate; restore the scan position so `pos` below
+                // stays the true file offset (it feeds both the next
+                // read and the progress reports).
+                src.seek(io::SeekFrom::Start(pos + n as u64))
+                    .map_err(io_err)?;
             }
             i += 1;
         }
@@ -792,6 +852,7 @@ fn find_inline_recovery_chunks_in_file(
             tail[k] = *b;
         }
         pos += n as u64;
+        progress(pos, file_size);
     }
     Ok(found)
 }
@@ -1736,11 +1797,13 @@ mod tests {
         damaged[100..500].fill(0x11);
         damaged[9_000..9_400].fill(0x33);
 
-        let repaired_shards =
-            repair_inline_recovery_prefix_shards(prefix.len(), &recovery_data, |range| {
-                Ok(damaged[range].to_vec())
-            })
-            .unwrap();
+        let repaired_shards = repair_inline_recovery_prefix_shards(
+            prefix.len(),
+            &recovery_data,
+            |range| Ok(damaged[range].to_vec()),
+            None,
+        )
+        .unwrap();
         assert!(!repaired_shards.is_empty());
 
         let mut repaired = damaged;

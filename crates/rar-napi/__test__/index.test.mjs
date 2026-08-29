@@ -539,13 +539,13 @@ test('repairArchive streams a damaged archive back to byte-exact', async () => {
 
     const { repairArchive } = await import('../index.js')
     const fixed = join(dir, 'fixed.rar')
-    assert.equal(repairArchive(damaged, fixed), true, 'damage must be reported')
+    assert.equal(await repairArchive(damaged, fixed), true, 'damage must be reported')
     assert.equal(existsSync(fixed), true)
     assert.deepEqual(readFileSync(fixed), readFileSync(good), 'byte-exact restore')
 
     // Intact archive: no repair, no output file.
     const out2 = join(dir, 'out2.rar')
-    assert.equal(repairArchive(good, out2), false, 'intact archive must report no repair')
+    assert.equal(await repairArchive(good, out2), false, 'intact archive must report no repair')
     assert.equal(existsSync(out2), false, 'no output written for an intact archive')
   } finally {
     rmSync(dir, { recursive: true, force: true })

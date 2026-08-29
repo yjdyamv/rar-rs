@@ -1038,3 +1038,128 @@ fn repair_archive_path_streams_and_matches_in_memory() {
     assert!(rar5::repair_archive_path(&plain, &out3).is_err());
     assert!(!out3.exists());
 }
+
+/// `repair_archive_path_with` reports non-decreasing progress reaching
+/// `(total, total)` and honours the cancellation flag (no partial output
+/// left behind).
+#[test]
+fn repair_archive_path_with_reports_progress_and_cancels() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = make_temp_dir();
+    let path = dir.path().join("rep-prog.rar");
+    let payload: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
+    {
+        let mut rar = rar5::RarArchive::create_with_recovery(&path, 10).unwrap();
+        rar.add_bytes("a.bin", &payload, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let good = std::fs::read(&path).unwrap();
+    let mut damaged = good.clone();
+    damaged[400] ^= 0x5A;
+    damaged[900] ^= 0x5A;
+    std::fs::write(&path, &damaged).unwrap();
+
+    // Progress: monotonic, reaches the file size exactly once.
+    let out = dir.path().join("fixed-prog.rar");
+    let mut reports: Vec<(u64, u64)> = Vec::new();
+    let repaired = rar5::repair_archive_path_with(
+        &path,
+        &out,
+        None,
+        Some(&mut |done, total| {
+            reports.push((done, total));
+        }),
+    )
+    .unwrap();
+    assert!(repaired);
+    assert_eq!(std::fs::read(&out).unwrap(), good);
+    assert!(!reports.is_empty());
+    let total = reports[0].1;
+    assert_eq!(total, good.len() as u64 * 2, "scan+copy total");
+    let mut last = 0u64;
+    let mut reached_end = false;
+    eprintln!("reports: {:?}", reports);
+    for (done, t) in &reports {
+        assert_eq!(*t, total);
+        assert!(*done >= last, "progress must be non-decreasing");
+        last = *done;
+        if *done == total {
+            reached_end = true;
+        }
+    }
+    assert!(reached_end, "progress must reach the total");
+
+    // Cancellation: flagged before the call -> Cancelled, no output file.
+    let cancel = AtomicBool::new(true);
+    let out2 = dir.path().join("fixed-cancel.rar");
+    let err = rar5::repair_archive_path_with(&path, &out2, Some(&cancel), None).unwrap_err();
+    assert!(matches!(err, rar5::RarError::Cancelled));
+    assert!(!out2.exists(), "cancelled repair must not leave output");
+
+    // Cancellation set mid-run: a flag armed after the first progress
+    // report aborts the streaming scan/copy and still leaves nothing.
+    let cancel = AtomicBool::new(false);
+    let out3 = dir.path().join("fixed-cancel2.rar");
+    let mut seen_progress = false;
+    let err = rar5::repair_archive_path_with(
+        &path,
+        &out3,
+        Some(&cancel),
+        Some(&mut |done, _| {
+            if done > 0 && !seen_progress {
+                seen_progress = true;
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }),
+    )
+    .unwrap_err();
+    assert!(matches!(err, rar5::RarError::Cancelled));
+    assert!(!out3.exists());
+}
+
+/// `rebuild_missing_volumes_with` reports non-decreasing progress and
+/// honours cancellation (missing volumes are not written on abort).
+#[test]
+fn rebuild_missing_volumes_with_reports_progress_and_cancels() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = make_temp_dir();
+    let path = dir.path().join("rcv2.rar");
+    let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    {
+        let mut rar =
+            rar5::RarArchive::create_multivolume_with_recovery_count(&path, 60_000, 2).unwrap();
+        rar.add_bytes("a.bin", &payload, 0).unwrap();
+        rar.close().unwrap();
+    }
+    let volumes = rar5::discover_volumes(&path);
+    let victim = volumes[1].clone();
+    std::fs::remove_file(&victim).unwrap();
+
+    let mut reports: Vec<(u64, u64)> = Vec::new();
+    let rebuilt = rar5::rebuild_missing_volumes_with(
+        &volumes[0],
+        None,
+        Some(&mut |done, total| reports.push((done, total))),
+    )
+    .unwrap();
+    assert!(rebuilt.contains(&victim));
+    assert!(!reports.is_empty());
+    let total = reports[0].1;
+    assert!(total > 0);
+    let mut last = 0u64;
+    for (done, t) in &reports {
+        assert_eq!(*t, total);
+        assert!(*done >= last, "progress must be non-decreasing");
+        last = *done;
+    }
+    assert_eq!(last, total, "progress must reach the total");
+    std::fs::remove_file(&victim).unwrap();
+
+    // Cancelled up front -> Cancelled, no volume written.
+    let cancel = AtomicBool::new(true);
+    let err = rar5::rebuild_missing_volumes_with(&volumes[0], Some(&cancel), None).unwrap_err();
+    assert!(matches!(err, rar5::RarError::Cancelled));
+    assert!(!victim.exists(), "cancelled rebuild must not write volumes");
+}

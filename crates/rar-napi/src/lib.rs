@@ -463,12 +463,56 @@ impl Task for CreateArchiveTask {
 /// Returns `false` when the archive was already intact (no output file
 /// is written in that case, like `rar r`'s "All OK").
 #[napi]
-pub fn repair_archive(input_path: String, output_path: String) -> Result<bool> {
-  rar5::repair_archive_path(
-    std::path::Path::new(&input_path),
-    std::path::Path::new(&output_path),
-  )
-  .map_err(|err| Error::new(Status::GenericFailure, format!("repair failed: {err}")))
+pub fn repair_archive(
+  input_path: String,
+  output_path: String,
+  on_progress: Option<ThreadsafeFunction<ProgressData, ()>>,
+  signal: Option<AbortSignal>,
+) -> AsyncTask<RepairArchiveTask> {
+  AsyncTask::new(RepairArchiveTask {
+    input_path,
+    output_path,
+    progress: on_progress,
+    cancel: abort_flag(signal),
+  })
+}
+
+pub struct RepairArchiveTask {
+  input_path: String,
+  output_path: String,
+  progress: Option<ThreadsafeFunction<ProgressData, ()>>,
+  cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Task for RepairArchiveTask {
+  type Output = bool;
+  type JsValue = bool;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let progress = self.progress.take();
+    let mut report = |done: u64, total: u64| {
+      if let Some(tsfn) = progress.as_ref() {
+        let _ = tsfn.call(
+          Ok(ProgressData {
+            done: done.min(total) as f64,
+            total: total as f64,
+          }),
+          ThreadsafeFunctionCallMode::NonBlocking,
+        );
+      }
+    };
+    rar5::repair_archive_path_with(
+      Path::new(&self.input_path),
+      Path::new(&self.output_path),
+      self.cancel.as_deref(),
+      Some(&mut report),
+    )
+    .map_err(to_napi_error)
+  }
+
+  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output)
+  }
 }
 
 /// Rebuild missing volumes of a multi-volume RAR5 set from its `.rev`
@@ -478,15 +522,58 @@ pub fn repair_archive(input_path: String, output_path: String) -> Result<bool> {
 /// reconstructed from the `.rev` parity volumes into the same directory.
 /// Returns the paths of all volumes produced.
 #[napi]
-pub fn rebuild_missing_volumes(first_volume: String) -> Result<Vec<String>> {
-  let paths = rar5::rebuild_missing_volumes(Path::new(&first_volume))
-    .map_err(|err| Error::new(Status::GenericFailure, format!("rebuild failed: {err}")))?;
-  Ok(
-    paths
-      .into_iter()
-      .map(|p| p.to_string_lossy().into_owned())
-      .collect(),
-  )
+pub fn rebuild_missing_volumes(
+  first_volume: String,
+  on_progress: Option<ThreadsafeFunction<ProgressData, ()>>,
+  signal: Option<AbortSignal>,
+) -> AsyncTask<RebuildVolumesTask> {
+  AsyncTask::new(RebuildVolumesTask {
+    first_volume,
+    progress: on_progress,
+    cancel: abort_flag(signal),
+  })
+}
+
+pub struct RebuildVolumesTask {
+  first_volume: String,
+  progress: Option<ThreadsafeFunction<ProgressData, ()>>,
+  cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Task for RebuildVolumesTask {
+  type Output = Vec<String>;
+  type JsValue = Vec<String>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let progress = self.progress.take();
+    let mut report = |done: u64, total: u64| {
+      if let Some(tsfn) = progress.as_ref() {
+        let _ = tsfn.call(
+          Ok(ProgressData {
+            done: done.min(total) as f64,
+            total: total as f64,
+          }),
+          ThreadsafeFunctionCallMode::NonBlocking,
+        );
+      }
+    };
+    let paths = rar5::rebuild_missing_volumes_with(
+      Path::new(&self.first_volume),
+      self.cancel.as_deref(),
+      Some(&mut report),
+    )
+    .map_err(to_napi_error)?;
+    Ok(
+      paths
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect(),
+    )
+  }
+
+  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output)
+  }
 }
 
 #[napi(object)]

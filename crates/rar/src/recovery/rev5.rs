@@ -122,7 +122,25 @@ pub fn build_recovery_volume_file(
 /// the surviving volumes and the `.rev` files are discovered next to it.
 /// Returns the paths of the rebuilt volumes.
 pub fn rebuild_missing_volumes(first_volume: &Path) -> RarResult<Vec<PathBuf>> {
+    rebuild_missing_volumes_with(first_volume, None, None)
+}
+
+/// [`rebuild_missing_volumes`] with a cancellation flag and progress
+/// reporting. `progress` receives `(rebuilt_bytes, total_bytes)`, strictly
+/// non-decreasing up to `total` on success; `cancel` is polled per chunk.
+pub fn rebuild_missing_volumes_with(
+    first_volume: &Path,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    mut progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> RarResult<Vec<PathBuf>> {
     use crate::recovery::rar5::reconstruct_data_shards;
+
+    let check_cancel = |cancel: Option<&std::sync::atomic::AtomicBool>| -> RarResult<()> {
+        if cancel.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err(RarError::Cancelled);
+        }
+        Ok(())
+    };
 
     let base = crate::archive::volume_base_of(first_volume);
     let parent = first_volume
@@ -251,6 +269,10 @@ pub fn rebuild_missing_volumes(first_volume: &Path) -> RarResult<Vec<PathBuf>> {
 
     let mut offset = 0u64;
     while offset < padded_max {
+        check_cancel(cancel)?;
+        if let Some(p) = progress.as_deref_mut() {
+            p(offset, padded_max);
+        }
         let want = (padded_max - offset).min(CHUNK) as usize;
         let mut data_shards: Vec<Option<Vec<u8>>> = Vec::with_capacity(data_count);
         for (i, vol) in survivors.iter().enumerate() {
@@ -281,12 +303,16 @@ pub fn rebuild_missing_volumes(first_volume: &Path) -> RarResult<Vec<PathBuf>> {
             rebuilt[j].extend_from_slice(&all[*i]);
         }
         offset += want as u64;
+        if let Some(p) = progress.as_deref_mut() {
+            p(offset.min(padded_max), padded_max);
+        }
     }
 
     // Write the rebuilt volumes, truncated to their recorded size and
     // validated against their recorded CRC32.
     let mut rebuilt_paths = Vec::with_capacity(missing.len());
     for (j, i) in missing.iter().enumerate() {
+        check_cancel(cancel)?;
         let size = volume_sizes[*i] as usize;
         if rebuilt[j].len() < size {
             return Err(RarError::Format(format!(
