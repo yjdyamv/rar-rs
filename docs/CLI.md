@@ -62,7 +62,8 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 | `-mt<threads>` | Compression/decompression thread count |
 | `-s` / `-ds` | Solid archive / disable solid sorting |
 | `-ms<list>` | List of file types to store without compressing |
-| `-mcl` | Long-distance matching (WinRAR hidden switch) — **not implemented** in rar-rs; currently rejected like `-log`/`-om` |
+| `-mcl` | Long-distance matching (WinRAR hidden switch) — automatic at `-m2`…`-m5`; the `-mcl` switch is accepted (no-op) because long-range matching is always on for those levels, matching WinRAR 7.23 |
+| filters | Automatic output filters: x86 `E8`/`E8E9` for code **and delta (multimedia) for correlated multi-channel data** (audio PCM, raw bitmaps, database pages) are applied per-member before LZSS and written as non-solid filter members; both decode byte-for-byte under WinRAR/UnRAR |
 
 ### Encryption & integrity
 

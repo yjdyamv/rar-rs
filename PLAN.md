@@ -32,6 +32,7 @@
 - [x] **顺序路径大字典提速（2026-08）**：树跨 chunk 真持久化——链接按帧滑动量重定基（`TreeMatchFinder::grow_to`/`rebase`），不再每 chunk 重建树 + 重播种 8 MiB 尾部（重播种在稠密桶数据上每 chunk 3.4s）。实测 64 MiB mixed（32 MiB dict）：26.6s→3.8s（16.6 MiB/s，7x），32 MiB 线性 10 MiB/s+；压缩率不变，解码字节级一致。多线程 worker（新树）保留 budget 4 播种
 - [x] 过滤器只实现 0–3（Delta/E8/E8E9/ARM），未知类型显式报错——类型 4–7 现实归档中不存在
 - [x] **自动 x86 (E8/E8E9) 过滤器**：rars `x86_filter_scan` 移植（簇/跨度聚类 + 填充边界）；`encode_with_auto_x86_filter` 试 E8E9 与 E8 取小；内存路径成员（<64 MiB）自动应用；过滤器成员按非 solid 写出。实测 m5 DLL 差距从 21-23% 降到 6-14%（后由最优解析进一步收窄）
+- [x] **自动 delta (multimedia) 过滤器**：内存路径成员先试 delta 再试 x86（真实 x86 代码非多通道相关，廉价 delta 扫描快速返回 None 落入 x86；音频/原始数据由 delta 胜出，避免无用的 x86 扫描）。通道选择按**压缩后尺寸**（采样前 64 KiB 各候选通道试压取最小），对字节回绕稳健——原始幅度启发式会被 0/255 边界回绕产生的大 delta 误导选错通道；且仅当严格优于 plain LZSS 才保留（结构化但非多通道数据如文本绝不劣化）。实测 8-bit walk 800000→25868、16-bit 立体声 1600000→48591，随机数据不触发（留给 plain LZSS）。`unrar` 读我们 delta 输出、`rar-rs` 读 WinRAR delta WAV 均字节级一致；顺序/批量字节级一致
 - [x] **最优解析（m2-m5）**：rars `optimal_tokens`/`TokenPrices`/`BlockSplitter`/BT4 tree finder 移植；每块收集一次 + 3 次定价（首次估计、后两次用上一 pass 的真实表）；不可编码匹配（距离 bonus 使 raw < 2）在定价期拒绝；过滤器路径同样启用。实测 m3 默认级：code -52%、xml -24%、text -13%、DLL +2-6%
 - [x] 解码器修复：RAR5 过滤器位置为流绝对（solid 链），但 E8/ARM 变换偏移为成员相对（unrar `WrittenFileSize`），且 x86 偏移按 16 MiB 取模——此前 solid+filter 归档跨成员引用会 CRC 错（已用真实 WinRAR 归档验证）
 - [x] 大字典内存防护：读侧上限改为可配置 `ExtractOptions::max_dict_size`（默认 4 GiB，`-mdx` 语义；`None` = 不限），RAR7 v70 >4 GiB 字典按上限拒绝

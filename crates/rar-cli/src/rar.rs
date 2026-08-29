@@ -471,6 +471,12 @@ struct CreateArgs {
     #[arg(long = "me", value_name = "PAR")]
     #[allow(dead_code)]
     me_params: Option<String>,
+    /// Long-distance matching control (like `-mcl`; accepted). Long-range
+    /// matching is always enabled for `-m2`…`-m5`, so this is a no-op that
+    /// matches WinRAR 7.23's own behaviour.
+    #[arg(long = "long-match", value_name = "PAR")]
+    #[allow(dead_code)]
+    long_match: Option<String>,
     /// Only add files with the Archive attribute set (like `-ao`;
     /// Windows-only, accepted)
     #[arg(long = "archive-attr")]

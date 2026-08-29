@@ -243,6 +243,140 @@ fn winrar_validates_streamed_compressed_archives() {
     }
 }
 
+/// Correlated multi-channel samples (small per-sample deltas) of the kind
+/// WinRAR's delta filter targets. We emit a delta filter for this data and
+/// the real UnRAR must decode it byte-for-byte.
+fn write_correlated_pcm(path: &Path, channels: usize, samples: usize) {
+    let mut val = vec![0i32; channels];
+    let mut state = 0xABCDEF01u64;
+    let mut buf = Vec::with_capacity(channels * samples * 2);
+    for _ in 0..samples {
+        for c in 0..channels {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            val[c] += ((state >> 33) as u32 % 8) as i32 - 4;
+            buf.extend_from_slice(&(val[c] as i16).to_le_bytes());
+        }
+    }
+    std::fs::write(path, &buf).unwrap();
+}
+
+/// Synthesize a minimal 16-bit PCM WAV so that real WinRAR applies its own
+/// delta (audio) filter when archiving it.
+fn write_wav(path: &Path, channels: u16, samples: u32) {
+    let byte_rate = 44100u32 * channels as u32 * 2;
+    let data_len = channels as u32 * samples * 2;
+    let mut hdr = Vec::with_capacity(44);
+    hdr.extend_from_slice(b"RIFF");
+    hdr.extend_from_slice(&(36 + data_len).to_le_bytes());
+    hdr.extend_from_slice(b"WAVE");
+    hdr.extend_from_slice(b"fmt ");
+    hdr.extend_from_slice(&16u32.to_le_bytes());
+    hdr.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    hdr.extend_from_slice(&channels.to_le_bytes());
+    hdr.extend_from_slice(&44100u32.to_le_bytes());
+    hdr.extend_from_slice(&byte_rate.to_le_bytes());
+    hdr.extend_from_slice(&(channels * 2).to_le_bytes());
+    hdr.extend_from_slice(&16u16.to_le_bytes());
+    hdr.extend_from_slice(b"data");
+    hdr.extend_from_slice(&data_len.to_le_bytes());
+    write_correlated_pcm(path, channels as usize, samples as usize);
+    let mut full = hdr;
+    let pcm = std::fs::read(path).unwrap();
+    full.extend_from_slice(&pcm);
+    std::fs::write(path, &full).unwrap();
+}
+
+#[test]
+fn unrar_reads_our_delta_filtered_output() {
+    let Some(unrar) = unrar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let _ = unrar;
+    let dir = temp_dir();
+    let src = dir.path().join("audio.bin");
+    // 16-bit stereo interleaved correlated PCM — our auto-delta detector
+    // should select channels=2 and emit a delta-filtered (non-solid) member.
+    write_correlated_pcm(&src, 2, 120_000);
+
+    let arc = dir.path().join("delta.rar");
+    {
+        let mut rar =
+            rar5::RarArchive::create_with_options(&arc, rar5::CreateOptions::default()).unwrap();
+        rar.add(&src, 3).unwrap();
+        rar.close().unwrap();
+    }
+
+    // The real UnRAR must accept and verify our delta-filtered archive.
+    let (ok, out) = unrar_test(&arc, None);
+    assert!(ok, "UnRAR rejected our delta-filtered archive:\n{out}");
+
+    // And extract it byte-for-byte identical to the source.
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let (ok, out) = unrar_extract(&arc, &dest, None);
+    assert!(ok, "UnRAR failed to extract our delta-filtered archive:\n{out}");
+    assert_eq!(
+        file_sha256(&dest.join("audio.bin")),
+        file_sha256(&src),
+        "UnRAR extracted different bytes from our delta-filtered archive"
+    );
+
+    // rar-rs must read its own delta output back too.
+    let ours = dir.path().join("ours");
+    std::fs::create_dir_all(&ours).unwrap();
+    let mut rar = rar5::RarArchive::open(&arc).unwrap();
+    rar.extract("audio.bin", &ours).unwrap();
+    assert_eq!(
+        file_sha256(&ours.join("audio.bin")),
+        file_sha256(&src),
+        "rar-rs round-trip mismatch for our delta-filtered archive"
+    );
+}
+
+#[test]
+fn rar_rs_reads_winrar_delta_filtered_wav() {
+    let Some(rar) = rar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let _ = rar;
+    let dir = temp_dir();
+    let src = dir.path().join("sample.wav");
+    // Real WinRAR applies its delta (audio) filter to WAV PCM by default.
+    write_wav(&src, 2, 120_000);
+
+    let arc = dir.path().join("winrar-delta.rar");
+    let (ok, out) = run(
+        Command::new(rar_bin().unwrap())
+            .arg("a")
+            .arg("-m5")
+            .arg("-idq")
+            .arg(&arc)
+            .arg("sample.wav")
+            .current_dir(dir.path()),
+    );
+    assert!(ok, "WinRAR failed to create the archive:\n{out}");
+
+    // Our reader must extract WinRAR's delta-filtered WAV byte-for-byte. Look
+    // the member up by suffix because WinRAR may store a path prefix.
+    let mut r = rar5::RarArchive::open(&arc).unwrap();
+    let names: Vec<String> = r.namelist().into_iter().map(|s| s.to_string()).collect();
+    let member = names
+        .iter()
+        .find(|n| n.ends_with("sample.wav"))
+        .unwrap_or_else(|| panic!("sample.wav not found in {names:?}"))
+        .clone();
+    let data = r.read(&member).unwrap();
+    assert_eq!(
+        data,
+        std::fs::read(&src).unwrap(),
+        "rar-rs read a different WAV than WinRAR archived"
+    );
+}
+
 #[test]
 fn winrar_validates_streamed_solid_archive() {
     let Some(unrar) = unrar_bin() else {

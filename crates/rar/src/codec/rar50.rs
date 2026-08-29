@@ -803,6 +803,63 @@ pub fn encode_with_auto_x86_filter(
     }))
 }
 
+/// Like [`encode_with_auto_x86_filter`] but for the delta (multimedia)
+/// filter. When the data looks correlated (the cheap
+/// [`filters::auto_delta_filter_channels`] gate passes), the best channel
+/// count is chosen by compressed size on a leading sample and the whole member
+/// is forward-transformed and packed as a standalone (non-solid) filter
+/// member — but only when it strictly beats plain LZSS. Size-based channel
+/// selection is what WinRAR does and is robust to byte-wrapping at sample
+/// boundaries (a raw magnitude heuristic is fooled into picking a wider channel
+/// by the large deltas that wrapping introduces), and the plain-LZSS
+/// comparison guarantees structured-but-not-multi-channel data (text, prose)
+/// is never made worse than the unfiltered pack.
+pub fn encode_with_auto_delta_filter(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    extra_dist: bool,
+) -> Result<Option<Vec<u8>>, String> {
+    // Cheap pre-gate: skip obviously-uncorrelated (random) data so we never pay
+    // for a sample encode on it.
+    if super::filters::auto_delta_filter_channels(data).is_none() {
+        return Ok(None);
+    }
+    // Pick the channel whose delta-filtered SAMPLE packs smallest; require it
+    // to beat plain LZSS on the sample before committing to a full encode.
+    let sample_len = data.len().min(1 << 16);
+    let sample = &data[..sample_len];
+    let plain_sample = encode_with_filters(sample, method, dict_size_log, &[], extra_dist)?;
+    let mut best_ch: Option<u8> = None;
+    let mut best_len = plain_sample.len();
+    for &ch in super::filters::AUTO_DELTA_CHANNELS {
+        let spec = FilterSpec::new(FILTER_DELTA, ch, 0, sample_len as u32);
+        let packed = encode_with_filters(sample, method, dict_size_log, &[spec], extra_dist)?;
+        if packed.len() < best_len {
+            best_len = packed.len();
+            best_ch = Some(ch);
+        }
+    }
+    let Some(channels) = best_ch else {
+        return Ok(None);
+    };
+    let block_length = (data.len() as u64).min(u32::MAX as u64) as u32;
+    let spec = FilterSpec::new(FILTER_DELTA, channels, 0, block_length);
+    let delta_packed = encode_with_filters(data, method, dict_size_log, &[spec], extra_dist)?;
+    // No point transforming if it does not even beat STORE.
+    if delta_packed.len() >= data.len() {
+        return Ok(None);
+    }
+    // Keep the filter only when it is strictly smaller than plain LZSS; the
+    // caller's chunked (possibly solid) path is the better choice otherwise.
+    let plain_packed = encode_with_filters(data, method, dict_size_log, &[], extra_dist)?;
+    if delta_packed.len() < plain_packed.len() {
+        Ok(Some(delta_packed))
+    } else {
+        Ok(None)
+    }
+}
+
 // ── Match finding ──────────────────────────────────────────────────────────
 
 /// Find matches for `chunk`, searching against `state.tail` as lookbehind.
@@ -3894,6 +3951,60 @@ mod decode_tests {
                 );
             }
         }
+    }
+
+    /// The automatic delta (multimedia) filter must round-trip correlated
+    /// multi-channel data and pack it smaller than STORE, while refusing
+    /// random/text data.
+    #[test]
+    fn auto_delta_filter_roundtrips_and_packs_smaller() {
+        use super::encode_with_auto_delta_filter;
+
+        // Correlated N-bit interleaved samples (small per-sample deltas),
+        // matching the kind of 8/16/24-bit multi-channel data WinRAR deltas.
+        fn correlated(channels: usize, n: usize) -> Vec<u8> {
+            let mut out = Vec::with_capacity(channels * n * 4);
+            let mut val = vec![0i32; channels];
+            let mut state = 0xABCDEF01u64;
+            for _ in 0..n {
+                for c in 0..channels {
+                    state ^= state >> 12;
+                    state ^= state << 25;
+                    state ^= state >> 27;
+                    val[c] += ((state >> 33) as u32 % 8) as i32 - 4;
+                    out.extend_from_slice(&(val[c] as i32).to_le_bytes());
+                }
+            }
+            out
+        }
+
+        for ch in [1usize, 2, 3] {
+            let data = correlated(ch, 200_000);
+            let packed = encode_with_auto_delta_filter(&data, 3, 0, false)
+                .unwrap()
+                .expect("delta scan must find a beneficial channel count");
+            assert!(
+                packed.len() < data.len(),
+                "delta-filtered encoding should compress: {} vs {}",
+                packed.len(),
+                data.len()
+            );
+            let back = decode_standalone(&packed, data.len() as u64, 0, None, false).unwrap();
+            assert_eq!(back, data);
+        }
+
+        // Random data must NOT be delta-filtered.
+        let mut state = 0x9E37_9B97_7F4A_7C15u64;
+        let mut random = vec![0u8; 200_000];
+        for b in random.iter_mut() {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            *b = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8;
+        }
+        assert!(encode_with_auto_delta_filter(&random, 3, 0, false)
+            .unwrap()
+            .is_none());
     }
 
     /// Synthetic x86 code: E8/E9 opcodes with plausible relative targets,

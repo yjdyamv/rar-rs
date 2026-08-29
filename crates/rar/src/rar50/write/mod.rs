@@ -475,9 +475,34 @@ impl RarArchive {
         let plain_crc = crc_hasher.finalize();
         let plain_blake = blake_hasher.map(|h| h.finalize());
 
-        if let Some(filtered) =
-            compression::encode_with_auto_x86_filter(&whole, method, dsl, dict_bytes.is_some())
-                .map_err(RarError::Unsupported)?
+        // Try the automatic delta (multimedia) filter first, then the x86
+        // (E8/E8E9) filter. Ordering matters: real x86 code is not
+        // multi-channel-correlated, so the cheap delta scan returns `None`
+        // immediately and we fall through to x86; for correlated audio/raw
+        // data the delta filter wins outright, so we never pay for a useless
+        // x86 scan. Each filter is only kept when it strictly beats plain
+        // LZSS (the encoder compares against an unfiltered pack), so neither
+        // can steal a member from the better transform or from plain LZSS.
+        // The caller's `< file_size` guard only accepts a filter when it also
+        // beats STORE.
+        let filtered = match compression::encode_with_auto_delta_filter(
+            &whole,
+            method,
+            dsl,
+            dict_bytes.is_some(),
+        )
+        .map_err(RarError::Unsupported)?
+        {
+            Some(f) => Some(f),
+            None => compression::encode_with_auto_x86_filter(
+                &whole,
+                method,
+                dsl,
+                dict_bytes.is_some(),
+            )
+            .map_err(RarError::Unsupported)?,
+        };
+        if let Some(filtered) = filtered
             && (filtered.len() as u64) < file_size
         {
             self.reset_solid_chain();
@@ -1182,17 +1207,33 @@ impl RarArchive {
         let mut state = crate::codec::EncoderState::default();
         let total = data.len() as u64;
         let packed = if file_origin {
-            // Mirror add_file's member encoding exactly: the automatic
-            // x86 (E8/E8E9) filter runs first and wins when its stream
-            // beats STORE (a filtered member is written standalone,
-            // non-solid); otherwise the member is compressed in bounded
-            // chunks with one shared encoder state across chunks.
-            match compression::encode_with_auto_x86_filter(data, method, dsl, dict_bytes.is_some())
-                .map_err(RarError::Unsupported)?
+            // Mirror add_file's member encoding exactly for byte-identity:
+            // the automatic delta (multimedia) filter runs first, then the
+            // x86 (E8/E8E9) filter; each is kept only when it strictly beats
+            // plain LZSS (the encoder compares against an unfiltered pack).
+            // A filtered member is written standalone (non-solid); otherwise
+            // the member is compressed in bounded chunks with one shared
+            // encoder state across chunks.
+            match compression::encode_with_auto_delta_filter(
+                data,
+                method,
+                dsl,
+                dict_bytes.is_some(),
+            )
+            .map_err(RarError::Unsupported)?
             {
                 Some(filtered) if filtered.len() < data.len() => filtered,
-                _ => {
-                    let mut packed = Vec::new();
+                _ => match compression::encode_with_auto_x86_filter(
+                    data,
+                    method,
+                    dsl,
+                    dict_bytes.is_some(),
+                )
+                .map_err(RarError::Unsupported)?
+                {
+                    Some(filtered) if filtered.len() < data.len() => filtered,
+                    _ => {
+                        let mut packed = Vec::new();
                     let mut processed = 0u64;
                     for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
                         if ctx
@@ -1232,6 +1273,7 @@ impl RarArchive {
                     }
                     packed
                 }
+                },
             }
         } else {
             compression::compress_chunked(

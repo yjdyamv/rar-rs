@@ -272,6 +272,9 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-me") {
         return format!("--me={rest}");
     }
+    if let Some(rest) = arg.strip_prefix("-mcl") {
+        return format!("--long-match={rest}");
+    }
     if arg == "-ao" {
         return "--archive-attr".into();
     }
