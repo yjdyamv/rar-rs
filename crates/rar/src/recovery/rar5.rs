@@ -566,8 +566,10 @@ where
         .iter()
         .map(|(_, parity)| {
             parity
-                .chunks_exact(2)
-                .map(|word| u16::from_le_bytes([word[0], word[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|word| u16::from_le_bytes(*word))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
@@ -584,8 +586,8 @@ where
             if coeff == 0 {
                 continue;
             }
-            for (word_index, word) in shard.chunks_exact(2).enumerate() {
-                let data_symbol = u16::from_le_bytes([word[0], word[1]]);
+            for (word_index, word) in shard.as_chunks::<2>().0.iter().enumerate() {
+                let data_symbol = u16::from_le_bytes(*word);
                 rhs[word_index] ^= gf.mul(coeff, data_symbol);
             }
         }

@@ -63,8 +63,8 @@ impl DerivedKeys {
     /// MAC a CRC32 value with the hash key (RAR5 encrypted-file checksums).
     pub fn mac_crc32(&self, crc: u32) -> u32 {
         let digest = hmac_sha256(&self.hash_key, &crc.to_le_bytes());
-        digest.chunks_exact(4).fold(0, |acc, chunk| {
-            acc ^ u32::from_le_bytes(chunk.try_into().unwrap())
+        digest.as_chunks::<4>().0.iter().fold(0, |acc, chunk| {
+            acc ^ u32::from_le_bytes(*chunk)
         })
     }
 
@@ -72,8 +72,13 @@ impl DerivedKeys {
     pub fn mac_hash32(&self, hash: [u8; 32]) -> [u8; 32] {
         let digest = hmac_sha256(&self.hash_key, &hash);
         let mut out = [0u8; 32];
-        for (slot, chunk) in out.chunks_exact_mut(4).zip(digest.chunks_exact(4)) {
-            slot.copy_from_slice(&u32::from_le_bytes(chunk.try_into().unwrap()).to_le_bytes());
+        for (slot, chunk) in out
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(digest.as_chunks::<4>().0)
+        {
+            *slot = u32::from_le_bytes(*chunk).to_le_bytes();
         }
         out
     }
@@ -189,11 +194,10 @@ impl Aes256Cbc {
                 data.len()
             )));
         }
-        for block in data.chunks_exact_mut(16) {
+        for block in data.as_chunks_mut::<16>().0 {
             for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
                 *byte ^= iv_byte;
             }
-            let block: &mut [u8; 16] = block.try_into().expect("16-byte AES block");
             self.cipher.encrypt_block(block.into());
             self.iv.copy_from_slice(block);
         }
@@ -207,9 +211,8 @@ impl Aes256Cbc {
                 data.len()
             )));
         }
-        for block in data.chunks_exact_mut(16) {
-            let ciphertext: [u8; 16] = block.try_into().expect("16-byte AES block");
-            let block: &mut [u8; 16] = block.try_into().expect("16-byte AES block");
+        for block in data.as_chunks_mut::<16>().0 {
+            let ciphertext: [u8; 16] = *block;
             self.cipher.decrypt_block(block.into());
             for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
                 *byte ^= iv_byte;

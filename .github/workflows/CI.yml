@@ -7,7 +7,7 @@ env:
 'on':
   push:
     branches:
-      - master
+      - main
     tags:
       - 'v*'
     paths-ignore:
@@ -74,7 +74,7 @@ jobs:
         working-directory: crates/rar-napi
         run: NAPI_RS_FORCE_WASI=error npm test
   build:
-    name: build - ${{ matrix.settings.target }} - node@22
+    name: build - ${{ matrix.settings.target }} - node@24
     runs-on: ${{ matrix.settings.host }}
     strategy:
       fail-fast: false
@@ -112,12 +112,12 @@ jobs:
       - name: Setup node
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           architecture: x64
           cache: npm
           cache-dependency-path: crates/rar-napi/package-lock.json
-      - name: Install rust toolchain (nightly + cross target)
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install rust toolchain (stable + cross target)
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}
       - name: Cache cargo
@@ -162,11 +162,11 @@ jobs:
       - name: Setup node
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: crates/rar-napi/package-lock.json
-      - name: Install rust toolchain (nightly + wasm target)
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install rust toolchain (stable + wasm target)
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1-threads
       - name: Install dependencies
