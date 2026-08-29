@@ -1,4 +1,3 @@
-#![allow(deprecated)] // legacy constructor family; use create_with_options
 //! Surgical rewrite commands: delete, append, lock, recovery-record addition, rename, repair and comment edits.
 
 #[path = "support/mod.rs"]
@@ -20,7 +19,8 @@ fn delete_kept_members_preserve_exact_bytes() {
         ("e.bin".into(), vec![0x3Cu8; 50_000]), // STORE (level 0)
     ];
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         for (name, data) in &files {
             let level = if name.ends_with(".bin") { 0 } else { 3 };
             rar.add_bytes(name, data, level).unwrap();
@@ -97,7 +97,14 @@ fn delete_rebuilds_recovery_record() {
     let dir = make_temp_dir();
     let path = dir.path().join("del-rr.rar");
     {
-        let mut rar = RarArchive::create_with_recovery(&path, 10).unwrap();
+        let mut rar = RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                recovery_percent: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("f1.txt", &compressible(1, 50_000), 3)
             .unwrap();
         rar.add_bytes("f2.txt", &compressible(2, 50_000), 3)
@@ -233,7 +240,14 @@ fn delete_from_encrypted_archives_roundtrips() {
     let path = dir.path().join("del-enc.rar");
     let payload = compressible(7, 60_000);
     {
-        let mut rar = RarArchive::create_with_password(&path, "s3cret").unwrap();
+        let mut rar = RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                password: Some("s3cret".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("f1.txt", &payload, 3).unwrap();
         rar.add_bytes("f2.txt", &payload, 3).unwrap();
         rar.add_bytes("f3.txt", &payload, 3).unwrap();
@@ -249,7 +263,15 @@ fn delete_from_encrypted_archives_roundtrips() {
     // Header-encrypted archives.
     let path2 = dir.path().join("del-hp.rar");
     {
-        let mut rar = RarArchive::create_with_password_headers(&path2, "s3cret").unwrap();
+        let mut rar = RarArchive::create_with_options(
+            &path2,
+            rar5::CreateOptions {
+                password: Some("s3cret".into()),
+                encrypt_headers: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("g1.txt", &payload, 3).unwrap();
         rar.add_bytes("g2.txt", &payload, 3).unwrap();
         rar.close().unwrap();
@@ -266,7 +288,8 @@ fn delete_all_members_erases_archive() {
     let dir = make_temp_dir();
     let path = dir.path().join("del-all.rar");
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("f1.txt", b"one", 0).unwrap();
         rar.add_bytes("f2.txt", b"two", 0).unwrap();
         rar.close().unwrap();
@@ -282,7 +305,8 @@ fn delete_rejects_missing_members_and_multivolume() {
     let dir = make_temp_dir();
     let path = dir.path().join("del-err.rar");
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("f1.txt", b"one", 0).unwrap();
         rar.close().unwrap();
     }
@@ -301,7 +325,14 @@ fn delete_rejects_missing_members_and_multivolume() {
     let payload_a: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
     let payload_b: Vec<u8> = (0..40_000u32).map(|i| (i % 253) as u8).collect();
     {
-        let mut rar = rar5::RarArchive::create_multivolume(&vol, 30_000).unwrap();
+        let mut rar = rar5::RarArchive::create_with_options(
+            &vol,
+            rar5::CreateOptions {
+                volume_size: Some(30_000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("a.bin", &payload_a, 0).unwrap();
         rar.add_bytes("b.bin", &payload_b, 0).unwrap();
         rar.add_bytes("c.bin", &payload_a, 0).unwrap();
@@ -327,7 +358,8 @@ fn delete_rejects_locked_archive() {
     let dir = make_temp_dir();
     let path = dir.path().join("del-locked.rar");
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("f1.txt", b"one", 0).unwrap();
         rar.close().unwrap();
     }
@@ -420,7 +452,8 @@ fn append_rejects_locked_archive() {
     let dir = make_temp_dir();
     let path = dir.path().join("app-locked.rar");
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("a.bin", b"x", 0).unwrap();
         rar.close().unwrap();
     }
@@ -451,7 +484,8 @@ fn add_recovery_record_to_existing_archive() {
     let path = dir.path().join("rr-new.rar");
     let payload = compressible(31, 80_000);
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("f1.bin", &payload, 3).unwrap();
         rar.close().unwrap();
     }
@@ -515,8 +549,15 @@ fn delete_multivolume_rebuilds_recovery_volumes() {
     let payload_a: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
     let payload_b: Vec<u8> = (0..40_000u32).map(|i| (i % 253) as u8).collect();
     {
-        let mut rar =
-            rar5::RarArchive::create_multivolume_with_recovery_count(&path, 30_000, 1).unwrap();
+        let mut rar = rar5::RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                volume_size: Some(30_000),
+                recovery_volume_count: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("a.bin", &payload_a, 0).unwrap();
         rar.add_bytes("b.bin", &payload_b, 0).unwrap();
         rar.add_bytes("c.bin", &payload_a, 0).unwrap();
@@ -656,7 +697,8 @@ fn rename_directory_renames_descendants() {
     let dir = make_temp_dir();
     let path = dir.path().join("rn-dir.rar");
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add_directory_only(dir.path(), "old").unwrap();
         rar.add_bytes("old/sub/f.txt", b"hello", 0).unwrap();
         rar.close().unwrap();
@@ -680,7 +722,14 @@ fn rename_multivolume_keeps_content() {
     let path = dir.path().join("rn-mv.rar");
     let payload: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
     {
-        let mut rar = rar5::RarArchive::create_multivolume(&path, 100_000).unwrap();
+        let mut rar = rar5::RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                volume_size: Some(100_000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("big.bin", &payload, 0).unwrap();
         rar.close().unwrap();
     }
@@ -700,7 +749,8 @@ fn rename_rejects_missing_and_locked() {
     let dir = make_temp_dir();
     let path = dir.path().join("rn-err.rar");
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("a.bin", b"x", 0).unwrap();
         rar.close().unwrap();
     }
@@ -728,7 +778,14 @@ fn repair_archive_restores_damaged_members() {
     // below lands inside the protected member data.
     let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
     {
-        let mut rar = rar5::RarArchive::create_with_recovery(&path, 10).unwrap();
+        let mut rar = rar5::RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                recovery_percent: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("a.bin", &payload, 0).unwrap();
         rar.close().unwrap();
     }
@@ -748,7 +805,8 @@ fn repair_archive_restores_damaged_members() {
     // An archive without a recovery record fails cleanly.
     let plain = dir.path().join("plain.rar");
     {
-        let mut rar = rar5::RarArchive::create(&plain).unwrap();
+        let mut rar =
+            rar5::RarArchive::create_with_options(&plain, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("a.bin", b"x", 0).unwrap();
         rar.close().unwrap();
     }
@@ -763,8 +821,15 @@ fn rebuild_missing_volumes_from_rev_files() {
     let payload_a: Vec<u8> = (0..120_000u32).map(|i| (i % 251) as u8).collect();
     let payload_b: Vec<u8> = (0..60_000u32).map(|i| (i % 253) as u8).collect();
     {
-        let mut rar =
-            rar5::RarArchive::create_multivolume_with_recovery_count(&path, 60_000, 2).unwrap();
+        let mut rar = rar5::RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                volume_size: Some(60_000),
+                recovery_volume_count: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("a.bin", &payload_a, 0).unwrap();
         rar.add_bytes("b.bin", &payload_b, 0).unwrap();
         rar.close().unwrap();
@@ -798,7 +863,8 @@ fn comment_set_get_roundtrip() {
     let dir = make_temp_dir();
     let path = dir.path().join("cmt.rar");
     {
-        let mut rar = rar5::RarArchive::create(&path).unwrap();
+        let mut rar =
+            rar5::RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("a.bin", b"x", 0).unwrap();
         rar.close().unwrap();
     }
@@ -845,7 +911,8 @@ fn sfx_archives_open_read_and_modify_with_stub_preserved() {
     let payload = compressible(61, 30_000);
     let payload2 = compressible(62, 20_000);
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("a.bin", &payload, 3).unwrap();
         rar.add_bytes("c.bin", &payload2, 0).unwrap();
         rar.close().unwrap();
@@ -892,7 +959,8 @@ fn symlink_and_hardlink_redirects_extract() {
     let dir = make_temp_dir();
     let path = dir.path().join("links.rar");
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("dir/target.txt", b"target content", 0)
             .unwrap();
         // Symlink entries: no data, redirect extra record only.
@@ -932,8 +1000,15 @@ fn zero_padded_volume_sets_discover_and_rebuild() {
     let path = dir.path().join("pad.rar");
     let payload: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
     {
-        let mut rar =
-            rar5::RarArchive::create_multivolume_with_recovery_count(&path, 20_000, 3).unwrap();
+        let mut rar = rar5::RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                volume_size: Some(20_000),
+                recovery_volume_count: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("a.bin", &payload, 0).unwrap();
         rar.close().unwrap();
     }
@@ -990,7 +1065,14 @@ fn repair_archive_path_streams_and_matches_in_memory() {
     // below lands inside the protected data.
     let payload: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
     {
-        let mut rar = rar5::RarArchive::create_with_recovery(&path, 10).unwrap();
+        let mut rar = rar5::RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                recovery_percent: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("a.bin", &payload, 0).unwrap();
         rar.close().unwrap();
     }
@@ -1030,7 +1112,8 @@ fn repair_archive_path_streams_and_matches_in_memory() {
     // No recovery record -> clean error, and the output stays absent.
     let plain = dir.path().join("plain.rar");
     {
-        let mut rar = rar5::RarArchive::create(&plain).unwrap();
+        let mut rar =
+            rar5::RarArchive::create_with_options(&plain, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("a.bin", b"x", 0).unwrap();
         rar.close().unwrap();
     }
@@ -1050,7 +1133,14 @@ fn repair_archive_path_with_reports_progress_and_cancels() {
     let path = dir.path().join("rep-prog.rar");
     let payload: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
     {
-        let mut rar = rar5::RarArchive::create_with_recovery(&path, 10).unwrap();
+        let mut rar = rar5::RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                recovery_percent: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("a.bin", &payload, 0).unwrap();
         rar.close().unwrap();
     }
@@ -1121,14 +1211,21 @@ fn repair_archive_path_with_reports_progress_and_cancels() {
 /// honours cancellation (missing volumes are not written on abort).
 #[test]
 fn rebuild_missing_volumes_with_reports_progress_and_cancels() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
 
     let dir = make_temp_dir();
     let path = dir.path().join("rcv2.rar");
     let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
     {
-        let mut rar =
-            rar5::RarArchive::create_multivolume_with_recovery_count(&path, 60_000, 2).unwrap();
+        let mut rar = rar5::RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                volume_size: Some(60_000),
+                recovery_volume_count: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("a.bin", &payload, 0).unwrap();
         rar.close().unwrap();
     }
@@ -1170,15 +1267,14 @@ fn delete_with_progress_reports_monotonic_progress() {
     let dir = make_temp_dir();
     let path = dir.path().join("del-prog.rar");
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         for i in 0..4u8 {
             let data: Vec<u8> = (0..60_000u32).map(|k| (k % 251) as u8).collect();
             rar.add_bytes(&format!("m{i}.bin"), &data, 3).unwrap();
         }
         rar.close().unwrap();
     }
-    let orig = std::fs::read(&path).unwrap();
-
     let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(u64, u64)>::new()));
     let mut rar = RarArchive::open(&path).unwrap();
     let cb_reports = reports.clone();
@@ -1197,14 +1293,12 @@ fn delete_with_progress_reports_monotonic_progress() {
 
     let reports = reports.lock().unwrap();
     let mut last = 0u64;
-    let mut total = 0u64;
     let mut reached_end = false;
     for (done, t) in reports.iter() {
-        total = *t;
-        assert!(total > 0);
+        assert!(*t > 0);
         assert!(*done >= last, "progress must be non-decreasing");
         last = *done;
-        if *done == total {
+        if *done == *t {
             reached_end = true;
         }
     }

@@ -985,8 +985,7 @@ impl RarArchive {
     ///
     /// This is the full-featured constructor: `solid`, `quick_open` and
     /// `blake2` options can be combined with passwords, header encryption,
-    /// recovery records and volume sizes. The dedicated `create*`
-    /// constructors are thin wrappers around it.
+    /// recovery records and volume sizes.
     ///
     /// The archive data is staged in a temporary sibling file and moved to
     /// `path` only when [`Self::close`] succeeds, so an aborted or failed
@@ -1101,198 +1100,6 @@ impl RarArchive {
             pending: None,
         };
         Ok(archive)
-    }
-
-    /// Create a new RAR5 archive (overwrites existing file).
-    #[deprecated(note = "use create_with_options instead")]
-    pub fn create(path: impl AsRef<Path>) -> RarResult<Self> {
-        Self::create_with_options(path, crate::options::CreateOptions::default())
-    }
-
-    /// Create a new multi-volume RAR5 archive.
-    #[deprecated(note = "use create_with_options instead")]
-    pub fn create_multivolume(path: impl AsRef<Path>, volume_size: u64) -> RarResult<Self> {
-        Self::create_with_options(
-            path,
-            crate::options::CreateOptions {
-                volume_size: Some(volume_size),
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Create a new multi-volume RAR5 archive with recovery volumes
-    /// (`-rv`): `percent` of `.rev` files relative to the volume count.
-    #[deprecated(note = "use create_with_options instead")]
-    pub fn create_multivolume_with_recovery(
-        path: impl AsRef<Path>,
-        volume_size: u64,
-        percent: u8,
-    ) -> RarResult<Self> {
-        Self::create_with_options(
-            path,
-            crate::options::CreateOptions {
-                volume_size: Some(volume_size),
-                recovery_volumes_percent: Some(percent.min(100)),
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Create a new multi-volume RAR5 archive with an exact number of
-    /// recovery volumes. The count is auto-capped at the data volume count.
-    #[deprecated(note = "use create_with_options instead")]
-    pub fn create_multivolume_with_recovery_count(
-        path: impl AsRef<Path>,
-        volume_size: u64,
-        rec_count: u32,
-    ) -> RarResult<Self> {
-        Self::create_with_options(
-            path,
-            crate::options::CreateOptions {
-                volume_size: Some(volume_size),
-                recovery_volume_count: Some(rec_count),
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Create a new encrypted multi-volume RAR5 archive (overwrites
-    /// existing file). File data is AES-256 encrypted; header encryption
-    /// is not supported for multi-volume archives.
-    #[deprecated(note = "use create_with_options instead")]
-    pub fn create_multivolume_with_password(
-        path: impl AsRef<Path>,
-        volume_size: u64,
-        password: &str,
-    ) -> RarResult<Self> {
-        Self::create_with_options(
-            path,
-            crate::options::CreateOptions {
-                volume_size: Some(volume_size),
-                password: Some(password.to_string()),
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Create a new multi-volume RAR5 archive with header encryption
-    /// (WinRAR `-hp` equivalent): every volume starts with the plaintext
-    /// encryption header and all blocks are encrypted.
-    #[deprecated(note = "use create_with_options instead")]
-    pub fn create_multivolume_with_password_headers(
-        path: impl AsRef<Path>,
-        volume_size: u64,
-        password: &str,
-    ) -> RarResult<Self> {
-        Self::create_with_options(
-            path,
-            crate::options::CreateOptions {
-                volume_size: Some(volume_size),
-                password: Some(password.to_string()),
-                encrypt_headers: true,
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Create a new encrypted multi-volume RAR5 archive with an exact
-    /// number of `.rev` recovery volumes.
-    #[deprecated(note = "use create_with_options instead")]
-    pub fn create_multivolume_with_recovery_count_and_password(
-        path: impl AsRef<Path>,
-        volume_size: u64,
-        rec_count: u32,
-        password: &str,
-    ) -> RarResult<Self> {
-        Self::create_with_options(
-            path,
-            crate::options::CreateOptions {
-                volume_size: Some(volume_size),
-                recovery_volume_count: Some(rec_count),
-                password: Some(password.to_string()),
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Create a new encrypted RAR5 archive (overwrites existing file).
-    #[deprecated(note = "use create_with_options instead")]
-    pub fn create_with_password(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
-        Self::create_with_options(
-            path,
-            crate::options::CreateOptions {
-                password: Some(password.to_string()),
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Create a new RAR5 archive with encrypted headers (overwrites existing
-    /// file). Hides file names and the whole archive structure: the main
-    /// archive header is followed by an archive-level encryption header and
-    /// every subsequent block header is AES-256-CBC encrypted.
-    ///
-    /// Not supported for multi-volume archives.
-    #[deprecated(note = "use create_with_options instead")]
-    pub fn create_with_password_headers(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
-        Self::create_with_options(
-            path,
-            crate::options::CreateOptions {
-                password: Some(password.to_string()),
-                encrypt_headers: true,
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Create a new RAR5 archive with an inline recovery record
-    /// (overwrites existing file). `percent` is the recovery percentage
-    /// (0-100), matching WinRAR's `-rr` switch.
-    #[deprecated(note = "use create_with_options instead")]
-    #[allow(deprecated)] // legacy constructor delegating to its sibling
-    pub fn create_with_recovery(path: impl AsRef<Path>, percent: u8) -> RarResult<Self> {
-        Self::create_with_password_recovery(path, "", percent)
-    }
-
-    /// Create a new encrypted RAR5 archive with an inline recovery record.
-    #[deprecated(note = "use create_with_options instead")]
-    pub fn create_with_password_recovery(
-        path: impl AsRef<Path>,
-        password: &str,
-        percent: u8,
-    ) -> RarResult<Self> {
-        Self::create_with_options(
-            path,
-            crate::options::CreateOptions {
-                password: if password.is_empty() {
-                    None
-                } else {
-                    Some(password.to_string())
-                },
-                recovery_percent: Some(percent.min(100)),
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Create a new RAR5 archive with header encryption and an inline
-    /// recovery record.
-    #[deprecated(note = "use create_with_options instead")]
-    pub fn create_with_password_headers_recovery(
-        path: impl AsRef<Path>,
-        password: &str,
-        percent: u8,
-    ) -> RarResult<Self> {
-        Self::create_with_options(
-            path,
-            crate::options::CreateOptions {
-                password: Some(password.to_string()),
-                encrypt_headers: true,
-                recovery_percent: Some(percent.min(100)),
-                ..Default::default()
-            },
-        )
     }
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -2137,7 +1944,6 @@ fn volume_path_padded(parent: &Path, base: &str, part_num: usize, width: usize) 
 
 #[cfg(test)]
 mod tests {
-    #![allow(deprecated)] // tests exercise the legacy constructor family
     use super::*;
     use crate::rar50::extract::sanitize_archive_path;
 
@@ -2147,7 +1953,14 @@ mod tests {
         let path = tmp.path().with_extension("rar");
         let data = b"Hello, encrypted world!";
         {
-            let mut ar = RarArchive::create_with_password(&path, "secret").unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    password: Some("secret".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("test.txt", data, 0).unwrap();
             ar.close().unwrap();
         }
@@ -2164,7 +1977,14 @@ mod tests {
         let path = tmp.path().with_extension("rar");
         let data = b"Compress me! ".repeat(200);
         {
-            let mut ar = RarArchive::create_with_password(&path, "pw").unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    password: Some("pw".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("test.txt", &data, 3).unwrap();
             ar.close().unwrap();
         }
@@ -2180,7 +2000,14 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().with_extension("rar");
         {
-            let mut ar = RarArchive::create_with_password(&path, "right").unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    password: Some("right".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("test.txt", b"data", 0).unwrap();
             ar.close().unwrap();
         }
@@ -2196,7 +2023,14 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().with_extension("rar");
         {
-            let mut ar = RarArchive::create_with_password(&path, "multi").unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    password: Some("multi".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("a.txt", b"First", 0).unwrap();
             ar.add_bytes("b.txt", &b"Second ".repeat(50), 3).unwrap();
             ar.add_bytes("c.bin", &(0..=255u8).collect::<Vec<_>>(), 0)
@@ -2220,8 +2054,15 @@ mod tests {
         {
             // Ask for 10 .rev files; the archive only splits into 3
             // volumes, so exactly 3 .rev files must be produced.
-            let mut ar =
-                RarArchive::create_multivolume_with_recovery_count(&base, 32768, 10).unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &base,
+                crate::options::CreateOptions {
+                    volume_size: Some(32768),
+                    recovery_volume_count: Some(10),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("big.bin", &data, 0).unwrap();
             ar.close().unwrap();
         }
@@ -2254,8 +2095,15 @@ mod tests {
         let base = dir.path().join("vol.part1.rar");
         let data = b"volume recovery payload ".repeat(4000);
         {
-            let mut ar =
-                RarArchive::create_multivolume_with_recovery_count(&base, 32768, 2).unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &base,
+                crate::options::CreateOptions {
+                    volume_size: Some(32768),
+                    recovery_volume_count: Some(2),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("big.bin", &data, 0).unwrap();
             ar.close().unwrap();
         }
@@ -2276,7 +2124,15 @@ mod tests {
         let base = dir.path().join("vol.part1.rar");
         let data = b"volume recovery payload ".repeat(4000); // ~100 KiB
         {
-            let mut ar = RarArchive::create_multivolume_with_recovery(&base, 32768, 20).unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &base,
+                crate::options::CreateOptions {
+                    volume_size: Some(32768),
+                    recovery_volumes_percent: Some(20),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("big.bin", &data, 0).unwrap();
             ar.close().unwrap();
         }
@@ -2378,7 +2234,14 @@ mod tests {
         let path = tmp.path().with_extension("rar");
         let data = b"recovery test payload ".repeat(1000);
         {
-            let mut ar = RarArchive::create_with_recovery(&path, 5).unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    recovery_percent: Some(5),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("a.bin", &data, 0).unwrap();
             ar.close().unwrap();
         }
@@ -2413,7 +2276,14 @@ mod tests {
         let path = tmp.path().with_extension("rar");
         let data = b"twin payload for relocated repair ".repeat(1000);
         {
-            let mut ar = RarArchive::create_with_recovery(&path, 5).unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    recovery_percent: Some(5),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("a.bin", &data, 0).unwrap();
             ar.add_bytes("b.bin", &data, 0).unwrap();
             ar.close().unwrap();
@@ -2461,7 +2331,14 @@ mod tests {
         let a = b"alpha payload ".repeat(1000);
         let b = b"beta payload differs ".repeat(1000);
         {
-            let mut ar = RarArchive::create_with_recovery(&path, 5).unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    recovery_percent: Some(5),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("a.bin", &a, 0).unwrap();
             ar.add_bytes("b.bin", &b, 0).unwrap();
             ar.close().unwrap();
@@ -2493,8 +2370,16 @@ mod tests {
         let path = tmp.path().with_extension("rar");
         let data = b"encrypted + recovery ".repeat(500);
         {
-            let mut ar =
-                RarArchive::create_with_password_headers_recovery(&path, "pw", 10).unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    password: Some("pw".into()),
+                    encrypt_headers: true,
+                    recovery_percent: Some(10),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("secret.bin", &data, 0).unwrap();
             ar.close().unwrap();
         }
@@ -2511,7 +2396,15 @@ mod tests {
         let path = tmp.path().with_extension("rar");
         let data = b"Hidden content!".repeat(100);
         {
-            let mut ar = RarArchive::create_with_password_headers(&path, "hdr-pw").unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    password: Some("hdr-pw".into()),
+                    encrypt_headers: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("secret/name.txt", &data, 3).unwrap();
             ar.close().unwrap();
         }
@@ -2540,7 +2433,15 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().with_extension("rar");
         {
-            let mut ar = RarArchive::create_with_password_headers(&path, "pw").unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    password: Some("pw".into()),
+                    encrypt_headers: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("a.txt", b"data", 0).unwrap();
             ar.close().unwrap();
         }
@@ -2611,7 +2512,14 @@ mod tests {
         let small = b"Hello from multi-volume test\n";
 
         {
-            let mut ar = RarArchive::create_multivolume(&path, 30000).unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    volume_size: Some(30000),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("big.bin", &rng_data, 0).unwrap();
             ar.add_bytes("small.txt", small, 0).unwrap();
             ar.close().unwrap();
@@ -2641,7 +2549,14 @@ mod tests {
         let small = b"Tiny file";
 
         {
-            let mut ar = RarArchive::create_multivolume(&path, 30000).unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    volume_size: Some(30000),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("data.txt", &data, 3).unwrap();
             ar.add_bytes("small.txt", small, 3).unwrap();
             ar.close().unwrap();
@@ -2669,8 +2584,16 @@ mod tests {
         let comp_data = b"header encrypted volume payload ".repeat(4_000);
 
         {
-            let mut ar =
-                RarArchive::create_multivolume_with_password_headers(&path, 30_000, "pw").unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    volume_size: Some(30_000),
+                    password: Some("pw".into()),
+                    encrypt_headers: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("store.bin", &store_data, 0).unwrap();
             ar.add_bytes("comp.bin", &comp_data, 3).unwrap();
             ar.close().unwrap();
@@ -2696,7 +2619,14 @@ mod tests {
 
         let data = vec![0u8; 50000];
         {
-            let mut ar = RarArchive::create_multivolume(&path, 20000).unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    volume_size: Some(20000),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("data.bin", &data, 0).unwrap();
             ar.close().unwrap();
         }
@@ -2721,7 +2651,14 @@ mod tests {
 
         let data = vec![42u8; 80000];
         {
-            let mut ar = RarArchive::create_multivolume(&path, 30000).unwrap();
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    volume_size: Some(30000),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("data.bin", &data, 0).unwrap();
             ar.close().unwrap();
         }
@@ -2778,7 +2715,9 @@ mod tests {
     fn create_is_not_visible_until_close_and_leaves_no_temp() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.rar");
-        let mut ar = RarArchive::create(&path).unwrap();
+        let mut ar =
+            RarArchive::create_with_options(&path, crate::options::CreateOptions::default())
+                .unwrap();
         ar.add_bytes("a.txt", b"data", 0).unwrap();
         // Creation is staged: nothing appears at the target path until close.
         assert!(!path.exists());
@@ -2794,7 +2733,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.rar");
         {
-            let mut ar = RarArchive::create(&path).unwrap();
+            let mut ar =
+                RarArchive::create_with_options(&path, crate::options::CreateOptions::default())
+                    .unwrap();
             ar.add_bytes("a.txt", b"data", 0).unwrap();
         }
         assert!(path.exists());
@@ -2810,7 +2751,9 @@ mod tests {
         let target = dir.path().join("t.rar");
         std::fs::create_dir(&target).unwrap();
         {
-            let mut ar = RarArchive::create(&target).unwrap();
+            let mut ar =
+                RarArchive::create_with_options(&target, crate::options::CreateOptions::default())
+                    .unwrap();
             ar.add_bytes("a.txt", b"data", 0).unwrap();
             assert!(ar.close().is_err());
         }
@@ -2824,7 +2767,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.rar");
         let original = {
-            let mut ar = RarArchive::create(&path).unwrap();
+            let mut ar =
+                RarArchive::create_with_options(&path, crate::options::CreateOptions::default())
+                    .unwrap();
             ar.add_bytes("a.txt", b"original", 0).unwrap();
             ar.close().unwrap();
             std::fs::read(&path).unwrap()
@@ -2850,7 +2795,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mv.rar");
         let data = vec![42u8; 80000];
-        let mut ar = RarArchive::create_multivolume(&path, 30000).unwrap();
+        let mut ar = RarArchive::create_with_options(
+            &path,
+            crate::options::CreateOptions {
+                volume_size: Some(30000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         ar.add_bytes("data.bin", &data, 0).unwrap();
         // Volumes are staged under a temporary base: no final volume exists
         // until close.

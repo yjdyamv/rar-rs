@@ -1,4 +1,3 @@
-#![allow(deprecated)] // legacy constructor family; use create_with_options
 //! Cross-validation against the official rar/unrar console tools (env-gated via SA_OFFICIAL_RAR / SA_OFFICIAL_UNRAR).
 
 #[path = "support/mod.rs"]
@@ -87,7 +86,14 @@ fn official_unrar_validates_our_feature_archives() {
         let payload: Vec<u8> = (0..2 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
         let rr = dir.path().join("rr.rar");
         {
-            let mut ar = rar5::RarArchive::create_with_recovery(&rr, 10).unwrap();
+            let mut ar = rar5::RarArchive::create_with_options(
+                &rr,
+                rar5::CreateOptions {
+                    recovery_percent: Some(10),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("payload.bin", &payload, 3).unwrap();
             ar.close().unwrap();
         }
@@ -153,9 +159,15 @@ fn official_unrar_validates_our_feature_archives() {
             .collect();
         let multi = dir.path().join("multi.part1.rar");
         {
-            let mut ar =
-                rar5::RarArchive::create_multivolume_with_recovery_count(&multi, 1024 * 1000, 2)
-                    .unwrap();
+            let mut ar = rar5::RarArchive::create_with_options(
+                &multi,
+                rar5::CreateOptions {
+                    volume_size: Some(1024 * 1000),
+                    recovery_volume_count: Some(2),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             ar.add_bytes("big.bin", &vol_payload, 0).unwrap();
             ar.close().unwrap();
         }
@@ -328,7 +340,9 @@ fn official_unrar_validates_deleted_archives() {
     if let Some(rar_bin) = &rar_bin {
         let path = dir.path().join("del-by-official.rar");
         {
-            let mut rar = rar5::RarArchive::create(&path).unwrap();
+            let mut rar =
+                rar5::RarArchive::create_with_options(&path, rar5::CreateOptions::default())
+                    .unwrap();
             rar.add_bytes("a.bin", &a, 3).unwrap();
             rar.add_bytes("b.bin", &b, 3).unwrap();
             rar.add_bytes("c.bin", &c, 3).unwrap();
@@ -467,7 +481,8 @@ fn official_rename_cross_validation() {
     // Official rar renames our archive.
     let path = dir.path().join("rn.rar");
     {
-        let mut rar = rar5::RarArchive::create(&path).unwrap();
+        let mut rar =
+            rar5::RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add(src.join("a.bin"), 3).unwrap();
         rar.add(src.join("b.bin"), 3).unwrap();
         rar.close().unwrap();
@@ -651,7 +666,8 @@ fn official_sfx_cross_validation() {
     // Official unrar validates a stub-prefixed rar-rs archive.
     let ours = dir.path().join("ours.rar");
     {
-        let mut ar = rar5::RarArchive::create(&ours).unwrap();
+        let mut ar =
+            rar5::RarArchive::create_with_options(&ours, rar5::CreateOptions::default()).unwrap();
         ar.add_bytes("b.bin", &payload, 3).unwrap();
         ar.close().unwrap();
     }
@@ -706,7 +722,8 @@ fn official_redirection_cross_validation() {
     // rar-rs redirect entries must be valid for the official unrar.
     let ours = dir.path().join("ours.rar");
     {
-        let mut ar = rar5::RarArchive::create(&ours).unwrap();
+        let mut ar =
+            rar5::RarArchive::create_with_options(&ours, rar5::CreateOptions::default()).unwrap();
         ar.add_bytes("target.txt", b"target content", 0).unwrap();
         ar.add_redirect("lnk.txt", 1, "target.txt").unwrap();
         ar.close().unwrap();
@@ -785,7 +802,8 @@ fn official_time_and_owner_cross_validation() {
     // Our ns-mtime archive must be readable by the official unrar.
     let ours = dir.path().join("ours.rar");
     {
-        let mut ar = rar5::RarArchive::create(&ours).unwrap();
+        let mut ar =
+            rar5::RarArchive::create_with_options(&ours, rar5::CreateOptions::default()).unwrap();
         ar.add(&src, 3).unwrap();
         ar.close().unwrap();
     }

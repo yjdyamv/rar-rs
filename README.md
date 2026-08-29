@@ -126,7 +126,7 @@ unrar p [-p<password>] archive.rar [file]     Print to stdout
 use rar5::RarArchive;
 
 // Create
-let mut rar = RarArchive::create("backup.rar")?;
+let mut rar = RarArchive::create_with_options("backup.rar", Default::default())?;
 rar.add("src/", 3)?;
 rar.add_bytes("notes.txt", b"Some notes", 3)?;
 rar.close()?;
@@ -140,7 +140,10 @@ let mut rar = RarArchive::open("backup.rar")?;
 let data = rar.read("notes.txt")?;
 
 // Create an encrypted archive
-let mut rar = RarArchive::create_with_password("secret.rar", "mypassword")?;
+let mut rar = RarArchive::create_with_options(
+    "secret.rar",
+    rar5::CreateOptions { password: Some("mypassword".into()), ..Default::default() },
+)?;
 rar.add("classified.txt", 3)?;
 rar.close()?;
 
@@ -149,7 +152,10 @@ let mut rar = RarArchive::open_with_password("secret.rar", "mypassword")?;
 let data = rar.read("classified.txt")?;
 
 // Create a multi-volume archive (1 MB per volume)
-let mut rar = RarArchive::create_multivolume("backup.rar", 1048576)?;
+let mut rar = RarArchive::create_with_options(
+    "backup.rar",
+    rar5::CreateOptions { volume_size: Some(1048576), ..Default::default() },
+)?;
 rar.add("large_file.bin", 3)?;
 rar.close()?;
 
@@ -233,7 +239,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 let cancel = Arc::new(AtomicBool::new(false));
-let mut rar = RarArchive::create("backup.rar")?;
+let mut rar = RarArchive::create_with_options("backup.rar", Default::default())?;
 rar.set_cancel_flag(Some(cancel.clone()));
 // ... from another thread: cancel.store(true, Ordering::Relaxed);
 rar.close()?; // Err(RarError::Cancelled) once the flag is set

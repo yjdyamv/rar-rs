@@ -2,8 +2,8 @@
 
 /// Options controlling RAR5 archive creation.
 ///
-/// All fields default to the same behavior as the existing `create*`
-/// constructors; enable only the features you need.
+/// All fields default to the plain unencrypted single-volume create
+/// behavior; enable only the features you need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateOptions {
     /// Create a solid archive: consecutive compressed members share one

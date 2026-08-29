@@ -9,7 +9,7 @@
 //! use rar5::RarArchive;
 //!
 //! // Create an archive
-//! let mut rar = RarArchive::create("backup.rar").unwrap();
+//! let mut rar = RarArchive::create_with_options("backup.rar", Default::default()).unwrap();
 //! rar.add("src/", 3).unwrap();
 //! rar.add_bytes("notes.txt", b"Some notes", 3).unwrap();
 //! rar.close().unwrap();

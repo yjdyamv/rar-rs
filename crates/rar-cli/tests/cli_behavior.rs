@@ -1,4 +1,3 @@
-#![allow(deprecated)] // legacy constructor family; use create_with_options
 //! CLI behavior tests: drive the built `rar`/`unrar` binaries through
 //! WinRAR-compatible switches. Lives in this crate because the
 //! `CARGO_BIN_EXE_*` env vars are only defined for the package that builds
@@ -238,7 +237,8 @@ fn cli_ch_converts_member_case_like_winrar() {
     std::fs::write(dir.path().join("MiXeD.TXT"), b"x").unwrap();
     let archive = dir.path().join("ch.rar");
     {
-        let mut rar = RarArchive::create(&archive).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&archive, rar5::CreateOptions::default()).unwrap();
         rar.add(dir.path().join("MiXeD.TXT"), 3).unwrap();
         rar.close().unwrap();
     }
@@ -259,7 +259,8 @@ fn cli_print_writes_member_to_stdout() {
     let dir = make_temp_dir();
     let archive = dir.path().join("p.rar");
     {
-        let mut rar = RarArchive::create(&archive).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&archive, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("a.txt", b"hello p", 0).unwrap();
         rar.close().unwrap();
     }
@@ -278,7 +279,8 @@ fn cli_overwrite_never_skips_existing_files() {
     let dir = make_temp_dir();
     let archive = dir.path().join("o.rar");
     {
-        let mut rar = RarArchive::create(&archive).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&archive, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("f.txt", b"new", 0).unwrap();
         rar.close().unwrap();
     }
@@ -304,7 +306,8 @@ fn cli_comment_file_sets_comment() {
     let dir = make_temp_dir();
     let archive = dir.path().join("z.rar");
     {
-        let mut rar = RarArchive::create(&archive).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&archive, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("f.txt", b"x", 0).unwrap();
         rar.close().unwrap();
     }
@@ -330,7 +333,8 @@ fn unrar_list_variants_bare_and_technical() {
     let dir = make_temp_dir();
     let archive = dir.path().join("lt.rar");
     {
-        let mut rar = RarArchive::create(&archive).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&archive, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("a.txt", b"aaa", 0).unwrap();
         rar.add_bytes("b.bin", b"bbbb", 0).unwrap();
         rar.close().unwrap();
@@ -823,7 +827,8 @@ fn cli_append_dir_extracts_under_archive_name() {
     let dir = make_temp_dir();
     let archive = dir.path().join("ad.rar");
     {
-        let mut rar = RarArchive::create(&archive).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&archive, rar5::CreateOptions::default()).unwrap();
         rar.add_bytes("f.txt", b"x", 0).unwrap();
         rar.close().unwrap();
     }

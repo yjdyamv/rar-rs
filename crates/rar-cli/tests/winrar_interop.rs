@@ -1,4 +1,3 @@
-#![allow(deprecated)] // legacy constructor family; use create_with_options
 //! WinRAR interoperability tests (Windows-friendly).
 //!
 //! Unlike `tests/interop.rs` (which uses the Linux `rar`/`unrar` console
@@ -547,7 +546,8 @@ fn huge_sparse_file_streamed_compression_roundtrips() {
     // 4 GiB through the spill file).
     let arc = dir.path().join("huge.rar");
     {
-        let mut rar = RarArchive::create(&arc).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&arc, rar5::CreateOptions::default()).unwrap();
         rar.add(&src, 3).unwrap();
         rar.close().unwrap();
     }

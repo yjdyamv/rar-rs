@@ -1,4 +1,3 @@
-#![allow(deprecated)] // legacy constructor family; use create_with_options
 //! Byte-level container assertions: locator records, quick-open caches and FILE_TIME extra records.
 
 #[path = "support/mod.rs"]
@@ -47,7 +46,14 @@ fn recovery_locator_offset_is_relative_to_archive_start() {
     let dir = make_temp_dir();
     let path = dir.path().join("rr.rar");
     {
-        let mut rar = rar5::RarArchive::create_with_recovery(&path, 10).unwrap();
+        let mut rar = rar5::RarArchive::create_with_options(
+            &path,
+            rar5::CreateOptions {
+                recovery_percent: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         rar.add_bytes("a.bin", &b"recovery test payload ".repeat(1000), 3)
             .unwrap();
         rar.close().unwrap();
@@ -85,7 +91,8 @@ fn nanosecond_mtime_roundtrip() {
 
     let path = dir.path().join("ns.rar");
     {
-        let mut rar = RarArchive::create(&path).unwrap();
+        let mut rar =
+            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
         rar.add(&src, 3).unwrap();
         rar.close().unwrap();
     }
