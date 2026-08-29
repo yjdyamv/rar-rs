@@ -498,6 +498,27 @@ test('listEntriesQuick matches listEntriesDetailed on a quickOpen archive', asyn
   }
 })
 
+test('readMember returns a single member byte-exact', async () => {
+  const dir = tempDir()
+  try {
+    const src = join(dir, 'preview.txt')
+    const content = Buffer.from('readMember preview content '.repeat(500))
+    writeFileSync(src, content)
+    const rar = join(dir, 'a.rar')
+    await createArchive({ outPath: rar, entries: [{ kind: 'file', path: src }] })
+    const { readMember } = await import('../index.js')
+    const data = Buffer.from(readMember(rar, 'preview.txt'))
+    assert.deepEqual(data, content, 'member must read back byte-exact')
+    // Encrypted member with password.
+    const enc = join(dir, 'enc.rar')
+    await createArchive({ outPath: enc, password: 'pw', entries: [{ kind: 'file', path: src }] })
+    const dec = Buffer.from(readMember(enc, 'preview.txt', 'pw'))
+    assert.deepEqual(dec, content)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('listEntriesQuick falls back on an archive without quickOpen', async () => {
   const dir = tempDir()
   try {

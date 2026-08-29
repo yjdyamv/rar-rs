@@ -466,6 +466,40 @@ impl RarArchive {
         self.decode_file_at(target_idx, None)
     }
 
+    /// Stream one member's uncompressed content into `writer` (bounded
+    /// memory: the member is decoded block by block, never materialized).
+    /// Returns the number of bytes written. The default limits of
+    /// [`ExtractOptions`] still apply (4 GiB per member); pass
+    /// [`ExtractOptions`] with `max_unpacked_bytes: None` via
+    /// [`Self::read_to_writer_with_options`] for arbitrarily large members.
+    /// Solid-chain members decode the whole chain through the member, like
+    /// [`Self::read`].
+    pub fn read_to_writer(&mut self, name: &str, writer: &mut dyn Write) -> RarResult<u64> {
+        self.read_to_writer_with_options(name, writer, crate::options::ExtractOptions::default())
+    }
+
+    /// [`Self::read_to_writer`] with explicit limits (see
+    /// [`crate::ExtractOptions`]).
+    pub fn read_to_writer_with_options(
+        &mut self,
+        name: &str,
+        writer: &mut dyn Write,
+        opts: crate::options::ExtractOptions,
+    ) -> RarResult<u64> {
+        let target_idx = self
+            .entries
+            .iter()
+            .position(|e| e.name() == name)
+            .ok_or_else(|| RarError::MemberNotFound {
+                name: name.to_string(),
+            })?;
+        self.extract_options = opts;
+        if self.is_solid_chain_member(target_idx) {
+            return self.decode_solid_through_to(target_idx, writer);
+        }
+        self.decode_file_to(target_idx, writer, None)
+    }
+
     /// Extract all archive contents to `dest_dir` (safe defaults).
     pub fn extract_all(&mut self, dest_dir: impl AsRef<Path>) -> RarResult<()> {
         self.extract_all_with_options(dest_dir, crate::options::ExtractOptions::default())

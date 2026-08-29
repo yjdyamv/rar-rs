@@ -696,6 +696,22 @@ pub fn delete_entries(
   Ok(count as u32)
 }
 
+/// Read one member's uncompressed content into memory (like previewing a
+/// file inside the archive). Bounded by the library's default 4 GiB
+/// per-member read limit; use `extractArchive` for arbitrarily large
+/// members.
+#[napi]
+pub fn read_member(archive_path: String, name: String, password: Option<String>) -> Result<Buffer> {
+  let mut archive = match password.as_deref() {
+    Some(pw) if !pw.is_empty() => {
+      rar5::RarArchive::open_with_password(&archive_path, pw).map_err(to_napi_error)?
+    }
+    _ => rar5::RarArchive::open(&archive_path).map_err(to_napi_error)?,
+  };
+  let data = archive.read(&name).map_err(to_napi_error)?;
+  Ok(data.into())
+}
+
 /// List the member names of a RAR5 archive.
 #[napi]
 pub fn list_entries(archive_path: String, password: Option<String>) -> Result<Vec<String>> {

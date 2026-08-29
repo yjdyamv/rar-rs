@@ -1194,3 +1194,55 @@ fn concurrent_creates_with_different_threads_are_isolated() {
         assert_eq!(out, *payload, "threads={threads} payload mismatch");
     }
 }
+
+// ── Streaming single-member read (read_to_writer) ──────────────────────────
+
+/// read_to_writer must decode a member into a sink byte-identically to
+/// `read`, with bounded memory (no per-member materialization), and work
+/// for solid-chain members too.
+#[test]
+fn read_to_writer_matches_read_and_streams() {
+    use std::io::Write;
+
+    let dir = make_temp_dir();
+    let path = dir.path().join("rtw.rar");
+    let payload: Vec<u8> = (0..500_000u32).map(|i| (i % 251) as u8).collect();
+    {
+        let mut ar = rar5::RarArchive::create(&path).unwrap();
+        ar.add_bytes("m.bin", &payload, 3).unwrap();
+        ar.close().unwrap();
+    }
+
+    let mut ar = rar5::RarArchive::open(&path).unwrap();
+    let mut sink = Vec::new();
+    let n = ar.read_to_writer("m.bin", &mut sink).unwrap();
+    assert_eq!(n as usize, payload.len());
+    assert_eq!(sink, payload);
+
+    // Solid archive: the second member's chain decode streams through it.
+    let solid = dir.path().join("rtw-solid.rar");
+    {
+        let mut ar = rar5::RarArchive::create_with_options(
+            &solid,
+            rar5::CreateOptions {
+                solid: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ar.add_bytes("a.bin", &payload, 3).unwrap();
+        ar.add_bytes("b.bin", &payload, 3).unwrap();
+        ar.close().unwrap();
+    }
+    let mut ar = rar5::RarArchive::open(&solid).unwrap();
+    let mut sink = Vec::new();
+    let n = ar.read_to_writer("b.bin", &mut sink).unwrap();
+    assert_eq!(n as usize, payload.len());
+    assert_eq!(sink, payload);
+
+    // Missing member -> MemberNotFound.
+    let err = ar
+        .read_to_writer("nope.bin", &mut std::io::sink())
+        .unwrap_err();
+    assert!(matches!(err, rar5::RarError::MemberNotFound { .. }));
+}
