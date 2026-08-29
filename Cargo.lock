@@ -579,7 +579,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rar-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "rar5",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "rar5"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes",
  "crc32fast",
@@ -677,7 +677,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smart-archive-rar"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "napi",
  "napi-build",

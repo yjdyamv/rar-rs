@@ -1,6 +1,6 @@
 {
   "name": "smart-archive-rar",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "RAR5 archive creation for the Smart Archive VS Code extension (napi-rs)",
   "main": "index.js",
   "license": "BSD-2-Clause",
