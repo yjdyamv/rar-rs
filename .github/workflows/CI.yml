@@ -25,8 +25,13 @@ concurrency:
 # (crates/rar-cli) and the smart-archive-rar napi-rs binding
 # (crates/rar-napi, native .node + wasm32-wasip1-threads). No npm package
 # is published: the VS Code consumer downloads the compiled artifacts from
-# the GitHub Release assets (tag v*), SHA-256 pinned in its installer.
+# the GitHub Release assets (tag v*), SHA-256 pinned in its installer —
+# every release ships a SHA-256SUMS manifest for that.
 # The binding's JS tests run with `node --test` under crates/rar-napi.
+#
+# This file must live at the repository ROOT: GitHub Actions only executes
+# .github/workflows/*.yml from the default branch root; the old copy under
+# crates/rar-napi/.github/workflows/ was never run.
 jobs:
   lint:
     name: Lint + workspace tests
@@ -178,8 +183,11 @@ jobs:
             crates/rar-napi/smart-archive-rar.wasm32-wasi.wasm
             crates/rar-napi/smart-archive-rar.wasm32-wasi.debug.wasm
             crates/rar-napi/smart-archive-rar.wasi.cjs
+            crates/rar-napi/smart-archive-rar.wasi.d.cts
+            crates/rar-napi/smart-archive-rar.wasi-browser.js
             crates/rar-napi/wasi-path-map.cjs
             crates/rar-napi/wasi-worker.mjs
+            crates/rar-napi/wasi-worker-browser.mjs
           if-no-files-found: error
   test-bindings:
     name: Test bindings on ${{ matrix.settings.host }} (${{ matrix.settings.target }})
@@ -317,9 +325,14 @@ jobs:
           cp wasm/smart-archive-rar.wasm32-wasi.wasm \
              wasm/smart-archive-rar.wasm32-wasi.debug.wasm \
              wasm/smart-archive-rar.wasi.cjs \
+             wasm/smart-archive-rar.wasi.d.cts \
+             wasm/smart-archive-rar.wasi-browser.js \
              wasm/wasi-path-map.cjs \
-             wasm/wasi-worker.mjs release/ 2>/dev/null || true
+             wasm/wasi-worker.mjs \
+             wasm/wasi-worker-browser.mjs release/ 2>/dev/null || true
           find bindings -name 'index.js' -o -name 'index.d.ts' | while read f; do cp -f "$f" release/; done
+          # SHA-256 manifest so the VS Code consumer can pin artifact hashes.
+          (cd release && sha256sum *) > release/SHA-256SUMS
           ls -la release/
         shell: bash
       - name: Create GitHub Release

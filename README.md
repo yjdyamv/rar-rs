@@ -319,8 +319,9 @@ fuzz/                            cargo-fuzz targets (standalone crate)
 The napi-rs binding (`crates/rar-napi`) builds native `.node` addons for
 Windows/macOS/Linux and a `wasm32-wasip1-threads` bundle. No npm package is
 published: the GitHub Actions CI (`.github/workflows/CI.yml`, tag `v*`)
-attaches the compiled artifacts to the Release; the VS Code extension
-`vscode-smart-archive` downloads them SHA-256 pinned.
+attaches the compiled artifacts and a `SHA-256SUMS` manifest to the
+Release; the VS Code extension `vscode-smart-archive` downloads them
+SHA-256 pinned.
 
 ## Building
 
