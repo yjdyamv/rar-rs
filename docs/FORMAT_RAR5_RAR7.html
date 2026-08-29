@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RAR5 / RAR7 格式参考（可视化）</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      body { -webkit-font-smoothing: antialiased; scroll-behavior: smooth; }
+      .seam { stroke-dasharray: 4 4; }
+      .leak { stroke: #dc2626; }
+      .deep { background: linear-gradient(135deg, #0f172a, #1e293b); }
+      .block-card { position: relative; transition: transform .15s ease, box-shadow .15s ease; }
+      .block-card:hover { transform: translateX(3px); box-shadow: 0 6px 18px rgba(15,23,42,.12); }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .tag { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+      .flowline::before {
+        content: ""; position: absolute; left: 1.1rem; top: -0.9rem; height: .9rem;
+        border-left: 2px dashed #94a3b8;
+      }
+      details > summary { list-style: none; cursor: pointer; }
+      details > summary::-webkit-details-marker { display: none; }
+      .toc a { color: #4f46e5; text-decoration: none; }
+      .toc a:hover { text-decoration: underline; }
+      table td, table th { vertical-align: top; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans leading-relaxed">
+    <main class="max-w-5xl mx-auto px-6 py-12 space-y-14">
+
+      <!-- ============ HEADER ============ -->
+      <header class="border-b border-slate-200 pb-8">
+        <p class="tag text-indigo-500 mb-2">磁盘格式 · 权威可视化参考</p>
+        <h1 class="font-serif text-4xl font-semibold tracking-tight text-slate-900">
+          RAR5 / RAR7 格式参考
+        </h1>
+        <p class="mt-3 text-slate-500">
+          以 <span class="mono text-slate-700">rar-rs</span> 实现为唯一权威（对照 WinRAR 7.23 逐字节互操作验证）。
+          与 bitplane/rars 及其 <span class="mono">rar-research</span> 规格书冲突处，<strong>以本实现为准</strong>。
+          所有 <span class="mono">vint</span> 为 RAR5 变长整数（§2.2）；多字节整数一律<strong>小端</strong>。
+        </p>
+
+        <div class="mt-6 flex flex-wrap gap-x-6 gap-y-3 text-xs text-slate-600">
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm bg-slate-200 border border-slate-400"></span>块（block）</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm deep border border-slate-700"></span>核心体（加密 / 压缩 / 恢复）</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm border-2 border-dashed border-slate-400"></span>可选区域 / vint 软边界</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-1 bg-red-600"></span>陷阱 / 易错点</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm bg-emerald-100 border border-emerald-400"></span>rar-rs 做法</span>
+        </div>
+
+        <!-- TOC -->
+        <nav class="toc mt-6 rounded-lg border border-slate-200 bg-white p-4 text-sm flex flex-wrap gap-x-5 gap-y-1">
+          <a href="#s1">§1 心智模型</a>
+          <a href="#s2">§2 基础编码</a>
+          <a href="#s3">§3 最小归档解剖</a>
+          <a href="#s4">§4 各块详解</a>
+          <a href="#s5">§5 Extra 记录</a>
+          <a href="#s6">§6 压缩流</a>
+          <a href="#s7">§7 加密</a>
+          <a href="#s8">§8 多卷</a>
+          <a href="#s9">§9 恢复记录</a>
+          <a href="#s10">§10 Solid</a>
+          <a href="#s11">§11 RAR7</a>
+          <a href="#s12">§12 差异清单</a>
+          <a href="#appA">附录 A 速查</a>
+          <a href="#appB">附录 B 来源</a>
+        </nav>
+      </header>
+
+      <!-- ============ 1. 心智模型 ============ -->
+      <section id="s1">
+        <h2 class="font-serif text-2xl font-semibold mb-1">1 · 心智模型：块流总览</h2>
+        <p class="text-sm text-slate-500 mb-6">RAR5/RAR7 是一个<strong>块流（block stream）</strong>格式：一个归档 = 一串首尾相接、无间隙的块。五种块共用同一个外层信封（§2/§4）。</p>
+
+        <div class="rounded-xl border border-slate-200 bg-white p-6">
+          <div class="space-y-0 pl-2">
+            <div class="block-card flowline rounded-lg border border-dashed border-slate-400 bg-slate-50 px-4 py-3">
+              <div class="flex items-center justify-between"><span class="tag text-slate-500">可选 · SFX stub</span><span class="mono text-xs text-slate-400">任意长度</span></div>
+              <p class="text-sm text-slate-600">自解压模块。起点 = 首个 <span class="mono">Rar!\x1a\x07\x01\x00</span> 签名（<span class="mono">detect::sfx_offset_of</span>）。</p>
+            </div>
+            <div class="block-card flowline rounded-lg bg-slate-200 border border-slate-400 px-4 py-3">
+              <div class="flex items-center justify-between"><span class="tag text-slate-700">签名 · 8 字节</span><span class="mono text-xs text-slate-600">52 61 72 21 1a 07 01 00</span></div>
+              <p class="text-sm text-slate-700"><span class="mono">Rar!</span> 后接 <span class="mono">1A 07 01 00</span>。RAR7 同此签名。</p>
+            </div>
+            <div class="block-card flowline rounded-lg border-2 border-dashed border-red-400 bg-red-50 px-4 py-3">
+              <div class="flex items-center justify-between"><span class="tag text-red-600">可选 · 归档加密头 0x04</span><span class="mono text-xs text-red-400">-hp</span></div>
+              <p class="text-sm text-red-700">明文写（无 IV）。<span class="mono">-hp</span> 分卷的<strong>每一卷开头</strong>重复此块。</p>
+            </div>
+            <div class="block-card flowline rounded-lg deep text-slate-100 px-4 py-3">
+              <div class="flex items-center justify-between"><span class="tag text-indigo-200">主归档头 · block 0x01</span><span class="mono text-xs text-slate-300">归档标志 + Locator</span></div>
+              <p class="text-sm">含 VOLUME / SOLID / RECOVERY / LOCKED 标志；extra 区携带 QO/RR 偏移 locator。</p>
+            </div>
+            <div class="block-card flowline rounded-lg border border-slate-300 bg-white px-4 py-3">
+              <div class="flex items-center justify-between"><span class="tag text-slate-600">文件头 + 数据区 · block 0x02</span><span class="mono text-xs text-slate-400">每成员一组，重复 N 次</span></div>
+              <p class="text-sm text-slate-600">成员 = 文件头 + 紧跟数据区。数据区是 LZSS+Huffman 流，或（method=0 STORE）原文。压缩成员后跟一组压缩块（§6）。</p>
+            </div>
+            <div class="block-card flowline rounded-lg border-2 border-dashed border-slate-400 bg-slate-50 px-4 py-3">
+              <div class="flex items-center justify-between"><span class="tag text-slate-500">可选 · QO 服务块 0x03</span><span class="mono text-xs text-slate-400">归档尾部</span></div>
+              <p class="text-sm text-slate-600">quick-open 缓存：每个文件头的副本，使 listing 为 <span class="mono">O(QO)</span> 而非 <span class="mono">O(archive)</span>。</p>
+            </div>
+            <div class="block-card flowline rounded-lg border-2 border-dashed border-slate-400 bg-slate-50 px-4 py-3">
+              <div class="flex items-center justify-between"><span class="tag text-slate-500">可选 · RR 内联恢复记录 0x03</span><span class="mono text-xs text-slate-400">QO 之后</span></div>
+              <p class="text-sm text-slate-600">GF(2¹⁶) Cauchy 奇偶（§9.1）。<span class="mono">-hp</span> / 分卷下不可用。</p>
+            </div>
+            <div class="block-card flowline rounded-lg deep text-slate-100 px-4 py-3">
+              <div class="flex items-center justify-between"><span class="tag text-indigo-200">归档结束头 · block 0x05</span><span class="mono text-xs text-slate-300">SKIP_IF_UNKNOWN + 结束标志</span></div>
+              <p class="text-sm">块标志写 <span class="mono">0x0004</span>；"有无下一卷"放在随后的<strong>结束标志 vint</strong> 里（见 §4.6 陷阱）。</p>
+            </div>
+          </div>
+          <p class="mt-5 text-xs text-slate-400">单卷：上序。多卷：每卷末尾为带 <span class="mono">END_FLAG_NEXT_VOLUME</span> 的结束头；<span class="mono">-hp</span> 分卷每卷开头重复明文加密头。</p>
+        </div>
+      </section>
+
+      <!-- ============ 2. 基础编码 ============ -->
+      <section id="s2">
+        <h2 class="font-serif text-2xl font-semibold mb-1">2 · 基础编码</h2>
+
+        <div class="grid md:grid-cols-2 gap-6 mt-4">
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">2.1 字节序</p>
+            <p class="text-sm text-slate-600">所有多字节整数（CRC、时间戳、偏移、大小）均为<strong>小端</strong>。</p>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">2.2 vint · 变长整数</p>
+            <p class="text-sm text-slate-600 mb-3">每字节 7 数据位（bit 0–6），bit 7 续延（1=还有）。<strong>小端序</strong>，上限 10 字节；第 10 字节超出 bit 63 的位被忽略。</p>
+            <div class="space-y-1.5 mono text-xs">
+              <div class="flex justify-between"><span>0 … 127</span><span class="text-slate-500">0xxxxxxx（1 字节）</span></div>
+              <div class="flex justify-between"><span>128 … 16383</span><span class="text-slate-500">1xxxxxxx 0xxxxxxx（2）</span></div>
+              <div class="flex justify-between"><span>…</span><span class="text-slate-500">最多 10 字节</span></div>
+            </div>
+            <div class="mt-3 rounded-lg border border-red-200 bg-red-50 p-3">
+              <p class="text-xs text-red-700"><strong class="mono">⚠ 非规范定宽 vint</strong>：WinRAR 7.x 写头部大小等字段用<strong>非最简</strong>定宽 vint，短值也可能占 9–10 字节。块头 CRC32 必须对<strong>磁盘原始 vint 字节 + body</strong> 算，而非重编码后的规范 vint；locator 偏移用 <span class="mono">vint_fixed5</span> 预分配、close 时回填。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 3. 最小归档解剖 ============ -->
+      <section id="s3">
+        <h2 class="font-serif text-2xl font-semibold mb-1">3 · 最小归档解剖（逐字节示例）</h2>
+        <p class="text-sm text-slate-500 mb-4">由 <span class="mono">rar a -m0 tiny.rar tiny.txt</span> 生成（STORE、单文件、单卷），共 <strong>111 字节</strong>。可对照 §2–§5 完整拆解。</p>
+
+        <div class="space-y-4">
+          <!-- main header -->
+          <details open class="rounded-xl border border-slate-200 bg-white">
+            <summary class="px-4 py-3 font-medium text-slate-700">主归档头 · block 0x01</summary>
+            <div class="px-4 pb-4 overflow-x-auto">
+              <table class="w-full text-xs mono border-collapse">
+                <thead><tr class="text-slate-400"><th class="text-left pr-4 py-1">偏移</th><th class="text-left pr-4 py-1">字节</th><th class="text-left py-1">说明</th></tr></thead>
+                <tbody class="text-slate-600">
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x00</td><td class="pr-4 py-1">52 61 72 21 1a 07 01 00</td><td>归档签名 <span class="mono">Rar!\x1a\x07\x01\x00</span>（8 字节）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x08</td><td class="pr-4 py-1">c5 1a 33 32</td><td>头部 CRC32（LE）= <span class="mono">0x32331AC5</span>，覆盖 [size vint 原字节] + body</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x0c</td><td class="pr-4 py-1">03</td><td>头部大小 vint = 3</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x0d</td><td class="pr-4 py-1">01</td><td>块类型 = 0x01（归档头）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x0e</td><td class="pr-4 py-1">00</td><td>块标志 = 0</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x0f</td><td class="pr-4 py-1">00</td><td>归档标志 = 0（单卷 / 非 solid / 未锁定）</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+
+          <!-- file header -->
+          <details open class="rounded-xl border border-slate-200 bg-white">
+            <summary class="px-4 py-3 font-medium text-slate-700">文件头 · block 0x02</summary>
+            <div class="px-4 pb-4 overflow-x-auto">
+              <table class="w-full text-xs mono border-collapse">
+                <thead><tr class="text-slate-400"><th class="text-left pr-4 py-1">偏移</th><th class="text-left pr-4 py-1">字节</th><th class="text-left py-1">说明</th></tr></thead>
+                <tbody class="text-slate-600">
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x10</td><td class="pr-4 py-1">6c 11 bb d1</td><td>头部 CRC32（LE）= <span class="mono">0xD1BB116C</span></td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x14</td><td class="pr-4 py-1">48</td><td>头部大小 vint = <span class="mono">0x48</span> = 72</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x15</td><td class="pr-4 py-1">02</td><td>块类型 = 0x02（文件头）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x16</td><td class="pr-4 py-1">03</td><td>块标志 = <span class="mono">0x0001 | 0x0002</span> = EXTRA_DATA | DATA_AREA</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x17</td><td class="pr-4 py-1">0b</td><td>额外区大小 vint = 11</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x18</td><td class="pr-4 py-1">0a</td><td>数据区大小 vint = 10（packed 大小）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x19</td><td class="pr-4 py-1">06</td><td>文件标志 = <span class="mono">0x0002 | 0x0004</span> = TIME_UNIX | CRC32</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x1a</td><td class="pr-4 py-1">0a</td><td>解压大小 vint = 10</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x1b</td><td class="pr-4 py-1">a4 83 02</td><td>属性 vint = <span class="mono">0o100644</span>（Unix 普通文件）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x1e</td><td class="pr-4 py-1">76 aa 92 6a</td><td>4 字节 LE mtime = <span class="mono">0x6A92AA76</span></td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x22</td><td class="pr-4 py-1">9d d2 80 b1</td><td>4 字节 LE CRC32（明文 <span class="mono">hello rar\n</span>）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x26</td><td class="pr-4 py-1">00</td><td>压缩信息 vint = 0 → v0(RAR5) · solid0 · method0(store) · dict0</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x27</td><td class="pr-4 py-1">01</td><td>host OS = 1（Unix）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x28</td><td class="pr-4 py-1">29</td><td>名字长度 vint = <span class="mono">0x29</span> = 41</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x29…0x51</td><td class="pr-4 py-1">43 3a 2f … 74 78 74</td><td>名字 UTF-8 = <span class="mono">C:/Users/.../tiny.txt</span>（41 字节）</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+
+          <!-- extra + data + end -->
+          <details class="rounded-xl border border-slate-200 bg-white">
+            <summary class="px-4 py-3 font-medium text-slate-700">额外区（11B）· 数据区（10B）· 结束头（block 0x05）</summary>
+            <div class="px-4 pb-4 overflow-x-auto">
+              <table class="w-full text-xs mono border-collapse">
+                <thead><tr class="text-slate-400"><th class="text-left pr-4 py-1">偏移</th><th class="text-left pr-4 py-1">字节</th><th class="text-left py-1">说明</th></tr></thead>
+                <tbody class="text-slate-600">
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x52</td><td class="pr-4 py-1">0a</td><td>额外记录大小 vint = 10（含类型字节）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x53</td><td class="pr-4 py-1">03</td><td>额外记录类型 = 0x03（HTIME 文件时间）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x54</td><td class="pr-4 py-1">13</td><td>HTIME 标志 = <span class="mono">0x01|0x02|0x10</span>（unix|mtime|ns）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x55…0x58</td><td class="pr-4 py-1">76 aa 92 6a</td><td>4 字节 LE mtime 秒 = <span class="mono">0x6A92AA76</span></td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x59…0x5c</td><td class="pr-4 py-1">58 6a b8 16</td><td>4 字节 LE mtime 纳秒 = <span class="mono">0x16B86A58</span>（≈ 0.381 s）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x5d…0x66</td><td class="pr-4 py-1">68 65 6c 6c 6f 20 72 61 72 0a</td><td>数据区：<span class="mono">hello rar\n</span>（STORE，原样）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x67</td><td class="pr-4 py-1">1d 77 56 51</td><td>结束头 CRC32（LE）= <span class="mono">0x5156771D</span></td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x6b</td><td class="pr-4 py-1">03</td><td>头部大小 vint = 3</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x6c</td><td class="pr-4 py-1">05</td><td>块类型 = 0x05（结束头）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x6d</td><td class="pr-4 py-1">04</td><td>块标志 = <span class="mono">0x0004</span>（SKIP_IF_UNKNOWN，⚠ 见 §4.6）</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x6e</td><td class="pr-4 py-1">00</td><td>结束标志 = 0（单卷，后面无分卷）</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+        </div>
+        <p class="mt-3 text-sm text-slate-500">💡 文件头里既有 4 字节头部 <span class="mono">mtime</span>（0x1e），额外区又有 HTIME 的 <span class="mono">mtime</span>（0x55）。两者值相同，但 HTIME 携带纳秒精度——解码时<strong>以 HTIME 的 mtime 为准</strong>。压缩成员（method≠0）的文件头后还跟一组压缩块（§6）。</p>
+      </section>
+
+      <!-- ============ 4. 各块详解 ============ -->
+      <section id="s4">
+        <h2 class="font-serif text-2xl font-semibold mb-1">4 · 各块详解</h2>
+
+        <div class="mt-4 space-y-5">
+          <!-- 4.1 -->
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">4.1 归档签名</p>
+            <p class="mono text-sm text-slate-700">52 61 72 21 1A 07 01 00&nbsp;&nbsp;—&nbsp;&nbsp;"Rar!" 1A 07 01 00</p>
+            <p class="text-xs text-slate-500 mt-2">RAR7 签名相同。RAR4 及更早（<span class="mono">Rar!\x1a\x07\x00</span> / <span class="mono">RE~^</span>）被 rar-rs 明确拒绝。</p>
+          </div>
+
+          <!-- 4.2 -->
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">4.2 主归档头（0x01）</p>
+            <p class="mono text-xs text-slate-600 mb-3">[块类型=0x01][块标志][extra 大小?][归档标志 vint][卷号 vint —— 仅当 VOLUME_NUM][extra 区]</p>
+            <div class="grid md:grid-cols-2 gap-5">
+              <div>
+                <p class="tag text-slate-400 mb-2">归档标志</p>
+                <table class="w-full text-xs border-collapse">
+                  <tbody class="mono text-slate-600">
+                    <tr class="border-b border-slate-100"><td class="py-1 pr-3">0x0001</td><td>VOLUME</td><td class="text-slate-400">分卷集一员</td></tr>
+                    <tr class="border-b border-slate-100"><td class="py-1 pr-3">0x0002</td><td>VOLUME_NUM</td><td class="text-slate-400">后随卷号（1 起）</td></tr>
+                    <tr class="border-b border-slate-100"><td class="py-1 pr-3">0x0004</td><td>SOLID</td><td class="text-slate-400">固态归档</td></tr>
+                    <tr class="border-b border-slate-100"><td class="py-1 pr-3">0x0008</td><td>RECOVERY</td><td class="text-slate-400">含内联 RR</td></tr>
+                    <tr><td class="py-1 pr-3">0x0010</td><td>LOCKED</td><td class="text-slate-400">已锁定</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div>
+                <p class="tag text-slate-400 mb-2">Locator 记录（extra type 0x01）</p>
+                <p class="mono text-xs text-slate-600">[记录大小 vint][类型=0x01][标志 vint: 0x0001 有 QO / 0x0002 有 RR][QO 偏移 vint][RR 偏移 vint]</p>
+                <p class="text-xs text-slate-500 mt-2">偏移相对归档起点（签名之后），固定 5 字节 vint；在 close 时回填（QO/RR 记录起始绝对位置）。</p>
+              </div>
+            </div>
+            <div class="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+              <p class="text-xs text-emerald-700">🔧 <strong>rar-rs 做法</strong>：locator 的 QO/RR 偏移字段用 <span class="mono">vint_fixed5</span> 预分配成固定 5 字节，写文件时在对应绝对位置<strong>原地回填</strong>——偏移在写文件头时尚未知。读端用 <span class="mono">main_header_locator_fields</span> 定位这两个 5 字节字段。</p>
+            </div>
+          </div>
+
+          <!-- 4.3 -->
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">4.3 文件头（0x02）</p>
+            <p class="mono text-xs text-slate-600 mb-3">[类型=0x02][块标志][extra 大小?][数据大小?][文件标志][解压大小][属性][mtime 4LE?][CRC32 4LE?][压缩信息][host OS][名字长度][名字 UTF-8][extra 区?]</p>
+            <div class="grid md:grid-cols-2 gap-5">
+              <div>
+                <p class="tag text-slate-400 mb-2">文件标志</p>
+                <table class="w-full text-xs border-collapse">
+                  <tbody class="mono text-slate-600">
+                    <tr class="border-b border-slate-100"><td class="py-1 pr-3">0x0001</td><td>DIRECTORY</td><td class="text-slate-400">目录条目（无数据区）</td></tr>
+                    <tr class="border-b border-slate-100"><td class="py-1 pr-3">0x0002</td><td>TIME_UNIX</td><td class="text-slate-400">4 字节 Unix mtime</td></tr>
+                    <tr class="border-b border-slate-100"><td class="py-1 pr-3">0x0004</td><td>CRC32</td><td class="text-slate-400">4 字节 CRC32</td></tr>
+                    <tr><td class="py-1 pr-3">0x0008</td><td>UNKNOWN_SIZE</td><td class="text-slate-400">解压大小未知（流式）</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div>
+                <p class="tag text-slate-400 mb-2">压缩信息 vint · 位布局</p>
+                <table class="w-full text-xs border-collapse">
+                  <tbody class="mono text-slate-600">
+                    <tr class="border-b border-slate-100"><td class="py-1 pr-3">bit 0–5</td><td>version</td><td class="text-slate-400">0=RAR5 / 1=RAR7</td></tr>
+                    <tr class="border-b border-slate-100"><td class="py-1 pr-3">bit 6</td><td>solid</td><td class="text-slate-400">共享 LZ 窗口</td></tr>
+                    <tr class="border-b border-slate-100"><td class="py-1 pr-3">bit 7–9</td><td>method</td><td class="text-slate-400">0=store, 1–5=级别</td></tr>
+                    <tr class="border-b border-slate-100"><td class="py-1 pr-3">bit 10–13</td><td>dict</td><td class="text-slate-400">RAR5 4 位幂</td></tr>
+                    <tr><td class="py-1 pr-3">bit 15–19</td><td>dict_frac</td><td class="text-slate-400">RAR7 1/32 增量</td></tr>
+                  </tbody>
+                </table>
+                <p class="text-xs text-slate-500 mt-2">RAR5 字典 <span class="mono">128 KiB &lt;&lt; log</span>（≤ 4 GiB）；RAR7 字典 <span class="mono">(32+frac) &lt;&lt; (power+12)</span>（≤ 64 GiB，见 §11.2）。</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 4.4 -->
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">4.4 服务块（0x03）</p>
+            <p class="text-sm text-slate-600 mb-3">复用文件头外形（type=0x03，名字在名字字段），数据区承载服务负载，extra 区承载 SUBDATA 记录（type 0x07）。rar-rs 支持四种：</p>
+            <div class="overflow-x-auto">
+              <table class="w-full text-xs border-collapse">
+                <thead><tr class="text-slate-400"><th class="text-left pr-4 py-1">名字</th><th class="text-left pr-4 py-1">负载</th><th class="text-left pr-4 py-1">extra SUBDATA</th><th class="text-left py-1">块标志</th></tr></thead>
+                <tbody class="mono text-slate-600">
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">CMT</td><td class="pr-4 py-1">注释文本（数据区，store）</td><td class="pr-4 py-1">无</td><td class="py-1">DATA_AREA</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">QO</td><td class="pr-4 py-1">quick-open 缓存</td><td class="pr-4 py-1">空记录（仅类型字节）</td><td class="py-1">DATA_AREA + SKIP_IF_UNKNOWN</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">RR</td><td class="pr-4 py-1">内联恢复奇偶数据</td><td class="pr-4 py-1">1 字节恢复百分比</td><td class="py-1">DATA_AREA + SKIP_IF_UNKNOWN</td></tr>
+                  <tr class="border-t border-slate-100"><td class="pr-4 py-1">STM</td><td class="pr-4 py-1">NTFS 备用流内容</td><td class="pr-4 py-1">流名 <span class="mono">:name</span></td><td class="py-1">DATA_AREA + DEPENDS_PREV</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="text-xs text-slate-500 mt-2 mono">QO 负载：每条 [条目 CRC32 4LE][body 大小 vint][body = 条目标志 0][相对偏移 vint][头部大小 vint][文件头原字节]；相对偏移 = QO 起始 − 文件头绝对位置（正值）。</p>
+          </div>
+
+          <!-- 4.5 -->
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">4.5 归档加密头（0x04）</p>
+            <p class="mono text-xs text-slate-600">[类型=0x04][块标志=0][加密版本 vint=0][加密标志 vint: 0x0001 密码校验位][强度 1B][盐 16B][12B 密码校验值?]</p>
+            <p class="text-xs text-slate-500 mt-2">归档级加密头<strong>不含 IV</strong>——其后每个块自带 16 字节 IV（§7.2）。<span class="mono">-hp</span> 分卷集的<strong>每一卷开头</strong>重复此明文块（同盐/同校验值）。该头之后所有块为 <span class="mono">[16B IV][AES-256-CBC 密文]</span>（zero-fill，§7.2）。</p>
+          </div>
+
+          <!-- 4.6 -->
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">4.6 归档结束头（0x05）</p>
+            <p class="mono text-xs text-slate-600">[类型=0x05][块标志=SKIP_IF_UNKNOWN 0x0004][结束标志 vint]</p>
+            <p class="text-xs text-slate-500 mt-1">结束标志 <span class="mono">0x0001</span> = NEXT_VOLUME；分卷非末卷写 NEXT_VOLUME，末卷写 0。</p>
+            <div class="mt-3 rounded-lg border border-red-200 bg-red-50 p-3">
+              <p class="text-xs text-red-700"><strong class="mono">⚠ 7-Zip 陷阱（务必照做）</strong>：<span class="mono">0x0004</span> 是真实的<strong>块标志位</strong>。若把"结束标志=1"误塞进<strong>块标志</strong>位，7-Zip 会把它当 <span class="mono">EXTRA_DATA</span>，进而把结束标志当 extra 区大小消费掉，多卷解析直接失败。WinRAR 写 <span class="mono">SKIP_IF_UNKNOWN</span>（0x0004），rar-rs 同样写这个<strong>块标志值</strong>，把"有无下一卷"放在随后的<strong>结束标志 vint</strong> 里。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 5. Extra 记录 ============ -->
+      <section id="s5">
+        <h2 class="font-serif text-2xl font-semibold mb-1">5 · Extra 记录</h2>
+        <p class="mono text-xs text-slate-600 mb-4">共用信封：[记录大小 vint][记录类型 vint][记录体 …]（记录大小 = 类型字节及之后所有字节数）</p>
+        <div class="rounded-xl border border-slate-200 bg-white p-5">
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs border-collapse">
+              <thead><tr class="text-slate-400"><th class="text-left pr-4 py-1">类型</th><th class="text-left pr-4 py-1">名称</th><th class="text-left py-1">出现位置</th></tr></thead>
+              <tbody class="mono text-slate-600">
+                <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x01</td><td class="pr-4 py-1">文件加密参数</td><td class="py-1">加密文件头</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x02</td><td class="pr-4 py-1">哈希（BLAKE2sp）</td><td class="py-1">文件头（<span class="mono">-htb</span>）</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x03</td><td class="pr-4 py-1">文件时间（HTIME）</td><td class="py-1">文件头（<span class="mono">-ts</span>）</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x04</td><td class="pr-4 py-1">文件版本</td><td class="py-1">文件头（<span class="mono">-ver[n]</span>）</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x05</td><td class="pr-4 py-1">重定向</td><td class="py-1">链接/复制成员（无数据区）</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x06</td><td class="pr-4 py-1">owner/group</td><td class="py-1">文件头（<span class="mono">-ow</span>）</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-4 py-1">0x07</td><td class="pr-4 py-1">服务数据 SUBDATA</td><td class="py-1">服务块（RR 百分比、STM 流名）</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4 text-sm">
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">5.1 文件加密（0x01）</p>
+            <p class="mono text-xs text-slate-600">[加密版本 0][加密标志: 0x0001 校验值 / 0x0002 hash-key MAC][强度 1B][盐 16B][IV 16B][12B 校验值?]</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">5.2 哈希（0x02）</p>
+            <p class="mono text-xs text-slate-600">[哈希类型 0（BLAKE2sp）][32 字节哈希值]</p>
+            <p class="text-xs text-slate-500 mt-1">8 路并行 BLAKE2s 树哈希，输出 32 字节（<span class="mono">-htb</span>）。加密文件用 hash-key MAC 保护（§7.5）。</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">5.3 文件时间 HTIME（0x03）</p>
+            <p class="mono text-xs text-slate-600">[标志 vint][时间字段 …]</p>
+            <p class="text-xs text-slate-500 mt-1">标志 0x0001 Unix 秒 / 0x0002 mtime / 0x0004 ctime / 0x0008 atime / 0x0010 纳秒。Unix 秒格式：先全部秒字段再全部纳秒字段。FILETIME 格式：8 字节 LE，100 ns 自 1601-01-01。💡 头部 mtime 被 HTIME 的 mtime <strong>覆盖</strong>。</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">5.4 文件版本（0x04）</p>
+            <p class="mono text-xs text-slate-600">[版本号 vint]</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">5.5 重定向（0x05）</p>
+            <p class="mono text-xs text-slate-600">[重定向类型 vint][标志 vint][目标名字长度][目标名字 UTF-8]</p>
+            <p class="text-xs text-slate-500 mt-1">0x01 Unix 符号链接 / 0x02 Windows 符号链接 / 0x03 junction / 0x04 硬链接 / 0x05 文件复制。无数据区；未知类型降级为空普通文件。</p>
+          </div>
+          <div class="grid grid-rows-2 gap-4">
+            <div class="rounded-xl border border-slate-200 bg-white p-4">
+              <p class="tag text-indigo-500 mb-2">5.6 owner/group（0x06）</p>
+              <p class="mono text-xs text-slate-600">[标志: 0x0001 owner / 0x0002 group][owner?][group?]</p>
+            </div>
+            <div class="rounded-xl border border-slate-200 bg-white p-4">
+              <p class="tag text-indigo-500 mb-2">5.7 SUBDATA（0x07）</p>
+              <p class="mono text-xs text-slate-600">服务块 extra 区。RR 1 字节恢复百分比；STM 流名 <span class="mono">:name</span>。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 6. 压缩数据流 ============ -->
+      <section id="s6">
+        <h2 class="font-serif text-2xl font-semibold mb-1">6 · 压缩数据流（LZSS + Huffman）</h2>
+        <div class="rounded-xl border border-slate-200 bg-white p-5 mt-4">
+          <pre class="mermaid">
+flowchart LR
+  A[输入字节] --> B[BT4 匹配查找]
+  B --> C[LZSS 符号流]
+  C --> D{过滤器}
+  D -->|Delta/E8/E8E9/ARM| E[解压输出区域]
+  E --> F[Huffman 表 ×4: BC/NC/DC/LDC/RC]
+  F --> G[压缩块帧: 标志/校验/大小]
+  G --> H[MSB 位流打包]
+  H --> I[packed 输出]
+  classDef core fill:#0f172a,stroke:#1e293b,color:#fff;
+  class I core;
+          </pre>
+        </div>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4 text-sm">
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">6.1 压缩块头</p>
+            <p class="mono text-xs text-slate-600 mb-2">[标志 1][校验 1][大小 1–3 LE][块数据]</p>
+            <p class="text-xs text-slate-600">标志 bit 7=含 Huffman 表；bit 6=末块；bit 5–3=大小字段宽度−1；bit 2–0=末字节有效位−1。校验 = <span class="mono">0x5A ^ 标志 ^ 大小每字节</span>。空成员：单块 <span class="mono">0x40</span>。编码器把 LZSS 流切成 ≤ 128 KiB（0x20000）块。</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">6.2 Huffman 表</p>
+            <p class="mono text-xs text-slate-600 mb-2">每块先写 4 张表，码长 ≤ 15</p>
+            <table class="w-full text-xs border-collapse">
+              <tbody class="mono text-slate-600">
+                <tr class="border-b border-slate-100"><td class="py-1 pr-3">BC</td><td>20</td><td class="text-slate-400">编码其余表的码长</td></tr>
+                <tr class="border-b border-slate-100"><td class="py-1 pr-3">NC</td><td>306</td><td class="text-slate-400">主符号</td></tr>
+                <tr class="border-b border-slate-100"><td class="py-1 pr-3">DC</td><td>64 / 80(DCX)</td><td class="text-slate-400">距离低位</td></tr>
+                <tr class="border-b border-slate-100"><td class="py-1 pr-3">LDC</td><td>16</td><td class="text-slate-400">大距离低 4 位</td></tr>
+                <tr><td class="py-1 pr-3">RC</td><td>44</td><td class="text-slate-400">过滤器参数</td></tr>
+              </tbody>
+            </table>
+            <p class="text-xs text-slate-500 mt-1">码长串联经 BC 表 RLE（16/17/18/19 带额外位）；BC 码长用 4 位半字节，<span class="mono">15</span> 转义零游程。解码用 quick-lookup（2¹⁰）。</p>
+          </div>
+        </div>
+
+        <div class="mt-4 rounded-xl border border-slate-200 bg-white p-5">
+          <p class="tag text-indigo-500 mb-2">6.3 LZSS 主符号（NC 表）</p>
+          <table class="w-full text-xs border-collapse">
+            <tbody class="mono text-slate-600">
+              <tr class="border-b border-slate-100"><td class="py-1 pr-3">0–255</td><td>字面量字节</td></tr>
+              <tr class="border-b border-slate-100"><td class="py-1 pr-3">256</td><td>过滤器标记（§6.6）</td></tr>
+              <tr class="border-b border-slate-100"><td class="py-1 pr-3">257</td><td>重复匹配（距离缓存 0 号 + 上一匹配长度）</td></tr>
+              <tr class="border-b border-slate-100"><td class="py-1 pr-3">258–261</td><td>距离缓存索引 0–3 的匹配（长度见后）</td></tr>
+              <tr><td class="py-1 pr-3">262–305</td><td>匹配，长度槽 = 符号 − 262（§6.4）</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4 text-sm">
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">6.4 长度解码</p>
+            <p class="mono text-xs text-slate-600">slot &lt; 8:&nbsp; 长度 = 2 + slot<br>slot ≥ 8:&nbsp; lbits = slot/4 − 1<br>&nbsp;&nbsp;base = 2 + ((4 | (slot & 3)) &lt;&lt; lbits)<br>&nbsp;&nbsp;长度 = base + 读 lbits 位</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">6.5 距离解码与缓存</p>
+            <p class="mono text-xs text-slate-600">slot &lt; 4:&nbsp; 距离 = 1 + slot<br>slot ≥ 4:&nbsp; dbits = slot/2 − 1<br>&nbsp;&nbsp;base = 1 + ((2 | (slot & 1)) &lt;&lt; dbits)<br>&nbsp;&nbsp;dbits ≥ 4: 高 (dbits−4) 位直接读，低 4 位用 LDC<br>&nbsp;&nbsp;dbits &lt; 4: 直接读 dbits 位<br>&nbsp;&nbsp;距离 = base + 上述增量</p>
+            <p class="text-xs text-slate-500 mt-2">距离缓存：4 项 LRU。NC 257 与 NC 258–261 读缓存提至队首；新距离压队首。<strong>长度奖励</strong>：距离 &gt; 0x100 / 0x2000 / 0x40000 各 +1。</p>
+          </div>
+        </div>
+
+        <div class="mt-4 grid md:grid-cols-2 gap-4 text-sm">
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">6.6 过滤器</p>
+            <p class="mono text-xs text-slate-600">[块起始偏移 vint][块长度 vint][过滤器类型 3 位][通道数−1 5 位]</p>
+            <p class="text-xs text-slate-500 mt-1">类型 0 Delta / 1 E8 / 2 E8E9 / 3 ARM（仅 Delta 用通道数 1–4）。作用于解压输出区域，可链式；区域上限 <span class="mono">0x3FFFF</span>（256 KiB − 1）。类型 4–7 显式报错。</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">6.7 位序</p>
+            <p class="text-sm text-slate-600">压缩位流<strong>高位在前</strong>（MSB-first）逐字节打包；Huffman 码与额外位同序。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 7. 加密 ============ -->
+      <section id="s7">
+        <h2 class="font-serif text-2xl font-semibold mb-1">7 · 加密</h2>
+        <div class="rounded-xl border border-slate-200 bg-white p-5 mt-4">
+          <pre class="mermaid">
+flowchart TD
+  P[password] --> KDF
+  S[salt 16B] --> KDF
+  KDF["HMAC-SHA256 单链 · 2^strength 次"] --> S1["切点 2^s: AES-256 数据/头密钥 32B"]
+  KDF --> S2["切点 +16: hash key 32B"]
+  KDF --> S3["切点 +32: 密码校验值 8B"]
+  S1 --> ENC["AES-256-CBC · zero-fill 填充"]
+  S2 --> MAC["hash-key MAC 保护明文 CRC/哈希"]
+  S3 --> PV["12B 校验值 · 常数时间比较"]
+  classDef core fill:#0f172a,stroke:#1e293b,color:#fff;
+  class ENC,MAC core;
+          </pre>
+        </div>
+
+        <div class="mt-4 space-y-4 text-sm">
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">7.1 密钥派生（链式 HMAC-SHA256 KDF）</p>
+            <p class="mono text-xs text-slate-600">U₀ = HMAC(password, salt‖BE32(1)); Uᵢ = HMAC(password, Uᵢ₋₁); acc = XOR 累积</p>
+            <p class="text-xs text-slate-600 mt-1">单条 HMAC 链共 <span class="mono">2^strength + 32</span> 次迭代，XOR 折叠在三个切点取样（数据密钥 / hash key / 校验值）。💡 强度上限 2²⁴（读取侧拒绝防 CPU DoS）；默认 2¹⁵。三段产物来自<strong>同一条</strong>链。</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">7.2 文件加密</p>
+            <p class="text-xs text-slate-600">AES-256-CBC，每文件随机 IV。填充 <strong>zero-fill</strong> 到 16 字节边界（非 PKCS7，7-Zip 校验全零）；空文件也产生 16 字节密文。流式：IV 链跨分块连续（<span class="mono">CbcRangeEmitter</span>），卷大小仍精确。加密成员头 CRC 是<strong>密文 CRC</strong>；明文 CRC 用 hash-key MAC 保护。</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">7.3 密码校验值（12 字节）</p>
+            <p class="mono text-xs text-slate-600">[0..8) KDF 末段 XOR 折叠 8 字节 · [8..12) SHA-256(前 8 字节)[0..4)</p>
+            <p class="text-xs text-slate-500 mt-1">比较为常数时间。无校验值时（flags 无 0x0001）任何密码都"通过"。</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">7.4 头加密（-hp）</p>
+            <p class="text-xs text-slate-600">每卷开头写明文归档加密头（无 IV）；其后每块头为 <span class="mono">[16B 随机 IV][AES-256-CBC(zero-fill) 密文]</span>。密钥每卷重派（同盐），块 IV 各自随机。🔧 限制（与 WinRAR 一致）：<span class="mono">-hp</span> 分卷不能用内联 RR；QO 不与 <span class="mono">-hp</span>/分卷组合。</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">7.5 hash-key MAC</p>
+            <p class="mono text-xs text-slate-600">MAC(CRC32) = XOR 折叠 HMAC(hash_key, CRC32_LE) 的 8 个 4 字节块<br>MAC(hash32) = 同上逐 4 字节折叠成 32 字节</p>
+            <p class="text-xs text-slate-500 mt-1">加密 extra 记录标志 0x0002 表示使用。解密端先还原明文 CRC/哈希再校验。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 8. 多卷 ============ -->
+      <section id="s8">
+        <h2 class="font-serif text-2xl font-semibold mb-1">8 · 多卷归档</h2>
+        <p class="text-sm text-slate-500 mb-4">命名 <span class="mono">name.partN.rar</span>（N 从 1）；<span class="mono">discover_volumes</span> 自动发现全卷。</p>
+        <div class="rounded-xl border border-slate-200 bg-white p-6 space-y-3">
+          <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><div class="flex justify-between"><span class="tag text-slate-500">卷 1 · part1.rar</span><span class="mono text-xs text-slate-400">[加密头?][主头][成员…][结束头 · NEXT_VOLUME]</span></div></div>
+          <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><div class="flex justify-between"><span class="tag text-slate-500">卷 2 · part2.rar</span><span class="mono text-xs text-slate-400">[加密头?][成员…][结束头 · NEXT_VOLUME]</span></div></div>
+          <div class="rounded-lg deep text-slate-100 p-3"><div class="flex justify-between"><span class="tag text-indigo-200">卷 N · partN.rar（末卷）</span><span class="mono text-xs text-slate-300">[加密头?][成员…][QO?][RR?][结束头 · 0]</span></div></div>
+          <p class="mono text-xs text-slate-400">跨卷成员：旧卷写 DATA_CONTINUES 块（非末块头带密文 CRC32），新卷写 DATA_CONTINUE_TO 块（末块头带 MAC 明文 CRC + 完整 extra 区）。支持创建/读取/删除/重命名跨卷成员；<strong>不支持</strong>分卷 append、分卷锁定、分卷注释、分卷内联 RR（官方 <span class="mono">rar</span> 同样拒绝）。恢复卷见 §9.2。</p>
+        </div>
+      </section>
+
+      <!-- ============ 9. 恢复记录 ============ -->
+      <section id="s9">
+        <h2 class="font-serif text-2xl font-semibold mb-1">9 · 恢复记录</h2>
+        <div class="grid md:grid-cols-2 gap-6 mt-4">
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-slate-400 mb-2">9.1 内联 RR · {RB} 块固定头 0x48 + 状态表 + 奇偶</p>
+            <div class="space-y-1.5 mono text-xs text-slate-600">
+              <div class="flex justify-between"><span>0x00</span><span class="text-slate-400">"{RB}" 标记 (4)</span></div>
+              <div class="flex justify-between"><span>0x04</span><span class="text-slate-400">CRC64-XZ (8)</span></div>
+              <div class="flex justify-between"><span>0x0c</span><span class="text-slate-400">total_size (4 LE)</span></div>
+              <div class="flex justify-between"><span>0x10</span><span class="text-slate-400">header_size (4 LE)</span></div>
+              <div class="flex justify-between"><span>0x14</span><span class="text-slate-400">= 1 版本</span></div>
+              <div class="flex justify-between"><span>0x22</span><span class="text-slate-400">protected_size (8)</span></div>
+              <div class="flex justify-between"><span>0x2a</span><span class="text-slate-400">group_count (8)</span></div>
+              <div class="flex justify-between"><span>0x32</span><span class="text-slate-400">shard_size (8)</span></div>
+              <div class="flex justify-between"><span>0x3a</span><span class="text-slate-400">data_shards (u16)</span></div>
+              <div class="flex justify-between"><span>0x3c</span><span class="text-slate-400">recovery_shards (u16)</span></div>
+              <div class="flex justify-between"><span>0x3e</span><span class="text-slate-400">shard_index (u16)</span></div>
+              <div class="rounded deep text-slate-100 px-2 py-1 mt-1">… 8×N 状态表 + 奇偶数据 (group_count 字节)</div>
+            </div>
+            <p class="text-xs text-slate-500 mt-2">规划：受保护前缀 ≥ 200 KiB 时 data_shards = 200；否则 <span class="mono">ceil(prefix/1 KiB)</span>。recovery_shards = <span class="mono">2·pct·data_shards/200</span>（≥1, ≤data_shards）。group_count = <span class="mono">2×ceil(prefix/(2·data_shards))</span>（偶数）。修复：找损坏分片（CRC64 状态不符），在 GF 上解缺失字节；无损坏原样返回。</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-slate-400 mb-2">9.1 GF(2¹⁶) Cauchy</p>
+            <p class="text-sm text-slate-600 mb-2">本原多项式 <span class="mono">0x1100b</span>，域大小 65535。</p>
+            <p class="mono text-xs text-slate-600 mb-3">M[i][j] = inv((i + data_shards) ^ j)</p>
+            <div class="grid grid-cols-[auto_repeat(4,1fr)] gap-px text-center mono text-xs bg-slate-200 rounded overflow-hidden">
+              <div class="bg-slate-100 p-2"></div><div class="bg-slate-100 p-2 text-slate-500">D₀</div><div class="bg-slate-100 p-2 text-slate-500">D₁</div><div class="bg-slate-100 p-2 text-slate-500">D₂</div><div class="bg-slate-100 p-2 text-slate-500">…</div>
+              <div class="bg-indigo-100 p-2 text-indigo-700">P₀</div><div class="bg-white p-2">m₀₀</div><div class="bg-white p-2">m₀₁</div><div class="bg-white p-2">m₀₂</div><div class="bg-white p-2">…</div>
+              <div class="bg-indigo-100 p-2 text-indigo-700">P₁</div><div class="bg-white p-2">m₁₀</div><div class="bg-white p-2">m₁₁</div><div class="bg-white p-2">m₁₂</div><div class="bg-white p-2">…</div>
+              <div class="bg-indigo-100 p-2 text-indigo-700">P₂</div><div class="bg-white p-2">m₂₀</div><div class="bg-white p-2">m₂₁</div><div class="bg-white p-2">m₂₂</div><div class="bg-white p-2">…</div>
+            </div>
+            <p class="mt-2 text-xs text-slate-400">奇偶字节 = 分片字节（16 位符号）按矩阵行线性组合（XOR + 域乘）。修复 = 从幸存分片 + 奇偶解线性方程（含矩阵求逆；奇异报错）。</p>
+            <p class="mt-3 text-sm text-slate-600"><strong class="tag text-indigo-500">9.2 恢复卷（.rev, REV5）</strong> <span class="mono">Rar!\x1aRev</span> 为分卷集提供 Reed-Solomon 奇偶卷，可重建缺失卷（<span class="mono">rar rc</span>）。数量 <span class="mono">NR = max(1, ceil(pct×ND/100))</span>（≤ ND）。奇偶按同一 GF(2¹⁶) Cauchy，切分补齐到最大卷大小。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 10. Solid ============ -->
+      <section id="s10">
+        <h2 class="font-serif text-2xl font-semibold mb-1">10 · Solid 固态归档</h2>
+        <div class="rounded-xl border border-slate-200 bg-white p-5 mt-4 text-sm text-slate-600">
+          <ul class="space-y-1.5">
+            <li>· 主头带 <span class="mono">SOLID</span> 标志；文件头压缩信息带 solid 位。</li>
+            <li>· <strong>编码器状态</strong>（EncoderState）跨成员保持：lookbehind 窗口尾部、距离缓存、last-length、Huffman 表——连续压缩成员共享一个 LZ 窗口。</li>
+            <li>· <strong>解码器状态</strong>（DecoderState）同理跨成员保持。</li>
+            <li>· 目录 / STORE / 空文件<strong>不参与</strong> LZ 窗口（写端重置链）。</li>
+            <li>· solid 分卷同样支持（状态跨卷保持）。</li>
+          </ul>
+          <div class="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+            <p class="text-xs text-emerald-700">🔧 rar-rs：solid 与多线程压缩<strong>互斥</strong>（solid 保持串行）；WinRAR 无 rarfiles.lst 时按名字/扩展名启发式排序，rar-rs 按参数顺序（已知小差异，互操作无碍）。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 11. RAR7 ============ -->
+      <section id="s11">
+        <h2 class="font-serif text-2xl font-semibold mb-1">11 · RAR7（v70）</h2>
+        <div class="rounded-xl border border-slate-200 bg-white p-6 mt-4">
+          <div class="grid md:grid-cols-3 gap-4 items-stretch">
+            <div class="rounded-lg border border-slate-300 bg-slate-50 p-4">
+              <p class="tag text-slate-500 mb-2">共享</p>
+              <ul class="text-sm text-slate-600 space-y-1">
+                <li>· 签名 <span class="mono">Rar!\x1a\x07\x01\x00</span></li>
+                <li>· 块信封 / 五种块</li>
+                <li>· 加密 / 恢复体系</li>
+              </ul>
+            </div>
+            <div class="flex items-center justify-center">
+              <div class="text-center">
+                <div class="mono text-xs text-slate-400">压缩信息 vint</div>
+                <div class="text-3xl text-indigo-500 font-mono">version</div>
+                <div class="text-xs text-slate-400">bit 0–5</div>
+              </div>
+            </div>
+            <div class="grid grid-rows-2 gap-3">
+              <div class="rounded-lg border border-slate-300 bg-white p-3">
+                <p class="tag text-slate-500">v50 · RAR5</p>
+                <p class="text-sm text-slate-600"><span class="mono">version=0</span>；DC 64 码；字典 <span class="mono">128 KiB &lt;&lt; log</span>（≤ 4 GiB）。</p>
+              </div>
+              <div class="rounded-lg deep text-slate-100 p-3">
+                <p class="tag text-indigo-200">v70 · RAR7</p>
+                <p class="text-sm"><span class="mono">version=1</span>；DCX 80 码；字典 <span class="mono">(32+frac)&lt;&lt;(power+12)</span>（非 2 的幂，≤ 64 GiB）。</p>
+              </div>
+            </div>
+          </div>
+          <p class="mono text-xs text-slate-400 mt-3">&gt; 4 GiB 字典请求自动选 v70；裁剪落回 ≤ 4 GiB 时自动降级 v50。RAR7 不是独立容器：同一签名、同一信封；逐成员由 version 位区分，一个归档可混合 v50 与 v70 成员。</p>
+        </div>
+        <div class="mt-4 grid md:grid-cols-3 gap-4 text-sm">
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">11.2 大字典编码</p>
+            <p class="mono text-xs text-slate-600">dict = (32+frac) &lt;&lt; (power+12)<br>&nbsp;&nbsp;= (128KiB&lt;&lt;power) + (128KiB&lt;&lt;power)/32 × frac</p>
+            <p class="text-xs text-slate-500 mt-1">dict_power 5 位（10–14），dict_frac 5 位（15–19），允许非 2 的幂；编码端以 n ≤ 19 为界（≤ ~126 GiB）。</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">11.3 DCX 距离表</p>
+            <p class="text-xs text-slate-600">DC 表从 64 扩到 <strong>80 码</strong>（HUFF_DCX）：距离槽上限 79 → DBits 38 → 距离可达 ~1 TB。解码用 u64（§6.5 公式不变，slot 上限放宽）。</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4">
+            <p class="tag text-indigo-500 mb-2">11.4 与 rars 差异</p>
+            <p class="text-xs text-slate-600">rars 解析压缩信息 bit 20（<span class="mono">rar5_compat</span>）。<strong>rar-rs 不写该位、读取忽略</strong>（WinRAR 7.23 双向验证通过，不需要它）。其余（v0/v1 字典公式、算法版本上限、solid/方法位）两实现一致。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 12. 差异清单 ============ -->
+      <section id="s12">
+        <h2 class="font-serif text-2xl font-semibold mb-1">12 · 与 rars / rar-research 的差异清单</h2>
+        <div class="rounded-xl border border-slate-200 bg-white p-5 mt-4">
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs border-collapse">
+              <thead><tr class="text-slate-400"><th class="text-left pr-3 py-1">#</th><th class="text-left pr-3 py-1">主题</th><th class="text-left pr-3 py-1">rars / rar-research</th><th class="text-left py-1">rar-rs（本文为准）</th></tr></thead>
+              <tbody class="text-slate-600">
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">1</td><td class="pr-3 py-1">RAR7 压缩信息 bit 20</td><td class="pr-3 py-1">解析 <span class="mono">rar5_compat</span></td><td class="py-1">不写、读取忽略</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">2</td><td class="pr-3 py-1">RAR4 兼容</td><td class="pr-3 py-1">支持 RAR1.3–RAR4</td><td class="py-1 text-red-600">明确拒绝，报 unsupported</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">3</td><td class="pr-3 py-1">过滤器类型</td><td class="pr-3 py-1">0–3</td><td class="py-1">同 0–3；类型 4–7 显式报错</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">4</td><td class="pr-3 py-1">块头 CRC</td><td class="pr-3 py-1">覆盖原始 vint 字节</td><td class="py-1">相同</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">5</td><td class="pr-3 py-1">压缩块校验</td><td class="pr-3 py-1"><span class="mono">0x5A ^ flags ^ size</span></td><td class="py-1">相同</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">6</td><td class="pr-3 py-1">结束头块标志</td><td class="pr-3 py-1">—</td><td class="py-1">写 SKIP_IF_UNKNOWN（§4.6）</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">7</td><td class="pr-3 py-1">RAR7 字典公式</td><td class="pr-3 py-1"><span class="mono">(frac+32)&lt;&lt;(power+12)</span></td><td class="py-1">相同（代数等价）</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">8</td><td class="pr-3 py-1">距离表</td><td class="pr-3 py-1">RAR5 64 / RAR7 80</td><td class="py-1">相同</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">9</td><td class="pr-3 py-1">加密填充</td><td class="pr-3 py-1">—</td><td class="py-1 text-red-600">zero-fill（非 PKCS7）</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">10</td><td class="pr-3 py-1">KDF</td><td class="pr-3 py-1">链式 HMAC-SHA256 单链</td><td class="py-1">相同（2^s / +16 / +32 三切点）</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">11</td><td class="pr-3 py-1">内联 RR 分片</td><td class="pr-3 py-1">200 上限</td><td class="py-1">相同</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">12</td><td class="pr-3 py-1">SFX</td><td class="pr-3 py-1">签名扫描</td><td class="py-1">相同</td></tr>
+                <tr class="border-t border-slate-100"><td class="pr-3 py-1">13</td><td class="pr-3 py-1">分卷命名</td><td class="pr-3 py-1"><span class="mono">name.partN.rar</span></td><td class="py-1">相同</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 附录 A ============ -->
+      <section id="appA">
+        <h2 class="font-serif text-2xl font-semibold mb-1">附录 A · 常量速查</h2>
+        <div class="grid md:grid-cols-2 gap-4 mt-4 text-sm">
+          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">签名 / 块类型</p><p class="mono text-xs text-slate-600">签名 Rar!\x1a\x07\x01\x00 · REV5 Rar!\x1aRev<br>0x01 归档 / 0x02 文件 / 0x03 服务 / 0x04 加密 / 0x05 结束</p></div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">块标志</p><p class="mono text-xs text-slate-600">0x0001 extra · 0x0002 data · 0x0004 skip<br>0x0008 cont · 0x0010 cont-to<br>0x0020 depends-prev · 0x0040 preserve-child</p></div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">归档标志</p><p class="mono text-xs text-slate-600">0x0001 volume · 0x0002 vol-num · 0x0004 solid<br>0x0008 recovery · 0x0010 locked</p></div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">文件标志</p><p class="mono text-xs text-slate-600">0x0001 dir · 0x0002 time · 0x0004 crc32 · 0x0008 unknown-size</p></div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">压缩信息位</p><p class="mono text-xs text-slate-600">0–5 version · 6 solid · 7–9 method<br>10–14 dict · 15–19 frac · 方法 0 store / 1–5 级别<br>OS 0 windows / 1 unix</p></div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">extra 记录</p><p class="mono text-xs text-slate-600">0x01 加密 · 0x02 哈希 · 0x03 时间 · 0x04 版本<br>0x05 重定向 · 0x06 owner · 0x07 服务数据</p></div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">重定向类型</p><p class="mono text-xs text-slate-600">0x01 unix-link · 0x02 win-link · 0x03 junction<br>0x04 hardlink · 0x05 file-copy</p></div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">Huffman / 压缩块</p><p class="mono text-xs text-slate-600">NC 306 / DC 64 / DCX 80 / LDC 16 / RC 44 / BC 20；码长 ≤ 15<br>0x5A 校验种子；分块上限 128 KiB（0x20000）</p></div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">过滤器 / 加密</p><p class="mono text-xs text-slate-600">0 Delta / 1 E8 / 2 E8E9 / 3 ARM；区域 ≤ 0x3FFFF<br>AES-256-CBC；盐 16 / IV 16 / 校验 12；KDF 2^15 默认</p></div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">GF(2¹⁶)</p><p class="mono text-xs text-slate-600">本原多项式 0x1100b<br>Cauchy M[i][j] = inv((i+ND) ^ j)</p></div>
+        </div>
+      </section>
+
+      <!-- ============ 附录 B ============ -->
+      <section id="appB">
+        <h2 class="font-serif text-2xl font-semibold mb-1">附录 B · 参考来源</h2>
+        <div class="rounded-xl border border-slate-200 bg-white p-5 mt-4 text-sm text-slate-600">
+          <ul class="space-y-1.5">
+            <li>· <strong>权威</strong>：rar-rs 实现（<span class="mono">crates/rar/src/rar50/{mod,headers,vint,blake2sp,extract,write}.rs</span>、<span class="mono">codec/rar50.rs</span>、<span class="mono">crypto/rar50.rs</span>、<span class="mono">recovery/{rar5,rev5}.rs</span>），WinRAR 7.23 双向互操作验证。</li>
+            <li>· 交叉核对：bitplane/rars（<span class="mono">crates/rars/src/rar50*.rs</span>）与 <a class="text-indigo-600" href="https://github.com/bitplane/rar-research">rar-research</a> 规格书；冲突处以本实现为准。</li>
+            <li>· 位流格式源自对 libarchive <span class="mono">archive_read_support_format_rar5.c</span>（Grzegorz Antoniak, 2018, BSD-2-Clause）的独立分析。</li>
+          </ul>
+        </div>
+      </section>
+
+      <footer class="border-t border-slate-200 pt-6 text-xs text-slate-400">
+        图优先可视化参考，以 <span class="mono">rar-rs</span> 实现为权威，对照 WinRAR 7.23 互操作验证。本文自包含全部字段布局、逐字节拆解与差异清单。
+      </footer>
+    </main>
+  </body>
+</html>

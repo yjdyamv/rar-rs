@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>rar-rs 架构与模块布局（可视化）</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      body { -webkit-font-smoothing: antialiased; scroll-behavior: smooth; }
+      .deep { background: linear-gradient(135deg, #0f172a, #1e293b); }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .tag { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+      .mod { border-left: 3px solid #6366f1; }
+      .core { border-left: 3px solid #0f172a; }
+      .toc a { color: #4f46e5; text-decoration: none; }
+      .toc a:hover { text-decoration: underline; }
+      .pipe { display: flex; align-items: center; gap: .25rem; flex-wrap: wrap; }
+      .pipe .ar { color: #94a3b8; }
+      table td, table th { vertical-align: top; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans leading-relaxed">
+    <main class="max-w-5xl mx-auto px-6 py-12 space-y-14">
+
+      <!-- ============ HEADER ============ -->
+      <header class="border-b border-slate-200 pb-8">
+        <p class="tag text-indigo-500 mb-2">内部参考 · 可视化</p>
+        <h1 class="font-serif text-4xl font-semibold tracking-tight text-slate-900">
+          rar-rs 架构与模块布局
+        </h1>
+        <p class="mt-3 text-slate-500">
+          库 crate <span class="mono text-slate-700">crates/rar</span>（公共 API：<span class="mono">rar5</span>）的内部模块地图与设计笔记。
+          人类面向的概览在 <span class="mono">README.md</span>；磁盘格式见
+          <span class="mono">FORMAT_RAR5_RAR7.html</span>；命令行面在 <span class="mono">CLI.md</span>。
+        </p>
+        <div class="mt-6 flex flex-wrap gap-x-6 gap-y-3 text-xs text-slate-600">
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm bg-slate-200 border border-slate-400"></span>module（模块）</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm deep border border-slate-700"></span>核心体（容器 / 编解码 / 加密 / 恢复）</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm border-2 border-dashed border-slate-400"></span>可选 / 特性门控（seam）</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-1 bg-red-600"></span>拒绝 / 陷阱</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm bg-emerald-100 border border-emerald-400"></span>已实现</span>
+        </div>
+        <nav class="toc mt-6 rounded-lg border border-slate-200 bg-white p-4 text-sm flex flex-wrap gap-x-5 gap-y-1">
+          <a href="#s1">§1 Workspace</a>
+          <a href="#s2">§2 模块地图</a>
+          <a href="#s3">§3 设计笔记</a>
+          <a href="#s4">§4 实现状态</a>
+        </nav>
+      </header>
+
+      <!-- ============ 1. Workspace ============ -->
+      <section id="s1">
+        <h2 class="font-serif text-2xl font-semibold mb-1">1 · Workspace</h2>
+        <p class="text-sm text-slate-500 mb-4">Cargo workspace：库 crate + CLI crate + napi-rs 绑定。仅库 crate 有外部依赖（无 RAR/UNRAR 二进制）。</p>
+        <div class="rounded-xl border border-slate-200 bg-white p-5">
+          <pre class="mermaid">
+flowchart LR
+  CLI[rar-cli: rar + unrar] --> LIB{{rar 库 crate}}
+  NAPI[rar-napi: smart-archive-rar] --> LIB
+  FUZZ[fuzz 目标] --> LIB
+  T[tests 夹具] --> LIB
+  LIB -->|无外部依赖| STD[(std only)]
+  classDef core fill:#0f172a,stroke:#1e293b,color:#fff;
+  class LIB core;
+          </pre>
+        </div>
+        <div class="mt-4 rounded-xl border border-slate-200 bg-white p-5">
+          <div class="grid md:grid-cols-3 gap-3 mono text-xs">
+            <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">crates/rar</span><div class="text-slate-500 mt-1">库 crate（公共 API，<span class="mono">rar5</span>）</div></div>
+            <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">crates/rar-cli</span><div class="text-slate-500 mt-1">binary crate（<span class="mono">rar</span> + <span class="mono">unrar</span>）</div></div>
+            <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">crates/rar-napi</span><div class="text-slate-500 mt-1">napi-rs 绑定（<span class="mono">smart-archive-rar</span>）</div></div>
+            <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">fuzz/</span><div class="text-slate-500 mt-1">cargo-fuzz 目标（独立 crate）</div></div>
+            <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">tests/</span><div class="text-slate-500 mt-1">共享集成夹具</div></div>
+            <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">docs/</span><div class="text-slate-500 mt-1">格式 + 架构 + CLI 参考</div></div>
+          </div>
+          <p class="mt-3 text-xs text-slate-400">napi-rs 绑定构建 Windows/macOS/Linux 原生 <span class="mono">.node</span> 与 <span class="mono">wasm32-wasip1-threads</span> bundle；不发布 npm 包，CI 把编译产物 + <span class="mono">SHA-256SUMS</span> 挂到 GitHub Releases，<span class="mono">vscode-smart-archive</span> 扩展按 SHA-256 固定下载。</p>
+        </div>
+      </section>
+
+      <!-- ============ 2. 模块地图 ============ -->
+      <section id="s2">
+        <h2 class="font-serif text-2xl font-semibold mb-1">2 · 库 crate 模块地图</h2>
+        <p class="text-sm text-slate-500 mb-4"><span class="mono">src/</span> 的模块划分为门面/状态层与四个核心子系统。词汇（块类型、块标志、extra 类型、压缩方法名）集中在 <span class="mono">rar50/mod.rs</span>，结构（序列化/解析）在 <span class="mono">rar50/headers.rs</span>——两者拆分使常量保持无依赖、头代码可用 crate 其余部分。</p>
+
+        <div class="rounded-xl border border-slate-200 bg-white p-5">
+          <div class="grid md:grid-cols-2 gap-5">
+            <!-- facade / state -->
+            <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <p class="tag text-slate-500 mb-3">门面 & 状态（顶层）</p>
+              <ul class="mono text-xs text-slate-600 space-y-1.5">
+                <li class="mod pl-2">lib.rs — 门面 <span class="mono">RarArchive</span> + 再导出</li>
+                <li class="mod pl-2">archive.rs — <span class="mono">RarArchive</span> 共享状态 + 生命周期</li>
+                <li class="mod pl-2">rewrite.rs — 手术式 delete/rename（字节级重写）</li>
+                <li class="mod pl-2">name_policy.rs — 路径收集 + 掩码</li>
+                <li class="mod pl-2">version.rs — <span class="mono">ArchiveVersion</span>（RAR5/RAR7 检测）</li>
+                <li class="mod pl-2">features.rs — <span class="mono">FeatureSet</span>（能力报告）</li>
+                <li class="mod pl-2">options.rs — <span class="mono">CreateOptions</span> / <span class="mono">ExtractOptions</span></li>
+                <li class="mod pl-2">error.rs — <span class="mono">RarError</span> / <span class="mono">RarResult</span></li>
+                <li class="mod pl-2">write_progress.rs — 进度回调管线</li>
+                <li class="mod pl-2">io_util.rs — 原子暂存 + 有界读取</li>
+                <li class="mod pl-2">parallel.rs — <span class="mono">parallel</span> 特性的 Rayon 池</li>
+                <li class="mod pl-2">detect.rs — 签名 / SFX 扫描</li>
+              </ul>
+            </div>
+
+            <!-- container layer -->
+            <div class="rounded-lg border border-slate-300 bg-white p-4 core">
+              <p class="tag text-indigo-500 mb-3">容器层 · rar50/</p>
+              <ul class="mono text-xs text-slate-600 space-y-1.5">
+                <li class="mod pl-2">mod.rs — 常量 + 块/头标志词汇</li>
+                <li class="mod pl-2">headers.rs — 块 & 头数据结构（序列化/解析）</li>
+                <li class="mod pl-2">vint.rs — 变长整数 codec</li>
+                <li class="mod pl-2">blake2sp.rs — BLAKE2sp 成员哈希</li>
+                <li class="mod pl-2">extract.rs — 读路径：scan/list/read/extract/solid 链</li>
+                <li class="mod pl-2">write/mod.rs — writer 门面：create/add/close 管线</li>
+                <li class="mod pl-2">write/engine.rs — payload/CBC 发射机</li>
+                <li class="mod pl-2">write/layout.rs — 字典定尺 + STORE 回退探测</li>
+              </ul>
+            </div>
+
+            <!-- codec -->
+            <div class="rounded-lg border border-slate-300 bg-white p-4 core">
+              <p class="tag text-indigo-500 mb-3">压缩 codec · codec/</p>
+              <ul class="mono text-xs text-slate-600 space-y-1.5">
+                <li class="mod pl-2">mod.rs — 分发</li>
+                <li class="mod pl-2">rar50.rs — LZSS+Huffman 编码 + 解码</li>
+                <li class="mod pl-2">bitstream.rs — MSB-first 位 I/O</li>
+                <li class="mod pl-2">huffman.rs — Huffman 表构建/解码（quick-lookup）</li>
+                <li class="mod pl-2">filters.rs — Delta / E8 / E8E9 / ARM 过滤器</li>
+                <li class="mod pl-2">match_finder.rs — BT4 匹配查找</li>
+                <li class="mod pl-2">window.rs — 共享 LZ 窗口（solid 链）</li>
+              </ul>
+            </div>
+
+            <!-- crypto + recovery -->
+            <div class="grid grid-rows-2 gap-4">
+              <div class="rounded-lg border border-slate-300 bg-white p-4 core">
+                <p class="tag text-indigo-500 mb-3">加密层 · crypto/</p>
+                <ul class="mono text-xs text-slate-600 space-y-1.5">
+                  <li class="mod pl-2">mod.rs — 解密辅助</li>
+                  <li class="mod pl-2">rar50.rs — AES-256-CBC + KDF + hash-key MAC</li>
+                </ul>
+              </div>
+              <div class="rounded-lg border border-slate-300 bg-white p-4 core">
+                <p class="tag text-indigo-500 mb-3">恢复层 · recovery/</p>
+                <ul class="mono text-xs text-slate-600 space-y-1.5">
+                  <li class="mod pl-2">mod.rs — repair/rebuild 分发</li>
+                  <li class="mod pl-2">rar5.rs — 内联恢复记录（RR）</li>
+                  <li class="mod pl-2">rev5.rs — 恢复卷（.rev, REV5）</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <div class="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+            💡 <strong>写路径</strong>（<span class="mono">rar50/write/*</span>）增量发射块：<span class="mono">engine.rs</span> 处理 payload +（可选）CBC 发射，<span class="mono">layout.rs</span> 决定字典大小并探测 STORE 回退。<span class="mono">rewrite.rs</span> 是手术路径：delete/rename 字节级复制保留的文件块、仅重发射变更的块，丢弃内联恢复记录并重建 quick-open 记录。
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 3. 设计笔记 ============ -->
+      <section id="s3">
+        <h2 class="font-serif text-2xl font-semibold mb-1">3 · 设计笔记</h2>
+        <div class="mt-4 space-y-5">
+
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">有界内存（Bounded memory）</p>
+            <div class="pipe text-sm text-slate-600 mb-3">
+              <span class="rounded border border-slate-300 bg-slate-50 px-2 py-1">大成员（磁盘）</span>
+              <span class="ar">→</span>
+              <span class="rounded border border-slate-300 bg-slate-50 px-2 py-1">STORE 流式</span>
+              <span class="ar">·</span>
+              <span class="rounded border border-slate-300 bg-slate-50 px-2 py-1">压缩：4 MiB 分块 + 共享 LZ 窗口</span>
+              <span class="ar">→</span>
+              <span class="rounded border border-slate-300 bg-slate-50 px-2 py-1">提取流式写出（不物化整文件）</span>
+            </div>
+            <p class="text-xs text-slate-500">压缩本身把 LZSS 流切成 ≤ 128 KiB（<span class="mono">MAX_BLOCK_SIZE</span>）块，每块独立 Huffman 表；过滤器区域上限 <span class="mono">0x3FFFF</span>。最坏内存 ≈ packed 大小 + 一个块，而非正比于整个文件的符号表。</p>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">安全提取（Safe extraction，默认开启）</p>
+            <div class="pipe text-sm text-slate-600 mb-2 flex-wrap">
+              <span class="rounded border border-red-300 bg-red-50 px-2 py-1">名字清洗（拒绝 ../ · 绝对路径 · 盘符 · NUL）</span>
+              <span class="ar">→</span>
+              <span class="rounded border border-red-300 bg-red-50 px-2 py-1">路径在目标内</span>
+              <span class="ar">→</span>
+              <span class="rounded border border-red-300 bg-red-50 px-2 py-1">单文件 / 总大小上限</span>
+              <span class="ar">→</span>
+              <span class="rounded border border-red-300 bg-red-50 px-2 py-1">临时兄弟 + 完整性校验后 rename</span>
+            </div>
+            <p class="text-xs text-slate-500">加密成员验证 MAC'd 校验和，损坏密文必被检出。仅对可信归档才放宽这些默认。</p>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">Solid 链 & 多线程（互斥）</p>
+            <div class="grid md:grid-cols-2 gap-3 text-sm">
+              <div class="rounded-lg border border-slate-300 bg-slate-50 p-3">
+                <p class="tag text-slate-500">Solid（串行）</p>
+                <p class="text-xs text-slate-600 mt-1">连续压缩成员共享一个 LZ 窗口（更好比率）；保持串行以维持窗口链。</p>
+              </div>
+              <div class="rounded-lg border border-slate-300 bg-slate-50 p-3">
+                <p class="tag text-slate-500">-mt（并行）</p>
+                <p class="text-xs text-slate-600 mt-1">多线程压缩；每个线程独立窗口。<strong>与 solid 互斥</strong>。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">Quick-open & 取消</p>
+            <div class="pipe text-sm text-slate-600 mb-2">
+              <span class="rounded border border-slate-300 bg-slate-50 px-2 py-1">open_quick</span>
+              <span class="ar">→</span>
+              <span class="rounded border border-slate-300 bg-slate-50 px-2 py-1">只读 主头 + QO 记录</span>
+              <span class="ar">→</span>
+              <span class="rounded deep text-slate-100 px-2 py-1">listing 为 O(QO) 而非 O(archive)</span>
+            </div>
+            <p class="text-xs text-slate-500">rar-rs 缓存<strong>每个</strong>成员（WinRAR 默认只缓存大文件）。长任务通过共享 <span class="mono">AtomicBool</span> 协作取消：下一检查点返回 <span class="mono">RarError::Cancelled</span>。</p>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white p-5">
+            <p class="tag text-indigo-500 mb-2">流式修复（Streaming repair）</p>
+            <p class="text-sm text-slate-600"><span class="mono">repair_archive_path</span> 在磁盘上修复受损归档，内存中<strong>仅持有恢复数据</strong>（非整个归档），故可修复极大归档；<span class="mono">repair_archive</span>（内存版）在需要时缓冲前缀。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 4. 实现状态 ============ -->
+      <section id="s4">
+        <h2 class="font-serif text-2xl font-semibold mb-1">4 · 实现状态</h2>
+        <p class="text-sm text-slate-500 mb-4">功能矩阵（镜像自项目计划）。<span class="text-emerald-600 font-medium">done</span> = 已实现且与 WinRAR/UnRAR 互操作；RAR4 为刻意、测试锁定的拒绝。</p>
+        <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-2.5 text-sm">
+          <!-- done cards -->
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">创建 RAR5 归档</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">提取 RAR5 归档</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">原生 LZSS+Huffman 压缩</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">压缩级别 0–5</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">CRC32 完整性校验</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">目录条目</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">时间戳保留</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">Solid 解压 / 创建</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">成员 delete（免重建）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">rename / append / update / freshen / move</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">find（i）/ lock（k）/ comment（c）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">恢复记录 rr / 修复 r</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">重建缺失卷 rc</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">SFX（读 + s/s-）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">符号/硬链接（重定向）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">RAR7 宽 vint（大字典）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">多卷 delete/rename</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">并行 rewrite 管线</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">Quick-open（-qo+）/ open_quick</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">BLAKE2sp（-htb）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">流式提取（有界内存）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">文件级 AES-256 加/解密</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">头加密解密（-hp）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">加密数据完整性（hash-key MAC）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">多卷读 / 创建</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">恢复卷 .rev / 创建 rv</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">Zero-padded 卷集（part01）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">多线程压缩（-mt）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">协作取消（set_cancel_flag）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">流式修复（repair_archive_path）</span></div>
+          <!-- rejected -->
+          <div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-red-500"></span><span class="text-red-700">提取 RAR4 归档 — 拒绝（清晰报错；用 7-Zip）</span></div>
+        </div>
+        <p class="mt-4 text-sm text-slate-500">rar-rs 产出的 RAR5 与 WinRAR / unrar 完全互操作。RAR4 刻意不在范围：以清晰 "unsupported" 错误拒绝。</p>
+      </section>
+
+      <footer class="border-t border-slate-200 pt-6 text-xs text-slate-400">
+        内部模块参考，图优先可视化。库 crate 为 <span class="mono">rar5</span>；完整 API 见 <span class="mono">crates/rar</span>，磁盘格式见 <span class="mono">FORMAT_RAR5_RAR7.html</span>。
+      </footer>
+    </main>
+  </body>
+</html>
