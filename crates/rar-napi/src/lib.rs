@@ -232,30 +232,8 @@ fn basename(path: &Path) -> String {
 /// powers of two (RAR5 dict log), anything above is accepted as-is and
 /// selects RAR7 (v70) with an actual byte size.
 fn parse_dict_size(s: &str) -> Result<(Option<u8>, Option<u64>)> {
-  let s = s.trim();
-  let (num, mult) = match s.chars().last() {
-    Some('k') | Some('K') => (&s[..s.len() - 1], 1024u64),
-    Some('m') | Some('M') => (&s[..s.len() - 1], 1024 * 1024),
-    Some('g') | Some('G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
-    _ => (s, 1024 * 1024),
-  };
-  let bytes = num
-    .parse::<u64>()
-    .ok()
-    .and_then(|n| n.checked_mul(mult))
-    .filter(|b| *b >= 128 * 1024)
-    .ok_or_else(|| Error::new(Status::InvalidArg, format!("invalid dictionary size: {s}")))?;
-  if bytes <= 4 * 1024 * 1024 * 1024 {
-    if !bytes.is_power_of_two() {
-      return Err(Error::new(
-        Status::InvalidArg,
-        format!("dictionary sizes up to 4 GiB must be powers of two: {s}"),
-      ));
-    }
-    Ok((Some((bytes.trailing_zeros() - 17) as u8), None))
-  } else {
-    Ok((None, Some(bytes)))
-  }
+  rar5::parse_dict_size(s)
+    .ok_or_else(|| Error::new(Status::InvalidArg, format!("invalid dictionary size: {s}")))
 }
 
 /// Build a cancellation flag from the JS `AbortSignal`: when the signal

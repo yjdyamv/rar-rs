@@ -171,3 +171,87 @@ impl Default for ExtractOptions {
         }
     }
 }
+
+/// Parse a WinRAR `-md<size>[k|m|g]` dictionary size into the
+/// `(dict_size_log, dict_size_bytes)` pair used by [`CreateOptions`].
+/// No unit means MiB.
+///
+/// Sizes in the RAR5 range (128 KiB ..= 4 GiB) must be a power of two and
+/// map to a dict log (WinRAR rejects e.g. `-md3m` with "Unknown option");
+/// anything above 4 GiB is accepted as-is (RAR7 v70 members), capped at
+/// 128 GiB — the header's 5-bit power-of-two base plus a 1/32 increment
+/// covers about 126 GiB, so 128 GiB is a safe round bound.
+///
+/// Returns `None` for empty, unparsable or out-of-range values.
+pub fn parse_dict_size(s: &str) -> Option<(Option<u8>, Option<u64>)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num, mult) = match s.chars().last() {
+        Some('k') | Some('K') => (&s[..s.len() - 1], 1024u64),
+        Some('m') | Some('M') => (&s[..s.len() - 1], 1024 * 1024),
+        Some('g') | Some('G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        _ => (s, 1024 * 1024),
+    };
+    let bytes = num
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(mult))
+        .filter(|b| *b >= 128 * 1024)?;
+    if bytes <= 4 * 1024 * 1024 * 1024 {
+        if !bytes.is_power_of_two() {
+            return None;
+        }
+        // 128 KiB = 2^17, so log = trailing_zeros - 17 (0..=15).
+        return Some((Some((bytes.trailing_zeros() - 17) as u8), None));
+    }
+    if bytes > 128 * 1024 * 1024 * 1024 {
+        return None;
+    }
+    Some((None, Some(bytes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dict_size;
+
+    #[test]
+    fn dict_size_parses_rar5_range() {
+        assert_eq!(parse_dict_size("128k"), Some((Some(0), None)));
+        assert_eq!(parse_dict_size("1m"), Some((Some(3), None)));
+        assert_eq!(parse_dict_size("32m"), Some((Some(8), None)));
+        assert_eq!(parse_dict_size("4g"), Some((Some(15), None)));
+        // No unit means MiB.
+        assert_eq!(parse_dict_size("64"), Some((Some(9), None)));
+        // Case-insensitive suffix.
+        assert_eq!(parse_dict_size("128K"), Some((Some(0), None)));
+    }
+
+    #[test]
+    fn dict_size_rejects_invalid_rar5_values() {
+        // Below the 128 KiB floor, non-power-of-two, unparsable, empty.
+        assert_eq!(parse_dict_size("1k"), None);
+        assert_eq!(parse_dict_size("3m"), None);
+        assert_eq!(parse_dict_size("abc"), None);
+        assert_eq!(parse_dict_size(""), None);
+    }
+
+    #[test]
+    fn dict_size_parses_v70_range() {
+        assert_eq!(
+            parse_dict_size("5g"),
+            Some((None, Some(5 * 1024 * 1024 * 1024)))
+        );
+        assert_eq!(
+            parse_dict_size("64g"),
+            Some((None, Some(64 * 1024 * 1024 * 1024)))
+        );
+        // 128 GiB is the accepted bound (the header's encodable range).
+        assert_eq!(
+            parse_dict_size("128g"),
+            Some((None, Some(128 * 1024 * 1024 * 1024)))
+        );
+        assert_eq!(parse_dict_size("129g"), None);
+    }
+}

@@ -557,64 +557,6 @@ fn parse_size(s: &str) -> Result<u64, String> {
     }
 }
 
-/// Parsed `-md<size>` dictionary setting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MdSetting {
-    /// RAR5 power-of-two dictionary (128 KiB .. 4 GiB) as a dict log.
-    Log(u8),
-    /// RAR7 dictionary size in bytes (any value > 4 GiB).
-    Bytes(u64),
-}
-
-/// Parse a WinRAR `-md<size>[k|m|g]` dictionary size. No unit means MiB.
-///
-/// Sizes in the RAR5 range (128 KiB .. 4 GiB) must be a power of two
-/// (like WinRAR, `-md3m` is rejected with `Unknown option: md...`).
-/// Anything above 4 GiB is accepted as-is — WinRAR accepts arbitrary
-/// values there (`-md6g`, `-md10g`, `-md48g`, `-md64g`, `-md65g` all
-/// work) — and selects RAR7 (v70) creation with an actual dictionary
-/// size (not necessarily a power of two).
-fn parse_md(s: &str) -> Result<MdSetting, String> {
-    if s.is_empty() {
-        return Err("Unknown option: md".into());
-    }
-    let (num, mult) = match s.chars().last() {
-        Some('k') | Some('K') => (&s[..s.len() - 1], 1024u64),
-        Some('m') | Some('M') => (&s[..s.len() - 1], 1024 * 1024),
-        Some('g') | Some('G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
-        _ => (s, 1024 * 1024),
-    };
-    let bytes = num
-        .parse::<u64>()
-        .ok()
-        .and_then(|n| n.checked_mul(mult))
-        .filter(|b| *b >= 128 * 1024)
-        .ok_or_else(|| format!("Unknown option: md{s}"))?;
-    if bytes <= 4 * 1024 * 1024 * 1024 {
-        if !bytes.is_power_of_two() {
-            return Err(format!("Unknown option: md{s}"));
-        }
-        // 128 KiB = 2^17, so log = trailing_zeros - 17 (0..=15).
-        return Ok(MdSetting::Log((bytes.trailing_zeros() - 17) as u8));
-    }
-    // RAR7: cap at the header encoding range (a 5-bit power-of-two base
-    // up to 64 GiB plus a 1/32 increment, so ~126 GiB of addressable
-    // dictionary; 128 GiB is a safe round bound).
-    if bytes > 128 * 1024 * 1024 * 1024 {
-        return Err(format!("Unknown option: md{s}"));
-    }
-    Ok(MdSetting::Bytes(bytes))
-}
-
-/// Split a parsed `-md` setting into the two `CreateOptions` fields.
-fn md_to_options(md: Option<MdSetting>) -> (Option<u8>, Option<u64>) {
-    match md {
-        None => (None, None),
-        Some(MdSetting::Log(l)) => (Some(l), None),
-        Some(MdSetting::Bytes(b)) => (None, Some(b)),
-    }
-}
-
 /// Resolve a `-ma<ver>` archive-format request into the v70 forcing
 /// options. `-ma5` is the default RAR5 format (a no-op, like WinRAR's
 /// accepted-but-inert `-ma5`); `-ma7` forces RAR7 (v70) members with the
@@ -663,59 +605,6 @@ fn wildcard_match(mask: &str, name: &str) -> bool {
         }
     }
     inner(mask.as_bytes(), name.as_bytes())
-}
-
-/// Parsed `-md` settings.
-#[cfg(test)]
-mod dict_log_tests {
-    use super::MdSetting;
-
-    #[test]
-    fn parse_md_accepts_rar5_range() {
-        use super::parse_md;
-        assert_eq!(parse_md("128k").unwrap(), MdSetting::Log(0));
-        assert_eq!(parse_md("128K").unwrap(), MdSetting::Log(0));
-        assert_eq!(parse_md("1m").unwrap(), MdSetting::Log(3));
-        assert_eq!(parse_md("64").unwrap(), MdSetting::Log(9)); // no unit = MiB
-        assert_eq!(parse_md("1g").unwrap(), MdSetting::Log(13));
-        assert_eq!(parse_md("2g").unwrap(), MdSetting::Log(14));
-        assert_eq!(parse_md("4G").unwrap(), MdSetting::Log(15));
-    }
-
-    #[test]
-    fn parse_md_accepts_v70_range() {
-        use super::parse_md;
-        // Any value above 4 GiB is accepted (WinRAR 7.23 behavior),
-        // including non-power-of-two sizes.
-        assert_eq!(
-            parse_md("6g").unwrap(),
-            MdSetting::Bytes(6 * 1024 * 1024 * 1024)
-        );
-        assert_eq!(
-            parse_md("10g").unwrap(),
-            MdSetting::Bytes(10 * 1024 * 1024 * 1024)
-        );
-        assert_eq!(
-            parse_md("48g").unwrap(),
-            MdSetting::Bytes(48 * 1024 * 1024 * 1024)
-        );
-        assert_eq!(
-            parse_md("65g").unwrap(),
-            MdSetting::Bytes(65 * 1024 * 1024 * 1024)
-        );
-        assert_eq!(
-            parse_md("5000m").unwrap(),
-            MdSetting::Bytes(5000 * 1024 * 1024)
-        );
-    }
-
-    #[test]
-    fn parse_md_rejects_invalid_values() {
-        for bad in ["", "3m", "0", "100k", "64m1", "abc", "1t", "129g"] {
-            let err = super::parse_md(bad).unwrap_err();
-            assert!(err.starts_with("Unknown option: md"), "{bad}: {err}");
-        }
-    }
 }
 
 fn main() {
@@ -893,8 +782,10 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     let archive_path = &archive_path;
     let files = &args.files;
 
-    let (dict_size_log, dict_size_bytes) =
-        md_to_options(args.dict_size.as_deref().map(parse_md).transpose()?);
+    let (dict_size_log, dict_size_bytes) = match args.dict_size.as_deref() {
+        Some(s) => rar5::parse_dict_size(s).ok_or_else(|| format!("Unknown option: md{s}"))?,
+        None => (None, None),
+    };
     let (force_v70, v70_dict_bytes) = archive_format_force_v70(
         args.archive_format.as_deref(),
         dict_size_log,
@@ -1529,8 +1420,10 @@ fn cmd_update_freshen(
     }
     // Deleting every member erases the archive file; recreate it when the
     // updated members were the only ones.
-    let (dict_size_log, dict_size_bytes) =
-        md_to_options(args.dict_size.as_deref().map(parse_md).transpose()?);
+    let (dict_size_log, dict_size_bytes) = match args.dict_size.as_deref() {
+        Some(s) => rar5::parse_dict_size(s).ok_or_else(|| format!("Unknown option: md{s}"))?,
+        None => (None, None),
+    };
     let (force_v70, v70_dict_bytes) = archive_format_force_v70(
         args.archive_format.as_deref(),
         dict_size_log,
@@ -1677,8 +1570,10 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
             return Err(format!("path not found: {file}"));
         }
     }
-    let (dict_size_log, dict_size_bytes) =
-        md_to_options(args.dict_size.as_deref().map(parse_md).transpose()?);
+    let (dict_size_log, dict_size_bytes) = match args.dict_size.as_deref() {
+        Some(s) => rar5::parse_dict_size(s).ok_or_else(|| format!("Unknown option: md{s}"))?,
+        None => (None, None),
+    };
     let (force_v70, v70_dict_bytes) = archive_format_force_v70(
         args.archive_format.as_deref(),
         dict_size_log,

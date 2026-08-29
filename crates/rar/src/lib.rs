@@ -50,7 +50,7 @@ pub use crypto::EncryptionParams;
 pub use detect::sfx_offset_of;
 pub use error::{RarError, RarResult};
 pub use features::{Feature, FeatureSet};
-pub use options::{CreateOptions, ExtractOptions};
+pub use options::{CreateOptions, ExtractOptions, parse_dict_size};
 pub use parallel::{set_compression_threads, set_extraction_threads};
 pub use rar50::*;
 pub use recovery::{
