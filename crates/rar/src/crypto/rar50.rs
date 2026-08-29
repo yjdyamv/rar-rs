@@ -63,9 +63,11 @@ impl DerivedKeys {
     /// MAC a CRC32 value with the hash key (RAR5 encrypted-file checksums).
     pub fn mac_crc32(&self, crc: u32) -> u32 {
         let digest = hmac_sha256(&self.hash_key, &crc.to_le_bytes());
-        digest.as_chunks::<4>().0.iter().fold(0, |acc, chunk| {
-            acc ^ u32::from_le_bytes(*chunk)
-        })
+        digest
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .fold(0, |acc, chunk| acc ^ u32::from_le_bytes(*chunk))
     }
 
     /// MAC a 32-byte hash with the hash key (RAR5 encrypted-file hashes).
