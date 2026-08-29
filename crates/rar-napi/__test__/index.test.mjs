@@ -311,7 +311,7 @@ test('appendEntries keeps existing members and listEntries/deleteEntries work', 
     let names = listEntries(out)
     assert.deepEqual(names.sort(), ['a.txt', 'dir/b.txt'])
 
-    const deleted = deleteEntries(out, ['a.txt'])
+    const deleted = await deleteEntries(out, ['a.txt'])
     assert.equal(deleted, 1)
     names = listEntries(out)
     assert.deepEqual(names, ['dir/b.txt'])
@@ -446,6 +446,21 @@ test('abort signal cancels a running create and leaves no partial archive', asyn
       ),
       /operation cancelled/,
     )
+    // The rejection must carry the cancellation contract the consumer's
+    // isCancellationError matches: name AbortError (unstarted work) or
+    // code "Cancelled" (mid-run cooperative cancellation).
+    const c1b = new AbortController()
+    setTimeout(() => c1b.abort(), 5)
+    await createArchive(
+      { outPath: out, level: 3, entries: [{ kind: 'file', path: src }] },
+      undefined,
+      c1b.signal,
+    ).catch((e) => {
+      assert.ok(
+        e.name === 'AbortError' || e.code === 'Cancelled',
+        `cancellation contract: name=${e.name} code=${e.code}`,
+      )
+    })
     assert.equal(existsSync(out), false, 'no partial archive after abort')
 
     // Abort mid-compression: same cooperative cancellation, still clean.

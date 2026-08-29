@@ -241,7 +241,7 @@ fn parse_dict_size(s: &str) -> Result<(Option<u8>, Option<u64>)> {
 /// its next per-member/per-chunk check point. Returns `None` when no
 /// signal was passed (never cancelled). The signal itself is kept alive
 /// by the task for the duration of the operation.
-fn abort_flag(signal: Option<AbortSignal>) -> Option<Arc<AtomicBool>> {
+fn abort_flag(signal: Option<&AbortSignal>) -> Option<Arc<AtomicBool>> {
   signal.map(|signal| {
     let flag = Arc::new(AtomicBool::new(false));
     let setter = flag.clone();
@@ -252,7 +252,13 @@ fn abort_flag(signal: Option<AbortSignal>) -> Option<Arc<AtomicBool>> {
 
 fn to_napi_error(err: rar5::RarError) -> Error {
   match err {
-    rar5::RarError::Cancelled => Error::new(Status::GenericFailure, "operation cancelled"),
+    rar5::RarError::Cancelled => {
+      // Status::Cancelled maps to a JS error with name = "Cancelled",
+      // which the consumer's isCancellationError matches (along with
+      // "AbortError"/"Canceled") — a GenericFailure here produced a
+      // name="Error" rejection that broke cancellation detection.
+      Error::new(Status::Cancelled, "operation cancelled")
+    }
     other => Error::new(Status::GenericFailure, format!("rar5: {other}")),
   }
 }
@@ -447,12 +453,15 @@ pub fn repair_archive(
   on_progress: Option<ThreadsafeFunction<ProgressData, ()>>,
   signal: Option<AbortSignal>,
 ) -> AsyncTask<RepairArchiveTask> {
-  AsyncTask::new(RepairArchiveTask {
-    input_path,
-    output_path,
-    progress: on_progress,
-    cancel: abort_flag(signal),
-  })
+  AsyncTask::with_optional_signal(
+    RepairArchiveTask {
+      input_path,
+      output_path,
+      progress: on_progress,
+      cancel: abort_flag(signal.as_ref()),
+    },
+    signal,
+  )
 }
 
 pub struct RepairArchiveTask {
@@ -505,11 +514,14 @@ pub fn rebuild_missing_volumes(
   on_progress: Option<ThreadsafeFunction<ProgressData, ()>>,
   signal: Option<AbortSignal>,
 ) -> AsyncTask<RebuildVolumesTask> {
-  AsyncTask::new(RebuildVolumesTask {
-    first_volume,
-    progress: on_progress,
-    cancel: abort_flag(signal),
-  })
+  AsyncTask::with_optional_signal(
+    RebuildVolumesTask {
+      first_volume,
+      progress: on_progress,
+      cancel: abort_flag(signal.as_ref()),
+    },
+    signal,
+  )
 }
 
 pub struct RebuildVolumesTask {
@@ -640,11 +652,14 @@ pub fn append_entries(
   on_progress: Option<ThreadsafeFunction<ProgressData, ()>>,
   signal: Option<AbortSignal>,
 ) -> AsyncTask<AppendArchiveTask> {
-  AsyncTask::new(AppendArchiveTask {
-    opts,
-    progress: on_progress,
-    cancel: abort_flag(signal),
-  })
+  AsyncTask::with_optional_signal(
+    AppendArchiveTask {
+      opts,
+      progress: on_progress,
+      cancel: abort_flag(signal.as_ref()),
+    },
+    signal,
+  )
 }
 
 /// Delete members from a RAR5 archive without rebuilding it.
@@ -662,16 +677,65 @@ pub fn delete_entries(
   archive_path: String,
   names: Vec<String>,
   password: Option<String>,
-) -> Result<u32> {
-  let mut archive = match password.as_deref() {
-    Some(pw) if !pw.is_empty() => {
-      rar5::RarArchive::open_with_password(&archive_path, pw).map_err(to_napi_error)?
-    }
-    _ => rar5::RarArchive::open(&archive_path).map_err(to_napi_error)?,
-  };
-  let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-  let count = archive.delete(&refs).map_err(to_napi_error)?;
-  Ok(count as u32)
+  on_progress: Option<ThreadsafeFunction<ProgressData, ()>>,
+  signal: Option<AbortSignal>,
+) -> AsyncTask<DeleteEntriesTask> {
+  AsyncTask::with_optional_signal(
+    DeleteEntriesTask {
+      archive_path,
+      names,
+      password,
+      progress: on_progress,
+      cancel: abort_flag(signal.as_ref()),
+    },
+    signal,
+  )
+}
+
+pub struct DeleteEntriesTask {
+  archive_path: String,
+  names: Vec<String>,
+  password: Option<String>,
+  progress: Option<ThreadsafeFunction<ProgressData, ()>>,
+  cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Task for DeleteEntriesTask {
+  type Output = u32;
+  type JsValue = u32;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let mut archive = match self.password.as_deref() {
+      Some(pw) if !pw.is_empty() => {
+        rar5::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
+      }
+      _ => rar5::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
+    };
+    archive.set_cancel_flag(self.cancel.take());
+    let progress = self.progress.take();
+    let refs: Vec<&str> = self.names.iter().map(|s| s.as_str()).collect();
+    let count = archive
+      .delete_with_progress(
+        &refs,
+        Some(Box::new(move |done: u64, total: u64| {
+          if let Some(tsfn) = progress.as_ref() {
+            let _ = tsfn.call(
+              Ok(ProgressData {
+                done: done.min(total) as f64,
+                total: total as f64,
+              }),
+              ThreadsafeFunctionCallMode::NonBlocking,
+            );
+          }
+        })),
+      )
+      .map_err(to_napi_error)?;
+    Ok(count as u32)
+  }
+
+  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output)
+  }
 }
 
 /// Read one member's uncompressed content into memory (like previewing a
@@ -730,11 +794,14 @@ pub fn create_archive(
   on_progress: Option<ThreadsafeFunction<ProgressData, ()>>,
   signal: Option<AbortSignal>,
 ) -> AsyncTask<CreateArchiveTask> {
-  AsyncTask::new(CreateArchiveTask {
-    opts,
-    progress: on_progress,
-    cancel: abort_flag(signal),
-  })
+  AsyncTask::with_optional_signal(
+    CreateArchiveTask {
+      opts,
+      progress: on_progress,
+      cancel: abort_flag(signal.as_ref()),
+    },
+    signal,
+  )
 }
 
 /// One member's details for [`list_entries_detailed`].
@@ -873,9 +940,12 @@ pub fn extract_archive(
   opts: ExtractArchiveOptions,
   signal: Option<AbortSignal>,
 ) -> AsyncTask<ExtractArchiveTask> {
-  AsyncTask::new(ExtractArchiveTask {
-    archive_path,
-    opts,
-    cancel: abort_flag(signal),
-  })
+  AsyncTask::with_optional_signal(
+    ExtractArchiveTask {
+      archive_path,
+      opts,
+      cancel: abort_flag(signal.as_ref()),
+    },
+    signal,
+  )
 }
