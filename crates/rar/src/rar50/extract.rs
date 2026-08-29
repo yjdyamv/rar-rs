@@ -500,6 +500,32 @@ impl RarArchive {
         self.decode_file_to(target_idx, writer, None)
     }
 
+    /// Test the integrity of every member (like `rar t`): each member is
+    /// decoded and its CRC32/BLAKE2sp verified without writing anything.
+    /// Returns `(checked, failed)`; a nonzero `failed` is still `Ok` so
+    /// callers can report per-member failures. Directories are skipped.
+    pub fn test(&mut self) -> RarResult<(usize, usize)> {
+        let names: Vec<String> = self.entries.iter().map(|e| e.name().to_string()).collect();
+        let mut checked = 0usize;
+        let mut failed = 0usize;
+        for name in &names {
+            self.check_cancel()?;
+            let entry = self
+                .entries
+                .iter()
+                .find(|e| e.name() == name.as_str())
+                .expect("name from entries");
+            if entry.is_dir() {
+                continue;
+            }
+            checked += 1;
+            if self.read(name).is_err() {
+                failed += 1;
+            }
+        }
+        Ok((checked, failed))
+    }
+
     /// Extract all archive contents to `dest_dir` (safe defaults).
     pub fn extract_all(&mut self, dest_dir: impl AsRef<Path>) -> RarResult<()> {
         self.extract_all_with_options(dest_dir, crate::options::ExtractOptions::default())

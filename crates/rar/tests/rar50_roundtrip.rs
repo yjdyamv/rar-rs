@@ -1246,3 +1246,38 @@ fn read_to_writer_matches_read_and_streams() {
         .unwrap_err();
     assert!(matches!(err, rar5::RarError::MemberNotFound { .. }));
 }
+
+/// `test()` verifies every member's CRC: a healthy archive reports zero
+/// failures, a corrupted one reports the damaged member.
+#[test]
+fn test_reports_member_integrity() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("t.rar");
+    let a: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+    let b: Vec<u8> = (0..70_000u32).map(|i| (i % 253) as u8).collect();
+    {
+        let mut ar = rar5::RarArchive::create(&path).unwrap();
+        ar.add_bytes("a.bin", &a, 3).unwrap();
+        ar.add_bytes("b.bin", &b, 0).unwrap();
+        ar.close().unwrap();
+    }
+    let mut ar = rar5::RarArchive::open(&path).unwrap();
+    assert_eq!(ar.test().unwrap(), (2, 0), "healthy archive: all ok");
+
+    // Corrupt a byte inside the compressed payload of a.bin (not the
+    // header), so only that member fails.
+    let bytes = std::fs::read(&path).unwrap();
+    let mut damaged = bytes.clone();
+    // Find the packed payload of a.bin (first file block, after its header).
+    let mut ar = rar5::RarArchive::open(&path).unwrap();
+    let a_entry = ar.get_entry("a.bin").unwrap();
+    let payload_off = a_entry.chunks[0].data_offset as usize;
+    damaged[payload_off + 16] ^= 0xFF;
+    drop(ar);
+    std::fs::write(&path, &damaged).unwrap();
+
+    let mut ar = rar5::RarArchive::open(&path).unwrap();
+    let (checked, failed) = ar.test().unwrap();
+    assert_eq!(checked, 2);
+    assert_eq!(failed, 1, "corrupted a.bin must fail");
+}

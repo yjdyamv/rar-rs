@@ -690,6 +690,21 @@ pub fn read_member(archive_path: String, name: String, password: Option<String>)
   Ok(data.into())
 }
 
+/// Test the integrity of every member (like `rar t`); returns the
+/// `(checked, failed)` counts. A damaged member is reported, never
+/// thrown.
+#[napi]
+pub fn test_archive(archive_path: String, password: Option<String>) -> Result<Vec<u32>> {
+  let mut archive = match password.as_deref() {
+    Some(pw) if !pw.is_empty() => {
+      rar5::RarArchive::open_with_password(&archive_path, pw).map_err(to_napi_error)?
+    }
+    _ => rar5::RarArchive::open(&archive_path).map_err(to_napi_error)?,
+  };
+  let (checked, failed) = archive.test().map_err(to_napi_error)?;
+  Ok(vec![checked as u32, failed as u32])
+}
+
 /// List the member names of a RAR5 archive.
 #[napi]
 pub fn list_entries(archive_path: String, password: Option<String>) -> Result<Vec<String>> {

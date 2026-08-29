@@ -43,6 +43,10 @@ pub mod version;
 mod write_progress;
 
 pub use archive::{ArchiveEntry, BatchEntry, RarArchive, discover_volumes};
+// Multi-threaded encoding internals used by the mtbench example and the
+// napi binding's streaming path; hidden from the public docs but stable
+// enough to build against (feature `parallel` only).
+#[doc(hidden)]
 #[cfg(feature = "parallel")]
 pub use codec::rar50::{EncoderState, encode_chunked_mt};
 pub use codec::rar50::{compress, compress_chunked, compress_with_progress, decompress};
