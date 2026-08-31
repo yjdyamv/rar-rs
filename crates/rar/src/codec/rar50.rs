@@ -8,6 +8,8 @@
 //!
 //! License: BSD-2-Clause
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 // ── Tables / format constants ──────────────────────────────────────────────/// Huffman table symbol counts.
 pub const HUFF_BC: usize = 20;
 pub const HUFF_NC: usize = 306;
@@ -1112,6 +1114,32 @@ const FAST_MODE_AFTER: usize = 64 * 1024;
 /// incompressible run would lock the probe off for the whole member).
 const FAST_RECOVER_INTERVAL: usize = 128;
 
+/// Consecutive failed tree probes before the block collector's tree walk
+/// drops to the [`FAST_RECOVER_INTERVAL`] cadence. A probe fails only when
+/// the tree found *no match at all* (not merely a short one): on
+/// text-like data 4-15 byte matches are real signal (word prefixes) and
+/// must keep the full search cadence — gating on them would let fast mode
+/// starve the recovery searches of candidates and measurably worsen the
+/// ratio on text — while on truly incompressible data a 4-byte
+/// hash-collision match is ~2^-32 per position, so the miss run still
+/// accumulates and the mode engages after a couple of KiB of wasted
+/// cache-missing descents into the multi-MiB son array.
+const COLLECT_TREE_MISS_THRESHOLD: usize = 256;
+
+/// Same gating for the long-range probe: `COLLECT_TREE_MISS_THRESHOLD`
+/// failed probes into the multi-MiB random-access table drops it to the
+/// recovery cadence. A spurious short tree match must not reset this — only
+/// an actual long-range hit pays for the probe.
+const COLLECT_LR_MISS_THRESHOLD: usize = 256;
+
+/// Test seam: force the full pricing passes even for matchless blocks, to
+/// prove the matchless fast path is byte-identical.
+static DISABLE_MATCHLESS_FAST_PATH: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+fn set_fast_path_enabled(enabled: bool) {
+    DISABLE_MATCHLESS_FAST_PATH.store(!enabled, Ordering::Relaxed);
+}
+
 /// Estimated cost of a literal before any block has been priced, in the
 /// same bit units as the match cost estimates (a main-table symbol out of
 /// 256 plus the odds that the table is skewed).
@@ -1471,9 +1499,15 @@ fn collect_block_matches(
             .map(|&(len, _)| len as usize)
             .max()
             .unwrap_or(0);
-        if longest < 16 {
+        // Fast mode gates on the tree finding *nothing at all* (`longest
+        // == 0`), not on a short match: on text-like data 4-15 byte
+        // matches are real signal (word prefixes) and must keep the full
+        // search cadence, while on truly incompressible data a 4-byte
+        // hash-collision match is ~2^-32 per position, so the miss run
+        // still accumulates and the mode engages as quickly as ever.
+        if longest == 0 {
             tree_misses += 1;
-            if !fast_tree && tree_misses >= 4096 {
+            if !fast_tree && tree_misses >= COLLECT_TREE_MISS_THRESHOLD {
                 fast_tree = true;
             }
         } else {
@@ -1512,10 +1546,11 @@ fn collect_block_matches(
                 lr_misses += 1;
                 // A 64 KiB parse block holds 64 K positions, so a
                 // 64 K-probe threshold would only fire at the last
-                // position of the block and never pay off; 4 K failed
-                // probes (16 KiB of incompressible data) is already
-                // definitive and leaves room to act within the block.
-                if !lr_fast && lr_misses >= 4096 {
+                // position of the block and never pay off; a few hundred
+                // failed probes (a couple of KiB of incompressible data)
+                // is already definitive and leaves room to act within
+                // the block.
+                if !lr_fast && lr_misses >= COLLECT_LR_MISS_THRESHOLD {
                     lr_fast = true;
                 }
             }
@@ -2083,6 +2118,53 @@ fn parse_one_block(
         window,
         lr,
     );
+
+    // Fast path: a block with no match candidates at all parses to pure
+    // literals, deterministically — the pricing passes would price the
+    // same literal at every position (all three tables rebuild to the
+    // same byte histogram) and never relax a match. The collector's tree
+    // is heuristic and can miss an exact byte-match at a cached repeat
+    // distance (the pricing pass probes those itself), so confirm the two
+    // repeat probes stay clean before taking the fast path; the check is
+    // a couple of byte compares per position and the result is
+    // byte-identical to running the full passes. This is the hot case on
+    // incompressible data, where the per-position price bookkeeping (a
+    // 1 MiB arrive_reps array plus four more arrays per pass) dominated
+    // the parse.
+    if matches.runs.is_empty() && !DISABLE_MATCHLESS_FAST_PATH.load(Ordering::Relaxed) {
+        let span = block.end - block.start;
+        let mut all_literal = true;
+        'probe: for index in 0..span {
+            let pos = block.start + index;
+            let max_distance = pos.min(window);
+            let max_length = (block.end - pos).min(max_match);
+            if max_distance == 0 || max_length < 4 {
+                continue;
+            }
+            // Literals leave the distance memory untouched, so the reps
+            // here are the block-entry reps at every position, exactly
+            // what the pricing pass would probe with.
+            for &repeat in state.reps.iter().take(2) {
+                if repeat == 0 || repeat > max_distance as u32 {
+                    continue;
+                }
+                if match_length_at(combined, pos, repeat as usize, max_length) >= 4 {
+                    all_literal = false;
+                    break 'probe;
+                }
+            }
+        }
+        if all_literal {
+            let mut symbols = Vec::with_capacity(span);
+            for index in 0..span {
+                symbols.push(Symbol::Literal(combined[block.start + index]));
+            }
+            // Literals leave the repeat cache and last-length exactly as
+            // the pricing passes would have.
+            return symbols;
+        }
+    }
+
     let initial = *state;
     let mut tokens = optimal_parse_tokens(
         combined,
@@ -4340,5 +4422,77 @@ mod mt_tests {
             false,
         );
         assert_eq!(a, b);
+    }
+
+    /// The matchless fast path must be byte-identical to the full pricing
+    /// passes: toggle it off, encode every corpus, toggle it back on, and
+    /// compare. Corpora cover the fast path's trigger (random), its
+    /// fallback triggers (text, repeats, structured data) and mixes.
+    #[test]
+    fn matchless_fast_path_is_byte_identical() {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                set_fast_path_enabled(true);
+            }
+        }
+        let _g = Guard;
+
+        let mut corpora: Vec<(String, Vec<u8>)> = Vec::new();
+        corpora.push(("random".into(), prng_block(3 * DEFAULT_CHUNK_SIZE, 42)));
+        corpora.push((
+            "text".into(),
+            b"the quick brown fox jumps over the lazy dog\n".repeat(200_000),
+        ));
+        corpora.push(("mixed".into(), mixed_data()));
+        let mut rep_random = prng_block(DEFAULT_CHUNK_SIZE + 4096, 99);
+        // A later copy of an early span: the tree finds it, the fast path
+        // must not trigger on the copy's block.
+        rep_random.extend(rep_random[..DEFAULT_CHUNK_SIZE].to_vec());
+        corpora.push(("self-copy".into(), rep_random));
+        let mut zipped = prng_block(DEFAULT_CHUNK_SIZE, 7);
+        for (i, b) in b"hello world ".iter().cycle().take(4096).enumerate() {
+            zipped[2 * i] = *b;
+        }
+        corpora.push(("structured".into(), zipped));
+
+        for (name, data) in &corpora {
+            for (level, dict_log, extra) in [
+                (2u8, 6u8, false),
+                (3, 6, false),
+                (5, 6, false),
+                (3, 3, true),
+            ] {
+                set_fast_path_enabled(true);
+                let fast = encode_chunked_mt(
+                    data,
+                    level,
+                    dict_log,
+                    DEFAULT_CHUNK_SIZE,
+                    &mut EncoderState::default(),
+                    3,
+                    true,
+                    extra,
+                );
+                set_fast_path_enabled(false);
+                let full = encode_chunked_mt(
+                    data,
+                    level,
+                    dict_log,
+                    DEFAULT_CHUNK_SIZE,
+                    &mut EncoderState::default(),
+                    3,
+                    true,
+                    extra,
+                );
+                assert_eq!(
+                    fast, full,
+                    "{name} l{level} dict{dict_log} extra{extra}: fast path diverged"
+                );
+                let out =
+                    decode_standalone(&fast, data.len() as u64, dict_log, None, extra).unwrap();
+                assert_eq!(out, *data, "{name} l{level}: fast-path decode mismatch");
+            }
+        }
     }
 }

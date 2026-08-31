@@ -13,7 +13,7 @@
 
 ## 待办
 
-- **MT 扩展性（已大幅改善，剩余瓶颈记录）**：mt2≈mt8 的主因已修——`compression_pool` 是 OnceLock，首次使用时的线程数被永久缓存（mtbench 先设 2 后测 4/8，实际全跑在 2 线程池）。改为配置变化时重建池（RwLock+Arc，在飞任务持 Arc 不受影响）；extraction 池同步修。另按 PLAN 方向砍掉不可压缩 slice 的片内播种：`mt_tail_is_incompressible` 按 stride-16 采样 256 KiB 尾部、4 字节窗去重率 ≥95% 判随机，跳过 2 MiB 树播种（head 仍清，chunk 自身插入 + LR 不变）。实测 64 MiB mixed m3：seq 17.5 / mt2 36.8 / mt4 62.1 / mt8 84.0 MiB/s（旧 mt8 21），ratio 与 seq 字节级同（50.02%）；text mt8 179 MiB/s；x86 mt8 125 MiB/s（ratio +8.2% 为既有 MT 分歧）。剩余瓶颈：随机 slice 的 collect（每 64 KiB 块 4096 位置快模式预热）+ DP 仍 ~450ms/片，且 mt8 后因内存带宽饱和不再扩展
+- **MT/不可压缩数据提速（2026-08，本会话）**：不可压缩输入的三大耗时已逐一处理——①collect 快模式阈值 4096→256（树+LR 各一），且**命中判据由 `longest<16` 改为 `longest==0`**（关键修正：文本里 4-15 字节匹配是真实信号，按 <16 计数会让快模式把文本也降到 1/128 搜索，text ratio 实测 15.32%→15.61% 劣化；按 ==0 计数后文本保持全量搜索、ratio 与基线字节级同，随机数据 4 字节碰巧匹配概率 ~2^-32 不受影响）；②**无匹配块 DP 快路径**（`parse_one_block`）：collect 返回空候选列表时，最优解析必然全字面量——3 次定价 pass（每块 2 MiB 数组记账）纯属浪费，用一次 O(span) 的缓存距离探针验证后直接产出全字面量 symbol，输出与全 pass 字节级一致（测试开关 + `matchless_fast_path_is_byte_identical` 五语料四参数验证）。实测 64 MiB 纯随机 m3：mt1 5044→1751 ms（2.9×，其中 DP CPU 6512→93 ms、collect 1105→439 ms）、mt8 1253→486 ms（2.6×）、ratio 100.02%→100.01%（更优）；text/mixed/xml/sparse 四合成语料 ratio 与基线完全相同、速度持平或更快（mixed m3 4283 vs 4494 ms）；全部解码字节级一致。验证工具：`examples/mtprobe`（随机数据多线程探针，原上次会话遗留，去除临时插桩后保留）、`examples/ratiocheck`（多语料 ratio/速度对照）
 - **batch 测试已修（原诊断有误，正确根因见下）**：`batch_archive_matches_sequential_bytes` 三处分歧：① `add` 对 <64 MiB 成员走内存路径先试 x86 过滤器，`add_batch` 的 `prepare_data_entry` 从不试过滤器（i%251 这类含规则 E8 字节的非代码数据会误触发，seq 351B vs batch 338B）；② 末 chunk 的 `is_final`：seq 用 `bytes_read >= len`（整 4 MiB 末块也标终），batch 用 `chunk.len() < DEFAULT_CHUNK_SIZE`（整倍长成员永不标终，末块 flags 差 0x40 位）；③ 非整倍长数据无分歧，20 MiB 文本成员对齐后字节全同。修复：`prepare_data_entry(file_origin=true)` 完整镜像 `add_file`（先试过滤器且胜 STORE 时用之，末块 finality 同 seq），seq 与 batch 输出字节级一致（4130==4130）。与 MT/flush_window 无关——PLAN 旧诊断（≥12 MiB 走 flush_window MT）不成立：64 MiB 阈值下 20 MiB 成员走内存路径
 
 ## 已取消 / 不做
@@ -22,6 +22,8 @@
 - unrar `s`（转 SFX）：官方 UnRAR 7.23 无此命令，非差距
 
 ## 已完成（要点）
+
+- [x] **不可压缩数据压缩提速（2026-08）**：collect 快模式阈值 4096→256 且命中判据 `longest<16`→`longest==0`（文本 4-15 字节匹配不再误触发快模式，text ratio 保持 15.32% 与基线同）；无匹配块 DP 快路径（空候选 + 缓存距离探针验证 → 直接全字面量，跳过 3 次定价 pass，输出字节级一致，测试 `matchless_fast_path_is_byte_identical` 锁定）。64 MiB 随机 m3：mt1 5044→1751、mt8 1253→486 ms，ratio 100.02%→100.01%；text/mixed/xml/sparse ratio 与基线完全一致、速度持平或更快
 
 - [x] **MT 扩展性（2026-08）**：`compression_pool` OnceLock 永久缓存首用线程数（mtbench 里 mt4/mt8 实际跑 2 线程）→ 改为配置变化时重建池（RwLock<Arc>，在飞任务持 Arc 安全）；`extraction_pool` 同步修。不可压缩 slice 跳过片内 2 MiB 树播种（`mt_tail_is_incompressible`：stride-16 采样 256 KiB、4 字节窗去重率 ≥95% 判随机；head 仍清、chunk 自身插入与共享 LR 不变）。实测 64 MiB mixed m3：seq 17.5、mt2 36.8、mt4 62.1、mt8 84.0 MiB/s（此前 mt2=mt8≈20）；text mt8 179 MiB/s；ratio mixed 与 seq 字节级同、x86 +8.2%（既有分歧）。另修持久树 `resolve` 下溢（`rebase` 的环绕链接在非环绕减法下 panic）——`long_range_respects_dictionary_window` 测试由此从失败转绿
 - [x] **napi/wasm binding 迁入 workspace（2026-08）**：`smart-archive-rar`（napi-rs，native 8 平台 + wasm32-wasip1-threads）整体迁入 `crates/rar-napi`——依赖从 git rev pin（5376c80，缺 15 提交含编码器 lock-in 修复）改为 path 依赖，rev 漂移根除；补 `..Default::default()` 修 force_v70 编译。不发布 npm 包：CI（`.github/workflows/CI.yml`，tag `v*`）矩阵构建 `.node` + wasm bundle → GitHub Release assets（含 `SHA-256SUMS` 清单），vscode 消费方 SHA-256 pin 直连下载。release profile（lto+strip）上移 workspace 根。本地验证：native + wasm 双 target 构建、node --test 29/29 通过。2026-08 CI 激活：工作流从 `crates/rar-napi/.github/`（GitHub 不执行子目录工作流）迁至仓库根；`origin` 指向 GitHub（Actions 跑 CI），codeberg 留作镜像
