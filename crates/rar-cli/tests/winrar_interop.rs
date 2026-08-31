@@ -126,6 +126,15 @@ fn file_sha256(path: &Path) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// SHA-256 of an in-memory byte slice.
+fn file_sha256_bytes(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// 96 MiB of compressible data — comfortably over the streaming
 /// compression threshold (64 MiB) and over one small volume.
 const STREAM_SIZE: u64 = 96 * 1024 * 1024;
@@ -2244,6 +2253,97 @@ fn solid_reset_extension_interops_with_winrar() {
                 file_sha256(&win.join(name)),
                 file_sha256(src),
                 "WinRAR extracted a different {name} from our -se archive"
+            );
+        }
+    }
+}
+
+/// CLI `-sd` (dependent solid volumes: keep the solid statistics across
+/// volume boundaries, disabling the per-volume reset) interoperates with
+/// WinRAR in both directions. Exercises the CLI `-sd` switch end-to-end
+/// (its `normalize_switch` path maps `-sd` to `--solid-reset=continuous`),
+/// which the library-API solid tests do not touch.
+#[test]
+fn cli_sd_dependent_volumes_interops_with_winrar() {
+    let dir = temp_dir();
+    // A few compressible files each sharing a long common text prefix plus
+    // a deterministic pseudo-random tail: the common prefix gives the solid
+    // chain something to share across volume boundaries (the observable
+    // effect of `-sd`), while the random tail keeps the set big enough to
+    // split into several volumes. Deterministic LCG keeps it cross-platform.
+    let mut files = Vec::new();
+    let mut data = Vec::new();
+    for i in 0..4u32 {
+        let p = dir.path().join(format!("m{i}.dat"));
+        let mut body = Vec::new();
+        let prefix =
+            format!("COMMONPREFIX record {i}: the quick brown fox jumps over the lazy dog.\n");
+        for _ in 0..20_000 {
+            body.extend_from_slice(prefix.as_bytes());
+        }
+        let mut seed = (i as u64)
+            .wrapping_mul(0x9E3779B97F4A7C15)
+            .wrapping_add(0x1234567);
+        for _ in 0..400_000 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            body.push((seed >> 33) as u8);
+        }
+        std::fs::write(&p, &body).unwrap();
+        data.push((p.file_name().unwrap().to_string_lossy().into_owned(), body));
+        files.push(p);
+    }
+
+    // Ours -> WinRAR: our own `rar` binary with `-s -sd` multi-volume.
+    let ours = dir.path().join("cli_sd.rar");
+    {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_rar"));
+        cmd.args(["a", "-s", "-sd", "-idq", "-v100k"])
+            .arg(&ours)
+            .args(files.iter().map(|p| p.file_name().unwrap()))
+            .current_dir(dir.path());
+        let (ok, out) = run(&mut cmd);
+        assert!(ok, "our rar -s -sd failed:\n{out}");
+    }
+    let volumes = rar5::discover_volumes(&ours);
+    assert!(
+        volumes.len() >= 3,
+        "expected several volumes, got {}",
+        volumes.len()
+    );
+    if let Some(_unrar) = unrar_bin() {
+        let (ok, out) = unrar_test(&volumes[0], None);
+        assert!(ok, "UnRAR rejected our -sd dependent volume set:\n{out}");
+        let win = dir.path().join("win_ours_cli_sd");
+        std::fs::create_dir_all(&win).unwrap();
+        let (ok, out) = unrar_extract(&volumes[0], &win, None);
+        assert!(ok, "UnRAR failed to extract our -sd volume set:\n{out}");
+        for (name, src) in &data {
+            assert_eq!(
+                file_sha256(&win.join(name)),
+                file_sha256_bytes(src),
+                "WinRAR extracted a different {name} from our -sd set"
+            );
+        }
+    }
+
+    // WinRAR -> ours: `-s -sd` multi-volume dependent set read back.
+    if let Some(rar) = rar_bin() {
+        let theirs = dir.path().join("theirs_cli_sd.rar");
+        let (ok, out) = run(Command::new(&rar)
+            .args(["a", "-s", "-sd", "-v100k", "-idq"])
+            .arg(&theirs)
+            .args(files.iter().map(|p| p.file_name().unwrap()))
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR -s -sd failed:\n{out}");
+        let volumes = rar5::discover_volumes(&theirs);
+        let mut ar = RarArchive::open(&volumes[0]).unwrap();
+        for (name, src) in &data {
+            assert_eq!(
+                ar.read(name).unwrap(),
+                *src,
+                "rar-rs read a different {name} from WinRAR's -sd set"
             );
         }
     }
