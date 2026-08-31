@@ -23,6 +23,8 @@
 
 ## 已完成（要点）
 
+- [x] **delta 自动过滤器候选通道扩到帧尺寸 + 预门采样（2026-08）**：修 `picks_correct_channel_count_for_interleaved_streams`（自 be7a254 引入即失败，simd feature 下 CI 未跑到）暴露的两个真实缺陷——①候选通道 [1,2,3,4] 到不了多字节采样帧尺寸（16 位立体声需 4、32 位立体声需 8、24 位三声道需 9、32 位四声道需 16），扩为 [1,2,3,4,6,8,9,12,16]；实测 32 位立体声 11%（原限 ch4 时 ~18%）、24 位三声道 14%、16 位四声道 22% vs plain 84%；②预门 `auto_delta_filter_channels` 全量扫描成员（63 MiB 成员 ~300ms+，只为保护一次 64 KiB 采样编码）改为 64 KiB 头部采样；接受判据从 min-mag 通道的 near-zero 改为跨通道最大 near-zero（0/255 回绕会误导 mag 选粗通道而误拒，如 8 位单声道回绕 walk 曾拒收）。尺寸选择提取为 `pick_delta_channel` 供测试直接验证（9 种帧布局全对）。测试重写：预门只断言开关（Some/None），新增 `delta_selection_prefers_frame_size`（9 布局 × 帧尺寸）、roundtrip 扩到 2/3/4 字节采样、text 拒绝断言。全部 120 lib 测试绿
+
 - [x] **不可压缩数据压缩提速（2026-08）**：collect 快模式阈值 4096→256 且命中判据 `longest<16`→`longest==0`（文本 4-15 字节匹配不再误触发快模式，text ratio 保持 15.32% 与基线同）；无匹配块 DP 快路径（空候选 + 缓存距离探针验证 → 直接全字面量，跳过 3 次定价 pass，输出字节级一致，测试 `matchless_fast_path_is_byte_identical` 锁定）。64 MiB 随机 m3：mt1 5044→1751、mt8 1253→486 ms，ratio 100.02%→100.01%；text/mixed/xml/sparse ratio 与基线完全一致、速度持平或更快
 
 - [x] **MT 扩展性（2026-08）**：`compression_pool` OnceLock 永久缓存首用线程数（mtbench 里 mt4/mt8 实际跑 2 线程）→ 改为配置变化时重建池（RwLock<Arc>，在飞任务持 Arc 安全）；`extraction_pool` 同步修。不可压缩 slice 跳过片内 2 MiB 树播种（`mt_tail_is_incompressible`：stride-16 采样 256 KiB、4 字节窗去重率 ≥95% 判随机；head 仍清、chunk 自身插入与共享 LR 不变）。实测 64 MiB mixed m3：seq 17.5、mt2 36.8、mt4 62.1、mt8 84.0 MiB/s（此前 mt2=mt8≈20）；text mt8 179 MiB/s；ratio mixed 与 seq 字节级同、x86 +8.2%（既有分歧）。另修持久树 `resolve` 下溢（`rebase` 的环绕链接在非环绕减法下 panic）——`long_range_respects_dictionary_window` 测试由此从失败转绿

@@ -437,11 +437,19 @@ fn push_x86_filter_range(
 // compressed size in the encoder (see `encode_with_auto_delta_filter`), which
 // is robust to byte-wrapping; here we only provide a cheap pre-gate.
 
-/// Candidate channel counts tried for the delta filter. 1..=4 covers 8/16/24/
-/// 32-bit interleaved streams, which is what real archives contain.
-pub(crate) const AUTO_DELTA_CHANNELS: &[u8] = &[1, 2, 3, 4];
+/// Candidate channel counts tried for the delta filter. Every frame size of
+/// common PCM (1-4 bytes per sample × 1-4 channels) plus the frequent
+/// 24-bit cases: 1, 2, 3, 4, 6, 8, 9, 12, 16. Each byte position of an
+/// interleaved little-endian frame packs best as its own delta lane, so the
+/// frame size (bytes × channels) is the channel count that wins — 16-bit
+/// stereo needs 4, 32-bit stereo 8, 24-bit 3-channel 9.
+pub(crate) const AUTO_DELTA_CHANNELS: &[u8] = &[1, 2, 3, 4, 6, 8, 9, 12, 16];
 /// Minimum data length before a delta filter is even considered.
 const AUTO_DELTA_MIN_LEN: usize = 256;
+
+/// Head sample length for the cheap pre-gate (same 64 KiB the size-based
+/// selection in the encoder packs).
+const AUTO_DELTA_SAMPLE_LEN: usize = 64 * 1024;
 
 /// Per-channel statistics of the delta(`channels`)-transformed `data`,
 /// computed in a single allocation-free pass. `mag_sum` is the total absolute
@@ -497,19 +505,31 @@ pub fn auto_delta_filter_channels(data: &[u8]) -> Option<u8> {
     if data.iter().all(|&b| b == data[0]) {
         return None;
     }
+    // Sample the head (same 64 KiB the size-based selection packs). The
+    // stats are a cheap reject gate; scanning the whole member for every
+    // candidate cost hundreds of ms on large members to protect a sample
+    // encode, and a leading sample is representative for the correlated
+    // data the filter targets.
+    let sample = &data[..data.len().min(AUTO_DELTA_SAMPLE_LEN)];
     let mut best: Option<(u8, u64)> = None; // (channel, mag_sum)
     let mut best_near_zero = 0u64;
     let mut best_total = 0u64;
     for &ch in AUTO_DELTA_CHANNELS {
-        let s = delta_stats(data, ch);
+        let s = delta_stats(sample, ch);
         if best.is_none() || s.mag_sum < best.unwrap().1 {
             best = Some((ch, s.mag_sum));
+        }
+        // Correlated data keeps the vast majority of its deltas small at the
+        // frame size; wrapping at 0/255 can inflate magnitudes (misleading
+        // the mag_sum choice into a coarser lane), so the accept decision
+        // follows the *best* near-zero ratio across channels, not the
+        // min-mag channel's.
+        if s.near_zero > best_near_zero {
             best_near_zero = s.near_zero;
             best_total = s.total;
         }
     }
     let (ch, _) = best?;
-    // Correlated data keeps the vast majority of its deltas small.
     (best_near_zero * 2 >= best_total).then_some(ch)
 }
 
@@ -677,15 +697,15 @@ mod tests {
         let mut val = vec![0i64; channels];
         let mut state = 0x1234_5678u64;
         for _ in 0..n {
-            for c in 0..channels {
+            for v in &mut val {
                 state ^= state >> 12;
                 state ^= state << 25;
                 state ^= state >> 27;
                 let r = (state >> 33) as u32;
-                val[c] += (r % 8) as i64 - 4;
-                let v = val[c] as i64;
+                *v += (r % 8) as i64 - 4;
+                let value = *v as i64;
                 for b in 0..bytes {
-                    out.push((v >> (8 * b)) as u8);
+                    out.push((value >> (8 * b)) as u8);
                 }
             }
         }
@@ -693,30 +713,28 @@ mod tests {
     }
 
     #[test]
-    fn picks_correct_channel_count_for_interleaved_streams() {
-        // 8/16/24-bit interleaved streams map to delta channels 1/2/3.
-        assert_eq!(
-            auto_delta_filter_channels(&correlated_samples(1, 1, 4096)),
-            Some(1)
-        );
-        assert_eq!(
-            auto_delta_filter_channels(&correlated_samples(2, 2, 4096)),
-            Some(2)
-        );
-        assert_eq!(
-            auto_delta_filter_channels(&correlated_samples(3, 3, 4096)),
-            Some(3)
-        );
-        // Two interleaved 8-bit channels (stereo u8) is a 2-channel delta.
-        assert_eq!(
-            auto_delta_filter_channels(&correlated_samples(1, 2, 4096)),
-            Some(2)
-        );
-        // A 4-lane (32-bit) layout aligns to channel 4.
-        assert_eq!(
-            auto_delta_filter_channels(&correlated_samples(2, 4, 4096)),
-            Some(4)
-        );
+    fn auto_delta_pre_gate_opens_for_interleaved_streams() {
+        // The pre-gate is a cheap accept/reject: it must open (Some) for
+        // correlated interleaved data of every common frame size — 8/16/24/
+        // 32-bit across 1-4 channels — and the channel count it returns is
+        // only a hint (the encoder re-picks by packed sample size over
+        // [`AUTO_DELTA_CHANNELS`]).
+        for (bytes, channels) in [
+            (1usize, 1usize),
+            (2, 1),
+            (2, 2),
+            (3, 1),
+            (3, 3),
+            (1, 2),
+            (2, 4),
+            (4, 2),
+            (4, 4),
+        ] {
+            assert!(
+                auto_delta_filter_channels(&correlated_samples(bytes, channels, 4096)).is_some(),
+                "bytes={bytes} channels={channels}: correlated interleaved data must look delta-able"
+            );
+        }
     }
 
     #[test]

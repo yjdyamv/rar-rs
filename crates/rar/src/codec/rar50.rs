@@ -805,6 +805,31 @@ pub fn encode_with_auto_x86_filter(
     }))
 }
 
+/// Pick the delta channel whose filtered leading sample packs smallest,
+/// requiring it to beat plain LZSS on that sample (`None` otherwise).
+/// WinRAR-style size-based selection is robust to byte-wrapping at sample
+/// boundaries (a raw magnitude heuristic is fooled into picking a wider
+/// channel by the large deltas that wrapping introduces).
+fn pick_delta_channel(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    extra_dist: bool,
+) -> Result<Option<u8>, String> {
+    let sample_len = data.len().min(1 << 16);
+    let sample = &data[..sample_len];
+    let plain = encode_with_filters(sample, method, dict_size_log, &[], extra_dist)?;
+    let mut best: Option<(u8, usize)> = None;
+    for &ch in super::filters::AUTO_DELTA_CHANNELS {
+        let spec = FilterSpec::new(FILTER_DELTA, ch, 0, sample_len as u32);
+        let packed = encode_with_filters(sample, method, dict_size_log, &[spec], extra_dist)?;
+        if packed.len() < plain.len() && best.is_none_or(|(_, b)| packed.len() < b) {
+            best = Some((ch, packed.len()));
+        }
+    }
+    Ok(best.map(|(ch, _)| ch))
+}
+
 /// Like [`encode_with_auto_x86_filter`] but for the delta (multimedia)
 /// filter. When the data looks correlated (the cheap
 /// [`filters::auto_delta_filter_channels`] gate passes), the best channel
@@ -827,22 +852,7 @@ pub fn encode_with_auto_delta_filter(
     if super::filters::auto_delta_filter_channels(data).is_none() {
         return Ok(None);
     }
-    // Pick the channel whose delta-filtered SAMPLE packs smallest; require it
-    // to beat plain LZSS on the sample before committing to a full encode.
-    let sample_len = data.len().min(1 << 16);
-    let sample = &data[..sample_len];
-    let plain_sample = encode_with_filters(sample, method, dict_size_log, &[], extra_dist)?;
-    let mut best_ch: Option<u8> = None;
-    let mut best_len = plain_sample.len();
-    for &ch in super::filters::AUTO_DELTA_CHANNELS {
-        let spec = FilterSpec::new(FILTER_DELTA, ch, 0, sample_len as u32);
-        let packed = encode_with_filters(sample, method, dict_size_log, &[spec], extra_dist)?;
-        if packed.len() < best_len {
-            best_len = packed.len();
-            best_ch = Some(ch);
-        }
-    }
-    let Some(channels) = best_ch else {
+    let Some(channels) = pick_delta_channel(data, method, dict_size_log, extra_dist)? else {
         return Ok(None);
     };
     let block_length = (data.len() as u64).min(u32::MAX as u64) as u32;
@@ -4035,6 +4045,52 @@ mod decode_tests {
         }
     }
 
+    /// The size-based channel selection must pick the frame size (bytes ×
+    /// channels) for interleaved little-endian samples: each byte position of
+    /// the frame packs best as its own delta lane, so 16-bit stereo picks 4,
+    /// 32-bit stereo 8, 24-bit 3-channel 9, 32-bit 4-channel 16.
+    #[test]
+    fn delta_selection_prefers_frame_size() {
+        fn correlated_samples(bytes: usize, channels: usize, n: usize) -> Vec<u8> {
+            let mut out = Vec::with_capacity(bytes * channels * n);
+            let mut val = vec![0i64; channels];
+            let mut state = 0x1234_5678u64;
+            for _ in 0..n {
+                for v in &mut val {
+                    state ^= state >> 12;
+                    state ^= state << 25;
+                    state ^= state >> 27;
+                    let r = (state >> 33) as u32;
+                    *v += (r % 8) as i64 - 4;
+                    let value = *v as i64;
+                    for b in 0..bytes {
+                        out.push((value >> (8 * b)) as u8);
+                    }
+                }
+            }
+            out
+        }
+        for (bytes, channels, expect) in [
+            (1usize, 1usize, 1u8),
+            (2, 1, 2),
+            (2, 2, 4),
+            (3, 1, 3),
+            (3, 3, 9),
+            (1, 2, 2),
+            (2, 4, 8),
+            (4, 2, 8),
+            (4, 4, 16),
+        ] {
+            let data = correlated_samples(bytes, channels, 100_000);
+            let got = pick_delta_channel(&data, 3, 0, false).unwrap();
+            assert_eq!(
+                got,
+                Some(expect),
+                "bytes={bytes} channels={channels}: expected frame size {expect}, got {got:?}"
+            );
+        }
+    }
+
     /// The automatic delta (multimedia) filter must round-trip correlated
     /// multi-channel data and pack it smaller than STORE, while refusing
     /// random/text data.
@@ -4043,37 +4099,57 @@ mod decode_tests {
         use super::encode_with_auto_delta_filter;
 
         // Correlated N-bit interleaved samples (small per-sample deltas),
-        // matching the kind of 8/16/24-bit multi-channel data WinRAR deltas.
-        fn correlated(channels: usize, n: usize) -> Vec<u8> {
-            let mut out = Vec::with_capacity(channels * n * 4);
-            let mut val = vec![0i32; channels];
+        // matching the kind of 8/16/24/32-bit multi-channel data WinRAR
+        // deltas: `bytes` little-endian bytes per sample × `channels` lanes.
+        fn correlated(bytes: usize, channels: usize, n: usize) -> Vec<u8> {
+            let mut out = Vec::with_capacity(bytes * channels * n);
+            let mut val = vec![0i64; channels];
             let mut state = 0xABCDEF01u64;
             for _ in 0..n {
                 for v in &mut val {
                     state ^= state >> 12;
                     state ^= state << 25;
                     state ^= state >> 27;
-                    *v += ((state >> 33) as u32 % 8) as i32 - 4;
-                    out.extend_from_slice(&(*v).to_le_bytes());
+                    *v += ((state >> 33) as u32 % 8) as i64 - 4;
+                    for b in 0..bytes {
+                        out.push((*v >> (8 * b)) as u8);
+                    }
                 }
             }
             out
         }
 
-        for ch in [1usize, 2, 3] {
-            let data = correlated(ch, 200_000);
+        for (bytes, channels) in [
+            (1usize, 1usize),
+            (2, 1),
+            (2, 2),
+            (3, 1),
+            (3, 3),
+            (4, 2),
+            (4, 4),
+        ] {
+            let data = correlated(bytes, channels, 200_000);
             let packed = encode_with_auto_delta_filter(&data, 3, 0, false)
                 .unwrap()
                 .expect("delta scan must find a beneficial channel count");
             assert!(
                 packed.len() < data.len(),
-                "delta-filtered encoding should compress: {} vs {}",
+                "bytes={bytes} channels={channels}: delta-filtered encoding should compress: {} vs {}",
                 packed.len(),
                 data.len()
             );
             let back = decode_standalone(&packed, data.len() as u64, 0, None, false).unwrap();
-            assert_eq!(back, data);
+            assert_eq!(back, data, "bytes={bytes} channels={channels}");
         }
+
+        // Text must NOT be delta-filtered: delta cannot beat plain LZSS on it.
+        let text = b"the quick brown fox jumps over the lazy dog. ".repeat(6_000);
+        assert!(
+            encode_with_auto_delta_filter(&text, 3, 0, false)
+                .unwrap()
+                .is_none(),
+            "text must fall back to plain LZSS"
+        );
 
         // Random data must NOT be delta-filtered.
         let mut state = 0x9E37_9B97_7F4A_7C15u64;
