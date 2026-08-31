@@ -11,10 +11,12 @@
 - 工程：fmt/clippy `-D warnings` 双门（本地，含测试目标）、五目标 fuzz（`fuzz/`）、取消钩子、QO 快路径 `open_quick`、流式修复 `repair_archive_path`、零填充分卷集支持。
 - 架构：workspace `crates/rar`（库 crate `rar5`）+ `crates/rar-cli`（rar/unrar），按 rars 分层——词汇见 `CONTEXT.md`，格式细节见 `docs/FORMAT_RAR5_RAR7.html`。
 
-## 待办
+## 待办（下一批，issue 见 `.scratch/compression-perf/`）
 
-- **MT/不可压缩数据提速（2026-08，本会话）**：不可压缩输入的三大耗时已逐一处理——①collect 快模式阈值 4096→256（树+LR 各一），且**命中判据由 `longest<16` 改为 `longest==0`**（关键修正：文本里 4-15 字节匹配是真实信号，按 <16 计数会让快模式把文本也降到 1/128 搜索，text ratio 实测 15.32%→15.61% 劣化；按 ==0 计数后文本保持全量搜索、ratio 与基线字节级同，随机数据 4 字节碰巧匹配概率 ~2^-32 不受影响）；②**无匹配块 DP 快路径**（`parse_one_block`）：collect 返回空候选列表时，最优解析必然全字面量——3 次定价 pass（每块 2 MiB 数组记账）纯属浪费，用一次 O(span) 的缓存距离探针验证后直接产出全字面量 symbol，输出与全 pass 字节级一致（测试开关 + `matchless_fast_path_is_byte_identical` 五语料四参数验证）。实测 64 MiB 纯随机 m3：mt1 5044→1751 ms（2.9×，其中 DP CPU 6512→93 ms、collect 1105→439 ms）、mt8 1253→486 ms（2.6×）、ratio 100.02%→100.01%（更优）；text/mixed/xml/sparse 四合成语料 ratio 与基线完全相同、速度持平或更快（mixed m3 4283 vs 4494 ms）；全部解码字节级一致。验证工具：`examples/mtprobe`（随机数据多线程探针，原上次会话遗留，去除临时插桩后保留）、`examples/ratiocheck`（多语料 ratio/速度对照）
-- **batch 测试已修（原诊断有误，正确根因见下）**：`batch_archive_matches_sequential_bytes` 三处分歧：① `add` 对 <64 MiB 成员走内存路径先试 x86 过滤器，`add_batch` 的 `prepare_data_entry` 从不试过滤器（i%251 这类含规则 E8 字节的非代码数据会误触发，seq 351B vs batch 338B）；② 末 chunk 的 `is_final`：seq 用 `bytes_read >= len`（整 4 MiB 末块也标终），batch 用 `chunk.len() < DEFAULT_CHUNK_SIZE`（整倍长成员永不标终，末块 flags 差 0x40 位）；③ 非整倍长数据无分歧，20 MiB 文本成员对齐后字节全同。修复：`prepare_data_entry(file_origin=true)` 完整镜像 `add_file`（先试过滤器且胜 STORE 时用之，末块 finality 同 seq），seq 与 batch 输出字节级一致（4130==4130）。与 MT/flush_window 无关——PLAN 旧诊断（≥12 MiB 走 flush_window MT）不成立：64 MiB 阈值下 20 MiB 成员走内存路径
+- **窗口级不可压缩跳过（04，待定）**：全随机成员 mt8 仍 ~486 ms——collect（树/LR 下降）+ 全字面量块的 Huffman 编码，而成员级 STORE 回退最终会丢弃这些输出。窗口探测（4 字节窗去重率 ≥99.5%）可门控跳过 parse 直接发全字面量块；风险是卡在 100% 边界 ±0.5% 的成员从 compressed 翻成 STORE——需要边界语料量化后才能定（严格 ratio 约束下可能放弃）
+- **流式路径自动过滤器（05）**：delta/x86 过滤器只走内存路径（<64 MiB 成员）；大音频/裸盘镜像 >64 MiB 走 spill 流式路径无过滤器，ratio 远差于 WinRAR——需调研 delta 可否按窗口应用、区域保持成员相对
+- **solid 归档 MT（06）**：solid 强制串行，备份类负载无多线程收益；MT 对 seq 的既有分歧（x86 +8.2%，重复距离缓存按片重置）会带进 solid，需先评估可接受性
+- 随机数据 ~800 ms 未记账开销（fast-path 循环、splitter、播种、LR 建表、片组装）尚未逐项归因
 
 ## 已取消 / 不做
 
