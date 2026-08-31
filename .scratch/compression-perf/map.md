@@ -56,3 +56,18 @@ MiB/s vs WinRAR ~7 MiB/s. (2) MT scaling is healthy on unfiltered files
 (2-64 MiB MT landed 7d7008c; text 19.5 MB 711→369 ms). (3) ultra-repetitive
 text ratio gap (12681 vs 8769). (4) incompressible probe keeps us 10-80x
 faster than WinRAR on random data.
+
+## Filter members are MT now (2026-08, 2e21d0b)
+
+encode_with_filters_mt: forward transform (unchanged) + windowed MT encode,
+filter records lead the first slice. Both auto filters take a threads count.
+Root cause found on the way: the MT long-range table is pre-built over the
+whole window, so a slice's own positions shadowed the copy source it should
+match (a random+exact-distant-copy 32 MiB file compressed to ~100% instead
+of 50%). Fixed by keeping the previous occurrence per key (vals2) and
+probing with get_before; the sequential encoder is byte-identical (its
+newest entry is always before the chunk being parsed).
+
+m3 results: dll 6.7 -> 3.1 s (-mt8, 36 KB smaller), mixed 2.7 -> 1.1 s,
+text 0.73 -> 0.39 s. Remaining gap vs WinRAR: per-byte parse speed on dense
+binaries (~2-3x slower single-thread) and the ultra-repetitive-text ratio.
