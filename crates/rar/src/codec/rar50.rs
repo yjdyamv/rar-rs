@@ -1149,7 +1149,6 @@ static DISABLE_MATCHLESS_FAST_PATH: AtomicBool = AtomicBool::new(false);
 fn set_fast_path_enabled(enabled: bool) {
     DISABLE_MATCHLESS_FAST_PATH.store(!enabled, Ordering::Relaxed);
 }
-
 /// Estimated cost of a literal before any block has been priced, in the
 /// same bit units as the match cost estimates (a main-table symbol out of
 /// 256 plus the odds that the table is skewed).
@@ -2143,24 +2142,33 @@ fn parse_one_block(
     // the parse.
     if matches.runs.is_empty() && !DISABLE_MATCHLESS_FAST_PATH.load(Ordering::Relaxed) {
         let span = block.end - block.start;
-        let mut all_literal = true;
-        'probe: for index in 0..span {
-            let pos = block.start + index;
-            let max_distance = pos.min(window);
-            let max_length = (block.end - pos).min(max_match);
-            if max_distance == 0 || max_length < 4 {
-                continue;
-            }
-            // Literals leave the distance memory untouched, so the reps
-            // here are the block-entry reps at every position, exactly
-            // what the pricing pass would probe with.
-            for &repeat in state.reps.iter().take(2) {
-                if repeat == 0 || repeat > max_distance as u32 {
+        // With no live cached distance the repeat probes are no-ops at
+        // every position, so the all-literal conclusion needs no
+        // per-position check at all — the common case on incompressible
+        // data (no match has ever been emitted, so the entry reps stay
+        // zero from the member head). A live rep re-arms the per-position
+        // probe loop, which the pricing pass would also run.
+        let reps_live = state.reps.iter().take(2).any(|&r| r != 0);
+        let mut all_literal = !reps_live;
+        if reps_live {
+            'probe: for index in 0..span {
+                let pos = block.start + index;
+                let max_distance = pos.min(window);
+                let max_length = (block.end - pos).min(max_match);
+                if max_distance == 0 || max_length < 4 {
                     continue;
                 }
-                if match_length_at(combined, pos, repeat as usize, max_length) >= 4 {
-                    all_literal = false;
-                    break 'probe;
+                // Literals leave the distance memory untouched, so the reps
+                // here are the block-entry reps at every position, exactly
+                // what the pricing pass would probe with.
+                for &repeat in state.reps.iter().take(2) {
+                    if repeat == 0 || repeat > max_distance as u32 {
+                        continue;
+                    }
+                    if match_length_at(combined, pos, repeat as usize, max_length) >= 4 {
+                        all_literal = false;
+                        break 'probe;
+                    }
                 }
             }
         }
