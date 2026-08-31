@@ -311,8 +311,31 @@ pub fn encode_chunked(
     Ok(output)
 }
 
-/// Multi-threaded encoding of one contiguous window of a member.
-///
+/// Multi-threaded encoding of one contiguous window of a member (see
+/// [`encode_chunked_mt_with_progress`]; this is the no-progress form).
+pub fn encode_chunked_mt(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    chunk_size: usize,
+    seed: &mut EncoderState,
+    threads: usize,
+    is_final: bool,
+    extra_dist: bool,
+) -> Vec<u8> {
+    encode_chunked_mt_with_progress(
+        data,
+        method,
+        dict_size_log,
+        chunk_size,
+        seed,
+        threads,
+        is_final,
+        extra_dist,
+        None,
+    )
+}
+
 /// Splits `data` into per-worker slices (chunk-size aligned) and encodes
 /// them concurrently on the compression pool. Each worker matches against
 /// the preceding plaintext — up to [`NEAR_WINDOW_MAX`] bytes ending at its
@@ -326,10 +349,11 @@ pub fn encode_chunked(
 /// On success `seed` is updated to continue after this window: its tail
 /// becomes the last `min(window, NEAR_WINDOW_MAX)` bytes of the window,
 /// the long-range history absorbs the whole window, and the repeat-distance
-/// cache resets.
+/// cache resets. `progress` reports the input bytes covered once each wave
+/// of slices completes (waves run in order, so the reports are monotonic).
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
-pub fn encode_chunked_mt(
+pub fn encode_chunked_mt_with_progress(
     data: &[u8],
     method: u8,
     dict_size_log: u8,
@@ -338,6 +362,7 @@ pub fn encode_chunked_mt(
     threads: usize,
     is_final: bool,
     extra_dist: bool,
+    mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Vec<u8> {
     let level = (method as usize).clamp(1, 5);
     let (chain_len, _lazy_thresh, max_match) = LEVEL_PARAMS[level];
@@ -430,6 +455,11 @@ pub fn encode_chunked_mt(
         }
         for r in results.into_inner().unwrap() {
             output.extend(r.expect("worker slot filled"));
+        }
+        if let Some(cb) = progress.as_deref_mut()
+            && bounds[last] > bounds[first]
+        {
+            cb(bounds[last] as u64, data.len() as u64);
         }
         first = last;
     }
@@ -779,11 +809,17 @@ pub fn encode_with_auto_x86_filter(
             )
         })
         .collect();
-    let packed_e9 = encode_with_filters(data, method, dict_size_log, &specs_e9, extra_dist)?;
 
     let mut ranges_e8 = super::filters::auto_x86_filter_ranges(data, false);
     if ranges_e8.is_empty() || ranges_e8 == ranges_e9 {
-        return Ok(Some(packed_e9));
+        // Only one variant exists: encode it once.
+        return Ok(Some(encode_with_filters(
+            data,
+            method,
+            dict_size_log,
+            &specs_e9,
+            extra_dist,
+        )?));
     }
     merge_ranges(&mut ranges_e8);
     let specs_e8: Vec<FilterSpec> = ranges_e8
@@ -797,6 +833,58 @@ pub fn encode_with_auto_x86_filter(
             )
         })
         .collect();
+
+    // The E8 vs E8E9 choice costs a full member encode each. Decide it on a
+    // leading 64 KiB sample instead (the delta filter picks its channel the
+    // same way): the two variants differ by a fraction of a percent on real
+    // binaries, and the sample winner is the full winner almost always. Only
+    // when the sample is inconclusive (no ranges in it, or a tie) does the
+    // full two-encode comparison run, preserving today's exact choice there.
+    let sample_len = data.len().min(1 << 16);
+    let sample = &data[..sample_len];
+    let clip_specs = |specs: &[FilterSpec]| -> Vec<FilterSpec> {
+        specs
+            .iter()
+            .filter_map(|s| {
+                if s.block_start >= sample_len as u32 {
+                    return None;
+                }
+                let end = (s.block_start as usize + s.block_length as usize).min(sample_len);
+                Some(FilterSpec::new(
+                    s.filter_type,
+                    0,
+                    s.block_start,
+                    (end - s.block_start as usize) as u32,
+                ))
+            })
+            .collect()
+    };
+    let sample_specs_e9 = clip_specs(&specs_e9);
+    let sample_specs_e8 = clip_specs(&specs_e8);
+    let sample_e9 =
+        encode_with_filters(sample, method, dict_size_log, &sample_specs_e9, extra_dist)?;
+    let sample_e8 =
+        encode_with_filters(sample, method, dict_size_log, &sample_specs_e8, extra_dist)?;
+    if sample_e8.len() != sample_e9.len()
+        && !sample_specs_e8.is_empty()
+        && !sample_specs_e9.is_empty()
+    {
+        let packed = encode_with_filters(
+            data,
+            method,
+            dict_size_log,
+            if sample_e8.len() < sample_e9.len() {
+                &specs_e8
+            } else {
+                &specs_e9
+            },
+            extra_dist,
+        )?;
+        return Ok(Some(packed));
+    }
+
+    // Inconclusive sample: keep the exact full comparison.
+    let packed_e9 = encode_with_filters(data, method, dict_size_log, &specs_e9, extra_dist)?;
     let packed_e8 = encode_with_filters(data, method, dict_size_log, &specs_e8, extra_dist)?;
     Ok(Some(if packed_e8.len() < packed_e9.len() {
         packed_e8

@@ -118,6 +118,8 @@ pub(crate) struct BatchPrepareCtx<'a> {
     pub(crate) save_mtime: bool,
     pub(crate) save_owner: bool,
     pub(crate) time_precision_seconds: bool,
+    /// Compression worker count for this batch (per-file MT slicing).
+    pub(crate) threads: usize,
     /// Caller-owned cancellation flag, checked per chunk in the parallel
     /// prepare loop; `None` = never cancelled.
     pub(crate) cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
