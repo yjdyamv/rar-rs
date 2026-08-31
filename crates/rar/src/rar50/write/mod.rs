@@ -1177,6 +1177,18 @@ impl RarArchive {
         let method = level_to_method(level);
 
         if method == COMP_METHOD_STORE || sample_is_incompressible(data, method) {
+            // Count the member's bytes so a folder of incompressible files
+            // moves the bar during the (CPU-heavy) hashing pass instead of
+            // freezing at ~0% until the terminal event slams it to 100%.
+            // The write-back safety net in `write_prepared_entry` treats
+            // this as a no-op (delta is already accounted).
+            if let Some(progress) = progress {
+                progress.lock().expect("progress lock").report(
+                    member,
+                    data.len() as u64,
+                    data.len() as u64,
+                );
+            }
             return Self::prepared_from_payload(
                 ctx,
                 name,
@@ -1235,7 +1247,25 @@ impl RarArchive {
                     Some(filtered) if filtered.len() < data.len() => filtered,
                     _ => {
                         let mut packed = Vec::new();
-                        let mut processed = 0u64;
+                        // Fine-grained progress: the sequential path feeds the
+                        // encoder a per-64 KiB callback (`encode_chunked` reports
+                        // every 0x10000 input bytes); the batch path used to only
+                        // report after each whole 4 MiB chunk, so the bar stepped
+                        // 64× more coarsely. Route a per-64 KiB callback into the
+                        // chunk encoder and offset its chunk-relative reports by
+                        // the member bytes already processed, so the shared
+                        // tracker sees a smooth member-relative stream.
+                        let processed_cell = std::cell::Cell::new(0u64);
+                        let cell_ref = &processed_cell;
+                        let mut cb = move |done: u64, _chunk_total: u64| {
+                            if let Some(progress) = progress {
+                                progress.lock().expect("progress lock").report(
+                                    member,
+                                    cell_ref.get() + done,
+                                    total,
+                                );
+                            }
+                        };
                         for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
                             if ctx
                                 .cancel
@@ -1248,7 +1278,7 @@ impl RarArchive {
                             // the last chunk is final even when it fills the
                             // whole 4 MiB slice (an exact-multiple member must
                             // still mark its closing block).
-                            let is_final = processed + chunk.len() as u64 >= total;
+                            let is_final = processed_cell.get() + chunk.len() as u64 >= total;
                             let compressed = compression::compress_chunked(
                                 chunk,
                                 method,
@@ -1256,18 +1286,12 @@ impl RarArchive {
                                 crate::codec::DEFAULT_CHUNK_SIZE,
                                 Some(&mut state),
                                 is_final,
-                                None,
+                                Some(&mut cb),
                                 dict_bytes.is_some(),
                             )
                             .map_err(RarError::Unsupported)?;
                             packed.extend(compressed);
-                            processed += chunk.len() as u64;
-                            if let Some(progress) = progress {
-                                progress
-                                    .lock()
-                                    .expect("progress lock")
-                                    .report(member, processed, total);
-                            }
+                            processed_cell.set(processed_cell.get() + chunk.len() as u64);
                             if packed.len() >= data.len() {
                                 break;
                             }
@@ -1450,6 +1474,20 @@ impl RarArchive {
 
     #[cfg(feature = "parallel")]
     fn write_prepared_entry(&mut self, entry: PreparedEntry) -> RarResult<()> {
+        // Safety net: every member's bytes must enter the shared tracker
+        // exactly once. Compression already reported most of them (LZSS per
+        // 64 KiB, STORE/filtered at completion); this accounts any remaining
+        // delta when the payload is written back to the archive stream, so a
+        // member can never leave the bar short of the full total. It is a
+        // no-op when the member already reported its full size.
+        if let Some(progress) = self.progress.clone() {
+            let member = self.progress_member;
+            progress.lock().expect("progress lock").report(
+                member,
+                entry.unpacked_size,
+                entry.unpacked_size,
+            );
+        }
         self.write_file_entry(
             &entry.name,
             entry.unpacked_size,
