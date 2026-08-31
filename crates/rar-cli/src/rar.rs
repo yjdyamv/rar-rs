@@ -195,12 +195,12 @@ struct ExtractArgs {
     password: password::PasswordArgs,
     #[arg(value_name = "ARCHIVE")]
     archive: String,
-    #[arg(value_name = "DEST", default_value = ".")]
+    #[arg(long = "dest", default_value = ".", value_name = "DEST")]
     dest: String,
     /// One or more member names to extract; when omitted, every file member
-    /// is extracted (or, with `-so`, written to stdout). WinRAR matches the
-    /// full stored path, so a basename also selects the member. Member names
-    /// follow the optional destination directory, like `x archive dest name`.
+    /// is extracted (or, with `-so`, written to stdout). Member names match
+    /// the full stored path or its basename. They are never treated as a
+    /// destination directory — set the destination with `--dest` instead.
     #[arg(value_name = "NAMES", trailing_var_arg = true)]
     names: Vec<String>,
     /// Compression threads (like `-mt<N>`; also used for extraction)
@@ -1060,17 +1060,10 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     let (file_entries, dir_entries): (Vec<_>, Vec<_>) =
         collected.into_iter().partition(|c| !c.is_dir);
     let mut collected: Vec<_> = file_entries;
-    // WinRAR `-se`: group the solid chain by file extension (the dominant
-    // compression-parity effect of resetting the statistics on an
-    // extension change). `maybe_reset_solid_for_extension` in the writer
-    // performs the actual reset as members of a new extension are added.
-    if solid_reset == rar5::SolidReset::PerExtension {
-        collected.sort_by_key(|c| {
-            let base = c.name.trim_end_matches('/');
-            let ext = base.rsplit('.').next().unwrap_or("");
-            ext.to_ascii_lowercase()
-        });
-    }
+    // `-se` (reset the solid chain on a file-extension change) is handled
+    // per-member inside the writer via `maybe_reset_solid_for_extension`, so
+    // WinRAR's input order is preserved (we do NOT reorder by extension here
+    // — WinRAR keeps order and resets only when the extension changes).
     // rarfiles.lst: user-defined add order for solid archives (mask list
     // with optional `$default`); matched files are grouped by the
     // highest-priority mask, where a mask whose matches are a subset of
@@ -2043,15 +2036,20 @@ fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
     if args.stdout {
         return extract_to_stdout(&mut rar, &args.names);
     }
-    let count = rar.list().len();
-    rar.extract_all_with_options(
-        &dest,
-        rar5::ExtractOptions {
-            skip_existing: args.overwrite.as_deref() == Some("never"),
-            ..Default::default()
-        },
-    )
-    .map_err(|e| format!("{e}"))?;
+    let skip = args.overwrite.as_deref() == Some("never");
+    let count = if args.names.is_empty() {
+        rar.extract_all_with_options(
+            &dest,
+            rar5::ExtractOptions {
+                skip_existing: skip,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("{e}"))?;
+        rar.list().len()
+    } else {
+        extract_selected(&mut rar, &dest, &args.names, false, skip)?
+    };
     info!("Extracted {count} file(s) to {}", dest.display());
     Ok(())
 }
@@ -2072,10 +2070,7 @@ fn extract_to_stdout(rar: &mut rar5::RarArchive, names: &[String]) -> Result<(),
         wanted = members;
     } else {
         for m in &members {
-            if names
-                .iter()
-                .any(|n| m == n || m.ends_with(&format!("/{n}")) || n.ends_with(m))
-            {
+            if names.iter().any(|n| name_matches(m, n)) {
                 wanted.push(m.clone());
             }
         }
@@ -2108,6 +2103,50 @@ fn extract_dest(args: &ExtractArgs) -> Result<std::path::PathBuf, String> {
     ))
 }
 
+/// Match a stored member name against a requested selector. WinRAR matches
+/// the full stored path, so a basename also selects the member.
+fn name_matches(member: &str, requested: &str) -> bool {
+    member == requested || member.ends_with(&format!("/{requested}")) || requested.ends_with(member)
+}
+
+/// Extract only the members whose name matches one of `names` (full stored
+/// path or basename). Errors clearly when no member matches, so a mistyped
+/// name is never silently swallowed or treated as a destination directory.
+fn extract_selected(
+    rar: &mut rar5::RarArchive,
+    dest: &std::path::Path,
+    names: &[String],
+    flat: bool,
+    skip_existing: bool,
+) -> Result<usize, String> {
+    let members: Vec<String> = rar
+        .list()
+        .iter()
+        .filter(|e| !e.is_dir())
+        .map(|e| e.name().to_string())
+        .collect();
+    let mut matched = 0usize;
+    for m in &members {
+        if names.iter().any(|n| name_matches(m, n)) {
+            let opts = rar5::ExtractOptions {
+                flat_paths: flat,
+                skip_existing,
+                ..Default::default()
+            };
+            rar.extract_with_options(m, dest, opts)
+                .map_err(|e| format!("extract {m}: {e}"))?;
+            matched += 1;
+        }
+    }
+    if matched == 0 {
+        return Err(format!(
+            "no archive members matched the requested name(s): {}",
+            names.join(", ")
+        ));
+    }
+    Ok(matched)
+}
+
 /// Extract without archived paths (like `rar e`).
 fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
     if let Some(threads) = args.threads {
@@ -2122,16 +2161,21 @@ fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
     if args.stdout {
         return extract_to_stdout(&mut rar, &args.names);
     }
-    let count = rar.list().len();
-    rar.extract_all_with_options(
-        &dest,
-        rar5::ExtractOptions {
-            flat_paths: true,
-            skip_existing: args.overwrite.as_deref() == Some("never"),
-            ..Default::default()
-        },
-    )
-    .map_err(|e| format!("{e}"))?;
+    let skip = args.overwrite.as_deref() == Some("never");
+    let count = if args.names.is_empty() {
+        rar.extract_all_with_options(
+            &dest,
+            rar5::ExtractOptions {
+                flat_paths: true,
+                skip_existing: skip,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("{e}"))?;
+        rar.list().len()
+    } else {
+        extract_selected(&mut rar, &dest, &args.names, true, skip)?
+    };
     info!("Extracted {count} file(s) to {}", dest.display());
     Ok(())
 }

@@ -92,12 +92,12 @@ enum Command {
 struct ExtractArgs {
     #[arg(value_name = "ARCHIVE")]
     archive: String,
-    #[arg(value_name = "DEST")]
+    #[arg(long = "dest", default_value = ".", value_name = "DEST")]
     dest: Option<String>,
     /// One or more member names to extract; when omitted, every file member
-    /// is extracted (or, with `-so`, written to stdout). WinRAR matches the
-    /// full stored path, so a basename also selects the member. Member names
-    /// follow the optional destination directory, like `x archive dest name`.
+    /// is extracted (or, with `-so`, written to stdout). Member names match
+    /// the full stored path or its basename. They are never treated as a
+    /// destination directory — set the destination with `--dest` instead.
     #[arg(value_name = "NAMES", trailing_var_arg = true)]
     names: Vec<String>,
     /// Output path for extracted files (like `-op<path>`; overrides
@@ -349,29 +349,69 @@ fn cmd_extract(
         return extract_to_stdout(&mut rar, &args.names);
     }
 
-    let count = rar.list().len();
-    rar.extract_all_with_options(
-        &dest,
-        rar5::ExtractOptions {
-            // Extraction is fully streaming: no per-member or total
-            // size caps (WinRAR's UnRAR extracts any size).
-            max_unpacked_bytes: None,
-            max_total_unpacked_bytes: None,
-            flat_paths: args.flat,
-            skip_existing: args.overwrite.as_deref() == Some("never"),
-            auto_rename: args.auto_rename,
-            keep_broken: args.keep_broken,
-            set_creation_time: ts.save_ctime,
-            set_access_time: ts.save_atime,
-            // WinRAR refuses dictionaries above 4 GiB unless -mdx raises
-            // the cap; None here means "use the default cap".
-            max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),
-            ..Default::default()
-        },
-    )
-    .map_err(|e| format!("{e}"))?;
+    let opts = rar5::ExtractOptions {
+        // Extraction is fully streaming: no per-member or total
+        // size caps (WinRAR's UnRAR extracts any size).
+        max_unpacked_bytes: None,
+        max_total_unpacked_bytes: None,
+        flat_paths: args.flat,
+        skip_existing: args.overwrite.as_deref() == Some("never"),
+        auto_rename: args.auto_rename,
+        keep_broken: args.keep_broken,
+        set_creation_time: ts.save_ctime,
+        set_access_time: ts.save_atime,
+        // WinRAR refuses dictionaries above 4 GiB unless -mdx raises
+        // the cap; None here means "use the default cap".
+        max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),
+        ..Default::default()
+    };
+    let count = if args.names.is_empty() {
+        rar.extract_all_with_options(&dest, opts)
+            .map_err(|e| format!("{e}"))?;
+        rar.list().len()
+    } else {
+        extract_selected(&mut rar, &dest, &args.names, &opts)?
+    };
     info!("Extracted {count} entries to {}", dest.display());
     Ok(())
+}
+
+/// Match a stored member name against a requested selector. WinRAR matches
+/// the full stored path, so a basename also selects the member.
+fn name_matches(member: &str, requested: &str) -> bool {
+    member == requested || member.ends_with(&format!("/{requested}")) || requested.ends_with(member)
+}
+
+/// Extract only the members whose name matches one of `names` (full stored
+/// path or basename). Errors clearly when no member matches, so a mistyped
+/// name is never silently swallowed or treated as a destination directory.
+fn extract_selected(
+    rar: &mut rar5::RarArchive,
+    dest: &std::path::Path,
+    names: &[String],
+    opts: &rar5::ExtractOptions,
+) -> Result<usize, String> {
+    let members: Vec<String> = rar
+        .list()
+        .iter()
+        .filter(|e| !e.is_dir())
+        .map(|e| e.name().to_string())
+        .collect();
+    let mut matched = 0usize;
+    for m in &members {
+        if names.iter().any(|n| name_matches(m, n)) {
+            rar.extract_with_options(m, dest, *opts)
+                .map_err(|e| format!("extract {m}: {e}"))?;
+            matched += 1;
+        }
+    }
+    if matched == 0 {
+        return Err(format!(
+            "no archive members matched the requested name(s): {}",
+            names.join(", ")
+        ));
+    }
+    Ok(matched)
 }
 
 /// Extract every file member of an archive to stdout, concatenated, like
@@ -390,10 +430,7 @@ fn extract_to_stdout(rar: &mut rar5::RarArchive, names: &[String]) -> Result<(),
         wanted = members;
     } else {
         for m in &members {
-            if names
-                .iter()
-                .any(|n| m == n || m.ends_with(&format!("/{n}")) || n.ends_with(m))
-            {
+            if names.iter().any(|n| name_matches(m, n)) {
                 wanted.push(m.clone());
             }
         }
@@ -433,22 +470,26 @@ fn cmd_extract_flat(
     if args.stdout {
         return extract_to_stdout(&mut rar, &args.names);
     }
-    rar.extract_all_with_options(
-        &dest,
-        rar5::ExtractOptions {
-            flat_paths: true,
-            max_unpacked_bytes: None,
-            max_total_unpacked_bytes: None,
-            skip_existing: args.overwrite.as_deref() == Some("never"),
-            auto_rename: args.auto_rename,
-            keep_broken: args.keep_broken,
-            set_creation_time: ts.save_ctime,
-            set_access_time: ts.save_atime,
-            max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),
-            ..Default::default()
-        },
-    )
-    .map_err(|e| format!("{e}"))?;
+    let opts = rar5::ExtractOptions {
+        flat_paths: true,
+        max_unpacked_bytes: None,
+        max_total_unpacked_bytes: None,
+        skip_existing: args.overwrite.as_deref() == Some("never"),
+        auto_rename: args.auto_rename,
+        keep_broken: args.keep_broken,
+        set_creation_time: ts.save_ctime,
+        set_access_time: ts.save_atime,
+        max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),
+        ..Default::default()
+    };
+    let count = if args.names.is_empty() {
+        rar.extract_all_with_options(&dest, opts)
+            .map_err(|e| format!("{e}"))?;
+        rar.list().len()
+    } else {
+        extract_selected(&mut rar, &dest, &args.names, &opts)?
+    };
+    info!("Extracted {count} entries to {}", dest.display());
     Ok(())
 }
 

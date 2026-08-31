@@ -290,6 +290,7 @@ fn cli_overwrite_never_skips_existing_files() {
     let status = std::process::Command::new(UNRAR_CLI)
         .args(["x", "-o-"])
         .arg(&archive)
+        .args(["--dest"])
         .arg(&out)
         .status()
         .unwrap();
@@ -837,6 +838,7 @@ fn cli_append_dir_extracts_under_archive_name() {
     let status = std::process::Command::new(UNRAR_CLI)
         .args(["x", "-ad", "-idq"])
         .arg(&archive)
+        .args(["--dest"])
         .arg(&out)
         .status()
         .unwrap();
@@ -1201,6 +1203,7 @@ fn cli_or_auto_renames_colliding_destinations() {
     let status = std::process::Command::new(UNRAR_CLI)
         .args(["x", "-or", "-idq"])
         .arg(&archive)
+        .args(["--dest"])
         .arg(&out)
         .status()
         .unwrap();
@@ -1252,6 +1255,7 @@ fn cli_sfx_roundtrip_with_module() {
     let status = std::process::Command::new(UNRAR_CLI)
         .args(["x", "-idq"])
         .arg(&sfx)
+        .args(["--dest"])
         .arg(&out)
         .status()
         .unwrap();
@@ -1347,6 +1351,7 @@ fn cli_ts_saves_and_restores_file_times() {
     let status = std::process::Command::new(UNRAR_CLI)
         .args(["x", "-ts", "-y"])
         .arg(&archive)
+        .args(["--dest"])
         .arg(&out)
         .current_dir(dir.path())
         .status()
@@ -1883,7 +1888,6 @@ fn cli_stdout_extract_writes_members_to_stdout() {
     let out = std::process::Command::new(RAR_CLI)
         .args(["x", "-so"])
         .arg(&archive)
-        .arg(".")
         .arg("f.txt")
         .output()
         .unwrap();
@@ -2010,4 +2014,141 @@ fn cli_mct_mcd_accepted_as_noops() {
             "{sw} must not alter the payload"
         );
     }
+}
+
+/// Member selection on extract (`x`/`e`) never treats a name as a destination
+/// directory. `rar x archive name` extracts only the matching member(s) to
+/// the default directory; a name that matches nothing is a hard error, not a
+/// silent dump into a `name/` folder.
+#[test]
+fn cli_extract_member_selection_never_hijacks_dest() {
+    let dir = make_temp_dir();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.bin");
+    let c = dir.path().join("c.txt");
+    std::fs::write(&a, b"alpha").unwrap();
+    std::fs::write(&b, vec![0x7u8; 64]).unwrap();
+    std::fs::write(&c, b"gamma").unwrap();
+    let archive = dir.path().join("sel.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .arg("b.bin")
+        .arg("c.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // `rar x archive a.txt` extracts ONLY a.txt here, not into an `a.txt/`
+    // directory, and does not extract b.bin/c.txt.
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .arg("a.txt")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        out.join("a.txt").exists(),
+        "selected member must be extracted"
+    );
+    assert!(
+        !out.join("b.bin").exists(),
+        "unselected member must not appear"
+    );
+    assert!(
+        !out.join("c.txt").exists(),
+        "unselected member must not appear"
+    );
+    // The selected name must not be interpreted as a directory.
+    assert!(
+        !out.join("a.txt").is_dir(),
+        "name must not become a directory"
+    );
+
+    // A name matching nothing is a hard error (clear message), not a silent
+    // extraction into a `<name>/` directory.
+    let miss = dir.path().join("miss");
+    std::fs::create_dir_all(&miss).unwrap();
+    let res = std::process::Command::new(RAR_CLI)
+        .args(["x", "--dest"])
+        .arg(&miss)
+        .arg(&archive)
+        .arg("nope.txt")
+        .output()
+        .unwrap();
+    assert!(!res.status.success(), "matching no member must fail");
+    let msg = format!(
+        "{}{}",
+        String::from_utf8_lossy(&res.stdout),
+        String::from_utf8_lossy(&res.stderr)
+    );
+    assert!(
+        msg.contains("no archive members matched"),
+        "expected a clear no-match error, got: {msg}"
+    );
+    assert!(
+        !miss.join("nope.txt").exists(),
+        "a non-matching name must not be created as a file/dir"
+    );
+}
+
+/// `-se` (reset the solid chain on a file-extension change) must preserve
+/// WinRAR's input order — it does NOT reorder members by extension. The solid
+/// statistics are simply reset as a new extension is encountered.
+#[test]
+fn cli_se_preserves_input_order() {
+    let dir = make_temp_dir();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.bin");
+    let c = dir.path().join("c.txt");
+    let d = dir.path().join("d.bin");
+    std::fs::write(&a, b"alpha text block ".repeat(20_000)).unwrap();
+    std::fs::write(&b, vec![0xABu8; 1_000_000]).unwrap();
+    std::fs::write(&c, b"gamma text block ".repeat(20_000)).unwrap();
+    std::fs::write(&d, vec![0xCDu8; 1_000_000]).unwrap();
+
+    let arc = dir.path().join("se_orig.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-s", "-se", "-idq"])
+        .arg(&arc)
+        .arg("a.txt")
+        .arg("b.bin")
+        .arg("c.txt")
+        .arg("d.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // Input order a.txt, b.bin, c.txt, d.bin must be preserved exactly.
+    let mut rar = rar5::RarArchive::open(&arc).unwrap();
+    assert_eq!(
+        rar.namelist(),
+        vec!["a.txt", "b.bin", "c.txt", "d.bin"],
+        "-se must not reorder members by extension"
+    );
+    assert_eq!(rar.read("a.txt").unwrap(), std::fs::read(&a).unwrap());
+    assert_eq!(rar.read("b.bin").unwrap(), std::fs::read(&b).unwrap());
+    assert_eq!(rar.read("c.txt").unwrap(), std::fs::read(&c).unwrap());
+    assert_eq!(rar.read("d.bin").unwrap(), std::fs::read(&d).unwrap());
+
+    // The order-preserving -se archive must read back through our own
+    // `unrar t` (self-consistency check; cli_behavior is cross-platform and
+    // has no WinRAR dependency).
+    let res = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-idq"])
+        .arg(&arc)
+        .output()
+        .unwrap();
+    assert!(
+        res.status.success(),
+        "unrar t rejected our order-preserving -se archive:\n{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
 }

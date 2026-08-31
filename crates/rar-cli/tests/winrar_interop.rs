@@ -2201,7 +2201,8 @@ fn solid_reset_extension_interops_with_winrar() {
         }
     }
 
-    // Ours -> WinRAR: -se (we sort by extension and reset on change).
+    // Ours -> WinRAR: -se (reset the solid chain on an extension change;
+    // input order is preserved, we no longer sort by extension).
     let ours = dir.path().join("ours_se.rar");
     {
         let mut rar = RarArchive::create_with_options(
@@ -2220,6 +2221,17 @@ fn solid_reset_extension_interops_with_winrar() {
         rar.close().unwrap();
     }
     let volumes = rar5::discover_volumes(&ours);
+    // Order must follow the call sequence (a.txt, b.bin, c.txt): -se resets
+    // the solid chain on an extension change but must not reorder members by
+    // extension, which would diverge from WinRAR.
+    {
+        let ar = RarArchive::open(&volumes[0]).unwrap();
+        assert_eq!(
+            ar.namelist(),
+            vec!["a.txt", "b.bin", "c.txt"],
+            "-se must preserve input order, not sort by extension"
+        );
+    }
     if let Some(_unrar) = unrar_bin() {
         let (ok, out) = unrar_test(&volumes[0], None);
         assert!(ok, "UnRAR rejected our -se archive:\n{out}");
