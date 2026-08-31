@@ -703,7 +703,7 @@ mod tests {
                 state ^= state >> 27;
                 let r = (state >> 33) as u32;
                 *v += (r % 8) as i64 - 4;
-                let value = *v as i64;
+                let value = *v;
                 for b in 0..bytes {
                     out.push((value >> (8 * b)) as u8);
                 }

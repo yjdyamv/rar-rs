@@ -111,7 +111,7 @@ impl FilterSpec {
 
 /// Symbol representation for the match finder output.
 #[derive(Clone, Debug)]
-enum Symbol {
+pub(crate) enum Symbol {
     Literal(u8),
     Match {
         distance: u32,
@@ -313,6 +313,7 @@ pub fn encode_chunked(
 
 /// Multi-threaded encoding of one contiguous window of a member (see
 /// [`encode_chunked_mt_with_progress`]; this is the no-progress form).
+#[allow(clippy::too_many_arguments)]
 pub fn encode_chunked_mt(
     data: &[u8],
     method: u8,
@@ -333,6 +334,7 @@ pub fn encode_chunked_mt(
         is_final,
         extra_dist,
         None,
+        None,
     )
 }
 
@@ -351,9 +353,12 @@ pub fn encode_chunked_mt(
 /// the long-range history absorbs the whole window, and the repeat-distance
 /// cache resets. `progress` reports the input bytes covered once each wave
 /// of slices completes (waves run in order, so the reports are monotonic).
+/// `lead_symbols` are prepended to the first slice's symbol stream — the
+/// filter records of a filtered member, which must be read before any
+/// output (their positions are member-relative).
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
-pub fn encode_chunked_mt_with_progress(
+pub(crate) fn encode_chunked_mt_with_progress(
     data: &[u8],
     method: u8,
     dict_size_log: u8,
@@ -362,6 +367,7 @@ pub fn encode_chunked_mt_with_progress(
     threads: usize,
     is_final: bool,
     extra_dist: bool,
+    lead_symbols: Option<&[Symbol]>,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Vec<u8> {
     let level = (method as usize).clamp(1, 5);
@@ -446,6 +452,7 @@ pub fn encode_chunked_mt_with_progress(
                             OPTIMAL_PARSE_PASSES[level],
                             is_final && k + 1 == n,
                             extra_dist,
+                            (k == 0).then_some(lead_symbols).flatten(),
                             state,
                         );
                         results_ref.lock().unwrap()[i] = Some(blocks);
@@ -537,6 +544,9 @@ fn encode_mt_slice(
     passes: usize,
     is_last_block_of_member: bool,
     extra_dist: bool,
+    // Filter records of a filtered member, prepended to the first slice's
+    // symbol stream so they precede all output (member-relative positions).
+    lead_symbols: Option<&[Symbol]>,
     state: &mut EncoderState,
 ) -> Vec<u8> {
     // Near-window context: the closest bytes before this slice, seeded
@@ -575,7 +585,7 @@ fn encode_mt_slice(
     // no match into it would be found anyway, and the parse's own
     // insertions plus the shared long-range table cover everything else.
     let seed_tail = !mt_tail_is_incompressible(&state.tail);
-    let symbols = find_matches_optimal(
+    let mut symbols = find_matches_optimal(
         state,
         &data[s0..e0],
         chain_len,
@@ -589,6 +599,11 @@ fn encode_mt_slice(
         passes,
         seed_tail,
     );
+    if let Some(lead) = lead_symbols {
+        let mut joined = lead.to_vec();
+        joined.append(&mut symbols);
+        symbols = joined;
+    }
 
     let mut out = Vec::new();
     let mut bs = 0usize;
@@ -652,24 +667,8 @@ pub fn encode_with_filters(
         }
     }
 
-    // 1. Forward-transform each region. Regions must be disjoint; the
-    //    transform reads only its own slice, and E8/ARM file offsets are
-    //    member-relative positions.
-    let mut transformed = data.to_vec();
-    for f in &specs {
-        let start = f.block_start as usize;
-        let end = (start + f.block_length as usize).min(transformed.len());
-        if start >= end {
-            continue;
-        }
-        let t = apply_filter_encode(
-            f.filter_type,
-            &mut transformed[start..end],
-            f.channels,
-            f.block_start as u64,
-        );
-        transformed[start..end].copy_from_slice(&t);
-    }
+    // 1. Forward-transform each region (shared with the MT path).
+    let transformed = forward_transform(data, &specs);
 
     // 2. Match-find on the transformed data in bounded chunks with a
     //    persistent window, mirroring the unfiltered chunked path. The
@@ -754,6 +753,86 @@ pub fn encode_with_filters(
     Ok(output)
 }
 
+/// Forward-transform `data` per filter spec, in place on a copy. Regions
+/// must be disjoint; the transform reads only its own slice, and E8/ARM
+/// file offsets are member-relative positions. Shared by the sequential
+/// and multi-threaded filtered encoders.
+fn forward_transform(data: &[u8], specs: &[FilterSpec]) -> Vec<u8> {
+    let mut transformed = data.to_vec();
+    for f in specs {
+        let start = f.block_start as usize;
+        let end = (start + f.block_length as usize).min(transformed.len());
+        if start >= end {
+            continue;
+        }
+        let t = apply_filter_encode(
+            f.filter_type,
+            &mut transformed[start..end],
+            f.channels,
+            f.block_start as u64,
+        );
+        transformed[start..end].copy_from_slice(&t);
+    }
+    transformed
+}
+
+/// Multi-threaded variant of [`encode_with_filters`]: the forward transform
+/// is identical, then the transformed member is encoded across the
+/// compression pool (the filter records lead the first slice's symbol
+/// stream). `threads == 1` keeps the sequential path (byte-identical to
+/// [`encode_with_filters`]); the MT slices reset the repeat-distance cache
+/// per slice, the documented MT divergence.
+#[cfg(feature = "parallel")]
+pub fn encode_with_filters_mt(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    filters: &[FilterSpec],
+    extra_dist: bool,
+    threads: usize,
+) -> Result<Vec<u8>, String> {
+    if data.is_empty() {
+        return Ok(encode_empty_block(extra_dist));
+    }
+    if threads <= 1 || filters.is_empty() {
+        return encode_with_filters(data, method, dict_size_log, filters, extra_dist);
+    }
+    let mut specs: Vec<FilterSpec> = Vec::new();
+    for f in filters {
+        let mut start = f.block_start;
+        let mut remaining = f.block_length;
+        while remaining > 0 {
+            let len = remaining.min(MAX_FILTER_BLOCK_LENGTH);
+            specs.push(FilterSpec::new(f.filter_type, f.channels, start, len));
+            start = start.saturating_add(len);
+            remaining = remaining.saturating_sub(len);
+        }
+    }
+    let transformed = forward_transform(data, &specs);
+    let lead: Vec<Symbol> = specs
+        .iter()
+        .map(|f| Symbol::Filter {
+            block_start: f.block_start,
+            block_length: f.block_length,
+            filter_type: f.filter_type,
+            channels: f.channels,
+        })
+        .collect();
+    let mut state = EncoderState::default();
+    Ok(encode_chunked_mt_with_progress(
+        &transformed,
+        method,
+        dict_size_log,
+        DEFAULT_CHUNK_SIZE,
+        &mut state,
+        threads,
+        true,
+        extra_dist,
+        Some(&lead),
+        None,
+    ))
+}
+
 /// Merge overlapping or adjacent ranges (the x86 scan can return a broad
 /// span plus tighter clusters inside it; overlapping filter records would
 /// double-transform the overlap).
@@ -789,6 +868,7 @@ pub fn encode_with_auto_x86_filter(
     method: u8,
     dict_size_log: u8,
     extra_dist: bool,
+    threads: usize,
 ) -> Result<Option<Vec<u8>>, String> {
     if data.len() <= 5 {
         return Ok(None);
@@ -813,12 +893,13 @@ pub fn encode_with_auto_x86_filter(
     let mut ranges_e8 = super::filters::auto_x86_filter_ranges(data, false);
     if ranges_e8.is_empty() || ranges_e8 == ranges_e9 {
         // Only one variant exists: encode it once.
-        return Ok(Some(encode_with_filters(
+        return Ok(Some(encode_with_filters_mt(
             data,
             method,
             dict_size_log,
             &specs_e9,
             extra_dist,
+            threads,
         )?));
     }
     merge_ranges(&mut ranges_e8);
@@ -869,7 +950,7 @@ pub fn encode_with_auto_x86_filter(
         && !sample_specs_e8.is_empty()
         && !sample_specs_e9.is_empty()
     {
-        let packed = encode_with_filters(
+        let packed = encode_with_filters_mt(
             data,
             method,
             dict_size_log,
@@ -879,13 +960,16 @@ pub fn encode_with_auto_x86_filter(
                 &specs_e9
             },
             extra_dist,
+            threads,
         )?;
         return Ok(Some(packed));
     }
 
     // Inconclusive sample: keep the exact full comparison.
-    let packed_e9 = encode_with_filters(data, method, dict_size_log, &specs_e9, extra_dist)?;
-    let packed_e8 = encode_with_filters(data, method, dict_size_log, &specs_e8, extra_dist)?;
+    let packed_e9 =
+        encode_with_filters_mt(data, method, dict_size_log, &specs_e9, extra_dist, threads)?;
+    let packed_e8 =
+        encode_with_filters_mt(data, method, dict_size_log, &specs_e8, extra_dist, threads)?;
     Ok(Some(if packed_e8.len() < packed_e9.len() {
         packed_e8
     } else {
@@ -934,6 +1018,7 @@ pub fn encode_with_auto_delta_filter(
     method: u8,
     dict_size_log: u8,
     extra_dist: bool,
+    threads: usize,
 ) -> Result<Option<Vec<u8>>, String> {
     // Cheap pre-gate: skip obviously-uncorrelated (random) data so we never pay
     // for a sample encode on it.
@@ -945,14 +1030,18 @@ pub fn encode_with_auto_delta_filter(
     };
     let block_length = (data.len() as u64).min(u32::MAX as u64) as u32;
     let spec = FilterSpec::new(FILTER_DELTA, channels, 0, block_length);
-    let delta_packed = encode_with_filters(data, method, dict_size_log, &[spec], extra_dist)?;
+    // The full member encode runs on the pool like the unfiltered path;
+    // the sample selection above stays sequential (64 KiB, negligible).
+    let delta_packed =
+        encode_with_filters_mt(data, method, dict_size_log, &[spec], extra_dist, threads)?;
     // No point transforming if it does not even beat STORE.
     if delta_packed.len() >= data.len() {
         return Ok(None);
     }
     // Keep the filter only when it is strictly smaller than plain LZSS; the
     // caller's chunked (possibly solid) path is the better choice otherwise.
-    let plain_packed = encode_with_filters(data, method, dict_size_log, &[], extra_dist)?;
+    let plain_packed =
+        encode_with_filters_mt(data, method, dict_size_log, &[], extra_dist, threads)?;
     if delta_packed.len() < plain_packed.len() {
         Ok(Some(delta_packed))
     } else {
@@ -4158,7 +4247,7 @@ mod decode_tests {
                     state ^= state >> 27;
                     let r = (state >> 33) as u32;
                     *v += (r % 8) as i64 - 4;
-                    let value = *v as i64;
+                    let value = *v;
                     for b in 0..bytes {
                         out.push((value >> (8 * b)) as u8);
                     }
@@ -4225,7 +4314,7 @@ mod decode_tests {
             (4, 4),
         ] {
             let data = correlated(bytes, channels, 200_000);
-            let packed = encode_with_auto_delta_filter(&data, 3, 0, false)
+            let packed = encode_with_auto_delta_filter(&data, 3, 0, false, 1)
                 .unwrap()
                 .expect("delta scan must find a beneficial channel count");
             assert!(
@@ -4241,7 +4330,7 @@ mod decode_tests {
         // Text must NOT be delta-filtered: delta cannot beat plain LZSS on it.
         let text = b"the quick brown fox jumps over the lazy dog. ".repeat(6_000);
         assert!(
-            encode_with_auto_delta_filter(&text, 3, 0, false)
+            encode_with_auto_delta_filter(&text, 3, 0, false, 1)
                 .unwrap()
                 .is_none(),
             "text must fall back to plain LZSS"
@@ -4257,7 +4346,7 @@ mod decode_tests {
             *b = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8;
         }
         assert!(
-            encode_with_auto_delta_filter(&random, 3, 0, false)
+            encode_with_auto_delta_filter(&random, 3, 0, false, 1)
                 .unwrap()
                 .is_none()
         );
@@ -4283,7 +4372,7 @@ mod decode_tests {
         }
 
         let data = x86ish(400_000);
-        let packed = encode_with_auto_x86_filter(&data, 3, 0, false)
+        let packed = encode_with_auto_x86_filter(&data, 3, 0, false, 1)
             .unwrap()
             .expect("x86 scan must find regions");
         assert!(
@@ -4300,7 +4389,7 @@ mod decode_tests {
         sparse[100] = 0xE8;
         sparse[10_000] = 0xE8;
         assert!(
-            encode_with_auto_x86_filter(&sparse, 3, 0, false)
+            encode_with_auto_x86_filter(&sparse, 3, 0, false, 1)
                 .unwrap()
                 .is_none()
         );
@@ -4333,7 +4422,7 @@ mod decode_tests {
         let member = x86ish(120_000);
 
         let packed_first = crate::codec::encode(&first, 3, 3, false);
-        let packed_member = encode_with_auto_x86_filter(&member, 3, 0, false)
+        let packed_member = encode_with_auto_x86_filter(&member, 3, 0, false, 1)
             .unwrap()
             .expect("x86 scan must find regions");
 

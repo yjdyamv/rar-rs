@@ -30,6 +30,15 @@ pub const LONG_RANGE_MAX: usize = 128 * 1024 * 1024;
 struct LongRangeTable {
     keys: Vec<u32>,
     vals: Vec<i32>,
+    /// Second-newest offset per key. The multi-threaded encoder pre-builds
+    /// the table over a whole window before any slice parses, so a slice's
+    /// own positions are already in it: a probe at a position that is the
+    /// newest occurrence of its 4-byte window would find itself (distance
+    /// 0) and miss the real copy source it shadows. Keeping the previous
+    /// occurrence lets the probe fall back to it. The sequential encoder
+    /// pushes history incrementally (never the chunk being parsed), so its
+    /// newest entry is always valid and this slot is never consulted.
+    vals2: Vec<i32>,
     mask: usize,
 }
 
@@ -50,6 +59,7 @@ impl LongRangeTable {
         Self {
             keys: vec![0; cap],
             vals: vec![0; cap],
+            vals2: vec![0; cap],
             mask: cap - 1,
         }
     }
@@ -69,15 +79,19 @@ impl LongRangeTable {
             return;
         }
         let mut grown = LongRangeTable::with_capacity(want);
-        for (k, v) in self.keys.iter().zip(self.vals.iter()) {
+        for (i, k) in self.keys.iter().enumerate() {
             if *k != 0 {
-                grown.insert(*k - 1, *v);
+                // Insert the second-newest first so the newest ends up in
+                // `vals` and the chain survives the rehash.
+                let v2 = self.vals2[i];
+                if v2 != 0 {
+                    grown.insert(*k - 1, v2);
+                }
+                grown.insert(*k - 1, self.vals[i]);
             }
         }
         *self = grown;
     }
-
-    /// Ensure capacity for the current history, then rebuild the sample
     /// table from scratch (used when the window slides).
     fn clear_and_rebuild(&mut self, hist: &[u8], max_cap: usize) {
         self.grow_to(hist.len() / LONG_RANGE_STEP, max_cap);
@@ -96,12 +110,16 @@ impl LongRangeTable {
     }
 
     /// Insert or refresh `(key, offset)` — the newest position wins for
-    /// repeated keys (LZ favors the most recent candidate).
+    /// repeated keys (LZ favors the most recent candidate); the previous
+    /// newest drops to the second slot (see [`LongRangeTable::vals2`]).
     fn insert(&mut self, key: u32, offset: i32) {
         let mut i = self.probe(key);
         let step = 1;
         loop {
             if self.keys[i] == 0 || self.keys[i] == key + 1 {
+                if self.keys[i] == key + 1 {
+                    self.vals2[i] = self.vals[i];
+                }
                 self.keys[i] = key + 1;
                 self.vals[i] = offset;
                 return;
@@ -110,14 +128,24 @@ impl LongRangeTable {
         }
     }
 
-    /// Look up the most recent offset for `key`; `None` when absent.
+    /// Most recent offset for `key` strictly before `limit` (hist-relative):
+    /// the newest entry when it qualifies, else the second-newest. Used by
+    /// the pre-built-table path where the newest can be the probing
+    /// position itself (self-shadowing).
     #[inline]
-    fn get(&self, key: u32) -> Option<i32> {
+    fn get_before(&self, key: u32, limit: i32) -> Option<i32> {
         let mut i = self.probe(key);
         loop {
             match self.keys[i] {
                 0 => return None,
-                k if k == key + 1 => return Some(self.vals[i]),
+                k if k == key + 1 => {
+                    let v = self.vals[i];
+                    if v < limit {
+                        return Some(v);
+                    }
+                    let v2 = self.vals2[i];
+                    return (v2 != 0 && v2 < limit).then_some(v2);
+                }
                 _ => i = (i + 1) & self.mask,
             }
         }
@@ -294,7 +322,13 @@ impl LongRange {
             return None;
         }
         let key = self.hash4(chunk, pos);
-        let cand = self.table.get(key)? as usize;
+        // Strictly before the probing position: in a pre-built table the
+        // newest entry for this key can be the probing position itself
+        // (self-shadow), so ask for the newest qualifying entry and let
+        // the table fall back to the previous occurrence.
+        let cand = self
+            .table
+            .get_before(key, (anchor + pos - self.hist_base()) as i32)? as usize;
         let cand_abs = self.hist_base() + cand;
         if cand_abs >= anchor {
             return None;

@@ -490,14 +490,19 @@ impl RarArchive {
             method,
             dsl,
             dict_bytes.is_some(),
+            self.effective_threads(),
         )
         .map_err(RarError::Unsupported)?
         {
             Some(f) => Some(f),
-            None => {
-                compression::encode_with_auto_x86_filter(&whole, method, dsl, dict_bytes.is_some())
-                    .map_err(RarError::Unsupported)?
-            }
+            None => compression::encode_with_auto_x86_filter(
+                &whole,
+                method,
+                dsl,
+                dict_bytes.is_some(),
+                self.effective_threads(),
+            )
+            .map_err(RarError::Unsupported)?,
         };
         if let Some(filtered) = filtered
             && (filtered.len() as u64) < file_size
@@ -1271,6 +1276,7 @@ impl RarArchive {
                 method,
                 dsl,
                 dict_bytes.is_some(),
+                ctx.threads,
             )
             .map_err(RarError::Unsupported)?
             {
@@ -1280,6 +1286,7 @@ impl RarArchive {
                     method,
                     dsl,
                     dict_bytes.is_some(),
+                    ctx.threads,
                 )
                 .map_err(RarError::Unsupported)?
                 {
@@ -1311,6 +1318,7 @@ impl RarArchive {
                                 ctx.threads,
                                 true,
                                 dict_bytes.is_some(),
+                                None,
                                 Some(&mut cb),
                             )
                         } else {
@@ -1392,6 +1400,7 @@ impl RarArchive {
                     ctx.threads,
                     true,
                     dict_bytes.is_some(),
+                    None,
                     Some(&mut cb),
                 )
             } else {
