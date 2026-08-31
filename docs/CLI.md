@@ -12,6 +12,11 @@ reference.
 
 ```
 rar <command> [switches] archive[.rar] [files...]
+
+For extract commands (`x`/`e`), every `files...` argument is a **member
+selector** (full stored path or basename); the destination directory is set
+with `--dest <path>` (default `.`). A name matching nothing is a hard error,
+never a silent dump into a `<name>/` folder.
 ```
 
 ### Commands
@@ -105,8 +110,13 @@ Switches that are Windows-only or interactive in WinRAR (e.g. `-ac`, `-dh`,
 ## `unrar` — extract, list, test, print
 
 ```
-unrar <command> [-p<password>] archive[.rar] [dest/]
+unrar <command> [-p<password>] [--dest <path>] archive[.rar] [names...]
 ```
+
+The destination directory is set with `--dest <path>` (default `.`); every
+`names...` argument is a **member selector** (full stored path or basename). A
+name matching nothing is a hard error, never a silent dump into a `<name>/`
+folder.
 
 | Command | Action |
 |---|---|
@@ -155,7 +165,8 @@ rar s- backup.rar                # strip the SFX module
 rar l  backup.rar
 rar lt backup.rar                # technical list
 rar i"TODO" backup.rar           # find a string
-unrar x backup.rar out/          # extract
+unrar x --dest out/ backup.rar   # extract all
+unrar x --dest out/ backup.rar a.txt  # extract only a.txt
 unrar t backup.rar               # test
 ```
 

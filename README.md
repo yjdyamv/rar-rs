@@ -41,7 +41,7 @@ rar a -m5 backup.rar src/ notes.txt
 
 # List / extract
 rar l backup.rar
-unrar x backup.rar out/
+unrar x --dest out/ backup.rar
 
 # Delete a member without rebuilding
 rar d backup.rar old.log
