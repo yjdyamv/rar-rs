@@ -65,7 +65,17 @@ const LEVEL_PARAMS: [(usize, usize, usize); 6] = [
     (1024, 8, 0x1001), // 5: best
 ];
 
-const MAX_BLOCK_SIZE: usize = 0x20000; // 128 KB
+const MAX_BLOCK_SIZE: usize = 0x20000; // 128 KB (parse block cap; prices stay localised)
+
+/// Cap for grouping parsed symbols into *emitted* blocks. The RAR5 size
+/// field allows blocks up to 4 GiB, so this is purely an encoder choice:
+/// on distribution-stable data (repetitive text) merging many parse blocks
+/// into one emitted block amortises the per-block Huffman table definitions
+/// (WinRAR writes one block per whole member there); on heterogeneous data
+/// the tables stay per-parse-block because the drift check keeps the parse
+/// blocks small. Only the emitted grouping is larger — the parse itself is
+/// unchanged, so token choices are byte-identical to the 128 KiB cap.
+const EMITTED_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
 /// Maximum length of one RAR5 filter block.
 ///
@@ -283,7 +293,7 @@ pub fn encode_chunked(
 
         let mut block_start = 0usize;
         while block_start < symbols.len() {
-            let (block_end, _) = find_block_end(&symbols, block_start, MAX_BLOCK_SIZE);
+            let (block_end, _) = find_block_end_adaptive(&symbols, block_start, EMITTED_BLOCK_SIZE);
             let is_last = is_final && chunk_end >= data.len() && block_end >= symbols.len();
             let block_data = encode_block(&symbols[block_start..block_end], is_last, extra_dist);
             output.extend(block_data);
@@ -313,6 +323,34 @@ pub fn encode_chunked(
 
 /// Multi-threaded encoding of one contiguous window of a member (see
 /// [`encode_chunked_mt_with_progress`]; this is the no-progress form).
+#[cfg(not(feature = "parallel"))]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_chunked_mt(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    chunk_size: usize,
+    seed: &mut EncoderState,
+    _threads: usize,
+    is_final: bool,
+    extra_dist: bool,
+) -> Vec<u8> {
+    // Without the pool this path is unreachable (callers gate on `use_mt`),
+    // but it must compile: encode sequentially over the window.
+    encode_chunked(
+        data,
+        method,
+        dict_size_log,
+        chunk_size,
+        Some(seed),
+        is_final,
+        None,
+        extra_dist,
+    )
+    .unwrap_or_default()
+}
+
+#[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
 pub fn encode_chunked_mt(
     data: &[u8],
@@ -608,7 +646,7 @@ fn encode_mt_slice(
     let mut out = Vec::new();
     let mut bs = 0usize;
     while bs < symbols.len() {
-        let (be, _) = find_block_end(&symbols, bs, MAX_BLOCK_SIZE);
+        let (be, _) = find_block_end_adaptive(&symbols, bs, EMITTED_BLOCK_SIZE);
         let is_last = is_last_block_of_member && be >= symbols.len();
         out.extend(encode_block(&symbols[bs..be], is_last, extra_dist));
         bs = be;
@@ -782,6 +820,20 @@ fn forward_transform(data: &[u8], specs: &[FilterSpec]) -> Vec<u8> {
 /// stream). `threads == 1` keeps the sequential path (byte-identical to
 /// [`encode_with_filters`]); the MT slices reset the repeat-distance cache
 /// per slice, the documented MT divergence.
+#[cfg(not(feature = "parallel"))]
+pub fn encode_with_filters_mt(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    filters: &[FilterSpec],
+    extra_dist: bool,
+    _threads: usize,
+) -> Result<Vec<u8>, String> {
+    // Without the pool, fall back to the sequential encode; the caller's
+    // member-level logic (threads == 1 or no pool) makes this equivalent.
+    encode_with_filters(data, method, dict_size_log, filters, extra_dist)
+}
+
 #[cfg(feature = "parallel")]
 pub fn encode_with_filters_mt(
     data: &[u8],
@@ -1666,6 +1718,25 @@ fn collect_block_matches(
                 chain_len,
                 &mut scratch,
             );
+            // The tree's internal ordering invariants can break when it is
+            // reused across chunks (budget-limited descents against a dense
+            // persistent tree — the DLL reproduction hit this: a bogus
+            // match copied the MZ header over real code, and the corrupt
+            // member was silently written). Verify every report byte-exactly
+            // before the parse can price it; a report whose bytes do not
+            // actually match is dropped, a short over-report is truncated to
+            // the true length. Cheap: the descent already compared these
+            // bytes, and matches are sparse relative to positions.
+            let mut w = 0usize;
+            for r in 0..scratch.len() {
+                let (_len, dist) = scratch[r];
+                let actual = match_length_at(combined, pos, dist as usize, len_limit);
+                if actual >= 4 {
+                    scratch[w] = (actual as u32, dist);
+                    w += 1;
+                }
+            }
+            scratch.truncate(w);
             matches.runs.extend(scratch.iter().copied());
             // Measure the last report out to its real end: the tree
             // stops comparing at the limit, and a match reaching it
@@ -2421,6 +2492,107 @@ fn find_block_end(symbols: &[Symbol], start: usize, max_uncompressed: usize) -> 
             Symbol::Filter { .. } => {}
         }
         if count >= max_uncompressed {
+            return (i + 1, count);
+        }
+    }
+    (symbols.len(), count)
+}
+
+/// Adaptive variant of [`find_block_end`]: group symbols into emitted blocks
+/// of up to `cap` uncompressed bytes, but close the block early when the
+/// symbol stream's *local* literal distribution drifts between adjacent
+/// ~64 KiB sub-spans.
+///
+/// The parse-side splitter compares each sub-block against the cumulative
+/// counts of the open block, which cannot see section boundaries once the
+/// cumulative mix stabilises (a DLL's code+data+padding blend looks stable
+/// over a 1 MiB span). Comparing each sub-span against the *previous* one
+/// catches those boundaries: repetitive text stays merged (WinRAR writes
+/// one block per member there), heterogeneous binaries keep small blocks
+/// (WinRAR's ~64 KiB DLL blocks). The token stream itself is untouched —
+/// only the emitted grouping changes, so parsers and decoders behave the
+/// same.
+fn find_block_end_adaptive(symbols: &[Symbol], start: usize, cap: usize) -> (usize, usize) {
+    const SUB_SPAN: usize = 64 * 1024;
+    const DRIFT_DIVISOR: usize = 128;
+    const LIT: usize = 256;
+    const DIST: usize = 5;
+    const LEN: usize = 3;
+    const BUCKETS: usize = LIT + DIST + LEN;
+    fn dist_bucket(d: u32) -> usize {
+        if d < 4096 {
+            0
+        } else if d < 65536 {
+            1
+        } else if d < 1 << 20 {
+            2
+        } else if d < 4 << 20 {
+            3
+        } else {
+            4
+        }
+    }
+    fn len_bucket(l: u32) -> usize {
+        if l < 16 {
+            0
+        } else if l < 64 {
+            1
+        } else {
+            2
+        }
+    }
+    let mut count = 0usize;
+    let mut last_len = 0u32;
+    let mut cur = [0u64; BUCKETS];
+    let mut prev = [0u64; BUCKETS];
+    let mut span_out = 0usize;
+    let mut drifted = false;
+    let mut have_prev = false;
+    for (offset, symbol) in symbols[start..].iter().enumerate() {
+        let i = start + offset;
+        match symbol {
+            Symbol::Literal(b) => {
+                cur[*b as usize] += 1;
+                count += 1;
+                span_out += 1;
+                last_len = 0;
+            }
+            Symbol::Match { distance, length } => {
+                last_len = apply_length_bonus(*length, *distance);
+                count += last_len as usize;
+                span_out += last_len as usize;
+                cur[LIT + dist_bucket(*distance)] += 1;
+                cur[LIT + DIST + len_bucket(last_len)] += 1;
+            }
+            Symbol::CacheRef { length, .. } => {
+                last_len = *length;
+                count += *length as usize;
+                span_out += *length as usize;
+                cur[LIT + DIST + len_bucket(last_len)] += 1;
+            }
+            Symbol::Repeat => {
+                count += last_len as usize;
+                span_out += last_len as usize;
+            }
+            Symbol::Filter { .. } => {}
+        }
+        if span_out >= SUB_SPAN {
+            // Full sub-span collected: local drift vs the previous sub-span.
+            if have_prev && !drifted {
+                let mut misplaced = 0u64;
+                for (a, b) in cur.iter().zip(prev.iter()) {
+                    misplaced += a.abs_diff(*b);
+                }
+                if misplaced > SUB_SPAN as u64 / DRIFT_DIVISOR as u64 {
+                    drifted = true;
+                }
+            }
+            have_prev = true;
+            prev = cur;
+            cur = [0u64; BUCKETS];
+            span_out = 0;
+        }
+        if drifted || count >= cap {
             return (i + 1, count);
         }
     }
@@ -3897,6 +4069,333 @@ fn decode_inner(
 
     output.truncate(unpacked_size as usize);
     Ok(output)
+}
+
+// ── Symbol-stream analysis (tooling) ───────────────────────────────────────
+
+/// Per-block symbol statistics, used by the analysis examples to dissect
+/// WinRAR-produced streams and compare them with ours. Not a public API;
+/// hidden because it exists only for the interop gap work.
+#[doc(hidden)]
+#[derive(Default, Clone, Debug)]
+pub struct BlockStat {
+    pub block_size: u32,
+    pub table_present: bool,
+    pub nc: usize,
+    pub dc: usize,
+    pub ldc: usize,
+    pub rc: usize,
+    pub literals: u64,
+    pub matches: u64,
+    pub cache_matches: u64,
+    pub repeats: u64,
+    pub filters: u64,
+    pub out_bytes: u64,
+}
+
+/// Whole-stream symbol statistics.
+#[doc(hidden)]
+#[derive(Default, Clone, Debug)]
+pub struct StreamAnalysis {
+    pub blocks: Vec<BlockStat>,
+    pub unpacked: u64,
+    /// Match length buckets: <16, 16-63, 64-255, 256-1023, 1024+.
+    pub len_hist: [u64; 5],
+    /// Match distance buckets: <4K, 4K-64K, 64K-1M, 1M-4M, 4M+.
+    pub dist_hist: [u64; 5],
+}
+
+/// Walk a RAR5/RAR7 compressed member stream and record per-block symbol
+/// statistics without materializing the output. Mirrors `decode_inner`'s
+/// state machine (block headers, table reads, cache/repeat semantics) so
+/// the recorded streams are the exact ones a decoder would execute.
+#[doc(hidden)]
+pub fn analyze_stream(
+    data: &[u8],
+    unpacked_size: u64,
+    _dict_size_log: u8,
+    extra_dist: bool,
+) -> Result<StreamAnalysis, String> {
+    let mut reader = BitReader::new(data);
+    let mut dist_cache = [0u64; DIST_CACHE_SIZE];
+    let mut last_length = 0u32;
+    let mut table_nc: Option<DecodeTable> = None;
+    let mut table_dc: Option<DecodeTable> = None;
+    let mut table_ldc: Option<DecodeTable> = None;
+    let mut table_rc: Option<DecodeTable> = None;
+    let mut out = StreamAnalysis::default();
+    let mut produced = 0u64;
+
+    while produced < unpacked_size {
+        let block_flags_byte = reader.read_byte().map_err(|e| e.to_string())?;
+        let table_present = (block_flags_byte >> 7) & 1 != 0;
+        let is_last_block = (block_flags_byte >> 6) & 1 != 0;
+        let byte_count = ((block_flags_byte >> 3) & 3) + 1;
+        let bit_size = block_flags_byte & 7;
+        let checksum_byte = reader.read_byte().map_err(|e| e.to_string())?;
+        let mut block_size: u32 = 0;
+        for i in 0..byte_count {
+            let b = reader.read_byte().map_err(|e| e.to_string())?;
+            block_size |= (b as u32) << (i * 8);
+        }
+        let mut expected_ck = BLOCK_CHECKSUM_SEED ^ block_flags_byte;
+        for i in 0..byte_count {
+            expected_ck ^= (block_size >> (i * 8)) as u8;
+        }
+        if checksum_byte != expected_ck {
+            return Err(format!(
+                "block checksum mismatch: got {checksum_byte:#x}, expected {expected_ck:#x}"
+            ));
+        }
+        if block_size == 0 {
+            return Err("zero-length block".into());
+        }
+        let block_bits = ((block_size as u64) - 1) * 8 + (1 + bit_size as u64);
+        let block_start_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
+
+        let (mut nc, mut dc, mut ldc, mut rc) = (0usize, 0usize, 0usize, 0usize);
+        if table_present {
+            let (tnc, tdc, tldc, trc) = read_tables(&mut reader, extra_dist)?;
+            nc = tnc.num_symbols;
+            dc = tdc.num_symbols;
+            ldc = tldc.num_symbols;
+            rc = trc.num_symbols;
+            table_nc = Some(tnc);
+            table_dc = Some(tdc);
+            table_ldc = Some(tldc);
+            table_rc = Some(trc);
+        }
+        let t_nc = table_nc.as_ref().ok_or("no Huffman tables defined")?;
+        let t_dc = table_dc.as_ref().ok_or("no Huffman tables defined")?;
+        let t_ldc = table_ldc.as_ref().ok_or("no Huffman tables defined")?;
+        let t_rc = table_rc.as_ref().ok_or("no Huffman tables defined")?;
+
+        let mut stat = BlockStat {
+            block_size,
+            table_present,
+            nc,
+            dc,
+            ldc,
+            rc,
+            ..Default::default()
+        };
+        while produced < unpacked_size {
+            let cur_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
+            if cur_bits - block_start_bits >= block_bits {
+                break;
+            }
+            let sym = decode_symbol(t_nc, &mut reader).map_err(|e| e.to_string())?;
+            if sym < 256 {
+                stat.literals += 1;
+                stat.out_bytes += 1;
+                produced += 1;
+            } else if sym == SYM_FILTER {
+                stat.filters += 1;
+                parse_filter(&mut reader, produced)?;
+            } else if sym == SYM_REPEAT {
+                stat.repeats += 1;
+                if last_length > 0 && dist_cache[0] > 0 {
+                    stat.out_bytes += last_length as u64;
+                    produced += last_length as u64;
+                }
+            } else if (SYM_CACHE_BASE..=SYM_CACHE_BASE + 3).contains(&sym) {
+                let cache_idx = sym - SYM_CACHE_BASE;
+                let dist = dist_cache_touch(&mut dist_cache, cache_idx);
+                let len_slot = decode_symbol(t_rc, &mut reader).map_err(|e| e.to_string())?;
+                let length = decode_length(len_slot, &mut reader)?;
+                last_length = length;
+                stat.cache_matches += 1;
+                stat.out_bytes += length as u64;
+                produced += length as u64;
+                bucket_len(&mut out, length);
+                bucket_dist(&mut out, dist as u32);
+            } else if sym >= SYM_MATCH_BASE {
+                let len_slot = sym - SYM_MATCH_BASE;
+                let mut length = decode_length(len_slot, &mut reader)?;
+                let dist_slot = decode_symbol(t_dc, &mut reader).map_err(|e| e.to_string())?;
+                let dist = decode_distance(dist_slot, &mut reader, t_ldc)?;
+                length = apply_length_bonus_u64(length, dist);
+                last_length = length;
+                dist_cache_push(&mut dist_cache, dist);
+                stat.matches += 1;
+                stat.out_bytes += length as u64;
+                produced += length as u64;
+                bucket_len(&mut out, length);
+                bucket_dist(&mut out, dist.min(u32::MAX as u64) as u32);
+            }
+        }
+        let block_end_bits = block_start_bits + block_bits;
+        reader.set_position((block_end_bits / 8) as usize, (block_end_bits % 8) as u8);
+        out.blocks.push(stat);
+        if is_last_block {
+            break;
+        }
+    }
+    out.unpacked = produced;
+    Ok(out)
+}
+
+fn bucket_len(out: &mut StreamAnalysis, len: u32) {
+    let b = if len < 16 {
+        0
+    } else if len < 64 {
+        1
+    } else if len < 256 {
+        2
+    } else if len < 1024 {
+        3
+    } else {
+        4
+    };
+    out.len_hist[b] += 1;
+}
+
+fn bucket_dist(out: &mut StreamAnalysis, dist: u32) {
+    let b = if dist < 4096 {
+        0
+    } else if dist < 65536 {
+        1
+    } else if dist < 1 << 20 {
+        2
+    } else if dist < 4 << 20 {
+        3
+    } else {
+        4
+    };
+    out.dist_hist[b] += 1;
+}
+
+/// One decoded symbol with its output position (debug tooling).
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct TraceSymbol {
+    pub out_pos: u64,
+    pub kind: &'static str,
+    pub dist: u64,
+    pub len: u32,
+}
+
+/// Walk the stream like [`analyze_stream`] but record every symbol whose
+/// output span intersects `[want_start, want_end)`, in stream order. Used
+/// to find which symbol corrupted a member's output.
+#[doc(hidden)]
+pub fn trace_stream(
+    data: &[u8],
+    unpacked_size: u64,
+    extra_dist: bool,
+    want_start: u64,
+    want_end: u64,
+) -> Result<Vec<TraceSymbol>, String> {
+    let mut reader = BitReader::new(data);
+    let mut dist_cache = [0u64; DIST_CACHE_SIZE];
+    let mut last_length = 0u32;
+    let mut table_nc: Option<DecodeTable> = None;
+    let mut table_dc: Option<DecodeTable> = None;
+    let mut table_ldc: Option<DecodeTable> = None;
+    let mut table_rc: Option<DecodeTable> = None;
+    let mut out = Vec::new();
+    let mut produced = 0u64;
+
+    while produced < unpacked_size {
+        let block_flags_byte = reader.read_byte().map_err(|e| e.to_string())?;
+        let is_last_block = (block_flags_byte >> 6) & 1 != 0;
+        let byte_count = ((block_flags_byte >> 3) & 3) + 1;
+        let bit_size = block_flags_byte & 7;
+        reader.read_byte().map_err(|e| e.to_string())?; // checksum
+        let mut block_size: u32 = 0;
+        for i in 0..byte_count {
+            let b = reader.read_byte().map_err(|e| e.to_string())?;
+            block_size |= (b as u32) << (i * 8);
+        }
+        let block_bits = ((block_size as u64) - 1) * 8 + (1 + bit_size as u64);
+        let block_start_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
+
+        if (block_flags_byte >> 7) & 1 != 0 {
+            let (tnc, tdc, tldc, trc) = read_tables(&mut reader, extra_dist)?;
+            table_nc = Some(tnc);
+            table_dc = Some(tdc);
+            table_ldc = Some(tldc);
+            table_rc = Some(trc);
+        }
+        let t_nc = table_nc.as_ref().ok_or("no Huffman tables defined")?;
+        let t_dc = table_dc.as_ref().ok_or("no Huffman tables defined")?;
+        let t_ldc = table_ldc.as_ref().ok_or("no Huffman tables defined")?;
+        let t_rc = table_rc.as_ref().ok_or("no Huffman tables defined")?;
+        while produced < unpacked_size {
+            let cur_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
+            if cur_bits - block_start_bits >= block_bits {
+                break;
+            }
+            let sym = decode_symbol(t_nc, &mut reader).map_err(|e| e.to_string())?;
+            if sym < 256 {
+                let p = produced;
+                produced += 1;
+                if p < want_end && p + 1 > want_start {
+                    out.push(TraceSymbol {
+                        out_pos: p,
+                        kind: "lit",
+                        dist: 0,
+                        len: 0,
+                    });
+                }
+            } else if sym == SYM_FILTER {
+                parse_filter(&mut reader, produced)?;
+            } else if sym == SYM_REPEAT {
+                let p = produced;
+                if last_length > 0 && dist_cache[0] > 0 {
+                    produced += last_length as u64;
+                }
+                if p < want_end && p + last_length as u64 > want_start {
+                    out.push(TraceSymbol {
+                        out_pos: p,
+                        kind: "repeat",
+                        dist: dist_cache[0],
+                        len: last_length,
+                    });
+                }
+            } else if (SYM_CACHE_BASE..=SYM_CACHE_BASE + 3).contains(&sym) {
+                let cache_idx = sym - SYM_CACHE_BASE;
+                let dist = dist_cache_touch(&mut dist_cache, cache_idx);
+                let len_slot = decode_symbol(t_rc, &mut reader).map_err(|e| e.to_string())?;
+                let length = decode_length(len_slot, &mut reader)?;
+                last_length = length;
+                let p = produced;
+                produced += length as u64;
+                if p < want_end && p + length as u64 > want_start {
+                    out.push(TraceSymbol {
+                        out_pos: p,
+                        kind: "cache",
+                        dist,
+                        len: length,
+                    });
+                }
+            } else if sym >= SYM_MATCH_BASE {
+                let len_slot = sym - SYM_MATCH_BASE;
+                let mut length = decode_length(len_slot, &mut reader)?;
+                let dist_slot = decode_symbol(t_dc, &mut reader).map_err(|e| e.to_string())?;
+                let dist = decode_distance(dist_slot, &mut reader, t_ldc)?;
+                length = apply_length_bonus_u64(length, dist);
+                last_length = length;
+                dist_cache_push(&mut dist_cache, dist);
+                let p = produced;
+                produced += length as u64;
+                if p < want_end && p + length as u64 > want_start {
+                    out.push(TraceSymbol {
+                        out_pos: p,
+                        kind: "match",
+                        dist,
+                        len: length,
+                    });
+                }
+            }
+        }
+        let block_end_bits = block_start_bits + block_bits;
+        reader.set_position((block_end_bits / 8) as usize, (block_end_bits % 8) as u8);
+        if is_last_block {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 // ── Huffman Table Reading ──────────────────────────────────────────────────

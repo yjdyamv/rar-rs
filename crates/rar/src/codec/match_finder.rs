@@ -660,7 +660,9 @@ impl TreeMatchFinder {
     }
 
     /// Grow the window in place, keeping every existing link (positions
-    /// below the old mask map identically under a larger one). Grows the
+    /// below the old mask map identically under a larger one: slot
+    /// `(pos & old_mask) << 1` equals `(pos & new_mask) << 1` for every
+    /// live position, so the old links are copied verbatim). Grows the
     /// `son` array when the window grew; shrinking keeps the larger
     /// allocation (the mask bounds the reachable window either way). Used
     /// by the persistent-finder path, where the finder spans chunks of one
@@ -668,7 +670,18 @@ impl TreeMatchFinder {
     pub fn grow_to(&mut self, window: usize) {
         let window = window.max(1).next_power_of_two();
         if window * 2 > self.son.len() {
-            self.son = vec![0; window * 2];
+            // Copy, never wipe: the head table persists across chunks and
+            // points at positions whose subtree links live in this array.
+            // Replacing it with fresh zeros turned every unwritten slot
+            // into a link to position 0 (0 is a valid position, only
+            // `NO_LINK` marks empty), and the next descent followed those
+            // zeros to the member head — a corrupt match. This was the
+            // multi-chunk DLL corruption (bogus matches copying the MZ
+            // header over real code).
+            let old = std::mem::take(&mut self.son);
+            let mut grown = vec![0; window * 2];
+            grown[..old.len()].copy_from_slice(&old);
+            self.son = grown;
         }
         self.mask = window - 1;
     }
@@ -687,21 +700,48 @@ impl TreeMatchFinder {
     /// turns into a self-terminating descent (the `current >= floor` guard)
     /// — so dropped entries cost nothing and can never resolve to a live
     /// in-window position. Used when the persistent finder's frame slides.
+    ///
+    /// Links are *migrated*, not just value-shifted: the son array is
+    /// indexed by `(pos & mask) << 1`, so a link belonging to old position
+    /// `p` must move from slot `(p & mask) << 1` to slot
+    /// `((p - sub) & mask) << 1` when the frame slides by `sub`. Shifting
+    /// the values in place left them at the wrong slots, and the slots the
+    /// new frame read were either stale or zero — and zero is a valid link
+    /// to position 0, so the descent could jump to the member head and
+    /// report a corrupt match (the multi-chunk DLL corruption).
     pub fn rebase(&mut self, sub: usize) {
         if sub == 0 {
             return;
         }
         let sub = sub as u32;
+        // The head table's values are positions too: shift them, dropping
+        // the ones that slid out of the frame (underflow wraps to a huge
+        // value, which `resolve` self-terminates — safe, but the slot
+        // stays; the parse overwrites it on the next insertion of that
+        // hash).
         for slot in self.head.iter_mut() {
             if *slot != NO_LINK {
                 *slot = slot.wrapping_sub(sub);
             }
         }
-        for slot in self.son.iter_mut() {
-            if *slot != NO_LINK {
-                *slot = slot.wrapping_sub(sub);
+        // The son array is indexed by `(pos & mask) << 1`, so a link that
+        // belonged to old position `p` must move to the slot of `p - sub`.
+        // Shifting the values in place left them at the wrong slots, and
+        // the slots the new frame read were either stale or zero — and
+        // zero is a valid link to position 0, so the descent could jump to
+        // the member head and report a corrupt match (the multi-chunk DLL
+        // corruption). Only links whose position *and* value both survive
+        // the slide are migrated; the rest are dropped.
+        let mut remapped = vec![NO_LINK; self.son.len()];
+        for (i, &slot) in self.son.iter().enumerate() {
+            let pos = i >> 1;
+            if slot != NO_LINK && pos >= sub as usize && slot >= sub {
+                let new_pos = (pos - sub as usize) & self.mask;
+                let side = i & 1;
+                remapped[(new_pos << 1) | side] = slot - sub;
             }
         }
+        self.son = remapped;
     }
 
     #[inline]

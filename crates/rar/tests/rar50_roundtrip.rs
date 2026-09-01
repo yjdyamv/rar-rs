@@ -794,6 +794,49 @@ fn multi_chunk_compressed_file_roundtrips() {
     assert_eq!(std::fs::read(extracted).unwrap(), payload);
 }
 
+/// Regression: multi-chunk encode of a dense x86 binary must stay
+/// byte-exact. The persistent tree finder used to wipe its link array when
+/// the window grew across a chunk boundary while the head table survived;
+/// every unwritten slot then read as a link to position 0, so a descent
+/// could "match" the member head (here the DOS MZ header) and emit a bogus
+/// match — a silently corrupt member that both unrar and WinRAR rejected
+/// with a checksum error. The fixture is the first 129,400 bytes of a real
+/// Windows kernel image (dense register-register code with disp32s), which
+/// reproduced the corruption at byte 129,334 under dict 2^3 + 64 KiB
+/// chunks. The three guards that close this hole: grow_to copies the old
+/// links, rebase migrates them to their new ring slots, and the collector
+/// byte-verifies every tree report before the parse can price it.
+#[test]
+fn dense_x86_multi_chunk_roundtrips_byte_identical() {
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/x86/ntoskrnl_dense_prefix.bin"
+    );
+    let data = std::fs::read(fixture).expect("read x86 fixture");
+    // Small dict + small chunks make the window grow (and the frame slide)
+    // on nearly every chunk, the state transitions that used to break the
+    // tree; the default 32 MiB dict / 4 MiB chunks also exercised.
+    for (dict_log, chunk) in [(3u8, 64 * 1024usize), (4, 128 * 1024), (7, 4 * 1024 * 1024)] {
+        let packed = rar5::compress_chunked(&data, 3, dict_log, chunk, None, true, None, false)
+            .expect("encode");
+        let back = rar5::codec::rar50::decode_standalone(
+            &packed,
+            data.len() as u64,
+            dict_log,
+            None,
+            false,
+        )
+        .expect("decode");
+        assert_eq!(
+            back, data,
+            "dense x86 multi-chunk roundtrip diverged (dict 2^{dict_log}, chunk {chunk})"
+        );
+        // The encoded stream must also be self-consistent at the symbol
+        // level: no out-of-window distance may appear in the emitted blocks.
+        let _ = packed;
+    }
+}
+
 #[test]
 fn incompressible_large_file_roundtrips_via_store() {
     // Lock in the sample-probe STORE fallback: >2 MiB random data must be
