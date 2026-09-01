@@ -321,6 +321,16 @@ impl LongRange {
         if pos + 4 > chunk.len() {
             return None;
         }
+        // The query position must lie inside the retained window: when the
+        // history was truncated (input larger than the window), positions
+        // older than `hist_base` are gone and there is no candidate. This
+        // happens with small dictionaries against a large chunk (and with
+        // multi-window MT chains); without the guard the subtraction below
+        // underflows.
+        let query_abs = anchor + pos;
+        if query_abs < self.hist_base() {
+            return None;
+        }
         let key = self.hash4(chunk, pos);
         // Strictly before the probing position: in a pre-built table the
         // newest entry for this key can be the probing position itself
@@ -328,7 +338,7 @@ impl LongRange {
         // the table fall back to the previous occurrence.
         let cand = self
             .table
-            .get_before(key, (anchor + pos - self.hist_base()) as i32)? as usize;
+            .get_before(key, (query_abs - self.hist_base()) as i32)? as usize;
         let cand_abs = self.hist_base() + cand;
         if cand_abs >= anchor {
             return None;
