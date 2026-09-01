@@ -53,3 +53,35 @@ Ratio is the contract: every candidate speed change was byte-diffed on the
 corpora; the tree-window caps and pass reductions all violated it and were
 rejected. The DLL ratio itself now wins vs WinRAR (43.90% vs 44.81%
 x86-filtered); the speed gap (3.6x mt1, ~7x mt8) is the open item.
+
+## 2026-09-01 follow-up: the levers tried and rejected, and what's left
+
+The session landed hash 20 bits (byte-identical, -4-15%) and adaptive MT
+slices (dll mt8 -50%) and then tried several further collect speedups. All
+measured on this machine, all rejected because the speed did not pay for the
+ratio cost (the plan's ratio contract; the user accepts a modest ratio hit
+but these were steep):
+
+- BT4 nice_len early exit (stop descending at a match >= N): at 32 it
+  almost never fires on the DLL (matches are 4-15 bytes) so no speed; at 8
+  the DLL was -23% at +4% ratio, text64 +3.5% — steep.
+- Cache-resident chain near-finder (head + prev ring, the tree as far
+  fallback): three configs (T=4 break-first, T=8 break-first, K=16 longest)
+  were all net-negative. T=4 gave the DLL -46% but +8.8% ratio (the chain's
+  first-match bias loses the longer matches the tree's descent finds) and
+  broke the random-data fast path (rand64 15 s + compressed). T=8 held the
+  DLL ratio (+0.37%) but gave no speed (the >=8 first-matches are rare) and
+  the chain's per-position find overhead slowed rand64 to 10 s.
+- Tree window caps (8 MiB, 4 MiB): the L3 is 16 MiB and the working set
+  (13 MiB input + son + 4 MiB head + LR) overflows it, so a smaller son
+  barely helps; 8 MiB gave ~0 speed at +0.09% ratio, 4 MiB -27% collect at
+  +0.9%.
+- DP pass-2 dropped at m3 (1 pass): -15% speed but xml +4.8%, text64 +1.7%.
+
+Verdict: the BT4 descent is genuinely DRAM-latency-bound (12 M queries x
+~5.5 dependent reads into a 32 MiB son). WinRAR's per-byte parse is ~3x
+faster and is likely hand-assembly-tuned; matching it in pure Rust needs
+software pipelining (batch several positions' descents so one position's
+DRAM read overlaps another's compute) — the designed but unbuilt next lever.
+Also on the list: the CLI's ~1 s overhead over the library core (the
+batch-wave + nested MT pool nesting), which is pure waste.
