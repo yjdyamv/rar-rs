@@ -80,6 +80,32 @@ Remaining gaps: dll single-thread parse speed (~6 s vs WinRAR 1.8 s — ratio
 now wins), xml parse (~1.5%), text64 MT ratio (6554 vs 6058, the documented
 MT divergence).
 
+## Speed work (2026-09-01, current state)
+
+Landed: tree hash 17->20 bits (mt1 -4-15%, byte-identical except xml m2 -1 B)
+and adaptive MT slice size (target ~2x threads, floor 2 MiB) — the fixed
+4 MiB slice left a 13 MB member with only 4 slices and the pool mostly
+idle. CLI head-to-head at m3/mt8 (user default):
+
+| file | ours mt8 | win mt8 | ours B | win B |
+|---|---|---|---|---|
+| dll (x86f) | 2323 ms | 433 ms | 5940581 | 5640870 |
+| text64 | 889 ms | 400 ms | 6527 | 8814 |
+| mixed | 912 ms | 369 ms | 10492341 | 10509703 |
+
+Library core (encode_with_auto_x86_filter direct): dll mt8 2638 -> 1329 ms
+(-50%); CLI adds ~1 s of overhead (batch-wave + delta attempt 129 ms +
+blake2 + container — the nesting of the wave pool and the MT pool is the
+largest chunk, unaccounted). MT divergence on the dll grew from +2% to
++3.3% (mt8 vs mt1) with the adaptive slices; a denser LR (step 8) recovered
+only 2 KB of the +65 KB — the divergence is the slice-boundary parse
+structure, not the LR sampling.
+
+Next levers: the per-byte parse (collect 5.3 s of the 8.4 s seq time, the
+DRAM-bound BT4 descent) — a cache-resident near-window chain finder with
+the tree as the far fallback is the designed-but-unbuilt option (see issue
+09); the CLI's ~1 s overhead deserves a profile pass (wave/MT pool nesting).
+
 ## Definitive head-to-head (2026-09-01, fixed CLI, m3, this machine)
 
 After the rar-cli parallel-feature fix (the CLI silently ran single-
