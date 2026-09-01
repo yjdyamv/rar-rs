@@ -810,6 +810,22 @@ impl TreeMatchFinder {
             let mut len = len0.min(len1);
             if input[current + len] == input[pos + len] {
                 len += 1;
+                // Compare in 8-byte words: the candidate byte range is a
+                // random access (the tree walks scattered history), so a
+                // word compare fetches the same cache lines but with a
+                // fraction of the loop iterations; the trailing_zeros
+                // finds the exact divergence inside the word.
+                while len + 8 <= len_limit {
+                    let a = u64::from_le_bytes(
+                        input[current + len..current + len + 8].try_into().unwrap(),
+                    );
+                    let b = u64::from_le_bytes(input[pos + len..pos + len + 8].try_into().unwrap());
+                    if a != b {
+                        len += ((a ^ b).trailing_zeros() / 8) as usize;
+                        break;
+                    }
+                    len += 8;
+                }
                 while len < len_limit && input[current + len] == input[pos + len] {
                     len += 1;
                 }
