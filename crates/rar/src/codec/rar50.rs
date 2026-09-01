@@ -412,7 +412,17 @@ pub(crate) fn encode_chunked_mt_with_progress(
     let (chain_len, _lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     let long_range = level >= 2;
-    let cs = chunk_size.max(1);
+    // Adaptive slice size: with a fixed 4 MiB slice a 13 MB member gives
+    // only 4 slices and the pool sits mostly idle. Target ~2x the thread
+    // count slices (floor 2 MiB) so medium members parallelize properly;
+    // members whose caller chunk already yields plenty of slices (big
+    // members, repetitive text) keep the caller's size unchanged.
+    let cs = {
+        let caller = chunk_size.max(1);
+        let by_count = data.len() / (threads.max(1) * 2);
+        let floored = by_count.max(caller.min(2 * 1024 * 1024));
+        caller.min(floored).max(1)
+    };
 
     // Shared long-range table over entry history plus this window; built
     // once, read-only afterwards (workers query with absolute anchors).
