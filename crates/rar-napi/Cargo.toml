@@ -15,3 +15,10 @@ rar5 = { path = "../rar", features = ["parallel", "simd"] }
 
 [build-dependencies]
 napi-build = "2"
+
+[lints.rust]
+# MSVC's link.exe writes its "Creating library ..." notice to stdout; the
+# linker_messages lint surfaces that as a warning on every DLL build. The
+# message is informational, so silence the lint (scoped to this crate, the
+# only one that exports a cdylib).
+linker_messages = "allow"
