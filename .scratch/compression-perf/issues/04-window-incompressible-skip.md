@@ -1,7 +1,7 @@
 # 04 — window-level incompressible skip for MT encode
 
 Type: task
-Status: open
+Status: open (parked — 2026-09 priorities moved to the WinRAR ratio/speed gap; the random-data speed lead over WinRAR is already 10-80x, so this is low value)
 
 ## Question
 

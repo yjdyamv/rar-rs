@@ -6,6 +6,8 @@
 
 - RAR5 创建/读取全功能对齐 WinRAR 7.23：压缩、`-hp` 头加密、分卷、solid、内联恢复记录、`.rev` 恢复卷、quick-open、NTFS ADS、三时间戳、owner；另含 RAR7 (v70) 读写、`-mt` 多线程压缩、长距离匹配。
 - **最优解析**（m2-m5 全部）：rars 移植的 forward shortest-path DP（每块收集一次匹配、按上一 pass 的 Huffman 表重新定价 3 次、LZMA BT4 tree finder 全程 + 历史种子、BlockSplitter 按字节分布切 64-128 KiB 块、每块独立表）。m3（默认）vs WinRAR 7.23：生成代码 -52%、XML -24%、文本 -13%、DLL +2-6%（此前 +3-23%）；m2 在 DLL 上已反超 WinRAR。所有输出 WinRAR 字节级可解。
+- **自适应发射块大小（2026-09）**：解剖 WinRAR 7.23 符号流（analyze_stream 工具）定位到 text64 压缩率差（12681 vs 8769 B）纯粹是每块表开销——WinRAR 在分布稳定数据上整成员一块，我们硬限 128 KiB。发射块现在合并到 4 MiB，符号流在 64 KiB 子跨度间的局部字面量/距离/长度分布漂移时提前闭合（异构二进制——DLL 节、XML——保持小块，对齐 WinRAR 的 ~64 KiB DLL 块）。解析本身不变（仍 64-128 KiB，DP 内存有界）。实测 m3 seq：text64 12607→6058（-52%，赢 WinRAR 8696）、dll -0.5%、mixed -640 B、xml +157 B（+0.18%，记录在案）、sparse/random 不变
+- **持久树跨 chunk 损坏修复（2026-09）**：验证新块大小时发现既有静默损坏——窗口跨 chunk 增长时 `grow_to` 用新零数组替换 son（head 表幸存），而 0 是到位置 0 的合法链接；`rebase` 同类缺陷（链接只改值不迁槽）。密集 x86 成员产生抄 MZ 头的假匹配，unrar 与 WinRAR 双双报 checksum error。修复：grow_to 复制旧链接、rebase 把链接迁移到新环槽、收集器在解析定价前逐字节验证每个树报告（未来任何不变量破坏的安全网）。回归：129 KB 真实内核镜像前缀（旧代码在 129,334 字节处损坏，dict 2^3 + 64 KiB chunk）现字节级回环。DLL 自动 x86 过滤器产物 5.75 MB（43.90%），赢 WinRAR 7.23 的 5.87 MB（44.81%），双向完整性校验通过
 - **自动 x86 过滤器**：rars 移植的结构扫描（E8/E8E9 簇/跨度检测）自动应用于内存路径成员；过滤器成员按非 solid 写出。修复了 solid 链中过滤器位置的流式绝对/成员相对语义（unrar `WrittenFileSize` 为成员相对、区域定位为流绝对、E8 偏移按 16 MiB 取模）。
 - 命令面：官方 rar 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt` 列表变体）。
 - 工程：fmt/clippy `-D warnings` 双门（本地，含测试目标）、五目标 fuzz（`fuzz/`）、取消钩子、QO 快路径 `open_quick`、流式修复 `repair_archive_path`、零填充分卷集支持。
@@ -13,10 +15,10 @@
 
 ## 待办（下一批，issue 见 `.scratch/compression-perf/`）
 
-- **窗口级不可压缩跳过（04，待定）**：全随机成员 mt8 仍 ~486 ms——collect（树/LR 下降）+ 全字面量块的 Huffman 编码，而成员级 STORE 回退最终会丢弃这些输出。窗口探测（4 字节窗去重率 ≥99.5%）可门控跳过 parse 直接发全字面量块；风险是卡在 100% 边界 ±0.5% 的成员从 compressed 翻成 STORE——需要边界语料量化后才能定（严格 ratio 约束下可能放弃）
 - **流式路径自动过滤器（05）**：delta/x86 过滤器只走内存路径（<64 MiB 成员）；大音频/裸盘镜像 >64 MiB 走 spill 流式路径无过滤器，ratio 远差于 WinRAR——需调研 delta 可否按窗口应用、区域保持成员相对
 - **solid 归档 MT（06）**：solid 强制串行，备份类负载无多线程收益；MT 对 seq 的既有分歧（x86 +8.2%，重复距离缓存按片重置）会带进 solid，需先评估可接受性
 - 随机数据 ~800 ms 未记账开销（fast-path 循环、splitter、播种、LR 建表、片组装）尚未逐项归因
+- **dll 单线程解析速度**（map 追踪）：WinRAR m3 1.8s vs 我们 ~6s；ratio 已反超（43.90% vs 44.81%），速度仍 3x 落后
 
 ## 已取消 / 不做
 

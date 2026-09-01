@@ -57,6 +57,29 @@ MiB/s vs WinRAR ~7 MiB/s. (2) MT scaling is healthy on unfiltered files
 text ratio gap (12681 vs 8769). (4) incompressible probe keeps us 10-80x
 faster than WinRAR on random data.
 
+## Head-to-head after adaptive blocks + corruption fix (2026-09, m3 seq)
+
+Same corpus, this machine (release). All roundtrips byte-verified; our
+archives pass WinRAR `t`, WinRAR archives pass our `t`.
+
+| file | ours packed | winrar packed | winrar archive | verdict |
+|---|---|---|---|---|
+| text64 | 6058 B | 8696 B (wr_text64.rar) | — | **-30% vs WinRAR** (was +44% worse) |
+| dll (x86 filter) | 5751393 B (43.90%) | 5870437 B (44.81%, dll8.rar) | — | **-2% vs WinRAR**; previously CORRUPT (silent tree bug, fixed) |
+| mixed20 | 10489643 B (50.02%) | 10492xxx B | — | ≈ / slightly better |
+| rand64 | 67118715 B | 67108940 B | — | tie (STORE) |
+| xml (1 MB) | 88950 B | 87656 B | — | +1.5% (pre-existing parse gap, not block overhead) |
+
+text64 12681→6058 came from emitted-block merging (see PLAN.md): WinRAR
+writes one block per member on stable data; we merge emitted blocks to 4
+MiB with local-drift closing. dll's corruption was the persistent tree
+wiping its son array on chunk grows + rebase slot misplacement — fixed,
+with a byte-verification net and a 129 KB x86 regression fixture.
+
+Remaining gaps: dll single-thread parse speed (~6 s vs WinRAR 1.8 s — ratio
+now wins), xml parse (~1.5%), text64 MT ratio (6554 vs 6058, the documented
+MT divergence).
+
 ## Filter members are MT now (2026-08, 2e21d0b)
 
 encode_with_filters_mt: forward transform (unchanged) + windowed MT encode,
