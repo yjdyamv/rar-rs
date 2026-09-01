@@ -4099,10 +4099,16 @@ pub struct BlockStat {
 pub struct StreamAnalysis {
     pub blocks: Vec<BlockStat>,
     pub unpacked: u64,
-    /// Match length buckets: <16, 16-63, 64-255, 256-1023, 1024+.
-    pub len_hist: [u64; 5],
+    /// Match length buckets: <2, 2, 3, 4-15, 16-63, 64-255, 256-1023, 1024+.
+    pub len_hist: [u64; 8],
     /// Match distance buckets: <4K, 4K-64K, 64K-1M, 1M-4M, 4M+.
     pub dist_hist: [u64; 5],
+    /// Distance buckets (<16, <256, <4K, <64K, 64K+) for len-2 and len-3
+    /// matches: `[len-2][bucket]`. WinRAR's short matches are almost all at
+    /// short distances, so this separates the cheap ones from the rest.
+    pub short_dist: [[u64; 5]; 2],
+    /// Filter regions as `(member-relative start, length)`.
+    pub filter_regions: Vec<(u64, u64)>,
 }
 
 /// Walk a RAR5/RAR7 compressed member stream and record per-block symbol
@@ -4191,7 +4197,10 @@ pub fn analyze_stream(
                 produced += 1;
             } else if sym == SYM_FILTER {
                 stat.filters += 1;
-                parse_filter(&mut reader, produced)?;
+                let filt = parse_filter(&mut reader, produced)?;
+                // Record the filter region's member-relative coverage.
+                out.filter_regions
+                    .push((filt.block_start, filt.block_length));
             } else if sym == SYM_REPEAT {
                 stat.repeats += 1;
                 if last_length > 0 && dist_cache[0] > 0 {
@@ -4222,6 +4231,9 @@ pub fn analyze_stream(
                 produced += length as u64;
                 bucket_len(&mut out, length);
                 bucket_dist(&mut out, dist.min(u32::MAX as u64) as u32);
+                if length == 2 || length == 3 {
+                    bucket_dist_short(&mut out, length, dist.min(u32::MAX as u64) as u32);
+                }
             }
         }
         let block_end_bits = block_start_bits + block_bits;
@@ -4236,16 +4248,22 @@ pub fn analyze_stream(
 }
 
 fn bucket_len(out: &mut StreamAnalysis, len: u32) {
-    let b = if len < 16 {
+    let b = if len < 2 {
         0
-    } else if len < 64 {
+    } else if len == 2 {
         1
-    } else if len < 256 {
+    } else if len == 3 {
         2
-    } else if len < 1024 {
+    } else if len < 16 {
         3
-    } else {
+    } else if len < 64 {
         4
+    } else if len < 256 {
+        5
+    } else if len < 1024 {
+        6
+    } else {
+        7
     };
     out.len_hist[b] += 1;
 }
@@ -4263,6 +4281,23 @@ fn bucket_dist(out: &mut StreamAnalysis, dist: u32) {
         4
     };
     out.dist_hist[b] += 1;
+}
+
+/// Distance buckets for len-2 / len-3 matches (`[len_idx][bucket]`).
+fn bucket_dist_short(out: &mut StreamAnalysis, len: u32, dist: u32) {
+    let b = if dist < 16 {
+        0
+    } else if dist < 256 {
+        1
+    } else if dist < 4096 {
+        2
+    } else if dist < 65536 {
+        3
+    } else {
+        4
+    };
+    let idx = (len - 2) as usize;
+    out.short_dist[idx][b] += 1;
 }
 
 /// One decoded symbol with its output position (debug tooling).

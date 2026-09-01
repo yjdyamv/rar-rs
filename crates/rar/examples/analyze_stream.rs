@@ -114,12 +114,16 @@ fn print_analysis(a: &rar5::codec::rar50::StreamAnalysis, packed: &[u8]) {
         fmt(&rc)
     );
     println!(
-        "    len_hist  [<16,16-63,64-255,256-1023,1024+]: {:?}",
+        "    len_hist  [<2,2,3,4-15,16-63,64-255,256-1023,1024+]: {:?}",
         a.len_hist
     );
     println!(
         "    dist_hist [<4K,4K-64K,64K-1M,1M-4M,4M+]:     {:?}",
         a.dist_hist
+    );
+    println!(
+        "    short_dist len2 [<16,<256,<4K,<64K,64K+]: {:?} | len3 {:?}",
+        a.short_dist[0], a.short_dist[1]
     );
     // Block-size distribution summary.
     let mut sizes: Vec<u32> = a.blocks.iter().map(|b| b.block_size).collect();
