@@ -126,3 +126,32 @@ waste is bounded.
   serial path on every corpus — this is a pure-latency-hiding change, not
   a quality/speed tradeoff.
 - 211+ tests green, fmt/clippy clean.
+## 2026-09-01: the interleaved batch is NOT byte-identical — plan revised
+
+Implemented `matches_batch` (interleaved, N=8, three phases) and compared it
+against serial `matches()` per position on real corpora (300 K of the DLL,
+1 MB xml, window 2^6/8/10): thousands of positions differ on every corpus
+and window. The cause is the BT4's insertion-order invariant: "a slot is
+always written during its own position's insertion before any link can lead
+to it." A later position in the batch (k+5) reads an earlier position's (k)
+son slot; the interleaved phases let it read the pre-batch value (k's
+previous insertion, or 0 on first touch) instead of k's re-insertion value.
+The candidate sets overlap (every position references the earlier batch
+positions), so the full MLP cannot be extracted while preserving byte
+identity.
+
+The only byte-identical batching is to run the descents strictly in order
+(identical to the serial, heads set upfront — harmless since a descent never
+touches a later position's head) and pipeline only the *first* step's loads
+(upfront prefetch of each position's first son slot — known from the
+setup's cur). That hides ~1 of ~5.5 steps per position — roughly an 18%
+collect win, not the 2-3x planned. Given the modest payoff versus the
+complexity and the several already-rejected collect levers (nice-exit,
+chain finder, window caps), this is parked: the BT4's structural invariant
+is the real ceiling, and matching WinRAR's hand-assembled per-byte parse in
+pure Rust is unlikely. The landed speed wins (hash 20, adaptive slices)
+stand.
+
+Open: the CLI's ~1 s overhead over the library core (batch-wave + nested MT
+pool nesting) is pure waste and worth a profile pass — a lower-risk user-
+facing win than the parse core.
