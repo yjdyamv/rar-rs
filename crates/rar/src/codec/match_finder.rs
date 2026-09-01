@@ -641,7 +641,7 @@ pub struct TreeMatchFinder {
 }
 
 impl TreeMatchFinder {
-    const HASH_BITS: u32 = 17;
+    const HASH_BITS: u32 = 20;
     const MIN_MATCH: usize = 4;
 
     /// Builds a finder that remembers the last `window` positions, at
