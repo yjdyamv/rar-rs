@@ -80,6 +80,30 @@ Remaining gaps: dll single-thread parse speed (~6 s vs WinRAR 1.8 s — ratio
 now wins), xml parse (~1.5%), text64 MT ratio (6554 vs 6058, the documented
 MT divergence).
 
+## Definitive head-to-head (2026-09-01, fixed CLI, m3, this machine)
+
+After the rar-cli parallel-feature fix (the CLI silently ran single-
+threaded when built standalone — see commit "fix(cli): enable the rar5
+parallel feature") and the u64 word compare:
+
+| file | ours mt1 | ours mt8 | win mt1 | win mt8 | ours B | win B |
+|---|---|---|---|---|---|---|
+| text64 | 2275 ms | 846 ms | 927 ms | 390 ms | 6133 | 8771 |
+| dll (x86f) | 8094 ms | 3115 ms | 1722 ms | 418 ms | 5751467 | 5640802 |
+| mixed20 | 2716 ms | 1032 ms | 1254 ms | 373 ms | 10490667 | 10509703 |
+| rand64 | 192 ms | 186 ms | 15836 ms | 2663 ms | 67108940 | 67109030 |
+
+Ratio verdict: text64 **-30%** (win), mixed **-0.2%** (win), rand64 tie,
+dll **+0.84%** (43.90% vs 43.06% — the fresh WinRAR run; the earlier
+dll8.rar comparison was against a suboptimal WinRAR archive). Speed:
+2.2-2.5x behind mt1 (text64/mixed), 4.7x on the dll mt1; mt8 2.2-7.5x.
+
+DLL parse diff (both dict 2^7, m3): ours lit=2345249 / match=1082545 /
+filter records=49 / 100 blocks @ 60 KB; WinRAR lit=1833699 /
+match=1279456 / filter=203 / 207 blocks @ 28 KB. We emit ~520 K more
+literals — the remaining dll ratio gap is the parse + the x86 filter scan
+(fewer, larger filter regions vs WinRAR's finer scan).
+
 ## Filter members are MT now (2026-08, 2e21d0b)
 
 encode_with_filters_mt: forward transform (unchanged) + windowed MT encode,
