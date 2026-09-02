@@ -1206,97 +1206,30 @@ impl RarArchive {
     fn read_packed_data(&mut self, idx: usize) -> RarResult<DecryptedPayload> {
         let entry = &self.entries[idx];
         let hdr = &entry.header;
-        let chunks = &entry.chunks;
         let max_packed = self.max_packed_bytes();
-
-        let mut total_packed = 0u64;
-        for c in chunks {
-            total_packed =
-                total_packed
-                    .checked_add(c.packed_size)
-                    .ok_or_else(|| RarError::LimitExceeded {
-                        limit: max_packed,
-                        context: format!("{}: packed size overflow", hdr.name),
-                    })?;
-            if total_packed > max_packed {
-                return Err(RarError::LimitExceeded {
-                    limit: max_packed,
-                    context: format!(
-                        "{}: packed data {total_packed} bytes exceeds limit",
-                        hdr.name
-                    ),
-                });
-            }
-        }
-
-        let mut packed_data = Vec::new();
-        packed_data
-            .try_reserve_exact(total_packed as usize)
-            .map_err(|_| RarError::LimitExceeded {
-                limit: max_packed,
-                context: format!("{}: cannot allocate packed data", hdr.name),
-            })?;
-
-        for chunk in chunks {
-            self.check_cancel()?;
-            let chunk_start = packed_data.len();
-            if chunk.volume_index == 0 {
-                let stream = self.stream.as_mut().unwrap();
-                stream.seek(SeekFrom::Start(chunk.data_offset))?;
-                let mut limited = stream.take(chunk.packed_size);
-                limited.read_to_end(&mut packed_data)?;
-            } else {
-                let mut f = File::open(&self.volume_paths[chunk.volume_index])?;
-                f.seek(SeekFrom::Start(chunk.data_offset))?;
-                let mut limited = f.take(chunk.packed_size);
-                limited.read_to_end(&mut packed_data)?;
-            }
-
-            // Verify intermediate chunk CRC (packed data CRC)
-            if !chunk.is_final
-                && let Some(expected_crc) = chunk.crc32_val
-            {
-                let actual_crc = crc32fast::hash(&packed_data[chunk_start..]);
-                if actual_crc != expected_crc {
-                    return Err(RarError::Crc {
-                        expected: expected_crc,
-                        actual: actual_crc,
-                        context: format!("{} vol {}", hdr.name, chunk.volume_index),
-                    });
+        let password = self.password.as_deref();
+        let cancel = &self.cancel;
+        let mut reader = crate::rar50::payload::StreamReader {
+            stream: self.stream.as_mut().unwrap(),
+            volume_paths: &self.volume_paths,
+        };
+        crate::rar50::payload::read_packed(
+            &mut reader,
+            hdr,
+            &entry.chunks,
+            &hdr.name,
+            password,
+            max_packed,
+            || {
+                if cancel
+                    .as_ref()
+                    .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+                {
+                    return Err(RarError::Cancelled);
                 }
-            }
-        }
-
-        // Decrypt if encrypted, deriving keys once for both decryption and
-        // integrity verification.
-        let params = if !hdr.extra_data.is_empty() {
-            crypto::parse_encryption_extra(&hdr.extra_data)?
-        } else {
-            None
-        };
-        let keys = if let Some(ref p) = params {
-            let password = self.password.as_ref().ok_or_else(|| {
-                RarError::Encrypted(format!("{}: encrypted, no password set", hdr.name))
-            })?;
-            if !p.verify_password(password) {
-                return Err(RarError::WrongPassword);
-            }
-            let keys = p.derive_keys(password)?;
-            let mut data = crypto::decrypt_data(&packed_data, &keys.key, &p.iv)?;
-            if hdr.comp_method == COMP_METHOD_STORE {
-                data.truncate(hdr.unpacked_size as usize);
-            }
-            packed_data = data;
-            Some(keys)
-        } else {
-            None
-        };
-
-        Ok(DecryptedPayload {
-            data: packed_data,
-            params,
-            keys,
-        })
+                Ok(())
+            },
+        )
     }
 
     /// Maximum packed bytes accepted for one member. Bounded by the
@@ -1326,30 +1259,13 @@ impl RarArchive {
         }
 
         let payload = self.read_packed_data(idx)?;
-        let hdr = &self.entries[idx].header;
-
-        let raw_data = if hdr.comp_method == COMP_METHOD_STORE {
-            payload.data
-        } else {
-            // v70-aware decode: the in-memory `read` path must carry the
-            // declared dictionary and the DCX flag (comp_version 1), like
-            // the disk-extract path — otherwise v70 members fail with an
-            // invalid Huffman code (the DCX table has 80 codes, RAR5 64).
-            let mut raw = Vec::new();
-            crate::codec::decode_to_writer(
-                &payload.data,
-                hdr.unpacked_size,
-                crate::codec::DecodeOptions {
-                    dict_size_log: hdr.comp_dict_size,
-                    dict_size_bytes: hdr.dict_size_bytes,
-                    extra_dist: hdr.comp_version == 1,
-                    state,
-                },
-                &mut raw,
-            )
-            .map_err(RarError::Unsupported)?;
-            raw
-        };
+        let mut raw_data = Vec::new();
+        crate::rar50::payload::decode_member(
+            &self.entries[idx].header,
+            &payload,
+            state,
+            &mut raw_data,
+        )?;
 
         let crc = crc32fast::hash(&raw_data);
         let blake = self.entries[idx]
@@ -1411,26 +1327,14 @@ impl RarArchive {
         }
 
         let payload = self.read_packed_data(idx)?;
-        let hdr = &self.entries[idx].header;
         let mut sink = IntegritySink::new(writer, self.entries[idx].header.hash_value.is_some());
 
-        let written = if hdr.comp_method == COMP_METHOD_STORE {
-            sink.write_all(&payload.data).map_err(RarError::Io)?;
-            payload.data.len() as u64
-        } else {
-            crate::codec::decode_to_writer(
-                &payload.data,
-                hdr.unpacked_size,
-                crate::codec::DecodeOptions {
-                    dict_size_log: hdr.comp_dict_size,
-                    dict_size_bytes: hdr.dict_size_bytes,
-                    extra_dist: hdr.comp_version == 1,
-                    state,
-                },
-                &mut sink,
-            )
-            .map_err(RarError::Unsupported)?
-        };
+        let written = crate::rar50::payload::decode_member(
+            &self.entries[idx].header,
+            &payload,
+            state,
+            &mut sink,
+        )?;
 
         let (crc, blake) = sink.finish();
         self.verify_integrity(

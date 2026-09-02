@@ -196,6 +196,12 @@ impl VolumeReaders {
     }
 }
 
+impl crate::rar50::payload::ChunkReader for VolumeReaders {
+    fn read_chunk(&mut self, vol: usize, offset: u64, len: u64) -> RarResult<Vec<u8>> {
+        VolumeReaders::read_chunk(self, vol, offset, len)
+    }
+}
+
 /// Parse the recovery parameters out of an existing `.rev` file header:
 /// `(rec_count, data_count)`.
 fn rev_params_from_file(path: &Path) -> RarResult<(u32, u32)> {

@@ -20,6 +20,7 @@ pub mod blake2sp;
 pub(crate) mod extract;
 #[doc(hidden)]
 pub mod headers;
+pub(crate) mod payload;
 pub mod vint;
 pub(crate) mod write;
 
