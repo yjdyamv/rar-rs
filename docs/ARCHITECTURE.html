@@ -84,7 +84,7 @@ flowchart LR
       <!-- ============ 2. 模块地图 ============ -->
       <section id="s2">
         <h2 class="font-serif text-2xl font-semibold mb-1">2 · 库 crate 模块地图</h2>
-        <p class="text-sm text-slate-500 mb-4"><span class="mono">src/</span> 的模块划分为门面/状态层与四个核心子系统。词汇（块类型、块标志、extra 类型、压缩方法名）集中在 <span class="mono">rar50/mod.rs</span>，结构（序列化/解析）在 <span class="mono">rar50/headers.rs</span>——两者拆分使常量保持无依赖、头代码可用 crate 其余部分。</p>
+        <p class="text-sm text-slate-500 mb-4"><span class="mono">src/</span> 的模块划分为门面/状态层与四个核心子系统。词汇（块类型、块标志、extra 类型、压缩方法名）集中在 <span class="mono">rar50/mod.rs</span>，结构数据在 <span class="mono">rar50/headers/</span>（<span class="mono">parse.rs</span> / <span class="mono">serialize.rs</span> / <span class="mono">locator.rs</span>）——拆成目录使常量保持无依赖、头代码可被 crate 其余部分复用。</p>
 
         <div class="rounded-xl border border-slate-200 bg-white p-5">
           <div class="grid md:grid-cols-2 gap-5">
@@ -112,7 +112,8 @@ flowchart LR
               <p class="tag text-indigo-500 mb-3">容器层 · rar50/</p>
               <ul class="mono text-xs text-slate-600 space-y-1.5">
                 <li class="mod pl-2">mod.rs — 常量 + 块/头标志词汇</li>
-                <li class="mod pl-2">headers.rs — 块 & 头数据结构（序列化/解析）</li>
+                <li class="mod pl-2">headers/ — 块 & 头数据结构（parse.rs / serialize.rs / locator.rs）</li>
+                <li class="mod pl-2">payload.rs — MemberDecoder（ChunkReader · read_packed · decode_member）</li>
                 <li class="mod pl-2">vint.rs — 变长整数 codec</li>
                 <li class="mod pl-2">blake2sp.rs — BLAKE2sp 成员哈希</li>
                 <li class="mod pl-2">extract.rs — 读路径：scan/list/read/extract/solid 链</li>
@@ -127,7 +128,7 @@ flowchart LR
               <p class="tag text-indigo-500 mb-3">压缩 codec · codec/</p>
               <ul class="mono text-xs text-slate-600 space-y-1.5">
                 <li class="mod pl-2">mod.rs — 分发</li>
-                <li class="mod pl-2">rar50.rs — LZSS+Huffman 编码 + 解码</li>
+                <li class="mod pl-2">rar50/ — mod.rs + encoder.rs + decoder.rs（LZSS+Huffman）</li>
                 <li class="mod pl-2">bitstream.rs — MSB-first 位 I/O</li>
                 <li class="mod pl-2">huffman.rs — Huffman 表构建/解码（quick-lookup）</li>
                 <li class="mod pl-2">filters.rs — Delta / E8 / E8E9 / ARM 过滤器</li>
@@ -177,7 +178,7 @@ flowchart LR
               <span class="ar">→</span>
               <span class="rounded border border-slate-300 bg-slate-50 px-2 py-1">提取流式写出（不物化整文件）</span>
             </div>
-            <p class="text-xs text-slate-500">压缩本身把 LZSS 流切成 ≤ 128 KiB（<span class="mono">MAX_BLOCK_SIZE</span>）块，每块独立 Huffman 表；过滤器区域上限 <span class="mono">0x3FFFF</span>。最坏内存 ≈ packed 大小 + 一个块，而非正比于整个文件的符号表。</p>
+            <p class="text-xs text-slate-500">压缩发射块合并到 ≤ 4 MiB（每块独立 Huffman 表），符号流局部分布漂移时提前闭合（见 FORMAT §6.1）；解析侧分块预算上限 128 KiB（<span class="mono">MAX_BLOCK_SIZE</span>）；滤波器区域上限 <span class="mono">0x3FFFF</span>。最坏内存 ≈ packed 大小 + 一个发射块，而非正比于整个文件的符号表。</p>
           </div>
 
           <div class="rounded-xl border border-slate-200 bg-white p-5">

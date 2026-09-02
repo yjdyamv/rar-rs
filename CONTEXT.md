@@ -9,7 +9,9 @@
 - **Volume（分卷）** — 多卷归档的单个 `.partN.rar` 文件；成员数据按卷切成 Chunk。
 - **Chunk（分块）** — 跨卷成员在某卷中的数据段。非末块头携带该块密文 CRC32；末块携带（hash-key MAC 过的）明文 CRC，并携带完整 extra 记录。
 - **Solid chain（固态链）** — 连续压缩成员共享一个 LZ 窗口；EncoderState/DecoderState 跨成员保持。单卷与分卷均已支持。
-- **EncoderState / DecoderState** — 跨块/跨成员保持的编解码状态（lookbehind tail、dist cache、last length、Huffman 表），定义在 `codec/rar50.rs`。
+- **EncoderState / DecoderState** — 跨块/跨成员保持的编解码状态（lookbehind tail、dist cache、last length、Huffman 表），定义在 `codec/rar50/encoder.rs` 与 `decoder.rs`。
+- **Emitted block（发射块）/ parse block（解析块）** — 压缩流两种块：写侧把 LZSS 符号流切成**发射块**（≤ 4 MiB，局部字面量/距离/长度分布漂移时提前闭合，每块独立 Huffman 表）；解析/预算侧分块上限仍 128 KiB（`MAX_BLOCK_SIZE`）。发射块大小与解析块解耦（自适应发射块，2026-09）。
+- **MemberDecoder** — `rar50/payload.rs`：统一成员读/解码门面（`ChunkReader` trait + `read_packed` + `decode_member`），STORE 直通与压缩解码共用。
 - **Spill file（溢出文件）** — 大文件（≥ `STREAM_COMPRESS_THRESHOLD`，64 MiB）压缩路径的临时落盘文件：压缩流先溢出，头写出后再流式进归档，保证内存有界。
 - **Streaming payload（流式负载）** — `write_streamed_payload`（`rar50/write/mod.rs`）：统一流式写路径（单卷/分卷 + 可选流式 AES-256-CBC），`write_stored_file` 是其 STORE 特例。
 - **CbcRangeEmitter** — `rar50/write/engine.rs` 中连续 CBC 密文按任意字节区间发出的机制（read-ahead 到块边界 + ≤15B carry），使加密分块边界任意、卷大小仍精确（与 WinRAR 字节级一致）。
@@ -28,8 +30,8 @@
 
 ## 分层结构（镜像参考架构 rars）
 
-- **格式层 `rar50/`**：容器常量 + 头类型/解析（mod.rs）、读路径（extract.rs）、写管线（write/{mod,engine,layout}.rs）、vint/blake2sp。将来低版本格式加 `rar40/` 等兄弟模块。
-- **编解码层 `codec/`**：一族一文件（codec/rar50.rs = 编码器+解码器+compress/decompress 分发）；bitstream/huffman/filters/match_finder/window 为共享原语。
+- **格式层 `rar50/`**：容器常量 + 头类型/解析（mod.rs + headers/{parse,serialize,locator}.rs）、成员读/解码门面（payload.rs）、读路径（extract.rs）、写管线（write/{mod,engine,layout}.rs）、vint/blake2sp。将来低版本格式加 `rar40/` 等兄弟模块。
+- **编解码层 `codec/`**：一族一目录（codec/rar50/{mod,encoder,decoder}.rs = 编码器 + 解码器 + compress/decompress 分发）；bitstream/huffman/filters/match_finder/window 为共享原语。
 - **加密层 `crypto/`**：一族一文件（crypto/rar50.rs）。
 - **恢复层 `recovery/`**：rar5.rs（内联 RR）+ rev5.rs（.rev 卷）。
 - **基础设施**：detect.rs（签名/SFX 扫描）、parallel.rs（Rayon 池）、io_util.rs（原子暂存/有界读）、version.rs/features.rs（薄词汇模块）、options.rs/error.rs/write_progress.rs。
@@ -43,5 +45,5 @@
 - fuzz：`fuzz/` 独立 crate（不在 workspace），五目标 parse/crypto/recovery（读侧）+ write/rewrite（写侧），standalone 变异循环 + `cargo +nightly fuzz run <t> --features fuzzing` 双模式；语料嵌入真实 WinRAR fixture。
 - 回归验证：fmt/clippy `-D warnings` 双门（本地手动跑）+ fuzz（`fuzz/` 五目标，standalone 变异循环 + libFuzzer 双模式）。
 - 迁移记录：仿 rars 架构重构的完整计划与决策（见 `PLAN.md` 与 git 历史）。
-- 格式参考：`docs/FORMAT_RAR5_RAR7.html`（RAR5/RAR7 格式可视化参考，以本实现为准，冲突处对照 rars）。
+- 文档索引：`docs/README.md`（所有文档的导航入口）；格式细节见 `docs/FORMAT_RAR5_RAR7.html`（以本实现为准，冲突处对照 rars）。
 - 计划：`PLAN.md`（已完成记录 + WinRAR 7.23 差距清单）。

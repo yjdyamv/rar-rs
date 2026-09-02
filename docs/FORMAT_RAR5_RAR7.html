@@ -407,7 +407,7 @@ flowchart LR
           <div class="rounded-xl border border-slate-200 bg-white p-4">
             <p class="tag text-indigo-500 mb-2">6.1 压缩块头</p>
             <p class="mono text-xs text-slate-600 mb-2">[标志 1][校验 1][大小 1–3 LE][块数据]</p>
-            <p class="text-xs text-slate-600">标志 bit 7=含 Huffman 表；bit 6=末块；bit 5–3=大小字段宽度−1；bit 2–0=末字节有效位−1。校验 = <span class="mono">0x5A ^ 标志 ^ 大小每字节</span>。空成员：单块 <span class="mono">0x40</span>。编码器把 LZSS 流切成 ≤ 128 KiB（0x20000）块。</p>
+            <p class="text-xs text-slate-600">标志 bit 7=含 Huffman 表；bit 6=末块；bit 5–3=大小字段宽度−1；bit 2–0=末字节有效位−1。校验 = <span class="mono">0x5A ^ 标志 ^ 大小每字节</span>。空成员：单块 <span class="mono">0x40</span>。主压缩路径把 LZSS 流切成<strong>发射块</strong>合并到 ≤ 4 MiB，每块独立 Huffman 表；符号流在 ~64 KiB 子跨度间局部字面量/距离/长度分布漂移时提前闭合（重复文本整成员一块，异构二进制保持 ~64 KiB 小块，对齐 WinRAR）。解析侧分块预算上限仍 128 KiB（<span class="mono">MAX_BLOCK_SIZE</span>），滤波器编码路径也在 128 KiB 块内。</p>
           </div>
           <div class="rounded-xl border border-slate-200 bg-white p-4">
             <p class="tag text-indigo-500 mb-2">6.2 Huffman 表</p>
@@ -664,7 +664,7 @@ flowchart TD
           <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">压缩信息位</p><p class="mono text-xs text-slate-600">0–5 version · 6 solid · 7–9 method<br>10–14 dict · 15–19 frac · 方法 0 store / 1–5 级别<br>OS 0 windows / 1 unix</p></div>
           <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">extra 记录</p><p class="mono text-xs text-slate-600">0x01 加密 · 0x02 哈希 · 0x03 时间 · 0x04 版本<br>0x05 重定向 · 0x06 owner · 0x07 服务数据</p></div>
           <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">重定向类型</p><p class="mono text-xs text-slate-600">0x01 unix-link · 0x02 win-link · 0x03 junction<br>0x04 hardlink · 0x05 file-copy</p></div>
-          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">Huffman / 压缩块</p><p class="mono text-xs text-slate-600">NC 306 / DC 64 / DCX 80 / LDC 16 / RC 44 / BC 20；码长 ≤ 15<br>0x5A 校验种子；分块上限 128 KiB（0x20000）</p></div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">Huffman / 压缩块</p><p class="mono text-xs text-slate-600">NC 306 / DC 64 / DCX 80 / LDC 16 / RC 44 / BC 20；码长 ≤ 15<br>0x5A 校验种子；发射块 ≤ 4 MiB（自适应早闭），解析预算 128 KiB（0x20000）</p></div>
           <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">过滤器 / 加密</p><p class="mono text-xs text-slate-600">0 Delta / 1 E8 / 2 E8E9 / 3 ARM；区域 ≤ 0x3FFFF<br>AES-256-CBC；盐 16 / IV 16 / 校验 12；KDF 2^15 默认</p></div>
           <div class="rounded-xl border border-slate-200 bg-white p-4"><p class="tag text-indigo-500 mb-2">GF(2¹⁶)</p><p class="mono text-xs text-slate-600">本原多项式 0x1100b<br>Cauchy M[i][j] = inv((i+ND) ^ j)</p></div>
         </div>
@@ -675,7 +675,7 @@ flowchart TD
         <h2 class="font-serif text-2xl font-semibold mb-1">附录 B · 参考来源</h2>
         <div class="rounded-xl border border-slate-200 bg-white p-5 mt-4 text-sm text-slate-600">
           <ul class="space-y-1.5">
-            <li>· <strong>权威</strong>：rar-rs 实现（<span class="mono">crates/rar/src/rar50/{mod,headers,vint,blake2sp,extract,write}.rs</span>、<span class="mono">codec/rar50.rs</span>、<span class="mono">crypto/rar50.rs</span>、<span class="mono">recovery/{rar5,rev5}.rs</span>），WinRAR 7.23 双向互操作验证。</li>
+            <li>· <strong>权威</strong>：rar-rs 实现（<span class="mono">crates/rar/src/rar50/{mod,payload,extract}.rs</span>、<span class="mono">rar50/headers/{parse,serialize,locator}.rs</span>、<span class="mono">rar50/write/{mod,engine,layout}.rs</span>、<span class="mono">codec/rar50/{encoder,decoder}.rs</span>、<span class="mono">crypto/rar50.rs</span>、<span class="mono">recovery/{rar5,rev5}.rs</span>），WinRAR 7.23 双向互操作验证。</li>
             <li>· 交叉核对：bitplane/rars（<span class="mono">crates/rars/src/rar50*.rs</span>）与 <a class="text-indigo-600" href="https://github.com/bitplane/rar-research">rar-research</a> 规格书；冲突处以本实现为准。</li>
             <li>· 位流格式源自对 libarchive <span class="mono">archive_read_support_format_rar5.c</span>（Grzegorz Antoniak, 2018, BSD-2-Clause）的独立分析。</li>
           </ul>

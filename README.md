@@ -110,9 +110,13 @@ rejected; KDF strength is capped at 2²⁴ iterations (default 2¹⁵).
 
 ## Documentation
 
-- **Format reference** — [visual diagram (HTML)](docs/FORMAT_RAR5_RAR7.html)
+Full index in **[docs/README.md](docs/README.md)**. Highlights:
+
+- **Format reference** — [visual diagram (HTML)](docs/FORMAT_RAR5_RAR7.html) (authoritative)
 - **Architecture & module layout** — [docs/ARCHITECTURE.html](docs/ARCHITECTURE.html)
 - **CLI reference** — [docs/CLI.md](docs/CLI.md)
+- **Domain vocabulary** — [CONTEXT.md](CONTEXT.md)
+- **Roadmap / status** — [PLAN.md](PLAN.md)
 
 ## Legal
 
