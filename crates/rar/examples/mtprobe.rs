@@ -74,7 +74,7 @@ fn main() {
             &mut seed,
             threads,
             true,
-            false,
+            rar5::ArchiveVersion::Rar50,
         );
         let mt_ms = t1.elapsed().as_millis() as f64;
         let ratio = packed.len() as f64 * 100.0 / data.len() as f64;

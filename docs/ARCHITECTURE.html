@@ -96,7 +96,7 @@ flowchart LR
                 <li class="mod pl-2">archive.rs — <span class="mono">RarArchive</span> 共享状态 + 生命周期</li>
                 <li class="mod pl-2">rewrite.rs — 手术式 delete/rename（字节级重写）</li>
                 <li class="mod pl-2">name_policy.rs — 路径收集 + 掩码</li>
-                <li class="mod pl-2">version.rs — <span class="mono">ArchiveVersion</span>（RAR5/RAR7 检测）</li>
+                <li class="mod pl-2">version.rs — <span class="mono">ArchiveVersion</span>：容器<em>家族</em>（RAR5）内的编解码<em>版本</em>（v50 / v70 codec）</li>
                 <li class="mod pl-2">features.rs — <span class="mono">FeatureSet</span>（能力报告）</li>
                 <li class="mod pl-2">options.rs — <span class="mono">CreateOptions</span> / <span class="mono">ExtractOptions</span></li>
                 <li class="mod pl-2">error.rs — <span class="mono">RarError</span> / <span class="mono">RarResult</span></li>

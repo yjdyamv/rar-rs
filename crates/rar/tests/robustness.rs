@@ -97,7 +97,13 @@ fn unpack50_decode_random_inputs_do_not_panic() {
             continue;
         }
         let stream = random_bytes(&mut rng, 1024 * 1024);
-        let _ = rar5::codec::decode_standalone(&stream, unpacked, dict.min(13), None, false);
+        let _ = rar5::codec::decode_standalone(
+            &stream,
+            unpacked,
+            dict.min(13),
+            None,
+            rar5::ArchiveVersion::Rar50,
+        );
     }
 }
 

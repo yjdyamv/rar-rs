@@ -15,7 +15,7 @@ fn main() {
 }
 
 fn analyze(path: &str) {
-    let mut rar = match rar5::RarArchive::open(path) {
+    let rar = match rar5::RarArchive::open(path) {
         Ok(r) => r,
         Err(e) => {
             println!("{path}: cannot open: {e}");
@@ -38,13 +38,8 @@ fn analyze(path: &str) {
         f.seek(SeekFrom::Start(h.data_offset)).unwrap();
         let mut buf = vec![0u8; h.packed_size as usize];
         f.read_exact(&mut buf).unwrap();
-        let extra_dist = h.comp_version == 1; // RAR7 v70
-        match rar5::codec::rar50::analyze_stream(
-            &buf,
-            h.unpacked_size,
-            h.comp_dict_size,
-            extra_dist,
-        ) {
+        let variant = rar5::ArchiveVersion::from_v70(h.comp_version == 1); // RAR7 v70
+        match rar5::codec::rar50::analyze_stream(&buf, h.unpacked_size, h.comp_dict_size, variant) {
             Ok(a) => print_analysis(&a, &buf),
             Err(err) => println!("    analyze: {err}"),
         }
@@ -139,14 +134,7 @@ fn print_analysis(a: &rar5::codec::rar50::StreamAnalysis, packed: &[u8]) {
     let lit_share: Vec<u64> = a
         .blocks
         .iter()
-        .map(|b| {
-            let out = b.out_bytes;
-            if out == 0 {
-                100
-            } else {
-                b.literals * 100 / out
-            }
-        })
+        .map(|b| (b.literals * 100).checked_div(b.out_bytes).unwrap_or(100))
         .collect();
     let p50 = lit_share.iter().filter(|&&v| v >= 50).count();
     let p85 = lit_share.iter().filter(|&&v| v >= 85).count();

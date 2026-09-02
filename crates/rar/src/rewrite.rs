@@ -452,7 +452,7 @@ impl RarArchive {
 
         let plain_crc = crc32fast::hash(&data);
         let plain_blake = hdr.hash_value.map(|_| crate::rar50::blake2sp::hash(&data));
-        let extra_dist = hdr.dict_size_bytes.is_some();
+        let variant = crate::version::ArchiveVersion::from_v70(hdr.dict_size_bytes.is_some());
         let packed = compression::compress_chunked(
             &data,
             hdr.comp_method,
@@ -461,7 +461,7 @@ impl RarArchive {
             Some(enc),
             true,
             None,
-            extra_dist,
+            variant,
         )
         .map_err(RarError::Unsupported)?;
 
@@ -1149,7 +1149,7 @@ impl RarArchive {
 
         let plain_crc = crc32fast::hash(&data);
         let plain_blake = hdr.hash_value.map(|_| crate::rar50::blake2sp::hash(&data));
-        let extra_dist = hdr.dict_size_bytes.is_some();
+        let variant = crate::version::ArchiveVersion::from_v70(hdr.dict_size_bytes.is_some());
         let packed = compression::compress_chunked(
             &data,
             hdr.comp_method,
@@ -1158,7 +1158,7 @@ impl RarArchive {
             Some(enc),
             true,
             None,
-            extra_dist,
+            variant,
         )
         .map_err(RarError::Unsupported)?;
 

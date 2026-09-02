@@ -169,7 +169,7 @@ pub(crate) fn decode_member(
             crate::codec::DecodeOptions {
                 dict_size_log: hdr.comp_dict_size,
                 dict_size_bytes: hdr.dict_size_bytes,
-                extra_dist: hdr.comp_version == 1,
+                variant: crate::version::ArchiveVersion::from_v70(hdr.comp_version == 1),
                 state,
             },
             out,

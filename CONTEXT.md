@@ -5,6 +5,7 @@
 ## 领域词汇
 
 - **Archive（归档）** — 一个 RAR5 归档：单卷文件或 `.partN.rar` 分卷集。
+- **ArchiveVersion（归档版本）** — *家族 vs 版本*命名：`ArchiveVersion`（`version.rs`）取的是 RAR5 容器**家族**内的编解码**版本**，不是容器本身。现仅两变体 `Rar50`（v50 codec，DC 64 码）与 `Rar70`（v70 codec，DCX 80 码），共用同一容器/签名/信封。`from_v70(bool)` 由成员头（读：`comp_version == 1`；写：字节级字典存在）映射；`uses_extra_dist()` 在 DC/DCX 表间选择。
 - **Member（成员）** — 归档中的一个条目（文件 / 目录 / 重定向），对应一个文件头 + 数据区。
 - **Volume（分卷）** — 多卷归档的单个 `.partN.rar` 文件；成员数据按卷切成 Chunk。
 - **Chunk（分块）** — 跨卷成员在某卷中的数据段。非末块头携带该块密文 CRC32；末块携带（hash-key MAC 过的）明文 CRC，并携带完整 extra 记录。

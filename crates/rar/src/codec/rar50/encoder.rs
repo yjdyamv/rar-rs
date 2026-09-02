@@ -12,6 +12,7 @@ use crate::codec::bitstream::BitWriter;
 use crate::codec::filters::apply_filter_encode;
 use crate::codec::huffman::{EncodeTable, build_code_lengths_from_freqs, encode_symbol};
 use crate::codec::match_finder::{self, MatchFinder};
+use crate::version::ArchiveVersion;
 
 // ── Compression level parameters ───────────────────────────────────────────
 
@@ -142,9 +143,9 @@ impl EncoderState {
     }
 }
 
-/// Encode raw data into RAR5/RAR7 compressed format. `extra_dist` selects
+/// Encode raw data into RAR5/RAR7 compressed format. `variant` selects
 /// the RAR7 (v70) 80-entry distance code table (RAR5 uses 64).
-pub fn encode(data: &[u8], method: u8, dict_size_log: u8, extra_dist: bool) -> Vec<u8> {
+pub fn encode(data: &[u8], method: u8, dict_size_log: u8, variant: ArchiveVersion) -> Vec<u8> {
     encode_chunked(
         data,
         method,
@@ -153,7 +154,7 @@ pub fn encode(data: &[u8], method: u8, dict_size_log: u8, extra_dist: bool) -> V
         None,
         true,
         None,
-        extra_dist,
+        variant,
     )
     .unwrap_or_default()
 }
@@ -165,7 +166,7 @@ pub fn encode_with_progress(
     method: u8,
     dict_size_log: u8,
     progress: Option<&mut dyn FnMut(u64, u64)>,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Vec<u8> {
     encode_chunked(
         data,
@@ -175,7 +176,7 @@ pub fn encode_with_progress(
         None,
         true,
         progress,
-        extra_dist,
+        variant,
     )
     .unwrap_or_default()
 }
@@ -186,7 +187,7 @@ pub fn encode_with_progress(
 /// end-of-stream flag. Returns the compressed stream; callers fall back to
 /// STORE when the result is not smaller than the input.
 ///
-/// `extra_dist` selects the RAR7 (v70) distance code table.
+/// `variant` selects the RAR7 (v70) distance code table.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_chunked(
     data: &[u8],
@@ -196,10 +197,10 @@ pub fn encode_chunked(
     state: Option<&mut EncoderState>,
     is_final: bool,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Result<Vec<u8>, String> {
     if data.is_empty() {
-        return Ok(encode_empty_block(extra_dist));
+        return Ok(encode_empty_block(variant));
     }
 
     let level = (method as usize).clamp(1, 5);
@@ -235,7 +236,7 @@ pub fn encode_chunked(
                 long_range,
                 None,
                 0,
-                extra_dist,
+                variant,
                 OPTIMAL_PARSE_PASSES[level],
                 true,
             )
@@ -255,7 +256,7 @@ pub fn encode_chunked(
         while block_start < symbols.len() {
             let (block_end, _) = find_block_end_adaptive(&symbols, block_start, EMITTED_BLOCK_SIZE);
             let is_last = is_final && chunk_end >= data.len() && block_end >= symbols.len();
-            let block_data = encode_block(&symbols[block_start..block_end], is_last, extra_dist);
+            let block_data = encode_block(&symbols[block_start..block_end], is_last, variant);
             output.extend(block_data);
             // Early bail-out: once the compressed stream already exceeds
             // the input size it can never beat STORE — stop before wasting
@@ -293,7 +294,7 @@ pub fn encode_chunked_mt(
     seed: &mut EncoderState,
     _threads: usize,
     is_final: bool,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Vec<u8> {
     // Without the pool this path is unreachable (callers gate on `use_mt`),
     // but it must compile: encode sequentially over the window.
@@ -305,7 +306,7 @@ pub fn encode_chunked_mt(
         Some(seed),
         is_final,
         None,
-        extra_dist,
+        variant,
     )
     .unwrap_or_default()
 }
@@ -320,7 +321,7 @@ pub fn encode_chunked_mt(
     seed: &mut EncoderState,
     threads: usize,
     is_final: bool,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Vec<u8> {
     encode_chunked_mt_with_progress(
         data,
@@ -330,7 +331,7 @@ pub fn encode_chunked_mt(
         seed,
         threads,
         is_final,
-        extra_dist,
+        variant,
         None,
         None,
     )
@@ -364,7 +365,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
     seed: &mut EncoderState,
     threads: usize,
     is_final: bool,
-    extra_dist: bool,
+    variant: ArchiveVersion,
     lead_symbols: Option<&[Symbol]>,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Vec<u8> {
@@ -459,7 +460,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
                             long_range,
                             OPTIMAL_PARSE_PASSES[level],
                             is_final && k + 1 == n,
-                            extra_dist,
+                            variant,
                             (k == 0).then_some(lead_symbols).flatten(),
                             state,
                         );
@@ -551,7 +552,7 @@ fn encode_mt_slice(
     long_range: bool,
     passes: usize,
     is_last_block_of_member: bool,
-    extra_dist: bool,
+    variant: ArchiveVersion,
     // Filter records of a filtered member, prepended to the first slice's
     // symbol stream so they precede all output (member-relative positions).
     lead_symbols: Option<&[Symbol]>,
@@ -603,7 +604,7 @@ fn encode_mt_slice(
         long_range,
         long_range.then_some(lr_shared),
         entry_len + s0,
-        extra_dist,
+        variant,
         passes,
         seed_tail,
     );
@@ -618,7 +619,7 @@ fn encode_mt_slice(
     while bs < symbols.len() {
         let (be, _) = find_block_end_adaptive(&symbols, bs, EMITTED_BLOCK_SIZE);
         let is_last = is_last_block_of_member && be >= symbols.len();
-        out.extend(encode_block(&symbols[bs..be], is_last, extra_dist));
+        out.extend(encode_block(&symbols[bs..be], is_last, variant));
         bs = be;
     }
     out
@@ -642,10 +643,10 @@ pub fn encode_with_filters(
     method: u8,
     dict_size_log: u8,
     filters: &[FilterSpec],
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Result<Vec<u8>, String> {
     if data.is_empty() {
-        return Ok(encode_empty_block(extra_dist));
+        return Ok(encode_empty_block(variant));
     }
     if filters.is_empty() {
         return encode_chunked(
@@ -656,7 +657,7 @@ pub fn encode_with_filters(
             None,
             true,
             None,
-            extra_dist,
+            variant,
         );
     }
 
@@ -715,7 +716,7 @@ pub fn encode_with_filters(
                 long_range,
                 None,
                 0,
-                extra_dist,
+                variant,
                 OPTIMAL_PARSE_PASSES[level],
                 true,
             )
@@ -744,7 +745,7 @@ pub fn encode_with_filters(
         while block_start < symbols.len() {
             let (block_end, _) = find_block_end(&symbols, block_start, MAX_BLOCK_SIZE);
             let is_last = is_final && block_end >= symbols.len();
-            let block_data = encode_block(&symbols[block_start..block_end], is_last, extra_dist);
+            let block_data = encode_block(&symbols[block_start..block_end], is_last, variant);
             output.extend(block_data);
             // Early bail-out: a filtered stream already larger than the
             // input cannot beat STORE (callers fall back to STORE).
@@ -796,12 +797,12 @@ pub fn encode_with_filters_mt(
     method: u8,
     dict_size_log: u8,
     filters: &[FilterSpec],
-    extra_dist: bool,
+    variant: ArchiveVersion,
     _threads: usize,
 ) -> Result<Vec<u8>, String> {
     // Without the pool, fall back to the sequential encode; the caller's
     // member-level logic (threads == 1 or no pool) makes this equivalent.
-    encode_with_filters(data, method, dict_size_log, filters, extra_dist)
+    encode_with_filters(data, method, dict_size_log, filters, variant)
 }
 
 #[cfg(feature = "parallel")]
@@ -810,14 +811,14 @@ pub fn encode_with_filters_mt(
     method: u8,
     dict_size_log: u8,
     filters: &[FilterSpec],
-    extra_dist: bool,
+    variant: ArchiveVersion,
     threads: usize,
 ) -> Result<Vec<u8>, String> {
     if data.is_empty() {
-        return Ok(encode_empty_block(extra_dist));
+        return Ok(encode_empty_block(variant));
     }
     if threads <= 1 || filters.is_empty() {
-        return encode_with_filters(data, method, dict_size_log, filters, extra_dist);
+        return encode_with_filters(data, method, dict_size_log, filters, variant);
     }
     let mut specs: Vec<FilterSpec> = Vec::new();
     for f in filters {
@@ -849,7 +850,7 @@ pub fn encode_with_filters_mt(
         &mut state,
         threads,
         true,
-        extra_dist,
+        variant,
         Some(&lead),
         None,
     ))
@@ -889,7 +890,7 @@ pub fn encode_with_auto_x86_filter(
     data: &[u8],
     method: u8,
     dict_size_log: u8,
-    extra_dist: bool,
+    variant: ArchiveVersion,
     threads: usize,
 ) -> Result<Option<Vec<u8>>, String> {
     if data.len() <= 5 {
@@ -920,7 +921,7 @@ pub fn encode_with_auto_x86_filter(
             method,
             dict_size_log,
             &specs_e9,
-            extra_dist,
+            variant,
             threads,
         )?));
     }
@@ -964,10 +965,8 @@ pub fn encode_with_auto_x86_filter(
     };
     let sample_specs_e9 = clip_specs(&specs_e9);
     let sample_specs_e8 = clip_specs(&specs_e8);
-    let sample_e9 =
-        encode_with_filters(sample, method, dict_size_log, &sample_specs_e9, extra_dist)?;
-    let sample_e8 =
-        encode_with_filters(sample, method, dict_size_log, &sample_specs_e8, extra_dist)?;
+    let sample_e9 = encode_with_filters(sample, method, dict_size_log, &sample_specs_e9, variant)?;
+    let sample_e8 = encode_with_filters(sample, method, dict_size_log, &sample_specs_e8, variant)?;
     if sample_e8.len() != sample_e9.len()
         && !sample_specs_e8.is_empty()
         && !sample_specs_e9.is_empty()
@@ -981,7 +980,7 @@ pub fn encode_with_auto_x86_filter(
             } else {
                 &specs_e9
             },
-            extra_dist,
+            variant,
             threads,
         )?;
         return Ok(Some(packed));
@@ -989,9 +988,9 @@ pub fn encode_with_auto_x86_filter(
 
     // Inconclusive sample: keep the exact full comparison.
     let packed_e9 =
-        encode_with_filters_mt(data, method, dict_size_log, &specs_e9, extra_dist, threads)?;
+        encode_with_filters_mt(data, method, dict_size_log, &specs_e9, variant, threads)?;
     let packed_e8 =
-        encode_with_filters_mt(data, method, dict_size_log, &specs_e8, extra_dist, threads)?;
+        encode_with_filters_mt(data, method, dict_size_log, &specs_e8, variant, threads)?;
     Ok(Some(if packed_e8.len() < packed_e9.len() {
         packed_e8
     } else {
@@ -1008,15 +1007,15 @@ pub fn pick_delta_channel(
     data: &[u8],
     method: u8,
     dict_size_log: u8,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Result<Option<u8>, String> {
     let sample_len = data.len().min(1 << 16);
     let sample = &data[..sample_len];
-    let plain = encode_with_filters(sample, method, dict_size_log, &[], extra_dist)?;
+    let plain = encode_with_filters(sample, method, dict_size_log, &[], variant)?;
     let mut best: Option<(u8, usize)> = None;
     for &ch in crate::codec::filters::AUTO_DELTA_CHANNELS {
         let spec = FilterSpec::new(FILTER_DELTA, ch, 0, sample_len as u32);
-        let packed = encode_with_filters(sample, method, dict_size_log, &[spec], extra_dist)?;
+        let packed = encode_with_filters(sample, method, dict_size_log, &[spec], variant)?;
         if packed.len() < plain.len() && best.is_none_or(|(_, b)| packed.len() < b) {
             best = Some((ch, packed.len()));
         }
@@ -1039,7 +1038,7 @@ pub fn encode_with_auto_delta_filter(
     data: &[u8],
     method: u8,
     dict_size_log: u8,
-    extra_dist: bool,
+    variant: ArchiveVersion,
     threads: usize,
 ) -> Result<Option<Vec<u8>>, String> {
     // Cheap pre-gate: skip obviously-uncorrelated (random) data so we never pay
@@ -1047,7 +1046,7 @@ pub fn encode_with_auto_delta_filter(
     if crate::codec::filters::auto_delta_filter_channels(data).is_none() {
         return Ok(None);
     }
-    let Some(channels) = pick_delta_channel(data, method, dict_size_log, extra_dist)? else {
+    let Some(channels) = pick_delta_channel(data, method, dict_size_log, variant)? else {
         return Ok(None);
     };
     let block_length = (data.len() as u64).min(u32::MAX as u64) as u32;
@@ -1055,15 +1054,14 @@ pub fn encode_with_auto_delta_filter(
     // The full member encode runs on the pool like the unfiltered path;
     // the sample selection above stays sequential (64 KiB, negligible).
     let delta_packed =
-        encode_with_filters_mt(data, method, dict_size_log, &[spec], extra_dist, threads)?;
+        encode_with_filters_mt(data, method, dict_size_log, &[spec], variant, threads)?;
     // No point transforming if it does not even beat STORE.
     if delta_packed.len() >= data.len() {
         return Ok(None);
     }
     // Keep the filter only when it is strictly smaller than plain LZSS; the
     // caller's chunked (possibly solid) path is the better choice otherwise.
-    let plain_packed =
-        encode_with_filters_mt(data, method, dict_size_log, &[], extra_dist, threads)?;
+    let plain_packed = encode_with_filters_mt(data, method, dict_size_log, &[], variant, threads)?;
     if delta_packed.len() < plain_packed.len() {
         Ok(Some(delta_packed))
     } else {
@@ -1399,7 +1397,12 @@ impl EncoderMatchState {
     /// match cannot be encoded: a fresh distance's length bonus can exceed
     /// the raw length (the format's minimum match length is 2), and the
     /// optimal parser must not price a token the writer cannot emit.
-    fn encode_match(&self, length: u32, distance: u32, extra_dist: bool) -> Option<EncodedMatch> {
+    fn encode_match(
+        &self,
+        length: u32,
+        distance: u32,
+        variant: ArchiveVersion,
+    ) -> Option<EncodedMatch> {
         if distance == self.reps[0] && length == self.last_length && self.last_length != 0 {
             return Some(EncodedMatch::Repeat);
         }
@@ -1416,7 +1419,7 @@ impl EncoderMatchState {
             return None;
         }
         let len_slot = encode_length_slot(raw_length);
-        let (dist_slot, dist_extra, dbits) = encode_distance_slot(distance, extra_dist);
+        let (dist_slot, dist_extra, dbits) = encode_distance_slot(distance, variant);
         Some(EncodedMatch::New {
             len_slot,
             len_extra: length_extra_bits(raw_length, len_slot),
@@ -1475,9 +1478,9 @@ fn estimated_match_cost(
     state: &EncoderMatchState,
     length: u32,
     distance: u32,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Option<usize> {
-    match state.encode_match(length, distance, extra_dist)? {
+    match state.encode_match(length, distance, variant)? {
         EncodedMatch::Repeat => Some(2),
         EncodedMatch::CacheRef { len_slot, .. } => Some(5 + length_extra_bits(length, len_slot)),
         EncodedMatch::New {
@@ -1518,9 +1521,9 @@ impl TokenPrices<'_> {
         state: &EncoderMatchState,
         length: u32,
         distance: u32,
-        extra_dist: bool,
+        variant: ArchiveVersion,
     ) -> Option<usize> {
-        match state.encode_match(length, distance, extra_dist)? {
+        match state.encode_match(length, distance, variant)? {
             EncodedMatch::Repeat => Some(Self::code(self.nc[SYM_REPEAT])),
             EncodedMatch::CacheRef {
                 index,
@@ -1801,7 +1804,7 @@ fn same_price_run_end(
     state: &EncoderMatchState,
     length: u32,
     distance: u32,
-    extra_dist: bool,
+    variant: ArchiveVersion,
     max_match: usize,
 ) -> u32 {
     // Repeating the last distance at the last length codes in a couple of
@@ -1827,7 +1830,7 @@ fn same_price_run_end(
     if let Some(repeat_length) = repeat_length {
         end = end.min(repeat_length - 1);
     }
-    let _ = extra_dist;
+    let _ = variant;
     end.max(length).min(max_match as u32)
 }
 
@@ -1843,7 +1846,7 @@ fn optimal_parse_tokens(
     block: std::ops::Range<usize>,
     max_match: usize,
     window: usize,
-    extra_dist: bool,
+    variant: ArchiveVersion,
     prices: Option<&TokenPrices<'_>>,
     matches: &BlockMatches,
     initial: EncoderMatchState,
@@ -1967,11 +1970,11 @@ fn optimal_parse_tokens(
                     }
                     steps_left -= 1;
                 }
-                let reach = same_price_run_end(&state, length, distance, extra_dist, max_match)
-                    .min(run_end);
+                let reach =
+                    same_price_run_end(&state, length, distance, variant, max_match).min(run_end);
                 let cost = match prices {
-                    Some(prices) => prices.match_cost(&state, reach, distance, extra_dist),
-                    None => estimated_match_cost(&state, reach, distance, extra_dist),
+                    Some(prices) => prices.match_cost(&state, reach, distance, variant),
+                    None => estimated_match_cost(&state, reach, distance, variant),
                 };
                 // `None`: a fresh-distance match whose length bonus would
                 // underflow the encodable raw length — the writer cannot
@@ -2063,9 +2066,13 @@ fn convert_tokens(
     combined: &[u8],
     block: std::ops::Range<usize>,
     state: &mut EncoderMatchState,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> ConvertedTokens {
-    let dc_count = if extra_dist { HUFF_DCX } else { HUFF_DC };
+    let dc_count = if variant.uses_extra_dist() {
+        HUFF_DCX
+    } else {
+        HUFF_DC
+    };
     let mut nc_freq = vec![0u32; HUFF_NC];
     let mut dc_freq = vec![0u32; dc_count];
     let mut ldc_freq = vec![0u32; HUFF_LDC];
@@ -2113,7 +2120,7 @@ fn convert_tokens(
         });
         let len_slot = encode_length_slot(raw_length);
         nc_freq[SYM_MATCH_BASE + len_slot] += 1;
-        let (dist_slot, dist_extra, dbits) = encode_distance_slot(distance, extra_dist);
+        let (dist_slot, dist_extra, dbits) = encode_distance_slot(distance, variant);
         dc_freq[dist_slot] += 1;
         if dist_slot >= 4 && dbits >= 4 {
             ldc_freq[(dist_extra & 0xF) as usize] += 1;
@@ -2178,7 +2185,7 @@ fn find_matches_optimal(
     // table, the sequential behaviour.
     lr_shared: Option<&match_finder::LongRange>,
     lr_anchor: usize,
-    extra_dist: bool,
+    variant: ArchiveVersion,
     passes: usize,
     seed_tail: bool,
 ) -> Vec<Symbol> {
@@ -2273,7 +2280,7 @@ fn find_matches_optimal(
                 max_match,
                 window,
                 lr,
-                extra_dist,
+                variant,
                 passes,
             );
             symbols.extend(block_symbols);
@@ -2295,7 +2302,7 @@ fn find_matches_optimal(
             max_match,
             window,
             lr,
-            extra_dist,
+            variant,
             passes,
         );
         symbols.extend(block_symbols);
@@ -2332,7 +2339,7 @@ fn parse_one_block(
     max_match: usize,
     window: usize,
     lr: Option<(&match_finder::LongRange, usize, usize)>,
-    extra_dist: bool,
+    variant: ArchiveVersion,
     passes: usize,
 ) -> Vec<Symbol> {
     let matches = collect_block_matches(
@@ -2407,7 +2414,7 @@ fn parse_one_block(
         block.clone(),
         max_match,
         window,
-        extra_dist,
+        variant,
         None,
         &matches,
         initial,
@@ -2415,7 +2422,7 @@ fn parse_one_block(
     for _ in 1..passes {
         let mut screen = *state;
         let (_, (nc, dc, ldc, rc)) =
-            convert_tokens(&tokens, combined, block.clone(), &mut screen, extra_dist);
+            convert_tokens(&tokens, combined, block.clone(), &mut screen, variant);
         let (nc_l, dc_l, ldc_l, rc_l) = prices_from_frequencies(&nc, &dc, &ldc, &rc);
         let prices = TokenPrices {
             nc: &nc_l,
@@ -2428,13 +2435,13 @@ fn parse_one_block(
             block.clone(),
             max_match,
             window,
-            extra_dist,
+            variant,
             Some(&prices),
             &matches,
             initial,
         );
     }
-    let (symbols, _) = convert_tokens(&tokens, combined, block.clone(), state, extra_dist);
+    let (symbols, _) = convert_tokens(&tokens, combined, block.clone(), state, variant);
     symbols
 }
 
@@ -2571,9 +2578,13 @@ fn find_block_end_adaptive(symbols: &[Symbol], start: usize, cap: usize) -> (usi
 
 // ── Block encoding ─────────────────────────────────────────────────────────
 
-fn encode_block(symbols: &[Symbol], is_last: bool, extra_dist: bool) -> Vec<u8> {
+fn encode_block(symbols: &[Symbol], is_last: bool, variant: ArchiveVersion) -> Vec<u8> {
     // Collect frequencies
-    let dc_count = if extra_dist { HUFF_DCX } else { HUFF_DC };
+    let dc_count = if variant.uses_extra_dist() {
+        HUFF_DCX
+    } else {
+        HUFF_DC
+    };
     let mut nc_freq = vec![0u32; HUFF_NC];
     let mut dc_freq = vec![0u32; dc_count];
     let mut ldc_freq = vec![0u32; HUFF_LDC];
@@ -2585,7 +2596,7 @@ fn encode_block(symbols: &[Symbol], is_last: bool, extra_dist: bool) -> Vec<u8> 
             Symbol::Match { distance, length } => {
                 let len_slot = encode_length_slot(*length);
                 nc_freq[SYM_MATCH_BASE + len_slot] += 1;
-                let (dist_slot, _, _) = encode_distance_slot(*distance, extra_dist);
+                let (dist_slot, _, _) = encode_distance_slot(*distance, variant);
                 dc_freq[dist_slot] += 1;
                 if dist_slot >= 4 {
                     let dbits = dist_slot / 2 - 1;
@@ -2653,7 +2664,7 @@ fn encode_block(symbols: &[Symbol], is_last: bool, extra_dist: bool) -> Vec<u8> 
                     &enc_ldc,
                     *distance,
                     *length,
-                    extra_dist,
+                    variant,
                 );
             }
             Symbol::CacheRef { index, length } => {
@@ -2689,7 +2700,7 @@ fn encode_block(symbols: &[Symbol], is_last: bool, extra_dist: bool) -> Vec<u8> 
     build_block_header(&block_data, total_bits, is_last, true)
 }
 
-fn encode_empty_block(extra_dist: bool) -> Vec<u8> {
+fn encode_empty_block(variant: ArchiveVersion) -> Vec<u8> {
     let mut writer = BitWriter::new();
     let nc_lengths = {
         let mut v = vec![0u8; HUFF_NC];
@@ -2697,7 +2708,14 @@ fn encode_empty_block(extra_dist: bool) -> Vec<u8> {
         v
     };
     let dc_lengths = {
-        let mut v = vec![0u8; if extra_dist { HUFF_DCX } else { HUFF_DC }];
+        let mut v = vec![
+            0u8;
+            if variant.uses_extra_dist() {
+                HUFF_DCX
+            } else {
+                HUFF_DC
+            }
+        ];
         v[0] = 1;
         v
     };
@@ -2922,13 +2940,13 @@ fn write_match(
     enc_ldc: &EncodeTable,
     dist: u32,
     length: u32,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) {
     let len_slot = encode_length_slot(length);
     encode_symbol(enc_nc, writer, SYM_MATCH_BASE + len_slot);
     write_length_extra(writer, length, len_slot);
 
-    let (dist_slot, extra, dbits) = encode_distance_slot(dist, extra_dist);
+    let (dist_slot, extra, dbits) = encode_distance_slot(dist, variant);
     encode_symbol(enc_dc, writer, dist_slot);
     write_distance_extra(writer, enc_ldc, dist_slot, extra, dbits);
 }
@@ -2981,7 +2999,7 @@ fn write_length_extra(writer: &mut BitWriter, length: u32, slot: usize) {
 /// (`HUFF_DCX`), which covers distances up to 1 TiB. `dbits >= 4` slots
 /// split their extra bits between a raw prefix and the low nibble encoded
 /// through the LDC table.
-fn encode_distance_slot(dist: u32, extra_dist: bool) -> (usize, u32, usize) {
+fn encode_distance_slot(dist: u32, variant: ArchiveVersion) -> (usize, u32, usize) {
     if dist <= 4 {
         return ((dist - 1) as usize, 0, 0);
     }
@@ -2995,7 +3013,7 @@ fn encode_distance_slot(dist: u32, extra_dist: bool) -> (usize, u32, usize) {
     let slot = 2 * (dbits + 1) + sub as usize;
     let base = (2 | sub) << dbits;
     let extra = val - base;
-    let max_slot = if extra_dist {
+    let max_slot = if variant.uses_extra_dist() {
         HUFF_DCX - 1
     } else {
         HUFF_DC - 1
@@ -3204,7 +3222,7 @@ mod encode_tests {
                     Some(&mut state),
                     i + 1 == chunks.len(),
                     None,
-                    false,
+                    ArchiveVersion::Rar50,
                 )
                 .unwrap(),
             );
@@ -3215,8 +3233,14 @@ mod encode_tests {
             packed.len(),
             data.len()
         );
-        let roundtrip =
-            crate::codec::decode_standalone(&packed, data.len() as u64, 3, None, false).unwrap();
+        let roundtrip = crate::codec::decode_standalone(
+            &packed,
+            data.len() as u64,
+            3,
+            None,
+            ArchiveVersion::Rar50,
+        )
+        .unwrap();
         assert_eq!(roundtrip, data);
     }
 
@@ -3232,15 +3256,28 @@ mod encode_tests {
         // Varied data (literal-heavy) at several sizes.
         for size in [1usize, 100, 1000, 100_000, 300_000] {
             let data: Vec<u8> = (0..size).map(|i| (i.wrapping_mul(31) >> 3) as u8).collect();
-            let packed = encode(&data, 3, 0, true);
-            let back = decode_standalone(&packed, size as u64, 0, Some(128 * 1024), true).unwrap();
+            let packed = encode(&data, 3, 0, ArchiveVersion::Rar70);
+            let back = decode_standalone(
+                &packed,
+                size as u64,
+                0,
+                Some(128 * 1024),
+                ArchiveVersion::Rar70,
+            )
+            .unwrap();
             assert_eq!(back, data, "size {size}");
         }
         // Repeated data (match/cache-heavy).
         let data = vec![0xABu8; 300_000];
-        let packed = encode(&data, 3, 0, true);
-        let back =
-            decode_standalone(&packed, data.len() as u64, 0, Some(128 * 1024), true).unwrap();
+        let packed = encode(&data, 3, 0, ArchiveVersion::Rar70);
+        let back = decode_standalone(
+            &packed,
+            data.len() as u64,
+            0,
+            Some(128 * 1024),
+            ArchiveVersion::Rar70,
+        )
+        .unwrap();
         assert_eq!(back, data);
     }
 
@@ -3269,7 +3306,17 @@ mod encode_tests {
         let mut data = pseudo_random(half, 42);
         let copy = data[..half].to_vec();
         data.extend_from_slice(&copy);
-        let packed = encode_chunked(&data, 3, 8, 64 * 1024, None, true, None, false).unwrap();
+        let packed = encode_chunked(
+            &data,
+            3,
+            8,
+            64 * 1024,
+            None,
+            true,
+            None,
+            ArchiveVersion::Rar50,
+        )
+        .unwrap();
         // The copy half must compress to a small fraction; the random half
         // stores at ~1:1. Well below 1.5 MiB total proves the 2 MiB
         // repeat was matched.
@@ -3281,7 +3328,8 @@ mod encode_tests {
         );
         // Byte-identical round-trip (dictionary 32 MiB covers the 2 MiB
         // distance; unpacked size over the RAR5 4 GiB cap is irrelevant).
-        let back = decode_standalone(&packed, data.len() as u64, 8, None, false).unwrap();
+        let back =
+            decode_standalone(&packed, data.len() as u64, 8, None, ArchiveVersion::Rar50).unwrap();
         assert_eq!(back, data);
     }
 
@@ -3297,7 +3345,17 @@ mod encode_tests {
         let mut data = pseudo_random(half, 7);
         let copy = data[..half].to_vec();
         data.extend_from_slice(&copy);
-        let packed = encode_chunked(&data, 3, 0, 64 * 1024, None, true, None, false).unwrap();
+        let packed = encode_chunked(
+            &data,
+            3,
+            0,
+            64 * 1024,
+            None,
+            true,
+            None,
+            ArchiveVersion::Rar50,
+        )
+        .unwrap();
         // Random half ~1:1 + copy half ~1:1 → near 4 MiB. Bail-out may
         // truncate; either way it must not shrink below ~half.
         assert!(
@@ -3371,7 +3429,7 @@ mod encode_tests {
                     Some(&mut state),
                     is_final,
                     None,
-                    false,
+                    ArchiveVersion::Rar50,
                 )
                 .unwrap(),
             );

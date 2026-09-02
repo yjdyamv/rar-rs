@@ -15,6 +15,7 @@ pub use encoder::pick_delta_channel;
 pub use encoder::*;
 
 use crate::rar50::{COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_STORE};
+use crate::version::ArchiveVersion;
 
 // ── Tables / format constants ──────────────────────────────────────────────
 
@@ -86,7 +87,7 @@ pub fn compress_with_progress(
             None,
             true,
             progress,
-            false,
+            ArchiveVersion::Rar50,
         );
     }
     Err(format!("unknown compression method: {method}"))
@@ -96,9 +97,10 @@ pub fn compress_with_progress(
 /// across files (solid archives). The symbol table and match finder stay
 /// proportional to `chunk_size` instead of the whole file.
 ///
-/// `extra_dist` selects the RAR7 (v70) distance code table (80 entries
-/// instead of 64); set it when the member header declares a dictionary
-/// above 4 GiB.
+/// `variant` selects the codec variant: every archive version maps to its
+/// own distance code table (`ArchiveVersion::Rar70` → the RAR7 80-entry
+/// table instead of the RAR5 64-entry one), set when the member header
+/// declares a dictionary above 4 GiB.
 #[allow(clippy::too_many_arguments)]
 pub fn compress_chunked(
     data: &[u8],
@@ -108,7 +110,7 @@ pub fn compress_chunked(
     state: Option<&mut EncoderState>,
     is_final: bool,
     progress: Option<&mut dyn FnMut(u64, u64)>,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Result<Vec<u8>, String> {
     if method == COMP_METHOD_STORE {
         if let Some(cb) = progress {
@@ -125,7 +127,7 @@ pub fn compress_chunked(
             state,
             is_final,
             progress,
-            extra_dist,
+            variant,
         );
     }
     Err(format!("unknown compression method: {method}"))
@@ -203,9 +205,11 @@ mod mt_tests {
                 &mut EncoderState::default(),
                 4,
                 true,
-                false,
+                ArchiveVersion::Rar50,
             );
-            let out = decode_standalone(&packed, data.len() as u64, log, None, false).unwrap();
+            let out =
+                decode_standalone(&packed, data.len() as u64, log, None, ArchiveVersion::Rar50)
+                    .unwrap();
             assert_eq!(out, data, "dict log {log}");
         }
     }
@@ -221,10 +225,16 @@ mod mt_tests {
             &mut EncoderState::default(),
             3,
             true,
-            true,
+            ArchiveVersion::Rar70,
         );
-        let out =
-            decode_standalone(&packed, data.len() as u64, 6, Some(48 * 1024 * 1024), true).unwrap();
+        let out = decode_standalone(
+            &packed,
+            data.len() as u64,
+            6,
+            Some(48 * 1024 * 1024),
+            ArchiveVersion::Rar70,
+        )
+        .unwrap();
         assert_eq!(out, data);
     }
 
@@ -234,7 +244,16 @@ mod mt_tests {
         let mut w2 = prng_block(DEFAULT_CHUNK_SIZE + 123, 22);
         w2[1000..2000].copy_from_slice(&w1[1000..2000]);
         let mut st = EncoderState::default();
-        let mut packed = encode_chunked_mt(&w1, 3, 6, DEFAULT_CHUNK_SIZE, &mut st, 3, false, false);
+        let mut packed = encode_chunked_mt(
+            &w1,
+            3,
+            6,
+            DEFAULT_CHUNK_SIZE,
+            &mut st,
+            3,
+            false,
+            ArchiveVersion::Rar50,
+        );
         packed.extend(encode_chunked_mt(
             &w2,
             3,
@@ -243,11 +262,12 @@ mod mt_tests {
             &mut st,
             3,
             true,
-            false,
+            ArchiveVersion::Rar50,
         ));
         let mut full = w1;
         full.extend(&w2);
-        let out = decode_standalone(&packed, full.len() as u64, 6, None, false).unwrap();
+        let out =
+            decode_standalone(&packed, full.len() as u64, 6, None, ArchiveVersion::Rar50).unwrap();
         assert_eq!(out, full);
     }
 
@@ -262,7 +282,7 @@ mod mt_tests {
             &mut EncoderState::default(),
             4,
             true,
-            false,
+            ArchiveVersion::Rar50,
         );
         let b = encode_chunked_mt(
             &data,
@@ -272,7 +292,7 @@ mod mt_tests {
             &mut EncoderState::default(),
             4,
             true,
-            false,
+            ArchiveVersion::Rar50,
         );
         assert_eq!(a, b);
     }
@@ -309,10 +329,10 @@ mod mt_tests {
 
         for (name, data) in &corpora {
             for (level, dict_log, extra) in [
-                (2u8, 6u8, false),
-                (3, 6, false),
-                (5, 6, false),
-                (3, 3, true),
+                (2u8, 6u8, ArchiveVersion::Rar50),
+                (3, 6, ArchiveVersion::Rar50),
+                (5, 6, ArchiveVersion::Rar50),
+                (3, 3, ArchiveVersion::Rar70),
             ] {
                 set_fast_path_enabled(true);
                 let fast = encode_chunked_mt(

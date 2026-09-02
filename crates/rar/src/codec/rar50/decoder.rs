@@ -10,6 +10,7 @@ use crate::codec::bitstream::BitReader;
 use crate::codec::filters::apply_filter_decode;
 use crate::codec::huffman::{DecodeTable, decode_symbol};
 use crate::codec::window::SlidingWindow;
+use crate::version::ArchiveVersion;
 
 // ── Decoder ────────────────────────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ pub struct DecodeOptions<'a> {
     /// non-power-of-two; the window rounds up to a power of two.
     pub dict_size_bytes: Option<u64>,
     /// RAR7 algorithm variant (extended distance codes, `v70`).
-    pub extra_dist: bool,
+    pub variant: ArchiveVersion,
     /// Shared decoder state for solid-chain continuity (`None` for
     /// standalone members).
     pub state: Option<&'a mut DecoderState>,
@@ -97,14 +98,14 @@ pub fn decode(data: &[u8], unpacked_size: u64, opts: DecodeOptions<'_>) -> Resul
             &mut st.table_dc,
             &mut st.table_ldc,
             &mut st.table_rc,
-            opts.extra_dist,
+            opts.variant,
         ),
         None => decode_standalone(
             data,
             unpacked_size,
             opts.dict_size_log,
             opts.dict_size_bytes,
-            opts.extra_dist,
+            opts.variant,
         ),
     }
 }
@@ -140,7 +141,7 @@ pub fn decode_to_writer(
             &mut st.table_dc,
             &mut st.table_ldc,
             &mut st.table_rc,
-            opts.extra_dist,
+            opts.variant,
             writer,
         ),
         None => decode_standalone_to_writer(
@@ -148,7 +149,7 @@ pub fn decode_to_writer(
             unpacked_size,
             opts.dict_size_log,
             opts.dict_size_bytes,
-            opts.extra_dist,
+            opts.variant,
             writer,
         ),
     }
@@ -160,7 +161,7 @@ pub fn decode_standalone_to_writer(
     unpacked_size: u64,
     dict_size_log: u8,
     dict_size_bytes: Option<u64>,
-    extra_dist: bool,
+    variant: ArchiveVersion,
     writer: &mut dyn std::io::Write,
 ) -> Result<u64, String> {
     let dict_size = checked_dict_size(dict_size_log, dict_size_bytes)?;
@@ -185,7 +186,7 @@ pub fn decode_standalone_to_writer(
         &mut table_dc,
         &mut table_ldc,
         &mut table_rc,
-        extra_dist,
+        variant,
         writer,
     )
 }
@@ -228,7 +229,7 @@ fn decode_inner_streaming(
     table_dc: &mut Option<DecodeTable>,
     table_ldc: &mut Option<DecodeTable>,
     table_rc: &mut Option<DecodeTable>,
-    extra_dist: bool,
+    variant: ArchiveVersion,
     writer: &mut dyn std::io::Write,
 ) -> Result<u64, String> {
     const COPY_THRESHOLD: u64 = 64 * 1024;
@@ -274,7 +275,7 @@ fn decode_inner_streaming(
         let block_start_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
 
         if table_present {
-            let (nc, dc, ldc, rc) = read_tables(reader, extra_dist)?;
+            let (nc, dc, ldc, rc) = read_tables(reader, variant)?;
             *table_nc = Some(nc);
             *table_dc = Some(dc);
             *table_ldc = Some(ldc);
@@ -480,7 +481,7 @@ pub fn decode_standalone(
     unpacked_size: u64,
     dict_size_log: u8,
     dict_size_bytes: Option<u64>,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Result<Vec<u8>, String> {
     let mut dict_size = checked_dict_size(dict_size_log, dict_size_bytes)?;
     // The decoder reconstructs the whole file in the sliding window before
@@ -517,7 +518,7 @@ pub fn decode_standalone(
         &mut table_dc,
         &mut table_ldc,
         &mut table_rc,
-        extra_dist,
+        variant,
     )
 }
 
@@ -533,7 +534,7 @@ fn decode_inner(
     table_dc: &mut Option<DecodeTable>,
     table_ldc: &mut Option<DecodeTable>,
     table_rc: &mut Option<DecodeTable>,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Result<Vec<u8>, String> {
     let mut pending_filters: Vec<PendingFilter> = Vec::new();
     let output_start = window.total_written();
@@ -576,7 +577,7 @@ fn decode_inner(
 
         // ── Read Huffman tables if present ──────────────────────────────
         if table_present {
-            let (nc, dc, ldc, rc) = read_tables(reader, extra_dist)?;
+            let (nc, dc, ldc, rc) = read_tables(reader, variant)?;
             *table_nc = Some(nc);
             *table_dc = Some(dc);
             *table_ldc = Some(ldc);
@@ -714,7 +715,7 @@ pub fn analyze_stream(
     data: &[u8],
     unpacked_size: u64,
     _dict_size_log: u8,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Result<StreamAnalysis, String> {
     let mut reader = BitReader::new(data);
     let mut dist_cache = [0u64; DIST_CACHE_SIZE];
@@ -755,7 +756,7 @@ pub fn analyze_stream(
 
         let (mut nc, mut dc, mut ldc, mut rc) = (0usize, 0usize, 0usize, 0usize);
         if table_present {
-            let (tnc, tdc, tldc, trc) = read_tables(&mut reader, extra_dist)?;
+            let (tnc, tdc, tldc, trc) = read_tables(&mut reader, variant)?;
             nc = tnc.num_symbols;
             dc = tdc.num_symbols;
             ldc = tldc.num_symbols;
@@ -911,7 +912,7 @@ pub struct TraceSymbol {
 pub fn trace_stream(
     data: &[u8],
     unpacked_size: u64,
-    extra_dist: bool,
+    variant: ArchiveVersion,
     want_start: u64,
     want_end: u64,
 ) -> Result<Vec<TraceSymbol>, String> {
@@ -940,7 +941,7 @@ pub fn trace_stream(
         let block_start_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
 
         if (block_flags_byte >> 7) & 1 != 0 {
-            let (tnc, tdc, tldc, trc) = read_tables(&mut reader, extra_dist)?;
+            let (tnc, tdc, tldc, trc) = read_tables(&mut reader, variant)?;
             table_nc = Some(tnc);
             table_dc = Some(tdc);
             table_ldc = Some(tldc);
@@ -1031,10 +1032,14 @@ pub fn trace_stream(
 
 fn read_tables(
     reader: &mut BitReader,
-    extra_dist: bool,
+    variant: ArchiveVersion,
 ) -> Result<(DecodeTable, DecodeTable, DecodeTable, DecodeTable), String> {
     // RAR7 (v70) extends the distance code table from 64 to 80 codes.
-    let dc_count = if extra_dist { HUFF_DCX } else { HUFF_DC };
+    let dc_count = if variant.uses_extra_dist() {
+        HUFF_DCX
+    } else {
+        HUFF_DC
+    };
     // Read BC table: 20 code lengths as nibbles with escape mechanism
     let mut bc_lengths = Vec::with_capacity(HUFF_BC);
     while bc_lengths.len() < HUFF_BC {
@@ -1261,7 +1266,7 @@ mod decode_tests {
     fn block_flags_with_reserved_bit_do_not_overflow() {
         let stream = [0xe4u8, 0x00, 0xe0, 0x00, 0xe0, 0x00, 0x00];
         let result = std::panic::catch_unwind(|| {
-            let _ = decode_standalone(&stream, 78090, 0, None, false);
+            let _ = decode_standalone(&stream, 78090, 0, None, ArchiveVersion::Rar50);
         });
         assert!(
             result.is_ok(),
@@ -1274,8 +1279,9 @@ mod decode_tests {
     #[test]
     fn three_byte_block_size_field_decodes() {
         let data = b"rar5 three-byte block size regression test data ".repeat(64);
-        let packed = crate::codec::encode(&data, 3, 3, false);
-        let back = decode_standalone(&packed, data.len() as u64, 3, None, false).unwrap();
+        let packed = crate::codec::encode(&data, 3, 3, ArchiveVersion::Rar50);
+        let back =
+            decode_standalone(&packed, data.len() as u64, 3, None, ArchiveVersion::Rar50).unwrap();
         assert_eq!(back, data);
     }
 
@@ -1333,15 +1339,18 @@ mod decode_tests {
             for &size in &[MAX_FILTER_BLOCK_LENGTH as usize + 1, 300_000usize] {
                 let data = pattern(filter_type, size);
                 let spec = FilterSpec::new(filter_type, channels, 0, size as u32);
-                let packed = encode_with_filters(&data, 3, 0, &[spec], false).unwrap();
-                let buffered = decode_standalone(&packed, size as u64, 0, None, false).unwrap();
+                let packed =
+                    encode_with_filters(&data, 3, 0, &[spec], ArchiveVersion::Rar50).unwrap();
+                let buffered =
+                    decode_standalone(&packed, size as u64, 0, None, ArchiveVersion::Rar50)
+                        .unwrap();
                 let mut streamed = Vec::new();
                 let written = decode_standalone_to_writer(
                     &packed,
                     size as u64,
                     0,
                     None,
-                    false,
+                    ArchiveVersion::Rar50,
                     &mut streamed,
                 )
                 .unwrap();
@@ -1395,7 +1404,7 @@ mod decode_tests {
             (4, 4, 16),
         ] {
             let data = correlated_samples(bytes, channels, 100_000);
-            let got = pick_delta_channel(&data, 3, 0, false).unwrap();
+            let got = pick_delta_channel(&data, 3, 0, ArchiveVersion::Rar50).unwrap();
             assert_eq!(
                 got,
                 Some(expect),
@@ -1442,7 +1451,7 @@ mod decode_tests {
             (4, 4),
         ] {
             let data = correlated(bytes, channels, 200_000);
-            let packed = encode_with_auto_delta_filter(&data, 3, 0, false, 1)
+            let packed = encode_with_auto_delta_filter(&data, 3, 0, ArchiveVersion::Rar50, 1)
                 .unwrap()
                 .expect("delta scan must find a beneficial channel count");
             assert!(
@@ -1451,14 +1460,16 @@ mod decode_tests {
                 packed.len(),
                 data.len()
             );
-            let back = decode_standalone(&packed, data.len() as u64, 0, None, false).unwrap();
+            let back =
+                decode_standalone(&packed, data.len() as u64, 0, None, ArchiveVersion::Rar50)
+                    .unwrap();
             assert_eq!(back, data, "bytes={bytes} channels={channels}");
         }
 
         // Text must NOT be delta-filtered: delta cannot beat plain LZSS on it.
         let text = b"the quick brown fox jumps over the lazy dog. ".repeat(6_000);
         assert!(
-            encode_with_auto_delta_filter(&text, 3, 0, false, 1)
+            encode_with_auto_delta_filter(&text, 3, 0, ArchiveVersion::Rar50, 1)
                 .unwrap()
                 .is_none(),
             "text must fall back to plain LZSS"
@@ -1474,7 +1485,7 @@ mod decode_tests {
             *b = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8;
         }
         assert!(
-            encode_with_auto_delta_filter(&random, 3, 0, false, 1)
+            encode_with_auto_delta_filter(&random, 3, 0, ArchiveVersion::Rar50, 1)
                 .unwrap()
                 .is_none()
         );
@@ -1500,7 +1511,7 @@ mod decode_tests {
         }
 
         let data = x86ish(400_000);
-        let packed = encode_with_auto_x86_filter(&data, 3, 0, false, 1)
+        let packed = encode_with_auto_x86_filter(&data, 3, 0, ArchiveVersion::Rar50, 1)
             .unwrap()
             .expect("x86 scan must find regions");
         assert!(
@@ -1509,7 +1520,8 @@ mod decode_tests {
             packed.len(),
             data.len()
         );
-        let back = decode_standalone(&packed, data.len() as u64, 0, None, false).unwrap();
+        let back =
+            decode_standalone(&packed, data.len() as u64, 0, None, ArchiveVersion::Rar50).unwrap();
         assert_eq!(back, data);
 
         // Non-code data with isolated opcodes must NOT be filtered.
@@ -1517,7 +1529,7 @@ mod decode_tests {
         sparse[100] = 0xE8;
         sparse[10_000] = 0xE8;
         assert!(
-            encode_with_auto_x86_filter(&sparse, 3, 0, false, 1)
+            encode_with_auto_x86_filter(&sparse, 3, 0, ArchiveVersion::Rar50, 1)
                 .unwrap()
                 .is_none()
         );
@@ -1549,8 +1561,8 @@ mod decode_tests {
         let first = b"solid chain prefix data padding padding padding".repeat(64);
         let member = x86ish(120_000);
 
-        let packed_first = crate::codec::encode(&first, 3, 3, false);
-        let packed_member = encode_with_auto_x86_filter(&member, 3, 0, false, 1)
+        let packed_first = crate::codec::encode(&first, 3, 3, ArchiveVersion::Rar50);
+        let packed_member = encode_with_auto_x86_filter(&member, 3, 0, ArchiveVersion::Rar50, 1)
             .unwrap()
             .expect("x86 scan must find regions");
 
@@ -1561,7 +1573,7 @@ mod decode_tests {
             DecodeOptions {
                 dict_size_log: 3,
                 dict_size_bytes: None,
-                extra_dist: false,
+                variant: ArchiveVersion::Rar50,
                 state: Some(&mut state),
             },
         )
@@ -1574,7 +1586,7 @@ mod decode_tests {
             DecodeOptions {
                 dict_size_log: 0,
                 dict_size_bytes: None,
-                extra_dist: false,
+                variant: ArchiveVersion::Rar50,
                 state: Some(&mut state),
             },
         )

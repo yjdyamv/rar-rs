@@ -136,7 +136,7 @@ fn main() {
                 &mut seed,
                 threads,
                 true,
-                false,
+                rar5::ArchiveVersion::Rar50,
             );
             let ms = t0.elapsed().as_millis();
             let ratio = packed.len() as f64 * 100.0 / corpus.len() as f64;

@@ -369,7 +369,7 @@ impl RarArchive {
             &whole,
             method,
             dsl,
-            dict_bytes.is_some(),
+            crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
             self.effective_threads(),
         )
         .map_err(RarError::Unsupported)?
@@ -379,7 +379,7 @@ impl RarArchive {
                 &whole,
                 method,
                 dsl,
-                dict_bytes.is_some(),
+                crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                 self.effective_threads(),
             )
             .map_err(RarError::Unsupported)?,
@@ -475,7 +475,7 @@ impl RarArchive {
                 state,
                 threads,
                 true,
-                dict_bytes.is_some(),
+                crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
             );
             self.report_progress(file_size, file_size);
         } else {
@@ -492,7 +492,7 @@ impl RarArchive {
                     state,
                     bytes_read >= whole.len() as u64,
                     None,
-                    dict_bytes.is_some(),
+                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                 )
                 .map_err(RarError::Unsupported)?;
                 packed.extend(compressed);
@@ -809,7 +809,7 @@ impl RarArchive {
                 self.write_ctx_mut().encoder_state.as_mut(),
                 true,
                 progress,
-                dict_bytes.is_some(),
+                crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
             )
             .map_err(RarError::Unsupported)?;
             if packed.len() >= data.len() {
@@ -1166,7 +1166,7 @@ impl RarArchive {
                 data,
                 method,
                 dsl,
-                dict_bytes.is_some(),
+                crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                 ctx.threads,
             )
             .map_err(RarError::Unsupported)?
@@ -1176,7 +1176,7 @@ impl RarArchive {
                     data,
                     method,
                     dsl,
-                    dict_bytes.is_some(),
+                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                     ctx.threads,
                 )
                 .map_err(RarError::Unsupported)?
@@ -1208,7 +1208,7 @@ impl RarArchive {
                                 &mut state,
                                 ctx.threads,
                                 true,
-                                dict_bytes.is_some(),
+                                crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                                 None,
                                 Some(&mut cb),
                             )
@@ -1254,7 +1254,7 @@ impl RarArchive {
                                     Some(&mut state),
                                     is_final,
                                     Some(&mut cb),
-                                    dict_bytes.is_some(),
+                                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                                 )
                                 .map_err(RarError::Unsupported)?;
                                 packed.extend(compressed);
@@ -1290,7 +1290,7 @@ impl RarArchive {
                     &mut state,
                     ctx.threads,
                     true,
-                    dict_bytes.is_some(),
+                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                     None,
                     Some(&mut cb),
                 )
@@ -1303,7 +1303,7 @@ impl RarArchive {
                     Some(&mut state),
                     true,
                     None,
-                    dict_bytes.is_some(),
+                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                 )
                 .map_err(RarError::Unsupported)?
             }
@@ -2264,7 +2264,7 @@ impl RarArchive {
                         state.get_or_insert_with(Default::default),
                         threads,
                         is_final,
-                        dict_bytes.is_some(),
+                        crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                     );
                     spill.write_all(&packed)?;
                     *packed_size += packed.len() as u64;
@@ -2282,7 +2282,7 @@ impl RarArchive {
                         state.as_mut(),
                         is_final && end >= work.len(),
                         None,
-                        dict_bytes.is_some(),
+                        crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                     )
                     .map_err(RarError::Unsupported)?;
                     spill.write_all(&compressed)?;

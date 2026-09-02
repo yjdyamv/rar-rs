@@ -657,7 +657,9 @@ impl RarArchive {
                             crate::codec::DecodeOptions {
                                 dict_size_log: hdr.comp_dict_size,
                                 dict_size_bytes: hdr.dict_size_bytes,
-                                extra_dist: hdr.dict_size_bytes.is_some(),
+                                variant: crate::version::ArchiveVersion::from_v70(
+                                    hdr.dict_size_bytes.is_some(),
+                                ),
                                 state: None,
                             },
                         )
@@ -907,7 +909,7 @@ impl RarArchive {
                         s.unpacked_size,
                         s.dict_size_log,
                         None,
-                        false,
+                        crate::version::ArchiveVersion::Rar50,
                     )
                     .map_err(|e| RarError::Format(format!("stream decode: {e}")))?
                 };

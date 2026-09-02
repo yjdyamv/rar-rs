@@ -15,6 +15,13 @@ pub enum ArchiveVersion {
     Rar70,
 }
 
+/// The default when no version is named is the RAR5.0 variant.
+impl Default for ArchiveVersion {
+    fn default() -> Self {
+        ArchiveVersion::Rar50
+    }
+}
+
 impl ArchiveVersion {
     /// All versions, in order.
     pub const ALL: [ArchiveVersion; 2] = [ArchiveVersion::Rar50, ArchiveVersion::Rar70];
@@ -24,6 +31,25 @@ impl ArchiveVersion {
         match self {
             ArchiveVersion::Rar50 => "rar50",
             ArchiveVersion::Rar70 => "rar70",
+        }
+    }
+
+    /// Whether this version selects the RAR7 (v70) extended distance code
+    /// table (80 entries instead of the RAR5 64-entry table). The codec
+    /// variant is exactly the archive version: v50 → 64 codes, v70 → 80.
+    pub const fn uses_extra_dist(self) -> bool {
+        matches!(self, ArchiveVersion::Rar70)
+    }
+
+    /// The codec variant for a member whose header flags the RAR7 (v70)
+    /// algorithm: on read that is `comp_version == 1`, on write the
+    /// presence of a byte-size dictionary (RAR7 carries the byte count,
+    /// RAR5 a log2 field).
+    pub const fn from_v70(v70: bool) -> Self {
+        if v70 {
+            ArchiveVersion::Rar70
+        } else {
+            ArchiveVersion::Rar50
         }
     }
 }
