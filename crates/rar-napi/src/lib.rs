@@ -98,6 +98,62 @@ struct PlannedEntry {
   data: Option<Vec<u8>>,
 }
 
+// ── Conversions from the JS-facing option structs to the rar5 library
+// structs, so each field mapping lives in one place next to its struct.
+
+impl CreateArchiveOptions {
+  fn to_create_options(&self) -> Result<rar5::CreateOptions> {
+    let rec = self.recovery_percent.unwrap_or(0).min(100);
+    let rec = if rec == 0 { None } else { Some(rec) };
+    let rev_count = self.recovery_volume_count.unwrap_or(0);
+    let password = self.password.as_deref().filter(|p| !p.is_empty());
+    let (dict_size_log, dict_size_bytes) = match self.dict_size.as_deref() {
+      Some(s) => parse_dict_size(s)?,
+      None => (None, None),
+    };
+    Ok(rar5::CreateOptions {
+      solid: self.solid.unwrap_or(false),
+      quick_open: self.quick_open.unwrap_or(false),
+      blake2: self.blake2.unwrap_or(false),
+      password: password.map(|p| p.to_string()),
+      encrypt_headers: self.encrypt_headers.unwrap_or(false),
+      recovery_percent: rec,
+      recovery_volumes_percent: None,
+      recovery_volume_count: if rev_count > 0 { Some(rev_count) } else { None },
+      volume_size: self.volume_size.map(|s| s as u64),
+      dict_size_log,
+      dict_size_bytes,
+      save_ctime: self.save_ctime.unwrap_or(false),
+      save_atime: self.save_atime.unwrap_or(false),
+      save_mtime: true,
+      time_precision_seconds: self.time_precision_seconds.unwrap_or(false),
+      save_owner: self.save_owner.unwrap_or(false),
+      save_streams: self.save_streams.unwrap_or(false),
+      threads: self.threads.map(|t| t.clamp(1, 64) as usize),
+      ..Default::default()
+    })
+  }
+}
+
+impl ExtractArchiveOptions {
+  /// `max_dict_size`: None (unset) keeps the WinRAR-style 4 GiB default
+  /// cap; Some(0) means unlimited; other values raise/lower the cap.
+  fn to_extract_options(&self) -> rar5::ExtractOptions {
+    let max_dict_size = match self.max_dict_size {
+      None => Some(4 * 1024 * 1024 * 1024),
+      Some(0) => None,
+      Some(v) => Some(v as u64),
+    };
+    rar5::ExtractOptions {
+      flat_paths: self.flat.unwrap_or(false),
+      max_unpacked_bytes: None,
+      max_total_unpacked_bytes: None,
+      max_dict_size,
+      ..Default::default()
+    }
+  }
+}
+
 pub struct CreateArchiveTask {
   opts: CreateArchiveOptions,
   progress: Option<ThreadsafeFunction<ProgressData, ()>>,
@@ -386,36 +442,7 @@ impl Task for CreateArchiveTask {
     // Per-archive thread count (scoped, so concurrent creates with
     // different `threads` never interfere); extraction stays on the global
     // default pool.
-    let threads = self.opts.threads.map(|t| t.clamp(1, 64) as usize);
-    let rec = self.opts.recovery_percent.unwrap_or(0).min(100);
-    let rec = if rec == 0 { None } else { Some(rec) };
-    let rev_count = self.opts.recovery_volume_count.unwrap_or(0);
-    let password = self.opts.password.as_deref().filter(|p| !p.is_empty());
-    let (dict_size_log, dict_size_bytes) = match self.opts.dict_size.as_deref() {
-      Some(s) => parse_dict_size(s)?,
-      None => (None, None),
-    };
-    let create_opts = rar5::CreateOptions {
-      solid: self.opts.solid.unwrap_or(false),
-      quick_open: self.opts.quick_open.unwrap_or(false),
-      blake2: self.opts.blake2.unwrap_or(false),
-      password: password.map(|p| p.to_string()),
-      encrypt_headers: self.opts.encrypt_headers.unwrap_or(false),
-      recovery_percent: rec,
-      recovery_volumes_percent: None,
-      recovery_volume_count: if rev_count > 0 { Some(rev_count) } else { None },
-      volume_size: self.opts.volume_size.map(|s| s as u64),
-      dict_size_log,
-      dict_size_bytes,
-      save_ctime: self.opts.save_ctime.unwrap_or(false),
-      save_atime: self.opts.save_atime.unwrap_or(false),
-      save_mtime: true,
-      time_precision_seconds: self.opts.time_precision_seconds.unwrap_or(false),
-      save_owner: self.opts.save_owner.unwrap_or(false),
-      save_streams: self.opts.save_streams.unwrap_or(false),
-      threads,
-      ..Default::default()
-    };
+    let create_opts = self.opts.to_create_options()?;
     let mut archive =
       rar5::RarArchive::create_with_options(out, create_opts).map_err(to_napi_error)?;
     archive.set_cancel_flag(self.cancel.take());
@@ -905,24 +932,8 @@ impl Task for ExtractArchiveTask {
     let dest = Path::new(&self.opts.dest_path);
     fs::create_dir_all(dest)
       .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
-    // `max_dict_size`: None (unset) keeps the WinRAR-style 4 GiB default
-    // cap; Some(0) means unlimited; other values raise/lower the cap.
-    let max_dict_size = match self.opts.max_dict_size {
-      None => Some(4 * 1024 * 1024 * 1024),
-      Some(0) => None,
-      Some(v) => Some(v as u64),
-    };
     archive
-      .extract_all_with_options(
-        dest,
-        rar5::ExtractOptions {
-          flat_paths: self.opts.flat.unwrap_or(false),
-          max_unpacked_bytes: None,
-          max_total_unpacked_bytes: None,
-          max_dict_size,
-          ..Default::default()
-        },
-      )
+      .extract_all_with_options(dest, self.opts.to_extract_options())
       .map_err(to_napi_error)?;
     Ok(())
   }

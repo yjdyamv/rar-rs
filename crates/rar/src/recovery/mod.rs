@@ -5,12 +5,20 @@ pub mod rev5;
 
 use crate::error::{RarError, RarResult};
 
+impl From<rar5::Error> for RarError {
+    fn from(e: rar5::Error) -> Self {
+        match e {
+            rar5::Error::Cancelled => RarError::Cancelled,
+            other => RarError::Format(format!("repair: {other}")),
+        }
+    }
+}
+
 /// Repair an archive in memory using its inline recovery record (like
 /// `rar r`). Returns the repaired bytes; an undamaged archive is returned
 /// unchanged.
 pub fn repair_archive(input: &[u8]) -> RarResult<Vec<u8>> {
-    rar5::repair_inline_recovery_archive(input)
-        .map_err(|e| RarError::Format(format!("repair: {e}")))
+    rar5::repair_inline_recovery_archive(input).map_err(RarError::from)
 }
 
 /// Streaming repair of a damaged archive on disk (like `rar r`): reads
@@ -44,11 +52,7 @@ pub fn repair_archive_path_with(
         rar5::repair_inline_recovery_archive_path(&mut input, &mut output, cancel, progress)
             .map_err(|e| {
                 let _ = std::fs::remove_file(&tmp);
-                if matches!(e, rar5::Error::Cancelled) {
-                    RarError::Cancelled
-                } else {
-                    RarError::Format(format!("repair: {e}"))
-                }
+                RarError::from(e)
             })?;
     if !repaired {
         // Intact archive: `dst` stays untouched (like `rar r`'s "All OK").
