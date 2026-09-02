@@ -1280,36 +1280,17 @@ impl RarArchive {
             arch_flags |= ARCHIVE_FLAG_RECOVERY;
         }
 
-        const LOCATOR_TYPE: u64 = 0x01;
-        const LOCATOR_FLAG_QUICK_OPEN: u64 = 0x0001;
-        const LOCATOR_FLAG_RECOVERY: u64 = 0x0002;
-        let mut qo_field_pos = None;
-        let mut rr_field_pos = None;
-        let mut locator_flags = 0u64;
-        if self.write_ctx().quick_open {
-            locator_flags |= LOCATOR_FLAG_QUICK_OPEN;
-        }
-        if self.recovery_percent.is_some() {
-            locator_flags |= LOCATOR_FLAG_RECOVERY;
-        }
-        let mut locator = Vec::new();
-        if locator_flags != 0 {
-            locator.extend(vint::encode(locator_flags));
-            if self.write_ctx().quick_open {
-                let p = locator.len();
-                locator.extend_from_slice(&vint_fixed5(0));
-                qo_field_pos = Some(p);
-            }
-            if self.recovery_percent.is_some() {
-                let p = locator.len();
-                locator.extend_from_slice(&vint_fixed5(0));
-                rr_field_pos = Some(p);
-            }
-            let mut record = Vec::new();
-            record.extend(vint::encode(locator.len() as u64));
-            record.extend(vint::encode(LOCATOR_TYPE));
-            record.extend(&locator);
-            extra.extend(record);
+        let quick_open = self.write_ctx().quick_open;
+        let recovery = self.recovery_percent.is_some();
+        let (locator, qo_field_pos, rr_field_pos) =
+            crate::rar50::headers::locator::build_locator_body(quick_open, recovery);
+        // When neither QO nor RR is active, locator_flags == 0 and
+        // the body is exactly 1 byte (the flags vint).  Omit the record
+        // in that case, preserving the original conditional emit.
+        if locator.len() > 1 {
+            extra.extend(crate::rar50::headers::locator::frame_locator_record(
+                &locator,
+            ));
         }
 
         let mut block_flags = 0u64;
@@ -1346,7 +1327,7 @@ impl RarArchive {
             + vint::encoded_size(extra.len() as u64)
             + vint::encoded_size(arch_flags)
             + vint::encoded_size(locator.len() as u64)
-            + vint::encoded_size(LOCATOR_TYPE);
+            + vint::encoded_size(crate::rar50::headers::locator::LOCATOR_TYPE);
         let qo_field_pos = qo_field_pos.map(|p| field_base + p);
         let rr_field_pos = rr_field_pos.map(|p| field_base + p);
 
@@ -1368,32 +1349,16 @@ impl RarArchive {
         rr_field_pos: Option<usize>,
         main_hdr: &[u8],
     ) -> RarResult<()> {
+        let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
         let mut hdr = main_hdr.to_vec();
-        let mut patched = false;
-        if let (Some(qo), Some(field)) = (qo_offset, qo_field_pos) {
-            let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
-            let field_bytes = vint_fixed5(qo.saturating_sub(base));
-            if field + field_bytes.len() > hdr.len() {
-                return Err(RarError::Format("locator field out of bounds".into()));
-            }
-            hdr[field..field + field_bytes.len()].copy_from_slice(&field_bytes);
-            patched = true;
-        }
-        if let (Some(rr), Some(field)) = (rr_offset, rr_field_pos) {
-            let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
-            let field_bytes = vint_fixed5(rr.saturating_sub(base));
-            if field + field_bytes.len() > hdr.len() {
-                return Err(RarError::Format("locator field out of bounds".into()));
-            }
-            hdr[field..field + field_bytes.len()].copy_from_slice(&field_bytes);
-            patched = true;
-        }
-        if patched {
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(&hdr[4..]);
-            let crc = hasher.finalize();
-            hdr[..4].copy_from_slice(&crc.to_le_bytes());
-        }
+        crate::rar50::headers::locator::patch_locator_fields(
+            &mut hdr,
+            qo_offset,
+            rr_offset,
+            qo_field_pos,
+            rr_field_pos,
+            base,
+        )?;
         self.stream
             .as_mut()
             .unwrap()

@@ -1609,34 +1609,15 @@ impl RarArchive {
         };
 
         let mut new_header = plain;
-        if let Some(qo) = qo_offset {
-            let field = self.write_ctx().qo_offset_field_pos.ok_or_else(|| {
-                RarError::Format("quick-open locator field position unknown".into())
-            })? as usize;
-            let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
-            let patched = vint_fixed5(qo.saturating_sub(base));
-            if field + patched.len() > new_header.len() {
-                return Err(RarError::Format("locator field out of bounds".into()));
-            }
-            new_header[field..field + patched.len()].copy_from_slice(&patched);
-        }
-        if let Some(rr) = rr_offset {
-            let field =
-                self.write_ctx().rr_offset_field_pos.ok_or_else(|| {
-                    RarError::Format("recovery locator field position unknown".into())
-                })? as usize;
-            let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
-            let patched = vint_fixed5(rr.saturating_sub(base));
-            if field + patched.len() > new_header.len() {
-                return Err(RarError::Format("locator field out of bounds".into()));
-            }
-            new_header[field..field + patched.len()].copy_from_slice(&patched);
-        }
-        // Recompute the header CRC (covers from the size field onwards).
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&new_header[4..]);
-        let crc = hasher.finalize();
-        new_header[..4].copy_from_slice(&crc.to_le_bytes());
+        let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
+        crate::rar50::headers::locator::patch_locator_fields(
+            &mut new_header,
+            qo_offset,
+            rr_offset,
+            self.write_ctx().qo_offset_field_pos.map(|p| p as usize),
+            self.write_ctx().rr_offset_field_pos.map(|p| p as usize),
+            base,
+        )?;
 
         let stream = self.stream.as_mut().unwrap();
         if self.header_encryption {
@@ -1739,39 +1720,17 @@ impl RarArchive {
     /// close time.
     fn write_archive_header_with_locators(&mut self) -> RarResult<()> {
         // Locator record body: [flags vint][qo offset vint][rr offset vint]
-        // (only the offsets whose flags are set).
-        const LOCATOR_TYPE: u64 = 0x01;
-        const LOCATOR_FLAG_QUICK_OPEN: u64 = 0x0001;
-        const LOCATOR_FLAG_RECOVERY: u64 = 0x0002;
-
-        let mut locator = Vec::new();
-        let mut locator_flags = 0u64;
-        if self.write_ctx().quick_open {
-            locator_flags |= LOCATOR_FLAG_QUICK_OPEN;
-        }
-        if self.recovery_percent.is_some() {
-            locator_flags |= LOCATOR_FLAG_RECOVERY;
-        }
-        locator.extend(vint::encode(locator_flags));
-        let qo_field_pos = if self.write_ctx().quick_open {
-            let p = locator.len();
-            locator.extend_from_slice(&vint_fixed5(0));
-            Some(p)
-        } else {
-            None
-        };
-        let rr_field_pos = if self.recovery_percent.is_some() {
-            let p = locator.len();
-            locator.extend_from_slice(&vint_fixed5(0));
-            Some(p)
-        } else {
-            None
-        };
+        // (only the offsets whose flags are set). The byte rules live once
+        // in headers::locator.
+        let quick_open = self.write_ctx().quick_open;
+        let recovery = self.recovery_percent.is_some();
+        let (locator, qo_field_pos, rr_field_pos) =
+            crate::rar50::headers::locator::build_locator_body(quick_open, recovery);
 
         let mut extra = Vec::new();
-        extra.extend(vint::encode(locator.len() as u64)); // record size
-        extra.extend(vint::encode(LOCATOR_TYPE));
-        extra.extend(&locator);
+        extra.extend(crate::rar50::headers::locator::frame_locator_record(
+            &locator,
+        ));
 
         let mut arch_flags = 0u64;
         if self.recovery_percent.is_some() {
@@ -1818,7 +1777,7 @@ impl RarArchive {
             + vint::encoded_size(extra.len() as u64) as u64
             + vint::encoded_size(arch_flags) as u64
             + vint::encoded_size(locator.len() as u64) as u64
-            + vint::encoded_size(LOCATOR_TYPE) as u64;
+            + vint::encoded_size(crate::rar50::headers::locator::LOCATOR_TYPE) as u64;
         if let Some(p) = qo_field_pos {
             self.write_ctx_mut().qo_offset_field_pos = Some(field_base + p as u64);
         }

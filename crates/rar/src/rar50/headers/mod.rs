@@ -1,3 +1,4 @@
+pub(crate) mod locator;
 /// The outer RAR5 block envelope is shared by every header:
 /// ```text
 /// [Header CRC32]  4 bytes LE
