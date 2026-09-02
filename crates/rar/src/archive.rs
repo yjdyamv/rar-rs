@@ -1209,7 +1209,7 @@ impl RarArchive {
                     "volume size must be greater than zero".into(),
                 ));
             }
-            let base = get_volume_base(&self.path);
+            let base = volume_base_of(&self.path);
             let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
             // Stage the volumes under a temporary volume base; they are
             // moved over the final `{base}.partN.rar` names on close.
@@ -2024,23 +2024,6 @@ pub(crate) fn volume_part_width(path: &Path) -> usize {
         .and_then(extract_volume_base)
         .map(|(_, w)| w)
         .unwrap_or(1)
-}
-
-pub(crate) fn get_volume_base(path: &Path) -> String {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("archive");
-    if let Some((base, _)) = extract_volume_base(name) {
-        return base;
-    }
-    if let Some(stem) = name.strip_suffix(".rar") {
-        return stem.to_string();
-    }
-    if let Some(stem) = name.strip_suffix(".RAR") {
-        return stem.to_string();
-    }
-    name.to_string()
 }
 
 fn volume_path(parent: &Path, base: &str, part_num: usize) -> PathBuf {

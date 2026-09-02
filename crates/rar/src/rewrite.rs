@@ -194,7 +194,7 @@ impl RarArchive {
             ));
         }
 
-        let base = get_volume_base(&self.path);
+        let base = volume_base_of(&self.path);
         let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
         // Write to a temporary volume base and rename over the originals
         // only after every volume succeeded (a failure never destroys the
