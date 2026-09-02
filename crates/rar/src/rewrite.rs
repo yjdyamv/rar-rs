@@ -77,6 +77,7 @@ impl RarArchive {
                 "delete requires an archive opened for reading".into(),
             ));
         }
+        self.ensure_write_ctx();
         let mut deleted = vec![false; self.entries.len()];
         let mut count = 0usize;
         for name in names {
@@ -107,8 +108,8 @@ impl RarArchive {
             }
             self.stream = None;
             self.entries.clear();
-            self.solid_state = None;
-            self.solid_decoded_through = -1;
+            self.read_ctx_mut().solid_state = None;
+            self.read_ctx_mut().solid_decoded_through = -1;
             return Ok(count);
         }
 
@@ -125,7 +126,7 @@ impl RarArchive {
             let tmp_path = temp_sibling_path(&src_path);
             let mut reader = File::open(&src_path)?;
             self.stream = Some(Box::new(read_write_create(&tmp_path)?));
-            self.quick_open_entries.clear();
+            self.write_ctx_mut().quick_open_entries.clear();
             // Rewriting rediscovers header encryption from the file itself.
             self.header_encryption = false;
             self.archive_encr = None;
@@ -152,8 +153,8 @@ impl RarArchive {
         }
 
         self.mode = Mode::Read;
-        self.solid_state = None;
-        self.solid_decoded_through = -1;
+        self.read_ctx_mut().solid_state = None;
+        self.read_ctx_mut().solid_decoded_through = -1;
         self.open_read()?;
         Ok(count)
     }
@@ -206,11 +207,11 @@ impl RarArchive {
         // volume naming itself comes from the staged `pending` set.
         let saved_path = self.path.clone();
         self.path = tmp_base_path;
-        self.volume_size = Some(volume_size);
+        self.write_ctx_mut().volume_size = Some(volume_size);
         self.volume_paths = vec![volume_path(&parent, &base, 1)];
-        self.current_volume = 1;
-        self.volume_bytes_written = 0;
-        self.pending = Some(PendingCommit::Volumes {
+        self.write_ctx_mut().current_volume = 1;
+        self.write_ctx_mut().volume_bytes_written = 0;
+        self.write_ctx_mut().pending = Some(PendingCommit::Volumes {
             parent: parent.clone(),
             tmp_base: tmp_base.clone(),
             final_base: base.clone(),
@@ -220,7 +221,8 @@ impl RarArchive {
         ))?));
         self.write_signature()?;
         self.write_archive_header_vol(None)?;
-        self.volume_bytes_written = self.stream.as_mut().unwrap().stream_position()?;
+        self.write_ctx_mut().volume_bytes_written =
+            self.stream.as_mut().unwrap().stream_position()?;
 
         let mut readers = VolumeReaders::new(&orig_volumes);
         let (mut dec, mut enc, mut enc_active) = (None, None, false);
@@ -323,7 +325,7 @@ impl RarArchive {
         }
         self.write_end_block()?;
         self.stream = None;
-        self.volume_size = None;
+        self.write_ctx_mut().volume_size = None;
         self.path = saved_path;
 
         // Move the new volumes into place, drop stale ones, and regenerate
@@ -369,7 +371,7 @@ impl RarArchive {
         })();
         // The staged volumes were renamed/cleaned above (or on error below),
         // so the drop guard must not touch them again.
-        self.pending = None;
+        self.write_ctx_mut().pending = None;
         if result.is_err() {
             for n in 1..=orig_volumes.len() {
                 let _ = fs::remove_file(volume_path(&parent, &tmp_base, n));
@@ -580,6 +582,7 @@ impl RarArchive {
                 "rename requires an archive opened for reading".into(),
             ));
         }
+        self.ensure_write_ctx();
         if self.main_header_is_locked()? {
             return Err(RarError::ArchiveLocked);
         }
@@ -633,7 +636,7 @@ impl RarArchive {
             let tmp_path = temp_sibling_path(&src_path);
             let mut reader = File::open(&src_path)?;
             self.stream = Some(Box::new(read_write_create(&tmp_path)?));
-            self.quick_open_entries.clear();
+            self.write_ctx_mut().quick_open_entries.clear();
             self.header_encryption = false;
             self.archive_encr = None;
 
@@ -659,8 +662,8 @@ impl RarArchive {
         }
 
         self.mode = Mode::Read;
-        self.solid_state = None;
-        self.solid_decoded_through = -1;
+        self.read_ctx_mut().solid_state = None;
+        self.read_ctx_mut().solid_decoded_through = -1;
         self.open_read()?;
         Ok(count)
     }
@@ -705,6 +708,7 @@ impl RarArchive {
                 "set_comment requires an archive opened for reading".into(),
             ));
         }
+        self.ensure_write_ctx();
         if self.volume_paths.len() > 1 {
             return Err(RarError::Unsupported(
                 "archive comments are not supported for multi-volume archives".into(),
@@ -717,7 +721,7 @@ impl RarArchive {
         let tmp_path = temp_sibling_path(&src_path);
         let mut reader = File::open(&src_path)?;
         self.stream = Some(Box::new(read_write_create(&tmp_path)?));
-        self.quick_open_entries.clear();
+        self.write_ctx_mut().quick_open_entries.clear();
         self.header_encryption = false;
         self.archive_encr = None;
 
@@ -1096,12 +1100,13 @@ impl RarArchive {
                     len,
                     qo_header,
                 } => {
-                    let stream = self.stream.as_mut().unwrap();
-                    let out_pos = stream.stream_position()?;
+                    let out_pos = self.stream.as_mut().unwrap().stream_position()?;
                     if let Some(qh) = qo_header {
-                        self.quick_open_entries.push((out_pos, qh.clone()));
+                        self.write_ctx_mut()
+                            .quick_open_entries
+                            .push((out_pos, qh.clone()));
                     }
-                    stream.write_all(header_bytes)?;
+                    self.stream.as_mut().unwrap().write_all(header_bytes)?;
                     processed += len;
                     #[cfg_attr(not(feature = "parallel"), allow(unused_mut))]
                     let mut left = *len;
@@ -1166,7 +1171,7 @@ impl RarArchive {
 
         // Quick-open record (rebuilt from the kept headers), locator patch
         // (with the recovery offset), recovery record and end block.
-        let qo_pos = if self.quick_open {
+        let qo_pos = if self.write_ctx().quick_open {
             Some(self.write_quick_open_record()?)
         } else {
             None
@@ -1382,7 +1387,7 @@ impl RarArchive {
             return Err(RarError::ArchiveLocked);
         }
         let (had_qo, _had_rr, mut extra) = split_main_extra(&ah.extra_data)?;
-        self.quick_open = had_qo && !self.header_encryption;
+        self.write_ctx_mut().quick_open = had_qo && !self.header_encryption;
         // The recovery record is rebuilt when the original archive had one
         // (or when the caller forces it, e.g. the `rr` command).
         self.recovery_percent = rr_percent;
@@ -1398,7 +1403,7 @@ impl RarArchive {
         let mut qo_field_pos = None;
         let mut rr_field_pos = None;
         let mut locator_flags = 0u64;
-        if self.quick_open {
+        if self.write_ctx().quick_open {
             locator_flags |= LOCATOR_FLAG_QUICK_OPEN;
         }
         if self.recovery_percent.is_some() {
@@ -1407,7 +1412,7 @@ impl RarArchive {
         let mut locator = Vec::new();
         if locator_flags != 0 {
             locator.extend(vint::encode(locator_flags));
-            if self.quick_open {
+            if self.write_ctx().quick_open {
                 let p = locator.len();
                 locator.extend_from_slice(&vint_fixed5(0));
                 qo_field_pos = Some(p);

@@ -210,7 +210,7 @@ impl RarArchive {
 
     fn scan_blocks(&mut self) -> RarResult<()> {
         self.entries.clear();
-        self.streams.clear();
+        self.read_ctx_mut().streams.clear();
 
         // None until the plaintext archive-level encryption header arrives
         // (header-encrypted archives: every block after it is `[IV][AES-256-
@@ -260,7 +260,7 @@ impl RarArchive {
                         && let Some((unpacked_size, method, dict_size_log)) =
                             crate::rar50::headers::parse_stream_params(&raw.header_data)
                     {
-                        self.streams.push(StreamRecord {
+                        self.read_ctx_mut().streams.push(StreamRecord {
                             owner_index,
                             name: String::from_utf8_lossy(&stream_name).into_owned(),
                             data_offset: raw.data_offset,
@@ -459,7 +459,7 @@ impl RarArchive {
             .ok_or_else(|| RarError::MemberNotFound {
                 name: name.to_string(),
             })?;
-        self.extract_options = opts;
+        self.read_ctx_mut().extract_options = opts;
         self.validate_entry_limits(target_idx)?;
         if self.is_solid_chain_member(target_idx) {
             return self.decode_solid_through(target_idx);
@@ -494,7 +494,7 @@ impl RarArchive {
             .ok_or_else(|| RarError::MemberNotFound {
                 name: name.to_string(),
             })?;
-        self.extract_options = opts;
+        self.read_ctx_mut().extract_options = opts;
         if self.is_solid_chain_member(target_idx) {
             return self.decode_solid_through_to(target_idx, writer);
         }
@@ -540,7 +540,7 @@ impl RarArchive {
     ) -> RarResult<()> {
         let dest = dest_dir.as_ref();
         fs::create_dir_all(dest)?;
-        self.extract_options = opts;
+        self.read_ctx_mut().extract_options = opts;
 
         #[cfg(feature = "parallel")]
         {
@@ -752,7 +752,7 @@ impl RarArchive {
     ) -> RarResult<PathBuf> {
         let dest = dest_dir.as_ref();
         fs::create_dir_all(dest)?;
-        self.extract_options = opts;
+        self.read_ctx_mut().extract_options = opts;
         let idx = self
             .entries
             .iter()
@@ -776,7 +776,7 @@ impl RarArchive {
                 ),
             });
         }
-        if let Some(limit) = self.extract_options.max_unpacked_bytes
+        if let Some(limit) = self.read_ctx().extract_options.max_unpacked_bytes
             && hdr.unpacked_size > limit
         {
             return Err(RarError::LimitExceeded {
@@ -806,7 +806,7 @@ impl RarArchive {
         // always applies here — the full member name is sanitized (which
         // rejects `..`/absolute/drive names) before its basename is used,
         // so traversal-shaped names cannot escape the destination.
-        let dest_path = if self.extract_options.flat_paths {
+        let dest_path = if self.read_ctx().extract_options.flat_paths {
             if entry.is_dir() {
                 return Ok(dest_dir.to_path_buf());
             }
@@ -819,14 +819,14 @@ impl RarArchive {
 
         // `-o-` (skip existing): members whose destination already exists
         // are left untouched.
-        if self.extract_options.skip_existing && dest_path.exists() {
+        if self.read_ctx().extract_options.skip_existing && dest_path.exists() {
             return Ok(dest_path);
         }
 
         // `-or` (auto rename): when the destination exists, insert `(N)`
         // before the extension (like WinRAR: a.txt -> a(1).txt).
         let mut dest_path = dest_path;
-        if self.extract_options.auto_rename && !entry.is_dir() {
+        if self.read_ctx().extract_options.auto_rename && !entry.is_dir() {
             let mut n = 1;
             while dest_path.exists() {
                 let file_name = dest_path
@@ -874,7 +874,7 @@ impl RarArchive {
                 replace_file(&tmp_path, &dest_path)?;
             }
             Err(e) => {
-                if self.extract_options.keep_broken {
+                if self.read_ctx().extract_options.keep_broken {
                     // `-kb`: keep the partially extracted file.
                     let _ = replace_file(&tmp_path, &dest_path);
                 } else {
@@ -903,6 +903,7 @@ impl RarArchive {
         {
             use std::io::Read;
             let owned: Vec<StreamRecord> = self
+                .read_ctx()
                 .streams
                 .iter()
                 .filter(|s| s.owner_index == idx)
@@ -956,7 +957,7 @@ impl RarArchive {
             times = times.set_modified(mtime);
             any = true;
         }
-        if self.extract_options.set_access_time
+        if self.read_ctx().extract_options.set_access_time
             && let Some((secs, ns)) = hdr.atime
         {
             let t = UNIX_EPOCH
@@ -972,7 +973,7 @@ impl RarArchive {
                 .and_then(|f| f.set_times(times));
         }
         #[cfg(windows)]
-        if self.extract_options.set_creation_time
+        if self.read_ctx().extract_options.set_creation_time
             && let Some((secs, ns)) = hdr.ctime
         {
             let _ = archive_write::windows_set_creation_time(dest_path, secs, ns);
@@ -1034,13 +1035,13 @@ impl RarArchive {
     /// Compute the destination path for an entry name, applying the safe
     /// path policy (sanitization + canonical containment check).
     fn safe_dest_path(&self, dest_dir: &Path, name: &str) -> RarResult<PathBuf> {
-        let sanitized = if self.extract_options.safe_paths {
+        let sanitized = if self.read_ctx().extract_options.safe_paths {
             sanitize_archive_path(name)?
         } else {
             name.replace('\\', "/")
         };
         let dest_path = dest_dir.join(&sanitized);
-        if self.extract_options.safe_paths
+        if self.read_ctx().extract_options.safe_paths
             && let Some(parent) = dest_path.parent()
         {
             fs::create_dir_all(parent)?;
@@ -1076,28 +1077,28 @@ impl RarArchive {
 
         // If we've already decoded past this point, and it's a forward request, reuse state.
         // If we need to go backwards, reset.
-        if self.solid_decoded_through >= chain_start as isize
-            && self.solid_decoded_through < target_idx as isize
+        if self.read_ctx_mut().solid_decoded_through >= chain_start as isize
+            && self.read_ctx_mut().solid_decoded_through < target_idx as isize
         {
             // Continue from where we left off
-        } else if self.solid_decoded_through >= target_idx as isize {
+        } else if self.read_ctx_mut().solid_decoded_through >= target_idx as isize {
             // Already decoded this file — but we don't cache the output,
             // so we must restart from the beginning.
-            self.solid_state = None;
-            self.solid_decoded_through = -1;
+            self.read_ctx_mut().solid_state = None;
+            self.read_ctx_mut().solid_decoded_through = -1;
         } else {
             // Starting fresh
-            self.solid_state = None;
-            self.solid_decoded_through = -1;
+            self.read_ctx_mut().solid_state = None;
+            self.read_ctx_mut().solid_decoded_through = -1;
         }
 
         // Determine dict_size from the first compressed entry in the chain
-        if self.solid_state.is_none() {
+        if self.read_ctx_mut().solid_state.is_none() {
             let dict_size = self.member_dict_window(chain_start)?;
-            self.solid_state = Some(DecoderState::new(dict_size));
+            self.read_ctx_mut().solid_state = Some(DecoderState::new(dict_size));
         }
 
-        let start_from = (self.solid_decoded_through + 1) as usize;
+        let start_from = (self.read_ctx_mut().solid_decoded_through + 1) as usize;
         let mut target_data = Vec::new();
 
         for i in start_from..=target_idx {
@@ -1112,13 +1113,13 @@ impl RarArchive {
             // cannot hold more than the dictionary size. Intermediate
             // members are decoded into a discard sink so the shared window
             // advances.
-            let mut state = self.solid_state.take().unwrap();
+            let mut state = self.read_ctx_mut().solid_state.take().unwrap();
             let mut data = Vec::new();
             let written = self.decode_file_to(i, &mut data, Some(&mut state))?;
             let _ = written;
-            self.solid_state = Some(state);
+            self.read_ctx_mut().solid_state = Some(state);
 
-            self.solid_decoded_through = i as isize;
+            self.read_ctx_mut().solid_decoded_through = i as isize;
 
             if i == target_idx {
                 target_data = data;
@@ -1157,22 +1158,22 @@ impl RarArchive {
     ) -> RarResult<u64> {
         let chain_start = self.find_solid_chain_start(target_idx);
 
-        if self.solid_decoded_through >= chain_start as isize
-            && self.solid_decoded_through < target_idx as isize
+        if self.read_ctx_mut().solid_decoded_through >= chain_start as isize
+            && self.read_ctx_mut().solid_decoded_through < target_idx as isize
         {
             // Continue from where we left off.
         } else {
             // Restart the chain when we need to go backwards or start fresh.
-            self.solid_state = None;
-            self.solid_decoded_through = -1;
+            self.read_ctx_mut().solid_state = None;
+            self.read_ctx_mut().solid_decoded_through = -1;
         }
 
-        if self.solid_state.is_none() {
+        if self.read_ctx_mut().solid_state.is_none() {
             let dict_size = self.member_dict_window(chain_start)?;
-            self.solid_state = Some(DecoderState::new(dict_size));
+            self.read_ctx_mut().solid_state = Some(DecoderState::new(dict_size));
         }
 
-        let start_from = (self.solid_decoded_through + 1) as usize;
+        let start_from = (self.read_ctx_mut().solid_decoded_through + 1) as usize;
         let mut target_written = 0u64;
         let mut discard = io::sink();
 
@@ -1186,10 +1187,10 @@ impl RarArchive {
             } else {
                 &mut discard
             };
-            let mut state = self.solid_state.take().unwrap();
+            let mut state = self.read_ctx_mut().solid_state.take().unwrap();
             let written = self.decode_file_to(i, sink, Some(&mut state))?;
-            self.solid_state = Some(state);
-            self.solid_decoded_through = i as isize;
+            self.read_ctx_mut().solid_state = Some(state);
+            self.read_ctx_mut().solid_decoded_through = i as isize;
             if i == target_idx {
                 target_written = written;
             }
@@ -1302,7 +1303,8 @@ impl RarArchive {
     /// configured unpacked limit plus a small overhead, or a hard 8 GiB
     /// guard when unlimited.
     pub(crate) fn max_packed_bytes(&self) -> u64 {
-        self.extract_options
+        self.read_ctx()
+            .extract_options
             .max_unpacked_bytes
             .map(|u| u.saturating_add(1 << 20))
             .unwrap_or(8 * 1024 * 1024 * 1024)
@@ -1377,7 +1379,7 @@ impl RarArchive {
             Some(b) => b,
             None => (128u64 * 1024) << hdr.comp_dict_size,
         };
-        if let Some(cap) = self.extract_options.max_dict_size
+        if let Some(cap) = self.read_ctx().extract_options.max_dict_size
             && bytes > cap
         {
             return Err(RarError::LimitExceeded {

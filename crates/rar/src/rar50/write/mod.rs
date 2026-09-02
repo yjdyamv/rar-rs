@@ -279,10 +279,10 @@ impl RarArchive {
         mtime_ns: u32,
     ) -> Option<Vec<u8>> {
         time_extra_cfg(
-            self.save_ctime,
-            self.save_atime,
-            self.save_mtime,
-            self.time_precision_seconds,
+            self.write_ctx().save_ctime,
+            self.write_ctx().save_atime,
+            self.write_ctx().save_mtime,
+            self.write_ctx().time_precision_seconds,
             meta,
             path,
             mtime,
@@ -293,7 +293,7 @@ impl RarArchive {
     /// Build the OWNER extra record (numeric uid/gid) when `-ow` is on;
     /// `None` off-Unix or when disabled.
     fn owner_extra_for(&self, meta: &fs::Metadata) -> Option<Vec<u8>> {
-        owner_extra_cfg(self.save_owner, meta)
+        owner_extra_cfg(self.write_ctx().save_owner, meta)
     }
 
     /// Add a file from the filesystem to the archive.
@@ -391,10 +391,10 @@ impl RarArchive {
             && sample_is_incompressible_file(path, file_size, method)?;
         let (dsl, dict_bytes) = dict_params_for(
             file_size as usize,
-            self.dict_size_log,
-            self.dict_size_bytes,
+            self.write_ctx().dict_size_log,
+            self.write_ctx().dict_size_bytes,
             method,
-            self.force_v70,
+            self.write_ctx().force_v70,
         );
 
         if method == COMP_METHOD_STORE || probe_incompressible {
@@ -402,7 +402,7 @@ impl RarArchive {
             // memory regardless of file size. Encrypted STORE is encrypted
             // on the fly with a chained CBC state (also bounded memory).
             self.reset_solid_chain();
-            let (plain_crc, plain_blake) = hash_file(path, file_size, self.blake2)?;
+            let (plain_crc, plain_blake) = hash_file(path, file_size, self.write_ctx().blake2)?;
             let (header_crc, mut extra_data, stored_hash, encr_params) =
                 RarArchive::payload_extra_and_crc(
                     self.password.as_deref(),
@@ -463,7 +463,7 @@ impl RarArchive {
             file.read_to_end(&mut whole)?;
         }
         let mut crc_hasher = crc32fast::Hasher::new();
-        let mut blake_hasher = if self.blake2 {
+        let mut blake_hasher = if self.write_ctx().blake2 {
             Some(crate::rar50::blake2sp::Hasher::new())
         } else {
             None
@@ -552,8 +552,10 @@ impl RarArchive {
         // search).
         // WinRAR `-se`: reset the solid statistics when the extension changes.
         self.maybe_reset_solid_for_extension(&name);
-        let chain_solid = self.solid_mode && self.encoder_state.is_some();
-        self.encoder_state.get_or_insert_with(Default::default);
+        let chain_solid = self.write_ctx().solid_mode && self.write_ctx().encoder_state.is_some();
+        self.write_ctx_mut()
+            .encoder_state
+            .get_or_insert_with(Default::default);
 
         // Mid-size members (2-64 MiB) get the same windowed MT encode as the
         // streaming path, matching WinRAR's per-file parallelization; the
@@ -580,7 +582,11 @@ impl RarArchive {
             }
         };
         if use_mt {
-            let state = self.encoder_state.as_mut().expect("encoder state seeded");
+            let state = self
+                .write_ctx_mut()
+                .encoder_state
+                .as_mut()
+                .expect("encoder state seeded");
             packed = crate::codec::rar50::encode_chunked_mt(
                 &whole,
                 method,
@@ -597,7 +603,7 @@ impl RarArchive {
             for chunk in whole.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
                 self.check_cancel()?;
                 bytes_read += chunk.len() as u64;
-                let state = self.encoder_state.as_mut();
+                let state = self.write_ctx_mut().encoder_state.as_mut();
                 let compressed = compression::compress_chunked(
                     chunk,
                     method,
@@ -679,7 +685,7 @@ impl RarArchive {
         self.write_member_streams(path)?;
         // Non-solid members use an independent LZ window: drop the
         // encoder state so the next member starts fresh.
-        if !self.solid_mode {
+        if !self.write_ctx().solid_mode {
             self.reset_solid_chain();
         }
 
@@ -758,7 +764,8 @@ impl RarArchive {
 
         let hdr_bytes = fh.to_bytes();
         self.write_block_header(&hdr_bytes)?;
-        self.volume_bytes_written += self.on_disk_header_len(hdr_bytes.len() as u64);
+        self.write_ctx_mut().volume_bytes_written +=
+            self.on_disk_header_len(hdr_bytes.len() as u64);
         self.entries.push(ArchiveEntry {
             header: fh,
             chunks: Vec::new(),
@@ -808,7 +815,8 @@ impl RarArchive {
 
         let hdr_bytes = fh.to_bytes();
         self.write_block_header(&hdr_bytes)?;
-        self.volume_bytes_written += self.on_disk_header_len(hdr_bytes.len() as u64);
+        self.write_ctx_mut().volume_bytes_written +=
+            self.on_disk_header_len(hdr_bytes.len() as u64);
         self.entries.push(ArchiveEntry {
             header: fh,
             chunks: Vec::new(),
@@ -846,7 +854,7 @@ impl RarArchive {
             h.update(data);
             h.finalize()
         };
-        let plain_blake = if self.blake2 {
+        let plain_blake = if self.write_ctx().blake2 {
             Some(crate::rar50::blake2sp::hash(data))
         } else {
             None
@@ -888,16 +896,19 @@ impl RarArchive {
         } else {
             let (dsl, dict_bytes) = dict_params_for(
                 data.len(),
-                self.dict_size_log,
-                self.dict_size_bytes,
+                self.write_ctx().dict_size_log,
+                self.write_ctx().dict_size_bytes,
                 method,
-                self.force_v70,
+                self.write_ctx().force_v70,
             );
             // WinRAR `-se`: reset the solid statistics when the extension changes.
             self.maybe_reset_solid_for_extension(&name);
-            let chain_solid = self.solid_mode && self.encoder_state.is_some();
-            if self.solid_mode {
-                self.encoder_state.get_or_insert_with(Default::default);
+            let chain_solid =
+                self.write_ctx().solid_mode && self.write_ctx().encoder_state.is_some();
+            if self.write_ctx().solid_mode {
+                self.write_ctx_mut()
+                    .encoder_state
+                    .get_or_insert_with(Default::default);
             }
             let shared = self.progress.clone();
             let member = self.progress_member;
@@ -915,7 +926,7 @@ impl RarArchive {
                 method,
                 dsl,
                 crate::codec::DEFAULT_CHUNK_SIZE,
-                self.encoder_state.as_mut(),
+                self.write_ctx_mut().encoder_state.as_mut(),
                 true,
                 progress,
                 dict_bytes.is_some(),
@@ -999,7 +1010,7 @@ impl RarArchive {
         self.check_cancel()?;
         #[cfg(feature = "parallel")]
         {
-            if !self.solid_mode && !entries.is_empty() {
+            if !self.write_ctx().solid_mode && !entries.is_empty() {
                 return self.add_batch_parallel(entries);
             }
         }
@@ -1128,15 +1139,15 @@ impl RarArchive {
 
         let ctx = BatchPrepareCtx {
             password: self.password.as_deref(),
-            blake2: self.blake2,
-            dict_size_log: self.dict_size_log,
-            dict_size_bytes: self.dict_size_bytes,
-            force_v70: self.force_v70,
-            save_ctime: self.save_ctime,
-            save_atime: self.save_atime,
-            save_mtime: self.save_mtime,
-            save_owner: self.save_owner,
-            time_precision_seconds: self.time_precision_seconds,
+            blake2: self.write_ctx().blake2,
+            dict_size_log: self.write_ctx().dict_size_log,
+            dict_size_bytes: self.write_ctx().dict_size_bytes,
+            force_v70: self.write_ctx().force_v70,
+            save_ctime: self.write_ctx().save_ctime,
+            save_atime: self.write_ctx().save_atime,
+            save_mtime: self.write_ctx().save_mtime,
+            save_owner: self.write_ctx().save_owner,
+            time_precision_seconds: self.write_ctx().time_precision_seconds,
             threads,
             cancel: self.cancel.clone(),
         };
@@ -1644,12 +1655,14 @@ impl RarArchive {
             ..Default::default()
         };
 
-        if self.volume_size.is_none() {
+        if self.write_ctx().volume_size.is_none() {
             // Single-volume
             let hdr_bytes = fh_base.to_bytes();
-            if self.quick_open {
+            if self.write_ctx().quick_open {
                 let pos = self.stream.as_mut().unwrap().stream_position()?;
-                self.quick_open_entries.push((pos, hdr_bytes.clone()));
+                self.write_ctx_mut()
+                    .quick_open_entries
+                    .push((pos, hdr_bytes.clone()));
             }
             self.write_block_header(&hdr_bytes)?;
             let stream = self.stream.as_mut().unwrap();
@@ -1674,7 +1687,7 @@ impl RarArchive {
         }
 
         // Multi-volume splitting
-        let volume_size = self.volume_size.unwrap();
+        let volume_size = self.write_ctx().volume_size.unwrap();
         // End-of-archive block: 8 plaintext bytes, or `[IV][padded]` when
         // header encryption wraps every block.
         let eoa_plain: u64 = 8;
@@ -1685,17 +1698,17 @@ impl RarArchive {
         let hdr_bytes = fh_base.to_bytes();
         let hdr_on_disk = self.on_disk_header_len(hdr_bytes.len() as u64);
         let total_needed = hdr_on_disk + total_packed + eoa_size;
-        let remaining = volume_size.saturating_sub(self.volume_bytes_written);
+        let remaining = volume_size.saturating_sub(self.write_ctx().volume_bytes_written);
 
         if total_needed <= remaining {
             // Fits entirely
             self.write_block_header(&hdr_bytes)?;
             let stream = self.stream.as_mut().unwrap();
             stream.write_all(packed_data)?;
-            self.volume_bytes_written += hdr_on_disk + total_packed;
             let data_offset = stream.stream_position()? - total_packed;
+            self.write_ctx_mut().volume_bytes_written += hdr_on_disk + total_packed;
             let chunk = DataChunk {
-                volume_index: self.current_volume - 1,
+                volume_index: self.write_ctx().current_volume - 1,
                 data_offset,
                 packed_size: total_packed,
                 crc32_val: Some(file_crc),
@@ -1744,7 +1757,7 @@ impl RarArchive {
         };
 
         while offset < total_packed {
-            let remaining_vol = volume_size.saturating_sub(self.volume_bytes_written);
+            let remaining_vol = volume_size.saturating_sub(self.write_ctx().volume_bytes_written);
 
             // Build chunk flags
             let mut block_flags: u64 = 0;
@@ -1821,11 +1834,11 @@ impl RarArchive {
             self.write_block_header(&final_hdr)?;
             let stream = self.stream.as_mut().unwrap();
             stream.write_all(chunk_packed)?;
-            self.volume_bytes_written += final_hdr_disk + chunk_size;
-
             let data_offset = stream.stream_position()? - chunk_size;
+            self.write_ctx_mut().volume_bytes_written += final_hdr_disk + chunk_size;
+
             chunks.push(DataChunk {
-                volume_index: self.current_volume - 1,
+                volume_index: self.write_ctx().current_volume - 1,
                 data_offset,
                 packed_size: chunk_size,
                 crc32_val: Some(chunk_crc),
@@ -1860,8 +1873,8 @@ impl RarArchive {
     /// not participate in the LZ window: directories, STORE files, empty
     /// files, or when compression fell back to STORE).
     fn reset_solid_chain(&mut self) {
-        self.encoder_state = None;
-        self.last_solid_ext = None;
+        self.write_ctx_mut().encoder_state = None;
+        self.write_ctx_mut().last_solid_ext = None;
     }
 
     /// Reset the solid chain when the next member's file extension differs
@@ -1870,16 +1883,18 @@ impl RarArchive {
     /// break the chain through `reset_solid_chain`, which also clears
     /// `last_solid_ext`, so this only needs to run for compressed members.
     pub(crate) fn maybe_reset_solid_for_extension(&mut self, name: &str) {
-        if !self.solid_mode || self.solid_reset != crate::options::SolidReset::PerExtension {
+        if !self.write_ctx().solid_mode
+            || self.write_ctx().solid_reset != crate::options::SolidReset::PerExtension
+        {
             return;
         }
         let base = name.trim_end_matches('/');
         let ext = base.rsplit('.').next().unwrap_or("");
-        match &self.last_solid_ext {
+        match &self.write_ctx().last_solid_ext {
             Some(prev) if prev == ext => {}
             _ => {
-                self.encoder_state = None;
-                self.last_solid_ext = Some(ext.to_string());
+                self.write_ctx_mut().encoder_state = None;
+                self.write_ctx_mut().last_solid_ext = Some(ext.to_string());
             }
         }
     }
@@ -2047,12 +2062,14 @@ impl RarArchive {
         let mut write_src = payload_stream(&key_iv);
         let mut probe_src = payload_stream(&key_iv);
 
-        if self.volume_size.is_none() {
+        if self.write_ctx().volume_size.is_none() {
             // ── Single-volume ──
             let hdr_bytes = fh_base.to_bytes();
-            if self.quick_open {
+            if self.write_ctx().quick_open {
                 let pos = self.stream.as_mut().unwrap().stream_position()?;
-                self.quick_open_entries.push((pos, hdr_bytes.clone()));
+                self.write_ctx_mut()
+                    .quick_open_entries
+                    .push((pos, hdr_bytes.clone()));
             }
             self.write_block_header(&hdr_bytes)?;
             let written = {
@@ -2101,7 +2118,7 @@ impl RarArchive {
         }
 
         // ── Multi-volume splitting ──
-        let volume_size = self.volume_size.unwrap();
+        let volume_size = self.write_ctx().volume_size.unwrap();
         // End-of-archive block: 8 plaintext bytes, or `[IV][padded]` when
         // header encryption wraps every block.
         let eoa_size: u64 = self.on_disk_header_len(8);
@@ -2136,7 +2153,7 @@ impl RarArchive {
         };
 
         while offset < packed_size {
-            let remaining_vol = volume_size.saturating_sub(self.volume_bytes_written);
+            let remaining_vol = volume_size.saturating_sub(self.write_ctx().volume_bytes_written);
 
             // Build chunk flags
             let mut block_flags: u64 = 0;
@@ -2236,11 +2253,11 @@ impl RarArchive {
                     )?;
                 }
             }
-            self.volume_bytes_written += final_hdr_disk + chunk_size;
+            self.write_ctx_mut().volume_bytes_written += final_hdr_disk + chunk_size;
             let stream = self.stream.as_mut().unwrap();
             let data_offset = stream.stream_position()? - chunk_size;
             chunks.push(DataChunk {
-                volume_index: self.current_volume - 1,
+                volume_index: self.write_ctx().current_volume - 1,
                 data_offset,
                 packed_size: chunk_size,
                 crc32_val: Some(chunk_crc),
@@ -2354,11 +2371,13 @@ impl RarArchive {
         // long range search) work for large files.
         // WinRAR `-se`: reset the solid statistics when the extension changes.
         self.maybe_reset_solid_for_extension(name);
-        let chain_solid = self.solid_mode && self.encoder_state.is_some();
-        self.encoder_state.get_or_insert_with(Default::default);
+        let chain_solid = self.write_ctx().solid_mode && self.write_ctx().encoder_state.is_some();
+        self.write_ctx_mut()
+            .encoder_state
+            .get_or_insert_with(Default::default);
 
         let mut crc_hasher = crc32fast::Hasher::new();
-        let mut blake_hasher = if self.blake2 {
+        let mut blake_hasher = if self.write_ctx().blake2 {
             Some(crate::rar50::blake2sp::Hasher::new())
         } else {
             None
@@ -2466,7 +2485,7 @@ impl RarArchive {
                         method,
                         dsl,
                         dict_bytes,
-                        &mut self.encoder_state,
+                        &mut self.write_ctx_mut().encoder_state,
                         &mut spill,
                         &mut packed_size,
                     )?;
@@ -2550,7 +2569,7 @@ impl RarArchive {
         self.write_member_streams(path)?;
         // Non-solid members use an independent LZ window: drop the
         // encoder state so the next member starts fresh.
-        if !self.solid_mode {
+        if !self.write_ctx().solid_mode {
             self.reset_solid_chain();
         }
         self.report_progress(file_size, file_size);
@@ -2560,7 +2579,7 @@ impl RarArchive {
     /// Write the NTFS alternate data streams of `path` as "STM" service
     /// records right after the member's file block (WinRAR `-os`).
     fn write_member_streams(&mut self, path: &Path) -> RarResult<()> {
-        if !self.save_streams {
+        if !self.write_ctx().save_streams {
             return Ok(());
         }
         #[cfg(windows)]
@@ -2599,8 +2618,10 @@ impl RarArchive {
                 self.write_block_header(&hdr)?;
                 let stream = self.stream.as_mut().unwrap();
                 stream.write_all(&data)?;
-                self.volume_bytes_written =
-                    self.volume_bytes_written.saturating_add(data.len() as u64);
+                self.write_ctx_mut().volume_bytes_written = self
+                    .write_ctx()
+                    .volume_bytes_written
+                    .saturating_add(data.len() as u64);
             }
         }
         #[cfg(not(windows))]
