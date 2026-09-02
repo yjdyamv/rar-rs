@@ -706,14 +706,7 @@ impl RarArchive {
         let main = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
                 let params = parse_archive_encrypt_header(&first.raw)?;
-                let password = self.password.as_ref().ok_or_else(|| {
-                    RarError::Encrypted("archive has encrypted headers; provide a password".into())
-                })?;
-                if !params.verify_password(password) {
-                    return Err(RarError::WrongPassword);
-                }
-                self.archive_encr = Some(params);
-                self.header_encryption = true;
+                self.handle_archive_encrypt_header(params)?;
                 crate::rar50::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
                     .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
             }
@@ -802,14 +795,7 @@ impl RarArchive {
         let main_meta = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
                 let params = parse_archive_encrypt_header(&first.raw)?;
-                let password = self.password.as_ref().ok_or_else(|| {
-                    RarError::Encrypted("archive has encrypted headers; provide a password".into())
-                })?;
-                if !params.verify_password(password) {
-                    return Err(RarError::WrongPassword);
-                }
-                self.archive_encr = Some(params);
-                self.header_encryption = true;
+                self.handle_archive_encrypt_header(params)?;
                 encrypt_header = Some(first.header_bytes);
                 let main = crate::rar50::headers::read_block(
                     reader,

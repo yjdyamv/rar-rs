@@ -13,7 +13,7 @@ use crate::archive::{
     ArchiveEntry, DecryptedPayload, MAX_DICT_SIZE_LOG, RarArchive, StreamRecord, discover_volumes,
 };
 use crate::codec::DecoderState;
-use crate::crypto::{self, parse_archive_encrypt_header};
+use crate::crypto;
 use crate::detect::{SFX_SCAN_LIMIT, find_bytes};
 use crate::error::{RarError, RarResult};
 use crate::io_util::{replace_file, temp_sibling_path};
@@ -273,16 +273,7 @@ impl RarArchive {
                 }
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_ENCRYPT_HEADER => {
-                    let password = self.password.as_ref().ok_or_else(|| {
-                        RarError::Encrypted(
-                            "archive has encrypted headers; provide a password".into(),
-                        )
-                    })?;
-                    let params = parse_archive_encrypt_header(raw)?;
-                    if !params.verify_password(password) {
-                        return Err(RarError::WrongPassword);
-                    }
-                    encr_key = Some(params.get_key(password));
+                    encr_key = Some(crypto::derive_header_key(raw, self.password.as_deref())?);
                 }
                 _ => {}
             }
@@ -397,16 +388,7 @@ impl RarArchive {
                         break; // continue to next volume
                     }
                     BLOCK_TYPE_ENCRYPT_HEADER => {
-                        let password = self.password.as_ref().ok_or_else(|| {
-                            RarError::Encrypted(
-                                "archive has encrypted headers; provide a password".into(),
-                            )
-                        })?;
-                        let params = parse_archive_encrypt_header(&raw)?;
-                        if !params.verify_password(password) {
-                            return Err(RarError::WrongPassword);
-                        }
-                        encr_key = Some(params.get_key(password));
+                        encr_key = Some(crypto::derive_header_key(&raw, self.password.as_deref())?);
                     }
                     _ => {}
                 }

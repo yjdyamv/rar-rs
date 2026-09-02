@@ -579,6 +579,23 @@ pub fn parse_archive_encrypt_header(
     })
 }
 
+/// Parse an archive encryption header block (type 0x04) that has already been
+/// decoded into `raw`, verify the given password, and return the derived
+/// header-decryption key.
+pub fn derive_header_key(
+    raw: &crate::rar50::headers::RawBlock,
+    password: Option<&str>,
+) -> RarResult<[u8; ENCR_KEY_SIZE]> {
+    let password = password.ok_or_else(|| {
+        RarError::Encrypted("archive has encrypted headers; provide a password".into())
+    })?;
+    let params = parse_archive_encrypt_header(raw)?;
+    if !params.verify_password(password) {
+        return Err(RarError::WrongPassword);
+    }
+    Ok(params.get_key(password))
+}
+
 /// Check if a file header's extra area contains an encryption record.
 pub fn is_encrypted(extra_data: &[u8]) -> bool {
     parse_encryption_extra(extra_data)
