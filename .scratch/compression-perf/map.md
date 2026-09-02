@@ -144,3 +144,61 @@ newest entry is always before the chunk being parsed).
 m3 results: dll 6.7 -> 3.1 s (-mt8, 36 KB smaller), mixed 2.7 -> 1.1 s,
 text 0.73 -> 0.39 s. Remaining gap vs WinRAR: per-byte parse speed on dense
 binaries (~2-3x slower single-thread) and the ultra-repetitive-text ratio.
+
+## Since v0.5.0 (napi/wasm release, 2026-08-29) -> HEAD (2026-09-02) — delta
+
+基线 = v0.5.0 发版时状态（2026-08 头对头表，map 由 8666de0 记录；发版到该表之间
+只有 7d7008c 一个 perf 变更，且不影响表中 filter 成员行）。本机 m3，对照 WinRAR 7.23。
+
+### 落地的 perf 提交（31 个提交中 11 个 perf/codec 相关）
+
+| commit | 内容 | 效果 |
+|---|---|---|
+| 3cd6b37 | 不可压缩输入提速（matchless DP 快路径 + collect 快模式门控 longest==0/256） | 64 MiB 随机 mt1 5044→1751 ms、mt8 1253→486 ms；ratio 100.02%→100.01% |
+| 45fa1e0 | delta 候选通道扩到帧尺寸 [1,2,3,4,6,8,9,12,16] + 预门改 64 KiB 采样 | 32 位立体声 11%（原 ~18%）、24 位 3ch 14%、16 位 4ch 22% vs plain 84%；预门从全量扫描（63 MiB ~300 ms+）降到采样 |
+| 47c5394 | 无匹配块无活 rep 时跳过重复距离探测 | 微优化 |
+| 7d7008c | MT 扩展到中尺寸成员 + x86 过滤抽样选择 + 进度 | text 19.5 MB mt8 711→369 ms |
+| 2e21d0b | **过滤成员 MT**（此前严格串行）+ MT 长距离自影修复 | dll mt8 6.7→3.1 s、mixed 2.7→1.1 s、text 0.73→0.39 s；随机+远端副本 32 MiB 从 ~100% 修复到 50% |
+| faa4ec3 | 长距离探测越窗守卫 | 正确性 |
+| 308157b | **自适应发射块大小**（合并到 4 MiB + 局部漂移闭合）+ 持久树跨 chunk 损坏修复 | text64 12681→6058 B（-52%）；DLL 归档此前静默损坏（unrar/WinRAR checksum error）→ 字节级回环 |
+| dd2d01c | 树下降 u64 字比较 | dll mt1 -10% |
+| 38a1131 | **CLI parallel feature 修复**（独立构建的 CLI 静默单线程） | CLI dll mt8 3.2→2.3 s |
+| 4c2666b | 树哈希 17→20 bits | mt1 全域 -4-15%，输出字节级一致（xml m2 -1 B） |
+| 8d23948 | 自适应 MT 片大小（目标 ~2×线程，下限 2 MiB） | 库核心 dll mt8 2638→1329 ms（-50%） |
+
+### 速度净变化（可比口径，m3）
+
+| 文件 | v0.5.0 mt8 | 现在 mt8 | 变化 |
+|---|---|---|---|
+| dll（x86 过滤成员） | 6.5 s（**无 MT 收益**，严格串行） | 3.115 s | **-52%**（且并发） |
+| mixed20 | 2.7 s（无 MT 收益） | 1.032 s | **-62%** |
+| text64 | 0.86 s | 0.846 s | ≈ -2% |
+| rand64 | 0.19 s | 0.186 s | ≈（对 WinRAR 2.66 s 保持 14× 领先） |
+| 64 MiB 随机 mt1 | 5.04 s | 1.75 s | -65% |
+
+### 压缩率净变化
+
+| 文件 | v0.5.0 | 现在 | vs WinRAR 7.23 |
+|---|---|---|---|
+| text64 | 12681 B（+44.6% 差于 WinRAR 8769） | 6133 B | **-30%**（反超） |
+| dll | 45.08%（+2.02%） | 43.90%（+0.84%，对比新跑的 WinRAR 43.06%；对 WinRAR 次优归档 44.81% 为 -2%） |
+| mixed20 | 50.03% | 50.02% | -0.2% |
+| rand64 | 100.0% | 100.0% | 平 |
+
+### 附带修复（本应属于发版质量）
+
+- 持久树跨 chunk 静默损坏：密集 x86 成员产出 WinRAR/unrar 双双 checksum error 的归档
+  → 修复 + 收集器字节验证安全网 + 129 KB 内核镜像回归 fixture（308157b）
+- CLI 独立构建静默丢 MT（38a1131）——napi 绑定不受影响（依赖 feature 常开），但 CLI 用户
+  在发版时实际拿不到任何多线程
+- MT 长距离自影：随机+远端精确副本从 ~100% 压缩到 50%（2e21d0b）
+
+### 剩余差距（保持开放）
+
+- dll 单线程解析 ~6-8 s vs WinRAR 1.8 s（4.7×），mt8 7.5×；issue 09（缓存驻留近窗 finder 未建）
+- xml m2/m3 +1.5%（解析差距，非块开销）
+- text64 MT 片间分歧（6554 vs seq 6058）
+- CLI ~1 s 未记账开销（batch wave/MT 池嵌套）
+
+注：两代头对头表的 dll mt1（6.5 s vs 8.09 s）不可直接比——测法不同（库核心直调 vs 修好
+后的 CLI），且 CLI 修复后测的是含 ~1 s CLI 开销的口径。上表可比行仅限同口径数字。
