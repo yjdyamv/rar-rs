@@ -7,7 +7,7 @@
 //! overflows, OOM aborts and unbounded loops.
 
 use rar5::crypto;
-use rar5::recovery::rar5 as recovery;
+use rar5::recovery::rar50 as recovery;
 
 /// xorshift64* PRNG with a fixed seed, matching `tests/interop.rs`.
 struct Rng(u64);

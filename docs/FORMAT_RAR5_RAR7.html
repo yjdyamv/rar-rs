@@ -675,7 +675,7 @@ flowchart TD
         <h2 class="font-serif text-2xl font-semibold mb-1">附录 B · 参考来源</h2>
         <div class="rounded-xl border border-slate-200 bg-white p-5 mt-4 text-sm text-slate-600">
           <ul class="space-y-1.5">
-            <li>· <strong>权威</strong>：rar-rs 实现（<span class="mono">crates/rar/src/rar50/{mod,payload,extract}.rs</span>、<span class="mono">rar50/headers/{parse,serialize,locator}.rs</span>、<span class="mono">rar50/write/{mod,engine,layout}.rs</span>、<span class="mono">codec/rar50/{encoder,decoder}.rs</span>、<span class="mono">crypto/rar50.rs</span>、<span class="mono">recovery/{rar5,rev5}.rs</span>），WinRAR 7.23 双向互操作验证。</li>
+            <li>· <strong>权威</strong>：rar-rs 实现（<span class="mono">crates/rar/src/rar50/{mod,payload,extract}.rs</span>、<span class="mono">rar50/headers/{parse,serialize,locator}.rs</span>、<span class="mono">rar50/write/{mod,engine,layout}.rs</span>、<span class="mono">codec/rar50/{encoder,decoder}.rs</span>、<span class="mono">crypto/rar50.rs</span>、<span class="mono">recovery/{rar50,rev50}.rs</span>），WinRAR 7.23 双向互操作验证。</li>
             <li>· 交叉核对：bitplane/rars（<span class="mono">crates/rars/src/rar50*.rs</span>）与 <a class="text-indigo-600" href="https://github.com/bitplane/rar-research">rar-research</a> 规格书；冲突处以本实现为准。</li>
             <li>· 位流格式源自对 libarchive <span class="mono">archive_read_support_format_rar5.c</span>（Grzegorz Antoniak, 2018, BSD-2-Clause）的独立分析。</li>
           </ul>

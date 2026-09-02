@@ -1567,13 +1567,14 @@ fn cmd_recovery_volumes(args: &RecoveryVolumesArgs) -> Result<(), String> {
         if pct > 1000 {
             return Err(format!("invalid recovery percent: {spec}"));
         }
-        rar5::recovery::rev5::plan_recovery_volume_count(nd, pct).map_err(|e| format!("rv: {e}"))?
+        rar5::recovery::rev50::plan_recovery_volume_count(nd, pct)
+            .map_err(|e| format!("rv: {e}"))?
     } else {
         spec.parse::<usize>()
             .map_err(|_| format!("invalid recovery volume count: {spec}"))?
     };
 
-    let written = rar5::recovery::rev5::build_recovery_volumes_for_set(&volumes, rec_count)
+    let written = rar5::recovery::rev50::build_recovery_volumes_for_set(&volumes, rec_count)
         .map_err(|e| format!("rv: {e}"))?;
     for path in &written {
         info!("Creating {}", path.display());

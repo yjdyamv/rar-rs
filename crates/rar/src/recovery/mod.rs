@@ -1,14 +1,14 @@
-//! Recovery-record and recovery-volume support (RAR5).
+//! Recovery-record and recovery-volume support (RAR5 family / v50).
 
-pub mod rar5;
-pub mod rev5;
+pub mod rar50;
+pub mod rev50;
 
 use crate::error::{RarError, RarResult};
 
-impl From<rar5::Error> for RarError {
-    fn from(e: rar5::Error) -> Self {
+impl From<rar50::Error> for RarError {
+    fn from(e: rar50::Error) -> Self {
         match e {
-            rar5::Error::Cancelled => RarError::Cancelled,
+            rar50::Error::Cancelled => RarError::Cancelled,
             other => RarError::Format(format!("repair: {other}")),
         }
     }
@@ -18,7 +18,7 @@ impl From<rar5::Error> for RarError {
 /// `rar r`). Returns the repaired bytes; an undamaged archive is returned
 /// unchanged.
 pub fn repair_archive(input: &[u8]) -> RarResult<Vec<u8>> {
-    rar5::repair_inline_recovery_archive(input).map_err(RarError::from)
+    rar50::repair_inline_recovery_archive(input).map_err(RarError::from)
 }
 
 /// Streaming repair of a damaged archive on disk (like `rar r`): reads
@@ -49,7 +49,7 @@ pub fn repair_archive_path_with(
     let tmp = crate::io_util::temp_sibling_path(dst);
     let mut output = crate::io_util::read_write_create(&tmp).map_err(RarError::Io)?;
     let repaired =
-        rar5::repair_inline_recovery_archive_path(&mut input, &mut output, cancel, progress)
+        rar50::repair_inline_recovery_archive_path(&mut input, &mut output, cancel, progress)
             .map_err(|e| {
                 let _ = std::fs::remove_file(&tmp);
                 RarError::from(e)
@@ -79,5 +79,5 @@ pub fn rebuild_missing_volumes_with(
     cancel: Option<&std::sync::atomic::AtomicBool>,
     progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> RarResult<Vec<std::path::PathBuf>> {
-    rev5::rebuild_missing_volumes_with(first_volume, cancel, progress)
+    rev50::rebuild_missing_volumes_with(first_volume, cancel, progress)
 }

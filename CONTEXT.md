@@ -16,8 +16,8 @@
 - **Streaming payload（流式负载）** — `write_streamed_payload`（`rar50/write/mod.rs`）：统一流式写路径（单卷/分卷 + 可选流式 AES-256-CBC），`write_stored_file` 是其 STORE 特例。
 - **CbcRangeEmitter** — `rar50/write/engine.rs` 中连续 CBC 密文按任意字节区间发出的机制（read-ahead 到块边界 + ≤15B carry），使加密分块边界任意、卷大小仍精确（与 WinRAR 字节级一致）。
 - **Header encryption（-hp）** — 归档级加密头（每卷开头明文），其后所有块为 `[IV][AES-256-CBC 加密头]`。
-- **Recovery record（恢复记录）** — 单卷内联 "RR" 服务块，奇偶校验保护归档前缀（GF(2^16) Cauchy 矩阵，见 `recovery/rar5.rs`）。
-- **Recovery volumes（.rev 恢复卷）** — 分卷集的 Reed-Solomon 奇偶校验卷，可重建缺失卷（`recovery/rev5.rs`）。
+- **Recovery record（恢复记录）** — 单卷内联 "RR" 服务块，奇偶校验保护归档前缀（GF(2^16) Cauchy 矩阵，见 `recovery/rar50.rs`）。
+- **Recovery volumes（.rev 恢复卷）** — 分卷集的 Reed-Solomon 奇偶校验卷，可重建缺失卷（`recovery/rev50.rs`）。
 - **Quick-open（QO）** — 主头 locator + 末尾 "QO" 服务块，缓存文件头副本加速列表。
 - **BLAKE2sp / hash-key MAC** — 成员哈希记录（`-htb`）；加密成员的校验和用 hash key MAC 保护（`rar50/blake2sp.rs`、`crypto/rar50.rs`）。
 - **Redirect（重定向）** — symlink / hardlink / file-copy 成员（无数据区，仅 extra 记录）。
@@ -33,7 +33,7 @@
 - **格式层 `rar50/`**：容器常量 + 头类型/解析（mod.rs + headers/{parse,serialize,locator}.rs）、成员读/解码门面（payload.rs）、读路径（extract.rs）、写管线（write/{mod,engine,layout}.rs）、vint/blake2sp。将来低版本格式加 `rar40/` 等兄弟模块。
 - **编解码层 `codec/`**：一族一目录（codec/rar50/{mod,encoder,decoder}.rs = 编码器 + 解码器 + compress/decompress 分发）；bitstream/huffman/filters/match_finder/window 为共享原语。
 - **加密层 `crypto/`**：一族一文件（crypto/rar50.rs）。
-- **恢复层 `recovery/`**：rar5.rs（内联 RR）+ rev5.rs（.rev 卷）。
+- **恢复层 `recovery/`**：rar50.rs（内联 RR）+ rev50.rs（.rev 卷）。
 - **基础设施**：detect.rs（签名/SFX 扫描）、parallel.rs（Rayon 池）、io_util.rs（原子暂存/有界读）、version.rs/features.rs（薄词汇模块）、options.rs/error.rs/write_progress.rs。
 - **CLI 层 `crates/rar-cli`**：rar/unrar 两二进制；common.rs（WinRAR 开关/配置兼容核心）+ input/password/output/time 模块。
 

@@ -325,7 +325,7 @@ pub fn write_roundtrip(data: &[u8]) {
         let rev_ok = if create_rev.is_some() {
             true // create-time .rev already on disk
         } else {
-            rar5::recovery::rev5::build_recovery_volumes_for_set(&volumes, 1 + (h[7] as usize % 2))
+            rar5::recovery::rev50::build_recovery_volumes_for_set(&volumes, 1 + (h[7] as usize % 2))
                 .is_ok()
         };
         if rev_ok {
@@ -499,7 +499,7 @@ pub fn recovery(data: &[u8]) {
         // one-byte-corrupted prefix (one damaged shard, one parity
         // shard: reconstruct must succeed).
         let pct = (data[0] % 101) as u64;
-        if let Ok(rr) = rar5::recovery::rar5::build_structural_inline_recovery_data(data, pct) {
+        if let Ok(rr) = rar5::recovery::rar50::build_structural_inline_recovery_data(data, pct) {
             let mut full = data.to_vec();
             full.extend_from_slice(&rr);
             let _ = rar5::repair_archive(&full);
@@ -509,8 +509,8 @@ pub fn recovery(data: &[u8]) {
         }
     }
 
-    let _ = rar5::recovery::rar5::crc64_xz(data);
-    let _ = rar5::recovery::rar5::crc64_rar_state(data);
+    let _ = rar5::recovery::rar50::crc64_xz(data);
+    let _ = rar5::recovery::rar50::crc64_rar_state(data);
 
     // `.rev` serialization: sizes/CRCs need not be meaningful for the
     // writer to produce a file.
@@ -518,6 +518,6 @@ pub fn recovery(data: &[u8]) {
         let sizes = [data.len() as u64];
         let crcs = [u32::from_le_bytes(data[0..4].try_into().unwrap())];
         let payload = &data[..data.len() / 2];
-        let _ = rar5::recovery::rev5::build_recovery_volume_file(0, 1, &sizes, &crcs, payload);
+        let _ = rar5::recovery::rev50::build_recovery_volume_file(0, 1, &sizes, &crcs, payload);
     }
 }

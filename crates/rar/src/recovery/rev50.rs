@@ -5,7 +5,7 @@
 //! recovery record (WinRAR's `-rv` switch). Each `.rev` file protects the
 //! whole volume set; up to `NR` missing/corrupt volumes can be rebuilt.
 
-use super::rar5::encode_parity_shards;
+use super::rar50::encode_parity_shards;
 use crate::error::{RarError, RarResult};
 use crate::io_util::read_up_to;
 use std::fs;
@@ -133,7 +133,7 @@ pub fn rebuild_missing_volumes_with(
     cancel: Option<&std::sync::atomic::AtomicBool>,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> RarResult<Vec<PathBuf>> {
-    use crate::recovery::rar5::reconstruct_data_shards;
+    use crate::recovery::rar50::reconstruct_data_shards;
 
     let check_cancel = |cancel: Option<&std::sync::atomic::AtomicBool>| -> RarResult<()> {
         if cancel.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {

@@ -207,7 +207,7 @@ impl crate::rar50::payload::ChunkReader for VolumeReaders {
 fn rev_params_from_file(path: &Path) -> RarResult<(u32, u32)> {
     let data = std::fs::read(path)?;
     if data.len() < 8 + 4 + 4 + 1 + 2 + 2 + 2 + 4
-        || &data[..8] != crate::recovery::rev5::REV5_SIGNATURE
+        || &data[..8] != crate::recovery::rev50::REV5_SIGNATURE
     {
         return Err(RarError::Format(format!(
             "{}: not a RAR5 recovery volume",
@@ -1371,13 +1371,13 @@ impl RarArchive {
         let rec_count = if let Some(count) = self.recovery_volumes_count {
             (count as usize).min(nd)
         } else if let Some(percent) = self.recovery_volumes_percent {
-            crate::recovery::rev5::plan_recovery_volume_count(nd, percent as u64)?
+            crate::recovery::rev50::plan_recovery_volume_count(nd, percent as u64)?
         } else {
             return Ok(());
         };
 
         let written =
-            crate::recovery::rev5::build_recovery_volumes_for_set(&self.volume_paths, rec_count)?;
+            crate::recovery::rev50::build_recovery_volumes_for_set(&self.volume_paths, rec_count)?;
         let _ = written;
         self.recovery_volumes_percent = None;
         Ok(())
@@ -1476,7 +1476,7 @@ impl RarArchive {
         }
 
         let rr_data =
-            crate::recovery::rar5::build_structural_inline_recovery_data(&prefix, percent)
+            crate::recovery::rar50::build_structural_inline_recovery_data(&prefix, percent)
                 .map_err(|e| RarError::Format(format!("recovery record encode: {e}")))?;
 
         // RR service header: type 3, name "RR", SubData = percent byte.
@@ -2263,8 +2263,8 @@ mod tests {
             .collect();
         padded.insert(missing, payload.to_vec());
 
-        let gf = crate::recovery::rar5::shared_gf16();
-        let matrix = crate::recovery::rar5::make_encoder_matrix(padded.len(), 1).unwrap();
+        let gf = crate::recovery::rar50::shared_gf16();
+        let matrix = crate::recovery::rar50::make_encoder_matrix(padded.len(), 1).unwrap();
         let mut rebuilt = vec![0u8; maxlen];
         let denom = matrix[0][missing];
         for off in (0..maxlen).step_by(2) {
@@ -2319,7 +2319,7 @@ mod tests {
         for pos in [100usize, 200, 300] {
             damaged[pos] ^= 0xFF;
         }
-        let repaired = crate::recovery::rar5::repair_inline_recovery_archive(&damaged).unwrap();
+        let repaired = crate::recovery::rar50::repair_inline_recovery_archive(&damaged).unwrap();
         assert_eq!(repaired, raw, "repair must restore the original bytes");
         std::fs::remove_file(&path).ok();
     }
@@ -2371,7 +2371,7 @@ mod tests {
         for byte in damaged.iter_mut().take(s2 + gc).skip(s1) {
             *byte ^= 0xFF;
         }
-        let repaired = crate::recovery::rar5::repair_inline_recovery_archive(&damaged).unwrap();
+        let repaired = crate::recovery::rar50::repair_inline_recovery_archive(&damaged).unwrap();
         assert_eq!(
             repaired, raw,
             "relocated repair must restore the original bytes"
@@ -2416,7 +2416,7 @@ mod tests {
             *byte ^= 0xFF;
         }
         assert!(
-            crate::recovery::rar5::repair_inline_recovery_archive(&damaged).is_err(),
+            crate::recovery::rar50::repair_inline_recovery_archive(&damaged).is_err(),
             "repair must refuse damage beyond parity capacity without a twin"
         );
         std::fs::remove_file(&path).ok();
