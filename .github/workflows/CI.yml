@@ -1,7 +1,7 @@
 name: CI
 env:
   DEBUG: napi:*
-  APP_NAME: smart-archive-rar
+  APP_NAME: rar-rs-napi
   MACOSX_DEPLOYMENT_TARGET: '10.13'
   CARGO_INCREMENTAL: '1'
 'on':
@@ -22,7 +22,7 @@ concurrency:
   cancel-in-progress: true
 
 # The rar-rs workspace ships a pure-Rust library (crates/rar), CLI
-# (crates/rar-cli) and the smart-archive-rar napi-rs binding
+# (crates/rar-cli) and the rar-rs-napi binding
 # (crates/rar-napi, native .node + wasm32-wasip1-threads). No npm package
 # is published: the VS Code consumer downloads the compiled artifacts from
 # the GitHub Release assets (tag v*), SHA-256 pinned in its installer —
@@ -185,11 +185,11 @@ jobs:
         with:
           name: bindings-wasm32-wasip1-threads
           path: |
-            crates/rar-napi/smart-archive-rar.wasm32-wasi.wasm
-            crates/rar-napi/smart-archive-rar.wasm32-wasi.debug.wasm
-            crates/rar-napi/smart-archive-rar.wasi.cjs
-            crates/rar-napi/smart-archive-rar.wasi.d.cts
-            crates/rar-napi/smart-archive-rar.wasi-browser.js
+            crates/rar-napi/rar-rs-napi.wasm32-wasi.wasm
+            crates/rar-napi/rar-rs-napi.wasm32-wasi.debug.wasm
+            crates/rar-napi/rar-rs-napi.wasi.cjs
+            crates/rar-napi/rar-rs-napi.wasi.d.cts
+            crates/rar-napi/rar-rs-napi.wasi-browser.js
             crates/rar-napi/wasi-path-map.cjs
             crates/rar-napi/wasi-worker.mjs
             crates/rar-napi/wasi-worker-browser.mjs
@@ -249,7 +249,7 @@ jobs:
           const fs = require('fs');
           const f = fs.readdirSync('.').find((n) => n.endsWith('.node'));
           if (!f) { console.error('no .node artifact'); process.exit(1); }
-          const expect = 'smart-archive-rar.${{ matrix.settings.triple }}.node';
+          const expect = 'rar-rs-napi.${{ matrix.settings.triple }}.node';
           if (f !== expect) { console.error('expected', expect, 'got', f); process.exit(1); }
           console.log('ok:', f);
           "
@@ -329,11 +329,11 @@ jobs:
         run: |
           mkdir -p release
           find bindings -name '*.node' -exec cp -f {} release/ \;
-          cp wasm/smart-archive-rar.wasm32-wasi.wasm \
-             wasm/smart-archive-rar.wasm32-wasi.debug.wasm \
-             wasm/smart-archive-rar.wasi.cjs \
-             wasm/smart-archive-rar.wasi.d.cts \
-             wasm/smart-archive-rar.wasi-browser.js \
+          cp wasm/rar-rs-napi.wasm32-wasi.wasm \
+             wasm/rar-rs-napi.wasm32-wasi.debug.wasm \
+             wasm/rar-rs-napi.wasi.cjs \
+             wasm/rar-rs-napi.wasi.d.cts \
+             wasm/rar-rs-napi.wasi-browser.js \
              wasm/wasi-path-map.cjs \
              wasm/wasi-worker.mjs \
              wasm/wasi-worker-browser.mjs release/ 2>/dev/null || true

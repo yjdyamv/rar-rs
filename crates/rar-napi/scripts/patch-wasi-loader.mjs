@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const loaderPath = join(root, 'smart-archive-rar.wasi.cjs')
+const loaderPath = join(root, 'rar-rs-napi.wasi.cjs')
 const workerPath = join(root, 'wasi-worker.mjs')
 const helperMarker = 'wasi-path-map.cjs'
 
@@ -239,4 +239,4 @@ writeFileSync(loaderPath, patchLoader(loader))
 const worker = readFileSync(workerPath, 'utf8')
 writeFileSync(workerPath, patchWorker(worker))
 
-console.log('patched smart-archive-rar.wasi.cjs and wasi-worker.mjs')
+console.log('patched rar-rs-napi.wasi.cjs and wasi-worker.mjs')

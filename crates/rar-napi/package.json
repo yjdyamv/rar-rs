@@ -1,7 +1,7 @@
 {
-  "name": "smart-archive-rar",
+  "name": "rar-rs-napi",
   "version": "0.5.0",
-  "description": "RAR5 archive creation for the Smart Archive VS Code extension (napi-rs)",
+  "description": "RAR5 archive creation — napi-rs binding (native .node + wasm32-wasip1-threads) around the rar5 library",
   "main": "index.js",
   "license": "BSD-2-Clause",
   "files": [
@@ -9,7 +9,7 @@
     "index.js"
   ],
   "napi": {
-    "binaryName": "smart-archive-rar",
+    "binaryName": "rar-rs-napi",
     "targets": [
       "x86_64-pc-windows-msvc",
       "i686-pc-windows-msvc",

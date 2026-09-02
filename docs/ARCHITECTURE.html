@@ -60,7 +60,7 @@
           <pre class="mermaid">
 flowchart LR
   CLI[rar-cli: rar + unrar] --> LIB{{rar 库 crate}}
-  NAPI[rar-napi: smart-archive-rar] --> LIB
+  NAPI[rar-napi: rar-rs-napi] --> LIB
   FUZZ[fuzz 目标] --> LIB
   T[tests 夹具] --> LIB
   LIB -->|无外部依赖| STD[(std only)]
@@ -72,7 +72,7 @@ flowchart LR
           <div class="grid md:grid-cols-3 gap-3 mono text-xs">
             <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">crates/rar</span><div class="text-slate-500 mt-1">库 crate（公共 API，<span class="mono">rar5</span>）</div></div>
             <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">crates/rar-cli</span><div class="text-slate-500 mt-1">binary crate（<span class="mono">rar</span> + <span class="mono">unrar</span>）</div></div>
-            <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">crates/rar-napi</span><div class="text-slate-500 mt-1">napi-rs 绑定（<span class="mono">smart-archive-rar</span>）</div></div>
+            <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">crates/rar-napi</span><div class="text-slate-500 mt-1">napi-rs 绑定（<span class="mono">rar-rs-napi</span>）</div></div>
             <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">fuzz/</span><div class="text-slate-500 mt-1">cargo-fuzz 目标（独立 crate）</div></div>
             <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">tests/</span><div class="text-slate-500 mt-1">共享集成夹具</div></div>
             <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">docs/</span><div class="text-slate-500 mt-1">格式 + 架构 + CLI 参考</div></div>

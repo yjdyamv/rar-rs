@@ -1,8 +1,8 @@
 [package]
-name = "smart-archive-rar"
+name = "rar-rs-napi"
 version = "0.5.0"
 edition = "2021"
-description = "RAR5 archive creation for Smart Archive — napi-rs binding around the rar5 library"
+description = "RAR5 archive creation — napi-rs binding (native .node + wasm32-wasip1-threads) around the rar5 library"
 license = "BSD-2-Clause"
 
 [lib]
