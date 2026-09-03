@@ -30,8 +30,7 @@ pub fn decode(
                 state,
                 ..Default::default()
             },
-        )
-        .map_err(RarError::Format)?;
+        )?;
         if result.len() != unpacked_size as usize {
             return Err(RarError::Format(format!(
                 "decoded size mismatch: expected {unpacked_size}, got {}",

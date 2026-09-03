@@ -173,8 +173,7 @@ pub(crate) fn decode_member(
                 state,
             },
             out,
-        )
-        .map_err(RarError::Format)?
+        )?
     };
     Ok(written)
 }

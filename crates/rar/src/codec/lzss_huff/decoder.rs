@@ -10,6 +10,7 @@ use crate::codec::bitstream::BitReader;
 use crate::codec::filters::apply_filter_decode;
 use crate::codec::huffman::{DecodeTable, decode_symbol};
 use crate::codec::window::SlidingWindow;
+use crate::error::{RarError, RarResult};
 use crate::version::ArchiveVersion;
 
 // ── Decoder ────────────────────────────────────────────────────────────────
@@ -83,11 +84,7 @@ pub struct DecodeOptions<'a> {
 ///
 /// - `data`: raw compressed bytes (the data area from the file block)
 /// - `unpacked_size`: expected decompressed size in bytes
-pub fn decode_raw(
-    data: &[u8],
-    unpacked_size: u64,
-    opts: DecodeOptions<'_>,
-) -> Result<Vec<u8>, String> {
+pub fn decode_raw(data: &[u8], unpacked_size: u64, opts: DecodeOptions<'_>) -> RarResult<Vec<u8>> {
     let mut reader = BitReader::new(data);
 
     match opts.state {
@@ -129,7 +126,7 @@ pub fn decode_to_writer(
     unpacked_size: u64,
     opts: DecodeOptions<'_>,
     writer: &mut dyn std::io::Write,
-) -> Result<u64, String> {
+) -> RarResult<u64> {
     if unpacked_size == 0 {
         return Ok(0);
     }
@@ -167,7 +164,7 @@ pub fn decode_standalone_to_writer(
     dict_size_bytes: Option<u64>,
     variant: ArchiveVersion,
     writer: &mut dyn std::io::Write,
-) -> Result<u64, String> {
+) -> RarResult<u64> {
     let dict_size = checked_dict_size(dict_size_log, dict_size_bytes)?;
     let mut reader = BitReader::new(data);
     let mut window = SlidingWindow::new(dict_size);
@@ -201,23 +198,28 @@ pub fn decode_standalone_to_writer(
 /// field (up to 4 GiB); for RAR7 the actual byte count is given (up to
 /// 64 GiB, possibly non-power-of-two — the window rounds up to a power of
 /// two so the circular buffer keeps its fast mask arithmetic).
-fn checked_dict_size(dict_size_log: u8, dict_size_bytes: Option<u64>) -> Result<usize, String> {
+fn checked_dict_size(dict_size_log: u8, dict_size_bytes: Option<u64>) -> RarResult<usize> {
     let bytes = match dict_size_bytes {
         Some(bytes) => bytes,
         None => {
             if dict_size_log > 15 {
-                return Err(format!(
+                return Err(RarError::Format(format!(
                     "dictionary size log {dict_size_log} exceeds supported maximum 15"
-                ));
+                )));
             }
             (128u64 * 1024) << dict_size_log
         }
     };
-    let bytes_usize = usize::try_from(bytes)
-        .map_err(|_| format!("dictionary size {bytes} overflows host address space"))?;
-    bytes_usize
-        .checked_next_power_of_two()
-        .ok_or_else(|| format!("dictionary size {bytes} overflows host address space"))
+    let bytes_usize = usize::try_from(bytes).map_err(|_| {
+        RarError::Format(format!(
+            "dictionary size {bytes} overflows host address space"
+        ))
+    })?;
+    bytes_usize.checked_next_power_of_two().ok_or_else(|| {
+        RarError::Format(format!(
+            "dictionary size {bytes} overflows host address space"
+        ))
+    })
 }
 
 /// Streaming decode core: writes decoded (and filtered) output to `writer`.
@@ -235,7 +237,7 @@ fn decode_inner_streaming(
     table_rc: &mut Option<DecodeTable>,
     variant: ArchiveVersion,
     writer: &mut dyn std::io::Write,
-) -> Result<u64, String> {
+) -> RarResult<u64> {
     const COPY_THRESHOLD: u64 = 64 * 1024;
 
     let mut pending_filters: Vec<PendingFilter> = Vec::new();
@@ -245,18 +247,22 @@ fn decode_inner_streaming(
 
     while (window.total_written() - output_start) < unpacked_size {
         // ── Read block header ──────────────────────────────────────────
-        let block_flags_byte = reader.read_byte().map_err(|e| e.to_string())?;
+        let block_flags_byte = reader
+            .read_byte()
+            .map_err(|e| RarError::Format(e.to_string()))?;
 
         let table_present = (block_flags_byte >> 7) & 1 != 0;
         let is_last_block = (block_flags_byte >> 6) & 1 != 0;
         let byte_count = ((block_flags_byte >> 3) & 3) + 1;
         let bit_size = block_flags_byte & 7;
 
-        let checksum_byte = reader.read_byte().map_err(|e| e.to_string())?;
+        let checksum_byte = reader
+            .read_byte()
+            .map_err(|e| RarError::Format(e.to_string()))?;
 
         let block_size_bytes = reader
             .read_bytes(byte_count as usize)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| RarError::Format(e.to_string()))?;
         let mut block_size: u32 = 0;
         for (i, &b) in block_size_bytes.iter().enumerate() {
             block_size |= (b as u32) << (i * 8);
@@ -267,13 +273,13 @@ fn decode_inner_streaming(
             expected_ck ^= b;
         }
         if checksum_byte != expected_ck {
-            return Err(format!(
+            return Err(RarError::Format(format!(
                 "block checksum mismatch: got {checksum_byte:#x}, expected {expected_ck:#x}"
-            ));
+            )));
         }
 
         if block_size == 0 {
-            return Err("zero-length block".into());
+            return Err(RarError::Format("zero-length block".into()));
         }
         let block_bits = ((block_size as u64) - 1) * 8 + (1 + bit_size as u64);
         let block_start_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
@@ -286,10 +292,18 @@ fn decode_inner_streaming(
             *table_rc = Some(rc);
         }
 
-        let t_nc = table_nc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_dc = table_dc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_ldc = table_ldc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_rc = table_rc.as_ref().ok_or("no Huffman tables defined")?;
+        let t_nc = table_nc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_dc = table_dc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_ldc = table_ldc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_rc = table_rc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
 
         // ── Decode symbols ─────────────────────────────────────────────
         while (window.total_written() - output_start) < unpacked_size {
@@ -298,7 +312,7 @@ fn decode_inner_streaming(
                 break;
             }
 
-            let sym = decode_symbol(t_nc, reader).map_err(|e| e.to_string())?;
+            let sym = decode_symbol(t_nc, reader).map_err(|e| RarError::Format(e.to_string()))?;
 
             if sym < 256 {
                 window.put_byte(sym as u8);
@@ -312,7 +326,8 @@ fn decode_inner_streaming(
             } else if (SYM_CACHE_BASE..=SYM_CACHE_BASE + 3).contains(&sym) {
                 let cache_idx = sym - SYM_CACHE_BASE;
                 let dist = dist_cache_touch(dist_cache, cache_idx);
-                let len_slot = decode_symbol(t_rc, reader).map_err(|e| e.to_string())?;
+                let len_slot =
+                    decode_symbol(t_rc, reader).map_err(|e| RarError::Format(e.to_string()))?;
                 let length = decode_length(len_slot, reader)?;
                 *last_length = length;
                 *prev_low_dist = (dist & 0xF) as u32;
@@ -320,7 +335,8 @@ fn decode_inner_streaming(
             } else if sym >= SYM_MATCH_BASE {
                 let len_slot = sym - SYM_MATCH_BASE;
                 let mut length = decode_length(len_slot, reader)?;
-                let dist_slot = decode_symbol(t_dc, reader).map_err(|e| e.to_string())?;
+                let dist_slot =
+                    decode_symbol(t_dc, reader).map_err(|e| RarError::Format(e.to_string()))?;
                 let dist = decode_distance(dist_slot, reader, t_ldc)?;
                 length = apply_length_bonus_u64(length, dist);
                 *last_length = length;
@@ -358,16 +374,20 @@ fn decode_inner_streaming(
 
     // Any filter whose region was never produced is malformed.
     if pending_filters.iter().any(|f| !f.applied) {
-        return Err("unapplied RAR5 filter at end of stream".into());
+        return Err(RarError::Format(
+            "unapplied RAR5 filter at end of stream".into(),
+        ));
     }
     if sink.staging_len() != 0 {
-        return Err("internal streaming decode staging error".into());
+        return Err(RarError::Format(
+            "internal streaming decode staging error".into(),
+        ));
     }
     let produced = written - output_start;
     if produced != unpacked_size {
-        return Err(format!(
+        return Err(RarError::Format(format!(
             "decompressed size mismatch: expected {unpacked_size}, got {produced}"
-        ));
+        )));
     }
     Ok(produced)
 }
@@ -401,22 +421,22 @@ impl<'a> OutputSink<'a> {
         self.staging.len() - self.consumed
     }
 
-    fn append_window(&mut self, window: &SlidingWindow, from: u64, to: u64) -> Result<(), String> {
+    fn append_window(&mut self, window: &SlidingWindow, from: u64, to: u64) -> RarResult<()> {
         if to <= from {
             return Ok(());
         }
         let bytes = window.get_output(from, (to - from) as usize);
         if self.staging_len() + bytes.len() > MAX_STREAMING_FILTER_BUFFER as usize {
-            return Err(format!(
+            return Err(RarError::Format(format!(
                 "filtered output region exceeds streaming buffer limit {}",
                 MAX_STREAMING_FILTER_BUFFER
-            ));
+            )));
         }
         self.staging.extend_from_slice(&bytes);
         Ok(())
     }
 
-    fn apply_complete_filters(&mut self, pending: &mut [PendingFilter]) -> Result<(), String> {
+    fn apply_complete_filters(&mut self, pending: &mut [PendingFilter]) -> RarResult<()> {
         for filt in pending.iter_mut().filter(|f| !f.applied) {
             let staging_end = self.staging_start + (self.staging_len() as u64);
             if staging_end < filt.block_start + filt.block_length {
@@ -429,7 +449,9 @@ impl<'a> OutputSink<'a> {
             // index `consumed`, not 0.
             let base = self.consumed;
             if base + end_off > self.staging.len() {
-                return Err("filter region out of staging bounds".into());
+                return Err(RarError::Format(
+                    "filter region out of staging bounds".into(),
+                ));
             }
             let region = &mut self.staging[base + start_off..base + end_off];
             // The E8/ARM inverse transforms read a file-relative position
@@ -442,9 +464,10 @@ impl<'a> OutputSink<'a> {
                 region,
                 filt.channels,
                 filt.block_start - self.member_start,
-            )?;
+            )
+            .map_err(RarError::Format)?;
             if filtered.len() != region.len() {
-                return Err("RAR5 filter changed output length".into());
+                return Err(RarError::Format("RAR5 filter changed output length".into()));
             }
             region.copy_from_slice(&filtered);
             filt.applied = true;
@@ -452,7 +475,7 @@ impl<'a> OutputSink<'a> {
         Ok(())
     }
 
-    fn drain_up_to(&mut self, written: u64, pending: &[PendingFilter]) -> Result<(), String> {
+    fn drain_up_to(&mut self, written: u64, pending: &[PendingFilter]) -> RarResult<()> {
         let earliest_filter = pending
             .iter()
             .filter(|f| !f.applied)
@@ -462,12 +485,12 @@ impl<'a> OutputSink<'a> {
         let drain_to = earliest_filter.min(written);
         let n = (drain_to - self.staging_start) as usize;
         if n > self.staging_len() {
-            return Err("internal drain beyond staging".into());
+            return Err(RarError::Format("internal drain beyond staging".into()));
         }
         if n > 0 {
             self.writer
                 .write_all(&self.staging[self.consumed..self.consumed + n])
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| RarError::Format(e.to_string()))?;
             self.consumed += n;
             self.staging_start += n as u64;
             if self.consumed > 1024 * 1024 || self.consumed == self.staging.len() {
@@ -486,7 +509,7 @@ pub fn decode_standalone(
     dict_size_log: u8,
     dict_size_bytes: Option<u64>,
     variant: ArchiveVersion,
-) -> Result<Vec<u8>, String> {
+) -> RarResult<Vec<u8>> {
     let mut dict_size = checked_dict_size(dict_size_log, dict_size_bytes)?;
     // The decoder reconstructs the whole file in the sliding window before
     // extracting it (see `get_output`), so the window must be at least as
@@ -494,11 +517,11 @@ pub fn decode_standalone(
     // input (WinRAR-style, capped at 2x the file size), so grow the decode
     // buffer here instead of reverting that cap.
     let unpacked = usize::try_from(unpacked_size)
-        .map_err(|_| "unpacked size overflows host address space".to_string())?;
+        .map_err(|_| RarError::Format("unpacked size overflows host address space".into()))?;
     if unpacked > dict_size {
-        dict_size = unpacked
-            .checked_next_power_of_two()
-            .ok_or_else(|| "unpacked size too large for host address space".to_string())?;
+        dict_size = unpacked.checked_next_power_of_two().ok_or_else(|| {
+            RarError::Format("unpacked size too large for host address space".into())
+        })?;
     }
 
     let mut reader = BitReader::new(data);
@@ -539,24 +562,28 @@ fn decode_inner(
     table_ldc: &mut Option<DecodeTable>,
     table_rc: &mut Option<DecodeTable>,
     variant: ArchiveVersion,
-) -> Result<Vec<u8>, String> {
+) -> RarResult<Vec<u8>> {
     let mut pending_filters: Vec<PendingFilter> = Vec::new();
     let output_start = window.total_written();
 
     while (window.total_written() - output_start) < unpacked_size {
         // ── Read block header ──────────────────────────────────────────
-        let block_flags_byte = reader.read_byte().map_err(|e| e.to_string())?;
+        let block_flags_byte = reader
+            .read_byte()
+            .map_err(|e| RarError::Format(e.to_string()))?;
 
         let table_present = (block_flags_byte >> 7) & 1 != 0;
         let is_last_block = (block_flags_byte >> 6) & 1 != 0;
         let byte_count = ((block_flags_byte >> 3) & 3) + 1;
         let bit_size = block_flags_byte & 7;
 
-        let checksum_byte = reader.read_byte().map_err(|e| e.to_string())?;
+        let checksum_byte = reader
+            .read_byte()
+            .map_err(|e| RarError::Format(e.to_string()))?;
 
         let block_size_bytes = reader
             .read_bytes(byte_count as usize)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| RarError::Format(e.to_string()))?;
         let mut block_size: u32 = 0;
         for (i, &b) in block_size_bytes.iter().enumerate() {
             block_size |= (b as u32) << (i * 8);
@@ -568,13 +595,13 @@ fn decode_inner(
             expected_ck ^= b;
         }
         if checksum_byte != expected_ck {
-            return Err(format!(
+            return Err(RarError::Format(format!(
                 "block checksum mismatch: got {checksum_byte:#x}, expected {expected_ck:#x}"
-            ));
+            )));
         }
 
         if block_size == 0 {
-            return Err("zero-length block".into());
+            return Err(RarError::Format("zero-length block".into()));
         }
         let block_bits = ((block_size as u64) - 1) * 8 + (1 + bit_size as u64);
         let block_start_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
@@ -588,10 +615,18 @@ fn decode_inner(
             *table_rc = Some(rc);
         }
 
-        let t_nc = table_nc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_dc = table_dc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_ldc = table_ldc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_rc = table_rc.as_ref().ok_or("no Huffman tables defined")?;
+        let t_nc = table_nc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_dc = table_dc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_ldc = table_ldc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_rc = table_rc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
 
         // ── Decode symbols ─────────────────────────────────────────────
         while (window.total_written() - output_start) < unpacked_size {
@@ -600,7 +635,7 @@ fn decode_inner(
                 break;
             }
 
-            let sym = decode_symbol(t_nc, reader).map_err(|e| e.to_string())?;
+            let sym = decode_symbol(t_nc, reader).map_err(|e| RarError::Format(e.to_string()))?;
 
             if sym < 256 {
                 window.put_byte(sym as u8);
@@ -614,7 +649,8 @@ fn decode_inner(
             } else if (SYM_CACHE_BASE..=SYM_CACHE_BASE + 3).contains(&sym) {
                 let cache_idx = sym - SYM_CACHE_BASE;
                 let dist = dist_cache_touch(dist_cache, cache_idx);
-                let len_slot = decode_symbol(t_rc, reader).map_err(|e| e.to_string())?;
+                let len_slot =
+                    decode_symbol(t_rc, reader).map_err(|e| RarError::Format(e.to_string()))?;
                 let length = decode_length(len_slot, reader)?;
                 *last_length = length;
                 *prev_low_dist = (dist & 0xF) as u32;
@@ -622,7 +658,8 @@ fn decode_inner(
             } else if sym >= SYM_MATCH_BASE {
                 let len_slot = sym - SYM_MATCH_BASE;
                 let mut length = decode_length(len_slot, reader)?;
-                let dist_slot = decode_symbol(t_dc, reader).map_err(|e| e.to_string())?;
+                let dist_slot =
+                    decode_symbol(t_dc, reader).map_err(|e| RarError::Format(e.to_string()))?;
                 let dist = decode_distance(dist_slot, reader, t_ldc)?;
                 length = apply_length_bonus_u64(length, dist);
                 *last_length = length;
@@ -662,7 +699,8 @@ fn decode_inner(
             region,
             filt.channels,
             filt.block_start - output_start,
-        )?;
+        )
+        .map_err(RarError::Format)?;
         output[start..start + filtered.len()].copy_from_slice(&filtered);
     }
 
@@ -720,7 +758,7 @@ pub fn analyze_stream(
     unpacked_size: u64,
     _dict_size_log: u8,
     variant: ArchiveVersion,
-) -> Result<StreamAnalysis, String> {
+) -> RarResult<StreamAnalysis> {
     let mut reader = BitReader::new(data);
     let mut dist_cache = [0u64; DIST_CACHE_SIZE];
     let mut last_length = 0u32;
@@ -732,15 +770,21 @@ pub fn analyze_stream(
     let mut produced = 0u64;
 
     while produced < unpacked_size {
-        let block_flags_byte = reader.read_byte().map_err(|e| e.to_string())?;
+        let block_flags_byte = reader
+            .read_byte()
+            .map_err(|e| RarError::Format(e.to_string()))?;
         let table_present = (block_flags_byte >> 7) & 1 != 0;
         let is_last_block = (block_flags_byte >> 6) & 1 != 0;
         let byte_count = ((block_flags_byte >> 3) & 3) + 1;
         let bit_size = block_flags_byte & 7;
-        let checksum_byte = reader.read_byte().map_err(|e| e.to_string())?;
+        let checksum_byte = reader
+            .read_byte()
+            .map_err(|e| RarError::Format(e.to_string()))?;
         let mut block_size: u32 = 0;
         for i in 0..byte_count {
-            let b = reader.read_byte().map_err(|e| e.to_string())?;
+            let b = reader
+                .read_byte()
+                .map_err(|e| RarError::Format(e.to_string()))?;
             block_size |= (b as u32) << (i * 8);
         }
         let mut expected_ck = BLOCK_CHECKSUM_SEED ^ block_flags_byte;
@@ -748,12 +792,12 @@ pub fn analyze_stream(
             expected_ck ^= (block_size >> (i * 8)) as u8;
         }
         if checksum_byte != expected_ck {
-            return Err(format!(
+            return Err(RarError::Format(format!(
                 "block checksum mismatch: got {checksum_byte:#x}, expected {expected_ck:#x}"
-            ));
+            )));
         }
         if block_size == 0 {
-            return Err("zero-length block".into());
+            return Err(RarError::Format("zero-length block".into()));
         }
         let block_bits = ((block_size as u64) - 1) * 8 + (1 + bit_size as u64);
         let block_start_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
@@ -770,10 +814,18 @@ pub fn analyze_stream(
             table_ldc = Some(tldc);
             table_rc = Some(trc);
         }
-        let t_nc = table_nc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_dc = table_dc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_ldc = table_ldc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_rc = table_rc.as_ref().ok_or("no Huffman tables defined")?;
+        let t_nc = table_nc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_dc = table_dc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_ldc = table_ldc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_rc = table_rc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
 
         let mut stat = BlockStat {
             block_size,
@@ -789,7 +841,8 @@ pub fn analyze_stream(
             if cur_bits - block_start_bits >= block_bits {
                 break;
             }
-            let sym = decode_symbol(t_nc, &mut reader).map_err(|e| e.to_string())?;
+            let sym =
+                decode_symbol(t_nc, &mut reader).map_err(|e| RarError::Format(e.to_string()))?;
             if sym < 256 {
                 stat.literals += 1;
                 stat.out_bytes += 1;
@@ -809,7 +862,8 @@ pub fn analyze_stream(
             } else if (SYM_CACHE_BASE..=SYM_CACHE_BASE + 3).contains(&sym) {
                 let cache_idx = sym - SYM_CACHE_BASE;
                 let dist = dist_cache_touch(&mut dist_cache, cache_idx);
-                let len_slot = decode_symbol(t_rc, &mut reader).map_err(|e| e.to_string())?;
+                let len_slot = decode_symbol(t_rc, &mut reader)
+                    .map_err(|e| RarError::Format(e.to_string()))?;
                 let length = decode_length(len_slot, &mut reader)?;
                 last_length = length;
                 stat.cache_matches += 1;
@@ -820,7 +874,8 @@ pub fn analyze_stream(
             } else if sym >= SYM_MATCH_BASE {
                 let len_slot = sym - SYM_MATCH_BASE;
                 let mut length = decode_length(len_slot, &mut reader)?;
-                let dist_slot = decode_symbol(t_dc, &mut reader).map_err(|e| e.to_string())?;
+                let dist_slot = decode_symbol(t_dc, &mut reader)
+                    .map_err(|e| RarError::Format(e.to_string()))?;
                 let dist = decode_distance(dist_slot, &mut reader, t_ldc)?;
                 length = apply_length_bonus_u64(length, dist);
                 last_length = length;
@@ -919,7 +974,7 @@ pub fn trace_stream(
     variant: ArchiveVersion,
     want_start: u64,
     want_end: u64,
-) -> Result<Vec<TraceSymbol>, String> {
+) -> RarResult<Vec<TraceSymbol>> {
     let mut reader = BitReader::new(data);
     let mut dist_cache = [0u64; DIST_CACHE_SIZE];
     let mut last_length = 0u32;
@@ -931,14 +986,20 @@ pub fn trace_stream(
     let mut produced = 0u64;
 
     while produced < unpacked_size {
-        let block_flags_byte = reader.read_byte().map_err(|e| e.to_string())?;
+        let block_flags_byte = reader
+            .read_byte()
+            .map_err(|e| RarError::Format(e.to_string()))?;
         let is_last_block = (block_flags_byte >> 6) & 1 != 0;
         let byte_count = ((block_flags_byte >> 3) & 3) + 1;
         let bit_size = block_flags_byte & 7;
-        reader.read_byte().map_err(|e| e.to_string())?; // checksum
+        reader
+            .read_byte()
+            .map_err(|e| RarError::Format(e.to_string()))?; // checksum
         let mut block_size: u32 = 0;
         for i in 0..byte_count {
-            let b = reader.read_byte().map_err(|e| e.to_string())?;
+            let b = reader
+                .read_byte()
+                .map_err(|e| RarError::Format(e.to_string()))?;
             block_size |= (b as u32) << (i * 8);
         }
         let block_bits = ((block_size as u64) - 1) * 8 + (1 + bit_size as u64);
@@ -951,16 +1012,25 @@ pub fn trace_stream(
             table_ldc = Some(tldc);
             table_rc = Some(trc);
         }
-        let t_nc = table_nc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_dc = table_dc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_ldc = table_ldc.as_ref().ok_or("no Huffman tables defined")?;
-        let t_rc = table_rc.as_ref().ok_or("no Huffman tables defined")?;
+        let t_nc = table_nc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_dc = table_dc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_ldc = table_ldc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
+        let t_rc = table_rc
+            .as_ref()
+            .ok_or(RarError::Format("no Huffman tables defined".into()))?;
         while produced < unpacked_size {
             let cur_bits = reader.byte_position() as u64 * 8 + reader.bit_position() as u64;
             if cur_bits - block_start_bits >= block_bits {
                 break;
             }
-            let sym = decode_symbol(t_nc, &mut reader).map_err(|e| e.to_string())?;
+            let sym =
+                decode_symbol(t_nc, &mut reader).map_err(|e| RarError::Format(e.to_string()))?;
             if sym < 256 {
                 let p = produced;
                 produced += 1;
@@ -990,7 +1060,8 @@ pub fn trace_stream(
             } else if (SYM_CACHE_BASE..=SYM_CACHE_BASE + 3).contains(&sym) {
                 let cache_idx = sym - SYM_CACHE_BASE;
                 let dist = dist_cache_touch(&mut dist_cache, cache_idx);
-                let len_slot = decode_symbol(t_rc, &mut reader).map_err(|e| e.to_string())?;
+                let len_slot = decode_symbol(t_rc, &mut reader)
+                    .map_err(|e| RarError::Format(e.to_string()))?;
                 let length = decode_length(len_slot, &mut reader)?;
                 last_length = length;
                 let p = produced;
@@ -1006,7 +1077,8 @@ pub fn trace_stream(
             } else if sym >= SYM_MATCH_BASE {
                 let len_slot = sym - SYM_MATCH_BASE;
                 let mut length = decode_length(len_slot, &mut reader)?;
-                let dist_slot = decode_symbol(t_dc, &mut reader).map_err(|e| e.to_string())?;
+                let dist_slot = decode_symbol(t_dc, &mut reader)
+                    .map_err(|e| RarError::Format(e.to_string()))?;
                 let dist = decode_distance(dist_slot, &mut reader, t_ldc)?;
                 length = apply_length_bonus_u64(length, dist);
                 last_length = length;
@@ -1037,7 +1109,7 @@ pub fn trace_stream(
 fn read_tables(
     reader: &mut BitReader,
     variant: ArchiveVersion,
-) -> Result<(DecodeTable, DecodeTable, DecodeTable, DecodeTable), String> {
+) -> RarResult<(DecodeTable, DecodeTable, DecodeTable, DecodeTable)> {
     // RAR7 (v70) extends the distance code table from 64 to 80 codes.
     let dc_count = if variant.uses_extra_dist() {
         HUFF_DCX
@@ -1047,9 +1119,13 @@ fn read_tables(
     // Read BC table: 20 code lengths as nibbles with escape mechanism
     let mut bc_lengths = Vec::with_capacity(HUFF_BC);
     while bc_lengths.len() < HUFF_BC {
-        let val = reader.read_bits(4).map_err(|e| e.to_string())? as u8;
+        let val = reader
+            .read_bits(4)
+            .map_err(|e| RarError::Format(e.to_string()))? as u8;
         if val == NIBBLE_ESCAPE {
-            let next_val = reader.read_bits(4).map_err(|e| e.to_string())? as u8;
+            let next_val = reader
+                .read_bits(4)
+                .map_err(|e| RarError::Format(e.to_string()))? as u8;
             if next_val == 0 {
                 bc_lengths.push(15);
             } else {
@@ -1086,22 +1162,28 @@ fn read_code_lengths(
     reader: &mut BitReader,
     bc_table: &DecodeTable,
     count: usize,
-) -> Result<Vec<u8>, String> {
+) -> RarResult<Vec<u8>> {
     let mut lengths = vec![0u8; count];
     let mut i = 0;
     while i < count {
-        let sym = decode_symbol(bc_table, reader).map_err(|e| e.to_string())?;
+        let sym = decode_symbol(bc_table, reader).map_err(|e| RarError::Format(e.to_string()))?;
         if sym < 16 {
             lengths[i] = sym as u8;
             i += 1;
         } else if sym < 18 {
             if i == 0 {
-                return Err("run-length repeat with no previous length".into());
+                return Err(RarError::Format(
+                    "run-length repeat with no previous length".into(),
+                ));
             }
             let repeat = if sym == 16 {
-                3 + reader.read_bits(3).map_err(|e| e.to_string())? as usize
+                3 + reader
+                    .read_bits(3)
+                    .map_err(|e| RarError::Format(e.to_string()))? as usize
             } else {
-                11 + reader.read_bits(7).map_err(|e| e.to_string())? as usize
+                11 + reader
+                    .read_bits(7)
+                    .map_err(|e| RarError::Format(e.to_string()))? as usize
             };
             let prev = lengths[i - 1];
             for _ in 0..repeat {
@@ -1113,9 +1195,13 @@ fn read_code_lengths(
             }
         } else {
             let repeat = if sym == 18 {
-                3 + reader.read_bits(3).map_err(|e| e.to_string())? as usize
+                3 + reader
+                    .read_bits(3)
+                    .map_err(|e| RarError::Format(e.to_string()))? as usize
             } else {
-                11 + reader.read_bits(7).map_err(|e| e.to_string())? as usize
+                11 + reader
+                    .read_bits(7)
+                    .map_err(|e| RarError::Format(e.to_string()))? as usize
             };
             for _ in 0..repeat {
                 if i >= count {
@@ -1131,14 +1217,16 @@ fn read_code_lengths(
 
 // ── Length/Distance Decoding ───────────────────────────────────────────────
 
-fn decode_length(slot: usize, reader: &mut BitReader) -> Result<u32, String> {
+fn decode_length(slot: usize, reader: &mut BitReader) -> RarResult<u32> {
     if slot < 8 {
         Ok(2 + slot as u32)
     } else {
         let lbits = (slot / 4 - 1) as u8;
         let base = 2 + ((4 | (slot & 3)) << lbits) as u32;
         if lbits > 0 {
-            let extra = reader.read_bits(lbits).map_err(|e| e.to_string())?;
+            let extra = reader
+                .read_bits(lbits)
+                .map_err(|e| RarError::Format(e.to_string()))?;
             Ok(base + extra)
         } else {
             Ok(base)
@@ -1150,7 +1238,7 @@ fn decode_distance(
     dist_slot: usize,
     reader: &mut BitReader,
     table_ldc: &DecodeTable,
-) -> Result<u64, String> {
+) -> RarResult<u64> {
     // RAR7's extended table (80 codes) reaches dist slots up to 79, i.e.
     // DBits up to 38 and distances beyond 4 GB — hence u64 arithmetic.
     if dist_slot < 4 {
@@ -1162,13 +1250,18 @@ fn decode_distance(
         if dbits > 0 {
             if dbits >= 4 {
                 if dbits > 4 {
-                    let upper = reader.read_bits(dbits - 4).map_err(|e| e.to_string())?;
+                    let upper = reader
+                        .read_bits(dbits - 4)
+                        .map_err(|e| RarError::Format(e.to_string()))?;
                     dist = dist.wrapping_add((upper as u64) << 4);
                 }
-                let low_dist = decode_symbol(table_ldc, reader).map_err(|e| e.to_string())?;
+                let low_dist = decode_symbol(table_ldc, reader)
+                    .map_err(|e| RarError::Format(e.to_string()))?;
                 dist = dist.wrapping_add(low_dist as u64);
             } else {
-                let extra = reader.read_bits(dbits).map_err(|e| e.to_string())?;
+                let extra = reader
+                    .read_bits(dbits)
+                    .map_err(|e| RarError::Format(e.to_string()))?;
                 dist = dist.wrapping_add(extra as u64);
             }
         }
@@ -1212,13 +1305,18 @@ fn apply_length_bonus_u64(length: u32, dist: u64) -> u32 {
 
 // ── Filter Parsing ─────────────────────────────────────────────────────────
 
-fn parse_filter(reader: &mut BitReader, write_pos: u64) -> Result<PendingFilter, String> {
+fn parse_filter(reader: &mut BitReader, write_pos: u64) -> RarResult<PendingFilter> {
     let block_start = write_pos + parse_filter_data(reader)? as u64;
     let block_length = parse_filter_data(reader)? as u64;
-    let filter_type = reader.read_bits(3).map_err(|e| e.to_string())? as u8;
+    let filter_type = reader
+        .read_bits(3)
+        .map_err(|e| RarError::Format(e.to_string()))? as u8;
 
     let channels = if filter_type == FILTER_DELTA {
-        reader.read_bits(5).map_err(|e| e.to_string())? as u8 + 1
+        reader
+            .read_bits(5)
+            .map_err(|e| RarError::Format(e.to_string()))? as u8
+            + 1
     } else {
         0
     };
@@ -1232,11 +1330,16 @@ fn parse_filter(reader: &mut BitReader, write_pos: u64) -> Result<PendingFilter,
     })
 }
 
-fn parse_filter_data(reader: &mut BitReader) -> Result<u32, String> {
-    let byte_count = reader.read_bits(2).map_err(|e| e.to_string())? + 1;
+fn parse_filter_data(reader: &mut BitReader) -> RarResult<u32> {
+    let byte_count = reader
+        .read_bits(2)
+        .map_err(|e| RarError::Format(e.to_string()))?
+        + 1;
     let mut value: u32 = 0;
     for i in 0..byte_count {
-        let b = reader.read_bits(8).map_err(|e| e.to_string())?;
+        let b = reader
+            .read_bits(8)
+            .map_err(|e| RarError::Format(e.to_string()))?;
         value |= b << (i * 8);
     }
     Ok(value)
@@ -1254,7 +1357,8 @@ mod decode_tests {
         assert_eq!(checked_dict_size(13, None).unwrap(), 1024 * 1024 * 1024);
         assert_eq!(checked_dict_size(15, None).unwrap(), 4 * 1024 * 1024 * 1024);
         let err = checked_dict_size(16, None).unwrap_err();
-        assert!(err.contains("maximum 15"), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("maximum 15"), "{msg}");
         // RAR7: byte count, non-power-of-two rounds the window up.
         assert_eq!(
             checked_dict_size(0, Some(6 * 1024 * 1024 * 1024)).unwrap(),
