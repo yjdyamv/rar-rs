@@ -796,7 +796,7 @@ impl RarArchive {
         let mut reader = File::open(&self.path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         while let Some(meta) =
-            crate::rar50::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
+            crate::rar50::headers::read_block(&mut reader, self.archive_block_key()?.as_ref())?
         {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
@@ -880,13 +880,13 @@ impl RarArchive {
         self.header_encryption = false;
         self.archive_encr = None;
         let first =
-            crate::rar50::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
+            crate::rar50::headers::read_block(&mut reader, self.archive_block_key()?.as_ref())?
                 .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
         let main = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
                 let params = parse_archive_encrypt_header(&first.raw)?;
                 self.handle_archive_encrypt_header(params)?;
-                crate::rar50::headers::read_block(&mut reader, self.archive_block_key().as_ref())?
+                crate::rar50::headers::read_block(&mut reader, self.archive_block_key()?.as_ref())?
                     .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
             }
             BLOCK_TYPE_ARCHIVE_HEADER => first,
@@ -969,18 +969,18 @@ impl RarArchive {
         // then the main archive header (rebuilt so the locator stays
         // consistent with the rewritten archive).
         let mut encrypt_header = None;
-        let first = crate::rar50::headers::read_block(reader, self.archive_block_key().as_ref())?
+        let first = crate::rar50::headers::read_block(reader, self.archive_block_key()?.as_ref())?
             .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
         let main_meta = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
                 let params = parse_archive_encrypt_header(&first.raw)?;
                 self.handle_archive_encrypt_header(params)?;
                 encrypt_header = Some(first.header_bytes);
-                let main = crate::rar50::headers::read_block(
-                    reader,
-                    self.archive_block_key().as_ref(),
-                )?
-                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
+                let main =
+                    crate::rar50::headers::read_block(reader, self.archive_block_key()?.as_ref())?
+                        .ok_or_else(|| {
+                            RarError::Format("archive is missing the main header".into())
+                        })?;
                 if main.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
                     return Err(RarError::Format(
                         "archive is missing the main header".into(),
@@ -1013,7 +1013,7 @@ impl RarArchive {
         let mut prev_file_deleted = false;
 
         while let Some(meta) =
-            crate::rar50::headers::read_block(reader, self.archive_block_key().as_ref())?
+            crate::rar50::headers::read_block(reader, self.archive_block_key()?.as_ref())?
         {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,

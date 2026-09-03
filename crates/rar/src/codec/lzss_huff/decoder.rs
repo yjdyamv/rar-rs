@@ -1559,7 +1559,7 @@ mod decode_tests {
             (4, 4),
         ] {
             let data = correlated(bytes, channels, 200_000);
-            let packed = encode_with_auto_delta_filter(&data, 3, 0, ArchiveVersion::Rar50, 1)
+            let packed = encode_with_auto_delta_filter(&data, 3, 0, ArchiveVersion::Rar50, 1, None)
                 .unwrap()
                 .expect("delta scan must find a beneficial channel count");
             assert!(
@@ -1577,7 +1577,7 @@ mod decode_tests {
         // Text must NOT be delta-filtered: delta cannot beat plain LZSS on it.
         let text = b"the quick brown fox jumps over the lazy dog. ".repeat(6_000);
         assert!(
-            encode_with_auto_delta_filter(&text, 3, 0, ArchiveVersion::Rar50, 1)
+            encode_with_auto_delta_filter(&text, 3, 0, ArchiveVersion::Rar50, 1, None)
                 .unwrap()
                 .is_none(),
             "text must fall back to plain LZSS"
@@ -1593,7 +1593,7 @@ mod decode_tests {
             *b = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8;
         }
         assert!(
-            encode_with_auto_delta_filter(&random, 3, 0, ArchiveVersion::Rar50, 1)
+            encode_with_auto_delta_filter(&random, 3, 0, ArchiveVersion::Rar50, 1, None)
                 .unwrap()
                 .is_none()
         );
@@ -1619,7 +1619,7 @@ mod decode_tests {
         }
 
         let data = x86ish(400_000);
-        let packed = encode_with_auto_x86_filter(&data, 3, 0, ArchiveVersion::Rar50, 1)
+        let packed = encode_with_auto_x86_filter(&data, 3, 0, ArchiveVersion::Rar50, 1, None)
             .unwrap()
             .expect("x86 scan must find regions");
         assert!(
@@ -1637,7 +1637,7 @@ mod decode_tests {
         sparse[100] = 0xE8;
         sparse[10_000] = 0xE8;
         assert!(
-            encode_with_auto_x86_filter(&sparse, 3, 0, ArchiveVersion::Rar50, 1)
+            encode_with_auto_x86_filter(&sparse, 3, 0, ArchiveVersion::Rar50, 1, None)
                 .unwrap()
                 .is_none()
         );
@@ -1670,9 +1670,10 @@ mod decode_tests {
         let member = x86ish(120_000);
 
         let packed_first = crate::codec::encode_raw(&first, 3, 3, ArchiveVersion::Rar50);
-        let packed_member = encode_with_auto_x86_filter(&member, 3, 0, ArchiveVersion::Rar50, 1)
-            .unwrap()
-            .expect("x86 scan must find regions");
+        let packed_member =
+            encode_with_auto_x86_filter(&member, 3, 0, ArchiveVersion::Rar50, 1, None)
+                .unwrap()
+                .expect("x86 scan must find regions");
 
         let mut state = DecoderState::new(128 * 1024);
         let decoded_first = decode_raw(

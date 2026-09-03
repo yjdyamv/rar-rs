@@ -12,7 +12,7 @@ use crate::codec::bitstream::BitWriter;
 use crate::codec::filters::apply_filter_encode;
 use crate::codec::huffman::{EncodeTable, build_code_lengths_from_freqs, encode_symbol};
 use crate::codec::match_finder::{self, MatchFinder};
-use crate::error::RarResult;
+use crate::error::{RarError, RarResult};
 use crate::version::ArchiveVersion;
 
 // ── Compression level parameters ───────────────────────────────────────────
@@ -324,6 +324,8 @@ pub fn encode_chunked_mt(
     is_final: bool,
     variant: ArchiveVersion,
 ) -> Vec<u8> {
+    // No cancel flag: the no-progress form is used by tooling/examples that
+    // never pass one, so this can only fail on an internal error.
     encode_chunked_mt_with_progress(
         data,
         method,
@@ -335,7 +337,9 @@ pub fn encode_chunked_mt(
         variant,
         None,
         None,
+        None,
     )
+    .expect("MT encode cannot fail without a cancel flag")
 }
 
 /// Splits `data` into per-worker slices (chunk-size aligned) and encodes
@@ -369,7 +373,8 @@ pub(crate) fn encode_chunked_mt_with_progress(
     variant: ArchiveVersion,
     lead_symbols: Option<&[Symbol]>,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
-) -> Vec<u8> {
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> RarResult<Vec<u8>> {
     let level = (method as usize).clamp(1, 5);
     let (chain_len, _lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
@@ -435,6 +440,9 @@ pub(crate) fn encode_chunked_mt_with_progress(
     let mut output = Vec::new();
     let mut first = 0usize;
     while first < n {
+        if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
+            return Err(RarError::Cancelled);
+        }
         let last = (first + n_workers).min(n);
         let wave = &mut worker_states[..last - first];
         let results = std::sync::Mutex::new(vec![None::<Vec<u8>>; last - first]);
@@ -499,7 +507,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
     seed.dist_cache = [0u32; DIST_CACHE_SIZE];
     seed.last_length = 0;
     seed.long_range = Some(lr_shared);
-    output
+    Ok(output)
 }
 
 /// Cheap per-slice probe: would seeding this tail ever pay off? Samples
@@ -814,6 +822,7 @@ pub fn encode_with_filters_mt(
     filters: &[FilterSpec],
     variant: ArchiveVersion,
     threads: usize,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> RarResult<Vec<u8>> {
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
@@ -843,7 +852,7 @@ pub fn encode_with_filters_mt(
         })
         .collect();
     let mut state = EncoderState::default();
-    Ok(encode_chunked_mt_with_progress(
+    encode_chunked_mt_with_progress(
         &transformed,
         method,
         dict_size_log,
@@ -854,7 +863,8 @@ pub fn encode_with_filters_mt(
         variant,
         Some(&lead),
         None,
-    ))
+        cancel,
+    )
 }
 
 /// Merge overlapping or adjacent ranges (the x86 scan can return a broad
@@ -893,6 +903,7 @@ pub fn encode_with_auto_x86_filter(
     dict_size_log: u8,
     variant: ArchiveVersion,
     threads: usize,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> RarResult<Option<Vec<u8>>> {
     if data.len() <= 5 {
         return Ok(None);
@@ -924,6 +935,7 @@ pub fn encode_with_auto_x86_filter(
             &specs_e9,
             variant,
             threads,
+            cancel,
         )?));
     }
     merge_ranges(&mut ranges_e8);
@@ -983,15 +995,30 @@ pub fn encode_with_auto_x86_filter(
             },
             variant,
             threads,
+            cancel,
         )?;
         return Ok(Some(packed));
     }
 
     // Inconclusive sample: keep the exact full comparison.
-    let packed_e9 =
-        encode_with_filters_mt(data, method, dict_size_log, &specs_e9, variant, threads)?;
-    let packed_e8 =
-        encode_with_filters_mt(data, method, dict_size_log, &specs_e8, variant, threads)?;
+    let packed_e9 = encode_with_filters_mt(
+        data,
+        method,
+        dict_size_log,
+        &specs_e9,
+        variant,
+        threads,
+        cancel,
+    )?;
+    let packed_e8 = encode_with_filters_mt(
+        data,
+        method,
+        dict_size_log,
+        &specs_e8,
+        variant,
+        threads,
+        cancel,
+    )?;
     Ok(Some(if packed_e8.len() < packed_e9.len() {
         packed_e8
     } else {
@@ -1041,6 +1068,7 @@ pub fn encode_with_auto_delta_filter(
     dict_size_log: u8,
     variant: ArchiveVersion,
     threads: usize,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> RarResult<Option<Vec<u8>>> {
     // Cheap pre-gate: skip obviously-uncorrelated (random) data so we never pay
     // for a sample encode on it.
@@ -1054,15 +1082,23 @@ pub fn encode_with_auto_delta_filter(
     let spec = FilterSpec::new(FILTER_DELTA, channels, 0, block_length);
     // The full member encode runs on the pool like the unfiltered path;
     // the sample selection above stays sequential (64 KiB, negligible).
-    let delta_packed =
-        encode_with_filters_mt(data, method, dict_size_log, &[spec], variant, threads)?;
+    let delta_packed = encode_with_filters_mt(
+        data,
+        method,
+        dict_size_log,
+        &[spec],
+        variant,
+        threads,
+        cancel,
+    )?;
     // No point transforming if it does not even beat STORE.
     if delta_packed.len() >= data.len() {
         return Ok(None);
     }
     // Keep the filter only when it is strictly smaller than plain LZSS; the
     // caller's chunked (possibly solid) path is the better choice otherwise.
-    let plain_packed = encode_with_filters_mt(data, method, dict_size_log, &[], variant, threads)?;
+    let plain_packed =
+        encode_with_filters_mt(data, method, dict_size_log, &[], variant, threads, cancel)?;
     if delta_packed.len() < plain_packed.len() {
         Ok(Some(delta_packed))
     } else {
@@ -3081,13 +3117,13 @@ fn apply_length_bonus(length: u32, dist: u32) -> u32 {
 fn remove_length_bonus(length: u32, dist: u32) -> u32 {
     let mut l = length;
     if dist > 0x100 {
-        l -= 1;
+        l = l.saturating_sub(1);
     }
     if dist > 0x2000 {
-        l -= 1;
+        l = l.saturating_sub(1);
     }
     if dist > 0x40000 {
-        l -= 1;
+        l = l.saturating_sub(1);
     }
     l
 }

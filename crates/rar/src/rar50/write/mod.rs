@@ -365,12 +365,14 @@ impl RarArchive {
         // can steal a member from the better transform or from plain LZSS.
         // The caller's `< file_size` guard only accepts a filter when it also
         // beats STORE.
+        let cancel_ref = self.cancel.as_deref();
         let filtered = match lzss_huff::encode_with_auto_delta_filter(
             &whole,
             method,
             dsl,
             crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
             self.effective_threads(),
+            cancel_ref,
         )? {
             Some(f) => Some(f),
             None => lzss_huff::encode_with_auto_x86_filter(
@@ -379,6 +381,7 @@ impl RarArchive {
                 dsl,
                 crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                 self.effective_threads(),
+                cancel_ref,
             )?,
         };
         if let Some(filtered) = filtered
@@ -1158,12 +1161,14 @@ impl RarArchive {
             // A filtered member is written standalone (non-solid); otherwise
             // the member is compressed in bounded chunks with one shared
             // encoder state across chunks.
+            let cancel_ref = ctx.cancel.as_deref();
             match lzss_huff::encode_with_auto_delta_filter(
                 data,
                 method,
                 dsl,
                 crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                 ctx.threads,
+                cancel_ref,
             )? {
                 Some(filtered) if filtered.len() < data.len() => filtered,
                 _ => match lzss_huff::encode_with_auto_x86_filter(
@@ -1172,6 +1177,7 @@ impl RarArchive {
                     dsl,
                     crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                     ctx.threads,
+                    cancel_ref,
                 )? {
                     Some(filtered) if filtered.len() < data.len() => filtered,
                     _ => {
@@ -1203,7 +1209,8 @@ impl RarArchive {
                                 crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                                 None,
                                 Some(&mut cb),
-                            )
+                                ctx.cancel.as_deref(),
+                            )?
                         } else {
                             let mut packed = Vec::new();
                             // Fine-grained progress: the sequential path feeds the
@@ -1287,7 +1294,8 @@ impl RarArchive {
                     crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                     None,
                     Some(&mut cb),
-                )
+                    ctx.cancel.as_deref(),
+                )?
             } else {
                 lzss_huff::encode_chunked(
                     data,
@@ -1691,6 +1699,7 @@ impl RarArchive {
         };
 
         while offset < total_packed {
+            self.check_cancel()?;
             let remaining_vol = volume_size.saturating_sub(self.write_ctx().volume_bytes_written);
 
             // Build chunk flags
@@ -1871,7 +1880,7 @@ impl RarArchive {
         plaintext: &[u8],
     ) -> RarResult<Vec<u8>> {
         match (password, params) {
-            (Some(password), Some(params)) => Ok(params.encrypt(plaintext, password)),
+            (Some(password), Some(params)) => params.encrypt(plaintext, password),
             (None, None) => Ok(plaintext.to_vec()),
             _ => Err(RarError::Format(
                 "internal error: encryption parameters mismatch".into(),
@@ -1976,7 +1985,7 @@ impl RarArchive {
         // ciphertext) and the write pass must produce identical bytes, so
         // they run separate chains from the same key and IV.
         let key_iv = match (encr, password) {
-            (Some(params), Some(password)) => Some((params.get_key(password), params.iv)),
+            (Some(params), Some(password)) => Some((params.get_key(password)?, params.iv)),
             (None, None) => None,
             _ => {
                 return Err(RarError::Format(
@@ -2218,6 +2227,9 @@ impl RarArchive {
         let mut bytes_read = 0u64;
         let mut packed_size = 0u64;
         let threads = self.effective_threads();
+        let cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+            self.cancel.clone();
+        let cancel_ref = cancel_flag.as_deref();
         let spill_path = spill_path_for(&self.path);
         let _spill_guard = SpillGuard(spill_path.clone());
         {
@@ -2239,6 +2251,7 @@ impl RarArchive {
                 state: &mut Option<crate::codec::EncoderState>,
                 spill: &mut File,
                 packed_size: &mut u64,
+                cancel: Option<&std::sync::atomic::AtomicBool>,
             ) -> RarResult<()> {
                 if work.is_empty() {
                     return Ok(());
@@ -2249,7 +2262,7 @@ impl RarArchive {
                 const MT_MIN: usize = 3 * crate::codec::DEFAULT_CHUNK_SIZE;
                 #[cfg(feature = "parallel")]
                 if !chain_solid && work.len() >= MT_MIN && threads > 1 {
-                    let packed = crate::codec::lzss_huff::encode_chunked_mt(
+                    let packed = crate::codec::lzss_huff::encode_chunked_mt_with_progress(
                         work,
                         method,
                         dsl,
@@ -2258,7 +2271,10 @@ impl RarArchive {
                         threads,
                         is_final,
                         crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                    );
+                        None,
+                        None,
+                        cancel,
+                    )?;
                     spill.write_all(&packed)?;
                     *packed_size += packed.len() as u64;
                     work.clear();
@@ -2266,6 +2282,9 @@ impl RarArchive {
                 }
                 let mut offset = 0usize;
                 while offset < work.len() {
+                    if cancel.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+                        return Err(RarError::Cancelled);
+                    }
                     let end = (offset + crate::codec::DEFAULT_CHUNK_SIZE).min(work.len());
                     let compressed = lzss_huff::encode_chunked(
                         &work[offset..end],
@@ -2320,6 +2339,7 @@ impl RarArchive {
                         &mut self.write_ctx_mut().encoder_state,
                         &mut spill,
                         &mut packed_size,
+                        cancel_ref,
                     )?;
                     if packed_size >= file_size {
                         break;
@@ -2453,6 +2473,7 @@ impl RarArchive {
                 self.write_ctx_mut().volume_bytes_written = self
                     .write_ctx()
                     .volume_bytes_written
+                    .saturating_add(self.on_disk_header_len(hdr.len() as u64))
                     .saturating_add(data.len() as u64);
             }
         }

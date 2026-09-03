@@ -128,7 +128,7 @@ impl RarArchive {
                 .password
                 .as_ref()
                 .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
-            let key = encr.get_key(password);
+            let key = encr.get_key(password)?;
             let mut iv = [0u8; ENCR_IV_SIZE];
             rand::fill(&mut iv);
             let ciphertext = crypto::encrypt_data(header_bytes, &key, &iv);
@@ -406,7 +406,7 @@ impl RarArchive {
                 .password
                 .as_ref()
                 .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
-            let key = encr.get_key(password);
+            let key = encr.get_key(password)?;
             let stream = self.stream.as_mut().unwrap();
             let mut iv = [0u8; 16];
             stream.seek(SeekFrom::Start(start))?;
@@ -462,7 +462,7 @@ impl RarArchive {
                 .password
                 .as_ref()
                 .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
-            let key = encr.get_key(password);
+            let key = encr.get_key(password)?;
             let mut iv = [0u8; 16];
             rand::fill(&mut iv);
             let ciphertext = crypto::encrypt_data(&new_header, &key, &iv);

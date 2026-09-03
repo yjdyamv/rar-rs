@@ -388,22 +388,24 @@ impl EncryptionParams {
     }
 
     /// Derive and return the AES key for `password`.
-    pub fn get_key(&self, password: &str) -> [u8; ENCR_KEY_SIZE] {
-        self.derive_keys(password)
-            .map(|k| k.key)
-            .unwrap_or([0u8; ENCR_KEY_SIZE])
+    ///
+    /// Returns the KDF error (e.g. an out-of-range strength) instead of
+    /// silently degrading to a zero key, so callers never encrypt/decrypt
+    /// against a wrong key.
+    pub fn get_key(&self, password: &str) -> RarResult<[u8; ENCR_KEY_SIZE]> {
+        self.derive_keys(password).map(|k| k.key)
     }
 
     /// Decrypt ciphertext with password using stored parameters.
     pub fn decrypt(&self, ciphertext: &[u8], password: &str) -> RarResult<Vec<u8>> {
-        let key = self.get_key(password);
+        let key = self.get_key(password)?;
         decrypt_data(ciphertext, &key, &self.iv)
     }
 
     /// Encrypt plaintext with password using stored parameters.
-    pub fn encrypt(&self, plaintext: &[u8], password: &str) -> Vec<u8> {
-        let key = self.get_key(password);
-        encrypt_data(plaintext, &key, &self.iv)
+    pub fn encrypt(&self, plaintext: &[u8], password: &str) -> RarResult<Vec<u8>> {
+        let key = self.get_key(password)?;
+        Ok(encrypt_data(plaintext, &key, &self.iv))
     }
 
     /// MAC a CRC32 for this file's password (for writing encrypted files).
@@ -593,7 +595,7 @@ pub fn derive_header_key(
     if !params.verify_password(password) {
         return Err(RarError::WrongPassword);
     }
-    Ok(params.get_key(password))
+    params.get_key(password)
 }
 
 /// Check if a file header's extra area contains an encryption record.

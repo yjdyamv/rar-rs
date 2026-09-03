@@ -1345,10 +1345,16 @@ impl RarArchive {
     }
 
     /// [`crate::rar50::headers::read_block`].
-    pub(crate) fn archive_block_key(&self) -> Option<[u8; 32]> {
-        let encr = self.archive_encr.as_ref()?;
-        let password = self.password.as_ref()?;
-        Some(encr.get_key(password))
+    pub(crate) fn archive_block_key(&self) -> RarResult<Option<[u8; 32]>> {
+        let encr = match self.archive_encr.as_ref() {
+            Some(encr) => encr,
+            None => return Ok(None),
+        };
+        let password = match self.password.as_ref() {
+            Some(password) => password,
+            None => return Ok(None),
+        };
+        encr.get_key(password).map(Some)
     }
 }
 
