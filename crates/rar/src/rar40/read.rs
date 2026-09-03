@@ -8,6 +8,7 @@
 //! by the caller). RAR 1.5/2.x compressed members and RAR3/4 PPMd or
 //! VM-filtered members are reported as not yet supported.
 
+use crate::codec::rar15::Rar15Decoder;
 use crate::codec::rar20::Rar20Decoder;
 use crate::codec::rar29::Rar29Decoder;
 use crate::crc32;
@@ -75,8 +76,16 @@ pub(crate) fn decode_member_bytes(
         return Ok(out);
     }
 
+    if hdr.unp_ver == 15 {
+        // RAR 1.5 adaptive-Huffman LZ. Solid RAR 1.5 chains are not yet
+        // supported: every member decodes fresh (solid=false resets the
+        // 64 KiB window and tables).
+        let out = Rar15Decoder::new().decode_member(&packed, hdr.unpacked_size, false)?;
+        return Ok(out);
+    }
+
     Err(RarError::Unsupported(format!(
-        "RAR 1.5 compressed members (unpack version {}) are not yet supported",
+        "RAR 1.3/1.4-era compressed members (unpack version {}) are not yet supported",
         hdr.unp_ver
     )))
 }

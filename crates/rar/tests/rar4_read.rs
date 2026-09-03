@@ -13,6 +13,7 @@ use rar5::{RarArchive, RarError};
 const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/");
 const RAR300: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar300/");
 const RAR2: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar2/");
+const RAR154: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar154/");
 const W591: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/rar40/winrar591/"
@@ -250,6 +251,56 @@ fn rar4_vm_filter_edge_cases() {
             assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
         }
     }
+}
+
+// ── RAR 1.5 (unp_ver 15, from the rars fixture corpus) ───────────────────
+
+#[test]
+fn rar4_rar154_fixtures_decode() {
+    // RAR 1.5.4-era archives: normal compression (incl. a 17-file doc set),
+    // DOS vs long file names, and a solid-flagged archive whose single
+    // member is stored.
+    for file in [
+        "readme_154_normal.rar",
+        "readme_154_store_solid.rar",
+        "doc_154_best.rar",
+        "audio_dos_names_unpack15.rar",
+        "audio_win_names_unpack15.rar",
+    ] {
+        let mut archive = RarArchive::open(&format!("{RAR154}{file}")).expect("open");
+        let snaps = snapshots(&archive);
+        assert!(!snaps.is_empty(), "{file}");
+        for (name, size, crc) in snaps {
+            let data = archive.read(&name).expect("decode RAR1.5 member");
+            assert_eq!(data.len() as u64, size, "{file}/{name} size");
+            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
+        }
+    }
+}
+
+#[test]
+fn rar4_rar154_encrypted_members_decode_with_password() {
+    // RAR 1.5 member data encrypted with the legacy RAR15 stream cipher;
+    // the decrypted README matches the unencrypted fixture byte for byte.
+    let mut archive = RarArchive::open(&format!("{RAR154}readme_154_password.rar")).expect("open");
+    match archive.read("README.md") {
+        Err(RarError::Encrypted(_)) => {}
+        other => panic!("expected Encrypted without password, got {other:?}"),
+    }
+    archive.set_password("password");
+    let data = archive.read("README.md").expect("decrypt RAR1.5 member");
+    assert_eq!(data.len(), 4_198);
+    assert_eq!(rar5_crc32(&data), 0x509e_5e3c);
+
+    let mut plain = RarArchive::open(&format!("{RAR154}readme_154_normal.rar")).expect("open");
+    assert_eq!(plain.read("README.md").expect("plain member"), data);
+}
+
+#[test]
+fn rar4_rar154_wrong_password_fails() {
+    let mut archive = RarArchive::open(&format!("{RAR154}readme_154_password.rar")).expect("open");
+    archive.set_password("wrong-password");
+    assert!(archive.read("README.md").is_err());
 }
 
 // ── RAR 2.x (unp_ver 20/26, from the rars fixture corpus) ─────────────────

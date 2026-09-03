@@ -12,6 +12,7 @@ pub(crate) mod huffman;
 pub mod lzss_huff;
 pub(crate) mod match_finder;
 pub(crate) mod ppmd;
+pub(crate) mod rar15;
 pub(crate) mod rar20;
 pub(crate) mod rar29;
 pub(crate) mod window;
