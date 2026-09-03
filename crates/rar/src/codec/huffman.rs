@@ -12,7 +12,6 @@ type HuffNode = (u32, usize, Option<(usize, usize)>);
 
 pub struct DecodeTable {
     pub num_symbols: usize,
-    pub code_lengths: Vec<u8>,
     decode_len: [u32; MAX_CODE_LENGTH + 2],
     decode_pos: [usize; MAX_CODE_LENGTH + 2],
     decode_num: Vec<u16>,
@@ -83,7 +82,6 @@ impl DecodeTable {
 
         DecodeTable {
             num_symbols: n,
-            code_lengths: code_lengths.to_vec(),
             decode_len,
             decode_pos,
             decode_num,
@@ -139,7 +137,6 @@ pub fn decode_symbol(table: &DecodeTable, reader: &mut BitReader) -> Result<usiz
 // ── Encode Table ───────────────────────────────────────────────────────────
 
 pub struct EncodeTable {
-    pub num_symbols: usize,
     pub codes: Vec<u32>,
     pub lengths: Vec<u8>,
 }
@@ -174,7 +171,6 @@ impl EncodeTable {
         }
 
         EncodeTable {
-            num_symbols: n,
             codes,
             lengths: code_lengths.to_vec(),
         }

@@ -6,8 +6,8 @@
 //! errors are expected and swallowed, and the goal is only to catch panics,
 //! overflows, OOM aborts and unbounded loops.
 
-use rar5::crypto;
 use rar5::recovery::rar50 as recovery;
+use rar5::{EncryptionParams, decrypt_data};
 
 /// xorshift64* PRNG with a fixed seed, matching `tests/interop.rs`.
 struct Rng(u64);
@@ -97,7 +97,7 @@ fn unpack50_decode_random_inputs_do_not_panic() {
             continue;
         }
         let stream = random_bytes(&mut rng, 1024 * 1024);
-        let _ = rar5::codec::decode_standalone(
+        let _ = rar5::decode_standalone(
             &stream,
             unpacked,
             dict.min(13),
@@ -147,7 +147,7 @@ fn exercise_crypto(data: &[u8]) {
         extra.extend_from_slice(&check);
     }
 
-    if let Ok(params) = crypto::EncryptionParams::from_extra_bytes(&extra) {
+    if let Ok(params) = EncryptionParams::from_extra_bytes(&extra) {
         let ciphertext = &data[data.len().min(2 + 128)..];
         let ciphertext = &ciphertext[..ciphertext.len().min(1 << 16)];
         let _ = params.verify_password("");
@@ -156,7 +156,7 @@ fn exercise_crypto(data: &[u8]) {
             && ciphertext.len() >= 16
             && ciphertext.len().is_multiple_of(16)
         {
-            let _ = crypto::decrypt_data(ciphertext, &keys.key, &iv);
+            let _ = decrypt_data(ciphertext, &keys.key, &iv);
         }
     }
 }

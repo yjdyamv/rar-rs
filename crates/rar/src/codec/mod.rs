@@ -6,12 +6,12 @@
 /// an independent BSD-2-Clause licensed implementation.
 ///
 /// License: BSD-2-Clause
-pub mod bitstream;
-pub mod filters;
-pub mod huffman;
-pub mod match_finder;
+pub(crate) mod bitstream;
+pub(crate) mod filters;
+pub(crate) mod huffman;
+pub(crate) mod match_finder;
 pub mod rar50;
-pub mod window;
+pub(crate) mod window;
 
 pub use rar50::{
     DEFAULT_CHUNK_SIZE, DecodeOptions, DecoderState, EncoderState, FilterSpec,

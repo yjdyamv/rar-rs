@@ -828,7 +828,7 @@ fn dense_x86_multi_chunk_roundtrips_byte_identical() {
             rar5::ArchiveVersion::Rar50,
         )
         .expect("encode");
-        let back = rar5::codec::rar50::decode_standalone(
+        let back = rar5::decode_standalone(
             &packed,
             data.len() as u64,
             dict_log,

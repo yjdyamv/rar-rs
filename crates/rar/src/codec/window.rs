@@ -19,16 +19,6 @@ impl SlidingWindow {
     }
 
     #[inline]
-    pub fn position(&self) -> usize {
-        self.pos
-    }
-
-    #[inline]
-    pub fn size(&self) -> usize {
-        self.buf.len()
-    }
-
-    #[inline]
     pub fn total_written(&self) -> u64 {
         self.total_written
     }
@@ -53,12 +43,6 @@ impl SlidingWindow {
         }
         self.pos = dst;
         self.total_written += length as u64;
-    }
-
-    /// Read the byte `dist` positions back from the current write position.
-    #[inline]
-    pub fn get_byte_at(&self, dist: usize) -> u8 {
-        self.buf[(self.pos.wrapping_sub(dist)) & self.mask]
     }
 
     /// Extract `length` bytes starting from a total-written offset.

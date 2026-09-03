@@ -24,9 +24,7 @@
 //! BSD-2-Clause. See LICENSE for details.
 
 pub mod archive;
-#[doc(hidden)]
 pub mod codec;
-#[doc(hidden)]
 pub mod crypto;
 pub mod detect;
 pub mod error;
@@ -49,8 +47,10 @@ pub use archive::{ArchiveEntry, BatchEntry, RarArchive, discover_volumes};
 #[doc(hidden)]
 #[cfg(feature = "parallel")]
 pub use codec::rar50::{EncoderState, encode_chunked_mt};
-pub use codec::rar50::{compress, compress_chunked, compress_with_progress, decompress};
-pub use crypto::EncryptionParams;
+pub use codec::rar50::{
+    compress, compress_chunked, compress_with_progress, decode_standalone, decompress,
+};
+pub use crypto::{EncryptionParams, decrypt_data, derive_keys, encrypt_data};
 pub use detect::sfx_offset_of;
 pub use error::{RarError, RarResult};
 pub use features::{Feature, FeatureSet};

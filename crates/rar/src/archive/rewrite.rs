@@ -1,9 +1,189 @@
 //! Surgical archive rewrite: delete, rename, comment and recovery-record
 //! mutation share one plan/execute pipeline. Methods on [RarArchive]
-//! in a sibling impl block (see src/archive.rs).
+//! in a sibling impl block (see `crate::archive::mod`).
+
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::io_util::temp_sibling_path;
+use crate::codec::{DecoderState, rar50 as compression};
+use crate::crypto::parse_archive_encrypt_header;
+use crate::io_util::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
+use crate::rar50::headers::*;
+use crate::rar50::vint;
+
+use super::{PendingCommit, volume_base_of, volume_path};
+
+/// One step of a surgical archive rewrite.
+enum RewriteOp {
+    /// Copy one block verbatim: `header_bytes` followed by `len` bytes of
+    /// data starting at `src_data` in the original archive. `qo_header`
+    /// holds the header bytes for the rebuilt quick-open record (copied
+    /// file blocks only, plaintext archives only).
+    CopyBlock {
+        header_bytes: Vec<u8>,
+        src_data: u64,
+        len: u64,
+        qo_header: Option<Vec<u8>>,
+    },
+    /// Decode (and recompress when kept) one member of the affected solid
+    /// chain.
+    Recompress { idx: usize, is_deleted: bool },
+}
+
+/// The result of planning a rewrite: the blocks to emit, in order.
+struct RewritePlan {
+    ops: Vec<RewriteOp>,
+    /// Verbatim bytes of the archive encryption header (if any), written
+    /// before the rebuilt main header.
+    encrypt_header: Option<Vec<u8>>,
+    /// Parsed main header block (plaintext).
+    main_meta: BlockMeta,
+    /// Recovery percentage from the dropped RR record; the record is
+    /// rebuilt over the rewritten archive.
+    rr_percent: Option<u8>,
+    /// New archive comment (CMT service block), written right after the
+    /// main header.
+    comment: Option<Vec<u8>>,
+}
+
+/// Lazily opened readers for every volume of the original archive.
+struct VolumeReaders {
+    files: Vec<Option<File>>,
+    paths: Vec<PathBuf>,
+}
+
+impl VolumeReaders {
+    fn new(paths: &[PathBuf]) -> Self {
+        VolumeReaders {
+            files: (0..paths.len()).map(|_| None).collect(),
+            paths: paths.to_vec(),
+        }
+    }
+
+    fn read_chunk(&mut self, vol: usize, offset: u64, len: u64) -> RarResult<Vec<u8>> {
+        let file = self
+            .files
+            .get_mut(vol)
+            .ok_or_else(|| RarError::Format(format!("chunk references missing volume {vol}")))?;
+        if file.is_none() {
+            *file = Some(File::open(&self.paths[vol])?);
+        }
+        let f = file.as_mut().unwrap();
+        f.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; len as usize];
+        f.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+}
+
+impl crate::rar50::payload::ChunkReader for VolumeReaders {
+    fn read_chunk(&mut self, vol: usize, offset: u64, len: u64) -> RarResult<Vec<u8>> {
+        VolumeReaders::read_chunk(self, vol, offset, len)
+    }
+}
+
+/// Parse the recovery parameters out of an existing `.rev` file header:
+/// `(rec_count, data_count)`.
+fn rev_params_from_file(path: &Path) -> RarResult<(u32, u32)> {
+    let data = std::fs::read(path)?;
+    if data.len() < 8 + 4 + 4 + 1 + 2 + 2 + 2 + 4
+        || &data[..8] != crate::recovery::rev50::REV5_SIGNATURE
+    {
+        return Err(RarError::Format(format!(
+            "{}: not a RAR5 recovery volume",
+            path.display()
+        )));
+    }
+    let mut off = 8 + 4 + 4; // signature + header CRC + header size
+    if data[off] != 1 {
+        return Err(RarError::Format(format!(
+            "{}: unsupported recovery volume version",
+            path.display()
+        )));
+    }
+    off += 1;
+    let data_count = u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as u32;
+    off += 2;
+    let rec_count = u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as u32;
+    Ok((rec_count, data_count))
+}
+
+/// Read-ahead copy job: `len` bytes from `src` in the original archive.
+#[cfg(feature = "parallel")]
+#[derive(Clone, Copy)]
+struct CopyJob {
+    src: u64,
+    len: u64,
+}
+
+/// Bounded producer thread that prefetches verbatim block data ahead of
+/// the writer, overlapping source reads with destination writes (and, for
+/// solid chains, with the CPU-bound recompression).
+#[cfg(feature = "parallel")]
+struct CopyPipeline {
+    rx: std::sync::mpsc::Receiver<Result<Vec<u8>, RarError>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "parallel")]
+impl CopyPipeline {
+    const CHUNK: usize = 4 * 1024 * 1024;
+    const QUEUE: usize = 4;
+
+    fn start(src_path: &Path, jobs: &[CopyJob]) -> Self {
+        let src_path = src_path.to_path_buf();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, RarError>>(Self::QUEUE);
+        let jobs = jobs.to_vec();
+        let handle = std::thread::spawn(move || {
+            let mut f = match File::open(src_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = tx.send(Err(e.into()));
+                    return;
+                }
+            };
+            for job in jobs {
+                if let Err(e) = f.seek(SeekFrom::Start(job.src)) {
+                    let _ = tx.send(Err(e.into()));
+                    return;
+                }
+                let mut left = job.len;
+                while left > 0 {
+                    let want = left.min(Self::CHUNK as u64) as usize;
+                    let mut buf = vec![0u8; want];
+                    if let Err(e) = f.read_exact(&mut buf) {
+                        let _ = tx.send(Err(e.into()));
+                        return;
+                    }
+                    if tx.send(Ok(buf)).is_err() {
+                        return; // consumer aborted
+                    }
+                    left -= want as u64;
+                }
+            }
+        });
+        CopyPipeline {
+            rx,
+            handle: Some(handle),
+        }
+    }
+
+    /// Next prefetched buffer, in job order.
+    fn take(&self) -> RarResult<Option<Vec<u8>>> {
+        match self.rx.recv() {
+            Ok(Ok(buf)) => Ok(Some(buf)),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
 
 impl RarArchive {
     // ── Public API: deletion ───────────────────────────────────────────────

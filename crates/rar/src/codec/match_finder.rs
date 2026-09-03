@@ -210,13 +210,9 @@ impl LongRange {
     }
 
     /// Current history length in bytes (≤ [`LONG_RANGE_MAX`]).
+    #[allow(dead_code)]
     pub fn hist_len(&self) -> usize {
         self.hist.len()
-    }
-
-    /// True when the long-range finder has history to search.
-    pub fn is_empty(&self) -> bool {
-        self.hist.is_empty()
     }
 
     #[inline]
@@ -228,6 +224,7 @@ impl LongRange {
     /// `min_dist` skips candidates the near match finder already covers
     /// (distances up to tail + chunk); candidates beyond `self.window`
     /// are rejected (the decoder window could not reach them).
+    #[allow(dead_code)]
     pub fn find(
         &self,
         chunk: &[u8],

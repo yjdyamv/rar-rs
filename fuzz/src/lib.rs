@@ -472,9 +472,9 @@ pub fn crypto(data: &[u8]) {
     iv.copy_from_slice(&data[17..33]);
     let plain = &data[33..];
 
-    if let Ok(keys) = rar5::crypto::derive_keys("fuzz", &salt, strength) {
-        let ct = rar5::crypto::encrypt_data(plain, &keys.key, &iv);
-        let pt = rar5::crypto::decrypt_data(&ct, &keys.key, &iv).expect("decrypt must succeed");
+    if let Ok(keys) = rar5::derive_keys("fuzz", &salt, strength) {
+        let ct = rar5::encrypt_data(plain, &keys.key, &iv);
+        let pt = rar5::decrypt_data(&ct, &keys.key, &iv).expect("decrypt must succeed");
         assert_eq!(
             &pt[..plain.len()],
             plain,
@@ -483,7 +483,7 @@ pub fn crypto(data: &[u8]) {
     }
     // Parameter parser over arbitrary extra-record bytes (vints, salt,
     // IV, checksum).
-    let _ = rar5::crypto::EncryptionParams::from_extra_bytes(data);
+    let _ = rar5::EncryptionParams::from_extra_bytes(data);
 }
 
 /// Recovery surface: inline `{RB}` build/parse/repair, the GF(2^16)
