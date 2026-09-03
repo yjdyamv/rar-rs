@@ -22,6 +22,7 @@
 设计见 `docs/LIVE_INTEROP.md`。路线：live 交互测试骨架已落地（`crates/rar/tests/live_interop.rs`，6.23 `-ma4` m0/m3/m5/solid/-p/-hp/-v 当场生成 → 我方读 vs UnRAR 6.23 解 sha256 对齐；win+linux 原生工具，按需下载 7z zs（自 repo 镜像）/RAR 6.23）；后续：
 - live 场景扩到 7.x ↔ RAR5 双向（我方建 RAR5 → 7.x UnRAR 校验）
 - **RAR4 创建**：只需 rar29 LZSS+Huffman 编码器 + 归档层（见 docs/LIVE_INTEROP.md 写路线；不做 15/20 写器、PPMd 发射），逐开关对照 6.23；目标 6.23 字节级可解 + 双向 live 验收，摆脱固定夹具
+  - **rars 写侧实测可用（2026-09）**：`rars add --format {rar14,rar15,rar20,rar29,rar30,rar40}` 全档可产；`rar40/29` 输出 unp_ver 29、`rar20`→20、`rar15`→15（RAR4 容器内老引擎档），我方读 + UnRAR 6.23 均字节级一致（sha 验证）。→ 移植参考 = rars `rar15_40/write.rs`（2924 行，按 ArchiveVersion 分档）+ `codec/rar29.rs` 编码半（`Unpack29Encoder`，~1600 行，含 ppmd hybrid/过滤但 CLI 默认 m5 走 LZSS）+ `rar20.rs`/`rar13.rs` 编码半（仅当要写 15/20 档——我方可不做）。另：rars CLI 可作 unp_ver 15/20 读侧 live 夹具生成器（替代 rars 语料）
 - 稳定后决定 `fixtures/rar40/` 去留（live 全覆盖后删除，见 docs 迁移节）
 
 ### 老版本 RAR 只读（继续）
