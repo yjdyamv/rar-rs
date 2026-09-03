@@ -18,6 +18,10 @@ const MVOL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/rar40/multivol/"
 );
+const ENC: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/rar40/encrypted/"
+);
 const W591: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/rar40/winrar591/"
@@ -255,6 +259,54 @@ fn rar4_vm_filter_edge_cases() {
             assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
         }
     }
+}
+
+// ── Header-encrypted RAR3/4 (`-hp`, from the rars fixture corpus) ────────
+
+#[test]
+fn rar4_header_encrypted_archives_decode() {
+    // -hp hides file names behind AES-128 header encryption; listing needs
+    // the password at open time.
+    assert!(matches!(
+        RarArchive::open(&format!("{ENC}header_rar300_password.rar")),
+        Err(RarError::Encrypted(_))
+    ));
+
+    let mut archive =
+        RarArchive::open_with_password(&format!("{ENC}header_rar300_password.rar"), "password")
+            .expect("open with password");
+    let snaps = snapshots(&archive);
+    assert_eq!(snaps.len(), 1);
+    assert_eq!(snaps[0].0, "hello.txt");
+    let data = archive.read("hello.txt").expect("decode");
+    assert_eq!(rar5_crc32(&data), snaps[0].2.unwrap());
+
+    // Unicode name inside an encrypted header.
+    let mut archive = RarArchive::open_with_password(&format!("{ENC}header_enc_1234.rar"), "1234")
+        .expect("open with password");
+    let names: Vec<String> = snapshots(&archive).into_iter().map(|(n, _, _)| n).collect();
+    assert_eq!(names.len(), 2);
+    assert!(names.iter().any(|n| n.contains("中文")), "{names:?}");
+
+    // Wrong password must not silently list garbage.
+    assert!(
+        RarArchive::open_with_password(&format!("{ENC}header_rar300_password.rar"), "nope")
+            .is_err()
+    );
+}
+
+#[test]
+fn rar4_header_encrypted_multivol_decode() {
+    let mut archive = RarArchive::open_with_password(
+        &format!("{ENC}header_encrypted_multivol_rar300.rar"),
+        "password",
+    )
+    .expect("open with password");
+    let (name, size, crc) = snapshots(&archive).into_iter().next().unwrap();
+    assert_eq!(name, "bigtext_64k.bin");
+    let data = archive.read(&name).expect("decode split -hp member");
+    assert_eq!(data.len() as u64, size);
+    assert_eq!(rar5_crc32(&data), crc.unwrap());
 }
 
 // ── Multi-volume RAR4 (from the rars fixture corpus) ──────────────────────

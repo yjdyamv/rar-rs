@@ -311,7 +311,12 @@ impl RarArchive {
         // Volume 0 is the already-open primary stream, positioned right
         // after the signature (SFX-aware). Later volumes open fresh and each
         // starts with its own 7-byte signature.
-        scan.scan_volume(self.stream.as_mut().unwrap(), 0, self.sfx_offset, &mut out)?;
+        scan.scan_volume(
+            self.stream.as_mut().unwrap(),
+            0,
+            self.password.as_deref(),
+            &mut out,
+        )?;
         for (vol_idx, vol_path) in self.volume_paths.iter().enumerate().skip(1) {
             self.check_cancel()?;
             let mut stream = std::fs::File::open(vol_path)?;
@@ -323,7 +328,7 @@ impl RarArchive {
                     vol_path.display()
                 )));
             }
-            scan.scan_volume(&mut stream, vol_idx, 0, &mut out)?;
+            scan.scan_volume(&mut stream, vol_idx, self.password.as_deref(), &mut out)?;
         }
         scan.finish()?;
         self.entries = out;

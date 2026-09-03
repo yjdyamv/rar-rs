@@ -49,9 +49,12 @@ struct Rar4Block {
     head_crc: u16,
     head_type: u8,
     flags: u16,
-    head_size: u16,
     /// Absolute offset where the block starts.
     offset: u64,
+    /// Offset where the block's data area starts (block start + the header's
+    /// on-disk byte count: `head_size`, or `8 + align16(head_size)` for
+    /// `-hp` header-encrypted blocks).
+    header_end: u64,
     /// Bytes on disk for this whole block (header + optional data area).
     total_size: u64,
     /// Header bytes (for validation / name parsing).
@@ -62,6 +65,12 @@ struct Rar4Block {
 /// or into the next volume (SPLIT_AFTER).
 pub(crate) const FHD_SPLIT_BEFORE: u16 = 0x0001;
 pub(crate) const FHD_SPLIT_AFTER: u16 = 0x0002;
+
+/// Main header flag: every block after the main header is encrypted (the
+/// legacy `-hp` header encryption of RAR 3.x/4.x). Each encrypted block is
+/// `[8-byte salt][AES-128-CBC ciphertext of head_size bytes, padded to a
+/// 16-byte multiple]`; the 7-byte block prefix lives inside the ciphertext.
+pub(crate) const MHD_PASSWORD: u16 = 0x0080;
 
 /// Cross-volume RAR4 block scan. A member split across volumes reappears as
 /// continuation file headers (FHD_SPLIT_BEFORE) in later volumes; the scan
@@ -76,21 +85,37 @@ impl Rar4VolumeScan {
     /// signature (the caller handles the first volume's SFX offset and
     /// signature; later volumes open fresh). Completed entries are pushed to
     /// `out`; an entry whose data continues into the next volume stays
-    /// pending here.
+    /// pending here. `password` decrypts `-hp` encrypted headers.
     pub(crate) fn scan_volume(
         &mut self,
         stream: &mut (impl Read + Seek),
         volume_index: usize,
-        sfx_data_base: u64,
+        password: Option<&str>,
         out: &mut Vec<ArchiveEntry>,
     ) -> RarResult<()> {
-        while let Some(block) = read_block(stream)? {
+        // Set when this volume's main header carries MHD_PASSWORD: every
+        // later block is header-encrypted. Resets per volume (each volume
+        // starts with its own plaintext marker + main header).
+        let mut header_encrypted = false;
+        let mut password_bytes: Option<&[u8]> = None;
+        while let Some(block) = read_block(stream, password_bytes, header_encrypted)? {
             match block.head_type {
-                MARK_HEAD | MAIN_HEAD => {}
+                MARK_HEAD | MAIN_HEAD => {
+                    if block.head_type == MAIN_HEAD && block.flags & MHD_PASSWORD != 0 {
+                        header_encrypted = true;
+                        let Some(password) = password else {
+                            return Err(RarError::Encrypted(
+                                "RAR4: header-encrypted archive, a password is required to list it"
+                                    .into(),
+                            ));
+                        };
+                        password_bytes = Some(password.as_bytes());
+                    }
+                }
                 FILE_HEAD => {
                     let split_before = block.flags & FHD_SPLIT_BEFORE != 0;
                     let split_after = block.flags & FHD_SPLIT_AFTER != 0;
-                    let fh = parse_file_header(&block, sfx_data_base)?;
+                    let fh = parse_file_header(&block)?;
                     let chunk = DataChunk {
                         volume_index,
                         data_offset: fh.data_offset,
@@ -163,8 +188,15 @@ impl Rar4VolumeScan {
     }
 }
 
-fn read_block(stream: &mut (impl Read + Seek)) -> RarResult<Option<Rar4Block>> {
+fn read_block(
+    stream: &mut (impl Read + Seek),
+    password: Option<&[u8]>,
+    encrypted: bool,
+) -> RarResult<Option<Rar4Block>> {
     let start = stream.stream_position()?;
+    if encrypted {
+        return read_encrypted_block(stream, start, password);
+    }
     let mut base = [0u8; 7];
     let n = read_some(stream, &mut base)?;
     if n == 0 {
@@ -173,10 +205,6 @@ fn read_block(stream: &mut (impl Read + Seek)) -> RarResult<Option<Rar4Block>> {
     if n < 7 {
         return Err(RarError::Format("RAR4: truncated block header".into()));
     }
-
-    let head_crc = u16::from_le_bytes([base[0], base[1]]);
-    let head_type = base[2];
-    let flags = u16::from_le_bytes([base[3], base[4]]);
     let head_size = u16::from_le_bytes([base[5], base[6]]);
     if head_size < 7 {
         return Err(RarError::Format(format!(
@@ -190,6 +218,75 @@ fn read_block(stream: &mut (impl Read + Seek)) -> RarResult<Option<Rar4Block>> {
         let mut rest = vec![0u8; head_size as usize - 7];
         read_exact(stream, &mut rest)?;
         header.extend_from_slice(&rest);
+    }
+    finish_block(start, header, u64::from(head_size))
+}
+
+/// Read an `-hp` encrypted block: `[8-byte salt][AES-128-CBC ciphertext]`,
+/// where the ciphertext holds the whole header (7-byte prefix included)
+/// padded to a 16-byte multiple. The head size only becomes known after
+/// decrypting the first block.
+fn read_encrypted_block(
+    stream: &mut (impl Read + Seek),
+    start: u64,
+    password: Option<&[u8]>,
+) -> RarResult<Option<Rar4Block>> {
+    let mut first = [0u8; 24];
+    let n = read_some(stream, &mut first)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if n < 24 {
+        return Err(RarError::Format(
+            "RAR4: truncated encrypted block header".into(),
+        ));
+    }
+    let Some(password) = password else {
+        return Err(RarError::Encrypted(
+            "RAR4: header-encrypted archive, a password is required to list it".into(),
+        ));
+    };
+    let salt: [u8; 8] = first[..8].try_into().unwrap();
+    let mut cipher = crate::crypto::Rar30Cipher::new(password, Some(salt))
+        .map_err(|e| RarError::Format(format!("RAR4 header key setup: {e}")))?;
+    let mut block0: [u8; 16] = first[8..24].try_into().unwrap();
+    cipher
+        .decrypt_in_place(&mut block0)
+        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
+    let head_size = u16::from_le_bytes([block0[5], block0[6]]);
+    if head_size < 7 {
+        return Err(RarError::Format(format!(
+            "RAR4: encrypted header head_size {head_size} too small (wrong password?)"
+        )));
+    }
+    let align16 = ((head_size as usize) + 15) & !15;
+    let mut rest = vec![0u8; align16 - 16];
+    read_exact(stream, &mut rest)?;
+    cipher
+        .decrypt_in_place(&mut rest)
+        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
+    let mut header = block0.to_vec();
+    header.extend_from_slice(&rest);
+    header.truncate(head_size as usize);
+    finish_block(start, header, 8 + align16 as u64)
+}
+
+/// Validate a (possibly decrypted) header and compute the block envelope.
+/// `on_disk_prefix` is the number of bytes the header occupies on disk
+/// (head_size for plaintext blocks, `8 + align16(head_size)` when the
+/// block was stored header-encrypted).
+fn finish_block(start: u64, header: Vec<u8>, on_disk_prefix: u64) -> RarResult<Option<Rar4Block>> {
+    if header.len() < 7 {
+        return Err(RarError::Format("RAR4: truncated block header".into()));
+    }
+    let head_crc = u16::from_le_bytes([header[0], header[1]]);
+    let head_type = header[2];
+    let flags = u16::from_le_bytes([header[3], header[4]]);
+    let head_size = u16::from_le_bytes([header[5], header[6]]);
+    if head_size < 7 || header.len() < head_size as usize {
+        return Err(RarError::Format(format!(
+            "RAR4: block head_size {head_size} too small"
+        )));
     }
 
     // Validate header CRC (16-bit) over bytes[2..head_size], except for
@@ -218,13 +315,13 @@ fn read_block(stream: &mut (impl Read + Seek)) -> RarResult<Option<Rar4Block>> {
         0
     };
 
-    let total_size = head_size as u64 + add_size;
+    let total_size = on_disk_prefix + add_size;
     Ok(Some(Rar4Block {
         head_crc,
         head_type,
         flags,
-        head_size,
         offset: start,
+        header_end: start + on_disk_prefix,
         total_size,
         header,
     }))
@@ -260,10 +357,9 @@ fn file_header_crc_end(header: &[u8]) -> usize {
 }
 
 /// Parse a RAR4 FILE_HEAD block body into a RAR5-style `FileHeader`, mapping
-/// fields to the common model (`format_version: 4`). `sfx_data_base` is the
-/// absolute offset of the archive start (signature end); file data offsets
-/// are absolute within the stream.
-fn parse_file_header(block: &Rar4Block, sfx_data_base: u64) -> RarResult<FileHeader> {
+/// fields to the common model (`format_version: 4`). File data offsets are
+/// absolute within the stream.
+fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
     let h = &block.header;
     let start = 0usize;
     let head_end = h.len();
@@ -335,15 +431,10 @@ fn parse_file_header(block: &Rar4Block, sfx_data_base: u64) -> RarResult<FileHea
         _ => OS_UNIX,
     };
 
-    // Data offset = this block's absolute end (header end pushed to 16-byte
-    // alignment for RAR3+ encrypted headers is handled by the caller via
-    // sfx_data_base alignment; here the block offset + head_size is the
-    // exact data start in the container).
-    let data_offset = block
-        .offset
-        .checked_add(block.head_size as u64)
-        .ok_or_else(|| RarError::Format("RAR4: data offset overflow".into()))?;
-    let _ = sfx_data_base;
+    // Data offset = where this block's data area starts on disk: past the
+    // header's real on-disk size (head_size for plaintext blocks, or
+    // 8 + align16(head_size) when the block was stored header-encrypted).
+    let data_offset = block.header_end;
 
     let fh = FileHeader {
         name,

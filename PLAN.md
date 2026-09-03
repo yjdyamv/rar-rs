@@ -10,7 +10,7 @@
 - **持久树跨 chunk 损坏修复（2026-09）**：验证新块大小时发现既有静默损坏——窗口跨 chunk 增长时 `grow_to` 用新零数组替换 son（head 表幸存），而 0 是到位置 0 的合法链接；`rebase` 同类缺陷（链接只改值不迁槽）。密集 x86 成员产生抄 MZ 头的假匹配，unrar 与 WinRAR 双双报 checksum error。修复：grow_to 复制旧链接、rebase 把链接迁移到新环槽、收集器在解析定价前逐字节验证每个树报告（未来任何不变量破坏的安全网）。回归：129 KB 真实内核镜像前缀（旧代码在 129,334 字节处损坏，dict 2^3 + 64 KiB chunk）现字节级回环。DLL 自动 x86 过滤器产物 5.75 MB（43.90%），赢 WinRAR 7.23 的 5.87 MB（44.81%），双向完整性校验通过
 - **自动 x86 过滤器**：rars 移植的结构扫描（E8/E8E9 簇/跨度检测）自动应用于内存路径成员；过滤器成员按非 solid 写出。修复了 solid 链中过滤器位置的流式绝对/成员相对语义（unrar `WrittenFileSize` 为成员相对、区域定位为流绝对、E8 偏移按 16 MiB 取模）。
 - 命令面：官方 rar 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt` 列表变体）。
-- **老版本 RAR 只读（2026-09 起）**：`Rar!\x1a\x07\x00` 容器族（RAR 1.5–4.x）读取——块扫描/文件头（unicode 名、DOS 时间、salt、字典位）、STORE 直通 + **三代解码器全覆盖**：RAR3/4（unp_ver ≥ 29）LZSS+Huffman + PPMd 变体 H + 五大标准 VM 过滤器（E8/E8E9/Itanium/Delta/RGB/Audio）、RAR 2.x（20/26，LZSS+Huffman + 音频块）、RAR 1.5（15，自适应 Huffman 老 LZ）——（`codec/rar29.rs`+`codec/ppmd.rs`+`codec/rar20.rs`+`codec/rar15.rs`，rars 解码半移植）含 RAR3/4 solid 链共享窗口 + **分卷（`.partN.rar` 新命名 + `.r00/.r01` 老命名，任意卷入口，split 成员合并为多 chunk）** + RAR15/20/30 全代解密。对 WinRAR 5.91 `-ma4` 夹具与 rars 语料（真 RAR 3.0/2.0/2.5/1.5.4：PPMd、六种过滤器、solid-PPMd、PPMd 内嵌过滤器、音频 WAV、17 文件 doc 集、RAR20/RAR15 老密码、2–5 卷 split 集含加密/存储/压缩）字节级通过（CRC 门）。WinRAR 5.x/7.x 的 RAR4 写器不再产 PPMd，老格式夹具只能来自 rars 语料（现代 WinRAR 连 RAR2.x/1.5 也不能产）。非标准（通用）VM 程序、solid RAR2.x/1.5 链、RAR4 头加密仍不支持。参考环境：`~/Desktop/winrar591`（WinRAR 5.91 绿色版，7-Zip ZS 提取），7.23 无 `-ma4` 故不能产 RAR4 夹具。
+- **老版本 RAR 只读（2026-09 起）**：`Rar!\x1a\x07\x00` 容器族（RAR 1.5–4.x）读取——块扫描/文件头（unicode 名、DOS 时间、salt、字典位）、STORE 直通 + **三代解码器全覆盖**：RAR3/4（unp_ver ≥ 29）LZSS+Huffman + PPMd 变体 H + 五大标准 VM 过滤器（E8/E8E9/Itanium/Delta/RGB/Audio）、RAR 2.x（20/26，LZSS+Huffman + 音频块）、RAR 1.5（15，自适应 Huffman 老 LZ）——（`codec/rar29.rs`+`codec/ppmd.rs`+`codec/rar20.rs`+`codec/rar15.rs`，rars 解码半移植）含 RAR3/4 solid 链共享窗口 + **分卷（`.partN.rar` 新命名 + `.r00/.r01` 老命名，任意卷入口，split 成员合并为多 chunk）** + **`-hp` 头加密（主头 MHD_PASSWORD 后每块 `[8B salt][align16 密文]`，列表即需口令）** + RAR15/20/30 全代数据解密。对 WinRAR 5.91 `-ma4` 夹具与 rars 语料（真 RAR 3.0/2.0/2.5/1.5.4：PPMd、六种过滤器、solid-PPMd、PPMd 内嵌过滤器、音频 WAV、17 文件 doc 集、RAR20/RAR15 老密码、2–5 卷 split 集、-hp 含中文名/分卷）字节级通过（CRC 门）。WinRAR 5.x/7.x 的 RAR4 写器不再产 PPMd，老格式夹具只能来自 rars 语料（现代 WinRAR 连 RAR2.x/1.5 也不能产）。非标准（通用）VM 程序、solid RAR2.x/1.5 链仍不支持。参考环境：`~/Desktop/winrar591`（WinRAR 5.91 绿色版，7-Zip ZS 提取），7.23 无 `-ma4` 故不能产 RAR4 夹具。
 - 工程：fmt/clippy `-D warnings` 双门（本地，含测试目标）、五目标 fuzz（`fuzz/`）、取消钩子、QO 快路径 `open_quick`、流式修复 `repair_archive_path`、零填充分卷集支持。
 - 架构：workspace `crates/rar`（库 crate `rar5`）+ `crates/rar-cli`（rar/unrar），按 rars 分层——词汇见 `CONTEXT.md`，格式细节见 `docs/FORMAT_RAR5_RAR7.html`。
 
@@ -19,8 +19,7 @@
 ### 老版本 RAR 只读（继续）
 
 - solid RAR2.x/1.5 链：现按单成员独立解码（无链窗）；需把 rar4 链引擎泛化为 unp_ver 分派（rar15 已带 solid 参数/64 KiB 窗，只差接线；rar20 需加链窗）
-- RAR3/4 头加密（-hp 旧式）、FHD_COMMENT 块展示、EXTTIME 亚秒时间
-- 分卷 + solid（RAR3/4 solid 跨卷链）、rar154 拆 2 MiB 老命名 split（random.rar 集）
+- FHD_COMMENT 块展示、EXTTIME 亚秒时间、rar154 拆 2 MiB 老命名 split（random.rar 集，头 CRC 0xFFFFFFFF 需哨兵语义）
 - RAR3/4 头加密（-hp 旧式）、FHD_COMMENT 块、FHD_EXTTIME 亚秒时间
 - store-in-solid 链内成员的窗口语义（现为断链保守处理，需对照 5.91 实测）
 - 大成员内存：现整成员驻留（packed+解码 Vec），后续流式（对齐 decode_member_from_reader）
