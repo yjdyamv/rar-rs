@@ -14,17 +14,21 @@ use crate::codec::rar29::Rar29Decoder;
 use crate::crc32;
 use crate::crypto::{Rar15Cipher, Rar20Cipher, Rar30Cipher};
 use crate::error::{RarError, RarResult};
-use crate::rar50::headers::FileHeader;
+use crate::rar50::headers::{DataChunk, FileHeader};
 use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
 
 /// Decode a single-volume RAR4 member into memory.
 ///
+/// `chunks` names the member's volume segments (one per volume for split
+/// members); the packed payload is the concatenation of those segments,
+/// read from `volume_paths[chunk.volume_index]` (volume 0 = `stream`).
 /// `decoder` carries persistent solid-chain state (`None` for a standalone
-/// member): compressed members feed it, and its look-behind window then
-/// serves the next solid member. The returned Vec holds exactly this member's
-/// unpacked bytes.
+/// member). The returned Vec holds exactly this member's unpacked bytes.
 pub(crate) fn decode_member_bytes(
     stream: &mut (impl Read + Seek),
+    volume_paths: &[PathBuf],
+    chunks: &[DataChunk],
     hdr: &FileHeader,
     password: Option<&str>,
     decoder: Option<&mut Rar29Decoder>,
@@ -33,9 +37,23 @@ pub(crate) fn decode_member_bytes(
         return Ok(Vec::new());
     }
 
-    let mut packed = vec![0u8; hdr.packed_size as usize];
-    stream.seek(SeekFrom::Start(hdr.data_offset))?;
-    stream.read_exact(&mut packed).map_err(RarError::Io)?;
+    let mut packed = Vec::new();
+    for chunk in chunks {
+        let mut segment = vec![0u8; chunk.packed_size as usize];
+        if chunk.volume_index == 0 {
+            stream.seek(SeekFrom::Start(chunk.data_offset))?;
+            stream.read_exact(&mut segment).map_err(RarError::Io)?;
+        } else {
+            let mut f = std::fs::File::open(
+                volume_paths
+                    .get(chunk.volume_index)
+                    .ok_or_else(|| RarError::Format("RAR4: chunk volume out of range".into()))?,
+            )?;
+            f.seek(SeekFrom::Start(chunk.data_offset))?;
+            f.read_exact(&mut segment).map_err(RarError::Io)?;
+        }
+        packed.extend_from_slice(&segment);
+    }
 
     let encrypted = hdr.flags & super::FHD_PASSWORD as u64 != 0;
     if encrypted {

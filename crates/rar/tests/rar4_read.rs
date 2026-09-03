@@ -14,6 +14,10 @@ const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/");
 const RAR300: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar300/");
 const RAR2: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar2/");
 const RAR154: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar154/");
+const MVOL: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/rar40/multivol/"
+);
 const W591: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/rar40/winrar591/"
@@ -247,6 +251,38 @@ fn rar4_vm_filter_edge_cases() {
         assert!(!snaps.is_empty());
         for (name, size, crc) in snaps {
             let data = archive.read(&name).expect("decode filter member");
+            assert_eq!(data.len() as u64, size, "{file}/{name} size");
+            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
+        }
+    }
+}
+
+// ── Multi-volume RAR4 (from the rars fixture corpus) ──────────────────────
+
+#[test]
+fn rar4_multivolume_sets_decode() {
+    // Genuine RAR 3.0 split archives across 2–5 volumes: new `.partN.rar`
+    // naming, legacy `.r00` naming, a stored file, a compressed PRNG file,
+    // and an encrypted file. Every member is decoded through its volume
+    // segments with the header CRC as the byte-exactness gate.
+    let cases = [
+        ("multivol_newnaming_rar300.part01.rar", None),
+        ("multivol_newnaming_rar300.part02.rar", None), // any-volume open
+        ("multivol_oldnaming_rar300.rar", None),
+        ("multivol_oldnaming_rar300.r00", None),
+        ("stored_multivol_rar300.rar", None),
+        ("compressed_multivol_prng_rar300.rar", None),
+        ("encrypted_multivol_rar300.rar", Some("password")),
+    ];
+    for (file, password) in cases {
+        let mut archive = RarArchive::open(&format!("{MVOL}{file}")).expect("open");
+        if let Some(p) = password {
+            archive.set_password(p);
+        }
+        let snaps = snapshots(&archive);
+        assert!(!snaps.is_empty(), "{file}");
+        for (name, size, crc) in snaps {
+            let data = archive.read(&name).expect("decode split member");
             assert_eq!(data.len() as u64, size, "{file}/{name} size");
             assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
         }

@@ -58,52 +58,109 @@ struct Rar4Block {
     header: Vec<u8>,
 }
 
-/// Top-level RAR4 archive read result.
-pub(crate) struct Rar4Reader {
-    pub entries: Vec<ArchiveEntry>,
+/// File header flag: data continues from the previous volume (SPLIT_BEFORE)
+/// or into the next volume (SPLIT_AFTER).
+pub(crate) const FHD_SPLIT_BEFORE: u16 = 0x0001;
+pub(crate) const FHD_SPLIT_AFTER: u16 = 0x0002;
+
+/// Cross-volume RAR4 block scan. A member split across volumes reappears as
+/// continuation file headers (FHD_SPLIT_BEFORE) in later volumes; the scan
+/// merges them into one entry with one chunk per volume segment.
+#[derive(Default)]
+pub(crate) struct Rar4VolumeScan {
+    pending: Option<ArchiveEntry>,
 }
 
-/// Scan a single-volume RAR4 archive. `stream` must be positioned right
-/// after the 7-byte signature (the caller handles SFX offset and signature).
-pub(crate) fn scan_stream(
-    stream: &mut (impl Read + Seek),
-    sfx_data_base: u64,
-) -> RarResult<Rar4Reader> {
-    let mut entries = Vec::new();
-
-    while let Some(block) = read_block(stream)? {
-        match block.head_type {
-            MARK_HEAD | MAIN_HEAD => {}
-            FILE_HEAD => {
-                let fh = parse_file_header(&block, sfx_data_base)?;
-                let chunk = DataChunk {
-                    volume_index: 0,
-                    data_offset: fh.data_offset,
-                    packed_size: fh.packed_size,
-                    crc32_val: fh.crc32_val,
-                    is_final: true,
-                    extra_data: Vec::new(),
-                };
-                entries.push(ArchiveEntry {
-                    header: fh,
-                    chunks: vec![chunk],
-                });
-                if block.total_size > block.header.len() as u64 {
-                    stream.seek(SeekFrom::Start(block.offset + block.total_size))?;
+impl Rar4VolumeScan {
+    /// Scan one volume. `stream` must be positioned right after the 7-byte
+    /// signature (the caller handles the first volume's SFX offset and
+    /// signature; later volumes open fresh). Completed entries are pushed to
+    /// `out`; an entry whose data continues into the next volume stays
+    /// pending here.
+    pub(crate) fn scan_volume(
+        &mut self,
+        stream: &mut (impl Read + Seek),
+        volume_index: usize,
+        sfx_data_base: u64,
+        out: &mut Vec<ArchiveEntry>,
+    ) -> RarResult<()> {
+        while let Some(block) = read_block(stream)? {
+            match block.head_type {
+                MARK_HEAD | MAIN_HEAD => {}
+                FILE_HEAD => {
+                    let split_before = block.flags & FHD_SPLIT_BEFORE != 0;
+                    let split_after = block.flags & FHD_SPLIT_AFTER != 0;
+                    let fh = parse_file_header(&block, sfx_data_base)?;
+                    let chunk = DataChunk {
+                        volume_index,
+                        data_offset: fh.data_offset,
+                        packed_size: fh.packed_size,
+                        crc32_val: None,
+                        is_final: !split_after,
+                        extra_data: Vec::new(),
+                    };
+                    if split_before {
+                        // Continuation of a member whose data started in an
+                        // earlier volume. The first header stays canonical
+                        // (name, unpacked size, method); later headers only
+                        // contribute this volume's segment.
+                        let Some(entry) = self.pending.as_mut() else {
+                            return Err(RarError::Format(format!(
+                                "RAR4: {}: split continuation without a start",
+                                fh.name
+                            )));
+                        };
+                        entry.chunks.push(chunk);
+                        if !split_after {
+                            // Final segment: this header carries the whole-
+                            // file CRC; total packed size is the chunk sum.
+                            entry.header.packed_size =
+                                entry.chunks.iter().map(|c| c.packed_size).sum();
+                            entry.header.crc32_val = fh.crc32_val;
+                            out.push(self.pending.take().unwrap());
+                        }
+                    } else if split_after {
+                        if self.pending.is_some() {
+                            return Err(RarError::Format("RAR4: overlapping split members".into()));
+                        }
+                        self.pending = Some(ArchiveEntry {
+                            header: fh,
+                            chunks: vec![chunk],
+                        });
+                    } else {
+                        out.push(ArchiveEntry {
+                            header: fh,
+                            chunks: vec![chunk],
+                        });
+                    }
+                    if block.total_size > block.header.len() as u64 {
+                        stream.seek(SeekFrom::Start(block.offset + block.total_size))?;
+                    }
                 }
-            }
-            ENDARC_HEAD => break,
-            _ => {
-                // Unknown block types (comment, protect, auth, subblock):
-                // skip over their data area when present.
-                if block.total_size > block.header.len() as u64 {
-                    stream.seek(SeekFrom::Start(block.offset + block.total_size))?;
+                ENDARC_HEAD => break,
+                _ => {
+                    // Unknown block types (comment, protect, auth, subblock):
+                    // skip over their data area when present.
+                    if block.total_size > block.header.len() as u64 {
+                        stream.seek(SeekFrom::Start(block.offset + block.total_size))?;
+                    }
                 }
             }
         }
+        Ok(())
     }
 
-    Ok(Rar4Reader { entries })
+    /// Finish: any member still pending is truncated (its last volume is
+    /// missing).
+    pub(crate) fn finish(self) -> RarResult<()> {
+        if let Some(entry) = self.pending {
+            return Err(RarError::Format(format!(
+                "RAR4: split member {} is missing its final volume",
+                entry.header.name
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn read_block(stream: &mut (impl Read + Seek)) -> RarResult<Option<Rar4Block>> {

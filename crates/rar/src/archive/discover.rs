@@ -2,18 +2,21 @@
 
 use std::path::{Path, PathBuf};
 
-/// Discover all volumes of a multi-volume RAR5 archive.
+/// Discover all volumes of a multi-volume RAR5 or legacy archive.
 ///
 /// Given any volume path, returns a sorted list of all volume paths
-/// starting from part1. Uses `.partN.rar` naming convention.
+/// starting from the first. Handles the `.partN.rar` naming convention
+/// (zero-padded or not; WinRAR pads to the digit count of the total volume
+/// count, e.g. `part01..part15`) and the legacy naming used by RAR 1.5–3.x
+/// sets (first volume `x.rar`, then `x.r00`, `x.r01`, … `.r99`, then
+/// `x.s00`, … — one letter per hundred volumes).
 pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
     let name = match path.file_name().and_then(|n| n.to_str()) {
         Some(n) => n.to_string(),
         None => return vec![path.to_path_buf()],
     };
 
-    // Match .partN.rar naming (zero-padded or not; WinRAR pads to the
-    // digit count of the total volume count, e.g. part01..part15).
+    // Match .partN.rar naming (zero-padded or not).
     if let Some((base, width)) = extract_volume_base(&name) {
         let parent = path.parent().unwrap_or(Path::new("."));
         let mut volumes = Vec::new();
@@ -50,6 +53,41 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
         }
     }
 
+    // Legacy volume naming: x.rar, x.r00, x.r01, …; extension letters
+    // advance every hundred volumes (r, s, t, …).
+    if let Some(base) = legacy_volume_base(&name) {
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let mut volumes = Vec::new();
+        let first = parent.join(format!("{base}.rar"));
+        if first.exists() {
+            volumes.push(first);
+        }
+        let mut found_any = !volumes.is_empty();
+        for letter in b'r'..=b'z' {
+            let mut any_in_run = false;
+            for n in 0..100 {
+                let vol = parent.join(format!("{base}.{}{:02}", letter as char, n));
+                if vol.exists() {
+                    volumes.push(vol);
+                    any_in_run = true;
+                    found_any = true;
+                } else if any_in_run {
+                    // A gap ends the run.
+                    break;
+                } else if !volumes.is_empty() && n == 0 {
+                    // Next letter after a completed run.
+                    break;
+                }
+            }
+            if !any_in_run && !volumes.is_empty() {
+                break;
+            }
+        }
+        if found_any {
+            return volumes;
+        }
+    }
+
     // Check if path itself names a single-volume file that has a .part1.rar sibling
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
         let parent = path.parent().unwrap_or(Path::new("."));
@@ -69,6 +107,27 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
     }
 
     vec![path.to_path_buf()]
+}
+
+/// Legacy volume base from `x.rar` / `x.r00` / `x.s37` (case-insensitive).
+fn legacy_volume_base(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    if let Some(base) = lower.strip_suffix(".rar") {
+        return Some(name[..base.len()].to_string());
+    }
+    let bytes = lower.as_bytes();
+    if bytes.len() >= 5
+        && bytes[bytes.len() - 4] == b'.'
+        && bytes[bytes.len() - 3].is_ascii_lowercase()
+        && bytes[bytes.len() - 3] >= b'r'
+        && bytes[bytes.len() - 3] <= b'z'
+        && bytes[bytes.len() - 2].is_ascii_digit()
+        && bytes[bytes.len() - 1].is_ascii_digit()
+    {
+        let end = bytes.len() - 4;
+        return Some(name[..end].to_string());
+    }
+    None
 }
 
 /// Extract volume base from a filename like `archive.part3.rar` → `archive`.

@@ -75,17 +75,15 @@ impl Write for IntegritySink<'_> {
 impl RarArchive {
     pub(crate) fn open_read(&mut self) -> RarResult<()> {
         self.volume_paths = discover_volumes(&self.path);
-        if self.volume_paths.len() > 1 {
+        let f = File::open(&self.volume_paths[0])?;
+        self.stream = Some(Box::new(f));
+        self.verify_signature()?;
+        if self.rar4 {
+            self.scan_rar4_blocks()?;
+        } else if self.volume_paths.len() > 1 {
             self.scan_all_volumes()?;
         } else {
-            let f = File::open(&self.path)?;
-            self.stream = Some(Box::new(f));
-            self.verify_signature()?;
-            if self.rar4 {
-                self.scan_rar4_blocks()?;
-            } else {
-                self.scan_blocks()?;
-            }
+            self.scan_blocks()?;
         }
         Ok(())
     }
@@ -97,16 +95,16 @@ impl RarArchive {
     /// no QO written, or a corrupt record).
     pub(crate) fn open_read_quick(&mut self) -> RarResult<()> {
         self.volume_paths = discover_volumes(&self.path);
-        if self.volume_paths.len() > 1 {
-            self.scan_all_volumes()?;
-            return Ok(());
-        }
-        let f = File::open(&self.path)?;
+        let f = File::open(&self.volume_paths[0])?;
         self.stream = Some(Box::new(f));
         self.verify_signature()?;
         if self.rar4 {
             // RAR4 has no quick-open record: always full-scan.
             self.scan_rar4_blocks()?;
+            return Ok(());
+        }
+        if self.volume_paths.len() > 1 {
+            self.scan_all_volumes()?;
             return Ok(());
         }
         if !self.try_quick_open_entries()? {
@@ -307,13 +305,28 @@ impl RarArchive {
     /// supported yet; opening one is reported clearly.
     fn scan_rar4_blocks(&mut self) -> RarResult<()> {
         self.entries.clear();
-        if self.volume_paths.len() > 1 {
-            return Err(RarError::Unsupported(
-                "multi-volume RAR4 archives are not yet supported".into(),
-            ));
+        let mut scan = crate::rar40::Rar4VolumeScan::default();
+        let mut out = Vec::new();
+
+        // Volume 0 is the already-open primary stream, positioned right
+        // after the signature (SFX-aware). Later volumes open fresh and each
+        // starts with its own 7-byte signature.
+        scan.scan_volume(self.stream.as_mut().unwrap(), 0, self.sfx_offset, &mut out)?;
+        for (vol_idx, vol_path) in self.volume_paths.iter().enumerate().skip(1) {
+            self.check_cancel()?;
+            let mut stream = std::fs::File::open(vol_path)?;
+            let mut sig = [0u8; 7];
+            stream.read_exact(&mut sig)?;
+            if &sig != crate::detect::RAR4_SIGNATURE {
+                return Err(RarError::Format(format!(
+                    "volume {} has a bad RAR4 signature",
+                    vol_path.display()
+                )));
+            }
+            scan.scan_volume(&mut stream, vol_idx, 0, &mut out)?;
         }
-        let reader = crate::rar40::scan_stream(self.stream.as_mut().unwrap(), self.sfx_offset)?;
-        self.entries = reader.entries;
+        scan.finish()?;
+        self.entries = out;
         Ok(())
     }
 
@@ -1391,10 +1404,12 @@ impl RarArchive {
         if self.is_rar4_solid_member(idx) {
             return self.rar4_decode_solid_through(idx);
         }
-        let hdr = self.entries[idx].header.clone();
+        let entry = self.entries[idx].clone();
         crate::rar40::decode_member_bytes(
             self.stream.as_mut().unwrap(),
-            &hdr,
+            &self.volume_paths,
+            &entry.chunks,
+            &entry.header,
             self.password.as_deref(),
             None,
         )
@@ -1459,6 +1474,7 @@ impl RarArchive {
                 continue;
             }
             let hdr = entry.header;
+            let chunks = entry.chunks;
             let mut decoder = self.read_ctx_mut().rar4_decoder.take();
             // A STORE member inside the run breaks the chain: its bytes do
             // not extend the LZ window, so the next solid member restarts.
@@ -1467,6 +1483,8 @@ impl RarArchive {
             }
             let data = crate::rar40::decode_member_bytes(
                 self.stream.as_mut().unwrap(),
+                &self.volume_paths,
+                &chunks,
                 &hdr,
                 self.password.as_deref(),
                 decoder.as_mut(),

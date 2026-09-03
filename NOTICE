@@ -51,9 +51,9 @@ covering the RAR 2.x LZSS+Huffman and audio-block codec; `src/codec/rar15.rs`,
 a near-verbatim extract of the rars `Unpack15` (codec/rar13.rs) for RAR 1.5).
 Each carries a note at its definition site.
 
-The `rar300/` test fixtures under `crates/rar/tests/fixtures/rar40/` are
-legacy RAR 3.0 archives copied from the rars test corpus (same licence
-terms), used as byte-level regression inputs.
+The legacy fixture dirs under `crates/rar/tests/fixtures/rar40/` (`rar300/`,
+`rar2/`, `rar154/`, `multivol/`, `rarvm/`) are archives copied from the rars
+test corpus (same licence terms), used as byte-level regression inputs.
 
 Official RAR/UNRAR binaries are used strictly as black-box interoperability
 references for testing (set `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` to run
