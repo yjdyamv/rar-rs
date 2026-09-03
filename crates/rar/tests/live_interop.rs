@@ -1,26 +1,33 @@
 //! Live interoperability tests against *genuine reference tools* fetched at
 //! test time — no committed fixture archives.
 //!
-//! The goal (see PLAN.md "老版本 RAR"): parity with WinRAR 5.x for legacy
-//! RAR exactly like the RAR5 ↔ WinRAR 7.23 parity. WinRAR 7.x cannot create
-//! RAR4 (`-ma4` was removed), so old-RAR *generation* needs WinRAR 5.91
-//! (Windows, or wine); on other platforms those scenarios are skipped and
-//! the RAR5-parity ones run against whatever RAR/UnRAR the environment
-//! provides.
+//! The goal (see PLAN.md "老版本 RAR"): parity with the reference tools for legacy
+//! RAR exactly like the RAR5 ↔ WinRAR 7.x parity. WinRAR 7.x removed RAR4
+//! creation (`-ma4`), so old-RAR generation uses WinRAR 6.23 (or 5.91 — both
+//! still ship `-ma4`; 6.23 is the last); the RAR7 (v70) *creation* side is
+//! intentionally not covered (WinRAR cannot be told to write small RAR7
+//! archives). RAR5 parity runs in both directions against WinRAR 7.x.
 //!
 //! Tool resolution (in order):
-//!   1. `RAR_TOOLS_DIR` — a directory containing `winrar591/`, `winrar7/`
+//!   1. `RAR_TOOLS_DIR` — a directory containing `winrar6/`, `winrar591/`, `winrar7/`
 //!      and/or `7z/` (each with the platform's binaries, e.g. `Rar.exe` +
 //!      `UnRAR.exe` on Windows, `rar` + `unrar` on unix);
-//!   2. known local installs (7-Zip ZS / 7-Zip in PATH or common dirs);
-//!   3. when `RAR_LIVE_DOWNLOAD=1`, fetch on demand: 7-Zip ZS latest from
-//!      the mcmilk GitHub release (silent-install the Windows exe into the
-//!      cache), then WinRAR 5.91 from rarlab and extract it with 7-Zip.
+//!   2. the persisted tool cache `.cache/winrar/<ver>/` under the repo root
+//!      (override with `RAR_CACHE_DIR`) — extracted builds keep working
+//!      across runs with no downloads; seed it once with any genuine
+//!      extraction (e.g. `6-23`, `5-91`, `7-23`);
+//!   3. known local installs (7-Zip ZS / 7-Zip in PATH or common dirs,
+//!      `C:\Program Files\WinRAR` on Windows);
+//!   4. when `RAR_LIVE_DOWNLOAD=1`, fetch on demand into the cache:
+//!      7-Zip ZS latest from the mcmilk GitHub release (silent-install into
+//!      `.cache/7z-zs`), then WinRAR 6.23 from rarlab into
+//!      `.cache/winrar/6-23` (installers kept under `.cache/downloads` so
+//!      re-runs only re-extract).
 //!
-//! Everything caches under `$RAR_CACHE_DIR` (default: system temp +
-//! `rar-rs-interop`). Tests self-skip with a clear reason when a tool is
-//! unavailable; set `RAR_LIVE_INTEROP=1` to run (tests stay off by default
-//! so plain `cargo test` needs no network).
+//! Everything lives under `$RAR_CACHE_DIR` (default: repo-root `.cache`).
+//! Tests self-skip with a clear reason when a tool is unavailable; set
+//! `RAR_LIVE_INTEROP=1` to run (tests stay off by default so plain
+//! `cargo test` needs no network).
 //!
 //! Platform notes: generation of RAR4 archives is Windows-only with the
 //! official 5.91 build; extraction/listing parity is cross-platform.
@@ -43,7 +50,8 @@ fn skip(reason: &str) {
 
 #[derive(Clone, Debug)]
 struct Tools {
-    /// Directory containing `Rar.exe`/`UnRAR.exe` (win) or `rar`/`unrar`.
+    /// RAR 6.23 / 5.91 `Rar.exe`/`rar` — the last releases able to create RAR4
+    /// (`-ma4` was removed in WinRAR 7.x).
     rar591: Option<PathBuf>,
     /// RAR 7.x binaries (same layout). Reserved for RAR5-parity scenarios.
     #[allow(dead_code)]
@@ -57,7 +65,42 @@ fn cache_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("RAR_CACHE_DIR") {
         return PathBuf::from(dir);
     }
-    std::env::temp_dir().join("rar-rs-interop")
+    // Project-local cache: extracted tools persist across runs (no
+    // re-download/extract each time). CARGO_MANIFEST_DIR = crates/rar.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(&manifest)
+        .join(".cache")
+}
+
+/// `.cache/winrar/<version-key>/` holding an extracted WinRAR/RAR build
+/// (e.g. `6-23`, `5-91`, `7-23`).
+fn winrar_cache_dir(version_key: &str) -> PathBuf {
+    cache_dir().join("winrar").join(version_key)
+}
+
+/// Enumerate version keys already cached under `.cache/winrar/`.
+fn cached_winrar_keys() -> Vec<String> {
+    let root = cache_dir().join("winrar");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut keys = Vec::new();
+    for entry in entries.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            keys.push(name.to_string());
+        }
+    }
+    keys.sort();
+    keys
+}
+
+/// `.cache/downloads/` for installer/download artifacts (kept so re-runs
+/// only re-extract, never re-download).
+fn downloads_dir() -> PathBuf {
+    cache_dir().join("downloads")
 }
 
 fn which(candidates: &[PathBuf]) -> Option<PathBuf> {
@@ -96,13 +139,17 @@ fn common_7z_paths() -> Vec<PathBuf> {
 fn resolve_tools() -> Tools {
     let (rar_bin, _unrar_bin) = bin_names();
 
-    // Explicit single-root layout: RAR_TOOLS_DIR/{winrar591,winrar7,7z}.
+    // Explicit single-root layout: RAR_TOOLS_DIR/{winrar6,winrar591,winrar7,7z}.
     let mut rar591 = None;
     let mut rar7 = None;
     let mut seven_zip = None;
     if let Some(root) = std::env::var_os("RAR_TOOLS_DIR") {
         let root = PathBuf::from(root);
-        rar591 = which(&[root.join("winrar591").join(rar_bin)]);
+        for dir in ["winrar6", "winrar591"] {
+            if rar591.is_none() {
+                rar591 = which(&[root.join(dir).join(rar_bin)]);
+            }
+        }
         rar7 = which(&[root.join("winrar7").join(rar_bin)]);
         seven_zip = which(&[
             root.join("7z").join("7z.exe"),
@@ -112,7 +159,31 @@ fn resolve_tools() -> Tools {
     }
 
     if rar591.is_none() {
-        rar591 = std::env::var_os("RAR_591_DIR")
+        // Persisted tool cache: `.cache/winrar/<ver>`. Prefer the newest
+        // 6.x (last -ma4 line) over 5.x; 7.x under its own key.
+        for key in cached_winrar_keys() {
+            let candidate = winrar_cache_dir(&key).join(rar_bin);
+            if candidate.is_file() {
+                if key.starts_with("7-") {
+                    if rar7.is_none() {
+                        rar7 = Some(candidate);
+                    }
+                } else if key.starts_with("6-") {
+                    rar591 = Some(candidate);
+                    break; // 6.x is the preferred legacy generator
+                } else if rar591.is_none() && key.starts_with("5-") {
+                    rar591 = Some(candidate);
+                }
+            }
+        }
+    }
+    if seven_zip.is_none() {
+        let zs = cache_dir().join("7z-zs");
+        seven_zip = which(&[zs.join("7z.exe"), zs.join("7z"), zs.join("7zz")]);
+    }
+    if rar591.is_none() {
+        rar591 = std::env::var_os("RAR_OLD_DIR")
+            .or_else(|| std::env::var_os("RAR_591_DIR"))
             .map(PathBuf::from)
             .and_then(|d| which(&[d.join(rar_bin)]));
     }
@@ -134,6 +205,9 @@ fn resolve_tools() -> Tools {
             .map(PathBuf::from)
             .and_then(|d| which(&[d.join(rar_bin)]));
     }
+    if rar7.is_none() && cfg!(windows) {
+        rar7 = which(&[PathBuf::from("C:\\Program Files\\WinRAR").join(rar_bin)]);
+    }
     if seven_zip.is_none() {
         seven_zip = which(&common_7z_paths());
     }
@@ -144,7 +218,7 @@ fn resolve_tools() -> Tools {
         && std::env::var("RAR_LIVE_DOWNLOAD").is_ok_and(|v| v == "1")
         && let Some(sz) = &seven_zip
     {
-        rar591 = fetch_winrar591(sz);
+        rar591 = fetch_old_winrar(sz);
     }
 
     Tools {
@@ -168,7 +242,7 @@ fn http_get(url: &str, dest: &Path) -> bool {
 /// Download 7-Zip ZS (mcmilk) latest Windows build and silent-install it
 /// into the cache so it can self-extract WinRAR installers.
 fn fetch_7z_zs() -> Option<PathBuf> {
-    let cache = cache_dir();
+    let cache = downloads_dir();
     std::fs::create_dir_all(&cache).ok()?;
     let listing = Command::new("curl")
         .args(["-sSL", "--max-time", "60"])
@@ -190,7 +264,7 @@ fn fetch_7z_zs() -> Option<PathBuf> {
     {
         return None;
     }
-    let dir = cache.join("7z-zs-install");
+    let dir = cache_dir().join("7z-zs");
     let status = Command::new(&exe)
         .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
         .arg(format!("/DIR={}", dir.display()))
@@ -204,17 +278,14 @@ fn fetch_7z_zs() -> Option<PathBuf> {
 
 /// Download WinRAR 5.91 (the last release able to create RAR4) and extract
 /// the portable build from its installer with 7-Zip.
-fn fetch_winrar591(seven_zip: &Path) -> Option<PathBuf> {
-    let cache = cache_dir();
-    std::fs::create_dir_all(&cache).ok()?;
-    let exe = cache.join("winrar-x64-591.exe");
-    if !exe.exists()
-        && !exe.exists()
-        && !http_get("https://www.rarlab.com/rar/winrar-x64-591.exe", &exe)
-    {
+fn fetch_old_winrar(seven_zip: &Path) -> Option<PathBuf> {
+    let downloads = downloads_dir();
+    std::fs::create_dir_all(&downloads).ok()?;
+    let exe = downloads.join("winrar-x64-623.exe");
+    if !exe.exists() && !http_get("https://www.rarlab.com/rar/winrar-x64-623.exe", &exe) {
         return None;
     }
-    let out = cache.join("winrar591");
+    let out = winrar_cache_dir("6-23");
     std::fs::create_dir_all(&out).ok()?;
     let _ = Command::new(seven_zip)
         .args(["x", "-y", "-o"])
@@ -250,7 +321,9 @@ fn sha256_hex(path: &Path) -> String {
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!("rar-rs-live-{}-{}", tag, std::process::id()));
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let base = std::env::temp_dir().join(format!("rar-rs-live-{tag}-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&base).expect("temp dir");
     base
 }
@@ -449,7 +522,131 @@ fn scenario_multivol_rar4(tools: &Tools) {
     let _ = std::fs::remove_dir_all(&work);
 }
 
+// ── RAR 7.x ↔ RAR5 bidirectional parity ────────────────────────────────────
+
+fn unrar_in(dir: &Path) -> PathBuf {
+    dir.join(if cfg!(windows) { "UnRAR.exe" } else { "unrar" })
+}
+
+/// UnRAR-extract `member` from `archive` and hash the bytes.
+fn unrar_extract_sha_dir(
+    rar_dir: &Path,
+    archive: &Path,
+    member: &str,
+    password: Option<&str>,
+) -> String {
+    unrar_extract_sha(&unrar_in(rar_dir), archive, member, password)
+}
+
+fn sha256_bytes(data: &[u8]) -> String {
+    let mut h = sha2::Sha256::new();
+    h.update(data);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// WinRAR 7.x (`-ma5`) creates RAR5 archives: our reader must reproduce the
+/// bytes its own UnRAR extracts, across methods, solid, passwords, header
+/// encryption and volumes.
+fn scenario_rar7_created_rar5_reads_identically(rar7_dir: &Path) {
+    let rar = rar7_dir.join(if cfg!(windows) { "Rar.exe" } else { "rar" });
+    let cases: &[(&str, Option<&str>, bool)] = &[
+        ("m0", None, false),
+        ("m3", None, false),
+        ("m5", None, false),
+        ("m3", None, true),
+        ("m3", Some("secret"), false),
+    ];
+    for (method, password, solid) in cases {
+        let work = temp_dir(&format!("r5-{method}"));
+        let files = corpus(&work);
+        let archive = work.join("out.rar");
+        let mut cmd = Command::new(&rar);
+        cmd.arg("a").arg("-ma5").arg(format!("-m{}", &method[1..]));
+        if *solid {
+            cmd.arg("-s");
+        }
+        if let Some(pw) = password {
+            cmd.arg(format!("-p{pw}"));
+        }
+        cmd.arg("-ep1")
+            .arg("-idq")
+            .arg(&archive)
+            .arg(work.join("*"));
+        let res = run(cmd);
+        assert!(res.status == 0, "rar7 create failed: {}", res.stderr);
+        for name in files.keys() {
+            let expected = unrar_extract_sha_dir(rar7_dir, &archive, name, *password);
+            let actual = our_member_sha(&archive, name, *password);
+            assert_eq!(
+                actual, expected,
+                "rar5 {method} solid={solid} pw={password:?} member {name}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&work);
+    }
+}
+
+/// Our RAR5 creation must be extractable byte-identically by WinRAR 7.x
+/// UnRAR — the write side of the bidirectional parity.
+fn scenario_our_rar5_reads_by_rar7(rar7_dir: &Path) {
+    let work = temp_dir("ours-r5");
+    let files = corpus(&work);
+
+    for (method, label) in [(0u8, "m0"), (3, "m3"), (5, "m5")] {
+        let path = work.join(format!("ours-{label}.rar"));
+        let mut archive =
+            rar5::RarArchive::create_with_options(&path, rar5::CreateOptions::default())
+                .expect("create");
+        for (name, data) in &files {
+            archive.add_bytes(name, data, method).expect("add member");
+        }
+        archive.close().expect("close");
+        for (name, data) in &files {
+            let expected = unrar_extract_sha_dir(rar7_dir, &path, name, None);
+            assert_eq!(expected, sha256_bytes(data), "our rar5 {label} {name}");
+        }
+    }
+
+    // Solid + data password + header encryption in one archive.
+    let path = work.join("ours-secret.rar");
+    let mut archive = rar5::RarArchive::create_with_options(
+        &path,
+        rar5::CreateOptions {
+            solid: true,
+            password: Some("secret".into()),
+            encrypt_headers: true,
+            ..Default::default()
+        },
+    )
+    .expect("create");
+    for (name, data) in &files {
+        archive.add_bytes(name, data, 3).expect("add member");
+    }
+    archive.close().expect("close");
+    for (name, data) in &files {
+        let expected = unrar_extract_sha_dir(rar7_dir, &path, name, Some("secret"));
+        assert_eq!(expected, sha256_bytes(data), "our solid/-hp rar5 {name}");
+    }
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 // ── tests ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn live_rar7_rar5_parity() {
+    if !live_enabled() {
+        skip("set RAR_LIVE_INTEROP=1 to run live tool tests");
+        return;
+    }
+    let tools = resolve_tools();
+    let Some(rar7) = &tools.rar7 else {
+        skip("WinRAR 7.x not found (set RAR_TOOLS_DIR or RAR_7_DIR)");
+        return;
+    };
+    let rar7_dir = rar7.parent().unwrap().to_path_buf();
+    scenario_rar7_created_rar5_reads_identically(&rar7_dir);
+    scenario_our_rar5_reads_by_rar7(&rar7_dir);
+}
 
 #[test]
 fn live_rar591_rar4_parity() {
