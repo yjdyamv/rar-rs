@@ -35,6 +35,20 @@ const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT + LENGTH
 /// Retained look-behind history for solid chains (4 MiB, the RAR3/4 window).
 const MAX_HISTORY: usize = 4 * 1024 * 1024;
 
+// RAR3 VM filter record limits (mirror rars).
+const MAX_VM_GLOBAL_DATA: usize = 0x2000;
+const MAX_VM_CODE_SIZE: usize = 64 * 1024;
+const MAX_VM_PROGRAMS: usize = 8192;
+const MAX_VM_FILTERS: usize = 8192;
+
+/// Channel ceiling for DELTA/AUDIO decode (the RAR 2.9 VM takes the channel
+/// count from register R[0], so it can exceed RAR 5's 32).
+const MAX_DELTA_CHANNELS: usize = 1024;
+
+/// E8/E8E9 transforms assume this fixed 16 MiB file size, as in the
+/// reference decoders.
+const E8_FILESIZE: u32 = 0x0100_0000;
+
 const LENGTH_BASES: [usize; LENGTH_COUNT] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
     160, 192, 224,
@@ -148,6 +162,31 @@ impl BitReader {
             value = (value << 1) | bit as u32;
         }
         Ok(value)
+    }
+
+    /// A reader over a standalone byte slice (VM filter record bodies).
+    fn from_bytes(input: &[u8]) -> Self {
+        Self {
+            input: input.to_vec(),
+            bit_pos: 0,
+        }
+    }
+
+    /// RARVM variable-length integer (2-bit tag + payload).
+    fn read_encoded_u32(&mut self) -> Res<u32> {
+        match self.read_bits(2)? {
+            0 => self.read_bits(4),
+            1 => {
+                let high = self.read_bits(8)?;
+                if high >= 16 {
+                    Ok(high)
+                } else {
+                    Ok(0xffff_ff00 | (high << 4) | self.read_bits(4)?)
+                }
+            }
+            2 => self.read_bits(16),
+            _ => Ok((self.read_bits(16)? << 16) | self.read_bits(16)?),
+        }
     }
 }
 
@@ -286,6 +325,36 @@ enum BlockMode {
     Ppmd,
 }
 
+/// One of the five standard RAR3 VM filters, recognized by bytecode
+/// fingerprint (length + CRC32, XOR checksum zero).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StandardFilter {
+    E8,
+    E8E9,
+    Itanium,
+    Delta,
+    Rgb,
+    Audio,
+}
+
+/// A pending filter application: transform `size` bytes of decoded output
+/// starting at absolute stream position `start`.
+#[derive(Debug, Clone)]
+struct VmFilter {
+    program: usize,
+    start: usize,
+    size: usize,
+    regs: [u32; 7],
+}
+
+/// A recognized filter program (standard filters only).
+#[derive(Debug, Clone)]
+struct VmProgram {
+    kind: StandardFilter,
+    block_size: usize,
+    exec_count: u32,
+}
+
 /// Persistent RAR3/4 LZSS+Huffman decoder. Keep one instance across solid
 /// chain members; use a fresh instance for a standalone member.
 #[derive(Debug)]
@@ -310,6 +379,12 @@ pub(crate) struct Rar29Decoder {
     /// main-thread stack on Windows).
     ppmd: Box<PpmdDecoder>,
     ppmd_esc: u8,
+    /// Pending VM filter applications, in record order.
+    filters: Vec<VmFilter>,
+    /// Recognized filter programs.
+    programs: Vec<VmProgram>,
+    /// Filter number of the last filter record (`0` = default reuse).
+    last_filter: usize,
     /// Absolute position of `output[0]`; history older than this is trimmed.
     base_offset: usize,
     /// All decoded bytes since the last trim, in stream order.
@@ -342,6 +417,9 @@ impl Rar29Decoder {
             block_mode: BlockMode::Lz,
             ppmd: Box::new(PpmdDecoder::new()),
             ppmd_esc: 2,
+            filters: Vec::new(),
+            programs: Vec::new(),
+            last_filter: 0,
             base_offset: 0,
             output: Vec::new(),
             last_block_end: None,
@@ -367,7 +445,7 @@ impl Rar29Decoder {
         self.bits.append(packed);
         self.decode_until(target).map_err(map_err)?;
         self.finish_member().map_err(map_err)?;
-        let out = self.raw_range(start, target).map_err(map_err)?.to_vec();
+        let out = self.filtered_range(start, target, start).map_err(map_err)?;
         self.trim_history(target, target);
         Ok(out)
     }
@@ -495,14 +573,9 @@ impl Rar29Decoder {
                     return Ok(());
                 }
                 257 => {
-                    // VM filter record (first byte already buffered by the
-                    // decoder's caller in rars; here we read the record the
-                    // same way so unsupported members fail before producing
-                    // wrong output).
-                    let _ = self.bits.read_bits(8)?;
-                    return Err(E::Unsupported(
-                        "RAR 3.x/4.x VM-filtered members are not yet supported (filters milestone pending)",
-                    ));
+                    // VM filter record (LZ stream): read + parse, then keep
+                    // decoding; the filter applies later to decoded output.
+                    self.read_vm_code()?;
                 }
                 258 => {
                     if self.last_length != 0 {
@@ -592,6 +665,198 @@ impl Rar29Decoder {
             }
         }
         Ok(offset)
+    }
+
+    /// Read a VM filter record from the LZ bitstream (main symbol 257).
+    fn read_vm_code(&mut self) -> Res<()> {
+        let first_byte = self.bits.read_bits(8)?;
+        let mut len = (first_byte & 7) + 1;
+        if len == 7 {
+            len = self.bits.read_bits(8)? + 7;
+        } else if len == 8 {
+            len = self.bits.read_bits(16)?;
+        }
+        let mut data = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            data.push(self.bits.read_bits(8)? as u8);
+        }
+        self.parse_vm_code(first_byte, data)
+    }
+
+    /// Read a VM filter record whose bytes come from the PPMd symbol stream
+    /// (escape code 3).
+    fn read_vm_code_ppmd(&mut self) -> Res<()> {
+        let first_byte = u32::from(self.read_ppmd_required_byte()?);
+        let mut len = (first_byte & 7) + 1;
+        if len == 7 {
+            len = u32::from(self.read_ppmd_required_byte()?) + 7;
+        } else if len == 8 {
+            len = (u32::from(self.read_ppmd_required_byte()?) << 8)
+                | u32::from(self.read_ppmd_required_byte()?);
+        }
+        let mut data = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            data.push(self.read_ppmd_required_byte()?);
+        }
+        self.parse_vm_code(first_byte, data)
+    }
+
+    /// Parse a VM filter record body (rars `parse_vm_code`): locate or load
+    /// the program (standard filters only), and append a pending filter.
+    fn parse_vm_code(&mut self, first_byte: u32, data: Vec<u8>) -> Res<()> {
+        let mut vm = BitReader::from_bytes(&data);
+        let program_index = if first_byte & 0x80 != 0 {
+            let value = vm.read_encoded_u32()?;
+            if value == 0 {
+                self.filters.clear();
+                self.programs.clear();
+                0
+            } else {
+                usize::try_from(value - 1).map_err(|_| E::Bad("VM program index overflows"))?
+            }
+        } else {
+            self.last_filter
+        };
+        if program_index > self.programs.len() {
+            return Err(E::Bad("VM program index is invalid"));
+        }
+        self.last_filter = program_index;
+        let new_program = program_index == self.programs.len();
+
+        let mut block_start = vm.read_encoded_u32()? as usize;
+        if first_byte & 0x40 != 0 {
+            block_start += 258;
+        }
+        block_start = self
+            .current_pos()
+            .checked_add(block_start)
+            .ok_or(E::Bad("VM block start overflows"))?;
+
+        let mut block_size = self
+            .programs
+            .get(program_index)
+            .map(|program| program.block_size)
+            .unwrap_or(0);
+        if first_byte & 0x20 != 0 {
+            block_size = vm.read_encoded_u32()? as usize;
+        }
+
+        let mut regs = [0u32; 7];
+        regs[3] = 0x3c000;
+        regs[4] = block_size as u32;
+        if let Some(program) = self.programs.get(program_index) {
+            regs[5] = program.exec_count;
+        }
+        if first_byte & 0x10 != 0 {
+            let mask = vm.read_bits(7)?;
+            for (index, reg) in regs.iter_mut().enumerate() {
+                if mask & (1 << index) != 0 {
+                    *reg = vm.read_encoded_u32()?;
+                }
+            }
+        }
+
+        if new_program {
+            if self.programs.len() >= MAX_VM_PROGRAMS {
+                return Err(E::Bad("VM program limit exceeded"));
+            }
+            let code_size = vm.read_encoded_u32()? as usize;
+            if code_size == 0 {
+                return Err(E::Bad("VM code is empty"));
+            }
+            if code_size > MAX_VM_CODE_SIZE {
+                return Err(E::Bad("VM code is too large"));
+            }
+            let mut code = Vec::with_capacity(code_size);
+            for _ in 0..code_size {
+                code.push(vm.read_bits(8)? as u8);
+            }
+            let Some(kind) = identify_standard_filter(&code) else {
+                return Err(E::Unsupported(
+                    "RAR 3.x/4.x member uses a non-standard VM program, which this decoder does not implement",
+                ));
+            };
+            self.programs.push(VmProgram {
+                kind,
+                block_size,
+                exec_count: 0,
+            });
+        } else if let Some(program) = self.programs.get_mut(program_index) {
+            program.exec_count = program.exec_count.wrapping_add(1);
+            program.block_size = block_size;
+        }
+
+        let mut global_data = Vec::new();
+        if first_byte & 0x08 != 0 {
+            // Global data only feeds generic (non-standard) VM programs,
+            // which this decoder does not run; still consume the bytes so
+            // the record parses and the stream position stays correct.
+            let data_size = vm.read_encoded_u32()? as usize;
+            global_data.reserve(data_size.min(MAX_VM_GLOBAL_DATA));
+            for _ in 0..data_size {
+                let byte = vm.read_bits(8)? as u8;
+                if global_data.len() < MAX_VM_GLOBAL_DATA {
+                    global_data.push(byte);
+                }
+            }
+        }
+        let _ = global_data;
+
+        if self.filters.len() >= MAX_VM_FILTERS {
+            return Err(E::Bad("VM filter limit exceeded"));
+        }
+        self.filters.push(VmFilter {
+            program: program_index,
+            start: block_start,
+            size: block_size,
+            regs,
+        });
+        Ok(())
+    }
+
+    /// Build the decoded byte range `[start, end)`, inverse-transforming
+    /// every fully-contained standard filter block (rars `filtered_range`).
+    fn filtered_range(&mut self, start: usize, end: usize, member_start: usize) -> Res<Vec<u8>> {
+        let mut out = Vec::with_capacity(end - start);
+        let mut pos = start;
+        let filters: Vec<_> = self
+            .filters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, filter)| {
+                (filter.start >= start && filter.start + filter.size <= end).then_some(index)
+            })
+            .collect();
+        for filter_index in filters {
+            let (program_index, filter_start, filter_size, regs) = {
+                let filter = self
+                    .filters
+                    .get(filter_index)
+                    .ok_or(E::Bad("VM filter is missing"))?;
+                (filter.program, filter.start, filter.size, filter.regs)
+            };
+            if filter_start < pos {
+                continue;
+            }
+            out.extend_from_slice(self.raw_range(pos, filter_start)?);
+            let mut block = self
+                .raw_range(filter_start, filter_start + filter_size)?
+                .to_vec();
+            let file_offset = filter_start
+                .checked_sub(member_start)
+                .ok_or(E::Bad("VM filter starts before file"))?
+                as u32;
+            let kind = self
+                .programs
+                .get(program_index)
+                .ok_or(E::Bad("VM program is missing"))?
+                .kind;
+            apply_standard_filter(kind, &mut block, file_offset, &regs)?;
+            out.extend_from_slice(&block);
+            pos = filter_start + filter_size;
+        }
+        out.extend_from_slice(self.raw_range(pos, end)?);
+        Ok(out)
     }
 
     fn read_end_of_block(&mut self) -> Res<LzBlockEnd> {
@@ -704,9 +969,7 @@ impl Rar29Decoder {
                 }
                 3 => {
                     // PPMd-embedded VM filter record (RAR3.0+ filters).
-                    return Err(E::Unsupported(
-                        "RAR 3.x/4.x VM-filtered members are not yet supported (filters milestone pending)",
-                    ));
+                    self.read_vm_code_ppmd()?;
                 }
                 4 => {
                     let mut offset = 0usize;
@@ -797,6 +1060,8 @@ impl Rar29Decoder {
         let drain = keep_from - self.base_offset;
         self.output.drain(..drain);
         self.base_offset = keep_from;
+        self.filters
+            .retain(|filter| filter.start.saturating_add(filter.size) > self.base_offset);
     }
 }
 
@@ -810,6 +1075,272 @@ fn fill_levels(levels: &mut [u8], pos: &mut usize, count: usize, value: u8) -> R
     }
     *pos = end;
     Ok(())
+}
+
+// ── Standard VM filters ────────────────────────────────────────────────────
+//
+// The five standard RAR3 filters are stored as RARVM bytecode in the stream;
+// the decoder recognises them by fingerprint (XOR checksum zero + (length,
+// CRC32)) and applies the native inverse transform instead of running a VM.
+
+fn identify_standard_filter(code: &[u8]) -> Option<StandardFilter> {
+    if code.iter().fold(0u8, |acc, &byte| acc ^ byte) != 0 {
+        return None;
+    }
+    match (code.len(), crate::crc32::crc32(code)) {
+        (53, 0xad57_6887) => Some(StandardFilter::E8),
+        (57, 0x3cd7_e57e) => Some(StandardFilter::E8E9),
+        (120, 0x3769_893f) => Some(StandardFilter::Itanium),
+        (29, 0x0e06_077d) => Some(StandardFilter::Delta),
+        (149, 0x1c2c_5dc8) => Some(StandardFilter::Rgb),
+        (216, 0xbc85_e701) => Some(StandardFilter::Audio),
+        _ => None,
+    }
+}
+
+fn apply_standard_filter(
+    filter: StandardFilter,
+    data: &mut Vec<u8>,
+    file_offset: u32,
+    regs: &[u32; 7],
+) -> Res<()> {
+    match filter {
+        StandardFilter::E8 => e8e9_decode(data, file_offset, false),
+        StandardFilter::E8E9 => e8e9_decode(data, file_offset, true),
+        StandardFilter::Itanium => itanium_decode(data, file_offset),
+        StandardFilter::Delta => {
+            let channels = regs[0] as usize;
+            if channels == 0 || channels > MAX_DELTA_CHANNELS {
+                return Err(E::Bad("DELTA filter channel count is invalid"));
+            }
+            *data = delta_decode(data, channels)?;
+            Ok(())
+        }
+        StandardFilter::Rgb => {
+            if regs[0] < 3 || regs[1] > 2 {
+                return Err(E::Bad("RGB filter parameters are invalid"));
+            }
+            let width = regs[0] as usize - 3;
+            let pos_r = regs[1] as usize;
+            *data = rgb_decode(data, width, pos_r)?;
+            Ok(())
+        }
+        StandardFilter::Audio => {
+            let channels = regs[0] as usize;
+            if channels == 0 || channels > MAX_DELTA_CHANNELS {
+                return Err(E::Bad("AUDIO filter channel count is invalid"));
+            }
+            *data = audio_decode(data, channels)?;
+            Ok(())
+        }
+    }
+}
+
+/// Inverse x86 E8/E8E9 transform (relative -> absolute call/jump targets).
+fn e8e9_decode(data: &mut [u8], file_offset: u32, include_e9: bool) -> Res<()> {
+    if data.len() <= 4 {
+        return Ok(());
+    }
+    let cmp_mask = if include_e9 { 0xfe } else { 0xff };
+    let opcode_limit = data.len() - 4;
+    let mut opcode_pos = 0usize;
+    while let Some(pos) = next_x86_opcode(data, opcode_pos, opcode_limit, cmp_mask) {
+        let cur_pos = pos + 1;
+        let offset = file_offset.wrapping_add(cur_pos as u32);
+        let addr = u32::from_le_bytes([
+            data[cur_pos],
+            data[cur_pos + 1],
+            data[cur_pos + 2],
+            data[cur_pos + 3],
+        ]);
+        let new_addr = if addr < E8_FILESIZE {
+            Some(addr.wrapping_sub(offset))
+        } else if addr & 0x8000_0000 != 0 && addr.wrapping_add(offset) & 0x8000_0000 == 0 {
+            Some(addr.wrapping_add(E8_FILESIZE))
+        } else {
+            None
+        };
+        if let Some(value) = new_addr {
+            data[cur_pos..cur_pos + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        opcode_pos = pos + 5;
+    }
+    Ok(())
+}
+
+/// First position >= `start` (exclusive of `end_exclusive`) whose byte
+/// matches the E8/E8E9 opcode mask.
+fn next_x86_opcode(data: &[u8], start: usize, end_exclusive: usize, cmp_mask: u8) -> Option<usize> {
+    data.get(start..end_exclusive.min(data.len()))?
+        .iter()
+        .position(|&byte| byte & cmp_mask == 0xe8)
+        .map(|offset| start + offset)
+}
+
+/// Inverse DELTA transform: de-interleave channels, then undo byte deltas.
+fn delta_decode(data: &[u8], channels: usize) -> Res<Vec<u8>> {
+    if channels == 0 {
+        return Err(E::Bad("DELTA filter has zero channels"));
+    }
+    if channels > MAX_DELTA_CHANNELS {
+        return Err(E::Bad("DELTA filter channel count is invalid"));
+    }
+    let mut out = vec![0u8; data.len()];
+    let mut src = 0usize;
+    for channel in 0..channels {
+        let mut prev = 0u8;
+        let mut dest = channel;
+        while dest < out.len() {
+            let byte = *data
+                .get(src)
+                .ok_or(E::Bad("DELTA filter source is truncated"))?;
+            prev = prev.wrapping_sub(byte);
+            out[dest] = prev;
+            src += 1;
+            dest += channels;
+        }
+    }
+    Ok(out)
+}
+
+fn itanium_decode(data: &mut [u8], file_offset: u32) -> Res<()> {
+    if data.len() <= 21 {
+        return Ok(());
+    }
+    let base_offset = file_offset >> 4;
+    // Each 16-byte Itanium bundle can inspect a 4-byte instruction field
+    // that starts up to 13 bytes into the bundle. Keeping a 21-byte tail
+    // prevents decoding a partial final bundle.
+    let block_count = (data.len() - 21).div_ceil(16);
+    for block in 0..block_count {
+        let pos = block * 16;
+        let file_offset = base_offset.wrapping_add(block as u32);
+        let mut mask = (0x334b_0000u32 >> (data[pos] & 0x1e)) & 3;
+        if mask != 0 {
+            mask += 1;
+            while mask <= 4 {
+                let p = pos + (mask as usize * 5 - 8);
+                if ((data[p + 3] >> mask) & 15) == 5 {
+                    let raw = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]);
+                    let mut value = raw >> mask;
+                    value = value.wrapping_sub(file_offset) & 0x000f_ffff;
+                    let raw = (raw & !(0x000f_ffff << mask)) | (value << mask);
+                    data[p..p + 4].copy_from_slice(&raw.to_le_bytes());
+                }
+                mask += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rgb_decode(data: &[u8], width: usize, pos_r: usize) -> Res<Vec<u8>> {
+    if data.len() < 3 || width == 0 || !width.is_multiple_of(3) || width > data.len() || pos_r > 2 {
+        return Err(E::Bad("RGB filter parameters are invalid"));
+    }
+    let mut out = vec![0u8; data.len()];
+    let mut src = 0usize;
+    for channel in 0..3 {
+        let mut prev = 0u8;
+        let mut i = channel;
+        while i < data.len() {
+            let predicted = if i >= width + 3 {
+                rgb_predict(prev, out[i - width], out[i - width - 3])
+            } else {
+                prev
+            };
+            let encoded = *data
+                .get(src)
+                .ok_or(E::Bad("RGB filter source is truncated"))?;
+            prev = predicted.wrapping_sub(encoded);
+            out[i] = prev;
+            src += 1;
+            i += 3;
+        }
+    }
+    for i in (pos_r..data.len().saturating_sub(2)).step_by(3) {
+        let green = out[i + 1];
+        out[i] = out[i].wrapping_add(green);
+        out[i + 2] = out[i + 2].wrapping_add(green);
+    }
+    Ok(out)
+}
+
+fn rgb_predict(prev: u8, upper: u8, upper_left: u8) -> u8 {
+    let predicted = i32::from(prev) + i32::from(upper) - i32::from(upper_left);
+    let pa = (predicted - i32::from(prev)).abs();
+    let pb = (predicted - i32::from(upper)).abs();
+    let pc = (predicted - i32::from(upper_left)).abs();
+    if pa <= pb && pa <= pc {
+        prev
+    } else if pb <= pc {
+        upper
+    } else {
+        upper_left
+    }
+}
+
+fn audio_decode(data: &[u8], channels: usize) -> Res<Vec<u8>> {
+    let mut out = vec![0u8; data.len()];
+    let mut src = 0usize;
+    for channel in 0..channels {
+        let mut prev_byte = 0u32;
+        let mut prev_delta = 0i32;
+        let mut d1 = 0i32;
+        let mut d2 = 0i32;
+        let mut k1 = 0i32;
+        let mut k2 = 0i32;
+        let mut k3 = 0i32;
+        let mut dif = [0u32; 7];
+        let mut byte_count = 0usize;
+        let mut i = channel;
+        while i < data.len() {
+            let d3 = d2;
+            d2 = prev_delta - d1;
+            d1 = prev_delta;
+            let predicted = ((8 * prev_byte as i32 + k1 * d1 + k2 * d2 + k3 * d3) >> 3) & 0xff;
+            let encoded = *data
+                .get(src)
+                .ok_or(E::Bad("AUDIO filter source is truncated"))?;
+            src += 1;
+            let decoded = (predicted as u8).wrapping_sub(encoded);
+            out[i] = decoded;
+            prev_delta = decoded.wrapping_sub(prev_byte as u8) as i8 as i32;
+            prev_byte = decoded as u32;
+            let d = (encoded as i8 as i32) << 3;
+            dif[0] += d.unsigned_abs();
+            dif[1] += (d - d1).unsigned_abs();
+            dif[2] += (d + d1).unsigned_abs();
+            dif[3] += (d - d2).unsigned_abs();
+            dif[4] += (d + d2).unsigned_abs();
+            dif[5] += (d - d3).unsigned_abs();
+            dif[6] += (d + d3).unsigned_abs();
+            if byte_count & 0x1f == 0 {
+                let mut min = dif[0];
+                let mut min_index = 0usize;
+                dif[0] = 0;
+                for (index, value) in dif.iter_mut().enumerate().skip(1) {
+                    if *value < min {
+                        min = *value;
+                        min_index = index;
+                    }
+                    *value = 0;
+                }
+                match min_index {
+                    1 if k1 >= -16 => k1 -= 1,
+                    2 if k1 < 16 => k1 += 1,
+                    3 if k2 >= -16 => k2 -= 1,
+                    4 if k2 < 16 => k2 += 1,
+                    5 if k3 >= -16 => k3 -= 1,
+                    6 if k3 < 16 => k3 += 1,
+                    _ => {}
+                }
+            }
+            byte_count += 1;
+            i += channels;
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

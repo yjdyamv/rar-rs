@@ -203,17 +203,51 @@ fn rar4_wrong_password_fails() {
     assert!(archive.read("repeat.txt").is_err());
 }
 
-// ── Feature gates (clear errors, not garbage) ─────────────────────────────
+// ── Standard VM filters (RAR 3.0 fixtures from the rars corpus) ───────────
 
 #[test]
-fn rar4_vm_filtered_members_report_unsupported() {
-    let mut archive = RarArchive::open(&format!("{RAR300}rarvm_x86_e8_rar300.rar")).expect("open");
-    match archive.read("x86_e8_stream.bin") {
-        Err(RarError::Unsupported(msg)) => assert!(
-            msg.contains("filter"),
-            "expected a VM-filter message, got: {msg}"
-        ),
-        other => panic!("expected Unsupported(VM filter), got {other:?}"),
+fn rar4_standard_vm_filters_decode() {
+    // One genuine RAR 3.0 fixture per standard filter type: E8, E8E9, delta
+    // (4ch), audio (stereo), RGB (24-bit BMP), Itanium.
+    for file in [
+        "rarvm_x86_e8_rar300.rar",
+        "rarvm_x86_e8e9_rar300.rar",
+        "rarvm_delta_4ch_rar300.rar",
+        "rarvm_audio_stereo_rar300.rar",
+        "rarvm_rgb_gradient_rar300.rar",
+        "rarvm_itanium_synthetic_rar300.rar",
+    ] {
+        let mut archive = RarArchive::open(&format!("{RAR300}{file}")).expect("open");
+        for (name, size, crc) in snapshots(&archive) {
+            let data = archive.read(&name).expect("decode filtered member");
+            assert_eq!(data.len() as u64, size, "{file}/{name} size");
+            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
+        }
+    }
+}
+
+#[test]
+fn rar4_vm_filter_edge_cases() {
+    // Solid chain whose later member carries an E8E9 filter (filter block
+    // position is member-relative), a PPMd member with an embedded filter
+    // record (escape code 3), a 64-channel delta, and two archives that
+    // exercise non-trivial record encodings on a real executable.
+    for file in [
+        "solid_e8_filter_member_offset.rar",
+        "ppmd_embedded_vm_filter.rar",
+        "delta_64_channels.rar",
+        "filter_bsdcat_exe.rar",
+        "vm_encoded_u32_filter.rar",
+    ] {
+        let path = format!("{FIX}rarvm/{file}");
+        let mut archive = RarArchive::open(&path).expect("open");
+        let snaps = snapshots(&archive);
+        assert!(!snaps.is_empty());
+        for (name, size, crc) in snaps {
+            let data = archive.read(&name).expect("decode filter member");
+            assert_eq!(data.len() as u64, size, "{file}/{name} size");
+            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
+        }
     }
 }
 
