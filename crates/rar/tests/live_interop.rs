@@ -239,63 +239,210 @@ fn http_get(url: &str, dest: &Path) -> bool {
     cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
-/// Download 7-Zip ZS (mcmilk) latest Windows build and silent-install it
-/// into the cache so it can self-extract WinRAR installers.
-fn fetch_7z_zs() -> Option<PathBuf> {
-    let cache = downloads_dir();
-    std::fs::create_dir_all(&cache).ok()?;
+/// The project's own mirror of 7-Zip-ZS (native per-platform archives).
+const ZS_REPO: &str = "yjdyamv/7-Zip-zstd-native";
+
+/// Pick the native 7-Zip-ZS asset for the current platform (Windows and
+/// Linux are supported; other platforms must provide tools via the env vars).
+fn zs_asset_for_platform() -> Option<(&'static str, bool)> {
+    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Some(("7zz-windows-x64.zip", true))
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some(("7zz-linux-x64.tar.gz", false))
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Some(("7zz-linux-arm64.tar.gz", false))
+    } else {
+        None
+    }
+}
+
+/// Browser URL of the `suffix` asset of the latest release of `repo`.
+fn github_latest_asset_url(repo: &str, suffix: &str) -> Option<String> {
     let listing = Command::new("curl")
         .args(["-sSL", "--max-time", "60"])
-        .arg("https://api.github.com/repos/mcmilk/7-Zip-zstd/releases/latest")
+        .arg(format!(
+            "https://api.github.com/repos/{repo}/releases/latest"
+        ))
         .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&listing.stdout);
-    let asset = text
+    String::from_utf8_lossy(&listing.stdout)
         .lines()
-        .find(|l| l.contains("\"name\":") && l.contains("zstd-x64.exe"))?
+        .find(|l| l.contains("browser_download_url") && l.contains(suffix))?
         .split('"')
-        .nth(3)?;
-    let exe = cache.join(asset);
-    if !exe.exists()
-        && !http_get(
-            &format!("https://github.com/mcmilk/7-Zip-zstd/releases/latest/download/{asset}"),
-            &exe,
-        )
-    {
-        return None;
-    }
-    let dir = cache_dir().join("7z-zs");
-    let status = Command::new(&exe)
-        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
-        .arg(format!("/DIR={}", dir.display()))
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    which(&[dir.join("7z.exe")])
+        .nth(3)
+        .map(str::to_string)
 }
 
-/// Download WinRAR 5.91 (the last release able to create RAR4) and extract
-/// the portable build from its installer with 7-Zip.
-fn fetch_old_winrar(seven_zip: &Path) -> Option<PathBuf> {
+/// Extract a `.tar.gz` or `.zip` archive into `dest` (Windows ships bsdtar,
+/// which handles both; unix uses system tar/unzip).
+fn extract_archive(archive: &Path, dest: &Path) -> bool {
+    let name = archive.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        return Command::new("tar")
+            .args(["-xzf"])
+            .arg(archive)
+            .args(["-C"])
+            .arg(dest)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+    // .zip: bsdtar handles it; fall back to unzip, then PowerShell
+    // Expand-Archive (plain Windows cmd has neither unzip nor bsdtar's
+    // zip support on all builds).
+    let via_tar = Command::new("tar")
+        .args(["-xf"])
+        .arg(archive)
+        .args(["-C"])
+        .arg(dest)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if via_tar {
+        return true;
+    }
+    if Command::new("unzip")
+        .args(["-o"])
+        .arg(archive)
+        .args(["-d"])
+        .arg(dest)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if cfg!(windows) {
+        return Command::new("powershell")
+            .args(["-NoProfile", "-Command"])
+            .arg(format!(
+                "Expand-Archive -Force -Path '{}' -DestinationPath '{}'",
+                archive.display(),
+                dest.display()
+            ))
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+    false
+}
+
+/// Find a file by name under `root` (up to 4 levels deep).
+fn find_binary(root: &Path, names: &[&str]) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    for _ in 0..4 {
+        let mut next = Vec::new();
+        for dir in stack {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    next.push(p);
+                } else if let Some(name) = p.file_name().and_then(|n| n.to_str())
+                    && names.contains(&name)
+                {
+                    return Some(p);
+                }
+            }
+        }
+        stack = next;
+    }
+    None
+}
+
+/// Download 7-Zip ZS (the project's mirror) and drop the native binary
+/// into `.cache/7z-zs`.
+fn fetch_7z_zs() -> Option<PathBuf> {
+    let install = cache_dir().join("7z-zs");
+    if let Some(existing) = find_binary(&install, &["7zz", "7zz.exe", "7z", "7z.exe"]) {
+        return Some(existing);
+    }
+    let (asset, _is_zip) = zs_asset_for_platform()?;
+    let url = github_latest_asset_url(ZS_REPO, asset)?;
     let downloads = downloads_dir();
     std::fs::create_dir_all(&downloads).ok()?;
-    let exe = downloads.join("winrar-x64-623.exe");
-    if !exe.exists() && !http_get("https://www.rarlab.com/rar/winrar-x64-623.exe", &exe) {
+    let file = downloads.join(asset);
+    if !file.exists() && !http_get(&url, &file) {
         return None;
     }
-    let out = winrar_cache_dir("6-23");
-    std::fs::create_dir_all(&out).ok()?;
-    let _ = Command::new(seven_zip)
-        .args(["x", "-y", "-o"])
-        .arg(&out)
-        .arg(&exe)
-        .status();
-    which(&[out.join("Rar.exe")])
+    std::fs::create_dir_all(&install).ok()?;
+    if !extract_archive(&file, &install) {
+        return None;
+    }
+    find_binary(&install, &["7zz", "7zz.exe", "7z", "7z.exe"])
 }
 
-// ── command helpers ────────────────────────────────────────────────────────
+/// Fetch a rarlab `.tar.gz` release (linux RAR) into `.cache/winrar/<key>`,
+/// flattening the `rar/` payload dir so `rar`/`unrar` sit at the root.
+#[allow(dead_code)] // used on unix; windows uses the installer path
+fn fetch_rarlab_tarball(version_key: &str, asset: &str) -> Option<PathBuf> {
+    let out = winrar_cache_dir(version_key);
+    let rar_bin = if cfg!(windows) { "Rar.exe" } else { "rar" };
+    if which(&[out.join(rar_bin)]).is_some() {
+        return which(&[out.join(rar_bin)]);
+    }
+    let downloads = downloads_dir();
+    std::fs::create_dir_all(&downloads).ok()?;
+    let file = downloads.join(asset);
+    if !file.exists() && !http_get(&format!("https://www.rarlab.com/rar/{asset}"), &file) {
+        return None;
+    }
+    std::fs::create_dir_all(&out).ok()?;
+    if !extract_archive(&file, &out) {
+        return None;
+    }
+    // rarlab tarballs carry a top-level `rar/` directory; flatten it.
+    if let Some(nested) =
+        find_binary(&out, &[rar_bin, "unrar"]).map(|p| p.parent().unwrap().to_path_buf())
+        && nested != out
+    {
+        for name in [rar_bin, "unrar"] {
+            let src = nested.join(name);
+            if src.is_file() {
+                let _ = std::fs::copy(&src, out.join(name));
+            }
+        }
+    }
+    which(&[out.join(rar_bin)])
+}
+
+/// Last release able to create RAR4 archives: Windows installer, or the
+/// Linux build that still ships `-ma4` (macOS has no RAR 6 build — point
+/// the env vars at wine or skip there).
+fn fetch_old_winrar(seven_zip: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let out = winrar_cache_dir("6-23");
+        if which(&[out.join("Rar.exe")]).is_some() {
+            return which(&[out.join("Rar.exe")]);
+        }
+        let downloads = downloads_dir();
+        std::fs::create_dir_all(&downloads).ok()?;
+        let exe = downloads.join("winrar-x64-623.exe");
+        if !exe.exists() && !http_get("https://www.rarlab.com/rar/winrar-x64-623.exe", &exe) {
+            return None;
+        }
+        std::fs::create_dir_all(&out).ok()?;
+        let _ = Command::new(seven_zip)
+            .args(["x", "-y", "-o"])
+            .arg(&out)
+            .arg(&exe)
+            .status();
+        which(&[out.join("Rar.exe")])
+    }
+    #[cfg(unix)]
+    {
+        let _ = seven_zip;
+        fetch_rarlab_tarball("6-23", "rarlinux-x64-623.tar.gz")
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = seven_zip;
+        None
+    }
+}
 
 struct RunResult {
     status: i32,
@@ -303,6 +450,7 @@ struct RunResult {
     stderr: String,
 }
 
+// ── command helpers ────────────────────────────────────────────────────────
 fn run(mut cmd: Command) -> RunResult {
     let out = cmd.output().expect("spawn command");
     RunResult {
