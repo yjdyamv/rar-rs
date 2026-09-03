@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::codec::{DecoderState, rar50 as compression};
+use crate::codec::{DecoderState, lzss_huff as compression};
 use crate::crypto::parse_archive_encrypt_header;
 use crate::io_util::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
 use crate::rar50::headers::*;
@@ -635,15 +635,14 @@ impl RarArchive {
         let variant = crate::version::ArchiveVersion::from_v70(hdr.dict_size_bytes.is_some());
         let packed = compression::encode_chunked(
             &data,
-            hdr.comp_method,
-            hdr.comp_dict_size,
-            crate::codec::DEFAULT_CHUNK_SIZE,
-            Some(enc),
-            true,
-            None,
-            variant,
-        )
-        .map_err(RarError::Unsupported)?;
+            compression::EncodeOptions {
+                chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                state: Some(enc),
+                is_final: true,
+                variant,
+                ..compression::EncodeOptions::new(hdr.comp_method, hdr.comp_dict_size)
+            },
+        )?;
 
         let (method, dsl, dict_bytes, payload) = if packed.len() >= data.len() {
             enc.reset();
@@ -1332,15 +1331,14 @@ impl RarArchive {
         let variant = crate::version::ArchiveVersion::from_v70(hdr.dict_size_bytes.is_some());
         let packed = compression::encode_chunked(
             &data,
-            hdr.comp_method,
-            hdr.comp_dict_size,
-            crate::codec::DEFAULT_CHUNK_SIZE,
-            Some(enc),
-            true,
-            None,
-            variant,
-        )
-        .map_err(RarError::Unsupported)?;
+            compression::EncodeOptions {
+                chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                state: Some(enc),
+                is_final: true,
+                variant,
+                ..compression::EncodeOptions::new(hdr.comp_method, hdr.comp_dict_size)
+            },
+        )?;
 
         let (method, dsl, dict_bytes, payload) = if packed.len() >= data.len() {
             // Compression is a net loss: STORE resets the chain, matching

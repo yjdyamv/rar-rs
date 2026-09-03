@@ -819,13 +819,11 @@ fn dense_x86_multi_chunk_roundtrips_byte_identical() {
     for (dict_log, chunk) in [(3u8, 64 * 1024usize), (4, 128 * 1024), (7, 4 * 1024 * 1024)] {
         let packed = rar5::encode_chunked(
             &data,
-            3,
-            dict_log,
-            chunk,
-            None,
-            true,
-            None,
-            rar5::ArchiveVersion::Rar50,
+            rar5::EncodeOptions {
+                chunk_size: chunk,
+                variant: rar5::ArchiveVersion::Rar50,
+                ..rar5::EncodeOptions::new(3, dict_log)
+            },
         )
         .expect("encode");
         let back = rar5::decode_standalone(

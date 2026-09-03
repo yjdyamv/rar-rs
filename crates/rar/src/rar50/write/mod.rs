@@ -15,7 +15,7 @@ use crate::archive::{ArchiveEntry, BatchEntry, Mode, RarArchive, STREAM_COMPRESS
 use crate::archive::{
     BatchPrepareCtx, PARALLEL_COMPRESS_MAX_MEMBER, PARALLEL_COMPRESS_WAVE_BUDGET, PreparedEntry,
 };
-use crate::codec::rar50 as compression;
+use crate::codec::lzss_huff;
 use crate::crypto;
 use crate::error::{RarError, RarResult};
 use crate::rar50::write::layout::{
@@ -365,24 +365,21 @@ impl RarArchive {
         // can steal a member from the better transform or from plain LZSS.
         // The caller's `< file_size` guard only accepts a filter when it also
         // beats STORE.
-        let filtered = match compression::encode_with_auto_delta_filter(
+        let filtered = match lzss_huff::encode_with_auto_delta_filter(
             &whole,
             method,
             dsl,
             crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
             self.effective_threads(),
-        )
-        .map_err(RarError::Unsupported)?
-        {
+        )? {
             Some(f) => Some(f),
-            None => compression::encode_with_auto_x86_filter(
+            None => lzss_huff::encode_with_auto_x86_filter(
                 &whole,
                 method,
                 dsl,
                 crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                 self.effective_threads(),
-            )
-            .map_err(RarError::Unsupported)?,
+            )?,
         };
         if let Some(filtered) = filtered
             && (filtered.len() as u64) < file_size
@@ -467,7 +464,7 @@ impl RarArchive {
                 .encoder_state
                 .as_mut()
                 .expect("encoder state seeded");
-            packed = crate::codec::rar50::encode_chunked_mt(
+            packed = crate::codec::lzss_huff::encode_chunked_mt(
                 &whole,
                 method,
                 dsl,
@@ -484,17 +481,16 @@ impl RarArchive {
                 self.check_cancel()?;
                 bytes_read += chunk.len() as u64;
                 let state = self.write_ctx_mut().encoder_state.as_mut();
-                let compressed = compression::encode_chunked(
+                let compressed = lzss_huff::encode_chunked(
                     chunk,
-                    method,
-                    dsl,
-                    crate::codec::DEFAULT_CHUNK_SIZE,
-                    state,
-                    bytes_read >= whole.len() as u64,
-                    None,
-                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                )
-                .map_err(RarError::Unsupported)?;
+                    lzss_huff::EncodeOptions {
+                        chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                        state,
+                        is_final: bytes_read >= whole.len() as u64,
+                        variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                        ..lzss_huff::EncodeOptions::new(method, dsl)
+                    },
+                )?;
                 packed.extend(compressed);
                 self.report_progress(bytes_read, file_size);
                 if packed.len() as u64 >= file_size {
@@ -801,17 +797,17 @@ impl RarArchive {
                 }
             };
             let progress: Option<&mut dyn FnMut(u64, u64)> = Some(&mut cb);
-            let packed = compression::encode_chunked(
+            let packed = lzss_huff::encode_chunked(
                 data,
-                method,
-                dsl,
-                crate::codec::DEFAULT_CHUNK_SIZE,
-                self.write_ctx_mut().encoder_state.as_mut(),
-                true,
-                progress,
-                crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-            )
-            .map_err(RarError::Unsupported)?;
+                lzss_huff::EncodeOptions {
+                    chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                    state: self.write_ctx_mut().encoder_state.as_mut(),
+                    is_final: true,
+                    variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                    progress,
+                    ..lzss_huff::EncodeOptions::new(method, dsl)
+                },
+            )?;
             if packed.len() >= data.len() {
                 self.reset_solid_chain();
                 let (header_crc, extra_data, stored_hash, encr_params) =
@@ -1162,25 +1158,21 @@ impl RarArchive {
             // A filtered member is written standalone (non-solid); otherwise
             // the member is compressed in bounded chunks with one shared
             // encoder state across chunks.
-            match compression::encode_with_auto_delta_filter(
+            match lzss_huff::encode_with_auto_delta_filter(
                 data,
                 method,
                 dsl,
                 crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                 ctx.threads,
-            )
-            .map_err(RarError::Unsupported)?
-            {
+            )? {
                 Some(filtered) if filtered.len() < data.len() => filtered,
-                _ => match compression::encode_with_auto_x86_filter(
+                _ => match lzss_huff::encode_with_auto_x86_filter(
                     data,
                     method,
                     dsl,
                     crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                     ctx.threads,
-                )
-                .map_err(RarError::Unsupported)?
-                {
+                )? {
                     Some(filtered) if filtered.len() < data.len() => filtered,
                     _ => {
                         // Mid-size members run the same windowed MT encode as
@@ -1200,7 +1192,7 @@ impl RarArchive {
                                         .report(member, done, total);
                                 }
                             };
-                            crate::codec::rar50::encode_chunked_mt_with_progress(
+                            crate::codec::lzss_huff::encode_chunked_mt_with_progress(
                                 data,
                                 method,
                                 dsl,
@@ -1246,17 +1238,19 @@ impl RarArchive {
                                 // whole 4 MiB slice (an exact-multiple member must
                                 // still mark its closing block).
                                 let is_final = processed_cell.get() + chunk.len() as u64 >= total;
-                                let compressed = compression::encode_chunked(
+                                let compressed = lzss_huff::encode_chunked(
                                     chunk,
-                                    method,
-                                    dsl,
-                                    crate::codec::DEFAULT_CHUNK_SIZE,
-                                    Some(&mut state),
-                                    is_final,
-                                    Some(&mut cb),
-                                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                                )
-                                .map_err(RarError::Unsupported)?;
+                                    lzss_huff::EncodeOptions {
+                                        chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                                        state: Some(&mut state),
+                                        is_final,
+                                        variant: crate::version::ArchiveVersion::from_v70(
+                                            dict_bytes.is_some(),
+                                        ),
+                                        progress: Some(&mut cb),
+                                        ..lzss_huff::EncodeOptions::new(method, dsl)
+                                    },
+                                )?;
                                 packed.extend(compressed);
                                 processed_cell.set(processed_cell.get() + chunk.len() as u64);
                                 if packed.len() >= data.len() {
@@ -1282,7 +1276,7 @@ impl RarArchive {
                             .report(member, done, total);
                     }
                 };
-                crate::codec::rar50::encode_chunked_mt_with_progress(
+                crate::codec::lzss_huff::encode_chunked_mt_with_progress(
                     data,
                     method,
                     dsl,
@@ -1295,17 +1289,16 @@ impl RarArchive {
                     Some(&mut cb),
                 )
             } else {
-                compression::encode_chunked(
+                lzss_huff::encode_chunked(
                     data,
-                    method,
-                    dsl,
-                    crate::codec::DEFAULT_CHUNK_SIZE,
-                    Some(&mut state),
-                    true,
-                    None,
-                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                )
-                .map_err(RarError::Unsupported)?
+                    lzss_huff::EncodeOptions {
+                        chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                        state: Some(&mut state),
+                        is_final: true,
+                        variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                        ..lzss_huff::EncodeOptions::new(method, dsl)
+                    },
+                )?
             }
         };
 
@@ -2256,7 +2249,7 @@ impl RarArchive {
                 const MT_MIN: usize = 3 * crate::codec::DEFAULT_CHUNK_SIZE;
                 #[cfg(feature = "parallel")]
                 if !chain_solid && work.len() >= MT_MIN && threads > 1 {
-                    let packed = crate::codec::rar50::encode_chunked_mt(
+                    let packed = crate::codec::lzss_huff::encode_chunked_mt(
                         work,
                         method,
                         dsl,
@@ -2274,17 +2267,16 @@ impl RarArchive {
                 let mut offset = 0usize;
                 while offset < work.len() {
                     let end = (offset + crate::codec::DEFAULT_CHUNK_SIZE).min(work.len());
-                    let compressed = compression::encode_chunked(
+                    let compressed = lzss_huff::encode_chunked(
                         &work[offset..end],
-                        method,
-                        dsl,
-                        crate::codec::DEFAULT_CHUNK_SIZE,
-                        state.as_mut(),
-                        is_final && end >= work.len(),
-                        None,
-                        crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                    )
-                    .map_err(RarError::Unsupported)?;
+                        lzss_huff::EncodeOptions {
+                            chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                            state: state.as_mut(),
+                            is_final: is_final && end >= work.len(),
+                            variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                            ..lzss_huff::EncodeOptions::new(method, dsl)
+                        },
+                    )?;
                     spill.write_all(&compressed)?;
                     *packed_size += compressed.len() as u64;
                     offset = end;

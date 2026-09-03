@@ -64,7 +64,7 @@ fn main() {
 
     // Sequential (optimal parse)
     let t0 = Instant::now();
-    let packed_seq = rar5::encode(&data, level, DICT).unwrap();
+    let packed_seq = rar5::encode(&data, rar5::EncodeOptions::new(level, DICT)).unwrap();
     let seq_ms = t0.elapsed().as_millis() as f64;
     println!(
         "seq   l{level} {} MiB: {:>7.0} ms  {:>5.1} MiB/s  ratio {:>6.2}%",

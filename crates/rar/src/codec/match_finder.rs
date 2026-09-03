@@ -1,5 +1,5 @@
 /// RAR5 LZ match finder — hash-chain match finder for LZSS compression.
-use super::rar50::DIST_CACHE_SIZE;
+use super::lzss_huff::DIST_CACHE_SIZE;
 
 /// Sampling step of the long-range hash table: one 4-byte sample per
 /// `LONG_RANGE_STEP` bytes of history. Finer steps catch more matches at

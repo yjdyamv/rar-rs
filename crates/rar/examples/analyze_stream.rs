@@ -39,7 +39,12 @@ fn analyze(path: &str) {
         let mut buf = vec![0u8; h.packed_size as usize];
         f.read_exact(&mut buf).unwrap();
         let variant = rar5::ArchiveVersion::from_v70(h.comp_version == 1); // RAR7 v70
-        match rar5::codec::rar50::analyze_stream(&buf, h.unpacked_size, h.comp_dict_size, variant) {
+        match rar5::codec::lzss_huff::analyze_stream(
+            &buf,
+            h.unpacked_size,
+            h.comp_dict_size,
+            variant,
+        ) {
             Ok(a) => print_analysis(&a, &buf),
             Err(err) => println!("    analyze: {err}"),
         }
@@ -47,7 +52,7 @@ fn analyze(path: &str) {
     let _ = rar; // keep the archive handle alive (entry list borrows it)
 }
 
-fn print_analysis(a: &rar5::codec::rar50::StreamAnalysis, packed: &[u8]) {
+fn print_analysis(a: &rar5::codec::lzss_huff::StreamAnalysis, packed: &[u8]) {
     let n = a.blocks.len();
     println!(
         "    unpacked={} packed={} blocks={}",

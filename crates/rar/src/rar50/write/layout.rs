@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::codec::rar50 as compression;
+use crate::codec::lzss_huff;
 use crate::error::{RarError, RarResult};
 use crate::io_util::read_up_to;
 
@@ -220,7 +220,8 @@ fn incompressible_sample(sample: &[u8], method: u8) -> bool {
     if sample.is_empty() {
         return false;
     }
-    let packed = compression::encode(sample, method, 0).unwrap_or_default();
+    let packed =
+        lzss_huff::encode(sample, lzss_huff::EncodeOptions::new(method, 0)).unwrap_or_default();
     packed.len() >= sample.len() * 9 / 10
 }
 

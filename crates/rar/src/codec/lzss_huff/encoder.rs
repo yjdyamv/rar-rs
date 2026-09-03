@@ -12,6 +12,7 @@ use crate::codec::bitstream::BitWriter;
 use crate::codec::filters::apply_filter_encode;
 use crate::codec::huffman::{EncodeTable, build_code_lengths_from_freqs, encode_symbol};
 use crate::codec::match_finder::{self, MatchFinder};
+use crate::error::RarResult;
 use crate::version::ArchiveVersion;
 
 // ── Compression level parameters ───────────────────────────────────────────
@@ -198,7 +199,7 @@ pub fn encode_chunked_raw(
     is_final: bool,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
     variant: ArchiveVersion,
-) -> Result<Vec<u8>, String> {
+) -> RarResult<Vec<u8>> {
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
     }
@@ -644,7 +645,7 @@ pub fn encode_with_filters(
     dict_size_log: u8,
     filters: &[FilterSpec],
     variant: ArchiveVersion,
-) -> Result<Vec<u8>, String> {
+) -> RarResult<Vec<u8>> {
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
     }
@@ -799,7 +800,7 @@ pub fn encode_with_filters_mt(
     filters: &[FilterSpec],
     variant: ArchiveVersion,
     _threads: usize,
-) -> Result<Vec<u8>, String> {
+) -> RarResult<Vec<u8>> {
     // Without the pool, fall back to the sequential encode; the caller's
     // member-level logic (threads == 1 or no pool) makes this equivalent.
     encode_with_filters(data, method, dict_size_log, filters, variant)
@@ -813,7 +814,7 @@ pub fn encode_with_filters_mt(
     filters: &[FilterSpec],
     variant: ArchiveVersion,
     threads: usize,
-) -> Result<Vec<u8>, String> {
+) -> RarResult<Vec<u8>> {
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
     }
@@ -892,7 +893,7 @@ pub fn encode_with_auto_x86_filter(
     dict_size_log: u8,
     variant: ArchiveVersion,
     threads: usize,
-) -> Result<Option<Vec<u8>>, String> {
+) -> RarResult<Option<Vec<u8>>> {
     if data.len() <= 5 {
         return Ok(None);
     }
@@ -1008,7 +1009,7 @@ pub fn pick_delta_channel(
     method: u8,
     dict_size_log: u8,
     variant: ArchiveVersion,
-) -> Result<Option<u8>, String> {
+) -> RarResult<Option<u8>> {
     let sample_len = data.len().min(1 << 16);
     let sample = &data[..sample_len];
     let plain = encode_with_filters(sample, method, dict_size_log, &[], variant)?;
@@ -1040,7 +1041,7 @@ pub fn encode_with_auto_delta_filter(
     dict_size_log: u8,
     variant: ArchiveVersion,
     threads: usize,
-) -> Result<Option<Vec<u8>>, String> {
+) -> RarResult<Option<Vec<u8>>> {
     // Cheap pre-gate: skip obviously-uncorrelated (random) data so we never pay
     // for a sample encode on it.
     if crate::codec::filters::auto_delta_filter_channels(data).is_none() {

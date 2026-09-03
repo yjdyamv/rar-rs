@@ -44,10 +44,10 @@ pub use archive::{ArchiveEntry, BatchEntry, RarArchive, discover_volumes};
 // Multi-threaded encoding internals used by the mtbench example and the
 // napi binding's streaming path; hidden from the public docs but stable
 // enough to build against (feature `parallel` only).
+pub use codec::lzss_huff::{EncodeOptions, decode, decode_standalone, encode, encode_chunked};
 #[doc(hidden)]
 #[cfg(feature = "parallel")]
-pub use codec::rar50::{EncoderState, encode_chunked_mt};
-pub use codec::rar50::{decode, decode_standalone, encode, encode_chunked, encode_with_progress};
+pub use codec::lzss_huff::{EncoderState, encode_chunked_mt};
 pub use crypto::{EncryptionParams, decrypt_data, derive_keys, encrypt_data};
 pub use detect::sfx_offset_of;
 pub use error::{RarError, RarResult};

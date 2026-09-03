@@ -3,7 +3,7 @@
 /// Two-level decode: quick table for codes up to QUICK_BITS, slower scan
 /// for longer codes. Based on the structure used in libarchive's RAR5 reader.
 use super::bitstream::{BitReader, BitWriter};
-use super::rar50::{MAX_CODE_LENGTH, QUICK_BITS, QUICK_SIZE};
+use super::lzss_huff::{MAX_CODE_LENGTH, QUICK_BITS, QUICK_SIZE};
 
 /// Huffman tree node: (frequency, symbol/node id, children).
 type HuffNode = (u32, usize, Option<(usize, usize)>);
@@ -346,7 +346,7 @@ pub fn build_code_lengths_from_freqs(freqs: &[u32], max_length: usize) -> Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::rar50::HUFF_NC;
+    use crate::codec::lzss_huff::HUFF_NC;
 
     // Regression test for the length-limited Huffman correction.
     //

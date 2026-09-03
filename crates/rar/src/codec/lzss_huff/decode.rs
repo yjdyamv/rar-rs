@@ -7,6 +7,7 @@
 
 pub use super::decoder::*;
 
+use crate::error::{RarError, RarResult};
 use crate::rar50::{COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_STORE};
 
 /// Decode `data` using the specified RAR5 compression method.
@@ -16,7 +17,7 @@ pub fn decode(
     unpacked_size: u64,
     dict_size_log: u8,
     state: Option<&mut DecoderState>,
-) -> Result<Vec<u8>, String> {
+) -> RarResult<Vec<u8>> {
     if method == COMP_METHOD_STORE {
         return Ok(data.to_vec());
     }
@@ -29,14 +30,17 @@ pub fn decode(
                 state,
                 ..Default::default()
             },
-        )?;
+        )
+        .map_err(RarError::Format)?;
         if result.len() != unpacked_size as usize {
-            return Err(format!(
+            return Err(RarError::Format(format!(
                 "decoded size mismatch: expected {unpacked_size}, got {}",
                 result.len()
-            ));
+            )));
         }
         return Ok(result);
     }
-    Err(format!("unknown compression method: {method}"))
+    Err(RarError::Unsupported(format!(
+        "unknown compression method: {method}"
+    )))
 }

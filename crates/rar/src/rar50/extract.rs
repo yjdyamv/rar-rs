@@ -663,7 +663,7 @@ impl RarArchive {
                                 state: None,
                             },
                         )
-                        .map_err(RarError::Unsupported)?
+                        .map_err(RarError::Format)?
                     };
 
                     let crc = crc32fast::hash(&data);

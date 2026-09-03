@@ -174,7 +174,7 @@ pub(crate) fn decode_member(
             },
             out,
         )
-        .map_err(RarError::Unsupported)?
+        .map_err(RarError::Format)?
     };
     Ok(written)
 }
