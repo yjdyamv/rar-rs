@@ -1372,7 +1372,7 @@ fn cmd_update_freshen(
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as u32)
                 .unwrap_or(0);
-            if src_mtime > entry.header.mtime {
+            if src_mtime > entry.mtime() {
                 to_delete.push(name);
                 to_add.push(file.clone());
             }

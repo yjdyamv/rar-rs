@@ -1374,7 +1374,7 @@ fn test_reports_member_integrity() {
     // Find the packed payload of a.bin (first file block, after its header).
     let ar = rar5::RarArchive::open(&path).unwrap();
     let a_entry = ar.get_entry("a.bin").unwrap();
-    let payload_off = a_entry.chunks[0].data_offset as usize;
+    let payload_off = a_entry.chunks()[0].data_offset as usize;
     damaged[payload_off + 16] ^= 0xFF;
     drop(ar);
     std::fs::write(&path, &damaged).unwrap();

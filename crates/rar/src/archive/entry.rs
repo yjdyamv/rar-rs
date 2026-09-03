@@ -6,10 +6,15 @@ use crate::rar50::method_name;
 use std::path::Path;
 
 /// A single entry in the archive (public API).
+///
+/// The underlying header and chunk-list fields are `pub(crate)`: external
+/// code reads metadata through the curated accessors rather than reaching
+/// into the wire representation, so the archive layer is free to change how
+/// a member's data is located.
 #[derive(Clone, Debug)]
 pub struct ArchiveEntry {
-    pub header: FileHeader,
-    pub chunks: Vec<DataChunk>,
+    pub(crate) header: FileHeader,
+    pub(crate) chunks: Vec<DataChunk>,
 }
 
 /// One entry to add through [`RarArchive::add_batch`].
@@ -152,5 +157,46 @@ impl ArchiveEntry {
     /// File attributes (OS-specific).
     pub fn attributes(&self) -> u64 {
         self.header.attributes
+    }
+
+    /// Codec version this member was compressed with: `0` = RAR5 (v50),
+    /// `1` = RAR7 (v70).
+    pub fn comp_version(&self) -> u8 {
+        self.header.comp_version
+    }
+
+    /// Dictionary size as `log2(size/128KiB)`. Only meaningful for RAR5
+    /// members; RAR7 members carry the byte count via
+    /// [`dict_size_bytes`](Self::dict_size_bytes).
+    pub fn comp_dict_size(&self) -> u8 {
+        self.header.comp_dict_size
+    }
+
+    /// Actual dictionary size in bytes for RAR7 members, `None` for RAR5.
+    pub fn dict_size_bytes(&self) -> Option<u64> {
+        self.header.dict_size_bytes
+    }
+
+    /// Owner record (OWNER extra) from the file header, when present.
+    pub fn owner(&self) -> Option<&str> {
+        self.header.owner.as_deref()
+    }
+
+    /// Whether this member is part of a solid chain (shares the LZ window
+    /// with its neighbours).
+    pub fn comp_solid(&self) -> bool {
+        self.header.comp_solid
+    }
+
+    /// Byte offset of this member's packed data within its volume (the
+    /// [`data_offset`](Self::data_offset) of the first data chunk).
+    pub fn data_offset(&self) -> u64 {
+        self.header.data_offset
+    }
+
+    /// Read-only view of the member's data chunks (one per volume for
+    /// multi-volume members).
+    pub fn chunks(&self) -> &[DataChunk] {
+        &self.chunks
     }
 }

@@ -26,25 +26,27 @@ fn analyze(path: &str) {
     let mut f = std::fs::File::open(path).unwrap();
     println!("== {path}: {} member(s)", entries.len());
     for e in &entries {
-        let h = &e.header;
+        let name = e.name();
+        let packed = e.compressed_size();
+        let unpacked = e.size();
         println!(
             "  [{}] method={} dict=2^{} solid={} packed={} unpacked={}",
-            h.name, h.comp_method, h.comp_dict_size, h.comp_solid, h.packed_size, h.unpacked_size
+            name,
+            e.method(),
+            e.comp_dict_size(),
+            e.comp_solid(),
+            packed,
+            unpacked
         );
-        if h.packed_size == 0 || h.unpacked_size == 0 || h.comp_solid {
+        if packed == 0 || unpacked == 0 || e.comp_solid() {
             println!("    (skipped: no data / solid chain)");
             continue;
         }
-        f.seek(SeekFrom::Start(h.data_offset)).unwrap();
-        let mut buf = vec![0u8; h.packed_size as usize];
+        f.seek(SeekFrom::Start(e.data_offset())).unwrap();
+        let mut buf = vec![0u8; packed as usize];
         f.read_exact(&mut buf).unwrap();
-        let variant = rar5::ArchiveVersion::from_v70(h.comp_version == 1); // RAR7 v70
-        match rar5::codec::lzss_huff::analyze_stream(
-            &buf,
-            h.unpacked_size,
-            h.comp_dict_size,
-            variant,
-        ) {
+        let variant = rar5::ArchiveVersion::from_v70(e.comp_version() == 1); // RAR7 v70
+        match rar5::codec::lzss_huff::analyze_stream(&buf, unpacked, e.comp_dict_size(), variant) {
             Ok(a) => print_analysis(&a, &buf),
             Err(err) => println!("    analyze: {err}"),
         }

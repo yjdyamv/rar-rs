@@ -865,7 +865,7 @@ fn write_rep_text(path: &Path, size: usize) {
 
 fn entry_dict_log(archive: &Path, name: &str) -> u8 {
     let rar = rar5::RarArchive::open(archive).unwrap();
-    rar.get_entry(name).unwrap().header.comp_dict_size
+    rar.get_entry(name).unwrap().comp_dict_size()
 }
 
 #[test]
@@ -930,10 +930,10 @@ fn cli_dict_size_switch_matches_winrar() {
         assert!(status.success(), "-md{md} must be accepted");
         let mut rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("rep32t.bin").unwrap();
-        assert_eq!(e.header.comp_version, 0, "-md{md} small file stays v50");
-        assert_eq!(e.header.dict_size_bytes, None, "-md{md}");
+        assert_eq!(e.comp_version(), 0, "-md{md} small file stays v50");
+        assert_eq!(e.dict_size_bytes(), None, "-md{md}");
         // 2x floor_pow2(32 MiB) = 64 MiB -> log 9.
-        assert_eq!(e.header.comp_dict_size, 9, "-md{md} cap");
+        assert_eq!(e.comp_dict_size(), 9, "-md{md} cap");
         let data = rar.read("rep32t.bin").unwrap();
         assert_eq!(data, std::fs::read(&file).unwrap(), "-md{md} roundtrip");
     }
@@ -1042,9 +1042,9 @@ fn cli_store_types_ms_stores_matching_files() {
     assert!(status.success());
     let mut rar = rar5::RarArchive::open(&archive).unwrap();
     let b = rar.get_entry("b.bin").unwrap();
-    assert_eq!(b.header.comp_method, 0, "-msbin must store b.bin");
+    assert_eq!(b.method(), 0, "-msbin must store b.bin");
     let a = rar.get_entry("a.txt").unwrap();
-    assert_eq!(a.header.comp_method, 3, "a.txt must still compress");
+    assert_eq!(a.method(), 3, "a.txt must still compress");
     assert_eq!(rar.read("b.bin").unwrap(), std::fs::read(&bin).unwrap());
     assert_eq!(rar.read("a.txt").unwrap(), std::fs::read(&txt).unwrap());
 }
@@ -1312,8 +1312,8 @@ fn cli_ts_saves_and_restores_file_times() {
     {
         let rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("t.txt").unwrap();
-        assert!(e.header.ctime.is_none(), "default must not store ctime");
-        assert!(e.header.atime.is_none(), "default must not store atime");
+        assert!(e.ctime().is_none(), "default must not store ctime");
+        assert!(e.atime().is_none(), "default must not store atime");
     }
 
     // -ts: all three times stored with ns precision.
@@ -1329,9 +1329,9 @@ fn cli_ts_saves_and_restores_file_times() {
     {
         let rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("t.txt").unwrap();
-        assert!(e.header.ctime.is_some(), "-ts must store ctime");
+        assert!(e.ctime().is_some(), "-ts must store ctime");
         if let Some(src_ctime) = src_ctime {
-            let c = e.header.ctime.unwrap();
+            let c = e.ctime().unwrap();
             let restored = std::time::UNIX_EPOCH
                 + std::time::Duration::from_secs(c.0)
                 + std::time::Duration::from_nanos(c.1 as u64);
@@ -1389,11 +1389,7 @@ fn cli_ts_saves_and_restores_file_times() {
     {
         let rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("t.txt").unwrap();
-        assert_eq!(
-            e.header.mtime_ns,
-            Some(0),
-            "-ts1 must store second precision"
-        );
+        assert_eq!(e.mtime_ns(), Some(0), "-ts1 must store second precision");
     }
 
     // -ts-: no times stored at all.
@@ -1409,9 +1405,9 @@ fn cli_ts_saves_and_restores_file_times() {
     {
         let rar = rar5::RarArchive::open(&archive).unwrap();
         let e = rar.get_entry("t.txt").unwrap();
-        assert!(e.header.ctime.is_none() && e.header.atime.is_none());
+        assert!(e.ctime().is_none() && e.atime().is_none());
         assert!(
-            e.header.mtime_ns.is_none(),
+            e.mtime_ns().is_none(),
             "-ts- must not write a time extra record"
         );
     }
@@ -1782,9 +1778,9 @@ fn cli_archive_format_ma_switch() {
     assert!(status.success(), "-ma7 must be accepted");
     let mut rar = rar5::RarArchive::open(&archive).unwrap();
     let e = rar.get_entry("f.bin").unwrap();
-    assert_eq!(e.header.comp_version, 1, "-ma7 forces v70");
+    assert_eq!(e.comp_version(), 1, "-ma7 forces v70");
     assert_eq!(
-        e.header.dict_size_bytes,
+        e.dict_size_bytes(),
         Some(32 * 1024 * 1024),
         "default 32 MiB declared"
     );
@@ -1802,9 +1798,9 @@ fn cli_archive_format_ma_switch() {
     assert!(status.success());
     let rar = rar5::RarArchive::open(&archive).unwrap();
     let e = rar.get_entry("f.bin").unwrap();
-    assert_eq!(e.header.comp_version, 1);
+    assert_eq!(e.comp_version(), 1);
     assert_eq!(
-        e.header.dict_size_bytes,
+        e.dict_size_bytes(),
         Some(16 * 1024 * 1024),
         "-md16m declared"
     );
@@ -1835,7 +1831,7 @@ fn cli_archive_format_ma_switch() {
     );
     let rar = rar5::RarArchive::open(&ma5).unwrap();
     let e = rar.get_entry("f.bin").unwrap();
-    assert_eq!(e.header.comp_version, 0, "-ma5 stays v50");
+    assert_eq!(e.comp_version(), 0, "-ma5 stays v50");
 
     // -ma4 (and other versions) are rejected with WinRAR's wording.
     for bad in ["4", "6", "8"] {

@@ -74,9 +74,9 @@ fn v70_forced_headers_and_roundtrip() {
         let mut rar = RarArchive::open(&arc).unwrap();
         for (name, expected) in [("a.bin", &a), ("b.bin", &b)] {
             let entry = rar.get_entry(name).unwrap();
-            assert_eq!(entry.header.comp_version, 1, "v70 header for {name}");
+            assert_eq!(entry.comp_version(), 1, "v70 header for {name}");
             assert_eq!(
-                entry.header.dict_size_bytes,
+                entry.dict_size_bytes(),
                 Some(dict),
                 "declared dictionary round trip for {name}"
             );
@@ -102,8 +102,8 @@ fn v70_forced_headers_and_roundtrip() {
     }
     let mut rar = RarArchive::open(&arc).unwrap();
     let entry = rar.get_entry("a.bin").unwrap();
-    assert_eq!(entry.header.comp_version, 0, "still v50 without the seam");
-    assert_eq!(entry.header.dict_size_bytes, None, "no v70 dict declared");
+    assert_eq!(entry.comp_version(), 0, "still v50 without the seam");
+    assert_eq!(entry.dict_size_bytes(), None, "no v70 dict declared");
     assert_eq!(rar.read("a.bin").unwrap(), b"plain v50");
 }
 
@@ -137,9 +137,9 @@ fn v70_forced_solid_roundtrip() {
     assert_eq!(rar.namelist(), ["a.bin", "b.bin", "c.bin"]);
     for (name, expected) in [("a.bin", &a), ("b.bin", &b), ("c.bin", &c)] {
         let entry = rar.get_entry(name).unwrap();
-        assert_eq!(entry.header.comp_version, 1, "v70 solid member {name}");
+        assert_eq!(entry.comp_version(), 1, "v70 solid member {name}");
         assert_eq!(
-            entry.header.dict_size_bytes,
+            entry.dict_size_bytes(),
             Some(8 * 1024 * 1024),
             "solid member {name} dictionary"
         );
@@ -176,7 +176,7 @@ fn v70_forced_multivolume_roundtrip() {
     assert!(volumes.len() >= 2, "precondition: multi-volume set");
     let mut rar = RarArchive::open(&volumes[0]).unwrap();
     let entry = rar.get_entry("a.bin").unwrap();
-    assert_eq!(entry.header.comp_version, 1, "v70 multi-volume member");
+    assert_eq!(entry.comp_version(), 1, "v70 multi-volume member");
     assert_eq!(&rar.read("a.bin").unwrap(), &a);
 }
 
@@ -204,6 +204,6 @@ fn v70_forced_encrypted_roundtrip() {
     }
     let mut rar = RarArchive::open_with_password(&arc, "s3cret").unwrap();
     let entry = rar.get_entry("a.bin").unwrap();
-    assert_eq!(entry.header.comp_version, 1, "v70 encrypted member");
+    assert_eq!(entry.comp_version(), 1, "v70 encrypted member");
     assert_eq!(&rar.read("a.bin").unwrap(), &a);
 }

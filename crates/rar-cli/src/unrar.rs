@@ -287,7 +287,7 @@ fn cmd_list_technical(archive: &str, password: Option<&str>) -> Result<(), Strin
             .crc32()
             .map(|c| format!("{c:08X}"))
             .unwrap_or_else(|| "-".to_string());
-        let modified = format_unix_time(entry.header.mtime);
+        let modified = format_unix_time(entry.mtime());
         println!(
             "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {:<19}  {}",
             entry.size(),

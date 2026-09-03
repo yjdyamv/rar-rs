@@ -796,8 +796,8 @@ fn official_time_and_owner_cross_validation() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    assert_eq!(entry.header.mtime_ns, Some(disk_ns));
-    assert!(entry.header.owner.is_some(), "owner record must be parsed");
+    assert_eq!(entry.mtime_ns(), Some(disk_ns));
+    assert!(entry.owner().is_some(), "owner record must be parsed");
 
     // Our ns-mtime archive must be readable by the official unrar.
     let ours = dir.path().join("ours.rar");

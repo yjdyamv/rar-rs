@@ -860,7 +860,7 @@ fn dictionary_size_md_interops_with_winrar() {
     }
     let ar = RarArchive::open(&ours).unwrap();
     let entry = ar.get_entry("rep32t.bin").unwrap();
-    assert_eq!(entry.header.comp_dict_size, 9);
+    assert_eq!(entry.comp_dict_size(), 9);
     if let Some(_unrar) = unrar_bin() {
         let (ok, out) = unrar_test(&ours, None);
         assert!(ok, "WinRAR rejected our -md64m archive:\n{out}");
@@ -884,7 +884,8 @@ fn dictionary_size_md_interops_with_winrar() {
         let name = ar.namelist()[0].to_string();
         let entry = ar.get_entry(&name).unwrap();
         assert_eq!(
-            entry.header.comp_dict_size, 9,
+            entry.comp_dict_size(),
+            9,
             "WinRAR -md64m should record a 64 MiB dictionary"
         );
         let mut ar = RarArchive::open(&theirs).unwrap();
@@ -934,14 +935,8 @@ fn ts_file_times_interop_with_winrar() {
     }
     let ar = RarArchive::open(&ours).unwrap();
     let entry = ar.get_entry("ts.bin").unwrap();
-    assert!(
-        entry.header.ctime.is_some(),
-        "our -ts archive must store ctime"
-    );
-    assert!(
-        entry.header.atime.is_some(),
-        "our -ts archive must store atime"
-    );
+    assert!(entry.ctime().is_some(), "our -ts archive must store ctime");
+    assert!(entry.atime().is_some(), "our -ts archive must store atime");
     if let Some(unrar) = unrar_bin() {
         let win = dir.path().join("win_ours_ts");
         std::fs::create_dir_all(&win).unwrap();
@@ -975,7 +970,7 @@ fn ts_file_times_interop_with_winrar() {
         let name = ar.namelist()[0].to_string();
         let entry = ar.get_entry(&name).unwrap();
         assert!(
-            entry.header.ctime.is_some() && entry.header.atime.is_some(),
+            entry.ctime().is_some() && entry.atime().is_some(),
             "WinRAR -ts archive must carry ctime and atime"
         );
         let out_dir = dir.path().join("ours_from_winrar_ts");
@@ -1111,11 +1106,8 @@ fn rar7_v70_archives_decode_with_mdx() {
         let ar = RarArchive::open(&arc).unwrap();
         let name = ar.namelist()[0].to_string();
         let e = ar.get_entry(&name).unwrap();
-        assert_eq!(e.header.comp_version, 1, "expected RAR7 (v70) member");
-        let bytes = e
-            .header
-            .dict_size_bytes
-            .expect("v70 must carry the byte count");
+        assert_eq!(e.comp_version(), 1, "expected RAR7 (v70) member");
+        let bytes = e.dict_size_bytes().expect("v70 must carry the byte count");
         assert!(
             bytes > 4 * 1024 * 1024 * 1024,
             "expected a >4 GiB dictionary, got {bytes}"
@@ -1186,11 +1178,8 @@ fn we_create_v70_archives_decode_everywhere() {
         let ar = RarArchive::open(&arc).unwrap();
         let name = ar.namelist()[0].to_string();
         let e = ar.get_entry(&name).unwrap();
-        assert_eq!(e.header.comp_version, 1, "expected RAR7 (v70) member");
-        let bytes = e
-            .header
-            .dict_size_bytes
-            .expect("v70 must carry the byte count");
+        assert_eq!(e.comp_version(), 1, "expected RAR7 (v70) member");
+        let bytes = e.dict_size_bytes().expect("v70 must carry the byte count");
         assert!(
             bytes > 4 * 1024 * 1024 * 1024,
             "expected a >4 GiB dictionary, got {bytes}"
@@ -1684,8 +1673,8 @@ fn our_small_dict_v70_archives_decode_with_winrar() {
         .unwrap()
         .to_string();
     let e = ar.get_entry(&name).unwrap();
-    assert_eq!(e.header.comp_version, 1, "expected a v70 member");
-    assert_eq!(e.header.dict_size_bytes, Some(6 * 1024 * 1024));
+    assert_eq!(e.comp_version(), 1, "expected a v70 member");
+    assert_eq!(e.dict_size_bytes(), Some(6 * 1024 * 1024));
 
     // WinRAR tests and extracts it byte-identically.
     let (ok, out) = unrar_test(&arc, None);
@@ -1722,7 +1711,7 @@ fn cli_ma7_archives_decode_with_winrar() {
     // The member really is v70 (per-member 2x-file cap floors the dict).
     let ar = RarArchive::open(&arc).unwrap();
     let e = ar.get_entry("ma7.bin").unwrap();
-    assert_eq!(e.header.comp_version, 1, "-ma7 must force v70");
+    assert_eq!(e.comp_version(), 1, "-ma7 must force v70");
     let (ok, out) = unrar_test(&arc, None);
     assert!(ok, "UnRAR rejected our -ma7 archive:\n{out}");
     let dest = dir.path().join("out");
@@ -1905,14 +1894,14 @@ fn rar5_vs_rar7_same_data_decode_everywhere() {
         let mut ar = RarArchive::open(&v50).unwrap();
         let n = ar.namelist()[0].to_string();
         let e = ar.get_entry(&n).unwrap();
-        assert_eq!(e.header.comp_version, 0, "v50 must stay comp_version 0");
+        assert_eq!(e.comp_version(), 0, "v50 must stay comp_version 0");
         ar.read(&n).unwrap()
     };
     let e70 = {
         let mut ar = RarArchive::open(&v70).unwrap();
         let n = ar.namelist()[0].to_string();
         let e = ar.get_entry(&n).unwrap();
-        assert_eq!(e.header.comp_version, 1, "v70 must be comp_version 1");
+        assert_eq!(e.comp_version(), 1, "v70 must be comp_version 1");
         ar.read(&n).unwrap()
     };
     // Both encode the same source; decoded bytes must match the source.

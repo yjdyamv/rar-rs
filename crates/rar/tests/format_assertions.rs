@@ -156,10 +156,7 @@ fn nanosecond_mtime_roundtrip() {
     let out = dir.path().join("out");
     {
         let mut rar = RarArchive::open(&path).unwrap();
-        assert_eq!(
-            rar.get_entry("ns.bin").unwrap().header.mtime_ns,
-            Some(disk_ns)
-        );
+        assert_eq!(rar.get_entry("ns.bin").unwrap().mtime_ns(), Some(disk_ns));
         rar.extract("ns.bin", &out).unwrap();
     }
     let extracted = std::fs::metadata(out.join("ns.bin")).unwrap();
