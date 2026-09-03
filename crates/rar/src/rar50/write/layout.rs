@@ -220,7 +220,7 @@ fn incompressible_sample(sample: &[u8], method: u8) -> bool {
     if sample.is_empty() {
         return false;
     }
-    let packed = compression::compress(sample, method, 0).unwrap_or_default();
+    let packed = compression::encode(sample, method, 0).unwrap_or_default();
     packed.len() >= sample.len() * 9 / 10
 }
 

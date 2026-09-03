@@ -817,7 +817,7 @@ fn dense_x86_multi_chunk_roundtrips_byte_identical() {
     // on nearly every chunk, the state transitions that used to break the
     // tree; the default 32 MiB dict / 4 MiB chunks also exercised.
     for (dict_log, chunk) in [(3u8, 64 * 1024usize), (4, 128 * 1024), (7, 4 * 1024 * 1024)] {
-        let packed = rar5::compress_chunked(
+        let packed = rar5::encode_chunked(
             &data,
             3,
             dict_log,

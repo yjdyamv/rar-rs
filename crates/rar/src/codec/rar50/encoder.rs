@@ -145,8 +145,8 @@ impl EncoderState {
 
 /// Encode raw data into RAR5/RAR7 compressed format. `variant` selects
 /// the RAR7 (v70) 80-entry distance code table (RAR5 uses 64).
-pub fn encode(data: &[u8], method: u8, dict_size_log: u8, variant: ArchiveVersion) -> Vec<u8> {
-    encode_chunked(
+pub fn encode_raw(data: &[u8], method: u8, dict_size_log: u8, variant: ArchiveVersion) -> Vec<u8> {
+    encode_chunked_raw(
         data,
         method,
         dict_size_log,
@@ -161,14 +161,14 @@ pub fn encode(data: &[u8], method: u8, dict_size_log: u8, variant: ArchiveVersio
 
 /// Encode raw data into RAR5/RAR7 compressed format, reporting match-finder
 /// progress as `(bytes_processed, total_bytes)`.
-pub fn encode_with_progress(
+pub fn encode_with_progress_raw(
     data: &[u8],
     method: u8,
     dict_size_log: u8,
     progress: Option<&mut dyn FnMut(u64, u64)>,
     variant: ArchiveVersion,
 ) -> Vec<u8> {
-    encode_chunked(
+    encode_chunked_raw(
         data,
         method,
         dict_size_log,
@@ -189,7 +189,7 @@ pub fn encode_with_progress(
 ///
 /// `variant` selects the RAR7 (v70) distance code table.
 #[allow(clippy::too_many_arguments)]
-pub fn encode_chunked(
+pub fn encode_chunked_raw(
     data: &[u8],
     method: u8,
     dict_size_log: u8,
@@ -298,7 +298,7 @@ pub fn encode_chunked_mt(
 ) -> Vec<u8> {
     // Without the pool this path is unreachable (callers gate on `use_mt`),
     // but it must compile: encode sequentially over the window.
-    encode_chunked(
+    encode_chunked_raw(
         data,
         method,
         dict_size_log,
@@ -649,7 +649,7 @@ pub fn encode_with_filters(
         return Ok(encode_empty_block(variant));
     }
     if filters.is_empty() {
-        return encode_chunked(
+        return encode_chunked_raw(
             data,
             method,
             dict_size_log,
@@ -3214,7 +3214,7 @@ mod encode_tests {
         let chunks: Vec<&[u8]> = data.chunks(DEFAULT_CHUNK_SIZE).collect();
         for (i, chunk) in chunks.iter().enumerate() {
             packed.extend(
-                encode_chunked(
+                encode_chunked_raw(
                     chunk,
                     5,
                     3,
@@ -3256,7 +3256,7 @@ mod encode_tests {
         // Varied data (literal-heavy) at several sizes.
         for size in [1usize, 100, 1000, 100_000, 300_000] {
             let data: Vec<u8> = (0..size).map(|i| (i.wrapping_mul(31) >> 3) as u8).collect();
-            let packed = encode(&data, 3, 0, ArchiveVersion::Rar70);
+            let packed = encode_raw(&data, 3, 0, ArchiveVersion::Rar70);
             let back = decode_standalone(
                 &packed,
                 size as u64,
@@ -3269,7 +3269,7 @@ mod encode_tests {
         }
         // Repeated data (match/cache-heavy).
         let data = vec![0xABu8; 300_000];
-        let packed = encode(&data, 3, 0, ArchiveVersion::Rar70);
+        let packed = encode_raw(&data, 3, 0, ArchiveVersion::Rar70);
         let back = decode_standalone(
             &packed,
             data.len() as u64,
@@ -3306,7 +3306,7 @@ mod encode_tests {
         let mut data = pseudo_random(half, 42);
         let copy = data[..half].to_vec();
         data.extend_from_slice(&copy);
-        let packed = encode_chunked(
+        let packed = encode_chunked_raw(
             &data,
             3,
             8,
@@ -3345,7 +3345,7 @@ mod encode_tests {
         let mut data = pseudo_random(half, 7);
         let copy = data[..half].to_vec();
         data.extend_from_slice(&copy);
-        let packed = encode_chunked(
+        let packed = encode_chunked_raw(
             &data,
             3,
             0,
@@ -3421,7 +3421,7 @@ mod encode_tests {
         for chunk in data.chunks(DEFAULT_CHUNK_SIZE) {
             let is_final = chunk.len() < DEFAULT_CHUNK_SIZE;
             packed.extend(
-                encode_chunked(
+                encode_chunked_raw(
                     chunk,
                     3,
                     8,

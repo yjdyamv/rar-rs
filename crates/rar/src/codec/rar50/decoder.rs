@@ -83,7 +83,11 @@ pub struct DecodeOptions<'a> {
 ///
 /// - `data`: raw compressed bytes (the data area from the file block)
 /// - `unpacked_size`: expected decompressed size in bytes
-pub fn decode(data: &[u8], unpacked_size: u64, opts: DecodeOptions<'_>) -> Result<Vec<u8>, String> {
+pub fn decode_raw(
+    data: &[u8],
+    unpacked_size: u64,
+    opts: DecodeOptions<'_>,
+) -> Result<Vec<u8>, String> {
     let mut reader = BitReader::new(data);
 
     match opts.state {
@@ -1279,7 +1283,7 @@ mod decode_tests {
     #[test]
     fn three_byte_block_size_field_decodes() {
         let data = b"rar5 three-byte block size regression test data ".repeat(64);
-        let packed = crate::codec::encode(&data, 3, 3, ArchiveVersion::Rar50);
+        let packed = crate::codec::encode_raw(&data, 3, 3, ArchiveVersion::Rar50);
         let back =
             decode_standalone(&packed, data.len() as u64, 3, None, ArchiveVersion::Rar50).unwrap();
         assert_eq!(back, data);
@@ -1561,13 +1565,13 @@ mod decode_tests {
         let first = b"solid chain prefix data padding padding padding".repeat(64);
         let member = x86ish(120_000);
 
-        let packed_first = crate::codec::encode(&first, 3, 3, ArchiveVersion::Rar50);
+        let packed_first = crate::codec::encode_raw(&first, 3, 3, ArchiveVersion::Rar50);
         let packed_member = encode_with_auto_x86_filter(&member, 3, 0, ArchiveVersion::Rar50, 1)
             .unwrap()
             .expect("x86 scan must find regions");
 
         let mut state = DecoderState::new(128 * 1024);
-        let decoded_first = decode(
+        let decoded_first = decode_raw(
             &packed_first,
             first.len() as u64,
             DecodeOptions {
@@ -1580,7 +1584,7 @@ mod decode_tests {
         .unwrap();
         assert_eq!(decoded_first, first);
 
-        let decoded_member = decode(
+        let decoded_member = decode_raw(
             &packed_member,
             member.len() as u64,
             DecodeOptions {

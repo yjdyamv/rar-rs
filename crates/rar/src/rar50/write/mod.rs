@@ -484,7 +484,7 @@ impl RarArchive {
                 self.check_cancel()?;
                 bytes_read += chunk.len() as u64;
                 let state = self.write_ctx_mut().encoder_state.as_mut();
-                let compressed = compression::compress_chunked(
+                let compressed = compression::encode_chunked(
                     chunk,
                     method,
                     dsl,
@@ -801,7 +801,7 @@ impl RarArchive {
                 }
             };
             let progress: Option<&mut dyn FnMut(u64, u64)> = Some(&mut cb);
-            let packed = compression::compress_chunked(
+            let packed = compression::encode_chunked(
                 data,
                 method,
                 dsl,
@@ -1246,7 +1246,7 @@ impl RarArchive {
                                 // whole 4 MiB slice (an exact-multiple member must
                                 // still mark its closing block).
                                 let is_final = processed_cell.get() + chunk.len() as u64 >= total;
-                                let compressed = compression::compress_chunked(
+                                let compressed = compression::encode_chunked(
                                     chunk,
                                     method,
                                     dsl,
@@ -1295,7 +1295,7 @@ impl RarArchive {
                     Some(&mut cb),
                 )
             } else {
-                compression::compress_chunked(
+                compression::encode_chunked(
                     data,
                     method,
                     dsl,
@@ -2274,7 +2274,7 @@ impl RarArchive {
                 let mut offset = 0usize;
                 while offset < work.len() {
                     let end = (offset + crate::codec::DEFAULT_CHUNK_SIZE).min(work.len());
-                    let compressed = compression::compress_chunked(
+                    let compressed = compression::encode_chunked(
                         &work[offset..end],
                         method,
                         dsl,

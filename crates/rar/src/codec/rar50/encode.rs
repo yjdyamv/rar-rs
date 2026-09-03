@@ -1,23 +1,23 @@
 //! RAR5/RAR7 (v70) encoding entry points.
 //!
 //! Re-exports the encoder implementation ([`super::encoder`]) and provides
-//! the high-level `compress*` dispatch functions, which normalize the WinRAR
+//! the high-level `encode*` dispatch functions, which normalize the WinRAR
 //! compression-method byte (STORE/FASTEST..=BEST) into a call on the
-//! underlying `encode*` machinery.
+//! underlying raw `encode*_raw` machinery.
 
 pub use super::encoder::*;
 
 use crate::rar50::{COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_STORE};
 use crate::version::ArchiveVersion;
 
-/// Compress `data` using the specified RAR5 compression method.
-pub fn compress(data: &[u8], method: u8, dict_size_log: u8) -> Result<Vec<u8>, String> {
-    compress_with_progress(data, method, dict_size_log, None)
+/// Encode `data` using the specified RAR5 compression method.
+pub fn encode(data: &[u8], method: u8, dict_size_log: u8) -> Result<Vec<u8>, String> {
+    encode_with_progress(data, method, dict_size_log, None)
 }
 
-/// Compress `data` using the specified RAR5 compression method, reporting
+/// Encode `data` using the specified RAR5 compression method, reporting
 /// progress as `(bytes_processed, total_bytes)` through `progress`.
-pub fn compress_with_progress(
+pub fn encode_with_progress(
     data: &[u8],
     method: u8,
     dict_size_log: u8,
@@ -30,7 +30,7 @@ pub fn compress_with_progress(
         return Ok(data.to_vec());
     }
     if (COMP_METHOD_FASTEST..=COMP_METHOD_BEST).contains(&method) {
-        return compress_chunked(
+        return encode_chunked(
             data,
             method,
             dict_size_log,
@@ -44,7 +44,7 @@ pub fn compress_with_progress(
     Err(format!("unknown compression method: {method}"))
 }
 
-/// Compress `data` in bounded chunks, optionally carrying encoder state
+/// Encode `data` in bounded chunks, optionally carrying encoder state
 /// across files (solid archives). The symbol table and match finder stay
 /// proportional to `chunk_size` instead of the whole file.
 ///
@@ -53,7 +53,7 @@ pub fn compress_with_progress(
 /// table instead of the RAR5 64-entry one), set when the member header
 /// declares a dictionary above 4 GiB.
 #[allow(clippy::too_many_arguments)]
-pub fn compress_chunked(
+pub fn encode_chunked(
     data: &[u8],
     method: u8,
     dict_size_log: u8,
@@ -70,7 +70,7 @@ pub fn compress_chunked(
         return Ok(data.to_vec());
     }
     if (COMP_METHOD_FASTEST..=COMP_METHOD_BEST).contains(&method) {
-        return encode_chunked(
+        return encode_chunked_raw(
             data,
             method,
             dict_size_log,

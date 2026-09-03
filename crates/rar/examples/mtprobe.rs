@@ -90,7 +90,7 @@ fn main() {
             ratio,
             speedup,
         );
-        let out = rar5::decompress(&packed, level, data.len() as u64, DICT, None).unwrap();
+        let out = rar5::decode(&packed, level, data.len() as u64, DICT, None).unwrap();
         assert_eq!(out.len(), data.len(), "mt length mismatch");
         assert_eq!(out, data, "mt decode mismatch");
     }

@@ -64,7 +64,7 @@ fn main() {
 
     // Sequential (optimal parse)
     let t0 = Instant::now();
-    let packed_seq = rar5::compress(&data, level, DICT).unwrap();
+    let packed_seq = rar5::encode(&data, level, DICT).unwrap();
     let seq_ms = t0.elapsed().as_millis() as f64;
     println!(
         "seq   l{level} {} MiB: {:>7.0} ms  {:>5.1} MiB/s  ratio {:>6.2}%",
@@ -98,7 +98,7 @@ fn main() {
             packed.len() as f64 * 100.0 / data.len() as f64,
             (packed.len() as f64 / packed_seq.len() as f64 - 1.0) * 100.0,
         );
-        let out = rar5::decompress(&packed, level, data.len() as u64, DICT, None).unwrap();
+        let out = rar5::decode(&packed, level, data.len() as u64, DICT, None).unwrap();
         assert_eq!(out.len(), data.len(), "mt length mismatch");
         assert_eq!(out, data, "mt decode mismatch");
     }

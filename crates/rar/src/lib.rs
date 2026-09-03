@@ -47,9 +47,7 @@ pub use archive::{ArchiveEntry, BatchEntry, RarArchive, discover_volumes};
 #[doc(hidden)]
 #[cfg(feature = "parallel")]
 pub use codec::rar50::{EncoderState, encode_chunked_mt};
-pub use codec::rar50::{
-    compress, compress_chunked, compress_with_progress, decode_standalone, decompress,
-};
+pub use codec::rar50::{decode, decode_standalone, encode, encode_chunked, encode_with_progress};
 pub use crypto::{EncryptionParams, decrypt_data, derive_keys, encrypt_data};
 pub use detect::sfx_offset_of;
 pub use error::{RarError, RarResult};

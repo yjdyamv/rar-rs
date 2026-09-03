@@ -651,7 +651,7 @@ impl RarArchive {
                     } else if hdr.comp_method == COMP_METHOD_STORE {
                         payload.data
                     } else {
-                        crate::codec::decode(
+                        crate::codec::decode_raw(
                             &payload.data,
                             hdr.unpacked_size,
                             crate::codec::DecodeOptions {
