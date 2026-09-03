@@ -1,23 +1,26 @@
-//! RAR 3.x/4.x member decompressor — the legacy `unp_ver >= 29` LZSS+Huffman
-//! codec used by every RAR 3.0–4.x archive (`Rar!\x1a\x07\x00` container).
+//! RAR 3.x/4.x member decompressor — the legacy `unp_ver >= 29` codec used by
+//! every RAR 3.0–4.x archive (`Rar!\x1a\x07\x00` container): LZSS+Huffman and
+//! PPMd variant H blocks.
 //!
-//! Ported from the decode half of bitplane's `rars` (WTFPL) `codec/rar29.rs`,
-//! which is validated against genuine WinRAR archives in its own fixture
-//! suite. The decoder is self-contained (its own MSB-first bit reader and
-//! canonical-Huffman tables) and keeps the RAR5 codec untouched.
+//! Ported from the decode half of bitplane's `rars` (WTFPL) `codec/rar29.rs`
+//! and `codec/ppmd.rs`, which are validated against genuine WinRAR archives
+//! in their own fixture suites. The decoder is self-contained (its own
+//! MSB-first bit reader and canonical-Huffman tables) and keeps the RAR5
+//! codec untouched.
 //!
 //! A member is a sequence of *blocks*. Each block begins (byte-aligned) with
-//! either a PPMd marker or an LZSS header that optionally re-reads the four
-//! Huffman tables (main/offset/low-offset/length). Solid chains share one
-//! decoder instance: the output window, `old_offsets`, last-length/last-offset
-//! and (per block header) the tables persist across members, while each
-//! member's packed bytes start a fresh bit reader at a block boundary.
+//! either a PPMd marker (bit 1 + init byte) or an LZSS header that optionally
+//! re-reads the four Huffman tables (main/offset/low-offset/length). Solid
+//! chains share one decoder instance: the output window, `old_offsets`,
+//! last-length/last-offset and (per block header) the tables persist across
+//! members, while each member's packed bytes start a fresh bit reader at a
+//! block boundary.
 //!
-//! Only the LZSS+Huffman path is implemented today; members whose first block
-//! header selects PPMd, or whose LZ stream carries a VM-filter record
-//! (symbol 257), fail with a clear [`RarError::Unsupported`]. Both are
-//! separate follow-up milestones.
+//! Only the LZSS and PPMd paths are implemented today; members whose stream
+//! carries a VM-filter record (LZ symbol 257, or PPMd escape code 3) fail
+//! with a clear [`RarError::Unsupported`] — the filters milestone.
 
+use super::ppmd::{self, PpmdByteReader, PpmdDecoder};
 use crate::error::{RarError, RarResult};
 
 // ── Table geometry ─────────────────────────────────────────────────────────
@@ -64,6 +67,15 @@ enum E {
     Bad(&'static str),
     /// Valid RAR3/4 feature this codec does not implement yet.
     Unsupported(&'static str),
+}
+
+impl From<ppmd::Error> for E {
+    fn from(error: ppmd::Error) -> E {
+        match error {
+            ppmd::Error::InvalidData(message) => E::Bad(message),
+            ppmd::Error::NeedMoreInput => E::Truncated,
+        }
+    }
 }
 
 fn map_err(error: E) -> RarError {
@@ -136,6 +148,18 @@ impl BitReader {
             value = (value << 1) | bit as u32;
         }
         Ok(value)
+    }
+}
+
+impl PpmdByteReader for BitReader {
+    fn read_ppmd_byte(&mut self) -> ppmd::Result<u8> {
+        self.read_bits(8)
+            .map(|value| value as u8)
+            .map_err(|error| match error {
+                E::Truncated => ppmd::Error::NeedMoreInput,
+                E::Bad(message) => ppmd::Error::InvalidData(message),
+                E::Unsupported(message) => ppmd::Error::InvalidData(message),
+            })
     }
 }
 
@@ -256,6 +280,12 @@ enum LzBlockEnd {
     NewFileNewTables,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockMode {
+    Lz,
+    Ppmd,
+}
+
 /// Persistent RAR3/4 LZSS+Huffman decoder. Keep one instance across solid
 /// chain members; use a fresh instance for a standalone member.
 #[derive(Debug)]
@@ -273,6 +303,13 @@ pub(crate) struct Rar29Decoder {
     low_offset_repeats: usize,
     pending_match: Option<(usize, usize)>,
     in_lz_block: bool,
+    block_mode: BlockMode,
+    /// Boxed: [`PpmdDecoder`] carries ~30 KB of fixed-size model tables and
+    /// must not inline into [`crate::archive::ReadState`] (kept by value in
+    /// `RarArchive`, whose frames would otherwise balloon past the 1 MiB
+    /// main-thread stack on Windows).
+    ppmd: Box<PpmdDecoder>,
+    ppmd_esc: u8,
     /// Absolute position of `output[0]`; history older than this is trimmed.
     base_offset: usize,
     /// All decoded bytes since the last trim, in stream order.
@@ -302,6 +339,9 @@ impl Rar29Decoder {
             low_offset_repeats: 0,
             pending_match: None,
             in_lz_block: false,
+            block_mode: BlockMode::Lz,
+            ppmd: Box::new(PpmdDecoder::new()),
+            ppmd_esc: 2,
             base_offset: 0,
             output: Vec::new(),
             last_block_end: None,
@@ -346,7 +386,10 @@ impl Rar29Decoder {
                 self.read_tables()?;
                 self.in_lz_block = true;
             }
-            self.decode_lz(target)?;
+            match self.block_mode {
+                BlockMode::Lz => self.decode_lz(target)?,
+                BlockMode::Ppmd => self.decode_ppmd(target)?,
+            }
         }
         Ok(())
     }
@@ -354,13 +397,16 @@ impl Rar29Decoder {
     fn read_tables(&mut self) -> Res<()> {
         self.bits.align_byte();
         if self.bits.peek_bit()? != 0 {
+            // PPMd block: the marker bit is followed by an 8-bit init byte
+            // (reset/max-order/esc flags), then the range-coder state.
             let first_byte = self.bits.read_bits(8)? as u8;
-            let _ = first_byte;
-            return Err(E::Unsupported(
-                "RAR 3.x/4.x PPMd-compressed members are not yet supported (decode only LZSS for now)",
-            ));
+            self.ppmd
+                .decode_init(first_byte, &mut self.bits, &mut self.ppmd_esc)?;
+            self.block_mode = BlockMode::Ppmd;
+            return Ok(());
         }
         self.bits.read_bit()?;
+        self.block_mode = BlockMode::Lz;
         let keep_tables = self.bits.read_bit()? != 0;
         self.last_low_offset = 0;
         self.low_offset_repeats = 0;
@@ -606,7 +652,10 @@ impl Rar29Decoder {
     }
 
     fn finish_member(&mut self) -> Res<()> {
-        self.finish_lz_member()
+        match self.block_mode {
+            BlockMode::Lz => self.finish_lz_member(),
+            BlockMode::Ppmd => self.finish_ppmd_member(),
+        }
     }
 
     fn finish_lz_member(&mut self) -> Res<()> {
@@ -627,6 +676,81 @@ impl Rar29Decoder {
                 }
                 LzBlockEnd::NewFileKeepTables | LzBlockEnd::NewFileNewTables => return Ok(()),
             }
+        }
+    }
+
+    fn decode_ppmd(&mut self, output_size: usize) -> Res<()> {
+        while self.current_pos() < output_size {
+            let Some(symbol) = self.ppmd.decode_symbol(&mut self.bits)? else {
+                return Ok(());
+            };
+            if symbol != self.ppmd_esc {
+                self.output.push(symbol);
+                continue;
+            }
+
+            let Some(next) = self.ppmd.decode_symbol(&mut self.bits)? else {
+                return Ok(());
+            };
+            match next {
+                0 => {
+                    self.in_lz_block = false;
+                    return Ok(());
+                }
+                1 | 6..=u8::MAX => self.output.push(self.ppmd_esc),
+                2 => {
+                    self.in_lz_block = false;
+                    return Ok(());
+                }
+                3 => {
+                    // PPMd-embedded VM filter record (RAR3.0+ filters).
+                    return Err(E::Unsupported(
+                        "RAR 3.x/4.x VM-filtered members are not yet supported (filters milestone pending)",
+                    ));
+                }
+                4 => {
+                    let mut offset = 0usize;
+                    for _ in 0..3 {
+                        offset = (offset << 8) | self.read_ppmd_required_byte()? as usize;
+                    }
+                    offset += 2;
+                    let length = self.read_ppmd_required_byte()? as usize + 32;
+                    self.copy_match(length, offset, output_size)?;
+                }
+                5 => {
+                    let length = self.read_ppmd_required_byte()? as usize + 4;
+                    self.copy_match(length, 1, output_size)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_ppmd_required_byte(&mut self) -> Res<u8> {
+        self.ppmd
+            .decode_symbol(&mut self.bits)?
+            .ok_or(E::Bad("PPMd stream ended early"))
+    }
+
+    fn finish_ppmd_member(&mut self) -> Res<()> {
+        if self.block_mode != BlockMode::Ppmd {
+            return Ok(());
+        }
+        let Some(symbol) = self.ppmd.decode_symbol(&mut self.bits)? else {
+            return Ok(());
+        };
+        if symbol != self.ppmd_esc {
+            return Err(E::Bad("PPMd member has trailing data"));
+        }
+        let Some(next) = self.ppmd.decode_symbol(&mut self.bits)? else {
+            return Ok(());
+        };
+        match next {
+            2 | 0 => {
+                self.in_lz_block = false;
+                Ok(())
+            }
+            _ => Err(E::Bad("PPMd member has trailing data")),
         }
     }
 

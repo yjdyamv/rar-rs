@@ -206,14 +206,61 @@ fn rar4_wrong_password_fails() {
 // ── Feature gates (clear errors, not garbage) ─────────────────────────────
 
 #[test]
-fn rar4_ppmd_members_report_unsupported() {
-    let mut archive = RarArchive::open(&format!("{RAR300}ppmd_lorem_rar300.rar")).expect("open");
-    match archive.read("lorem_127k.txt") {
+fn rar4_vm_filtered_members_report_unsupported() {
+    let mut archive = RarArchive::open(&format!("{RAR300}rarvm_x86_e8_rar300.rar")).expect("open");
+    match archive.read("x86_e8_stream.bin") {
         Err(RarError::Unsupported(msg)) => assert!(
-            msg.contains("PPMd"),
-            "expected a PPMd-specific message, got: {msg}"
+            msg.contains("filter"),
+            "expected a VM-filter message, got: {msg}"
         ),
-        other => panic!("expected Unsupported(PPMd), got {other:?}"),
+        other => panic!("expected Unsupported(VM filter), got {other:?}"),
+    }
+}
+
+// ── PPMd (RAR 3.0 m5 members from the rars fixture corpus) ────────────────
+
+#[test]
+fn rar4_ppmd_members_decode() {
+    // A 127 KiB lorem member compressed with PPMd by genuine RAR 3.0.
+    let mut archive = RarArchive::open(&format!("{RAR300}ppmd_lorem_rar300.rar")).expect("open");
+    let (name, size, crc) = snapshots(&archive).into_iter().next().unwrap();
+    assert_eq!(name, "lorem_127k.txt");
+    assert_eq!(size, 130_048);
+    let data = archive.read("lorem_127k.txt").expect("decode PPMd member");
+    assert_eq!(data.len(), 130_048);
+    assert_eq!(rar5_crc32(&data), crc.unwrap(), "PPMd lorem CRC");
+}
+
+#[test]
+fn rar4_ppmd_mixed_and_escape_fixtures() {
+    for (file, member) in [
+        ("ppmd_mixed_rar300.rar", "binary_64k.bin"),
+        ("ppmd_escape_rar300.rar", "escape_64k.bin"),
+        ("ppmd_lz_match_rar300.rar", "repeated_phrase_64k.txt"),
+    ] {
+        let mut archive = RarArchive::open(&format!("{RAR300}{file}")).expect("open");
+        let snaps = snapshots(&archive);
+        for (name, size, crc) in &snaps {
+            let data = archive.read(name).expect("decode PPMd member");
+            assert_eq!(data.len() as u64, *size, "{file}/{name} size");
+            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
+        }
+        let names: Vec<&str> = snaps.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert!(names.contains(&member), "{file} member shape");
+    }
+}
+
+#[test]
+fn rar4_ppmd_solid_chain_decodes() {
+    // Two 96 KiB lorem files in one solid PPMd chain: the second member
+    // references the first through the shared window.
+    let mut archive = RarArchive::open(&format!("{RAR300}ppmd_solid_rar300.rar")).expect("open");
+    let snaps = snapshots(&archive);
+    assert_eq!(snaps.len(), 2);
+    for (name, size, crc) in snaps {
+        let data = archive.read(&name).expect("decode solid PPMd member");
+        assert_eq!(data.len() as u64, size, "{name} size");
+        assert_eq!(rar5_crc32(&data), crc.unwrap(), "{name} CRC");
     }
 }
 

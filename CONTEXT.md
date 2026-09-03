@@ -29,13 +29,14 @@
 - **Cancel flag（取消钩子）** — `set_cancel_flag(Arc<AtomicBool>)`：长操作在逐成员/逐块检查点返回 `RarError::Cancelled`；binding 映射 AbortSignal。
 - **Zero-padded volumes（零填充卷）** — WinRAR 把卷号填充到总卷数位数（`part01..part15`）；发现/重建/.rev 命名均识别。
 - **Legacy family（老容器族）** — `Rar!\x1a\x07\x00` 7 字节签名的 RAR 1.5–4.x 容器（`rar40/`），与 RAR5 8 字节签名区分；固定宽度头 + 16 位头 CRC（ext-time 尾不在覆盖内）、`format_version: 4`。读路径：`rar40/mod.rs` 扫描/解析 → `rar40/read.rs` 成员解码门面。
-- **Rar29Decoder（`codec/rar29.rs`）** — RAR 3.x/4.x（unp_ver ≥ 29）LZSS+Huffman 成员解码器（rars 解码半移植）：自带 MSB 位读器 + 规范 Huffman 表；成员=块序列，块头（byte 对齐）= PPMd 标记位或 LZ 头（keep-tables 位 + 可选新表）。成员尾消费 256 块控制符（`SameFileNewTable`/`NewFileKeepTables`/`NewFileNewTables`）——solid 链跨成员靠它续表/换表，每个成员自己的 packed 区从块边界起新位读器。窗口保留 ≤ 4 MiB（`MAX_HISTORY`）。PPMd 块头与 VM 过滤记录（symbol 257）显式 Unsupported。
+- **Rar29Decoder（`codec/rar29.rs`）** — RAR 3.x/4.x（unp_ver ≥ 29）成员解码器（rars 解码半移植）：自带 MSB 位读器 + 规范 Huffman 表；成员=块序列，块头（byte 对齐）= PPMd 标记（bit1 + init byte → `codec/ppmd.rs` 的 PpmdDecoder/RangeDecoder）或 LZ 头（keep-tables 位 + 可选新表），块间可混切模式。成员尾消费块控制符（`SameFileNewTable`/`NewFileKeepTables`/`NewFileNewTables`；PPMd 走 esc 结束符）——solid 链跨成员靠它续表/换表，每个成员自己的 packed 区从块边界起新位读器。窗口保留 ≤ 4 MiB（`MAX_HISTORY`）。VM 过滤记录（LZ symbol 257 / PPMd esc-3）显式 Unsupported。
+- **PpmdDecoder（`codec/ppmd.rs`）** — PPMd 变体 H 解码器（rars 解码半移植，编码器不移植）：Suballocator（12 B 单元、双端 bump + 空闲桶 + glue）+ 上下文模型（contexts Vec 模拟 C 指针布局）；`decode_init` 由块头 init byte（reset/阶/字典 MB/esc 标记）重启模型，`decode_symbol` 出符号。错误走自带 `Error`（InvalidData/NeedMoreInput），rar29 侧 From 映射。
 - **Legacy solid chain（老固态链）** — `extract.rs` 对 RAR4 用常驻 `rar4_decoder`（`ReadState`）+ `rar4_decoded_through` 索引镜像 RAR5 链解码；链内 STORE 成员断链（窗口重开）。solid 排序由 WinRAR 决定，链起点=归档首文件。
 
 ## 分层结构（镜像参考架构 rars）
 
 - **格式层 `rar50/`**：容器常量 + 头类型/解析（mod.rs + headers/{parse,serialize,locator}.rs）、成员读/解码门面（payload.rs）、读路径（extract.rs）、写管线（write/{mod,engine,layout}.rs）、vint/blake2sp。低版本格式兄弟模块 `rar40/`（只读：扫描/头解析 + 成员解码门面）。
-- **编解码层 `codec/`**：一族一目录/一文件——`lzss_huff/`（RAR5 LZSS+Huffman 编码器+解码器）、`rar29.rs`（RAR3/4 LZSS+Huffman 解码器，只读）；bitstream/huffman/filters/match_finder/window 为共享原语（`rar29.rs` 自含位读器/Huffman，不动 RAR5 原语）。
+- **编解码层 `codec/`**：一族一目录/一文件——`lzss_huff/`（RAR5 LZSS+Huffman 编码器+解码器）、`rar29.rs`（RAR3/4 成员解码器：LZSS+Huffman+PPMd 块）、`ppmd.rs`（PPMd 变体 H 解码器，rar29 引用）；bitstream/huffman/filters/match_finder/window 为共享原语（`rar29.rs`/`ppmd.rs` 自含位读器/错误，不动 RAR5 原语）。
 - **加密层 `crypto/`**：一族一文件（crypto/rar50.rs）。
 - **恢复层 `recovery/`**：rar50.rs（内联 RR）+ rev50.rs（.rev 卷）。
 - **基础设施**：detect.rs（签名/SFX 扫描）、parallel.rs（Rayon 池）、io_util.rs（原子暂存/有界读）、version.rs/features.rs（薄词汇模块）、options.rs/error.rs/write_progress.rs。

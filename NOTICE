@@ -43,8 +43,9 @@ the automatic x86 filter scan (`src/codec/filters.rs`,
 (`src/codec/match_finder.rs`, LZMA-style BT4), the optimal parse
 (`src/codec/rar50.rs`, `optimal_parse_tokens` + `TokenPrices` +
 `BlockSplitter`), the E8/E8E9 x86 transform modulo normalization, and the
-RAR 3.x/4.x LZSS+Huffman member decoder (`src/codec/rar29.rs`, decode half
-of rars `codec/rar29.rs`). Each carries a note at its definition site.
+RAR 3.x/4.x member decoders (`src/codec/rar29.rs`, decode half of rars
+`codec/rar29.rs`; `src/codec/ppmd.rs`, decode half of rars `codec/ppmd.rs`).
+Each carries a note at its definition site.
 
 The `rar300/` test fixtures under `crates/rar/tests/fixtures/rar40/` are
 legacy RAR 3.0 archives copied from the rars test corpus (same licence
