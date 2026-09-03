@@ -12,7 +12,9 @@ use crate::codec::bitstream::BitWriter;
 use crate::codec::filters::apply_filter_encode;
 use crate::codec::huffman::{EncodeTable, build_code_lengths_from_freqs, encode_symbol};
 use crate::codec::match_finder::{self, MatchFinder};
-use crate::error::{RarError, RarResult};
+#[cfg(feature = "parallel")]
+use crate::error::RarError;
+use crate::error::RarResult;
 use crate::version::ArchiveVersion;
 
 // ── Compression level parameters ───────────────────────────────────────────
@@ -808,6 +810,7 @@ pub fn encode_with_filters_mt(
     filters: &[FilterSpec],
     variant: ArchiveVersion,
     _threads: usize,
+    _cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> RarResult<Vec<u8>> {
     // Without the pool, fall back to the sequential encode; the caller's
     // member-level logic (threads == 1 or no pool) makes this equivalent.
