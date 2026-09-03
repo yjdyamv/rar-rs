@@ -10,10 +10,24 @@
 - **持久树跨 chunk 损坏修复（2026-09）**：验证新块大小时发现既有静默损坏——窗口跨 chunk 增长时 `grow_to` 用新零数组替换 son（head 表幸存），而 0 是到位置 0 的合法链接；`rebase` 同类缺陷（链接只改值不迁槽）。密集 x86 成员产生抄 MZ 头的假匹配，unrar 与 WinRAR 双双报 checksum error。修复：grow_to 复制旧链接、rebase 把链接迁移到新环槽、收集器在解析定价前逐字节验证每个树报告（未来任何不变量破坏的安全网）。回归：129 KB 真实内核镜像前缀（旧代码在 129,334 字节处损坏，dict 2^3 + 64 KiB chunk）现字节级回环。DLL 自动 x86 过滤器产物 5.75 MB（43.90%），赢 WinRAR 7.23 的 5.87 MB（44.81%），双向完整性校验通过
 - **自动 x86 过滤器**：rars 移植的结构扫描（E8/E8E9 簇/跨度检测）自动应用于内存路径成员；过滤器成员按非 solid 写出。修复了 solid 链中过滤器位置的流式绝对/成员相对语义（unrar `WrittenFileSize` 为成员相对、区域定位为流绝对、E8 偏移按 16 MiB 取模）。
 - 命令面：官方 rar 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt` 列表变体）。
+- **老版本 RAR 只读（2026-09 起）**：`Rar!\x1a\x07\x00` 容器族（RAR 1.5–4.x）读取——块扫描/文件头（unicode 名、DOS 时间、salt、字典位）、STORE 直通 + RAR3/4（unp_ver ≥ 29）LZSS+Huffman 解码（`codec/rar29.rs`，rars 解码半移植）含 solid 链共享窗口 + RAR15/20/30 全代解密。对 WinRAR 5.91 `-ma4` 夹具与 rars rar300（真 RAR 3.0）夹具字节级通过（CRC 门），输出与 UnRAR 5.91 逐字节一致。PPMd / VM 过滤 / unp_ver<29 压缩成员仍显式报 unsupported。参考环境：`~/Desktop/winrar591`（WinRAR 5.91 绿色版，7-Zip ZS 提取），7.23 无 `-ma4` 故不能产 RAR4 夹具。
 - 工程：fmt/clippy `-D warnings` 双门（本地，含测试目标）、五目标 fuzz（`fuzz/`）、取消钩子、QO 快路径 `open_quick`、流式修复 `repair_archive_path`、零填充分卷集支持。
 - 架构：workspace `crates/rar`（库 crate `rar5`）+ `crates/rar-cli`（rar/unrar），按 rars 分层——词汇见 `CONTEXT.md`，格式细节见 `docs/FORMAT_RAR5_RAR7.html`。
 
 ## 待办（下一批，issue 见 `.scratch/compression-perf/`）
+
+### 老版本 RAR 只读（继续）
+
+- **unp_ver 29 PPMd 成员**：移植 rars `ppmd.rs` 解码（PpmdDecoder + RangeDecoder）到 rar29 解码器（块头 PPMd 标记分支现已显式报错）——RAR3/4 m5 文本类归档的多数缺口
+- **RAR3/4 VM 过滤器**：symbol 257 过滤器记录解析（`read_vm_code`/`parse_vm_code` 已定位）+ 标准过滤器识别执行（E8/E8E9/Delta/RGB/Audio；rars `filters.rs` + rarvm 通用执行或指纹捷径）——x86/音频/图像归档
+- **RAR 2.x（unp_ver 20/26）与 1.5（15）压缩**：rars `rar20.rs`/`rar13.rs` 解码（unp_ver 20/26 带音频表；15 老 LZ）——夹具只能从 rars 语料来（现代 WinRAR 不能产）
+- 分卷 RAR4（.partN.rar 新旧命名）、split-before/after 成员、多卷 solid
+- RAR3/4 头加密（-hp 旧式）、FHD_COMMENT 块、FHD_EXTTIME 亚秒时间
+- store-in-solid 链内成员的窗口语义（现为断链保守处理，需对照 5.91 实测）
+- 大成员内存：现整成员驻留（packed+解码 Vec），后续流式（对齐 decode_member_from_reader）
+- 错误口径：错误口令在 RAR3/4 表现为解码乱码错误，考虑提示 password mismatch
+
+### RAR5（压缩面）
 
 - **流式路径自动过滤器（05）**：delta/x86 过滤器只走内存路径（<64 MiB 成员）；大音频/裸盘镜像 >64 MiB 走 spill 流式路径无过滤器，ratio 远差于 WinRAR——需调研 delta 可否按窗口应用、区域保持成员相对
 - **solid 归档 MT（06）**：solid 强制串行，备份类负载无多线程收益；MT 对 seq 的既有分歧（x86 +8.2%，重复距离缓存按片重置）会带进 solid，需先评估可接受性
@@ -22,7 +36,8 @@
 
 ## 已取消 / 不做
 
-- **RAR4 全部**（创建 `-ma4`、PPMd、加密解压）：定位 RAR5-only，遇 RAR4 明确报 unsupported（有测试锁定）
+- **老版本 RAR 创建**（`-ma4`、RAR4 压缩器、PPMd 编码）：只读定位不变；创建能力以后再说。WinRAR 7.x 已删 `-ma4`，参考为 5.91
+- RAR 1.3/1.4（`RE~^` 族）：rars 支持但本实现不追（夹具稀少、DOS 时代）
 - unrar `s`（转 SFX）：官方 UnRAR 7.23 无此命令，非差距
 
 ## 已完成（要点）

@@ -5,6 +5,10 @@
 
 use crate::rar50::RAR5_SIGNATURE;
 
+/// The RAR 1.5–4.x container family signature (7 bytes, distinct from
+/// RAR5's 8-byte `Rar!\x1a\x07\x01\x00`).
+pub const RAR4_SIGNATURE: &[u8; 7] = b"Rar!\x1a\x07\x00";
+
 /// Scan at most this many bytes of an input for the archive signature.
 /// SFX stubs are small; 8 MiB covers realistic self-extracting modules
 /// (the same bound the reference readers use).

@@ -36,12 +36,19 @@ The RAR5 recovery-record codec (`src/recovery/rar5.rs`), the BLAKE2sp hash
 MIT OR Apache-2.0. Those portions retain their upstream license; the rest
 of this project remains BSD-2-Clause.
 
-Further `rars` portions ported later (same MIT OR Apache-2.0 terms): the
-automatic x86 filter scan (`src/codec/filters.rs`, `auto_x86_filter_ranges`),
-the binary-tree match finder (`src/codec/match_finder.rs`, LZMA-style BT4),
-the optimal parse (`src/codec/rar50.rs`, `optimal_parse_tokens` +
-`TokenPrices` + `BlockSplitter`), and the E8/E8E9 x86 transform modulo
-normalization. Each carries a note at its definition site.
+Further `rars` portions ported later (same MIT OR Apache-2.0 terms; the
+vendored repository copy carries the WTFPL licence with a no-blame clause):
+the automatic x86 filter scan (`src/codec/filters.rs`,
+`auto_x86_filter_ranges`), the binary-tree match finder
+(`src/codec/match_finder.rs`, LZMA-style BT4), the optimal parse
+(`src/codec/rar50.rs`, `optimal_parse_tokens` + `TokenPrices` +
+`BlockSplitter`), the E8/E8E9 x86 transform modulo normalization, and the
+RAR 3.x/4.x LZSS+Huffman member decoder (`src/codec/rar29.rs`, decode half
+of rars `codec/rar29.rs`). Each carries a note at its definition site.
+
+The `rar300/` test fixtures under `crates/rar/tests/fixtures/rar40/` are
+legacy RAR 3.0 archives copied from the rars test corpus (same licence
+terms), used as byte-level regression inputs.
 
 Official RAR/UNRAR binaries are used strictly as black-box interoperability
 references for testing (set `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` to run

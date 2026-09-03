@@ -1,0 +1,468 @@
+//! RAR 1.5–4.x container family: block scanning, file-header parsing, and
+//! member decode.
+//!
+//! This is the legacy `Rar!\x1a\x07\x00` family (WinRAR 1.5 through 4.x),
+//! distinct from the RAR5 container in [`crate::rar50`]. Headers are
+//! fixed-width (not vint-encoded) and carry a 16-bit CRC over the header
+//! body. Member decoding dispatches on the header's `unp_ver` (15 → Unpack15,
+//! 20/26 → Unpack20, >= 29 → Unpack29) and on the `method` byte.
+//!
+//! Only the STORE method (0x30) is decoded today; compressed members return
+//! [`RarError::Unsupported`] until the Unpack15/20/29 engines land.
+
+mod read;
+use crate::archive::ArchiveEntry;
+use crate::crc32;
+use crate::error::{RarError, RarResult};
+use crate::rar50::headers::{DataChunk, FileHeader};
+use crate::rar50::*;
+pub(crate) use read::{decode_member_bytes, member_crc};
+use std::io::{Read, Seek, SeekFrom};
+
+// ── Block types ────────────────────────────────────────────────────────────
+
+pub(crate) const MARK_HEAD: u8 = 0x72;
+pub(crate) const MAIN_HEAD: u8 = 0x73;
+pub(crate) const FILE_HEAD: u8 = 0x74;
+pub(crate) const ENDARC_HEAD: u8 = 0x7b;
+
+// ── Header flags ───────────────────────────────────────────────────────────
+
+pub(crate) const LONG_BLOCK: u16 = 0x8000;
+
+pub(crate) const FHD_PASSWORD: u16 = 0x0004;
+pub(crate) const FHD_COMMENT: u16 = 0x0008;
+pub(crate) const FHD_SOLID: u16 = 0x0010;
+pub(crate) const FHD_LARGE: u16 = 0x0100;
+pub(crate) const FHD_UNICODE: u16 = 0x0200;
+pub(crate) const FHD_SALT: u16 = 0x0400;
+
+/// RAR4 compression method value for the STORE (uncompressed) method.
+pub(crate) const RAR4_METHOD_STORE: u8 = 0x30;
+
+/// RAR4 header minimum size for the fixed fields before the variable tail.
+const FILE_HEADER_FIXED: usize = 32;
+
+/// A parsed RAR4 block envelope.
+#[derive(Debug, Clone)]
+struct Rar4Block {
+    head_crc: u16,
+    head_type: u8,
+    flags: u16,
+    head_size: u16,
+    /// Absolute offset where the block starts.
+    offset: u64,
+    /// Bytes on disk for this whole block (header + optional data area).
+    total_size: u64,
+    /// Header bytes (for validation / name parsing).
+    header: Vec<u8>,
+}
+
+/// Top-level RAR4 archive read result.
+pub(crate) struct Rar4Reader {
+    pub entries: Vec<ArchiveEntry>,
+}
+
+/// Scan a single-volume RAR4 archive. `stream` must be positioned right
+/// after the 7-byte signature (the caller handles SFX offset and signature).
+pub(crate) fn scan_stream(
+    stream: &mut (impl Read + Seek),
+    sfx_data_base: u64,
+) -> RarResult<Rar4Reader> {
+    let mut entries = Vec::new();
+
+    while let Some(block) = read_block(stream)? {
+        match block.head_type {
+            MARK_HEAD | MAIN_HEAD => {}
+            FILE_HEAD => {
+                let fh = parse_file_header(&block, sfx_data_base)?;
+                let chunk = DataChunk {
+                    volume_index: 0,
+                    data_offset: fh.data_offset,
+                    packed_size: fh.packed_size,
+                    crc32_val: fh.crc32_val,
+                    is_final: true,
+                    extra_data: Vec::new(),
+                };
+                entries.push(ArchiveEntry {
+                    header: fh,
+                    chunks: vec![chunk],
+                });
+                if block.total_size > block.header.len() as u64 {
+                    stream.seek(SeekFrom::Start(block.offset + block.total_size))?;
+                }
+            }
+            ENDARC_HEAD => break,
+            _ => {
+                // Unknown block types (comment, protect, auth, subblock):
+                // skip over their data area when present.
+                if block.total_size > block.header.len() as u64 {
+                    stream.seek(SeekFrom::Start(block.offset + block.total_size))?;
+                }
+            }
+        }
+    }
+
+    Ok(Rar4Reader { entries })
+}
+
+fn read_block(stream: &mut (impl Read + Seek)) -> RarResult<Option<Rar4Block>> {
+    let start = stream.stream_position()?;
+    let mut base = [0u8; 7];
+    let n = read_some(stream, &mut base)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if n < 7 {
+        return Err(RarError::Format("RAR4: truncated block header".into()));
+    }
+
+    let head_crc = u16::from_le_bytes([base[0], base[1]]);
+    let head_type = base[2];
+    let flags = u16::from_le_bytes([base[3], base[4]]);
+    let head_size = u16::from_le_bytes([base[5], base[6]]);
+    if head_size < 7 {
+        return Err(RarError::Format(format!(
+            "RAR4: block head_size {head_size} too small"
+        )));
+    }
+
+    // Read the full header.
+    let mut header = base.to_vec();
+    if head_size as usize > 7 {
+        let mut rest = vec![0u8; head_size as usize - 7];
+        read_exact(stream, &mut rest)?;
+        header.extend_from_slice(&rest);
+    }
+
+    // Validate header CRC (16-bit) over bytes[2..head_size], except for
+    // MARK (which has no meaningful CRC) and AV/SIGN (documented bad).
+    let should_check = !matches!(head_type, MARK_HEAD | 0x76 | 0x79);
+    let crc_end = header_crc_end(&header, head_type, flags);
+    if should_check {
+        let actual = (crc32::crc32(&header[2..crc_end]) & 0xffff) as u16;
+        if actual != head_crc {
+            return Err(RarError::Crc {
+                expected: head_crc as u32,
+                actual: actual as u32,
+                context: format!("RAR4 block type {head_type:#x} header"),
+            });
+        }
+    }
+
+    let add_size = if flags & LONG_BLOCK != 0 {
+        if header.len() < 11 {
+            return Err(RarError::Format(
+                "RAR4: header missing LONG_BLOCK size".into(),
+            ));
+        }
+        u32::from_le_bytes(header[7..11].try_into().unwrap()) as u64
+    } else {
+        0
+    };
+
+    let total_size = head_size as u64 + add_size;
+    Ok(Some(Rar4Block {
+        head_crc,
+        head_type,
+        flags,
+        head_size,
+        offset: start,
+        total_size,
+        header,
+    }))
+}
+
+/// Where the header CRC coverage ends: some block types with a nested
+/// comment stop before the comment (which has its own CRC).
+fn header_crc_end(header: &[u8], head_type: u8, flags: u16) -> usize {
+    match head_type {
+        MAIN_HEAD if flags & 0x0002 != 0 => 13.min(header.len()),
+        FILE_HEAD if flags & FHD_COMMENT != 0 => file_header_crc_end(header),
+        _ => header.len(),
+    }
+}
+
+fn file_header_crc_end(header: &[u8]) -> usize {
+    // Named blocks end at name (+ salt + large high sizes), before the
+    // trailing comment block.
+    let mut end = FILE_HEADER_FIXED;
+    if header.len() < FILE_HEADER_FIXED {
+        return header.len();
+    }
+    let flags = u16::from_le_bytes([header[3], header[4]]);
+    if flags & FHD_LARGE != 0 {
+        end += 8;
+    }
+    let name_size = u16::from_le_bytes([header[26], header[27]]) as usize;
+    end += name_size;
+    if flags & FHD_SALT != 0 {
+        end += 8;
+    }
+    end.min(header.len())
+}
+
+/// Parse a RAR4 FILE_HEAD block body into a RAR5-style `FileHeader`, mapping
+/// fields to the common model (`format_version: 4`). `sfx_data_base` is the
+/// absolute offset of the archive start (signature end); file data offsets
+/// are absolute within the stream.
+fn parse_file_header(block: &Rar4Block, sfx_data_base: u64) -> RarResult<FileHeader> {
+    let h = &block.header;
+    let start = 0usize;
+    let head_end = h.len();
+    if head_end < FILE_HEADER_FIXED {
+        return Err(RarError::Format("RAR4: file header too short".into()));
+    }
+    if block.flags & LONG_BLOCK == 0 {
+        return Err(RarError::Format(
+            "RAR4: file header missing data size".into(),
+        ));
+    }
+
+    let pack_low = u32::from_le_bytes(h[start + 7..start + 11].try_into().unwrap()) as u64;
+    let unp_low = u32::from_le_bytes(h[start + 11..start + 15].try_into().unwrap()) as u64;
+    let host_os = h[start + 15];
+    let file_crc = u32::from_le_bytes(h[start + 16..start + 20].try_into().unwrap());
+    let file_time = u32::from_le_bytes(h[start + 20..start + 24].try_into().unwrap());
+    let unp_ver = h[start + 24];
+    let method = h[start + 25];
+    let name_size = u16::from_le_bytes([h[start + 26], h[start + 27]]) as usize;
+    let attr = u32::from_le_bytes(h[start + 28..start + 32].try_into().unwrap());
+    let mut pos = start + 32;
+
+    let (pack_size, unp_size) = if block.flags & FHD_LARGE != 0 {
+        let high_pack = u32::from_le_bytes(h[pos..pos + 4].try_into().unwrap()) as u64;
+        let high_unp = u32::from_le_bytes(h[pos + 4..pos + 8].try_into().unwrap()) as u64;
+        pos += 8;
+        ((high_pack << 32) | pack_low, (high_unp << 32) | unp_low)
+    } else {
+        (pack_low, unp_low)
+    };
+
+    let name_end = pos
+        .checked_add(name_size)
+        .ok_or_else(|| RarError::Format("RAR4: name size overflow".into()))?;
+    if name_end > head_end {
+        return Err(RarError::Format(
+            "RAR4: file name extends past header".into(),
+        ));
+    }
+    let name = decode_file_name(&h[pos..name_end], block.flags);
+    pos = name_end;
+
+    let salt = if block.flags & FHD_SALT != 0 {
+        let salt_end = pos
+            .checked_add(8)
+            .ok_or_else(|| RarError::Format("RAR4: salt overflow".into()))?;
+        if salt_end > head_end {
+            return Err(RarError::Format("RAR4: salt extends past header".into()));
+        }
+        let s: [u8; 8] = h[pos..salt_end].try_into().unwrap();
+        Some(s)
+    } else {
+        None
+    };
+
+    let is_directory = match host_os {
+        // MS-DOS / Windows: FILE_ATTRIBUTE_DIRECTORY in the low attribute word.
+        0 | 2 => attr & 0x10 != 0,
+        // Unix: high attribute word holds the mode bits; S_IFDIR = 0o040000.
+        3 => (attr >> 16) & 0o170000 == 0o040000,
+        _ => false,
+    };
+
+    // RAR4 host OS: 0 = MS-DOS, 1 = OS/2, 2 = Windows, 3 = Unix, 4 = Mac.
+    // Map to the shared OS constants (0 = Windows, 1 = Unix).
+    let host_os_u64 = match host_os {
+        0 | 2 => OS_WINDOWS,
+        _ => OS_UNIX,
+    };
+
+    // Data offset = this block's absolute end (header end pushed to 16-byte
+    // alignment for RAR3+ encrypted headers is handled by the caller via
+    // sfx_data_base alignment; here the block offset + head_size is the
+    // exact data start in the container).
+    let data_offset = block
+        .offset
+        .checked_add(block.head_size as u64)
+        .ok_or_else(|| RarError::Format("RAR4: data offset overflow".into()))?;
+    let _ = sfx_data_base;
+
+    let fh = FileHeader {
+        name,
+        unpacked_size: unp_size,
+        packed_size: pack_size,
+        attributes: attr as u64,
+        mtime: dos_time_to_unix(file_time),
+        crc32_val: Some(file_crc),
+        hash_type: HASH_NONE,
+        hash_value: None,
+        // RAR4 methods are 0x30..=0x35 on disk; the shared model uses 0..=5.
+        comp_method: method.wrapping_sub(RAR4_METHOD_STORE),
+        comp_version: 0,
+        comp_solid: block.flags & FHD_SOLID != 0,
+        comp_dict_size: 0,
+        host_os: host_os_u64,
+        flags: block.flags as u64,
+        file_flags: FILE_FLAG_CRC32,
+        extra_data: Vec::new(),
+        is_directory,
+        data_offset,
+        format_version: 4,
+        dict_size_bytes: None,
+        mtime_ns: None,
+        ctime: None,
+        atime: None,
+        owner: None,
+        group: None,
+        version: None,
+        unp_ver,
+        salt,
+        legacy_head_crc: Some(block.head_crc),
+    };
+    Ok(fh)
+}
+
+/// Decode a RAR4 member name, honoring the `FHD_UNICODE` extension when the
+/// name carries the legacy-encoded UTF-16 payload.
+pub(crate) fn decode_file_name(raw: &[u8], flags: u16) -> String {
+    if flags & FHD_UNICODE == 0 {
+        let end = raw
+            .iter()
+            .rposition(|b| *b != 0)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        return String::from_utf8_lossy(&raw[..end]).into_owned();
+    }
+
+    let Some(zero_pos) = raw.iter().position(|b| *b == 0) else {
+        return String::from_utf8_lossy(raw).into_owned();
+    };
+    if zero_pos + 1 >= raw.len() {
+        return String::from_utf8_lossy(&raw[..zero_pos]).into_owned();
+    }
+
+    let fallback = &raw[..zero_pos];
+    let high_byte = raw[zero_pos + 1];
+    let encoded = &raw[zero_pos + 2..];
+    let mut pos = 0usize;
+    let mut flag_byte = 0u8;
+    let mut flag_bits = 0u8;
+    let mut dst_pos = 0usize;
+    let mut units = Vec::new();
+
+    while pos < encoded.len() {
+        if flag_bits == 0 {
+            flag_byte = encoded[pos];
+            pos += 1;
+            flag_bits = 8;
+        }
+        let mode = flag_byte >> 6;
+        flag_byte <<= 2;
+        flag_bits -= 2;
+
+        match mode {
+            0 => {
+                let Some(&low) = encoded.get(pos) else {
+                    return String::from_utf8_lossy(raw).into_owned();
+                };
+                pos += 1;
+                units.push(u16::from(low));
+                dst_pos += 1;
+            }
+            1 => {
+                let Some(&low) = encoded.get(pos) else {
+                    return String::from_utf8_lossy(raw).into_owned();
+                };
+                pos += 1;
+                units.push((u16::from(high_byte) << 8) | u16::from(low));
+                dst_pos += 1;
+            }
+            2 => {
+                let Some((&low, &high)) = encoded.get(pos).zip(encoded.get(pos + 1)) else {
+                    return String::from_utf8_lossy(raw).into_owned();
+                };
+                pos += 2;
+                units.push((u16::from(high) << 8) | u16::from(low));
+                dst_pos += 1;
+            }
+            3 => {
+                let Some(&length_byte) = encoded.get(pos) else {
+                    return String::from_utf8_lossy(raw).into_owned();
+                };
+                pos += 1;
+                let (count, correction, high) = if length_byte & 0x80 != 0 {
+                    let Some(&correction) = encoded.get(pos) else {
+                        return String::from_utf8_lossy(raw).into_owned();
+                    };
+                    pos += 1;
+                    ((length_byte & 0x7f) as usize + 2, correction, high_byte)
+                } else {
+                    (length_byte as usize + 2, 0, 0)
+                };
+                for _ in 0..count {
+                    let low = fallback
+                        .get(dst_pos)
+                        .copied()
+                        .unwrap_or(b'?')
+                        .wrapping_add(correction);
+                    units.push((u16::from(high) << 8) | u16::from(low));
+                    dst_pos += 1;
+                }
+            }
+            _ => unreachable!("2-bit filename mode"),
+        }
+    }
+
+    char::decode_utf16(units)
+        .map(|u| u.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
+}
+
+/// Convert a RAR4 MS-DOS date/time (10/6/6 packed fields) to a Unix
+/// timestamp (seconds). Best effort: DOS times predate the Unix epoch only
+/// for pre-1980, so the result is a near-epoch non-negative value there.
+pub(crate) fn dos_time_to_unix(dos: u32) -> u32 {
+    let year = ((dos >> 25) & 0x7f) as i64 + 1980;
+    let month = (dos >> 21) & 0x0f;
+    let day = (dos >> 16) & 0x1f;
+    let hour = (dos >> 11) & 0x1f;
+    let minute = (dos >> 5) & 0x3f;
+    let second = (dos & 0x1f) * 2;
+
+    let days_since_epoch = days_from_civil(year, month, day);
+    let secs = days_since_epoch * 86400
+        + (i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second));
+    secs.clamp(0, u32::MAX as i64) as u32
+}
+
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = ((m + 9) % 12) as i64;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn read_some(stream: &mut impl Read, buf: &mut [u8]) -> RarResult<usize> {
+    let mut read = 0;
+    while read < buf.len() {
+        let n = stream.read(&mut buf[read..])?;
+        if n == 0 {
+            break;
+        }
+        read += n;
+    }
+    Ok(read)
+}
+
+fn read_exact(stream: &mut impl Read, buf: &mut [u8]) -> RarResult<()> {
+    stream.read_exact(buf).map_err(RarError::Io)
+}
+
+/// Whether a RAR4 member's payload uses the STORE method.
+pub(crate) fn is_stored(comp_method: u8) -> bool {
+    comp_method == 0
+}

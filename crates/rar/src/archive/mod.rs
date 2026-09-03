@@ -78,6 +78,10 @@ pub(crate) struct ReadState {
     pub solid_state: Option<DecoderState>,
     /// Index of the last file decoded in the solid chain (-1 = none).
     pub solid_decoded_through: isize,
+    /// Persistent RAR3/4 (legacy) LZ decoder for solid chains.
+    pub rar4_decoder: Option<crate::codec::rar29::Rar29Decoder>,
+    /// Index of the last legacy-solid member decoded (-1 = none).
+    pub rar4_decoded_through: isize,
     /// Options for the current read/extract operation (set per call).
     pub extract_options: crate::options::ExtractOptions,
     /// NTFS alternate data streams ("STM" service records) attached to
@@ -91,6 +95,8 @@ impl Default for ReadState {
         Self {
             solid_state: None,
             solid_decoded_through: -1,
+            rar4_decoder: None,
+            rar4_decoded_through: -1,
             extract_options: crate::options::ExtractOptions::default(),
             streams: Vec::new(),
         }
@@ -208,6 +214,8 @@ pub struct RarArchive {
     /// Byte offset where the RAR5 signature begins (0 for plain archives,
     /// >0 for SFX archives whose stub precedes the archive).
     pub(crate) sfx_offset: u64,
+    /// Whether the archive uses the legacy RAR 1.5–4.x container (vs RAR5).
+    pub(crate) rar4: bool,
     /// Password for encrypted archives.
     pub(crate) password: Option<String>,
     /// Encrypt archive headers (file names/structure hidden) — RAR5
@@ -332,6 +340,7 @@ impl RarArchive {
             mode,
             entries: Vec::new(),
             sfx_offset: 0,
+            rar4: false,
             stream: None,
             password,
             header_encryption: false,
@@ -838,6 +847,7 @@ impl RarArchive {
             mode: Mode::Write,
             entries: Vec::new(),
             sfx_offset: 0,
+            rar4: false,
             stream: None,
             password: opts.password,
             header_encryption: opts.encrypt_headers,

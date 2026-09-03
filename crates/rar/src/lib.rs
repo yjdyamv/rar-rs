@@ -25,6 +25,7 @@
 
 pub mod archive;
 pub mod codec;
+pub(crate) mod crc32;
 pub mod crypto;
 pub mod detect;
 pub mod error;
@@ -34,6 +35,7 @@ mod io_util;
 pub mod name_policy;
 pub mod options;
 mod parallel;
+pub mod rar40;
 pub mod rar50;
 #[doc(hidden)]
 pub mod recovery;
