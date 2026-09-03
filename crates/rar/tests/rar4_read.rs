@@ -12,6 +12,7 @@ use rar5::{RarArchive, RarError};
 
 const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/");
 const RAR300: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar300/");
+const RAR2: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar2/");
 const W591: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/rar40/winrar591/"
@@ -249,6 +250,57 @@ fn rar4_vm_filter_edge_cases() {
             assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
         }
     }
+}
+
+// ── RAR 2.x (unp_ver 20/26, from the rars fixture corpus) ─────────────────
+
+#[test]
+fn rar4_rar2x_fixtures_decode() {
+    // RAR 2.0-era archives: plain LZ, audio-table blocks (a WAV), multiple
+    // blocks per member, kept tables, and an out-of-window zero-fill member.
+    for file in [
+        "comment_nopsw.rar",
+        "rar20.rar",
+        "unpack20_audio_text.rar",
+        "unpack20_keep_tables.rar",
+        "unpack20_multiblock.rar",
+    ] {
+        let mut archive = RarArchive::open(&format!("{RAR2}{file}")).expect("open");
+        let snaps = snapshots(&archive);
+        assert!(!snaps.is_empty(), "{file}");
+        for (name, size, crc) in snaps {
+            let data = archive.read(&name).expect("decode RAR2 member");
+            assert_eq!(data.len() as u64, size, "{file}/{name} size");
+            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
+        }
+    }
+}
+
+#[test]
+fn rar4_rar202_encrypted_members_decode_with_password() {
+    // RAR 2.0 member data encrypted with the legacy RAR20 block cipher;
+    // contents pinned from the rars fixture corpus.
+    let mut archive = RarArchive::open(&format!("{RAR2}comment_psw.rar")).expect("open");
+    match archive.read("FILE1.TXT") {
+        Err(RarError::Encrypted(_)) => {}
+        other => panic!("expected Encrypted without password, got {other:?}"),
+    }
+    archive.set_password("password");
+    assert_eq!(
+        archive.read("FILE1.TXT").expect("decrypt FILE1"),
+        b"file1\r\n"
+    );
+    assert_eq!(
+        archive.read("FILE2.TXT").expect("decrypt FILE2"),
+        b"file2\r\n"
+    );
+}
+
+#[test]
+fn rar4_rar202_wrong_password_fails() {
+    let mut archive = RarArchive::open(&format!("{RAR2}comment_psw.rar")).expect("open");
+    archive.set_password("wrong-password");
+    assert!(archive.read("FILE1.TXT").is_err());
 }
 
 // ── PPMd (RAR 3.0 m5 members from the rars fixture corpus) ────────────────

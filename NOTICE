@@ -46,7 +46,9 @@ the automatic x86 filter scan (`src/codec/filters.rs`,
 RAR 3.x/4.x member decoders (`src/codec/rar29.rs`, decode half of rars
 `codec/rar29.rs` incl. its native standard-filter transforms for
 E8/E8E9/Itanium/Delta/RGB/Audio; `src/codec/ppmd.rs`, decode half of rars
-`codec/ppmd.rs`). Each carries a note at its definition site.
+`codec/ppmd.rs`; `src/codec/rar20.rs`, decode half of rars `codec/rar20.rs`
+covering the RAR 2.x LZSS+Huffman and audio-block codec). Each carries a
+note at its definition site.
 
 The `rar300/` test fixtures under `crates/rar/tests/fixtures/rar40/` are
 legacy RAR 3.0 archives copied from the rars test corpus (same licence

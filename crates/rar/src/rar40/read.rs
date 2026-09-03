@@ -8,6 +8,7 @@
 //! by the caller). RAR 1.5/2.x compressed members and RAR3/4 PPMd or
 //! VM-filtered members are reported as not yet supported.
 
+use crate::codec::rar20::Rar20Decoder;
 use crate::codec::rar29::Rar29Decoder;
 use crate::crc32;
 use crate::crypto::{Rar15Cipher, Rar20Cipher, Rar30Cipher};
@@ -66,8 +67,16 @@ pub(crate) fn decode_member_bytes(
         return Ok(out);
     }
 
+    if hdr.unp_ver == 20 || hdr.unp_ver == 26 {
+        // RAR 2.x LZSS+Huffman. The shared RAR29 solid-chain decoder is not
+        // reused here: solid RAR 2.x chains (flagged FHD_SOLID on old
+        // archives) are not yet supported, so every member decodes fresh.
+        let out = Rar20Decoder::new().decode_member(&packed, hdr.unpacked_size)?;
+        return Ok(out);
+    }
+
     Err(RarError::Unsupported(format!(
-        "RAR 1.5/2.x compressed members (unpack version {}) are not yet supported",
+        "RAR 1.5 compressed members (unpack version {}) are not yet supported",
         hdr.unp_ver
     )))
 }
