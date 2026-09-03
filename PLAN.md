@@ -16,6 +16,13 @@
 
 ## 待办（下一批，issue 见 `.scratch/compression-perf/`）
 
+### 老 RAR 创建（-ma4 对齐 WinRAR 5.x）与 live 交互测试
+
+设计见 `docs/LIVE_INTEROP.md`。路线：live 交互测试骨架已落地（`crates/rar/tests/live_interop.rs`，WinRAR 5.91 `-ma4` m0/m3/m5/solid/-p/-hp/-v 当场生成 → 我方读 vs UnRAR 5.91 解 sha256 对齐；跨平台跳过策略 + 按需下载 7z zs/WinRAR 5.91）；后续：
+- live 场景扩到 7.x ↔ RAR5 双向（我方建 RAR5 → 7.x UnRAR 校验）
+- **RAR4 创建**：移植 rars 编码半（`rar15_40/write.rs` + codec 编码器 rar20/rar29/ppmd/rarvm/filters），逐开关对照 5.91（见 docs/LIVE_INTEROP.md 路线 1–3）；目标 5.91 字节级可解 + 双向 live 验收，摆脱固定夹具
+- 稳定后决定 `fixtures/rar40/` 去留（live 全覆盖后删除，见 docs 迁移节）
+
 ### 老版本 RAR 只读（继续）
 
 - solid RAR2.x/1.5 链：现按单成员独立解码（无链窗）；需把 rar4 链引擎泛化为 unp_ver 分派（rar15 已带 solid 参数/64 KiB 窗，只差接线；rar20 需加链窗）

@@ -83,7 +83,7 @@ fn rar4_store_header_fields() {
 
 #[test]
 fn rar4_winrar591_m3_compressed_read() {
-    let mut archive = RarArchive::open(&format!("{W591}c_m3.rar")).expect("open c_m3");
+    let mut archive = RarArchive::open(format!("{W591}c_m3.rar")).expect("open c_m3");
     let repeat = snapshots(&archive)
         .into_iter()
         .find(|(name, _, _)| name == "repeat.txt")
@@ -105,7 +105,7 @@ fn rar4_winrar591_m3_compressed_read() {
 #[test]
 fn rar4_winrar591_m5_lz_compressed_read() {
     // -ma4 -m5 on this highly repetitive text picks LZSS (not PPMd).
-    let mut archive = RarArchive::open(&format!("{W591}c_m5.rar")).expect("open c_m5");
+    let mut archive = RarArchive::open(format!("{W591}c_m5.rar")).expect("open c_m5");
     assert_eq!(
         archive.read("repeat.txt").expect("decode m5 member"),
         repeat_content()
@@ -116,7 +116,7 @@ fn rar4_winrar591_m5_lz_compressed_read() {
 fn rar4_winrar591_random_and_tiny_members() {
     // Incompressible and tiny members store even under -m3/-m5.
     for file in ["c_m3.rar", "c_m5.rar"] {
-        let mut archive = RarArchive::open(&format!("{W591}{file}")).expect("open");
+        let mut archive = RarArchive::open(format!("{W591}{file}")).expect("open");
         let snaps = snapshots(&archive);
         for (name, size, crc) in snaps {
             let data = archive.read(&name).expect("read member");
@@ -130,7 +130,7 @@ fn rar4_winrar591_random_and_tiny_members() {
 
 #[test]
 fn rar4_solid_chain_winrar591() {
-    let mut archive = RarArchive::open(&format!("{W591}c_solid.rar")).expect("open c_solid");
+    let mut archive = RarArchive::open(format!("{W591}c_solid.rar")).expect("open c_solid");
     let snaps = snapshots(&archive);
     assert_eq!(snaps.len(), 4);
     // WinRAR sorts solid archives by name: a.txt, b.txt, repeat.txt, random.bin.
@@ -161,7 +161,7 @@ fn rar4_solid_chain_winrar591() {
 #[test]
 fn rar4_rar300_compressed_text() {
     let mut archive =
-        RarArchive::open(&format!("{RAR300}compressed_text_rar300.rar")).expect("open");
+        RarArchive::open(format!("{RAR300}compressed_text_rar300.rar")).expect("open");
     let (name, size, crc) = snapshots(&archive).into_iter().next().unwrap();
     assert_eq!(name, "text.txt");
     assert_eq!(size, 2_400);
@@ -172,7 +172,7 @@ fn rar4_rar300_compressed_text() {
 #[test]
 fn rar4_rar300_solid_archives() {
     for file in ["solid_simple_rar300.rar", "solid_rar300.rar"] {
-        let mut archive = RarArchive::open(&format!("{RAR300}{file}")).expect("open");
+        let mut archive = RarArchive::open(format!("{RAR300}{file}")).expect("open");
         let snaps = snapshots(&archive);
         assert!(!snaps.is_empty());
         for (name, size, crc) in snaps {
@@ -187,7 +187,7 @@ fn rar4_rar300_solid_archives() {
 
 #[test]
 fn rar4_encrypted_members_need_password() {
-    let mut archive = RarArchive::open(&format!("{W591}c_pw.rar")).expect("open");
+    let mut archive = RarArchive::open(format!("{W591}c_pw.rar")).expect("open");
     match archive.read("repeat.txt") {
         Err(RarError::Encrypted(msg)) => assert!(msg.contains("no password")),
         other => panic!("expected Encrypted without password, got {other:?}"),
@@ -196,7 +196,7 @@ fn rar4_encrypted_members_need_password() {
 
 #[test]
 fn rar4_encrypted_compressed_members_decode_with_password() {
-    let mut archive = RarArchive::open(&format!("{W591}c_pw.rar")).expect("open");
+    let mut archive = RarArchive::open(format!("{W591}c_pw.rar")).expect("open");
     archive.set_password("pass123");
     assert_eq!(
         archive.read("repeat.txt").expect("decrypt + decode"),
@@ -208,7 +208,7 @@ fn rar4_encrypted_compressed_members_decode_with_password() {
 
 #[test]
 fn rar4_wrong_password_fails() {
-    let mut archive = RarArchive::open(&format!("{W591}c_pw.rar")).expect("open");
+    let mut archive = RarArchive::open(format!("{W591}c_pw.rar")).expect("open");
     archive.set_password("not-the-password");
     assert!(archive.read("repeat.txt").is_err());
 }
@@ -227,7 +227,7 @@ fn rar4_standard_vm_filters_decode() {
         "rarvm_rgb_gradient_rar300.rar",
         "rarvm_itanium_synthetic_rar300.rar",
     ] {
-        let mut archive = RarArchive::open(&format!("{RAR300}{file}")).expect("open");
+        let mut archive = RarArchive::open(format!("{RAR300}{file}")).expect("open");
         for (name, size, crc) in snapshots(&archive) {
             let data = archive.read(&name).expect("decode filtered member");
             assert_eq!(data.len() as u64, size, "{file}/{name} size");
@@ -268,12 +268,12 @@ fn rar4_header_encrypted_archives_decode() {
     // -hp hides file names behind AES-128 header encryption; listing needs
     // the password at open time.
     assert!(matches!(
-        RarArchive::open(&format!("{ENC}header_rar300_password.rar")),
+        RarArchive::open(format!("{ENC}header_rar300_password.rar")),
         Err(RarError::Encrypted(_))
     ));
 
     let mut archive =
-        RarArchive::open_with_password(&format!("{ENC}header_rar300_password.rar"), "password")
+        RarArchive::open_with_password(format!("{ENC}header_rar300_password.rar"), "password")
             .expect("open with password");
     let snaps = snapshots(&archive);
     assert_eq!(snaps.len(), 1);
@@ -282,7 +282,7 @@ fn rar4_header_encrypted_archives_decode() {
     assert_eq!(rar5_crc32(&data), snaps[0].2.unwrap());
 
     // Unicode name inside an encrypted header.
-    let mut archive = RarArchive::open_with_password(&format!("{ENC}header_enc_1234.rar"), "1234")
+    let archive = RarArchive::open_with_password(format!("{ENC}header_enc_1234.rar"), "1234")
         .expect("open with password");
     let names: Vec<String> = snapshots(&archive).into_iter().map(|(n, _, _)| n).collect();
     assert_eq!(names.len(), 2);
@@ -290,15 +290,14 @@ fn rar4_header_encrypted_archives_decode() {
 
     // Wrong password must not silently list garbage.
     assert!(
-        RarArchive::open_with_password(&format!("{ENC}header_rar300_password.rar"), "nope")
-            .is_err()
+        RarArchive::open_with_password(format!("{ENC}header_rar300_password.rar"), "nope").is_err()
     );
 }
 
 #[test]
 fn rar4_header_encrypted_multivol_decode() {
     let mut archive = RarArchive::open_with_password(
-        &format!("{ENC}header_encrypted_multivol_rar300.rar"),
+        format!("{ENC}header_encrypted_multivol_rar300.rar"),
         "password",
     )
     .expect("open with password");
@@ -327,7 +326,7 @@ fn rar4_multivolume_sets_decode() {
         ("encrypted_multivol_rar300.rar", Some("password")),
     ];
     for (file, password) in cases {
-        let mut archive = RarArchive::open(&format!("{MVOL}{file}")).expect("open");
+        let mut archive = RarArchive::open(format!("{MVOL}{file}")).expect("open");
         if let Some(p) = password {
             archive.set_password(p);
         }
@@ -355,7 +354,7 @@ fn rar4_rar154_fixtures_decode() {
         "audio_dos_names_unpack15.rar",
         "audio_win_names_unpack15.rar",
     ] {
-        let mut archive = RarArchive::open(&format!("{RAR154}{file}")).expect("open");
+        let mut archive = RarArchive::open(format!("{RAR154}{file}")).expect("open");
         let snaps = snapshots(&archive);
         assert!(!snaps.is_empty(), "{file}");
         for (name, size, crc) in snaps {
@@ -370,7 +369,7 @@ fn rar4_rar154_fixtures_decode() {
 fn rar4_rar154_encrypted_members_decode_with_password() {
     // RAR 1.5 member data encrypted with the legacy RAR15 stream cipher;
     // the decrypted README matches the unencrypted fixture byte for byte.
-    let mut archive = RarArchive::open(&format!("{RAR154}readme_154_password.rar")).expect("open");
+    let mut archive = RarArchive::open(format!("{RAR154}readme_154_password.rar")).expect("open");
     match archive.read("README.md") {
         Err(RarError::Encrypted(_)) => {}
         other => panic!("expected Encrypted without password, got {other:?}"),
@@ -380,13 +379,13 @@ fn rar4_rar154_encrypted_members_decode_with_password() {
     assert_eq!(data.len(), 4_198);
     assert_eq!(rar5_crc32(&data), 0x509e_5e3c);
 
-    let mut plain = RarArchive::open(&format!("{RAR154}readme_154_normal.rar")).expect("open");
+    let mut plain = RarArchive::open(format!("{RAR154}readme_154_normal.rar")).expect("open");
     assert_eq!(plain.read("README.md").expect("plain member"), data);
 }
 
 #[test]
 fn rar4_rar154_wrong_password_fails() {
-    let mut archive = RarArchive::open(&format!("{RAR154}readme_154_password.rar")).expect("open");
+    let mut archive = RarArchive::open(format!("{RAR154}readme_154_password.rar")).expect("open");
     archive.set_password("wrong-password");
     assert!(archive.read("README.md").is_err());
 }
@@ -404,7 +403,7 @@ fn rar4_rar2x_fixtures_decode() {
         "unpack20_keep_tables.rar",
         "unpack20_multiblock.rar",
     ] {
-        let mut archive = RarArchive::open(&format!("{RAR2}{file}")).expect("open");
+        let mut archive = RarArchive::open(format!("{RAR2}{file}")).expect("open");
         let snaps = snapshots(&archive);
         assert!(!snaps.is_empty(), "{file}");
         for (name, size, crc) in snaps {
@@ -419,7 +418,7 @@ fn rar4_rar2x_fixtures_decode() {
 fn rar4_rar202_encrypted_members_decode_with_password() {
     // RAR 2.0 member data encrypted with the legacy RAR20 block cipher;
     // contents pinned from the rars fixture corpus.
-    let mut archive = RarArchive::open(&format!("{RAR2}comment_psw.rar")).expect("open");
+    let mut archive = RarArchive::open(format!("{RAR2}comment_psw.rar")).expect("open");
     match archive.read("FILE1.TXT") {
         Err(RarError::Encrypted(_)) => {}
         other => panic!("expected Encrypted without password, got {other:?}"),
@@ -437,7 +436,7 @@ fn rar4_rar202_encrypted_members_decode_with_password() {
 
 #[test]
 fn rar4_rar202_wrong_password_fails() {
-    let mut archive = RarArchive::open(&format!("{RAR2}comment_psw.rar")).expect("open");
+    let mut archive = RarArchive::open(format!("{RAR2}comment_psw.rar")).expect("open");
     archive.set_password("wrong-password");
     assert!(archive.read("FILE1.TXT").is_err());
 }
@@ -447,7 +446,7 @@ fn rar4_rar202_wrong_password_fails() {
 #[test]
 fn rar4_ppmd_members_decode() {
     // A 127 KiB lorem member compressed with PPMd by genuine RAR 3.0.
-    let mut archive = RarArchive::open(&format!("{RAR300}ppmd_lorem_rar300.rar")).expect("open");
+    let mut archive = RarArchive::open(format!("{RAR300}ppmd_lorem_rar300.rar")).expect("open");
     let (name, size, crc) = snapshots(&archive).into_iter().next().unwrap();
     assert_eq!(name, "lorem_127k.txt");
     assert_eq!(size, 130_048);
@@ -463,7 +462,7 @@ fn rar4_ppmd_mixed_and_escape_fixtures() {
         ("ppmd_escape_rar300.rar", "escape_64k.bin"),
         ("ppmd_lz_match_rar300.rar", "repeated_phrase_64k.txt"),
     ] {
-        let mut archive = RarArchive::open(&format!("{RAR300}{file}")).expect("open");
+        let mut archive = RarArchive::open(format!("{RAR300}{file}")).expect("open");
         let snaps = snapshots(&archive);
         for (name, size, crc) in &snaps {
             let data = archive.read(name).expect("decode PPMd member");
@@ -479,7 +478,7 @@ fn rar4_ppmd_mixed_and_escape_fixtures() {
 fn rar4_ppmd_solid_chain_decodes() {
     // Two 96 KiB lorem files in one solid PPMd chain: the second member
     // references the first through the shared window.
-    let mut archive = RarArchive::open(&format!("{RAR300}ppmd_solid_rar300.rar")).expect("open");
+    let mut archive = RarArchive::open(format!("{RAR300}ppmd_solid_rar300.rar")).expect("open");
     let snaps = snapshots(&archive);
     assert_eq!(snaps.len(), 2);
     for (name, size, crc) in snaps {

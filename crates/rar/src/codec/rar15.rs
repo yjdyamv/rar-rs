@@ -99,6 +99,7 @@ pub struct Rar15Decoder {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(dead_code)] // rars test-hook stats kept only for code parity
 struct DecodeTokenStats {
     literals: u64,
     st_literals: u64,
@@ -121,6 +122,7 @@ struct DecodeTokenStats {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // rars test-hook event kept only for code parity
 struct OldDistanceEvent {
     output_position: usize,
     short_code: u32,
