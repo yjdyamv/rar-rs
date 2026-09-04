@@ -3,10 +3,8 @@
 //! Reads a member's packed payload (single volume), decrypts it with the
 //! cipher selected by `unp_ver` (15 → RAR15 stream, 20/26 → RAR20 block, and
 //! 29+ → RAR30 AES-CBC block), then decodes it. STORE members pass through
-//! raw; compressed members with unpack version 29 or newer decode through
-//! [`crate::codec::rar29`] (solid chains share one decoder instance passed in
-//! by the caller). RAR 1.5/2.x compressed members and RAR3/4 PPMd or
-//! VM-filtered members are reported as not yet supported.
+//! raw; compressed members decode through the appropriate codec. Solid chains
+//! share one decoder instance passed in by the caller via [`super::LegacyDecoder`].
 
 use crate::codec::rar15::Rar15Decoder;
 use crate::codec::rar20::Rar20Decoder;
@@ -17,6 +15,8 @@ use crate::error::{RarError, RarResult};
 use crate::rar50::headers::{DataChunk, FileHeader};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
+
+use super::LegacyDecoder;
 
 /// Decode a single-volume RAR4 member into memory.
 ///
@@ -31,7 +31,7 @@ pub(crate) fn decode_member_bytes(
     chunks: &[DataChunk],
     hdr: &FileHeader,
     password: Option<&str>,
-    decoder: Option<&mut Rar29Decoder>,
+    decoder: Option<&mut LegacyDecoder>,
 ) -> RarResult<Vec<u8>> {
     if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
         return Ok(Vec::new());
@@ -80,25 +80,37 @@ pub(crate) fn decode_member_bytes(
 
     if hdr.unp_ver >= 29 {
         let out = match decoder {
-            Some(dec) => dec.decode_member(&packed, hdr.unpacked_size)?,
-            None => Rar29Decoder::new().decode_member(&packed, hdr.unpacked_size)?,
-        };
+            Some(LegacyDecoder::Rar29(dec)) => dec.decode_member(&packed, hdr.unpacked_size),
+            Some(_) => Err(RarError::Format(
+                "RAR4: unp_ver >= 29 but wrong decoder type in solid chain".into(),
+            )),
+            None => Rar29Decoder::new().decode_member(&packed, hdr.unpacked_size),
+        }
+        .map_err(|e| map_codec_error(hdr, e))?;
         return Ok(out);
     }
 
     if hdr.unp_ver == 20 || hdr.unp_ver == 26 {
-        // RAR 2.x LZSS+Huffman. The shared RAR29 solid-chain decoder is not
-        // reused here: solid RAR 2.x chains (flagged FHD_SOLID on old
-        // archives) are not yet supported, so every member decodes fresh.
-        let out = Rar20Decoder::new().decode_member(&packed, hdr.unpacked_size)?;
+        let out = match decoder {
+            Some(LegacyDecoder::Rar20(dec)) => dec.decode_member(&packed, hdr.unpacked_size),
+            Some(_) => Err(RarError::Format(
+                "RAR4: unp_ver 20/26 but wrong decoder type in solid chain".into(),
+            )),
+            None => Rar20Decoder::new().decode_member(&packed, hdr.unpacked_size),
+        }
+        .map_err(|e| map_codec_error(hdr, e))?;
         return Ok(out);
     }
 
     if hdr.unp_ver == 15 {
-        // RAR 1.5 adaptive-Huffman LZ. Solid RAR 1.5 chains are not yet
-        // supported: every member decodes fresh (solid=false resets the
-        // 64 KiB window and tables).
-        let out = Rar15Decoder::new().decode_member(&packed, hdr.unpacked_size, false)?;
+        let out = match decoder {
+            Some(LegacyDecoder::Rar15(dec)) => dec.decode_member(&packed, hdr.unpacked_size, true),
+            Some(_) => Err(RarError::Format(
+                "RAR4: unp_ver 15 but wrong decoder type in solid chain".into(),
+            )),
+            None => Rar15Decoder::new().decode_member(&packed, hdr.unpacked_size, false),
+        }
+        .map_err(|e| map_codec_error(hdr, e))?;
         return Ok(out);
     }
 
@@ -106,6 +118,23 @@ pub(crate) fn decode_member_bytes(
         "RAR 1.3/1.4-era compressed members (unpack version {}) are not yet supported",
         hdr.unp_ver
     )))
+}
+
+/// Map codec-level errors to user-facing errors: encrypted members with a
+/// password provided treat CRC/codec/crypto errors as
+/// `WrongPassword` (mirrors rars `map_encrypted_payload_error`).
+fn map_codec_error(hdr: &FileHeader, error: RarError) -> RarError {
+    let encrypted = hdr.flags & super::FHD_PASSWORD as u64 != 0;
+    if !encrypted {
+        return error;
+    }
+    match error {
+        RarError::Encrypted(_) => error,
+        RarError::Crc { .. } | RarError::Format(_) | RarError::Unsupported(_) => {
+            RarError::WrongPassword
+        }
+        other => other,
+    }
 }
 
 /// Decrypt `data` in place according to the member's cipher.

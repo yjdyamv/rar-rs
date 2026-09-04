@@ -1450,8 +1450,9 @@ impl RarArchive {
 
     /// Decode the legacy solid chain up through `target_idx` with one shared
     /// decoder, returning the target member's bytes. Intermediate members are
-    /// decoded only to advance the shared window. STORE members break the
-    /// chain (the window restarts after them).
+    /// decoded only to advance the shared window. STORE members in a RAR2.x
+    /// or RAR1.5 chain do not advance the window but do not break the chain
+    /// either (the decoder is simply not called).
     fn rar4_decode_solid_through(&mut self, target_idx: usize) -> RarResult<Vec<u8>> {
         let chain_start = self.rar4_find_chain_start(target_idx);
 
@@ -1467,7 +1468,11 @@ impl RarArchive {
                 ctx.rar4_decoded_through = -1;
             }
             if ctx.rar4_decoder.is_none() {
-                ctx.rar4_decoder = Some(crate::codec::rar29::Rar29Decoder::new());
+                // Bootstrap with a Rar29 decoder; it will be replaced on the
+                // first compressed member that reveals the actual unp_ver.
+                ctx.rar4_decoder = Some(crate::rar40::LegacyDecoder::Rar29(
+                    crate::codec::rar29::Rar29Decoder::new(),
+                ));
             }
             (ctx.rar4_decoded_through + 1) as usize
         };
@@ -1480,12 +1485,35 @@ impl RarArchive {
             }
             let hdr = entry.header;
             let chunks = entry.chunks;
-            let mut decoder = self.read_ctx_mut().rar4_decoder.take();
-            // A STORE member inside the run breaks the chain: its bytes do
-            // not extend the LZ window, so the next solid member restarts.
-            if hdr.comp_method == 0 {
-                decoder = Some(crate::codec::rar29::Rar29Decoder::new());
+
+            // Determine decoder type from the member's unp_ver. A STORE
+            // member keeps the existing decoder unchanged (for RAR2.x the
+            // window is not advanced; for RAR1.5 likewise).
+            let is_compressed = !crate::rar40::is_stored(hdr.comp_method);
+            if is_compressed {
+                // Ensure the decoder matches this member's codec version.
+                let needs_rebuild = {
+                    let dec = self.read_ctx_mut().rar4_decoder.as_ref();
+                    match (hdr.unp_ver, dec) {
+                        (v, Some(crate::rar40::LegacyDecoder::Rar29(_))) if v >= 29 => false,
+                        (20 | 26, Some(crate::rar40::LegacyDecoder::Rar20(_))) => false,
+                        (15, Some(crate::rar40::LegacyDecoder::Rar15(_))) => false,
+                        _ => true,
+                    }
+                };
+                if needs_rebuild {
+                    let new_decoder = if hdr.unp_ver >= 29 {
+                        crate::rar40::LegacyDecoder::Rar29(crate::codec::rar29::Rar29Decoder::new())
+                    } else if hdr.unp_ver == 20 || hdr.unp_ver == 26 {
+                        crate::rar40::LegacyDecoder::Rar20(Box::default())
+                    } else {
+                        crate::rar40::LegacyDecoder::Rar15(Box::default())
+                    };
+                    self.read_ctx_mut().rar4_decoder = Some(new_decoder);
+                }
             }
+
+            let mut decoder = self.read_ctx_mut().rar4_decoder.take();
             let data = crate::rar40::decode_member_bytes(
                 self.stream.as_mut().unwrap(),
                 &self.volume_paths,

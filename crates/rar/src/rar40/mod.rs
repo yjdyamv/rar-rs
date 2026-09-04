@@ -36,6 +36,19 @@ pub(crate) const FHD_SOLID: u16 = 0x0010;
 pub(crate) const FHD_LARGE: u16 = 0x0100;
 pub(crate) const FHD_UNICODE: u16 = 0x0200;
 pub(crate) const FHD_SALT: u16 = 0x0400;
+pub(crate) const FHD_EXTTIME: u16 = 0x1000;
+
+/// Persistent decoder state for legacy solid chains.
+///
+/// RAR 2.x and 1.5 decoders retain their window/predictor state across
+/// members; a STORE member does not advance the window but does not break
+/// the chain either (the decoder is simply not called).
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum LegacyDecoder {
+    Rar29(crate::codec::rar29::Rar29Decoder),
+    Rar20(Box<crate::codec::rar20::Rar20Decoder>),
+    Rar15(Box<crate::codec::rar15::Rar15Decoder>),
+}
 
 /// RAR4 compression method value for the STORE (uncompressed) method.
 pub(crate) const RAR4_METHOD_STORE: u8 = 0x30;
@@ -290,8 +303,9 @@ fn finish_block(start: u64, header: Vec<u8>, on_disk_prefix: u64) -> RarResult<O
     }
 
     // Validate header CRC (16-bit) over bytes[2..head_size], except for
-    // MARK (which has no meaningful CRC) and AV/SIGN (documented bad).
-    let should_check = !matches!(head_type, MARK_HEAD | 0x76 | 0x79);
+    // MARK (which has no meaningful CRC), AV/SIGN (documented bad), and
+    // the 0xFFFF sentinel (RAR 1.5.4-era "no CRC" marker).
+    let should_check = !matches!(head_type, MARK_HEAD | 0x76 | 0x79) && head_crc != 0xFFFF;
     let crc_end = header_crc_end(&header, head_type, flags);
     if should_check {
         let actual = (crc32::crc32(&header[2..crc_end]) & 0xffff) as u16;
@@ -411,10 +425,31 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
             return Err(RarError::Format("RAR4: salt extends past header".into()));
         }
         let s: [u8; 8] = h[pos..salt_end].try_into().unwrap();
+        pos = salt_end;
         Some(s)
     } else {
         None
     };
+
+    // File comment: a nested COMM_HEAD block inside the header. Its own
+    // 16-bit CRC covers the comment data; the outer header CRC stops before
+    // it (handled by `header_crc_end`). We skip over the comment bytes here;
+    // they are not exposed in the common model.
+    if block.flags & FHD_COMMENT != 0 && pos + 2 <= head_end {
+        pos += 2;
+        // Comment data runs to the end of the header (before ext_time).
+    }
+
+    // Extended time: four nibbles (mtime, ctime, atime, arctime) with
+    // sub-second precision. Only mtime is decoded; ctime/atime are stored
+    // in `extra_data` for potential future use.
+    let ext_time = if block.flags & FHD_EXTTIME != 0 {
+        h[pos..head_end].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let mtime_ns = extract_mtime_refinement(&ext_time);
 
     let is_directory = match host_os {
         // MS-DOS / Windows: FILE_ATTRIBUTE_DIRECTORY in the low attribute word.
@@ -453,12 +488,12 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         host_os: host_os_u64,
         flags: block.flags as u64,
         file_flags: FILE_FLAG_CRC32,
-        extra_data: Vec::new(),
+        extra_data: ext_time,
         is_directory,
         data_offset,
         format_version: 4,
         dict_size_bytes: None,
-        mtime_ns: None,
+        mtime_ns,
         ctime: None,
         atime: None,
         owner: None,
@@ -613,4 +648,24 @@ fn read_exact(stream: &mut impl Read, buf: &mut [u8]) -> RarResult<()> {
 /// Whether a RAR4 member's payload uses the STORE method.
 pub(crate) fn is_stored(comp_method: u8) -> bool {
     comp_method == 0
+}
+
+/// Extract the mtime sub-second refinement from the RAR4 extended-time
+/// field.  The flags word holds four nibbles (mtime first at bits 15-12),
+/// each encoding PRESENT (0x8), ADD_SECOND (0x4), and a 0-3 byte count.
+/// Sub-second bytes arrive high-end first into a 24-bit accumulator.
+fn extract_mtime_refinement(ext_time: &[u8]) -> Option<u32> {
+    const PRESENT: u8 = 0x8;
+    const TICK_NANOSECONDS: u32 = 100;
+
+    let flags = u16::from_le_bytes(ext_time.get(..2)?.try_into().ok()?);
+    let rmode = ((flags >> 12) & 0xf) as u8;
+    if rmode & PRESENT == 0 {
+        return None;
+    }
+    let mut ticks = 0u32;
+    for &byte in ext_time.get(2..2 + usize::from(rmode & 0x3))? {
+        ticks = (u32::from(byte) << 16) | (ticks >> 8);
+    }
+    Some(ticks * TICK_NANOSECONDS)
 }

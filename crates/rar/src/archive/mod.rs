@@ -78,8 +78,8 @@ pub(crate) struct ReadState {
     pub solid_state: Option<DecoderState>,
     /// Index of the last file decoded in the solid chain (-1 = none).
     pub solid_decoded_through: isize,
-    /// Persistent RAR3/4 (legacy) LZ decoder for solid chains.
-    pub rar4_decoder: Option<crate::codec::rar29::Rar29Decoder>,
+    /// Persistent legacy decoder for solid chains (RAR 1.5/2.x/3.x).
+    pub rar4_decoder: Option<crate::rar40::LegacyDecoder>,
     /// Index of the last legacy-solid member decoded (-1 = none).
     pub rar4_decoded_through: isize,
     /// Options for the current read/extract operation (set per call).
