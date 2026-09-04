@@ -17,7 +17,7 @@ use crate::crc32;
 use crate::error::{RarError, RarResult};
 use crate::rar50::headers::{DataChunk, FileHeader};
 use crate::rar50::*;
-pub(crate) use read::{decode_member_bytes, member_crc};
+pub(crate) use read::{decode_member_bytes, decode_member_bytes_to, member_crc};
 use std::io::{Read, Seek, SeekFrom};
 
 // ── Block types ────────────────────────────────────────────────────────────

@@ -450,6 +450,58 @@ impl Rar29Decoder {
         Ok(out)
     }
 
+    /// Decode a member streaming its output to `writer` with bounded memory
+    /// (~window + one flush chunk) instead of accumulating the whole member.
+    ///
+    /// Members carrying VM-filter records are the exception: a filter range
+    /// can only be reversed once the member output is complete, so those
+    /// members are decoded whole and written at the end (the record bytes
+    /// queue in `filters` before any flush point is reached).
+    pub(crate) fn decode_member_streaming_to(
+        &mut self,
+        packed: &[u8],
+        output_size: u64,
+        writer: &mut dyn std::io::Write,
+    ) -> RarResult<()> {
+        const FLUSH: usize = 1024 * 1024;
+        let output_size = usize::try_from(output_size).map_err(|_| RarError::LimitExceeded {
+            limit: u64::MAX,
+            context: "RAR 2.9 member is too large for this platform".into(),
+        })?;
+        let member_start = self.current_pos();
+        let target = member_start
+            .checked_add(output_size)
+            .ok_or_else(|| RarError::Format("RAR 2.9 output size overflows".into()))?;
+        if !packed.is_empty() {
+            self.bits = BitReader::new();
+        }
+        self.bits.append(packed);
+
+        let mut flushed = member_start;
+        while flushed < target {
+            let next = (flushed + FLUSH).min(target);
+            self.decode_until(next).map_err(map_err)?;
+            let pos = self.current_pos();
+            if !self.filters.is_empty() {
+                // A VM-filter record arrived: reverse the rest at member end.
+                break;
+            }
+            let chunk = self.raw_range(flushed, pos).map_err(map_err)?;
+            writer.write_all(chunk).map_err(RarError::Io)?;
+            flushed = pos;
+            // Drop decoded history beyond the sliding window.
+            self.trim_history(pos, pos);
+        }
+        self.decode_until(target).map_err(map_err)?;
+        self.finish_member().map_err(map_err)?;
+        let out = self
+            .filtered_range(flushed, target, member_start)
+            .map_err(map_err)?;
+        writer.write_all(&out).map_err(RarError::Io)?;
+        self.trim_history(target, target);
+        Ok(())
+    }
+
     fn decode_until(&mut self, target: usize) -> Res<()> {
         while self.current_pos() < target {
             self.drain_pending_match(target)?;

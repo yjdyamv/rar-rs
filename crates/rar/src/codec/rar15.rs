@@ -12,8 +12,6 @@
 //! error enum (mirroring the rars codec error) kept so the code needs no
 //! other edits.
 
-use std::io::Write;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Error {
     InvalidData(&'static str),
@@ -188,7 +186,7 @@ impl Rar15Decoder {
         input: &[u8],
         target: usize,
         solid: bool,
-        out: &mut impl Write,
+        out: &mut dyn std::io::Write,
     ) -> Result<()> {
         self.init_member(target, solid);
         self.bits = BitReader::new_final(input);
@@ -211,7 +209,7 @@ impl Rar15Decoder {
         }
     }
 
-    fn decode_loop(&mut self, out: &mut impl Write) -> Result<()> {
+    fn decode_loop(&mut self, out: &mut dyn std::io::Write) -> Result<()> {
         if self.target == 0 {
             return Ok(());
         }
@@ -219,7 +217,7 @@ impl Rar15Decoder {
         self.decode_loop_until(self.target, out)
     }
 
-    fn decode_loop_until(&mut self, target: usize, out: &mut impl Write) -> Result<()> {
+    fn decode_loop_until(&mut self, target: usize, out: &mut dyn std::io::Write) -> Result<()> {
         while self.output_written < target {
             self.decode_step(out)?;
         }
@@ -227,7 +225,7 @@ impl Rar15Decoder {
         Ok(())
     }
 
-    fn decode_step(&mut self, out: &mut impl Write) -> Result<()> {
+    fn decode_step(&mut self, out: &mut dyn std::io::Write) -> Result<()> {
         if self.flags_cnt == -2 {
             self.get_flags_buf()?;
             self.flags_cnt = 8;
@@ -297,7 +295,7 @@ impl Rar15Decoder {
         self.init_huff();
     }
 
-    fn short_lz(&mut self, out: &mut impl Write) -> Result<()> {
+    fn short_lz(&mut self, out: &mut dyn std::io::Write) -> Result<()> {
         self.num_huf = 0;
         let mut bit_field = self.bits.get_bits()?;
         if self.l_count == 2 {
@@ -429,7 +427,7 @@ impl Rar15Decoder {
         self.copy_string(distance, length, out)
     }
 
-    fn long_lz(&mut self, out: &mut impl Write) -> Result<()> {
+    fn long_lz(&mut self, out: &mut dyn std::io::Write) -> Result<()> {
         self.num_huf = 0;
         self.nlzb += 16;
         if self.nlzb > 0xff {
@@ -526,7 +524,7 @@ impl Rar15Decoder {
         self.copy_string(distance, length, out)
     }
 
-    fn huff_decode(&mut self, out: &mut impl Write) -> Result<()> {
+    fn huff_decode(&mut self, out: &mut dyn std::io::Write) -> Result<()> {
         let bit_field = self.bits.get_bits()?;
 
         let mut byte_place = if self.avr_plc > 0x75ff {
@@ -658,7 +656,12 @@ impl Rar15Decoder {
             + pos_tab[start_pos as usize] as u32
     }
 
-    fn copy_string(&mut self, distance: u32, length: u32, out: &mut impl Write) -> Result<()> {
+    fn copy_string(
+        &mut self,
+        distance: u32,
+        length: u32,
+        out: &mut dyn std::io::Write,
+    ) -> Result<()> {
         if self.output_written + length as usize > self.target {
             return Err(Error::InvalidData("RAR 1.3 match exceeds output size"));
         }
@@ -679,7 +682,7 @@ impl Rar15Decoder {
         Ok(())
     }
 
-    fn put_byte(&mut self, byte: u8, out: &mut impl Write) -> Result<()> {
+    fn put_byte(&mut self, byte: u8, out: &mut dyn std::io::Write) -> Result<()> {
         if self.output_written >= self.target {
             return Err(Error::InvalidData("RAR 1.3 literal exceeds output size"));
         }

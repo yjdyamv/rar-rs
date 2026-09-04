@@ -10,6 +10,7 @@ mod support;
 use support::*;
 
 use rar5::{ArchiveVersion, CreateOptions, RarArchive, discover_volumes};
+use std::io::Write;
 
 fn crate_crc(data: &[u8]) -> u32 {
     let mut c = 0xFFFFFFFFu32;
@@ -1062,4 +1063,56 @@ fn create_rar4_solid_ppmd_text_chain() {
             names[index]
         );
     }
+}
+
+/// Large-member extraction takes the streaming path: a ~96 MB STORE member
+/// is copied chunk-by-chunk (never buffered whole) and a compressed member
+/// decodes incrementally, both verified byte-identical via
+/// `RarArchive::extract` (the writer path, not the buffering `read`).
+#[test]
+fn create_rar4_large_members_stream_on_extract() {
+    let dir = make_temp_dir();
+    // Deterministic 96 MiB pseudo-random store payload.
+    let store = dir.path().join("disk.bin");
+    {
+        let mut f = std::fs::File::create(&store).unwrap();
+        let mut block = vec![0u8; 1 << 20];
+        let mut seed = 0x1234_5678u32;
+        for i in 0..96usize {
+            for chunk in block.chunks_exact_mut(4) {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                chunk.copy_from_slice(&seed.to_le_bytes());
+            }
+            f.write_all(&block).unwrap();
+            let _ = i;
+        }
+    }
+    let text = dir.path().join("stream.txt");
+    let mut body = Vec::new();
+    for j in 0..200_000u32 {
+        body.extend_from_slice(
+            format!("streaming line {j:06} with repeating words words words\n").as_bytes(),
+        );
+    }
+    std::fs::write(&text, &body).unwrap();
+
+    let arc = dir.path().join("stream.rar");
+    let opts = CreateOptions {
+        format_version: ArchiveVersion::Rar40,
+        ..Default::default()
+    };
+    let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
+    archive.add(&store, 0).expect("store member");
+    archive.add(&text, 5).expect("compressed member");
+    archive.close().expect("close");
+
+    let out = dir.path().join("out");
+    let mut ar = RarArchive::open(&arc).expect("reopen");
+    ar.extract("disk.bin", &out).expect("extract store");
+    ar.extract("stream.txt", &out).expect("extract compressed");
+    assert_eq!(
+        std::fs::read(out.join("disk.bin")).unwrap(),
+        std::fs::read(&store).unwrap()
+    );
+    assert_eq!(std::fs::read(out.join("stream.txt")).unwrap(), body);
 }

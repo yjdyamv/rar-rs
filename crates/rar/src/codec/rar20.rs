@@ -324,6 +324,43 @@ impl Rar20Decoder {
         Ok(out)
     }
 
+    /// Decode a member streaming its output to `writer` (bounded memory:
+    /// sliding window + one flush chunk). RAR 2.x has no VM-filter records,
+    /// so every byte can be flushed as it decodes.
+    pub(crate) fn decode_member_streaming_to(
+        &mut self,
+        packed: &[u8],
+        output_size: u64,
+        writer: &mut dyn std::io::Write,
+    ) -> RarResult<()> {
+        const FLUSH: usize = 1024 * 1024;
+        let output_size = usize::try_from(output_size).map_err(|_| RarError::LimitExceeded {
+            limit: u64::MAX,
+            context: "RAR 2.0 member is too large for this platform".into(),
+        })?;
+        let start = self.current_pos();
+        let target = start
+            .checked_add(output_size)
+            .ok_or_else(|| RarError::Format("RAR 2.0 output size overflows".into()))?;
+        if !packed.is_empty() {
+            self.bits = BitReader::new();
+        }
+        self.bits.append(packed);
+        let mut flushed = start;
+        while flushed < target {
+            let next = (flushed + FLUSH).min(target);
+            self.decode_until(next).map_err(map_err)?;
+            let pos = self.current_pos();
+            let chunk = self.raw_range(flushed, pos).map_err(map_err)?;
+            writer.write_all(chunk).map_err(RarError::Io)?;
+            flushed = pos;
+            self.trim_history(pos, pos);
+        }
+        self.read_last_tables().map_err(map_err)?;
+        self.trim_history(target, target);
+        Ok(())
+    }
+
     fn decode_until(&mut self, target: usize) -> Res<()> {
         while self.current_pos() < target {
             self.drain_pending_match(target)?;

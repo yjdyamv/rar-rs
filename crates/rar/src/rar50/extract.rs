@@ -1395,13 +1395,39 @@ impl RarArchive {
     }
 
     /// Decode a single RAR4 member, streaming output to `writer`, verifying
-    /// its CRC32 over the written bytes.
+    /// its CRC32 over the written bytes. Non-chain members stream through
+    /// the bounded-memory path (STORE chunks copied straight out; compressed
+    /// members decode incrementally); solid-chain members keep the shared
+    /// window semantics and decode in one pass.
     fn decode_rar4_to(&mut self, idx: usize, writer: &mut dyn Write) -> RarResult<u64> {
         let hdr = self.entries[idx].header.clone();
-        let out = self.rar4_decode_member(idx)?;
-        self.rar4_verify_crc(&hdr, &out)?;
-        writer.write_all(&out).map_err(RarError::Io)?;
-        Ok(out.len() as u64)
+        if self.is_rar4_solid_member(idx) {
+            let out = self.rar4_decode_solid_through(idx)?;
+            self.rar4_verify_crc(&hdr, &out)?;
+            writer.write_all(&out).map_err(RarError::Io)?;
+            return Ok(out.len() as u64);
+        }
+        let entry = self.entries[idx].clone();
+        let (written, crc) = crate::rar40::decode_member_bytes_to(
+            self.stream.as_mut().unwrap(),
+            &self.volume_paths,
+            &entry.chunks,
+            &entry.header,
+            self.password.as_deref(),
+            None,
+            writer,
+        )?;
+        // The streamed CRC is authoritative; compare with the header.
+        if let Some(expected) = hdr.crc32_val
+            && crc != expected
+        {
+            return Err(RarError::Crc {
+                expected,
+                actual: crc,
+                context: format!("{}: CRC32 mismatch", hdr.name),
+            });
+        }
+        Ok(written)
     }
 
     /// Decode RAR4 member `idx`, routing solid-chain members through the
