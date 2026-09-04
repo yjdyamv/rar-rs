@@ -576,10 +576,11 @@ impl RarArchive {
         Ok(())
     }
 
-    /// RAR4 STORE path: write a plain (unencrypted, uncompressed) member in
-    /// the legacy container. A single-volume member is one FILE_HEAD + raw
-    /// data; in a multi-volume set the member data is split at volume
-    /// boundaries, writing `FHD_SPLIT_AFTER` on every non-final head and
+    /// RAR4 STORE path: write a member in the legacy container — STORE or
+    /// LZSS-compressed (m1–m5), optionally AES-encrypted with the member
+    /// password. A single-volume member is one FILE_HEAD + data; in a
+    /// multi-volume set the member data is split at volume boundaries,
+    /// writing `FHD_SPLIT_AFTER` on every non-final head and
     /// `FHD_SPLIT_BEFORE` on every continuation head.
     fn add_file_rar4(&mut self, path: &Path, arcname: Option<&str>, level: u8) -> RarResult<()> {
         let meta = fs::metadata(path)?;
@@ -609,7 +610,7 @@ impl RarArchive {
         // not shrink the data, fall back to STORE.  `method` is the on-disk
         // byte (0x30 = store, 0x31–0x35 = m1–m5); `packed` is what the write
         // pipeline emits; `unpacked_size` is always the original size.
-        let (packed, method) = if (1..=5).contains(&level) {
+        let (mut packed, method) = if (1..=5).contains(&level) {
             use crate::codec::rar29_encoder::{Unpack29Encoder, options_for_level};
             let mut encoder = Unpack29Encoder::with_options(options_for_level(level));
             let compressed = encoder.encode_member(&data)?;
@@ -622,6 +623,26 @@ impl RarArchive {
             (data.clone(), crate::rar40::RAR4_METHOD_STORE)
         };
         let unpacked_size = file_size;
+
+        // Member-level encryption (WinRAR `-p`): every member gets its own
+        // 8-byte salt; the data is zero-padded to a 16-byte AES block and
+        // encrypted with the RAR30 AES-128-CBC cipher. `packed_size` then
+        // covers the padded ciphertext; the header CRC stays the plaintext
+        // CRC and is checked after decryption.
+        let mut salt = None;
+        if self.password.as_deref().is_some_and(|pw| !pw.is_empty()) {
+            let pw = self.password.as_deref().unwrap();
+            let mut s = [0u8; 8];
+            rand::fill(&mut s);
+            salt = Some(s);
+            let mut cipher = crate::crypto::Rar30Cipher::new(pw.as_bytes(), salt)
+                .map_err(|e| RarError::Format(format!("RAR4 member key setup: {e:?}")))?;
+            let pad = (16 - packed.len() % 16) % 16;
+            packed.resize(packed.len() + pad, 0);
+            cipher
+                .encrypt_in_place(&mut packed)
+                .map_err(|e| RarError::Format(format!("RAR4 member encrypt: {e:?}")))?;
+        }
         let packed_size = packed.len() as u64;
 
         let dos_time = crate::rar40::write::unix_to_dos_time(mtime);
@@ -641,17 +662,21 @@ impl RarArchive {
             packed_size: u32,
             unpacked_size: u32,
             data: &[u8],
+            salt: Option<[u8; 8]>,
             split_before: bool,
             split_after: bool,
         ) -> RarResult<(u64, u64)> {
             use crate::rar40::write::{FileHeaderParams, build_file_header};
-            use crate::rar40::{FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE};
+            use crate::rar40::{FHD_PASSWORD, FHD_SALT, FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE};
             let mut fhd = name_flags;
             if split_before {
                 fhd |= FHD_SPLIT_BEFORE;
             }
             if split_after {
                 fhd |= FHD_SPLIT_AFTER;
+            }
+            if salt.is_some() {
+                fhd |= FHD_PASSWORD | FHD_SALT;
             }
             let params = FileHeaderParams {
                 flags: fhd,
@@ -664,7 +689,7 @@ impl RarArchive {
                 method,
                 name: encoded_name,
                 attr: 0x20, // archive bit: regular file
-                salt: None,
+                salt,
                 ext_time: None,
                 window_bits: 6, // 4 MiB dictionary
             };
@@ -690,6 +715,7 @@ impl RarArchive {
                     packed_size as u32,
                     unpacked_size as u32,
                     &packed,
+                    salt,
                     false,
                     false,
                 )?;
@@ -705,6 +731,12 @@ impl RarArchive {
                         format_version: 4,
                         unp_ver: 29,
                         data_offset,
+                        flags: if salt.is_some() {
+                            crate::rar40::FHD_PASSWORD as u64
+                        } else {
+                            0
+                        },
+                        salt,
                         ..Default::default()
                     },
                     chunks: vec![crate::rar50::headers::DataChunk {
@@ -760,6 +792,7 @@ impl RarArchive {
                         chunk_size as u32,
                         unpacked_size as u32,
                         segment,
+                        salt,
                         split_before,
                         split_after,
                     )?;
@@ -786,6 +819,12 @@ impl RarArchive {
                         format_version: 4,
                         unp_ver: 29,
                         data_offset: 0,
+                        flags: if salt.is_some() {
+                            crate::rar40::FHD_PASSWORD as u64
+                        } else {
+                            0
+                        },
+                        salt,
                         ..Default::default()
                     },
                     chunks,

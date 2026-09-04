@@ -2530,3 +2530,58 @@ fn we_create_rar4_directory_trees_winrar_valid() {
         );
     }
 }
+
+/// We create a RAR4 archive with member-level encryption (`-ma4 -p`) and
+/// WinRAR's UnRAR must decrypt it: `t` and `x` with the password succeed and
+/// reproduce the source bytes, while a wrong or missing password fails.
+#[test]
+fn we_create_rar4_encrypted_members_winrar_valid() {
+    let dir = temp_dir();
+    let src = dir.path().join("secret.bin");
+    let mut content = Vec::with_capacity(200_000);
+    let mut seed = 12345u32;
+    while content.len() < 200_000 {
+        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+        content.push((seed >> 16) as u8);
+    }
+    std::fs::write(&src, &content).unwrap();
+
+    let arc = dir.path().join("enc.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-psecret", "-m3", "-idq"])
+        .arg(&arc)
+        .arg("secret.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 -p failed:\n{out}");
+
+    // Our own reader decrypts with the password and rejects the wrong one.
+    {
+        let mut ar = RarArchive::open_with_password(&arc, "secret").unwrap();
+        assert_eq!(ar.read("secret.bin").unwrap(), content);
+        let mut ar = RarArchive::open_with_password(&arc, "wrong").unwrap();
+        assert!(ar.read("secret.bin").is_err(), "wrong password must fail");
+    }
+
+    // WinRAR's UnRAR must decrypt byte-identically.
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["t", "-idq", "-psecret"])
+            .arg(&arc));
+        assert!(ok, "UnRAR t -psecret failed:\n{out}");
+        let (ok, _) = run(Command::new(&unrar).args(["t", "-idq"]).arg(&arc));
+        assert!(!ok, "UnRAR t without password must fail");
+
+        let out_dir = dir.path().join("out_unrar");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y", "-psecret"])
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x -psecret failed:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("secret.bin")),
+            file_sha256(&src),
+            "WinRAR decrypted different bytes"
+        );
+    }
+}

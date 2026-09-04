@@ -451,3 +451,99 @@ fn create_rar4_directory_multivolume() {
     assert_eq!(archive.read("src/small.txt").unwrap(), b"small");
     assert!(archive.get_entry("src/emptydir").unwrap().is_dir());
 }
+
+/// Member-level encryption (`-p`): every member carries FHD_PASSWORD plus an
+/// 8-byte salt, and the payload is AES-128-CBC ciphertext. Round-trips
+/// through our own reader with the password; a wrong/missing password fails.
+#[test]
+fn create_rar4_encrypted_members_roundtrip() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("secret.txt");
+    let mut content = Vec::with_capacity(4096);
+    for i in 0..300 {
+        content.extend_from_slice(format!("secret line {i:04} ...\n").as_bytes());
+    }
+    std::fs::write(&src, &content).unwrap();
+    let arc = dir.path().join("enc.rar");
+
+    let opts = CreateOptions {
+        format_version: ArchiveVersion::Rar40,
+        password: Some("hunter2".to_string()),
+        ..Default::default()
+    };
+    let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
+    archive.add(&src, 3).expect("add encrypted member");
+    archive.close().expect("close");
+
+    // Raw bytes: FHD_PASSWORD (0x04) and FHD_SALT (0x0400) flags set, an
+    // 8-byte salt present, and no plaintext in the payload.
+    let raw = std::fs::read(&arc).unwrap();
+    let members = scan_rar4_members(&raw);
+    assert_eq!(members.len(), 1);
+    let (name, flags, packed, _unpacked, _attr) = &members[0];
+    assert_eq!(name, "secret.txt");
+    assert_ne!(flags & 0x04, 0, "must set FHD_PASSWORD");
+    assert_ne!(flags & 0x0400, 0, "must set FHD_SALT");
+    assert!(packed % 16 == 0, "encrypted payload must be block aligned");
+    assert!(
+        raw.windows(content.len()).all(|w| w != content),
+        "payload must not contain the plaintext"
+    );
+
+    // Read back with the password.
+    let mut archive = RarArchive::open_with_password(&arc, "hunter2").expect("reopen");
+    assert_eq!(
+        archive.read("secret.txt").expect("read").as_slice(),
+        &content[..]
+    );
+
+    // Wrong / missing password fails.
+    let mut archive = RarArchive::open_with_password(&arc, "wrong").expect("reopen");
+    assert!(
+        archive.read("secret.txt").is_err(),
+        "wrong password must fail"
+    );
+    let mut archive = RarArchive::open(&arc).expect("reopen-no-pw");
+    assert!(archive.read("secret.txt").is_err(), "no password must fail");
+}
+
+/// Encrypted members split across volumes still decrypt: the per-member salt
+/// lives in every FILE_HEAD, and the concatenated ciphertext is decrypted as
+/// one stream (the RAR30 scheme has no per-volume IV).
+#[test]
+fn create_rar4_encrypted_multivolume() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("big.bin");
+    let mut content = Vec::with_capacity(60_000);
+    let mut seed = 0x9E3779B9u32;
+    while content.len() < 60_000 {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        content.push((seed >> 24) as u8);
+    }
+    std::fs::write(&src, &content).unwrap();
+    let arc = dir.path().join("encvol.rar");
+
+    let mut archive = RarArchive::create_with_options(
+        &arc,
+        CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            password: Some("volpw".to_string()),
+            volume_size: Some(4_000),
+            ..Default::default()
+        },
+    )
+    .expect("create");
+    archive.add(&src, 0).expect("add encrypted split member"); // STORE: keeps size predictable
+    archive.close().expect("close");
+
+    let volumes = discover_volumes(&arc);
+    assert!(
+        volumes.len() >= 2,
+        "expected multiple volumes, got {volumes:?}"
+    );
+    let mut archive = RarArchive::open_with_password(&arc, "volpw").expect("reopen");
+    assert_eq!(
+        archive.read("big.bin").expect("read").as_slice(),
+        &content[..]
+    );
+}
