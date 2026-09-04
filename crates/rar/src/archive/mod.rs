@@ -840,9 +840,12 @@ impl RarArchive {
                     "BLAKE2sp hashes are not supported for RAR4 archives".into(),
                 ));
             }
-            if opts.recovery_percent.is_some() {
+            // Inline recovery records are now supported on single-volume
+            // RAR4 archives too (the NEWSUB 0x7a form WinRAR writes); the
+            // multi-volume rejection below still applies, matching WinRAR.
+            if opts.recovery_percent.is_some() && opts.volume_size.is_some() {
                 return Err(RarError::Unsupported(
-                    "recovery records are not supported for RAR4 archives".into(),
+                    "recovery records are not supported for multi-volume archives".into(),
                 ));
             }
             if opts.recovery_volumes_percent.is_some() || opts.recovery_volume_count.is_some() {

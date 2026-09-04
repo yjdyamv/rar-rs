@@ -366,6 +366,9 @@ pub fn normalize_switch(arg: &str) -> String {
         };
     }
     if let Some(rest) = arg.strip_prefix("-rr") {
+        // WinRAR: `-rr` alone means 10%, `-rrN` / `-rrN%` a percentage.
+        let rest = rest.strip_suffix('%').unwrap_or(rest);
+        let rest = if rest.is_empty() { "10" } else { rest };
         return format!("--recovery-percent={rest}");
     }
     if let Some(rest) = arg.strip_prefix("-rv") {

@@ -2227,8 +2227,8 @@ fn cli_ma4_creates_rar4_archive() {
 }
 
 /// RAR5-only creation switches are rejected when combined with `-ma4`, since
-/// the RAR4 container cannot express them. `-hp` is now supported on RAR4
-/// too, so it is verified positively instead.
+/// the RAR4 container cannot express them. `-hp` and `-rr` are now supported
+/// on RAR4 too, so they are verified positively instead.
 #[test]
 fn cli_ma4_rejects_rar5_only_switches() {
     let dir = make_temp_dir();
@@ -2236,19 +2236,19 @@ fn cli_ma4_rejects_rar5_only_switches() {
     std::fs::write(&f, b"payload").unwrap();
     let arc = dir.path().join("ma4x.rar");
 
-    for sw in ["-rr10%"] {
-        let status = std::process::Command::new(RAR_CLI)
-            .args(["a", "-ma4", sw])
-            .arg(&arc)
-            .arg("f.txt")
-            .current_dir(dir.path())
-            .status()
-            .unwrap();
-        assert!(
-            !status.success(),
-            "-ma4 combined with {sw} must be rejected"
-        );
-    }
+    // Multi-volume + recovery record stays rejected for RAR4 (WinRAR
+    // forbids inline recovery records on volume sets there too).
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-rr10%", "--volume-size=100k"])
+        .arg(&arc)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(
+        !status.success(),
+        "-ma4 -rr10% with volumes must be rejected"
+    );
 
     // `-hp` header encryption is supported on RAR4; the CLI must accept it.
     let arc2 = dir.path().join("ma4hp.rar");
@@ -2266,5 +2266,26 @@ fn cli_ma4_rejects_rar5_only_switches() {
     );
 
     let mut rar = rar5::RarArchive::open_with_password(&arc2, "secret").unwrap();
+    assert_eq!(rar.read("f.txt").unwrap(), b"payload");
+
+    // `-rr10%` inline recovery record is supported on single-volume RAR4:
+    // the archive must carry a NEWSUB (0x7a) `RR` block before ENDARC.
+    let arc3 = dir.path().join("ma4rr.rar");
+    let ok = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-rr10%", "-m0", "-idq"])
+        .arg(&arc3)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "-ma4 -rr10% must be accepted (recovery record on RAR4)");
+    let raw = std::fs::read(&arc3).unwrap();
+    let has_newsub_rr = raw.windows(10).any(|w| w == b"RRProtect+");
+    assert!(
+        has_newsub_rr,
+        "-ma4 -rr10% archive must carry a NEWSUB RR block"
+    );
+    let mut rar = rar5::RarArchive::open(&arc3).unwrap();
     assert_eq!(rar.read("f.txt").unwrap(), b"payload");
 }

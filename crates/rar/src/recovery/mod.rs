@@ -2,6 +2,12 @@
 
 mod legacy;
 pub use legacy::repair_legacy_archive_path;
+
+/// Write-side legacy recovery-block helpers (crate-internal; the RAR4
+/// creation path calls these from `archive/create.rs`).
+pub(crate) mod legacy_rr {
+    pub(crate) use super::legacy::{build_legacy_recovery_block, recovery_sector_count};
+}
 pub mod rar50;
 pub mod rev50;
 

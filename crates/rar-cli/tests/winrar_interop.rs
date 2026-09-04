@@ -47,6 +47,23 @@ fn rar_bin() -> Option<PathBuf> {
     bin.exists().then_some(bin)
 }
 
+/// The WinRAR 6.23 console writer from the project's tool cache — the last
+/// release whose `Rar.exe` can both create (`-ma4`) and REPAIR RAR4
+/// archives. The default-install 7.23 reads RAR4 but neither writes it nor
+/// repairs its recovery records, so RAR4 write/repair interop must drive
+/// 6.23 explicitly. `None` skips those tests (e.g. on CI without the cache).
+fn rar4_623_bin() -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "Rar.exe" } else { "rar" };
+    [
+        "../../.cache/winrar/6-23",
+        "../.cache/winrar/6-23",
+        ".cache/winrar/6-23",
+    ]
+    .iter()
+    .map(|dir| Path::new(env!("CARGO_MANIFEST_DIR")).join(dir).join(exe))
+    .find(|bin| bin.exists())
+}
+
 fn unrar_bin() -> Option<PathBuf> {
     let dir = winrar_dir()?;
     let exe = if cfg!(windows) { "UnRAR.exe" } else { "unrar" };
@@ -2714,6 +2731,115 @@ fn we_create_rar4_ppmd_text_winrar_valid() {
             file_sha256(&out_dir.join("textmix.txt")),
             file_sha256(&src),
             "WinRAR decoded different bytes from our PPMd member"
+        );
+    }
+}
+
+/// RAR4 inline recovery records (`-ma4 -rr`) interoperate both ways with
+/// WinRAR 6.23 (the last RAR4 writer): WinRAR's `rar r` repairs damage
+/// from OUR NEWSUB (0x7a) record byte-identically, and OUR repair path
+/// rebuilds a damaged WinRAR-made RAR4 RR archive.
+#[test]
+fn rar4_recovery_record_interops_with_winrar() {
+    let dir = temp_dir();
+    // Pseudo-random payload (NOT the periodic pattern: WinRAR 6.23's RAR4
+    // repair mis-rebuilds periodic data whether the record is its own or
+    // ours, so a byte-identical repair check needs aperiodic bytes).
+    let src = dir.path().join("rr4.bin");
+    let mut content = Vec::with_capacity(500 * 1024);
+    let mut seed = 41u32;
+    while content.len() < 500 * 1024 {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        content.push((seed >> 24) as u8);
+    }
+    std::fs::write(&src, &content).unwrap();
+
+    // A stored RAR4 member's payload starts right after the file header,
+    // which sits after the 7-byte signature + 13-byte main header. The
+    // file header's own head_size field (offset +5 within it) tells where.
+    fn payload_offset(raw: &[u8]) -> usize {
+        let fh = 7 + 13;
+        assert_eq!(&raw[..7], b"Rar!\x1a\x07\x00");
+        let hsize = u16::from_le_bytes([raw[fh + 5], raw[fh + 6]]) as usize;
+        fh + hsize
+    }
+
+    // Ours -> WinRAR: create with -ma4 -rr10%, damage a payload sector, and
+    // both OUR repair and WinRAR's `rar r` rebuild it.
+    let arc = dir.path().join("our_rr4.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m0", "-rr10%", "-idq"])
+        .arg(&arc)
+        .arg("rr4.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 -rr10% failed:\n{out}");
+
+    // Our own repair round-trip: damage -> fix -> byte-identical.
+    let mut damaged = std::fs::read(&arc).unwrap();
+    let start = payload_offset(&damaged);
+    damaged[start + 8000..start + 8000 + 128].fill(0x5a);
+    let damaged_path = dir.path().join("our_rr4_damaged.rar");
+    std::fs::write(&damaged_path, &damaged).unwrap();
+    let fixed_path = dir.path().join("our_rr4_fixed.rar");
+    let repaired =
+        rar5::repair_legacy_archive_path(&damaged_path, &fixed_path).expect("our repair");
+    assert!(repaired, "our repair must find and fix the damage");
+    assert_eq!(
+        std::fs::read(&fixed_path).unwrap(),
+        std::fs::read(&arc).unwrap(),
+        "our repair must restore the archive byte-identically"
+    );
+
+    // WinRAR repairs the same damage from our recovery record (6.23 only:
+    // 7.23 cannot repair RAR4 recovery records).
+    if let Some(rar) = rar4_623_bin() {
+        let (ok, out) = run(Command::new(&rar)
+            .args(["r", "-y", "-idq"])
+            .arg("our_rr4_damaged.rar")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR r failed on our RAR4 RR archive:\n{out}");
+        let win_fixed = dir.path().join("fixed.our_rr4_damaged.rar");
+        assert!(
+            win_fixed.exists(),
+            "WinRAR must write fixed.our_rr4_damaged.rar"
+        );
+        let out_dir = dir.path().join("win_rr4_out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar_bin().unwrap())
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(&win_fixed)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x of the WinRAR-fixed archive failed:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("rr4.bin")),
+            file_sha256(&src),
+            "WinRAR rebuilt different bytes from our RAR4 RR record"
+        );
+    }
+
+    // WinRAR -> ours: WinRAR 6.23 creates the record, we repair damage.
+    if let Some(rar) = rar4_623_bin() {
+        let warc = dir.path().join("win_rr4.rar");
+        let (ok, out) = run(Command::new(&rar)
+            .args(["a", "-ma4", "-m0", "-rr10%", "-idq"])
+            .arg(&warc)
+            .arg("rr4.bin")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR -ma4 -rr10% failed:\n{out}");
+        let mut wdamaged = std::fs::read(&warc).unwrap();
+        let wstart = payload_offset(&wdamaged);
+        wdamaged[wstart + 12345..wstart + 12345 + 96].fill(0xa5);
+        let wdamaged_path = dir.path().join("win_rr4_damaged.rar");
+        std::fs::write(&wdamaged_path, &wdamaged).unwrap();
+        let wfixed_path = dir.path().join("win_rr4_fixed.rar");
+        let repaired =
+            rar5::repair_legacy_archive_path(&wdamaged_path, &wfixed_path).expect("our repair");
+        assert!(repaired, "our repair must fix the WinRAR RAR4 RR archive");
+        let mut ar = RarArchive::open(&wfixed_path).unwrap();
+        assert_eq!(
+            ar.read("rr4.bin").unwrap(),
+            std::fs::read(&src).unwrap(),
+            "we repaired WinRAR's RAR4 RR archive to different bytes"
         );
     }
 }

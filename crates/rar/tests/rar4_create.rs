@@ -859,3 +859,57 @@ fn create_rar4_solid_extension_reset() {
         );
     }
 }
+
+/// RAR4 recovery record on periodic (short-cycle) data: OUR repair path
+/// rebuilds a damaged sector byte-identically. WinRAR 6.23/7.23 cannot do
+/// this — its RAR4 `rar r` corrupts the tail when the record's own
+/// protected partial sector overlaps the record on periodic data (see
+/// PLAN.md "已知小差异") — so this locks in the robustness edge.
+#[test]
+fn create_rar4_recovery_record_repairs_periodic_damage() {
+    let dir = make_temp_dir();
+    // 64-byte periodic pattern, 600 KiB — the exact shape that trips
+    // WinRAR's RAR4 repair.
+    let pat: Vec<u8> = (0..64u8)
+        .map(|i| i.wrapping_mul(7).wrapping_add(41))
+        .collect();
+    let mut content = Vec::with_capacity(600 * 1024);
+    while content.len() < 600 * 1024 {
+        content.extend_from_slice(&pat);
+    }
+    let src = dir.path().join("periodic.bin");
+    std::fs::write(&src, &content).unwrap();
+    let arc = dir.path().join("periodic_rr.rar");
+
+    let opts = CreateOptions {
+        format_version: ArchiveVersion::Rar40,
+        recovery_percent: Some(10),
+        ..Default::default()
+    };
+    let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
+    archive.add(&src, 0).expect("add"); // STORE: keeps the sector grid stable
+    archive.close().expect("close");
+
+    // A short 64-byte damage fully inside one protected payload sector.
+    let mut damaged = std::fs::read(&arc).unwrap();
+    let fh = 7 + 13;
+    let hsize = u16::from_le_bytes([damaged[fh + 5], damaged[fh + 6]]) as usize;
+    let payload = fh + hsize;
+    let at = payload + 40_000;
+    damaged[at..at + 64].fill(0x5a);
+
+    let damaged_path = dir.path().join("periodic_damaged.rar");
+    std::fs::write(&damaged_path, &damaged).unwrap();
+    let fixed_path = dir.path().join("periodic_fixed.rar");
+    let repaired = rar5::repair_legacy_archive_path(&damaged_path, &fixed_path).expect("repair");
+    assert!(repaired, "periodic damage must be repairable by us");
+    assert_eq!(
+        std::fs::read(&fixed_path).unwrap(),
+        std::fs::read(&arc).unwrap(),
+        "our repair must restore the periodic-data archive byte-identically"
+    );
+
+    // And the restored archive reads back fine.
+    let mut archive = RarArchive::open(&fixed_path).expect("reopen fixed");
+    assert_eq!(archive.read("periodic.bin").unwrap(), content);
+}

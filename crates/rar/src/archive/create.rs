@@ -731,6 +731,12 @@ impl RarArchive {
             // matching `scan_volume`).
             flags |= crate::rar40::MHD_PASSWORD;
         }
+        if self.recovery_percent.is_some() {
+            // MHD_RECOVERY: the archive carries a recovery record (the
+            // NEWSUB `RR` block written at close). WinRAR's repair looks
+            // for this bit before scanning for the record.
+            flags |= 0x0040;
+        }
         let buf = crate::rar40::write::build_main_header(flags);
         let stream = self.stream.as_mut().unwrap();
         stream.write_all(&buf)?;
@@ -739,8 +745,50 @@ impl RarArchive {
 
     fn finish_writing_rar4(&mut self) -> RarResult<()> {
         if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
+            // `-rr`: the legacy NEWSUB (0x7a) recovery record goes between
+            // the last member and the end-of-archive block (single-volume
+            // only, matching WinRAR's RAR4 writer).
+            if let Some(percent) = self.recovery_percent {
+                self.write_rar4_recovery_block(percent)?;
+            }
             self.write_rar4_end_block()?;
             self.mode = Mode::Read;
+        }
+        Ok(())
+    }
+
+    /// Build and append the RAR 3.x/4.x NEWSUB recovery block protecting
+    /// everything written so far. Reads the prefix back through the staged
+    /// file (the write stream is positioned at its end); the sector grid is
+    /// anchored at the archive start, so the recovery block itself is the
+    /// only thing left outside the protected range.
+    fn write_rar4_recovery_block(&mut self, percent: u8) -> RarResult<()> {
+        let path = self.write_file_path().to_path_buf();
+        let prefix_len = {
+            let stream = self.stream.as_mut().unwrap();
+            stream.stream_position()? as usize
+        };
+        let mut prefix = vec![0u8; prefix_len];
+        {
+            let mut reader = std::fs::File::open(&path)?;
+            std::io::Read::read_exact(&mut reader, &mut prefix)?;
+        }
+        let rec_sectors = crate::recovery::legacy_rr::recovery_sector_count(prefix_len, percent);
+        let block = crate::recovery::legacy_rr::build_legacy_recovery_block(&prefix, rec_sectors)?;
+        let stream = self.stream.as_mut().unwrap();
+        if self.header_encryption {
+            // `-hp`: the recovery block is header-encrypted like every other
+            // block after the main header.
+            let password = self.password.as_deref().ok_or_else(|| {
+                RarError::Encrypted("header encryption requires a password".into())
+            })?;
+            let (ciphertext, on_disk) =
+                crate::rar40::write::encrypt_block_header(&block, password)?;
+            stream.write_all(&ciphertext)?;
+            self.write_ctx_mut().volume_bytes_written += on_disk;
+        } else {
+            stream.write_all(&block)?;
+            self.write_ctx_mut().volume_bytes_written += block.len() as u64;
         }
         Ok(())
     }
