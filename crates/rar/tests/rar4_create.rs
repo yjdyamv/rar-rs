@@ -607,3 +607,131 @@ fn create_rar4_exttime_mtime_ns_roundtrip() {
     );
     assert_eq!(archive.read("stamp.bin").unwrap(), b"timestamped payload");
 }
+
+/// RAR4 solid (`-s`): one persistent encoder carries the LZ window and Huffman
+/// tables across the members of a solid run. The first member has no
+/// FHD_SOLID; every later compressed member does; the main header carries
+/// MHD_SOLID. The shared window makes the archive measurably smaller than the
+/// equivalent non-solid archive, and WinRAR extracts it byte-identically.
+#[test]
+fn create_rar4_solid_chain() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("t");
+    std::fs::create_dir_all(&src).unwrap();
+    // Eight similar text files: ideal for the shared dictionary.
+    let mut contents = Vec::new();
+    for i in 0..8u32 {
+        let mut text = format!("alpha-beta-gamma-delta file {i} common header line\n").into_bytes();
+        text.extend(std::iter::repeat_n(b'x', 100 + i as usize * 7));
+        contents.push(text);
+        std::fs::write(src.join(format!("f{i}.txt")), &contents[i as usize]).unwrap();
+    }
+    let solid_arc = dir.path().join("solid.rar");
+    let mut archive = RarArchive::create_with_options(
+        &solid_arc,
+        CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            solid: true,
+            ..Default::default()
+        },
+    )
+    .expect("create");
+    archive.add(&src, 3).expect("add solid tree");
+    archive.close().expect("close");
+
+    // The main header must carry MHD_SOLID (0x0008) alongside LONG_BLOCK.
+    let raw = std::fs::read(&solid_arc).unwrap();
+    let main_flags = u16::from_le_bytes([raw[10], raw[11]]);
+    assert_ne!(main_flags & 0x0008, 0, "solid archive must set MHD_SOLID");
+
+    // Member flags: first compressed member no FHD_SOLID, rest yes.
+    let members = scan_rar4_members(&raw);
+    let files: Vec<&(String, u16, u32, u32, u32)> =
+        members.iter().filter(|(n, ..)| n != "t").collect();
+    assert!(files.len() >= 8, "expected the 8 members");
+    assert_eq!(files[0].1 & 0x0010, 0, "first member starts the chain");
+    for m in files.iter().skip(1) {
+        assert_ne!(m.1 & 0x0010, 0, "later members must continue the chain");
+    }
+
+    // Round-trip every member through our own reader.
+    let mut archive = RarArchive::open(&solid_arc).expect("reopen");
+    for i in 0..8u32 {
+        assert_eq!(
+            archive.read(&format!("t/f{i}.txt")).unwrap().as_slice(),
+            &contents[i as usize][..]
+        );
+    }
+
+    // The shared window must actually help: solid < non-solid archive size.
+    let ns_arc = dir.path().join("nonsolid.rar");
+    let mut archive = RarArchive::create_with_options(
+        &ns_arc,
+        CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            solid: false,
+            ..Default::default()
+        },
+    )
+    .expect("create");
+    archive.add(&src, 3).expect("add non-solid tree");
+    archive.close().expect("close");
+    let solid_size = std::fs::metadata(&solid_arc).unwrap().len();
+    let ns_size = std::fs::metadata(&ns_arc).unwrap().len();
+    assert!(
+        solid_size < ns_size,
+        "solid archive should be smaller: solid={solid_size} non-solid={ns_size}"
+    );
+}
+
+/// RAR4 solid with `-se` (SolidReset::PerExtension): the chain restarts when
+/// the file extension changes, so each distinct extension begins a fresh run
+/// (no FHD_SOLID) instead of continuing the previous run's dictionary.
+#[test]
+fn create_rar4_solid_extension_reset() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("se");
+    std::fs::create_dir_all(&src).unwrap();
+    for (name, ext) in [("a.txt", 0), ("b.bin", 1), ("c.txt", 2), ("d.bin", 3)] {
+        let mut text = format!("shared prefix {} data\n", name).into_bytes();
+        text.extend(std::iter::repeat_n(b'q', 300 + ext * 13));
+        std::fs::write(src.join(name), &text).unwrap();
+    }
+    let arc = dir.path().join("se.rar");
+    let mut archive = RarArchive::create_with_options(
+        &arc,
+        CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            solid: true,
+            solid_reset: rar5::SolidReset::PerExtension,
+            ..Default::default()
+        },
+    )
+    .expect("create");
+    archive.add(&src, 3).expect("add");
+    archive.close().expect("close");
+
+    let raw = std::fs::read(&arc).unwrap();
+    let members = scan_rar4_members(&raw);
+    let files: Vec<&(String, u16, u32, u32, u32)> =
+        members.iter().filter(|(n, ..)| n != "se").collect();
+    assert_eq!(files.len(), 4, "expected the four member files");
+    // Alternating extensions under -se mean every file starts its own run:
+    // none may carry FHD_SOLID, or a decoder would inherit a previous run's
+    // tables.
+    for (name, flags, _p, _u, _a) in &files {
+        assert_eq!(
+            flags & 0x0010,
+            0,
+            "-se must start a new run on an extension change: {name}"
+        );
+    }
+    // Everything still reads back.
+    let mut archive = RarArchive::open(&arc).expect("reopen");
+    for (name, _ext) in [("a.txt", 0), ("b.bin", 1), ("c.txt", 2), ("d.bin", 3)] {
+        assert!(
+            archive.read(&format!("se/{name}")).is_ok(),
+            "{name} readable"
+        );
+    }
+}

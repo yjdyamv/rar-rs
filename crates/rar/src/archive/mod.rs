@@ -121,6 +121,12 @@ pub(crate) struct WriteState {
     pub last_solid_ext: Option<String>,
     /// Persistent RAR5 encoder state for solid archives.
     pub encoder_state: Option<crate::codec::EncoderState>,
+    /// Persistent RAR4 LZSS encoder for solid archives; the sliding window
+    /// and Huffman table state carry across the members of a solid run.
+    pub rar4_solid_encoder: Option<crate::codec::rar29_encoder::Unpack29Encoder>,
+    /// True once the current RAR4 solid run has emitted a member, so the next
+    /// compressed member is flagged as a chain continuation (`FHD_SOLID`).
+    pub rar4_solid_run_has_member: bool,
     /// Per-archive compression thread count (`-mt`); `None` = process-global
     /// default. The compression pool is selected per thread count, so
     /// concurrent archives with different values never interfere.
@@ -181,6 +187,8 @@ impl Default for WriteState {
             solid_reset: crate::options::SolidReset::Continuous,
             last_solid_ext: None,
             encoder_state: None,
+            rar4_solid_encoder: None,
+            rar4_solid_run_has_member: false,
             compression_threads: None,
             dict_size_log: None,
             dict_size_bytes: None,
@@ -912,6 +920,8 @@ impl RarArchive {
                 solid_reset: opts.solid_reset,
                 last_solid_ext: None,
                 encoder_state: None,
+                rar4_solid_encoder: None,
+                rar4_solid_run_has_member: false,
                 compression_threads: opts.threads,
                 dict_size_log: opts.dict_size_log,
                 dict_size_bytes: opts.dict_size_bytes,

@@ -610,10 +610,25 @@ impl RarArchive {
         // not shrink the data, fall back to STORE.  `method` is the on-disk
         // byte (0x30 = store, 0x31–0x35 = m1–m5); `packed` is what the write
         // pipeline emits; `unpacked_size` is always the original size.
+        if self.write_ctx().solid_mode {
+            self.maybe_reset_solid_for_extension(&name);
+        }
         let (mut packed, method) = if (1..=5).contains(&level) {
             use crate::codec::rar29_encoder::{Unpack29Encoder, options_for_level};
-            let mut encoder = Unpack29Encoder::with_options(options_for_level(level));
-            let compressed = encoder.encode_member(&data)?;
+            let options = options_for_level(level);
+            let compressed = if self.write_ctx().solid_mode {
+                // Solid: reuse the persistent encoder so its sliding window
+                // and Huffman table state carry across the members of the
+                // run (this is what makes a real -ms archive compress better
+                // than independent members).
+                let encoder = self
+                    .write_ctx_mut()
+                    .rar4_solid_encoder
+                    .get_or_insert_with(|| Unpack29Encoder::with_options(options));
+                encoder.encode_member(&data)?
+            } else {
+                Unpack29Encoder::with_options(options).encode_member(&data)?
+            };
             if compressed.len() < data.len() {
                 (compressed, crate::rar40::RAR4_METHOD_STORE + level)
             } else {
@@ -623,6 +638,22 @@ impl RarArchive {
             (data.clone(), crate::rar40::RAR4_METHOD_STORE)
         };
         let unpacked_size = file_size;
+
+        // Solid-chain bookkeeping (mirrors rars' `solid_run_has_member`
+        // logic): a member is a chain continuation when it compresses and the
+        // run has already emitted a member; storing a member rebuilds the
+        // encoder and ends the run. The reader keeps its window/tables across
+        // members flagged `FHD_SOLID`, so the flags and the encoder must stay
+        // in lockstep.
+        let solid_continuation = self.write_ctx().solid_mode
+            && method != crate::rar40::RAR4_METHOD_STORE
+            && self.write_ctx().rar4_solid_run_has_member;
+        if method == crate::rar40::RAR4_METHOD_STORE {
+            self.write_ctx_mut().rar4_solid_encoder = None;
+            self.write_ctx_mut().rar4_solid_run_has_member = false;
+        } else if unpacked_size != 0 {
+            self.write_ctx_mut().rar4_solid_run_has_member = true;
+        }
 
         let mtime_ns = meta
             .modified()
@@ -672,12 +703,13 @@ impl RarArchive {
             data: &[u8],
             salt: Option<[u8; 8]>,
             ext_time: Option<&[u8]>,
+            solid_continuation: bool,
             split_before: bool,
             split_after: bool,
         ) -> RarResult<(u64, u64)> {
             use crate::rar40::write::{FileHeaderParams, build_file_header};
             use crate::rar40::{
-                FHD_EXTTIME, FHD_PASSWORD, FHD_SALT, FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE,
+                FHD_EXTTIME, FHD_PASSWORD, FHD_SALT, FHD_SOLID, FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE,
             };
             let mut fhd = name_flags;
             if split_before {
@@ -691,6 +723,9 @@ impl RarArchive {
             }
             if ext_time.is_some() {
                 fhd |= FHD_EXTTIME;
+            }
+            if solid_continuation {
+                fhd |= FHD_SOLID;
             }
             let params = FileHeaderParams {
                 flags: fhd,
@@ -731,6 +766,7 @@ impl RarArchive {
                     &packed,
                     salt,
                     ext_time.as_deref(),
+                    solid_continuation,
                     false,
                     false,
                 )?;
@@ -811,6 +847,7 @@ impl RarArchive {
                         segment,
                         salt,
                         ext_time.as_deref(),
+                        solid_continuation,
                         split_before,
                         split_after,
                     )?;
@@ -2184,6 +2221,8 @@ impl RarArchive {
     /// files, or when compression fell back to STORE).
     fn reset_solid_chain(&mut self) {
         self.write_ctx_mut().encoder_state = None;
+        self.write_ctx_mut().rar4_solid_encoder = None;
+        self.write_ctx_mut().rar4_solid_run_has_member = false;
         self.write_ctx_mut().last_solid_ext = None;
     }
 
@@ -2204,6 +2243,8 @@ impl RarArchive {
             Some(prev) if prev == ext => {}
             _ => {
                 self.write_ctx_mut().encoder_state = None;
+                self.write_ctx_mut().rar4_solid_encoder = None;
+                self.write_ctx_mut().rar4_solid_run_has_member = false;
                 self.write_ctx_mut().last_solid_ext = Some(ext.to_string());
             }
         }
