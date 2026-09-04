@@ -1391,6 +1391,11 @@ impl RarArchive {
             if !self.rar4 && !self.write_ctx().solid_mode && !entries.is_empty() {
                 return self.add_batch_parallel(entries);
             }
+            // RAR4: independent non-solid file members compress in parallel
+            // waves too (solid runs stay sequential - shared window).
+            if self.rar4 && !self.write_ctx().solid_mode && !entries.is_empty() {
+                return self.add_batch_parallel_rar4(entries);
+            }
         }
         self.progress_set_batch_total(entries)?;
         for (i, entry) in entries.iter().enumerate() {
@@ -2983,6 +2988,431 @@ impl RarArchive {
         #[cfg(not(windows))]
         {
             let _ = path;
+        }
+        Ok(())
+    }
+}
+// ═══════════════════════════════════════════════════════════════════════════
+//  RAR4 parallel batch compression (feature `parallel`): independent
+//  non-solid members are compressed on the pool, then emitted in archive
+//  order on the writing thread. Byte-identical to the sequential path
+//  (each member uses a fresh engine, exactly like add_file_rar4 non-solid).
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "parallel")]
+pub(crate) struct Rar4PreparedMember {
+    pub name: String,
+    pub mtime: u32,
+    pub mtime_ns: u32,
+    pub file_size: u64,
+    pub file_crc: u32,
+    pub packed: Vec<u8>,
+    pub method: u8,
+}
+
+/// Compress one RAR4 file member (non-solid, independent engine state)
+/// without touching the archive stream: read + CRC + the smallest of
+/// LZ / PPMd (m4+) / auto-filter candidates / STORE. Runs on the pool;
+/// emission happens later on the writing thread.
+#[cfg(feature = "parallel")]
+pub(crate) fn prepare_rar4_file_member(
+    path: &Path,
+    name: &str,
+    level: u8,
+) -> RarResult<Rar4PreparedMember> {
+    use crate::codec::rar29_encoder::{Rar29FilterKind, Unpack29Encoder, options_for_level};
+    let meta = fs::metadata(path)?;
+    let file_size = meta.len();
+    let mtime = meta
+        .modified()
+        .unwrap_or(SystemTime::now())
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as u32;
+    let mtime_ns = meta
+        .modified()
+        .unwrap_or(SystemTime::now())
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let mut reader = File::open(path)?;
+    let mut data = Vec::with_capacity(file_size as usize);
+    std::io::Read::read_to_end(&mut reader, &mut data)?;
+    let file_crc = crate::crc32::crc32(&data);
+
+    let (packed, method) = if (1..=5).contains(&level) {
+        let options = options_for_level(level);
+        let lz = Unpack29Encoder::with_options(options).encode_member(&data)?;
+        let mut best_len = lz.len();
+        let mut best: (Vec<u8>, u8) = (lz, crate::rar40::RAR4_METHOD_STORE + level);
+
+        if !data.is_empty() {
+            let candidates = {
+                let mut list: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> = Vec::new();
+                let e8e9 = crate::codec::filters::auto_x86_filter_ranges(&data, true);
+                if !e8e9.is_empty() {
+                    list.push((Rar29FilterKind::E8E9, e8e9));
+                }
+                let e8 = crate::codec::filters::auto_x86_filter_ranges(&data, false);
+                if !e8.is_empty() {
+                    list.push((Rar29FilterKind::E8, e8));
+                }
+                if let Some(channels) = crate::codec::filters::auto_delta_filter_channels(&data) {
+                    list.push((
+                        Rar29FilterKind::Delta {
+                            channels: channels as usize,
+                        },
+                        std::iter::once(0..data.len()).collect(),
+                    ));
+                }
+                if let Some(channels) = crate::codec::filters::auto_audio_filter_channels(&data) {
+                    list.push((
+                        Rar29FilterKind::Audio { channels },
+                        std::iter::once(0..data.len()).collect(),
+                    ));
+                }
+                list
+            };
+            for (kind, ranges) in candidates {
+                let Ok(candidate) = Unpack29Encoder::with_options(options)
+                    .encode_member_with_filter_ranges(&data, kind, &ranges)
+                else {
+                    continue;
+                };
+                if candidate.len() < best_len {
+                    best_len = candidate.len();
+                    best = (candidate, crate::rar40::RAR4_METHOD_STORE + level);
+                }
+            }
+        }
+        if level >= 4
+            && !data.is_empty()
+            && let Ok(ppmd) = Unpack29Encoder::with_options(options).encode_ppmd_member(&data)
+            && ppmd.len() < best_len
+        {
+            best_len = ppmd.len();
+            best = (ppmd, crate::rar40::RAR4_METHOD_STORE + level);
+        }
+        if best_len < data.len() {
+            best
+        } else {
+            (data.clone(), crate::rar40::RAR4_METHOD_STORE)
+        }
+    } else {
+        (data, crate::rar40::RAR4_METHOD_STORE)
+    };
+    Ok(Rar4PreparedMember {
+        name: name.to_string(),
+        mtime,
+        mtime_ns,
+        file_size,
+        file_crc,
+        packed,
+        method,
+    })
+}
+
+#[cfg(feature = "parallel")]
+impl RarArchive {
+    /// Emit a compressed RAR4 member prepared on a worker thread: member
+    /// encryption, header + payload (single or multi-volume split), entry
+    /// bookkeeping and progress. Mirrors `add_file_rar4`'s emission half
+    /// for non-solid members (no FHD_SOLID continuation).
+    fn emit_rar4_prepared(&mut self, prepared: Rar4PreparedMember) -> RarResult<()> {
+        let Rar4PreparedMember {
+            name,
+            mtime,
+            mtime_ns,
+            file_size,
+            file_crc,
+            mut packed,
+            method,
+        } = prepared;
+        let ext_time = crate::rar40::write::build_ext_time(Some(mtime_ns));
+
+        let mut salt = None;
+        if self.password.as_deref().is_some_and(|pw| !pw.is_empty()) {
+            let pw = self.password.as_deref().unwrap();
+            let mut s = [0u8; 8];
+            rand::fill(&mut s);
+            salt = Some(s);
+            let mut cipher = crate::crypto::Rar30Cipher::new(pw.as_bytes(), salt)
+                .map_err(|e| RarError::Format(format!("RAR4 member key setup: {e:?}")))?;
+            let pad = (16 - packed.len() % 16) % 16;
+            packed.resize(packed.len() + pad, 0);
+            cipher
+                .encrypt_in_place(&mut packed)
+                .map_err(|e| RarError::Format(format!("RAR4 member encrypt: {e:?}")))?;
+        }
+        let packed_size = packed.len() as u64;
+        let unpacked_size = file_size;
+
+        let dos_time = crate::rar40::write::unix_to_dos_time(mtime);
+        let (encoded_name, name_flags) = crate::rar40::write::encode_file_name(&name);
+
+        #[allow(clippy::too_many_arguments)]
+        fn emit_segment(
+            this: &mut RarArchive,
+            encoded_name: &[u8],
+            name_flags: u16,
+            file_crc: u32,
+            dos_time: u32,
+            method: u8,
+            packed_size: u32,
+            unpacked_size: u32,
+            data: &[u8],
+            salt: Option<[u8; 8]>,
+            ext_time: Option<&[u8]>,
+            split_before: bool,
+            split_after: bool,
+        ) -> RarResult<(u64, u64)> {
+            use crate::rar40::write::{FileHeaderParams, build_file_header};
+            use crate::rar40::{
+                FHD_EXTTIME, FHD_PASSWORD, FHD_SALT, FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE,
+            };
+            let mut fhd = name_flags;
+            if split_before {
+                fhd |= FHD_SPLIT_BEFORE;
+            }
+            if split_after {
+                fhd |= FHD_SPLIT_AFTER;
+            }
+            if salt.is_some() {
+                fhd |= FHD_PASSWORD | FHD_SALT;
+            }
+            if ext_time.is_some() {
+                fhd |= FHD_EXTTIME;
+            }
+            let params = FileHeaderParams {
+                flags: fhd,
+                packed_size,
+                unpacked_size,
+                host_os: 0,
+                file_crc,
+                file_time: dos_time,
+                unp_ver: 29,
+                method,
+                name: encoded_name,
+                attr: 0x20,
+                salt,
+                ext_time,
+                window_bits: 6,
+            };
+            let hdr = build_file_header(&params)?;
+            let stream = this.stream.as_mut().unwrap();
+            let (header_bytes, header_on_disk) = if this.header_encryption {
+                let password = this.password.as_deref().ok_or_else(|| {
+                    RarError::Encrypted("header encryption requires a password".into())
+                })?;
+                crate::rar40::write::encrypt_block_header(&hdr, password)?
+            } else {
+                (hdr.clone(), hdr.len() as u64)
+            };
+            let data_offset = stream.stream_position()? + header_on_disk;
+            stream.write_all(&header_bytes)?;
+            stream.write_all(data)?;
+            this.write_ctx_mut().volume_bytes_written += header_on_disk + data.len() as u64;
+            Ok((data_offset, data.len() as u64))
+        }
+
+        match self.write_ctx().volume_size {
+            None => {
+                let (data_offset, _) = emit_segment(
+                    self,
+                    &encoded_name,
+                    name_flags,
+                    file_crc,
+                    dos_time,
+                    method,
+                    packed_size as u32,
+                    unpacked_size as u32,
+                    &packed,
+                    salt,
+                    ext_time.as_deref(),
+                    false,
+                    false,
+                )?;
+                self.entries.push(crate::archive::ArchiveEntry {
+                    header: crate::rar50::headers::FileHeader {
+                        name,
+                        unpacked_size,
+                        packed_size,
+                        crc32_val: Some(file_crc),
+                        mtime,
+                        mtime_ns: Some(mtime_ns),
+                        comp_method: method.wrapping_sub(crate::rar40::RAR4_METHOD_STORE),
+                        host_os: 0,
+                        format_version: 4,
+                        unp_ver: 29,
+                        data_offset,
+                        flags: if salt.is_some() {
+                            crate::rar40::FHD_PASSWORD as u64
+                        } else {
+                            0
+                        },
+                        salt,
+                        extra_data: ext_time.unwrap_or_default(),
+                        ..Default::default()
+                    },
+                    chunks: vec![crate::rar50::headers::DataChunk {
+                        volume_index: 0,
+                        data_offset,
+                        packed_size,
+                        crc32_val: Some(file_crc),
+                        is_final: true,
+                        extra_data: Vec::new(),
+                    }],
+                });
+                self.report_progress(file_size, file_size);
+                Ok(())
+            }
+            Some(volume_size) => {
+                let mut chunks = Vec::<crate::rar50::headers::DataChunk>::new();
+                let mut sent = 0u64;
+                let mut vol_index = self.write_ctx().current_volume - 1;
+                let mut split_before = false;
+                while sent < packed_size {
+                    loop {
+                        let used = self.write_ctx().volume_bytes_written;
+                        if volume_size.saturating_sub(used) > 7 {
+                            break;
+                        }
+                        self.start_next_volume()?;
+                        vol_index = self.write_ctx().current_volume - 1;
+                    }
+                    let used = self.write_ctx().volume_bytes_written;
+                    let available = volume_size - used - 7;
+                    let chunk_size = (packed_size - sent).min(available);
+                    let split_after = sent + chunk_size < packed_size;
+                    let segment = &packed[sent as usize..(sent + chunk_size) as usize];
+                    let head_crc = if split_after {
+                        crate::crc32::crc32(segment)
+                    } else {
+                        file_crc
+                    };
+                    let (data_offset, _) = emit_segment(
+                        self,
+                        &encoded_name,
+                        name_flags,
+                        head_crc,
+                        dos_time,
+                        method,
+                        chunk_size as u32,
+                        unpacked_size as u32,
+                        segment,
+                        salt,
+                        ext_time.as_deref(),
+                        split_before,
+                        split_after,
+                    )?;
+                    chunks.push(crate::rar50::headers::DataChunk {
+                        volume_index: vol_index,
+                        data_offset,
+                        packed_size: chunk_size,
+                        crc32_val: Some(head_crc),
+                        is_final: !split_after,
+                        extra_data: Vec::new(),
+                    });
+                    sent += chunk_size;
+                    split_before = true;
+                }
+                self.entries.push(crate::archive::ArchiveEntry {
+                    header: crate::rar50::headers::FileHeader {
+                        name,
+                        unpacked_size,
+                        packed_size,
+                        crc32_val: Some(file_crc),
+                        mtime,
+                        comp_method: method.wrapping_sub(crate::rar40::RAR4_METHOD_STORE),
+                        host_os: 0,
+                        format_version: 4,
+                        unp_ver: 29,
+                        data_offset: 0,
+                        flags: if salt.is_some() {
+                            crate::rar40::FHD_PASSWORD as u64
+                        } else {
+                            0
+                        },
+                        salt,
+                        extra_data: ext_time.unwrap_or_default(),
+                        ..Default::default()
+                    },
+                    chunks,
+                });
+                self.report_progress(file_size, file_size);
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl RarArchive {
+    /// Parallel RAR4 batch: waves of independent non-solid file members are
+    /// compressed on the pool and emitted in archive order (byte-identical
+    /// to the sequential path). Solid runs, directories and oversized
+    /// members fall back to the sequential path at their original position.
+    fn add_batch_parallel_rar4(&mut self, entries: &[BatchEntry<'_>]) -> RarResult<()> {
+        use rayon::prelude::*;
+        self.progress_set_batch_total(entries)?;
+        let mut i = 0usize;
+        while i < entries.len() {
+            self.check_cancel()?;
+            let mut wave: Vec<(usize, BatchEntry<'_>)> = Vec::new();
+            let mut wave_bytes = 0u64;
+            while i < entries.len() {
+                let size = match entries[i] {
+                    BatchEntry::File { path, .. } => fs::metadata(path)
+                        .ok()
+                        .filter(|m| m.len() <= PARALLEL_COMPRESS_MAX_MEMBER)
+                        .map(|m| m.len()),
+                    _ => None,
+                };
+                let Some(size) = size else { break };
+                if wave_bytes + size > PARALLEL_COMPRESS_WAVE_BUDGET && !wave.is_empty() {
+                    break;
+                }
+                wave_bytes += size;
+                wave.push((i, entries[i]));
+                i += 1;
+            }
+            if !wave.is_empty() {
+                let threads = self.effective_threads();
+                let pool = crate::parallel::compression_pool_for(threads);
+                let prepared: Vec<RarResult<(usize, Rar4PreparedMember)>> = pool.install(|| {
+                    wave.par_iter()
+                        .map(|&(idx, entry)| {
+                            let BatchEntry::File { path, name, level } = entry else {
+                                unreachable!("wave holds only file members")
+                            };
+                            let name = match name {
+                                Some(name) => name.to_string(),
+                                None => path
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .into_owned(),
+                            };
+                            prepare_rar4_file_member(path, &name, level).map(|p| (idx, p))
+                        })
+                        .collect()
+                });
+                self.check_cancel()?;
+                let mut ordered = Vec::with_capacity(prepared.len());
+                for result in prepared {
+                    ordered.push(result?);
+                }
+                ordered.sort_by_key(|(idx, _)| *idx);
+                for (idx, member) in ordered {
+                    self.progress_member = idx;
+                    self.emit_rar4_prepared(member)?;
+                }
+            }
+            if i < entries.len() {
+                self.progress_member = i;
+                self.add_batch_entry_sequential(&entries[i])?;
+                i += 1;
+            }
         }
         Ok(())
     }

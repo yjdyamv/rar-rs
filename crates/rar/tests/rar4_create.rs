@@ -1116,3 +1116,91 @@ fn create_rar4_large_members_stream_on_extract() {
     );
     assert_eq!(std::fs::read(out.join("stream.txt")).unwrap(), body);
 }
+
+/// RAR4 multi-file batch creation (parallel waves when the `parallel`
+/// feature is on) must be byte-identical to adding the same files one by
+/// one in order: each member is compressed with an independent engine, so
+/// ordering is the only shared state.
+#[test]
+fn rar4_batch_matches_sequential_bytes() {
+    let dir = make_temp_dir();
+    let mut paths = Vec::new();
+    for i in 0..5u8 {
+        let p = dir.path().join(format!("m{i}.txt"));
+        let mut body = Vec::new();
+        for j in 0..4000u32 {
+            body.extend_from_slice(
+                format!("member {i} line {j:05}: batch text with repeated words words words\n")
+                    .as_bytes(),
+            );
+        }
+        std::fs::write(&p, &body).unwrap();
+        paths.push((p, body));
+    }
+    // One non-text member to exercise the filter/PPMd candidate paths.
+    let bin = dir.path().join("snd.bin");
+    let mut body = Vec::with_capacity(300_000);
+    let mut l = 0i16;
+    let mut r = 0i16;
+    let mut seed = 7u32;
+    while body.len() < 260_000 {
+        l = l.wrapping_add(((seed >> 16) & 0x3f) as i16 - 30);
+        r = r.wrapping_add(((seed >> 8) & 0x3f) as i16 - 20);
+        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+        body.extend_from_slice(&l.to_le_bytes());
+        body.extend_from_slice(&r.to_le_bytes());
+    }
+    std::fs::write(&bin, &body).unwrap();
+
+    let mk = |name: &str| -> std::path::PathBuf {
+        let arc = dir.path().join(name);
+        let opts = CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            ..Default::default()
+        };
+        let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
+        archive.add(&bin, 3).expect("audio member");
+        for (p, _) in &paths {
+            archive.add(p, 5).expect("text member");
+        }
+        archive.close().expect("close");
+        arc
+    };
+    let seq_arc = mk("seq.rar");
+
+    // Batch: same members, same order, via add_batch.
+    let bat_arc = dir.path().join("batch.rar");
+    {
+        let opts = CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            ..Default::default()
+        };
+        let mut archive = RarArchive::create_with_options(&bat_arc, opts).expect("create");
+        let mut entries: Vec<rar5::BatchEntry<'_>> = Vec::new();
+        entries.push(rar5::BatchEntry::File {
+            path: &bin,
+            name: None,
+            level: 3,
+        });
+        for (p, _) in &paths {
+            entries.push(rar5::BatchEntry::File {
+                path: p,
+                name: None,
+                level: 5,
+            });
+        }
+        archive.add_batch(&entries).expect("add_batch");
+        archive.close().expect("close");
+    }
+    let seq = std::fs::read(&seq_arc).unwrap();
+    let bat = std::fs::read(&bat_arc).unwrap();
+    assert_eq!(
+        seq.len(),
+        bat.len(),
+        "batch and sequential archives must be the same size"
+    );
+    assert_eq!(
+        seq, bat,
+        "batch (parallel-capable) must be byte-identical to sequential"
+    );
+}
