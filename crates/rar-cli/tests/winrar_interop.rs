@@ -2637,3 +2637,83 @@ fn we_create_rar4_header_encrypted_winrar_valid() {
         );
     }
 }
+
+/// We create a RAR4 m5 archive on word-random text and WinRAR's UnRAR must
+/// decode the PPMd blocks: modern WinRAR (5.x/6.x) no longer *produces*
+/// RAR4 PPMd, but its RAR3 decoder still reads it, so this is the one-way
+/// interop check that our PPMd member encoding is real RAR3 PPMd. The m5
+/// member must also be markedly smaller than the m3 LZ-only member on the
+/// same text (the PPMd pass wins on context-rich data).
+#[test]
+fn we_create_rar4_ppmd_text_winrar_valid() {
+    let dir = temp_dir();
+    let words = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+        "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+    ];
+    let mut content = Vec::with_capacity(500_000);
+    let mut seed = 12345u32;
+    let mut n = 0u32;
+    while content.len() < 450_000 {
+        let mut line = format!("record {n:06}: ").into_bytes();
+        for _ in 0..10 {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            line.extend_from_slice(words[(seed >> 27) as usize % words.len()].as_bytes());
+            line.push(b' ');
+        }
+        line.push(b'\n');
+        content.extend_from_slice(&line);
+        n += 1;
+    }
+    let src = dir.path().join("textmix.txt");
+    std::fs::write(&src, &content).unwrap();
+
+    let lz_arc = dir.path().join("lz3.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m3", "-idq"])
+        .arg(&lz_arc)
+        .arg("textmix.txt")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 -m3 failed:\n{out}");
+
+    let arc = dir.path().join("ppmd5.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m5", "-idq"])
+        .arg(&arc)
+        .arg("textmix.txt")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 -m5 failed:\n{out}");
+
+    let lz_size = std::fs::metadata(&lz_arc).unwrap().len();
+    let m5_size = std::fs::metadata(&arc).unwrap().len();
+    assert!(
+        m5_size * 3 < lz_size * 2,
+        "m5 PPMd must beat m3 LZSS on text: LZ={lz_size} m5={m5_size}"
+    );
+
+    // Our own reader round-trips the PPMd member.
+    {
+        let mut ar = RarArchive::open(&arc).unwrap();
+        assert_eq!(ar.list()[0].method(), 5);
+        assert_eq!(ar.read("textmix.txt").unwrap(), content);
+    }
+
+    // WinRAR's UnRAR decodes the PPMd blocks byte-identically.
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar).args(["t", "-idq"]).arg(&arc));
+        assert!(ok, "UnRAR t rejected our PPMd archive:\n{out}");
+
+        let out_dir = dir.path().join("out_ppmd");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x failed on our PPMd archive:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("textmix.txt")),
+            file_sha256(&src),
+            "WinRAR decoded different bytes from our PPMd member"
+        );
+    }
+}

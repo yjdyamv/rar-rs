@@ -6,12 +6,17 @@
 //! block sequences (不含 FILE_HEAD，只含压缩数据流).  The write pipeline
 //! (`rar40/write.rs`) handles headers, encryption, and multi-volume splitting.
 //!
-//! Phase 1: LZSS only (m1–m5).  PPMd and VM-filter integration are Phase 2.
+//! Phase 1: LZSS only (m1–m5).  Phase 2 adds PPMd member encoding (m4/m5):
+//! a whole member is one PPMd block whose model either starts fresh
+//! (order-8, 25 MiB suballocator) or continues a solid chain's, with LZ
+//! matches escaped into the model where the tokeniser prices them cheaper
+//! than literals.  VM-filter integration is still out of scope.
 
 use crate::codec::bitstream::BitWriter;
 use crate::codec::huffman::EncodeTable;
 use crate::codec::lzss_huff::DIST_CACHE_SIZE;
 use crate::codec::match_finder::MatchFinder;
+use crate::codec::ppmd::PpmdEncoder;
 use crate::error::{RarError, RarResult};
 
 // ── Table geometry ─────────────────────────────────────────────────────────
@@ -35,6 +40,35 @@ const MAX_MATCH_CANDIDATES: usize = 256;
 /// Default LZ block size for table splitting (64 KiB, benchmarked optimal in
 /// rars).
 pub(crate) const RAR29_LZ_BLOCK_SIZE: usize = 64 * 1024;
+
+// ── PPMd member encoding (m4/m5) ───────────────────────────────────────────
+
+/// Order-8 PPMd, 25 MiB suballocator, escape char 2 — the values rars and
+/// WinRAR use for RAR3/4 PPMd members. The wire header byte is
+/// `0x80 | 0x20 | (order-1)` for a fresh model and `0x80 | (order-1)` when a
+/// solid chain continues an existing one; a fresh block appends
+/// `(dictionary_mb - 1)` after the header byte.
+const PPMD_ORDER: usize = 8;
+const PPMD_DICTIONARY_MB: u8 = 25;
+const PPMD_ESC: u8 = 2;
+
+/// A PPMd escape match can only carry lengths 32..=287 (one byte past the
+/// escape-4 symbol); shorter repeats use the offset-one form (4..=259).
+const MAX_PPMD_MATCH_LENGTH: usize = 255;
+const MIN_PPMD_MATCH_LENGTH: usize = 32;
+const MAX_PPMD_REPEAT_LENGTH: usize = 259;
+
+// Seeds and EMA weights for the escape-token cost model in
+// `encode_ppmd_hybrid` (ported from rars): the tokeniser prices an escape
+// token against the literals it would replace using the range coder's
+// measured bit cost of each kind of token.
+const PPMD_LITERAL_BITS_SEED: f64 = 4.0;
+const PPMD_MATCH_BITS_SEED: f64 = 60.0;
+const PPMD_REPEAT_BITS_SEED: f64 = 24.0;
+const PPMD_LITERAL_EMA_WEIGHT: f64 = 1.0 / 32.0;
+const PPMD_TOKEN_EMA_WEIGHT: f64 = 1.0 / 8.0;
+const PPMD_CONTEXT_BREAK_BITS: f64 = 16.0;
+const PPMD_REJECT_SEARCH_COOLDOWN: usize = 8;
 
 // ── Shared lookup tables (identical to the decoder) ───────────────────────
 
@@ -922,6 +956,158 @@ fn encode_member_blocks(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  PPMd member encoding (m4/m5) — Phase 2
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn ppmd_err(e: crate::codec::ppmd::Error) -> RarError {
+    RarError::Format(format!("RAR 2.9 PPMd encode: {e}"))
+}
+
+/// One way of pricing an escape token: `length * literal_bits` is what the
+/// model would charge to code those bytes as literals, so an escape pays
+/// when that exceeds the measured cost of the token plus the context-break
+/// overhead. The slots are EMA-smoothed against the range coder's real
+/// per-token bit cost as the member is coded (ported from rars).
+struct PpmdTokenCosts {
+    literal_bits: f64,
+    match_bits: f64,
+    repeat_bits: f64,
+}
+
+impl PpmdTokenCosts {
+    fn new() -> Self {
+        Self {
+            literal_bits: PPMD_LITERAL_BITS_SEED,
+            match_bits: PPMD_MATCH_BITS_SEED,
+            repeat_bits: PPMD_REPEAT_BITS_SEED,
+        }
+    }
+
+    fn match_pays(&self, length: usize) -> bool {
+        length as f64 * self.literal_bits > self.match_bits + PPMD_CONTEXT_BREAK_BITS
+    }
+
+    fn repeat_pays(&self, length: usize) -> bool {
+        length as f64 * self.literal_bits > self.repeat_bits + PPMD_CONTEXT_BREAK_BITS
+    }
+
+    fn record_literal(&mut self, bits: f64) {
+        ema(&mut self.literal_bits, bits, PPMD_LITERAL_EMA_WEIGHT);
+    }
+
+    fn record_match(&mut self, bits: f64) {
+        ema(&mut self.match_bits, bits, PPMD_TOKEN_EMA_WEIGHT);
+    }
+
+    fn record_repeat(&mut self, bits: f64) {
+        ema(&mut self.repeat_bits, bits, PPMD_TOKEN_EMA_WEIGHT);
+    }
+}
+
+fn ema(slot: &mut f64, sample: f64, weight: f64) {
+    *slot += weight * (sample - *slot);
+}
+
+/// Length of an offset-one run (`input[pos] == input[pos-1]` repeated),
+/// 4..=259, or `None`.
+fn ppmd_offset_one_repeat(input: &[u8], pos: usize) -> Option<usize> {
+    if pos == 0 || input[pos] != input[pos - 1] {
+        return None;
+    }
+    let mut length = 0usize;
+    while pos + length < input.len()
+        && input[pos + length] == input[pos - 1]
+        && length < MAX_PPMD_REPEAT_LENGTH
+    {
+        length += 1;
+    }
+    (length >= 4).then_some(length)
+}
+
+/// Feed the member through PPMd, escaping to an LZ token only where the
+/// tokeniser prices it cheaper than letting the model code the same bytes
+/// as literals (ported from rars `encode_ppmd_hybrid`). Tokenising and
+/// encoding are one loop so each decision can read the cost of the last one
+/// straight off the range coder.
+///
+/// The match finder covers only the member itself (a PPMd block's escape
+/// matches are intra-member); the model carries the cross-member context.
+fn encode_ppmd_hybrid(input: &[u8], encoder: &mut PpmdEncoder) -> RarResult<()> {
+    let mut costs = PpmdTokenCosts::new();
+    let mut finder = MatchFinder::new(
+        input,
+        MIN_PPMD_MATCH_LENGTH,
+        MAX_PPMD_MATCH_LENGTH,
+        MAX_MATCH_CANDIDATES,
+        MAX_ENCODER_MATCH_OFFSET,
+    );
+    let mut pos = 0usize;
+    let mut search_from = 0usize;
+    while pos < input.len() {
+        if let Some(length) = ppmd_offset_one_repeat(input, pos)
+            && costs.repeat_pays(length)
+        {
+            let before = encoder.spent_bits();
+            encoder.encode_repeat_offset_one(length).map_err(ppmd_err)?;
+            costs.record_repeat(encoder.spent_bits() - before);
+            for history_pos in pos..pos + length {
+                finder.insert(history_pos);
+            }
+            pos += length;
+            continue;
+        }
+
+        if pos >= search_from {
+            // find_match inserts `pos` itself before searching.
+            let (offset, length) = finder.find_match(pos);
+            if length >= MIN_PPMD_MATCH_LENGTH && offset >= 2 && costs.match_pays(length) {
+                let before = encoder.spent_bits();
+                encoder.encode_match(offset, length).map_err(ppmd_err)?;
+                costs.record_match(encoder.spent_bits() - before);
+                for history_pos in pos + 1..pos + length {
+                    finder.insert(history_pos);
+                }
+                pos += length;
+                continue;
+            }
+            // Rejected match: `pos` was already inserted; back off the
+            // search for a few positions and code literals.
+            search_from = pos + PPMD_REJECT_SEARCH_COOLDOWN;
+        } else {
+            finder.insert(pos);
+        }
+
+        let before = encoder.spent_bits();
+        encoder.encode_literal(input[pos]).map_err(ppmd_err)?;
+        costs.record_literal(encoder.spent_bits() - before);
+        pos += 1;
+    }
+    Ok(())
+}
+
+/// Code one member as a single fresh-model PPMd block (order-8, 25 MiB
+/// suballocator), optionally escaping LZ matches into the model.
+/// Returns the wire bytes: `[0x80|0x20|order-1][dict_mb-1]` + range-coded
+/// payload. The model is not retained (solid-chain continuation of a PPMd
+/// model is a later phase; solid RAR4 members stay LZ-only, which matches
+/// what WinRAR 6.23 itself produces).
+pub(crate) fn encode_ppmd_member_packed(input: &[u8], lz_escapes: bool) -> RarResult<Vec<u8>> {
+    let mut out = vec![0x80 | 0x20 | (PPMD_ORDER as u8 - 1), PPMD_DICTIONARY_MB - 1];
+    let mut encoder =
+        PpmdEncoder::new(PPMD_ORDER, PPMD_ESC, PPMD_DICTIONARY_MB as usize).map_err(ppmd_err)?;
+    if lz_escapes {
+        encode_ppmd_hybrid(input, &mut encoder)?;
+    } else {
+        for &byte in input {
+            encoder.encode_literal(byte).map_err(ppmd_err)?;
+        }
+    }
+    let (packed, _model) = encoder.finish_keeping_model().map_err(ppmd_err)?;
+    out.extend_from_slice(&packed);
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Unpack29Encoder — public API
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -972,6 +1158,21 @@ impl Unpack29Encoder {
         Ok(packed)
     }
 
+    /// Code one member as a PPMd block (m4/m5 text path). Always starts a
+    /// fresh model; the caller decides when PPMd is worth trying and keeps
+    /// this encoder out of solid runs (see `encode_ppmd_member_packed`).
+    pub fn encode_ppmd_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
+        encode_ppmd_member_packed(input, true)
+    }
+
+    /// PPMd with LZ escapes disabled (pure literals) — used by the caller
+    /// when the member is small enough that the tokeniser overhead is not
+    /// worth it, and by tests.
+    #[allow(dead_code)] // exercised via `encode_ppmd_member_packed` in tests
+    pub fn encode_ppmd_literals_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
+        encode_ppmd_member_packed(input, false)
+    }
+
     fn remember(&mut self, input: &[u8]) {
         self.history.extend_from_slice(input);
         let keep_from = self.history.len().saturating_sub(MAX_HISTORY);
@@ -988,6 +1189,82 @@ impl Unpack29Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_text() -> Vec<u8> {
+        // Repetitive prose with enough variation to exercise escapes and
+        // literals; a good PPMd candidate.
+        let mut out = Vec::with_capacity(220_000);
+        let sentences = [
+            "The quick brown fox jumps over the lazy dog. ",
+            "Pack my box with five dozen liquor jugs. ",
+            "How vexingly quick daft zebras jump! ",
+            "Sphinx of black quartz, judge my vow. ",
+        ];
+        let mut n = 0u32;
+        while out.len() < 200_000 {
+            out.extend_from_slice(
+                format!("paragraph {n:05}: {}\n", sentences[(n % 4) as usize]).as_bytes(),
+            );
+            n += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn ppmd_roundtrip_text_hybrid() {
+        let input = sample_text();
+        let packed = encode_ppmd_member_packed(&input, true).unwrap();
+        assert!(
+            packed.len() < input.len() / 4,
+            "PPMd hybrid should compress repetitive text hard: {} -> {}",
+            input.len(),
+            packed.len()
+        );
+        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let out = decoder
+            .decode_member(&packed, input.len() as u64)
+            .unwrap_or_else(|e| panic!("PPMd hybrid decode: {e:?}"));
+        assert_eq!(out, input, "PPMd hybrid roundtrip mismatch");
+    }
+
+    #[test]
+    fn ppmd_roundtrip_text_literals() {
+        let input = sample_text();
+        let packed = encode_ppmd_member_packed(&input, false).unwrap();
+        assert!(
+            packed.len() < input.len() / 4,
+            "PPMd literals should compress repetitive text hard: {} -> {}",
+            input.len(),
+            packed.len()
+        );
+        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let out = decoder.decode_member(&packed, input.len() as u64).unwrap();
+        assert_eq!(out, input, "PPMd literals roundtrip mismatch");
+    }
+
+    #[test]
+    fn ppmd_roundtrip_binary_and_empty() {
+        // Structured binary with runs and repeats (still PPMd-friendly).
+        let mut input = Vec::new();
+        for i in 0..4000u16 {
+            input.extend_from_slice(&i.to_le_bytes());
+            input.extend_from_slice(&i.to_le_bytes());
+            if i % 7 == 0 {
+                input.extend_from_slice(&[0u8; 64]);
+            }
+        }
+        let packed = encode_ppmd_member_packed(&input, true).unwrap();
+        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        assert_eq!(
+            decoder.decode_member(&packed, input.len() as u64).unwrap(),
+            input
+        );
+
+        // Empty member: header + end-of-block only; decodes to nothing.
+        let packed = encode_ppmd_member_packed(&[], true).unwrap();
+        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        assert_eq!(decoder.decode_member(&packed, 0).unwrap(), Vec::<u8>::new());
+    }
 
     #[test]
     fn roundtrip_literals_only() {

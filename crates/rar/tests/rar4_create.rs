@@ -147,6 +147,62 @@ fn create_rar4_compressed_roundtrip_all_levels() {
     }
 }
 
+/// m4/m5 PPMd: on word-random text (weak distance matches, strong context
+/// model) the PPMd pass must win over the LZSS pass, so the level-5 member
+/// is markedly smaller than the level-3 LZ-only member, and still round-
+/// trips byte-identically through the RAR4 reader.
+#[test]
+fn create_rar4_ppmd_wins_on_text_m5() {
+    let dir = make_temp_dir();
+    let words = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+        "juliet", "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo",
+    ];
+    let mut content = Vec::with_capacity(420_000);
+    let mut seed = 0x9E3779B9u32;
+    let mut n = 0u32;
+    while content.len() < 400_000 {
+        let mut line = format!("record {n:06}: ").into_bytes();
+        for _ in 0..10 {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            line.extend_from_slice(words[(seed >> 27) as usize % words.len()].as_bytes());
+            line.push(b' ');
+        }
+        line.push(b'\n');
+        content.extend_from_slice(&line);
+        n += 1;
+    }
+    let src = dir.path().join("textmix.txt");
+    std::fs::write(&src, &content).unwrap();
+
+    // Level 3 never tries PPMd; level 5 does.
+    let make = |level: u8, name: &str| -> u64 {
+        let arc = dir.path().join(name);
+        let opts = CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            ..Default::default()
+        };
+        let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
+        archive.add(&src, level).expect("add");
+        archive.close().expect("close");
+        std::fs::metadata(&arc).unwrap().len()
+    };
+    let lz_size = make(3, "ppmd_lz.rar");
+    let m5_size = make(5, "ppmd_m5.rar");
+
+    assert!(
+        m5_size * 3 < lz_size * 2,
+        "m5 PPMd must beat LZSS on text: LZ={lz_size} m5={m5_size}"
+    );
+
+    let mut archive = RarArchive::open(&dir.path().join("ppmd_m5.rar")).expect("reopen");
+    assert_eq!(archive.list()[0].method(), 5);
+    assert_eq!(
+        archive.read("textmix.txt").expect("read").as_slice(),
+        &content[..]
+    );
+}
+
 #[test]
 fn create_rar4_compressed_store_fallback_random() {
     let dir = make_temp_dir();

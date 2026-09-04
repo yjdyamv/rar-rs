@@ -607,8 +607,12 @@ impl RarArchive {
         let file_crc = crate::crc32::crc32(&data);
 
         // Compress with the RAR29 LZSS encoder (m1–m5).  If compressing does
-        // not shrink the data, fall back to STORE.  `method` is the on-disk
-        // byte (0x30 = store, 0x31–0x35 = m1–m5); `packed` is what the write
+        // not shrink the data, fall back to STORE.  On m4/m5 (non-solid,
+        // non-empty members) a PPMd pass is tried too and the smallest of
+        // LZ / PPMd / STORE wins; PPMd is where RAR4's text-level ratio
+        // advantage over LZ comes from, matching the pre-6.x WinRARs that
+        // could still produce PPMd blocks.  `method` is the on-disk byte
+        // (0x30 = store, 0x31–0x35 = m1–m5); `packed` is what the write
         // pipeline emits; `unpacked_size` is always the original size.
         if self.write_ctx().solid_mode {
             self.maybe_reset_solid_for_extension(&name);
@@ -616,11 +620,13 @@ impl RarArchive {
         let (mut packed, method) = if (1..=5).contains(&level) {
             use crate::codec::rar29_encoder::{Unpack29Encoder, options_for_level};
             let options = options_for_level(level);
-            let compressed = if self.write_ctx().solid_mode {
+            let lz = if self.write_ctx().solid_mode {
                 // Solid: reuse the persistent encoder so its sliding window
                 // and Huffman table state carry across the members of the
                 // run (this is what makes a real -ms archive compress better
-                // than independent members).
+                // than independent members). PPMd stays out of solid runs
+                // (a continuing model is a later phase); solid RAR4 members
+                // are LZ-only, which is also all WinRAR 6.23 produces.
                 let encoder = self
                     .write_ctx_mut()
                     .rar4_solid_encoder
@@ -629,8 +635,19 @@ impl RarArchive {
             } else {
                 Unpack29Encoder::with_options(options).encode_member(&data)?
             };
-            if compressed.len() < data.len() {
-                (compressed, crate::rar40::RAR4_METHOD_STORE + level)
+            let mut best_len = lz.len();
+            let mut best: (Vec<u8>, u8) = (lz, crate::rar40::RAR4_METHOD_STORE + level);
+            if level >= 4
+                && !self.write_ctx().solid_mode
+                && !data.is_empty()
+                && let Ok(ppmd) = Unpack29Encoder::with_options(options).encode_ppmd_member(&data)
+                && ppmd.len() < best_len
+            {
+                best_len = ppmd.len();
+                best = (ppmd, crate::rar40::RAR4_METHOD_STORE + level);
+            }
+            if best_len < data.len() {
+                best
             } else {
                 (data.clone(), crate::rar40::RAR4_METHOD_STORE)
             }
