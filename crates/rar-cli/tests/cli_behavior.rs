@@ -6,6 +6,18 @@
 use rar5::RarArchive;
 use std::io::Write;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+
+/// Serializes tests that (a) write `rarfiles.lst` next to the rar binary
+/// (`cli_rarfiles_lst_orders_solid_members`) with (b) tests whose member
+/// order would be corrupted if a stray `rarfiles.lst` were present
+/// (`cli_se_preserves_input_order`, and the `-s` round-trip test). Without
+/// it the parallel test threads race on `target/debug/rarfiles.lst` and the
+/// order-sensitive tests flake.
+fn rarfiles_lst_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn make_temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
@@ -1597,6 +1609,9 @@ fn cli_config_sources_apply_with_winrar_priority() {
 
 #[test]
 fn cli_rarfiles_lst_orders_solid_members() {
+    let _guard = rarfiles_lst_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = make_temp_dir();
     std::fs::write(dir.path().join("aaa.cpp"), b"a").unwrap();
     std::fs::write(dir.path().join("f1.cpp"), b"b").unwrap();
@@ -1911,6 +1926,9 @@ fn cli_stdout_extract_writes_members_to_stdout() {
 /// file-extension change. All must round-trip byte-identically.
 #[test]
 fn cli_solid_reset_switches_accepted_and_roundtrip() {
+    let _guard = rarfiles_lst_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = make_temp_dir();
     let a = dir.path().join("a.txt");
     let b = dir.path().join("b.bin");
@@ -2101,6 +2119,9 @@ fn cli_extract_member_selection_never_hijacks_dest() {
 /// statistics are simply reset as a new extension is encountered.
 #[test]
 fn cli_se_preserves_input_order() {
+    let _guard = rarfiles_lst_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = make_temp_dir();
     let a = dir.path().join("a.txt");
     let b = dir.path().join("b.bin");
@@ -2206,7 +2227,8 @@ fn cli_ma4_creates_rar4_archive() {
 }
 
 /// RAR5-only creation switches are rejected when combined with `-ma4`, since
-/// the RAR4 container cannot express them.
+/// the RAR4 container cannot express them. `-hp` is now supported on RAR4
+/// too, so it is verified positively instead.
 #[test]
 fn cli_ma4_rejects_rar5_only_switches() {
     let dir = make_temp_dir();
@@ -2214,7 +2236,7 @@ fn cli_ma4_rejects_rar5_only_switches() {
     std::fs::write(&f, b"payload").unwrap();
     let arc = dir.path().join("ma4x.rar");
 
-    for sw in ["-hpsecret", "-rr10%"] {
+    for sw in ["-rr10%"] {
         let status = std::process::Command::new(RAR_CLI)
             .args(["a", "-ma4", sw])
             .arg(&arc)
@@ -2227,4 +2249,22 @@ fn cli_ma4_rejects_rar5_only_switches() {
             "-ma4 combined with {sw} must be rejected"
         );
     }
+
+    // `-hp` header encryption is supported on RAR4; the CLI must accept it.
+    let arc2 = dir.path().join("ma4hp.rar");
+    let ok = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-hpsecret", "-idq"])
+        .arg(&arc2)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        ok,
+        "-ma4 -hpsecret must be accepted (header encryption on RAR4)"
+    );
+
+    let mut rar = rar5::RarArchive::open_with_password(&arc2, "secret").unwrap();
+    assert_eq!(rar.read("f.txt").unwrap(), b"payload");
 }
