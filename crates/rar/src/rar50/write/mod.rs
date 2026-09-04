@@ -226,7 +226,7 @@ impl RarArchive {
     fn add_file(&mut self, path: &Path, arcname: Option<&str>, level: u8) -> RarResult<()> {
         self.check_cancel()?;
         if self.rar4 {
-            return self.add_file_rar4(path, arcname);
+            return self.add_file_rar4(path, arcname, level);
         }
         let meta = fs::metadata(path)?;
         if !meta.is_file() {
@@ -581,7 +581,7 @@ impl RarArchive {
     /// data; in a multi-volume set the member data is split at volume
     /// boundaries, writing `FHD_SPLIT_AFTER` on every non-final head and
     /// `FHD_SPLIT_BEFORE` on every continuation head.
-    fn add_file_rar4(&mut self, path: &Path, arcname: Option<&str>) -> RarResult<()> {
+    fn add_file_rar4(&mut self, path: &Path, arcname: Option<&str>, level: u8) -> RarResult<()> {
         let meta = fs::metadata(path)?;
         let file_size = meta.len();
         let mtime = meta
@@ -599,16 +599,35 @@ impl RarArchive {
             self.report_progress(0, file_size);
         }
 
-        // STORE: read the whole member, compute its CRC32, then stream the
-        // bytes. Phase 1.2 scope is plain STORE without encryption.
+        // Read the whole member, then (for level >= 1) LZSS-compress it.
         let mut reader = File::open(path)?;
         let mut data = Vec::with_capacity(file_size as usize);
         std::io::Read::read_to_end(&mut reader, &mut data)?;
         let file_crc = crate::crc32::crc32(&data);
+
+        // Compress with the RAR29 LZSS encoder (m1–m5).  If compressing does
+        // not shrink the data, fall back to STORE.  `method` is the on-disk
+        // byte (0x30 = store, 0x31–0x35 = m1–m5); `packed` is what the write
+        // pipeline emits; `unpacked_size` is always the original size.
+        let (packed, method) = if (1..=5).contains(&level) {
+            use crate::codec::rar29_encoder::{Unpack29Encoder, options_for_level};
+            let mut encoder = Unpack29Encoder::with_options(options_for_level(level));
+            let compressed = encoder.encode_member(&data)?;
+            if compressed.len() < data.len() {
+                (compressed, crate::rar40::RAR4_METHOD_STORE + level)
+            } else {
+                (data.clone(), crate::rar40::RAR4_METHOD_STORE)
+            }
+        } else {
+            (data.clone(), crate::rar40::RAR4_METHOD_STORE)
+        };
+        let unpacked_size = file_size;
+        let packed_size = packed.len() as u64;
+
         let dos_time = crate::rar40::write::unix_to_dos_time(mtime);
         let (encoded_name, name_flags) = crate::rar40::write::encode_file_name(&name);
 
-        // Write head + data for one segment of `[data[..data_end])` on the
+        // Write head + data for one segment of `[packed[..packed_end])` on the
         // current volume. `split_before` marks a continuation head and
         // `split_after` a head whose data continues on the next volume.
         #[allow(clippy::too_many_arguments)]
@@ -618,6 +637,7 @@ impl RarArchive {
             name_flags: u16,
             file_crc: u32,
             dos_time: u32,
+            method: u8,
             packed_size: u32,
             unpacked_size: u32,
             data: &[u8],
@@ -625,7 +645,7 @@ impl RarArchive {
             split_after: bool,
         ) -> RarResult<(u64, u64)> {
             use crate::rar40::write::{FileHeaderParams, build_file_header};
-            use crate::rar40::{FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE, RAR4_METHOD_STORE};
+            use crate::rar40::{FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE};
             let mut fhd = name_flags;
             if split_before {
                 fhd |= FHD_SPLIT_BEFORE;
@@ -641,7 +661,7 @@ impl RarArchive {
                 file_crc,
                 file_time: dos_time,
                 unp_ver: 29,
-                method: RAR4_METHOD_STORE,
+                method,
                 name: encoded_name,
                 salt: None,
                 ext_time: None,
@@ -665,20 +685,21 @@ impl RarArchive {
                     name_flags,
                     file_crc,
                     dos_time,
-                    file_size as u32,
-                    file_size as u32,
-                    &data,
+                    method,
+                    packed_size as u32,
+                    unpacked_size as u32,
+                    &packed,
                     false,
                     false,
                 )?;
                 self.entries.push(crate::archive::ArchiveEntry {
                     header: crate::rar50::headers::FileHeader {
                         name,
-                        unpacked_size: file_size,
-                        packed_size: file_size,
+                        unpacked_size,
+                        packed_size,
                         crc32_val: Some(file_crc),
                         mtime,
-                        comp_method: 0,
+                        comp_method: method.wrapping_sub(crate::rar40::RAR4_METHOD_STORE),
                         host_os: 0,
                         format_version: 4,
                         unp_ver: 29,
@@ -688,7 +709,7 @@ impl RarArchive {
                     chunks: vec![crate::rar50::headers::DataChunk {
                         volume_index: 0,
                         data_offset,
-                        packed_size: file_size,
+                        packed_size,
                         crc32_val: Some(file_crc),
                         is_final: true,
                         extra_data: Vec::new(),
@@ -698,12 +719,12 @@ impl RarArchive {
                 Ok(())
             }
             Some(volume_size) => {
-                // ── Multi-volume: split the member across volumes ──
+                // ── Multi-volume: split the packed member across volumes ──
                 let mut chunks = Vec::<crate::rar50::headers::DataChunk>::new();
                 let mut sent = 0u64;
                 let mut vol_index = self.write_ctx().current_volume - 1;
                 let mut split_before = false;
-                while sent < file_size {
+                while sent < packed_size {
                     // Roll to a volume with room for at least 7 bytes (EOA).
                     loop {
                         let used = self.write_ctx().volume_bytes_written;
@@ -715,9 +736,9 @@ impl RarArchive {
                     }
                     let used = self.write_ctx().volume_bytes_written;
                     let available = volume_size - used - 7;
-                    let chunk_size = (file_size - sent).min(available);
-                    let split_after = sent + chunk_size < file_size;
-                    let segment = &data[sent as usize..(sent + chunk_size) as usize];
+                    let chunk_size = (packed_size - sent).min(available);
+                    let split_after = sent + chunk_size < packed_size;
+                    let segment = &packed[sent as usize..(sent + chunk_size) as usize];
                     // RAR4 split-member CRC convention (matches WinRAR):
                     // every non-final head carries the CRC32 of its OWN
                     // segment's data; only the final head carries the
@@ -734,8 +755,9 @@ impl RarArchive {
                         name_flags,
                         head_crc,
                         dos_time,
+                        method,
                         chunk_size as u32,
-                        file_size as u32,
+                        unpacked_size as u32,
                         segment,
                         split_before,
                         split_after,
@@ -754,11 +776,11 @@ impl RarArchive {
                 self.entries.push(crate::archive::ArchiveEntry {
                     header: crate::rar50::headers::FileHeader {
                         name,
-                        unpacked_size: file_size,
-                        packed_size: file_size,
+                        unpacked_size,
+                        packed_size,
                         crc32_val: Some(file_crc),
                         mtime,
-                        comp_method: 0,
+                        comp_method: method.wrapping_sub(crate::rar40::RAR4_METHOD_STORE),
                         host_os: 0,
                         format_version: 4,
                         unp_ver: 29,
