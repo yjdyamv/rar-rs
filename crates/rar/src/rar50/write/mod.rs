@@ -744,10 +744,24 @@ impl RarArchive {
             };
             let hdr = build_file_header(&params)?;
             let stream = this.stream.as_mut().unwrap();
-            let data_offset = stream.stream_position()? + hdr.len() as u64;
-            stream.write_all(&hdr)?;
+            // `-hp`: the file-header block is header-encrypted like every
+            // other block after the main header. The member payload (data)
+            // itself is NOT part of the ciphertext; it follows the encrypted
+            // header on disk and is covered by member-level encryption (`-p`)
+            // separately. The data offset is past the `[8B salt][align16]`
+            // block, matching the read side's `block.header_end`.
+            let (header_bytes, header_on_disk) = if this.header_encryption {
+                let password = this.password.as_deref().ok_or_else(|| {
+                    RarError::Encrypted("header encryption requires a password".into())
+                })?;
+                crate::rar40::write::encrypt_block_header(&hdr, password)?
+            } else {
+                (hdr.clone(), hdr.len() as u64)
+            };
+            let data_offset = stream.stream_position()? + header_on_disk;
+            stream.write_all(&header_bytes)?;
             stream.write_all(data)?;
-            this.write_ctx_mut().volume_bytes_written += hdr.len() as u64 + data.len() as u64;
+            this.write_ctx_mut().volume_bytes_written += header_on_disk + data.len() as u64;
             Ok((data_offset, data.len() as u64))
         }
 

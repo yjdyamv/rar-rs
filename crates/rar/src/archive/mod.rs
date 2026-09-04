@@ -850,11 +850,6 @@ impl RarArchive {
                     "recovery volumes are not supported for RAR4 archives".into(),
                 ));
             }
-            if opts.encrypt_headers {
-                return Err(RarError::Unsupported(
-                    "header encryption (-hp) is not yet supported for RAR4 archives".into(),
-                ));
-            }
             if opts.save_owner {
                 return Err(RarError::Unsupported(
                     "owner/group records are not supported for RAR4 archives".into(),

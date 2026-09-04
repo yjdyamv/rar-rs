@@ -548,6 +548,74 @@ fn create_rar4_encrypted_multivolume() {
     );
 }
 
+/// RAR4 header encryption (`-hp`): the main header is plaintext and carries
+/// MHD_PASSWORD, and every block after it (file headers, end-of-archive) is
+/// stored as `[8-byte salt][AES-128-CBC ciphertext]`. The filename must not
+/// appear as plaintext in the archive; reading back with the password works,
+/// and a wrong/missing password fails.
+#[test]
+fn create_rar4_header_encrypted_roundtrip() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("top-secret.txt");
+    let content = b"classified payload for the -hp header-encryption test\n";
+    std::fs::write(&src, content).unwrap();
+    let arc = dir.path().join("hpenctest.rar");
+
+    let mut archive = RarArchive::create_with_options(
+        &arc,
+        CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            encrypt_headers: true,
+            password: Some("hunter2".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("create");
+    archive.add(&src, 3).expect("add");
+    archive.close().expect("close");
+
+    // The 7-byte signature is at offset 0; the 13-byte main header follows.
+    // Its flags word (bytes 3-4) must carry MHD_PASSWORD = 0x0080.
+    let raw = std::fs::read(&arc).unwrap();
+    assert!(raw.len() > 7 + 13);
+    assert_eq!(&raw[..7], b"Rar!\x1a\x07\x00");
+    let main_flags = u16::from_le_bytes([raw[10], raw[11]]);
+    assert_ne!(
+        main_flags & 0x0080,
+        0,
+        "main header must set MHD_PASSWORD (0x0080)"
+    );
+
+    // The header-encrypted blocks must hide the member name and payload:
+    // neither should appear as plaintext anywhere in the archive bytes.
+    assert!(
+        raw.windows(11).all(|w| w != b"top-secret.txt".as_slice()),
+        "filename must not appear as plaintext under -hp"
+    );
+    assert!(
+        raw.windows(content.len()).all(|w| w != content),
+        "payload must not appear as plaintext under -hp"
+    );
+
+    // Read back with the correct password.
+    let mut archive = RarArchive::open_with_password(&arc, "hunter2").expect("reopen");
+    assert_eq!(
+        archive.read("top-secret.txt").expect("read").as_slice(),
+        content
+    );
+
+    // A wrong password must fail to even open: every header block after
+    // the main header is encrypted, so the scan itself needs the password.
+    assert!(
+        RarArchive::open_with_password(&arc, "wrong").is_err(),
+        "wrong password must fail to open an -hp archive"
+    );
+    assert!(
+        RarArchive::open(&arc).is_err(),
+        "no password must fail to open an -hp archive"
+    );
+}
+
 /// RAR4 EXTTIME: the writer stores the member's nanosecond mtime fraction
 /// as a 3-byte, least-significant-first tick count in the FILE_HEAD (bits
 /// 12-15 of the flags = mtime present, 3 bytes), matching WinRAR. Reading

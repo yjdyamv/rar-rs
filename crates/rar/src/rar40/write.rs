@@ -221,6 +221,34 @@ pub(crate) fn write_endarc(out: &mut impl std::io::Write, flags: u16) -> RarResu
     Ok(())
 }
 
+/// Encrypt a RAR4 block header for a `-hp` header-encrypted archive.
+///
+/// Every block after the main header (file headers, end-of-archive) is
+/// stored on disk as `[8-byte salt][AES-128-CBC ciphertext]`, where the
+/// ciphertext is the full block header (7-byte prefix + body) zero-padded
+/// to a 16-byte multiple. This mirrors the read side (`read_encrypted_block`
+/// in `rar40/mod.rs`), which reads the 8-byte salt, derives the key, and
+/// decrypts `align16(head_size)` bytes back into the header.
+///
+/// Returns the bytes to write and their on-disk length (`8 + align16`).
+pub(crate) fn encrypt_block_header(header: &[u8], password: &str) -> RarResult<(Vec<u8>, u64)> {
+    let align16 = (header.len() + 15) & !15;
+    let mut plain = header.to_vec();
+    plain.resize(align16, 0);
+    let mut salt = [0u8; 8];
+    rand::fill(&mut salt);
+    let mut cipher = crate::crypto::Rar30Cipher::new(password.as_bytes(), Some(salt))
+        .map_err(|e| RarError::Format(format!("RAR4 header key setup: {e:?}")))?;
+    cipher
+        .encrypt_in_place(&mut plain)
+        .map_err(|e| RarError::Format(format!("RAR4 header encrypt: {e:?}")))?;
+    let mut out = Vec::with_capacity(8 + plain.len());
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&plain);
+    let on_disk_len = 8u64 + align16 as u64;
+    Ok((out, on_disk_len))
+}
+
 // ── Filename encoding ───────────────────────────────────────────────────────
 
 /// Encode a filename for the RAR4 FILE_HEAD.

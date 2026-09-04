@@ -725,6 +725,12 @@ impl RarArchive {
                 flags |= MHD_FIRSTVOLUME;
             }
         }
+        if self.header_encryption {
+            // `-hp`: the main header is written in plaintext as the marker,
+            // and every block after it is header-encrypted (RAR4 convention,
+            // matching `scan_volume`).
+            flags |= crate::rar40::MHD_PASSWORD;
+        }
         let buf = crate::rar40::write::build_main_header(flags);
         let stream = self.stream.as_mut().unwrap();
         stream.write_all(&buf)?;
@@ -742,7 +748,19 @@ impl RarArchive {
     fn write_rar4_end_block(&mut self) -> RarResult<()> {
         let buf = crate::rar40::write::build_endarc(0);
         let stream = self.stream.as_mut().unwrap();
-        stream.write_all(&buf)?;
+        if self.header_encryption {
+            // `-hp`: the end-of-archive block is header-encrypted like every
+            // other block after the main header.
+            let password = self.password.as_deref().ok_or_else(|| {
+                RarError::Encrypted("header encryption requires a password".into())
+            })?;
+            let (ciphertext, on_disk) = crate::rar40::write::encrypt_block_header(&buf, password)?;
+            stream.write_all(&ciphertext)?;
+            self.write_ctx_mut().volume_bytes_written += on_disk;
+        } else {
+            stream.write_all(&buf)?;
+            self.write_ctx_mut().volume_bytes_written += buf.len() as u64;
+        }
         Ok(())
     }
 
