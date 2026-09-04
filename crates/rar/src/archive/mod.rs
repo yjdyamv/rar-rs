@@ -227,6 +227,10 @@ pub struct RarArchive {
     pub(crate) sfx_offset: u64,
     /// Whether the archive uses the legacy RAR 1.5–4.x container (vs RAR5).
     pub(crate) rar4: bool,
+    /// The legacy main header carried MHD_SOLID: pre-RAR3 codec members
+    /// (unp_ver < 29) chain by this archive-level flag + position, since
+    /// those codecs never write the per-file FHD_SOLID bit.
+    pub(crate) rar4_solid_archive: bool,
     /// Password for encrypted archives.
     pub(crate) password: Option<String>,
     /// Encrypt archive headers (file names/structure hidden) — RAR5
@@ -352,6 +356,7 @@ impl RarArchive {
             entries: Vec::new(),
             sfx_offset: 0,
             rar4: false,
+            rar4_solid_archive: false,
             stream: None,
             password,
             header_encryption: false,
@@ -901,6 +906,7 @@ impl RarArchive {
             entries: Vec::new(),
             sfx_offset: 0,
             rar4: is_rar4,
+            rar4_solid_archive: false,
             stream: None,
             password: opts.password,
             header_encryption: opts.encrypt_headers,

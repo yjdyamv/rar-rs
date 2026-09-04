@@ -330,7 +330,9 @@ impl RarArchive {
             }
             scan.scan_volume(&mut stream, vol_idx, self.password.as_deref(), &mut out)?;
         }
+        let archive_solid = scan.archive_solid;
         scan.finish()?;
+        self.rar4_solid_archive = archive_solid;
         self.entries = out;
         Ok(())
     }
@@ -1420,10 +1422,16 @@ impl RarArchive {
         )
     }
 
-    /// Whether `idx` sits in a legacy solid run (flagged solid itself, or
-    /// directly followed by a flagged member, which makes it the run head).
+    /// Whether `idx` sits in a legacy solid run. RAR3+ members (unp_ver >=
+    /// 29) chain on the per-file FHD_SOLID bit (a head member is solid by
+    /// being directly followed by a flagged member). Pre-RAR3 codecs never
+    /// write that bit: when the main header carried MHD_SOLID, every
+    /// compressed member of such a codec is part of one shared-window run.
     fn is_rar4_solid_member(&self, idx: usize) -> bool {
         let hdr = &self.entries[idx].header;
+        if hdr.unp_ver < 29 {
+            return self.rar4_solid_archive && !self.entries[idx].is_dir();
+        }
         if hdr.comp_solid {
             return true;
         }
@@ -1437,6 +1445,17 @@ impl RarArchive {
         let mut chain_start = target_idx;
         for i in (0..target_idx).rev() {
             if self.entries[i].is_dir() {
+                continue;
+            }
+            // Pre-RAR3 codecs under MHD_SOLID: STORE members leave the
+            // shared window untouched (the decoder is simply not called), so
+            // the run reaches back across them to the first compressed
+            // member. RAR3+ chains break on a stored member (per-file flags
+            // stop).
+            if self.entries[i].header.unp_ver < 29 {
+                if !crate::rar40::is_stored(self.entries[i].header.comp_method) {
+                    chain_start = i;
+                }
                 continue;
             }
             if self.entries[i].header.comp_solid || self.is_rar4_solid_member(i) {

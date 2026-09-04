@@ -343,6 +343,26 @@ fn rar4_multivolume_sets_decode() {
 // ── RAR 1.5 (unp_ver 15, from the rars fixture corpus) ───────────────────
 
 #[test]
+#[test]
+/// Below `UnpVer` 20 the per-file FHD_SOLID bit is never written (and is
+/// ignored when present): a solid run is anchored by the archive-level
+/// MHD_SOLID flag plus member position. This crafted fixture is a solid
+/// RAR 1.5 pair whose second member had FHD_SOLID cleared and its header
+/// CRC recomputed; the member is 46 packed bytes standing for 2700
+/// unpacked, so it can only decode by carrying the shared window across.
+#[test]
+fn rar4_solid15_chain_ignores_cleared_fhd_solid() {
+    let path = format!("{RAR154}solid_flag_cleared_rar15.rar");
+    let mut archive = RarArchive::open(&path).expect("open");
+    let names: Vec<String> = archive.namelist().into_iter().map(str::to_string).collect();
+    assert_eq!(names.len(), 2);
+    let a = archive.read(&names[0]).expect("first solid member");
+    let b = archive.read(&names[1]).expect("second solid member");
+    assert_eq!(a.len(), 2700);
+    assert_eq!(b.len(), 2700);
+    assert_eq!(a, b, "both solid members share the same window content");
+}
+
 fn rar4_rar154_fixtures_decode() {
     // RAR 1.5.4-era archives: normal compression (incl. a 17-file doc set),
     // DOS vs long file names, and a solid-flagged archive whose single
@@ -503,4 +523,22 @@ fn rar5_crc32(data: &[u8]) -> u32 {
         }
     }
     !c
+}
+
+/// RAR 2.0 solid pair (WinRAR 2.5-era): MHD_SOLID main header, second
+/// member flagged FHD_SOLID. The shared 64 KiB window must carry across
+/// (payload CRCs 0x97668cf2 / 0x28833332 from the reference).
+#[test]
+fn rar4_solid20_chain_shared_window() {
+    let path = format!("{RAR2}SOLID.RAR");
+    let mut archive = RarArchive::open(&path).expect("open");
+    let names: Vec<String> = archive.namelist().into_iter().map(str::to_string).collect();
+    assert_eq!(
+        names,
+        vec!["SOLID1.TXT".to_string(), "SOLID2.TXT".to_string()]
+    );
+    let a = archive.read("SOLID1.TXT").expect("first");
+    let b = archive.read("SOLID2.TXT").expect("second");
+    assert_eq!(rar5_crc32(&a), 0x9766_8cf2, "SOLID1 payload CRC");
+    assert_eq!(rar5_crc32(&b), 0x2883_3332, "SOLID2 payload CRC");
 }

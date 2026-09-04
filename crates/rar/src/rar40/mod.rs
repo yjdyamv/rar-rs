@@ -104,6 +104,11 @@ pub(crate) const MHD_SOLID: u16 = 0x0008;
 #[derive(Default)]
 pub(crate) struct Rar4VolumeScan {
     pending: Option<ArchiveEntry>,
+    /// The main header of the first volume carried MHD_SOLID: the archive is
+    /// a solid run. Members of pre-RAR3 codecs (unp_ver < 29) are chained by
+    /// this archive-level flag plus position, NOT by the per-file FHD_SOLID
+    /// bit (which those codecs never write); RAR3+ members use FHD_SOLID.
+    pub archive_solid: bool,
 }
 
 impl Rar4VolumeScan {
@@ -136,6 +141,9 @@ impl Rar4VolumeScan {
                             ));
                         };
                         password_bytes = Some(password.as_bytes());
+                    }
+                    if block.head_type == MAIN_HEAD && block.flags & MHD_SOLID != 0 {
+                        self.archive_solid = true;
                     }
                 }
                 FILE_HEAD => {
