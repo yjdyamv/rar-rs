@@ -624,6 +624,14 @@ impl RarArchive {
         };
         let unpacked_size = file_size;
 
+        let mtime_ns = meta
+            .modified()
+            .unwrap_or(SystemTime::now())
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let ext_time = crate::rar40::write::build_ext_time(Some(mtime_ns));
+
         // Member-level encryption (WinRAR `-p`): every member gets its own
         // 8-byte salt; the data is zero-padded to a 16-byte AES block and
         // encrypted with the RAR30 AES-128-CBC cipher. `packed_size` then
@@ -663,11 +671,14 @@ impl RarArchive {
             unpacked_size: u32,
             data: &[u8],
             salt: Option<[u8; 8]>,
+            ext_time: Option<&[u8]>,
             split_before: bool,
             split_after: bool,
         ) -> RarResult<(u64, u64)> {
             use crate::rar40::write::{FileHeaderParams, build_file_header};
-            use crate::rar40::{FHD_PASSWORD, FHD_SALT, FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE};
+            use crate::rar40::{
+                FHD_EXTTIME, FHD_PASSWORD, FHD_SALT, FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE,
+            };
             let mut fhd = name_flags;
             if split_before {
                 fhd |= FHD_SPLIT_BEFORE;
@@ -677,6 +688,9 @@ impl RarArchive {
             }
             if salt.is_some() {
                 fhd |= FHD_PASSWORD | FHD_SALT;
+            }
+            if ext_time.is_some() {
+                fhd |= FHD_EXTTIME;
             }
             let params = FileHeaderParams {
                 flags: fhd,
@@ -690,7 +704,7 @@ impl RarArchive {
                 name: encoded_name,
                 attr: 0x20, // archive bit: regular file
                 salt,
-                ext_time: None,
+                ext_time,
                 window_bits: 6, // 4 MiB dictionary
             };
             let hdr = build_file_header(&params)?;
@@ -716,6 +730,7 @@ impl RarArchive {
                     unpacked_size as u32,
                     &packed,
                     salt,
+                    ext_time.as_deref(),
                     false,
                     false,
                 )?;
@@ -726,6 +741,7 @@ impl RarArchive {
                         packed_size,
                         crc32_val: Some(file_crc),
                         mtime,
+                        mtime_ns: Some(mtime_ns),
                         comp_method: method.wrapping_sub(crate::rar40::RAR4_METHOD_STORE),
                         host_os: 0,
                         format_version: 4,
@@ -737,6 +753,7 @@ impl RarArchive {
                             0
                         },
                         salt,
+                        extra_data: ext_time.unwrap_or_default(),
                         ..Default::default()
                     },
                     chunks: vec![crate::rar50::headers::DataChunk {
@@ -793,6 +810,7 @@ impl RarArchive {
                         unpacked_size as u32,
                         segment,
                         salt,
+                        ext_time.as_deref(),
                         split_before,
                         split_after,
                     )?;
@@ -825,6 +843,7 @@ impl RarArchive {
                             0
                         },
                         salt,
+                        extra_data: ext_time.unwrap_or_default(),
                         ..Default::default()
                     },
                     chunks,
@@ -882,7 +901,13 @@ impl RarArchive {
             .as_secs() as u32;
 
         if self.rar4 {
-            return self.write_rar4_dir_entry(&name, mtime);
+            let mtime_ns = meta
+                .modified()
+                .unwrap_or(SystemTime::now())
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos();
+            return self.write_rar4_dir_entry(&name, mtime, mtime_ns);
         }
 
         #[cfg(unix)]
@@ -918,13 +943,23 @@ impl RarArchive {
     /// Write one RAR4 directory FILE_HEAD member (WinRAR convention: zero
     /// packed/unpacked sizes, CRC 0, `attr = 0x10`, `unp_ver 20`, name
     /// without a trailing slash; directories carry no data payload).
-    fn write_rar4_dir_entry(&mut self, name: &str, mtime_secs: u32) -> RarResult<()> {
+    fn write_rar4_dir_entry(
+        &mut self,
+        name: &str,
+        mtime_secs: u32,
+        mtime_ns: u32,
+    ) -> RarResult<()> {
         use crate::rar40::write::{
-            FileHeaderParams, build_file_header, encode_file_name, unix_to_dos_time,
+            FileHeaderParams, build_ext_time, build_file_header, encode_file_name, unix_to_dos_time,
         };
         let (encoded_name, name_flags) = encode_file_name(name);
+        let ext_time = build_ext_time(Some(mtime_ns));
+        let mut flags = name_flags;
+        if ext_time.is_some() {
+            flags |= crate::rar40::FHD_EXTTIME;
+        }
         let params = FileHeaderParams {
-            flags: name_flags,
+            flags,
             packed_size: 0,
             unpacked_size: 0,
             host_os: 0,
@@ -939,7 +974,7 @@ impl RarArchive {
             // 0..=6 dictionary-size value instead).
             window_bits: 7,
             salt: None,
-            ext_time: None,
+            ext_time: ext_time.as_deref(),
         };
         let hdr = build_file_header(&params)?;
         // Multi-volume: roll to a volume with room for this head plus the
@@ -964,6 +999,7 @@ impl RarArchive {
                 packed_size: 0,
                 attributes: 0x10,
                 mtime: mtime_secs,
+                mtime_ns: ext_time.is_some().then_some(mtime_ns),
                 crc32_val: Some(0),
                 comp_method: 0,
                 host_os: 0,
@@ -971,6 +1007,7 @@ impl RarArchive {
                 unp_ver: 20,
                 legacy_head_crc: Some(head_crc),
                 is_directory: true,
+                extra_data: ext_time.unwrap_or_default(),
                 ..Default::default()
             },
             chunks: Vec::new(),
@@ -1000,7 +1037,13 @@ impl RarArchive {
             .as_secs() as u32;
 
         if self.rar4 {
-            self.write_rar4_dir_entry(&name, mtime)?;
+            let mtime_ns = meta
+                .modified()
+                .unwrap_or(SystemTime::now())
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos();
+            self.write_rar4_dir_entry(&name, mtime, mtime_ns)?;
         } else {
             #[cfg(unix)]
             let attrs = {

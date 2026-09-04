@@ -339,8 +339,11 @@ pub(crate) fn unix_to_dos_time(secs: u32) -> u32 {
 
 /// Build the FHD_EXTTIME field for a file header.
 ///
-/// The ext-time field carries sub-second precision for mtime (and optionally
-/// ctime, atime). Format: 2-byte flags word + up to 4 bytes of tick count.
+/// The ext-time field carries sub-second precision for mtime. RAR4 stores
+/// the 100-ns tick count as three bytes, least significant first, with a
+/// 2-byte flags word whose bits 12-15 encode "present + byte count" (`0xB` =
+/// mtime present, 3 bytes). This matches what WinRAR writes and what
+/// `extract_mtime_refinement` decodes.
 pub(crate) fn build_ext_time(mtime_ns: Option<u32>) -> Option<Vec<u8>> {
     let ns = mtime_ns?;
     let ticks = ns / 100; // Convert nanoseconds to 100-ns ticks.
@@ -348,25 +351,12 @@ pub(crate) fn build_ext_time(mtime_ns: Option<u32>) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Encode ticks as 1–3 bytes (big-endian, high bytes first).
-    let mut tick_bytes = Vec::new();
-    if ticks <= 0xFF {
-        tick_bytes.push(ticks as u8);
-    } else if ticks <= 0xFFFF {
-        tick_bytes.extend_from_slice(&(ticks as u16).to_be_bytes());
-    } else {
-        tick_bytes.push((ticks >> 16) as u8);
-        tick_bytes.push(((ticks >> 8) & 0xFF) as u8);
-        tick_bytes.push((ticks & 0xFF) as u8);
-    }
-
-    // mtime flags: PRESENT (0x8) + byte count (1-3).
-    let mtime_flags: u16 = 0x8 | (tick_bytes.len() as u16);
-    let flags = mtime_flags << 12;
-
-    let mut ext = Vec::with_capacity(2 + tick_bytes.len());
+    let mut ext = Vec::with_capacity(5);
+    let flags: u16 = (0x8 | 3) << 12; // mtime present, 3 bytes of ticks.
     ext.extend_from_slice(&flags.to_le_bytes());
-    ext.extend_from_slice(&tick_bytes);
+    ext.push((ticks & 0xFF) as u8);
+    ext.push(((ticks >> 8) & 0xFF) as u8);
+    ext.push((ticks >> 16) as u8);
     Some(ext)
 }
 

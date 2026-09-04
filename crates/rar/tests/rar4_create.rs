@@ -547,3 +547,63 @@ fn create_rar4_encrypted_multivolume() {
         &content[..]
     );
 }
+
+/// RAR4 EXTTIME: the writer stores the member's nanosecond mtime fraction
+/// as a 3-byte, least-significant-first tick count in the FILE_HEAD (bits
+/// 12-15 of the flags = mtime present, 3 bytes), matching WinRAR. Reading
+/// back through our own reader reproduces the fraction to the format's
+/// 100 ns resolution.
+#[test]
+fn create_rar4_exttime_mtime_ns_roundtrip() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("stamp.bin");
+    std::fs::write(&src, b"timestamped payload").unwrap();
+
+    // Set a precise sub-second mtime; read the on-disk value back so the
+    // assertion matches the platform's actual timestamp resolution.
+    let target = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_789);
+    let times = std::fs::FileTimes::new().set_modified(target);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
+    let disk_mtime = std::fs::metadata(&src).unwrap().modified().unwrap();
+    let disk_ns = disk_mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+
+    let arc = dir.path().join("stamp.rar");
+    let mut archive = RarArchive::create_with_options(
+        &arc,
+        CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            ..Default::default()
+        },
+    )
+    .expect("create");
+    archive.add(&src, 0).expect("add"); // STORE keeps the member trivially small
+    archive.close().expect("close");
+
+    // The FILE_HEAD must carry FHD_EXTTIME (0x1000).
+    let raw = std::fs::read(&arc).unwrap();
+    let members = scan_rar4_members(&raw);
+    assert_eq!(members.len(), 1);
+    let (name, flags, _packed, _unp, _attr) = &members[0];
+    assert_eq!(name, "stamp.bin");
+    assert_ne!(flags & 0x1000, 0, "must set FHD_EXTTIME");
+
+    // Reading back reproduces the sub-second fraction to 100 ns resolution
+    // (None when the fraction rounds to a whole second on coarse filesystems).
+    let mut archive = RarArchive::open(&arc).expect("reopen");
+    let entry = archive.get_entry("stamp.bin").expect("entry");
+    let expect = (disk_ns / 100) * 100;
+    assert_eq!(
+        entry.mtime_ns(),
+        (expect > 0).then_some(expect),
+        "mtime_ns must round-trip to 100 ns resolution"
+    );
+    assert_eq!(archive.read("stamp.bin").unwrap(), b"timestamped payload");
+}
