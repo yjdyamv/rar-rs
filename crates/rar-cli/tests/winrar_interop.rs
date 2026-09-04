@@ -2805,7 +2805,7 @@ fn rar4_recovery_record_interops_with_winrar() {
         );
         let out_dir = dir.path().join("win_rr4_out");
         std::fs::create_dir_all(&out_dir).unwrap();
-        let (ok, out) = run(Command::new(&unrar_bin().unwrap())
+        let (ok, out) = run(Command::new(unrar_bin().unwrap())
             .args(["x", "-idq", "-o+", "-y"])
             .arg(&win_fixed)
             .arg(&out_dir));

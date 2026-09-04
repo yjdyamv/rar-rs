@@ -135,7 +135,7 @@ pub(crate) struct WriteState {
     /// `None` = default selection.
     pub dict_size_log: Option<u8>,
     /// Requested dictionary size in bytes for RAR7 (v70) members
-    /// (WinRAR `-md` above 4 GiB, any value > 4 GiB accepted).
+    /// (WinRAR `-md` above 4 GiB, up to the 126 GiB encoding limit).
     pub dict_size_bytes: Option<u64>,
     /// Force RAR7 (v70) member headers even below the 4 GiB threshold
     /// (test seam; see `CreateOptions::force_v70`).
@@ -213,7 +213,7 @@ impl Default for WriteState {
     }
 }
 
-/// RAR5 archive reader/writer.
+/// RAR archive reader/writer for legacy RAR 1.5–4.x and RAR5/RAR7.
 pub struct RarArchive {
     pub(crate) path: PathBuf,
     pub(crate) mode: Mode,
@@ -387,13 +387,24 @@ impl RarArchive {
     }
 
     /// Set the compression thread count for this archive (like `-mt<N>`),
-    /// overriding the process-global default. `None` restores the global
-    /// default. The pool is chosen per thread count, so concurrent archives
-    /// with different settings each run on their own pool and never
-    /// interfere. Requires the `parallel` feature; without it compression
-    /// stays sequential.
-    pub fn set_compression_threads(&mut self, threads: Option<usize>) {
-        self.write_ctx_mut().compression_threads = threads;
+    /// overriding the process-global default. `Some(0)` requests automatic
+    /// sizing for this archive; `None` restores the global default. The pool
+    /// is chosen per thread count, so concurrent archives with different
+    /// settings each run on their own pool and never interfere. Requires the
+    /// `parallel` feature; without it compression stays sequential.
+    pub fn set_compression_threads(&mut self, threads: Option<usize>) -> RarResult<()> {
+        if self.mode == Mode::Read {
+            return Err(RarError::InvalidState(
+                "compression threads can only be set while writing or appending".into(),
+            ));
+        }
+        crate::options::validate_threads(threads)?;
+        let write = self
+            .write
+            .as_mut()
+            .ok_or_else(|| RarError::InvalidState("write context is not available".into()))?;
+        write.compression_threads = threads;
+        Ok(())
     }
 
     /// Effective compression worker count for this archive: the per-archive
@@ -401,9 +412,7 @@ impl RarArchive {
     pub(crate) fn effective_threads(&self) -> usize {
         #[cfg(feature = "parallel")]
         {
-            self.write_ctx()
-                .compression_threads
-                .unwrap_or_else(crate::parallel::default_compression_threads)
+            crate::parallel::compression_threads_for(self.write_ctx().compression_threads)
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -454,7 +463,7 @@ impl RarArchive {
         self.write.get_or_insert_with(WriteState::default);
     }
 
-    /// Open an existing RAR5 archive for reading.
+    /// Open an existing RAR archive for reading.
     pub fn open(path: impl AsRef<Path>) -> RarResult<Self> {
         let mut archive = Self::new_for_mode(path.as_ref().to_path_buf(), Mode::Read, None);
         archive.open_read()?;
@@ -476,7 +485,7 @@ impl RarArchive {
         Ok(archive)
     }
 
-    /// Open an existing RAR5 archive with a password for encrypted content.
+    /// Open an existing RAR archive with a password for encrypted content.
     pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
         let mut archive = Self::new_for_mode(
             path.as_ref().to_path_buf(),
@@ -525,9 +534,29 @@ impl RarArchive {
     /// archive (WinRAR's `-md`; `None` = default selection). Applies to
     /// archives opened with `open_append*`, where the create options are
     /// not available.
-    pub fn set_dictionary(&mut self, dict_size_log: Option<u8>, dict_size_bytes: Option<u64>) {
-        self.write_ctx_mut().dict_size_log = dict_size_log;
-        self.write_ctx_mut().dict_size_bytes = dict_size_bytes;
+    pub fn set_dictionary(
+        &mut self,
+        dict_size_log: Option<u8>,
+        dict_size_bytes: Option<u64>,
+    ) -> RarResult<()> {
+        if self.mode == Mode::Read {
+            return Err(RarError::InvalidState(
+                "dictionary can only be set while writing or appending".into(),
+            ));
+        }
+        crate::options::validate_dictionary(dict_size_log, dict_size_bytes)?;
+        if self.rar4 && dict_size_bytes.is_some() {
+            return Err(RarError::InvalidOption(
+                "RAR4 does not support byte-sized RAR7 dictionaries".into(),
+            ));
+        }
+        let write = self
+            .write
+            .as_mut()
+            .ok_or_else(|| RarError::InvalidState("write context is not available".into()))?;
+        write.dict_size_log = dict_size_log;
+        write.dict_size_bytes = dict_size_bytes;
+        Ok(())
     }
 
     /// Open an existing archive for appending, with a password for
@@ -782,7 +811,7 @@ impl RarArchive {
         Ok(())
     }
 
-    /// Create a new RAR5 archive with explicit options (overwrites an
+    /// Create a new RAR archive with explicit options (overwrites an
     /// existing file).
     ///
     /// This is the full-featured constructor: `solid`, `quick_open` and
@@ -832,6 +861,7 @@ impl RarArchive {
     /// Validate options and build the archive state (without opening the
     /// stream).
     fn new_with_options(path: PathBuf, opts: crate::options::CreateOptions) -> RarResult<Self> {
+        opts.validate()?;
         let is_rar4 = opts.format_version == ArchiveVersion::Rar40;
         if is_rar4 {
             // RAR4 does not support these RAR5-specific features.

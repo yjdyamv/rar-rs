@@ -50,9 +50,10 @@ pub(crate) fn build_locator_body(
 /// Frame a locator record for the header extra area:
 /// `[record size vint][record type vint][body]`.
 pub(crate) fn frame_locator_record(body: &[u8]) -> Vec<u8> {
+    let record_type = vint::encode(LOCATOR_TYPE);
     let mut record = Vec::new();
-    record.extend(vint::encode(body.len() as u64));
-    record.extend(vint::encode(LOCATOR_TYPE));
+    record.extend(vint::encode((record_type.len() + body.len()) as u64));
+    record.extend(record_type);
     record.extend(body);
     record
 }
@@ -93,4 +94,20 @@ pub(crate) fn patch_locator_fields(
         hdr[..4].copy_from_slice(&crc.to_le_bytes());
     }
     Ok(patched)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn locator_record_size_includes_type_vint() {
+        let body = [LOCATOR_FLAG_QUICK_OPEN as u8, 0, 0, 0, 0, 0];
+        let record = frame_locator_record(&body);
+        let (size, size_len) = vint::decode_from_slice(&record, 0).unwrap();
+        let (_, type_len) = vint::decode_from_slice(&record, size_len).unwrap();
+
+        assert_eq!(size as usize, type_len + body.len());
+        assert_eq!(record.len(), size_len + size as usize);
+    }
 }

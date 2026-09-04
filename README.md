@@ -7,7 +7,8 @@ binary is required at runtime.
 
 > Licensed under BSD-2-Clause for original project portions. This is an
 > independent implementation with separately identified upstream portions —
-> see [NOTICE](NOTICE) for legal details and trademark attribution.
+> see [NOTICE](NOTICE) and the provenance-oriented
+> [third-party source inventory](THIRD_PARTY_LICENSES.md).
 
 ---
 
@@ -30,8 +31,12 @@ binary is required at runtime.
 
 ## Build
 
+The workspace requires Rust 1.88, matching the standard-library APIs used by
+the implementation. CI validates the current stable toolchain; release checks
+should also keep the declared MSRV buildable as dependencies evolve.
+
 ```bash
-cargo build --release
+cargo build --release --locked
 # Binaries: target/release/rar and target/release/unrar
 ```
 
@@ -120,10 +125,22 @@ Full index in **[docs/README.md](docs/README.md)**. Highlights:
 - **CLI reference** — [docs/CLI.md](docs/CLI.md)
 - **Domain vocabulary** — [CONTEXT.md](CONTEXT.md)
 - **Roadmap / status** — [PLAN.md](PLAN.md)
+- **Security policy** — [SECURITY.md](SECURITY.md)
+- **Release history** — [CHANGELOG.md](CHANGELOG.md)
+- **Code audit baseline** — [docs/CODE_AUDIT_2026-09-05.md](docs/CODE_AUDIT_2026-09-05.md)
 
 ## Legal
 
 Independent implementation for software conservancy and educational
 purposes, with separately identified upstream portions. See [NOTICE](NOTICE)
-for source attribution and license boundaries. Original project portions are
-licensed under BSD-2-Clause — see [LICENSE](LICENSE).
+for attribution and license boundaries,
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the source inventory,
+and [`LICENSES/`](LICENSES/) for standard texts of the identified third-party
+license families. Original project portions are licensed under BSD-2-Clause —
+see [LICENSE](LICENSE).
+
+The workspace's current `BSD-2-Clause` Cargo metadata is not intended to
+supersede terms attached to third-party portions. A final repository-wide SPDX
+expression remains pending the per-file audit documented in the code-audit
+baseline; the metadata is deliberately unchanged until that review is
+complete.

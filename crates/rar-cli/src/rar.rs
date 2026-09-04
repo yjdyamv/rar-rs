@@ -1,9 +1,10 @@
-//! rar — create and modify RAR5 archives.
+//! rar — create, modify, and inspect RAR4, RAR5, and RAR7 archives.
 
 mod common;
 mod input;
 mod output;
 mod password;
+mod selector;
 mod time;
 
 use clap::{Args, Parser, Subcommand};
@@ -13,8 +14,8 @@ use std::process;
 #[command(
     name = "rar",
     version,
-    about = "create and modify RAR5 archives",
-    long_about = "Pure-Rust RAR5 archive tool: create, append, update, delete, rename,\nlock, repair and extract archives, with WinRAR-compatible switches.",
+    about = "create and modify RAR archives",
+    long_about = "Pure-Rust RAR4/RAR5/RAR7 archive tool: create, append, update, delete, rename,\nlock, repair and extract archives, with WinRAR-compatible switches.",
     propagate_version = true
 )]
 struct Cli {
@@ -30,7 +31,7 @@ struct Cli {
     /// Work directory (like `-w<path>`)
     #[arg(long = "work-dir", global = true)]
     work_dir: Option<String>,
-    /// Misc switches (-ow, -tsp, -ilog, -ver, and accepted no-ops)
+    /// Misc switches (-ow, -tsp, -ilog, -ver, and compatibility switches)
     #[command(flatten)]
     misc: common::MiscSwitches,
     #[command(subcommand)]
@@ -239,7 +240,8 @@ struct FilesArgs {
     /// Archive format version (like `-ma5`; `-ma7` forces RAR7/v70)
     #[arg(long = "archive-format", value_name = "VER", hide = true)]
     archive_format: Option<String>,
-    /// Extraction dictionary cap (like `-mdx<size>`; accepted, no effect)
+    /// Extraction dictionary cap (like `-mdx<size>`; accepted for CLI
+    /// compatibility and unused by update/move operations)
     #[arg(long = "dict-extract", value_name = "SIZE")]
     dict_extract: Option<String>,
     /// Save/restore file times (like `-ts[m,c,a][+,-,1]`; repeatable)
@@ -346,8 +348,8 @@ struct CreateArgs {
     /// extension beyond WinRAR 7.23, which has no such switch)
     #[arg(long = "archive-format", value_name = "VER", hide = true)]
     archive_format: Option<String>,
-    /// Extraction dictionary cap (like `-mdx<size>`; accepted, no effect
-    /// for RAR5 which is capped at 4 GiB)
+    /// Extraction dictionary cap (like `-mdx<size>`; accepted for CLI
+    /// compatibility and unused while creating archives)
     #[arg(long = "dict-extract", value_name = "SIZE")]
     dict_extract: Option<String>,
     /// Save/restore file times (like `-ts[m,c,a][+,-,1]`; repeatable)
@@ -518,13 +520,11 @@ struct CreateArgs {
     #[arg(long = "shared-files")]
     #[allow(dead_code)]
     shared_files: bool,
-    /// Move deleted files to the Recycle Bin (like `-dr`; accepted)
+    /// Move deleted files to the Recycle Bin (like `-dr`; unsupported)
     #[arg(long = "recycle-bin")]
-    #[allow(dead_code)]
     recycle_bin: bool,
-    /// Wipe files after archiving (like `-dw`; accepted)
+    /// Securely wipe files after archiving (like `-dw`; unsupported)
     #[arg(long = "wipe")]
-    #[allow(dead_code)]
     wipe: bool,
     /// Read one member from stdin under this name (like `-si<name>`)
     #[arg(long = "stdin-name", value_name = "NAME")]
@@ -569,21 +569,16 @@ fn parse_threads(s: &str) -> Result<usize, String> {
 
 fn parse_size(s: &str) -> Result<u64, String> {
     let s = s.trim();
-    if let Some(num) = s.strip_suffix('k').or_else(|| s.strip_suffix('K')) {
-        num.parse::<u64>()
-            .map(|n| n * 1024)
-            .map_err(|_| format!("invalid size: {s}"))
-    } else if let Some(num) = s.strip_suffix('m').or_else(|| s.strip_suffix('M')) {
-        num.parse::<u64>()
-            .map(|n| n * 1024 * 1024)
-            .map_err(|_| format!("invalid size: {s}"))
-    } else if let Some(num) = s.strip_suffix('g').or_else(|| s.strip_suffix('G')) {
-        num.parse::<u64>()
-            .map(|n| n * 1024 * 1024 * 1024)
-            .map_err(|_| format!("invalid size: {s}"))
-    } else {
-        s.parse::<u64>().map_err(|_| format!("invalid size: {s}"))
-    }
+    let (num, multiplier) = match s.chars().last() {
+        Some('k' | 'K') => (&s[..s.len() - 1], 1024),
+        Some('m' | 'M') => (&s[..s.len() - 1], 1024 * 1024),
+        Some('g' | 'G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        _ => (s, 1),
+    };
+    num.parse::<u64>()
+        .map_err(|_| format!("invalid size: {s}"))?
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("size is too large: {s}"))
 }
 
 /// Resolve a `-ma<ver>` archive-format request into the format version and
@@ -615,6 +610,25 @@ fn archive_format_force_v70(
 /// Whether an archive member name matches one `-ms<list>` entry: a bare
 /// extension (`bin` matches `*.bin`) or a wildcard mask (`*.bin`, `a?c`)
 /// matched against the basename.
+/// Expand source arguments with the same name policy used by create, while
+/// ensuring a directory argument never feeds the destination archive back
+/// into the operation.
+fn collect_inputs(
+    policy: &rar5::name_policy::NamePolicy,
+    files: &[String],
+    level: u8,
+    archive_path: &str,
+) -> Result<Vec<rar5::name_policy::Collected>, String> {
+    let mut collected =
+        rar5::name_policy::collect(policy, files, level).map_err(|e| format!("collect: {e}"))?;
+    if let Ok(abs_archive) = std::fs::canonicalize(archive_path) {
+        collected.retain(
+            |item| !matches!(std::fs::canonicalize(&item.path), Ok(path) if path == abs_archive),
+        );
+    }
+    Ok(collected)
+}
+
 fn store_type_matches(mask: &str, name: &str) -> bool {
     if mask.contains('*') || mask.contains('?') {
         let base = name.rsplit('/').next().unwrap_or(name);
@@ -654,6 +668,10 @@ fn main() {
         .map(|a| common::normalize_switch(a))
         .collect();
     let args = common::merge_default_switches(defaults, cli_args);
+    if let Err(e) = password::reject_bare_password(&args) {
+        eprintln!("rar: {e}");
+        process::exit(1);
+    }
     // `rar -iver` prints the version and exits (no subcommand needed).
     if args.iter().any(|a| a == "--version-info") {
         println!("RAR 7.23 CLI parity (rar-rs {})", env!("CARGO_PKG_VERSION"));
@@ -688,6 +706,9 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), String> {
     let misc = &cli.misc;
+    if misc.erase_disk {
+        return Err("-vd/--erase-disk is not supported; no disk was erased".into());
+    }
     match cli.command {
         Command::Create(args) => cmd_create(&args, misc),
         Command::Update(args) => cmd_update(&args, misc),
@@ -745,10 +766,15 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         rar5::set_compression_threads(threads);
         rar5::set_extraction_threads(threads);
     }
+    if args.wipe {
+        return Err("-dw/--wipe is not supported; no source files were deleted".into());
+    }
+    if args.recycle_bin {
+        return Err("-dr/--recycle-bin is not supported; no source files were deleted".into());
+    }
     let mut password = args.password.password.clone();
-    // `-p-` (and bare `-p`, whose interactive prompt we do not simulate)
-    // normalizes to an empty password; treat it as "no password" like
-    // WinRAR, instead of encrypting with an empty key.
+    // `-p-` normalizes to an empty value and explicitly disables password
+    // use. Bare `-p` was rejected before clap parsing.
     if password.as_deref() == Some("") {
         password = None;
     }
@@ -822,6 +848,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         dict_size_log,
         dict_size_bytes,
     )?;
+    let dict_size_log = if force_v70 { None } else { dict_size_log };
     let solid_reset = match args.solid_reset.as_str() {
         "volume" => rar5::SolidReset::PerVolume,
         "extension" => rar5::SolidReset::PerExtension,
@@ -901,8 +928,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         include_masks,
         exclude_masks,
     };
-    let mut collected = rar5::name_policy::collect(&policy, files, args.level)
-        .map_err(|e| format!("collect: {e}"))?;
+    let mut collected = collect_inputs(&policy, files, args.level, archive_path)?;
     // -ms<list>: files matching one of the listed types (extensions or
     // wildcard masks, semicolon-separated, repeatable) are stored without
     // compression (level 0), like WinRAR.
@@ -920,11 +946,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
             }
         }
     }
-    // Never archive the archive itself (WinRAR skips the output file when
-    // a directory argument covers it, e.g. `rar a x.rar .`).
-    if let Ok(abs_archive) = std::fs::canonicalize(archive_path) {
-        collected.retain(|c| !matches!(std::fs::canonicalize(&c.path), Ok(p) if p == abs_archive));
-    }
+
     // -sl / -sm / -ed: size filters and skip-empty-directories.
     if args.size_less.is_some() || args.size_more.is_some() || args.no_empty_dirs {
         collected.retain(|c| {
@@ -1163,7 +1185,8 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
             rar5::RarArchive::create_with_options(archive_path, opts)
                 .map_err(|e| format!("create: {e}"))?
         };
-        r.set_dictionary(dict_size_log, dict_size_bytes);
+        r.set_dictionary(dict_size_log, dict_size_bytes)
+            .map_err(|e| format!("dictionary: {e}"))?;
         r
     } else {
         rar.expect("new archive opened above")
@@ -1236,25 +1259,18 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
             }
         }
     }
-    // -t: test the archive right after creating it.
+    // -t: test the archive right after creating it without materializing
+    // member contents or extracting to a temporary directory.
     if args.test_after {
         let mut ar = match &password {
             Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
                 .map_err(|e| format!("open: {e}"))?,
             None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
         };
-        let tmp = std::env::temp_dir().join(format!("rar5-test-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).map_err(|e| format!("test dir: {e}"))?;
-        let result = ar.extract_all_with_options(
-            &tmp,
-            rar5::ExtractOptions {
-                max_unpacked_bytes: None,
-                max_total_unpacked_bytes: None,
-                ..Default::default()
-            },
-        );
-        let _ = std::fs::remove_dir_all(&tmp);
-        result.map_err(|e| format!("test failed: {e}"))?;
+        let (_, failed) = ar.test().map_err(|e| format!("test failed: {e}"))?;
+        if failed != 0 {
+            return Err(format!("test failed: {failed} member(s) failed"));
+        }
     }
     // -as: synchronize the archive contents — drop members that are not
     // part of the file list (only meaningful when appending to an
@@ -1321,6 +1337,129 @@ fn cmd_delete(args: &DeleteArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// A same-directory archive copy that is removed unless successfully
+/// installed over the original archive.
+struct StagedArchive {
+    path: std::path::PathBuf,
+    committed: bool,
+}
+
+impl StagedArchive {
+    fn copy_from(original: &std::path::Path) -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let parent = original
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let file_name = original
+            .file_name()
+            .ok_or_else(|| format!("invalid archive path: {}", original.display()))?
+            .to_string_lossy();
+        for _ in 0..100 {
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(
+                ".{file_name}.rar-rs-update-{}-{id}.tmp",
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => {
+                    drop(file);
+                    if let Err(error) = std::fs::copy(original, &path) {
+                        let _ = std::fs::remove_file(&path);
+                        return Err(format!("stage archive copy: {error}"));
+                    }
+                    return Ok(Self {
+                        path,
+                        committed: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("create staged archive: {error}")),
+            }
+        }
+        Err("could not allocate a unique staged archive path".into())
+    }
+
+    fn commit(mut self, original: &std::path::Path) -> Result<(), String> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("sync staged archive: {error}"))?;
+        replace_archive_file(&self.path, original)?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for StagedArchive {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn replace_archive_file(
+    staged: &std::path::Path,
+    original: &std::path::Path,
+) -> Result<(), String> {
+    std::fs::rename(staged, original).map_err(|error| format!("replace archive: {error}"))
+}
+
+#[cfg(windows)]
+fn replace_archive_file(
+    staged: &std::path::Path,
+    original: &std::path::Path,
+) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let original: Vec<u16> = original.as_os_str().encode_wide().chain(Some(0)).collect();
+    let staged: Vec<u16> = staged.as_os_str().encode_wide().chain(Some(0)).collect();
+    let replaced = unsafe {
+        windows_sys::Win32::Storage::FileSystem::ReplaceFileW(
+            original.as_ptr(),
+            staged.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced == 0 {
+        Err(format!(
+            "replace archive: {}",
+            std::io::Error::last_os_error()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn replace_archive_file(
+    _staged: &std::path::Path,
+    _original: &std::path::Path,
+) -> Result<(), String> {
+    Err("transactional archive replacement is not supported on this platform".into())
+}
+
+fn update_archive_transactionally(
+    archive: &std::path::Path,
+    operation: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let staged = StagedArchive::copy_from(archive)?;
+    operation(&staged.path)?;
+    staged.commit(archive)
+}
+
 /// Update an archive: add files not present, replace files whose source
 /// is newer (like `rar u`).
 fn cmd_update(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String> {
@@ -1333,139 +1472,30 @@ fn cmd_freshen(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     cmd_update_freshen(args, true, "Freshened", misc)
 }
 
-/// Shared update/freshen implementation: members whose source mtime is
-/// newer than the archived one are deleted and re-added. With `freshen`,
-/// members missing from the archive are skipped; otherwise they are added.
+/// Shared transactional update/freshen implementation. Source arguments are
+/// expanded with the create command's collector. Every mutation is applied to
+/// a same-directory copy and the original is atomically replaced only after
+/// the complete delete/rename/append/close sequence succeeds.
 fn cmd_update_freshen(
     args: &FilesArgs,
     freshen: bool,
     verb: &str,
     misc: &common::MiscSwitches,
 ) -> Result<(), String> {
-    let archive_path = &args.archive;
-    let files = &args.files;
+    let archive_path = std::path::Path::new(&args.archive);
     let password = &args.password.password;
-    if !std::path::Path::new(archive_path).exists() {
-        return Err(format!("archive not found: {archive_path}"));
+    if !archive_path.exists() {
+        return Err(format!("archive not found: {}", archive_path.display()));
     }
-    // -tk: keep the archive's original modification time.
-    let orig_mtime = if args.keep_time {
-        std::fs::metadata(archive_path)
-            .and_then(|m| m.modified())
-            .ok()
-    } else {
-        None
-    };
+    if rar5::discover_volumes(archive_path).len() > 1 {
+        return Err("transactional update of multi-volume archives is not supported".into());
+    }
 
-    // Decide per file: skip (unchanged), delete + re-add (newer), add.
-    let rar = match password {
-        Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
-    };
-    let mut to_delete = Vec::new();
-    let mut to_add = Vec::new();
-    for file in files {
-        let path = std::path::Path::new(file);
-        let name = arg_to_name(file);
-        if let Some(entry) = rar.get_entry(&name) {
-            let src_mtime = std::fs::metadata(path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as u32)
-                .unwrap_or(0);
-            if src_mtime > entry.mtime() {
-                to_delete.push(name);
-                to_add.push(file.clone());
-            }
-            // else: unchanged, skip
-        } else if !freshen {
-            to_add.push(file.clone());
-        }
-        // Freshen skips members missing from the archive.
-    }
-    drop(rar);
-    if to_delete.is_empty() {
-        info!("{archive_path}: no files to {verb}");
-        return Ok(());
-    }
-    {
-        let mut rar = match &password {
-            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
-                .map_err(|e| format!("open: {e}"))?,
-            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
-        };
-        if let Some(ver_spec) = &misc.version_control {
-            // -ver[n]: keep previous versions on update. Existing members
-            // `name`, `name;1`, ... shift down the chain (`name;1` is the
-            // newest previous version); with a limit `n`, older versions
-            // beyond `name;n` are dropped.
-            let max_versions: Option<u32> = if ver_spec.is_empty() {
-                None
-            } else {
-                ver_spec.parse::<u32>().ok().filter(|n| *n > 0)
-            };
-            let mut renames: Vec<(String, String)> = Vec::new();
-            let mut to_drop: Vec<String> = Vec::new();
-            for name in &to_delete {
-                // Collect existing versions of `name`.
-                let mut versions: Vec<(u32, String)> = rar
-                    .namelist()
-                    .iter()
-                    .filter_map(|n| {
-                        if *n == name {
-                            Some((0, n.to_string()))
-                        } else if let Some(rest) = n.strip_prefix(&format!("{name};")) {
-                            rest.parse::<u32>().ok().map(|v| (v, n.to_string()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                if versions.is_empty() {
-                    continue;
-                }
-                versions.sort_by_key(|(v, _)| *v);
-                // Shift the old versions up by one, dropping beyond the cap.
-                for (v, full) in versions.iter().rev() {
-                    let new_suffix = v + 1;
-                    if max_versions.is_some_and(|m| new_suffix > m) {
-                        to_drop.push(full.clone());
-                    } else {
-                        let new_name = if *v == 0 {
-                            format!("{name};1")
-                        } else {
-                            format!("{name};{new_suffix}")
-                        };
-                        renames.push((full.clone(), new_name));
-                    }
-                }
-            }
-            if !renames.is_empty() {
-                let pairs: Vec<(&str, &str)> = renames
-                    .iter()
-                    .map(|(a, b)| (a.as_str(), b.as_str()))
-                    .collect();
-                rar.rename(&pairs).map_err(|e| format!("rename: {e}"))?;
-            }
-            if !to_drop.is_empty() {
-                let names: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
-                rar.delete(&names).map_err(|e| format!("delete: {e}"))?;
-            }
-        } else {
-            let names: Vec<&str> = to_delete.iter().map(|s| s.as_str()).collect();
-            rar.delete(&names).map_err(|e| format!("delete: {e}"))?;
-        }
-    }
-    if to_add.is_empty() {
-        info!("{archive_path}: no files to {verb}");
-        return Ok(());
-    }
-    // Deleting every member erases the archive file; recreate it when the
-    // updated members were the only ones.
+    // Validate all operation options before allocating the staged copy.
     let (dict_size_log, dict_size_bytes) = match args.dict_size.as_deref() {
-        Some(s) => rar5::parse_dict_size(s).ok_or_else(|| format!("Unknown option: md{s}"))?,
+        Some(spec) => {
+            rar5::parse_dict_size(spec).ok_or_else(|| format!("Unknown option: md{spec}"))?
+        }
         None => (None, None),
     };
     let (format_version, force_v70, v70_dict_bytes) = archive_format_force_v70(
@@ -1473,48 +1503,198 @@ fn cmd_update_freshen(
         dict_size_log,
         dict_size_bytes,
     )?;
-    let mut rar = if std::path::Path::new(archive_path).exists() {
-        match &password {
-            Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
-                .map_err(|e| format!("open: {e}"))?,
-            None => {
-                rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
-            }
-        }
+    let dict_size_log = if force_v70 { None } else { dict_size_log };
+    let ts = time::parse_ts_specs(&args.ts_specs)?;
+    let original_mtime = if args.keep_time {
+        Some(
+            std::fs::metadata(archive_path)
+                .and_then(|metadata| metadata.modified())
+                .map_err(|error| format!("read archive modification time: {error}"))?,
+        )
     } else {
-        let ts = time::parse_ts_specs(&args.ts_specs)?;
-        let create_opts = rar5::CreateOptions {
-            format_version,
-            password: password.clone(),
-            dict_size_log,
-            dict_size_bytes: v70_dict_bytes,
-            force_v70,
-            save_ctime: ts.save_ctime,
-            save_atime: ts.save_atime,
-            save_mtime: ts.save_mtime,
-            save_owner: misc.owner,
-            save_streams: misc.save_streams,
-            time_precision_seconds: ts.precision_seconds,
-            ..Default::default()
-        };
-        rar5::RarArchive::create_with_options(archive_path, create_opts)
-            .map_err(|e| format!("create: {e}"))?
+        None
     };
-    rar.set_dictionary(dict_size_log, dict_size_bytes);
-    for file in &to_add {
-        let name = arg_to_name(file);
-        rar.add_as(file, &name, 3)
-            .map_err(|e| format!("add {file}: {e}"))?;
+
+    let collected = collect_inputs(
+        &rar5::name_policy::NamePolicy::default(),
+        &args.files,
+        3,
+        &args.archive,
+    )?;
+    let archive = match password {
+        Some(value) => rar5::RarArchive::open_with_password(archive_path, value)
+            .map_err(|error| format!("open: {error}"))?,
+        None => rar5::RarArchive::open(archive_path).map_err(|error| format!("open: {error}"))?,
+    };
+    let mut to_delete = Vec::new();
+    let mut to_add = Vec::new();
+    for item in &collected {
+        let source_mtime = std::fs::metadata(&item.path)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|error| format!("read source metadata {}: {error}", item.path.display()))?
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let source_mtime = u32::try_from(source_mtime).unwrap_or(u32::MAX);
+        if let Some(entry) = archive.get_entry(&item.name) {
+            if source_mtime > entry.mtime() {
+                to_delete.push(item.name.clone());
+                to_add.push(item);
+            }
+        } else if !freshen {
+            to_add.push(item);
+        }
     }
-    rar.close().map_err(|e| format!("close: {e}"))?;
-    // -tk: restore the original archive mtime after the rewrite.
-    if let Some(t) = orig_mtime {
-        let _ = std::fs::File::options()
-            .write(true)
-            .open(archive_path)
-            .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(t)));
+    drop(archive);
+
+    if to_delete.is_empty() && to_add.is_empty() {
+        info!("{}: no files to {verb}", archive_path.display());
+        return Ok(());
     }
-    info!("{verb} {archive_path} ({} file(s))", to_add.len());
+
+    let updated_count = to_add.len();
+    update_archive_transactionally(archive_path, |staged_path| {
+        if !to_delete.is_empty() {
+            let mut staged = match password {
+                Some(value) => rar5::RarArchive::open_with_password(staged_path, value)
+                    .map_err(|error| format!("open staged archive: {error}"))?,
+                None => rar5::RarArchive::open(staged_path)
+                    .map_err(|error| format!("open staged archive: {error}"))?,
+            };
+            if let Some(version_spec) = &misc.version_control {
+                let max_versions = if version_spec.is_empty() {
+                    None
+                } else {
+                    version_spec.parse::<u32>().ok().filter(|count| *count > 0)
+                };
+                let mut renames = Vec::new();
+                let mut to_drop = Vec::new();
+                for name in &to_delete {
+                    let mut versions: Vec<(u32, String)> = staged
+                        .namelist()
+                        .iter()
+                        .filter_map(|member| {
+                            if *member == name {
+                                Some((0, member.to_string()))
+                            } else {
+                                member
+                                    .strip_prefix(&format!("{name};"))
+                                    .and_then(|suffix| suffix.parse::<u32>().ok())
+                                    .map(|version| (version, member.to_string()))
+                            }
+                        })
+                        .collect();
+                    versions.sort_by_key(|(version, _)| *version);
+                    for (version, member) in versions.iter().rev() {
+                        let new_suffix = version
+                            .checked_add(1)
+                            .ok_or_else(|| format!("version number overflow for {member}"))?;
+                        if max_versions.is_some_and(|limit| new_suffix > limit) {
+                            to_drop.push(member.clone());
+                        } else {
+                            let new_name = if *version == 0 {
+                                format!("{name};1")
+                            } else {
+                                format!("{name};{new_suffix}")
+                            };
+                            renames.push((member.clone(), new_name));
+                        }
+                    }
+                }
+                if !renames.is_empty() {
+                    let pairs: Vec<(&str, &str)> = renames
+                        .iter()
+                        .map(|(old, new)| (old.as_str(), new.as_str()))
+                        .collect();
+                    staged
+                        .rename(&pairs)
+                        .map_err(|error| format!("rename staged members: {error}"))?;
+                }
+                if !to_drop.is_empty() {
+                    let names: Vec<&str> = to_drop.iter().map(String::as_str).collect();
+                    staged
+                        .delete(&names)
+                        .map_err(|error| format!("delete staged versions: {error}"))?;
+                }
+            } else {
+                let names: Vec<&str> = to_delete.iter().map(String::as_str).collect();
+                staged
+                    .delete(&names)
+                    .map_err(|error| format!("delete staged members: {error}"))?;
+            }
+            staged
+                .close()
+                .map_err(|error| format!("close staged archive after rewrite: {error}"))?;
+        }
+
+        let mut staged = if staged_path.exists() {
+            match password {
+                Some(value) => rar5::RarArchive::open_append_with_password(staged_path, value)
+                    .map_err(|error| format!("open staged archive for append: {error}"))?,
+                None => rar5::RarArchive::open_append(staged_path)
+                    .map_err(|error| format!("open staged archive for append: {error}"))?,
+            }
+        } else {
+            rar5::RarArchive::create_with_options(
+                staged_path,
+                rar5::CreateOptions {
+                    format_version,
+                    password: password.clone(),
+                    dict_size_log,
+                    dict_size_bytes: v70_dict_bytes,
+                    force_v70,
+                    save_ctime: ts.save_ctime,
+                    save_atime: ts.save_atime,
+                    save_mtime: ts.save_mtime,
+                    save_owner: misc.owner,
+                    save_streams: misc.save_streams,
+                    time_precision_seconds: ts.precision_seconds,
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| format!("recreate staged archive: {error}"))?
+        };
+        staged
+            .set_dictionary(dict_size_log, v70_dict_bytes)
+            .map_err(|error| format!("set staged dictionary: {error}"))?;
+        let entries: Vec<rar5::BatchEntry<'_>> = to_add
+            .iter()
+            .map(|item| {
+                if item.is_dir {
+                    rar5::BatchEntry::Directory {
+                        path: &item.path,
+                        name: Some(&item.name),
+                    }
+                } else {
+                    rar5::BatchEntry::File {
+                        path: &item.path,
+                        name: Some(&item.name),
+                        level: item.level,
+                    }
+                }
+            })
+            .collect();
+        staged
+            .add_batch(&entries)
+            .map_err(|error| format!("append staged members: {error}"))?;
+        staged
+            .close()
+            .map_err(|error| format!("close staged archive: {error}"))?;
+
+        if let Some(modified) = original_mtime {
+            std::fs::File::options()
+                .write(true)
+                .open(staged_path)
+                .and_then(|file| file.set_times(std::fs::FileTimes::new().set_modified(modified)))
+                .map_err(|error| format!("restore staged archive time: {error}"))?;
+        }
+        Ok(())
+    })?;
+
+    info!(
+        "{verb} {} ({updated_count} file(s))",
+        archive_path.display()
+    );
     Ok(())
 }
 
@@ -1625,6 +1805,7 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
         dict_size_log,
         dict_size_bytes,
     )?;
+    let dict_size_log = if force_v70 { None } else { dict_size_log };
     let mut rar = if std::path::Path::new(archive_path).exists() {
         match &password {
             Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
@@ -1652,7 +1833,8 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
         rar5::RarArchive::create_with_options(archive_path, create_opts)
             .map_err(|e| format!("create: {e}"))?
     };
-    rar.set_dictionary(dict_size_log, dict_size_bytes);
+    rar.set_dictionary(dict_size_log, v70_dict_bytes)
+        .map_err(|e| format!("dictionary: {e}"))?;
     for file in files {
         let name = arg_to_name(file);
         rar.add_as(file, &name, 3)
@@ -2017,21 +2199,29 @@ fn cmd_print(args: &PrintArgs) -> Result<(), String> {
             .map_err(|e| format!("open: {e}"))?,
         None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let options = rar5::ExtractOptions {
+        max_unpacked_bytes: None,
+        max_total_unpacked_bytes: None,
+        ..Default::default()
+    };
     if let Some(file) = &args.file {
-        let data = rar.read(file).map_err(|e| format!("{e}"))?;
-        std::io::stdout()
-            .write_all(&data)
-            .map_err(|e| format!("stdout: {e}"))?;
+        rar.read_to_writer_with_options(file, &mut out, options)
+            .map_err(|e| format!("{e}"))?;
     } else {
-        let names: Vec<String> = rar.namelist().into_iter().map(|s| s.to_string()).collect();
+        let names: Vec<String> = rar
+            .list()
+            .iter()
+            .filter(|entry| !entry.is_dir())
+            .map(|entry| entry.name().to_string())
+            .collect();
         for name in names {
-            let data = rar.read(&name).map_err(|e| format!("{name}: {e}"))?;
-            std::io::stdout()
-                .write_all(&data)
-                .map_err(|e| format!("stdout: {e}"))?;
+            rar.read_to_writer_with_options(&name, &mut out, options)
+                .map_err(|e| format!("{name}: {e}"))?;
         }
     }
-    Ok(())
+    out.flush().map_err(|e| format!("stdout: {e}"))
 }
 
 /// Extract with full paths (like `rar x`).
@@ -2076,36 +2266,28 @@ fn extract_to_stdout(rar: &mut rar5::RarArchive, names: &[String]) -> Result<(),
     let members: Vec<String> = rar
         .list()
         .iter()
-        .filter(|e| !e.is_dir())
-        .map(|e| e.name().to_string())
+        .filter(|entry| !entry.is_dir())
+        .map(|entry| entry.name().to_string())
         .collect();
-    let mut wanted: Vec<String> = Vec::new();
-    if names.is_empty() {
-        wanted = members;
-    } else {
-        for m in &members {
-            if names.iter().any(|n| name_matches(m, n)) {
-                wanted.push(m.clone());
-            }
-        }
+    let wanted = selector::select_members(members.iter().map(String::as_str), names);
+    if wanted.is_empty() && !names.is_empty() {
+        return Err(format!(
+            "no archive members matched the requested name(s): {}",
+            names.join(", ")
+        ));
     }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    for name in &wanted {
-        let data = rar
-            .read_with_options(
-                name,
-                rar5::ExtractOptions {
-                    max_unpacked_bytes: None,
-                    max_total_unpacked_bytes: None,
-                    ..Default::default()
-                },
-            )
+    let options = rar5::ExtractOptions {
+        max_unpacked_bytes: None,
+        max_total_unpacked_bytes: None,
+        ..Default::default()
+    };
+    for name in wanted {
+        rar.read_to_writer_with_options(name, &mut out, options)
             .map_err(|e| format!("read {name}: {e}"))?;
-        out.write_all(&data).map_err(|e| format!("stdout: {e}"))?;
     }
-    out.flush().map_err(|e| format!("stdout: {e}"))?;
-    Ok(())
+    out.flush().map_err(|e| format!("stdout: {e}"))
 }
 
 /// Destination directory, honoring `-ad` (append the archive base name).
@@ -2115,12 +2297,6 @@ fn extract_dest(args: &ExtractArgs) -> Result<std::path::PathBuf, String> {
         &args.archive,
         args.append_dir,
     ))
-}
-
-/// Match a stored member name against a requested selector. WinRAR matches
-/// the full stored path, so a basename also selects the member.
-fn name_matches(member: &str, requested: &str) -> bool {
-    member == requested || member.ends_with(&format!("/{requested}")) || requested.ends_with(member)
 }
 
 /// Extract only the members whose name matches one of `names` (full stored
@@ -2139,26 +2315,23 @@ fn extract_selected(
         .filter(|e| !e.is_dir())
         .map(|e| e.name().to_string())
         .collect();
-    let mut matched = 0usize;
-    for m in &members {
-        if names.iter().any(|n| name_matches(m, n)) {
-            let opts = rar5::ExtractOptions {
-                flat_paths: flat,
-                skip_existing,
-                ..Default::default()
-            };
-            rar.extract_with_options(m, dest, opts)
-                .map_err(|e| format!("extract {m}: {e}"))?;
-            matched += 1;
-        }
-    }
-    if matched == 0 {
+    let wanted = selector::select_members(members.iter().map(String::as_str), names);
+    if wanted.is_empty() {
         return Err(format!(
             "no archive members matched the requested name(s): {}",
             names.join(", ")
         ));
     }
-    Ok(matched)
+    for member in &wanted {
+        let opts = rar5::ExtractOptions {
+            flat_paths: flat,
+            skip_existing,
+            ..Default::default()
+        };
+        rar.extract_with_options(member, dest, opts)
+            .map_err(|e| format!("extract {member}: {e}"))?;
+    }
+    Ok(wanted.len())
 }
 
 /// Extract without archived paths (like `rar e`).
@@ -2201,30 +2374,13 @@ fn cmd_test(args: &ArchiveArgs) -> Result<(), String> {
             .map_err(|e| format!("open: {e}"))?,
         None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
-    let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
-    let mut ok = 0;
-    let mut fail = 0;
-    for name in &names {
-        let entry = rar.get_entry(name).unwrap();
-        if entry.is_dir() {
-            continue;
-        }
-        match rar.read(name) {
-            Ok(_) => {
-                info!("  OK  {name}");
-                ok += 1;
-            }
-            Err(e) => {
-                info!("  FAIL {name}: {e}");
-                fail += 1;
-            }
-        }
+    let (checked, failed) = rar.test().map_err(|e| format!("test: {e}"))?;
+    info!("{checked} OK, {failed} failed");
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err("test failed".into())
     }
-    info!("{ok} OK, {fail} failed");
-    if fail > 0 {
-        return Err("test failed".into());
-    }
-    Ok(())
 }
 
 /// Normalize a path argument into an archive name: relative paths stay as
@@ -2645,5 +2801,47 @@ fn is_rar4_file(path: &std::path::Path) -> bool {
         (Some(r5), Some(r4)) => r4 < r5, // earliest signature wins (SFX stub)
         (None, Some(_)) => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_size, update_archive_transactionally};
+
+    #[test]
+    fn size_parsing_checks_multiplication_overflow() {
+        assert_eq!(parse_size("2k"), Ok(2 * 1024));
+        assert!(parse_size("18446744073709551615g").is_err());
+    }
+
+    #[test]
+    fn failed_archive_transaction_preserves_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive.rar");
+        std::fs::write(&archive, b"original").unwrap();
+
+        let result = update_archive_transactionally(&archive, |staged| {
+            std::fs::write(staged, b"damaged staged copy").unwrap();
+            Err("injected append failure".into())
+        });
+
+        assert_eq!(result, Err("injected append failure".into()));
+        assert_eq!(std::fs::read(&archive).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn successful_archive_transaction_replaces_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive.rar");
+        std::fs::write(&archive, b"original").unwrap();
+
+        update_archive_transactionally(&archive, |staged| {
+            std::fs::write(staged, b"replacement").map_err(|error| error.to_string())
+        })
+        .unwrap();
+
+        assert_eq!(std::fs::read(&archive).unwrap(), b"replacement");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

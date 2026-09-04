@@ -1,14 +1,13 @@
-//! RAR5 archive creation for the Smart Archive VS Code extension.
+//! RAR archive operations for the Smart Archive VS Code extension.
 //!
-//! Wraps the pure-Rust `rar5` library (codeberg.org/yjdyamv/rar-rs fork) behind
-//! a minimal napi-rs API: create a RAR5 archive from disk paths and/or byte
-//! buffers, with optional AES-256 password encryption, multi-volume output,
-//! progress reporting, and size-bomb guards.
+//! Wraps the pure-Rust `rar5` crate behind a napi-rs API for creating, reading,
+//! testing, listing, extracting, repairing, and modifying RAR archives.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -18,6 +17,8 @@ use napi_derive::napi;
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Maximum total input size across all entries (32 GiB).
 const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+/// Largest integer that a JavaScript `number` can represent exactly.
+const JS_MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 #[napi(object)]
 pub struct EntryInput {
@@ -37,23 +38,23 @@ pub struct CreateArchiveOptions {
   pub out_path: String,
   pub entries: Vec<EntryInput>,
   /// Compression level 0..=5 (default 3).
-  pub level: Option<u32>,
+  pub level: Option<f64>,
   /// Optional AES-256 password (file-level encryption).
   pub password: Option<String>,
-  /// Also encrypt the archive structure (file names) — RAR5 header
-  /// encryption. Requires `password`; incompatible with multi-volume.
+  /// Also encrypt the archive structure (file names). Requires `password`;
+  /// incompatible with multi-volume.
   pub encrypt_headers: Option<bool>,
   /// Add a WinRAR-compatible inline recovery record protecting this percent
   /// (0-100) of the archive. Incompatible with multi-volume.
-  pub recovery_percent: Option<u8>,
+  pub recovery_percent: Option<f64>,
   /// Create this many `.rev` recovery volumes (WinRAR `-rv`); auto-capped
   /// at the actual data volume count. Requires `volume_size`.
-  pub recovery_volume_count: Option<u32>,
+  pub recovery_volume_count: Option<f64>,
   /// Volume size in bytes; when set, produces multi-volume archives
   /// (`name.part1.rar`, ...).
-  pub volume_size: Option<i64>,
+  pub volume_size: Option<f64>,
   /// Reject the operation when the summed input size exceeds this.
-  pub max_total_bytes: Option<i64>,
+  pub max_total_bytes: Option<f64>,
   /// Dictionary size (like WinRAR `-md<size>[k|m|g]`, no unit = MiB).
   /// Values up to 4 GiB must be powers of two (128 KiB .. 4 GiB); values
   /// above 4 GiB are accepted as-is and produce RAR7 (v70) archives.
@@ -65,7 +66,7 @@ pub struct CreateArchiveOptions {
   /// Write BLAKE2sp hash records for every member (like WinRAR `-htb`).
   pub blake2: Option<bool>,
   /// Compression threads (1..=64).
-  pub threads: Option<u32>,
+  pub threads: Option<f64>,
   /// Save the creation time (Windows) / ctime (Unix) in the FILE_TIME
   /// extra record (like WinRAR `-tsc`).
   pub save_ctime: Option<bool>,
@@ -101,11 +102,68 @@ struct PlannedEntry {
 // ── Conversions from the JS-facing option structs to the rar5 library
 // structs, so each field mapping lives in one place next to its struct.
 
+fn checked_js_integer(value: f64, field: &str, min: u64, max: u64) -> Result<u64> {
+  if !value.is_finite() || value.fract() != 0.0 || value.abs() > JS_MAX_SAFE_INTEGER {
+    return Err(Error::new(
+      Status::InvalidArg,
+      format!("`{field}` must be a safe integer"),
+    ));
+  }
+  if value < min as f64 || value > max as f64 {
+    return Err(Error::new(
+      Status::InvalidArg,
+      format!("`{field}` must be in the range {min}..={max}"),
+    ));
+  }
+  Ok(value as u64)
+}
+
+fn checked_optional_js_integer(
+  value: Option<f64>,
+  field: &str,
+  min: u64,
+  max: u64,
+) -> Result<Option<u64>> {
+  value
+    .map(|value| checked_js_integer(value, field, min, max))
+    .transpose()
+}
+
 impl CreateArchiveOptions {
+  fn level(&self) -> Result<u8> {
+    checked_js_integer(self.level.unwrap_or(3.0), "level", 0, 5).map(|value| value as u8)
+  }
+
+  fn max_total_bytes(&self) -> Result<Option<u64>> {
+    checked_optional_js_integer(
+      self.max_total_bytes,
+      "maxTotalBytes",
+      0,
+      JS_MAX_SAFE_INTEGER as u64,
+    )
+  }
+
   fn to_create_options(&self) -> Result<rar5::CreateOptions> {
-    let rec = self.recovery_percent.unwrap_or(0).min(100);
-    let rec = if rec == 0 { None } else { Some(rec) };
-    let rev_count = self.recovery_volume_count.unwrap_or(0);
+    let recovery_percent =
+      checked_optional_js_integer(self.recovery_percent, "recoveryPercent", 0, 100)?
+        .filter(|&value| value != 0)
+        .map(|value| value as u8);
+    let recovery_volume_count = checked_optional_js_integer(
+      self.recovery_volume_count,
+      "recoveryVolumeCount",
+      0,
+      u32::MAX as u64,
+    )?
+    .filter(|&value| value != 0)
+    .map(|value| value as u32);
+    let volume_size = checked_optional_js_integer(
+      self.volume_size,
+      "volumeSize",
+      1,
+      JS_MAX_SAFE_INTEGER as u64,
+    )?;
+    let threads =
+      checked_optional_js_integer(self.threads, "threads", 1, 64)?.map(|value| value as usize);
     let password = self.password.as_deref().filter(|p| !p.is_empty());
     let (dict_size_log, dict_size_bytes) = match self.dict_size.as_deref() {
       Some(s) => parse_dict_size(s)?,
@@ -117,10 +175,10 @@ impl CreateArchiveOptions {
       blake2: self.blake2.unwrap_or(false),
       password: password.map(|p| p.to_string()),
       encrypt_headers: self.encrypt_headers.unwrap_or(false),
-      recovery_percent: rec,
+      recovery_percent,
       recovery_volumes_percent: None,
-      recovery_volume_count: if rev_count > 0 { Some(rev_count) } else { None },
-      volume_size: self.volume_size.map(|s| s as u64),
+      recovery_volume_count,
+      volume_size,
       dict_size_log,
       dict_size_bytes,
       save_ctime: self.save_ctime.unwrap_or(false),
@@ -129,28 +187,39 @@ impl CreateArchiveOptions {
       time_precision_seconds: self.time_precision_seconds.unwrap_or(false),
       save_owner: self.save_owner.unwrap_or(false),
       save_streams: self.save_streams.unwrap_or(false),
-      threads: self.threads.map(|t| t.clamp(1, 64) as usize),
+      threads,
       ..Default::default()
     })
+  }
+}
+
+impl AppendArchiveOptions {
+  fn level(&self) -> Result<u8> {
+    checked_js_integer(self.level.unwrap_or(3.0), "level", 0, 5).map(|value| value as u8)
   }
 }
 
 impl ExtractArchiveOptions {
   /// `max_dict_size`: None (unset) keeps the WinRAR-style 4 GiB default
   /// cap; Some(0) means unlimited; other values raise/lower the cap.
-  fn to_extract_options(&self) -> rar5::ExtractOptions {
-    let max_dict_size = match self.max_dict_size {
+  fn to_extract_options(&self) -> Result<rar5::ExtractOptions> {
+    let max_dict_size = match checked_optional_js_integer(
+      self.max_dict_size,
+      "maxDictSize",
+      0,
+      JS_MAX_SAFE_INTEGER as u64,
+    )? {
       None => Some(4 * 1024 * 1024 * 1024),
       Some(0) => None,
-      Some(v) => Some(v as u64),
+      Some(value) => Some(value),
     };
-    rar5::ExtractOptions {
+    Ok(rar5::ExtractOptions {
       flat_paths: self.flat.unwrap_or(false),
       max_unpacked_bytes: None,
       max_total_unpacked_bytes: None,
       max_dict_size,
       ..Default::default()
-    }
+    })
   }
 }
 
@@ -189,7 +258,7 @@ fn plan_entries(entries: &[EntryInput]) -> Result<Vec<PlannedEntry>> {
           return Err(Error::new(
             Status::InvalidArg,
             format!(
-              "{} is {:.1} GiB, rar5 supports files up to 4 GiB",
+              "{} is {:.1} GiB, the binding supports inputs up to 4 GiB",
               path.display(),
               meta.len() as f64 / (1 << 30) as f64
             ),
@@ -283,6 +352,15 @@ fn basename(path: &Path) -> String {
     .unwrap_or_default()
 }
 
+fn discovered_paths_in_order(paths: Vec<PathBuf>) -> Vec<String> {
+  let mut seen = HashSet::with_capacity(paths.len());
+  paths
+    .into_iter()
+    .map(|path| path.to_string_lossy().into_owned())
+    .filter(|path| seen.insert(path.clone()))
+    .collect()
+}
+
 /// Parse a WinRAR-style dictionary size (`-md<size>[k|m|g]`, no unit =
 /// MiB) into the two `CreateOptions` fields: values up to 4 GiB must be
 /// powers of two (RAR5 dict log), anything above is accepted as-is and
@@ -307,16 +385,27 @@ fn abort_flag(signal: Option<&AbortSignal>) -> Option<Arc<AtomicBool>> {
 }
 
 fn to_napi_error(err: rar5::RarError) -> Error {
-  match err {
-    rar5::RarError::Cancelled => {
-      // Status::Cancelled maps to a JS error with name = "Cancelled",
-      // which the consumer's isCancellationError matches (along with
-      // "AbortError"/"Canceled") — a GenericFailure here produced a
-      // name="Error" rejection that broke cancellation detection.
-      Error::new(Status::Cancelled, "operation cancelled")
-    }
-    other => Error::new(Status::GenericFailure, format!("rar5: {other}")),
-  }
+  // napi-rs tasks expose N-API Status strings as JS `error.code`. N-API has
+  // no dedicated unsupported/security/not-found statuses, so keep a stable
+  // semantic split instead of assigning unrelated status names.
+  let status = match &err {
+    rar5::RarError::Format(_)
+    | rar5::RarError::InvalidOption(_)
+    | rar5::RarError::Encrypted(_)
+    | rar5::RarError::Security(_)
+    | rar5::RarError::LimitExceeded { .. }
+    | rar5::RarError::MemberNotFound { .. }
+    | rar5::RarError::WrongPassword => Status::InvalidArg,
+    rar5::RarError::Cancelled => Status::Cancelled,
+    rar5::RarError::InvalidState(_)
+    | rar5::RarError::Crc { .. }
+    | rar5::RarError::HashMismatch { .. }
+    | rar5::RarError::Unsupported(_)
+    | rar5::RarError::ArchiveLocked
+    | rar5::RarError::Io(_) => Status::GenericFailure,
+    _ => Status::GenericFailure,
+  };
+  Error::new(status, format!("rar: {err}"))
 }
 
 fn build_batch(planned: &[PlannedEntry], level: u8) -> Vec<rar5::BatchEntry<'_>> {
@@ -419,19 +508,19 @@ impl Task for CreateArchiveTask {
       Ok(next)
     })?;
 
-    if let Some(limit) = self.opts.max_total_bytes {
-      if total_bytes > limit as u64 {
-        return Err(Error::new(
-          Status::InvalidArg,
-          format!(
-            "total input size {:.1} MiB exceeds limit {:.1} MiB",
-            total_bytes as f64 / 1048576.0,
-            limit as f64 / 1048576.0
-          ),
-        ));
-      }
+    if let Some(limit) = self.opts.max_total_bytes()?
+      && total_bytes > limit
+    {
+      return Err(Error::new(
+        Status::InvalidArg,
+        format!(
+          "total input size {:.1} MiB exceeds limit {:.1} MiB",
+          total_bytes as f64 / 1048576.0,
+          limit as f64 / 1048576.0
+        ),
+      ));
     }
-    let level = self.opts.level.unwrap_or(3).min(5) as u8;
+    let level = self.opts.level()?;
     let batch = build_batch(&planned, level);
     let out = Path::new(&self.opts.out_path);
     if let Some(parent) = out.parent() {
@@ -450,12 +539,7 @@ impl Task for CreateArchiveTask {
     write_batch(&mut archive, &batch, total_bytes, self.progress.take())?;
     drop(archive);
 
-    let mut files = rar5::discover_volumes(out)
-      .into_iter()
-      .map(|p| p.to_string_lossy().into_owned())
-      .collect::<Vec<_>>();
-    files.sort();
-    files.dedup();
+    let files = discovered_paths_in_order(rar5::discover_volumes(out));
 
     Ok(CreateResult { files })
   }
@@ -465,7 +549,7 @@ impl Task for CreateArchiveTask {
   }
 }
 
-/// Repair a damaged RAR5 archive using its inline recovery record.
+/// Repair a damaged archive using its inline recovery record.
 ///
 /// Reads `input_path`, rebuilds any damaged data shards from the `{RB}`
 /// parity shards and writes the repaired archive to `output_path`.
@@ -473,7 +557,7 @@ impl Task for CreateArchiveTask {
 /// shards are held), so archives far larger than RAM can be repaired.
 /// Returns `false` when the archive was already intact (no output file
 /// is written in that case, like `rar r`'s "All OK").
-#[napi]
+#[napi(ts_return_type = "Promise<boolean>")]
 pub fn repair_archive(
   input_path: String,
   output_path: String,
@@ -498,6 +582,7 @@ pub struct RepairArchiveTask {
   cancel: Option<Arc<AtomicBool>>,
 }
 
+#[napi]
 impl Task for RepairArchiveTask {
   type Output = bool;
   type JsValue = bool;
@@ -529,13 +614,13 @@ impl Task for RepairArchiveTask {
   }
 }
 
-/// Rebuild missing volumes of a multi-volume RAR5 set from its `.rev`
-/// recovery volumes (like WinRAR `rc`).
+/// Rebuild missing volumes of a multi-volume set from its `.rev` recovery
+/// volumes (like WinRAR `rc`).
 ///
 /// `first_volume` is the path of `name.part1.rar`; every missing volume is
 /// reconstructed from the `.rev` parity volumes into the same directory.
 /// Returns the paths of all volumes produced.
-#[napi]
+#[napi(ts_return_type = "Promise<Array<string>>")]
 pub fn rebuild_missing_volumes(
   first_volume: String,
   on_progress: Option<ThreadsafeFunction<ProgressData, ()>>,
@@ -557,6 +642,7 @@ pub struct RebuildVolumesTask {
   cancel: Option<Arc<AtomicBool>>,
 }
 
+#[napi]
 impl Task for RebuildVolumesTask {
   type Output = Vec<String>;
   type JsValue = Vec<String>;
@@ -595,11 +681,11 @@ impl Task for RebuildVolumesTask {
 
 #[napi(object)]
 pub struct AppendArchiveOptions {
-  /// Existing RAR5 archive to append to (single-volume only).
+  /// Existing archive to append to (single-volume only).
   pub archive_path: String,
   pub entries: Vec<EntryInput>,
   /// Compression level 0..=5 (default 3).
-  pub level: Option<u32>,
+  pub level: Option<f64>,
   /// Password of the existing archive (needed when its content is
   /// encrypted so the solid chain can be extended).
   pub password: Option<String>,
@@ -633,7 +719,7 @@ impl Task for AppendArchiveTask {
       Ok(next)
     })?;
 
-    let level = self.opts.level.unwrap_or(3).min(5) as u8;
+    let level = self.opts.level()?;
     let batch = build_batch(&planned, level);
     let (dict_size_log, dict_size_bytes) = match self.opts.dict_size.as_deref() {
       Some(s) => parse_dict_size(s)?,
@@ -647,17 +733,15 @@ impl Task for AppendArchiveTask {
       _ => rar5::RarArchive::open_append(&self.opts.archive_path).map_err(to_napi_error)?,
     };
     archive.set_cancel_flag(self.cancel.take());
-    archive.set_dictionary(dict_size_log, dict_size_bytes);
+    archive
+      .set_dictionary(dict_size_log, dict_size_bytes)
+      .map_err(to_napi_error)?;
 
     write_batch(&mut archive, &batch, total_bytes, self.progress.take())?;
     drop(archive);
 
-    let mut files = rar5::discover_volumes(Path::new(&self.opts.archive_path))
-      .into_iter()
-      .map(|p| p.to_string_lossy().into_owned())
-      .collect::<Vec<_>>();
-    files.sort();
-    files.dedup();
+    let files =
+      discovered_paths_in_order(rar5::discover_volumes(Path::new(&self.opts.archive_path)));
 
     Ok(CreateResult { files })
   }
@@ -667,7 +751,7 @@ impl Task for AppendArchiveTask {
   }
 }
 
-/// Append entries to an existing RAR5 archive without rebuilding it.
+/// Append entries to an existing archive without rebuilding it.
 ///
 /// Existing members are preserved verbatim (never recompressed); only the
 /// trailing quick-open/recovery/end blocks are truncated and rewritten.
@@ -689,7 +773,7 @@ pub fn append_entries(
   )
 }
 
-/// Delete members from a RAR5 archive without rebuilding it.
+/// Delete members from an archive without rebuilding it.
 ///
 /// Non-solid archives are rewritten surgically: kept members are copied
 /// verbatim, never recompressed (like the official `rar d`). Solid chains
@@ -699,7 +783,7 @@ pub fn append_entries(
 ///
 /// Fails when any requested name is not present, or when the archive is
 /// locked. Returns the number of deleted members.
-#[napi]
+#[napi(ts_return_type = "Promise<number>")]
 pub fn delete_entries(
   archive_path: String,
   names: Vec<String>,
@@ -727,6 +811,7 @@ pub struct DeleteEntriesTask {
   cancel: Option<Arc<AtomicBool>>,
 }
 
+#[napi]
 impl Task for DeleteEntriesTask {
   type Output = u32;
   type JsValue = u32;
@@ -769,52 +854,123 @@ impl Task for DeleteEntriesTask {
 /// file inside the archive). Bounded by the library's default 4 GiB
 /// per-member read limit; use `extractArchive` for arbitrarily large
 /// members.
+#[napi(ts_return_type = "Promise<Buffer>")]
+pub fn read_member(
+  archive_path: String,
+  name: String,
+  password: Option<String>,
+) -> AsyncTask<ReadMemberTask> {
+  AsyncTask::new(ReadMemberTask {
+    archive_path,
+    name,
+    password,
+  })
+}
+
+pub struct ReadMemberTask {
+  archive_path: String,
+  name: String,
+  password: Option<String>,
+}
+
 #[napi]
-pub fn read_member(archive_path: String, name: String, password: Option<String>) -> Result<Buffer> {
-  let mut archive = match password.as_deref() {
-    Some(pw) if !pw.is_empty() => {
-      rar5::RarArchive::open_with_password(&archive_path, pw).map_err(to_napi_error)?
-    }
-    _ => rar5::RarArchive::open(&archive_path).map_err(to_napi_error)?,
-  };
-  let data = archive.read(&name).map_err(to_napi_error)?;
-  Ok(data.into())
+impl Task for ReadMemberTask {
+  type Output = Vec<u8>;
+  type JsValue = Buffer;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let mut archive = match self.password.as_deref() {
+      Some(pw) if !pw.is_empty() => {
+        rar5::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
+      }
+      _ => rar5::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
+    };
+    archive.read(&self.name).map_err(to_napi_error)
+  }
+
+  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output.into())
+  }
 }
 
 /// Test the integrity of every member (like `rar t`); returns the
 /// `(checked, failed)` counts. A damaged member is reported, never
 /// thrown.
-#[napi]
-pub fn test_archive(archive_path: String, password: Option<String>) -> Result<Vec<u32>> {
-  let mut archive = match password.as_deref() {
-    Some(pw) if !pw.is_empty() => {
-      rar5::RarArchive::open_with_password(&archive_path, pw).map_err(to_napi_error)?
-    }
-    _ => rar5::RarArchive::open(&archive_path).map_err(to_napi_error)?,
-  };
-  let (checked, failed) = archive.test().map_err(to_napi_error)?;
-  Ok(vec![checked as u32, failed as u32])
+#[napi(ts_return_type = "Promise<Array<number>>")]
+pub fn test_archive(archive_path: String, password: Option<String>) -> AsyncTask<TestArchiveTask> {
+  AsyncTask::new(TestArchiveTask {
+    archive_path,
+    password,
+  })
 }
 
-/// List the member names of a RAR5 archive.
-#[napi]
-pub fn list_entries(archive_path: String, password: Option<String>) -> Result<Vec<String>> {
-  let archive = match password.as_deref() {
-    Some(pw) if !pw.is_empty() => {
-      rar5::RarArchive::open_with_password(&archive_path, pw).map_err(to_napi_error)?
-    }
-    _ => rar5::RarArchive::open(&archive_path).map_err(to_napi_error)?,
-  };
-  Ok(
-    archive
-      .namelist()
-      .into_iter()
-      .map(|name| name.to_string())
-      .collect(),
-  )
+pub struct TestArchiveTask {
+  archive_path: String,
+  password: Option<String>,
 }
 
-/// Create a RAR5 archive from the given entries.
+#[napi]
+impl Task for TestArchiveTask {
+  type Output = Vec<u32>;
+  type JsValue = Vec<u32>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let mut archive = match self.password.as_deref() {
+      Some(pw) if !pw.is_empty() => {
+        rar5::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
+      }
+      _ => rar5::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
+    };
+    let (checked, failed) = archive.test().map_err(to_napi_error)?;
+    Ok(vec![checked as u32, failed as u32])
+  }
+
+  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output)
+  }
+}
+
+/// List the member names of an archive without blocking the JS thread.
+#[napi(ts_return_type = "Promise<Array<string>>")]
+pub fn list_entries(archive_path: String, password: Option<String>) -> AsyncTask<ListEntriesTask> {
+  AsyncTask::new(ListEntriesTask {
+    archive_path,
+    password,
+  })
+}
+
+pub struct ListEntriesTask {
+  archive_path: String,
+  password: Option<String>,
+}
+
+#[napi]
+impl Task for ListEntriesTask {
+  type Output = Vec<String>;
+  type JsValue = Vec<String>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let archive = match self.password.as_deref() {
+      Some(pw) if !pw.is_empty() => {
+        rar5::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
+      }
+      _ => rar5::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
+    };
+    Ok(
+      archive
+        .namelist()
+        .into_iter()
+        .map(|name| name.to_string())
+        .collect(),
+    )
+  }
+
+  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output)
+  }
+}
+
+/// Create an archive from the given entries.
 #[napi]
 pub fn create_archive(
   opts: CreateArchiveOptions,
@@ -846,39 +1002,62 @@ pub struct EntryInfo {
   pub mtime: f64,
 }
 
-/// List the members of a RAR5 archive with sizes and methods.
-#[napi]
+/// List archive members with sizes and methods without blocking the JS thread.
+#[napi(ts_return_type = "Promise<Array<EntryInfo>>")]
 pub fn list_entries_detailed(
   archive_path: String,
   password: Option<String>,
-) -> Result<Vec<EntryInfo>> {
-  let archive = match password.as_deref() {
-    Some(pw) if !pw.is_empty() => {
-      rar5::RarArchive::open_with_password(&archive_path, pw).map_err(to_napi_error)?
-    }
-    _ => rar5::RarArchive::open(&archive_path).map_err(to_napi_error)?,
-  };
-  Ok(entry_infos(&archive))
+) -> AsyncTask<ListEntriesDetailedTask> {
+  AsyncTask::new(ListEntriesDetailedTask {
+    archive_path,
+    password,
+    quick: false,
+  })
 }
 
-/// List the members of a RAR5 archive through its quick-open record —
-/// the fast path for archives created with `quickOpen`: only the main
-/// header + QO record are read, so listing is O(QO) instead of
-/// O(archive). Archives without a usable record (multi-volume,
-/// header-encrypted, or created without `quickOpen`) transparently fall
-/// back to a full scan, so the result is always complete.
-#[napi]
+/// List the members of an archive through its quick-open record — the fast
+/// path for archives created with `quickOpen`. Archives without a usable
+/// record transparently fall back to a full scan on a worker thread.
+#[napi(ts_return_type = "Promise<Array<EntryInfo>>")]
 pub fn list_entries_quick(
   archive_path: String,
   password: Option<String>,
-) -> Result<Vec<EntryInfo>> {
-  let archive = match password.as_deref() {
-    Some(pw) if !pw.is_empty() => {
-      rar5::RarArchive::open_quick_with_password(&archive_path, pw).map_err(to_napi_error)?
-    }
-    _ => rar5::RarArchive::open_quick(&archive_path).map_err(to_napi_error)?,
-  };
-  Ok(entry_infos(&archive))
+) -> AsyncTask<ListEntriesDetailedTask> {
+  AsyncTask::new(ListEntriesDetailedTask {
+    archive_path,
+    password,
+    quick: true,
+  })
+}
+
+pub struct ListEntriesDetailedTask {
+  archive_path: String,
+  password: Option<String>,
+  quick: bool,
+}
+
+#[napi]
+impl Task for ListEntriesDetailedTask {
+  type Output = Vec<EntryInfo>;
+  type JsValue = Vec<EntryInfo>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let archive = match (self.quick, self.password.as_deref()) {
+      (true, Some(pw)) if !pw.is_empty() => {
+        rar5::RarArchive::open_quick_with_password(&self.archive_path, pw).map_err(to_napi_error)?
+      }
+      (true, _) => rar5::RarArchive::open_quick(&self.archive_path).map_err(to_napi_error)?,
+      (false, Some(pw)) if !pw.is_empty() => {
+        rar5::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
+      }
+      (false, _) => rar5::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
+    };
+    Ok(entry_infos(&archive))
+  }
+
+  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output)
+  }
 }
 
 fn entry_infos(archive: &rar5::RarArchive) -> Vec<EntryInfo> {
@@ -908,7 +1087,7 @@ pub struct ExtractArchiveOptions {
   /// Maximum dictionary size in bytes accepted when decoding a member.
   /// WinRAR-compatible default: 4 GiB (RAR7 v70 members with larger
   /// dictionaries are refused). Pass 0 for no limit.
-  pub max_dict_size: Option<i64>,
+  pub max_dict_size: Option<f64>,
 }
 
 pub struct ExtractArchiveTask {
@@ -917,6 +1096,7 @@ pub struct ExtractArchiveTask {
   cancel: Option<Arc<AtomicBool>>,
 }
 
+#[napi]
 impl Task for ExtractArchiveTask {
   type Output = ();
   type JsValue = ();
@@ -933,7 +1113,7 @@ impl Task for ExtractArchiveTask {
     fs::create_dir_all(dest)
       .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
     archive
-      .extract_all_with_options(dest, self.opts.to_extract_options())
+      .extract_all_with_options(dest, self.opts.to_extract_options()?)
       .map_err(to_napi_error)?;
     Ok(())
   }
@@ -943,8 +1123,8 @@ impl Task for ExtractArchiveTask {
   }
 }
 
-/// Extract a RAR5 archive into a directory (fully streaming: no per-member
-/// or total size limits, so arbitrarily large members work).
+/// Extract an archive into a directory (fully streaming: no per-member or
+/// total size limits, so arbitrarily large members work).
 #[napi]
 pub fn extract_archive(
   archive_path: String,
@@ -959,4 +1139,85 @@ pub fn extract_archive(
     },
     signal,
   )
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn js_integer_validation_rejects_lossy_or_out_of_range_values() {
+    for value in [
+      f64::NAN,
+      f64::INFINITY,
+      -1.0,
+      1.5,
+      JS_MAX_SAFE_INTEGER + 1.0,
+    ] {
+      let err = checked_js_integer(value, "value", 0, JS_MAX_SAFE_INTEGER as u64).unwrap_err();
+      assert_eq!(err.status, Status::InvalidArg);
+    }
+    assert_eq!(
+      checked_js_integer(JS_MAX_SAFE_INTEGER, "value", 0, JS_MAX_SAFE_INTEGER as u64).unwrap(),
+      JS_MAX_SAFE_INTEGER as u64
+    );
+  }
+
+  #[test]
+  fn core_error_variants_have_stable_napi_statuses() {
+    let invalid_arguments = [
+      rar5::RarError::Format("bad header".into()),
+      rar5::RarError::InvalidOption("bad option".into()),
+      rar5::RarError::Encrypted("password required".into()),
+      rar5::RarError::Security("unsafe path".into()),
+      rar5::RarError::LimitExceeded {
+        limit: 1,
+        context: "test".into(),
+      },
+      rar5::RarError::MemberNotFound { name: "x".into() },
+      rar5::RarError::WrongPassword,
+    ];
+    for err in invalid_arguments {
+      assert_eq!(to_napi_error(err).status, Status::InvalidArg);
+    }
+
+    let operation_failures = [
+      rar5::RarError::InvalidState("read mode".into()),
+      rar5::RarError::Unsupported("feature".into()),
+      rar5::RarError::ArchiveLocked,
+      rar5::RarError::Crc {
+        expected: 1,
+        actual: 2,
+        context: "member".into(),
+      },
+      rar5::RarError::HashMismatch {
+        expected: [1; 32],
+        actual: [2; 32],
+        context: "member".into(),
+      },
+      rar5::RarError::Io(std::io::Error::other("disk")),
+    ];
+    for err in operation_failures {
+      assert_eq!(to_napi_error(err).status, Status::GenericFailure);
+    }
+
+    assert_eq!(
+      to_napi_error(rar5::RarError::Cancelled).status,
+      Status::Cancelled
+    );
+  }
+
+  #[test]
+  fn discovered_paths_keep_natural_volume_order_and_deduplicate() {
+    let mut paths = (1..=12)
+      .map(|part| PathBuf::from(format!("archive.part{part}.rar")))
+      .collect::<Vec<_>>();
+    paths.push(PathBuf::from("archive.part10.rar"));
+
+    let result = discovered_paths_in_order(paths);
+    assert_eq!(result.len(), 12);
+    assert_eq!(result[1], "archive.part2.rar");
+    assert_eq!(result[9], "archive.part10.rar");
+    assert_eq!(result[11], "archive.part12.rar");
+  }
 }

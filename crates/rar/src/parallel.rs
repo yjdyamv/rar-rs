@@ -79,11 +79,31 @@ pub(crate) fn pool_threads(default: usize) -> usize {
     }
 }
 
+#[cfg(feature = "parallel")]
+fn resolve_compression_threads(
+    archive_threads: Option<usize>,
+    global_threads: Option<usize>,
+    automatic_threads: usize,
+) -> usize {
+    match archive_threads {
+        Some(0) => automatic_threads,
+        Some(threads) => threads,
+        None => global_threads.unwrap_or(automatic_threads),
+    }
+}
+
+/// Effective worker count for an archive-local override. In particular,
+/// `Some(0)` selects automatic sizing without consulting the global override.
+#[cfg(feature = "parallel")]
+pub(crate) fn compression_threads_for(archive_threads: Option<usize>) -> usize {
+    resolve_compression_threads(archive_threads, configured_threads(), pool_threads(4))
+}
+
 /// Default compression worker count: the `-mt` override when set,
 /// otherwise automatic sizing to *all* host cores (maximum parallelism).
 #[cfg(feature = "parallel")]
 pub(crate) fn default_compression_threads() -> usize {
-    configured_threads().unwrap_or_else(|| pool_threads(4))
+    compression_threads_for(None)
 }
 
 /// Pool with exactly `threads` workers, cached per thread count (see the
@@ -182,6 +202,13 @@ impl Drop for BatchWorkerGuard {
 #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_auto_threads_ignore_global_override() {
+        assert_eq!(resolve_compression_threads(Some(0), Some(2), 7), 7);
+        assert_eq!(resolve_compression_threads(None, Some(2), 7), 2);
+        assert_eq!(resolve_compression_threads(Some(3), Some(2), 7), 3);
+    }
 
     #[test]
     fn default_compression_uses_all_host_cores() {

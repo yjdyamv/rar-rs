@@ -1964,7 +1964,7 @@ mod tests {
             // A handful of E8 calls with small relative targets.
             for k in 0..6u32 {
                 data.push(0xE8);
-                let target = (k * 0x100 + 0x40) as u32;
+                let target = k * 0x100 + 0x40;
                 data.extend_from_slice(&target.to_le_bytes());
                 data.extend_from_slice(&[0x90, 0x90]);
             }
@@ -2043,9 +2043,9 @@ mod tests {
         let mut ch = [128i16; 2];
         let mut seed = 0xC0FFEEu32;
         while data.len() < bytes {
-            for c in 0..2usize {
-                ch[c] = (ch[c] + (((seed >> (c * 8)) & 0x3f) as i16 - 30)).clamp(0, 255);
-                data.push(ch[c] as u8);
+            for (c, sample) in ch.iter_mut().enumerate() {
+                *sample = (*sample + (((seed >> (c * 8)) & 0x3f) as i16 - 30)).clamp(0, 255);
+                data.push(*sample as u8);
             }
             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
         }

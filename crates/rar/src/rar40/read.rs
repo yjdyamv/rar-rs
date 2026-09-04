@@ -18,7 +18,16 @@ use std::path::PathBuf;
 
 use super::LegacyDecoder;
 
-/// Decode a single-volume RAR4 member into memory.
+pub(crate) struct MemberDecodeOptions<'a> {
+    pub password: Option<&'a str>,
+    pub decoder: Option<&'a mut LegacyDecoder>,
+    /// Guard for paths that aggregate the packed payload in a `Vec`.
+    pub max_alloc_packed_bytes: u64,
+    /// Guard for unencrypted STORE payloads copied directly to a writer.
+    pub max_stream_packed_bytes: u64,
+}
+
+/// Decode a RAR4 member into memory, including split multi-volume members.
 ///
 /// `chunks` names the member's volume segments (one per volume for split
 /// members); the packed payload is the concatenation of those segments,
@@ -31,13 +40,32 @@ struct CrcWriter<'a, W: ?Sized + std::io::Write> {
     inner: &'a mut W,
     hasher: crc32fast::Hasher,
     count: u64,
+    limit: u64,
 }
 
 impl<W: ?Sized + std::io::Write> std::io::Write for CrcWriter<'_, W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let requested = u64::try_from(buf.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RAR4 output length overflows u64",
+            )
+        })?;
+        let remaining = self.limit.saturating_sub(self.count);
+        if requested > remaining {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "RAR4 decoder attempted to write beyond declared unpacked size {}",
+                    self.limit
+                ),
+            ));
+        }
         let n = self.inner.write(buf)?;
         self.hasher.update(&buf[..n]);
-        self.count += n as u64;
+        self.count = self.count.checked_add(n as u64).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "RAR4 output size overflow")
+        })?;
         Ok(n)
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -59,19 +87,20 @@ pub(crate) fn decode_member_bytes_to(
     volume_paths: &[PathBuf],
     chunks: &[DataChunk],
     hdr: &FileHeader,
-    password: Option<&str>,
-    decoder: Option<&mut LegacyDecoder>,
+    options: MemberDecodeOptions<'_>,
     writer: &mut dyn std::io::Write,
 ) -> RarResult<(u64, u32)> {
     let mut crc_writer = CrcWriter {
         inner: writer,
         hasher: crc32fast::Hasher::new(),
         count: 0,
+        limit: hdr.unpacked_size,
     };
     {
         let writer: &mut dyn std::io::Write = &mut crc_writer;
-        decode_member_bytes_to_inner(stream, volume_paths, chunks, hdr, password, decoder, writer)?;
+        decode_member_bytes_to_inner(stream, volume_paths, chunks, hdr, options, writer)?;
     }
+    validate_output_size(hdr, crc_writer.count)?;
     Ok((crc_writer.count, crc_writer.hasher.clone().finalize()))
 }
 
@@ -80,19 +109,36 @@ fn decode_member_bytes_to_inner(
     volume_paths: &[PathBuf],
     chunks: &[DataChunk],
     hdr: &FileHeader,
-    password: Option<&str>,
-    decoder: Option<&mut LegacyDecoder>,
+    options: MemberDecodeOptions<'_>,
     writer: &mut dyn std::io::Write,
 ) -> RarResult<()> {
+    let MemberDecodeOptions {
+        password,
+        decoder,
+        max_alloc_packed_bytes,
+        max_stream_packed_bytes,
+    } = options;
+    let encrypted = hdr.flags & super::FHD_PASSWORD as u64 != 0;
+    let streams_store = super::is_stored(hdr.comp_method) && !encrypted;
+    let packed_limit = if streams_store {
+        max_stream_packed_bytes
+    } else {
+        max_alloc_packed_bytes
+    };
+    let packed_size = checked_packed_size(chunks, hdr, packed_limit)?;
     if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
         return Ok(());
     }
-    let encrypted = hdr.flags & super::FHD_PASSWORD as u64 != 0;
-    let unp_size = hdr.unpacked_size as usize;
 
-    if super::is_stored(hdr.comp_method) && !encrypted {
+    if streams_store {
+        if hdr.packed_size != hdr.unpacked_size {
+            return Err(RarError::Format(format!(
+                "RAR4: {}: STORE packed size {} does not match unpacked size {}",
+                hdr.name, hdr.packed_size, hdr.unpacked_size
+            )));
+        }
         for chunk in chunks {
-            let mut remaining = chunk.packed_size as usize;
+            let mut remaining = chunk.packed_size;
             let mut buffer = vec![0u8; 1 << 20];
             let mut source: Box<dyn Read> = if chunk.volume_index == 0 {
                 stream.seek(SeekFrom::Start(chunk.data_offset))?;
@@ -106,34 +152,32 @@ fn decode_member_bytes_to_inner(
                 Box::new(f)
             };
             while remaining > 0 {
-                let take = remaining.min(buffer.len());
+                let take = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| {
+                    RarError::Format("RAR4: packed chunk size overflows usize".into())
+                })?;
                 source
                     .read_exact(&mut buffer[..take])
                     .map_err(RarError::Io)?;
                 writer.write_all(&buffer[..take]).map_err(RarError::Io)?;
-                remaining -= take;
+                remaining -= take as u64;
             }
         }
         return Ok(());
     }
 
-    let mut packed = Vec::new();
-    for chunk in chunks {
-        let mut segment = vec![0u8; chunk.packed_size as usize];
-        if chunk.volume_index == 0 {
-            stream.seek(SeekFrom::Start(chunk.data_offset))?;
-            stream.read_exact(&mut segment).map_err(RarError::Io)?;
-        } else {
-            let mut f = std::fs::File::open(
-                volume_paths
-                    .get(chunk.volume_index)
-                    .ok_or_else(|| RarError::Format("RAR4: chunk volume out of range".into()))?,
-            )?;
-            f.seek(SeekFrom::Start(chunk.data_offset))?;
-            f.read_exact(&mut segment).map_err(RarError::Io)?;
-        }
-        packed.extend_from_slice(&segment);
-    }
+    let unp_size = usize::try_from(hdr.unpacked_size).map_err(|_| RarError::LimitExceeded {
+        limit: hdr.unpacked_size,
+        context: format!("{}: unpacked size overflows host address space", hdr.name),
+    })?;
+    let packed_len = packed_len_for_allocation(hdr, packed_size, max_alloc_packed_bytes)?;
+    let mut packed = read_packed_payload(
+        stream,
+        volume_paths,
+        chunks,
+        hdr,
+        packed_len,
+        max_alloc_packed_bytes,
+    )?;
 
     if encrypted {
         let password = password
@@ -146,9 +190,13 @@ fn decode_member_bytes_to_inner(
             .as_bytes();
         decrypt_in_place(hdr, password, &mut packed)?;
         if super::is_stored(hdr.comp_method) {
-            if packed.len() > unp_size {
-                packed.truncate(unp_size);
+            if packed.len() < unp_size {
+                return Err(RarError::Format(format!(
+                    "RAR4: {}: encrypted STORE payload is shorter than declared unpacked size {}",
+                    hdr.name, hdr.unpacked_size
+                )));
             }
+            packed.truncate(unp_size);
             writer.write_all(&packed).map_err(RarError::Io)?;
             return Ok(());
         }
@@ -219,35 +267,135 @@ fn decode_member_bytes_to_inner(
     )))
 }
 
+fn checked_packed_size(
+    chunks: &[DataChunk],
+    hdr: &FileHeader,
+    max_packed_bytes: u64,
+) -> RarResult<u64> {
+    let total = chunks.iter().try_fold(0u64, |total, chunk| {
+        total
+            .checked_add(chunk.packed_size)
+            .ok_or_else(|| RarError::Format(format!("RAR4: {}: packed size overflow", hdr.name)))
+    })?;
+    if total != hdr.packed_size {
+        return Err(RarError::Format(format!(
+            "RAR4: {}: chunk packed size {total} does not match header packed size {}",
+            hdr.name, hdr.packed_size
+        )));
+    }
+    if total > max_packed_bytes {
+        return Err(RarError::LimitExceeded {
+            limit: max_packed_bytes,
+            context: format!(
+                "{}: packed size {total} exceeds the extraction limit",
+                hdr.name
+            ),
+        });
+    }
+    Ok(total)
+}
+
+fn packed_len_for_allocation(
+    hdr: &FileHeader,
+    packed_size: u64,
+    max_packed_bytes: u64,
+) -> RarResult<usize> {
+    usize::try_from(packed_size).map_err(|_| RarError::LimitExceeded {
+        limit: max_packed_bytes,
+        context: format!("{}: packed size overflows host address space", hdr.name),
+    })
+}
+
+fn read_packed_payload(
+    stream: &mut (impl Read + Seek),
+    volume_paths: &[PathBuf],
+    chunks: &[DataChunk],
+    hdr: &FileHeader,
+    packed_len: usize,
+    max_packed_bytes: u64,
+) -> RarResult<Vec<u8>> {
+    let mut packed = Vec::new();
+    packed
+        .try_reserve_exact(packed_len)
+        .map_err(|_| RarError::LimitExceeded {
+            limit: max_packed_bytes,
+            context: format!(
+                "{}: unable to reserve {packed_len} bytes for RAR4 packed payload",
+                hdr.name
+            ),
+        })?;
+    for chunk in chunks {
+        let segment_len =
+            usize::try_from(chunk.packed_size).map_err(|_| RarError::LimitExceeded {
+                limit: max_packed_bytes,
+                context: format!("{}: packed chunk overflows host address space", hdr.name),
+            })?;
+        let start = packed.len();
+        let end = start
+            .checked_add(segment_len)
+            .ok_or_else(|| RarError::Format("RAR4: packed buffer size overflow".into()))?;
+        if end > packed_len {
+            return Err(RarError::Format(
+                "RAR4: packed chunks exceed reserved size".into(),
+            ));
+        }
+        packed.resize(end, 0);
+        if chunk.volume_index == 0 {
+            stream.seek(SeekFrom::Start(chunk.data_offset))?;
+            stream
+                .read_exact(&mut packed[start..end])
+                .map_err(RarError::Io)?;
+        } else {
+            let mut file = std::fs::File::open(
+                volume_paths
+                    .get(chunk.volume_index)
+                    .ok_or_else(|| RarError::Format("RAR4: chunk volume out of range".into()))?,
+            )?;
+            file.seek(SeekFrom::Start(chunk.data_offset))?;
+            file.read_exact(&mut packed[start..end])
+                .map_err(RarError::Io)?;
+        }
+    }
+    Ok(packed)
+}
+
+fn validate_output_size(hdr: &FileHeader, actual: u64) -> RarResult<()> {
+    if actual != hdr.unpacked_size {
+        return Err(RarError::Format(format!(
+            "RAR4: {}: decoded size {actual} does not match declared unpacked size {}",
+            hdr.name, hdr.unpacked_size
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn decode_member_bytes(
     stream: &mut (impl Read + Seek),
     volume_paths: &[PathBuf],
     chunks: &[DataChunk],
     hdr: &FileHeader,
-    password: Option<&str>,
-    decoder: Option<&mut LegacyDecoder>,
+    options: MemberDecodeOptions<'_>,
 ) -> RarResult<Vec<u8>> {
+    let MemberDecodeOptions {
+        password,
+        decoder,
+        max_alloc_packed_bytes,
+        max_stream_packed_bytes: _,
+    } = options;
+    let packed_size = checked_packed_size(chunks, hdr, max_alloc_packed_bytes)?;
     if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
         return Ok(Vec::new());
     }
 
-    let mut packed = Vec::new();
-    for chunk in chunks {
-        let mut segment = vec![0u8; chunk.packed_size as usize];
-        if chunk.volume_index == 0 {
-            stream.seek(SeekFrom::Start(chunk.data_offset))?;
-            stream.read_exact(&mut segment).map_err(RarError::Io)?;
-        } else {
-            let mut f = std::fs::File::open(
-                volume_paths
-                    .get(chunk.volume_index)
-                    .ok_or_else(|| RarError::Format("RAR4: chunk volume out of range".into()))?,
-            )?;
-            f.seek(SeekFrom::Start(chunk.data_offset))?;
-            f.read_exact(&mut segment).map_err(RarError::Io)?;
-        }
-        packed.extend_from_slice(&segment);
-    }
+    let packed_len = packed_len_for_allocation(hdr, packed_size, max_alloc_packed_bytes)?;
+    let mut packed = read_packed_payload(
+        stream,
+        volume_paths,
+        chunks,
+        hdr,
+        packed_len,
+        max_alloc_packed_bytes,
+    )?;
 
     let encrypted = hdr.flags & super::FHD_PASSWORD as u64 != 0;
     if encrypted {
@@ -262,13 +410,27 @@ pub(crate) fn decode_member_bytes(
         decrypt_in_place(hdr, password, &mut packed)?;
     }
 
-    let unp_size = hdr.unpacked_size as usize;
+    let unp_size = usize::try_from(hdr.unpacked_size).map_err(|_| RarError::LimitExceeded {
+        limit: hdr.unpacked_size,
+        context: format!("{}: unpacked size overflows host address space", hdr.name),
+    })?;
     if super::is_stored(hdr.comp_method) {
-        // STORE: encrypted payload includes block padding, and STORE never
-        // expands, so trim to the unpacked size.
-        if packed.len() > unp_size {
-            packed.truncate(unp_size);
+        if !encrypted && packed.len() != unp_size {
+            return Err(RarError::Format(format!(
+                "RAR4: {}: STORE packed size {} does not match unpacked size {}",
+                hdr.name,
+                packed.len(),
+                hdr.unpacked_size
+            )));
         }
+        if packed.len() < unp_size {
+            return Err(RarError::Format(format!(
+                "RAR4: {}: STORE payload is shorter than declared unpacked size {}",
+                hdr.name, hdr.unpacked_size
+            )));
+        }
+        packed.truncate(unp_size);
+        validate_output_size(hdr, packed.len() as u64)?;
         return Ok(packed);
     }
 
@@ -281,6 +443,7 @@ pub(crate) fn decode_member_bytes(
             None => Rar29Decoder::new().decode_member(&packed, hdr.unpacked_size),
         }
         .map_err(|e| map_codec_error(hdr, e))?;
+        validate_output_size(hdr, out.len() as u64)?;
         return Ok(out);
     }
 
@@ -293,6 +456,7 @@ pub(crate) fn decode_member_bytes(
             None => Rar20Decoder::new().decode_member(&packed, hdr.unpacked_size),
         }
         .map_err(|e| map_codec_error(hdr, e))?;
+        validate_output_size(hdr, out.len() as u64)?;
         return Ok(out);
     }
 
@@ -305,6 +469,7 @@ pub(crate) fn decode_member_bytes(
             None => Rar15Decoder::new().decode_member(&packed, hdr.unpacked_size, false),
         }
         .map_err(|e| map_codec_error(hdr, e))?;
+        validate_output_size(hdr, out.len() as u64)?;
         return Ok(out);
     }
 
@@ -361,4 +526,141 @@ pub(crate) fn decrypt_in_place(
 /// Compute the RFC/standard CRC-32 of `data` for RAR4 integrity checking.
 pub(crate) fn member_crc(data: &[u8]) -> u32 {
     crc32::crc32(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn store_header(packed_size: u64, unpacked_size: u64) -> FileHeader {
+        FileHeader {
+            name: "payload.bin".into(),
+            packed_size,
+            unpacked_size,
+            comp_method: 0,
+            format_version: 4,
+            ..Default::default()
+        }
+    }
+
+    fn options(max_packed_bytes: u64) -> MemberDecodeOptions<'static> {
+        MemberDecodeOptions {
+            password: None,
+            decoder: None,
+            max_alloc_packed_bytes: max_packed_bytes,
+            max_stream_packed_bytes: max_packed_bytes,
+        }
+    }
+
+    fn chunk(packed_size: u64) -> DataChunk {
+        DataChunk {
+            volume_index: 0,
+            data_offset: 0,
+            packed_size,
+            crc32_val: None,
+            is_final: true,
+            extra_data: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn store_stream_rejects_output_larger_than_declared_size() {
+        let header = store_header(4, 2);
+        let mut output = Vec::new();
+        let error = decode_member_bytes_to(
+            &mut Cursor::new(b"abcd".to_vec()),
+            &[],
+            &[chunk(4)],
+            &header,
+            options(16),
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("does not match unpacked size"));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn store_rejects_output_shorter_than_declared_size() {
+        let header = store_header(2, 4);
+        let error = decode_member_bytes(
+            &mut Cursor::new(b"ab".to_vec()),
+            &[],
+            &[chunk(2)],
+            &header,
+            options(16),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("does not match unpacked size"));
+    }
+
+    #[test]
+    fn packed_payload_limit_is_checked_before_allocation() {
+        let header = store_header(u64::MAX, u64::MAX);
+        let error = decode_member_bytes(
+            &mut Cursor::new(Vec::new()),
+            &[],
+            &[chunk(u64::MAX)],
+            &header,
+            options(1024),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, RarError::LimitExceeded { limit: 1024, .. }));
+    }
+
+    #[test]
+    fn unlimited_store_stream_is_not_rejected_by_allocation_guard() {
+        const ALLOCATION_GUARD: u64 = 8 * 1024 * 1024 * 1024;
+        let size = ALLOCATION_GUARD + 1;
+        let header = store_header(size, size);
+        let mut output = Vec::new();
+        let error = decode_member_bytes_to(
+            &mut Cursor::new(Vec::new()),
+            &[],
+            &[chunk(size)],
+            &header,
+            MemberDecodeOptions {
+                password: None,
+                decoder: None,
+                max_alloc_packed_bytes: ALLOCATION_GUARD,
+                max_stream_packed_bytes: u64::MAX,
+            },
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, RarError::Io(_)),
+            "unexpected error: {error}"
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn packed_chunk_sum_overflow_is_rejected() {
+        let header = store_header(0, 0);
+        let error =
+            checked_packed_size(&[chunk(u64::MAX), chunk(1)], &header, u64::MAX).unwrap_err();
+
+        assert!(error.to_string().contains("packed size overflow"));
+    }
+
+    #[test]
+    fn store_exact_size_roundtrips() {
+        let header = store_header(4, 4);
+        let output = decode_member_bytes(
+            &mut Cursor::new(b"abcd".to_vec()),
+            &[],
+            &[chunk(4)],
+            &header,
+            options(16),
+        )
+        .unwrap();
+
+        assert_eq!(output, b"abcd");
+    }
 }

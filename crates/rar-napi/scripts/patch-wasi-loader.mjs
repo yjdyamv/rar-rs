@@ -81,9 +81,17 @@ module.exports.deleteEntries = function __wasiDeleteEntriesWrapper(
   archivePath,
   names,
   password,
+  onProgress,
+  signal,
 ) {
   return __wasiDeleteEntries(
-    ...__wasiPathMap.mapDeleteArgs(archivePath, names, password),
+    ...__wasiPathMap.mapDeleteArgs(
+      archivePath,
+      names,
+      password,
+      onProgress,
+      signal,
+    ),
   )
 }`
 const LOADER_EXPORTS_LIST_NEW = `const __wasiListEntries = __napiModule.exports.listEntries
@@ -99,9 +107,16 @@ const LOADER_EXPORTS_REPAIR_NEW = `const __wasiRepairArchive = __napiModule.expo
 module.exports.repairArchive = function __wasiRepairArchiveWrapper(
   inputPath,
   outputPath,
+  onProgress,
+  signal,
 ) {
   return __wasiRepairArchive(
-    ...__wasiPathMap.mapRepairArgs(inputPath, outputPath),
+    ...__wasiPathMap.mapRepairArgs(
+      inputPath,
+      outputPath,
+      onProgress,
+      signal,
+    ),
   )
 }`
 const LOADER_EXPORTS_EXTRACT_NEW = `const __wasiExtractArchive = __napiModule.exports.extractArchive
@@ -155,7 +170,7 @@ module.exports.rebuildMissingVolumes = function __wasiRebuildMissingVolumesWrapp
     __wasiPathMap.toGuestPath(firstVolume),
     onProgress,
     signal,
-  )
+  ).then((paths) => __wasiPathMap.mapPathsToHost(paths))
 }`
 const LOADER_EXPORTS_TEST_ARCHIVE_NEW = `const __wasiTestArchive = __napiModule.exports.testArchive
 module.exports.testArchive = function __wasiTestArchiveWrapper(

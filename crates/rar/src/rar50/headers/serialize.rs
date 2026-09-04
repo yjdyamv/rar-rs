@@ -104,7 +104,7 @@ impl FileHeader {
         comp_info |= ((self.comp_method as u64) & 0x07) << COMP_INFO_METHOD_SHIFT;
         if let Some(bytes) = self.dict_size_bytes {
             // RAR7 (v70): 5-bit dict field (bits 10-14) + 1/32 increment
-            // (bits 15-19) encode non-power-of-two sizes up to 64 GiB;
+            // (bits 15-19) encode non-power-of-two sizes up to 126 GiB;
             // the compression version is forced to 1.
             let mut n = 0u32;
             while (0x20000u64 << (n + 1)) <= bytes && n < 19 {
@@ -356,4 +356,26 @@ pub(crate) fn vint_fixed5(value: u64) -> [u8; 5] {
         *byte = b;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rar7_max_dictionary_roundtrips_exactly() {
+        let header = FileHeader {
+            name: "max-dict.bin".into(),
+            comp_version: 1,
+            dict_size_bytes: Some(crate::options::MAX_RAR7_DICTIONARY_BYTES),
+            ..Default::default()
+        };
+
+        let raw = crate::rar50::headers::parse_block_bytes(&header.to_bytes()).unwrap();
+        let parsed = FileHeader::from_raw(&raw, raw.data_offset).unwrap();
+        assert_eq!(
+            parsed.dict_size_bytes,
+            Some(crate::options::MAX_RAR7_DICTIONARY_BYTES)
+        );
+    }
 }

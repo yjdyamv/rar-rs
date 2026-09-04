@@ -9,6 +9,16 @@
 | [`../README.md`](../README.md) | 项目概览：构建、快速上手、特性与限制 | 第一次接触 / 想知道"这是什么" |
 | [`CONTEXT.md`](../CONTEXT.md) | 领域词汇（Archive/Member/Volume/Chunk/…）+ 分层结构 + 项目事实 | 遇到新术语、做架构审查、写 skill 前查这里 |
 | [`PLAN.md`](../PLAN.md) | 工程计划：现状、待办、已完成里程碑、一致拒绝、已知差异、改代码前必读 | 计划工作量 / 对齐进度 / 改代码前 |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | 面向发布的变更摘要 | 准备发布 / 查询版本变化 |
+| [`../SECURITY.md`](../SECURITY.md) | 漏洞报告渠道、范围与披露建议 | 发现安全问题 / 处理恶意归档 |
+
+## 审查与治理
+
+| 文档 | 内容 | 何时读 |
+|---|---|---|
+| [`CODE_AUDIT_2026-09-05.md`](CODE_AUDIT_2026-09-05.md) | 代码、API、CI、Release 与许可证整改基线 | 排整改优先级 / 验收审查问题 |
+| [`../NOTICE`](../NOTICE) | 项目归属、上游部分和商标说明 | 发布 / 核对来源边界 |
+| [`../THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md) | 第三方来源清单；不是法律结论或完整许可证判定 | 来源审计 / 准备发行材料 |
 
 ## 格式与架构（深入）
 
@@ -17,6 +27,14 @@
 | [`FORMAT_RAR5_RAR7.html`](FORMAT_RAR5_RAR7.html) | 磁盘格式权威参考：块流、逐字节拆解、Extra、压缩/加密/多卷/恢复/Solid/RAR7、差异清单、常量速查 | 需要格式细节 / 校验字节布局 / 对照实现 |
 | [`ARCHITECTURE.html`](ARCHITECTURE.html) | 库 crate 模块地图、workspace、设计笔记（有界内存/安全提取/solid 链）、特性矩阵 | 理解代码分层 / 定位模块 |
 | [`CLI.md`](CLI.md) | 命令行工具 `rar` / `unrar` 全量开关与命令参考 | 用 CLI / 实现新开关 |
+
+## ADR 与规格
+
+| 文档 | 内容 | 何时读 |
+|---|---|---|
+| [`adr/0001-rar4-creation-architecture.md`](adr/0001-rar4-creation-architecture.md) | RAR4 创建架构决策记录 | 修改 RAR4 写管线 / 理解决策约束 |
+| [`rar4-creation-spec.md`](rar4-creation-spec.md) | RAR4 创建行为与格式规格 | 实现或验证 RAR4 创建 |
+| [`plan-rar29-encoder-port.md`](plan-rar29-encoder-port.md) | RAR29 encoder port 实施计划与历史 | 追溯 legacy encoder 迁移 |
 
 ## 过程与工具
 

@@ -4,9 +4,10 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
+rust-version = "1.88"
 license = "BSD-2-Clause"
 repository = "https://codeberg.org/librar/rar-rs"
-description = "Pure-Rust RAR5 archive library — create, read, and extract RAR5 archives with native LZSS+Huffman compression"
+description = "Pure-Rust library and tools for RAR 1.5-4.x, RAR5, and RAR7 archives"
 
 [workspace.dependencies]
 crc32fast = "1"

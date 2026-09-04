@@ -426,7 +426,7 @@ impl<'a> MatchFinder<'a> {
         // Keeping the ring at window size keeps it hot in cache.
         //
         // The ring is capped at the input length so a huge declared
-        // dictionary (RAR7 `-md` up to 64 GiB) can never allocate a
+        // dictionary (RAR7 `-md` up to 126 GiB) can never allocate a
         // multi-GiB `prev` array (or overflow its i32 slots) — with
         // chunked compression the match finder only ever sees one
         // chunk + tail anyway.

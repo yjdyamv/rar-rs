@@ -1,6 +1,114 @@
 use super::*;
 use crate::rar50::extract::sanitize_archive_path;
 
+fn assert_invalid_option(result: RarResult<RarArchive>) {
+    match result {
+        Err(RarError::InvalidOption(_)) => {}
+        Err(error) => panic!("expected InvalidOption, got {error}"),
+        Ok(_) => panic!("expected invalid options to be rejected"),
+    }
+}
+
+#[test]
+fn create_options_reject_invalid_dictionary_and_thread_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid.rar");
+
+    assert_invalid_option(RarArchive::create_with_options(
+        &path,
+        crate::options::CreateOptions {
+            dict_size_log: Some(16),
+            ..Default::default()
+        },
+    ));
+    assert_invalid_option(RarArchive::create_with_options(
+        &path,
+        crate::options::CreateOptions {
+            dict_size_log: Some(1),
+            dict_size_bytes: Some(1024 * 1024),
+            ..Default::default()
+        },
+    ));
+    for bytes in [1, crate::options::MAX_RAR7_DICTIONARY_BYTES + 1] {
+        assert_invalid_option(RarArchive::create_with_options(
+            &path,
+            crate::options::CreateOptions {
+                dict_size_bytes: Some(bytes),
+                ..Default::default()
+            },
+        ));
+    }
+    assert_invalid_option(RarArchive::create_with_options(
+        &path,
+        crate::options::CreateOptions {
+            threads: Some(crate::options::MAX_COMPRESSION_THREADS + 1),
+            ..Default::default()
+        },
+    ));
+}
+
+#[test]
+fn archive_local_zero_threads_use_automatic_sizing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auto-threads.rar");
+    let mut archive = RarArchive::create_with_options(
+        &path,
+        crate::options::CreateOptions {
+            threads: Some(0),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(archive.write_ctx().compression_threads, Some(0));
+    #[cfg(feature = "parallel")]
+    assert_eq!(
+        archive.effective_threads(),
+        crate::parallel::pool_threads(4)
+    );
+    archive.close().unwrap();
+}
+
+#[test]
+fn write_only_setters_return_errors_in_read_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.rar");
+    let mut archive = RarArchive::create_with_options(&path, Default::default()).unwrap();
+    archive.set_compression_threads(Some(2)).unwrap();
+    archive.set_dictionary(Some(3), None).unwrap();
+    archive.add_bytes("a.txt", b"a", 0).unwrap();
+    archive.close().unwrap();
+
+    let mut archive = RarArchive::open(&path).unwrap();
+    assert!(matches!(
+        archive.set_compression_threads(Some(2)),
+        Err(RarError::InvalidState(_))
+    ));
+    assert!(matches!(
+        archive.set_dictionary(Some(3), None),
+        Err(RarError::InvalidState(_))
+    ));
+}
+
+#[test]
+fn setters_reject_invalid_values_without_mutating_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid-setter.rar");
+    let mut archive = RarArchive::create_with_options(&path, Default::default()).unwrap();
+
+    archive.set_compression_threads(Some(0)).unwrap();
+    assert!(matches!(
+        archive.set_compression_threads(Some(crate::options::MAX_COMPRESSION_THREADS + 1)),
+        Err(RarError::InvalidOption(_))
+    ));
+    assert!(matches!(
+        archive.set_dictionary(Some(16), None),
+        Err(RarError::InvalidOption(_))
+    ));
+    assert_eq!(archive.write_ctx().compression_threads, Some(0));
+    assert_eq!(archive.write_ctx().dict_size_log, None);
+}
+
 #[test]
 fn encrypted_store_roundtrip() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -874,6 +982,33 @@ fn append_keeps_original_untouched_until_close() {
     let mut rar = RarArchive::open(&path).unwrap();
     assert_eq!(rar.read("a.txt").unwrap(), b"original");
     assert_eq!(rar.read("b.txt").unwrap(), b"appended");
+}
+
+#[test]
+fn quick_open_only_archive_can_be_appended() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("quick-open.rar");
+    {
+        let mut archive = RarArchive::create_with_options(
+            &path,
+            crate::options::CreateOptions {
+                quick_open: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("a.txt", b"original", 0).unwrap();
+        archive.close().unwrap();
+    }
+    {
+        let mut archive = RarArchive::open_append(&path).unwrap();
+        archive.add_bytes("b.txt", b"appended", 0).unwrap();
+        archive.close().unwrap();
+    }
+
+    let mut archive = RarArchive::open(&path).unwrap();
+    assert_eq!(archive.read("a.txt").unwrap(), b"original");
+    assert_eq!(archive.read("b.txt").unwrap(), b"appended");
 }
 
 #[test]

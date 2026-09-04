@@ -264,22 +264,24 @@ impl RarArchive {
                     let name = self.service_block_name(&meta)?;
                     if name.as_deref() == Some("STM")
                         && let Some(owner_index) = last_file_index
-                        && let Some(stream_name) = crate::rar50::headers::parse_service_subdata(
-                            &crate::rar50::headers::block_extra_area(&raw.header_data),
-                        )
-                        && !stream_name.is_empty()
-                        && let Some((unpacked_size, method, dict_size_log)) =
-                            crate::rar50::headers::parse_stream_params(&raw.header_data)
                     {
-                        self.read_ctx_mut().streams.push(StreamRecord {
-                            owner_index,
-                            name: String::from_utf8_lossy(&stream_name).into_owned(),
-                            data_offset: raw.data_offset,
-                            data_size: raw.data_size,
-                            unpacked_size,
-                            method,
-                            dict_size_log,
-                        });
+                        let extra = crate::rar50::headers::block_extra_area(&raw.header_data)?;
+                        if let Some(stream_name) =
+                            crate::rar50::headers::parse_service_subdata(&extra)
+                            && !stream_name.is_empty()
+                            && let Some((unpacked_size, method, dict_size_log)) =
+                                crate::rar50::headers::parse_stream_params(&raw.header_data)
+                        {
+                            self.read_ctx_mut().streams.push(StreamRecord {
+                                owner_index,
+                                name: String::from_utf8_lossy(&stream_name).into_owned(),
+                                data_offset: raw.data_offset,
+                                data_size: raw.data_size,
+                                unpacked_size,
+                                method,
+                                dict_size_log,
+                            });
+                        }
                     }
                 }
                 BLOCK_TYPE_END_ARCHIVE => break,
@@ -293,7 +295,7 @@ impl RarArchive {
                 self.stream
                     .as_mut()
                     .unwrap()
-                    .seek(SeekFrom::Start(raw.data_offset + raw.data_size))?;
+                    .seek(SeekFrom::Start(meta.data_end))?;
             }
         }
 
@@ -1270,15 +1272,25 @@ impl RarArchive {
         )
     }
 
-    /// Maximum packed bytes accepted for one member. Bounded by the
-    /// configured unpacked limit plus a small overhead, or a hard 8 GiB
-    /// guard when unlimited.
+    /// Maximum packed bytes accepted when the payload must be aggregated in
+    /// memory. Bounded by the configured unpacked limit plus a small overhead,
+    /// or a hard 8 GiB allocation guard when output is otherwise unlimited.
     pub(crate) fn max_packed_bytes(&self) -> u64 {
         self.read_ctx()
             .extract_options
             .max_unpacked_bytes
             .map(|u| u.saturating_add(1 << 20))
             .unwrap_or(8 * 1024 * 1024 * 1024)
+    }
+
+    /// Maximum packed bytes accepted by a truly streaming STORE path. With no
+    /// unpacked limit there is no allocation-driven packed-size ceiling.
+    fn max_stream_packed_bytes(&self) -> u64 {
+        self.read_ctx()
+            .extract_options
+            .max_unpacked_bytes
+            .map(|u| u.saturating_add(1 << 20))
+            .unwrap_or(u64::MAX)
     }
 
     /// Decode a single file into memory, optionally with a shared
@@ -1388,6 +1400,7 @@ impl RarArchive {
     /// Decode a single RAR4 member in memory, verifying its CRC32. Solid
     /// chain members decode through their chain prefix (shared window).
     fn decode_rar4_at(&mut self, idx: usize) -> RarResult<Vec<u8>> {
+        self.validate_entry_limits(idx)?;
         let hdr = self.entries[idx].header.clone();
         let out = self.rar4_decode_member(idx)?;
         self.rar4_verify_crc(&hdr, &out)?;
@@ -1400,6 +1413,7 @@ impl RarArchive {
     /// members decode incrementally); solid-chain members keep the shared
     /// window semantics and decode in one pass.
     fn decode_rar4_to(&mut self, idx: usize, writer: &mut dyn Write) -> RarResult<u64> {
+        self.validate_entry_limits(idx)?;
         let hdr = self.entries[idx].header.clone();
         if self.is_rar4_solid_member(idx) {
             let out = self.rar4_decode_solid_through(idx)?;
@@ -1408,13 +1422,19 @@ impl RarArchive {
             return Ok(out.len() as u64);
         }
         let entry = self.entries[idx].clone();
+        let max_alloc_packed_bytes = self.max_packed_bytes();
+        let max_stream_packed_bytes = self.max_stream_packed_bytes();
         let (written, crc) = crate::rar40::decode_member_bytes_to(
             self.stream.as_mut().unwrap(),
             &self.volume_paths,
             &entry.chunks,
             &entry.header,
-            self.password.as_deref(),
-            None,
+            crate::rar40::MemberDecodeOptions {
+                password: self.password.as_deref(),
+                decoder: None,
+                max_alloc_packed_bytes,
+                max_stream_packed_bytes,
+            },
             writer,
         )?;
         // The streamed CRC is authoritative; compare with the header.
@@ -1438,13 +1458,18 @@ impl RarArchive {
             return self.rar4_decode_solid_through(idx);
         }
         let entry = self.entries[idx].clone();
+        let max_packed_bytes = self.max_packed_bytes();
         crate::rar40::decode_member_bytes(
             self.stream.as_mut().unwrap(),
             &self.volume_paths,
             &entry.chunks,
             &entry.header,
-            self.password.as_deref(),
-            None,
+            crate::rar40::MemberDecodeOptions {
+                password: self.password.as_deref(),
+                decoder: None,
+                max_alloc_packed_bytes: max_packed_bytes,
+                max_stream_packed_bytes: max_packed_bytes,
+            },
         )
     }
 
@@ -1468,27 +1493,34 @@ impl RarArchive {
     /// first member at or before it that is not solid, followed by solid
     /// members; directory entries do not break the run).
     fn rar4_find_chain_start(&self, target_idx: usize) -> usize {
-        let mut chain_start = target_idx;
-        for i in (0..target_idx).rev() {
-            if self.entries[i].is_dir() {
-                continue;
-            }
-            // Pre-RAR3 codecs under MHD_SOLID: STORE members leave the
-            // shared window untouched (the decoder is simply not called), so
-            // the run reaches back across them to the first compressed
-            // member. RAR3+ chains break on a stored member (per-file flags
-            // stop).
-            if self.entries[i].header.unp_ver < 29 {
-                if !crate::rar40::is_stored(self.entries[i].header.comp_method) {
+        // Pre-RAR3 codecs under MHD_SOLID do not write FHD_SOLID. STORE
+        // members leave the shared window untouched, so the run reaches back
+        // across them to the first compressed member.
+        if self.entries[target_idx].header.unp_ver < 29 {
+            let mut chain_start = target_idx;
+            for i in (0..target_idx).rev() {
+                if !self.entries[i].is_dir()
+                    && !crate::rar40::is_stored(self.entries[i].header.comp_method)
+                {
                     chain_start = i;
                 }
-                continue;
             }
-            if self.entries[i].header.comp_solid || self.is_rar4_solid_member(i) {
-                chain_start = i;
-            } else {
+            return chain_start;
+        }
+
+        // For RAR3+, FHD_SOLID belongs to the current member and means it
+        // continues the previous non-directory member. Stop as soon as the
+        // current chain head is unflagged; inspecting the previous member's
+        // flag would incorrectly cross into an independent earlier run.
+        let mut chain_start = target_idx;
+        while self.entries[chain_start].header.comp_solid {
+            let Some(previous) = (0..chain_start).rev().find(|&i| !self.entries[i].is_dir()) else {
+                break;
+            };
+            if self.entries[previous].header.unp_ver < 29 {
                 break;
             }
+            chain_start = previous;
         }
         chain_start
     }
@@ -1508,9 +1540,10 @@ impl RarArchive {
             {
                 // Continue from where we left off.
             } else {
-                // Backwards request or a fresh chain: restart from the head.
+                // Backwards request or a fresh chain: restart from this run's
+                // head, not from unrelated members in an earlier solid run.
                 ctx.rar4_decoder = None;
-                ctx.rar4_decoded_through = -1;
+                ctx.rar4_decoded_through = chain_start as isize - 1;
             }
             if ctx.rar4_decoder.is_none() {
                 // Bootstrap with a Rar29 decoder; it will be replaced on the
@@ -1524,6 +1557,7 @@ impl RarArchive {
 
         let mut target = Vec::new();
         for i in start_from..=target_idx {
+            self.validate_entry_limits(i)?;
             let entry = self.entries[i].clone();
             if entry.is_dir() {
                 continue;
@@ -1559,13 +1593,18 @@ impl RarArchive {
             }
 
             let mut decoder = self.read_ctx_mut().rar4_decoder.take();
+            let max_packed_bytes = self.max_packed_bytes();
             let data = crate::rar40::decode_member_bytes(
                 self.stream.as_mut().unwrap(),
                 &self.volume_paths,
                 &chunks,
                 &hdr,
-                self.password.as_deref(),
-                decoder.as_mut(),
+                crate::rar40::MemberDecodeOptions {
+                    password: self.password.as_deref(),
+                    decoder: decoder.as_mut(),
+                    max_alloc_packed_bytes: max_packed_bytes,
+                    max_stream_packed_bytes: max_packed_bytes,
+                },
             )?;
             self.read_ctx_mut().rar4_decoder = decoder;
             self.read_ctx_mut().rar4_decoded_through = i as isize;

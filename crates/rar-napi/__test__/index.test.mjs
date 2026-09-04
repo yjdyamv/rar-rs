@@ -195,7 +195,7 @@ test('never reports done > total for a >64MiB sequential file', async () => {
   }
 })
 
-test('creates multi-volume archives', async () => {
+test('creates 10+ volumes in natural discovery order', async () => {
   const dir = tempDir()
   try {
     const out = join(dir, 'vol.rar')
@@ -203,9 +203,16 @@ test('creates multi-volume archives', async () => {
       outPath: out,
       volumeSize: 100_000,
       level: 0,
-      entries: [{ kind: 'bytes', name: 'big.bin', data: Buffer.alloc(250_000, 9) }],
+      entries: [{ kind: 'bytes', name: 'big.bin', data: Buffer.alloc(1_200_000, 9) }],
     })
-    assert.ok(res.files.length >= 3, `expected >=3 volumes, got ${res.files.length}`)
+    assert.ok(res.files.length >= 12, `expected >=12 volumes, got ${res.files.length}`)
+    const width = String(res.files.length).length
+    assert.deepEqual(
+      res.files,
+      res.files.map((_, index) =>
+        join(dir, `vol.part${String(index + 1).padStart(width, '0')}.rar`),
+      ),
+    )
     for (const f of res.files) {
       assert.equal((await readFileHead(f)).subarray(0, 7).toString(), 'Rar!\x1a\x07\x01')
     }
@@ -261,6 +268,81 @@ test('rejects when maxTotalBytes is exceeded', async () => {
   }
 })
 
+test('rejects invalid JS numeric options with InvalidArg', async () => {
+  const dir = tempDir()
+  try {
+    const invalidOptions = [
+      ['level', -1],
+      ['level', 6],
+      ['level', 1.5],
+      ['level', Number.NaN],
+      ['threads', 0],
+      ['threads', 65],
+      ['threads', Number.POSITIVE_INFINITY],
+      ['recoveryPercent', -1],
+      ['recoveryPercent', 101],
+      ['recoveryPercent', 1.5],
+      ['recoveryVolumeCount', -1],
+      ['recoveryVolumeCount', 2 ** 32],
+      ['volumeSize', 0],
+      ['volumeSize', -1],
+      ['volumeSize', 1.5],
+      ['volumeSize', Number.MAX_SAFE_INTEGER + 1],
+      ['maxTotalBytes', -1],
+      ['maxTotalBytes', 1.5],
+      ['maxTotalBytes', Number.MAX_SAFE_INTEGER + 1],
+    ]
+
+    for (const [field, value] of invalidOptions) {
+      await assert.rejects(
+        createArchive({
+          outPath: join(dir, `${field}-${String(value)}.rar`),
+          entries: [{ kind: 'bytes', name: 'a.bin', data: Buffer.from([1]) }],
+          [field]: value,
+        }),
+        (error) => {
+          assert.equal(error.code, 'InvalidArg', `${field}=${String(value)}`)
+          return true
+        },
+      )
+    }
+
+    const archive = join(dir, 'valid.rar')
+    await createArchive({
+      outPath: archive,
+      entries: [{ kind: 'bytes', name: 'a.bin', data: Buffer.from([1]) }],
+    })
+    const { extractArchive } = await import('../index.js')
+    for (const value of [-1, 1.5, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+      await assert.rejects(
+        extractArchive(archive, {
+          destPath: join(dir, `extract-${String(value)}`),
+          maxDictSize: value,
+        }),
+        (error) => {
+          assert.equal(error.code, 'InvalidArg', `maxDictSize=${String(value)}`)
+          return true
+        },
+      )
+    }
+
+    // This passes the JS-number validation and is rejected by the core as
+    // LimitExceeded because it is below the member's required dictionary.
+    await assert.rejects(
+      extractArchive(archive, {
+        destPath: join(dir, 'extract-limited'),
+        maxDictSize: 1,
+      }),
+      (error) => {
+        assert.equal(error.code, 'InvalidArg')
+        return true
+      },
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('rejects missing file paths', async () => {
   const dir = tempDir()
   try {
@@ -308,15 +390,20 @@ test('appendEntries keeps existing members and listEntries/deleteEntries work', 
     })
     assert.deepEqual(res.files, [out])
 
-    let names = listEntries(out)
+    const pendingNames = listEntries(out)
+    assert.equal(typeof pendingNames.then, 'function', 'listEntries must be async')
+    let names = await pendingNames
     assert.deepEqual(names.sort(), ['a.txt', 'dir/b.txt'])
 
     const deleted = await deleteEntries(out, ['a.txt'])
     assert.equal(deleted, 1)
-    names = listEntries(out)
+    names = await listEntries(out)
     assert.deepEqual(names, ['dir/b.txt'])
 
-    assert.throws(() => listEntries(join(dir, 'missing.rar')), /repair|open|read|rar5/i)
+    await assert.rejects(listEntries(join(dir, 'missing.rar')), (error) => {
+      assert.equal(error.code, 'GenericFailure')
+      return true
+    })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -364,7 +451,13 @@ test('listEntriesDetailed reports sizes and methods', async () => {
       ],
     })
     const { listEntriesDetailed } = await import('../index.js')
-    const entries = listEntriesDetailed(out)
+    const pendingEntries = listEntriesDetailed(out)
+    assert.equal(
+      typeof pendingEntries.then,
+      'function',
+      'listEntriesDetailed must be async',
+    )
+    const entries = await pendingEntries
     assert.equal(entries.length, 2)
     const a = entries.find((e) => e.name === 'a.txt')
     assert.equal(a.size, 3000)
@@ -388,7 +481,7 @@ test('dictSize accepts powers of two up to 4 GiB and rejects invalid values', as
       entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('data') }],
     })
     const { listEntriesDetailed } = await import('../index.js')
-    const entries = listEntriesDetailed(out)
+    const entries = await listEntriesDetailed(out)
     assert.equal(entries.length, 1)
 
     // Values above 4 GiB are accepted (RAR7 path); for a small file the
@@ -399,7 +492,7 @@ test('dictSize accepts powers of two up to 4 GiB and rejects invalid values', as
       dictSize: '8g',
       entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('data') }],
     })
-    assert.equal(listEntriesDetailed(big).length, 1)
+    assert.equal((await listEntriesDetailed(big)).length, 1)
 
     // Non-power-of-two values up to 4 GiB are rejected.
     await assert.rejects(
@@ -410,7 +503,7 @@ test('dictSize accepts powers of two up to 4 GiB and rejects invalid values', as
       }),
       /powers of two|dictionary/,
     )
-    // Garbage is rejected.
+    // Garbage is rejected by the binding parser.
     await assert.rejects(
       createArchive({
         outPath: join(dir, 'bad2.rar'),
@@ -418,6 +511,19 @@ test('dictSize accepts powers of two up to 4 GiB and rejects invalid values', as
         entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('data') }],
       }),
       /invalid dictionary size/,
+    )
+    // A syntactically valid dictionary above the core maximum reaches
+    // RarError::InvalidOption and must retain the InvalidArg code.
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'bad3.rar'),
+        dictSize: '256g',
+        entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('data') }],
+      }),
+      (error) => {
+        assert.equal(error.code, 'InvalidArg')
+        return true
+      },
     )
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -502,8 +608,8 @@ test('listEntriesQuick matches listEntriesDetailed on a quickOpen archive', asyn
       ],
     })
     const { listEntriesDetailed, listEntriesQuick } = await import('../index.js')
-    const full = listEntriesDetailed(out)
-    const quick = listEntriesQuick(out)
+    const full = await listEntriesDetailed(out)
+    const quick = await listEntriesQuick(out)
     assert.deepEqual(quick, full, 'QO fast path must list identically')
     assert.equal(quick.length, 2)
     const a = quick.find((e) => e.name === 'a.txt')
@@ -522,13 +628,71 @@ test('readMember returns a single member byte-exact', async () => {
     const rar = join(dir, 'a.rar')
     await createArchive({ outPath: rar, entries: [{ kind: 'file', path: src }] })
     const { readMember } = await import('../index.js')
-    const data = Buffer.from(readMember(rar, 'preview.txt'))
+    const pendingRead = readMember(rar, 'preview.txt')
+    assert.equal(typeof pendingRead.then, 'function', 'readMember must be async')
+    const data = Buffer.from(await pendingRead)
     assert.deepEqual(data, content, 'member must read back byte-exact')
     // Encrypted member with password.
     const enc = join(dir, 'enc.rar')
     await createArchive({ outPath: enc, password: 'pw', entries: [{ kind: 'file', path: src }] })
-    const dec = Buffer.from(readMember(enc, 'preview.txt', 'pw'))
+    const dec = Buffer.from(await readMember(enc, 'preview.txt', 'pw'))
     assert.deepEqual(dec, content)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('core errors expose stable napi codes and archive testing is async', async () => {
+  const dir = tempDir()
+  try {
+    const { listEntries, readMember, testArchive } = await import('../index.js')
+    const plain = join(dir, 'plain.rar')
+    await createArchive({
+      outPath: plain,
+      entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('alpha') }],
+    })
+
+    await assert.rejects(readMember(plain, 'missing.txt'), (error) => {
+      assert.equal(error.code, 'InvalidArg')
+      return true
+    })
+
+    const encrypted = join(dir, 'encrypted.rar')
+    await createArchive({
+      outPath: encrypted,
+      password: 'correct',
+      entries: [{ kind: 'bytes', name: 'secret.txt', data: Buffer.from('secret') }],
+    })
+    await assert.rejects(readMember(encrypted, 'secret.txt', 'wrong'), (error) => {
+      assert.equal(error.code, 'InvalidArg')
+      return true
+    })
+
+    const malformed = join(dir, 'malformed.rar')
+    writeFileSync(malformed, Buffer.from('not a rar archive'))
+    await assert.rejects(listEntries(malformed), (error) => {
+      assert.equal(error.code, 'InvalidArg')
+      return true
+    })
+
+    // This option combination reaches RarError::Unsupported. N-API has no
+    // dedicated unsupported status, so the stable code is GenericFailure.
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'unsupported.rar'),
+        volumeSize: 100_000,
+        recoveryPercent: 10,
+        entries: [{ kind: 'bytes', name: 'a.bin', data: Buffer.alloc(200_000) }],
+      }),
+      (error) => {
+        assert.equal(error.code, 'GenericFailure')
+        return true
+      },
+    )
+
+    const pendingTest = testArchive(plain)
+    assert.equal(typeof pendingTest.then, 'function', 'testArchive must be async')
+    assert.deepEqual(await pendingTest, [1, 0])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -543,7 +707,7 @@ test('listEntriesQuick falls back on an archive without quickOpen', async () => 
       entries: [{ kind: 'bytes', name: 'x.txt', data: Buffer.from('plain') }],
     })
     const { listEntriesQuick } = await import('../index.js')
-    const quick = listEntriesQuick(out)
+    const quick = await listEntriesQuick(out)
     assert.equal(quick.length, 1)
     assert.equal(quick[0].name, 'x.txt')
   } finally {

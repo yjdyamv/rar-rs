@@ -196,7 +196,7 @@ pub fn decode_standalone_to_writer(
 ///
 /// For RAR5 (`dict_size_bytes == None`) the size comes from the 4-bit log
 /// field (up to 4 GiB); for RAR7 the actual byte count is given (up to
-/// 64 GiB, possibly non-power-of-two — the window rounds up to a power of
+/// 126 GiB, possibly non-power-of-two — the window rounds up to a power of
 /// two so the circular buffer keeps its fast mask arithmetic).
 fn checked_dict_size(dict_size_log: u8, dict_size_bytes: Option<u64>) -> RarResult<usize> {
     let bytes = match dict_size_bytes {

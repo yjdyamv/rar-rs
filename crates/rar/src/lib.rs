@@ -1,7 +1,8 @@
 //! # rar5
 //!
-//! Pure-Rust RAR5 archive library. Creates, reads, and extracts RAR5 archives
-//! with native LZSS+Huffman compression — no external binaries required.
+//! Pure-Rust RAR archive library. Creates, reads, and extracts legacy RAR
+//! 1.5–4.x and modern RAR5/RAR7 archives with native compression — no
+//! external binaries required.
 //!
 //! ## Quick Start
 //!

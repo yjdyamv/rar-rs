@@ -80,21 +80,28 @@ function mapCreateArchiveOptions(options, platform = process.platform) {
   return mapped
 }
 
+function mapPathsToHost(paths, platform = process.platform) {
+  if (!Array.isArray(paths)) return paths
+  return paths.map((p) =>
+    typeof p === 'string' ? toHostPath(p, platform) : p,
+  )
+}
+
 function mapCreateResult(result, platform = process.platform) {
   if (!result || typeof result !== 'object' || !Array.isArray(result.files)) {
     return result
   }
   return {
     ...result,
-    files: result.files.map((f) =>
-      typeof f === 'string' ? toHostPath(f, platform) : f,
-    ),
+    files: mapPathsToHost(result.files, platform),
   }
 }
 
 function mapRepairArgs(
   inputPath,
   outputPath,
+  onProgress,
+  signal,
   platform = process.platform,
 ) {
   return [
@@ -102,6 +109,8 @@ function mapRepairArgs(
     typeof outputPath === 'string'
       ? toGuestPath(outputPath, platform)
       : outputPath,
+    onProgress,
+    signal,
   ]
 }
 
@@ -124,13 +133,22 @@ function mapAppendOptions(options, platform = process.platform) {
   return mapped
 }
 
-function mapDeleteArgs(archivePath, names, password, platform = process.platform) {
+function mapDeleteArgs(
+  archivePath,
+  names,
+  password,
+  onProgress,
+  signal,
+  platform = process.platform,
+) {
   return [
     typeof archivePath === 'string'
       ? toGuestPath(archivePath, platform)
       : archivePath,
     names,
     password,
+    onProgress,
+    signal,
   ]
 }
 
@@ -161,6 +179,7 @@ module.exports = {
   toHostPath,
   wasiPreopens,
   mapCreateArchiveOptions,
+  mapPathsToHost,
   mapCreateResult,
   mapRepairArgs,
   mapAppendOptions,

@@ -1,4 +1,4 @@
-/// Error types for RAR5 archive operations.
+/// Error types for RAR archive operations.
 use std::fmt;
 use std::io;
 
@@ -7,6 +7,10 @@ use std::io;
 pub enum RarError {
     /// Invalid or unexpected archive format.
     Format(String),
+    /// The requested operation is not valid for the archive's current mode.
+    InvalidState(String),
+    /// An API option is invalid or uses an unsupported value combination.
+    InvalidOption(String),
     /// CRC32 checksum mismatch.
     Crc {
         expected: u32,
@@ -21,7 +25,7 @@ pub enum RarError {
     },
     /// Encrypted content encountered without a password.
     Encrypted(String),
-    /// Valid RAR5 feature not yet implemented.
+    /// Valid RAR feature not yet implemented.
     Unsupported(String),
     /// Security policy violation (path traversal, unsafe member names, etc.).
     Security(String),
@@ -49,6 +53,8 @@ impl fmt::Display for RarError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RarError::Format(msg) => write!(f, "RAR format error: {msg}"),
+            RarError::InvalidState(msg) => write!(f, "invalid archive state: {msg}"),
+            RarError::InvalidOption(msg) => write!(f, "invalid option: {msg}"),
             RarError::Crc {
                 expected,
                 actual,

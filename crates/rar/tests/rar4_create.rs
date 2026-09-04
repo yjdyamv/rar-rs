@@ -9,7 +9,7 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar5::{ArchiveVersion, CreateOptions, RarArchive, discover_volumes};
+use rar5::{ArchiveVersion, CreateOptions, ExtractOptions, RarArchive, discover_volumes};
 use std::io::Write;
 
 fn crate_crc(data: &[u8]) -> u32 {
@@ -196,7 +196,7 @@ fn create_rar4_ppmd_wins_on_text_m5() {
         "m5 PPMd must beat LZSS on text: LZ={lz_size} m5={m5_size}"
     );
 
-    let mut archive = RarArchive::open(&dir.path().join("ppmd_m5.rar")).expect("reopen");
+    let mut archive = RarArchive::open(dir.path().join("ppmd_m5.rar")).expect("reopen");
     assert_eq!(archive.list()[0].method(), 5);
     assert_eq!(
         archive.read("textmix.txt").expect("read").as_slice(),
@@ -861,6 +861,62 @@ fn create_rar4_solid_extension_reset() {
     }
 }
 
+#[test]
+fn rar4_second_solid_run_starts_at_its_own_chain_head() {
+    let dir = make_temp_dir();
+    let arc = dir.path().join("two-runs.rar");
+    let first = vec![b'a'; 4096];
+    let second = vec![b'b'; 600];
+    for (name, data) in [
+        ("a1.txt", first.as_slice()),
+        ("a2.txt", first.as_slice()),
+        ("b1.bin", second.as_slice()),
+        ("b2.bin", second.as_slice()),
+    ] {
+        std::fs::write(dir.path().join(name), data).unwrap();
+    }
+    let mut archive = RarArchive::create_with_options(
+        &arc,
+        CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            solid: true,
+            solid_reset: rar5::SolidReset::PerExtension,
+            ..Default::default()
+        },
+    )
+    .expect("create");
+    for name in ["a1.txt", "a2.txt", "b1.bin", "b2.bin"] {
+        archive.add(dir.path().join(name), 3).unwrap();
+    }
+    archive.close().expect("close");
+
+    let raw = std::fs::read(&arc).unwrap();
+    let members = scan_rar4_members(&raw);
+    let flags = |name: &str| {
+        members
+            .iter()
+            .find(|(n, ..)| n == name)
+            .unwrap_or_else(|| panic!("missing {name} in {members:?}"))
+            .1
+    };
+    assert_eq!(flags("a1.txt") & 0x0010, 0);
+    assert_ne!(flags("a2.txt") & 0x0010, 0);
+    assert_eq!(flags("b1.bin") & 0x0010, 0);
+    assert_ne!(flags("b2.bin") & 0x0010, 0);
+
+    let mut archive = RarArchive::open(&arc).expect("reopen");
+    let output = archive
+        .read_with_options(
+            "b2.bin",
+            ExtractOptions {
+                max_unpacked_bytes: Some(1024),
+                ..Default::default()
+            },
+        )
+        .expect("decode only the second solid run");
+    assert_eq!(output, second);
+}
+
 /// RAR4 recovery record on periodic (short-cycle) data: OUR repair path
 /// rebuilds a damaged sector byte-identically. WinRAR 6.23/7.23 cannot do
 /// this — its RAR4 `rar r` corrupts the tail when the record's own
@@ -973,9 +1029,9 @@ fn create_rar4_auto_audio_filter_on_waveform() {
     let mut ch = [128i16; 2];
     let mut seed = 0xC0FFEEu32;
     while content.len() < 350_000 {
-        for c in 0..2usize {
-            ch[c] = (ch[c] + (((seed >> (c * 8)) & 0x3f) as i16 - 30)).clamp(0, 255);
-            content.push(ch[c] as u8);
+        for (c, sample) in ch.iter_mut().enumerate() {
+            *sample = (*sample + (((seed >> (c * 8)) & 0x3f) as i16 - 30)).clamp(0, 255);
+            content.push(*sample as u8);
         }
         seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
     }
@@ -1048,7 +1104,7 @@ fn create_rar4_solid_ppmd_text_chain() {
         "solid PPMd must beat per-member fresh models on shared text: solid={solid_size} plain={plain_size}"
     );
 
-    let mut archive = RarArchive::open(&dir.path().join("sppmd.rar")).expect("reopen");
+    let mut archive = RarArchive::open(dir.path().join("sppmd.rar")).expect("reopen");
     let names: Vec<String> = archive
         .list()
         .iter()
@@ -1079,7 +1135,7 @@ fn create_rar4_large_members_stream_on_extract() {
         let mut block = vec![0u8; 1 << 20];
         let mut seed = 0x1234_5678u32;
         for i in 0..96usize {
-            for chunk in block.chunks_exact_mut(4) {
+            for chunk in block.as_chunks_mut::<4>().0 {
                 seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
                 chunk.copy_from_slice(&seed.to_le_bytes());
             }

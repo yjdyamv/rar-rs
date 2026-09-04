@@ -51,10 +51,16 @@ jobs:
           targets: wasm32-wasip1-threads
       - name: Cargo fmt (workspace)
         run: cargo fmt --all --check
-      - name: Clippy (workspace, all features)
-        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: Cargo check (workspace defaults)
+        run: cargo check --workspace --all-targets --locked
+      - name: Cargo check (rar5, no default features)
+        run: cargo check -p rar5 --no-default-features --locked
+      - name: Cargo check (fuzz workspace)
+        run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
+      - name: Clippy (workspace, all features and targets)
+        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
       - name: Cargo test (workspace)
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --locked
       - name: Install binding dependencies
         working-directory: crates/rar-napi
         run: npm ci
@@ -82,30 +88,39 @@ jobs:
         settings:
           - host: macos-latest
             target: aarch64-apple-darwin
+            addon: rar-rs-napi.darwin-arm64.node
             build: npx napi build --platform --release --target aarch64-apple-darwin
           - host: windows-latest
             target: x86_64-pc-windows-msvc
+            addon: rar-rs-napi.win32-x64-msvc.node
             build: npx napi build --platform --release --target x86_64-pc-windows-msvc
           - host: windows-latest
             target: i686-pc-windows-msvc
+            addon: rar-rs-napi.win32-ia32-msvc.node
             build: npx napi build --platform --release --target i686-pc-windows-msvc
           - host: windows-latest
             target: aarch64-pc-windows-msvc
+            addon: rar-rs-napi.win32-arm64-msvc.node
             build: npx napi build --platform --release --target aarch64-pc-windows-msvc
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            addon: rar-rs-napi.linux-x64-gnu.node
             build: npx napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            addon: rar-rs-napi.linux-x64-musl.node
             build: npx napi build --platform --release --target x86_64-unknown-linux-musl -x
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            addon: rar-rs-napi.linux-arm64-gnu.node
             build: npx napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
+            addon: rar-rs-napi.linux-arm64-musl.node
             build: npx napi build --platform --release --target aarch64-unknown-linux-musl -x
           - host: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
+            addon: rar-rs-napi.linux-arm-gnueabihf.node
             build: npx napi build --platform --release --target armv7-unknown-linux-gnueabihf --use-napi-cross
     steps:
       - uses: actions/checkout@v7
@@ -137,7 +152,7 @@ jobs:
       - name: Install cargo-zigbuild
         if: contains(matrix.settings.target, 'musl')
         run: |
-          cargo install cargo-zigbuild
+          cargo install cargo-zigbuild --version 0.23.4 --locked
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install dependencies
         working-directory: crates/rar-napi
@@ -145,12 +160,28 @@ jobs:
       - name: Build
         working-directory: crates/rar-napi
         run: ${{ matrix.settings.build }}
+      - name: Verify native addon artifact
+        working-directory: crates/rar-napi
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          node_files=( *.node )
+          if (( ${#node_files[@]} != 1 )); then
+            echo "::error::expected exactly one .node file, found ${#node_files[@]}"
+            printf 'found: %s\n' "${node_files[@]:-<none>}"
+            exit 1
+          fi
+          if [[ "${node_files[0]}" != "${{ matrix.settings.addon }}" ]]; then
+            echo "::error::expected ${{ matrix.settings.addon }}, found ${node_files[0]}"
+            exit 1
+          fi
+        shell: bash
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: bindings-${{ matrix.settings.target }}
           path: |
-            crates/rar-napi/*.node
+            crates/rar-napi/${{ matrix.settings.addon }}
             crates/rar-napi/index.js
             crates/rar-napi/index.d.ts
           if-no-files-found: error
@@ -305,16 +336,32 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 24
-      - name: Verify tag matches package.json version
-        working-directory: crates/rar-napi
+      - name: Verify tag matches Cargo.toml and package.json versions
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          VERSION=$(node -p "require('./package.json').version")
-          if [ "$TAG" != "$VERSION" ]; then
-            echo "::error::tag v$TAG does not match package.json version $VERSION"
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(
+            awk '
+              $0 == "[package]" { in_package = 1; next }
+              in_package && /^\[/ { in_package = 0 }
+              in_package && /^version[[:space:]]*=/ {
+                gsub(/^[^=]*=[[:space:]]*"/, "")
+                gsub(/"[[:space:]]*$/, "")
+                print
+                exit
+              }
+            ' crates/rar-napi/Cargo.toml
+          )"
+          PACKAGE_VERSION="$(node -p "require('./crates/rar-napi/package.json').version")"
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "::error::could not read crates/rar-napi/Cargo.toml package version"
             exit 1
           fi
-          echo "releasing v$VERSION"
+          if [ "$TAG" != "$CARGO_VERSION" ] || [ "$TAG" != "$PACKAGE_VERSION" ]; then
+            echo "::error::tag v$TAG, Cargo.toml $CARGO_VERSION, and package.json $PACKAGE_VERSION must match"
+            exit 1
+          fi
+          echo "releasing v$TAG"
         shell: bash
       - name: Download all bindings
         uses: actions/download-artifact@v8
@@ -325,10 +372,40 @@ jobs:
         with:
           name: bindings-wasm32-wasip1-threads
           path: wasm
-      - name: Collect native addons
+      - name: Collect release assets
         run: |
+          set -euo pipefail
+          export LC_ALL=C
           mkdir -p release
-          find bindings -name '*.node' -exec cp -f {} release/ \;
+
+          EXPECTED_ADDONS=(
+            rar-rs-napi.darwin-arm64.node
+            rar-rs-napi.win32-x64-msvc.node
+            rar-rs-napi.win32-ia32-msvc.node
+            rar-rs-napi.win32-arm64-msvc.node
+            rar-rs-napi.linux-x64-gnu.node
+            rar-rs-napi.linux-x64-musl.node
+            rar-rs-napi.linux-arm64-gnu.node
+            rar-rs-napi.linux-arm64-musl.node
+            rar-rs-napi.linux-arm-gnueabihf.node
+          )
+          mapfile -d '' -t NODE_FILES < <(find bindings -type f -name '*.node' -print0 | sort -z)
+          if (( ${#NODE_FILES[@]} != ${#EXPECTED_ADDONS[@]} )); then
+            echo "::error::expected ${#EXPECTED_ADDONS[@]} native addons, found ${#NODE_FILES[@]}"
+            printf 'found: %s\n' "${NODE_FILES[@]:-<none>}"
+            exit 1
+          fi
+          for addon in "${EXPECTED_ADDONS[@]}"; do
+            mapfile -d '' -t matches < <(find bindings -type f -name "$addon" -print0 | sort -z)
+            if (( ${#matches[@]} != 1 )); then
+              echo "::error::expected exactly one $addon artifact, found ${#matches[@]}"
+              exit 1
+            fi
+            cp "${matches[0]}" release/
+          done
+
+          # Every listed WASI file is part of the release contract. A missing
+          # file must fail this step rather than produce a partial release.
           cp wasm/rar-rs-napi.wasm32-wasi.wasm \
              wasm/rar-rs-napi.wasm32-wasi.debug.wasm \
              wasm/rar-rs-napi.wasi.cjs \
@@ -336,10 +413,49 @@ jobs:
              wasm/rar-rs-napi.wasi-browser.js \
              wasm/wasi-path-map.cjs \
              wasm/wasi-worker.mjs \
-             wasm/wasi-worker-browser.mjs release/ 2>/dev/null || true
-          find bindings -name 'index.js' -o -name 'index.d.ts' | while read f; do cp -f "$f" release/; done
-          # SHA-256 manifest so the VS Code consumer can pin artifact hashes.
-          (cd release && sha256sum *) > release/SHA-256SUMS
+             wasm/wasi-worker-browser.mjs release/
+
+          copy_identical_generated_file() {
+            local name="$1"
+            local source
+            mapfile -d '' -t files < <(find bindings -type f -name "$name" -print0 | sort -z)
+            if (( ${#files[@]} == 0 )); then
+              echo "::error::no $name artifact was downloaded"
+              exit 1
+            fi
+            source="${files[0]}"
+            for candidate in "${files[@]:1}"; do
+              if ! cmp -s "$source" "$candidate"; then
+                echo "::error::$name differs between $source and $candidate"
+                exit 1
+              fi
+            done
+            cp "$source" "release/$name"
+          }
+          copy_identical_generated_file index.js
+          copy_identical_generated_file index.d.ts
+
+          cp LICENSE NOTICE THIRD_PARTY_LICENSES.md release/
+
+          mapfile -d '' -t LICENSE_FILES < <(find LICENSES -type f -print0 | sort -z)
+          if (( ${#LICENSE_FILES[@]} == 0 )); then
+            echo "::error::no identified license-family texts found under LICENSES/"
+            exit 1
+          fi
+          for file in "${LICENSE_FILES[@]}"; do
+            relative="${file#LICENSES/}"
+            flattened="${relative//\//__}"
+            destination="release/THIRD_PARTY_LICENSE-$flattened"
+            if [[ -e "$destination" ]]; then
+              echo "::error::flattened license filename collision: $destination"
+              exit 1
+            fi
+            cp "$file" "$destination"
+          done
+
+          # Write outside release/ so SHA-256SUMS can never hash itself.
+          (cd release && sha256sum *) > SHA-256SUMS.tmp
+          mv SHA-256SUMS.tmp release/SHA-256SUMS
           ls -la release/
         shell: bash
       - name: Create GitHub Release

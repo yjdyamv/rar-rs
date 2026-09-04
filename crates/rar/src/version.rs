@@ -1,16 +1,14 @@
 //! Archive format versions.
 //!
-//! Mirrors the reference layout's `version` module: the crate writes RAR5
-//! today; RAR7 (v70) dictionary encoding rides on the same container. The
-//! enum keeps room for earlier families so callers can name the target
-//! explicitly once they land.
+//! Covers the legacy RAR 1.5–4.x container and the modern RAR5 container;
+//! RAR7 (v70) dictionary encoding rides on the RAR5 container.
 
 /// A concrete archive format version this library can read or write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ArchiveVersion {
     /// RAR 4.x and earlier: the legacy `Rar!\x1a\x07\x00` container family
-    /// (RAR 1.5 through 4.x). Read support only.
+    /// (RAR 1.5 through 4.x), supported for reading and creation.
     Rar40,
     /// RAR 5.0 container + v50 compression.
     Rar50,

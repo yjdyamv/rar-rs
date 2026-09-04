@@ -68,8 +68,9 @@ pub fn parse_mdx_size(s: &str) -> Result<u64, String> {
         _ => (s, 1024 * 1024 * 1024),
     };
     num.parse::<u64>()
-        .map(|n| n * mult)
-        .map_err(|_| format!("invalid dictionary size: {s}"))
+        .map_err(|_| format!("invalid dictionary size: {s}"))?
+        .checked_mul(mult)
+        .ok_or_else(|| format!("dictionary size is too large: {s}"))
 }
 
 /// The subcommand name of a raw argument list (the first token that does
@@ -214,8 +215,7 @@ pub struct MiscSwitches {
     /// Display the version and quit (`-iver`)
     #[arg(global = true, long = "version-info")]
     pub version_info: bool,
-    /// Ignore configuration file and RARINISWITCHES (`-cfg-`; no config
-    /// files are read anyway)
+    /// Ignore the configuration file and RARINISWITCHES (`-cfg-`)
     #[arg(global = true, long = "no-config")]
     #[allow(dead_code)]
     pub no_config: bool,
@@ -279,14 +279,14 @@ pub fn normalize_switch(arg: &str) -> String {
     if arg == "-htc" {
         return "--hash-crc".into();
     }
+    if let Some(rest) = arg.strip_prefix("-mcl") {
+        return format!("--long-match={rest}");
+    }
     if let Some(rest) = arg.strip_prefix("-mc") {
         return format!("--mc={rest}");
     }
     if let Some(rest) = arg.strip_prefix("-me") {
         return format!("--me={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-mcl") {
-        return format!("--long-match={rest}");
     }
     if arg == "-ao" {
         return "--archive-attr".into();
@@ -324,10 +324,11 @@ pub fn normalize_switch(arg: &str) -> String {
     }
     if let Some(rest) = arg.strip_prefix("-p") {
         return if rest.is_empty() {
-            "--password".into()
+            // The caller rejects this form unless secure no-echo prompting is
+            // available. Keep it distinct from `-p-` during normalization.
+            "--password-prompt".into()
         } else if rest == "-" {
-            // `-p-` means "no password" in WinRAR (unlike bare `-p`, which
-            // encrypts with an empty/prompted password).
+            // `-p-` explicitly disables password use.
             "--password=".into()
         } else {
             format!("--password={rest}")
@@ -552,9 +553,7 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-e") {
         return format!("--exclude-attrs={rest}");
     }
-    if arg == "-p-" {
-        return "--password=".into();
-    }
+
     if arg == "-c-" {
         return "--no-comment".into();
     }
@@ -584,4 +583,29 @@ macro_rules! info {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_switch, parse_mdx_size};
+
+    #[test]
+    fn mcl_is_normalized_before_the_shorter_mc_prefix() {
+        assert_eq!(normalize_switch("-mcl"), "--long-match=");
+        assert_eq!(normalize_switch("-mcl123"), "--long-match=123");
+        assert_eq!(normalize_switch("-mc123"), "--mc=123");
+    }
+
+    #[test]
+    fn password_switch_forms_remain_distinct() {
+        assert_eq!(normalize_switch("-p"), "--password-prompt");
+        assert_eq!(normalize_switch("-p-"), "--password=");
+        assert_eq!(normalize_switch("-psecret"), "--password=secret");
+    }
+
+    #[test]
+    fn mdx_size_parsing_checks_multiplication_overflow() {
+        assert_eq!(parse_mdx_size("2k"), Ok(2 * 1024));
+        assert!(parse_mdx_size("18446744073709551615g").is_err());
+    }
 }

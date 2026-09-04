@@ -1,10 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   toGuestPath,
   toHostPath,
   wasiPreopens,
   mapCreateArchiveOptions,
+  mapPathsToHost,
   mapCreateResult,
   mapRepairArgs,
   mapAppendOptions,
@@ -72,11 +74,19 @@ test('create result maps files back to host paths', () => {
   )
 })
 
-test('repair args map to guest paths', () => {
-  assert.deepEqual(mapRepairArgs('C:\\in.rar', 'C:\\out.rar', 'win32'), [
-    '/C:/in.rar',
-    '/C:/out.rar',
-  ])
+test('repair args map paths and preserve progress and signal', () => {
+  const progress = () => {}
+  const signal = new AbortController().signal
+  assert.deepEqual(
+    mapRepairArgs(
+      'C:\\in.rar',
+      'C:\\out.rar',
+      progress,
+      signal,
+      'win32',
+    ),
+    ['/C:/in.rar', '/C:/out.rar', progress, signal],
+  )
 })
 
 test('append options map archive path and entries but preserve other fields', () => {
@@ -93,13 +103,51 @@ test('append options map archive path and entries but preserve other fields', ()
   assert.equal(options.archivePath, 'C:\\existing.rar', 'input options must not mutate')
 })
 
-test('delete args map archive path and pass names and password through', () => {
+test('delete args preserve password, progress, and signal', () => {
+  const progress = () => {}
+  const signal = new AbortController().signal
   assert.deepEqual(
-    mapDeleteArgs('C:\\del.rar', ['a.txt', 'b.txt'], 'pw', 'win32'),
-    ['/C:/del.rar', ['a.txt', 'b.txt'], 'pw'],
+    mapDeleteArgs(
+      'C:\\del.rar',
+      ['a.txt', 'b.txt'],
+      'pw',
+      progress,
+      signal,
+      'win32',
+    ),
+    ['/C:/del.rar', ['a.txt', 'b.txt'], 'pw', progress, signal],
   )
 })
 
 test('list args map archive path and pass password through', () => {
   assert.deepEqual(mapListArgs('C:\\a.rar', 'pw', 'win32'), ['/C:/a.rar', 'pw'])
+})
+
+test('rebuilt volume paths map back to the host in original order', () => {
+  assert.deepEqual(
+    mapPathsToHost(
+      ['/C:/v.part1.rar', '/C:/v.part10.rar', '/C:/v.part2.rar'],
+      'win32',
+    ),
+    ['C:\\v.part1.rar', 'C:\\v.part10.rar', 'C:\\v.part2.rar'],
+  )
+})
+
+test('WASI patch templates keep async operation contracts', () => {
+  const source = readFileSync(
+    new URL('../scripts/patch-wasi-loader.mjs', import.meta.url),
+    'utf8',
+  )
+  assert.match(
+    source,
+    /mapDeleteArgs\([\s\S]*?onProgress,[\s\S]*?signal,[\s\S]*?\)/,
+  )
+  assert.match(
+    source,
+    /mapRepairArgs\([\s\S]*?onProgress,[\s\S]*?signal,[\s\S]*?\)/,
+  )
+  assert.match(
+    source,
+    /rebuildMissingVolumes[\s\S]*?\.then\(\(paths\) => __wasiPathMap\.mapPathsToHost\(paths\)\)/,
+  )
 })

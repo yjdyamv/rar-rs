@@ -46,11 +46,11 @@
 
 ## 项目事实
 
-- Cargo workspace：库 crate `rar5`（RAR5-only 创建/读取，明确拒绝 RAR4）+ CLI crate `rar-cli`（`rar` 创建/修改/提取、`unrar` 提取/列表）。
+- Cargo workspace：库 crate `rar5`（历史名称；读取 RAR 1.5–4.x/RAR5/RAR7，创建 RAR4/RAR5/RAR7）+ CLI crate `rar-cli`（`rar` 创建/修改/提取、`unrar` 提取/列表）+ `rar-rs-napi`（native/WASI binding）。
 - 库热点已拆解：`archive/` 目录是 facade 层（`mod.rs` 结构体/构造器/生命周期，`create.rs` 写生命周期，`rewrite.rs` 外科重写，`entry.rs` 条目类型，`discover.rs` 分卷发现）；读写路径分别在 `rar50/extract.rs` 与 `rar50/write/`。
 - 互操作测试：`crates/rar/tests/{rar50_roundtrip,format_assertions,rewrite_tests,official_interop,rar4_rejection,cancel_flag,quick_open_listing}.rs`（官方 rar/unrar 用 SA_OFFICIAL_RAR/UNRAR env 门控）、`crates/rar-cli/tests/cli_behavior.rs`（CARGO_BIN_EXE 需随二进制所在 crate）、`crates/rar-cli/tests/winrar_interop.rs`（Windows 本机 WinRAR 双向验证）。
 - fuzz：`fuzz/` 独立 crate（不在 workspace），五目标 parse/crypto/recovery（读侧）+ write/rewrite（写侧），standalone 变异循环 + `cargo +nightly fuzz run <t> --features fuzzing` 双模式；语料嵌入真实 WinRAR fixture。
-- 回归验证：fmt/clippy `-D warnings` 双门（本地手动跑）+ fuzz（`fuzz/` 五目标，standalone 变异循环 + libFuzzer 双模式）。
+- 回归验证：根 `.github/workflows/CI.yml` 执行 workspace fmt、默认/无默认 feature check、全 target clippy `-D warnings`、测试、独立 fuzz workspace check，以及 native/WASI binding 构建与测试；官方二进制互操作仍由 `SA_OFFICIAL_RAR`/`SA_OFFICIAL_UNRAR` 手动门控。
 - 迁移记录：仿 rars 架构重构的完整计划与决策（见 `PLAN.md` 与 git 历史）。
 - 文档索引：`docs/README.md`（所有文档的导航入口）；格式细节见 `docs/FORMAT_RAR5_RAR7.html`（以本实现为准，冲突处对照 rars）。
 - 计划：`PLAN.md`（已完成记录 + WinRAR 7.23 差距清单）。

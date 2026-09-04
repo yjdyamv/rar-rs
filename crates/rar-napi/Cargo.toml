@@ -1,9 +1,11 @@
 [package]
 name = "rar-rs-napi"
 version = "0.6.0"
-edition = "2021"
-description = "RAR5 archive creation — napi-rs binding (native .node + wasm32-wasip1-threads) around the rar5 library"
-license = "BSD-2-Clause"
+edition.workspace = true
+rust-version.workspace = true
+description = "RAR archive toolkit — napi-rs bindings for creating, reading, extracting, modifying, and repairing archives"
+license.workspace = true
+repository.workspace = true
 
 [lib]
 crate-type = ["cdylib"]
@@ -11,7 +13,7 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = "3"
 napi-derive = "3"
-rar5 = { path = "../rar", features = ["parallel", "simd"] }
+rar5 = { workspace = true, features = ["parallel", "simd"] }
 
 [build-dependencies]
 napi-build = "2"

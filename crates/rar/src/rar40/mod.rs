@@ -7,8 +7,8 @@
 //! body. Member decoding dispatches on the header's `unp_ver` (15 → Unpack15,
 //! 20/26 → Unpack20, >= 29 → Unpack29) and on the `method` byte.
 //!
-//! Only the STORE method (0x30) is decoded today; compressed members return
-//! [`RarError::Unsupported`] until the Unpack15/20/29 engines land.
+//! STORE members pass through directly; compressed members dispatch to the
+//! implemented Unpack15, Unpack20, Unpack29, and PPMd-compatible paths.
 
 mod read;
 pub(crate) mod write;
@@ -17,7 +17,9 @@ use crate::crc32;
 use crate::error::{RarError, RarResult};
 use crate::rar50::headers::{DataChunk, FileHeader};
 use crate::rar50::*;
-pub(crate) use read::{decode_member_bytes, decode_member_bytes_to, member_crc};
+pub(crate) use read::{
+    MemberDecodeOptions, decode_member_bytes, decode_member_bytes_to, member_crc,
+};
 use std::io::{Read, Seek, SeekFrom};
 
 // ── Block types ────────────────────────────────────────────────────────────
@@ -174,7 +176,14 @@ impl Rar4VolumeScan {
                             // Final segment: this header carries the whole-
                             // file CRC; total packed size is the chunk sum.
                             entry.header.packed_size =
-                                entry.chunks.iter().map(|c| c.packed_size).sum();
+                                entry.chunks.iter().try_fold(0u64, |total, chunk| {
+                                    total.checked_add(chunk.packed_size).ok_or_else(|| {
+                                        RarError::Format(format!(
+                                            "RAR4: {}: split packed size overflow",
+                                            entry.header.name
+                                        ))
+                                    })
+                                })?;
                             entry.header.crc32_val = fh.crc32_val;
                             out.push(self.pending.take().unwrap());
                         }

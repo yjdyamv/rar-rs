@@ -784,6 +784,71 @@ fn cli_clear_password_and_no_comment_switches() {
     let dir = make_temp_dir();
     std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
 
+    // Bare -p must not silently create an unencrypted archive when secure
+    // no-echo prompting is unavailable.
+    let bare_archive = dir.path().join("bare-p.rar");
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a", "-p", "-idq"])
+        .arg(&bare_archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!bare_archive.exists());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("secure no-echo password prompt"),
+        "unexpected bare -p error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // unrar rejects the same unsafe prompt form before attempting to open.
+    let out = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-p"])
+        .arg("missing.rar")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("secure no-echo password prompt"));
+
+    // A separated long-option value is a real password, not a bare prompt.
+    let long_password_archive = dir.path().join("long-password.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "--password", "secret", "-idq"])
+        .arg(&long_password_archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = RarArchive::open_with_password(&long_password_archive, "secret").unwrap();
+    assert_eq!(rar.read("f.txt").unwrap(), b"x");
+
+    // The attached WinRAR form remains supported.
+    let attached_password_archive = dir.path().join("attached-password.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-psecret", "-idq"])
+        .arg(&attached_password_archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = RarArchive::open_with_password(&attached_password_archive, "secret").unwrap();
+    assert_eq!(rar.read("f.txt").unwrap(), b"x");
+
+    // A long password option with no following value is still rejected.
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(dir.path().join("bare-long.rar"))
+        .arg("f.txt")
+        .arg("--password")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("secure no-echo password prompt"));
+
     // -p- creates an unencrypted archive (readable without a password).
     let archive = dir.path().join("pm.rar");
     let status = std::process::Command::new(RAR_CLI)
@@ -1435,7 +1500,7 @@ fn cli_ts_saves_and_restores_file_times() {
     assert!(!out.status.success(), "invalid -ts spec must be rejected");
 }
 
-// ── misc switches: -ver version control, accepted no-ops, -ilog ────────────
+// ── update/freshen and miscellaneous switches ─────────────────────────────
 
 #[test]
 fn cli_version_control_keeps_previous_versions() {
@@ -1508,6 +1573,338 @@ fn cli_version_control_keeps_previous_versions() {
 }
 
 #[test]
+fn cli_update_pure_addition_adds_the_missing_member() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("seed.txt"), b"seed").unwrap();
+    std::fs::write(dir.path().join("added.txt"), b"added").unwrap();
+    let archive = dir.path().join("update-add.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("seed.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["u", "-idq"])
+        .arg(&archive)
+        .arg("added.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = RarArchive::open(&archive).unwrap();
+    assert_eq!(rar.read("seed.txt").unwrap(), b"seed");
+    assert_eq!(rar.read("added.txt").unwrap(), b"added");
+}
+
+#[test]
+fn cli_update_replaces_newer_members_and_adds_missing_members() {
+    let dir = make_temp_dir();
+    let existing = dir.path().join("existing.txt");
+    std::fs::write(&existing, b"old").unwrap();
+    set_mtime_ago(&existing, 120);
+    let archive = dir.path().join("update-replace.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("existing.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    std::fs::write(&existing, b"new").unwrap();
+    std::fs::write(dir.path().join("added.txt"), b"added").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["u", "-idq"])
+        .arg(&archive)
+        .args(["existing.txt", "added.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = RarArchive::open(&archive).unwrap();
+    assert_eq!(rar.read("existing.txt").unwrap(), b"new");
+    assert_eq!(rar.read("added.txt").unwrap(), b"added");
+}
+
+#[test]
+fn cli_freshen_replaces_existing_members_without_adding_missing_members() {
+    let dir = make_temp_dir();
+    let existing = dir.path().join("existing.txt");
+    std::fs::write(&existing, b"old").unwrap();
+    set_mtime_ago(&existing, 120);
+    let archive = dir.path().join("freshen.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("existing.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    std::fs::write(&existing, b"new").unwrap();
+    std::fs::write(dir.path().join("missing.txt"), b"missing").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["f", "-idq"])
+        .arg(&archive)
+        .args(["existing.txt", "missing.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = RarArchive::open(&archive).unwrap();
+    assert_eq!(rar.read("existing.txt").unwrap(), b"new");
+    assert!(!rar.namelist().contains(&"missing.txt"));
+}
+
+#[test]
+fn cli_update_and_freshen_expand_directory_arguments() {
+    let dir = make_temp_dir();
+
+    let update_tree = dir.path().join("update-tree");
+    std::fs::create_dir_all(&update_tree).unwrap();
+    std::fs::write(update_tree.join("changed.txt"), b"old").unwrap();
+    std::fs::write(update_tree.join("unchanged.txt"), b"same").unwrap();
+    set_mtime_ago(&update_tree.join("changed.txt"), 120);
+    set_mtime_ago(&update_tree.join("unchanged.txt"), 120);
+    let update_archive = dir.path().join("directory-update.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&update_archive)
+        .arg("update-tree")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    std::fs::write(update_tree.join("changed.txt"), b"new").unwrap();
+    std::fs::write(update_tree.join("added.txt"), b"added").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["u", "-idq"])
+        .arg(&update_archive)
+        .arg("update-tree")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = RarArchive::open(&update_archive).unwrap();
+    assert_eq!(rar.read("update-tree/changed.txt").unwrap(), b"new");
+    assert_eq!(rar.read("update-tree/unchanged.txt").unwrap(), b"same");
+    assert_eq!(rar.read("update-tree/added.txt").unwrap(), b"added");
+
+    let freshen_tree = dir.path().join("freshen-tree");
+    std::fs::create_dir_all(&freshen_tree).unwrap();
+    std::fs::write(freshen_tree.join("changed.txt"), b"old").unwrap();
+    std::fs::write(freshen_tree.join("unchanged.txt"), b"same").unwrap();
+    set_mtime_ago(&freshen_tree.join("changed.txt"), 120);
+    set_mtime_ago(&freshen_tree.join("unchanged.txt"), 120);
+    let freshen_archive = dir.path().join("directory-freshen.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&freshen_archive)
+        .arg("freshen-tree")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    std::fs::write(freshen_tree.join("changed.txt"), b"new").unwrap();
+    std::fs::write(freshen_tree.join("missing.txt"), b"missing").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["f", "-idq"])
+        .arg(&freshen_archive)
+        .arg("freshen-tree")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = RarArchive::open(&freshen_archive).unwrap();
+    assert_eq!(rar.read("freshen-tree/changed.txt").unwrap(), b"new");
+    assert_eq!(rar.read("freshen-tree/unchanged.txt").unwrap(), b"same");
+    assert!(!rar.namelist().contains(&"freshen-tree/missing.txt"));
+}
+
+#[test]
+fn cli_failed_update_preserves_the_original_archive() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("existing.txt"), b"original").unwrap();
+    let archive = dir.path().join("transaction.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("existing.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let original = std::fs::read(&archive).unwrap();
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["u", "-idq"])
+        .arg(&archive)
+        .arg("missing.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["u", "-md3m", "-idq"])
+        .arg(&archive)
+        .arg("existing.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+    assert_eq!(
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("rar-rs-update"))
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn cli_update_rejects_multi_volume_archives_without_modifying_them() {
+    let dir = make_temp_dir();
+    std::fs::write(
+        dir.path().join("payload.bin"),
+        pseudo_random_bytes(16 * 1024, 91),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("added.txt"), b"added").unwrap();
+    let base = dir.path().join("multi");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-v1k", "-idq"])
+        .arg(&base)
+        .arg("payload.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut volumes: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rar"))
+        .collect();
+    volumes.sort();
+    assert!(volumes.len() > 1, "expected a multi-volume archive");
+    let original: Vec<Vec<u8>> = volumes
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["u", "-idq"])
+        .arg(&volumes[0])
+        .arg("added.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("multi-volume"));
+    for (path, expected) in volumes.iter().zip(original) {
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+    }
+}
+
+#[test]
+fn cli_member_selection_uses_exact_paths_or_basenames() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("selectors.rar");
+    {
+        let mut rar =
+            RarArchive::create_with_options(&archive, rar5::CreateOptions::default()).unwrap();
+        rar.add_bytes("a", b"A", 0).unwrap();
+        rar.add_bytes("dir/base.txt", b"BASE", 0).unwrap();
+        rar.add_bytes("full/path.txt", b"FULL", 0).unwrap();
+        rar.close().unwrap();
+    }
+
+    for binary in [RAR_CLI, UNRAR_CLI] {
+        let out = std::process::Command::new(binary)
+            .args(["x", "-so"])
+            .arg(&archive)
+            .arg("data")
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{binary} must not match a as data");
+        assert!(out.stdout.is_empty());
+
+        let out = std::process::Command::new(binary)
+            .args(["x", "-so"])
+            .arg(&archive)
+            .arg("base.txt")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{binary} basename selection failed");
+        assert_eq!(out.stdout, b"BASE");
+
+        let out = std::process::Command::new(binary)
+            .args(["x", "-so"])
+            .arg(&archive)
+            .arg("full/path.txt")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{binary} full-path selection failed");
+        assert_eq!(out.stdout, b"FULL");
+
+        let out = std::process::Command::new(binary)
+            .args(["x", "-so"])
+            .arg(&archive)
+            .arg("full\\path.txt")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{binary} backslash path selection failed"
+        );
+        assert_eq!(out.stdout, b"FULL");
+    }
+}
+
+#[test]
+fn unrar_stdout_honors_the_extraction_dictionary_limit() {
+    let dir = make_temp_dir();
+    let source = dir.path().join("dict.bin");
+    write_rep_text(&source, 8 * 1024 * 1024);
+    let archive = dir.path().join("dict-limit.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma7", "-md16m", "-idq"])
+        .arg(&archive)
+        .arg("dict.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let rar = RarArchive::open(&archive).unwrap();
+    assert!(rar.get_entry("dict.bin").unwrap().dict_size_bytes() > Some(8 * 1024 * 1024));
+
+    let out = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "-so", "-mdx8m"])
+        .arg(&archive)
+        .arg("dict.bin")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("dictionary"));
+}
+
+#[test]
 fn cli_misc_switches_are_accepted_and_ilog_logs_errors() {
     let dir = make_temp_dir();
     std::fs::write(dir.path().join("m.txt"), b"m").unwrap();
@@ -1517,7 +1914,7 @@ fn cli_misc_switches_are_accepted_and_ilog_logs_errors() {
     let status = std::process::Command::new(RAR_CLI)
         .args([
             "a", "-idc", "-idd", "-idn", "-idp", "-ac", "-ai", "-os", "-scu", "-oni", "-ri5",
-            "-vp", "-vd", "-oi1", "-ams", "-e1", "-ow", "-idq",
+            "-vp", "-oi1", "-ams", "-e1", "-ow", "-idq",
         ])
         .arg(&archive)
         .arg("m.txt")
@@ -1525,6 +1922,25 @@ fn cli_misc_switches_are_accepted_and_ilog_logs_errors() {
         .status()
         .unwrap();
     assert!(status.success(), "misc switches must be accepted");
+
+    // Destructive switches whose semantics are not implemented must fail
+    // explicitly and leave source data untouched.
+    for switch in ["-vd", "-dw", "-dr"] {
+        let out = std::process::Command::new(RAR_CLI)
+            .args(["a", switch, "-idq"])
+            .arg(dir.path().join(format!("unsafe-{}.rar", &switch[1..])))
+            .arg("m.txt")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{switch} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("not supported"),
+            "{switch}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(dir.path().join("m.txt").exists());
+    }
 
     // -ilog writes the error to the log file.
     let log = dir.path().join("err.log");

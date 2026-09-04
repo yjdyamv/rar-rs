@@ -41,16 +41,14 @@ pub(crate) fn temp_sibling_path(dest_path: &Path) -> PathBuf {
     dest_path.with_file_name(tmp_name)
 }
 
-/// Open a file for both reading and writing, truncating it. The archive
-/// stream is read back for locator patches and recovery records, and
-/// Windows `File::create` opens write-only (`GENERIC_WRITE`), so the
-/// write path uses a read+write handle.
+/// Create a new file for both reading and writing. Archive staging paths must
+/// never follow or truncate a pre-existing file: callers generate a fresh
+/// sibling name and receive `AlreadyExists` if it collides.
 pub(crate) fn read_write_create(path: &Path) -> io::Result<File> {
     fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .open(path)
 }
 
@@ -78,16 +76,83 @@ pub(crate) fn copy_prefix(
     Ok(total)
 }
 
-/// Replace `dest` with `src` (atomic on Unix; falls back to remove+rename
-/// on platforms where rename over an existing file fails).
+/// Atomically replace `dest` with `src` without deleting `dest` first.
+#[cfg(unix)]
 pub(crate) fn replace_file(src: &Path, dest: &Path) -> RarResult<()> {
-    match fs::rename(src, dest) {
-        Ok(()) => Ok(()),
-        Err(_) if dest.exists() => {
-            fs::remove_file(dest)?;
-            fs::rename(src, dest)?;
-            Ok(())
-        }
-        Err(e) => Err(RarError::Io(e)),
+    fs::rename(src, dest).map_err(RarError::Io)
+}
+
+#[cfg(windows)]
+pub(crate) fn replace_file(src: &Path, dest: &Path) -> RarResult<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    if !dest.exists() {
+        return fs::rename(src, dest).map_err(RarError::Io);
+    }
+    let dest: Vec<u16> = dest.as_os_str().encode_wide().chain(Some(0)).collect();
+    let src: Vec<u16> = src.as_os_str().encode_wide().chain(Some(0)).collect();
+    let replaced = unsafe {
+        windows_sys::Win32::Storage::FileSystem::ReplaceFileW(
+            dest.as_ptr(),
+            src.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced == 0 {
+        Err(RarError::Io(io::Error::last_os_error()))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn replace_file(src: &Path, dest: &Path) -> RarResult<()> {
+    if dest.exists() {
+        return Err(RarError::Unsupported(
+            "atomic replacement is not supported on this platform".into(),
+        ));
+    }
+    fs::rename(src, dest).map_err(RarError::Io)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_write_create, replace_file};
+
+    #[test]
+    fn staging_create_never_truncates_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stage.tmp");
+        std::fs::write(&path, b"keep").unwrap();
+
+        assert!(read_write_create(&path).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn failed_replace_preserves_the_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.tmp");
+        let dest = dir.path().join("archive.rar");
+        std::fs::write(&dest, b"original").unwrap();
+
+        assert!(replace_file(&missing, &dest).is_err());
+        assert_eq!(std::fs::read(dest).unwrap(), b"original");
+    }
+
+    #[test]
+    fn replace_installs_the_staged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("stage.tmp");
+        let dest = dir.path().join("archive.rar");
+        std::fs::write(&src, b"replacement").unwrap();
+        std::fs::write(&dest, b"original").unwrap();
+
+        replace_file(&src, &dest).unwrap();
+        assert_eq!(std::fs::read(dest).unwrap(), b"replacement");
+        assert!(!src.exists());
     }
 }

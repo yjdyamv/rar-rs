@@ -111,7 +111,7 @@ pub struct FileHeader {
     pub format_version: u8,
     /// Actual dictionary size in bytes for RAR7 members (`comp_version`
     /// 1): the 5-bit dict field plus the 1/32 increment allow
-    /// non-power-of-two sizes up to 64 GB. `None` for RAR5 members, whose
+    /// non-power-of-two sizes up to 126 GiB. `None` for RAR5 members, whose
     /// dictionary is `128 KiB << comp_dict_size`.
     pub dict_size_bytes: Option<u64>,
     /// Nanosecond fraction of the modification time (FILE_TIME extra

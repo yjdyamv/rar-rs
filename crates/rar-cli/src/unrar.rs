@@ -1,9 +1,10 @@
-//! unrar — extract and inspect RAR5 archives.
+//! unrar — extract and inspect RAR4, RAR5, and RAR7 archives.
 
 mod common;
 mod input;
 mod output;
 mod password;
+mod selector;
 mod time;
 
 use clap::{Args, Parser, Subcommand};
@@ -13,7 +14,7 @@ use std::process;
 #[command(
     name = "unrar",
     version,
-    about = "unrar-rs — extract and inspect RAR5 archives"
+    about = "unrar-rs — extract and inspect RAR archives"
 )]
 struct Cli {
     #[command(flatten)]
@@ -24,13 +25,12 @@ struct Cli {
     /// Send informational messages to stderr (like `-ierr`)
     #[arg(long, global = true)]
     err: bool,
-    /// Dictionary size (like `-md<size>`; accepted for CLI parity, no
-    /// effect on extraction — RAR5 dictionaries up to 4 GiB are always
-    /// supported)
+    /// Dictionary size (like `-md<size>`; accepted for CLI parity; the
+    /// decoder uses the dictionary declared by each member)
     #[arg(long = "dict-size", value_name = "SIZE", global = true)]
     #[allow(dead_code)]
     dict_size: Option<String>,
-    /// Extraction dictionary cap (like `-mdx<size>`; accepted, no effect)
+    /// Extraction dictionary cap (like `-mdx<size>`)
     #[arg(long = "dict-extract", value_name = "SIZE", global = true)]
     #[allow(dead_code)]
     dict_extract: Option<String>,
@@ -43,7 +43,7 @@ struct Cli {
     #[arg(long = "ts", value_name = "SPEC", global = true, action = clap::ArgAction::Append)]
     #[allow(dead_code)]
     ts_specs: Vec<String>,
-    /// Misc switches (-ilog and accepted no-ops)
+    /// Misc switches (-ilog and compatibility switches)
     #[command(flatten)]
     misc: common::MiscSwitches,
     #[command(subcommand)]
@@ -187,6 +187,10 @@ fn main() {
         })
         .collect();
     let args = common::merge_default_switches(defaults, cli_args);
+    if let Err(e) = password::reject_bare_password(&args) {
+        eprintln!("unrar: {e}");
+        process::exit(1);
+    }
     // `unrar -iver` prints the version and exits (no subcommand needed).
     if args.iter().any(|a| a == "--version-info") {
         println!(
@@ -223,6 +227,9 @@ fn run(cli: Cli) -> Result<(), String> {
 }
 
 fn run_inner(cli: Cli) -> Result<(), String> {
+    if cli.misc.erase_disk {
+        return Err("-vd/--erase-disk is not supported; no disk was erased".into());
+    }
     let password = cli.password.password.as_deref();
     let ts = time::parse_ts_specs(&cli.ts_specs)?;
     let max_dict_size = cli
@@ -346,7 +353,7 @@ fn cmd_extract(
     // `-so`: write the extracted members to stdout (one stream) instead of
     // to disk — handy for piping. Directories carry no data.
     if args.stdout {
-        return extract_to_stdout(&mut rar, &args.names);
+        return extract_to_stdout(&mut rar, &args.names, max_dict_size);
     }
 
     let opts = rar5::ExtractOptions {
@@ -376,12 +383,6 @@ fn cmd_extract(
     Ok(())
 }
 
-/// Match a stored member name against a requested selector. WinRAR matches
-/// the full stored path, so a basename also selects the member.
-fn name_matches(member: &str, requested: &str) -> bool {
-    member == requested || member.ends_with(&format!("/{requested}")) || requested.ends_with(member)
-}
-
 /// Extract only the members whose name matches one of `names` (full stored
 /// path or basename). Errors clearly when no member matches, so a mistyped
 /// name is never silently swallowed or treated as a destination directory.
@@ -397,61 +398,55 @@ fn extract_selected(
         .filter(|e| !e.is_dir())
         .map(|e| e.name().to_string())
         .collect();
-    let mut matched = 0usize;
-    for m in &members {
-        if names.iter().any(|n| name_matches(m, n)) {
-            rar.extract_with_options(m, dest, *opts)
-                .map_err(|e| format!("extract {m}: {e}"))?;
-            matched += 1;
-        }
-    }
-    if matched == 0 {
+    let wanted = selector::select_members(members.iter().map(String::as_str), names);
+    if wanted.is_empty() {
         return Err(format!(
             "no archive members matched the requested name(s): {}",
             names.join(", ")
         ));
     }
-    Ok(matched)
+    for member in &wanted {
+        rar.extract_with_options(member, dest, *opts)
+            .map_err(|e| format!("extract {member}: {e}"))?;
+    }
+    Ok(wanted.len())
 }
 
 /// Extract every file member of an archive to stdout, concatenated, like
 /// `rar/unrar x -so`. Informational messages are suppressed so the stream
 /// stays clean.
-fn extract_to_stdout(rar: &mut rar5::RarArchive, names: &[String]) -> Result<(), String> {
+fn extract_to_stdout(
+    rar: &mut rar5::RarArchive,
+    names: &[String],
+    max_dict_size: Option<u64>,
+) -> Result<(), String> {
     use std::io::Write;
     let members: Vec<String> = rar
         .list()
         .iter()
-        .filter(|e| !e.is_dir())
-        .map(|e| e.name().to_string())
+        .filter(|entry| !entry.is_dir())
+        .map(|entry| entry.name().to_string())
         .collect();
-    let mut wanted: Vec<String> = Vec::new();
-    if names.is_empty() {
-        wanted = members;
-    } else {
-        for m in &members {
-            if names.iter().any(|n| name_matches(m, n)) {
-                wanted.push(m.clone());
-            }
-        }
+    let wanted = selector::select_members(members.iter().map(String::as_str), names);
+    if wanted.is_empty() && !names.is_empty() {
+        return Err(format!(
+            "no archive members matched the requested name(s): {}",
+            names.join(", ")
+        ));
     }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    for name in &wanted {
-        let data = rar
-            .read_with_options(
-                name,
-                rar5::ExtractOptions {
-                    max_unpacked_bytes: None,
-                    max_total_unpacked_bytes: None,
-                    ..Default::default()
-                },
-            )
+    let options = rar5::ExtractOptions {
+        max_unpacked_bytes: None,
+        max_total_unpacked_bytes: None,
+        max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),
+        ..Default::default()
+    };
+    for name in wanted {
+        rar.read_to_writer_with_options(name, &mut out, options)
             .map_err(|e| format!("read {name}: {e}"))?;
-        out.write_all(&data).map_err(|e| format!("stdout: {e}"))?;
     }
-    out.flush().map_err(|e| format!("stdout: {e}"))?;
-    Ok(())
+    out.flush().map_err(|e| format!("stdout: {e}"))
 }
 
 fn cmd_extract_flat(
@@ -468,7 +463,7 @@ fn cmd_extract_flat(
     let dest = output::extract_dest(&base, &args.archive, args.append_dir);
     let mut rar = open_archive(&args.archive, password)?;
     if args.stdout {
-        return extract_to_stdout(&mut rar, &args.names);
+        return extract_to_stdout(&mut rar, &args.names, max_dict_size);
     }
     let opts = rar5::ExtractOptions {
         flat_paths: true,
@@ -530,59 +525,42 @@ fn cmd_list(archive: &str, password: Option<&str>) -> Result<(), String> {
 fn cmd_test(archive: &str, password: Option<&str>) -> Result<(), String> {
     let mut rar = open_archive(archive, password)?;
 
-    let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
-    let mut ok = 0;
-    let mut fail = 0;
-
-    for name in &names {
-        let entry = rar.get_entry(name).unwrap();
-        if entry.is_dir() {
-            continue;
-        }
-        match rar.read(name) {
-            Ok(_) => {
-                info!("  OK  {name}");
-                ok += 1;
-            }
-            Err(e) => {
-                info!("  FAIL  {name}: {e}");
-                fail += 1;
-            }
-        }
-    }
-
+    let (checked, failed) = rar.test().map_err(|e| format!("test: {e}"))?;
     info!();
-    if fail == 0 {
-        info!("All {ok} files OK");
+    if failed == 0 {
+        info!("All {checked} files OK");
         Ok(())
     } else {
-        Err(format!("{fail} file(s) failed, {ok} OK"))
+        Err(format!("{failed} file(s) failed, {checked} checked"))
     }
 }
 
 fn cmd_print(args: &PrintArgs, password: Option<&str>) -> Result<(), String> {
+    use std::io::Write;
     let mut rar = open_archive(&args.archive, password)?;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let options = rar5::ExtractOptions {
+        max_unpacked_bytes: None,
+        max_total_unpacked_bytes: None,
+        ..Default::default()
+    };
 
     if let Some(file) = &args.file {
-        let data = rar.read(file).map_err(|e| format!("{e}"))?;
-        use std::io::Write;
-        std::io::stdout()
-            .write_all(&data)
+        rar.read_to_writer_with_options(file, &mut out, options)
             .map_err(|e| format!("{e}"))?;
     } else {
-        let names: Vec<String> = rar.list().iter().map(|e| e.name().to_string()).collect();
+        let names: Vec<String> = rar
+            .list()
+            .iter()
+            .filter(|entry| !entry.is_dir())
+            .map(|entry| entry.name().to_string())
+            .collect();
         for name in &names {
-            let entry = rar.get_entry(name).unwrap();
-            if entry.is_dir() {
-                continue;
-            }
-            let data = rar.read(name).map_err(|e| format!("{e}"))?;
-            use std::io::Write;
-            std::io::stdout()
-                .write_all(&data)
+            rar.read_to_writer_with_options(name, &mut out, options)
                 .map_err(|e| format!("{e}"))?;
         }
     }
 
-    Ok(())
+    out.flush().map_err(|e| format!("stdout: {e}"))
 }

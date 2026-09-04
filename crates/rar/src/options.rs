@@ -1,8 +1,13 @@
 //! Public option structs for archive creation and extraction.
 
+use crate::error::{RarError, RarResult};
 use crate::version::ArchiveVersion;
 
-/// Options controlling RAR5 archive creation.
+pub(crate) const MAX_COMPRESSION_THREADS: usize = 64;
+const MIN_DICTIONARY_BYTES: u64 = 128 * 1024;
+pub(crate) const MAX_RAR7_DICTIONARY_BYTES: u64 = 126 * 1024 * 1024 * 1024;
+
+/// Options controlling RAR archive creation.
 ///
 /// All fields default to the plain unencrypted single-volume create
 /// behavior; enable only the features you need.
@@ -36,7 +41,8 @@ pub struct CreateOptions {
     /// `Rar70` selects RAR5 with v70 codec members.
     pub format_version: ArchiveVersion,
     /// Create a solid archive: consecutive compressed members share one
-    /// LZ window (better ratio, slower random access). Single-volume only.
+    /// LZ window (better ratio, slower random access). Solid state can remain
+    /// continuous across volumes or reset according to [`SolidReset`].
     pub solid: bool,
     /// How the solid chain is split (WinRAR `-s` modifiers `-sd`/`-sv`/`-se`).
     /// `Continuous` keeps the statistics across the whole archive (the
@@ -54,7 +60,8 @@ pub struct CreateOptions {
     /// Optional AES-256 password for file-level encryption.
     pub password: Option<String>,
     /// Encrypt archive headers (file names and structure). Requires
-    /// `password`; incompatible with multi-volume archives.
+    /// `password`; in multi-volume archives each volume carries the required
+    /// encryption setup.
     pub encrypt_headers: bool,
     /// Add an inline recovery record protecting this percent (0-100) of
     /// the archive (WinRAR `-rr`). Incompatible with multi-volume.
@@ -73,10 +80,10 @@ pub struct CreateOptions {
     /// (128 KiB .. 4 GiB).
     pub dict_size_log: Option<u8>,
     /// Actual dictionary size in bytes for RAR7 (v70) members (WinRAR's
-    /// `-md` above 4 GiB). Any value > 4 GiB is accepted (it need not be
-    /// a power of two); the header encodes it as a 5-bit power-of-two
-    /// base plus a 1/32 increment. Mutually exclusive with
-    /// `dict_size_log` in practice (one `-md` switch only).
+    /// `-md` above 4 GiB). Values need not be powers of two; the header uses
+    /// a 5-bit power-of-two base plus a 1/32 increment and can represent up
+    /// to 126 GiB. Mutually exclusive with `dict_size_log` in practice (one
+    /// `-md` switch only).
     pub dict_size_bytes: Option<u64>,
     /// Write RAR7 (v70) members (`comp_version` 1, DCX distance table)
     /// even when `dict_size_bytes` is at or below the 4 GiB threshold
@@ -105,13 +112,58 @@ pub struct CreateOptions {
     /// Save NTFS alternate data streams as "STM" service records (like
     /// WinRAR's `-os`); no-op off Windows.
     pub save_streams: bool,
-    /// Compression threads for this archive (like `-mt<N>`); `None` uses
-    /// the process-global [`set_compression_threads`] setting (automatic
-    /// sizing when that is 0). Scoped to the archive: concurrent archives
-    /// with different thread counts each run on their own pool and never
-    /// interfere. This field is only consulted when the `parallel` feature
-    /// is enabled; without it compression is sequential regardless.
+    /// Compression threads for this archive (like `-mt<N>`), in the range
+    /// 0..=64. `Some(0)` requests automatic sizing for this archive regardless
+    /// of the process-global setting; `None` uses the process-global
+    /// [`set_compression_threads`] setting. Scoped to the archive: concurrent
+    /// archives with different thread counts each run on their own pool and
+    /// never interfere. This field is only consulted when the `parallel`
+    /// feature is enabled; without it compression is sequential regardless.
     pub threads: Option<usize>,
+}
+
+impl CreateOptions {
+    pub(crate) fn validate(&self) -> RarResult<()> {
+        validate_dictionary(self.dict_size_log, self.dict_size_bytes)?;
+        validate_threads(self.threads)
+    }
+}
+
+pub(crate) fn validate_dictionary(
+    dict_size_log: Option<u8>,
+    dict_size_bytes: Option<u64>,
+) -> RarResult<()> {
+    if let Some(log) = dict_size_log
+        && log > 15
+    {
+        return Err(RarError::InvalidOption(format!(
+            "dictionary size log {log} exceeds the supported maximum 15"
+        )));
+    }
+    if dict_size_log.is_some() && dict_size_bytes.is_some() {
+        return Err(RarError::InvalidOption(
+            "dict_size_log and dict_size_bytes are mutually exclusive".into(),
+        ));
+    }
+    if let Some(bytes) = dict_size_bytes
+        && !(MIN_DICTIONARY_BYTES..=MAX_RAR7_DICTIONARY_BYTES).contains(&bytes)
+    {
+        return Err(RarError::InvalidOption(format!(
+            "dictionary size {bytes} bytes is outside the supported range {MIN_DICTIONARY_BYTES}..={MAX_RAR7_DICTIONARY_BYTES}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_threads(threads: Option<usize>) -> RarResult<()> {
+    if let Some(threads) = threads
+        && threads > MAX_COMPRESSION_THREADS
+    {
+        return Err(RarError::InvalidOption(format!(
+            "compression threads must be in 0..={MAX_COMPRESSION_THREADS}, got {threads}"
+        )));
+    }
+    Ok(())
 }
 
 impl Default for CreateOptions {
@@ -215,9 +267,8 @@ impl Default for ExtractOptions {
 ///
 /// Sizes in the RAR5 range (128 KiB ..= 4 GiB) must be a power of two and
 /// map to a dict log (WinRAR rejects e.g. `-md3m` with "Unknown option");
-/// anything above 4 GiB is accepted as-is (RAR7 v70 members), capped at
-/// 128 GiB — the header's 5-bit power-of-two base plus a 1/32 increment
-/// covers about 126 GiB, so 128 GiB is a safe round bound.
+/// anything above 4 GiB is accepted as-is (RAR7 v70 members), capped at the
+/// exactly encodable maximum of 126 GiB (a 64 GiB base plus 31/32).
 ///
 /// Returns `None` for empty, unparsable or out-of-range values.
 pub fn parse_dict_size(s: &str) -> Option<(Option<u8>, Option<u64>)> {
@@ -243,7 +294,7 @@ pub fn parse_dict_size(s: &str) -> Option<(Option<u8>, Option<u64>)> {
         // 128 KiB = 2^17, so log = trailing_zeros - 17 (0..=15).
         return Some((Some((bytes.trailing_zeros() - 17) as u8), None));
     }
-    if bytes > 128 * 1024 * 1024 * 1024 {
+    if bytes > MAX_RAR7_DICTIONARY_BYTES {
         return None;
     }
     Some((None, Some(bytes)))
@@ -251,7 +302,7 @@ pub fn parse_dict_size(s: &str) -> Option<(Option<u8>, Option<u64>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_dict_size;
+    use super::{MAX_RAR7_DICTIONARY_BYTES, parse_dict_size};
 
     #[test]
     fn dict_size_parses_rar5_range() {
@@ -284,11 +335,11 @@ mod tests {
             parse_dict_size("64g"),
             Some((None, Some(64 * 1024 * 1024 * 1024)))
         );
-        // 128 GiB is the accepted bound (the header's encodable range).
         assert_eq!(
-            parse_dict_size("128g"),
-            Some((None, Some(128 * 1024 * 1024 * 1024)))
+            parse_dict_size("126g"),
+            Some((None, Some(MAX_RAR7_DICTIONARY_BYTES)))
         );
-        assert_eq!(parse_dict_size("129g"), None);
+        assert_eq!(parse_dict_size("127g"), None);
+        assert_eq!(parse_dict_size("128g"), None);
     }
 }

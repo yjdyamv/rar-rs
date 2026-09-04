@@ -11,7 +11,6 @@ Thumbs.db
 *.fixed.*.rar
 fixed.*.rar
 rebuilt.*.rar
-fixed.*.rar
 
 # 本地参考工具(不入库)
 /.cache
