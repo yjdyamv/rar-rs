@@ -542,3 +542,20 @@ fn rar4_solid20_chain_shared_window() {
     assert_eq!(rar5_crc32(&a), 0x9766_8cf2, "SOLID1 payload CRC");
     assert_eq!(rar5_crc32(&b), 0x2883_3332, "SOLID2 payload CRC");
 }
+
+/// RAR 1.54-era split set under the OLD numbering (`random.rar` + `.r00` +
+/// `.r01`), with a single member split across all three volumes (2 MiB
+/// unpacked). The 1.5.x block-header CRC sentinel (0xFFFF) must be
+/// tolerated. Payload CRC 0x1c9eb697 from the reference corpus.
+#[test]
+fn rar4_rar154_old_numbered_split_set() {
+    let base = format!("{RAR154}random.rar");
+    let volumes = rar5::discover_volumes(std::path::Path::new(&base));
+    assert!(volumes.len() >= 3, "expected several volumes: {volumes:?}");
+    let mut archive = RarArchive::open(&volumes[0]).expect("open");
+    let names = archive.namelist();
+    assert_eq!(names, vec!["random.bin"]);
+    let data = archive.read("random.bin").expect("decode split member");
+    assert_eq!(data.len(), 2_097_152);
+    assert_eq!(rar5_crc32(&data), 0x1c9e_b697, "random.bin payload CRC");
+}

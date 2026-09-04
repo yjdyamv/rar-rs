@@ -18,11 +18,11 @@
 ## 待办（下一批，issue 见 `.scratch/compression-perf/`）
 
 ### 老版本 RAR 只读（继续）
-- solid RAR2.x/1.5 链：链引擎按 unp_ver 泛化（rar15 已带 solid 参/64 KiB 窗，只差接线；rar20 需加链窗）
-- EXTTIME 亚秒时间（mtime_ns/ctime/atime）解析、FHD_COMMENT 注释展示
-- store-in-solid 链内成员的窗口语义（对照 6.23 实测；现断链保守处理）
-- rar154 拆 2 MiB 老命名 split 集（random.rar；头 CRC 0xFFFFFFFF 哨兵语义）
-- 大成员流式（现整成员驻留内存）与错误口令提示（RAR3/4 现为解码乱码错）
+- [x] solid RAR2.x/1.5 链（2026-09）：unp_ver<29 的链按归档级 MHD_SOLID+位置判定（该代编码器从不写 FHD_SOLID；rars crafted fixture 第二成员清除标志仍须共享窗口），`rar4_solid_archive` 标志接线；RAR3+ 维持 FHD_SOLID 语义。验证：solid_flag_cleared_rar15（46B→2700B 续窗）、rar250 SOLID.RAR（CRC 0x97668cf2/0x28833332 精确）b3d19a7
+- [x] EXTTIME mtime 亚秒（9845c34；RAR4 无 ctime/atime 秒基字段，亚秒无从附着——记录为格式事实）；FHD_COMMENT 跳过已做、展示留待有 API 需求
+- [x] store-in-solid 窗口语义（2026-09 实测）：WinRAR 6.23 RAR4 solid 强制压缩不产 store 成员（随机也压）；我们的写侧 STORE 断链、读侧对 store 冻结窗口（WinRAR 自产无此类，互操作无碍）
+- [x] rar154 老命名 split 集（2026-09）：random.rar+.r00+.r01 三卷 2 MiB 成员，头 CRC 0xFFFF 哨兵容忍，CRC 0x1c9eb697 精确
+- 大成员流式（现整成员驻留内存）与错误口令提示（RAR3/4 错口令已映射 WrongPassword 9845c34；大成员流式留作后续）
 
 
 ### RAR5（压缩面）
