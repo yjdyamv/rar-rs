@@ -11,6 +11,7 @@
 //! [`RarError::Unsupported`] until the Unpack15/20/29 engines land.
 
 mod read;
+pub(crate) mod write;
 use crate::archive::ArchiveEntry;
 use crate::crc32;
 use crate::error::{RarError, RarResult};
@@ -84,6 +85,18 @@ pub(crate) const FHD_SPLIT_AFTER: u16 = 0x0002;
 /// `[8-byte salt][AES-128-CBC ciphertext of head_size bytes, padded to a
 /// 16-byte multiple]`; the 7-byte block prefix lives inside the ciphertext.
 pub(crate) const MHD_PASSWORD: u16 = 0x0080;
+
+/// Main header flag: this is a multi-volume archive.
+#[allow(dead_code)]
+pub(crate) const MHD_VOLUME: u16 = 0x0001;
+
+/// Main header flag: this is the first volume of a multi-volume set.
+#[allow(dead_code)]
+pub(crate) const MHD_FIRSTVOLUME: u16 = 0x0100;
+
+/// Main header flag: archive is solid (all members share one LZ window).
+#[allow(dead_code)]
+pub(crate) const MHD_SOLID: u16 = 0x0008;
 
 /// Cross-volume RAR4 block scan. A member split across volumes reappears as
 /// continuation file headers (FHD_SPLIT_BEFORE) in later volumes; the scan

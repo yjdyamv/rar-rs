@@ -225,6 +225,9 @@ impl RarArchive {
 
     fn add_file(&mut self, path: &Path, arcname: Option<&str>, level: u8) -> RarResult<()> {
         self.check_cancel()?;
+        if self.rar4 {
+            return self.add_file_rar4(path, arcname);
+        }
         let meta = fs::metadata(path)?;
         if !meta.is_file() {
             return Err(RarError::Io(io::Error::new(
@@ -573,9 +576,202 @@ impl RarArchive {
         Ok(())
     }
 
-    /// Add a file redirection entry (symlink, hardlink or file copy) to
-    /// the archive (like `rar a -ol` / `-oh`).
-    ///
+    /// RAR4 STORE path: write a plain (unencrypted, uncompressed) member in
+    /// the legacy container. A single-volume member is one FILE_HEAD + raw
+    /// data; in a multi-volume set the member data is split at volume
+    /// boundaries, writing `FHD_SPLIT_AFTER` on every non-final head and
+    /// `FHD_SPLIT_BEFORE` on every continuation head.
+    fn add_file_rar4(&mut self, path: &Path, arcname: Option<&str>) -> RarResult<()> {
+        let meta = fs::metadata(path)?;
+        let file_size = meta.len();
+        let mtime = meta
+            .modified()
+            .unwrap_or(SystemTime::now())
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
+        let name = arcname
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().into_owned());
+        let name = name.replace('\\', "/");
+
+        if self.progress.is_some() {
+            self.report_progress(0, file_size);
+        }
+
+        // STORE: read the whole member, compute its CRC32, then stream the
+        // bytes. Phase 1.2 scope is plain STORE without encryption.
+        let mut reader = File::open(path)?;
+        let mut data = Vec::with_capacity(file_size as usize);
+        std::io::Read::read_to_end(&mut reader, &mut data)?;
+        let file_crc = crate::crc32::crc32(&data);
+        let dos_time = crate::rar40::write::unix_to_dos_time(mtime);
+        let (encoded_name, name_flags) = crate::rar40::write::encode_file_name(&name);
+
+        // Write head + data for one segment of `[data[..data_end])` on the
+        // current volume. `split_before` marks a continuation head and
+        // `split_after` a head whose data continues on the next volume.
+        #[allow(clippy::too_many_arguments)]
+        fn emit_segment(
+            this: &mut crate::archive::RarArchive,
+            encoded_name: &[u8],
+            name_flags: u16,
+            file_crc: u32,
+            dos_time: u32,
+            packed_size: u32,
+            unpacked_size: u32,
+            data: &[u8],
+            split_before: bool,
+            split_after: bool,
+        ) -> RarResult<(u64, u64)> {
+            use crate::rar40::write::{FileHeaderParams, build_file_header};
+            use crate::rar40::{FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE, RAR4_METHOD_STORE};
+            let mut fhd = name_flags;
+            if split_before {
+                fhd |= FHD_SPLIT_BEFORE;
+            }
+            if split_after {
+                fhd |= FHD_SPLIT_AFTER;
+            }
+            let params = FileHeaderParams {
+                flags: fhd,
+                packed_size,
+                unpacked_size,
+                host_os: 0,
+                file_crc,
+                file_time: dos_time,
+                unp_ver: 29,
+                method: RAR4_METHOD_STORE,
+                name: encoded_name,
+                salt: None,
+                ext_time: None,
+                dict_size: 0x40_0000,
+            };
+            let hdr = build_file_header(&params)?;
+            let stream = this.stream.as_mut().unwrap();
+            let data_offset = stream.stream_position()? + hdr.len() as u64;
+            stream.write_all(&hdr)?;
+            stream.write_all(data)?;
+            this.write_ctx_mut().volume_bytes_written += hdr.len() as u64 + data.len() as u64;
+            Ok((data_offset, data.len() as u64))
+        }
+
+        match self.write_ctx().volume_size {
+            None => {
+                // ── Single-volume ──
+                let (data_offset, _) = emit_segment(
+                    self,
+                    &encoded_name,
+                    name_flags,
+                    file_crc,
+                    dos_time,
+                    file_size as u32,
+                    file_size as u32,
+                    &data,
+                    false,
+                    false,
+                )?;
+                self.entries.push(crate::archive::ArchiveEntry {
+                    header: crate::rar50::headers::FileHeader {
+                        name,
+                        unpacked_size: file_size,
+                        packed_size: file_size,
+                        crc32_val: Some(file_crc),
+                        mtime,
+                        comp_method: 0,
+                        host_os: 0,
+                        format_version: 4,
+                        unp_ver: 29,
+                        data_offset,
+                        ..Default::default()
+                    },
+                    chunks: vec![crate::rar50::headers::DataChunk {
+                        volume_index: 0,
+                        data_offset,
+                        packed_size: file_size,
+                        crc32_val: Some(file_crc),
+                        is_final: true,
+                        extra_data: Vec::new(),
+                    }],
+                });
+                self.report_progress(file_size, file_size);
+                Ok(())
+            }
+            Some(volume_size) => {
+                // ── Multi-volume: split the member across volumes ──
+                let mut chunks = Vec::<crate::rar50::headers::DataChunk>::new();
+                let mut sent = 0u64;
+                let mut vol_index = self.write_ctx().current_volume - 1;
+                let mut split_before = false;
+                while sent < file_size {
+                    // Roll to a volume with room for at least 7 bytes (EOA).
+                    loop {
+                        let used = self.write_ctx().volume_bytes_written;
+                        if volume_size.saturating_sub(used) > 7 {
+                            break;
+                        }
+                        self.start_next_volume()?;
+                        vol_index = self.write_ctx().current_volume - 1;
+                    }
+                    let used = self.write_ctx().volume_bytes_written;
+                    let available = volume_size - used - 7;
+                    let chunk_size = (file_size - sent).min(available);
+                    let split_after = sent + chunk_size < file_size;
+                    let segment = &data[sent as usize..(sent + chunk_size) as usize];
+                    // RAR4 split-member CRC convention (matches WinRAR):
+                    // every non-final head carries the CRC32 of its OWN
+                    // segment's data; only the final head carries the
+                    // whole-file CRC. Unpacked size is the full file size in
+                    // every head; packed size is per-segment.
+                    let head_crc = if split_after {
+                        crate::crc32::crc32(segment)
+                    } else {
+                        file_crc
+                    };
+                    let (data_offset, _) = emit_segment(
+                        self,
+                        &encoded_name,
+                        name_flags,
+                        head_crc,
+                        dos_time,
+                        chunk_size as u32,
+                        file_size as u32,
+                        segment,
+                        split_before,
+                        split_after,
+                    )?;
+                    chunks.push(crate::rar50::headers::DataChunk {
+                        volume_index: vol_index,
+                        data_offset,
+                        packed_size: chunk_size,
+                        crc32_val: Some(head_crc),
+                        is_final: !split_after,
+                        extra_data: Vec::new(),
+                    });
+                    sent += chunk_size;
+                    split_before = true;
+                }
+                self.entries.push(crate::archive::ArchiveEntry {
+                    header: crate::rar50::headers::FileHeader {
+                        name,
+                        unpacked_size: file_size,
+                        packed_size: file_size,
+                        crc32_val: Some(file_crc),
+                        mtime,
+                        comp_method: 0,
+                        host_os: 0,
+                        format_version: 4,
+                        unp_ver: 29,
+                        data_offset: 0,
+                        ..Default::default()
+                    },
+                    chunks,
+                });
+                self.report_progress(file_size, file_size);
+                Ok(())
+            }
+        }
+    }
     /// The entry carries no data; `redir_type` is 1 (Unix symlink),
     /// 2 (Windows symlink), 3 (Windows junction), 4 (hardlink) or
     /// 5 (file copy) and `target` is the referenced member name.

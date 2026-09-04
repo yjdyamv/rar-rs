@@ -1,5 +1,7 @@
 //! Public option structs for archive creation and extraction.
 
+use crate::version::ArchiveVersion;
+
 /// Options controlling RAR5 archive creation.
 ///
 /// All fields default to the plain unencrypted single-volume create
@@ -28,6 +30,11 @@ pub enum SolidReset {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateOptions {
+    /// Target archive format version. `Rar40` writes the legacy RAR 3.x/4.x
+    /// container (`Rar!\x1a\x07\x00`, 7-byte signature, fixed-width headers,
+    /// 16-bit CRC). `Rar50` (default) writes the modern RAR5 container.
+    /// `Rar70` selects RAR5 with v70 codec members.
+    pub format_version: ArchiveVersion,
     /// Create a solid archive: consecutive compressed members share one
     /// LZ window (better ratio, slower random access). Single-volume only.
     pub solid: bool,
@@ -110,6 +117,7 @@ pub struct CreateOptions {
 impl Default for CreateOptions {
     fn default() -> Self {
         Self {
+            format_version: ArchiveVersion::Rar50,
             solid: false,
             solid_reset: SolidReset::Continuous,
             quick_open: false,

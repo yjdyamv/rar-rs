@@ -185,6 +185,19 @@ pub(crate) fn volume_path(parent: &Path, base: &str, part_num: usize) -> PathBuf
     parent.join(format!("{base}.part{part_num}.rar"))
 }
 
+/// Legacy RAR 1.5–3.x volume name: the first volume is `{base}.rar`, then
+/// `{base}.r00`, `{base}.r01`, … `.r99`, then `{base}.s00`, … — one extension
+/// letter per hundred volumes, matching WinRAR's RAR4 multi-volume naming.
+pub(crate) fn volume_path_rar4(parent: &Path, base: &str, part_num: usize) -> PathBuf {
+    if part_num <= 1 {
+        return parent.join(format!("{base}.rar"));
+    }
+    let idx = part_num - 2;
+    let letter = b'r' + (idx / 100) as u8;
+    let num = idx % 100;
+    parent.join(format!("{base}.{}{:02}", letter as char, num))
+}
+
 /// Volume path with the part number zero-padded to `width` digits
 /// (`part01.rar` for width 2), matching WinRAR's naming for sets of 10
 /// or more volumes.

@@ -699,6 +699,39 @@ fn multivolume_discover_volumes() {
 }
 
 #[test]
+fn rar4_volume_path_legacy_naming() {
+    // RAR4 multi-volume sets use the legacy `.rar`/`.rNN` naming: the first
+    // volume is `x.rar`, then `x.r00`, `x.r01`, … with one extension letter
+    // per hundred volumes.
+    let parent = std::path::Path::new("set");
+    assert_eq!(
+        volume_path_rar4(parent, "vol", 1).to_string_lossy(),
+        r"set\vol.rar"
+    );
+    assert_eq!(
+        volume_path_rar4(parent, "vol", 2).to_string_lossy(),
+        r"set\vol.r00"
+    );
+    assert_eq!(
+        volume_path_rar4(parent, "vol", 3).to_string_lossy(),
+        r"set\vol.r01"
+    );
+    assert_eq!(
+        volume_path_rar4(parent, "vol", 100).to_string_lossy(),
+        r"set\vol.r98"
+    );
+    assert_eq!(
+        volume_path_rar4(parent, "vol", 101).to_string_lossy(),
+        r"set\vol.r99"
+    );
+    // Past 100 volumes the letter advances: r → s.
+    assert_eq!(
+        volume_path_rar4(parent, "vol", 102).to_string_lossy(),
+        r"set\vol.s00"
+    );
+}
+
+#[test]
 fn multivolume_open_from_any_part() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("anypart.rar");

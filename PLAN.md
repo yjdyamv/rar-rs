@@ -33,12 +33,12 @@
 
 ## 已取消 / 不做
 
-- **老版本 RAR 创建**（`-ma4`）：**搁置（用户决策 2026-09：解压能力即可，暂不做创建）**。若未来重启：只需 rar29 写核心 + 归档层，参考 = WinRAR 6.23（最后的 -ma4；5.91 等价兜底；15/20 写器不做）
 - RAR 1.3/1.4（`RE~^` 族）：rars 支持但本实现不追（夹具稀少、DOS 时代）
 - unrar `s`（转 SFX）：官方 UnRAR 7.23 无此命令，非差距
 
 ## 已完成（要点）
 
+- [x] **老版本 RAR 创建（`-ma4`）Phase 1.2：STORE + 成员边界多卷（2026-09）**：`options.rs` 增 `CreateOptions::format_version`（默认 Rar50，`Rar40` 拒绝 RAR5-only 特性：quick-open/BLAKE2/恢复记录/恢复卷/-hp/owner/streams/RAR7 字典）；`rar40/write.rs` 固定宽度头序列化（签名/主头/文件头/endarc、CRC16、DOS 时间、ext-time、文件名编码、字典位）；`archive/create.rs` 独立 RAR4 写管线（`open_write_rar4`/`finish_writing_rar4`/`start_next_volume_rar4`）；`rar50/write/mod.rs::add_file_rar4` STORE 成员写器（单卷 + 分卷切分）。跨卷规范对齐 WinRAR 7.23（`unrar t` All OK + `unrar x` SHA256 字节级一致）：主头首卷 `MHD_FIRSTVOLUME|MHD_VOLUME`；分块头 **非末块 CR C32=本段数据**、**末块 CR C32=整文件**，packed_size=段、unpacked_size=每头整文件长；分卷用**老命名** `x.rar`/`x.r00`/`.rNN`（每百卷升字母 r→z，`volume_path_rar4`）。读回经自身 RAR4 reader 分卷合并 roundtrip 通过。CLI `-ma4` 与 LZSS/PPMd 压缩留待下一阶段。设计见 `docs/rar4-creation-spec.md` + `docs/adr/0001-rar4-creation-architecture.md`
 - [x] **delta 自动过滤器候选通道扩到帧尺寸 + 预门采样（2026-08）**：修 `picks_correct_channel_count_for_interleaved_streams`（自 be7a254 引入即失败，simd feature 下 CI 未跑到）暴露的两个真实缺陷——①候选通道 [1,2,3,4] 到不了多字节采样帧尺寸（16 位立体声需 4、32 位立体声需 8、24 位三声道需 9、32 位四声道需 16），扩为 [1,2,3,4,6,8,9,12,16]；实测 32 位立体声 11%（原限 ch4 时 ~18%）、24 位三声道 14%、16 位四声道 22% vs plain 84%；②预门 `auto_delta_filter_channels` 全量扫描成员（63 MiB 成员 ~300ms+，只为保护一次 64 KiB 采样编码）改为 64 KiB 头部采样；接受判据从 min-mag 通道的 near-zero 改为跨通道最大 near-zero（0/255 回绕会误导 mag 选粗通道而误拒，如 8 位单声道回绕 walk 曾拒收）。尺寸选择提取为 `pick_delta_channel` 供测试直接验证（9 种帧布局全对）。测试重写：预门只断言开关（Some/None），新增 `delta_selection_prefers_frame_size`（9 布局 × 帧尺寸）、roundtrip 扩到 2/3/4 字节采样、text 拒绝断言。全部 120 lib 测试绿
 
 - [x] **不可压缩数据压缩提速（2026-08）**：collect 快模式阈值 4096→256 且命中判据 `longest<16`→`longest==0`（文本 4-15 字节匹配不再误触发快模式，text ratio 保持 15.32% 与基线同）；无匹配块 DP 快路径（空候选 + 缓存距离探针验证 → 直接全字面量，跳过 3 次定价 pass，输出字节级一致，测试 `matchless_fast_path_is_byte_identical` 锁定）。64 MiB 随机 m3：mt1 5044→1751、mt8 1253→486 ms，ratio 100.02%→100.01%；text/mixed/xml/sparse ratio 与基线完全一致、速度持平或更快

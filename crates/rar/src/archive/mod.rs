@@ -26,10 +26,13 @@ use crate::io_util::{copy_prefix, read_write_create, replace_file, temp_sibling_
 use crate::rar50::headers::*;
 use crate::rar50::vint;
 use crate::rar50::*;
+use crate::version::ArchiveVersion;
 use crate::write_progress::ProgressTracker;
 
 pub use discover::discover_volumes;
-pub(crate) use discover::{volume_base_of, volume_part_width, volume_path, volume_path_padded};
+pub(crate) use discover::{
+    volume_base_of, volume_part_width, volume_path, volume_path_padded, volume_path_rar4,
+};
 pub use entry::{ArchiveEntry, BatchEntry};
 #[cfg(feature = "parallel")]
 pub(crate) use entry::{BatchPrepareCtx, PreparedEntry};
@@ -816,6 +819,50 @@ impl RarArchive {
     /// Validate options and build the archive state (without opening the
     /// stream).
     fn new_with_options(path: PathBuf, opts: crate::options::CreateOptions) -> RarResult<Self> {
+        let is_rar4 = opts.format_version == ArchiveVersion::Rar40;
+        if is_rar4 {
+            // RAR4 does not support these RAR5-specific features.
+            if opts.quick_open {
+                return Err(RarError::Unsupported(
+                    "quick-open is not supported for RAR4 archives".into(),
+                ));
+            }
+            if opts.blake2 {
+                return Err(RarError::Unsupported(
+                    "BLAKE2sp hashes are not supported for RAR4 archives".into(),
+                ));
+            }
+            if opts.recovery_percent.is_some() {
+                return Err(RarError::Unsupported(
+                    "recovery records are not supported for RAR4 archives".into(),
+                ));
+            }
+            if opts.recovery_volumes_percent.is_some() || opts.recovery_volume_count.is_some() {
+                return Err(RarError::Unsupported(
+                    "recovery volumes are not supported for RAR4 archives".into(),
+                ));
+            }
+            if opts.encrypt_headers {
+                return Err(RarError::Unsupported(
+                    "header encryption (-hp) is not yet supported for RAR4 archives".into(),
+                ));
+            }
+            if opts.save_owner {
+                return Err(RarError::Unsupported(
+                    "owner/group records are not supported for RAR4 archives".into(),
+                ));
+            }
+            if opts.save_streams {
+                return Err(RarError::Unsupported(
+                    "NTFS stream records are not supported for RAR4 archives".into(),
+                ));
+            }
+            if opts.dict_size_bytes.is_some() {
+                return Err(RarError::Unsupported(
+                    "RAR4 does not support RAR7 dictionary sizes".into(),
+                ));
+            }
+        }
         if opts.encrypt_headers && opts.password.as_deref().is_none_or(|pw| pw.is_empty()) {
             return Err(RarError::Encrypted(
                 "header encryption requires a password".into(),
@@ -847,7 +894,7 @@ impl RarArchive {
             mode: Mode::Write,
             entries: Vec::new(),
             sfx_offset: 0,
-            rar4: false,
+            rar4: is_rar4,
             stream: None,
             password: opts.password,
             header_encryption: opts.encrypt_headers,

@@ -826,6 +826,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         _ => rar5::SolidReset::Continuous,
     };
     let opts = rar5::CreateOptions {
+        format_version: rar5::ArchiveVersion::Rar50,
         solid: args.solid
             || args.solid_params.is_some()
             || solid_reset != rar5::SolidReset::Continuous,
