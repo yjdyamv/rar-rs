@@ -33,3 +33,11 @@ workspace = true
 [[example]]
 name = "mtbench"
 required-features = ["parallel"]
+
+[[example]]
+name = "ratiocheck"
+required-features = ["parallel"]
+
+[[example]]
+name = "mtprobe"
+required-features = ["parallel"]
