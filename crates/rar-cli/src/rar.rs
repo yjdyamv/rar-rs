@@ -586,25 +586,27 @@ fn parse_size(s: &str) -> Result<u64, String> {
     }
 }
 
-/// Resolve a `-ma<ver>` archive-format request into the v70 forcing
-/// options. `-ma5` is the default RAR5 format (a no-op, like WinRAR's
+/// Resolve a `-ma<ver>` archive-format request into the format version and
+/// the v70 forcing options. `-ma4` selects the legacy RAR3/4 container
+/// (`Rar40`); `-ma5` is the default RAR5 format (a no-op, like WinRAR's
 /// accepted-but-inert `-ma5`); `-ma7` forces RAR7 (v70) members with the
 /// `-md` dictionary (default 32 MiB) declared in the header — an
 /// extension beyond WinRAR 7.23, which only writes v70 above 4 GiB. Any
-/// other version is rejected like WinRAR rejects unknown options
-/// (`-ma4` -> `Unknown option: ma4`). Returns `(force_v70, dict_bytes)`.
+/// other version is rejected like WinRAR rejects unknown options.
+/// Returns `(format_version, force_v70, dict_bytes)`.
 fn archive_format_force_v70(
     ma: Option<&str>,
     dict_size_log: Option<u8>,
     dict_size_bytes: Option<u64>,
-) -> Result<(bool, Option<u64>), String> {
+) -> Result<(rar5::ArchiveVersion, bool, Option<u64>), String> {
     match ma {
-        None | Some("5") => Ok((false, dict_size_bytes)),
+        Some("4") => Ok((rar5::ArchiveVersion::Rar40, false, None)),
+        None | Some("5") => Ok((rar5::ArchiveVersion::Rar50, false, dict_size_bytes)),
         Some("7") => {
             let bytes = dict_size_bytes
                 .or_else(|| dict_size_log.map(|l| (128u64 * 1024) << l))
                 .unwrap_or(32 * 1024 * 1024);
-            Ok((true, Some(bytes)))
+            Ok((rar5::ArchiveVersion::Rar50, true, Some(bytes)))
         }
         Some(other) => Err(format!("Unknown option: ma{other}")),
     }
@@ -815,7 +817,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         Some(s) => rar5::parse_dict_size(s).ok_or_else(|| format!("Unknown option: md{s}"))?,
         None => (None, None),
     };
-    let (force_v70, v70_dict_bytes) = archive_format_force_v70(
+    let (format_version, force_v70, v70_dict_bytes) = archive_format_force_v70(
         args.archive_format.as_deref(),
         dict_size_log,
         dict_size_bytes,
@@ -826,7 +828,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         _ => rar5::SolidReset::Continuous,
     };
     let opts = rar5::CreateOptions {
-        format_version: rar5::ArchiveVersion::Rar50,
+        format_version,
         solid: args.solid
             || args.solid_params.is_some()
             || solid_reset != rar5::SolidReset::Continuous,
@@ -1466,7 +1468,7 @@ fn cmd_update_freshen(
         Some(s) => rar5::parse_dict_size(s).ok_or_else(|| format!("Unknown option: md{s}"))?,
         None => (None, None),
     };
-    let (force_v70, v70_dict_bytes) = archive_format_force_v70(
+    let (format_version, force_v70, v70_dict_bytes) = archive_format_force_v70(
         args.archive_format.as_deref(),
         dict_size_log,
         dict_size_bytes,
@@ -1482,6 +1484,7 @@ fn cmd_update_freshen(
     } else {
         let ts = time::parse_ts_specs(&args.ts_specs)?;
         let create_opts = rar5::CreateOptions {
+            format_version,
             password: password.clone(),
             dict_size_log,
             dict_size_bytes: v70_dict_bytes,
@@ -1617,7 +1620,7 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
         Some(s) => rar5::parse_dict_size(s).ok_or_else(|| format!("Unknown option: md{s}"))?,
         None => (None, None),
     };
-    let (force_v70, v70_dict_bytes) = archive_format_force_v70(
+    let (format_version, force_v70, v70_dict_bytes) = archive_format_force_v70(
         args.archive_format.as_deref(),
         dict_size_log,
         dict_size_bytes,
@@ -1633,6 +1636,7 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
     } else {
         let ts = time::parse_ts_specs(&args.ts_specs)?;
         let create_opts = rar5::CreateOptions {
+            format_version,
             password: password.clone(),
             dict_size_log,
             dict_size_bytes: v70_dict_bytes,

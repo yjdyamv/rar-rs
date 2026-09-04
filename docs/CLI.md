@@ -61,7 +61,7 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 | `-m0` … `-m5` | Compression level (Store … Best) |
 | `-ma5` | RAR5 format (default; inert like WinRAR's own `-ma5`) |
 | `-ma7` | Force RAR7 (v70) members at any dictionary size — an extension beyond WinRAR 7.23, which only switches to v70 above a 4 GiB dictionary |
-| `-ma4` | Rejected with "Unknown option", matching WinRAR 7.23 |
+| `-ma4` | Legacy RAR3/4 container (STORE-only for now; members round-trip through WinRAR 7.23) |
 | `-md<size>` | Dictionary size (incl. RAR7 >4 GiB when `-ma7`); follows `-md`, default 32 MiB, capped at 2× member size |
 | `-mdx<size>` | Decompression dictionary cap (default 4 GiB) |
 | `-mt<threads>` | Compression/decompression thread count |
