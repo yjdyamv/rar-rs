@@ -624,18 +624,23 @@ impl RarArchive {
             let options = options_for_level(level);
             let solid = self.write_ctx().solid_mode;
             let lz = if solid {
-                // Solid: reuse the persistent encoder so its sliding window
-                // and Huffman table state carry across the members of the
-                // run (this is what makes a real -ms archive compress better
-                // than independent members). Auto-filters stay out of solid
-                // runs (a filtered member's window holds the transformed
-                // bytes, a later phase); solid RAR4 members are plain LZ,
-                // which is also all WinRAR 6.23 produces.
+                // Solid: reuse the persistent encoder so its sliding window,
+                // Huffman table and PPMd model state carry across the members
+                // of the run (this is what makes a real -ms archive compress
+                // better than independent members). Each compressed member is
+                // measured both ways (LZ and PPMd, continuing the model when
+                // the run is already in PPMd) and the smaller wins. Filters
+                // stay out of solid runs (a filtered member's window holds
+                // the transformed bytes - a later phase).
                 let encoder = self
                     .write_ctx_mut()
                     .rar4_solid_encoder
                     .get_or_insert_with(|| Unpack29Encoder::with_options(options));
-                encoder.encode_member(&data)?
+                if data.is_empty() {
+                    encoder.encode_member(&data)?
+                } else {
+                    encoder.encode_solid_member(&data)?
+                }
             } else {
                 Unpack29Encoder::with_options(options).encode_member(&data)?
             };

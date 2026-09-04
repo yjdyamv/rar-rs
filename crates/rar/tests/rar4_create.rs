@@ -1002,3 +1002,64 @@ fn create_rar4_auto_audio_filter_on_waveform() {
         &content[..]
     );
 }
+
+/// Solid + m5: text members in a solid run are coded PPMd (continuing the
+/// carried model across members where it pays), so a run of near-identical
+/// text files must compress far better solid than non-solid, and every
+/// member round-trips byte-identically through the RAR4 reader.
+#[test]
+fn create_rar4_solid_ppmd_text_chain() {
+    let dir = make_temp_dir();
+    let mut sources = Vec::new();
+    for chapter in 1..=4u8 {
+        let src = dir.path().join(format!("chap{chapter}.txt"));
+        let mut content = Vec::with_capacity(250_000);
+        for line in 0..2500u32 {
+            content.extend_from_slice(
+                format!(
+                    "chapter {chapter} line {line:05}: shared boilerplate text that repeats across every chapter of this archive body body body\n"
+                )
+                .as_bytes(),
+            );
+        }
+        std::fs::write(&src, &content).unwrap();
+        sources.push((src, content));
+    }
+
+    let make = |solid: bool, name: &str| -> u64 {
+        let arc = dir.path().join(name);
+        let opts = CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            solid,
+            ..Default::default()
+        };
+        let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
+        for (src, _) in &sources {
+            archive.add(src, 5).expect("add");
+        }
+        archive.close().expect("close");
+        std::fs::metadata(&arc).unwrap().len()
+    };
+    let solid_size = make(true, "sppmd.rar");
+    let plain_size = make(false, "nsppmd.rar");
+    assert!(
+        solid_size < plain_size,
+        "solid PPMd must beat per-member fresh models on shared text: solid={solid_size} plain={plain_size}"
+    );
+
+    let mut archive = RarArchive::open(&dir.path().join("sppmd.rar")).expect("reopen");
+    let names: Vec<String> = archive
+        .list()
+        .iter()
+        .map(|entry| entry.name().to_string())
+        .collect();
+    assert_eq!(names.len(), 4);
+    for (index, (_, content)) in sources.iter().enumerate() {
+        let out = archive.read(&names[index]).unwrap();
+        assert_eq!(
+            &out, content,
+            "{} solid-PPMd roundtrip mismatch",
+            names[index]
+        );
+    }
+}

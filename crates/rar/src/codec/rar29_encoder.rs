@@ -1678,6 +1678,16 @@ pub struct Unpack29Encoder {
     /// The code-length table a reader holds after reading all coded members
     /// so far.  A solid chain carries it from one member to the next.
     levels: [u8; TABLE_COUNT],
+    /// The PPMd model a reader holds, once some member of a solid run has
+    /// built one. A chain can interleave LZ and PPMd members: each engine
+    /// keeps its own state and only the winning member's state advances.
+    /// Boxed: the model carries ~20 KB of fixed tables (see the decoder's
+    /// own `ppmd: Box<...>` note) and must not inline into `WriteState`,
+    /// whose `RarArchive` frame already brushes the 1 MiB main-thread stack.
+    ppmd: Option<Box<crate::codec::ppmd::PpmdDecoder>>,
+    /// Whether the last COMPRESSED member was PPMd: decides whether the next
+    /// PPMd member continues the model (0x87 header) or starts fresh (0xA7).
+    last_was_ppmd: bool,
 }
 
 impl Default for Unpack29Encoder {
@@ -1697,6 +1707,8 @@ impl Unpack29Encoder {
             history: Vec::new(),
             options,
             levels: [0; TABLE_COUNT],
+            ppmd: None,
+            last_was_ppmd: false,
         }
     }
 
@@ -1710,8 +1722,66 @@ impl Unpack29Encoder {
             &mut self.levels,
             None,
         )?;
+        self.last_was_ppmd = false;
         self.remember(input);
         Ok(packed)
+    }
+
+    /// Code one member of a solid run as PPMd, continuing the carried model
+    /// when the previous compressed member was PPMd, otherwise starting a
+    /// fresh order-8 / 25 MiB model (0xA7 + dict byte header). The model is
+    /// stored back for the next PPMd member; LZ levels are left untouched.
+    /// Window: PPMd output equals the input, so `remember` is the caller's
+    /// job (the LZ candidate already remembered it when both were tried).
+    pub fn encode_ppmd_member_chain(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
+        use crate::codec::ppmd::PpmdEncoder;
+        let continuing = self.ppmd.is_some() && self.last_was_ppmd;
+        let mut out = Vec::new();
+        let mut encoder = match (continuing, self.ppmd.take()) {
+            (true, Some(model)) => {
+                out.push(0x80 | (PPMD_ORDER as u8 - 1)); // continuing header
+                PpmdEncoder::continuing(*model, PPMD_ESC)
+            }
+            _ => {
+                out.push(0x80 | 0x20 | (PPMD_ORDER as u8 - 1));
+                out.push(PPMD_DICTIONARY_MB - 1);
+                PpmdEncoder::new(PPMD_ORDER, PPMD_ESC, usize::from(PPMD_DICTIONARY_MB))
+                    .map_err(ppmd_err)?
+            }
+        };
+        encode_ppmd_hybrid(input, &mut encoder)?;
+        let (packed, model) = encoder.finish_keeping_model().map_err(ppmd_err)?;
+        out.extend_from_slice(&packed);
+        self.ppmd = Some(Box::new(model));
+        self.last_was_ppmd = true;
+        Ok(out)
+    }
+
+    /// Solid-run member: code it both ways (LZ and PPMd) and keep the
+    /// smaller, advancing only the winner's chain state. PPMd reuses the
+    /// carried model when the last member was PPMd (the model is cloned so a
+    /// losing trial never disturbs it).
+    pub fn encode_solid_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
+        // LZ first (submits levels + window). If PPMd wins, the LZ table
+        // advance must be rolled back: a decoder never decodes an LZ table
+        // for a PPMd member, so its levels stay at the pre-member value, and
+        // the next LZ member's keep/delta decision must be made against that.
+        let levels_before = self.levels;
+        let lz = self.encode_member(input)?;
+        // The PPMd trial may continue the carried model; try on a clone so a
+        // loss leaves the model untouched for a later member.
+        let saved = self.ppmd.clone();
+        let saved_flag = self.last_was_ppmd;
+        let trial = self.encode_ppmd_member_chain(input);
+        match trial {
+            Ok(ppmd) if ppmd.len() < lz.len() => Ok(ppmd),
+            _ => {
+                self.levels = levels_before;
+                self.ppmd = saved;
+                self.last_was_ppmd = saved_flag;
+                Ok(lz)
+            }
+        }
     }
 
     /// Code one member as a PPMd block (m4/m5 text path). Always starts a

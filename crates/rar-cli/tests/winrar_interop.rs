@@ -2910,3 +2910,61 @@ fn we_create_rar4_delta_filtered_member_winrar_valid() {
         );
     }
 }
+
+/// RAR4 solid m5 on a run of near-identical text files: the run is coded
+/// with a shared PPMd model (members 2.. continue it), and WinRAR's UnRAR
+/// must decode every member byte-identically. WinRAR 6.23's RAR4 writer
+/// never produced PPMd, so this is one-way interop.
+#[test]
+fn we_create_rar4_solid_ppmd_text_winrar_valid() {
+    let dir = temp_dir();
+    let mut content = Vec::new();
+    for chapter in 1..=4u8 {
+        let mut body = Vec::with_capacity(240_000);
+        for line in 0..2200u32 {
+            body.extend_from_slice(
+                format!(
+                    "chapter {chapter} line {line:05}: shared boilerplate that repeats across every chapter of this archive body body body tail tail\n"
+                )
+                .as_bytes(),
+            );
+        }
+        let src = dir.path().join(format!("chap{chapter}.txt"));
+        std::fs::write(&src, &body).unwrap();
+        content.push((format!("chap{chapter}.txt"), body));
+    }
+
+    let arc = dir.path().join("solidppmd.rar");
+    let mut args = vec!["a", "-s", "-ma4", "-m5", "-idq"];
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rar"));
+    cmd.args(&args).arg(&arc).current_dir(dir.path());
+    for i in 1..=4 {
+        cmd.arg(format!("chap{i}.txt"));
+    }
+    let (ok, out) = run(&mut cmd);
+    assert!(ok, "our rar -s -ma4 -m5 failed:\n{out}");
+
+    // Our own reader round-trips the chain.
+    {
+        let mut ar = RarArchive::open(&arc).unwrap();
+        for (name, body) in &content {
+            assert_eq!(&ar.read(name).unwrap(), body, "{name} solid-PPMd mismatch");
+        }
+    }
+
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar).args(["t", "-idq"]).arg(&arc));
+        assert!(ok, "UnRAR t rejected our solid-PPMd RAR4 archive:\n{out}");
+        let out_dir = dir.path().join("out_solidppmd");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x failed on our solid-PPMd archive:\n{out}");
+        for (name, body) in &content {
+            let got = std::fs::read(out_dir.join(name)).unwrap();
+            assert_eq!(&got, body, "WinRAR decoded {name} differently");
+        }
+    }
+}
