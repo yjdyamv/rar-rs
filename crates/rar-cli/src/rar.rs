@@ -1772,11 +1772,19 @@ fn cmd_repair(args: &ArchiveArgs) -> Result<(), String> {
     let fixed_path = format!("fixed.{name}");
     // Streaming repair: bounded memory regardless of archive size; the
     // repaired archive is staged and renamed atomically by the library.
-    let repaired = rar5::repair_archive_path(
-        std::path::Path::new(archive_path),
-        std::path::Path::new(&fixed_path),
-    )
-    .map_err(|e| format!("repair: {e}"))?;
+    let repaired = if is_rar4_file(std::path::Path::new(archive_path)) {
+        rar5::repair_legacy_archive_path(
+            std::path::Path::new(archive_path),
+            std::path::Path::new(&fixed_path),
+        )
+        .map_err(|e| format!("repair: {e}"))?
+    } else {
+        rar5::repair_archive_path(
+            std::path::Path::new(archive_path),
+            std::path::Path::new(&fixed_path),
+        )
+        .map_err(|e| format!("repair: {e}"))?
+    };
     if !repaired {
         info!("All OK");
         return Ok(());
@@ -2611,4 +2619,26 @@ fn apply_rarfiles_order(
     let reordered: Vec<rar5::name_policy::Collected> =
         order.into_iter().map(|i| collected[i].clone()).collect();
     *collected = reordered;
+}
+
+/// Whether `path` carries the legacy 7-byte `Rar!\x1a\x07\x00` signature
+/// (peek at the head, tolerating an SFX stub within the first 8 MiB).
+fn is_rar4_file(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; 8 * 1024 * 1024];
+    let Ok(n) = f.read(&mut buf) else {
+        return false;
+    };
+    buf.truncate(n);
+    let rar4 = b"Rar!\x1a\x07\x00";
+    let rar5 = b"Rar!\x1a\x07\x01\x00";
+    let first = |needle: &[u8]| buf.windows(needle.len()).position(|w| w == needle);
+    match (first(rar5), first(rar4)) {
+        (Some(r5), Some(r4)) => r4 < r5, // earliest signature wins (SFX stub)
+        (None, Some(_)) => true,
+        _ => false,
+    }
 }

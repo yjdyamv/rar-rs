@@ -1,5 +1,7 @@
 //! Recovery-record and recovery-volume support (RAR5 family / v50).
 
+mod legacy;
+pub use legacy::repair_legacy_archive_path;
 pub mod rar50;
 pub mod rev50;
 
