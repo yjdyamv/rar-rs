@@ -22,7 +22,12 @@
 - [x] EXTTIME mtime 亚秒（9845c34；RAR4 无 ctime/atime 秒基字段，亚秒无从附着——记录为格式事实）；FHD_COMMENT 跳过已做、展示留待有 API 需求
 - [x] store-in-solid 窗口语义（2026-09 实测）：WinRAR 6.23 RAR4 solid 强制压缩不产 store 成员（随机也压）；我们的写侧 STORE 断链、读侧对 store 冻结窗口（WinRAR 自产无此类，互操作无碍）
 - [x] rar154 老命名 split 集（2026-09）：random.rar+.r00+.r01 三卷 2 MiB 成员，头 CRC 0xFFFF 哨兵容忍，CRC 0x1c9eb697 精确
-- 大成员流式（现整成员驻留内存）与错误口令提示（RAR3/4 错口令已映射 WrongPassword 9845c34；大成员流式留作后续）
+- [x] 大成员流式提取（2026-09，8588302）：提取到 writer 不再整驻留——STORE 明文成员按 1 MiB 分块直拷（零整缓冲）；压缩成员（RAR29/20/15）packed 小流整读后解码器每 1 MiB flush + 窗口裁剪（峰值=窗口+一块，与成员大小无关）；VM-filter 成员整解码后还原；solid 链保持共享窗口单遍；流式 CRC 校验。验证：CLI 解 250 MB store + 67 MB m5 文本字节一致、extract 96 MiB store+压缩成员测试。错误口令提示已映射 WrongPassword（9845c34）
+
+
+### RAR4（创建面·速度，后续）
+- [x] 多文件并行 batch（2026-09，7c07e77）：非 solid 独立成员在线程池压缩（每成员独立引擎 + 全候选 LZ/PPMd/filter/STORE），顺序 emit（`emit_rar4_prepared` 镜像 add_file_rar4 发射半）；solid/目录/超大成员落回顺序原位。字节与顺序一致（双 feature 模式测试锁定）。实测 8×2.7 MB m5 文本 2.45s vs 单线程 14.2s（~5.8x）
+- **单大成员并行（记录，未做）**：>64 MiB 单文件 `-ma4 -m5` 仍单线程（成员级并行已做、块级未做）。方向：仿 RAR5 `encode_chunked_mt` 给 RAR29 编码器做分片 MT——64 KiB LZ 块表链依赖（块间 keep/差分表）与跨块窗口语义使字节必有分歧，需先评估可接受性；或仅对 m1–m3 非最优路径做块并行
 
 
 ### RAR5（压缩面）
