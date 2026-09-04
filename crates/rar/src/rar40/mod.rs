@@ -15,8 +15,7 @@ pub(crate) mod write;
 use crate::archive::ArchiveEntry;
 use crate::crc32;
 use crate::error::{RarError, RarResult};
-use crate::rar50::headers::{DataChunk, FileHeader};
-use crate::rar50::*;
+use crate::model::{DataChunk, FileHeader};
 pub(crate) use read::{
     MemberDecodeOptions, decode_member_bytes, decode_member_bytes_to, member_crc,
 };
@@ -55,6 +54,14 @@ pub(crate) enum LegacyDecoder {
 
 /// RAR4 compression method value for the STORE (uncompressed) method.
 pub(crate) const RAR4_METHOD_STORE: u8 = 0x30;
+
+// Normalized model values previously imported from `rar50`; these local
+// compatibility constants preserve the existing RAR4 mapping without coupling
+// the legacy format implementation to RAR5 wire definitions.
+const MODEL_HASH_NONE: u8 = 0;
+const MODEL_HOST_OS_WINDOWS: u64 = 0;
+const MODEL_HOST_OS_UNIX: u64 = 1;
+const MODEL_FILE_FLAG_CRC32: u64 = 0x0004;
 
 /// RAR4 header minimum size for the fixed fields before the variable tail.
 const FILE_HEADER_FIXED: usize = 32;
@@ -400,8 +407,8 @@ fn file_header_crc_end(header: &[u8]) -> usize {
     end.min(header.len())
 }
 
-/// Parse a RAR4 FILE_HEAD block body into a RAR5-style `FileHeader`, mapping
-/// fields to the common model (`format_version: 4`). File data offsets are
+/// Parse a RAR4 FILE_HEAD block body into the format-neutral `FileHeader`,
+/// mapping fields to the common model (`format_version: 4`). File data offsets are
 /// absolute within the stream.
 fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
     let h = &block.header;
@@ -492,8 +499,8 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
     // RAR4 host OS: 0 = MS-DOS, 1 = OS/2, 2 = Windows, 3 = Unix, 4 = Mac.
     // Map to the shared OS constants (0 = Windows, 1 = Unix).
     let host_os_u64 = match host_os {
-        0 | 2 => OS_WINDOWS,
-        _ => OS_UNIX,
+        0 | 2 => MODEL_HOST_OS_WINDOWS,
+        _ => MODEL_HOST_OS_UNIX,
     };
 
     // Data offset = where this block's data area starts on disk: past the
@@ -508,7 +515,7 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         attributes: attr as u64,
         mtime: dos_time_to_unix(file_time),
         crc32_val: Some(file_crc),
-        hash_type: HASH_NONE,
+        hash_type: MODEL_HASH_NONE,
         hash_value: None,
         // RAR4 methods are 0x30..=0x35 on disk; the shared model uses 0..=5.
         comp_method: method.wrapping_sub(RAR4_METHOD_STORE),
@@ -517,7 +524,7 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         comp_dict_size: 0,
         host_os: host_os_u64,
         flags: block.flags as u64,
-        file_flags: FILE_FLAG_CRC32,
+        file_flags: MODEL_FILE_FLAG_CRC32,
         extra_data: ext_time,
         is_directory,
         data_offset,

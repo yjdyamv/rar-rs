@@ -2,6 +2,61 @@
 use std::fmt;
 use std::io;
 
+/// Stable, machine-readable category for a [`RarError`].
+///
+/// Unlike formatted error messages, these values are suitable for logs,
+/// bindings, telemetry, and command-line exit-code mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ErrorCode {
+    Format,
+    InvalidState,
+    InvalidOption,
+    CrcMismatch,
+    HashMismatch,
+    Encrypted,
+    Unsupported,
+    Security,
+    LimitExceeded,
+    MemberNotFound,
+    AmbiguousMember,
+    StaleEntryId,
+    ArchiveLocked,
+    Cancelled,
+    WrongPassword,
+    Io,
+}
+
+impl ErrorCode {
+    /// Return the stable snake-case representation of this error category.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Format => "format",
+            Self::InvalidState => "invalid_state",
+            Self::InvalidOption => "invalid_option",
+            Self::CrcMismatch => "crc_mismatch",
+            Self::HashMismatch => "hash_mismatch",
+            Self::Encrypted => "encrypted",
+            Self::Unsupported => "unsupported",
+            Self::Security => "security",
+            Self::LimitExceeded => "limit_exceeded",
+            Self::MemberNotFound => "member_not_found",
+            Self::AmbiguousMember => "ambiguous_member",
+            Self::StaleEntryId => "stale_entry_id",
+            Self::ArchiveLocked => "archive_locked",
+            Self::Cancelled => "cancelled",
+            Self::WrongPassword => "wrong_password",
+            Self::Io => "io",
+        }
+    }
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RarError {
@@ -38,6 +93,15 @@ pub enum RarError {
     },
     /// The requested member does not exist in the archive.
     MemberNotFound { name: String },
+    /// A name expected to identify one member matched multiple entries.
+    AmbiguousMember {
+        /// The duplicate archive member name.
+        name: String,
+        /// Number of entries carrying `name`.
+        matches: usize,
+    },
+    /// An opaque entry ID belongs to another or outdated archive catalog.
+    StaleEntryId,
     /// The archive is locked (read-only).
     ArchiveLocked,
     /// The operation was cancelled through the caller's cancellation flag
@@ -47,6 +111,30 @@ pub enum RarError {
     WrongPassword,
     /// Underlying I/O error.
     Io(io::Error),
+}
+
+impl RarError {
+    /// Return the stable machine-readable category for this error.
+    pub const fn code(&self) -> ErrorCode {
+        match self {
+            Self::Format(_) => ErrorCode::Format,
+            Self::InvalidState(_) => ErrorCode::InvalidState,
+            Self::InvalidOption(_) => ErrorCode::InvalidOption,
+            Self::Crc { .. } => ErrorCode::CrcMismatch,
+            Self::HashMismatch { .. } => ErrorCode::HashMismatch,
+            Self::Encrypted(_) => ErrorCode::Encrypted,
+            Self::Unsupported(_) => ErrorCode::Unsupported,
+            Self::Security(_) => ErrorCode::Security,
+            Self::LimitExceeded { .. } => ErrorCode::LimitExceeded,
+            Self::MemberNotFound { .. } => ErrorCode::MemberNotFound,
+            Self::AmbiguousMember { .. } => ErrorCode::AmbiguousMember,
+            Self::StaleEntryId => ErrorCode::StaleEntryId,
+            Self::ArchiveLocked => ErrorCode::ArchiveLocked,
+            Self::Cancelled => ErrorCode::Cancelled,
+            Self::WrongPassword => ErrorCode::WrongPassword,
+            Self::Io(_) => ErrorCode::Io,
+        }
+    }
 }
 
 impl fmt::Display for RarError {
@@ -80,6 +168,10 @@ impl fmt::Display for RarError {
                 write!(f, "limit exceeded ({limit}): {context}")
             }
             RarError::MemberNotFound { name } => write!(f, "member not found: {name}"),
+            RarError::AmbiguousMember { name, matches } => {
+                write!(f, "member name is ambiguous: {name} ({matches} matches)")
+            }
+            RarError::StaleEntryId => write!(f, "entry ID belongs to another or outdated catalog"),
             RarError::ArchiveLocked => write!(f, "archive is locked"),
             RarError::Cancelled => write!(f, "operation cancelled"),
             RarError::WrongPassword => write!(f, "encrypted: wrong password"),
@@ -114,3 +206,39 @@ impl From<io::Error> for RarError {
 }
 
 pub type RarResult<T> = Result<T, RarError>;
+
+#[cfg(test)]
+mod tests {
+    use super::{ErrorCode, RarError};
+
+    #[test]
+    fn error_codes_are_stable_and_machine_readable() {
+        let cases = [
+            (RarError::Format(String::new()), ErrorCode::Format, "format"),
+            (
+                RarError::AmbiguousMember {
+                    name: "duplicate".into(),
+                    matches: 2,
+                },
+                ErrorCode::AmbiguousMember,
+                "ambiguous_member",
+            ),
+            (
+                RarError::StaleEntryId,
+                ErrorCode::StaleEntryId,
+                "stale_entry_id",
+            ),
+            (
+                RarError::Io(std::io::Error::other("disk")),
+                ErrorCode::Io,
+                "io",
+            ),
+        ];
+
+        for (error, expected, text) in cases {
+            assert_eq!(error.code(), expected);
+            assert_eq!(expected.as_str(), text);
+            assert_eq!(expected.to_string(), text);
+        }
+    }
+}

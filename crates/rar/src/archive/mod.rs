@@ -9,6 +9,7 @@
 mod create;
 mod discover;
 mod entry;
+mod reader;
 mod rewrite;
 
 #[cfg(test)]
@@ -36,6 +37,10 @@ pub(crate) use discover::{
 pub use entry::{ArchiveEntry, BatchEntry};
 #[cfg(feature = "parallel")]
 pub(crate) use entry::{BatchPrepareCtx, PreparedEntry};
+pub use reader::{
+    ArchiveReader, Entries, EntryId, EntryMatches, EntryRef, OpenOptions, ScanStrategy,
+    VerificationFailure, VerificationReport,
+};
 
 /// Maximum archive prefix buffered for inline recovery-record parity.
 /// Streamed recovery records are not implemented yet; larger archives must

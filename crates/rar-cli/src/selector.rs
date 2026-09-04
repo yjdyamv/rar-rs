@@ -15,26 +15,27 @@ pub fn name_matches(member: &str, requested: &str) -> bool {
                 .is_some_and(|name| name == requested))
 }
 
-/// Select members in archive order. An empty selector list selects all
-/// members.
-pub fn select_members<'a>(
-    members: impl IntoIterator<Item = &'a str>,
+/// Select member identities in archive order. An empty selector list selects
+/// all members. Distinct identities are preserved when names are duplicated.
+pub fn select_entries<'a, T>(
+    members: impl IntoIterator<Item = (T, &'a str)>,
     requested: &[String],
-) -> Vec<&'a str> {
+) -> Vec<T> {
     members
         .into_iter()
-        .filter(|member| {
+        .filter(|(_, member)| {
             requested.is_empty()
                 || requested
                     .iter()
                     .any(|selector| name_matches(member, selector))
         })
+        .map(|(id, _)| id)
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{name_matches, select_members};
+    use super::{name_matches, select_entries};
 
     #[test]
     fn does_not_match_member_as_selector_suffix() {
@@ -63,7 +64,13 @@ mod tests {
 
     #[test]
     fn empty_selector_list_selects_every_member_in_order() {
-        let members = ["a", "dir/b"];
-        assert_eq!(select_members(members, &[]), members);
+        let members = [(1, "a"), (2, "dir/b")];
+        assert_eq!(select_entries(members, &[]), [1, 2]);
+    }
+
+    #[test]
+    fn duplicate_names_keep_their_distinct_identities() {
+        let members = [(1, "same.bin"), (2, "same.bin"), (3, "other.bin")];
+        assert_eq!(select_entries(members, &["same.bin".to_string()]), [1, 2]);
     }
 }

@@ -33,6 +33,8 @@
 | 文档 | 内容 | 何时读 |
 |---|---|---|
 | [`adr/0001-rar4-creation-architecture.md`](adr/0001-rar4-creation-architecture.md) | RAR4 创建架构决策记录 | 修改 RAR4 写管线 / 理解决策约束 |
+| [`adr/0002-format-neutral-model-and-api-v2.md`](adr/0002-format-neutral-model-and-api-v2.md) | 格式中立模型、依赖方向与 API v2 兼容策略 | 修改核心模型 / 设计公共 API |
+| [`plan-architecture-api-v2.md`](plan-architecture-api-v2.md) | 架构与 API v2 分阶段实施清单 | 推进 model、reader/writer/editor 迁移 |
 | [`rar4-creation-spec.md`](rar4-creation-spec.md) | RAR4 创建行为与格式规格 | 实现或验证 RAR4 创建 |
 | [`plan-rar29-encoder-port.md`](plan-rar29-encoder-port.md) | RAR29 encoder port 实施计划与历史 | 追溯 legacy encoder 迁移 |
 

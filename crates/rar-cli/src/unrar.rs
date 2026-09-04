@@ -264,7 +264,7 @@ fn run_inner(cli: Cli) -> Result<(), String> {
 /// Bare list (`lb` / `vb`): member names only.
 fn cmd_list_bare(archive: &str, password: Option<&str>) -> Result<(), String> {
     let rar = open_archive(archive, password)?;
-    for entry in rar.list() {
+    for entry in rar.entries() {
         println!("{}", entry.name());
     }
     Ok(())
@@ -279,7 +279,7 @@ fn cmd_list_technical(archive: &str, password: Option<&str>) -> Result<(), Strin
         "Size", "Packed", "Ratio", "Checksum", "Method", "Modified"
     );
     println!("{}", "-".repeat(86));
-    for entry in rar.list() {
+    for entry in rar.entries() {
         let ratio = if entry.is_dir() {
             "  dir".to_string()
         } else if entry.size() > 0 {
@@ -325,12 +325,12 @@ fn format_unix_time(secs: u32) -> String {
     )
 }
 
-fn open_archive(path: &str, password: Option<&str>) -> Result<rar5::RarArchive, String> {
-    if let Some(pw) = password {
-        rar5::RarArchive::open_with_password(path, pw).map_err(|e| format!("{e}"))
-    } else {
-        rar5::RarArchive::open(path).map_err(|e| format!("{e}"))
+fn open_archive(path: &str, password: Option<&str>) -> Result<rar5::ArchiveReader, String> {
+    let mut options = rar5::OpenOptions::new();
+    if let Some(password) = password {
+        options = options.password(password);
     }
+    rar5::ArchiveReader::open_with(path, options).map_err(|e| format!("{e}"))
 }
 
 fn cmd_extract(
@@ -375,7 +375,7 @@ fn cmd_extract(
     let count = if args.names.is_empty() {
         rar.extract_all_with_options(&dest, opts)
             .map_err(|e| format!("{e}"))?;
-        rar.list().len()
+        rar.entries().len()
     } else {
         extract_selected(&mut rar, &dest, &args.names, &opts)?
     };
@@ -387,26 +387,30 @@ fn cmd_extract(
 /// path or basename). Errors clearly when no member matches, so a mistyped
 /// name is never silently swallowed or treated as a destination directory.
 fn extract_selected(
-    rar: &mut rar5::RarArchive,
+    rar: &mut rar5::ArchiveReader,
     dest: &std::path::Path,
     names: &[String],
     opts: &rar5::ExtractOptions,
 ) -> Result<usize, String> {
-    let members: Vec<String> = rar
-        .list()
-        .iter()
-        .filter(|e| !e.is_dir())
-        .map(|e| e.name().to_string())
-        .collect();
-    let wanted = selector::select_members(members.iter().map(String::as_str), names);
+    let wanted = selector::select_entries(
+        rar.entries()
+            .filter(|entry| !entry.is_dir())
+            .map(|entry| (entry.id(), entry.metadata().name())),
+        names,
+    );
     if wanted.is_empty() {
         return Err(format!(
             "no archive members matched the requested name(s): {}",
             names.join(", ")
         ));
     }
-    for member in &wanted {
-        rar.extract_with_options(member, dest, *opts)
+    for &id in &wanted {
+        let member = rar
+            .entry(id)
+            .map_err(|e| format!("resolve archive member: {e}"))?
+            .name()
+            .to_string();
+        rar.extract_entry_with_options(id, dest, *opts)
             .map_err(|e| format!("extract {member}: {e}"))?;
     }
     Ok(wanted.len())
@@ -416,18 +420,17 @@ fn extract_selected(
 /// `rar/unrar x -so`. Informational messages are suppressed so the stream
 /// stays clean.
 fn extract_to_stdout(
-    rar: &mut rar5::RarArchive,
+    rar: &mut rar5::ArchiveReader,
     names: &[String],
     max_dict_size: Option<u64>,
 ) -> Result<(), String> {
     use std::io::Write;
-    let members: Vec<String> = rar
-        .list()
-        .iter()
-        .filter(|entry| !entry.is_dir())
-        .map(|entry| entry.name().to_string())
-        .collect();
-    let wanted = selector::select_members(members.iter().map(String::as_str), names);
+    let wanted = selector::select_entries(
+        rar.entries()
+            .filter(|entry| !entry.is_dir())
+            .map(|entry| (entry.id(), entry.metadata().name())),
+        names,
+    );
     if wanted.is_empty() && !names.is_empty() {
         return Err(format!(
             "no archive members matched the requested name(s): {}",
@@ -442,8 +445,13 @@ fn extract_to_stdout(
         max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),
         ..Default::default()
     };
-    for name in wanted {
-        rar.read_to_writer_with_options(name, &mut out, options)
+    for id in wanted {
+        let name = rar
+            .entry(id)
+            .map_err(|e| format!("resolve archive member: {e}"))?
+            .name()
+            .to_string();
+        rar.copy_entry_to_with_options(id, &mut out, options)
             .map_err(|e| format!("read {name}: {e}"))?;
     }
     out.flush().map_err(|e| format!("stdout: {e}"))
@@ -480,7 +488,7 @@ fn cmd_extract_flat(
     let count = if args.names.is_empty() {
         rar.extract_all_with_options(&dest, opts)
             .map_err(|e| format!("{e}"))?;
-        rar.list().len()
+        rar.entries().len()
     } else {
         extract_selected(&mut rar, &dest, &args.names, &opts)?
     };
@@ -497,7 +505,7 @@ fn cmd_list(archive: &str, password: Option<&str>) -> Result<(), String> {
     );
     println!("{}", "-".repeat(60));
 
-    for entry in rar.list() {
+    for entry in rar.entries() {
         let ratio = if entry.is_dir() {
             "  dir".to_string()
         } else if entry.size() > 0 {
@@ -525,13 +533,24 @@ fn cmd_list(archive: &str, password: Option<&str>) -> Result<(), String> {
 fn cmd_test(archive: &str, password: Option<&str>) -> Result<(), String> {
     let mut rar = open_archive(archive, password)?;
 
-    let (checked, failed) = rar.test().map_err(|e| format!("test: {e}"))?;
+    let report: rar5::VerificationReport = rar.verify().map_err(|e| format!("test: {e}"))?;
     info!();
-    if failed == 0 {
-        info!("All {checked} files OK");
+    if report.failed() == 0 {
+        info!("All {} files OK", report.checked());
         Ok(())
     } else {
-        Err(format!("{failed} file(s) failed, {checked} checked"))
+        for failure in report.failures() {
+            let name = rar
+                .entry(failure.entry_id())
+                .map(|entry| entry.name().to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            info!("{name}: {}", failure.error());
+        }
+        Err(format!(
+            "{} file(s) failed, {} checked",
+            report.failed(),
+            report.checked()
+        ))
     }
 }
 
@@ -545,21 +564,26 @@ fn cmd_print(args: &PrintArgs, password: Option<&str>) -> Result<(), String> {
         max_total_unpacked_bytes: None,
         ..Default::default()
     };
-
-    if let Some(file) = &args.file {
-        rar.read_to_writer_with_options(file, &mut out, options)
-            .map_err(|e| format!("{e}"))?;
-    } else {
-        let names: Vec<String> = rar
-            .list()
-            .iter()
+    let wanted: Vec<_> = if let Some(file) = &args.file {
+        rar.entries_named(file)
             .filter(|entry| !entry.is_dir())
-            .map(|entry| entry.name().to_string())
-            .collect();
-        for name in &names {
-            rar.read_to_writer_with_options(name, &mut out, options)
-                .map_err(|e| format!("{e}"))?;
-        }
+            .map(|entry| entry.id())
+            .collect()
+    } else {
+        rar.entries()
+            .filter(|entry| !entry.is_dir())
+            .map(|entry| entry.id())
+            .collect()
+    };
+    if wanted.is_empty() && args.file.is_some() {
+        let file = args.file.as_deref().unwrap_or_default();
+        return Err(format!(
+            "no archive members matched the requested name(s): {file}"
+        ));
+    }
+    for id in wanted {
+        rar.copy_entry_to_with_options(id, &mut out, options)
+            .map_err(|e| format!("{e}"))?;
     }
 
     out.flush().map_err(|e| format!("stdout: {e}"))

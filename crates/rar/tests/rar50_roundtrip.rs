@@ -526,6 +526,26 @@ fn multivolume_creation_roundtrip() {
     );
 
     let mut rar = RarArchive::open(&base).expect("open first volume");
+    {
+        let entry = rar.get_entry("big.bin").expect("entry");
+        let chunks = entry.chunks();
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .windows(2)
+                .all(|pair| pair[0].volume_index < pair[1].volume_index)
+        );
+        assert!(
+            chunks[..chunks.len() - 1]
+                .iter()
+                .all(|chunk| !chunk.is_final)
+        );
+        assert!(chunks.last().unwrap().is_final);
+        assert_eq!(
+            chunks.iter().map(|chunk| chunk.packed_size).sum::<u64>(),
+            entry.compressed_size()
+        );
+    }
     assert_eq!(rar.read("big.bin").expect("read"), payload);
 }
 

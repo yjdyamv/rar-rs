@@ -1262,14 +1262,12 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     // -t: test the archive right after creating it without materializing
     // member contents or extracting to a temporary directory.
     if args.test_after {
-        let mut ar = match &password {
-            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
-                .map_err(|e| format!("open: {e}"))?,
-            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
-        };
-        let (_, failed) = ar.test().map_err(|e| format!("test failed: {e}"))?;
-        if failed != 0 {
-            return Err(format!("test failed: {failed} member(s) failed"));
+        let mut ar =
+            open_reader(archive_path, password.as_deref()).map_err(|e| format!("open: {e}"))?;
+        let report: rar5::VerificationReport =
+            ar.verify().map_err(|e| format!("test failed: {e}"))?;
+        if report.failed() != 0 {
+            return Err(format!("test failed: {} member(s) failed", report.failed()));
         }
     }
     // -as: synchronize the archive contents — drop members that are not
@@ -1936,15 +1934,19 @@ fn cmd_find(cmd: &str, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn open_reader(path: &str, password: Option<&str>) -> Result<rar5::ArchiveReader, rar5::RarError> {
+    let mut options = rar5::OpenOptions::new();
+    if let Some(password) = password {
+        options = options.password(password);
+    }
+    rar5::ArchiveReader::open_with(path, options)
+}
+
 /// Verbose list (like `rar v`): adds the packed size, ratio and checksum
 /// columns.
 fn cmd_verbose_list(args: &ArchiveArgs) -> Result<(), String> {
-    let rar = match &args.password.password {
-        Some(pw) => {
-            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
-        }
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
-    };
+    let rar = open_reader(&args.archive, args.password.password.as_deref())
+        .map_err(|e| format!("{e}"))?;
     output::print_verbose_list(&rar)
 }
 
@@ -2194,11 +2196,8 @@ fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
 /// Print a member to stdout (like `rar p`).
 fn cmd_print(args: &PrintArgs) -> Result<(), String> {
     use std::io::Write;
-    let mut rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
-    };
+    let mut rar = open_reader(&args.archive, args.password.password.as_deref())
+        .map_err(|e| format!("open: {e}"))?;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let options = rar5::ExtractOptions {
@@ -2206,20 +2205,31 @@ fn cmd_print(args: &PrintArgs) -> Result<(), String> {
         max_total_unpacked_bytes: None,
         ..Default::default()
     };
-    if let Some(file) = &args.file {
-        rar.read_to_writer_with_options(file, &mut out, options)
-            .map_err(|e| format!("{e}"))?;
-    } else {
-        let names: Vec<String> = rar
-            .list()
-            .iter()
+    let wanted: Vec<_> = if let Some(file) = &args.file {
+        rar.entries_named(file)
             .filter(|entry| !entry.is_dir())
-            .map(|entry| entry.name().to_string())
-            .collect();
-        for name in names {
-            rar.read_to_writer_with_options(&name, &mut out, options)
-                .map_err(|e| format!("{name}: {e}"))?;
-        }
+            .map(|entry| entry.id())
+            .collect()
+    } else {
+        rar.entries()
+            .filter(|entry| !entry.is_dir())
+            .map(|entry| entry.id())
+            .collect()
+    };
+    if wanted.is_empty() && args.file.is_some() {
+        let file = args.file.as_deref().unwrap_or_default();
+        return Err(format!(
+            "no archive members matched the requested name(s): {file}"
+        ));
+    }
+    for id in wanted {
+        let name = rar
+            .entry(id)
+            .map_err(|e| format!("resolve archive member: {e}"))?
+            .name()
+            .to_string();
+        rar.copy_entry_to_with_options(id, &mut out, options)
+            .map_err(|e| format!("{name}: {e}"))?;
     }
     out.flush().map_err(|e| format!("stdout: {e}"))
 }
@@ -2230,11 +2240,8 @@ fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
         rar5::set_extraction_threads(threads);
     }
     let dest = extract_dest(args)?;
-    let mut rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
-    };
+    let mut rar = open_reader(&args.archive, args.password.password.as_deref())
+        .map_err(|e| format!("open: {e}"))?;
     // `-so`: write the extracted members to stdout (one stream) instead of
     // to disk — handy for piping. Directories carry no data.
     if args.stdout {
@@ -2250,7 +2257,7 @@ fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
             },
         )
         .map_err(|e| format!("{e}"))?;
-        rar.list().len()
+        rar.entries().len()
     } else {
         extract_selected(&mut rar, &dest, &args.names, false, skip)?
     };
@@ -2261,15 +2268,14 @@ fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
 /// Extract every file member of an archive to stdout, concatenated, like
 /// `rar/unrar x -so`. Informational messages are suppressed so the stream
 /// stays clean.
-fn extract_to_stdout(rar: &mut rar5::RarArchive, names: &[String]) -> Result<(), String> {
+fn extract_to_stdout(rar: &mut rar5::ArchiveReader, names: &[String]) -> Result<(), String> {
     use std::io::Write;
-    let members: Vec<String> = rar
-        .list()
-        .iter()
-        .filter(|entry| !entry.is_dir())
-        .map(|entry| entry.name().to_string())
-        .collect();
-    let wanted = selector::select_members(members.iter().map(String::as_str), names);
+    let wanted = selector::select_entries(
+        rar.entries()
+            .filter(|entry| !entry.is_dir())
+            .map(|entry| (entry.id(), entry.metadata().name())),
+        names,
+    );
     if wanted.is_empty() && !names.is_empty() {
         return Err(format!(
             "no archive members matched the requested name(s): {}",
@@ -2283,8 +2289,13 @@ fn extract_to_stdout(rar: &mut rar5::RarArchive, names: &[String]) -> Result<(),
         max_total_unpacked_bytes: None,
         ..Default::default()
     };
-    for name in wanted {
-        rar.read_to_writer_with_options(name, &mut out, options)
+    for id in wanted {
+        let name = rar
+            .entry(id)
+            .map_err(|e| format!("resolve archive member: {e}"))?
+            .name()
+            .to_string();
+        rar.copy_entry_to_with_options(id, &mut out, options)
             .map_err(|e| format!("read {name}: {e}"))?;
     }
     out.flush().map_err(|e| format!("stdout: {e}"))
@@ -2303,32 +2314,36 @@ fn extract_dest(args: &ExtractArgs) -> Result<std::path::PathBuf, String> {
 /// path or basename). Errors clearly when no member matches, so a mistyped
 /// name is never silently swallowed or treated as a destination directory.
 fn extract_selected(
-    rar: &mut rar5::RarArchive,
+    rar: &mut rar5::ArchiveReader,
     dest: &std::path::Path,
     names: &[String],
     flat: bool,
     skip_existing: bool,
 ) -> Result<usize, String> {
-    let members: Vec<String> = rar
-        .list()
-        .iter()
-        .filter(|e| !e.is_dir())
-        .map(|e| e.name().to_string())
-        .collect();
-    let wanted = selector::select_members(members.iter().map(String::as_str), names);
+    let wanted = selector::select_entries(
+        rar.entries()
+            .filter(|entry| !entry.is_dir())
+            .map(|entry| (entry.id(), entry.metadata().name())),
+        names,
+    );
     if wanted.is_empty() {
         return Err(format!(
             "no archive members matched the requested name(s): {}",
             names.join(", ")
         ));
     }
-    for member in &wanted {
+    for &id in &wanted {
+        let member = rar
+            .entry(id)
+            .map_err(|e| format!("resolve archive member: {e}"))?
+            .name()
+            .to_string();
         let opts = rar5::ExtractOptions {
             flat_paths: flat,
             skip_existing,
             ..Default::default()
         };
-        rar.extract_with_options(member, dest, opts)
+        rar.extract_entry_with_options(id, dest, opts)
             .map_err(|e| format!("extract {member}: {e}"))?;
     }
     Ok(wanted.len())
@@ -2340,11 +2355,8 @@ fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
         rar5::set_extraction_threads(threads);
     }
     let dest = extract_dest(args)?;
-    let mut rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
-    };
+    let mut rar = open_reader(&args.archive, args.password.password.as_deref())
+        .map_err(|e| format!("open: {e}"))?;
     if args.stdout {
         return extract_to_stdout(&mut rar, &args.names);
     }
@@ -2359,7 +2371,7 @@ fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
             },
         )
         .map_err(|e| format!("{e}"))?;
-        rar.list().len()
+        rar.entries().len()
     } else {
         extract_selected(&mut rar, &dest, &args.names, true, skip)?
     };
@@ -2369,16 +2381,20 @@ fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
 
 /// Test archive contents (like `rar t`).
 fn cmd_test(args: &ArchiveArgs) -> Result<(), String> {
-    let mut rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
-    };
-    let (checked, failed) = rar.test().map_err(|e| format!("test: {e}"))?;
-    info!("{checked} OK, {failed} failed");
-    if failed == 0 {
+    let mut rar = open_reader(&args.archive, args.password.password.as_deref())
+        .map_err(|e| format!("open: {e}"))?;
+    let report: rar5::VerificationReport = rar.verify().map_err(|e| format!("test: {e}"))?;
+    info!("{} OK, {} failed", report.passed(), report.failed());
+    if report.failed() == 0 {
         Ok(())
     } else {
+        for failure in report.failures() {
+            let name = rar
+                .entry(failure.entry_id())
+                .map(|entry| entry.name().to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            info!("{name}: {}", failure.error());
+        }
         Err("test failed".into())
     }
 }
@@ -2555,12 +2571,8 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 }
 
 fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
-    let rar = match &args.password.password {
-        Some(pw) => {
-            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
-        }
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
-    };
+    let rar = open_reader(&args.archive, args.password.password.as_deref())
+        .map_err(|e| format!("{e}"))?;
 
     println!(
         "{:>10}  {:>10}  {:>6}  {:<8}  Name",
@@ -2571,7 +2583,7 @@ fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
     let mut total_size = 0u64;
     let mut total_packed = 0u64;
 
-    for entry in rar.list() {
+    for entry in rar.entries() {
         let ratio = if entry.is_dir() {
             "  dir".to_string()
         } else if entry.size() > 0 {
@@ -2605,7 +2617,7 @@ fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
     println!(
         "{total_size:>10}  {total_packed:>10}  {overall:>6}  {:<8}  {} file(s)",
         "",
-        rar.list().len()
+        rar.entries().len()
     );
 
     Ok(())
@@ -2613,13 +2625,9 @@ fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
 
 /// Bare list (`lb` / `vb`): member names only.
 fn cmd_list_bare(args: &ArchiveArgs) -> Result<(), String> {
-    let rar = match &args.password.password {
-        Some(pw) => {
-            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
-        }
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
-    };
-    for entry in rar.list() {
+    let rar = open_reader(&args.archive, args.password.password.as_deref())
+        .map_err(|e| format!("{e}"))?;
+    for entry in rar.entries() {
         println!("{}", entry.name());
     }
     Ok(())
@@ -2628,18 +2636,14 @@ fn cmd_list_bare(args: &ArchiveArgs) -> Result<(), String> {
 /// Technical list (`lt` / `vt`): mtime, attributes, sizes, ratio, CRC and
 /// method per member, in the spirit of the official `rar lt`.
 fn cmd_list_technical(args: &ArchiveArgs) -> Result<(), String> {
-    let rar = match &args.password.password {
-        Some(pw) => {
-            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
-        }
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
-    };
+    let rar = open_reader(&args.archive, args.password.password.as_deref())
+        .map_err(|e| format!("{e}"))?;
     println!(
         "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {:<19}  Name",
         "Size", "Packed", "Ratio", "Checksum", "Method", "Modified"
     );
     println!("{}", "-".repeat(86));
-    for entry in rar.list() {
+    for entry in rar.entries() {
         let ratio = if entry.is_dir() {
             "  dir".to_string()
         } else if entry.size() > 0 {

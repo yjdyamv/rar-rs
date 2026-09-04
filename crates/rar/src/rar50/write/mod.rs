@@ -18,6 +18,7 @@ use crate::archive::{
 use crate::codec::lzss_huff;
 use crate::crypto;
 use crate::error::{RarError, RarResult};
+use crate::model::{DataChunk, FileHeader};
 use crate::rar50::write::layout::{
     SAMPLE_PROBE_HEAD, dict_params_for, hash_file, sample_is_incompressible,
     sample_is_incompressible_file,
@@ -857,7 +858,7 @@ impl RarArchive {
                     false,
                 )?;
                 self.entries.push(crate::archive::ArchiveEntry {
-                    header: crate::rar50::headers::FileHeader {
+                    header: crate::model::FileHeader {
                         name,
                         unpacked_size,
                         packed_size,
@@ -878,7 +879,7 @@ impl RarArchive {
                         extra_data: ext_time.unwrap_or_default(),
                         ..Default::default()
                     },
-                    chunks: vec![crate::rar50::headers::DataChunk {
+                    chunks: vec![crate::model::DataChunk {
                         volume_index: 0,
                         data_offset,
                         packed_size,
@@ -892,7 +893,7 @@ impl RarArchive {
             }
             Some(volume_size) => {
                 // ── Multi-volume: split the packed member across volumes ──
-                let mut chunks = Vec::<crate::rar50::headers::DataChunk>::new();
+                let mut chunks = Vec::<crate::model::DataChunk>::new();
                 let mut sent = 0u64;
                 let mut vol_index = self.write_ctx().current_volume - 1;
                 let mut split_before = false;
@@ -937,7 +938,7 @@ impl RarArchive {
                         split_before,
                         split_after,
                     )?;
-                    chunks.push(crate::rar50::headers::DataChunk {
+                    chunks.push(crate::model::DataChunk {
                         volume_index: vol_index,
                         data_offset,
                         packed_size: chunk_size,
@@ -949,7 +950,7 @@ impl RarArchive {
                     split_before = true;
                 }
                 self.entries.push(crate::archive::ArchiveEntry {
-                    header: crate::rar50::headers::FileHeader {
+                    header: crate::model::FileHeader {
                         name,
                         unpacked_size,
                         packed_size,
@@ -3233,7 +3234,7 @@ impl RarArchive {
                     false,
                 )?;
                 self.entries.push(crate::archive::ArchiveEntry {
-                    header: crate::rar50::headers::FileHeader {
+                    header: crate::model::FileHeader {
                         name,
                         unpacked_size,
                         packed_size,
@@ -3254,7 +3255,7 @@ impl RarArchive {
                         extra_data: ext_time.unwrap_or_default(),
                         ..Default::default()
                     },
-                    chunks: vec![crate::rar50::headers::DataChunk {
+                    chunks: vec![crate::model::DataChunk {
                         volume_index: 0,
                         data_offset,
                         packed_size,
@@ -3267,7 +3268,7 @@ impl RarArchive {
                 Ok(())
             }
             Some(volume_size) => {
-                let mut chunks = Vec::<crate::rar50::headers::DataChunk>::new();
+                let mut chunks = Vec::<crate::model::DataChunk>::new();
                 let mut sent = 0u64;
                 let mut vol_index = self.write_ctx().current_volume - 1;
                 let mut split_before = false;
@@ -3305,7 +3306,7 @@ impl RarArchive {
                         split_before,
                         split_after,
                     )?;
-                    chunks.push(crate::rar50::headers::DataChunk {
+                    chunks.push(crate::model::DataChunk {
                         volume_index: vol_index,
                         data_offset,
                         packed_size: chunk_size,
@@ -3317,7 +3318,7 @@ impl RarArchive {
                     split_before = true;
                 }
                 self.entries.push(crate::archive::ArchiveEntry {
-                    header: crate::rar50::headers::FileHeader {
+                    header: crate::model::FileHeader {
                         name,
                         unpacked_size,
                         packed_size,

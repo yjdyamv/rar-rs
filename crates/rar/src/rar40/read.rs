@@ -12,7 +12,7 @@ use crate::codec::rar29::Rar29Decoder;
 use crate::crc32;
 use crate::crypto::{Rar15Cipher, Rar20Cipher, Rar30Cipher};
 use crate::error::{RarError, RarResult};
-use crate::rar50::headers::{DataChunk, FileHeader};
+use crate::model::{DataChunk, FileHeader};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 

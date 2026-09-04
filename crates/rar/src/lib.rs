@@ -32,6 +32,7 @@ pub mod detect;
 pub mod error;
 pub mod features;
 mod io_util;
+mod model;
 #[doc(hidden)]
 pub mod name_policy;
 pub mod options;
@@ -43,7 +44,10 @@ pub mod recovery;
 pub mod version;
 mod write_progress;
 
-pub use archive::{ArchiveEntry, BatchEntry, RarArchive, discover_volumes};
+pub use archive::{
+    ArchiveEntry, ArchiveReader, BatchEntry, Entries, EntryId, EntryMatches, EntryRef, OpenOptions,
+    RarArchive, ScanStrategy, VerificationFailure, VerificationReport, discover_volumes,
+};
 // Multi-threaded encoding internals used by the mtbench example and the
 // napi binding's streaming path; hidden from the public docs but stable
 // enough to build against (feature `parallel` only).
@@ -53,7 +57,7 @@ pub use codec::lzss_huff::{EncodeOptions, decode, decode_standalone, encode, enc
 pub use codec::lzss_huff::{EncoderState, encode_chunked_mt};
 pub use crypto::{EncryptionParams, decrypt_data, derive_keys, encrypt_data};
 pub use detect::sfx_offset_of;
-pub use error::{RarError, RarResult};
+pub use error::{ErrorCode, RarError, RarResult};
 pub use features::{Feature, FeatureSet};
 pub use options::{CreateOptions, ExtractOptions, SolidReset, parse_dict_size};
 pub use parallel::{set_compression_threads, set_extraction_threads};

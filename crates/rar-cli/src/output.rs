@@ -27,7 +27,7 @@ pub fn extract_dest(dest: &str, archive: &str, append_dir: bool) -> std::path::P
 }
 
 /// Print a verbose listing (like `rar v` / `unrar v`).
-pub fn print_verbose_list(rar: &rar5::RarArchive) -> Result<(), String> {
+pub fn print_verbose_list(rar: &rar5::ArchiveReader) -> Result<(), String> {
     println!(
         "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  Name",
         "Size", "Packed", "Ratio", "Checksum", "Method"
@@ -35,7 +35,7 @@ pub fn print_verbose_list(rar: &rar5::RarArchive) -> Result<(), String> {
     println!("{}", "-".repeat(70));
     let mut total_size = 0u64;
     let mut total_packed = 0u64;
-    for entry in rar.list() {
+    for entry in rar.entries() {
         let ratio = if entry.is_dir() {
             "  dir".to_string()
         } else if entry.size() > 0 {
@@ -71,7 +71,7 @@ pub fn print_verbose_list(rar: &rar5::RarArchive) -> Result<(), String> {
     println!(
         "{total_size:>10}  {total_packed:>10}  {overall:>6}  {:<10}  {} file(s)",
         "",
-        rar.list().len()
+        rar.entries().len()
     );
     Ok(())
 }

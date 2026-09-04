@@ -32,6 +32,13 @@ fn make_tree(dir: &std::path::Path) {
     std::fs::write(dir.join("sub/f4.bin"), b"four").unwrap();
 }
 
+fn create_duplicate_archive(path: &Path) {
+    let mut rar = RarArchive::create_with_options(path, rar5::CreateOptions::default()).unwrap();
+    rar.add_bytes("same.bin", b"first payload", 0).unwrap();
+    rar.add_bytes("same.bin", b"second payload", 0).unwrap();
+    rar.close().unwrap();
+}
+
 fn cli_names(archive: &std::path::Path) -> Vec<String> {
     let rar = rar5::RarArchive::open(archive).unwrap();
     let mut names: Vec<String> = rar
@@ -284,6 +291,96 @@ fn cli_print_writes_member_to_stdout() {
         .unwrap();
     assert!(out.status.success());
     assert_eq!(out.stdout, b"hello p");
+}
+
+#[test]
+fn cli_print_preserves_duplicate_members_and_reports_no_match() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("duplicate-print.rar");
+    create_duplicate_archive(&archive);
+    let expected = b"first payloadsecond payload";
+
+    for binary in [RAR_CLI, UNRAR_CLI] {
+        for selector in [Some("same.bin"), None] {
+            let mut command = std::process::Command::new(binary);
+            command.arg("p").arg(&archive);
+            if let Some(selector) = selector {
+                command.arg(selector);
+            }
+            let out = command.output().unwrap();
+            assert!(out.status.success(), "{binary} print failed");
+            assert_eq!(out.stdout, expected, "{binary} collapsed a duplicate");
+        }
+
+        let out = std::process::Command::new(binary)
+            .arg("p")
+            .arg(&archive)
+            .arg("missing.bin")
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{binary} accepted a missing selector"
+        );
+        assert!(out.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("no archive members matched"),
+            "{binary} did not report the missing selector clearly"
+        );
+    }
+
+    let exact_archive = dir.path().join("exact-print.rar");
+    let mut rar = RarArchive::create_with_options(&exact_archive, Default::default()).unwrap();
+    rar.add_bytes("same.bin", b"exact", 0).unwrap();
+    rar.add_bytes("dir/same.bin", b"basename only", 0).unwrap();
+    rar.close().unwrap();
+    for binary in [RAR_CLI, UNRAR_CLI] {
+        let out = std::process::Command::new(binary)
+            .arg("p")
+            .arg(&exact_archive)
+            .arg("same.bin")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{binary} exact print failed");
+        assert_eq!(out.stdout, b"exact", "{binary} matched by basename");
+    }
+}
+
+#[test]
+fn cli_stdout_and_selected_extraction_preserve_duplicate_members() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("duplicate-extract.rar");
+    create_duplicate_archive(&archive);
+    let expected = b"first payloadsecond payload";
+
+    for (index, binary) in [RAR_CLI, UNRAR_CLI].into_iter().enumerate() {
+        for selector in [Some("same.bin"), None] {
+            let mut command = std::process::Command::new(binary);
+            command.args(["x", "-so", "-idq"]).arg(&archive);
+            if let Some(selector) = selector {
+                command.arg(selector);
+            }
+            let out = command.output().unwrap();
+            assert!(out.status.success(), "{binary} stdout extraction failed");
+            assert_eq!(out.stdout, expected, "{binary} collapsed a duplicate");
+        }
+
+        let output = dir.path().join(format!("selected-{index}"));
+        let out = std::process::Command::new(binary)
+            .args(["x", "-idq"])
+            .arg(&archive)
+            .arg("--dest")
+            .arg(&output)
+            .arg("same.bin")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{binary} selected extraction failed");
+        assert_eq!(
+            std::fs::read(output.join("same.bin")).unwrap(),
+            b"second payload",
+            "{binary} repeatedly extracted the first duplicate"
+        );
+    }
 }
 
 #[test]

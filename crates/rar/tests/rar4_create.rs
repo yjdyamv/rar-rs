@@ -279,6 +279,24 @@ fn create_rar4_compressed_multivolume_split_member() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name(), "big.txt");
     assert_eq!(entries[0].size(), content.len() as u64);
+    let chunks = entries[0].chunks();
+    assert!(chunks.len() > 1);
+    assert!(
+        chunks
+            .windows(2)
+            .all(|pair| pair[0].volume_index < pair[1].volume_index)
+    );
+    assert!(
+        chunks[..chunks.len() - 1]
+            .iter()
+            .all(|chunk| !chunk.is_final)
+    );
+    assert!(chunks.last().unwrap().is_final);
+    assert!(chunks.iter().all(|chunk| chunk.extra_data.is_empty()));
+    assert_eq!(
+        chunks.iter().map(|chunk| chunk.packed_size).sum::<u64>(),
+        entries[0].compressed_size()
+    );
     let out = archive.read("big.txt").expect("read split member");
     assert_eq!(&out, &content);
 }
@@ -317,6 +335,24 @@ fn create_rar4_store_multivolume_split_member() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name(), "big.bin");
     assert_eq!(entries[0].size(), content.len() as u64);
+    let chunks = entries[0].chunks();
+    assert!(chunks.len() > 1);
+    assert!(
+        chunks
+            .windows(2)
+            .all(|pair| pair[0].volume_index < pair[1].volume_index)
+    );
+    assert!(
+        chunks[..chunks.len() - 1]
+            .iter()
+            .all(|chunk| !chunk.is_final)
+    );
+    assert!(chunks.last().unwrap().is_final);
+    assert!(chunks.iter().all(|chunk| chunk.extra_data.is_empty()));
+    assert_eq!(
+        chunks.iter().map(|chunk| chunk.packed_size).sum::<u64>(),
+        entries[0].compressed_size()
+    );
 
     let out = archive.read("big.bin").expect("read split member");
     assert_eq!(&out, &content);

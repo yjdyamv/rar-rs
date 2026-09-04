@@ -395,6 +395,8 @@ fn to_napi_error(err: rar5::RarError) -> Error {
     | rar5::RarError::Security(_)
     | rar5::RarError::LimitExceeded { .. }
     | rar5::RarError::MemberNotFound { .. }
+    | rar5::RarError::AmbiguousMember { .. }
+    | rar5::RarError::StaleEntryId
     | rar5::RarError::WrongPassword => Status::InvalidArg,
     rar5::RarError::Cancelled => Status::Cancelled,
     rar5::RarError::InvalidState(_)
@@ -1175,6 +1177,11 @@ mod tests {
         context: "test".into(),
       },
       rar5::RarError::MemberNotFound { name: "x".into() },
+      rar5::RarError::AmbiguousMember {
+        name: "x".into(),
+        matches: 2,
+      },
+      rar5::RarError::StaleEntryId,
       rar5::RarError::WrongPassword,
     ];
     for err in invalid_arguments {
