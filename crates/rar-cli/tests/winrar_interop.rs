@@ -47,6 +47,23 @@ fn rar_bin() -> Option<PathBuf> {
     bin.exists().then_some(bin)
 }
 
+/// The WinRAR 6.23 console writer from the project's tool cache — the last
+/// release whose `Rar.exe` can both create (`-ma4`) and REPAIR RAR4
+/// archives. The default-install 7.23 reads RAR4 but neither writes it nor
+/// repairs its recovery records, so RAR4 write/repair interop must drive
+/// 6.23 explicitly. `None` skips those tests (e.g. on CI without the cache).
+fn rar4_623_bin() -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "Rar.exe" } else { "rar" };
+    [
+        "../../.cache/winrar/6-23",
+        "../.cache/winrar/6-23",
+        ".cache/winrar/6-23",
+    ]
+    .iter()
+    .map(|dir| Path::new(env!("CARGO_MANIFEST_DIR")).join(dir).join(exe))
+    .find(|bin| bin.exists())
+}
+
 fn unrar_bin() -> Option<PathBuf> {
     let dir = winrar_dir()?;
     let exe = if cfg!(windows) { "UnRAR.exe" } else { "unrar" };
@@ -2438,5 +2455,516 @@ fn rar5_huge_single_file_decodes_with_winrar() {
             file_sha256(&src),
             "WinRAR extracted different bytes"
         );
+    }
+}
+
+/// We create a RAR4 (`-ma4`) archive containing a directory tree — nested
+/// directories, an empty directory, and a non-ASCII directory name — and
+/// both our extractor and WinRAR's UnRAR must see the same tree: the empty
+/// directory must come back as a real directory (RAR4 encodes directories
+/// in the FILE_HEAD window bits, not just the host attribute), and every
+/// member's bytes must match the source.
+#[test]
+fn we_create_rar4_directory_trees_winrar_valid() {
+    let dir = temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("sub/deep")).unwrap();
+    std::fs::create_dir(src.join("sub/emptydir")).unwrap();
+    std::fs::create_dir(src.join("资料")).unwrap();
+    std::fs::write(src.join("top.txt"), b"top-level file").unwrap();
+    std::fs::write(src.join("sub/mid.txt"), b"mid level").unwrap();
+    std::fs::write(src.join("sub/deep/leaf.txt"), b"leaf content here").unwrap();
+    std::fs::write(src.join("资料/note.txt"), b"unicode note").unwrap();
+
+    let arc = dir.path().join("tree4.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m3", "-idq"])
+        .arg(&arc)
+        .arg("src")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 (directory tree) failed:\n{out}");
+
+    // Our own reader: exact UTF-8 names, directory flags, contents.
+    {
+        let mut ar = RarArchive::open(&arc).unwrap();
+        let mut names: Vec<String> = ar.namelist().into_iter().map(str::to_string).collect();
+        names.sort();
+        let mut expected: Vec<String> = [
+            "src",
+            "src/sub",
+            "src/sub/deep",
+            "src/sub/emptydir",
+            "src/sub/deep/leaf.txt",
+            "src/sub/mid.txt",
+            "src/top.txt",
+            "src/资料",
+            "src/资料/note.txt",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        expected.sort();
+        assert_eq!(names, expected);
+        for name in ["src", "src/sub/emptydir", "src/资料"] {
+            assert!(ar.get_entry(name).unwrap().is_dir(), "{name} must be a dir");
+        }
+        for (name, bytes) in [
+            ("src/top.txt", b"top-level file".as_slice()),
+            ("src/sub/deep/leaf.txt", b"leaf content here".as_slice()),
+            ("src/资料/note.txt", b"unicode note".as_slice()),
+        ] {
+            assert_eq!(&ar.read(name).unwrap(), bytes);
+        }
+    }
+
+    // WinRAR's UnRAR must accept the archive and reproduce the tree.
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar).args(["t", "-idq"]).arg(&arc));
+        assert!(ok, "UnRAR t rejected our -ma4 directory archive:\n{out}");
+
+        let out_dir = dir.path().join("out_unrar");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x failed on our -ma4 directory archive:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("src/sub/deep/leaf.txt")),
+            file_sha256(&src.join("sub/deep/leaf.txt"))
+        );
+        assert_eq!(
+            file_sha256(&out_dir.join("src/资料/note.txt")),
+            file_sha256(&src.join("资料/note.txt"))
+        );
+        assert!(
+            out_dir.join("src/sub/emptydir").is_dir(),
+            "the empty directory must extract as a directory"
+        );
+        assert!(
+            out_dir.join("src/资料").is_dir(),
+            "the unicode directory must extract as a directory"
+        );
+    }
+}
+
+/// We create a RAR4 archive with member-level encryption (`-ma4 -p`) and
+/// WinRAR's UnRAR must decrypt it: `t` and `x` with the password succeed and
+/// reproduce the source bytes, while a wrong or missing password fails.
+#[test]
+fn we_create_rar4_encrypted_members_winrar_valid() {
+    let dir = temp_dir();
+    let src = dir.path().join("secret.bin");
+    let mut content = Vec::with_capacity(200_000);
+    let mut seed = 12345u32;
+    while content.len() < 200_000 {
+        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+        content.push((seed >> 16) as u8);
+    }
+    std::fs::write(&src, &content).unwrap();
+
+    let arc = dir.path().join("enc.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-psecret", "-m3", "-idq"])
+        .arg(&arc)
+        .arg("secret.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 -p failed:\n{out}");
+
+    // Our own reader decrypts with the password and rejects the wrong one.
+    {
+        let mut ar = RarArchive::open_with_password(&arc, "secret").unwrap();
+        assert_eq!(ar.read("secret.bin").unwrap(), content);
+        let mut ar = RarArchive::open_with_password(&arc, "wrong").unwrap();
+        assert!(ar.read("secret.bin").is_err(), "wrong password must fail");
+    }
+
+    // WinRAR's UnRAR must decrypt byte-identically.
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["t", "-idq", "-psecret"])
+            .arg(&arc));
+        assert!(ok, "UnRAR t -psecret failed:\n{out}");
+        let (ok, _) = run(Command::new(&unrar).args(["t", "-idq"]).arg(&arc));
+        assert!(!ok, "UnRAR t without password must fail");
+
+        let out_dir = dir.path().join("out_unrar");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y", "-psecret"])
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x -psecret failed:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("secret.bin")),
+            file_sha256(&src),
+            "WinRAR decrypted different bytes"
+        );
+    }
+}
+
+/// We create a RAR4 archive with header encryption (`-ma4 -hp`) and WinRAR's
+/// UnRAR must decrypt the headers: `t`/`x` with the password succeed and
+/// reproduce the source bytes, while a wrong or missing password fails even
+/// to list (the member headers are encrypted, so the scan needs the key).
+#[test]
+fn we_create_rar4_header_encrypted_winrar_valid() {
+    let dir = temp_dir();
+    let src = dir.path().join("classified.bin");
+    let content = b"top-secret payload guarded by -hp header encryption\n".repeat(4000);
+    std::fs::write(&src, &content).unwrap();
+
+    let arc = dir.path().join("hpenctest.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-hpsword", "-m3", "-idq"])
+        .arg(&arc)
+        .arg("classified.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 -hp failed:\n{out}");
+
+    // Our own reader decrypts the headers with the password.
+    {
+        let mut ar = RarArchive::open_with_password(&arc, "sword").unwrap();
+        assert_eq!(ar.read("classified.bin").unwrap(), content);
+        // Wrong password fails at open (the header scan cannot decrypt).
+        assert!(RarArchive::open_with_password(&arc, "wrong").is_err());
+        assert!(RarArchive::open(&arc).is_err());
+    }
+
+    // WinRAR's UnRAR must decrypt and verify byte-identically.
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["t", "-idq", "-psword"])
+            .arg(&arc));
+        assert!(ok, "UnRAR t -hp -psword failed:\n{out}");
+        let (ok, _) = run(Command::new(&unrar).args(["t", "-idq"]).arg(&arc));
+        assert!(!ok, "UnRAR t -hp without password must fail");
+
+        let out_dir = dir.path().join("out_unrar_hp");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y", "-psword"])
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x -hp -psword failed:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("classified.bin")),
+            file_sha256(&src),
+            "WinRAR decrypted different bytes"
+        );
+    }
+}
+
+/// We create a RAR4 m5 archive on word-random text and WinRAR's UnRAR must
+/// decode the PPMd blocks: modern WinRAR (5.x/6.x) no longer *produces*
+/// RAR4 PPMd, but its RAR3 decoder still reads it, so this is the one-way
+/// interop check that our PPMd member encoding is real RAR3 PPMd. The m5
+/// member must also be markedly smaller than the m3 LZ-only member on the
+/// same text (the PPMd pass wins on context-rich data).
+#[test]
+fn we_create_rar4_ppmd_text_winrar_valid() {
+    let dir = temp_dir();
+    let words = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+        "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+    ];
+    let mut content = Vec::with_capacity(500_000);
+    let mut seed = 12345u32;
+    let mut n = 0u32;
+    while content.len() < 450_000 {
+        let mut line = format!("record {n:06}: ").into_bytes();
+        for _ in 0..10 {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            line.extend_from_slice(words[(seed >> 27) as usize % words.len()].as_bytes());
+            line.push(b' ');
+        }
+        line.push(b'\n');
+        content.extend_from_slice(&line);
+        n += 1;
+    }
+    let src = dir.path().join("textmix.txt");
+    std::fs::write(&src, &content).unwrap();
+
+    let lz_arc = dir.path().join("lz3.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m3", "-idq"])
+        .arg(&lz_arc)
+        .arg("textmix.txt")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 -m3 failed:\n{out}");
+
+    let arc = dir.path().join("ppmd5.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m5", "-idq"])
+        .arg(&arc)
+        .arg("textmix.txt")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 -m5 failed:\n{out}");
+
+    let lz_size = std::fs::metadata(&lz_arc).unwrap().len();
+    let m5_size = std::fs::metadata(&arc).unwrap().len();
+    assert!(
+        m5_size * 3 < lz_size * 2,
+        "m5 PPMd must beat m3 LZSS on text: LZ={lz_size} m5={m5_size}"
+    );
+
+    // Our own reader round-trips the PPMd member.
+    {
+        let mut ar = RarArchive::open(&arc).unwrap();
+        assert_eq!(ar.list()[0].method(), 5);
+        assert_eq!(ar.read("textmix.txt").unwrap(), content);
+    }
+
+    // WinRAR's UnRAR decodes the PPMd blocks byte-identically.
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar).args(["t", "-idq"]).arg(&arc));
+        assert!(ok, "UnRAR t rejected our PPMd archive:\n{out}");
+
+        let out_dir = dir.path().join("out_ppmd");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x failed on our PPMd archive:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("textmix.txt")),
+            file_sha256(&src),
+            "WinRAR decoded different bytes from our PPMd member"
+        );
+    }
+}
+
+/// RAR4 inline recovery records (`-ma4 -rr`) interoperate both ways with
+/// WinRAR 6.23 (the last RAR4 writer): WinRAR's `rar r` repairs damage
+/// from OUR NEWSUB (0x7a) record byte-identically, and OUR repair path
+/// rebuilds a damaged WinRAR-made RAR4 RR archive.
+#[test]
+fn rar4_recovery_record_interops_with_winrar() {
+    let dir = temp_dir();
+    // Pseudo-random payload (NOT the periodic pattern: WinRAR 6.23's RAR4
+    // repair mis-rebuilds periodic data whether the record is its own or
+    // ours, so a byte-identical repair check needs aperiodic bytes).
+    let src = dir.path().join("rr4.bin");
+    let mut content = Vec::with_capacity(500 * 1024);
+    let mut seed = 41u32;
+    while content.len() < 500 * 1024 {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        content.push((seed >> 24) as u8);
+    }
+    std::fs::write(&src, &content).unwrap();
+
+    // A stored RAR4 member's payload starts right after the file header,
+    // which sits after the 7-byte signature + 13-byte main header. The
+    // file header's own head_size field (offset +5 within it) tells where.
+    fn payload_offset(raw: &[u8]) -> usize {
+        let fh = 7 + 13;
+        assert_eq!(&raw[..7], b"Rar!\x1a\x07\x00");
+        let hsize = u16::from_le_bytes([raw[fh + 5], raw[fh + 6]]) as usize;
+        fh + hsize
+    }
+
+    // Ours -> WinRAR: create with -ma4 -rr10%, damage a payload sector, and
+    // both OUR repair and WinRAR's `rar r` rebuild it.
+    let arc = dir.path().join("our_rr4.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m0", "-rr10%", "-idq"])
+        .arg(&arc)
+        .arg("rr4.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 -rr10% failed:\n{out}");
+
+    // Our own repair round-trip: damage -> fix -> byte-identical.
+    let mut damaged = std::fs::read(&arc).unwrap();
+    let start = payload_offset(&damaged);
+    damaged[start + 8000..start + 8000 + 128].fill(0x5a);
+    let damaged_path = dir.path().join("our_rr4_damaged.rar");
+    std::fs::write(&damaged_path, &damaged).unwrap();
+    let fixed_path = dir.path().join("our_rr4_fixed.rar");
+    let repaired =
+        rar5::repair_legacy_archive_path(&damaged_path, &fixed_path).expect("our repair");
+    assert!(repaired, "our repair must find and fix the damage");
+    assert_eq!(
+        std::fs::read(&fixed_path).unwrap(),
+        std::fs::read(&arc).unwrap(),
+        "our repair must restore the archive byte-identically"
+    );
+
+    // WinRAR repairs the same damage from our recovery record (6.23 only:
+    // 7.23 cannot repair RAR4 recovery records).
+    if let Some(rar) = rar4_623_bin() {
+        let (ok, out) = run(Command::new(&rar)
+            .args(["r", "-y", "-idq"])
+            .arg("our_rr4_damaged.rar")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR r failed on our RAR4 RR archive:\n{out}");
+        let win_fixed = dir.path().join("fixed.our_rr4_damaged.rar");
+        assert!(
+            win_fixed.exists(),
+            "WinRAR must write fixed.our_rr4_damaged.rar"
+        );
+        let out_dir = dir.path().join("win_rr4_out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar_bin().unwrap())
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(&win_fixed)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x of the WinRAR-fixed archive failed:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("rr4.bin")),
+            file_sha256(&src),
+            "WinRAR rebuilt different bytes from our RAR4 RR record"
+        );
+    }
+
+    // WinRAR -> ours: WinRAR 6.23 creates the record, we repair damage.
+    if let Some(rar) = rar4_623_bin() {
+        let warc = dir.path().join("win_rr4.rar");
+        let (ok, out) = run(Command::new(&rar)
+            .args(["a", "-ma4", "-m0", "-rr10%", "-idq"])
+            .arg(&warc)
+            .arg("rr4.bin")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR -ma4 -rr10% failed:\n{out}");
+        let mut wdamaged = std::fs::read(&warc).unwrap();
+        let wstart = payload_offset(&wdamaged);
+        wdamaged[wstart + 12345..wstart + 12345 + 96].fill(0xa5);
+        let wdamaged_path = dir.path().join("win_rr4_damaged.rar");
+        std::fs::write(&wdamaged_path, &wdamaged).unwrap();
+        let wfixed_path = dir.path().join("win_rr4_fixed.rar");
+        let repaired =
+            rar5::repair_legacy_archive_path(&wdamaged_path, &wfixed_path).expect("our repair");
+        assert!(repaired, "our repair must fix the WinRAR RAR4 RR archive");
+        let mut ar = RarArchive::open(&wfixed_path).unwrap();
+        assert_eq!(
+            ar.read("rr4.bin").unwrap(),
+            std::fs::read(&src).unwrap(),
+            "we repaired WinRAR's RAR4 RR archive to different bytes"
+        );
+    }
+}
+
+/// RAR4 auto filter (`-ma4`): a delta-transformable member (16-bit stereo
+/// samples) must fire the RAR3 DELTA filter record, and WinRAR's UnRAR must
+/// decode the filtered member byte-identically. (WinRAR 6.23's RAR4 writer
+/// no longer emits VM filters, so this is a one-way interop check.)
+#[test]
+fn we_create_rar4_delta_filtered_member_winrar_valid() {
+    let dir = temp_dir();
+    // 16-bit stereo random-walk samples: channels = 4 (2 ch x 2 bytes).
+    let mut content = Vec::with_capacity(600_000);
+    let mut l = 0i16;
+    let mut r = 0i16;
+    let mut seed = 42u32;
+    while content.len() < 600_000 {
+        l = l.wrapping_add(((seed >> 16) & 0x3f) as i16 - 30);
+        r = r.wrapping_add(((seed >> 8) & 0x3f) as i16 - 20);
+        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+        content.extend_from_slice(&l.to_le_bytes());
+        content.extend_from_slice(&r.to_le_bytes());
+    }
+    let src = dir.path().join("audio.bin");
+    std::fs::write(&src, &content).unwrap();
+
+    let arc = dir.path().join("delta.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m3", "-idq"])
+        .arg(&arc)
+        .arg("audio.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 (delta) failed:\n{out}");
+
+    // The filter must have won decisively: the archive is far smaller than
+    // the raw samples (the filter-record bytes sit unaligned in the
+    // bitstream, so size is the reliable fingerprint).
+    let raw = std::fs::read(&arc).unwrap();
+    assert!(
+        (raw.len() as u64) * 3 < content.len() as u64,
+        "auto delta filter must have fired (member barely compressed)"
+    );
+
+    // Our own reader round-trips the filtered member.
+    {
+        let mut ar = RarArchive::open(&arc).unwrap();
+        assert_eq!(ar.read("audio.bin").unwrap(), content);
+    }
+
+    // WinRAR decodes it byte-identically.
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar).args(["t", "-idq"]).arg(&arc));
+        assert!(
+            ok,
+            "UnRAR t rejected our delta-filtered RAR4 archive:\n{out}"
+        );
+        let out_dir = dir.path().join("out_delta");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x failed on our delta-filtered archive:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("audio.bin")),
+            file_sha256(&src),
+            "WinRAR decoded different bytes from our delta-filtered member"
+        );
+    }
+}
+
+/// RAR4 solid m5 on a run of near-identical text files: the run is coded
+/// with a shared PPMd model (members 2.. continue it), and WinRAR's UnRAR
+/// must decode every member byte-identically. WinRAR 6.23's RAR4 writer
+/// never produced PPMd, so this is one-way interop.
+#[test]
+fn we_create_rar4_solid_ppmd_text_winrar_valid() {
+    let dir = temp_dir();
+    let mut content = Vec::new();
+    for chapter in 1..=4u8 {
+        let mut body = Vec::with_capacity(240_000);
+        for line in 0..2200u32 {
+            body.extend_from_slice(
+                format!(
+                    "chapter {chapter} line {line:05}: shared boilerplate that repeats across every chapter of this archive body body body tail tail\n"
+                )
+                .as_bytes(),
+            );
+        }
+        let src = dir.path().join(format!("chap{chapter}.txt"));
+        std::fs::write(&src, &body).unwrap();
+        content.push((format!("chap{chapter}.txt"), body));
+    }
+
+    let arc = dir.path().join("solidppmd.rar");
+    let mut args = vec!["a", "-s", "-ma4", "-m5", "-idq"];
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rar"));
+    cmd.args(&args).arg(&arc).current_dir(dir.path());
+    for i in 1..=4 {
+        cmd.arg(format!("chap{i}.txt"));
+    }
+    let (ok, out) = run(&mut cmd);
+    assert!(ok, "our rar -s -ma4 -m5 failed:\n{out}");
+
+    // Our own reader round-trips the chain.
+    {
+        let mut ar = RarArchive::open(&arc).unwrap();
+        for (name, body) in &content {
+            assert_eq!(&ar.read(name).unwrap(), body, "{name} solid-PPMd mismatch");
+        }
+    }
+
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar).args(["t", "-idq"]).arg(&arc));
+        assert!(ok, "UnRAR t rejected our solid-PPMd RAR4 archive:\n{out}");
+        let out_dir = dir.path().join("out_solidppmd");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x failed on our solid-PPMd archive:\n{out}");
+        for (name, body) in &content {
+            let got = std::fs::read(out_dir.join(name)).unwrap();
+            assert_eq!(&got, body, "WinRAR decoded {name} differently");
+        }
     }
 }

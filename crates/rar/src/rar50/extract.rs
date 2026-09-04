@@ -75,12 +75,14 @@ impl Write for IntegritySink<'_> {
 impl RarArchive {
     pub(crate) fn open_read(&mut self) -> RarResult<()> {
         self.volume_paths = discover_volumes(&self.path);
-        if self.volume_paths.len() > 1 {
+        let f = File::open(&self.volume_paths[0])?;
+        self.stream = Some(Box::new(f));
+        self.verify_signature()?;
+        if self.rar4 {
+            self.scan_rar4_blocks()?;
+        } else if self.volume_paths.len() > 1 {
             self.scan_all_volumes()?;
         } else {
-            let f = File::open(&self.path)?;
-            self.stream = Some(Box::new(f));
-            self.verify_signature()?;
             self.scan_blocks()?;
         }
         Ok(())
@@ -93,13 +95,18 @@ impl RarArchive {
     /// no QO written, or a corrupt record).
     pub(crate) fn open_read_quick(&mut self) -> RarResult<()> {
         self.volume_paths = discover_volumes(&self.path);
+        let f = File::open(&self.volume_paths[0])?;
+        self.stream = Some(Box::new(f));
+        self.verify_signature()?;
+        if self.rar4 {
+            // RAR4 has no quick-open record: always full-scan.
+            self.scan_rar4_blocks()?;
+            return Ok(());
+        }
         if self.volume_paths.len() > 1 {
             self.scan_all_volumes()?;
             return Ok(());
         }
-        let f = File::open(&self.path)?;
-        self.stream = Some(Box::new(f));
-        self.verify_signature()?;
         if !self.try_quick_open_entries()? {
             // `try_quick_open_entries` may have consumed the leading
             // plaintext blocks (e.g. a -hp encryption header); rewind to
@@ -182,19 +189,17 @@ impl RarArchive {
         let n = stream.read(&mut buf)?;
         buf.truncate(n);
         let rar5_pos = find_bytes(&buf, RAR5_SIGNATURE);
-        let rar4_pos = find_bytes(&buf, b"Rar!\x1a\x07\x00");
-        let sfx_offset = match (rar5_pos, rar4_pos) {
-            (Some(_), Some(r4)) if r4 < rar5_pos.unwrap() => {
-                return Err(RarError::Unsupported(
-                    "RAR4 archives are not supported; use 7-Zip to read or extract them".into(),
-                ));
+        let rar4_pos = find_bytes(&buf, crate::detect::RAR4_SIGNATURE);
+        let (sfx_offset, is_rar4) = match (rar5_pos, rar4_pos) {
+            (Some(r5), Some(r4)) => {
+                if r4 < r5 {
+                    (r4 as u64, true)
+                } else {
+                    (r5 as u64, false)
+                }
             }
-            (Some(r5), _) => r5 as u64,
-            (None, Some(_)) => {
-                return Err(RarError::Unsupported(
-                    "RAR4 archives are not supported; use 7-Zip to read or extract them".into(),
-                ));
-            }
+            (Some(r5), None) => (r5 as u64, false),
+            (None, Some(r4)) => (r4 as u64, true),
             (None, None) => {
                 return Err(RarError::Format(
                     "not a RAR archive (signature not found)".into(),
@@ -202,7 +207,13 @@ impl RarArchive {
             }
         };
         self.sfx_offset = sfx_offset;
-        stream.seek(SeekFrom::Start(sfx_offset + RAR5_SIGNATURE.len() as u64))?;
+        self.rar4 = is_rar4;
+        let sig_len = if is_rar4 {
+            crate::detect::RAR4_SIGNATURE.len() as u64
+        } else {
+            RAR5_SIGNATURE.len() as u64
+        };
+        stream.seek(SeekFrom::Start(sfx_offset + sig_len))?;
         Ok(())
     }
 
@@ -289,7 +300,43 @@ impl RarArchive {
         Ok(())
     }
 
-    /// Scan all volumes of a multi-volume archive.
+    /// Scan a single-volume RAR 1.5–4.x archive (legacy fixed-width block
+    /// headers). Multi-volume RAR4 sets use different naming and are not
+    /// supported yet; opening one is reported clearly.
+    fn scan_rar4_blocks(&mut self) -> RarResult<()> {
+        self.entries.clear();
+        let mut scan = crate::rar40::Rar4VolumeScan::default();
+        let mut out = Vec::new();
+
+        // Volume 0 is the already-open primary stream, positioned right
+        // after the signature (SFX-aware). Later volumes open fresh and each
+        // starts with its own 7-byte signature.
+        scan.scan_volume(
+            self.stream.as_mut().unwrap(),
+            0,
+            self.password.as_deref(),
+            &mut out,
+        )?;
+        for (vol_idx, vol_path) in self.volume_paths.iter().enumerate().skip(1) {
+            self.check_cancel()?;
+            let mut stream = std::fs::File::open(vol_path)?;
+            let mut sig = [0u8; 7];
+            stream.read_exact(&mut sig)?;
+            if &sig != crate::detect::RAR4_SIGNATURE {
+                return Err(RarError::Format(format!(
+                    "volume {} has a bad RAR4 signature",
+                    vol_path.display()
+                )));
+            }
+            scan.scan_volume(&mut stream, vol_idx, self.password.as_deref(), &mut out)?;
+        }
+        let archive_solid = scan.archive_solid;
+        scan.finish()?;
+        self.rar4_solid_archive = archive_solid;
+        self.entries = out;
+        Ok(())
+    }
+
     ///
     /// Header-encrypted volume sets repeat the plaintext archive-level
     /// encryption header at the start of EVERY volume (WinRAR convention);
@@ -443,6 +490,9 @@ impl RarArchive {
             })?;
         self.read_ctx_mut().extract_options = opts;
         self.validate_entry_limits(target_idx)?;
+        if self.rar4 {
+            return self.decode_rar4_at(target_idx);
+        }
         if self.is_solid_chain_member(target_idx) {
             return self.decode_solid_through(target_idx);
         }
@@ -477,6 +527,9 @@ impl RarArchive {
                 name: name.to_string(),
             })?;
         self.read_ctx_mut().extract_options = opts;
+        if self.rar4 {
+            return self.decode_rar4_to(target_idx, writer);
+        }
         if self.is_solid_chain_member(target_idx) {
             return self.decode_solid_through_to(target_idx, writer);
         }
@@ -843,7 +896,9 @@ impl RarArchive {
         let tmp_path = temp_sibling_path(&dest_path);
         let result = (|| -> RarResult<u64> {
             let mut file = File::create(&tmp_path)?;
-            let written = if self.is_solid_chain_member(idx) {
+            let written = if self.rar4 {
+                self.decode_rar4_to(idx, &mut file)?
+            } else if self.is_solid_chain_member(idx) {
                 self.decode_solid_through_to(idx, &mut file)?
             } else {
                 self.decode_file_to(idx, &mut file, None)?
@@ -1328,6 +1383,211 @@ impl RarArchive {
             payload.keys.as_ref(),
         )?;
         Ok(written)
+    }
+
+    /// Decode a single RAR4 member in memory, verifying its CRC32. Solid
+    /// chain members decode through their chain prefix (shared window).
+    fn decode_rar4_at(&mut self, idx: usize) -> RarResult<Vec<u8>> {
+        let hdr = self.entries[idx].header.clone();
+        let out = self.rar4_decode_member(idx)?;
+        self.rar4_verify_crc(&hdr, &out)?;
+        Ok(out)
+    }
+
+    /// Decode a single RAR4 member, streaming output to `writer`, verifying
+    /// its CRC32 over the written bytes. Non-chain members stream through
+    /// the bounded-memory path (STORE chunks copied straight out; compressed
+    /// members decode incrementally); solid-chain members keep the shared
+    /// window semantics and decode in one pass.
+    fn decode_rar4_to(&mut self, idx: usize, writer: &mut dyn Write) -> RarResult<u64> {
+        let hdr = self.entries[idx].header.clone();
+        if self.is_rar4_solid_member(idx) {
+            let out = self.rar4_decode_solid_through(idx)?;
+            self.rar4_verify_crc(&hdr, &out)?;
+            writer.write_all(&out).map_err(RarError::Io)?;
+            return Ok(out.len() as u64);
+        }
+        let entry = self.entries[idx].clone();
+        let (written, crc) = crate::rar40::decode_member_bytes_to(
+            self.stream.as_mut().unwrap(),
+            &self.volume_paths,
+            &entry.chunks,
+            &entry.header,
+            self.password.as_deref(),
+            None,
+            writer,
+        )?;
+        // The streamed CRC is authoritative; compare with the header.
+        if let Some(expected) = hdr.crc32_val
+            && crc != expected
+        {
+            return Err(RarError::Crc {
+                expected,
+                actual: crc,
+                context: format!("{}: CRC32 mismatch", hdr.name),
+            });
+        }
+        Ok(written)
+    }
+
+    /// Decode RAR4 member `idx`, routing solid-chain members through the
+    /// persistent legacy decoder so their look-behind window covers the
+    /// chain prefix.
+    fn rar4_decode_member(&mut self, idx: usize) -> RarResult<Vec<u8>> {
+        if self.is_rar4_solid_member(idx) {
+            return self.rar4_decode_solid_through(idx);
+        }
+        let entry = self.entries[idx].clone();
+        crate::rar40::decode_member_bytes(
+            self.stream.as_mut().unwrap(),
+            &self.volume_paths,
+            &entry.chunks,
+            &entry.header,
+            self.password.as_deref(),
+            None,
+        )
+    }
+
+    /// Whether `idx` sits in a legacy solid run. RAR3+ members (unp_ver >=
+    /// 29) chain on the per-file FHD_SOLID bit (a head member is solid by
+    /// being directly followed by a flagged member). Pre-RAR3 codecs never
+    /// write that bit: when the main header carried MHD_SOLID, every
+    /// compressed member of such a codec is part of one shared-window run.
+    fn is_rar4_solid_member(&self, idx: usize) -> bool {
+        let hdr = &self.entries[idx].header;
+        if hdr.unp_ver < 29 {
+            return self.rar4_solid_archive && !self.entries[idx].is_dir();
+        }
+        if hdr.comp_solid {
+            return true;
+        }
+        idx + 1 < self.entries.len() && self.entries[idx + 1].header.comp_solid
+    }
+
+    /// Find the start index of the legacy solid chain containing `idx` (the
+    /// first member at or before it that is not solid, followed by solid
+    /// members; directory entries do not break the run).
+    fn rar4_find_chain_start(&self, target_idx: usize) -> usize {
+        let mut chain_start = target_idx;
+        for i in (0..target_idx).rev() {
+            if self.entries[i].is_dir() {
+                continue;
+            }
+            // Pre-RAR3 codecs under MHD_SOLID: STORE members leave the
+            // shared window untouched (the decoder is simply not called), so
+            // the run reaches back across them to the first compressed
+            // member. RAR3+ chains break on a stored member (per-file flags
+            // stop).
+            if self.entries[i].header.unp_ver < 29 {
+                if !crate::rar40::is_stored(self.entries[i].header.comp_method) {
+                    chain_start = i;
+                }
+                continue;
+            }
+            if self.entries[i].header.comp_solid || self.is_rar4_solid_member(i) {
+                chain_start = i;
+            } else {
+                break;
+            }
+        }
+        chain_start
+    }
+
+    /// Decode the legacy solid chain up through `target_idx` with one shared
+    /// decoder, returning the target member's bytes. Intermediate members are
+    /// decoded only to advance the shared window. STORE members in a RAR2.x
+    /// or RAR1.5 chain do not advance the window but do not break the chain
+    /// either (the decoder is simply not called).
+    fn rar4_decode_solid_through(&mut self, target_idx: usize) -> RarResult<Vec<u8>> {
+        let chain_start = self.rar4_find_chain_start(target_idx);
+
+        let start_from = {
+            let ctx = self.read_ctx_mut();
+            if ctx.rar4_decoded_through >= chain_start as isize
+                && ctx.rar4_decoded_through < target_idx as isize
+            {
+                // Continue from where we left off.
+            } else {
+                // Backwards request or a fresh chain: restart from the head.
+                ctx.rar4_decoder = None;
+                ctx.rar4_decoded_through = -1;
+            }
+            if ctx.rar4_decoder.is_none() {
+                // Bootstrap with a Rar29 decoder; it will be replaced on the
+                // first compressed member that reveals the actual unp_ver.
+                ctx.rar4_decoder = Some(crate::rar40::LegacyDecoder::Rar29(
+                    crate::codec::rar29::Rar29Decoder::new(),
+                ));
+            }
+            (ctx.rar4_decoded_through + 1) as usize
+        };
+
+        let mut target = Vec::new();
+        for i in start_from..=target_idx {
+            let entry = self.entries[i].clone();
+            if entry.is_dir() {
+                continue;
+            }
+            let hdr = entry.header;
+            let chunks = entry.chunks;
+
+            // Determine decoder type from the member's unp_ver. A STORE
+            // member keeps the existing decoder unchanged (for RAR2.x the
+            // window is not advanced; for RAR1.5 likewise).
+            let is_compressed = !crate::rar40::is_stored(hdr.comp_method);
+            if is_compressed {
+                // Ensure the decoder matches this member's codec version.
+                let needs_rebuild = {
+                    let dec = self.read_ctx_mut().rar4_decoder.as_ref();
+                    match (hdr.unp_ver, dec) {
+                        (v, Some(crate::rar40::LegacyDecoder::Rar29(_))) if v >= 29 => false,
+                        (20 | 26, Some(crate::rar40::LegacyDecoder::Rar20(_))) => false,
+                        (15, Some(crate::rar40::LegacyDecoder::Rar15(_))) => false,
+                        _ => true,
+                    }
+                };
+                if needs_rebuild {
+                    let new_decoder = if hdr.unp_ver >= 29 {
+                        crate::rar40::LegacyDecoder::Rar29(crate::codec::rar29::Rar29Decoder::new())
+                    } else if hdr.unp_ver == 20 || hdr.unp_ver == 26 {
+                        crate::rar40::LegacyDecoder::Rar20(Box::default())
+                    } else {
+                        crate::rar40::LegacyDecoder::Rar15(Box::default())
+                    };
+                    self.read_ctx_mut().rar4_decoder = Some(new_decoder);
+                }
+            }
+
+            let mut decoder = self.read_ctx_mut().rar4_decoder.take();
+            let data = crate::rar40::decode_member_bytes(
+                self.stream.as_mut().unwrap(),
+                &self.volume_paths,
+                &chunks,
+                &hdr,
+                self.password.as_deref(),
+                decoder.as_mut(),
+            )?;
+            self.read_ctx_mut().rar4_decoder = decoder;
+            self.read_ctx_mut().rar4_decoded_through = i as isize;
+            if i == target_idx {
+                target = data;
+            }
+        }
+        Ok(target)
+    }
+
+    fn rar4_verify_crc(&self, hdr: &FileHeader, data: &[u8]) -> RarResult<()> {
+        if let Some(expected) = hdr.crc32_val {
+            let actual = crate::rar40::member_crc(data);
+            if actual != expected {
+                return Err(RarError::Crc {
+                    expected,
+                    actual,
+                    context: format!("{}: CRC32 mismatch", hdr.name),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Verify CRC32 and BLAKE2sp integrity of decoded data. Encrypted

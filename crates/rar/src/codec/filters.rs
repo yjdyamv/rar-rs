@@ -71,7 +71,7 @@ fn delta_decode(data: &[u8], channels: u8) -> Vec<u8> {
     result
 }
 
-fn delta_encode(data: &[u8], channels: u8) -> Vec<u8> {
+pub(crate) fn delta_encode(data: &[u8], channels: u8) -> Vec<u8> {
     if channels < 1 {
         return data.to_vec();
     }
@@ -209,7 +209,7 @@ fn e8_decode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
     data.to_vec()
 }
 
-fn e8_encode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
+pub(crate) fn e8_encode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
     let n = data.len();
     if n < 5 {
         return data.to_vec();
@@ -761,4 +761,53 @@ mod tests {
         // filter is pointless (and would force a non-solid member).
         assert_eq!(auto_delta_filter_channels(&[0xABu8; 8192]), None);
     }
+}
+
+/// Sample-based audio-filter gate (ported from rars' RAR4 writer): for each
+/// candidate channel count 1..=4, look at a few windows of the interleaved
+/// stream and accept when the per-channel byte deltas stay small (smoothed
+/// audio, not noise). Returns the first channel count that passes; the
+/// RAR3 AUDIO VM filter is an 8-bit predictor, so this only makes sense on
+/// 8-bit interleaved samples.
+pub fn auto_audio_filter_channels(data: &[u8]) -> Option<usize> {
+    const SAMPLE: usize = 8192;
+    for channels in 1..=4usize {
+        if data.len() < channels * 64 {
+            continue;
+        }
+        let mut total_delta = 0usize;
+        let mut small_delta = 0usize;
+        let mut compared = 0usize;
+        for &start in &[
+            0,
+            data.len().saturating_sub(SAMPLE) / 2,
+            data.len().saturating_sub(SAMPLE),
+        ] {
+            let end = start.saturating_add(SAMPLE).min(data.len());
+            let aligned = start + ((channels - start % channels) % channels);
+            if aligned + channels >= end {
+                continue;
+            }
+            for channel in 0..channels {
+                let mut previous = None;
+                let mut index = aligned + channel;
+                while index < end {
+                    let byte = data[index];
+                    if let Some(previous) = previous {
+                        let delta = usize::from(byte.abs_diff(previous));
+                        let delta = delta.min(256 - delta);
+                        total_delta += delta;
+                        small_delta += usize::from(delta <= 8);
+                        compared += 1;
+                    }
+                    previous = Some(byte);
+                    index += channels;
+                }
+            }
+        }
+        if compared != 0 && total_delta <= compared * 24 && small_delta * 100 >= compared * 55 {
+            return Some(channels);
+        }
+    }
+    None
 }

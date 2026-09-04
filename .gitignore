@@ -3,3 +3,12 @@
 /.scratch
 .DS_Store
 Thumbs.db
+
+# 本地工作计划(不入库)
+/docs/plan-rar4-next.md
+
+# WinRAR 修复互操作副产物
+*.fixed.*.rar
+fixed.*.rar
+rebuilt.*.rar
+fixed.*.rar

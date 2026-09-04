@@ -1,5 +1,5 @@
 #![allow(deprecated)] // legacy constructor family; use create_with_options
-//! RAR4 containers are rejected with a clear unsupported error.
+//! RAR4 containers are now accepted and decoded.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -9,21 +9,24 @@ use support::*;
 use rar5::RarArchive;
 
 #[test]
-fn rar4_archives_are_rejected_with_clear_error() {
+fn synthetic_rar4_with_bogus_header_is_refused_with_clear_error() {
     let dir = make_temp_dir();
-    let path = dir.path().join("rar4.rar");
-    // RAR4 signature plus a marker-block header; rar-rs is RAR5-only and
-    // must refuse with an actionable error (7-Zip handles RAR4).
+    let path = dir.path().join("rar4_synthetic.rar");
+    // Valid signature + a marker-block header with head_size=4 (below
+    // minimum 7), which must fail with a Format error.
     let mut data = b"Rar!\x1a\x07\x00".to_vec();
-    data.extend_from_slice(&[0x72, 0x04, 0x00]);
+    data.extend_from_slice(&[0x72, 0x04, 0x00, 0x00, 0x00]);
     std::fs::write(&path, &data).unwrap();
 
-    match RarArchive::open(&path) {
-        Err(rar5::RarError::Unsupported(msg)) => assert!(
-            msg.contains("RAR4"),
-            "expected a RAR4-specific message, got: {msg}"
+    let err = match RarArchive::open(&path) {
+        Ok(_) => panic!("expected synthetic RAR4 with broken header to fail"),
+        Err(e) => e,
+    };
+    match err {
+        rar5::RarError::Format(msg) => assert!(
+            msg.contains("too small") || msg.contains("truncated"),
+            "expected format-level error, got: {msg}"
         ),
-        Err(e) => panic!("expected Unsupported(RAR4), got {e:?}"),
-        Ok(_) => panic!("expected RAR4 archive to be rejected"),
+        other => panic!("expected Format error for broken RAR4 header, got {other:?}"),
     }
 }

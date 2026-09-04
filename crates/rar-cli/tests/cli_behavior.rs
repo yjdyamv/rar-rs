@@ -6,6 +6,18 @@
 use rar5::RarArchive;
 use std::io::Write;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+
+/// Serializes tests that (a) write `rarfiles.lst` next to the rar binary
+/// (`cli_rarfiles_lst_orders_solid_members`) with (b) tests whose member
+/// order would be corrupted if a stray `rarfiles.lst` were present
+/// (`cli_se_preserves_input_order`, and the `-s` round-trip test). Without
+/// it the parallel test threads race on `target/debug/rarfiles.lst` and the
+/// order-sensitive tests flake.
+fn rarfiles_lst_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn make_temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
@@ -1597,6 +1609,9 @@ fn cli_config_sources_apply_with_winrar_priority() {
 
 #[test]
 fn cli_rarfiles_lst_orders_solid_members() {
+    let _guard = rarfiles_lst_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = make_temp_dir();
     std::fs::write(dir.path().join("aaa.cpp"), b"a").unwrap();
     std::fs::write(dir.path().join("f1.cpp"), b"b").unwrap();
@@ -1757,8 +1772,9 @@ fn cli_rv_creates_recovery_volumes_and_rc_rebuilds() {
 
 /// `-ma7` forces RAR7 (v70) members at any dictionary size (an extension
 /// beyond WinRAR 7.23, which only writes v70 above 4 GiB); `-ma5` is the
-/// default RAR5 format (a no-op, like WinRAR's inert `-ma5`); `-ma4` is
-/// rejected with WinRAR's wording.
+/// default RAR5 format (a no-op, like WinRAR's inert `-ma5`); `-ma4` selects
+/// the legacy RAR4 container (covered separately by `cli_ma4_*`); other
+/// versions are rejected with WinRAR's wording.
 #[test]
 fn cli_archive_format_ma_switch() {
     let dir = make_temp_dir();
@@ -1833,8 +1849,9 @@ fn cli_archive_format_ma_switch() {
     let e = rar.get_entry("f.bin").unwrap();
     assert_eq!(e.comp_version(), 0, "-ma5 stays v50");
 
-    // -ma4 (and other versions) are rejected with WinRAR's wording.
-    for bad in ["4", "6", "8"] {
+    // -ma6, -ma8 (and other unsupported versions) are rejected with
+    // WinRAR's wording.
+    for bad in ["6", "8"] {
         let out = std::process::Command::new(RAR_CLI)
             .args(["a", &format!("-ma{bad}"), "-idq"])
             .arg(dir.path().join(format!("bad{bad}.rar")))
@@ -1909,6 +1926,9 @@ fn cli_stdout_extract_writes_members_to_stdout() {
 /// file-extension change. All must round-trip byte-identically.
 #[test]
 fn cli_solid_reset_switches_accepted_and_roundtrip() {
+    let _guard = rarfiles_lst_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = make_temp_dir();
     let a = dir.path().join("a.txt");
     let b = dir.path().join("b.bin");
@@ -2099,6 +2119,9 @@ fn cli_extract_member_selection_never_hijacks_dest() {
 /// statistics are simply reset as a new extension is encountered.
 #[test]
 fn cli_se_preserves_input_order() {
+    let _guard = rarfiles_lst_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = make_temp_dir();
     let a = dir.path().join("a.txt");
     let b = dir.path().join("b.bin");
@@ -2147,4 +2170,122 @@ fn cli_se_preserves_input_order() {
         "unrar t rejected our order-preserving -se archive:\n{}",
         String::from_utf8_lossy(&res.stderr)
     );
+}
+
+/// `-ma4` (legacy RAR3/4 container) creates a RAR4 archive whose members
+/// round-trip through both our own reader and the `unrar` CLI, and are
+/// rejected when combined with RAR5-only switches.
+#[test]
+fn cli_ma4_creates_rar4_archive() {
+    let dir = make_temp_dir();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    std::fs::write(&a, b"rar4 CLI member A").unwrap();
+    std::fs::write(&b, b"rar4 CLI member B is a bit longer").unwrap();
+    let arc = dir.path().join("ma4.rar");
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-idq"])
+        .arg(&arc)
+        .arg("a.txt")
+        .arg("b.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "rar a -ma4 failed");
+
+    // The RAR4 container carries the 7-byte `Rar!\x1a\x07\x00` signature
+    // (a RAR5 archive would start with the 8-byte `...\x07\x01\x00`).
+    let head = std::fs::read(&arc).unwrap();
+    assert_eq!(
+        &head[..7],
+        b"Rar!\x1a\x07\x00",
+        "archive must carry the RAR4 signature"
+    );
+
+    let mut rar = rar5::RarArchive::open(&arc).unwrap();
+    let mut names: Vec<String> = rar.namelist().into_iter().map(str::to_string).collect();
+    names.sort();
+    assert_eq!(names, vec!["a.txt".to_string(), "b.txt".to_string()]);
+    assert_eq!(rar.read("a.txt").unwrap(), b"rar4 CLI member A");
+    assert_eq!(
+        rar.read("b.txt").unwrap(),
+        b"rar4 CLI member B is a bit longer"
+    );
+
+    // Our own `unrar t` must accept the RAR4 archive.
+    let res = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-idq"])
+        .arg(&arc)
+        .output()
+        .unwrap();
+    assert!(
+        res.status.success(),
+        "unrar t rejected our -ma4 archive:\n{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+}
+
+/// RAR5-only creation switches are rejected when combined with `-ma4`, since
+/// the RAR4 container cannot express them. `-hp` and `-rr` are now supported
+/// on RAR4 too, so they are verified positively instead.
+#[test]
+fn cli_ma4_rejects_rar5_only_switches() {
+    let dir = make_temp_dir();
+    let f = dir.path().join("f.txt");
+    std::fs::write(&f, b"payload").unwrap();
+    let arc = dir.path().join("ma4x.rar");
+
+    // Multi-volume + recovery record stays rejected for RAR4 (WinRAR
+    // forbids inline recovery records on volume sets there too).
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-rr10%", "--volume-size=100k"])
+        .arg(&arc)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(
+        !status.success(),
+        "-ma4 -rr10% with volumes must be rejected"
+    );
+
+    // `-hp` header encryption is supported on RAR4; the CLI must accept it.
+    let arc2 = dir.path().join("ma4hp.rar");
+    let ok = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-hpsecret", "-idq"])
+        .arg(&arc2)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        ok,
+        "-ma4 -hpsecret must be accepted (header encryption on RAR4)"
+    );
+
+    let mut rar = rar5::RarArchive::open_with_password(&arc2, "secret").unwrap();
+    assert_eq!(rar.read("f.txt").unwrap(), b"payload");
+
+    // `-rr10%` inline recovery record is supported on single-volume RAR4:
+    // the archive must carry a NEWSUB (0x7a) `RR` block before ENDARC.
+    let arc3 = dir.path().join("ma4rr.rar");
+    let ok = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-rr10%", "-m0", "-idq"])
+        .arg(&arc3)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "-ma4 -rr10% must be accepted (recovery record on RAR4)");
+    let raw = std::fs::read(&arc3).unwrap();
+    let has_newsub_rr = raw.windows(10).any(|w| w == b"RRProtect+");
+    assert!(
+        has_newsub_rr,
+        "-ma4 -rr10% archive must carry a NEWSUB RR block"
+    );
+    let mut rar = rar5::RarArchive::open(&arc3).unwrap();
+    assert_eq!(rar.read("f.txt").unwrap(), b"payload");
 }

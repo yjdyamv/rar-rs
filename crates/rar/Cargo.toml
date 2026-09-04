@@ -11,6 +11,7 @@ crc32fast = { workspace = true }
 aes = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+sha1 = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
 windows-sys = { workspace = true }
@@ -25,9 +26,18 @@ simd = ["dep:wide"]
 [dev-dependencies]
 tempfile = "3"
 
+
 [lints]
 workspace = true
 
 [[example]]
 name = "mtbench"
+required-features = ["parallel"]
+
+[[example]]
+name = "ratiocheck"
+required-features = ["parallel"]
+
+[[example]]
+name = "mtprobe"
 required-features = ["parallel"]

@@ -13,6 +13,7 @@ crc32fast = "1"
 aes = { version = "0.9", features = ["zeroize"] }
 hmac = "0.13"
 sha2 = "0.11"
+sha1 = "0.11"
 rand = "0.10"
 clap = { version = "4.6", features = ["derive", "wrap_help"] }
 zeroize = { version = "1.9", features = ["alloc", "derive"] }

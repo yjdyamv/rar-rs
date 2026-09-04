@@ -129,6 +129,15 @@ pub struct FileHeader {
     pub group: Option<String>,
     /// File version (VERSION extra record).
     pub version: Option<u64>,
+    /// RAR 1.5–4.x unpack version codec selector (`15`/`20`/`26`/`29`/`36`).
+    /// Meaningful only when [`format_version`](Self::format_version) is 4.
+    pub unp_ver: u8,
+    /// RAR 3.x+ (unp_ver >= 29) per-file encryption salt; `None` for
+    /// RAR1.5/2.x (no salt) and for unencrypted members.
+    pub salt: Option<[u8; 8]>,
+    /// RAR 1.5–4.x raw header CRC (16-bit); `None` for RAR5 members, which
+    /// use the 32-bit header CRC32.
+    pub legacy_head_crc: Option<u16>,
 }
 
 impl Default for FileHeader {
@@ -160,6 +169,9 @@ impl Default for FileHeader {
             owner: None,
             group: None,
             version: None,
+            unp_ver: 0,
+            salt: None,
+            legacy_head_crc: None,
         }
     }
 }

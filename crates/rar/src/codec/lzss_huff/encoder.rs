@@ -1383,6 +1383,7 @@ const COLLECT_LR_MISS_THRESHOLD: usize = 256;
 /// prove the matchless fast path is byte-identical.
 static DISABLE_MATCHLESS_FAST_PATH: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn set_fast_path_enabled(enabled: bool) {
     DISABLE_MATCHLESS_FAST_PATH.store(!enabled, Ordering::Relaxed);
 }

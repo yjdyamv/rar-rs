@@ -9,6 +9,9 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ArchiveVersion {
+    /// RAR 4.x and earlier: the legacy `Rar!\x1a\x07\x00` container family
+    /// (RAR 1.5 through 4.x). Read support only.
+    Rar40,
     /// RAR 5.0 container + v50 compression.
     Rar50,
     /// RAR 5.0 container with the RAR7 (v70) large-dictionary codec.
@@ -24,14 +27,24 @@ impl Default for ArchiveVersion {
 
 impl ArchiveVersion {
     /// All versions, in order.
-    pub const ALL: [ArchiveVersion; 2] = [ArchiveVersion::Rar50, ArchiveVersion::Rar70];
+    pub const ALL: [ArchiveVersion; 3] = [
+        ArchiveVersion::Rar40,
+        ArchiveVersion::Rar50,
+        ArchiveVersion::Rar70,
+    ];
 
-    /// Stable machine-readable name (`"rar50"` / `"rar70"`).
+    /// Stable machine-readable name (`"rar40"` / `"rar50"` / `"rar70"`).
     pub const fn as_str(self) -> &'static str {
         match self {
+            ArchiveVersion::Rar40 => "rar40",
             ArchiveVersion::Rar50 => "rar50",
             ArchiveVersion::Rar70 => "rar70",
         }
+    }
+
+    /// Whether this is the legacy RAR 1.5–4.x container family.
+    pub const fn is_rar40(self) -> bool {
+        matches!(self, ArchiveVersion::Rar40)
     }
 
     /// Whether this version selects the RAR7 (v70) extended distance code

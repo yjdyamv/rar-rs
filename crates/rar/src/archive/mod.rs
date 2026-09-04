@@ -26,10 +26,13 @@ use crate::io_util::{copy_prefix, read_write_create, replace_file, temp_sibling_
 use crate::rar50::headers::*;
 use crate::rar50::vint;
 use crate::rar50::*;
+use crate::version::ArchiveVersion;
 use crate::write_progress::ProgressTracker;
 
 pub use discover::discover_volumes;
-pub(crate) use discover::{volume_base_of, volume_part_width, volume_path, volume_path_padded};
+pub(crate) use discover::{
+    volume_base_of, volume_part_width, volume_path, volume_path_padded, volume_path_rar4,
+};
 pub use entry::{ArchiveEntry, BatchEntry};
 #[cfg(feature = "parallel")]
 pub(crate) use entry::{BatchPrepareCtx, PreparedEntry};
@@ -78,6 +81,10 @@ pub(crate) struct ReadState {
     pub solid_state: Option<DecoderState>,
     /// Index of the last file decoded in the solid chain (-1 = none).
     pub solid_decoded_through: isize,
+    /// Persistent legacy decoder for solid chains (RAR 1.5/2.x/3.x).
+    pub rar4_decoder: Option<crate::rar40::LegacyDecoder>,
+    /// Index of the last legacy-solid member decoded (-1 = none).
+    pub rar4_decoded_through: isize,
     /// Options for the current read/extract operation (set per call).
     pub extract_options: crate::options::ExtractOptions,
     /// NTFS alternate data streams ("STM" service records) attached to
@@ -91,6 +98,8 @@ impl Default for ReadState {
         Self {
             solid_state: None,
             solid_decoded_through: -1,
+            rar4_decoder: None,
+            rar4_decoded_through: -1,
             extract_options: crate::options::ExtractOptions::default(),
             streams: Vec::new(),
         }
@@ -112,6 +121,12 @@ pub(crate) struct WriteState {
     pub last_solid_ext: Option<String>,
     /// Persistent RAR5 encoder state for solid archives.
     pub encoder_state: Option<crate::codec::EncoderState>,
+    /// Persistent RAR4 LZSS encoder for solid archives; the sliding window
+    /// and Huffman table state carry across the members of a solid run.
+    pub rar4_solid_encoder: Option<crate::codec::rar29_encoder::Unpack29Encoder>,
+    /// True once the current RAR4 solid run has emitted a member, so the next
+    /// compressed member is flagged as a chain continuation (`FHD_SOLID`).
+    pub rar4_solid_run_has_member: bool,
     /// Per-archive compression thread count (`-mt`); `None` = process-global
     /// default. The compression pool is selected per thread count, so
     /// concurrent archives with different values never interfere.
@@ -172,6 +187,8 @@ impl Default for WriteState {
             solid_reset: crate::options::SolidReset::Continuous,
             last_solid_ext: None,
             encoder_state: None,
+            rar4_solid_encoder: None,
+            rar4_solid_run_has_member: false,
             compression_threads: None,
             dict_size_log: None,
             dict_size_bytes: None,
@@ -208,6 +225,12 @@ pub struct RarArchive {
     /// Byte offset where the RAR5 signature begins (0 for plain archives,
     /// >0 for SFX archives whose stub precedes the archive).
     pub(crate) sfx_offset: u64,
+    /// Whether the archive uses the legacy RAR 1.5–4.x container (vs RAR5).
+    pub(crate) rar4: bool,
+    /// The legacy main header carried MHD_SOLID: pre-RAR3 codec members
+    /// (unp_ver < 29) chain by this archive-level flag + position, since
+    /// those codecs never write the per-file FHD_SOLID bit.
+    pub(crate) rar4_solid_archive: bool,
     /// Password for encrypted archives.
     pub(crate) password: Option<String>,
     /// Encrypt archive headers (file names/structure hidden) — RAR5
@@ -332,6 +355,8 @@ impl RarArchive {
             mode,
             entries: Vec::new(),
             sfx_offset: 0,
+            rar4: false,
+            rar4_solid_archive: false,
             stream: None,
             password,
             header_encryption: false,
@@ -807,6 +832,48 @@ impl RarArchive {
     /// Validate options and build the archive state (without opening the
     /// stream).
     fn new_with_options(path: PathBuf, opts: crate::options::CreateOptions) -> RarResult<Self> {
+        let is_rar4 = opts.format_version == ArchiveVersion::Rar40;
+        if is_rar4 {
+            // RAR4 does not support these RAR5-specific features.
+            if opts.quick_open {
+                return Err(RarError::Unsupported(
+                    "quick-open is not supported for RAR4 archives".into(),
+                ));
+            }
+            if opts.blake2 {
+                return Err(RarError::Unsupported(
+                    "BLAKE2sp hashes are not supported for RAR4 archives".into(),
+                ));
+            }
+            // Inline recovery records are now supported on single-volume
+            // RAR4 archives too (the NEWSUB 0x7a form WinRAR writes); the
+            // multi-volume rejection below still applies, matching WinRAR.
+            if opts.recovery_percent.is_some() && opts.volume_size.is_some() {
+                return Err(RarError::Unsupported(
+                    "recovery records are not supported for multi-volume archives".into(),
+                ));
+            }
+            if opts.recovery_volumes_percent.is_some() || opts.recovery_volume_count.is_some() {
+                return Err(RarError::Unsupported(
+                    "recovery volumes are not supported for RAR4 archives".into(),
+                ));
+            }
+            if opts.save_owner {
+                return Err(RarError::Unsupported(
+                    "owner/group records are not supported for RAR4 archives".into(),
+                ));
+            }
+            if opts.save_streams {
+                return Err(RarError::Unsupported(
+                    "NTFS stream records are not supported for RAR4 archives".into(),
+                ));
+            }
+            if opts.dict_size_bytes.is_some() {
+                return Err(RarError::Unsupported(
+                    "RAR4 does not support RAR7 dictionary sizes".into(),
+                ));
+            }
+        }
         if opts.encrypt_headers && opts.password.as_deref().is_none_or(|pw| pw.is_empty()) {
             return Err(RarError::Encrypted(
                 "header encryption requires a password".into(),
@@ -838,6 +905,8 @@ impl RarArchive {
             mode: Mode::Write,
             entries: Vec::new(),
             sfx_offset: 0,
+            rar4: is_rar4,
+            rar4_solid_archive: false,
             stream: None,
             password: opts.password,
             header_encryption: opts.encrypt_headers,
@@ -855,6 +924,8 @@ impl RarArchive {
                 solid_reset: opts.solid_reset,
                 last_solid_ext: None,
                 encoder_state: None,
+                rar4_solid_encoder: None,
+                rar4_solid_run_has_member: false,
                 compression_threads: opts.threads,
                 dict_size_log: opts.dict_size_log,
                 dict_size_bytes: opts.dict_size_bytes,

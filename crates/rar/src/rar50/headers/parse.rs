@@ -347,6 +347,9 @@ impl FileHeader {
             owner,
             group,
             version,
+            unp_ver: 0,
+            salt: None,
+            legacy_head_crc: None,
         })
     }
 }
