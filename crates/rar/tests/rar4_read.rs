@@ -342,8 +342,6 @@ fn rar4_multivolume_sets_decode() {
 
 // ── RAR 1.5 (unp_ver 15, from the rars fixture corpus) ───────────────────
 
-#[test]
-#[test]
 /// Below `UnpVer` 20 the per-file FHD_SOLID bit is never written (and is
 /// ignored when present): a solid run is anchored by the archive-level
 /// MHD_SOLID flag plus member position. This crafted fixture is a solid
@@ -363,6 +361,7 @@ fn rar4_solid15_chain_ignores_cleared_fhd_solid() {
     assert_eq!(a, b, "both solid members share the same window content");
 }
 
+#[test]
 fn rar4_rar154_fixtures_decode() {
     // RAR 1.5.4-era archives: normal compression (incl. a 17-file doc set),
     // DOS vs long file names, and a solid-flagged archive whose single

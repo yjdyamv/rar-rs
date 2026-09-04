@@ -2935,7 +2935,7 @@ fn we_create_rar4_solid_ppmd_text_winrar_valid() {
     }
 
     let arc = dir.path().join("solidppmd.rar");
-    let mut args = vec!["a", "-s", "-ma4", "-m5", "-idq"];
+    let args = vec!["a", "-s", "-ma4", "-m5", "-idq"];
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rar"));
     cmd.args(&args).arg(&arc).current_dir(dir.path());
     for i in 1..=4 {
