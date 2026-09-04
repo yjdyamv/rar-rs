@@ -1346,7 +1346,6 @@ fn audio_decode(data: &[u8], channels: usize) -> Res<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn huffman_roundtrip_table_build() {
         // Uniform 2-bit code over four symbols: canonical codes 00/01/10/11.

@@ -697,6 +697,7 @@ fn encode_code(table: &EncodeTable, symbol: usize) -> RarResult<(u32, u8)> {
 fn encode_member_inner(
     input: &[u8],
     history: &[u8],
+    initial_filters: &[Vec<u8>],
     options: EncodeOptions,
     more_blocks_follow: bool,
     previous_levels: &mut [u8; TABLE_COUNT],
@@ -709,6 +710,7 @@ fn encode_member_inner(
     let mut offset_frequencies = vec![0usize; OFFSET_COUNT];
     let mut low_offset_frequencies = [0usize; LOW_OFFSET_COUNT];
     let mut length_frequencies = vec![0usize; LENGTH_COUNT];
+    main_frequencies[257] += initial_filters.len();
     let mut match_state = EncoderMatchState::default();
     for token in &tokens {
         match *token {
@@ -825,6 +827,17 @@ fn encode_member_inner(
         }
     }
 
+    // ── VM filter records (main symbol 257) ─────────────────────────────
+    // Announced at the head of the block whose range they start in, before
+    // any token, so the decoder has them queued when the range arrives.
+    for filter in initial_filters {
+        let (code, cl) = encode_code(&main_codes, 257)?;
+        bits.write_bits(code, cl);
+        for &byte in filter {
+            bits.write_bits(u32::from(byte), 8);
+        }
+    }
+
     // ── Write tokens ─────────────────────────────────────────────────────
     let mut match_state = EncoderMatchState::default();
     for token in tokens {
@@ -915,7 +928,7 @@ fn encode_member_with_options_impl(
     {
         return encode_member_blocks(input, history, options, block_size, levels, progress);
     }
-    encode_member_inner(input, history, options, false, levels, progress)
+    encode_member_inner(input, history, &[], options, false, levels, progress)
 }
 
 fn encode_member_blocks(
@@ -940,6 +953,7 @@ fn encode_member_blocks(
         out.extend_from_slice(&encode_member_inner(
             chunk,
             &local_history,
+            &[],
             options,
             index + 1 < block_count,
             levels,
@@ -1108,6 +1122,330 @@ pub(crate) fn encode_ppmd_member_packed(input: &[u8], lz_escapes: bool) -> RarRe
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  RAR 2.9 VM filter records (E8 / E8E9 / Delta) — Phase 3
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A filtered member is coded in two parts: the member's bytes are first
+// transformed (x86 call-relative / delta), then the LZ layer compresses the
+// transformed bytes while the transform itself travels as a VM-filter
+// record (LZ main symbol 257) at the head of the block the filter's range
+// starts in. The decoder replays the record and inverse-transforms. The
+// wire record layout mirrors `rar29.rs`'s `read_vm_code`/`parse_vm_code`
+// (ported from rars). E8/E8E9/Delta reuse the shared RAR5 transform
+// primitives (`codec/filters.rs`): the RAR3 standard filters are the same
+// transforms, recognised by bytecode fingerprint on the read side.
+
+/// RAR3 standard-filter bytecode for E8/E8E9/Delta (length + CRC32 = the
+/// fingerprints `rar29.rs::identify_standard_filter` recognises). Kept
+/// verbatim from rars so writer output and reader recognition use the same
+/// wire identity.
+const RAR3_E8_FILTER_BYTECODE: &[u8] = &[
+    0x97, 0x1b, 0x01, 0x28, 0x07, 0x06, 0x98, 0x08, 0x00, 0x00, 0x00, 0xd1, 0x3a, 0x10, 0x15, 0x92,
+    0xec, 0x50, 0xcb, 0x99, 0x20, 0xb9, 0x25, 0xf0, 0x29, 0x19, 0x15, 0x53, 0x03, 0x12, 0xae, 0x51,
+    0x10, 0x35, 0x59, 0x2b, 0x60, 0x04, 0x15, 0x6d, 0x40, 0x66, 0xab, 0x02, 0x34, 0x49, 0x04, 0x36,
+    0x02, 0x52, 0x3e, 0x97, 0x00,
+];
+const RAR3_E8E9_FILTER_BYTECODE: &[u8] = &[
+    0x84, 0x1b, 0x01, 0x28, 0x11, 0x10, 0x69, 0x80, 0x80, 0x00, 0x00, 0x0d, 0x13, 0xa1, 0x01, 0xc6,
+    0x89, 0xd2, 0x80, 0xac, 0x97, 0x62, 0x85, 0x5c, 0xc9, 0x05, 0xc9, 0x2f, 0x81, 0x48, 0xc8, 0xaa,
+    0x98, 0x18, 0x95, 0x72, 0x88, 0x81, 0xaa, 0xc9, 0x5b, 0x00, 0x20, 0xab, 0x6a, 0x03, 0x35, 0x58,
+    0x11, 0xa2, 0x48, 0x21, 0xb0, 0x12, 0x91, 0xf4, 0xb8,
+];
+const RAR3_DELTA_FILTER_BYTECODE: &[u8] = &[
+    0x2f, 0x01, 0x9a, 0x41, 0x80, 0xec, 0x27, 0x48, 0x2f, 0x09, 0x76, 0x6d, 0xd3, 0xea, 0x41, 0x5b,
+    0x59, 0x44, 0xe8, 0x17, 0x5c, 0xe1, 0x6c, 0x91, 0x4c, 0x4e, 0x3f, 0x77, 0x00,
+];
+
+/// One VM filter pass the LZ layer must announce: transform `block_size`
+/// bytes starting `block_start` bytes into the (transformed) member by
+/// replaying `code` with `init_regs`.
+struct OwnedVmFilterRecord {
+    block_start: usize,
+    block_size: usize,
+    init_regs: Vec<(usize, u32)>,
+    code: &'static [u8],
+}
+
+/// The RAR3 standard filters this encoder can emit. Audio/RGB/Itanium are
+/// read (their transforms are in `rar29.rs`) but not yet written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum Rar29FilterKind {
+    E8,
+    E8E9,
+    Delta { channels: usize },
+}
+
+/// Transform `data[range]` in place the way the RAR3 standard filter does
+/// (same primitives the RAR5 writer uses; verified identical to rars).
+/// Returns the record that lets a decoder undo it.
+fn apply_rar29_filter(
+    data: &mut [u8],
+    kind: Rar29FilterKind,
+    range: std::ops::Range<usize>,
+) -> OwnedVmFilterRecord {
+    let mut block = data[range.clone()].to_vec();
+    let (init_regs, code) = match kind {
+        Rar29FilterKind::E8 => {
+            crate::codec::filters::e8_encode(&mut block, range.start as u64, true);
+            (Vec::new(), RAR3_E8_FILTER_BYTECODE)
+        }
+        Rar29FilterKind::E8E9 => {
+            crate::codec::filters::e8_encode(&mut block, range.start as u64, false);
+            (Vec::new(), RAR3_E8E9_FILTER_BYTECODE)
+        }
+        Rar29FilterKind::Delta { channels } => {
+            block =
+                crate::codec::filters::delta_encode(&block, channels.min(u8::MAX as usize) as u8);
+            (vec![(0, channels as u32)], RAR3_DELTA_FILTER_BYTECODE)
+        }
+    };
+    data[range.clone()].copy_from_slice(&block);
+    OwnedVmFilterRecord {
+        block_start: range.start,
+        block_size: range.end - range.start,
+        init_regs,
+        code,
+    }
+}
+
+/// Split one filter range into VM-sized chunks (each standard program can
+/// only cover `MAX_VM_FILTER_BLOCK_SIZE` bytes per execution; delta chunks
+/// also keep whole channel groups). A trailing remainder too small for the
+/// filter's unit is left unfiltered.
+pub(crate) fn split_rar29_filter_range(
+    kind: Rar29FilterKind,
+    range: std::ops::Range<usize>,
+) -> Vec<std::ops::Range<usize>> {
+    const MAX_VM_FILTER_BLOCK_SIZE: usize = 128 * 1024;
+    let (unit, chunk_size) = match kind {
+        Rar29FilterKind::E8 | Rar29FilterKind::E8E9 => (4, MAX_VM_FILTER_BLOCK_SIZE),
+        Rar29FilterKind::Delta { channels } => {
+            let channels = channels.max(1);
+            let chunk = MAX_VM_FILTER_BLOCK_SIZE - (MAX_VM_FILTER_BLOCK_SIZE % channels);
+            (channels, chunk)
+        }
+    };
+    let mut out = Vec::new();
+    let mut start = range.start;
+    while start < range.end {
+        let end = (start + chunk_size).min(range.end);
+        if end - start < unit {
+            break;
+        }
+        out.push(start..end);
+        start = end;
+    }
+    out
+}
+
+/// Write an encoded u32 (2-bit width selector + value), mirroring
+/// `rar29.rs::read_encoded_u32` for the widths this encoder emits (16..255
+/// never uses the decoder's negative-range branch, and nothing here emits
+/// 256..=65535 except via the 16-bit selector).
+fn write_encoded_u32(bits: &mut crate::codec::bitstream::BitWriter, value: u32) {
+    if value < 16 {
+        bits.write_bits(0, 2);
+        bits.write_bits(value, 4);
+    } else if value < 256 {
+        bits.write_bits(1, 2);
+        bits.write_bits(value, 8);
+    } else if value <= 0xffff {
+        bits.write_bits(2, 2);
+        bits.write_bits(value, 16);
+    } else {
+        bits.write_bits(3, 2);
+        bits.write_bits(value >> 16, 16);
+        bits.write_bits(value & 0xffff, 16);
+    }
+}
+
+/// Encode one VM filter record (rars `encode_vm_filter_record_inner`):
+/// `first_byte` flags + body, with the record length packed into the low
+/// bits of `first_byte` and optional extension bytes.
+fn encode_vm_filter_record_inner(
+    record: &OwnedVmFilterRecord,
+    program_selector: u32,
+    include_code: bool,
+) -> RarResult<Vec<u8>> {
+    if record.block_size == 0 {
+        return Err(enc_err("RAR 2.9 VM filter block is empty"));
+    }
+    if include_code && record.code.is_empty() {
+        return Err(enc_err("RAR 2.9 VM filter bytecode is empty"));
+    }
+
+    let mut body = crate::codec::bitstream::BitWriter::new();
+    write_encoded_u32(&mut body, program_selector);
+    write_encoded_u32(
+        &mut body,
+        u32::try_from(record.block_start)
+            .map_err(|_| enc_err("RAR 2.9 VM block start overflows"))?,
+    );
+    write_encoded_u32(
+        &mut body,
+        u32::try_from(record.block_size).map_err(|_| enc_err("RAR 2.9 VM block size overflows"))?,
+    );
+    if !record.init_regs.is_empty() {
+        let mut mask = 0u32;
+        for &(index, _) in &record.init_regs {
+            if index >= 7 {
+                return Err(enc_err("RAR 2.9 VM init register index is invalid"));
+            }
+            mask |= 1 << index;
+        }
+        body.write_bits(mask, 7);
+        for index in 0..7 {
+            if let Some((_, value)) = record.init_regs.iter().find(|(reg, _)| *reg == index) {
+                write_encoded_u32(&mut body, *value);
+            }
+        }
+    }
+    if include_code {
+        write_encoded_u32(
+            &mut body,
+            u32::try_from(record.code.len())
+                .map_err(|_| enc_err("RAR 2.9 VM code size overflows"))?,
+        );
+        for &byte in record.code {
+            body.write_bits(u32::from(byte), 8);
+        }
+    }
+    let body = body.into_bytes();
+
+    let mut out = Vec::new();
+    let mut first: u8 = 0x80 | 0x20;
+    if !record.init_regs.is_empty() {
+        first |= 0x10;
+    }
+    match body.len() {
+        1..=6 => first |= (body.len() as u8) - 1,
+        7..=262 => {
+            first |= 6;
+            out.push((body.len() - 7) as u8);
+        }
+        263..=65535 => {
+            first |= 7;
+            out.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        }
+        _ => return Err(enc_err("RAR 2.9 VM filter record is too large")),
+    }
+    out.insert(0, first);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Encode the filter records whose range starts in `[base, base + window)`,
+/// keeping the shared program table across blocks (a program is spelled out
+/// once; later blocks reference it by selector).
+fn encoded_filter_records_at(
+    filters: &[&OwnedVmFilterRecord],
+    base: usize,
+    window: usize,
+    programs: &mut Vec<&'static [u8]>,
+) -> RarResult<Vec<Vec<u8>>> {
+    let mut records = Vec::with_capacity(filters.len());
+    for filter in filters {
+        let existing = (filter.code != RAR3_DELTA_FILTER_BYTECODE)
+            .then(|| programs.iter().position(|&code| code == filter.code))
+            .flatten();
+        let (program_selector, include_code) = match existing {
+            Some(index) => (u32::try_from(index + 1).map_err(enc_int)?, false),
+            None => {
+                let selector = if programs.is_empty() {
+                    0
+                } else {
+                    u32::try_from(programs.len() + 1).map_err(enc_int)?
+                };
+                programs.push(filter.code);
+                (selector, true)
+            }
+        };
+        let block_start = filter
+            .block_start
+            .checked_sub(base)
+            .ok_or_else(|| enc_err("RAR 2.9 VM filter starts before its block"))?;
+        if block_start >= window {
+            return Err(enc_err(
+                "RAR 2.9 VM filter starts further past its block than the window can express",
+            ));
+        }
+        // The wire record carries the range RELATIVE to its own block; the
+        // decoder adds its current output position back on.
+        let mut adjusted = OwnedVmFilterRecord {
+            block_start,
+            block_size: filter.block_size,
+            init_regs: filter.init_regs.clone(),
+            code: filter.code,
+        };
+        records.push(encode_vm_filter_record_inner(
+            &adjusted,
+            program_selector,
+            include_code,
+        )?);
+        adjusted.init_regs.clear();
+    }
+    Ok(records)
+}
+
+fn enc_int(_: std::num::TryFromIntError) -> RarError {
+    enc_err("RAR 2.9 VM program index overflows")
+}
+
+/// Code a filtered member: transform `input` under `filters`, then LZ-code
+/// the transformed bytes block by block, announcing each filter record at
+/// the head of the block its range starts in. The caller hands back the
+/// transformed bytes too, since those are what a solid chain's window holds.
+fn encode_filtered_member_blocks(
+    data: &[u8],
+    history: &[u8],
+    filters: &[OwnedVmFilterRecord],
+    options: EncodeOptions,
+    levels: &mut [u8; TABLE_COUNT],
+) -> RarResult<(Vec<u8>, Vec<u8>)> {
+    let block_size = options
+        .block_size
+        .filter(|&size| size != 0)
+        .unwrap_or(data.len().max(1))
+        .min(options.max_match_distance.max(1))
+        .max(1);
+    let window = options.max_match_distance.max(1);
+    let mut inner = options;
+    inner.block_size = None;
+    let mut programs: Vec<&'static [u8]> = Vec::new();
+    let mut out = Vec::new();
+    let mut local_history = history[history.len().saturating_sub(MAX_HISTORY)..].to_vec();
+    let mut base = 0usize;
+    while base < data.len().max(1) {
+        let end = (base + block_size).min(data.len());
+        let chunk = &data[base..end];
+        let in_block: Vec<&OwnedVmFilterRecord> = filters
+            .iter()
+            .filter(|record| record.block_start >= base && record.block_start < end.max(base + 1))
+            .collect();
+        let records = encoded_filter_records_at(&in_block, base, window, &mut programs)?;
+        out.extend_from_slice(&encode_member_inner(
+            chunk,
+            &local_history,
+            &records,
+            inner,
+            end < data.len(),
+            levels,
+            None,
+        )?);
+        local_history.extend_from_slice(chunk);
+        let keep_from = local_history.len().saturating_sub(MAX_HISTORY);
+        if keep_from != 0 {
+            local_history.drain(..keep_from);
+        }
+        base = end;
+    }
+    // `data` is already the transformed bytes (the caller transformed it
+    // before calling); the solid chain must remember them, not the original.
+    Ok((out, data.to_vec()))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Unpack29Encoder — public API
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1173,6 +1511,64 @@ impl Unpack29Encoder {
         encode_ppmd_member_packed(input, false)
     }
 
+    /// Code one member through the RAR3 standard filter `kind` over
+    /// `range`, then LZ-code the transformed bytes with the filter records
+    /// announced at the head of the block each range starts in. The window
+    /// is advanced with the TRANSFORMED bytes (what a decoder holds).
+    /// `None` ranges cover the whole member.
+    #[allow(dead_code)] // single-range convenience; the ranges variant is the production path
+    pub fn encode_member_with_filter(
+        &mut self,
+        input: &[u8],
+        kind: Rar29FilterKind,
+        range: Option<std::ops::Range<usize>>,
+    ) -> RarResult<Vec<u8>> {
+        let range = range.unwrap_or(0..input.len());
+        let mut data = input.to_vec();
+        let mut filters = Vec::new();
+        for chunk in split_rar29_filter_range(kind, range) {
+            filters.push(apply_rar29_filter(&mut data, kind, chunk));
+        }
+        let (packed, transformed) = encode_filtered_member_blocks(
+            &data,
+            &self.history,
+            &filters,
+            self.options,
+            &mut self.levels,
+        )?;
+        self.remember(&transformed);
+        Ok(packed)
+    }
+
+    /// Code one member through a list of same-kind filter ranges (e.g. every
+    /// x86 cluster the auto-scanner found), sharing one program record.
+    pub fn encode_member_with_filter_ranges(
+        &mut self,
+        input: &[u8],
+        kind: Rar29FilterKind,
+        ranges: &[std::ops::Range<usize>],
+    ) -> RarResult<Vec<u8>> {
+        if ranges.is_empty() {
+            return self.encode_member(input);
+        }
+        let mut data = input.to_vec();
+        let mut filters = Vec::new();
+        for range in ranges {
+            for chunk in split_rar29_filter_range(kind, range.clone()) {
+                filters.push(apply_rar29_filter(&mut data, kind, chunk));
+            }
+        }
+        let (packed, transformed) = encode_filtered_member_blocks(
+            &data,
+            &self.history,
+            &filters,
+            self.options,
+            &mut self.levels,
+        )?;
+        self.remember(&transformed);
+        Ok(packed)
+    }
+
     fn remember(&mut self, input: &[u8]) {
         self.history.extend_from_slice(input);
         let keep_from = self.history.len().saturating_sub(MAX_HISTORY);
@@ -1189,26 +1585,6 @@ impl Unpack29Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sample_text() -> Vec<u8> {
-        // Repetitive prose with enough variation to exercise escapes and
-        // literals; a good PPMd candidate.
-        let mut out = Vec::with_capacity(220_000);
-        let sentences = [
-            "The quick brown fox jumps over the lazy dog. ",
-            "Pack my box with five dozen liquor jugs. ",
-            "How vexingly quick daft zebras jump! ",
-            "Sphinx of black quartz, judge my vow. ",
-        ];
-        let mut n = 0u32;
-        while out.len() < 200_000 {
-            out.extend_from_slice(
-                format!("paragraph {n:05}: {}\n", sentences[(n % 4) as usize]).as_bytes(),
-            );
-            n += 1;
-        }
-        out
-    }
 
     #[test]
     fn ppmd_roundtrip_text_hybrid() {
@@ -1264,6 +1640,131 @@ mod tests {
         let packed = encode_ppmd_member_packed(&[], true).unwrap();
         let mut decoder = crate::codec::rar29::Rar29Decoder::new();
         assert_eq!(decoder.decode_member(&packed, 0).unwrap(), Vec::<u8>::new());
+    }
+
+    fn sample_text() -> Vec<u8> {
+        // Repetitive prose with enough variation to exercise escapes and
+        // literals; a good PPMd candidate.
+        let mut out = Vec::with_capacity(220_000);
+        let sentences = [
+            "The quick brown fox jumps over the lazy dog. ",
+            "Pack my box with five dozen liquor jugs. ",
+            "How vexingly quick daft zebras jump! ",
+            "Sphinx of black quartz, judge my vow. ",
+        ];
+        let mut n = 0u32;
+        while out.len() < 200_000 {
+            out.extend_from_slice(
+                format!("paragraph {n:05}: {}\n", sentences[(n % 4) as usize]).as_bytes(),
+            );
+            n += 1;
+        }
+        out
+    }
+
+    /// Synthetic x86-ish data: a scatter of E8 (call) opcodes whose 4-byte
+    /// operands are small relative offsets (the shape the E8 filter makes
+    /// compressible). After `e8_encode` the operands become absolute-ish
+    /// values the filter record can reverse.
+    fn x86_like_data(blocks: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(blocks * 256);
+        let mut seed = 0xDEADBEEFu32;
+        for _ in 0..blocks {
+            for _ in 0..64 {
+                data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+            }
+            // A handful of E8 calls with small relative targets.
+            for k in 0..6u32 {
+                data.push(0xE8);
+                let target = (k * 0x100 + 0x40) as u32;
+                data.extend_from_slice(&target.to_le_bytes());
+                data.extend_from_slice(&[0x90, 0x90]);
+            }
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        }
+        data
+    }
+
+    #[test]
+    fn e8_filter_roundtrips_via_decoder() {
+        let input = x86_like_data(2000);
+        let mut encoder = Unpack29Encoder::with_options(options_for_level(3));
+        let packed = encoder
+            .encode_member_with_filter(&input, Rar29FilterKind::E8, None)
+            .unwrap();
+        // The filtered member must be plainly smaller than the raw input
+        // (E8 zeros dominate after the transform).
+        assert!(
+            packed.len() < input.len() / 2,
+            "E8-filtered member should compress hard: {} -> {}",
+            input.len(),
+            packed.len()
+        );
+        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let out = decoder
+            .decode_member(&packed, input.len() as u64)
+            .unwrap_or_else(|e| panic!("E8 filtered decode: {e:?}"));
+        assert_eq!(out, input, "E8 filter roundtrip mismatch");
+    }
+
+    #[test]
+    fn e8e9_filter_roundtrips_via_decoder() {
+        let input = x86_like_data(1500);
+        let mut encoder = Unpack29Encoder::with_options(options_for_level(3));
+        let packed = encoder
+            .encode_member_with_filter(&input, Rar29FilterKind::E8E9, None)
+            .unwrap();
+        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        assert_eq!(
+            decoder.decode_member(&packed, input.len() as u64).unwrap(),
+            input,
+            "E8E9 filter roundtrip mismatch"
+        );
+    }
+
+    #[test]
+    fn delta_filter_roundtrips_via_decoder() {
+        // 16-bit stereo samples (little-endian pairs with slow deltas) — the
+        // classic delta-filter payload.
+        let mut input = Vec::with_capacity(120_000);
+        let mut left = 0i16;
+        let mut right = 0i16;
+        let mut seed = 12345u32;
+        while input.len() < 100_000 {
+            left = left.wrapping_add(((seed >> 16) & 0xff) as i16 - 100);
+            right = right.wrapping_add((((seed >> 8) & 0xff) as i16) - 120);
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            input.extend_from_slice(&left.to_le_bytes());
+            input.extend_from_slice(&right.to_le_bytes());
+        }
+        let mut encoder = Unpack29Encoder::with_options(options_for_level(3));
+        let packed = encoder
+            .encode_member_with_filter(&input, Rar29FilterKind::Delta { channels: 4 }, None)
+            .unwrap();
+        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        assert_eq!(
+            decoder.decode_member(&packed, input.len() as u64).unwrap(),
+            input,
+            "delta filter roundtrip mismatch"
+        );
+    }
+
+    #[test]
+    fn filter_range_partial_roundtrips() {
+        // Only the middle of the member is x86 code; the tail stays literal.
+        let mut input = x86_like_data(1000);
+        input.extend_from_slice(&[0u8; 5000]);
+        let range = 0..input.len() - 5000;
+        let mut encoder = Unpack29Encoder::with_options(options_for_level(3));
+        let packed = encoder
+            .encode_member_with_filter(&input, Rar29FilterKind::E8, Some(range))
+            .unwrap();
+        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        assert_eq!(
+            decoder.decode_member(&packed, input.len() as u64).unwrap(),
+            input,
+            "partial-range E8 filter roundtrip mismatch"
+        );
     }
 
     #[test]

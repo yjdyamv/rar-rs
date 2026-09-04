@@ -2843,3 +2843,70 @@ fn rar4_recovery_record_interops_with_winrar() {
         );
     }
 }
+
+/// RAR4 auto filter (`-ma4`): a delta-transformable member (16-bit stereo
+/// samples) must fire the RAR3 DELTA filter record, and WinRAR's UnRAR must
+/// decode the filtered member byte-identically. (WinRAR 6.23's RAR4 writer
+/// no longer emits VM filters, so this is a one-way interop check.)
+#[test]
+fn we_create_rar4_delta_filtered_member_winrar_valid() {
+    let dir = temp_dir();
+    // 16-bit stereo random-walk samples: channels = 4 (2 ch x 2 bytes).
+    let mut content = Vec::with_capacity(600_000);
+    let mut l = 0i16;
+    let mut r = 0i16;
+    let mut seed = 42u32;
+    while content.len() < 600_000 {
+        l = l.wrapping_add(((seed >> 16) & 0x3f) as i16 - 30);
+        r = r.wrapping_add(((seed >> 8) & 0x3f) as i16 - 20);
+        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+        content.extend_from_slice(&l.to_le_bytes());
+        content.extend_from_slice(&r.to_le_bytes());
+    }
+    let src = dir.path().join("audio.bin");
+    std::fs::write(&src, &content).unwrap();
+
+    let arc = dir.path().join("delta.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m3", "-idq"])
+        .arg(&arc)
+        .arg("audio.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 (delta) failed:\n{out}");
+
+    // The filter must have won decisively: the archive is far smaller than
+    // the raw samples (the filter-record bytes sit unaligned in the
+    // bitstream, so size is the reliable fingerprint).
+    let raw = std::fs::read(&arc).unwrap();
+    assert!(
+        (raw.len() as u64) * 3 < content.len() as u64,
+        "auto delta filter must have fired (member barely compressed)"
+    );
+
+    // Our own reader round-trips the filtered member.
+    {
+        let mut ar = RarArchive::open(&arc).unwrap();
+        assert_eq!(ar.read("audio.bin").unwrap(), content);
+    }
+
+    // WinRAR decodes it byte-identically.
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar).args(["t", "-idq"]).arg(&arc));
+        assert!(
+            ok,
+            "UnRAR t rejected our delta-filtered RAR4 archive:\n{out}"
+        );
+        let out_dir = dir.path().join("out_delta");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x failed on our delta-filtered archive:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("audio.bin")),
+            file_sha256(&src),
+            "WinRAR decoded different bytes from our delta-filtered member"
+        );
+    }
+}

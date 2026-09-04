@@ -618,15 +618,19 @@ impl RarArchive {
             self.maybe_reset_solid_for_extension(&name);
         }
         let (mut packed, method) = if (1..=5).contains(&level) {
-            use crate::codec::rar29_encoder::{Unpack29Encoder, options_for_level};
+            use crate::codec::rar29_encoder::{
+                Rar29FilterKind, Unpack29Encoder, options_for_level,
+            };
             let options = options_for_level(level);
-            let lz = if self.write_ctx().solid_mode {
+            let solid = self.write_ctx().solid_mode;
+            let lz = if solid {
                 // Solid: reuse the persistent encoder so its sliding window
                 // and Huffman table state carry across the members of the
                 // run (this is what makes a real -ms archive compress better
-                // than independent members). PPMd stays out of solid runs
-                // (a continuing model is a later phase); solid RAR4 members
-                // are LZ-only, which is also all WinRAR 6.23 produces.
+                // than independent members). Auto-filters stay out of solid
+                // runs (a filtered member's window holds the transformed
+                // bytes, a later phase); solid RAR4 members are plain LZ,
+                // which is also all WinRAR 6.23 produces.
                 let encoder = self
                     .write_ctx_mut()
                     .rar4_solid_encoder
@@ -637,8 +641,47 @@ impl RarArchive {
             };
             let mut best_len = lz.len();
             let mut best: (Vec<u8>, u8) = (lz, crate::rar40::RAR4_METHOD_STORE + level);
+
+            if !solid && !data.is_empty() {
+                // Auto filters on binary members (any level): every candidate
+                // is measured with its own throwaway encoder (no chain state).
+                // The RAR5 scanners gate the search — text never produces x86
+                // clusters or structured deltas.
+                let candidates = {
+                    let mut list: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> = Vec::new();
+                    let e8e9 = crate::codec::filters::auto_x86_filter_ranges(&data, true);
+                    if !e8e9.is_empty() {
+                        list.push((Rar29FilterKind::E8E9, e8e9));
+                    }
+                    let e8 = crate::codec::filters::auto_x86_filter_ranges(&data, false);
+                    if !e8.is_empty() {
+                        list.push((Rar29FilterKind::E8, e8));
+                    }
+                    if let Some(channels) = crate::codec::filters::auto_delta_filter_channels(&data)
+                    {
+                        list.push((
+                            Rar29FilterKind::Delta {
+                                channels: channels as usize,
+                            },
+                            std::iter::once(0..data.len()).collect(),
+                        ));
+                    }
+                    list
+                };
+                for (kind, ranges) in candidates {
+                    let Ok(candidate) = Unpack29Encoder::with_options(options)
+                        .encode_member_with_filter_ranges(&data, kind, &ranges)
+                    else {
+                        continue;
+                    };
+                    if candidate.len() < best_len {
+                        best_len = candidate.len();
+                        best = (candidate, crate::rar40::RAR4_METHOD_STORE + level);
+                    }
+                }
+            }
             if level >= 4
-                && !self.write_ctx().solid_mode
+                && !solid
                 && !data.is_empty()
                 && let Ok(ppmd) = Unpack29Encoder::with_options(options).encode_ppmd_member(&data)
                 && ppmd.len() < best_len

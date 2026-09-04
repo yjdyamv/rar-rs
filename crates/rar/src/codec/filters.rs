@@ -71,7 +71,7 @@ fn delta_decode(data: &[u8], channels: u8) -> Vec<u8> {
     result
 }
 
-fn delta_encode(data: &[u8], channels: u8) -> Vec<u8> {
+pub(crate) fn delta_encode(data: &[u8], channels: u8) -> Vec<u8> {
     if channels < 1 {
         return data.to_vec();
     }
@@ -209,7 +209,7 @@ fn e8_decode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
     data.to_vec()
 }
 
-fn e8_encode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
+pub(crate) fn e8_encode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
     let n = data.len();
     if n < 5 {
         return data.to_vec();
