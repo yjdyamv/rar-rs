@@ -2440,3 +2440,93 @@ fn rar5_huge_single_file_decodes_with_winrar() {
         );
     }
 }
+
+/// We create a RAR4 (`-ma4`) archive containing a directory tree — nested
+/// directories, an empty directory, and a non-ASCII directory name — and
+/// both our extractor and WinRAR's UnRAR must see the same tree: the empty
+/// directory must come back as a real directory (RAR4 encodes directories
+/// in the FILE_HEAD window bits, not just the host attribute), and every
+/// member's bytes must match the source.
+#[test]
+fn we_create_rar4_directory_trees_winrar_valid() {
+    let dir = temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("sub/deep")).unwrap();
+    std::fs::create_dir(src.join("sub/emptydir")).unwrap();
+    std::fs::create_dir(src.join("资料")).unwrap();
+    std::fs::write(src.join("top.txt"), b"top-level file").unwrap();
+    std::fs::write(src.join("sub/mid.txt"), b"mid level").unwrap();
+    std::fs::write(src.join("sub/deep/leaf.txt"), b"leaf content here").unwrap();
+    std::fs::write(src.join("资料/note.txt"), b"unicode note").unwrap();
+
+    let arc = dir.path().join("tree4.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m3", "-idq"])
+        .arg(&arc)
+        .arg("src")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma4 (directory tree) failed:\n{out}");
+
+    // Our own reader: exact UTF-8 names, directory flags, contents.
+    {
+        let mut ar = RarArchive::open(&arc).unwrap();
+        let mut names: Vec<String> = ar.namelist().into_iter().map(str::to_string).collect();
+        names.sort();
+        let mut expected: Vec<String> = [
+            "src",
+            "src/sub",
+            "src/sub/deep",
+            "src/sub/emptydir",
+            "src/sub/deep/leaf.txt",
+            "src/sub/mid.txt",
+            "src/top.txt",
+            "src/资料",
+            "src/资料/note.txt",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        expected.sort();
+        assert_eq!(names, expected);
+        for name in ["src", "src/sub/emptydir", "src/资料"] {
+            assert!(ar.get_entry(name).unwrap().is_dir(), "{name} must be a dir");
+        }
+        for (name, bytes) in [
+            ("src/top.txt", b"top-level file".as_slice()),
+            ("src/sub/deep/leaf.txt", b"leaf content here".as_slice()),
+            ("src/资料/note.txt", b"unicode note".as_slice()),
+        ] {
+            assert_eq!(&ar.read(name).unwrap(), bytes);
+        }
+    }
+
+    // WinRAR's UnRAR must accept the archive and reproduce the tree.
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar).args(["t", "-idq"]).arg(&arc));
+        assert!(ok, "UnRAR t rejected our -ma4 directory archive:\n{out}");
+
+        let out_dir = dir.path().join("out_unrar");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x failed on our -ma4 directory archive:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("src/sub/deep/leaf.txt")),
+            file_sha256(&src.join("sub/deep/leaf.txt"))
+        );
+        assert_eq!(
+            file_sha256(&out_dir.join("src/资料/note.txt")),
+            file_sha256(&src.join("资料/note.txt"))
+        );
+        assert!(
+            out_dir.join("src/sub/emptydir").is_dir(),
+            "the empty directory must extract as a directory"
+        );
+        assert!(
+            out_dir.join("src/资料").is_dir(),
+            "the unicode directory must extract as a directory"
+        );
+    }
+}

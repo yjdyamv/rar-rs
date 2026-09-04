@@ -663,9 +663,10 @@ impl RarArchive {
                 unp_ver: 29,
                 method,
                 name: encoded_name,
+                attr: 0x20, // archive bit: regular file
                 salt: None,
                 ext_time: None,
-                dict_size: 0x40_0000,
+                window_bits: 6, // 4 MiB dictionary
             };
             let hdr = build_file_header(&params)?;
             let stream = this.stream.as_mut().unwrap();
@@ -831,7 +832,7 @@ impl RarArchive {
         self.check_cancel()?;
         let path = path.as_ref();
         self.reset_solid_chain();
-        let name = arcname.replace('\\', "/").trim_end_matches('/').to_string() + "/";
+        let name = arcname.replace('\\', "/").trim_end_matches('/').to_string();
 
         let meta = fs::metadata(path)?;
         let mtime = meta
@@ -840,6 +841,10 @@ impl RarArchive {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as u32;
+
+        if self.rar4 {
+            return self.write_rar4_dir_entry(&name, mtime);
+        }
 
         #[cfg(unix)]
         let attrs = {
@@ -850,7 +855,7 @@ impl RarArchive {
         let attrs = 0o040755u64;
 
         let fh = FileHeader {
-            name: name.clone(),
+            name: format!("{name}/"),
             attributes: attrs,
             mtime,
             host_os: OS_UNIX,
@@ -871,6 +876,69 @@ impl RarArchive {
         Ok(())
     }
 
+    /// Write one RAR4 directory FILE_HEAD member (WinRAR convention: zero
+    /// packed/unpacked sizes, CRC 0, `attr = 0x10`, `unp_ver 20`, name
+    /// without a trailing slash; directories carry no data payload).
+    fn write_rar4_dir_entry(&mut self, name: &str, mtime_secs: u32) -> RarResult<()> {
+        use crate::rar40::write::{
+            FileHeaderParams, build_file_header, encode_file_name, unix_to_dos_time,
+        };
+        let (encoded_name, name_flags) = encode_file_name(name);
+        let params = FileHeaderParams {
+            flags: name_flags,
+            packed_size: 0,
+            unpacked_size: 0,
+            host_os: 0,
+            file_crc: 0,
+            file_time: unix_to_dos_time(mtime_secs),
+            unp_ver: 20,
+            method: crate::rar40::RAR4_METHOD_STORE,
+            name: &encoded_name,
+            attr: 0x10,
+            // All window bits set: the RAR4 directory marker that UnRAR and
+            // WinRAR use to classify a member as a directory (files carry a
+            // 0..=6 dictionary-size value instead).
+            window_bits: 7,
+            salt: None,
+            ext_time: None,
+        };
+        let hdr = build_file_header(&params)?;
+        // Multi-volume: roll to a volume with room for this head plus the
+        // 7-byte end-of-archive block (same rule as file members).
+        if let Some(volume_size) = self.write_ctx().volume_size {
+            loop {
+                let used = self.write_ctx().volume_bytes_written;
+                if volume_size.saturating_sub(used) > 7 + hdr.len() as u64 {
+                    break;
+                }
+                self.start_next_volume()?;
+            }
+        }
+        let stream = self.stream.as_mut().unwrap();
+        stream.write_all(&hdr)?;
+        self.write_ctx_mut().volume_bytes_written += hdr.len() as u64;
+        let head_crc = u16::from_le_bytes([hdr[0], hdr[1]]);
+        self.entries.push(ArchiveEntry {
+            header: FileHeader {
+                name: name.to_string(),
+                unpacked_size: 0,
+                packed_size: 0,
+                attributes: 0x10,
+                mtime: mtime_secs,
+                crc32_val: Some(0),
+                comp_method: 0,
+                host_os: 0,
+                format_version: 4,
+                unp_ver: 20,
+                legacy_head_crc: Some(head_crc),
+                is_directory: true,
+                ..Default::default()
+            },
+            chunks: Vec::new(),
+        });
+        Ok(())
+    }
+
     fn add_directory(
         &mut self,
         path: &Path,
@@ -882,7 +950,7 @@ impl RarArchive {
         let name = arcname
             .map(|s| s.to_string())
             .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().into_owned());
-        let name = name.replace('\\', "/").trim_end_matches('/').to_string() + "/";
+        let name = name.replace('\\', "/").trim_end_matches('/').to_string();
 
         let meta = fs::metadata(path)?;
         let mtime = meta
@@ -892,32 +960,36 @@ impl RarArchive {
             .unwrap_or_default()
             .as_secs() as u32;
 
-        #[cfg(unix)]
-        let attrs = {
-            use std::os::unix::fs::MetadataExt;
-            meta.mode() as u64
-        };
-        #[cfg(not(unix))]
-        let attrs = 0o040755u64;
+        if self.rar4 {
+            self.write_rar4_dir_entry(&name, mtime)?;
+        } else {
+            #[cfg(unix)]
+            let attrs = {
+                use std::os::unix::fs::MetadataExt;
+                meta.mode() as u64
+            };
+            #[cfg(not(unix))]
+            let attrs = 0o040755u64;
 
-        let fh = FileHeader {
-            name: name.clone(),
-            attributes: attrs,
-            mtime,
-            host_os: OS_UNIX,
-            file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY,
-            is_directory: true,
-            ..Default::default()
-        };
+            let fh = FileHeader {
+                name: format!("{name}/"),
+                attributes: attrs,
+                mtime,
+                host_os: OS_UNIX,
+                file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY,
+                is_directory: true,
+                ..Default::default()
+            };
 
-        let hdr_bytes = fh.to_bytes();
-        self.write_block_header(&hdr_bytes)?;
-        self.write_ctx_mut().volume_bytes_written +=
-            self.on_disk_header_len(hdr_bytes.len() as u64);
-        self.entries.push(ArchiveEntry {
-            header: fh,
-            chunks: Vec::new(),
-        });
+            let hdr_bytes = fh.to_bytes();
+            self.write_block_header(&hdr_bytes)?;
+            self.write_ctx_mut().volume_bytes_written +=
+                self.on_disk_header_len(hdr_bytes.len() as u64);
+            self.entries.push(ArchiveEntry {
+                header: fh,
+                chunks: Vec::new(),
+            });
+        }
 
         if recursive {
             let mut children: Vec<_> = fs::read_dir(path)?.filter_map(|e| e.ok()).collect();
@@ -925,7 +997,11 @@ impl RarArchive {
 
             for child in children {
                 let child_path = child.path();
-                let child_name = format!("{}{}", name, child.file_name().to_string_lossy());
+                let child_name = if name.is_empty() {
+                    child.file_name().to_string_lossy().into_owned()
+                } else {
+                    format!("{name}/{}", child.file_name().to_string_lossy())
+                };
                 if child_path.is_dir() {
                     self.add_directory(&child_path, Some(&child_name), true, level)?;
                 } else {

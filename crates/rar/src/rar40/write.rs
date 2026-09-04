@@ -68,7 +68,7 @@ pub(crate) fn write_main_header(out: &mut impl std::io::Write, flags: u16) -> Ra
     Ok(())
 }
 
-// ── Dictionary size flags ───────────────────────────────────────────────────
+// ── Dictionary / directory window bits ─────────────────────────────────────
 
 /// Encode a dictionary size (in bytes) into the upper bits of the FILE_HEAD
 /// flags word (bits 5–7). Returns the flags-with-dict value.
@@ -93,6 +93,12 @@ pub(crate) fn dictionary_flags(size: usize) -> RarResult<u16> {
     Ok(bits << 5)
 }
 
+/// The flags value for a RAR4 directory member: bits 5–7 all set. UnRAR and
+/// WinRAR classify a member as a directory when the window bits equal this
+/// mask (`flags & 0xE0 == 0xE0`); host-specific file attributes are not
+/// consulted for RAR4 (see `rar15_40.rs` in the reference rars port).
+pub(crate) const DIRECTORY_WINDOW_BITS: u16 = 0x00E0;
+
 // ── File header ─────────────────────────────────────────────────────────────
 
 /// Parameters for building a FILE_HEAD block.
@@ -116,12 +122,17 @@ pub(crate) struct FileHeaderParams<'a> {
     pub method: u8,
     /// File name bytes (already encoded; use `encode_file_name` for Unicode).
     pub name: &'a [u8],
+    /// On-disk file attributes: `0x20` (archive) for regular files,
+    /// `0x10` (FILE_ATTRIBUTE_DIRECTORY) for directory members.
+    pub attr: u32,
+    /// Window-bits value (flags bits 5–7): 0..=6 encode a 64 KiB – 4 MiB
+    /// dictionary for compressed members; 7 marks a directory member
+    /// (see [`DIRECTORY_WINDOW_BITS`]).
+    pub window_bits: u8,
     /// Optional 8-byte salt for encrypted members.
     pub salt: Option<[u8; 8]>,
     /// Optional extended time field (FHD_EXTTIME).
     pub ext_time: Option<&'a [u8]>,
-    /// Dictionary size in bytes (encoded into flags bits 5–7).
-    pub dict_size: usize,
 }
 
 /// Build a FILE_HEAD block. Returns the serialized header bytes (without the
@@ -132,7 +143,7 @@ pub(crate) fn build_file_header(p: &FileHeaderParams<'_>) -> RarResult<Vec<u8>> 
     let ext_len = p.ext_time.map_or(0, |e| e.len());
     let head_size = FILE_HEADER_FIXED_SIZE as usize + name_len + salt_len + ext_len;
 
-    let dict_flags = dictionary_flags(p.dict_size)?;
+    let dict_flags = u16::from(p.window_bits) << 5;
     let flags = p.flags | dict_flags | LONG_BLOCK;
 
     let mut buf = Vec::with_capacity(head_size);
@@ -160,8 +171,8 @@ pub(crate) fn build_file_header(p: &FileHeaderParams<'_>) -> RarResult<Vec<u8>> 
     buf.push(p.method);
     // name_size
     buf.extend_from_slice(&(name_len as u16).to_le_bytes());
-    // file_attr (Unix attr: 0x20 = archive bit for files)
-    buf.extend_from_slice(&0x20u32.to_le_bytes());
+    // file_attr (0x20 = archive bit for files, 0x10 = directory)
+    buf.extend_from_slice(&p.attr.to_le_bytes());
     // name
     buf.extend_from_slice(p.name);
     // salt
@@ -221,7 +232,12 @@ pub(crate) fn encode_file_name(name: &str) -> (Vec<u8>, u16) {
     if name.is_ascii() {
         return (name.as_bytes().to_vec(), 0);
     }
-    // Encode as RAR4 Unicode: null-terminated ASCII fallback + Unicode extension.
+    // Encode as RAR4 Unicode: null-terminated ASCII fallback + Unicode
+    // extension. The extension is a byte-aligned stream of 2-bit mode codes
+    // (4 per flag byte, MSB first) interleaved with each code's data:
+    // mode 0 = single byte (`unit < 0x100`), mode 2 = two bytes LE.
+    // The decoder (rar40::decode_file_name) reads a flag byte, then the
+    // data bytes of the up-to-four codes it describes, in order.
     let ascii_fallback: Vec<u8> = name
         .chars()
         .map(|c| if c.is_ascii() { c as u8 } else { b'?' })
@@ -230,47 +246,53 @@ pub(crate) fn encode_file_name(name: &str) -> (Vec<u8>, u16) {
 
     let utf16: Vec<u16> = name.encode_utf16().collect();
     let mut ext = Vec::new();
-    // High byte for the Unicode extension (usually 0xFF for Latin-1 supplement).
-    let high_byte = 0xFFu8;
-    ext.push(high_byte);
+    // High byte shared by mode-1 codes (units in the 0xFFxx range). We only
+    // emit mode 2 for units >= 0x100, so this value is inert; 0xFF is the
+    // conventional WinRAR value.
+    ext.push(0xFF);
 
-    // Simple encoding: store each code unit as 2 bytes (mode 2).
-    let mut flag_byte = 0u8;
-    let mut flag_bits = 0u8;
-
+    let mut modes = [0u8; 4];
+    let mut data = Vec::<u8>::new();
+    let mut group = 0usize;
     for &unit in &utf16 {
         if unit <= 0xFF {
             // Mode 0: single byte.
-            if flag_bits == 6 {
-                ext.push(flag_byte);
-                flag_byte = 0;
-                flag_bits = 0;
-            }
-            flag_byte <<= 2;
-            flag_bits += 2;
-            ext.push(unit as u8);
+            modes[group] = 0;
+            data.push(unit as u8);
         } else {
-            // Mode 2: two bytes.
-            if flag_bits == 6 {
-                ext.push(flag_byte);
-                flag_byte = 0;
-                flag_bits = 0;
-            }
-            flag_byte = (flag_byte << 2) | 2;
-            flag_bits += 2;
-            ext.push((unit & 0xFF) as u8);
-            ext.push((unit >> 8) as u8);
+            // Mode 2: two bytes, low first.
+            modes[group] = 2;
+            data.push((unit & 0xFF) as u8);
+            data.push((unit >> 8) as u8);
+        }
+        group += 1;
+        if group == 4 {
+            ext.push(encode_flag_byte(&modes[..4]));
+            ext.extend_from_slice(&data);
+            data.clear();
+            group = 0;
         }
     }
-    // Pad flag byte if needed.
-    if flag_bits > 0 {
-        flag_byte <<= 6 - flag_bits;
-        ext.push(flag_byte);
+    if group > 0 {
+        ext.push(encode_flag_byte(&modes[..group]));
+        ext.extend_from_slice(&data);
     }
 
     let mut result = ascii_fallback;
     result.extend_from_slice(&ext);
     (result, FHD_UNICODE)
+}
+
+/// Pack up to four 2-bit mode codes into one flag byte (MSB first); unused
+/// low slots are zero-padded.
+fn encode_flag_byte(modes: &[u8]) -> u8 {
+    debug_assert!(modes.len() <= 4 && modes.iter().all(|&m| m < 4));
+    let mut flag = 0u8;
+    for &m in modes {
+        flag = (flag << 2) | m;
+    }
+    flag <<= 2 * (4 - modes.len());
+    flag
 }
 
 // ── DOS time encoding ───────────────────────────────────────────────────────
@@ -390,9 +412,10 @@ mod tests {
             unp_ver: 29,
             method: RAR4_METHOD_STORE,
             name,
+            attr: 0x20,
             salt: None,
             ext_time: None,
-            dict_size: 0x40_0000, // 4 MiB
+            window_bits: 6, // 4 MiB dictionary
         };
         let buf = build_file_header(&params).unwrap();
         // 32 fixed + 8 name + 0 salt + 0 ext = 40.
@@ -462,8 +485,39 @@ mod tests {
 
     #[test]
     fn dictionary_flags_sizes() {
-        assert_eq!(dictionary_flags(0x1_0000).unwrap(), 0 << 5);
-        assert_eq!(dictionary_flags(0x40_0000).unwrap(), 6 << 5);
+        // Window bits 0..=6 encode 64 KiB ..= 4 MiB dictionaries.
+        for (size, bits) in [
+            (0x1_0000usize, 0u16),
+            (0x2_0000, 1),
+            (0x4_0000, 2),
+            (0x8_0000, 3),
+            (0x10_0000, 4),
+            (0x20_0000, 5),
+            (0x40_0000, 6),
+        ] {
+            assert_eq!(dictionary_flags(size).unwrap(), bits << 5);
+        }
         assert!(dictionary_flags(0x80_0000).is_err());
+        // Bit 7 (all window bits set) marks a directory member.
+        assert_eq!(DIRECTORY_WINDOW_BITS, 7 << 5);
+        assert_eq!(
+            build_file_header(&FileHeaderParams {
+                flags: 0,
+                packed_size: 0,
+                unpacked_size: 0,
+                host_os: 0,
+                file_crc: 0,
+                file_time: 0,
+                unp_ver: 20,
+                method: RAR4_METHOD_STORE,
+                name: b"d",
+                attr: 0x10,
+                window_bits: 7,
+                salt: None,
+                ext_time: None,
+            })
+            .unwrap()[3..5],
+            (LONG_BLOCK | DIRECTORY_WINDOW_BITS).to_le_bytes()
+        );
     }
 }

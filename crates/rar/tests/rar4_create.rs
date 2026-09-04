@@ -264,3 +264,190 @@ fn create_rar4_store_multivolume_split_member() {
     let out = archive.read("big.bin").expect("read split member");
     assert_eq!(&out, &content);
 }
+
+/// Walk the raw FILE_HEAD blocks of a freshly created RAR4 archive and
+/// return `(name, flags, packed, unpacked, attr)` for every member.
+///
+/// This inspects the on-disk bytes rather than the parsed model, so it can
+/// pin the exact WinRAR conventions the writer must follow (directory
+/// members carry window bits 7 and attr 0x10, zero sizes and CRC).
+fn scan_rar4_members(data: &[u8]) -> Vec<(String, u16, u32, u32, u32)> {
+    let mut out = Vec::new();
+    let mut pos = 7usize; // after "Rar!\x1a\x07\x00"
+    while pos + 7 <= data.len() {
+        let htype = data[pos + 2];
+        let flags = u16::from_le_bytes([data[pos + 3], data[pos + 4]]);
+        let hsize = u16::from_le_bytes([data[pos + 5], data[pos + 6]]) as usize;
+        if pos + hsize > data.len() {
+            break;
+        }
+        match htype {
+            0x74 => {
+                let body = &data[pos + 7..pos + hsize];
+                let packed = u32::from_le_bytes(body[0..4].try_into().unwrap());
+                let unpacked = u32::from_le_bytes(body[4..8].try_into().unwrap());
+                let name_size = u16::from_le_bytes(body[19..21].try_into().unwrap()) as usize;
+                let attr = u32::from_le_bytes(body[21..25].try_into().unwrap());
+                let name = String::from_utf8_lossy(&body[25..25 + name_size]).into_owned();
+                out.push((name, flags, packed, unpacked, attr));
+                pos += hsize + packed as usize;
+            }
+            0x7b | 0x73 | 0x72 => {
+                pos += hsize;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
+#[test]
+fn create_rar4_directory_tree_roundtrip() {
+    let dir = make_temp_dir();
+    // Tree: top.txt, sub/mid.txt, sub/deep/leaf.txt, sub/emptydir, plus a
+    // non-ASCII directory to exercise the FHD_UNICODE name extension.
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("sub/deep")).unwrap();
+    std::fs::create_dir(src.join("sub/emptydir")).unwrap();
+    std::fs::create_dir(src.join("资料")).unwrap();
+    std::fs::write(src.join("top.txt"), b"top").unwrap();
+    std::fs::write(src.join("sub/mid.txt"), b"mid").unwrap();
+    std::fs::write(src.join("sub/deep/leaf.txt"), b"leaf").unwrap();
+    std::fs::write(src.join("资料/note.txt"), b"note").unwrap();
+    let arc = dir.path().join("tree.rar");
+
+    let mut archive = RarArchive::create_with_options(
+        &arc,
+        CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            ..Default::default()
+        },
+    )
+    .expect("create");
+    archive.add(&src, 3).expect("add directory tree");
+    archive.close().expect("close");
+
+    // Read back: every directory and file must round-trip with exact UTF-8
+    // names (dirs without a trailing slash, like WinRAR).
+    let mut archive = RarArchive::open(&arc).expect("reopen");
+    let mut names: Vec<String> = archive.namelist().into_iter().map(str::to_string).collect();
+    names.sort();
+    let mut expected: Vec<String> = [
+        "src",
+        "src/sub",
+        "src/sub/deep",
+        "src/sub/emptydir",
+        "src/sub/deep/leaf.txt",
+        "src/sub/mid.txt",
+        "src/top.txt",
+        "src/资料",
+        "src/资料/note.txt",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    expected.sort();
+    assert_eq!(names, expected);
+
+    for name in [
+        "src",
+        "src/sub",
+        "src/sub/deep",
+        "src/sub/emptydir",
+        "src/资料",
+    ] {
+        let entry = archive.get_entry(name).expect("dir entry");
+        assert!(entry.is_dir(), "{name} must list as a directory");
+        assert_eq!(entry.size(), 0, "{name} must have zero size");
+    }
+    for (name, content) in [
+        ("src/top.txt", b"top".as_slice()),
+        ("src/sub/mid.txt", b"mid".as_slice()),
+        ("src/sub/deep/leaf.txt", b"leaf".as_slice()),
+        ("src/资料/note.txt", b"note".as_slice()),
+    ] {
+        assert_eq!(&archive.read(name).unwrap(), content);
+    }
+
+    // Raw-byte conventions (WinRAR/UnRAR classify RAR4 directories by the
+    // window bits, not the attr): dir members must carry flags & 0xE0 ==
+    // 0xE0 with zero sizes and CRC; regular files must not.
+    let raw = std::fs::read(&arc).unwrap();
+    let members = scan_rar4_members(&raw);
+    assert_eq!(members.len(), 9);
+    for (name, flags, packed, unpacked, attr) in &members {
+        if *attr & 0x10 != 0 {
+            assert_eq!(
+                flags & 0x00E0,
+                0x00E0,
+                "dir {name}: window bits must mark a directory"
+            );
+            assert_eq!(
+                (*packed, *unpacked),
+                (0u32, 0u32),
+                "dir {name} must have zero sizes"
+            );
+        } else {
+            assert_ne!(
+                flags & 0x00E0,
+                0x00E0,
+                "file {name} must not be a directory"
+            );
+        }
+    }
+}
+
+#[test]
+fn create_rar4_directory_multivolume() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("deep")).unwrap();
+    std::fs::create_dir(src.join("emptydir")).unwrap();
+    let mut content = Vec::with_capacity(120_000);
+    let mut n = 0u32;
+    while content.len() < 120_000 {
+        content.extend_from_slice(
+            format!("payload line {n} abcdefghijklmnopqrstuvwxyz 0123456789\n").as_bytes(),
+        );
+        n += 1;
+    }
+    std::fs::write(src.join("deep/big.txt"), &content).unwrap();
+    std::fs::write(src.join("small.txt"), b"small").unwrap();
+    let arc = dir.path().join("dvol.rar");
+
+    let mut archive = RarArchive::create_with_options(
+        &arc,
+        CreateOptions {
+            format_version: ArchiveVersion::Rar40,
+            volume_size: Some(8_000),
+            ..Default::default()
+        },
+    )
+    .expect("create");
+    archive.add(&src, 0).expect("add tree across volumes");
+    archive.close().expect("close");
+
+    let volumes = discover_volumes(&arc);
+    assert!(
+        volumes.len() >= 2,
+        "expected multiple volumes, got {volumes:?}"
+    );
+
+    // The whole tree (dirs included) must read back across the volumes.
+    let mut archive = RarArchive::open(&arc).expect("reopen");
+    let mut names: Vec<String> = archive.namelist().into_iter().map(str::to_string).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "src".to_string(),
+            "src/deep".to_string(),
+            "src/deep/big.txt".to_string(),
+            "src/emptydir".to_string(),
+            "src/small.txt".to_string(),
+        ]
+    );
+    assert_eq!(archive.read("src/deep/big.txt").unwrap(), content);
+    assert_eq!(archive.read("src/small.txt").unwrap(), b"small");
+    assert!(archive.get_entry("src/emptydir").unwrap().is_dir());
+}
