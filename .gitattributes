@@ -1,0 +1,46 @@
+# Keep repository text files normalized to LF on every platform.
+* text=auto eol=lf
+
+# Source code, build metadata, documentation, and scripts.
+*.rs text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+
+# Legal and repository metadata files.
+LICENSE text eol=lf
+NOTICE text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Binary archives, fixtures, native artifacts, and media.
+*.rar binary
+*.rev binary
+*.r00 binary
+*.r01 binary
+*.r02 binary
+*.r03 binary
+*.bin binary
+*.node binary
+*.dll binary
+*.exe binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.bmp binary
+*.ico binary
+*.pdf binary
+*.zip binary

@@ -1,64 +1,78 @@
 LEGAL NOTICE
 =============
 
-rar-rs is a clean-room Rust implementation of the RAR archive format for
-software conservancy and educational purposes, providing BSD-2-Clause licensed
-`rar` and `unrar` command-line tools.
+Copyright and authorship
+------------------------
 
-Clean-Room Implementation
---------------------------
+The initial implementation was contributed by librar contributors. The
+original contributions and modifications made by yjdyamv in 2026 are
+copyright (c) 2026 yjdyamv. This statement does not transfer ownership of
+third-party code or test materials identified below, and does not replace the
+license terms applicable to those portions.
 
-The RAR5 LZSS+Huffman compression codec (src/codec/) was developed as a
-clean-room implementation. The bitstream format was derived from analysis of
-libarchive's archive_read_support_format_rar5.c by Grzegorz Antoniak (2018),
-which is itself an independent BSD-2-Clause licensed implementation of a RAR5
-decompressor. No proprietary RARLAB source code was used or referenced.
+Unless otherwise noted, original project contributions are licensed under the
+BSD-2-Clause License. See LICENSE for the full text.
 
-The RAR4 decompressor (src/rar4/) was developed as a clean-room implementation
-based on libarchive's archive_read_support_format_rar.c, which is an
-independent BSD-2-Clause licensed RAR4 reader. The RAR4 support is read-only:
-it parses RAR4 headers, decompresses LZSS+Huffman (method 3) streams, and
-applies VM filters (E8, E8E9, Delta, RGB, Audio). No RAR4 compression or
-archive creation capability is provided.
+rar-rs is a Rust implementation of the RAR archive format for software
+conservancy, interoperability, and educational purposes. It provides `rar`
+and `unrar` command-line tools. Original project portions are BSD-2-Clause;
+third-party portions retain the licenses identified below.
 
-This project does not contain, link to, or derive from the proprietary unrar
-source code distributed by RARLAB under its restrictive license. The archive
-header and block structure implementations are based on the publicly documented
-RAR format specifications and libarchive's independent BSD-2-Clause work.
+Implementation sources
+----------------------
+
+The RAR5 LZSS+Huffman codec
+(`crates/rar/src/codec/lzss_huff/`) was independently implemented from the
+public RAR format and from analysis of libarchive's
+`archive_read_support_format_rar5.c` by Grzegorz Antoniak (2018), an
+independent BSD-2-Clause implementation. It is not copied from proprietary
+RARLAB source code.
+
+RAR4 support combines original project code with the upstream-derived decoder
+portions identified in the `rars` section below. The current implementation
+supports RAR 1.5–4.x reading and RAR4 archive creation, including the relevant
+legacy codecs, filters, encryption, solid chains, and volume handling. It does
+not contain, link to, or derive from the proprietary `unrar` source code
+distributed by RARLAB. Archive structures are implemented from public format
+descriptions and independent open-source references.
 
 Portions from the `rars` project
 --------------------------------
 
-The RAR5 recovery-record codec (`src/recovery/rar5.rs`), the BLAKE2sp hash
-(`src/blake2sp.rs`) and the RAR5 key-derivation / hash-key MAC patterns
-(`src/encryption.rs`) are ported from the `rars` project
-(https://github.com/bitplane/rars, crates.io `rars`), which is licensed
-MIT OR Apache-2.0. Those portions retain their upstream license; the rest
-of this project remains BSD-2-Clause.
+The RAR5 recovery-record codec
+(`crates/rar/src/recovery/rar50.rs`), the BLAKE2sp hash
+(`crates/rar/src/rar50/blake2sp.rs`) and the RAR5 key-derivation / hash-key
+MAC patterns (`crates/rar/src/crypto/rar50.rs`) were ported from the `rars`
+project (https://github.com/bitplane/rars, crates.io `rars`) at upstream
+revision `c08a17b`. At that revision, the `rars` workspace declared
+`MIT OR Apache-2.0` in its Cargo metadata and did not yet contain its later
+WTFPL `COPYING` file. These portions therefore retain the upstream
+`MIT OR Apache-2.0` terms. Other project contributions by yjdyamv are
+licensed under BSD-2-Clause unless otherwise noted.
 
-Further `rars` portions ported later (same MIT OR Apache-2.0 terms; the
-vendored repository copy carries the WTFPL licence with a no-blame clause):
-the automatic x86 filter scan (`src/codec/filters.rs`,
-`auto_x86_filter_ranges`), the binary-tree match finder
-(`src/codec/match_finder.rs`, LZMA-style BT4), the optimal parse
-(`src/codec/rar50.rs`, `optimal_parse_tokens` + `TokenPrices` +
-`BlockSplitter`), the E8/E8E9 x86 transform modulo normalization, and the
-RAR 3.x/4.x member decoders (`src/codec/rar29.rs`, decode half of rars
-`codec/rar29.rs` incl. its native standard-filter transforms for
-E8/E8E9/Itanium/Delta/RGB/Audio; `src/codec/ppmd.rs`, decode half of rars
-`codec/ppmd.rs`; `src/codec/rar20.rs`, decode half of rars `codec/rar20.rs`
-covering the RAR 2.x LZSS+Huffman and audio-block codec; `src/codec/rar15.rs`,
-a near-verbatim extract of the rars `Unpack15` (codec/rar13.rs) for RAR 1.5).
-Each carries a note at its definition site.
+Further `rars` portions were ported later: the automatic x86 filter scan
+(`crates/rar/src/codec/filters.rs`, `auto_x86_filter_ranges`), the binary-tree
+match finder (`crates/rar/src/codec/match_finder.rs`, LZMA-style BT4), the
+optimal parse and block splitter, the E8/E8E9 x86 transform normalization,
+and the RAR 3.x/4.x, RAR 2.x and RAR 1.5 member decoders. The definition-site
+notices currently identify `crates/rar/src/codec/rar29_encoder.rs` as
+MIT OR Apache-2.0, and identify the decode-side legacy codec ports in
+`rar15.rs`, `rar20.rs`, `rar29.rs`, and `ppmd.rs` as WTFPL. The `rars`
+workspace metadata declares `MIT OR Apache-2.0`, while a later `COPYING` file
+in that repository declares WTFPL with a no-blame clause; this notice does not
+treat those distinct statements as interchangeable. Other ported portions
+must be checked against their corresponding upstream file and revision.
 
-The legacy fixture dirs under `crates/rar/tests/fixtures/rar40/` (`rar300/`,
-`rar2/`, `rar154/`, `multivol/`, `rarvm/`) are archives copied from the rars
-test corpus (same licence terms), used as byte-level regression inputs.
+The legacy fixture directories under `crates/rar/tests/fixtures/rar40/`
+(`rar300/`, `rar2/`, `rar154/`, `multivol/`, `rarvm/`) contain archive files
+copied from the `rars` test corpus. They are test inputs, not source code; any
+redistribution of those binary fixtures remains subject to the terms applicable
+to their original corpus.
 
 Official RAR/UNRAR binaries are used strictly as black-box interoperability
 references for testing (set `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` to run
-the `official_*` interop tests); their code is not used or referenced, and
-this project remains a clean-room implementation.
+the `official_*` interop tests). Their code is not included in this project
+and is not used as source code.
 
 Scope and Limitations
 ----------------------
@@ -72,10 +86,10 @@ This software:
     Compression ratios will vary; this implementation may produce larger output
     than the native tool in many real-world scenarios.
 
-  - Provides RAR5 read/write (compress and decompress) and RAR4 read-only
-    (decompress only) support. There is no ability to create or compress RAR4
-    or RAR3 archives — only RAR5 archive creation is supported. RAR4 support
-    is limited to reading, listing, testing, and extracting existing archives.
+  - Provides RAR5/RAR7 read and write support, plus RAR 1.5–4.x reading and
+    RAR4 archive creation. RAR3 and earlier archive creation is not provided.
+    Legacy-format support has feature-specific limitations documented by the
+    library and CLI.
 
   - Is intended for software conservancy, interoperability, and educational use.
     It enables reading and writing of the RAR archive format without depending
@@ -102,5 +116,6 @@ produced by CI and attached to GitHub Releases.
 License
 --------
 
-This project is licensed under the BSD 2-Clause License. See the LICENSE file
-for the full text.
+Unless otherwise noted, original project contributions are licensed under the
+BSD 2-Clause License. Third-party portions retain the licenses identified in
+this notice. See LICENSE for the full BSD-2-Clause text.

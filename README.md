@@ -1,28 +1,32 @@
 # rar-rs
 
-**Pure-Rust RAR5 / RAR7 archive library and command-line tools.** Create,
-read, extract, and modify RAR archives with native LZSS+Huffman
-compression — no external RAR/UNRAR binaries required.
+**Pure-Rust RAR archive library and command-line tools.** Create, read,
+extract, and modify RAR5/RAR7 archives, read legacy RAR 1.5–4.x archives,
+and create RAR4 archives with native Rust codecs. No external RAR/UNRAR
+binary is required at runtime.
 
-> Licensed under BSD-2-Clause. This is a clean-room implementation for
-> software conservancy and education — see [NOTICE](NOTICE) for legal
-> details and trademark attribution.
+> Licensed under BSD-2-Clause for original project portions. This is an
+> independent implementation with separately identified upstream portions —
+> see [NOTICE](NOTICE) for legal details and trademark attribution.
 
 ---
 
 ## Why rar-rs
 
-- **Pure Rust, zero external dependencies** for the core library and tools.
-- **Full RAR5 (v50) + RAR7 (v70)** read/write, byte-for-byte interoperable
-  with WinRAR 7.x and UnRAR.
-- **Modify in place** — delete or rename members without recompressing the
-  whole archive; append, update, freshen, move, lock, repair.
+- **Pure Rust** implementation with no external RAR/UNRAR runtime binary.
+- **RAR5 (v50) and RAR7 (v70)** read/write support with WinRAR/UnRAR
+  interoperability testing.
+- **Legacy support** for reading RAR 1.5–4.x archives and creating RAR4
+  archives, including legacy codecs, encryption, solid chains, and volumes.
+- **Archive operations** — append, update, delete, rename, freshen, move, lock,
+  repair, comments, SFX handling, and multi-volume processing.
 - **Recovery** — inline recovery records and `.rev` recovery volumes, with
-  streaming repair that holds only the recovery data in memory.
-- **Safe by default** — path sanitization, size caps, atomic staging, and
-  AES-256 encryption (file-level and header-level with a hash-key MAC).
-- **Multi-volume** archives, **BLAKE2sp** hashes, **quick-open** fast
-  listing, multi-threaded compression, and a Node/WASI binding.
+  bounded-memory repair paths.
+- **Safe extraction** — path sanitization, size limits, atomic staging, and
+  cooperative cancellation.
+- **Compression and integrity** — LZSS+Huffman, PPMd, CRC32, BLAKE2sp,
+  encrypted-data MACs, filters, solid archives, and parallel compression.
+- **Bindings** — Node.js native and WASI bindings under `crates/rar-napi`.
 
 ## Build
 
@@ -50,8 +54,9 @@ rar d backup.rar old.log
 rar a -pSecret secret.rar docs/
 ```
 
-All official commands are implemented: `a c ch cw d e f i k l[t][b] m p r
-rc rn rr rv s s- t u v[t][b] x`. Full reference in
+The CLI implements the documented command set, including archive creation,
+listing, extraction, modification, repair, recovery, and SFX operations. See
+the full reference in
 [docs/CLI.md](docs/CLI.md).
 
 ### Library
@@ -75,38 +80,36 @@ let data = rar.read("notes.txt")?;
 ```
 
 The crate is `rar5`; see `crates/rar` for the full API and
-[docs/ARCHITECTURE.html](docs/ARCHITECTURE.html) for advanced usage
-(solid/quick-open/BLAKE2sp, safe extraction, `open_quick`, cancellation,
-streaming repair, multi-volume).
+[docs/ARCHITECTURE.html](docs/ARCHITECTURE.html) for advanced usage,
+including solid archives, quick-open, BLAKE2sp, safe extraction,
+`open_quick`, cancellation, streaming repair, and multi-volume processing.
 
 ## Feature highlights
 
-- **Formats:** RAR5 (v50) and RAR7 (v70) create + extract. **RAR4 is
-  explicitly unsupported** (rejected with a clear error — use 7-Zip).
-- **Compression:** native LZSS + Huffman, levels 0–5, dictionaries up to
-  4 GiB (RAR5) / beyond (RAR7), multi-threaded (`-mt`).
-- **Integrity:** CRC32, BLAKE2sp (`-htb`), and encrypted-data MAC.
-- **Operations:** create, append, delete (no rebuild), rename, update (`u`),
-  freshen (`f`), move (`m`), lock (`k`), comment (`c`/`cw`), SFX (`s`/`s-`),
-  string search (`i`), symlinks/hardlinks.
-- **Solid archives, quick-open (`-qo+`), and multi-volume** create / read /
-  modify.
-- **Recovery:** inline recovery record (`rr`/`r`) and recovery volumes
-  (`.rev`, `rv`/`rc`).
-- **Encryption:** file-level AES-256 (CBC + chained HMAC-SHA256 KDF) and
-  header-level (`-hp`).
-- **Streaming, bounded-memory** extraction with cooperative cancellation.
+- **Formats:** RAR5 (v50) and RAR7 (v70) create/read/write; RAR 1.5–4.x
+  read/extract; and RAR4 archive creation.
+- **Compression:** native LZSS+Huffman and PPMd codecs, levels 0–5,
+  dictionary controls, filters, solid archives, and parallel compression.
+- **Integrity:** CRC32, BLAKE2sp (`-htb`), recovery records, recovery volumes,
+  and encrypted-data MACs.
+- **Operations:** create, append, delete, rename, update, freshen, move, lock,
+  comments, SFX handling, string search, symlinks, and hardlinks.
+- **Encryption:** file-level AES-256 with chained HMAC-SHA256 KDF and
+  header-level encryption (`-hp`).
+- **Streaming and safety:** bounded-memory extraction, path sanitization,
+  atomic writes, and cooperative cancellation.
 
 The complete feature matrix lives in
 [docs/ARCHITECTURE.html](docs/ARCHITECTURE.html).
 
 ## Limitations
 
-RAR4 is not supported (use 7-Zip), and appending to multi-volume archives is not
-supported either (the official `rar` refuses too). Other notes: inline recovery
-records stream on repair; `-hp` multi-volume sets can't use inline RR (only `.rev`);
-solid and multithreaded compression are mutually exclusive; filter types 4–7 are
-rejected; KDF strength is capped at 2²⁴ iterations (default 2¹⁵).
+Legacy RAR4 creation and extraction have feature-specific limitations.
+Appending to multi-volume archives is not supported (the official `rar` refuses
+too). Inline recovery records have streaming limitations during repair; encrypted
+multi-volume sets cannot combine `-hp` with inline RR and must use `.rev` recovery
+volumes. Solid and multithreaded compression are mutually exclusive; filter types
+4–7 are rejected; KDF strength is capped at 2²⁴ iterations (default 2¹⁵).
 
 ## Documentation
 
@@ -120,6 +123,7 @@ Full index in **[docs/README.md](docs/README.md)**. Highlights:
 
 ## Legal
 
-Clean-room implementation for software conservancy and educational purposes.
-See [NOTICE](NOTICE) for the full legal notice. Licensed under
-BSD-2-Clause — see [LICENSE](LICENSE).
+Independent implementation for software conservancy and educational
+purposes, with separately identified upstream portions. See [NOTICE](NOTICE)
+for source attribution and license boundaries. Original project portions are
+licensed under BSD-2-Clause — see [LICENSE](LICENSE).
