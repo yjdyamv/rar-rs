@@ -1155,6 +1155,44 @@ const RAR3_DELTA_FILTER_BYTECODE: &[u8] = &[
     0x2f, 0x01, 0x9a, 0x41, 0x80, 0xec, 0x27, 0x48, 0x2f, 0x09, 0x76, 0x6d, 0xd3, 0xea, 0x41, 0x5b,
     0x59, 0x44, 0xe8, 0x17, 0x5c, 0xe1, 0x6c, 0x91, 0x4c, 0x4e, 0x3f, 0x77, 0x00,
 ];
+const RAR3_ITANIUM_FILTER_BYTECODE: &[u8] = &[
+    0x46, 0x9e, 0x08, 0x08, 0x0c, 0x0c, 0x00, 0x00, 0x0e, 0x0e, 0x08, 0x08, 0x00, 0x00, 0x08, 0x08,
+    0x00, 0x00, 0x6c, 0x11, 0x5a, 0x04, 0xac, 0x0c, 0xc4, 0xcc, 0x5c, 0x08, 0x18, 0x46, 0x24, 0x08,
+    0xf9, 0xa0, 0x44, 0x25, 0x12, 0x12, 0x45, 0x85, 0x99, 0x0c, 0x14, 0x00, 0x26, 0x25, 0x58, 0x99,
+    0x90, 0x03, 0x38, 0x1a, 0x08, 0xdc, 0x02, 0x30, 0x0c, 0x4e, 0xd1, 0x1d, 0x89, 0xa1, 0xe2, 0xd0,
+    0x55, 0x11, 0x33, 0x60, 0x8c, 0x5a, 0x23, 0x06, 0xde, 0x06, 0x18, 0x00, 0x7f, 0xff, 0xfc, 0x4d,
+    0xcc, 0x19, 0x17, 0xb3, 0x06, 0xc4, 0x44, 0xb2, 0x32, 0x5a, 0x44, 0xc4, 0xa6, 0x01, 0xf4, 0x24,
+    0x88, 0x83, 0x38, 0xcc, 0xc4, 0x11, 0x09, 0x87, 0xa6, 0xe0, 0x46, 0x02, 0xb2, 0x24, 0x03, 0xe2,
+    0xa0, 0x32, 0x54, 0x83, 0x52, 0xc5, 0xb1, 0x70,
+];
+const RAR3_RGB_FILTER_BYTECODE: &[u8] = &[
+    0xc5, 0x01, 0x9a, 0x41, 0x95, 0xc9, 0xa6, 0x4d, 0xba, 0x4b, 0x14, 0x0a, 0xf4, 0x9b, 0x80, 0x4c,
+    0x00, 0x15, 0xa6, 0xa8, 0x07, 0x26, 0x2a, 0xc9, 0xc4, 0x8b, 0x86, 0x62, 0x32, 0x0f, 0x86, 0x64,
+    0x24, 0x06, 0x66, 0x71, 0x19, 0x98, 0xcc, 0x43, 0x33, 0x31, 0x99, 0x00, 0x66, 0x88, 0x33, 0x30,
+    0xcc, 0xd1, 0x0e, 0x98, 0x0b, 0x33, 0x34, 0x40, 0x0c, 0xd1, 0x46, 0x66, 0x19, 0x9a, 0x28, 0xcc,
+    0x49, 0x80, 0xb3, 0x33, 0x45, 0x00, 0xcd, 0x18, 0x66, 0x61, 0x99, 0xa3, 0x0c, 0xc8, 0x98, 0x0b,
+    0x33, 0x34, 0x60, 0x4c, 0xd1, 0x06, 0x68, 0xa5, 0x20, 0x62, 0x66, 0x88, 0x33, 0x46, 0x28, 0x05,
+    0x0f, 0x32, 0x0c, 0x4c, 0xd1, 0x46, 0x68, 0xc5, 0x00, 0x41, 0xe4, 0x8f, 0xc8, 0x85, 0x5e, 0x02,
+    0x7c, 0xc9, 0x26, 0x81, 0x83, 0xb0, 0x9d, 0xc2, 0xde, 0x9c, 0x78, 0xac, 0xd6, 0x68, 0xb4, 0x0e,
+    0x71, 0xdb, 0xb2, 0x49, 0x38, 0x6e, 0x02, 0x2a, 0x2c, 0x41, 0x2b, 0x10, 0x98, 0x82, 0x49, 0x03,
+    0x14, 0xf4, 0xe1, 0x97, 0x00,
+];
+const RAR3_AUDIO_FILTER_BYTECODE: &[u8] = &[
+    0x47, 0x01, 0x9a, 0x41, 0x95, 0xe5, 0x72, 0x0d, 0xc2, 0x64, 0x82, 0x74, 0x93, 0x24, 0xb1, 0x40,
+    0x06, 0xd8, 0x38, 0x44, 0x00, 0xa8, 0x01, 0x34, 0x11, 0xdc, 0xa1, 0xba, 0x01, 0x99, 0x0c, 0xc4,
+    0x03, 0x31, 0x19, 0xa4, 0x06, 0x66, 0x22, 0x60, 0x4d, 0x9a, 0x40, 0x0d, 0x66, 0x8e, 0x60, 0xd0,
+    0x30, 0x40, 0x18, 0x26, 0xc1, 0xc8, 0xf6, 0xe6, 0x26, 0x13, 0x78, 0x92, 0x08, 0xe8, 0x50, 0xbc,
+    0x5a, 0x07, 0xc6, 0xe9, 0xf5, 0x20, 0xa9, 0xa0, 0xed, 0x37, 0x33, 0x47, 0x39, 0x66, 0x90, 0x70,
+    0x19, 0xa3, 0x9b, 0xcf, 0x25, 0x83, 0x80, 0xc1, 0xbd, 0x30, 0x16, 0x6e, 0x23, 0x34, 0x93, 0x81,
+    0x16, 0x09, 0xb0, 0x50, 0x18, 0x3b, 0x4d, 0xc8, 0x4c, 0x05, 0x9b, 0x88, 0xc5, 0x28, 0xe0, 0x76,
+    0x93, 0x90, 0x98, 0x0b, 0x37, 0x11, 0x8a, 0x59, 0xc4, 0x80, 0x42, 0x48, 0x43, 0xa9, 0x47, 0xee,
+    0x43, 0x34, 0x60, 0x47, 0xd4, 0x4a, 0x0d, 0xbb, 0xd3, 0x59, 0xa4, 0x86, 0xee, 0x05, 0x09, 0x40,
+    0x26, 0xc9, 0x34, 0x24, 0x76, 0xa0, 0x30, 0x6a, 0x20, 0xea, 0x02, 0x20, 0x04, 0xa0, 0x41, 0x50,
+    0x9e, 0x50, 0x3f, 0xe6, 0xe1, 0x28, 0x94, 0x46, 0x01, 0xbd, 0x8b, 0x40, 0xf0, 0x68, 0x11, 0x36,
+    0xc9, 0xa1, 0x92, 0x38, 0x11, 0x41, 0x9c, 0xa8, 0x95, 0x10, 0xee, 0x50, 0x66, 0x2b, 0x00, 0x20,
+    0x95, 0x11, 0x04, 0x02, 0x62, 0xac, 0x66, 0x8c, 0x6a, 0xca, 0x26, 0x40, 0xb2, 0x67, 0x1b, 0x4b,
+    0x26, 0xcc, 0x64, 0x8a, 0x62, 0x71, 0xa2, 0xb8,
+];
 
 /// One VM filter pass the LZ layer must announce: transform `block_size`
 /// bytes starting `block_start` bytes into the (transformed) member by
@@ -1169,11 +1207,25 @@ struct OwnedVmFilterRecord {
 /// The RAR3 standard filters this encoder can emit. Audio/RGB/Itanium are
 /// read (their transforms are in `rar29.rs`) but not yet written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Itanium/Rgb constructed by tests; production auto-selects E8/E8E9/Delta/Audio
 pub(crate) enum Rar29FilterKind {
     E8,
     E8E9,
-    Delta { channels: usize },
+    Delta {
+        channels: usize,
+    },
+    /// Itanium branch-conversion filter (no init registers).
+    Itanium,
+    /// 24-bit RGB: `width` = scanline width in bytes (multiple of 3), the
+    /// optional `pos_r` channel order (0 = RGB, 1 = GBR, 2 = BRG).
+    Rgb {
+        width: usize,
+        pos_r: usize,
+    },
+    /// 8-bit audio with `channels` interleaved streams.
+    Audio {
+        channels: usize,
+    },
 }
 
 /// Transform `data[range]` in place the way the RAR3 standard filter does
@@ -1183,7 +1235,7 @@ fn apply_rar29_filter(
     data: &mut [u8],
     kind: Rar29FilterKind,
     range: std::ops::Range<usize>,
-) -> OwnedVmFilterRecord {
+) -> RarResult<OwnedVmFilterRecord> {
     let mut block = data[range.clone()].to_vec();
     let (init_regs, code) = match kind {
         Rar29FilterKind::E8 => {
@@ -1199,14 +1251,31 @@ fn apply_rar29_filter(
                 crate::codec::filters::delta_encode(&block, channels.min(u8::MAX as usize) as u8);
             (vec![(0, channels as u32)], RAR3_DELTA_FILTER_BYTECODE)
         }
+        Rar29FilterKind::Itanium => {
+            itanium_encode(&mut block, range.start as u32);
+            (Vec::new(), RAR3_ITANIUM_FILTER_BYTECODE)
+        }
+        Rar29FilterKind::Rgb { width, pos_r } => {
+            block = rgb_encode(&block, width, pos_r)?;
+            let init_regs = if pos_r == 0 {
+                vec![(0, width as u32 + 3)]
+            } else {
+                vec![(0, width as u32 + 3), (1, pos_r as u32)]
+            };
+            (init_regs, RAR3_RGB_FILTER_BYTECODE)
+        }
+        Rar29FilterKind::Audio { channels } => {
+            block = audio_encode(&block, channels)?;
+            (vec![(0, channels as u32)], RAR3_AUDIO_FILTER_BYTECODE)
+        }
     };
     data[range.clone()].copy_from_slice(&block);
-    OwnedVmFilterRecord {
+    Ok(OwnedVmFilterRecord {
         block_start: range.start,
         block_size: range.end - range.start,
         init_regs,
         code,
-    }
+    })
 }
 
 /// Split one filter range into VM-sized chunks (each standard program can
@@ -1219,11 +1288,23 @@ pub(crate) fn split_rar29_filter_range(
 ) -> Vec<std::ops::Range<usize>> {
     const MAX_VM_FILTER_BLOCK_SIZE: usize = 128 * 1024;
     let (unit, chunk_size) = match kind {
-        Rar29FilterKind::E8 | Rar29FilterKind::E8E9 => (4, MAX_VM_FILTER_BLOCK_SIZE),
+        Rar29FilterKind::E8 | Rar29FilterKind::E8E9 | Rar29FilterKind::Itanium => {
+            (4, MAX_VM_FILTER_BLOCK_SIZE)
+        }
         Rar29FilterKind::Delta { channels } => {
             let channels = channels.max(1);
             let chunk = MAX_VM_FILTER_BLOCK_SIZE - (MAX_VM_FILTER_BLOCK_SIZE % channels);
             (channels, chunk)
+        }
+        Rar29FilterKind::Audio { channels } => {
+            let channels = channels.max(1);
+            let chunk = 120_000 - (120_000 % channels);
+            (channels, chunk)
+        }
+        Rar29FilterKind::Rgb { width, .. } => {
+            let width = width.max(3);
+            let chunk = MAX_VM_FILTER_BLOCK_SIZE - (MAX_VM_FILTER_BLOCK_SIZE % width);
+            (width, chunk)
         }
     };
     let mut out = Vec::new();
@@ -1237,6 +1318,143 @@ pub(crate) fn split_rar29_filter_range(
         start = end;
     }
     out
+}
+
+// ── RAR3 standard-filter transforms (encode side) ──────────────────────────
+// Mirrors of rars' rar29.rs rgb_encode/audio_encode/itanium_encode; the read
+// side (rar29.rs) carries the inverse transforms.
+
+fn rgb_predict(prev: u8, upper: u8, upper_left: u8) -> u8 {
+    let predicted = i32::from(prev) + i32::from(upper) - i32::from(upper_left);
+    let pa = (predicted - i32::from(prev)).abs();
+    let pb = (predicted - i32::from(upper)).abs();
+    let pc = (predicted - i32::from(upper_left)).abs();
+    if pa <= pb && pa <= pc {
+        prev
+    } else if pb <= pc {
+        upper
+    } else {
+        upper_left
+    }
+}
+
+fn rgb_encode(data: &[u8], width: usize, pos_r: usize) -> Result<Vec<u8>, RarError> {
+    if data.len() < 3 || width == 0 || !width.is_multiple_of(3) || width > data.len() || pos_r > 2 {
+        return Err(enc_err("RAR 2.9 RGB filter parameters are invalid"));
+    }
+    let mut work = data.to_vec();
+    for i in (pos_r..work.len().saturating_sub(2)).step_by(3) {
+        let green = work[i + 1];
+        work[i] = work[i].wrapping_sub(green);
+        work[i + 2] = work[i + 2].wrapping_sub(green);
+    }
+
+    let mut out = Vec::with_capacity(data.len());
+    for channel in 0..3 {
+        let mut prev = 0u8;
+        let mut i = channel;
+        while i < work.len() {
+            let predicted = if i >= width + 3 {
+                rgb_predict(prev, work[i - width], work[i - width - 3])
+            } else {
+                prev
+            };
+            let byte = work[i];
+            out.push(predicted.wrapping_sub(byte));
+            prev = byte;
+            i += 3;
+        }
+    }
+    Ok(out)
+}
+
+fn audio_encode(data: &[u8], channels: usize) -> Result<Vec<u8>, RarError> {
+    if channels == 0 || channels > 32 {
+        return Err(enc_err("RAR 2.9 AUDIO filter channel count is invalid"));
+    }
+    let mut out = Vec::with_capacity(data.len());
+    for channel in 0..channels {
+        let mut prev_byte = 0u32;
+        let mut prev_delta = 0i32;
+        let mut d1 = 0i32;
+        let mut d2 = 0i32;
+        let mut k1 = 0i32;
+        let mut k2 = 0i32;
+        let mut k3 = 0i32;
+        let mut dif = [0u32; 7];
+        let mut byte_count = 0usize;
+        let mut i = channel;
+        while i < data.len() {
+            let d3 = d2;
+            d2 = prev_delta - d1;
+            d1 = prev_delta;
+            let predicted = ((8 * prev_byte as i32 + k1 * d1 + k2 * d2 + k3 * d3) >> 3) & 0xff;
+            let decoded = data[i];
+            let encoded = (predicted as u8).wrapping_sub(decoded);
+            out.push(encoded);
+            prev_delta = decoded.wrapping_sub(prev_byte as u8) as i8 as i32;
+            prev_byte = decoded as u32;
+            let d = (encoded as i8 as i32) << 3;
+            dif[0] += d.unsigned_abs();
+            dif[1] += (d - d1).unsigned_abs();
+            dif[2] += (d + d1).unsigned_abs();
+            dif[3] += (d - d2).unsigned_abs();
+            dif[4] += (d + d2).unsigned_abs();
+            dif[5] += (d - d3).unsigned_abs();
+            dif[6] += (d + d3).unsigned_abs();
+            if byte_count & 0x1f == 0 {
+                let mut min = dif[0];
+                let mut min_index = 0usize;
+                dif[0] = 0;
+                for (index, value) in dif.iter_mut().enumerate().skip(1) {
+                    if *value < min {
+                        min = *value;
+                        min_index = index;
+                    }
+                    *value = 0;
+                }
+                match min_index {
+                    1 if k1 >= -16 => k1 -= 1,
+                    2 if k1 < 16 => k1 += 1,
+                    3 if k2 >= -16 => k2 -= 1,
+                    4 if k2 < 16 => k2 += 1,
+                    5 if k3 >= -16 => k3 -= 1,
+                    6 if k3 < 16 => k3 += 1,
+                    _ => {}
+                }
+            }
+            byte_count += 1;
+            i += channels;
+        }
+    }
+    Ok(out)
+}
+
+fn itanium_encode(data: &mut [u8], file_offset: u32) {
+    if data.len() <= 21 {
+        return;
+    }
+    let base_offset = file_offset >> 4;
+    let block_count = (data.len() - 21).div_ceil(16);
+    for block in 0..block_count {
+        let pos = block * 16;
+        let file_offset = base_offset.wrapping_add(block as u32);
+        let mut mask = (0x334b_0000u32 >> (data[pos] & 0x1e)) & 3;
+        if mask != 0 {
+            mask += 1;
+            while mask <= 4 {
+                let p = pos + (mask as usize * 5 - 8);
+                if ((data[p + 3] >> mask) & 15) == 5 {
+                    let raw = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]);
+                    let mut value = raw >> mask;
+                    value = value.wrapping_add(file_offset) & 0x000f_ffff;
+                    let raw = (raw & !(0x000f_ffff << mask)) | (value << mask);
+                    data[p..p + 4].copy_from_slice(&raw.to_le_bytes());
+                }
+                mask += 1;
+            }
+        }
+    }
 }
 
 /// Write an encoded u32 (2-bit width selector + value), mirroring
@@ -1527,7 +1745,7 @@ impl Unpack29Encoder {
         let mut data = input.to_vec();
         let mut filters = Vec::new();
         for chunk in split_rar29_filter_range(kind, range) {
-            filters.push(apply_rar29_filter(&mut data, kind, chunk));
+            filters.push(apply_rar29_filter(&mut data, kind, chunk)?);
         }
         let (packed, transformed) = encode_filtered_member_blocks(
             &data,
@@ -1555,7 +1773,7 @@ impl Unpack29Encoder {
         let mut filters = Vec::new();
         for range in ranges {
             for chunk in split_rar29_filter_range(kind, range.clone()) {
-                filters.push(apply_rar29_filter(&mut data, kind, chunk));
+                filters.push(apply_rar29_filter(&mut data, kind, chunk)?);
             }
         }
         let (packed, transformed) = encode_filtered_member_blocks(
@@ -1746,6 +1964,113 @@ mod tests {
             decoder.decode_member(&packed, input.len() as u64).unwrap(),
             input,
             "delta filter roundtrip mismatch"
+        );
+    }
+
+    fn audio_wave_data(bytes: usize) -> Vec<u8> {
+        // Interleaved 8-bit two-channel audio: per-channel smooth walk.
+        let mut data = Vec::with_capacity(bytes);
+        let mut ch = [128i16; 2];
+        let mut seed = 0xC0FFEEu32;
+        while data.len() < bytes {
+            for c in 0..2usize {
+                ch[c] = (ch[c] + (((seed >> (c * 8)) & 0x3f) as i16 - 30)).clamp(0, 255);
+                data.push(ch[c] as u8);
+            }
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        }
+        data
+    }
+
+    fn rgb_data(bytes: usize) -> Vec<u8> {
+        // 24-bit RGB rows with smooth colour gradients (row stride 300 = 100 px).
+        let mut data = Vec::with_capacity(bytes);
+        let width = 300usize;
+        let mut seed = 0xABCDEFu32;
+        while data.len() < bytes {
+            let mut row = Vec::with_capacity(width);
+            for i in 0..width {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let base = ((seed >> 16) & 0xff) as u8;
+                row.push(base.wrapping_add((i as u8).wrapping_mul(3)));
+            }
+            data.extend_from_slice(&row);
+        }
+        let cut = (bytes / width) * width;
+        data.truncate(cut);
+        data
+    }
+
+    #[test]
+    fn itanium_filter_roundtrips_via_decoder() {
+        // Itanium bundles: byte 0's slot-mask template must only select
+        // masks 0,2,3,4 (mask 1 would make the slot offset negative), so
+        // (b % 11) * 2 cycles 0x00..0x14 and never 0x16 (the mask-1 template).
+        let mut input = Vec::new();
+        for b in 0..2000usize {
+            let mut bundle = vec![0u8; 16];
+            bundle[0] = ((b % 11) * 2) as u8;
+            for slot in 2..=4u32 {
+                let p = slot as usize * 5 - 8;
+                if p + 4 <= 16 {
+                    bundle[p] = 0x0d;
+                    bundle[p + 3] = bundle[p + 3].wrapping_add(0x50);
+                }
+            }
+            input.extend_from_slice(&bundle);
+        }
+        let mut encoder = Unpack29Encoder::with_options(options_for_level(3));
+        let packed = encoder
+            .encode_member_with_filter(&input, Rar29FilterKind::Itanium, None)
+            .unwrap();
+        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        assert_eq!(
+            decoder.decode_member(&packed, input.len() as u64).unwrap(),
+            input,
+            "Itanium filter roundtrip mismatch"
+        );
+    }
+
+    #[test]
+    fn rgb_filter_roundtrips_via_decoder() {
+        let input = rgb_data(150_000);
+        let mut encoder = Unpack29Encoder::with_options(options_for_level(3));
+        let packed = encoder
+            .encode_member_with_filter(
+                &input,
+                Rar29FilterKind::Rgb {
+                    width: 300,
+                    pos_r: 0,
+                },
+                None,
+            )
+            .unwrap();
+        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        assert_eq!(
+            decoder.decode_member(&packed, input.len() as u64).unwrap(),
+            input,
+            "RGB filter roundtrip mismatch"
+        );
+    }
+
+    #[test]
+    fn audio_filter_roundtrips_via_decoder() {
+        let input = audio_wave_data(180_000);
+        let mut encoder = Unpack29Encoder::with_options(options_for_level(3));
+        let packed = encoder
+            .encode_member_with_filter(&input, Rar29FilterKind::Audio { channels: 2 }, None)
+            .unwrap();
+        assert!(
+            packed.len() * 3 < input.len(),
+            "audio filter should compress smooth waves hard: {} -> {}",
+            input.len(),
+            packed.len()
+        );
+        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        assert_eq!(
+            decoder.decode_member(&packed, input.len() as u64).unwrap(),
+            input,
+            "audio filter roundtrip mismatch"
         );
     }
 

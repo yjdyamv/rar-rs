@@ -666,6 +666,13 @@ impl RarArchive {
                             std::iter::once(0..data.len()).collect(),
                         ));
                     }
+                    if let Some(channels) = crate::codec::filters::auto_audio_filter_channels(&data)
+                    {
+                        list.push((
+                            Rar29FilterKind::Audio { channels },
+                            std::iter::once(0..data.len()).collect(),
+                        ));
+                    }
                     list
                 };
                 for (kind, ranges) in candidates {

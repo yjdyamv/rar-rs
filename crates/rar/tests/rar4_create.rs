@@ -962,3 +962,43 @@ fn create_rar4_auto_delta_filter_on_samples() {
         &content[..]
     );
 }
+
+/// Auto audio filter on 8-bit interleaved samples: the RAR3 AUDIO filter
+/// must fire (member far below input size) and round-trip byte-identically.
+#[test]
+fn create_rar4_auto_audio_filter_on_waveform() {
+    let dir = make_temp_dir();
+    let mut content = Vec::with_capacity(400_000);
+    let mut ch = [128i16; 2];
+    let mut seed = 0xC0FFEEu32;
+    while content.len() < 350_000 {
+        for c in 0..2usize {
+            ch[c] = (ch[c] + (((seed >> (c * 8)) & 0x3f) as i16 - 30)).clamp(0, 255);
+            content.push(ch[c] as u8);
+        }
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+    }
+    let src = dir.path().join("voice8.bin");
+    std::fs::write(&src, &content).unwrap();
+
+    let arc = dir.path().join("auto_audio.rar");
+    let opts = CreateOptions {
+        format_version: ArchiveVersion::Rar40,
+        ..Default::default()
+    };
+    let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
+    archive.add(&src, 3).expect("add");
+    archive.close().expect("close");
+
+    let size = std::fs::metadata(&arc).unwrap().len();
+    assert!(
+        size * 5 < content.len() as u64,
+        "audio-filtered member must compress hard: {size} vs {}",
+        content.len()
+    );
+    let mut archive = RarArchive::open(&arc).expect("reopen");
+    assert_eq!(
+        archive.read("voice8.bin").expect("read").as_slice(),
+        &content[..]
+    );
+}
