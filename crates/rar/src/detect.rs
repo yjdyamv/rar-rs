@@ -3,7 +3,7 @@
 //! Mirrors the reference layout's `detect` module: locating the archive
 //! start (plain or self-extracting) lives here, not in the format modules.
 
-use crate::rar50::RAR5_SIGNATURE;
+use crate::format::rar5::RAR5_SIGNATURE;
 
 /// The RAR 1.5–4.x container family signature (7 bytes, distinct from
 /// RAR5's 8-byte `Rar!\x1a\x07\x01\x00`).

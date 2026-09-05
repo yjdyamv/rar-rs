@@ -1,9 +1,9 @@
 //! Write-side serialization of RAR5 block/header envelopes and the
 //! extra-record / service-block builders.
 
-use crate::rar50::headers::*;
-use crate::rar50::vint;
-use crate::rar50::*;
+use crate::format::rar5::headers::*;
+use crate::format::rar5::vint;
+use crate::format::rar5::*;
 
 impl ArchiveHeader {
     /// Serialize to RAR5 binary format (including CRC).
@@ -371,7 +371,7 @@ mod tests {
             ..Default::default()
         };
 
-        let raw = crate::rar50::headers::parse_block_bytes(&header.to_bytes()).unwrap();
+        let raw = crate::format::rar5::headers::parse_block_bytes(&header.to_bytes()).unwrap();
         let parsed = FileHeader::from_raw(&raw, raw.data_offset).unwrap();
         assert_eq!(
             parsed.dict_size_bytes,

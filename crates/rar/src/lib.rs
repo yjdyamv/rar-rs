@@ -33,12 +33,16 @@ pub mod error;
 pub mod features;
 mod fs;
 mod model;
+// Internal home of the historical `rar40`/`rar50` module trees; the old
+// public paths remain available as re-export aliases below.
+#[doc(hidden)]
+pub mod format;
 #[doc(hidden)]
 pub mod name_policy;
 pub mod options;
 mod parallel;
 pub mod rar40;
-pub mod rar50;
+pub use crate::format::rar5 as rar50;
 #[doc(hidden)]
 pub mod recovery;
 pub mod version;

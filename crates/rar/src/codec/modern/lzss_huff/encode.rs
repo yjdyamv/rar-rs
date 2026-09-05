@@ -8,7 +8,9 @@
 pub use super::encoder::*;
 
 use crate::error::{RarError, RarResult};
-use crate::rar50::{COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_NORMAL, COMP_METHOD_STORE};
+use crate::format::rar5::{
+    COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_NORMAL, COMP_METHOD_STORE,
+};
 use crate::version::ArchiveVersion;
 
 /// Options controlling compression of one member.

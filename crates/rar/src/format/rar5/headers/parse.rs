@@ -3,9 +3,9 @@
 use std::io::{self, Read, Seek};
 
 use crate::error::{RarError, RarResult};
-use crate::rar50::headers::*;
-use crate::rar50::vint;
-use crate::rar50::*;
+use crate::format::rar5::headers::*;
+use crate::format::rar5::vint;
+use crate::format::rar5::*;
 
 pub fn read_block<R: Read + Seek>(
     reader: &mut R,
@@ -132,7 +132,7 @@ fn read_plain_header<R: Read>(reader: &mut R) -> RarResult<Option<RawHeader>> {
 }
 
 fn read_encrypted_header<R: Read>(reader: &mut R, key: &[u8; 32]) -> RarResult<Option<RawHeader>> {
-    let mut iv = [0u8; crate::rar50::ENCR_IV_SIZE];
+    let mut iv = [0u8; crate::format::rar5::ENCR_IV_SIZE];
     match reader.read_exact(&mut iv[..1]) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
@@ -1100,9 +1100,11 @@ mod tests {
 
     #[test]
     fn main_locator_accepts_legacy_size_without_type_vint() {
-        let (body, _, _) = crate::rar50::headers::locator::build_locator_body(true, false);
+        let (body, _, _) = crate::format::rar5::headers::locator::build_locator_body(true, false);
         let mut extra = vint::encode(body.len() as u64);
-        extra.extend(vint::encode(crate::rar50::headers::locator::LOCATOR_TYPE));
+        extra.extend(vint::encode(
+            crate::format::rar5::headers::locator::LOCATOR_TYPE,
+        ));
         extra.extend(body);
 
         let mut header_data = Vec::new();

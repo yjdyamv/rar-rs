@@ -8,7 +8,7 @@
 pub use super::decoder::*;
 
 use crate::error::{RarError, RarResult};
-use crate::rar50::{COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_STORE};
+use crate::format::rar5::{COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_STORE};
 
 /// Decode `data` using the specified RAR5 compression method.
 pub fn decode(

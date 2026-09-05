@@ -2,7 +2,7 @@
 //! configuration setters and drop-time cleanup.
 //!
 //! This module is intentionally a thin seam. Read/decode lives in
-//! [`crate::rar50::extract`], the write pipeline in [`crate::rar50::write`],
+//! [`crate::format::rar5::extract`], the write pipeline in [`crate::format::rar5::write`],
 //! create/append finalization in `crate::archive::create`, and surgical
 //! edit transactions (delete/rename/comment/recovery) in
 //! `crate::archive::transaction`.
@@ -26,10 +26,10 @@ use crate::codec::DecoderState;
 use crate::crypto;
 use crate::crypto::parse_archive_encrypt_header;
 use crate::error::{RarError, RarResult};
+use crate::format::rar5::headers::*;
+use crate::format::rar5::vint;
+use crate::format::rar5::*;
 use crate::fs::atomic::{copy_prefix, read_write_create, replace_file, temp_sibling_path};
-use crate::rar50::headers::*;
-use crate::rar50::vint;
-use crate::rar50::*;
 use crate::version::ArchiveVersion;
 use crate::write_progress::ProgressTracker;
 
@@ -636,15 +636,20 @@ impl RarArchive {
         let mut reader = File::open(&path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
 
-        let first =
-            crate::rar50::headers::read_block(&mut reader, self.archive_block_key()?.as_ref())?
-                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
+        let first = crate::format::rar5::headers::read_block(
+            &mut reader,
+            self.archive_block_key()?.as_ref(),
+        )?
+        .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
         let main_meta = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
                 let params = parse_archive_encrypt_header(&first.raw)?;
                 self.handle_archive_encrypt_header(params)?;
-                crate::rar50::headers::read_block(&mut reader, self.archive_block_key()?.as_ref())?
-                    .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
+                crate::format::rar5::headers::read_block(
+                    &mut reader,
+                    self.archive_block_key()?.as_ref(),
+                )?
+                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
             }
             BLOCK_TYPE_ARCHIVE_HEADER => first,
             _ => {
@@ -670,9 +675,10 @@ impl RarArchive {
         let mut truncate_pos = None;
         let mut last_file_end = 0u64;
         let mut rr_percent = None;
-        while let Some(meta) =
-            crate::rar50::headers::read_block(&mut reader, self.archive_block_key()?.as_ref())?
-        {
+        while let Some(meta) = crate::format::rar5::headers::read_block(
+            &mut reader,
+            self.archive_block_key()?.as_ref(),
+        )? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => {
                     if truncate_pos.is_none() {
@@ -743,15 +749,20 @@ impl RarArchive {
         let path = self.path.clone();
         let mut reader = File::open(&path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
-        let first =
-            crate::rar50::headers::read_block(&mut reader, self.archive_block_key()?.as_ref())?
-                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
+        let first = crate::format::rar5::headers::read_block(
+            &mut reader,
+            self.archive_block_key()?.as_ref(),
+        )?
+        .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
         let main_meta = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
                 let params = parse_archive_encrypt_header(&first.raw)?;
                 self.handle_archive_encrypt_header(params)?;
-                crate::rar50::headers::read_block(&mut reader, self.archive_block_key()?.as_ref())?
-                    .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
+                crate::format::rar5::headers::read_block(
+                    &mut reader,
+                    self.archive_block_key()?.as_ref(),
+                )?
+                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
             }
             BLOCK_TYPE_ARCHIVE_HEADER => first,
             _ => {

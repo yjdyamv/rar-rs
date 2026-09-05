@@ -2,7 +2,7 @@
 //! member decode.
 //!
 //! This is the legacy `Rar!\x1a\x07\x00` family (WinRAR 1.5 through 4.x),
-//! distinct from the RAR5 container in [`crate::rar50`]. Headers are
+//! distinct from the RAR5 container in [`crate::format::rar5`]. Headers are
 //! fixed-width (not vint-encoded) and carry a 16-bit CRC over the header
 //! body. Member decoding dispatches on the header's `unp_ver` (15 → Unpack15,
 //! 20/26 → Unpack20, >= 29 → Unpack29) and on the `method` byte.

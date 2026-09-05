@@ -640,7 +640,7 @@ fn in_memory_sink_archive_is_well_formed() {
     let mut cursor = Cursor::new(&bytes);
     cursor.set_position(8); // skip signature
     let mut types = Vec::new();
-    while let Ok(Some(meta)) = crate::rar50::headers::read_block(&mut cursor, None) {
+    while let Ok(Some(meta)) = crate::format::rar5::headers::read_block(&mut cursor, None) {
         types.push(meta.block_type);
         cursor.set_position(meta.data_end);
         if meta.block_type == BLOCK_TYPE_END_ARCHIVE {

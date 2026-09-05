@@ -233,7 +233,7 @@ pub(crate) fn hash_file(
     want_blake: bool,
 ) -> RarResult<(u32, Option<[u8; 32]>)> {
     let mut crc = crc32fast::Hasher::new();
-    let mut blake = want_blake.then(crate::rar50::blake2sp::Hasher::new);
+    let mut blake = want_blake.then(crate::format::rar5::blake2sp::Hasher::new);
     let mut f = File::open(path)?;
     let mut buf = vec![0u8; 1 << 20];
     let mut total = 0u64;

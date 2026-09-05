@@ -16,15 +16,15 @@ use crate::codec::DecoderState;
 use crate::crypto;
 use crate::detect::{SFX_SCAN_LIMIT, find_bytes};
 use crate::error::{RarError, RarResult};
+use crate::format::rar5::headers::*;
+#[cfg(windows)]
+use crate::format::rar5::write as archive_write;
+use crate::format::rar5::*;
 use crate::fs::atomic::{replace_file, temp_sibling_path};
 use crate::fs::safe_path::sanitize_archive_path;
 use crate::model::{DataChunk, FileHeader};
 #[cfg(feature = "parallel")]
 use crate::parallel::extraction_pool;
-use crate::rar50::headers::*;
-#[cfg(windows)]
-use crate::rar50::write as archive_write;
-use crate::rar50::*;
 
 /// Memory budget (packed + unpacked) for the optional parallel extraction
 /// path; larger archives stream sequentially to stay bounded.
@@ -42,7 +42,7 @@ const PARALLEL_MIN_UNPACKED: u64 = 64 * 1024 * 1024;
 struct IntegritySink<'a> {
     inner: &'a mut dyn Write,
     crc: crc32fast::Hasher,
-    blake: Option<crate::rar50::blake2sp::Hasher>,
+    blake: Option<crate::format::rar5::blake2sp::Hasher>,
 }
 
 impl<'a> IntegritySink<'a> {
@@ -50,7 +50,7 @@ impl<'a> IntegritySink<'a> {
         Self {
             inner,
             crc: crc32fast::Hasher::new(),
-            blake: want_blake.then(crate::rar50::blake2sp::Hasher::new),
+            blake: want_blake.then(crate::format::rar5::blake2sp::Hasher::new),
         }
     }
 
@@ -129,15 +129,17 @@ impl RarArchive {
     fn try_quick_open_entries(&mut self) -> RarResult<bool> {
         // Header-encrypted archives never carry a QO record, and reading
         // their main header would need the derived key — bail out early.
-        let first = match crate::rar50::headers::read_block(self.stream.as_mut().unwrap(), None)? {
-            Some(meta) => meta,
-            None => return Ok(false),
-        };
+        let first =
+            match crate::format::rar5::headers::read_block(self.stream.as_mut().unwrap(), None)? {
+                Some(meta) => meta,
+                None => return Ok(false),
+            };
         if first.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
             return Ok(false);
         }
         let ah = ArchiveHeader::from_raw(&first.raw)?;
-        let Some(qo_rel) = crate::rar50::headers::locator_quick_open_offset(&ah.extra_data) else {
+        let Some(qo_rel) = crate::format::rar5::headers::locator_quick_open_offset(&ah.extra_data)
+        else {
             return Ok(false);
         };
         let qo_abs = self
@@ -147,7 +149,7 @@ impl RarArchive {
             .unwrap_or(u64::MAX);
         let stream = self.stream.as_mut().unwrap();
         stream.seek(SeekFrom::Start(qo_abs))?;
-        let Some(qo) = crate::rar50::headers::read_block(stream, None)? else {
+        let Some(qo) = crate::format::rar5::headers::read_block(stream, None)? else {
             return Ok(false);
         };
         if qo.block_type != BLOCK_TYPE_SERVICE_HEADER {
@@ -231,9 +233,10 @@ impl RarArchive {
         let mut encr_key: Option<[u8; 32]> = None;
         let mut last_file_index: Option<usize> = None;
 
-        while let Some(meta) =
-            crate::rar50::headers::read_block(self.stream.as_mut().unwrap(), encr_key.as_ref())?
-        {
+        while let Some(meta) = crate::format::rar5::headers::read_block(
+            self.stream.as_mut().unwrap(),
+            encr_key.as_ref(),
+        )? {
             self.check_cancel()?;
             let raw = &meta.raw;
             let stream_pos = self.stream.as_mut().unwrap().stream_position()?;
@@ -259,7 +262,7 @@ impl RarArchive {
                     last_file_index = Some(self.entries.len() - 1);
                 }
                 BLOCK_TYPE_SERVICE_HEADER
-                    if raw.flags & crate::rar50::BLOCK_FLAG_DEPENDS_PREV != 0 =>
+                    if raw.flags & crate::format::rar5::BLOCK_FLAG_DEPENDS_PREV != 0 =>
                 {
                     // NTFS stream record ("STM"): the SUBDATA extra holds
                     // the stream name (":name"), the data area the content.
@@ -267,12 +270,13 @@ impl RarArchive {
                     if name.as_deref() == Some("STM")
                         && let Some(owner_index) = last_file_index
                     {
-                        let extra = crate::rar50::headers::block_extra_area(&raw.header_data)?;
+                        let extra =
+                            crate::format::rar5::headers::block_extra_area(&raw.header_data)?;
                         if let Some(stream_name) =
-                            crate::rar50::headers::parse_service_subdata(&extra)
+                            crate::format::rar5::headers::parse_service_subdata(&extra)
                             && !stream_name.is_empty()
                             && let Some((unpacked_size, method, dict_size_log)) =
-                                crate::rar50::headers::parse_stream_params(&raw.header_data)
+                                crate::format::rar5::headers::parse_stream_params(&raw.header_data)
                         {
                             self.read_ctx_mut().streams.push(StreamRecord {
                                 owner_index,
@@ -368,7 +372,7 @@ impl RarArchive {
             let mut encr_key: Option<[u8; 32]> = None;
 
             while let Some(meta) =
-                crate::rar50::headers::read_block(&mut stream, encr_key.as_ref())?
+                crate::format::rar5::headers::read_block(&mut stream, encr_key.as_ref())?
             {
                 self.check_cancel()?;
                 let raw = meta.raw;
@@ -750,7 +754,7 @@ impl RarArchive {
 
                     let crc = crc32fast::hash(&data);
                     let blake = if hdr.hash_value.is_some() {
-                        Some(crate::rar50::blake2sp::hash(&data))
+                        Some(crate::format::rar5::blake2sp::hash(&data))
                     } else {
                         None
                     };
@@ -1000,7 +1004,7 @@ impl RarArchive {
                     stream.seek(SeekFrom::Start(s.data_offset))?;
                     stream.read_exact(&mut packed)?;
                 }
-                let data = if s.method == crate::rar50::COMP_METHOD_STORE {
+                let data = if s.method == crate::format::rar5::COMP_METHOD_STORE {
                     packed
                 } else {
                     crate::codec::decode_standalone(
@@ -1256,11 +1260,11 @@ impl RarArchive {
         let max_packed = self.max_packed_bytes();
         let password = self.password.as_deref();
         let cancel = &self.cancel;
-        let mut reader = crate::rar50::payload::StreamReader {
+        let mut reader = crate::format::rar5::payload::StreamReader {
             stream: self.stream.as_mut().unwrap(),
             volume_paths: &self.volume_paths,
         };
-        crate::rar50::payload::read_packed(
+        crate::format::rar5::payload::read_packed(
             &mut reader,
             hdr,
             &entry.chunks,
@@ -1317,7 +1321,7 @@ impl RarArchive {
 
         let payload = self.read_packed_data(idx)?;
         let mut raw_data = Vec::new();
-        crate::rar50::payload::decode_member(
+        crate::format::rar5::payload::decode_member(
             &self.entries[idx].header,
             &payload,
             state,
@@ -1328,7 +1332,7 @@ impl RarArchive {
         let blake = self.entries[idx]
             .header
             .hash_value
-            .map(|_| crate::rar50::blake2sp::hash(&raw_data));
+            .map(|_| crate::format::rar5::blake2sp::hash(&raw_data));
         self.verify_integrity(
             idx,
             crc,
@@ -1386,7 +1390,7 @@ impl RarArchive {
         let payload = self.read_packed_data(idx)?;
         let mut sink = IntegritySink::new(writer, self.entries[idx].header.hash_value.is_some());
 
-        let written = crate::rar50::payload::decode_member(
+        let written = crate::format::rar5::payload::decode_member(
             &self.entries[idx].header,
             &payload,
             state,
@@ -1680,7 +1684,7 @@ impl RarArchive {
         verify_integrity_for(hdr, crc, blake, params, keys)
     }
 
-    /// [`crate::rar50::headers::read_block`].
+    /// [`crate::format::rar5::headers::read_block`].
     pub(crate) fn archive_block_key(&self) -> RarResult<Option<[u8; 32]>> {
         let encr = match self.archive_encr.as_ref() {
             Some(encr) => encr,
@@ -1808,7 +1812,7 @@ fn parse_quick_open_payload(payload: &[u8], qo_abs: u64) -> RarResult<Vec<Archiv
         if hdr_end > body_end {
             return Err(RarError::Format("quick-open: truncated file header".into()));
         }
-        let raw = crate::rar50::headers::parse_block_bytes(&payload[p..hdr_end])?;
+        let raw = crate::format::rar5::headers::parse_block_bytes(&payload[p..hdr_end])?;
         if raw.block_type != BLOCK_TYPE_FILE_HEADER {
             return Err(RarError::Format("quick-open: unexpected block type".into()));
         }

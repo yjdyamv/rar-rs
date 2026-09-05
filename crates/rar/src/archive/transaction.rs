@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::codec::{DecoderState, lzss_huff as compression};
 use crate::crypto::parse_archive_encrypt_header;
+use crate::format::rar5::headers::*;
+use crate::format::rar5::vint;
 use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
-use crate::rar50::headers::*;
-use crate::rar50::vint;
 
 use super::{PendingCommit, volume_base_of, volume_path};
 
@@ -86,7 +86,7 @@ impl VolumeReaders {
     }
 }
 
-impl crate::rar50::payload::ChunkReader for VolumeReaders {
+impl crate::format::rar5::payload::ChunkReader for VolumeReaders {
     fn read_chunk(&mut self, vol: usize, offset: u64, len: u64) -> RarResult<Vec<u8>> {
         VolumeReaders::read_chunk(self, vol, offset, len)
     }
@@ -527,7 +527,7 @@ impl RarArchive {
     ) -> RarResult<DecryptedPayload> {
         let entry = &self.entries[idx];
         let hdr = &entry.header;
-        crate::rar50::payload::read_packed(
+        crate::format::rar5::payload::read_packed(
             readers,
             hdr,
             &entry.chunks,
@@ -552,7 +552,7 @@ impl RarArchive {
         }
         let payload = self.read_packed_volumes(readers, idx)?;
         let mut raw_data = Vec::new();
-        crate::rar50::payload::decode_member(
+        crate::format::rar5::payload::decode_member(
             &self.entries[idx].header,
             &payload,
             Some(state),
@@ -562,7 +562,7 @@ impl RarArchive {
         let blake = self.entries[idx]
             .header
             .hash_value
-            .map(|_| crate::rar50::blake2sp::hash(&raw_data));
+            .map(|_| crate::format::rar5::blake2sp::hash(&raw_data));
         self.verify_integrity(
             idx,
             crc,
@@ -589,7 +589,9 @@ impl RarArchive {
         let data = self.decode_chain_member_volumes(readers, idx, dec)?;
 
         let plain_crc = crc32fast::hash(&data);
-        let plain_blake = hdr.hash_value.map(|_| crate::rar50::blake2sp::hash(&data));
+        let plain_blake = hdr
+            .hash_value
+            .map(|_| crate::format::rar5::blake2sp::hash(&data));
         let variant = crate::version::ArchiveVersion::from_v70(hdr.dict_size_bytes.is_some());
         let packed = compression::encode_chunked(
             &data,
@@ -950,9 +952,10 @@ impl RarArchive {
     pub fn get_comment(&mut self) -> RarResult<Option<Vec<u8>>> {
         let mut reader = File::open(&self.path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
-        while let Some(meta) =
-            crate::rar50::headers::read_block(&mut reader, self.archive_block_key()?.as_ref())?
-        {
+        while let Some(meta) = crate::format::rar5::headers::read_block(
+            &mut reader,
+            self.archive_block_key()?.as_ref(),
+        )? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_SERVICE_HEADER
@@ -1034,15 +1037,20 @@ impl RarArchive {
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         self.header_encryption = false;
         self.archive_encr = None;
-        let first =
-            crate::rar50::headers::read_block(&mut reader, self.archive_block_key()?.as_ref())?
-                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
+        let first = crate::format::rar5::headers::read_block(
+            &mut reader,
+            self.archive_block_key()?.as_ref(),
+        )?
+        .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
         let main = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
                 let params = parse_archive_encrypt_header(&first.raw)?;
                 self.handle_archive_encrypt_header(params)?;
-                crate::rar50::headers::read_block(&mut reader, self.archive_block_key()?.as_ref())?
-                    .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
+                crate::format::rar5::headers::read_block(
+                    &mut reader,
+                    self.archive_block_key()?.as_ref(),
+                )?
+                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
             }
             BLOCK_TYPE_ARCHIVE_HEADER => first,
             _ => {
@@ -1124,18 +1132,19 @@ impl RarArchive {
         // then the main archive header (rebuilt so the locator stays
         // consistent with the rewritten archive).
         let mut encrypt_header = None;
-        let first = crate::rar50::headers::read_block(reader, self.archive_block_key()?.as_ref())?
-            .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
+        let first =
+            crate::format::rar5::headers::read_block(reader, self.archive_block_key()?.as_ref())?
+                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
         let main_meta = match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
                 let params = parse_archive_encrypt_header(&first.raw)?;
                 self.handle_archive_encrypt_header(params)?;
                 encrypt_header = Some(first.header_bytes);
-                let main =
-                    crate::rar50::headers::read_block(reader, self.archive_block_key()?.as_ref())?
-                        .ok_or_else(|| {
-                            RarError::Format("archive is missing the main header".into())
-                        })?;
+                let main = crate::format::rar5::headers::read_block(
+                    reader,
+                    self.archive_block_key()?.as_ref(),
+                )?
+                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
                 if main.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
                     return Err(RarError::Format(
                         "archive is missing the main header".into(),
@@ -1168,7 +1177,7 @@ impl RarArchive {
         let mut prev_file_deleted = false;
 
         while let Some(meta) =
-            crate::rar50::headers::read_block(reader, self.archive_block_key()?.as_ref())?
+            crate::format::rar5::headers::read_block(reader, self.archive_block_key()?.as_ref())?
         {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
@@ -1482,7 +1491,9 @@ impl RarArchive {
         let data = self.decode_chain_member(reader, idx, dec)?;
 
         let plain_crc = crc32fast::hash(&data);
-        let plain_blake = hdr.hash_value.map(|_| crate::rar50::blake2sp::hash(&data));
+        let plain_blake = hdr
+            .hash_value
+            .map(|_| crate::format::rar5::blake2sp::hash(&data));
         let variant = crate::version::ArchiveVersion::from_v70(hdr.dict_size_bytes.is_some());
         let packed = compression::encode_chunked(
             &data,
@@ -1549,7 +1560,7 @@ impl RarArchive {
         }
         let payload = self.read_packed_single(reader, idx)?;
         let mut raw_data = Vec::new();
-        crate::rar50::payload::decode_member(
+        crate::format::rar5::payload::decode_member(
             &self.entries[idx].header,
             &payload,
             Some(state),
@@ -1559,7 +1570,7 @@ impl RarArchive {
         let blake = self.entries[idx]
             .header
             .hash_value
-            .map(|_| crate::rar50::blake2sp::hash(&raw_data));
+            .map(|_| crate::format::rar5::blake2sp::hash(&raw_data));
         self.verify_integrity(
             idx,
             crc,
@@ -1575,8 +1586,8 @@ impl RarArchive {
     fn read_packed_single(&mut self, reader: &mut File, idx: usize) -> RarResult<DecryptedPayload> {
         let entry = &self.entries[idx];
         let hdr = &entry.header;
-        let mut rr = crate::rar50::payload::SingleFileReader { reader };
-        crate::rar50::payload::read_packed(
+        let mut rr = crate::format::rar5::payload::SingleFileReader { reader };
+        crate::format::rar5::payload::read_packed(
             &mut rr,
             hdr,
             &entry.chunks,
@@ -1616,12 +1627,12 @@ impl RarArchive {
         let quick_open = self.write_ctx().quick_open;
         let recovery = self.recovery_percent.is_some();
         let (locator, qo_field_pos, rr_field_pos) =
-            crate::rar50::headers::locator::build_locator_body(quick_open, recovery);
+            crate::format::rar5::headers::locator::build_locator_body(quick_open, recovery);
         // When neither QO nor RR is active, locator_flags == 0 and
         // the body is exactly 1 byte (the flags vint).  Omit the record
         // in that case, preserving the original conditional emit.
         if locator.len() > 1 {
-            extra.extend(crate::rar50::headers::locator::frame_locator_record(
+            extra.extend(crate::format::rar5::headers::locator::frame_locator_record(
                 &locator,
             ));
         }
@@ -1660,7 +1671,7 @@ impl RarArchive {
             + vint::encoded_size(extra.len() as u64)
             + vint::encoded_size(arch_flags)
             + vint::encoded_size(locator.len() as u64)
-            + vint::encoded_size(crate::rar50::headers::locator::LOCATOR_TYPE);
+            + vint::encoded_size(crate::format::rar5::headers::locator::LOCATOR_TYPE);
         let qo_field_pos = qo_field_pos.map(|p| field_base + p);
         let rr_field_pos = rr_field_pos.map(|p| field_base + p);
 
@@ -1684,7 +1695,7 @@ impl RarArchive {
     ) -> RarResult<()> {
         let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
         let mut hdr = main_hdr.to_vec();
-        crate::rar50::headers::locator::patch_locator_fields(
+        crate::format::rar5::headers::locator::patch_locator_fields(
             &mut hdr,
             qo_offset,
             rr_offset,

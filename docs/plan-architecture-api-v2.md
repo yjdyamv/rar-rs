@@ -323,8 +323,8 @@ modern LZSS module (a shared-constant extraction is a later cleanup).
   `discover_volumes`, matching the target layout.
 
 - [ ] Move format modules only after model ownership is stable.
-      (format modules still under `src/rar40`/`src/rar50`; deferred until the
-      remaining convergence items below are in place)
+      (`rar50` moved to `src/format/rar5` with the public `rar5::rar50` path
+      kept as a `#[doc(hidden)]` re-export alias; `rar40` moves next).
 - [x] Move filesystem policy out of format extraction/writing
       (done: `src/fs/{atomic.rs, volume.rs, safe_path.rs}` — see notes below).
 - [ ] Split CLI binaries into `src/bin` plus shared command modules

@@ -5,8 +5,8 @@
 //! (`rewrite.rs`) consume this module.
 
 use crate::error::{RarError, RarResult};
-use crate::rar50::headers::vint_fixed5;
-use crate::rar50::vint;
+use crate::format::rar5::headers::vint_fixed5;
+use crate::format::rar5::vint;
 
 /// Locator record type (extra record type 0x01).
 pub(crate) const LOCATOR_TYPE: u64 = 0x01;

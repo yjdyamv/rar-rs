@@ -1,5 +1,5 @@
 use crate::error::{RarError, RarResult};
-use crate::rar50::vint;
+use crate::format::rar5::vint;
 /// RAR5 Encryption Support
 ///
 /// RAR5 uses AES-256 in CBC mode with keys derived from a password via a
@@ -14,7 +14,7 @@ use crate::rar50::vint;
 /// 4. Header encryption: when an archive-level encryption header is
 ///    present, all subsequent blocks (including file headers) are also
 ///    encrypted.
-use crate::rar50::*;
+use crate::format::rar5::*;
 
 use aes::Aes256;
 use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
@@ -484,7 +484,7 @@ impl EncryptionParams {
     /// [12-byte check value]` — matching `parse_archive_encrypt_header`.
     pub fn to_archive_header_block(&self) -> Vec<u8> {
         let mut body = Vec::new();
-        body.extend(vint::encode(crate::rar50::BLOCK_TYPE_ENCRYPT_HEADER));
+        body.extend(vint::encode(crate::format::rar5::BLOCK_TYPE_ENCRYPT_HEADER));
         body.extend(vint::encode(0u64)); // block flags
         body.extend(vint::encode(ENCR_VERSION_AES256 as u64));
         // The archive-level record carries only the password-check bit;
@@ -518,7 +518,7 @@ impl EncryptionParams {
 /// `[vint encr_version] [vint encr_flags] [u8 strength] [16-byte salt]`
 /// Optionally followed by a 12-byte password check value if encr_flags & 0x01.
 pub fn parse_archive_encrypt_header(
-    raw: &crate::rar50::headers::RawBlock,
+    raw: &crate::format::rar5::headers::RawBlock,
 ) -> RarResult<EncryptionParams> {
     let data = &raw.header_data;
     let mut offset = 0;
@@ -585,7 +585,7 @@ pub fn parse_archive_encrypt_header(
 /// decoded into `raw`, verify the given password, and return the derived
 /// header-decryption key.
 pub fn derive_header_key(
-    raw: &crate::rar50::headers::RawBlock,
+    raw: &crate::format::rar5::headers::RawBlock,
     password: Option<&str>,
 ) -> RarResult<[u8; ENCR_KEY_SIZE]> {
     let password = password.ok_or_else(|| {

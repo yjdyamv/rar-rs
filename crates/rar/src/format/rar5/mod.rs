@@ -2,8 +2,8 @@
 //!
 //! Mirrors the reference layout's `rar50` family module: the container
 //! vocabulary (block types, flags, extra-record types) and the block/header
-//! structures live here; extraction is in [`crate::rar50::extract`], the
-//! writer in [`crate::rar50::write`].
+//! structures live here; extraction is in [`crate::format::rar5::extract`], the
+//! writer in [`crate::format::rar5::write`].
 //!
 //! RAR5 archive structure:
 //! ```text

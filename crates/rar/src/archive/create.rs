@@ -12,14 +12,14 @@ use super::{
 };
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
-use crate::rar50::headers::*;
-use crate::rar50::vint;
-use crate::rar50::{
+use crate::format::rar5::headers::*;
+use crate::format::rar5::vint;
+use crate::format::rar5::{
     ARCHIVE_FLAG_RECOVERY, ARCHIVE_FLAG_SOLID, ARCHIVE_FLAG_VOLUME, BLOCK_FLAG_EXTRA_DATA,
     BLOCK_TYPE_ARCHIVE_HEADER, ENCR_IV_SIZE, ENCR_PBKDF2_ITER_LOG, END_FLAG_NEXT_VOLUME,
     RAR5_SIGNATURE,
 };
+use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
 
 impl RarArchive {
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -338,11 +338,11 @@ impl RarArchive {
             extra.extend(rec);
             extra
         };
-        let hdr = crate::rar50::headers::build_service_block(
+        let hdr = crate::format::rar5::headers::build_service_block(
             "RR",
             &subdata,
             rr_data.len() as u64,
-            crate::rar50::BLOCK_FLAG_SKIP_IF_UNKNOWN,
+            crate::format::rar5::BLOCK_FLAG_SKIP_IF_UNKNOWN,
         );
 
         self.write_block_header(&hdr)?;
@@ -384,11 +384,11 @@ impl RarArchive {
             extra.extend(vint::encode(0x07u64)); // service data record type
             extra
         };
-        let hdr = crate::rar50::headers::build_service_block(
+        let hdr = crate::format::rar5::headers::build_service_block(
             "QO",
             &subdata,
             payload.len() as u64,
-            crate::rar50::BLOCK_FLAG_SKIP_IF_UNKNOWN,
+            crate::format::rar5::BLOCK_FLAG_SKIP_IF_UNKNOWN,
         );
 
         self.write_block_header(&hdr)?;
@@ -460,7 +460,7 @@ impl RarArchive {
 
         let mut new_header = plain;
         let base = self.sfx_offset + RAR5_SIGNATURE.len() as u64;
-        crate::rar50::headers::locator::patch_locator_fields(
+        crate::format::rar5::headers::locator::patch_locator_fields(
             &mut new_header,
             qo_offset,
             rr_offset,
@@ -535,10 +535,10 @@ impl RarArchive {
         let quick_open = self.write_ctx().quick_open;
         let recovery = self.recovery_percent.is_some();
         let (locator, qo_field_pos, rr_field_pos) =
-            crate::rar50::headers::locator::build_locator_body(quick_open, recovery);
+            crate::format::rar5::headers::locator::build_locator_body(quick_open, recovery);
 
         let mut extra = Vec::new();
-        extra.extend(crate::rar50::headers::locator::frame_locator_record(
+        extra.extend(crate::format::rar5::headers::locator::frame_locator_record(
             &locator,
         ));
 
@@ -587,7 +587,7 @@ impl RarArchive {
             + vint::encoded_size(extra.len() as u64) as u64
             + vint::encoded_size(arch_flags) as u64
             + vint::encoded_size(locator.len() as u64) as u64
-            + vint::encoded_size(crate::rar50::headers::locator::LOCATOR_TYPE) as u64;
+            + vint::encoded_size(crate::format::rar5::headers::locator::LOCATOR_TYPE) as u64;
         if let Some(p) = qo_field_pos {
             self.write_ctx_mut().qo_offset_field_pos = Some(field_base + p as u64);
         }

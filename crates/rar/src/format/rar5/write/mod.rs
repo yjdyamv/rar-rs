@@ -18,18 +18,18 @@ use crate::archive::{
 use crate::codec::lzss_huff;
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::model::{DataChunk, FileHeader};
-use crate::rar50::write::layout::{
+use crate::format::rar5::write::layout::{
     SAMPLE_PROBE_HEAD, dict_params_for, hash_file, sample_is_incompressible,
     sample_is_incompressible_file,
 };
+use crate::model::{DataChunk, FileHeader};
 #[cfg(feature = "parallel")]
 use crate::write_progress::ProgressTracker;
 
-use crate::rar50::headers::*;
+use crate::format::rar5::headers::*;
 #[cfg(windows)]
-use crate::rar50::vint;
-use crate::rar50::*;
+use crate::format::rar5::vint;
+use crate::format::rar5::*;
 pub(crate) mod engine;
 pub(crate) mod layout;
 #[cfg(windows)]
@@ -348,7 +348,7 @@ impl RarArchive {
         }
         let mut crc_hasher = crc32fast::Hasher::new();
         let mut blake_hasher = if self.write_ctx().blake2 {
-            Some(crate::rar50::blake2sp::Hasher::new())
+            Some(crate::format::rar5::blake2sp::Hasher::new())
         } else {
             None
         };
@@ -1234,7 +1234,7 @@ impl RarArchive {
             h.finalize()
         };
         let plain_blake = if self.write_ctx().blake2 {
-            Some(crate::rar50::blake2sp::hash(data))
+            Some(crate::format::rar5::blake2sp::hash(data))
         } else {
             None
         };
@@ -1609,7 +1609,7 @@ impl RarArchive {
     ) -> RarResult<PreparedEntry> {
         let plain_crc = crc32fast::hash(data);
         let plain_blake = if ctx.blake2 {
-            Some(crate::rar50::blake2sp::hash(data))
+            Some(crate::format::rar5::blake2sp::hash(data))
         } else {
             None
         };
@@ -2368,13 +2368,13 @@ impl RarArchive {
             };
             let mut extra = params.to_extra_bytes();
             if let Some(h) = stored_hash {
-                extra.extend(crate::rar50::headers::hash_extra_record(h));
+                extra.extend(crate::format::rar5::headers::hash_extra_record(h));
             }
             Ok((header_crc, extra, stored_hash, Some(params)))
         } else {
             let mut extra = Vec::new();
             if let Some(h) = plain_blake {
-                extra.extend(crate::rar50::headers::hash_extra_record(h));
+                extra.extend(crate::format::rar5::headers::hash_extra_record(h));
             }
             Ok((plain_crc, extra, plain_blake, None))
         }
@@ -2729,7 +2729,7 @@ impl RarArchive {
 
         let mut crc_hasher = crc32fast::Hasher::new();
         let mut blake_hasher = if self.write_ctx().blake2 {
-            Some(crate::rar50::blake2sp::Hasher::new())
+            Some(crate::format::rar5::blake2sp::Hasher::new())
         } else {
             None
         };
@@ -2966,15 +2966,15 @@ impl RarArchive {
                 let subdata = {
                     let mut extra = Vec::new();
                     extra.extend(vint::encode((1 + name.len()) as u64));
-                    extra.extend(vint::encode(crate::rar50::EXTRA_SERVICE_SUBDATA));
+                    extra.extend(vint::encode(crate::format::rar5::EXTRA_SERVICE_SUBDATA));
                     extra.extend(name.as_bytes());
                     extra
                 };
-                let hdr = crate::rar50::headers::build_service_block(
+                let hdr = crate::format::rar5::headers::build_service_block(
                     "STM",
                     &subdata,
                     data.len() as u64,
-                    crate::rar50::BLOCK_FLAG_DEPENDS_PREV,
+                    crate::format::rar5::BLOCK_FLAG_DEPENDS_PREV,
                 );
                 self.write_block_header(&hdr)?;
                 let stream = self.stream.as_mut().unwrap();

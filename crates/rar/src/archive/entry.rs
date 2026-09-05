@@ -1,8 +1,8 @@
 //! Public archive entry types: the metadata view returned by listing and
 //! the input description used by batch addition.
 
+use crate::format::rar5::method_name;
 use crate::model::{DataChunk, FileHeader};
-use crate::rar50::method_name;
 use std::path::Path;
 
 /// A single entry in the archive (public API).
