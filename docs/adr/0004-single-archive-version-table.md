@@ -46,7 +46,10 @@ covering every member codec version this library reads and writes:
   `WriterOptions::compression(ArchiveVersion)` knob; the writable subset is
   `{v29, v50, v70}` and read-only versions are rejected at validation
   (`InvalidOption`) rather than silently downgraded.
-- `CreateOptions.format_version` becomes `ArchiveVersion` (default `v50`).
+- `CreateOptions.compression` becomes `ArchiveVersion` (default `v50`); the field
+  was renamed from `format_version` so the single version axis carries one name
+  across both surfaces (`WriterOptions::compression`). The raw model keeps
+  `FileHeader::format_version` (the wire container version 4/5).
 - `ArchiveEntry::version()` maps each member onto the table: RAR4 via
   `unp_ver`, RAR5 via `comp_version`.
 - `from_v70(bool)` and `uses_extra_dist()` (v70 only) keep their semantics.

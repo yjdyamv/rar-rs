@@ -42,7 +42,7 @@ pub struct CreateOptions {
     /// combine with `force_v70` (and `dict_size_bytes`) to request v70.
     /// Only writable versions (`v29`/`v50`/`v70`) are accepted; the
     /// v15/v20/v26/v36 readers exist for interoperability only.
-    pub format_version: ArchiveVersion,
+    pub compression: ArchiveVersion,
     /// Create a solid archive: consecutive compressed members share one
     /// LZ window (better ratio, slower random access). Solid state can remain
     /// continuous across volumes or reset according to [`SolidReset`].
@@ -127,15 +127,22 @@ pub struct CreateOptions {
 
 impl CreateOptions {
     pub(crate) fn validate(&self) -> RarResult<()> {
-        if !self.format_version.is_writable() {
-            return Err(RarError::InvalidOption(format!(
-                "only versions v29, v50 and v70 are writable, got {}",
-                self.format_version
-            )));
-        }
+        require_writable_version(self.compression)?;
         validate_dictionary(self.dict_size_log, self.dict_size_bytes)?;
         validate_threads(self.threads)
     }
+}
+
+/// Refuse archive versions the writer cannot produce (`v15`/`v20`/`v26`/
+/// `v36` read backward for interoperability only). Shared by `CreateOptions`
+/// and `WriterOptions` so both surfaces report the same error text.
+pub(crate) fn require_writable_version(version: ArchiveVersion) -> RarResult<()> {
+    if !version.is_writable() {
+        return Err(RarError::InvalidOption(format!(
+            "only versions v29, v50 and v70 are writable, got {version}"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_dictionary(
@@ -178,7 +185,7 @@ pub(crate) fn validate_threads(threads: Option<usize>) -> RarResult<()> {
 impl Default for CreateOptions {
     fn default() -> Self {
         Self {
-            format_version: ArchiveVersion::V50,
+            compression: ArchiveVersion::V50,
             solid: false,
             solid_reset: SolidReset::Continuous,
             quick_open: false,

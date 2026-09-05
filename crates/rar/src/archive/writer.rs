@@ -424,12 +424,7 @@ impl WriterOptions {
             ));
         }
 
-        if !self.compression.is_writable() {
-            return Err(RarError::InvalidOption(format!(
-                "only versions v29, v50 and v70 are writable, got {}",
-                self.compression
-            )));
-        }
+        crate::options::require_writable_version(self.compression)?;
         if self.compression.is_legacy() {
             crate::format::rar4::create::validate_rar4_only(self.into())?;
         }
@@ -457,7 +452,7 @@ impl WriterOptions {
         };
 
         Ok(CreateOptions {
-            format_version: self.compression,
+            compression: self.compression,
             solid,
             solid_reset,
             quick_open: self.quick_open,
@@ -889,7 +884,7 @@ mod tests {
             .dictionary_size(DictionarySize::try_from(64 * 1024 * 1024u64).unwrap())
             .into_legacy()
             .unwrap();
-        assert_eq!(small.format_version, ArchiveVersion::V50);
+        assert_eq!(small.compression, ArchiveVersion::V50);
         assert_eq!(small.dict_size_log, Some(9)); // 64 MiB = 128 KiB << 9
         assert_eq!(small.dict_size_bytes, None);
         assert!(!small.force_v70);
@@ -901,7 +896,7 @@ mod tests {
             .dictionary_size(DictionarySize::try_from(6 * 1024 * 1024 * 1024u64).unwrap())
             .into_legacy()
             .unwrap();
-        assert_eq!(big.format_version, ArchiveVersion::V50);
+        assert_eq!(big.compression, ArchiveVersion::V50);
         assert_eq!(big.dict_size_log, None);
         assert_eq!(big.dict_size_bytes, Some(6 * 1024 * 1024 * 1024));
         assert!(!big.force_v70, "v50 never forces v70");
@@ -913,8 +908,8 @@ mod tests {
             .compression(ArchiveVersion::V29)
             .into_legacy()
             .unwrap();
-        assert_eq!(options.format_version, ArchiveVersion::V29);
-        assert!(options.format_version.is_legacy());
+        assert_eq!(options.compression, ArchiveVersion::V29);
+        assert!(options.compression.is_legacy());
         assert_eq!(options.dict_size_log, None);
         assert_eq!(options.dict_size_bytes, None);
         assert!(!options.force_v70);
@@ -952,7 +947,7 @@ mod tests {
     #[test]
     fn default_writer_is_v50() {
         let options = WriterOptions::new().into_legacy().unwrap();
-        assert_eq!(options.format_version, ArchiveVersion::V50);
-        assert!(!options.format_version.is_legacy());
+        assert_eq!(options.compression, ArchiveVersion::V50);
+        assert!(!options.compression.is_legacy());
     }
 }

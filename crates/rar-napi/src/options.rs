@@ -1,5 +1,5 @@
 //! Option mapping: JS-facing option structs validate and convert onto
-//! the rar5 typed option structs.
+//! the rar-rs typed option structs.
 
 use napi::bindgen_prelude::*;
 
@@ -7,7 +7,7 @@ use crate::{AppendArchiveOptions, CreateArchiveOptions, ExtractArchiveOptions};
 
 pub(crate) const JS_MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
-// ── Conversions from the JS-facing option structs to the rar5 library
+// ── Conversions from the JS-facing option structs to the rar-rs library
 // structs, so each field mapping lives in one place next to its struct.
 
 pub(crate) fn checked_js_integer(value: f64, field: &str, min: u64, max: u64) -> Result<u64> {

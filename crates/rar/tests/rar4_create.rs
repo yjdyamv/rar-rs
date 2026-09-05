@@ -33,7 +33,7 @@ fn create_rar4_store_single_roundtrip() {
     let arc = dir.path().join("out.rar");
 
     let opts = CreateOptions {
-        format_version: ArchiveVersion::V29,
+        compression: ArchiveVersion::V29,
         ..Default::default()
     };
     let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
@@ -65,7 +65,7 @@ fn create_rar4_store_multiple_files() {
     let mut archive = RarArchive::create_with_options(
         &arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             ..Default::default()
         },
     )
@@ -91,7 +91,7 @@ fn create_rar4_empty_file() {
     let mut archive = RarArchive::create_with_options(
         &arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             ..Default::default()
         },
     )
@@ -119,7 +119,7 @@ fn create_rar4_compressed_roundtrip_all_levels() {
     for level in 1..=5u8 {
         let arc = dir.path().join(format!("c{level}.rar"));
         let opts = CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             ..Default::default()
         };
         let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
@@ -181,7 +181,7 @@ fn create_rar4_ppmd_wins_on_text_m5() {
     let make = |level: u8, name: &str| -> u64 {
         let arc = dir.path().join(name);
         let opts = CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             ..Default::default()
         };
         let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
@@ -222,7 +222,7 @@ fn create_rar4_compressed_store_fallback_random() {
     for level in 1..=5u8 {
         let arc = dir.path().join(format!("r{level}.rar"));
         let opts = CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             ..Default::default()
         };
         let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
@@ -260,7 +260,7 @@ fn create_rar4_compressed_multivolume_split_member() {
     let mut archive = RarArchive::create_with_options(
         &arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             volume_size: Some(20_000),
             ..Default::default()
         },
@@ -315,7 +315,7 @@ fn create_rar4_store_multivolume_split_member() {
     let mut archive = RarArchive::create_with_options(
         &arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             volume_size: Some(5_000),
             ..Default::default()
         },
@@ -413,7 +413,7 @@ fn create_rar4_directory_tree_roundtrip() {
     let mut archive = RarArchive::create_with_options(
         &arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             ..Default::default()
         },
     )
@@ -512,7 +512,7 @@ fn create_rar4_directory_multivolume() {
     let mut archive = RarArchive::create_with_options(
         &arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             volume_size: Some(8_000),
             ..Default::default()
         },
@@ -561,7 +561,7 @@ fn create_rar4_encrypted_members_roundtrip() {
     let arc = dir.path().join("enc.rar");
 
     let opts = CreateOptions {
-        format_version: ArchiveVersion::V29,
+        compression: ArchiveVersion::V29,
         password: Some("hunter2".to_string()),
         ..Default::default()
     };
@@ -620,7 +620,7 @@ fn create_rar4_encrypted_multivolume() {
     let mut archive = RarArchive::create_with_options(
         &arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             password: Some("volpw".to_string()),
             volume_size: Some(4_000),
             ..Default::default()
@@ -658,7 +658,7 @@ fn create_rar4_header_encrypted_roundtrip() {
     let mut archive = RarArchive::create_with_options(
         &arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             encrypt_headers: true,
             password: Some("hunter2".to_string()),
             ..Default::default()
@@ -741,7 +741,7 @@ fn create_rar4_exttime_mtime_ns_roundtrip() {
     let mut archive = RarArchive::create_with_options(
         &arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             ..Default::default()
         },
     )
@@ -792,7 +792,7 @@ fn create_rar4_solid_chain() {
     let mut archive = RarArchive::create_with_options(
         &solid_arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             solid: true,
             ..Default::default()
         },
@@ -830,7 +830,7 @@ fn create_rar4_solid_chain() {
     let mut archive = RarArchive::create_with_options(
         &ns_arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             solid: false,
             ..Default::default()
         },
@@ -863,7 +863,7 @@ fn create_rar4_solid_extension_reset() {
     let mut archive = RarArchive::create_with_options(
         &arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             solid: true,
             solid_reset: rar_rs::SolidReset::PerExtension,
             ..Default::default()
@@ -915,7 +915,7 @@ fn rar4_second_solid_run_starts_at_its_own_chain_head() {
     let mut archive = RarArchive::create_with_options(
         &arc,
         CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             solid: true,
             solid_reset: rar_rs::SolidReset::PerExtension,
             ..Default::default()
@@ -976,7 +976,7 @@ fn create_rar4_recovery_record_repairs_periodic_damage() {
     let arc = dir.path().join("periodic_rr.rar");
 
     let opts = CreateOptions {
-        format_version: ArchiveVersion::V29,
+        compression: ArchiveVersion::V29,
         recovery_percent: Some(10),
         ..Default::default()
     };
@@ -1033,7 +1033,7 @@ fn create_rar4_auto_delta_filter_on_samples() {
 
     let arc = dir.path().join("auto_delta.rar");
     let opts = CreateOptions {
-        format_version: ArchiveVersion::V29,
+        compression: ArchiveVersion::V29,
         ..Default::default()
     };
     let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
@@ -1077,7 +1077,7 @@ fn create_rar4_auto_audio_filter_on_waveform() {
 
     let arc = dir.path().join("auto_audio.rar");
     let opts = CreateOptions {
-        format_version: ArchiveVersion::V29,
+        compression: ArchiveVersion::V29,
         ..Default::default()
     };
     let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
@@ -1123,7 +1123,7 @@ fn create_rar4_solid_ppmd_text_chain() {
     let make = |solid: bool, name: &str| -> u64 {
         let arc = dir.path().join(name);
         let opts = CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             solid,
             ..Default::default()
         };
@@ -1191,7 +1191,7 @@ fn create_rar4_large_members_stream_on_extract() {
 
     let arc = dir.path().join("stream.rar");
     let opts = CreateOptions {
-        format_version: ArchiveVersion::V29,
+        compression: ArchiveVersion::V29,
         ..Default::default()
     };
     let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
@@ -1248,7 +1248,7 @@ fn rar4_batch_matches_sequential_bytes() {
     let mk = |name: &str| -> std::path::PathBuf {
         let arc = dir.path().join(name);
         let opts = CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             ..Default::default()
         };
         let mut archive = RarArchive::create_with_options(&arc, opts).expect("create");
@@ -1265,7 +1265,7 @@ fn rar4_batch_matches_sequential_bytes() {
     let bat_arc = dir.path().join("batch.rar");
     {
         let opts = CreateOptions {
-            format_version: ArchiveVersion::V29,
+            compression: ArchiveVersion::V29,
             ..Default::default()
         };
         let mut archive = RarArchive::create_with_options(&bat_arc, opts).expect("create");

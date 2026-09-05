@@ -1,4 +1,4 @@
-//! Stable N-API error mapping: rar5 `RarError` variants to N-API status
+//! Stable N-API error mapping: the rar-rs `RarError` variants to N-API status
 //! codes and messages.
 
 use napi::bindgen_prelude::*;

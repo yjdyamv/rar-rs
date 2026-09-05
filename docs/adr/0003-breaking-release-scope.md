@@ -101,8 +101,11 @@ tests/examples/fuzz. The npm package is already `rar-rs-napi`.
    `rar50` (alias) is used by three wire-level test files. `recovery`,
    `name_policy`, `lzss_huff` internals are used by bindings/CLI/examples.
    Recommendation: gate the wire-level `rar40` surface behind a `raw`
-   feature (done; `rar_rs::rar40` is now feature-gated and `format::rar4` is
-   internal), keep `rar50` public while the in-tree wire tests still use
+   feature (done; `rar_rs::rar40` is now feature-gated; `format::rar4` stays
+   reachable through the `#[doc(hidden)]` `format` tree until the breaking
+   release closes that visibility — "internal" is aspirational, the items are
+   `pub(crate)` and nothing is exported from it), keep `rar50` public while
+   the in-tree wire tests still use
    it, keep `recovery`/`name_policy` doc(hidden) as-is, and keep
    `codec::lzss_huff` public (stable enough for the mtbench/napi streaming
    paths).

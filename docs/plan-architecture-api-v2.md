@@ -312,6 +312,11 @@ Deferred to the Phase 6 breaking release: the `#[doc(hidden)]`
 visibility), and low-level module splits that still reference the old
 names.
 
+> The `model/` sub-split in the target tree is **aspirational**: the module
+> currently holds `entry.rs` (`FileHeader`) and `chunk.rs` (`DataChunk`)
+> only. The finer `path`/`timestamp`/`compression`/`redirect` files remain a
+> later regrouping — no empty module was fabricated to match the figure.
+
 ### fs/ convergence notes (recorded with the filesystem policy move)
 
 - `src/fs/atomic.rs` (was `src/io_util.rs`): bounded reads, unique temp
@@ -373,8 +378,11 @@ maintainer decision before execution.
       (done, then **superseded by ADR 0004**: the two-axis split was replaced
       by the single `ArchiveVersion` table — `V15`–`V70` two-digit variants,
       container derived from the version, `ArchiveFormat` and
-      `CompressionVersion` removed. `CreateOptions::format_version` and
-      `WriterOptions::compression` now take `ArchiveVersion`; `ArchiveEntry::version()`
+      `CompressionVersion` removed. `CreateOptions::compression` and
+      `WriterOptions::compression` now take `ArchiveVersion` — the legacy option
+      field was renamed from `format_version` so the single version axis has one
+      name across both surfaces (the raw model keeps `FileHeader::format_version`,
+      the wire container version 4/5); `ArchiveEntry::version()`
       maps RAR4 `unp_ver` and RAR5 `comp_version` onto the table.
       RAR4 members report `format_version: 4` / `unp_ver` on the raw model.)
 - [ ] Decide which low-level modules remain supported.
@@ -389,9 +397,13 @@ maintainer decision before execution.
       `rename`, `lock`, `list`, `get_entry`, `namelist`, `read`, `extract_all`,
       `extract`, pointing at their typed-role replacements; the CLI, examples
       and N-API migrated onto the roles (`ArchiveReader::open_with`, `entries`,
-      `unique_entry`, `read_entry`; `open_reader` is now the CLI's single open
-      path), and the in-tree test/fuzz consumers keep the legacy facade under
-      `#![allow(deprecated)]`. Removal stays at the breaking release.)
+      `unique_entry`, `read_entry`; `open_reader` is the CLI's single open
+      path for read-driven commands — `rar cw` and the post-`repair`
+      validation still open `RarArchive` directly because the typed reader
+      does not yet surface the comment read and path-based repair services;
+      see CODE_REVIEW_2026-09-05 SP-02), and the in-tree test/fuzz consumers
+      keep the legacy facade under `#![allow(deprecated)]`. Removal stays at
+      the breaking release.)
 
 ## Validation matrix
 

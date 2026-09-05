@@ -389,7 +389,7 @@ fn append_rejects_rar4_archives_before_touching_the_original() {
         let mut archive = RarArchive::create_with_options(
             &path,
             rar_rs::CreateOptions {
-                format_version: ArchiveVersion::V29,
+                compression: ArchiveVersion::V29,
                 ..Default::default()
             },
         )

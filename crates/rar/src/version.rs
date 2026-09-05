@@ -21,7 +21,7 @@
 //! 8-byte-signature RAR5 container. Readers report a version per member
 //! ([`crate::ArchiveEntry::version`]); writers select the version on the
 //! writer options ([`crate::WriterOptions::compression`] /
-//! `CreateOptions::format_version`). Only `v29`, `v50` and `v70` are
+//! `CreateOptions::compression`). Only `v29`, `v50` and `v70` are
 //! writable: the v15/v20/v26/v36 readers exist for interoperability, and
 //! writers reject them.
 

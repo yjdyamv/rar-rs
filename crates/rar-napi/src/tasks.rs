@@ -17,7 +17,7 @@ use crate::{
   ExtractArchiveOptions, ProgressData,
 };
 
-/// Maximum per-file size read into memory by the rar5 library (4 GiB).
+/// Maximum per-file size read into memory by the rar-rs library (4 GiB).
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Maximum total input size across all entries (32 GiB).
 const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024 * 1024;
@@ -159,7 +159,7 @@ fn basename(path: &Path) -> String {
 }
 
 /// Build a cancellation flag from the JS `AbortSignal`: when the signal
-/// fires, the flag is set and the rar5 operation returns `Cancelled` at
+/// fires, the flag is set and the rar-rs operation returns `Cancelled` at
 /// its next per-member/per-chunk check point. Returns `None` when no
 /// signal was passed (never cancelled). The signal itself is kept alive
 /// by the task for the duration of the operation.

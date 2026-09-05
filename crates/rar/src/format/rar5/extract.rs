@@ -23,7 +23,7 @@ use crate::format::rar5::headers::{
 };
 use crate::format::rar5::vint;
 #[cfg(windows)]
-use crate::format::rar5::write as archive_write;
+use crate::format::rar5::write as rar5_write;
 use crate::format::rar5::{
     BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, BLOCK_TYPE_ARCHIVE_HEADER,
     BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
@@ -1031,7 +1031,7 @@ impl RarArchive {
                     )
                     .map_err(|e| RarError::Format(format!("stream decode: {e}")))?
                 };
-                archive_write::write_windows_stream(dest_path, &s.name, &data)?;
+                rar5_write::write_windows_stream(dest_path, &s.name, &data)?;
             }
         }
         #[cfg(not(windows))]
@@ -1078,7 +1078,7 @@ impl RarArchive {
         if self.read_ctx().extract_options.set_creation_time
             && let Some((secs, ns)) = hdr.ctime
         {
-            let _ = archive_write::windows_set_creation_time(dest_path, secs, ns);
+            let _ = rar5_write::windows_set_creation_time(dest_path, secs, ns);
         }
     }
 

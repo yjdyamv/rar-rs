@@ -121,7 +121,7 @@ fn duplicate_entries_are_addressable_by_id() {
     );
 }
 
-fn assert_solid_reader_recovers_after_writer_failure(format: ArchiveVersion, file_name: &str) {
+fn assert_solid_reader_recovers_after_writer_failure(version: ArchiveVersion, file_name: &str) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join(file_name);
     let common = b"shared solid dictionary content with enough repetition\n".repeat(4_096);
@@ -136,7 +136,7 @@ fn assert_solid_reader_recovers_after_writer_failure(format: ArchiveVersion, fil
     let mut archive = RarArchive::create_with_options(
         &path,
         CreateOptions {
-            format_version: format,
+            compression: version,
             solid: true,
             ..Default::default()
         },

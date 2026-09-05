@@ -930,7 +930,7 @@ impl RarArchive {
     /// stream).
     fn new_with_options(path: PathBuf, opts: crate::options::CreateOptions) -> RarResult<Self> {
         opts.validate()?;
-        let is_rar4 = opts.format_version.is_legacy();
+        let is_rar4 = opts.compression.is_legacy();
         if is_rar4 {
             // RAR4 does not support these RAR5-specific features.
             if opts.quick_open {

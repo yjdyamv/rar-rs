@@ -1,6 +1,6 @@
 //! RAR archive operations for the Smart Archive VS Code extension.
 //!
-//! Wraps the pure-Rust `rar5` crate behind a napi-rs API for creating, reading,
+//! Wraps the pure-Rust `rar-rs` crate behind a napi-rs API for creating, reading,
 //! testing, listing, extracting, repairing, and modifying RAR archives.
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
