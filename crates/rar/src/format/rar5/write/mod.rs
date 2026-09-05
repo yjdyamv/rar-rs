@@ -646,7 +646,7 @@ impl RarArchive {
                 Unpack29Encoder::with_options(options).encode_member(&data)?
             };
             let mut best_len = lz.len();
-            let mut best: (Vec<u8>, u8) = (lz, crate::rar40::RAR4_METHOD_STORE + level);
+            let mut best: (Vec<u8>, u8) = (lz, crate::format::rar4::RAR4_METHOD_STORE + level);
 
             if !solid && !data.is_empty() {
                 // Auto filters on binary members (any level): every candidate
@@ -689,7 +689,7 @@ impl RarArchive {
                     };
                     if candidate.len() < best_len {
                         best_len = candidate.len();
-                        best = (candidate, crate::rar40::RAR4_METHOD_STORE + level);
+                        best = (candidate, crate::format::rar4::RAR4_METHOD_STORE + level);
                     }
                 }
             }
@@ -700,15 +700,15 @@ impl RarArchive {
                 && ppmd.len() < best_len
             {
                 best_len = ppmd.len();
-                best = (ppmd, crate::rar40::RAR4_METHOD_STORE + level);
+                best = (ppmd, crate::format::rar4::RAR4_METHOD_STORE + level);
             }
             if best_len < data.len() {
                 best
             } else {
-                (data.clone(), crate::rar40::RAR4_METHOD_STORE)
+                (data.clone(), crate::format::rar4::RAR4_METHOD_STORE)
             }
         } else {
-            (data.clone(), crate::rar40::RAR4_METHOD_STORE)
+            (data.clone(), crate::format::rar4::RAR4_METHOD_STORE)
         };
         let unpacked_size = file_size;
 
@@ -719,9 +719,9 @@ impl RarArchive {
         // members flagged `FHD_SOLID`, so the flags and the encoder must stay
         // in lockstep.
         let solid_continuation = self.write_ctx().solid_mode
-            && method != crate::rar40::RAR4_METHOD_STORE
+            && method != crate::format::rar4::RAR4_METHOD_STORE
             && self.write_ctx().rar4_solid_run_has_member;
-        if method == crate::rar40::RAR4_METHOD_STORE {
+        if method == crate::format::rar4::RAR4_METHOD_STORE {
             self.write_ctx_mut().rar4_solid_encoder = None;
             self.write_ctx_mut().rar4_solid_run_has_member = false;
         } else if unpacked_size != 0 {
@@ -734,7 +734,7 @@ impl RarArchive {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
-        let ext_time = crate::rar40::write::build_ext_time(Some(mtime_ns));
+        let ext_time = crate::format::rar4::write::build_ext_time(Some(mtime_ns));
 
         // Member-level encryption (WinRAR `-p`): every member gets its own
         // 8-byte salt; the data is zero-padded to a 16-byte AES block and
@@ -757,8 +757,8 @@ impl RarArchive {
         }
         let packed_size = packed.len() as u64;
 
-        let dos_time = crate::rar40::write::unix_to_dos_time(mtime);
-        let (encoded_name, name_flags) = crate::rar40::write::encode_file_name(&name);
+        let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
+        let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(&name);
 
         // Write head + data for one segment of `[packed[..packed_end])` on the
         // current volume. `split_before` marks a continuation head and
@@ -780,8 +780,8 @@ impl RarArchive {
             split_before: bool,
             split_after: bool,
         ) -> RarResult<(u64, u64)> {
-            use crate::rar40::write::{FileHeaderParams, build_file_header};
-            use crate::rar40::{
+            use crate::format::rar4::write::{FileHeaderParams, build_file_header};
+            use crate::format::rar4::{
                 FHD_EXTTIME, FHD_PASSWORD, FHD_SALT, FHD_SOLID, FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE,
             };
             let mut fhd = name_flags;
@@ -827,7 +827,7 @@ impl RarArchive {
                 let password = this.password.as_deref().ok_or_else(|| {
                     RarError::Encrypted("header encryption requires a password".into())
                 })?;
-                crate::rar40::write::encrypt_block_header(&hdr, password)?
+                crate::format::rar4::write::encrypt_block_header(&hdr, password)?
             } else {
                 (hdr.clone(), hdr.len() as u64)
             };
@@ -865,13 +865,13 @@ impl RarArchive {
                         crc32_val: Some(file_crc),
                         mtime,
                         mtime_ns: Some(mtime_ns),
-                        comp_method: method.wrapping_sub(crate::rar40::RAR4_METHOD_STORE),
+                        comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
                         host_os: 0,
                         format_version: 4,
                         unp_ver: 29,
                         data_offset,
                         flags: if salt.is_some() {
-                            crate::rar40::FHD_PASSWORD as u64
+                            crate::format::rar4::FHD_PASSWORD as u64
                         } else {
                             0
                         },
@@ -956,13 +956,13 @@ impl RarArchive {
                         packed_size,
                         crc32_val: Some(file_crc),
                         mtime,
-                        comp_method: method.wrapping_sub(crate::rar40::RAR4_METHOD_STORE),
+                        comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
                         host_os: 0,
                         format_version: 4,
                         unp_ver: 29,
                         data_offset: 0,
                         flags: if salt.is_some() {
-                            crate::rar40::FHD_PASSWORD as u64
+                            crate::format::rar4::FHD_PASSWORD as u64
                         } else {
                             0
                         },
@@ -1073,14 +1073,14 @@ impl RarArchive {
         mtime_secs: u32,
         mtime_ns: u32,
     ) -> RarResult<()> {
-        use crate::rar40::write::{
+        use crate::format::rar4::write::{
             FileHeaderParams, build_ext_time, build_file_header, encode_file_name, unix_to_dos_time,
         };
         let (encoded_name, name_flags) = encode_file_name(name);
         let ext_time = build_ext_time(Some(mtime_ns));
         let mut flags = name_flags;
         if ext_time.is_some() {
-            flags |= crate::rar40::FHD_EXTTIME;
+            flags |= crate::format::rar4::FHD_EXTTIME;
         }
         let params = FileHeaderParams {
             flags,
@@ -1090,7 +1090,7 @@ impl RarArchive {
             file_crc: 0,
             file_time: unix_to_dos_time(mtime_secs),
             unp_ver: 20,
-            method: crate::rar40::RAR4_METHOD_STORE,
+            method: crate::format::rar4::RAR4_METHOD_STORE,
             name: &encoded_name,
             attr: 0x10,
             // All window bits set: the RAR4 directory marker that UnRAR and
@@ -3045,7 +3045,7 @@ pub(crate) fn prepare_rar4_file_member(
         let options = options_for_level(level);
         let lz = Unpack29Encoder::with_options(options).encode_member(&data)?;
         let mut best_len = lz.len();
-        let mut best: (Vec<u8>, u8) = (lz, crate::rar40::RAR4_METHOD_STORE + level);
+        let mut best: (Vec<u8>, u8) = (lz, crate::format::rar4::RAR4_METHOD_STORE + level);
 
         if !data.is_empty() {
             let candidates = {
@@ -3082,7 +3082,7 @@ pub(crate) fn prepare_rar4_file_member(
                 };
                 if candidate.len() < best_len {
                     best_len = candidate.len();
-                    best = (candidate, crate::rar40::RAR4_METHOD_STORE + level);
+                    best = (candidate, crate::format::rar4::RAR4_METHOD_STORE + level);
                 }
             }
         }
@@ -3092,15 +3092,15 @@ pub(crate) fn prepare_rar4_file_member(
             && ppmd.len() < best_len
         {
             best_len = ppmd.len();
-            best = (ppmd, crate::rar40::RAR4_METHOD_STORE + level);
+            best = (ppmd, crate::format::rar4::RAR4_METHOD_STORE + level);
         }
         if best_len < data.len() {
             best
         } else {
-            (data.clone(), crate::rar40::RAR4_METHOD_STORE)
+            (data.clone(), crate::format::rar4::RAR4_METHOD_STORE)
         }
     } else {
-        (data, crate::rar40::RAR4_METHOD_STORE)
+        (data, crate::format::rar4::RAR4_METHOD_STORE)
     };
     Ok(Rar4PreparedMember {
         name: name.to_string(),
@@ -3129,7 +3129,7 @@ impl RarArchive {
             mut packed,
             method,
         } = prepared;
-        let ext_time = crate::rar40::write::build_ext_time(Some(mtime_ns));
+        let ext_time = crate::format::rar4::write::build_ext_time(Some(mtime_ns));
 
         let mut salt = None;
         if self.password.as_deref().is_some_and(|pw| !pw.is_empty()) {
@@ -3148,8 +3148,8 @@ impl RarArchive {
         let packed_size = packed.len() as u64;
         let unpacked_size = file_size;
 
-        let dos_time = crate::rar40::write::unix_to_dos_time(mtime);
-        let (encoded_name, name_flags) = crate::rar40::write::encode_file_name(&name);
+        let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
+        let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(&name);
 
         #[allow(clippy::too_many_arguments)]
         fn emit_segment(
@@ -3167,8 +3167,8 @@ impl RarArchive {
             split_before: bool,
             split_after: bool,
         ) -> RarResult<(u64, u64)> {
-            use crate::rar40::write::{FileHeaderParams, build_file_header};
-            use crate::rar40::{
+            use crate::format::rar4::write::{FileHeaderParams, build_file_header};
+            use crate::format::rar4::{
                 FHD_EXTTIME, FHD_PASSWORD, FHD_SALT, FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE,
             };
             let mut fhd = name_flags;
@@ -3205,7 +3205,7 @@ impl RarArchive {
                 let password = this.password.as_deref().ok_or_else(|| {
                     RarError::Encrypted("header encryption requires a password".into())
                 })?;
-                crate::rar40::write::encrypt_block_header(&hdr, password)?
+                crate::format::rar4::write::encrypt_block_header(&hdr, password)?
             } else {
                 (hdr.clone(), hdr.len() as u64)
             };
@@ -3241,13 +3241,13 @@ impl RarArchive {
                         crc32_val: Some(file_crc),
                         mtime,
                         mtime_ns: Some(mtime_ns),
-                        comp_method: method.wrapping_sub(crate::rar40::RAR4_METHOD_STORE),
+                        comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
                         host_os: 0,
                         format_version: 4,
                         unp_ver: 29,
                         data_offset,
                         flags: if salt.is_some() {
-                            crate::rar40::FHD_PASSWORD as u64
+                            crate::format::rar4::FHD_PASSWORD as u64
                         } else {
                             0
                         },
@@ -3324,13 +3324,13 @@ impl RarArchive {
                         packed_size,
                         crc32_val: Some(file_crc),
                         mtime,
-                        comp_method: method.wrapping_sub(crate::rar40::RAR4_METHOD_STORE),
+                        comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
                         host_os: 0,
                         format_version: 4,
                         unp_ver: 29,
                         data_offset: 0,
                         flags: if salt.is_some() {
-                            crate::rar40::FHD_PASSWORD as u64
+                            crate::format::rar4::FHD_PASSWORD as u64
                         } else {
                             0
                         },

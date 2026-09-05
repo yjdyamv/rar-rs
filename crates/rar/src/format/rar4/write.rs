@@ -8,7 +8,7 @@
 
 use crate::crc32;
 use crate::error::{RarError, RarResult};
-use crate::rar40::{ENDARC_HEAD, FHD_UNICODE, FILE_HEAD, LONG_BLOCK, MAIN_HEAD};
+use crate::format::rar4::{ENDARC_HEAD, FHD_UNICODE, FILE_HEAD, LONG_BLOCK, MAIN_HEAD};
 
 /// RAR 1.5–4.x signature (7 bytes, not a real block header).
 pub(crate) const RAR4_SIGNATURE: &[u8; 7] = b"Rar!\x1a\x07\x00";
@@ -391,7 +391,7 @@ pub(crate) fn build_ext_time(mtime_ns: Option<u32>) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rar40::RAR4_METHOD_STORE;
+    use crate::format::rar4::RAR4_METHOD_STORE;
 
     #[test]
     fn signature_is_correct_length() {

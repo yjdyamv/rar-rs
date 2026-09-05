@@ -14,7 +14,7 @@ fn rust_sources_below(dir: &Path, out: &mut Vec<PathBuf>) {
 #[test]
 fn rar40_does_not_import_models_from_rar50_headers() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source_dir = manifest_dir.join("src").join("rar40");
+    let source_dir = manifest_dir.join("src").join("format").join("rar4");
     let mut sources = Vec::new();
     rust_sources_below(&source_dir, &mut sources);
 
@@ -23,13 +23,13 @@ fn rar40_does_not_import_models_from_rar50_headers() {
         .filter(|path| {
             std::fs::read_to_string(path)
                 .expect("read RAR4 source")
-                .contains("rar50::headers")
+                .contains("rar5::headers")
         })
         .collect();
 
     assert!(
         offenders.is_empty(),
-        "RAR4 must use crate::model instead of rar50::headers: {offenders:?}"
+        "RAR4 must use crate::model instead of rar5 headers: {offenders:?}"
     );
 }
 
@@ -65,8 +65,8 @@ fn use_lines_with(dir: &Path, forbidden: &[&str]) -> Vec<(String, String)> {
 fn role_facades_stay_off_format_and_codec_internals() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let forbidden = [
-        "crate::rar50",
-        "crate::rar40",
+        "crate::format",
+        "crate::codec",
         "crate::codec",
         "crate::crypto",
         "crate::recovery",
@@ -93,8 +93,8 @@ fn fs_and_model_policy_do_not_depend_upward() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let forbidden = [
         "crate::archive",
-        "crate::rar50",
-        "crate::rar40",
+        "crate::format",
+        "crate::codec",
         "crate::codec",
         "crate::crypto",
         "crate::recovery",

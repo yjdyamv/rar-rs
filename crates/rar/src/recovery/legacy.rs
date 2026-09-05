@@ -450,8 +450,8 @@ mod tests {
     /// damage, and damage inside a protected sector is rebuilt exactly.
     #[test]
     fn newsub_rr_block_roundtrips_through_scan_and_repair() {
-        use crate::rar40::RAR4_METHOD_STORE;
-        use crate::rar40::write::{FileHeaderParams, build_file_header, build_main_header};
+        use crate::format::rar4::RAR4_METHOD_STORE;
+        use crate::format::rar4::write::{FileHeaderParams, build_file_header, build_main_header};
 
         // A minimal but structurally valid archive: signature + main header
         // + one stored member, whose payload fills most of the protected

@@ -313,7 +313,7 @@ impl RarArchive {
     /// supported yet; opening one is reported clearly.
     fn scan_rar4_blocks(&mut self) -> RarResult<()> {
         self.entries.clear();
-        let mut scan = crate::rar40::Rar4VolumeScan::default();
+        let mut scan = crate::format::rar4::Rar4VolumeScan::default();
         let mut out = Vec::new();
 
         // Volume 0 is the already-open primary stream, positioned right
@@ -1451,12 +1451,12 @@ impl RarArchive {
         let entry = self.entries[idx].clone();
         let max_alloc_packed_bytes = self.max_packed_bytes();
         let max_stream_packed_bytes = self.max_stream_packed_bytes();
-        let (written, crc) = crate::rar40::decode_member_bytes_to(
+        let (written, crc) = crate::format::rar4::decode_member_bytes_to(
             self.stream.as_mut().unwrap(),
             &self.volume_paths,
             &entry.chunks,
             &entry.header,
-            crate::rar40::MemberDecodeOptions {
+            crate::format::rar4::MemberDecodeOptions {
                 password: self.password.as_deref(),
                 decoder: None,
                 max_alloc_packed_bytes,
@@ -1486,12 +1486,12 @@ impl RarArchive {
         }
         let entry = self.entries[idx].clone();
         let max_packed_bytes = self.max_packed_bytes();
-        crate::rar40::decode_member_bytes(
+        crate::format::rar4::decode_member_bytes(
             self.stream.as_mut().unwrap(),
             &self.volume_paths,
             &entry.chunks,
             &entry.header,
-            crate::rar40::MemberDecodeOptions {
+            crate::format::rar4::MemberDecodeOptions {
                 password: self.password.as_deref(),
                 decoder: None,
                 max_alloc_packed_bytes: max_packed_bytes,
@@ -1527,7 +1527,7 @@ impl RarArchive {
             let mut chain_start = target_idx;
             for i in (0..target_idx).rev() {
                 if !self.entries[i].is_dir()
-                    && !crate::rar40::is_stored(self.entries[i].header.comp_method)
+                    && !crate::format::rar4::is_stored(self.entries[i].header.comp_method)
                 {
                     chain_start = i;
                 }
@@ -1583,7 +1583,7 @@ impl RarArchive {
             if ctx.rar4_decoder.is_none() {
                 // Bootstrap with a Rar29 decoder; it will be replaced on the
                 // first compressed member that reveals the actual unp_ver.
-                ctx.rar4_decoder = Some(crate::rar40::LegacyDecoder::Rar29(
+                ctx.rar4_decoder = Some(crate::format::rar4::LegacyDecoder::Rar29(
                     crate::codec::rar29::Rar29Decoder::new(),
                 ));
             }
@@ -1603,25 +1603,27 @@ impl RarArchive {
             // Determine decoder type from the member's unp_ver. A STORE
             // member keeps the existing decoder unchanged (for RAR2.x the
             // window is not advanced; for RAR1.5 likewise).
-            let is_compressed = !crate::rar40::is_stored(hdr.comp_method);
+            let is_compressed = !crate::format::rar4::is_stored(hdr.comp_method);
             if is_compressed {
                 // Ensure the decoder matches this member's codec version.
                 let needs_rebuild = {
                     let dec = self.read_ctx_mut().rar4_decoder.as_ref();
                     match (hdr.unp_ver, dec) {
-                        (v, Some(crate::rar40::LegacyDecoder::Rar29(_))) if v >= 29 => false,
-                        (20 | 26, Some(crate::rar40::LegacyDecoder::Rar20(_))) => false,
-                        (15, Some(crate::rar40::LegacyDecoder::Rar15(_))) => false,
+                        (v, Some(crate::format::rar4::LegacyDecoder::Rar29(_))) if v >= 29 => false,
+                        (20 | 26, Some(crate::format::rar4::LegacyDecoder::Rar20(_))) => false,
+                        (15, Some(crate::format::rar4::LegacyDecoder::Rar15(_))) => false,
                         _ => true,
                     }
                 };
                 if needs_rebuild {
                     let new_decoder = if hdr.unp_ver >= 29 {
-                        crate::rar40::LegacyDecoder::Rar29(crate::codec::rar29::Rar29Decoder::new())
+                        crate::format::rar4::LegacyDecoder::Rar29(
+                            crate::codec::rar29::Rar29Decoder::new(),
+                        )
                     } else if hdr.unp_ver == 20 || hdr.unp_ver == 26 {
-                        crate::rar40::LegacyDecoder::Rar20(Box::default())
+                        crate::format::rar4::LegacyDecoder::Rar20(Box::default())
                     } else {
-                        crate::rar40::LegacyDecoder::Rar15(Box::default())
+                        crate::format::rar4::LegacyDecoder::Rar15(Box::default())
                     };
                     self.read_ctx_mut().rar4_decoder = Some(new_decoder);
                 }
@@ -1629,12 +1631,12 @@ impl RarArchive {
 
             let mut decoder = self.read_ctx_mut().rar4_decoder.take();
             let max_packed_bytes = self.max_packed_bytes();
-            let data = match crate::rar40::decode_member_bytes(
+            let data = match crate::format::rar4::decode_member_bytes(
                 self.stream.as_mut().unwrap(),
                 &self.volume_paths,
                 &chunks,
                 &hdr,
-                crate::rar40::MemberDecodeOptions {
+                crate::format::rar4::MemberDecodeOptions {
                     password: self.password.as_deref(),
                     decoder: decoder.as_mut(),
                     max_alloc_packed_bytes: max_packed_bytes,
@@ -1658,7 +1660,7 @@ impl RarArchive {
 
     fn rar4_verify_crc(&self, hdr: &FileHeader, data: &[u8]) -> RarResult<()> {
         if let Some(expected) = hdr.crc32_val {
-            let actual = crate::rar40::member_crc(data);
+            let actual = crate::format::rar4::member_crc(data);
             if actual != expected {
                 return Err(RarError::Crc {
                     expected,
