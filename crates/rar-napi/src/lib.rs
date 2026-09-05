@@ -867,18 +867,30 @@ impl Task for DeleteEntriesTask {
   type JsValue = u32;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut archive = match self.password.as_deref() {
+    let mut editor = match self.password.as_deref() {
       Some(pw) if !pw.is_empty() => {
-        rar5::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
+        rar5::ArchiveEditor::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
       }
-      _ => rar5::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
+      _ => rar5::ArchiveEditor::open(&self.archive_path).map_err(to_napi_error)?,
     };
-    archive.set_cancel_flag(self.cancel.take());
+    editor.set_cancel_flag(self.cancel.take());
+    // Preserve the legacy name semantics: every name deletes the first
+    // matching member not already selected, so repeated names delete
+    // successive duplicates, and a missing name fails the whole plan
+    // before any rewrite starts.
+    let mut ids: Vec<rar5::EntryId> = Vec::with_capacity(self.names.len());
+    for name in &self.names {
+      let id = editor
+        .entries_named(name)
+        .map(|entry| entry.id())
+        .find(|id| !ids.contains(id))
+        .ok_or_else(|| to_napi_error(rar5::RarError::MemberNotFound { name: name.clone() }))?;
+      ids.push(id);
+    }
     let progress = self.progress.take();
-    let refs: Vec<&str> = self.names.iter().map(|s| s.as_str()).collect();
-    let count = archive
-      .delete_with_progress(
-        &refs,
+    let count = editor
+      .delete_entries_with_progress(
+        &ids,
         Some(Box::new(move |done: u64, total: u64| {
           if let Some(tsfn) = progress.as_ref() {
             let _ = tsfn.call(

@@ -1373,7 +1373,10 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
 
 /// Delete members from an archive without rebuilding it (mirrors `rar d`).
 /// Open an [`ArchiveEditor`] for the CLI, honoring the password switch.
-fn open_editor(path: &str, password: Option<&str>) -> Result<rar5::ArchiveEditor, String> {
+fn open_editor(
+    path: impl AsRef<std::path::Path>,
+    password: Option<&str>,
+) -> Result<rar5::ArchiveEditor, String> {
     match password {
         Some(pw) if !pw.is_empty() => {
             rar5::ArchiveEditor::open_with_password(path, pw).map_err(|e| format!("open: {e}"))
@@ -1683,13 +1686,17 @@ fn cmd_update_freshen(
     let updated_count = to_add.len();
     update_archive_transactionally(archive_path, |staged_path| {
         if !to_delete.is_empty() {
-            let mut staged = match password {
-                Some(value) => rar5::RarArchive::open_with_password(staged_path, value)
-                    .map_err(|error| format!("open staged archive: {error}"))?,
-                None => rar5::RarArchive::open(staged_path)
-                    .map_err(|error| format!("open staged archive: {error}"))?,
-            };
             if let Some(version_spec) = &misc.version_control {
+                // Version control chains renames inside one call with
+                // map-aware resolution (a.txt -> a.txt;1 -> a.txt;2); it
+                // stays on the legacy rename/delete seam until the editor's
+                // name resolution covers chained renames.
+                let mut staged = match password {
+                    Some(value) => rar5::RarArchive::open_with_password(staged_path, value)
+                        .map_err(|error| format!("open staged archive: {error}"))?,
+                    None => rar5::RarArchive::open(staged_path)
+                        .map_err(|error| format!("open staged archive: {error}"))?,
+                };
                 let max_versions = if version_spec.is_empty() {
                     None
                 } else {
@@ -1744,15 +1751,21 @@ fn cmd_update_freshen(
                         .delete(&names)
                         .map_err(|error| format!("delete staged versions: {error}"))?;
                 }
-            } else {
-                let names: Vec<&str> = to_delete.iter().map(String::as_str).collect();
                 staged
-                    .delete(&names)
+                    .close()
+                    .map_err(|error| format!("close staged archive after rewrite: {error}"))?;
+            } else {
+                // Plain replacement delete (no version control) runs through
+                // the editor role in one atomic rewrite.
+                let mut editor = open_editor(staged_path, password.as_deref())
+                    .map_err(|error| format!("open staged archive: {error}"))?;
+                let names: Vec<&str> = to_delete.iter().map(String::as_str).collect();
+                let plan = editor_delete_plan(&editor, &names)
+                    .map_err(|error| format!("delete staged members: {error}"))?;
+                editor
+                    .apply(plan)
                     .map_err(|error| format!("delete staged members: {error}"))?;
             }
-            staged
-                .close()
-                .map_err(|error| format!("close staged archive after rewrite: {error}"))?;
         }
 
         let mut staged = if staged_path.exists() {

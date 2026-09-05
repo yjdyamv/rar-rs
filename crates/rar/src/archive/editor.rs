@@ -314,8 +314,7 @@ impl ArchiveEditor {
             // work byte count (kept payloads + recompressed input), which
             // the tracker adopts as its denominator.
             let tracker = crate::write_progress::ProgressTracker::new(Some(cb));
-            self.archive.progress =
-                Some(std::sync::Arc::new(std::sync::Mutex::new(tracker)));
+            self.archive.progress = Some(std::sync::Arc::new(std::sync::Mutex::new(tracker)));
         }
         let result = self.delete_entries(ids);
         self.archive.progress = saved;

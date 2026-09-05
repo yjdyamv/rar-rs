@@ -167,10 +167,12 @@ binding migrations remain.
 - [x] Introduce `EditPlan` only after individual ID operations are stable.
 - [x] Combine delete, rename, comment, and recovery changes into one rewrite.
 - [x] Define and test multi-volume transaction/rollback behavior.
-- [ ] Migrate CLI and N-API edit operations (CLI edit commands `d`/`rn`/`ch`/
-      `c`/`rr`/`m` and the `rar a` replacement + `-as` sync seams are
-      migrated; the staged `rar u`/`rar f` version-control rewrite and the
-      N-API `deleteEntries` task remain).
+- [ ] Migrate CLI and N-API edit operations (nearly done: CLI edit commands
+      `d`/`rn`/`ch`/`c`/`rr`/`m`, the `rar a` replacement + `-as` sync seams,
+      the non-version staged `rar u`/`rar f` rewrite, and the N-API
+      `deleteEntries` task are migrated; the map-aware chained-rename
+      version-control branch of `rar u`/`rar f` and `rar k` (lock, no
+      editor counterpart yet) stay on the legacy seam).
 
 Exit criteria:
 
@@ -250,6 +252,17 @@ Exit criteria:
   version-control rewrite (rename/delete on the staged copy, tested by
   `cli_version_control_keeps_previous_versions`) and the N-API
   `deleteEntries` task.
+
+### Edit-migration completion notes (recorded with the bindings)
+
+- The N-API `deleteEntries` task now drives `ArchiveEditor` (name
+  resolution preserving the legacy first-match delete semantics,
+  progress through `delete_entries_with_progress`, cancellation through
+  `set_cancel_flag`); JS suite 33/33 against a rebuilt addon.
+- The non-version staged delete inside `rar u`/`rar f` runs through the
+  editor; only the version-control branch keeps its map-aware chained
+  rename on the legacy seam (resolution semantics differ), and `rar k`
+  stays on `RarArchive::lock`.
 
 ## Phase 5: internal directory convergence
 
