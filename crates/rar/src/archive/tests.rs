@@ -1036,3 +1036,81 @@ fn multivolume_creation_stages_volumes_until_close() {
     let mut rar = RarArchive::open(&path).unwrap();
     assert_eq!(rar.read("data.bin").unwrap(), data);
 }
+
+fn all_files(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn abort_clears_recovery_state_and_disarms_later_close() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Inline recovery record on a single-volume archive.
+    let inline_path = dir.path().join("abort-inline.rar");
+    {
+        let mut archive = RarArchive::create_with_options(
+            &inline_path,
+            crate::options::CreateOptions {
+                recovery_percent: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("a.txt", b"x", 0).unwrap();
+        archive.abort();
+        // Drop still runs close(); with the recovery trigger cleared it must
+        // commit nothing and must not rebuild the inline recovery record.
+        assert!(archive.recovery_percent.is_none());
+        assert!(archive.close().is_ok());
+    }
+    assert!(!inline_path.exists());
+
+    // .rev recovery volumes on a multi-volume archive.
+    let volumes_path = dir.path().join("abort-volumes.rar");
+    {
+        let mut archive = RarArchive::create_with_options(
+            &volumes_path,
+            crate::options::CreateOptions {
+                volume_size: Some(32 * 1024),
+                recovery_volume_count: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive
+            .add_bytes("payload.bin", &vec![7u8; 96 * 1024], 0)
+            .unwrap();
+        assert!(archive.recovery_volumes_count.is_some());
+        archive.abort();
+        assert!(archive.recovery_volumes_count.is_none());
+        assert!(archive.recovery_volumes_percent.is_none());
+        assert!(archive.recovery_percent.is_none());
+        // Drop's close() must not regenerate .rev files over a volume set
+        // that was never committed.
+        assert!(archive.close().is_ok());
+    }
+    assert!(
+        all_files(dir.path()).is_empty(),
+        "aborted transaction left files: {:?}",
+        all_files(dir.path())
+    );
+}
+
+#[test]
+fn abort_disarms_the_legacy_drop_auto_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abort-drop.rar");
+    {
+        let mut archive = RarArchive::create_with_options(&path, Default::default()).unwrap();
+        archive.add_bytes("a.txt", b"x", 0).unwrap();
+        // Legacy Drop commits on its own; abort() must turn that off so an
+        // aborted transaction never becomes visible at the final path.
+        archive.abort();
+    }
+    assert!(!path.exists());
+    assert!(all_files(dir.path()).is_empty());
+}

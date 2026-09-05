@@ -59,6 +59,7 @@ impl RarArchive {
         // Stage the archive under a temporary sibling name; it is moved
         // over the final path on close, so a failed or interrupted
         // creation never leaves a partial archive at the target path.
+        self.volume_paths = vec![self.path.clone()];
         let tmp_path = temp_sibling_path(&self.path);
         self.write_ctx_mut().pending = Some(PendingCommit::Single(tmp_path.clone()));
         let f = read_write_create(&tmp_path)?;
@@ -222,6 +223,7 @@ impl RarArchive {
             crate::recovery::rev50::build_recovery_volumes_for_set(&self.volume_paths, rec_count)?;
         let _ = written;
         self.recovery_volumes_percent = None;
+        self.recovery_volumes_count = None;
         Ok(())
     }
 
@@ -694,6 +696,7 @@ impl RarArchive {
             return Ok(());
         }
 
+        self.volume_paths = vec![self.path.clone()];
         let tmp_path = temp_sibling_path(&self.path);
         self.write_ctx_mut().pending = Some(PendingCommit::Single(tmp_path.clone()));
         let f = read_write_create(&tmp_path)?;

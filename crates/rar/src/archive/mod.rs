@@ -11,6 +11,7 @@ mod discover;
 mod entry;
 mod reader;
 mod rewrite;
+mod writer;
 
 #[cfg(test)]
 mod tests;
@@ -40,6 +41,10 @@ pub(crate) use entry::{BatchPrepareCtx, PreparedEntry};
 pub use reader::{
     ArchiveReader, Entries, EntryId, EntryMatches, EntryRef, OpenOptions, ScanStrategy,
     VerificationFailure, VerificationReport,
+};
+pub use writer::{
+    AppendOptions, ArchiveWriter, CompressionLevel, DictionarySize, EntryWriteOptions, SolidMode,
+    ThreadCount, WriteEntry, WriteReport, WriterOptions,
 };
 
 /// Maximum archive prefix buffered for inline recovery-record parity.
@@ -468,6 +473,26 @@ impl RarArchive {
         self.write.get_or_insert_with(WriteState::default);
     }
 
+    /// Abort an in-progress staged write and disarm the legacy auto-commit
+    /// behavior in [`Drop`]. Typed writer transactions use this seam for
+    /// explicit abort-on-drop and poison-on-error semantics.
+    ///
+    /// [`Drop`] still runs [`Self::close`], so abort must also clear the
+    /// recovery triggers: `close` regenerates `.rev` recovery volumes after
+    /// the data volumes are committed, and an aborted transaction must never
+    /// reach that step again (its volume set may not exist at all, or may
+    /// have been only partially committed before an error).
+    pub(crate) fn abort(&mut self) {
+        self.stream = None;
+        self.mode = Mode::Read;
+        self.recovery_volumes_percent = None;
+        self.recovery_volumes_count = None;
+        self.recovery_percent = None;
+        if let Some(pending) = self.write.as_mut().and_then(|write| write.pending.take()) {
+            pending.cleanup(self.volume_paths.len());
+        }
+    }
+
     /// Open an existing RAR archive for reading.
     pub fn open(path: impl AsRef<Path>) -> RarResult<Self> {
         let mut archive = Self::new_for_mode(path.as_ref().to_path_buf(), Mode::Read, None);
@@ -518,8 +543,10 @@ impl RarArchive {
         self.password = Some(password.to_string());
     }
 
-    /// Open an existing single-volume RAR5 archive for appending new
-    /// members (like `rar a` on an existing archive).
+    /// Open an existing single-volume RAR5 (RAR50/RAR70) archive for
+    /// appending new members (like `rar a` on an existing archive). RAR4
+    /// archives are rejected with [`RarError::Unsupported`]: appending
+    /// requires the RAR5 container.
     ///
     /// Existing members are preserved verbatim: the trailing quick-open and
     /// recovery records are truncated, new members are written after the
@@ -573,8 +600,10 @@ impl RarArchive {
             Some(password.to_string())
         };
         let mut archive = Self::new_for_mode(path.as_ref().to_path_buf(), Mode::Append, pw);
-        archive.open_read()?;
-        archive.prepare_append()?;
+        if let Err(error) = archive.open_read().and_then(|()| archive.prepare_append()) {
+            archive.abort();
+            return Err(error);
+        }
         Ok(archive)
     }
 
@@ -583,6 +612,17 @@ impl RarArchive {
     /// the rebuilt quick-open record, and truncate the trailing end /
     /// quick-open / recovery blocks.
     fn prepare_append(&mut self) -> RarResult<()> {
+        // Appending is implemented for the RAR5 container only: the staged
+        // rewrite below re-parses RAR5 block headers, rebuilds the quick-open
+        // record and patches the RAR5 main-header locator. Reject RAR4
+        // archives up front with a clear error instead of misparsing their
+        // fixed-width headers.
+        if self.rar4 {
+            return Err(RarError::Unsupported(
+                "appending to RAR4 archives is not supported; append requires the RAR5 container"
+                    .into(),
+            ));
+        }
         if self.volume_paths.len() > 1 {
             return Err(RarError::Unsupported(
                 "appending to multi-volume archives is not supported (the official rar refuses too)"
@@ -671,10 +711,10 @@ impl RarArchive {
         // over the archive on close, so a failed or interrupted append
         // never truncates or corrupts the original archive.
         let tmp_path = temp_sibling_path(&path);
+        self.write_ctx_mut().pending = Some(PendingCommit::Single(tmp_path.clone()));
         let mut src = File::open(&path)?;
         let mut dst = read_write_create(&tmp_path)?;
         copy_prefix(&mut src, &mut dst, truncate_pos)?;
-        self.write_ctx_mut().pending = Some(PendingCommit::Single(tmp_path));
         self.stream = Some(Box::new(dst));
         Ok(())
     }
@@ -832,7 +872,10 @@ impl RarArchive {
     ) -> RarResult<Self> {
         let path = path.as_ref().to_path_buf();
         let mut archive = Self::new_with_options(path, opts)?;
-        archive.open_write()?;
+        if let Err(error) = archive.open_write() {
+            archive.abort();
+            return Err(error);
+        }
         Ok(archive)
     }
 

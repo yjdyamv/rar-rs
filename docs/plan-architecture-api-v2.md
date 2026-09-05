@@ -87,22 +87,51 @@ Known deferred risks:
 
 ## Phase 3: validated options and writer API
 
-- [ ] Add `CompressionLevel`, `DictionarySize`, `ThreadCount`, and `SolidMode`.
-- [ ] Add `WriterOptions`, `AppendOptions`, and `EntryWriteOptions` with private
+Phase 3 core slice completed here: the Rust writer API and transaction boundary are
+in place. CLI and N-API migration remain intentionally deferred.
+
+- [x] Add `CompressionLevel`, `DictionarySize`, `ThreadCount`, and `SolidMode`.
+- [x] Add `WriterOptions`, `AppendOptions`, and `EntryWriteOptions` with private
       fields and validated builders.
-- [ ] Add `ArchiveWriter::create` and `ArchiveWriter::append` as wrappers around
+- [x] Add `ArchiveWriter::create` and `ArchiveWriter::append` as wrappers around
       the existing implementation.
-- [ ] Add consuming `ArchiveWriter::finish() -> WriteReport`.
-- [ ] Return final volume paths in `WriteReport`; remove binding-side rediscovery
+- [x] Add consuming `ArchiveWriter::finish() -> WriteReport`.
+- [x] Return final volume paths in `WriteReport`; remove binding-side rediscovery
       from new APIs.
 - [ ] Migrate CLI create/append and N-API create/append to the writer API.
-- [ ] Keep `CreateOptions`, numeric compression levels, and `close()` available.
+- [x] Keep `CreateOptions`, numeric compression levels, and `close()` available.
 
 Exit criteria:
 
 - invalid option combinations fail during construction;
 - successful `finish()` is the only explicit commit path in the new writer API;
 - Drop cleans staging files but is not relied upon to report commit errors.
+
+### Contract tightening pass (recorded before public release)
+
+Review of the transaction seam against the legacy [`Drop`] auto-commit found
+boundaries that were still too loose; all fixed and covered by tests
+(`tests/archive_writer.rs`, unit tests in `archive/tests.rs`):
+
+- `abort()` now clears the recovery state (`recovery_percent`,
+  `recovery_volumes_percent`, `recovery_volumes_count`). `Drop` still runs
+  `close()`, which generates `.rev` files after the data volumes are
+  committed; an aborted transaction must never reach that step again (the
+  volume set may not exist, or may be only partially committed).
+- Append now explicitly rejects RAR4 archives with `RarError::Unsupported`
+  before any staging I/O; the append rewrite is RAR5-container only.
+- `WriterOptions` rejects combinations the legacy writer would silently
+  downgrade: quick-open + header encryption, quick-open + data volumes,
+  and any dictionary size on RAR4 (its writer picks the window internally).
+- `finish()` documentation states commit granularity honestly: a
+  single-volume replace is atomic; multi-volume output is moved volume by
+  volume (each file complete, but a partial set is possible if interrupted
+  between renames); `.rev` generation runs only after all data volumes are
+  committed, so a `.rev` failure returns the error with data on disk.
+
+Deferred with the CLI/N-API migration: binding-side create/append still uses
+`CreateOptions`/numeric levels/`close()`, and RAR4 append remains
+unsupported (matching the legacy seam).
 
 ## Phase 4: editor API and combined transactions
 
