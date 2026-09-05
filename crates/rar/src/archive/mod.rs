@@ -46,8 +46,8 @@ pub use reader::{
     VerificationFailure, VerificationReport,
 };
 pub use writer::{
-    AppendOptions, ArchiveWriter, CompressionLevel, DictionarySize, EntryWriteOptions, SolidMode,
-    ThreadCount, WriteEntry, WriteReport, WriterOptions,
+    AppendOptions, ArchiveWriter, CompressionLevel, CompressionVersion, DictionarySize,
+    EntryWriteOptions, SolidMode, ThreadCount, WriteEntry, WriteReport, WriterOptions,
 };
 
 /// Maximum archive prefix buffered for inline recovery-record parity.

@@ -136,4 +136,4 @@ pub const ENCR_IV_SIZE: usize = 16;
 pub const ENCR_KEY_SIZE: usize = 32;
 pub const ENCR_PBKDF2_ITER_LOG: u8 = 15;
 
-pub(crate) mod create;
+pub mod create;

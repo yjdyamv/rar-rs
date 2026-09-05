@@ -11,6 +11,8 @@ use crate::error::{RarError, RarResult};
 use crate::options::{CreateOptions, SolidReset};
 use crate::version::ArchiveVersion;
 
+pub use crate::format::rar5::create::CompressionVersion;
+
 const MIN_DICTIONARY_BYTES: u64 = 128 * 1024;
 const MAX_RAR5_DICTIONARY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const DEFAULT_RAR70_DICTIONARY_BYTES: u64 = 32 * 1024 * 1024;
@@ -180,6 +182,7 @@ pub enum SolidMode {
 #[derive(Clone)]
 pub struct WriterOptions {
     format_version: ArchiveVersion,
+    compression: CompressionVersion,
     solid_mode: SolidMode,
     quick_open: bool,
     blake2: bool,
@@ -203,6 +206,7 @@ impl Default for WriterOptions {
     fn default() -> Self {
         Self {
             format_version: ArchiveVersion::Rar50,
+            compression: CompressionVersion::V50,
             solid_mode: SolidMode::Disabled,
             quick_open: false,
             blake2: false,
@@ -234,6 +238,31 @@ impl WriterOptions {
     #[must_use]
     pub fn format_version(mut self, version: ArchiveVersion) -> Self {
         self.format_version = version;
+        self.compression = match version {
+            ArchiveVersion::Rar70 => CompressionVersion::V70,
+            ArchiveVersion::Rar50 | ArchiveVersion::Rar40 => CompressionVersion::V50,
+        };
+        self
+    }
+
+    /// Select the member compression version (RAR5 container only). The
+    /// owning policy lives in [`crate::format::rar5::create`]; v70 members
+    /// are never produced implicitly.
+    #[must_use]
+    pub fn compression(mut self, version: CompressionVersion) -> Self {
+        self.compression = version;
+        match version {
+            CompressionVersion::V70 => {
+                if self.format_version != ArchiveVersion::Rar40 {
+                    self.format_version = ArchiveVersion::Rar70;
+                }
+            }
+            CompressionVersion::V50 => {
+                if self.format_version == ArchiveVersion::Rar70 {
+                    self.format_version = ArchiveVersion::Rar50;
+                }
+            }
+        }
         self
     }
 
@@ -418,6 +447,13 @@ impl WriterOptions {
             ));
         }
 
+        if self.format_version == ArchiveVersion::Rar40
+            && self.compression == CompressionVersion::V70
+        {
+            return Err(RarError::InvalidOption(
+                "RAR7 (v70) compression requires the RAR5 container".into(),
+            ));
+        }
         if self.format_version == ArchiveVersion::Rar40 {
             crate::format::rar4::create::validate_rar4_only(
                 self.quick_open,
@@ -445,7 +481,7 @@ impl WriterOptions {
         };
         // Dictionary mapping is owned by the RAR5 format module (the RAR4
         // container takes no dictionary; validation above refuses one).
-        let v70 = self.format_version == ArchiveVersion::Rar70;
+        let v70 = self.compression == CompressionVersion::V70;
         let (dictionary_log, dictionary_bytes) = if self.format_version == ArchiveVersion::Rar40 {
             (None, None)
         } else {
@@ -482,6 +518,7 @@ impl fmt::Debug for WriterOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WriterOptions")
             .field("format_version", &self.format_version)
+            .field("compression", &self.compression)
             .field("solid_mode", &self.solid_mode)
             .field("quick_open", &self.quick_open)
             .field("blake2", &self.blake2)
