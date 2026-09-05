@@ -342,6 +342,11 @@ splits that still reference the old names.
 
 ## Phase 6: breaking-release decisions
 
+Decision inputs and recommendations are recorded in
+[ADR 0003](adr/0003-breaking-release-scope.md) (in-tree usage inventory,
+rename surface, low-level module users). Each bullet below needs a
+maintainer decision before execution.
+
 - [ ] Decide whether to rename crate `rar5`.
 - [ ] Split archive format from compression version in the public model.
 - [ ] Decide which low-level modules remain supported.
