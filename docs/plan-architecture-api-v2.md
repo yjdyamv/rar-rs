@@ -323,11 +323,10 @@ preserving public paths through re-export shims until a breaking release.
 - [ ] Split CLI binaries into `src/bin` plus shared command modules
       (done: entry points moved to `src/bin/{rar,unrar}.rs`, shared modules
       stay in `src/` referenced via `#[path]`).
-- [ ] Split N-API tasks/options/error mapping out of `src/lib.rs`
-      (error mapping -> `src/error.rs`; option validation/mapping and the
-      dict parser -> `src/options.rs`; a first async task + factory live in
-      `src/tasks.rs` proving cross-module `#[napi]` registration; the
-      remaining task implementations migrate next).
+- [x] Split N-API tasks/options/error mapping out of `src/lib.rs`
+      (done: `error.rs` error mapping, `options.rs` option structs +
+      validation/conversion, `tasks.rs` task implementations + factories;
+      `lib.rs` keeps the JS-facing structs, module wiring and re-exports).
 - [ ] Remove transitional wildcard imports and add dependency guards
       (guards added: role facades stay off format/codec internals; fs/ and
       model/ do not depend upward; wildcard-import cleanup follows the
