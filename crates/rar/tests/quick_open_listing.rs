@@ -6,7 +6,7 @@
 
 use std::fs;
 
-use rar5::RarArchive;
+use rar_rs::RarArchive;
 
 fn temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
@@ -25,9 +25,9 @@ fn open_quick_lists_identically_to_full_scan() {
     let dir = temp_dir();
     let path = dir.path().join("qo.rar");
     {
-        let mut rar = rar5::RarArchive::create_with_options(
+        let mut rar = rar_rs::RarArchive::create_with_options(
             &path,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 quick_open: true,
                 ..Default::default()
             },
@@ -61,9 +61,9 @@ fn open_quick_reads_and_extracts_members() {
     let dir = temp_dir();
     let path = dir.path().join("qo.rar");
     {
-        let mut rar = rar5::RarArchive::create_with_options(
+        let mut rar = rar_rs::RarArchive::create_with_options(
             &path,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 quick_open: true,
                 ..Default::default()
             },
@@ -86,7 +86,7 @@ fn open_quick_reads_and_extracts_members() {
     quick
         .extract_all_with_options(
             &out,
-            rar5::ExtractOptions {
+            rar_rs::ExtractOptions {
                 safe_paths: true,
                 ..Default::default()
             },
@@ -106,9 +106,9 @@ fn open_quick_falls_back_without_quick_open_record() {
     let dir = temp_dir();
     let path = dir.path().join("plain.rar");
     {
-        let mut rar = rar5::RarArchive::create_with_options(
+        let mut rar = rar_rs::RarArchive::create_with_options(
             &path,
-            rar5::CreateOptions::default(), // quick_open: false
+            rar_rs::CreateOptions::default(), // quick_open: false
         )
         .expect("create");
         for (name, data) in payloads() {
@@ -128,9 +128,9 @@ fn open_quick_handles_encrypted_archives() {
     let dir = temp_dir();
     let path = dir.path().join("enc.rar");
     {
-        let mut rar = rar5::RarArchive::create_with_options(
+        let mut rar = rar_rs::RarArchive::create_with_options(
             &path,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 quick_open: true,
                 password: Some("secret".into()),
                 ..Default::default()
@@ -152,9 +152,9 @@ fn open_quick_handles_encrypted_archives() {
     // must produce the same listing (password required).
     let path_hp = dir.path().join("hp.rar");
     {
-        let mut rar = rar5::RarArchive::create_with_options(
+        let mut rar = rar_rs::RarArchive::create_with_options(
             &path_hp,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 encrypt_headers: true,
                 password: Some("secret".into()),
                 ..Default::default()

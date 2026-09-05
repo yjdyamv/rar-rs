@@ -5,7 +5,7 @@
 
 #![allow(deprecated)] // legacy facade (delete/rename/lock/list/read) — kept for byte-parity checks
 
-use rar5::{ArchiveEditor, ArchiveReader, ArchiveVersion, EditPlan, RarArchive, RarError};
+use rar_rs::{ArchiveEditor, ArchiveReader, ArchiveVersion, EditPlan, RarArchive, RarError};
 
 fn stored_level() -> u8 {
     0
@@ -14,7 +14,7 @@ fn stored_level() -> u8 {
 /// Build `path` with duplicate members plus a directory tree:
 /// `same.txt` x2 ("first", "second"), `other.txt`, `d/`, `d/x.txt`.
 fn build_fixture(path: &std::path::Path, dir: &std::path::Path) {
-    let mut archive = RarArchive::create_with_options(path, rar5::CreateOptions::default())
+    let mut archive = RarArchive::create_with_options(path, rar_rs::CreateOptions::default())
         .expect("create fixture");
     archive
         .add_bytes("same.txt", b"first", stored_level())
@@ -244,7 +244,7 @@ fn deleting_every_member_erases_the_archive_like_rar_d() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("erase.rar");
     let mut archive =
-        RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
+        RarArchive::create_with_options(&path, rar_rs::CreateOptions::default()).unwrap();
     archive.add_bytes("only.txt", b"only", 0).unwrap();
     archive.close().unwrap();
 
@@ -270,7 +270,7 @@ fn solid_chain_delete_roundtrips_and_refreshes_catalog() {
     {
         let mut archive = RarArchive::create_with_options(
             &path,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 solid: true,
                 ..Default::default()
             },
@@ -307,7 +307,7 @@ fn edition_never_mixes_ids_between_archives() {
     build_fixture(&a, dir.path());
     {
         let mut archive =
-            RarArchive::create_with_options(&b, rar5::CreateOptions::default()).unwrap();
+            RarArchive::create_with_options(&b, rar_rs::CreateOptions::default()).unwrap();
         archive.add_bytes("same.txt", b"from b", 0).unwrap();
         archive.close().unwrap();
     }
@@ -334,7 +334,7 @@ fn rar4_archives_are_refused_with_a_clear_unsupported() {
     {
         let mut archive = RarArchive::create_with_options(
             &path,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 format_version: ArchiveVersion::Rar40,
                 ..Default::default()
             },
@@ -431,7 +431,7 @@ fn plan_rejects_conflicts_and_solid_chain_renames_atomically() {
     {
         let mut archive = RarArchive::create_with_options(
             &solid,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 solid: true,
                 ..Default::default()
             },
@@ -471,7 +471,7 @@ fn multivolume_plan_is_atomic_and_failures_leave_all_volumes_intact() {
     let base = dir.path().join("mv.rar");
     let mut archive = RarArchive::create_with_options(
         &base,
-        rar5::CreateOptions {
+        rar_rs::CreateOptions {
             volume_size: Some(48 * 1024),
             ..Default::default()
         },
@@ -638,7 +638,7 @@ fn comment_and_recovery_ops_refuse_multivolume_archives() {
     let base = dir.path().join("mv-cmt.rar");
     let mut archive = RarArchive::create_with_options(
         &base,
-        rar5::CreateOptions {
+        rar_rs::CreateOptions {
             volume_size: Some(32 * 1024),
             ..Default::default()
         },

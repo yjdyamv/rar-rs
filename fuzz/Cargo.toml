@@ -1,9 +1,9 @@
 [package]
-name = "rar5-fuzz"
+name = "rar-rs-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
-description = "Fuzz targets for the rar5 library — libFuzzer-compatible, runnable standalone on stable Rust"
+description = "Fuzz targets for the rar-rs library — libFuzzer-compatible, runnable standalone on stable Rust"
 
 # Standalone package (not a workspace member): the fuzz crate must build
 # without the `fuzzing` feature and must not be caught by workspace-wide
@@ -16,7 +16,7 @@ description = "Fuzz targets for the rar5 library — libFuzzer-compatible, runna
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [dependencies]
-rar5 = { path = "../crates/rar", features = ["parallel", "simd"] }
+rar-rs = { path = "../crates/rar", features = ["parallel", "simd"] }
 tempfile = "3"
 libfuzzer-sys = { version = "0.4", optional = true }
 

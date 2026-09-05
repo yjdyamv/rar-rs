@@ -43,8 +43,8 @@ real re-exports from `rar50::headers`:
 pub use crate::model::{DataChunk, FileHeader};
 ```
 
-This keeps `rar5::rar50::headers::FileHeader` and
-`rar5::rar50::FileHeader` source-compatible while internal consumers migrate to
+This keeps `rar_rs::rar50::headers::FileHeader` and
+`rar_rs::rar50::FileHeader` source-compatible while internal consumers migrate to
 `crate::model`.
 
 ### 2. Keep format-specific wire structures in format modules
@@ -119,7 +119,7 @@ Forbidden dependency directions include:
 
 The following are explicitly deferred to a breaking release:
 
-- renaming the `rar5` crate;
+- renaming the `rar-rs` crate;
 - splitting `ArchiveVersion` into format and codec-version types;
 - hiding all existing low-level public modules;
 - changing the semantics of name-based `read`, `delete`, or `rename`;

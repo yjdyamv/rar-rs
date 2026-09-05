@@ -8,9 +8,9 @@
 use libfuzzer_sys::fuzz_target;
 
 #[cfg(fuzzing)]
-fuzz_target!(|data: &[u8]| rar5_fuzz::crypto(data));
+fuzz_target!(|data: &[u8]| rar_rs_fuzz::crypto(data));
 
 #[cfg(not(fuzzing))]
 fn main() {
-    rar5_fuzz::standalone("crypto", rar5_fuzz::CORPUS_ALL, rar5_fuzz::crypto);
+    rar_rs_fuzz::standalone("crypto", rar_rs_fuzz::CORPUS_ALL, rar_rs_fuzz::crypto);
 }

@@ -1,6 +1,6 @@
-# rar5-fuzz
+# rar-rs-fuzz
 
-Fuzz targets for the `rar5` library, covering the three attack surfaces:
+Fuzz targets for the `rar-rs` library, covering the three attack surfaces:
 
 | target | surface |
 |---|---|

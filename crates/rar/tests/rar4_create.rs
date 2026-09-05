@@ -9,7 +9,7 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar5::{ArchiveVersion, CreateOptions, ExtractOptions, RarArchive, discover_volumes};
+use rar_rs::{ArchiveVersion, CreateOptions, ExtractOptions, RarArchive, discover_volumes};
 use std::io::Write;
 
 fn crate_crc(data: &[u8]) -> u32 {
@@ -864,7 +864,7 @@ fn create_rar4_solid_extension_reset() {
         CreateOptions {
             format_version: ArchiveVersion::Rar40,
             solid: true,
-            solid_reset: rar5::SolidReset::PerExtension,
+            solid_reset: rar_rs::SolidReset::PerExtension,
             ..Default::default()
         },
     )
@@ -916,7 +916,7 @@ fn rar4_second_solid_run_starts_at_its_own_chain_head() {
         CreateOptions {
             format_version: ArchiveVersion::Rar40,
             solid: true,
-            solid_reset: rar5::SolidReset::PerExtension,
+            solid_reset: rar_rs::SolidReset::PerExtension,
             ..Default::default()
         },
     )
@@ -994,7 +994,7 @@ fn create_rar4_recovery_record_repairs_periodic_damage() {
     let damaged_path = dir.path().join("periodic_damaged.rar");
     std::fs::write(&damaged_path, &damaged).unwrap();
     let fixed_path = dir.path().join("periodic_fixed.rar");
-    let repaired = rar5::repair_legacy_archive_path(&damaged_path, &fixed_path).expect("repair");
+    let repaired = rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path).expect("repair");
     assert!(repaired, "periodic damage must be repairable by us");
     assert_eq!(
         std::fs::read(&fixed_path).unwrap(),
@@ -1268,14 +1268,14 @@ fn rar4_batch_matches_sequential_bytes() {
             ..Default::default()
         };
         let mut archive = RarArchive::create_with_options(&bat_arc, opts).expect("create");
-        let mut entries: Vec<rar5::BatchEntry<'_>> = Vec::new();
-        entries.push(rar5::BatchEntry::File {
+        let mut entries: Vec<rar_rs::BatchEntry<'_>> = Vec::new();
+        entries.push(rar_rs::BatchEntry::File {
             path: &bin,
             name: None,
             level: 3,
         });
         for (p, _) in &paths {
-            entries.push(rar5::BatchEntry::File {
+            entries.push(rar_rs::BatchEntry::File {
                 path: p,
                 name: None,
                 level: 5,

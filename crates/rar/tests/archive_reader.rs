@@ -3,7 +3,7 @@
 use std::fs::OpenOptions as FsOpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
-use rar5::{
+use rar_rs::{
     ArchiveReader, ArchiveVersion, CreateOptions, ErrorCode, ExtractOptions, OpenOptions,
     RarArchive, RarError, ScanStrategy,
 };

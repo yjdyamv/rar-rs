@@ -64,7 +64,7 @@ fn main() {
 
     // Sequential (optimal parse)
     let t0 = Instant::now();
-    let packed_seq = rar5::encode(&data, rar5::EncodeOptions::new(level, DICT)).unwrap();
+    let packed_seq = rar_rs::encode(&data, rar_rs::EncodeOptions::new(level, DICT)).unwrap();
     let seq_ms = t0.elapsed().as_millis() as f64;
     println!(
         "seq   l{level} {} MiB: {:>7.0} ms  {:>5.1} MiB/s  ratio {:>6.2}%",
@@ -76,10 +76,10 @@ fn main() {
 
     // Multi-threaded (optimal parse per slice)
     for threads in [2usize, 4, 8] {
-        rar5::set_compression_threads(threads);
+        rar_rs::set_compression_threads(threads);
         let t1 = Instant::now();
-        let mut seed = rar5::EncoderState::default();
-        let packed = rar5::encode_chunked_mt(
+        let mut seed = rar_rs::EncoderState::default();
+        let packed = rar_rs::encode_chunked_mt(
             &data,
             level,
             DICT,
@@ -87,7 +87,7 @@ fn main() {
             &mut seed,
             threads,
             true,
-            rar5::ArchiveVersion::Rar50,
+            rar_rs::ArchiveVersion::Rar50,
         );
         let mt_ms = t1.elapsed().as_millis() as f64;
         println!(
@@ -98,10 +98,10 @@ fn main() {
             packed.len() as f64 * 100.0 / data.len() as f64,
             (packed.len() as f64 / packed_seq.len() as f64 - 1.0) * 100.0,
         );
-        let out = rar5::decode(&packed, level, data.len() as u64, DICT, None).unwrap();
+        let out = rar_rs::decode(&packed, level, data.len() as u64, DICT, None).unwrap();
         assert_eq!(out.len(), data.len(), "mt length mismatch");
         assert_eq!(out, data, "mt decode mismatch");
     }
-    rar5::set_compression_threads(0);
+    rar_rs::set_compression_threads(0);
     println!("all MT outputs decode byte-identically");
 }

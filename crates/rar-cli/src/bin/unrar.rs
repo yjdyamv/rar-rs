@@ -331,12 +331,12 @@ fn format_unix_time(secs: u32) -> String {
     )
 }
 
-fn open_archive(path: &str, password: Option<&str>) -> Result<rar5::ArchiveReader, String> {
-    let mut options = rar5::OpenOptions::new();
+fn open_archive(path: &str, password: Option<&str>) -> Result<rar_rs::ArchiveReader, String> {
+    let mut options = rar_rs::OpenOptions::new();
     if let Some(password) = password {
         options = options.password(password);
     }
-    rar5::ArchiveReader::open_with(path, options).map_err(|e| format!("{e}"))
+    rar_rs::ArchiveReader::open_with(path, options).map_err(|e| format!("{e}"))
 }
 
 fn cmd_extract(
@@ -346,7 +346,7 @@ fn cmd_extract(
     max_dict_size: Option<u64>,
 ) -> Result<(), String> {
     if let Some(threads) = args.threads {
-        rar5::set_extraction_threads(threads);
+        rar_rs::set_extraction_threads(threads);
     }
     let base = args
         .output_path
@@ -362,7 +362,7 @@ fn cmd_extract(
         return extract_to_stdout(&mut rar, &args.names, max_dict_size);
     }
 
-    let opts = rar5::ExtractOptions {
+    let opts = rar_rs::ExtractOptions {
         // Extraction is fully streaming: no per-member or total
         // size caps (WinRAR's UnRAR extracts any size).
         max_unpacked_bytes: None,
@@ -375,7 +375,7 @@ fn cmd_extract(
         set_access_time: ts.save_atime,
         // WinRAR refuses dictionaries above 4 GiB unless -mdx raises
         // the cap; None here means "use the default cap".
-        max_dict_size: max_dict_size.or(Some(rar5::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
+        max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
     let count = if args.names.is_empty() {
@@ -393,10 +393,10 @@ fn cmd_extract(
 /// path or basename). Errors clearly when no member matches, so a mistyped
 /// name is never silently swallowed or treated as a destination directory.
 fn extract_selected(
-    rar: &mut rar5::ArchiveReader,
+    rar: &mut rar_rs::ArchiveReader,
     dest: &std::path::Path,
     names: &[String],
-    opts: &rar5::ExtractOptions,
+    opts: &rar_rs::ExtractOptions,
 ) -> Result<usize, String> {
     let wanted = selector::select_entries(
         rar.entries()
@@ -426,7 +426,7 @@ fn extract_selected(
 /// `rar/unrar x -so`. Informational messages are suppressed so the stream
 /// stays clean.
 fn extract_to_stdout(
-    rar: &mut rar5::ArchiveReader,
+    rar: &mut rar_rs::ArchiveReader,
     names: &[String],
     max_dict_size: Option<u64>,
 ) -> Result<(), String> {
@@ -445,10 +445,10 @@ fn extract_to_stdout(
     }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let options = rar5::ExtractOptions {
+    let options = rar_rs::ExtractOptions {
         max_unpacked_bytes: None,
         max_total_unpacked_bytes: None,
-        max_dict_size: max_dict_size.or(Some(rar5::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
+        max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
     for id in wanted {
@@ -479,7 +479,7 @@ fn cmd_extract_flat(
     if args.stdout {
         return extract_to_stdout(&mut rar, &args.names, max_dict_size);
     }
-    let opts = rar5::ExtractOptions {
+    let opts = rar_rs::ExtractOptions {
         flat_paths: true,
         max_unpacked_bytes: None,
         max_total_unpacked_bytes: None,
@@ -488,7 +488,7 @@ fn cmd_extract_flat(
         keep_broken: args.keep_broken,
         set_creation_time: ts.save_ctime,
         set_access_time: ts.save_atime,
-        max_dict_size: max_dict_size.or(Some(rar5::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
+        max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
     let count = if args.names.is_empty() {
@@ -539,7 +539,7 @@ fn cmd_list(archive: &str, password: Option<&str>) -> Result<(), String> {
 fn cmd_test(archive: &str, password: Option<&str>) -> Result<(), String> {
     let mut rar = open_archive(archive, password)?;
 
-    let report: rar5::VerificationReport = rar.verify().map_err(|e| format!("test: {e}"))?;
+    let report: rar_rs::VerificationReport = rar.verify().map_err(|e| format!("test: {e}"))?;
     info!();
     if report.failed() == 0 {
         info!("All {} files OK", report.checked());
@@ -565,7 +565,7 @@ fn cmd_print(args: &PrintArgs, password: Option<&str>) -> Result<(), String> {
     let mut rar = open_archive(&args.archive, password)?;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let options = rar5::ExtractOptions {
+    let options = rar_rs::ExtractOptions {
         max_unpacked_bytes: None,
         max_total_unpacked_bytes: None,
         ..Default::default()

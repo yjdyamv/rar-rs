@@ -172,16 +172,16 @@ fn abort_flag(signal: Option<&AbortSignal>) -> Option<Arc<AtomicBool>> {
   })
 }
 
-fn write_entries(planned: &[PlannedEntry], level: u8) -> Result<Vec<rar5::WriteEntry<'_>>> {
-  let compression = rar5::CompressionLevel::try_from(level)
+fn write_entries(planned: &[PlannedEntry], level: u8) -> Result<Vec<rar_rs::WriteEntry<'_>>> {
+  let compression = rar_rs::CompressionLevel::try_from(level)
     .map_err(|err| Error::new(Status::InvalidArg, format!("level: {err}")))?;
-  let options = rar5::EntryWriteOptions::new().compression_level(compression);
-  let mut batch: Vec<rar5::WriteEntry<'_>> = Vec::with_capacity(planned.len());
+  let options = rar_rs::EntryWriteOptions::new().compression_level(compression);
+  let mut batch: Vec<rar_rs::WriteEntry<'_>> = Vec::with_capacity(planned.len());
   for e in planned {
     match e.kind.as_str() {
       "file" => {
         let path = e.path.as_ref().expect("file path");
-        batch.push(rar5::WriteEntry::File {
+        batch.push(rar_rs::WriteEntry::File {
           path,
           name: if e.name.is_empty() {
             None
@@ -193,14 +193,14 @@ fn write_entries(planned: &[PlannedEntry], level: u8) -> Result<Vec<rar5::WriteE
       }
       "dir" => {
         let path = e.path.as_ref().expect("dir path");
-        batch.push(rar5::WriteEntry::Directory {
+        batch.push(rar_rs::WriteEntry::Directory {
           path,
           name: Some(&e.name),
         });
       }
       "bytes" => {
         let data = e.data.as_ref().expect("bytes data");
-        batch.push(rar5::WriteEntry::Bytes {
+        batch.push(rar_rs::WriteEntry::Bytes {
           name: &e.name,
           data,
           options,
@@ -218,11 +218,11 @@ fn write_entries(planned: &[PlannedEntry], level: u8) -> Result<Vec<rar5::WriteE
 /// records and volume finalization). Returns the committed volume paths
 /// from the write report — no filesystem rediscovery needed.
 fn write_transaction(
-  mut writer: rar5::ArchiveWriter,
-  batch: &[rar5::WriteEntry<'_>],
+  mut writer: rar_rs::ArchiveWriter,
+  batch: &[rar_rs::WriteEntry<'_>],
   total_bytes: u64,
   progress: Option<ThreadsafeFunction<ProgressData, ()>>,
-) -> Result<rar5::WriteReport> {
+) -> Result<rar_rs::WriteReport> {
   let terminal = progress.map(Arc::new);
   if let Some(tsfn) = terminal.as_ref() {
     let cb_tsfn = tsfn.clone();
@@ -259,7 +259,7 @@ fn write_transaction(
   Ok(report)
 }
 
-fn report_files(report: rar5::WriteReport) -> Vec<String> {
+fn report_files(report: rar_rs::WriteReport) -> Vec<String> {
   report
     .into_volume_paths()
     .into_iter()
@@ -310,7 +310,7 @@ impl Task for CreateArchiveTask {
     // a failed or cancelled add aborts the transaction and leaves nothing
     // at the output path.
     let writer_opts = self.opts.to_writer_options()?;
-    let mut writer = rar5::ArchiveWriter::create_with(out, writer_opts).map_err(to_napi_error)?;
+    let mut writer = rar_rs::ArchiveWriter::create_with(out, writer_opts).map_err(to_napi_error)?;
     writer
       .set_cancel_flag(self.cancel.take())
       .map_err(to_napi_error)?;
@@ -378,7 +378,7 @@ impl Task for RepairArchiveTask {
         );
       }
     };
-    rar5::repair_archive_path_with(
+    rar_rs::repair_archive_path_with(
       Path::new(&self.input_path),
       Path::new(&self.output_path),
       self.cancel.as_deref(),
@@ -438,7 +438,7 @@ impl Task for RebuildVolumesTask {
         );
       }
     };
-    let paths = rar5::rebuild_missing_volumes_with(
+    let paths = rar_rs::rebuild_missing_volumes_with(
       Path::new(&self.first_volume),
       self.cancel.as_deref(),
       Some(&mut report),
@@ -484,7 +484,7 @@ impl Task for AppendArchiveTask {
 
     let level = self.opts.level()?;
     let batch = write_entries(&planned, level)?;
-    let mut append_opts = rar5::AppendOptions::new();
+    let mut append_opts = rar_rs::AppendOptions::new();
     if let Some(pw) = self.opts.password.as_deref().filter(|pw| !pw.is_empty()) {
       append_opts = append_opts.password(pw.to_string());
     }
@@ -494,14 +494,14 @@ impl Task for AppendArchiveTask {
         .or_else(|| dict_log.map(|log| (128u64 * 1024) << log))
         .expect("dictionary parse returns a log or a byte count");
       append_opts =
-        append_opts.dictionary_size(rar5::DictionarySize::try_from(bytes).map_err(|err| {
+        append_opts.dictionary_size(rar_rs::DictionarySize::try_from(bytes).map_err(|err| {
           Error::new(
             Status::InvalidArg,
             format!("invalid dictionary size: {err}"),
           )
         })?);
     }
-    let mut writer = rar5::ArchiveWriter::append_with(&self.opts.archive_path, append_opts)
+    let mut writer = rar_rs::ArchiveWriter::append_with(&self.opts.archive_path, append_opts)
       .map_err(to_napi_error)?;
     writer
       .set_cancel_flag(self.cancel.take())
@@ -587,22 +587,22 @@ impl Task for DeleteEntriesTask {
   fn compute(&mut self) -> Result<Self::Output> {
     let mut editor = match self.password.as_deref() {
       Some(pw) if !pw.is_empty() => {
-        rar5::ArchiveEditor::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
+        rar_rs::ArchiveEditor::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
       }
-      _ => rar5::ArchiveEditor::open(&self.archive_path).map_err(to_napi_error)?,
+      _ => rar_rs::ArchiveEditor::open(&self.archive_path).map_err(to_napi_error)?,
     };
     editor.set_cancel_flag(self.cancel.take());
     // Preserve the legacy name semantics: every name deletes the first
     // matching member not already selected, so repeated names delete
     // successive duplicates, and a missing name fails the whole plan
     // before any rewrite starts.
-    let mut ids: Vec<rar5::EntryId> = Vec::with_capacity(self.names.len());
+    let mut ids: Vec<rar_rs::EntryId> = Vec::with_capacity(self.names.len());
     for name in &self.names {
       let id = editor
         .entries_named(name)
         .map(|entry| entry.id())
         .find(|id| !ids.contains(id))
-        .ok_or_else(|| to_napi_error(rar5::RarError::MemberNotFound { name: name.clone() }))?;
+        .ok_or_else(|| to_napi_error(rar_rs::RarError::MemberNotFound { name: name.clone() }))?;
       ids.push(id);
     }
     let progress = self.progress.take();
@@ -654,9 +654,9 @@ impl Task for TestArchiveTask {
   fn compute(&mut self) -> Result<Self::Output> {
     let mut archive = match self.password.as_deref() {
       Some(pw) if !pw.is_empty() => {
-        rar5::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
+        rar_rs::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
       }
-      _ => rar5::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
+      _ => rar_rs::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
     };
     let (checked, failed) = archive.test().map_err(to_napi_error)?;
     Ok(vec![checked as u32, failed as u32])
@@ -687,12 +687,12 @@ impl Task for ListEntriesTask {
   type JsValue = Vec<String>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut options = rar5::OpenOptions::new();
+    let mut options = rar_rs::OpenOptions::new();
     if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
       options = options.password(pw);
     }
     let archive =
-      rar5::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
     Ok(
       archive
         .entries()
@@ -763,7 +763,7 @@ impl Task for ListEntriesDetailedTask {
   type JsValue = Vec<EntryInfo>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut options = rar5::OpenOptions::new();
+    let mut options = rar_rs::OpenOptions::new();
     if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
       options = options.password(pw);
     }
@@ -771,7 +771,7 @@ impl Task for ListEntriesDetailedTask {
     // back to a full scan, so the explicit `quick` selector is subsumed.
     let _ = self.quick;
     let archive =
-      rar5::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
     Ok(entry_infos(&archive))
   }
 
@@ -780,7 +780,7 @@ impl Task for ListEntriesDetailedTask {
   }
 }
 
-fn entry_infos(archive: &rar5::ArchiveReader) -> Vec<EntryInfo> {
+fn entry_infos(archive: &rar_rs::ArchiveReader) -> Vec<EntryInfo> {
   archive
     .entries()
     .map(|e| EntryInfo {
@@ -808,9 +808,9 @@ impl Task for ExtractArchiveTask {
   fn compute(&mut self) -> Result<Self::Output> {
     let mut archive = match self.opts.password.as_deref() {
       Some(pw) if !pw.is_empty() => {
-        rar5::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
+        rar_rs::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
       }
-      _ => rar5::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
+      _ => rar_rs::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
     };
     archive.set_cancel_flag(self.cancel.take());
     let dest = Path::new(&self.opts.dest_path);
@@ -874,12 +874,12 @@ impl Task for ReadMemberTask {
   type JsValue = Buffer;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut options = rar5::OpenOptions::new();
+    let mut options = rar_rs::OpenOptions::new();
     if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
       options = options.password(pw);
     }
     let mut archive =
-      rar5::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
     let id = archive.unique_entry(&self.name).map_err(to_napi_error)?;
     archive.read_entry(id).map_err(to_napi_error)
   }

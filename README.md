@@ -67,7 +67,7 @@ the full reference in
 ### Library
 
 ```rust
-use rar5::RarArchive;
+use rar_rs::RarArchive;
 
 // Create
 let mut rar = RarArchive::create_with_options("backup.rar", Default::default())?;
@@ -84,7 +84,7 @@ let mut rar = RarArchive::open("backup.rar")?;
 let data = rar.read("notes.txt")?;
 ```
 
-The crate is `rar5`; see `crates/rar` for the full API and
+The crate is `rar-rs`; see `crates/rar` for the full API and
 [docs/ARCHITECTURE.html](docs/ARCHITECTURE.html) for advanced usage,
 including solid archives, quick-open, BLAKE2sp, safe extraction,
 `open_quick`, cancellation, streaming repair, and multi-volume processing.

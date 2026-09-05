@@ -36,8 +36,8 @@ die with the facade.
 
 | deprecated facade call | remaining call sites | where |
 | --- | --- | --- |
-| `create_with_options` | many | rar5 compat tests, fuzz |
-| `.close()` | many | rar5 compat tests, fuzz, examples |
+| `create_with_options` | many | compat tests, fuzz |
+| `.close()` | many | compat tests, fuzz, examples |
 | `.add_bytes` / `.add` | many | compat tests, examples, fuzz |
 | `.namelist()` | ~76 | compat tests only (CLI now uses `ArchiveReader`) |
 | `.delete()` / `.delete_with_progress()` / `.rename()` | ~30 | compat tests only (`rar u/f` now uses `ArchiveEditor`) |
@@ -57,26 +57,27 @@ Low-level public modules and their in-tree users:
 
 | module | visibility | in-tree users |
 | --- | --- | --- |
-| `rar5::rar50` (alias of `format::rar5`) | public | 3 test files (wire-level helpers) |
-| `rar5::rar40` (alias of `format::rar4`) | public | none |
-| `rar5::recovery` | doc(hidden) | CLI `rv`, robustness, fuzz |
-| `rar5::name_policy` | doc(hidden) | CLI mask/exclusion logic |
-| `rar5::codec::lzss_huff` | public | napi streaming, mtbench examples |
-| `rar5::options` / `rar5::version` | public | CLI/typed option mapping |
+| `rar_rs::rar50` (alias of `format::rar5`) | public | 3 test files (wire-level helpers) |
+| `rar_rs::rar40` (alias of `format::rar4`) | public | none |
+| `rar_rs::recovery` | doc(hidden) | CLI `rv`, robustness, fuzz |
+| `rar_rs::name_policy` | doc(hidden) | CLI mask/exclusion logic |
+| `rar_rs::codec::lzss_huff` | public | napi streaming, mtbench examples |
+| `rar_rs::options` / `rar_rs::version` | public | CLI/typed option mapping |
 
-Crate naming surface: package name `rar5` in `crates/rar/Cargo.toml`, the
-workspace dependency alias (`rar5 = { path = "crates/rar" }`), the two
-binding crates' dependency entries, and code references `rar5::…` across
+Crate naming surface: package name `rar-rs` in `crates/rar/Cargo.toml`, the
+workspace dependency key (`rar-rs = { path = "crates/rar" }`), the two
+binding crates' dependency entries, and code references `rar_rs::…` across
 tests/examples/fuzz. The npm package is already `rar-rs-napi`.
 
 ## Decisions and recommendations
 
-1. Crate rename. Options: (a) keep `rar5`, (b) rename lib crate to
-   `rar-rs` (repo/README/binding branding) with the alias plumbing updated,
-   (c) rename to a format-neutral name. Recommendation: decide after the
-   model split; a rename is mechanical (workspace alias + `crate::`-free
-   external refs) but touches every `use rar5::…` in tests/fuzz, so it
-   should ride the same release as the removals below.
+1. Crate rename. Decided: rename the lib crate to `rar-rs`.
+   Executed with Phase 6: package name, workspace dependency key and every
+   external `use rar5::…` reference became `rar_rs::…` (the fuzz harness is
+   `rar-rs-fuzz`); the `format::rar5`/`format/rar4` internal module paths are
+   untouched. A rename is mechanical (workspace alias + `crate::`-free
+   external refs) but touches every external reference, so it rides the same
+   breaking release as the removals below.
 2. Split archive format from compression version. The public
    `ArchiveVersion` conflates container (`Rar40`) with codec selection
    (`Rar50` v50-only vs `Rar70` forced-v70 + auto v50/v70 on Rar50).
@@ -88,7 +89,7 @@ tests/examples/fuzz. The npm package is already `rar-rs-napi`.
    `rar50` (alias) is used by three wire-level test files. `recovery`,
    `name_policy`, `lzss_huff` internals are used by bindings/CLI/examples.
    Recommendation: gate the wire-level `rar40` surface behind a `raw`
-   feature (done; `rar5::rar40` is now feature-gated and `format::rar4` is
+   feature (done; `rar_rs::rar40` is now feature-gated and `format::rar4` is
    internal), keep `rar50` public while the in-tree wire tests still use
    it, keep `recovery`/`name_policy` doc(hidden) as-is, and keep
    `codec::lzss_huff` public (stable enough for the mtbench/napi streaming

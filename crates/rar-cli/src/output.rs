@@ -27,7 +27,7 @@ pub fn extract_dest(dest: &str, archive: &str, append_dir: bool) -> std::path::P
 }
 
 /// Print a verbose listing (like `rar v` / `unrar v`).
-pub fn print_verbose_list(rar: &rar5::ArchiveReader) -> Result<(), String> {
+pub fn print_verbose_list(rar: &rar_rs::ArchiveReader) -> Result<(), String> {
     println!(
         "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  Name",
         "Size", "Packed", "Ratio", "Checksum", "Method"

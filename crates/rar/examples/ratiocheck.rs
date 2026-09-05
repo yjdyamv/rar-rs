@@ -127,8 +127,8 @@ fn main() {
     for (name, corpus) in &data {
         for level in [2u8, 3, 5] {
             let t0 = Instant::now();
-            let mut seed = rar5::EncoderState::default();
-            let packed = rar5::encode_chunked_mt(
+            let mut seed = rar_rs::EncoderState::default();
+            let packed = rar_rs::encode_chunked_mt(
                 corpus,
                 level,
                 6,
@@ -136,7 +136,7 @@ fn main() {
                 &mut seed,
                 threads,
                 true,
-                rar5::ArchiveVersion::Rar50,
+                rar_rs::ArchiveVersion::Rar50,
             );
             let ms = t0.elapsed().as_millis();
             let ratio = packed.len() as f64 * 100.0 / corpus.len() as f64;

@@ -7,7 +7,7 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar5::RarArchive;
+use rar_rs::RarArchive;
 
 /// Official UNRAR (e.g. /home/yuan/下载/rar/unrar) validates archives
 /// produced by rar-rs with every new feature combination.
@@ -23,15 +23,15 @@ fn official_unrar_validates_our_feature_archives() {
     let a = b"official interop solid content ".repeat(3000);
     let b = b"different solid member content ".repeat(2500);
 
-    let cases: Vec<(String, rar5::CreateOptions, Vec<(String, Vec<u8>)>)> = vec![
+    let cases: Vec<(String, rar_rs::CreateOptions, Vec<(String, Vec<u8>)>)> = vec![
         (
             "plain".into(),
-            rar5::CreateOptions::default(),
+            rar_rs::CreateOptions::default(),
             vec![("f1.bin".into(), a.clone()), ("f2.bin".into(), b.clone())],
         ),
         (
             "solid-qo-blake2".into(),
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 solid: true,
                 quick_open: true,
                 blake2: true,
@@ -41,7 +41,7 @@ fn official_unrar_validates_our_feature_archives() {
         ),
         (
             "encrypted".into(),
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 password: Some("s3cret".into()),
                 ..Default::default()
             },
@@ -49,7 +49,7 @@ fn official_unrar_validates_our_feature_archives() {
         ),
         (
             "headers-recovery".into(),
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 password: Some("s3cret".into()),
                 encrypt_headers: true,
                 recovery_percent: Some(10),
@@ -62,7 +62,7 @@ fn official_unrar_validates_our_feature_archives() {
     for (name, opts, entries) in cases {
         let path = dir.path().join(format!("{name}.rar"));
         {
-            let mut rar = rar5::RarArchive::create_with_options(&path, opts.clone()).unwrap();
+            let mut rar = rar_rs::RarArchive::create_with_options(&path, opts.clone()).unwrap();
             for (n, data) in &entries {
                 rar.add_bytes(n, data, 3).unwrap();
             }
@@ -88,9 +88,9 @@ fn official_unrar_validates_our_feature_archives() {
         let payload: Vec<u8> = (0..2 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
         let rr = dir.path().join("rr.rar");
         {
-            let mut ar = rar5::RarArchive::create_with_options(
+            let mut ar = rar_rs::RarArchive::create_with_options(
                 &rr,
-                rar5::CreateOptions {
+                rar_rs::CreateOptions {
                     recovery_percent: Some(10),
                     ..Default::default()
                 },
@@ -145,7 +145,7 @@ fn official_unrar_validates_our_feature_archives() {
             "repaired archive still fails official unrar test"
         );
 
-        let mut ar = rar5::RarArchive::open(&fixed).unwrap();
+        let mut ar = rar_rs::RarArchive::open(&fixed).unwrap();
         assert_eq!(ar.read("payload.bin").unwrap(), payload);
 
         // Recovery volumes: official `rar rc` must reconstruct a deleted
@@ -161,9 +161,9 @@ fn official_unrar_validates_our_feature_archives() {
             .collect();
         let multi = dir.path().join("multi.part1.rar");
         {
-            let mut ar = rar5::RarArchive::create_with_options(
+            let mut ar = rar_rs::RarArchive::create_with_options(
                 &multi,
-                rar5::CreateOptions {
+                rar_rs::CreateOptions {
                     volume_size: Some(1024 * 1000),
                     recovery_volume_count: Some(2),
                     ..Default::default()
@@ -201,7 +201,7 @@ fn official_unrar_validates_our_feature_archives() {
             status.success(),
             "reconstructed volume set fails unrar test"
         );
-        let mut ar = rar5::RarArchive::open(&multi).unwrap();
+        let mut ar = rar_rs::RarArchive::open(&multi).unwrap();
         assert_eq!(ar.read("big.bin").unwrap(), vol_payload);
     }
 }
@@ -242,7 +242,7 @@ fn our_unrar_reads_official_archives() {
         .status()
         .expect("run official rar");
     assert!(status.success(), "official rar solid creation failed");
-    let mut ar = rar5::RarArchive::open(&solid).unwrap();
+    let mut ar = rar_rs::RarArchive::open(&solid).unwrap();
     assert_eq!(ar.read("src/a.bin").unwrap(), a);
     assert_eq!(ar.read("src/b.bin").unwrap(), b);
 
@@ -256,7 +256,7 @@ fn our_unrar_reads_official_archives() {
         .status()
         .expect("run official rar");
     assert!(status.success(), "official rar encrypted creation failed");
-    let mut ar = rar5::RarArchive::open_with_password(&enc, "pw").unwrap();
+    let mut ar = rar_rs::RarArchive::open_with_password(&enc, "pw").unwrap();
     assert_eq!(ar.read("src/a.bin").unwrap(), a);
     assert_eq!(ar.read("src/b.bin").unwrap(), b);
 }
@@ -275,11 +275,11 @@ fn official_unrar_validates_deleted_archives() {
     let b = compressible(12, 60_000);
     let c = compressible(13, 60_000);
 
-    let cases: Vec<(String, rar5::CreateOptions)> = vec![
-        ("plain".into(), rar5::CreateOptions::default()),
+    let cases: Vec<(String, rar_rs::CreateOptions)> = vec![
+        ("plain".into(), rar_rs::CreateOptions::default()),
         (
             "solid-qo".into(),
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 solid: true,
                 quick_open: true,
                 ..Default::default()
@@ -287,14 +287,14 @@ fn official_unrar_validates_deleted_archives() {
         ),
         (
             "encrypted".into(),
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 password: Some("s3cret".into()),
                 ..Default::default()
             },
         ),
         (
             "headers".into(),
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 password: Some("s3cret".into()),
                 encrypt_headers: true,
                 ..Default::default()
@@ -304,7 +304,7 @@ fn official_unrar_validates_deleted_archives() {
     for (name, opts) in cases {
         let path = dir.path().join(format!("del-{name}.rar"));
         {
-            let mut rar = rar5::RarArchive::create_with_options(&path, opts.clone()).unwrap();
+            let mut rar = rar_rs::RarArchive::create_with_options(&path, opts.clone()).unwrap();
             rar.add_bytes("a.bin", &a, 3).unwrap();
             rar.add_bytes("b.bin", &b, 3).unwrap();
             rar.add_bytes("c.bin", &c, 3).unwrap();
@@ -316,8 +316,8 @@ fn official_unrar_validates_deleted_archives() {
             .map(|pw| vec![format!("-p{pw}")])
             .unwrap_or_default();
         let mut rar = match &opts.password {
-            Some(pw) => rar5::RarArchive::open_with_password(&path, pw).unwrap(),
-            None => rar5::RarArchive::open(&path).unwrap(),
+            Some(pw) => rar_rs::RarArchive::open_with_password(&path, pw).unwrap(),
+            None => rar_rs::RarArchive::open(&path).unwrap(),
         };
         rar.delete(&["b.bin"]).unwrap();
         let status = std::process::Command::new(&unrar)
@@ -330,8 +330,8 @@ fn official_unrar_validates_deleted_archives() {
 
         // Content still correct through our own reader.
         let mut rar = match &opts.password {
-            Some(pw) => rar5::RarArchive::open_with_password(&path, pw).unwrap(),
-            None => rar5::RarArchive::open(&path).unwrap(),
+            Some(pw) => rar_rs::RarArchive::open_with_password(&path, pw).unwrap(),
+            None => rar_rs::RarArchive::open(&path).unwrap(),
         };
         assert_eq!(rar.read("a.bin").unwrap(), a);
         assert_eq!(rar.read("c.bin").unwrap(), c);
@@ -343,7 +343,7 @@ fn official_unrar_validates_deleted_archives() {
         let path = dir.path().join("del-by-official.rar");
         {
             let mut rar =
-                rar5::RarArchive::create_with_options(&path, rar5::CreateOptions::default())
+                rar_rs::RarArchive::create_with_options(&path, rar_rs::CreateOptions::default())
                     .unwrap();
             rar.add_bytes("a.bin", &a, 3).unwrap();
             rar.add_bytes("b.bin", &b, 3).unwrap();
@@ -357,7 +357,7 @@ fn official_unrar_validates_deleted_archives() {
             .status()
             .expect("run official rar d");
         assert!(status.success(), "official rar d failed");
-        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
         assert_eq!(rar.namelist(), ["a.bin", "c.bin"]);
         assert_eq!(rar.read("a.bin").unwrap(), a);
         assert_eq!(rar.read("c.bin").unwrap(), c);
@@ -393,7 +393,7 @@ fn official_tools_validate_modified_archives() {
         .unwrap();
     assert!(status.success());
     {
-        let mut rar = rar5::RarArchive::open_append(&path).unwrap();
+        let mut rar = rar_rs::RarArchive::open_append(&path).unwrap();
         rar.add(src.join("b.bin"), 3).unwrap();
         rar.close().unwrap();
     }
@@ -431,7 +431,7 @@ fn official_tools_validate_modified_archives() {
         .status()
         .unwrap();
     assert!(status.success());
-    let volumes = rar5::discover_volumes(&mv);
+    let volumes = rar_rs::discover_volumes(&mv);
     assert!(volumes.len() > 1, "precondition: multi-volume set");
 
     // Delete the small member from the rar-created volumes (the official
@@ -484,7 +484,8 @@ fn official_rename_cross_validation() {
     let path = dir.path().join("rn.rar");
     {
         let mut rar =
-            rar5::RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
+            rar_rs::RarArchive::create_with_options(&path, rar_rs::CreateOptions::default())
+                .unwrap();
         rar.add(src.join("a.bin"), 3).unwrap();
         rar.add(src.join("b.bin"), 3).unwrap();
         rar.close().unwrap();
@@ -566,7 +567,7 @@ fn official_repair_and_rebuild_cross_validation() {
     for pos in [500usize, 520, 540] {
         damaged[pos] ^= 0xA5;
     }
-    let repaired = rar5::repair_archive(&damaged).unwrap();
+    let repaired = rar_rs::repair_archive(&damaged).unwrap();
     assert_eq!(repaired, good, "byte-identical repair of rar archive");
     std::fs::write(dir.path().join("repaired.rar"), &repaired).unwrap();
     let status = std::process::Command::new(&unrar)
@@ -586,10 +587,10 @@ fn official_repair_and_rebuild_cross_validation() {
         .status()
         .unwrap();
     assert!(status.success());
-    let volumes = rar5::discover_volumes(&mv);
+    let volumes = rar_rs::discover_volumes(&mv);
     assert!(volumes.len() > 1, "precondition: multi-volume set");
     std::fs::remove_file(&volumes[1]).unwrap();
-    let rebuilt = rar5::rebuild_missing_volumes(&volumes[0]).unwrap();
+    let rebuilt = rar_rs::rebuild_missing_volumes(&volumes[0]).unwrap();
     assert_eq!(rebuilt.len(), 1);
     let status = std::process::Command::new(&unrar)
         .arg("t")
@@ -597,7 +598,7 @@ fn official_repair_and_rebuild_cross_validation() {
         .status()
         .unwrap();
     assert!(status.success(), "unrar rejected the rebuilt volume set");
-    let mut rar = rar5::RarArchive::open(&volumes[0]).unwrap();
+    let mut rar = rar_rs::RarArchive::open(&volumes[0]).unwrap();
     let big_name = rar
         .namelist()
         .iter()
@@ -662,14 +663,15 @@ fn official_sfx_cross_validation() {
         .to_string();
     rar.delete(&[&name]).unwrap();
     let data = std::fs::read(&sfx).unwrap();
-    let stub_len = rar5::sfx_offset_of(&data).unwrap();
+    let stub_len = rar_rs::sfx_offset_of(&data).unwrap();
     assert!(stub_len > 0, "stub preserved");
 
     // Official unrar validates a stub-prefixed rar-rs archive.
     let ours = dir.path().join("ours.rar");
     {
         let mut ar =
-            rar5::RarArchive::create_with_options(&ours, rar5::CreateOptions::default()).unwrap();
+            rar_rs::RarArchive::create_with_options(&ours, rar_rs::CreateOptions::default())
+                .unwrap();
         ar.add_bytes("b.bin", &payload, 3).unwrap();
         ar.close().unwrap();
     }
@@ -715,7 +717,7 @@ fn official_redirection_cross_validation() {
     assert!(status.success());
     let out = dir.path().join("out");
     {
-        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
         rar.extract_all(&out).unwrap();
     }
     let link = std::fs::read_link(out.join("src/lnk.txt")).unwrap();
@@ -725,7 +727,8 @@ fn official_redirection_cross_validation() {
     let ours = dir.path().join("ours.rar");
     {
         let mut ar =
-            rar5::RarArchive::create_with_options(&ours, rar5::CreateOptions::default()).unwrap();
+            rar_rs::RarArchive::create_with_options(&ours, rar_rs::CreateOptions::default())
+                .unwrap();
         ar.add_bytes("target.txt", b"target content", 0).unwrap();
         ar.add_redirect("lnk.txt", 1, "target.txt").unwrap();
         ar.close().unwrap();
@@ -787,7 +790,7 @@ fn official_time_and_owner_cross_validation() {
         .status()
         .unwrap();
     assert!(status.success());
-    let rar = rar5::RarArchive::open(&path).unwrap();
+    let rar = rar_rs::RarArchive::open(&path).unwrap();
     let entry = rar.get_entry("ns.bin").unwrap();
     // The official rar stores the on-disk timestamp, which NTFS quantizes
     // to 100 ns; compare against the actual disk value, not the request.
@@ -805,7 +808,8 @@ fn official_time_and_owner_cross_validation() {
     let ours = dir.path().join("ours.rar");
     {
         let mut ar =
-            rar5::RarArchive::create_with_options(&ours, rar5::CreateOptions::default()).unwrap();
+            rar_rs::RarArchive::create_with_options(&ours, rar_rs::CreateOptions::default())
+                .unwrap();
         ar.add(&src, 3).unwrap();
         ar.close().unwrap();
     }

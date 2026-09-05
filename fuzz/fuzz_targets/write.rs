@@ -10,16 +10,16 @@
 use libfuzzer_sys::fuzz_target;
 
 #[cfg(fuzzing)]
-fuzz_target!(|data: &[u8]| rar5_fuzz::write_roundtrip(data));
+fuzz_target!(|data: &[u8]| rar_rs_fuzz::write_roundtrip(data));
 
 #[cfg(not(fuzzing))]
 fn main() {
     // Write-side targets do real file I/O per iteration (and Windows file
     // churn is slow), so they default lower than the read targets.
-    rar5_fuzz::standalone_with(
+    rar_rs_fuzz::standalone_with(
         "write",
-        rar5_fuzz::CORPUS_ALL,
-        rar5_fuzz::write_roundtrip,
+        rar_rs_fuzz::CORPUS_ALL,
+        rar_rs_fuzz::write_roundtrip,
         20_000,
     );
 }

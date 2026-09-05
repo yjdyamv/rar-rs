@@ -9,11 +9,11 @@
 use libfuzzer_sys::fuzz_target;
 
 #[cfg(fuzzing)]
-fuzz_target!(|data: &[u8]| rar5_fuzz::rewrite(data));
+fuzz_target!(|data: &[u8]| rar_rs_fuzz::rewrite(data));
 
 #[cfg(not(fuzzing))]
 fn main() {
     // Write-side targets do real file I/O per iteration (and Windows file
     // churn is slow), so they default lower than the read targets.
-    rar5_fuzz::standalone_with("rewrite", rar5_fuzz::CORPUS_ALL, rar5_fuzz::rewrite, 20_000);
+    rar_rs_fuzz::standalone_with("rewrite", rar_rs_fuzz::CORPUS_ALL, rar_rs_fuzz::rewrite, 20_000);
 }

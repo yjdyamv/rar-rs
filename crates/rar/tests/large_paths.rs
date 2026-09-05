@@ -10,7 +10,7 @@
 
 #![allow(deprecated)] // legacy facade (add_bytes/close/read) — kept for the scale tiers
 
-use rar5::RarArchive;
+use rar_rs::RarArchive;
 use std::path::Path;
 
 #[path = "support/mod.rs"]
@@ -55,7 +55,7 @@ fn large_sparse_streamed_compression_roundtrips() {
     let arc = dir.path().join("big.rar");
     {
         let mut rar =
-            RarArchive::create_with_options(&arc, rar5::CreateOptions::default()).unwrap();
+            RarArchive::create_with_options(&arc, rar_rs::CreateOptions::default()).unwrap();
         rar.add(&src, 3).unwrap();
         rar.close().unwrap();
     }
@@ -71,7 +71,7 @@ fn large_sparse_streamed_compression_roundtrips() {
         rar.extract_with_options(
             "big.bin",
             &out,
-            rar5::ExtractOptions {
+            rar_rs::ExtractOptions {
                 max_unpacked_bytes: None,
                 max_total_unpacked_bytes: None,
                 ..Default::default()
@@ -97,9 +97,9 @@ fn large_streamed_encrypted_multivolume_roundtrips() {
     let vol_size = 32 * 1024 * 1024u64;
     let arc = dir.path().join("big.rar");
     {
-        let mut rar = rar5::RarArchive::create_with_options(
+        let mut rar = rar_rs::RarArchive::create_with_options(
             &arc,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 password: Some("s3cret".into()),
                 volume_size: Some(vol_size),
                 ..Default::default()
@@ -109,7 +109,7 @@ fn large_streamed_encrypted_multivolume_roundtrips() {
         rar.add(&src, 0).unwrap();
         rar.close().unwrap();
     }
-    let volumes = rar5::discover_volumes(&arc);
+    let volumes = rar_rs::discover_volumes(&arc);
     assert!(
         volumes.len() >= 6,
         "expected several exact volumes, got {}",
@@ -130,7 +130,7 @@ fn large_streamed_encrypted_multivolume_roundtrips() {
         rar.extract_with_options(
             "big.bin",
             &out,
-            rar5::ExtractOptions {
+            rar_rs::ExtractOptions {
                 max_unpacked_bytes: None,
                 max_total_unpacked_bytes: None,
                 ..Default::default()
@@ -174,9 +174,9 @@ fn long_range_matches_roundtrip_at_scale() {
 
     let arc = dir.path().join("pair.rar");
     {
-        let mut rar = rar5::RarArchive::create_with_options(
+        let mut rar = rar_rs::RarArchive::create_with_options(
             &arc,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 dict_size_log: Some(8), // 32 MiB window: 16 MiB copy is long-range
                 ..Default::default()
             },
@@ -202,7 +202,7 @@ fn long_range_matches_roundtrip_at_scale() {
         rar.extract_with_options(
             "pair.bin",
             &out,
-            rar5::ExtractOptions {
+            rar_rs::ExtractOptions {
                 max_unpacked_bytes: None,
                 max_total_unpacked_bytes: None,
                 ..Default::default()

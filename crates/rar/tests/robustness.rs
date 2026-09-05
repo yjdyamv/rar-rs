@@ -8,8 +8,8 @@
 
 #![allow(deprecated)] // exercises the legacy facade under malformed input
 
-use rar5::recovery::rar50 as recovery;
-use rar5::{EncryptionParams, decrypt_data};
+use rar_rs::recovery::rar50 as recovery;
+use rar_rs::{EncryptionParams, decrypt_data};
 
 /// xorshift64* PRNG with a fixed seed, matching `tests/interop.rs`.
 struct Rng(u64);
@@ -52,7 +52,7 @@ fn archive_parse_random_inputs_do_not_panic() {
     let path = dir.path().join("fuzz-archive.rar");
     let mut rng = Rng::new(0x5EED_0001);
 
-    let opts = rar5::ExtractOptions {
+    let opts = rar_rs::ExtractOptions {
         safe_paths: true,
         max_unpacked_bytes: Some(64 * 1024 * 1024),
         max_total_unpacked_bytes: Some(128 * 1024 * 1024),
@@ -63,7 +63,7 @@ fn archive_parse_random_inputs_do_not_panic() {
         let data = random_bytes(&mut rng, 256 * 1024);
         std::fs::write(&path, &data).expect("write archive input");
 
-        let mut archive = match rar5::RarArchive::open(&path) {
+        let mut archive = match rar_rs::RarArchive::open(&path) {
             Ok(a) => a,
             Err(_) => continue,
         };
@@ -99,12 +99,12 @@ fn unpack50_decode_random_inputs_do_not_panic() {
             continue;
         }
         let stream = random_bytes(&mut rng, 1024 * 1024);
-        let _ = rar5::decode_standalone(
+        let _ = rar_rs::decode_standalone(
             &stream,
             unpacked,
             dict.min(13),
             None,
-            rar5::ArchiveVersion::Rar50,
+            rar_rs::ArchiveVersion::Rar50,
         );
     }
 }
@@ -121,8 +121,8 @@ fn exercise_crypto(data: &[u8]) {
     let strength = data[1] % 8;
 
     let mut extra: Vec<u8> = Vec::new();
-    extra.extend_from_slice(&rar5::rar50::vint::encode(1)); // version
-    extra.extend_from_slice(&rar5::rar50::vint::encode(if with_checksum {
+    extra.extend_from_slice(&rar_rs::rar50::vint::encode(1)); // version
+    extra.extend_from_slice(&rar_rs::rar50::vint::encode(if with_checksum {
         0x02
     } else {
         0x00

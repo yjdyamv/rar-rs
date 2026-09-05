@@ -53,8 +53,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Cargo check (workspace defaults)
         run: cargo check --workspace --all-targets --locked
-      - name: Cargo check (rar5, no default features)
-        run: cargo check -p rar5 --no-default-features --locked
+      - name: Cargo check (rar-rs, no default features)
+        run: cargo check -p rar-rs --no-default-features --locked
       - name: Cargo check (fuzz workspace)
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
       - name: Clippy (workspace, all features and targets)

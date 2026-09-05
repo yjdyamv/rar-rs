@@ -1,4 +1,4 @@
-//! # rar5
+//! # rar-rs
 //!
 //! Pure-Rust RAR archive library. Creates, reads, and extracts legacy RAR
 //! 1.5–4.x and modern RAR5/RAR7 archives with native compression — no
@@ -7,7 +7,7 @@
 //! ## Quick Start
 //!
 //! ```no_run
-//! use rar5::{ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions};
+//! use rar_rs::{ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions};
 //!
 //! // Create an archive
 //! let mut writer = ArchiveWriter::create("backup.rar").unwrap();

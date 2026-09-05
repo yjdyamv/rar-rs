@@ -328,7 +328,7 @@ names.
 
 - [x] Move format modules only after model ownership is stable
       (both done: `rar50` and `rar40` moved to `src/format/rar5` and
-      `src/format/rar4`; the historical public `rar5::rar40`/`rar5::rar50`
+      `src/format/rar4`; the historical public `rar_rs::rar40`/`rar_rs::rar50`
       paths are kept as `#[doc(hidden)]` re-export aliases until the
       breaking release).
 - [x] Move filesystem policy out of format extraction/writing
@@ -364,11 +364,15 @@ Decision inputs and recommendations are recorded in
 rename surface, low-level module users). Each bullet below needs a
 maintainer decision before execution.
 
-- [ ] Decide whether to rename crate `rar5`.
+- [x] Decide whether to rename crate `rar5`.
+      (done: the library crate is now `rar-rs` — package name, workspace
+      dependency key, and every external `use rar5::…` reference were
+      updated to `rar_rs::…`; the fuzz harness is `rar-rs-fuzz`. The
+      `format::rar5`/`format/rar5` internal module paths are untouched.)
 - [ ] Split archive format from compression version in the public model.
 - [ ] Decide which low-level modules remain supported.
 - [x] Move unsupported low-level APIs behind `raw`/`unstable`, if appropriate
-      (done: `rar5::rar40` is behind a new default-off `raw` feature; `rar50`
+      (done: `rar_rs::rar40` is behind a new default-off `raw` feature; `rar50`
       stays public while in-tree wire tests use it).
 - [x] Deprecate, then remove, legacy facade methods only after all in-tree
       consumers use API v2.

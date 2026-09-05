@@ -1,4 +1,4 @@
-//! Shared harness for the rar5 fuzz targets.
+//! Shared harness for the rar-rs fuzz targets.
 //!
 //! Each target is a `fn(&[u8])` runner (no panics tolerated — a panic is
 //! a bug the fuzzer is looking for). The same runners drive libFuzzer
@@ -162,16 +162,16 @@ pub fn parse(data: &[u8]) {
     let path = dir.path().join("in.rar");
     let _ = std::fs::write(&path, data);
 
-    let opts = rar5::ExtractOptions {
+    let opts = rar_rs::ExtractOptions {
         safe_paths: true,
         max_unpacked_bytes: Some(64 * 1024 * 1024),
         max_total_unpacked_bytes: Some(128 * 1024 * 1024),
-        max_dict_size: Some(rar5::ExtractOptions::DEFAULT_MAX_DICT_SIZE),
+        max_dict_size: Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE),
         ..Default::default()
     };
 
     // Plain read path: scan + list + read every member + extract all.
-    if let Ok(mut a) = rar5::RarArchive::open(&path) {
+    if let Ok(mut a) = rar_rs::RarArchive::open(&path) {
         let names: Vec<String> = a.namelist().into_iter().map(|s| s.to_string()).collect();
         for name in &names {
             let _ = a.read_with_options(name, opts);
@@ -182,12 +182,12 @@ pub fn parse(data: &[u8]) {
     // input almost never forms a valid block envelope, so the KDF is
     // effectively never hit with hostile strength here; the crypto
     // target covers bounded-strength KDF directly.
-    if let Ok(mut a) = rar5::RarArchive::open_with_password(&path, "fuzz") {
+    if let Ok(mut a) = rar_rs::RarArchive::open_with_password(&path, "fuzz") {
         let _ = a.extract_all_with_options(dir.path().join("y"), opts);
     }
 
-    let _ = rar5::sfx_offset_of(data);
-    let _ = rar5::discover_volumes(&path);
+    let _ = rar_rs::sfx_offset_of(data);
+    let _ = rar_rs::discover_volumes(&path);
 }
 
 /// Produce a deterministic `need`-byte payload from a seed slice (bounded
@@ -251,7 +251,7 @@ pub fn write_roundtrip(data: &[u8]) {
     } else {
         (None, false)
     };
-    let opts = rar5::CreateOptions {
+    let opts = rar_rs::CreateOptions {
         solid: h[3].is_multiple_of(2),
         blake2: h[4].is_multiple_of(2),
         quick_open: h[4] % 4 < 3,
@@ -279,8 +279,8 @@ pub fn write_roundtrip(data: &[u8]) {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let arc = dir.path().join("w.rar");
-    let created = (|| -> rar5::RarResult<()> {
-        let mut rar = rar5::RarArchive::create_with_options(&arc, opts.clone())?;
+    let created = (|| -> rar_rs::RarResult<()> {
+        let mut rar = rar_rs::RarArchive::create_with_options(&arc, opts.clone())?;
         for (i, (name, payload)) in members.iter().enumerate() {
             // Multi-volume members are STORED (level 0): the compressible
             // tile pattern would otherwise collapse below one volume and
@@ -301,11 +301,11 @@ pub fn write_roundtrip(data: &[u8]) {
     }
 
     // Round trip: read every member back and compare byte-for-byte.
-    let volumes = rar5::discover_volumes(&arc);
+    let volumes = rar_rs::discover_volumes(&arc);
     let pw = opts.password.as_deref();
     let opened = match pw {
-        Some(pw) => rar5::RarArchive::open_with_password(&volumes[0], pw),
-        None => rar5::RarArchive::open(&volumes[0]),
+        Some(pw) => rar_rs::RarArchive::open_with_password(&volumes[0], pw),
+        None => rar_rs::RarArchive::open(&volumes[0]),
     };
     if let Ok(mut ar) = opened {
         for (name, payload) in &members {
@@ -327,14 +327,14 @@ pub fn write_roundtrip(data: &[u8]) {
         let rev_ok = if create_rev.is_some() {
             true // create-time .rev already on disk
         } else {
-            rar5::recovery::rev50::build_recovery_volumes_for_set(&volumes, 1 + (h[7] as usize % 2))
+            rar_rs::recovery::rev50::build_recovery_volumes_for_set(&volumes, 1 + (h[7] as usize % 2))
                 .is_ok()
         };
         if rev_ok {
             let victim = volumes[volumes.len() / 2].clone();
             let orig = std::fs::read(&victim).ok();
             let _ = std::fs::remove_file(&victim);
-            if let (Some(orig), Ok(rebuilt)) = (&orig, rar5::rebuild_missing_volumes(&volumes[0]))
+            if let (Some(orig), Ok(rebuilt)) = (&orig, rar_rs::rebuild_missing_volumes(&volumes[0]))
                 && rebuilt.contains(&victim)
                 && let Ok(bytes) = std::fs::read(&victim)
             {
@@ -366,9 +366,9 @@ pub fn rewrite(data: &[u8]) {
     let solid = data[0].is_multiple_of(2);
 
     {
-        let mut rar = rar5::RarArchive::create_with_options(
+        let mut rar = rar_rs::RarArchive::create_with_options(
             &path,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 solid,
                 quick_open: true,
                 ..Default::default()
@@ -385,7 +385,7 @@ pub fn rewrite(data: &[u8]) {
 
     // 1. Delete b.bin.
     {
-        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
         rar.delete(&["b.bin"]).unwrap();
     }
     expected.retain(|(n, _)| *n != "b.bin");
@@ -393,7 +393,7 @@ pub fn rewrite(data: &[u8]) {
 
     // 2. Rename a.bin -> z.bin.
     if data[1].is_multiple_of(2) {
-        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
         rar.rename(&[("a.bin", "z.bin")]).unwrap();
         for e in &mut expected {
             if e.0 == "a.bin" {
@@ -405,7 +405,7 @@ pub fn rewrite(data: &[u8]) {
 
     // 3. Append d.bin.
     if data[2].is_multiple_of(3) {
-        let mut rar = rar5::RarArchive::open_append(&path).unwrap();
+        let mut rar = rar_rs::RarArchive::open_append(&path).unwrap();
         rar.add_bytes("d.bin", d, 0).unwrap();
         rar.close().unwrap();
         expected.push(("d.bin", d));
@@ -414,9 +414,9 @@ pub fn rewrite(data: &[u8]) {
 
     // 4. Comment round trip.
     if data[3].is_multiple_of(2) {
-        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
         rar.set_comment(b"fuzz comment").unwrap();
-        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
         assert_eq!(
             rar.get_comment().unwrap().as_deref(),
             Some(b"fuzz comment".as_slice()),
@@ -428,13 +428,13 @@ pub fn rewrite(data: &[u8]) {
     // 5. Lock (irreversible — must be last): further rewrites refuse.
     if data[4].is_multiple_of(2) {
         {
-            let mut rar = rar5::RarArchive::open(&path).unwrap();
+            let mut rar = rar_rs::RarArchive::open(&path).unwrap();
             rar.lock().unwrap();
         }
         verify_members(&path, &expected);
-        let mut rar = rar5::RarArchive::open(&path).unwrap();
+        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
         match rar.rename(&[(expected[0].0, "locked-check.bin")]) {
-            Err(rar5::RarError::ArchiveLocked) => {}
+            Err(rar_rs::RarError::ArchiveLocked) => {}
             other => panic!("expected ArchiveLocked, got {other:?}"),
         }
     }
@@ -443,7 +443,7 @@ pub fn rewrite(data: &[u8]) {
 /// Open `path` and assert that exactly the `expected` members exist with
 /// byte-identical content.
 fn verify_members(path: &std::path::Path, expected: &[(&str, &[u8])]) {
-    let mut ar = rar5::RarArchive::open(path).unwrap();
+    let mut ar = rar_rs::RarArchive::open(path).unwrap();
     let names: Vec<String> = ar.namelist().into_iter().map(|s| s.to_string()).collect();
     assert_eq!(
         names.len(),
@@ -474,9 +474,9 @@ pub fn crypto(data: &[u8]) {
     iv.copy_from_slice(&data[17..33]);
     let plain = &data[33..];
 
-    if let Ok(keys) = rar5::derive_keys("fuzz", &salt, strength) {
-        let ct = rar5::encrypt_data(plain, &keys.key, &iv);
-        let pt = rar5::decrypt_data(&ct, &keys.key, &iv).expect("decrypt must succeed");
+    if let Ok(keys) = rar_rs::derive_keys("fuzz", &salt, strength) {
+        let ct = rar_rs::encrypt_data(plain, &keys.key, &iv);
+        let pt = rar_rs::decrypt_data(&ct, &keys.key, &iv).expect("decrypt must succeed");
         assert_eq!(
             &pt[..plain.len()],
             plain,
@@ -485,7 +485,7 @@ pub fn crypto(data: &[u8]) {
     }
     // Parameter parser over arbitrary extra-record bytes (vints, salt,
     // IV, checksum).
-    let _ = rar5::EncryptionParams::from_extra_bytes(data);
+    let _ = rar_rs::EncryptionParams::from_extra_bytes(data);
 }
 
 /// Recovery surface: inline `{RB}` build/parse/repair, the GF(2^16)
@@ -493,7 +493,7 @@ pub fn crypto(data: &[u8]) {
 pub fn recovery(data: &[u8]) {
     // Inline recovery record: parse + repair (allocations bounded by the
     // input length — chunk sizes must fit inside the input).
-    let _ = rar5::repair_archive(data);
+    let _ = rar_rs::repair_archive(data);
 
     if !data.is_empty() {
         // Build real `{RB}` recovery data over the input at a bounded
@@ -501,18 +501,18 @@ pub fn recovery(data: &[u8]) {
         // one-byte-corrupted prefix (one damaged shard, one parity
         // shard: reconstruct must succeed).
         let pct = (data[0] % 101) as u64;
-        if let Ok(rr) = rar5::recovery::rar50::build_structural_inline_recovery_data(data, pct) {
+        if let Ok(rr) = rar_rs::recovery::rar50::build_structural_inline_recovery_data(data, pct) {
             let mut full = data.to_vec();
             full.extend_from_slice(&rr);
-            let _ = rar5::repair_archive(&full);
+            let _ = rar_rs::repair_archive(&full);
             let bit = (data[0] as usize) % data.len();
             full[bit] ^= 0xFF;
-            let _ = rar5::repair_archive(&full);
+            let _ = rar_rs::repair_archive(&full);
         }
     }
 
-    let _ = rar5::recovery::rar50::crc64_xz(data);
-    let _ = rar5::recovery::rar50::crc64_rar_state(data);
+    let _ = rar_rs::recovery::rar50::crc64_xz(data);
+    let _ = rar_rs::recovery::rar50::crc64_rar_state(data);
 
     // `.rev` serialization: sizes/CRCs need not be meaningful for the
     // writer to produce a file.
@@ -520,6 +520,6 @@ pub fn recovery(data: &[u8]) {
         let sizes = [data.len() as u64];
         let crcs = [u32::from_le_bytes(data[0..4].try_into().unwrap())];
         let payload = &data[..data.len() / 2];
-        let _ = rar5::recovery::rev50::build_recovery_volume_file(0, 1, &sizes, &crcs, payload);
+        let _ = rar_rs::recovery::rev50::build_recovery_volume_file(0, 1, &sizes, &crcs, payload);
     }
 }

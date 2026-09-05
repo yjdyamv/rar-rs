@@ -51,7 +51,7 @@ impl CreateArchiveOptions {
     )
   }
 
-  pub(crate) fn to_writer_options(&self) -> Result<rar5::WriterOptions> {
+  pub(crate) fn to_writer_options(&self) -> Result<rar_rs::WriterOptions> {
     let recovery_percent =
       checked_optional_js_integer(self.recovery_percent, "recoveryPercent", 0, 100)?
         .filter(|&value| value != 0)
@@ -79,7 +79,7 @@ impl CreateArchiveOptions {
         let bytes = dict_bytes
           .or_else(|| dict_log.map(|log| (128u64 * 1024) << log))
           .expect("dictionary parse returns a log or a byte count");
-        Some(rar5::DictionarySize::try_from(bytes).map_err(|err| {
+        Some(rar_rs::DictionarySize::try_from(bytes).map_err(|err| {
           Error::new(
             Status::InvalidArg,
             format!("invalid dictionary size: {err}"),
@@ -88,11 +88,11 @@ impl CreateArchiveOptions {
       }
       None => None,
     };
-    let opts = rar5::WriterOptions::new()
+    let opts = rar_rs::WriterOptions::new()
       .solid_mode(if self.solid.unwrap_or(false) {
-        rar5::SolidMode::Continuous
+        rar_rs::SolidMode::Continuous
       } else {
-        rar5::SolidMode::Disabled
+        rar_rs::SolidMode::Disabled
       })
       .quick_open(self.quick_open.unwrap_or(false))
       .blake2(self.blake2.unwrap_or(false))
@@ -130,7 +130,7 @@ impl CreateArchiveOptions {
     };
     let opts = if let Some(threads) = threads {
       opts.thread_count(
-        rar5::ThreadCount::try_from(threads)
+        rar_rs::ThreadCount::try_from(threads)
           .map_err(|err| Error::new(Status::InvalidArg, format!("{err}")))?,
       )
     } else {
@@ -149,18 +149,18 @@ impl AppendArchiveOptions {
 impl ExtractArchiveOptions {
   /// `max_dict_size`: None (unset) keeps the WinRAR-style 4 GiB default
   /// cap; Some(0) means unlimited; other values raise/lower the cap.
-  pub(crate) fn to_extract_options(&self) -> Result<rar5::ExtractOptions> {
+  pub(crate) fn to_extract_options(&self) -> Result<rar_rs::ExtractOptions> {
     let max_dict_size = match checked_optional_js_integer(
       self.max_dict_size,
       "maxDictSize",
       0,
       JS_MAX_SAFE_INTEGER as u64,
     )? {
-      None => Some(rar5::ExtractOptions::DEFAULT_MAX_DICT_SIZE),
+      None => Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE),
       Some(0) => None,
       Some(value) => Some(value),
     };
-    Ok(rar5::ExtractOptions {
+    Ok(rar_rs::ExtractOptions {
       flat_paths: self.flat.unwrap_or(false),
       max_unpacked_bytes: None,
       max_total_unpacked_bytes: None,
@@ -175,6 +175,6 @@ impl ExtractArchiveOptions {
 /// powers of two (RAR5 dict log), anything above is accepted as-is and
 /// selects RAR7 (v70) with an actual byte size.
 pub(crate) fn parse_dict_size(s: &str) -> Result<(Option<u8>, Option<u64>)> {
-  rar5::parse_dict_size(s)
+  rar_rs::parse_dict_size(s)
     .ok_or_else(|| Error::new(Status::InvalidArg, format!("invalid dictionary size: {s}")))
 }

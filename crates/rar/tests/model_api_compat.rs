@@ -1,7 +1,7 @@
-use rar5::rar50::headers::{
+use rar_rs::rar50::headers::{
     DataChunk as HeadersDataChunk, FileHeader as HeadersFileHeader, RawBlock,
 };
-use rar5::rar50::{DataChunk as FacadeDataChunk, FileHeader as FacadeFileHeader};
+use rar_rs::rar50::{DataChunk as FacadeDataChunk, FileHeader as FacadeFileHeader};
 
 #[test]
 fn legacy_model_paths_resolve_to_the_same_types_and_methods() {
@@ -9,7 +9,7 @@ fn legacy_model_paths_resolve_to_the_same_types_and_methods() {
     let header_from_facade: FacadeFileHeader = header_from_headers;
     assert!(!header_from_facade.to_bytes().is_empty());
 
-    let _: fn(&RawBlock, u64) -> rar5::RarResult<HeadersFileHeader> = HeadersFileHeader::from_raw;
+    let _: fn(&RawBlock, u64) -> rar_rs::RarResult<HeadersFileHeader> = HeadersFileHeader::from_raw;
 
     let chunk_from_headers = HeadersDataChunk {
         volume_index: 2,

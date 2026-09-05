@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = "3"
 napi-derive = "3"
-rar5 = { workspace = true, features = ["parallel", "simd"] }
+rar-rs = { workspace = true, features = ["parallel", "simd"] }
 
 [build-dependencies]
 napi-build = "2"

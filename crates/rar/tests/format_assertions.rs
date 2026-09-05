@@ -7,7 +7,7 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar5::RarArchive;
+use rar_rs::RarArchive;
 
 #[test]
 fn quick_open_record_written_with_correct_relative_locator() {
@@ -15,9 +15,9 @@ fn quick_open_record_written_with_correct_relative_locator() {
     let path = dir.path().join("qo.rar");
     let payload = b"quick open payload ".repeat(1000);
     {
-        let mut rar = rar5::RarArchive::create_with_options(
+        let mut rar = rar_rs::RarArchive::create_with_options(
             &path,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 quick_open: true,
                 ..Default::default()
             },
@@ -28,7 +28,7 @@ fn quick_open_record_written_with_correct_relative_locator() {
         rar.close().unwrap();
     }
 
-    let mut rar = rar5::RarArchive::open(&path).unwrap();
+    let mut rar = rar_rs::RarArchive::open(&path).unwrap();
     assert_eq!(rar.read("f1.bin").unwrap(), payload);
     assert_eq!(rar.read("f2.bin").unwrap(), vec![7u8; 4096]);
 
@@ -48,9 +48,9 @@ fn recovery_locator_offset_is_relative_to_archive_start() {
     let dir = make_temp_dir();
     let path = dir.path().join("rr.rar");
     {
-        let mut rar = rar5::RarArchive::create_with_options(
+        let mut rar = rar_rs::RarArchive::create_with_options(
             &path,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 recovery_percent: Some(10),
                 ..Default::default()
             },
@@ -94,7 +94,7 @@ fn nanosecond_mtime_roundtrip() {
     let path = dir.path().join("ns.rar");
     {
         let mut rar =
-            RarArchive::create_with_options(&path, rar5::CreateOptions::default()).unwrap();
+            RarArchive::create_with_options(&path, rar_rs::CreateOptions::default()).unwrap();
         rar.add(&src, 3).unwrap();
         rar.close().unwrap();
     }

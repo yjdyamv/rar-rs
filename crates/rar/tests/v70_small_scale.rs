@@ -15,7 +15,7 @@
 
 #![allow(deprecated)] // legacy add/close/read for v70 fixture construction
 
-use rar5::RarArchive;
+use rar_rs::RarArchive;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -62,7 +62,7 @@ fn v70_forced_headers_and_roundtrip() {
         {
             let mut rar = RarArchive::create_with_options(
                 &arc,
-                rar5::CreateOptions {
+                rar_rs::CreateOptions {
                     dict_size_bytes: Some(dict),
                     force_v70: true,
                     ..Default::default()
@@ -92,7 +92,7 @@ fn v70_forced_headers_and_roundtrip() {
     {
         let mut rar = RarArchive::create_with_options(
             &arc,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 dict_size_bytes: Some(6 * 1024 * 1024),
                 force_v70: false,
                 ..Default::default()
@@ -122,7 +122,7 @@ fn v70_forced_solid_roundtrip() {
     {
         let mut rar = RarArchive::create_with_options(
             &arc,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 solid: true,
                 dict_size_bytes: Some(8 * 1024 * 1024),
                 force_v70: true,
@@ -163,7 +163,7 @@ fn v70_forced_multivolume_roundtrip() {
     {
         let mut rar = RarArchive::create_with_options(
             &arc,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 volume_size: Some(2 * 1024 * 1024),
                 dict_size_bytes: Some(8 * 1024 * 1024),
                 force_v70: true,
@@ -174,7 +174,7 @@ fn v70_forced_multivolume_roundtrip() {
         rar.add_bytes("a.bin", &a, 3).unwrap();
         rar.close().unwrap();
     }
-    let volumes = rar5::discover_volumes(&arc);
+    let volumes = rar_rs::discover_volumes(&arc);
     assert!(volumes.len() >= 2, "precondition: multi-volume set");
     let mut rar = RarArchive::open(&volumes[0]).unwrap();
     let entry = rar.get_entry("a.bin").unwrap();
@@ -193,7 +193,7 @@ fn v70_forced_encrypted_roundtrip() {
     {
         let mut rar = RarArchive::create_with_options(
             &arc,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 password: Some("s3cret".into()),
                 dict_size_bytes: Some(6 * 1024 * 1024),
                 force_v70: true,

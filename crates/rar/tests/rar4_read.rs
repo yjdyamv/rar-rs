@@ -10,7 +10,7 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar5::{RarArchive, RarError};
+use rar_rs::{RarArchive, RarError};
 
 const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/");
 const RAR300: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar300/");
@@ -551,7 +551,7 @@ fn rar4_solid20_chain_shared_window() {
 #[test]
 fn rar4_rar154_old_numbered_split_set() {
     let base = format!("{RAR154}random.rar");
-    let volumes = rar5::discover_volumes(std::path::Path::new(&base));
+    let volumes = rar_rs::discover_volumes(std::path::Path::new(&base));
     assert!(volumes.len() >= 3, "expected several volumes: {volumes:?}");
     let mut archive = RarArchive::open(&volumes[0]).expect("open");
     let names = archive.namelist();

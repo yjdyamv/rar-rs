@@ -16,7 +16,7 @@ name = "unrar"
 path = "src/bin/unrar.rs"
 
 [dependencies]
-rar5 = { workspace = true, features = ["parallel"] }
+rar-rs = { workspace = true, features = ["parallel"] }
 clap = { workspace = true }
 windows-sys = { workspace = true }
 

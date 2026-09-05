@@ -1,5 +1,5 @@
 [package]
-name = "rar5"
+name = "rar-rs"
 version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
@@ -21,7 +21,7 @@ wide = { workspace = true, optional = true }
 
 [features]
 default = []
-# Opt-in to the legacy container's low-level wire surface (`rar5::rar40`).
+# Opt-in to the legacy container's low-level wire surface (`rar_rs::rar40`).
 # Off by default: the RAR4 wire helpers have no in-tree users and are kept
 # only for downstream raw access until the breaking release removes them.
 raw = []

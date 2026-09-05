@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use rar5::RarError;
+use rar_rs::RarError;
 
 fn temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
@@ -25,7 +25,7 @@ fn create_aborts_immediately_when_flag_already_set() {
     let path = dir.path().join("cancel.rar");
     let flag = Arc::new(AtomicBool::new(true));
 
-    let mut rar = rar5::RarArchive::create_with_options(&path, rar5::CreateOptions::default())
+    let mut rar = rar_rs::RarArchive::create_with_options(&path, rar_rs::CreateOptions::default())
         .expect("create");
     rar.set_cancel_flag(Some(flag.clone()));
     let res = rar.add_bytes("a.bin", &payload(), 3);
@@ -43,15 +43,17 @@ fn extract_aborts_immediately_when_flag_already_set() {
     let dir = temp_dir();
     let path = dir.path().join("cancel.rar");
     {
-        let mut rar = rar5::RarArchive::create_with_options(&path, rar5::CreateOptions::default())
-            .expect("create");
+        let mut rar =
+            rar_rs::RarArchive::create_with_options(&path, rar_rs::CreateOptions::default())
+                .expect("create");
         rar.add_bytes("a.bin", &payload(), 3).expect("add");
         rar.close().expect("close");
     }
     let flag = Arc::new(AtomicBool::new(true));
-    let mut rar = rar5::RarArchive::open(&path).expect("open");
+    let mut rar = rar_rs::RarArchive::open(&path).expect("open");
     rar.set_cancel_flag(Some(flag.clone()));
-    let res = rar.extract_all_with_options(dir.path().join("out"), rar5::ExtractOptions::default());
+    let res =
+        rar.extract_all_with_options(dir.path().join("out"), rar_rs::ExtractOptions::default());
     assert!(
         matches!(res, Err(RarError::Cancelled)),
         "expected Cancelled, got {res:?}"
@@ -67,7 +69,7 @@ fn batch_aborts_midway_when_flag_flips_during_first_member() {
     let flag_for_cb = flag.clone();
     let member: Vec<u8> = payload();
 
-    let mut rar = rar5::RarArchive::create_with_options(&path, rar5::CreateOptions::default())
+    let mut rar = rar_rs::RarArchive::create_with_options(&path, rar_rs::CreateOptions::default())
         .expect("create");
     rar.set_cancel_flag(Some(flag.clone()));
     // Flip the flag on the first progress event (fired when the first
@@ -79,17 +81,17 @@ fn batch_aborts_midway_when_flag_flips_during_first_member() {
     })));
 
     let batch = [
-        rar5::BatchEntry::Bytes {
+        rar_rs::BatchEntry::Bytes {
             name: "a.bin",
             data: &member,
             level: 3,
         },
-        rar5::BatchEntry::Bytes {
+        rar_rs::BatchEntry::Bytes {
             name: "b.bin",
             data: &member,
             level: 3,
         },
-        rar5::BatchEntry::Bytes {
+        rar_rs::BatchEntry::Bytes {
             name: "c.bin",
             data: &member,
             level: 3,
@@ -107,15 +109,15 @@ fn batch_aborts_midway_when_flag_flips_during_first_member() {
 fn unset_flag_allows_completion() {
     let dir = temp_dir();
     let path = dir.path().join("cancel.rar");
-    let mut rar = rar5::RarArchive::create_with_options(&path, rar5::CreateOptions::default())
+    let mut rar = rar_rs::RarArchive::create_with_options(&path, rar_rs::CreateOptions::default())
         .expect("create");
     rar.set_cancel_flag(Some(Arc::new(AtomicBool::new(false))));
     rar.add_bytes("a.bin", &payload(), 3).expect("add");
     rar.close().expect("close");
 
-    let mut rar = rar5::RarArchive::open(&path).expect("open");
+    let mut rar = rar_rs::RarArchive::open(&path).expect("open");
     rar.set_cancel_flag(Some(Arc::new(AtomicBool::new(false))));
-    rar.extract_all_with_options(dir.path().join("out"), rar5::ExtractOptions::default())
+    rar.extract_all_with_options(dir.path().join("out"), rar_rs::ExtractOptions::default())
         .expect("extract");
     assert_eq!(
         std::fs::read(dir.path().join("out/a.bin")).expect("read"),

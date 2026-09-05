@@ -6,7 +6,7 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar5::RarArchive;
+use rar_rs::RarArchive;
 
 #[test]
 fn synthetic_rar4_with_bogus_header_is_refused_with_clear_error() {
@@ -23,7 +23,7 @@ fn synthetic_rar4_with_bogus_header_is_refused_with_clear_error() {
         Err(e) => e,
     };
     match err {
-        rar5::RarError::Format(msg) => assert!(
+        rar_rs::RarError::Format(msg) => assert!(
             msg.contains("too small") || msg.contains("truncated"),
             "expected format-level error, got: {msg}"
         ),

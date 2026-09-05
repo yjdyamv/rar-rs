@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use rar5::{
+use rar_rs::{
     AppendOptions, ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, DictionarySize,
     EntryWriteOptions, RarArchive, RarError, ThreadCount, WriteEntry, WriterOptions,
 };
@@ -103,7 +103,7 @@ fn typed_rar50_big_dictionary_keeps_legacy_auto_semantics() {
     let legacy_path = dir.path().join("legacy.rar");
     let mut legacy = RarArchive::create_with_options(
         &legacy_path,
-        rar5::CreateOptions {
+        rar_rs::CreateOptions {
             dict_size_bytes: Some(6 * 1024 * 1024 * 1024),
             ..Default::default()
         },
@@ -232,7 +232,7 @@ fn exact_recovery_volume_generation_is_disarmed_after_close() {
     let payload = vec![7u8; 96 * 1024];
     let mut archive = RarArchive::create_with_options(
         &path,
-        rar5::CreateOptions {
+        rar_rs::CreateOptions {
             volume_size: Some(32 * 1024),
             recovery_volume_count: Some(1),
             ..Default::default()
@@ -390,7 +390,7 @@ fn append_rejects_rar4_archives_before_touching_the_original() {
     {
         let mut archive = RarArchive::create_with_options(
             &path,
-            rar5::CreateOptions {
+            rar_rs::CreateOptions {
                 format_version: ArchiveVersion::Rar40,
                 ..Default::default()
             },

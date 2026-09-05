@@ -582,24 +582,14 @@ name = "rar-cli"
 version = "0.1.2"
 dependencies = [
  "clap",
- "rar5",
+ "rar-rs",
  "sha2",
  "tempfile",
  "windows-sys",
 ]
 
 [[package]]
-name = "rar-rs-napi"
-version = "0.6.0"
-dependencies = [
- "napi",
- "napi-build",
- "napi-derive",
- "rar5",
-]
-
-[[package]]
-name = "rar5"
+name = "rar-rs"
 version = "0.1.2"
 dependencies = [
  "aes",
@@ -613,6 +603,16 @@ dependencies = [
  "wide",
  "windows-sys",
  "zeroize",
+]
+
+[[package]]
+name = "rar-rs-napi"
+version = "0.6.0"
+dependencies = [
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "rar-rs",
 ]
 
 [[package]]

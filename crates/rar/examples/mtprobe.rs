@@ -65,8 +65,8 @@ fn main() {
     // Full MT encode (optimal parse per slice) — the current cost.
     for threads in [1usize, 2, 4, 8, 16] {
         let t1 = Instant::now();
-        let mut seed = rar5::EncoderState::default();
-        let packed = rar5::encode_chunked_mt(
+        let mut seed = rar_rs::EncoderState::default();
+        let packed = rar_rs::encode_chunked_mt(
             &data,
             level,
             DICT,
@@ -74,7 +74,7 @@ fn main() {
             &mut seed,
             threads,
             true,
-            rar5::ArchiveVersion::Rar50,
+            rar_rs::ArchiveVersion::Rar50,
         );
         let mt_ms = t1.elapsed().as_millis() as f64;
         let ratio = packed.len() as f64 * 100.0 / data.len() as f64;
@@ -90,7 +90,7 @@ fn main() {
             ratio,
             speedup,
         );
-        let out = rar5::decode(&packed, level, data.len() as u64, DICT, None).unwrap();
+        let out = rar_rs::decode(&packed, level, data.len() as u64, DICT, None).unwrap();
         assert_eq!(out.len(), data.len(), "mt length mismatch");
         assert_eq!(out, data, "mt decode mismatch");
     }

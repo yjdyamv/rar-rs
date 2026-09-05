@@ -46,7 +46,7 @@
 
 ## 项目事实
 
-- Cargo workspace：库 crate `rar5`（历史名称；读取 RAR 1.5–4.x/RAR5/RAR7，创建 RAR4/RAR5/RAR7）+ CLI crate `rar-cli`（`rar` 创建/修改/提取、`unrar` 提取/列表）+ `rar-rs-napi`（native/WASI binding）。
+- Cargo workspace：库 crate `rar-rs`（读取 RAR 1.5–4.x/RAR5/RAR7，创建 RAR4/RAR5/RAR7）+ CLI crate `rar-cli`（`rar` 创建/修改/提取、`unrar` 提取/列表）+ `rar-rs-napi`（native/WASI binding）。
 - 库热点已拆解：`archive/` 目录是 facade 层（`mod.rs` 结构体/构造器/生命周期，`create.rs` 写生命周期，`rewrite.rs` 外科重写，`entry.rs` 条目类型，`discover.rs` 分卷发现）；读写路径分别在 `rar50/extract.rs` 与 `rar50/write/`。
 - 互操作测试：`crates/rar/tests/{rar50_roundtrip,format_assertions,rewrite_tests,official_interop,rar4_rejection,cancel_flag,quick_open_listing}.rs`（官方 rar/unrar 用 SA_OFFICIAL_RAR/UNRAR env 门控）、`crates/rar-cli/tests/cli_behavior.rs`（CARGO_BIN_EXE 需随二进制所在 crate）、`crates/rar-cli/tests/winrar_interop.rs`（Windows 本机 WinRAR 双向验证）。
 - fuzz：`fuzz/` 独立 crate（不在 workspace），五目标 parse/crypto/recovery（读侧）+ write/rewrite（写侧），standalone 变异循环 + `cargo +nightly fuzz run <t> --features fuzzing` 双模式；语料嵌入真实 WinRAR fixture。

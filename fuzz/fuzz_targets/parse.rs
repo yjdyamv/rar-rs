@@ -8,9 +8,9 @@
 use libfuzzer_sys::fuzz_target;
 
 #[cfg(fuzzing)]
-fuzz_target!(|data: &[u8]| rar5_fuzz::parse(data));
+fuzz_target!(|data: &[u8]| rar_rs_fuzz::parse(data));
 
 #[cfg(not(fuzzing))]
 fn main() {
-    rar5_fuzz::standalone("parse", rar5_fuzz::CORPUS_PARSE, rar5_fuzz::parse);
+    rar_rs_fuzz::standalone("parse", rar_rs_fuzz::CORPUS_PARSE, rar_rs_fuzz::parse);
 }
