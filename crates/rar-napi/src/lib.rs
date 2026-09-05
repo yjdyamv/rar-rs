@@ -3,7 +3,6 @@
 //! Wraps the pure-Rust `rar5` crate behind a napi-rs API for creating, reading,
 //! testing, listing, extracting, repairing, and modifying RAR archives.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -143,7 +142,7 @@ impl CreateArchiveOptions {
     )
   }
 
-  fn to_create_options(&self) -> Result<rar5::CreateOptions> {
+  fn to_writer_options(&self) -> Result<rar5::WriterOptions> {
     let recovery_percent =
       checked_optional_js_integer(self.recovery_percent, "recoveryPercent", 0, 100)?
         .filter(|&value| value != 0)
@@ -165,31 +164,70 @@ impl CreateArchiveOptions {
     let threads =
       checked_optional_js_integer(self.threads, "threads", 1, 64)?.map(|value| value as usize);
     let password = self.password.as_deref().filter(|p| !p.is_empty());
-    let (dict_size_log, dict_size_bytes) = match self.dict_size.as_deref() {
-      Some(s) => parse_dict_size(s)?,
-      None => (None, None),
+    let dictionary = match self.dict_size.as_deref() {
+      Some(s) => {
+        let (dict_log, dict_bytes) = parse_dict_size(s)?;
+        let bytes = dict_bytes
+          .or_else(|| dict_log.map(|log| (128u64 * 1024) << log))
+          .expect("dictionary parse returns a log or a byte count");
+        Some(rar5::DictionarySize::try_from(bytes).map_err(|err| {
+          Error::new(
+            Status::InvalidArg,
+            format!("invalid dictionary size: {err}"),
+          )
+        })?)
+      }
+      None => None,
     };
-    Ok(rar5::CreateOptions {
-      solid: self.solid.unwrap_or(false),
-      quick_open: self.quick_open.unwrap_or(false),
-      blake2: self.blake2.unwrap_or(false),
-      password: password.map(|p| p.to_string()),
-      encrypt_headers: self.encrypt_headers.unwrap_or(false),
-      recovery_percent,
-      recovery_volumes_percent: None,
-      recovery_volume_count,
-      volume_size,
-      dict_size_log,
-      dict_size_bytes,
-      save_ctime: self.save_ctime.unwrap_or(false),
-      save_atime: self.save_atime.unwrap_or(false),
-      save_mtime: true,
-      time_precision_seconds: self.time_precision_seconds.unwrap_or(false),
-      save_owner: self.save_owner.unwrap_or(false),
-      save_streams: self.save_streams.unwrap_or(false),
-      threads,
-      ..Default::default()
-    })
+    let opts = rar5::WriterOptions::new()
+      .solid_mode(if self.solid.unwrap_or(false) {
+        rar5::SolidMode::Continuous
+      } else {
+        rar5::SolidMode::Disabled
+      })
+      .quick_open(self.quick_open.unwrap_or(false))
+      .blake2(self.blake2.unwrap_or(false))
+      .encrypt_headers(self.encrypt_headers.unwrap_or(false))
+      .save_ctime(self.save_ctime.unwrap_or(false))
+      .save_atime(self.save_atime.unwrap_or(false))
+      .save_mtime(true)
+      .time_precision_seconds(self.time_precision_seconds.unwrap_or(false))
+      .save_owner(self.save_owner.unwrap_or(false))
+      .save_streams(self.save_streams.unwrap_or(false));
+    let opts = if let Some(pw) = password {
+      opts.password(pw.to_string())
+    } else {
+      opts
+    };
+    let opts = if let Some(percent) = recovery_percent {
+      opts.recovery_percent(percent)
+    } else {
+      opts
+    };
+    let opts = if let Some(count) = recovery_volume_count {
+      opts.recovery_volume_count(count)
+    } else {
+      opts
+    };
+    let opts = if let Some(size) = volume_size {
+      opts.volume_size(size)
+    } else {
+      opts
+    };
+    let opts = if let Some(size) = dictionary {
+      opts.dictionary_size(size)
+    } else {
+      opts
+    };
+    let opts = if let Some(threads) = threads {
+      opts.thread_count(
+        rar5::ThreadCount::try_from(threads)
+          .map_err(|err| Error::new(Status::InvalidArg, format!("{err}")))?,
+      )
+    } else {
+      opts
+    };
+    Ok(opts)
   }
 }
 
@@ -352,15 +390,6 @@ fn basename(path: &Path) -> String {
     .unwrap_or_default()
 }
 
-fn discovered_paths_in_order(paths: Vec<PathBuf>) -> Vec<String> {
-  let mut seen = HashSet::with_capacity(paths.len());
-  paths
-    .into_iter()
-    .map(|path| path.to_string_lossy().into_owned())
-    .filter(|path| seen.insert(path.clone()))
-    .collect()
-}
-
 /// Parse a WinRAR-style dictionary size (`-md<size>[k|m|g]`, no unit =
 /// MiB) into the two `CreateOptions` fields: values up to 4 GiB must be
 /// powers of two (RAR5 dict log), anything above is accepted as-is and
@@ -410,71 +439,77 @@ fn to_napi_error(err: rar5::RarError) -> Error {
   Error::new(status, format!("rar: {err}"))
 }
 
-fn build_batch(planned: &[PlannedEntry], level: u8) -> Vec<rar5::BatchEntry<'_>> {
-  let mut batch: Vec<rar5::BatchEntry<'_>> = Vec::with_capacity(planned.len());
+fn write_entries(planned: &[PlannedEntry], level: u8) -> Result<Vec<rar5::WriteEntry<'_>>> {
+  let compression = rar5::CompressionLevel::try_from(level)
+    .map_err(|err| Error::new(Status::InvalidArg, format!("level: {err}")))?;
+  let options = rar5::EntryWriteOptions::new().compression_level(compression);
+  let mut batch: Vec<rar5::WriteEntry<'_>> = Vec::with_capacity(planned.len());
   for e in planned {
     match e.kind.as_str() {
       "file" => {
         let path = e.path.as_ref().expect("file path");
-        batch.push(rar5::BatchEntry::File {
+        batch.push(rar5::WriteEntry::File {
           path,
           name: if e.name.is_empty() {
             None
           } else {
             Some(&e.name)
           },
-          level,
+          options,
         });
       }
       "dir" => {
         let path = e.path.as_ref().expect("dir path");
-        batch.push(rar5::BatchEntry::Directory {
+        batch.push(rar5::WriteEntry::Directory {
           path,
           name: Some(&e.name),
         });
       }
       "bytes" => {
         let data = e.data.as_ref().expect("bytes data");
-        batch.push(rar5::BatchEntry::Bytes {
+        batch.push(rar5::WriteEntry::Bytes {
           name: &e.name,
           data,
-          level,
+          options,
         });
       }
       _ => {}
     }
   }
-  batch
+  Ok(batch)
 }
 
-fn write_batch(
-  archive: &mut rar5::RarArchive,
-  batch: &[rar5::BatchEntry<'_>],
+/// Add the members through the typed writer and commit with `finish()`,
+/// forwarding `(committed, total)` progress and delivering a terminal 100%
+/// event only after the archive is fully closed (including recovery
+/// records and volume finalization). Returns the committed volume paths
+/// from the write report — no filesystem rediscovery needed.
+fn write_transaction(
+  mut writer: rar5::ArchiveWriter,
+  batch: &[rar5::WriteEntry<'_>],
   total_bytes: u64,
   progress: Option<ThreadsafeFunction<ProgressData, ()>>,
-) -> Result<()> {
+) -> Result<rar5::WriteReport> {
   let terminal = progress.map(Arc::new);
   if let Some(tsfn) = terminal.as_ref() {
     let cb_tsfn = tsfn.clone();
     // rar-rs already aggregates every member's deltas (sequential and
     // parallel-wave alike) into one monotonic, operation-global stream, so
     // this side just forwards `(committed, total)`.
-    archive.set_progress_callback(Some(Box::new(move |done, total| {
-      let _ = cb_tsfn.call(
-        Ok(ProgressData {
-          done: done.min(total) as f64,
-          total: total as f64,
-        }),
-        ThreadsafeFunctionCallMode::NonBlocking,
-      );
-    })));
-    archive.add_batch(batch).map_err(to_napi_error)?;
-  } else {
-    archive.add_batch(batch).map_err(to_napi_error)?;
+    writer
+      .set_progress_callback(Some(Box::new(move |done, total| {
+        let _ = cb_tsfn.call(
+          Ok(ProgressData {
+            done: done.min(total) as f64,
+            total: total as f64,
+          }),
+          ThreadsafeFunctionCallMode::NonBlocking,
+        );
+      })))
+      .map_err(to_napi_error)?;
   }
-
-  archive.close().map_err(to_napi_error)?;
-
+  writer.add_batch(batch).map_err(to_napi_error)?;
+  let report = writer.finish().map_err(to_napi_error)?;
   if let Some(tsfn) = terminal {
     // Terminal 100% event after the archive is fully closed (including
     // recovery records and volume finalization). Delivery is asynchronous,
@@ -488,7 +523,15 @@ fn write_batch(
       ThreadsafeFunctionCallMode::Blocking,
     );
   }
-  Ok(())
+  Ok(report)
+}
+
+fn report_files(report: rar5::WriteReport) -> Vec<String> {
+  report
+    .into_volume_paths()
+    .into_iter()
+    .map(|path| path.to_string_lossy().into_owned())
+    .collect()
 }
 
 #[napi]
@@ -523,27 +566,27 @@ impl Task for CreateArchiveTask {
       ));
     }
     let level = self.opts.level()?;
-    let batch = build_batch(&planned, level);
+    let batch = write_entries(&planned, level)?;
     let out = Path::new(&self.opts.out_path);
     if let Some(parent) = out.parent() {
       fs::create_dir_all(parent)
         .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
     }
 
-    // Per-archive thread count (scoped, so concurrent creates with
-    // different `threads` never interfere); extraction stays on the global
-    // default pool.
-    let create_opts = self.opts.to_create_options()?;
-    let mut archive =
-      rar5::RarArchive::create_with_options(out, create_opts).map_err(to_napi_error)?;
-    archive.set_cancel_flag(self.cancel.take());
+    // The typed writer stages everything and commits only in `finish()`:
+    // a failed or cancelled add aborts the transaction and leaves nothing
+    // at the output path.
+    let writer_opts = self.opts.to_writer_options()?;
+    let mut writer = rar5::ArchiveWriter::create_with(out, writer_opts).map_err(to_napi_error)?;
+    writer
+      .set_cancel_flag(self.cancel.take())
+      .map_err(to_napi_error)?;
 
-    write_batch(&mut archive, &batch, total_bytes, self.progress.take())?;
-    drop(archive);
+    let report = write_transaction(writer, &batch, total_bytes, self.progress.take())?;
 
-    let files = discovered_paths_in_order(rar5::discover_volumes(out));
-
-    Ok(CreateResult { files })
+    Ok(CreateResult {
+      files: report_files(report),
+    })
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -722,30 +765,35 @@ impl Task for AppendArchiveTask {
     })?;
 
     let level = self.opts.level()?;
-    let batch = build_batch(&planned, level);
-    let (dict_size_log, dict_size_bytes) = match self.opts.dict_size.as_deref() {
-      Some(s) => parse_dict_size(s)?,
-      None => (None, None),
-    };
-    let mut archive = match self.opts.password.as_deref() {
-      Some(pw) if !pw.is_empty() => {
-        rar5::RarArchive::open_append_with_password(&self.opts.archive_path, pw)
-          .map_err(to_napi_error)?
-      }
-      _ => rar5::RarArchive::open_append(&self.opts.archive_path).map_err(to_napi_error)?,
-    };
-    archive.set_cancel_flag(self.cancel.take());
-    archive
-      .set_dictionary(dict_size_log, dict_size_bytes)
+    let batch = write_entries(&planned, level)?;
+    let mut append_opts = rar5::AppendOptions::new();
+    if let Some(pw) = self.opts.password.as_deref().filter(|pw| !pw.is_empty()) {
+      append_opts = append_opts.password(pw.to_string());
+    }
+    if let Some(spec) = self.opts.dict_size.as_deref() {
+      let (dict_log, dict_bytes) = parse_dict_size(spec)?;
+      let bytes = dict_bytes
+        .or_else(|| dict_log.map(|log| (128u64 * 1024) << log))
+        .expect("dictionary parse returns a log or a byte count");
+      append_opts =
+        append_opts.dictionary_size(rar5::DictionarySize::try_from(bytes).map_err(|err| {
+          Error::new(
+            Status::InvalidArg,
+            format!("invalid dictionary size: {err}"),
+          )
+        })?);
+    }
+    let mut writer = rar5::ArchiveWriter::append_with(&self.opts.archive_path, append_opts)
+      .map_err(to_napi_error)?;
+    writer
+      .set_cancel_flag(self.cancel.take())
       .map_err(to_napi_error)?;
 
-    write_batch(&mut archive, &batch, total_bytes, self.progress.take())?;
-    drop(archive);
+    let report = write_transaction(writer, &batch, total_bytes, self.progress.take())?;
 
-    let files =
-      discovered_paths_in_order(rar5::discover_volumes(Path::new(&self.opts.archive_path)));
-
-    Ok(CreateResult { files })
+    Ok(CreateResult {
+      files: report_files(report),
+    })
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -1212,19 +1260,5 @@ mod tests {
       to_napi_error(rar5::RarError::Cancelled).status,
       Status::Cancelled
     );
-  }
-
-  #[test]
-  fn discovered_paths_keep_natural_volume_order_and_deduplicate() {
-    let mut paths = (1..=12)
-      .map(|part| PathBuf::from(format!("archive.part{part}.rar")))
-      .collect::<Vec<_>>();
-    paths.push(PathBuf::from("archive.part10.rar"));
-
-    let result = discovered_paths_in_order(paths);
-    assert_eq!(result.len(), 12);
-    assert_eq!(result[1], "archive.part2.rar");
-    assert_eq!(result[9], "archive.part10.rar");
-    assert_eq!(result[11], "archive.part12.rar");
   }
 }

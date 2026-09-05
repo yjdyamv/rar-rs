@@ -87,8 +87,10 @@ Known deferred risks:
 
 ## Phase 3: validated options and writer API
 
-Phase 3 core slice completed here: the Rust writer API and transaction boundary are
-in place. CLI and N-API migration remain intentionally deferred.
+Phase 3 completed: the Rust writer API, its transaction boundary, and the CLI
+and N-API create/append migrations are in place and byte-compatible. RAR4
+append and the editor-style rewrite steps (delete/rename/version control)
+remain on the legacy seam until Phase 4.
 
 - [x] Add `CompressionLevel`, `DictionarySize`, `ThreadCount`, and `SolidMode`.
 - [x] Add `WriterOptions`, `AppendOptions`, and `EntryWriteOptions` with private
@@ -98,7 +100,7 @@ in place. CLI and N-API migration remain intentionally deferred.
 - [x] Add consuming `ArchiveWriter::finish() -> WriteReport`.
 - [x] Return final volume paths in `WriteReport`; remove binding-side rediscovery
       from new APIs.
-- [ ] Migrate CLI create/append and N-API create/append to the writer API.
+- [x] Migrate CLI create/append and N-API create/append to the writer API.
 - [x] Keep `CreateOptions`, numeric compression levels, and `close()` available.
 
 Exit criteria:
@@ -129,9 +131,27 @@ boundaries that were still too loose; all fixed and covered by tests
   between renames); `.rev` generation runs only after all data volumes are
   committed, so a `.rev` failure returns the error with data on disk.
 
-Deferred with the CLI/N-API migration: binding-side create/append still uses
-`CreateOptions`/numeric levels/`close()`, and RAR4 append remains
+Deferred with the editor migration (Phase 4): the CLI's delete-then-append
+replacement rewrite in `rar a` and the staged delete/rename/version-control
+steps of `rar u`/`rar f` still use the legacy read/delete seam; their
+create/append stages already run on `ArchiveWriter`. RAR4 append remains
 unsupported (matching the legacy seam).
+
+### Migration notes (recorded with the binding migrations)
+
+- `WriterOptions` on `Rar50` accepts dictionaries above 4 GiB with WinRAR's
+  auto semantics (v50 for small members, v70 only when the effective
+  dictionary exceeds 4 GiB), which the CLI's default/`-ma5` + `-md>4g`
+  combination requires for byte parity; `-ma7` maps to the `Rar70` format
+  (forced v70). `-ma4` keeps ignoring `-md`, as before.
+- Bindings surface typed validation errors: invalid cross-field
+  combinations that the legacy layer silently downgraded or reported as
+  `Unsupported` now fail as `InvalidOption` (`rar a` errors out; N-API
+  reports `InvalidArg`; the JS test expectation was updated).
+- `rar a` on an existing archive now aborts cleanly on a failed append
+  instead of leaving the legacy partial-commit artifacts, and N-API
+  create/append tasks leave nothing at the output path when a member add
+  fails or is cancelled.
 
 ## Phase 4: editor API and combined transactions
 

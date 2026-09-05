@@ -675,8 +675,8 @@ test('core errors expose stable napi codes and archive testing is async', async 
       return true
     })
 
-    // This option combination reaches RarError::Unsupported. N-API has no
-    // dedicated unsupported status, so the stable code is GenericFailure.
+    // This option combination is rejected by the typed writer's option
+    // validation (InvalidOption) and must retain the InvalidArg code.
     await assert.rejects(
       createArchive({
         outPath: join(dir, 'unsupported.rar'),
@@ -685,7 +685,7 @@ test('core errors expose stable napi codes and archive testing is async', async 
         entries: [{ kind: 'bytes', name: 'a.bin', data: Buffer.alloc(200_000) }],
       }),
       (error) => {
-        assert.equal(error.code, 'GenericFailure')
+        assert.equal(error.code, 'InvalidArg')
         return true
       },
     )
