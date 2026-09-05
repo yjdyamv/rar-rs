@@ -1,5 +1,7 @@
 //! Byte-level container assertions: locator records, quick-open caches and FILE_TIME extra records.
 
+#![allow(deprecated)] // legacy facade used for control archives
+
 #[path = "support/mod.rs"]
 mod support;
 #[allow(unused_imports)]

@@ -16,10 +16,19 @@ use crate::codec::DecoderState;
 use crate::crypto;
 use crate::detect::{SFX_SCAN_LIMIT, find_bytes};
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::*;
+#[cfg(feature = "parallel")]
+use crate::format::rar5::COMP_METHOD_STORE;
+use crate::format::rar5::headers::{
+    ArchiveHeader, EndOfArchiveHeader, RedirectSpec, parse_redirect_record,
+};
+use crate::format::rar5::vint;
 #[cfg(windows)]
 use crate::format::rar5::write as archive_write;
-use crate::format::rar5::*;
+use crate::format::rar5::{
+    BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, BLOCK_TYPE_ARCHIVE_HEADER,
+    BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
+    BLOCK_TYPE_SERVICE_HEADER, RAR5_SIGNATURE,
+};
 use crate::fs::atomic::{replace_file, temp_sibling_path};
 use crate::fs::safe_path::sanitize_archive_path;
 use crate::model::{DataChunk, FileHeader};
@@ -462,16 +471,19 @@ impl RarArchive {
     // ── Public API: listing ────────────────────────────────────────────────
 
     /// Return all entries in the archive.
+    #[deprecated(note = "use ArchiveReader::entries instead")]
     pub fn list(&self) -> &[ArchiveEntry] {
         &self.entries
     }
 
     /// Find an entry by name.
+    #[deprecated(note = "use ArchiveReader::entries_named instead")]
     pub fn get_entry(&self, name: &str) -> Option<&ArchiveEntry> {
         self.entries.iter().find(|e| e.name() == name)
     }
 
     /// Return a list of all entry names.
+    #[deprecated(note = "use ArchiveReader::entries instead")]
     pub fn namelist(&self) -> Vec<&str> {
         self.entries.iter().map(|e| e.name()).collect()
     }
@@ -479,6 +491,7 @@ impl RarArchive {
     // ── Public API: reading ────────────────────────────────────────────────
 
     /// Read and return the uncompressed content of a member.
+    #[deprecated(note = "use ArchiveReader::read_entry instead")]
     pub fn read(&mut self, name: &str) -> RarResult<Vec<u8>> {
         self.read_with_options(name, crate::options::ExtractOptions::default())
     }
@@ -597,6 +610,7 @@ impl RarArchive {
     }
 
     /// Extract all archive contents to `dest_dir` (safe defaults).
+    #[deprecated(note = "use ArchiveReader::extract_all instead")]
     pub fn extract_all(&mut self, dest_dir: impl AsRef<Path>) -> RarResult<()> {
         self.extract_all_with_options(dest_dir, crate::options::ExtractOptions::default())
     }
@@ -809,6 +823,7 @@ impl RarArchive {
     }
 
     /// Extract a single entry to `dest_dir` (safe defaults).
+    #[deprecated(note = "use ArchiveReader::extract_entry instead")]
     pub fn extract(&mut self, name: &str, dest_dir: impl AsRef<Path>) -> RarResult<PathBuf> {
         self.extract_with_options(name, dest_dir, crate::options::ExtractOptions::default())
     }

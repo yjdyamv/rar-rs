@@ -327,6 +327,17 @@ impl ArchiveEditor {
         self.archive.set_cancel_flag(flag);
     }
 
+    /// Lock the archive (like `rar k`): sets the `LOCKED` flag in the main
+    /// archive header, making the archive read-only. Locking is
+    /// irreversible. Multi-volume archives are refused with
+    /// [`RarError::Unsupported`] (lock the first volume instead), matching
+    /// the legacy method. Editing an already-locked archive fails with
+    /// [`RarError::ArchiveLocked`] on the next [`Self::apply`].
+    #[allow(deprecated)] // role seam: delegates to the legacy in-place patch
+    pub fn lock(&mut self) -> RarResult<()> {
+        self.archive.lock()
+    }
+
     /// The surgical rewrite engine behind every edit operates on RAR5
     /// blocks; refuse legacy-container archives up front with a clear error
     /// instead of a confusing parse failure mid-rewrite.

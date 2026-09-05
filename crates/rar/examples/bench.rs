@@ -2,6 +2,8 @@
 //!
 //! Run:  cargo run --release --example bench [size_mb]
 
+#![allow(deprecated)] // benchmarks the legacy create path
+
 use std::time::Instant;
 
 use rar5::RarArchive;

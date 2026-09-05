@@ -6,11 +6,22 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-use super::*;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+
+use super::{DecryptedPayload, Mode, RarArchive};
 use crate::codec::{DecoderState, lzss_huff as compression};
 use crate::crypto::parse_archive_encrypt_header;
-use crate::format::rar5::headers::*;
+use crate::error::{RarError, RarResult};
+use crate::format::rar5::headers::{
+    ArchiveHeader, BlockMeta, FileHeader, build_comment_block, split_main_extra,
+};
 use crate::format::rar5::vint;
+use crate::format::rar5::{
+    ARCHIVE_FLAG_LOCKED, ARCHIVE_FLAG_RECOVERY, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_DEPENDS_PREV,
+    BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_ENCRYPT_HEADER,
+    BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER, COMP_METHOD_STORE,
+    FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX, RAR5_SIGNATURE,
+};
 use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
 
 use super::{PendingCommit, volume_base_of, volume_path};
@@ -232,6 +243,8 @@ impl RarArchive {
     /// receives `(written_bytes, total_bytes)`, monotonic, covering the
     /// whole rewrite (verbatim copies plus any solid-chain recompression)
     /// and reaching `total` on success.
+    #[deprecated(note = "use ArchiveEditor::delete_entries_with_progress instead")]
+    #[allow(deprecated)] // internal delegation, removed together with the facade
     pub fn delete_with_progress(
         &mut self,
         names: &[&str],
@@ -260,6 +273,7 @@ impl RarArchive {
     /// archives are re-split at the volume size limit and `.rev` recovery
     /// volumes are regenerated. Fails when any requested name is not
     /// present, and with [`RarError::Unsupported`] for locked archives.
+    #[deprecated(note = "use ArchiveEditor::delete_entries instead")]
     pub fn delete(&mut self, names: &[&str]) -> RarResult<usize> {
         if self.mode != Mode::Read {
             return Err(RarError::Format(
@@ -656,6 +670,7 @@ impl RarArchive {
     /// Returns the number of renamed members. Fails with
     /// [`RarError::Format`] when any source name is not present, and with
     /// [`RarError::Unsupported`] for locked archives.
+    #[deprecated(note = "use ArchiveEditor::rename_entries instead")]
     pub fn rename(&mut self, renames: &[(&str, &str)]) -> RarResult<usize> {
         if self.mode != Mode::Read {
             return Err(RarError::Format(
@@ -980,6 +995,7 @@ impl RarArchive {
     /// The comment is stored in a "CMT" service block right after the main
     /// header; the quick-open and recovery records are rebuilt over the
     /// rewritten archive. Multi-volume archives are not supported.
+    #[deprecated(note = "use an EditPlan with set_comment instead")]
     pub fn set_comment(&mut self, comment: &[u8]) -> RarResult<()> {
         if self.mode != Mode::Read {
             return Err(RarError::Format(

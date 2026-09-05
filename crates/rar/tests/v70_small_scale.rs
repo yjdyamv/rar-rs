@@ -13,6 +13,8 @@
 //! size (WinRAR's selection rule), so members here are >= 4 MiB to keep
 //! the requested 6-8 MiB dictionaries intact.
 
+#![allow(deprecated)] // legacy add/close/read for v70 fixture construction
+
 use rar5::RarArchive;
 
 #[path = "support/mod.rs"]

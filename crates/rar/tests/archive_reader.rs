@@ -1,3 +1,5 @@
+#![allow(deprecated)] // legacy facade (list/read via RarArchive) — mirrors the typed reader
+
 use std::fs::OpenOptions as FsOpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 

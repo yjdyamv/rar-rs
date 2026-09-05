@@ -155,10 +155,13 @@ unsupported (matching the legacy seam).
 
 ## Phase 4: editor API and combined transactions
 
-Phase 4 core slice completed here: the typed `ArchiveEditor` role with a
-catalog and ID-based structural edits is in place and verified against the
-legacy rewrite engine. `EditPlan`, comment/recovery combination, and the
-binding migrations remain.
+Phase 4 walked to its documented remaining surface: the typed
+`ArchiveEditor` role with a catalog and ID-based structural edits,
+`EditPlan` (delete/rename/comment/recovery combined rewrites), and the CLI
+(`d`/`rn`/`ch`/`c`/`rr`/`m`, `rar a` replacement + `-as`, non-staged
+(and now the version-control) `rar u`/`rar f`, and `rar k`) and N-API
+(`deleteEntries`) migrations are all in place and verified against the
+legacy rewrite engine.
 
 - [x] Add `ArchiveEditor` catalog and ID validation.
 - [x] Extract internal index-based delete and rename operations.
@@ -167,12 +170,11 @@ binding migrations remain.
 - [x] Introduce `EditPlan` only after individual ID operations are stable.
 - [x] Combine delete, rename, comment, and recovery changes into one rewrite.
 - [x] Define and test multi-volume transaction/rollback behavior.
-- [ ] Migrate CLI and N-API edit operations (nearly done: CLI edit commands
-      `d`/`rn`/`ch`/`c`/`rr`/`m`, the `rar a` replacement + `-as` sync seams,
-      the non-version staged `rar u`/`rar f` rewrite, and the N-API
-      `deleteEntries` task are migrated; the map-aware chained-rename
-      version-control branch of `rar u`/`rar f` and `rar k` (lock, no
-      editor counterpart yet) stay on the legacy seam).
+- [x] Migrate CLI and N-API edit operations (CLI edit commands `d`/`rn`/
+      `ch`/`c`/`rr`/`m`, the `rar a` replacement + `-as` sync seams, the
+      staged `rar u`/`rar f` rewrite including the version-control rename
+      chain and the `-ver` cap drop, `rar k` (lock) via `ArchiveEditor::lock`,
+      and the N-API `deleteEntries` task are all migrated).
 
 Exit criteria:
 
@@ -248,10 +250,11 @@ Exit criteria:
   members through the editor too. `rar ch` now also converts directory
   members consistently (the legacy name path failed on dir trees because
   expansion renames made later lookups miss).
-- Remaining legacy edit surface: the staged `rar u`/`rar f`
-  version-control rewrite (rename/delete on the staged copy, tested by
-  `cli_version_control_keeps_previous_versions`) and the N-API
-  `deleteEntries` task.
+- The staged `rar u`/`rar f` rewrite (including the version-control chain:
+  renames via a map-aware resolver mirroring the legacy `rename`
+  resolution, then the `-ver` cap drop) and `rar k` (lock, through
+  `ArchiveEditor::lock`) run on the editor; the N-API `deleteEntries` task
+  is the only remaining editor-surface consumer.
 
 ### Edit-migration completion notes (recorded with the bindings)
 
@@ -259,10 +262,12 @@ Exit criteria:
   resolution preserving the legacy first-match delete semantics,
   progress through `delete_entries_with_progress`, cancellation through
   `set_cancel_flag`); JS suite 33/33 against a rebuilt addon.
-- The non-version staged delete inside `rar u`/`rar f` runs through the
-  editor; only the version-control branch keeps its map-aware chained
-  rename on the legacy seam (resolution semantics differ), and `rar k`
-  stays on `RarArchive::lock`.
+- The staged `rar u`/`rar f` rewrite runs through the editor in two
+  atomic applies that mirror the legacy sequential calls: renames first
+  (version chain via a map-aware resolver equivalent to legacy `rename`,
+  re-emitting only headers), then the `-ver` cap drop (may recompress a
+  solid chain), then the appended fresh members. `rar k` locks through
+  `ArchiveEditor::lock` (byte-identical in-place main-header patch).
 
 ## Phase 5: internal directory convergence
 
@@ -302,10 +307,10 @@ filesystem policy; the CLI entry points live under `src/bin`; the N-API
 binding is split across `lib.rs` (JS surface) + `options.rs` + `tasks.rs` +
 `error.rs`; codec files are bucketed under `common/`/`legacy/`/`modern`;
 and the format modules live at `src/format/rar4` + `src/format/rar5`.
-Deferred to the Phase 6 breaking release: the remaining transitional
-wildcard imports, the `#[doc(hidden)]` `rar40`/`rar50` re-export aliases
-(and the equally hidden `format` tree visibility), and low-level module
-splits that still reference the old names.
+Deferred to the Phase 6 breaking release: the `#[doc(hidden)]`
+`rar40`/`rar50` re-export aliases (and the equally hidden `format` tree
+visibility), and low-level module splits that still reference the old
+names.
 
 ### fs/ convergence notes (recorded with the filesystem policy move)
 
@@ -328,17 +333,23 @@ splits that still reference the old names.
       breaking release).
 - [x] Move filesystem policy out of format extraction/writing
       (done: `src/fs/{atomic.rs, volume.rs, safe_path.rs}` — see notes below).
-- [ ] Split CLI binaries into `src/bin` plus shared command modules
+- [x] Split CLI binaries into `src/bin` plus shared command modules
       (done: entry points moved to `src/bin/{rar,unrar}.rs`, shared modules
       stay in `src/` referenced via `#[path]`).
 - [x] Split N-API tasks/options/error mapping out of `src/lib.rs`
       (done: `error.rs` error mapping, `options.rs` option structs +
       validation/conversion, `tasks.rs` task implementations + factories;
       `lib.rs` keeps the JS-facing structs, module wiring and re-exports).
-- [ ] Remove transitional wildcard imports and add dependency guards
-      (guards added; codec legacy/common aliases removed after bucketing;
-      remaining wildcard imports and the `#[doc(hidden)]` `rar40`/`rar50`
-      re-export aliases are dropped at the Phase 6 breaking release).
+- [x] Remove transitional wildcard imports and add dependency guards
+      (done: all library-level glob imports removed — every production
+      `use crate::…::*` / `use super::*` swept to explicit imports, public
+      barrels re-exported as explicit item lists, `#[cfg]`-gated where the
+      consumer was platform/feature/test-scoped. Remaining globs are only
+      the test-module `use super::*`, `rayon::prelude::*` in parallel paths,
+      `napi::bindgen_prelude::*`, and integration-test `support::*`. The
+      `#[doc(hidden)]` `rar40`/`rar50` re-export aliases plus the equally
+      hidden `format` tree visibility and the low-level module splits are
+      dropped at the Phase 6 breaking release.)
 
 ## Phase 6: breaking-release decisions
 
@@ -359,8 +370,17 @@ maintainer decision before execution.
 - [x] Move unsupported low-level APIs behind `raw`/`unstable`, if appropriate
       (done: `rar5::rar40` is behind a new default-off `raw` feature; `rar50`
       stays public while in-tree wire tests use it).
-- [ ] Deprecate, then remove, legacy facade methods only after all in-tree
+- [x] Deprecate, then remove, legacy facade methods only after all in-tree
       consumers use API v2.
+      (done: `#[deprecated]` on `create_with_options`, `close`, `add`, `add_as`,
+      `add_directory_only`, `add_bytes`, `add_redirect`, `add_batch`,
+      `add_recovery_record`, `set_comment`, `delete`, `delete_with_progress`,
+      `rename`, `lock`, `list`, `get_entry`, `namelist`, `read`, `extract_all`,
+      `extract`, pointing at their typed-role replacements; the CLI, examples
+      and N-API migrated onto the roles (`ArchiveReader::open_with`, `entries`,
+      `unique_entry`, `read_entry`; `open_reader` is now the CLI's single open
+      path), and the in-tree test/fuzz consumers keep the legacy facade under
+      `#![allow(deprecated)]`. Removal stays at the breaking release.)
 
 ## Validation matrix
 

@@ -1442,6 +1442,41 @@ fn editor_rename_plan(
     Ok(plan)
 }
 
+/// Resolve chained rename pairs onto an [`rar5::EditPlan`] mirroring the
+/// legacy name-based `rename` resolution exactly: each old name targets the
+/// first member whose stored name — or already-planned rename in this call —
+/// equals it, so version chains (`a.txt -> a.txt;1 -> a.txt;2`) and repeated
+/// old names resolve like the legacy sequential rewrite while staying
+/// index-addressed.
+fn editor_chained_rename_plan(
+    editor: &rar5::ArchiveEditor,
+    pairs: &[(&str, &str)],
+) -> Result<rar5::EditPlan, rar5::RarError> {
+    let mut plan = rar5::EditPlan::new();
+    let mut planned: std::collections::HashMap<rar5::EntryId, String> =
+        std::collections::HashMap::new();
+    for (old, new) in pairs {
+        let old_norm = old.trim_end_matches('/');
+        let id = editor
+            .entries()
+            .find(|entry| {
+                planned
+                    .get(&entry.id())
+                    .map(String::as_str)
+                    .unwrap_or_else(|| entry.name())
+                    .trim_end_matches('/')
+                    == old_norm
+            })
+            .map(|entry| entry.id())
+            .ok_or_else(|| rar5::RarError::MemberNotFound {
+                name: (*old).to_string(),
+            })?;
+        planned.insert(id, (*new).to_string());
+        plan = plan.rename(id, (*new).to_string());
+    }
+    Ok(plan)
+}
+
 fn cmd_delete(args: &DeleteArgs) -> Result<(), String> {
     let archive_path = &args.archive;
     let names: Vec<&str> = args.names.iter().map(|s| s.as_str()).collect();
@@ -1658,11 +1693,8 @@ fn cmd_update_freshen(
         3,
         &args.archive,
     )?;
-    let archive = match password {
-        Some(value) => rar5::RarArchive::open_with_password(archive_path, value)
-            .map_err(|error| format!("open: {error}"))?,
-        None => rar5::RarArchive::open(archive_path).map_err(|error| format!("open: {error}"))?,
-    };
+    let archive =
+        open_reader(archive_path, password.as_deref()).map_err(|error| format!("open: {error}"))?;
     let mut to_delete = Vec::new();
     let mut to_add = Vec::new();
     for item in &collected {
@@ -1673,7 +1705,7 @@ fn cmd_update_freshen(
             .unwrap_or_default()
             .as_secs();
         let source_mtime = u32::try_from(source_mtime).unwrap_or(u32::MAX);
-        if let Some(entry) = archive.get_entry(&item.name) {
+        if let Some(entry) = archive.entries_named(&item.name).next() {
             if source_mtime > entry.mtime() {
                 to_delete.push(item.name.clone());
                 to_add.push(item);
@@ -1694,15 +1726,14 @@ fn cmd_update_freshen(
         if !to_delete.is_empty() {
             if let Some(version_spec) = &misc.version_control {
                 // Version control chains renames inside one call with
-                // map-aware resolution (a.txt -> a.txt;1 -> a.txt;2); it
-                // stays on the legacy rename/delete seam until the editor's
-                // name resolution covers chained renames.
-                let mut staged = match password {
-                    Some(value) => rar5::RarArchive::open_with_password(staged_path, value)
-                        .map_err(|error| format!("open staged archive: {error}"))?,
-                    None => rar5::RarArchive::open(staged_path)
-                        .map_err(|error| format!("open staged archive: {error}"))?,
-                };
+                // map-aware resolution (a.txt -> a.txt;1 -> a.txt;2), then
+                // drops versions above the cap. Both run through the editor
+                // role in two atomic rewrites — renames re-emit only the
+                // headers (never recompressing), while the drop may
+                // recompress the solid chain, so they stay split exactly
+                // like the legacy sequential calls.
+                let mut editor = open_editor(staged_path, password.as_deref())
+                    .map_err(|error| format!("open staged archive: {error}"))?;
                 let max_versions = if version_spec.is_empty() {
                     None
                 } else {
@@ -1711,17 +1742,18 @@ fn cmd_update_freshen(
                 let mut renames = Vec::new();
                 let mut to_drop = Vec::new();
                 for name in &to_delete {
-                    let mut versions: Vec<(u32, String)> = staged
-                        .namelist()
-                        .iter()
-                        .filter_map(|member| {
-                            if *member == name {
+                    let mut versions: Vec<(u32, String)> = editor
+                        .entries()
+                        .filter_map(|entry| {
+                            let member = entry.name();
+                            if member == *name {
                                 Some((0, member.to_string()))
+                            } else if let Some(suffix) = member.strip_prefix(&format!("{name};"))
+                                && let Ok(version) = suffix.parse::<u32>()
+                            {
+                                Some((version, member.to_string()))
                             } else {
-                                member
-                                    .strip_prefix(&format!("{name};"))
-                                    .and_then(|suffix| suffix.parse::<u32>().ok())
-                                    .map(|version| (version, member.to_string()))
+                                None
                             }
                         })
                         .collect();
@@ -1747,19 +1779,20 @@ fn cmd_update_freshen(
                         .iter()
                         .map(|(old, new)| (old.as_str(), new.as_str()))
                         .collect();
-                    staged
-                        .rename(&pairs)
+                    let plan = editor_chained_rename_plan(&editor, &pairs)
+                        .map_err(|error| format!("rename staged members: {error}"))?;
+                    editor
+                        .apply(plan)
                         .map_err(|error| format!("rename staged members: {error}"))?;
                 }
                 if !to_drop.is_empty() {
                     let names: Vec<&str> = to_drop.iter().map(String::as_str).collect();
-                    staged
-                        .delete(&names)
+                    let plan = editor_delete_plan(&editor, &names)
+                        .map_err(|error| format!("delete staged versions: {error}"))?;
+                    editor
+                        .apply(plan)
                         .map_err(|error| format!("delete staged versions: {error}"))?;
                 }
-                staged
-                    .close()
-                    .map_err(|error| format!("close staged archive after rewrite: {error}"))?;
             } else {
                 // Plain replacement delete (no version control) runs through
                 // the editor role in one atomic rewrite.
@@ -1847,12 +1880,9 @@ fn cmd_update_freshen(
 
 /// Lock the archive (like `rar k`).
 fn cmd_lock(args: &ArchiveArgs) -> Result<(), String> {
-    let mut rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
-    };
-    rar.lock().map_err(|e| format!("lock: {e}"))?;
+    let mut editor = open_editor(&args.archive, args.password.password.as_deref())
+        .map_err(|e| format!("open: {e}"))?;
+    editor.lock().map_err(|e| format!("lock: {e}"))?;
     info!("Locked {archive}", archive = args.archive);
     Ok(())
 }
@@ -2060,16 +2090,15 @@ fn cmd_find(cmd: &str, args: &[String]) -> Result<(), String> {
     if needle.is_empty() {
         return Err("empty search string".into());
     }
-    let mut rar = rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?;
-    let entries: Vec<String> = rar
-        .list()
-        .iter()
+    let mut rar = open_reader(archive_path, None).map_err(|e| format!("open: {e}"))?;
+    let entries: Vec<(rar5::EntryId, String)> = rar
+        .entries()
         .filter(|e| !e.is_dir())
-        .map(|e| e.name().to_string())
+        .map(|e| (e.id(), e.name().to_string()))
         .collect();
     let mut found = 0usize;
-    for name in entries {
-        let data = match rar.read(&name) {
+    for (id, name) in entries {
+        let data = match rar.read_entry(id) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -2103,7 +2132,10 @@ fn cmd_find(cmd: &str, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn open_reader(path: &str, password: Option<&str>) -> Result<rar5::ArchiveReader, rar5::RarError> {
+fn open_reader(
+    path: impl AsRef<std::path::Path>,
+    password: Option<&str>,
+) -> Result<rar5::ArchiveReader, rar5::RarError> {
     let mut options = rar5::OpenOptions::new();
     if let Some(password) = password {
         options = options.password(password);
@@ -2863,15 +2895,11 @@ fn cmd_list_technical(args: &ArchiveArgs) -> Result<(), String> {
 }
 
 fn cmd_info(args: &ArchiveArgs) -> Result<(), String> {
-    let rar = match &args.password.password {
-        Some(pw) => {
-            rar5::RarArchive::open_with_password(&args.archive, pw).map_err(|e| format!("{e}"))?
-        }
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("{e}"))?,
-    };
+    let rar = open_reader(&args.archive, args.password.password.as_deref())
+        .map_err(|e| format!("{e}"))?;
 
-    let files: Vec<_> = rar.list().iter().filter(|e| !e.is_dir()).collect();
-    let dirs: Vec<_> = rar.list().iter().filter(|e| e.is_dir()).collect();
+    let files: Vec<_> = rar.entries().filter(|e| !e.is_dir()).collect();
+    let dirs: Vec<_> = rar.entries().filter(|e| e.is_dir()).collect();
     let total_size: u64 = files.iter().map(|e| e.size()).sum();
     let total_packed: u64 = files.iter().map(|e| e.compressed_size()).sum();
 

@@ -156,7 +156,7 @@ impl ExtractArchiveOptions {
       0,
       JS_MAX_SAFE_INTEGER as u64,
     )? {
-      None => Some(4 * 1024 * 1024 * 1024),
+      None => Some(rar5::ExtractOptions::DEFAULT_MAX_DICT_SIZE),
       Some(0) => None,
       Some(value) => Some(value),
     };

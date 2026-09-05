@@ -3,6 +3,8 @@
 //! against genuine WinRAR 5.91 `-ma4` fixtures and legacy RAR 3.0 archives
 //! (from the rars fixture corpus).
 
+#![allow(deprecated)] // read/list via the legacy facade for formatted fixtures
+
 #[path = "support/mod.rs"]
 mod support;
 #[allow(unused_imports)]

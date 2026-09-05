@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::fs::volume::extract_volume_base;
+use crate::fs::volume::{extract_volume_base, legacy_volume_base};
 
 /// Discover all volumes of a multi-volume RAR5 or legacy archive.
 ///
@@ -109,25 +109,4 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
     }
 
     vec![path.to_path_buf()]
-}
-
-/// Legacy volume base from `x.rar` / `x.r00` / `x.s37` (case-insensitive).
-fn legacy_volume_base(name: &str) -> Option<String> {
-    let lower = name.to_lowercase();
-    if let Some(base) = lower.strip_suffix(".rar") {
-        return Some(name[..base.len()].to_string());
-    }
-    let bytes = lower.as_bytes();
-    if bytes.len() >= 5
-        && bytes[bytes.len() - 4] == b'.'
-        && bytes[bytes.len() - 3].is_ascii_lowercase()
-        && bytes[bytes.len() - 3] >= b'r'
-        && bytes[bytes.len() - 3] <= b'z'
-        && bytes[bytes.len() - 2].is_ascii_digit()
-        && bytes[bytes.len() - 1].is_ascii_digit()
-    {
-        let end = bytes.len() - 4;
-        return Some(name[..end].to_string());
-    }
-    None
 }

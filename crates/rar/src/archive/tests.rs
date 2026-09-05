@@ -1,3 +1,5 @@
+#![allow(deprecated)] // legacy facade fixtures inside the lib test module
+
 use super::*;
 use crate::fs::safe_path::sanitize_archive_path;
 

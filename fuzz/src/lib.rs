@@ -5,6 +5,8 @@
 //! (`#[cfg(fuzzing)]`) and the standalone mutation loop (`standalone`),
 //! so the targets run on stable Rust without libFuzzer.
 
+#![allow(deprecated)] // fuzz targets exercise the legacy facade entry points
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Deterministic xorshift64* PRNG (no external deps).
@@ -164,7 +166,7 @@ pub fn parse(data: &[u8]) {
         safe_paths: true,
         max_unpacked_bytes: Some(64 * 1024 * 1024),
         max_total_unpacked_bytes: Some(128 * 1024 * 1024),
-        max_dict_size: Some(4 * 1024 * 1024 * 1024),
+        max_dict_size: Some(rar5::ExtractOptions::DEFAULT_MAX_DICT_SIZE),
         ..Default::default()
     };
 

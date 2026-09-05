@@ -6,6 +6,8 @@
 //! errors are expected and swallowed, and the goal is only to catch panics,
 //! overflows, OOM aborts and unbounded loops.
 
+#![allow(deprecated)] // exercises the legacy facade under malformed input
+
 use rar5::recovery::rar50 as recovery;
 use rar5::{EncryptionParams, decrypt_data};
 

@@ -6,6 +6,9 @@
 //! table (block bytes, table symbols, literal/match/repeat/filter counts) and
 //! global length/distance histograms. The same input compressed by WinRAR and
 //! by rar-rs can be compared to locate parse-level differences.
+
+#![allow(deprecated)] // reads members through the legacy facade
+
 use std::io::{Read, Seek, SeekFrom};
 
 fn main() {

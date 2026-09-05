@@ -14,6 +14,8 @@
 //! and multiple GiB of disk. Run them explicitly with
 //! `cargo test --release --test winrar_interop -- --ignored`.
 
+#![allow(deprecated)] // fixture archives built through the legacy write facade
+
 use rar5::RarArchive;
 use std::io::Write;
 use std::path::{Path, PathBuf};

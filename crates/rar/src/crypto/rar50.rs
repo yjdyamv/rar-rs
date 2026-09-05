@@ -14,7 +14,9 @@ use crate::format::rar5::vint;
 /// 4. Header encryption: when an archive-level encryption header is
 ///    present, all subsequent blocks (including file headers) are also
 ///    encrypted.
-use crate::format::rar5::*;
+use crate::format::rar5::{
+    ENCR_IV_SIZE, ENCR_KEY_SIZE, ENCR_SALT_SIZE, ENCR_VERSION_AES256, EXTRA_FILE_ENCRYPTION,
+};
 
 use aes::Aes256;
 use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};

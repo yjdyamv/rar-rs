@@ -687,17 +687,16 @@ impl Task for ListEntriesTask {
   type JsValue = Vec<String>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let archive = match self.password.as_deref() {
-      Some(pw) if !pw.is_empty() => {
-        rar5::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
-      }
-      _ => rar5::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
-    };
+    let mut options = rar5::OpenOptions::new();
+    if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
+      options = options.password(pw);
+    }
+    let archive =
+      rar5::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
     Ok(
       archive
-        .namelist()
-        .into_iter()
-        .map(|name| name.to_string())
+        .entries()
+        .map(|entry| entry.name().to_string())
         .collect(),
     )
   }
@@ -764,16 +763,15 @@ impl Task for ListEntriesDetailedTask {
   type JsValue = Vec<EntryInfo>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let archive = match (self.quick, self.password.as_deref()) {
-      (true, Some(pw)) if !pw.is_empty() => {
-        rar5::RarArchive::open_quick_with_password(&self.archive_path, pw).map_err(to_napi_error)?
-      }
-      (true, _) => rar5::RarArchive::open_quick(&self.archive_path).map_err(to_napi_error)?,
-      (false, Some(pw)) if !pw.is_empty() => {
-        rar5::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
-      }
-      (false, _) => rar5::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
-    };
+    let mut options = rar5::OpenOptions::new();
+    if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
+      options = options.password(pw);
+    }
+    // `ArchiveReader` transparently prefers the quick-open record and falls
+    // back to a full scan, so the explicit `quick` selector is subsumed.
+    let _ = self.quick;
+    let archive =
+      rar5::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
     Ok(entry_infos(&archive))
   }
 
@@ -782,10 +780,9 @@ impl Task for ListEntriesDetailedTask {
   }
 }
 
-fn entry_infos(archive: &rar5::RarArchive) -> Vec<EntryInfo> {
+fn entry_infos(archive: &rar5::ArchiveReader) -> Vec<EntryInfo> {
   archive
-    .list()
-    .iter()
+    .entries()
     .map(|e| EntryInfo {
       name: e.name().to_string(),
       size: e.size() as f64,
@@ -877,13 +874,14 @@ impl Task for ReadMemberTask {
   type JsValue = Buffer;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut archive = match self.password.as_deref() {
-      Some(pw) if !pw.is_empty() => {
-        rar5::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
-      }
-      _ => rar5::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
-    };
-    archive.read(&self.name).map_err(to_napi_error)
+    let mut options = rar5::OpenOptions::new();
+    if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
+      options = options.password(pw);
+    }
+    let mut archive =
+      rar5::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+    let id = archive.unique_entry(&self.name).map_err(to_napi_error)?;
+    archive.read_entry(id).map_err(to_napi_error)
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {

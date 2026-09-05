@@ -2,6 +2,8 @@
 //! create/extract at the next per-member or per-chunk check point with
 //! `RarError::Cancelled`.
 
+#![allow(deprecated)] // cancellation applies to the legacy facade too
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 

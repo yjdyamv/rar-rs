@@ -13,27 +13,45 @@ modern}`). The remaining API v2 work is a breaking release: legacy surface
 removal, public-path convergence and (possibly) a crate rename. This ADR
 records what is actually used in-tree, so those decisions are data-driven.
 
-## In-tree usage inventory (post Phase 5)
+## In-tree usage inventory (after Phase 4/5 migration, deprecation applied)
 
-Legacy facade methods still called by in-tree consumers (tests/cli/napi/
-examples/fuzz, aggregated by call-site count):
+Phase 5 also finished the wildcard import sweep: every production
+`use crate::…::*` / `use super::*` is now an explicit import (public barrels
+re-exported as explicit item lists, `#[cfg]`-gated where consumers were
+platform/feature/test-scoped). The only globs left are the idiomatic test-
+module `use super::*`, `rayon::prelude::*` in parallel paths,
+`napi::bindgen_prelude::*`, and integration-test `support::*`. The remaining
+path-level transitional surface — the `#[doc(hidden)]` `rar40`/`rar50` aliases
+and the `format` tree visibility — is removed at the breaking release.
 
-| legacy call | call sites | typical user |
+The CLI and N-API run entirely on the typed role APIs. Every legacy facade
+method with a role equivalent now carries `#[deprecated]` pointing at its
+replacement, and the remaining in-tree callers are the compat-test body
+(which exists to prove byte behavior and keeps compiling against the facade
+under `#![allow(deprecated)]`), the fuzz harness, and the examples. The two
+roles still delegate to the facade internally (`ArchiveWriter` → `create`/
+`add*`/`close`, `ArchiveReader::extract_all` → `extract_all`,
+`ArchiveEditor::lock` → `lock`); those seams carry `#[allow(deprecated)]` and
+die with the facade.
+
+| deprecated facade call | remaining call sites | where |
 | --- | --- | --- |
-| `create_with_options` | 140 | rar5 tests (compat) |
-| `.close()` | 146 | rar5 tests, leftover seams |
-| `.add_bytes` / `.add` | 182 | rar5 tests, leftovers |
-| `.namelist()` | 41 | tests + CLI replace/version logic |
-| `.delete()` / `.rename()` | 46 | tests + `rar u/f` version-control seam |
-| `.lock()` | 14 | CLI `rar k` (no editor counterpart) |
-| `.get_entry()` / `.verify()` | 18 | tests, `-t` post-create check |
-| `.extract_all()` | 7 | tests |
+| `create_with_options` | many | rar5 compat tests, fuzz |
+| `.close()` | many | rar5 compat tests, fuzz, examples |
+| `.add_bytes` / `.add` | many | compat tests, examples, fuzz |
+| `.namelist()` | ~76 | compat tests only (CLI now uses `ArchiveReader`) |
+| `.delete()` / `.delete_with_progress()` / `.rename()` | ~30 | compat tests only (`rar u/f` now uses `ArchiveEditor`) |
+| `.lock()` | few | rewrite/lock parity tests only (`rar k` now uses `ArchiveEditor::lock`) |
+| `.get_entry()` | many | compat tests only |
+| `.extract_all()` | several | compat tests, examples |
+| `.read()` | several | compat tests, fuzz (N-API now uses `read_entry`) |
 
-The CLI/N-API create/append/edit paths already run on the role APIs; the
-remaining legacy seams are documented in the plan (version-control
-rename chain in `rar u/f`, `rar k` lock) plus the large compat-test body,
-which exists to prove byte behavior and should keep compiling against the
-legacy facade until it is removed.
+The version-control rename chain in `rar u/f` and the `rar k` lock command
+were the last CLI users of the legacy mutation surface; both now run on
+`ArchiveEditor` (`editor_chained_rename_plan` / `editor_delete_plan` two-apply
+rewrite for version control, `ArchiveEditor::lock` for locking), so the
+facade's only remaining consumers are the byte-parity test corpus, fuzz and
+the benchmarks.
 
 Low-level public modules and their in-tree users:
 
@@ -75,12 +93,14 @@ tests/examples/fuzz. The npm package is already `rar-rs-napi`.
    it, keep `recovery`/`name_policy` doc(hidden) as-is, and keep
    `codec::lzss_huff` public (stable enough for the mtbench/napi streaming
    paths).
-4. Legacy facade removal. Only the compat tests, the `rar u/f`
-   version-control rename chain and `rar k` (lock) still call legacy
-   mutation; read paths already use `ArchiveReader`. Recommendation:
-   deprecate legacy methods now (warnings in-tree), keep the facade until
-   an `ArchiveEditor` lock op and an editor-native chained-rename path
-   exist, then delete in the same breaking release.
+4. Legacy facade removal. The typed roles now cover the full surface
+   including the previously blocking seams: `archive u/f` version control
+   runs on `ArchiveEditor` (chained rename + delete, two applies) and
+   `rar k` uses `ArchiveEditor::lock`. The remaining facade callers are the
+   byte-parity compat corpus, fuzz and examples, all under explicit deprecation
+   allows. Recommendation: keep the facade until the breaking release, then
+   delete it together with the `#[allow(deprecated)]` seams and the compat-test
+   allows (or migrate the tests to the roles where byte parity still holds).
 
 ## Sequence
 

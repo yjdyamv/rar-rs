@@ -8,6 +8,8 @@
 //! CBC, long-range matching) at sizes that complete in seconds, so the
 //! default suite still catches regressions in them.
 
+#![allow(deprecated)] // legacy facade (add_bytes/close/read) — kept for the scale tiers
+
 use rar5::RarArchive;
 use std::path::Path;
 

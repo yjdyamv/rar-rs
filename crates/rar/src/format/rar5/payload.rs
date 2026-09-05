@@ -9,7 +9,7 @@ use crate::archive::DecryptedPayload;
 use crate::codec::DecoderState;
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::*;
+use crate::format::rar5::COMP_METHOD_STORE;
 use crate::model::{DataChunk, FileHeader};
 
 use std::io::{Read, Seek, SeekFrom};

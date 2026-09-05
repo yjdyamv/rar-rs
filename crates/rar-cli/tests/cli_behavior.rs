@@ -3,6 +3,8 @@
 //! `CARGO_BIN_EXE_*` env vars are only defined for the package that builds
 //! the binaries (moved here from the library's interop.rs).
 
+#![allow(deprecated)] // fixture archives built through the legacy write facade
+
 use rar5::RarArchive;
 use std::io::Write;
 use std::path::Path;
@@ -1666,6 +1668,48 @@ fn cli_version_control_keeps_previous_versions() {
         assert_eq!(rar.read("ver.txt").unwrap(), b"v4");
         assert_eq!(rar.read("ver.txt;1").unwrap(), b"v3");
         assert!(!rar.namelist().contains(&"ver.txt;2"));
+    }
+}
+
+#[test]
+fn cli_lock_command_freezes_the_archive_against_edits() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("keep.txt"), b"k").unwrap();
+    let archive = dir.path().join("locked.rar");
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("keep.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["k"])
+        .arg(&archive)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "rar k must succeed on a normal archive");
+
+    // The locked archive refuses further edits but stays readable.
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["d", "-idq"])
+        .arg(&archive)
+        .arg("keep.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(!status.success(), "rar d must refuse a locked archive");
+    let mut rar = rar5::RarArchive::open(&archive).unwrap();
+    assert_eq!(rar.read("keep.txt").unwrap(), b"k");
+    drop(rar);
+    match rar5::RarArchive::open_append(&archive) {
+        Err(rar5::RarError::ArchiveLocked) => {}
+        Err(e) => panic!("expected ArchiveLocked after rar k, got {e:?}"),
+        Ok(_) => panic!("expected ArchiveLocked after rar k"),
     }
 }
 

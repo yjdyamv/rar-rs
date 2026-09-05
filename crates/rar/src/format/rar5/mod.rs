@@ -24,7 +24,7 @@ pub(crate) mod payload;
 pub mod vint;
 pub(crate) mod write;
 
-pub use headers::*;
+pub use headers::{DataChunk, FileHeader};
 
 // ── Archive Signature ──────────────────────────────────────────────────────
 /// RAR5 magic number (8 bytes).

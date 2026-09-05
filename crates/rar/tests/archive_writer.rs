@@ -1,3 +1,5 @@
+#![allow(deprecated)] // legacy facade (add*/close) — mirrors the typed writer
+
 use std::path::PathBuf;
 
 use rar5::{

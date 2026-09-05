@@ -7,17 +7,18 @@
 //! ## Quick Start
 //!
 //! ```no_run
-//! use rar5::RarArchive;
+//! use rar5::{ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions};
 //!
 //! // Create an archive
-//! let mut rar = RarArchive::create_with_options("backup.rar", Default::default()).unwrap();
-//! rar.add("src/", 3).unwrap();
-//! rar.add_bytes("notes.txt", b"Some notes", 3).unwrap();
-//! rar.close().unwrap();
+//! let mut writer = ArchiveWriter::create("backup.rar").unwrap();
+//! let opts = EntryWriteOptions::new().compression_level(CompressionLevel::NORMAL);
+//! writer.add_path("src/", opts).unwrap();
+//! writer.add_bytes("notes.txt", b"Some notes", opts).unwrap();
+//! writer.finish().unwrap();
 //!
 //! // Extract an archive
-//! let mut rar = RarArchive::open("backup.rar").unwrap();
-//! rar.extract_all("/tmp/output/").unwrap();
+//! let mut reader = ArchiveReader::open("backup.rar").unwrap();
+//! reader.extract_all("/tmp/output/").unwrap();
 //! ```
 //!
 //! ## License

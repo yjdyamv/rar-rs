@@ -71,6 +71,28 @@ pub(crate) fn volume_path_rar4(parent: &Path, base: &str, part_num: usize) -> Pa
     parent.join(format!("{base}.{}{:02}", letter as char, num))
 }
 
+/// Legacy volume base from `x.rar` / `x.r00` / `x.s37` (case-insensitive),
+/// the inverse of [`volume_path_rar4`].
+pub(crate) fn legacy_volume_base(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    if let Some(base) = lower.strip_suffix(".rar") {
+        return Some(name[..base.len()].to_string());
+    }
+    let bytes = lower.as_bytes();
+    if bytes.len() >= 5
+        && bytes[bytes.len() - 4] == b'.'
+        && bytes[bytes.len() - 3].is_ascii_lowercase()
+        && bytes[bytes.len() - 3] >= b'r'
+        && bytes[bytes.len() - 3] <= b'z'
+        && bytes[bytes.len() - 2].is_ascii_digit()
+        && bytes[bytes.len() - 1].is_ascii_digit()
+    {
+        let end = bytes.len() - 4;
+        return Some(name[..end].to_string());
+    }
+    None
+}
+
 /// Volume path with the part number zero-padded to `width` digits
 /// (`part01.rar` for width 2), matching WinRAR's naming for sets of 10
 /// or more volumes.

@@ -2,6 +2,8 @@
 //! to the full-scan opener, and transparently fall back when the archive
 //! has no quick-open record.
 
+#![allow(deprecated)] // compares list/read against the facade
+
 use std::fs;
 
 use rar5::RarArchive;

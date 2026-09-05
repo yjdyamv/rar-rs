@@ -455,15 +455,7 @@ impl WriterOptions {
             ));
         }
         if self.format_version == ArchiveVersion::Rar40 {
-            crate::format::rar4::create::validate_rar4_only(
-                self.quick_open,
-                self.blake2,
-                self.recovery_volumes_percent,
-                self.recovery_volume_count,
-                self.save_owner,
-                self.save_streams,
-                self.dictionary_size.is_some(),
-            )?;
+            crate::format::rar4::create::validate_rar4_only(self.into())?;
         }
         // A `Rar50` archive accepts every dictionary size; sizes above 4 GiB
         // keep WinRAR's auto semantics (see [`Self::into_legacy`]) instead of
@@ -511,6 +503,20 @@ impl WriterOptions {
             save_streams: self.save_streams,
             threads: self.thread_count.map(ThreadCount::get),
         })
+    }
+}
+
+impl From<&WriterOptions> for crate::format::rar4::create::Rar4WriteOptions {
+    fn from(options: &WriterOptions) -> Self {
+        Self {
+            quick_open: options.quick_open,
+            blake2: options.blake2,
+            recovery_volumes_percent: options.recovery_volumes_percent,
+            recovery_volume_count: options.recovery_volume_count,
+            save_owner: options.save_owner,
+            save_streams: options.save_streams,
+            has_dictionary: options.dictionary_size.is_some(),
+        }
     }
 }
 
@@ -683,6 +689,10 @@ pub struct ArchiveWriter {
     archive: Option<RarArchive>,
 }
 
+// The typed writer role delegates to the legacy write facade (create, add*,
+// close). The deprecation targets external users; the delegation seam stays
+// allowed until the facade is removed at the breaking release.
+#[allow(deprecated)]
 impl ArchiveWriter {
     /// Begin creating an archive with default [`WriterOptions`].
     pub fn create(path: impl AsRef<Path>) -> RarResult<Self> {

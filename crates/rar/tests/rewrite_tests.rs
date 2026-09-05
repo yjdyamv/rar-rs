@@ -1,5 +1,7 @@
 //! Surgical rewrite commands: delete, append, lock, recovery-record addition, rename, repair and comment edits.
 
+#![allow(deprecated)] // legacy rewrite facade; editor parity lives in tests/archive_editor.rs
+
 #[path = "support/mod.rs"]
 mod support;
 #[allow(unused_imports)]

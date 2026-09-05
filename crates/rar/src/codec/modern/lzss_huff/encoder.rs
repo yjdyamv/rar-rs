@@ -7,7 +7,13 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::*;
+use super::{
+    BLOCK_CHECKSUM_SEED, DIST_CACHE_SIZE, FILTER_DELTA, FILTER_E8, FILTER_E8E9, HUFF_BC, HUFF_DC,
+    HUFF_DCX, HUFF_LDC, HUFF_NC, HUFF_RC, MAX_CODE_LENGTH, NIBBLE_ESCAPE, SYM_CACHE_BASE,
+    SYM_FILTER, SYM_MATCH_BASE, SYM_REPEAT,
+};
+#[cfg(test)]
+use super::{DecodeOptions, decode_to_writer};
 use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::filters::apply_filter_encode;
 use crate::codec::common::huffman::{EncodeTable, build_code_lengths_from_freqs, encode_symbol};
@@ -3168,7 +3174,6 @@ fn write_filter_data(writer: &mut BitWriter, value: u32) {
 
 #[cfg(test)]
 mod encode_tests {
-    use super::decode_to_writer;
     use super::*;
     use crate::codec::common::huffman::DecodeTable;
 

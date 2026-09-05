@@ -3,6 +3,8 @@
 //! after structural edits. Byte parity with the legacy name-based
 //! operations is checked on twin archive copies.
 
+#![allow(deprecated)] // legacy facade (delete/rename/lock/list/read) — kept for byte-parity checks
+
 use rar5::{ArchiveEditor, ArchiveReader, ArchiveVersion, EditPlan, RarArchive, RarError};
 
 fn stored_level() -> u8 {
@@ -151,6 +153,39 @@ fn rename_entries_matches_legacy_output_bytes_with_dir_expansion() {
     let mut reader = ArchiveReader::open(&twin).unwrap();
     let child = reader.unique_entry("renamed/x.txt").unwrap();
     assert_eq!(reader.read_entry(child).unwrap(), b"leaf payload");
+}
+
+#[test]
+fn lock_matches_legacy_locked_archive_and_refuses_further_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let (src, twin) = fixture_pair(dir.path(), "lock");
+
+    let mut legacy = RarArchive::open(&src).unwrap();
+    legacy.lock().unwrap();
+    drop(legacy);
+
+    let mut editor = ArchiveEditor::open(&twin).unwrap();
+    editor.lock().unwrap();
+
+    assert_eq!(
+        std::fs::read(&src).unwrap(),
+        std::fs::read(&twin).unwrap(),
+        "editor lock must produce the same in-place main-header patch"
+    );
+
+    // Locked archives are read-only: any rewrite fails with ArchiveLocked,
+    // while opening them for read/edit remains allowed.
+    let mut locked_editor = ArchiveEditor::open(&twin).unwrap();
+    let other = locked_editor.unique_entry("other.txt").unwrap();
+    assert!(matches!(
+        locked_editor.delete_entries(&[other]),
+        Err(RarError::ArchiveLocked)
+    ));
+
+    // Content still readable after the lock.
+    let mut reader = ArchiveReader::open(&twin).unwrap();
+    let other_id = reader.unique_entry("other.txt").unwrap();
+    assert_eq!(reader.read_entry(other_id).unwrap(), b"other");
 }
 
 #[test]

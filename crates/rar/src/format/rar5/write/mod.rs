@@ -26,10 +26,16 @@ use crate::model::{DataChunk, FileHeader};
 #[cfg(feature = "parallel")]
 use crate::write_progress::ProgressTracker;
 
-use crate::format::rar5::headers::*;
+#[cfg(unix)]
+use crate::format::rar5::headers::build_owner_extra_record;
+use crate::format::rar5::headers::{file_time_extra_record, redirect_extra_bytes};
 #[cfg(windows)]
 use crate::format::rar5::vint;
-use crate::format::rar5::*;
+use crate::format::rar5::{
+    BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, COMP_METHOD_STORE,
+    ENCR_PBKDF2_ITER_LOG, FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX,
+    level_to_method,
+};
 pub(crate) mod engine;
 pub(crate) mod layout;
 #[cfg(windows)]
@@ -178,6 +184,7 @@ impl RarArchive {
     }
 
     /// Add a file from the filesystem to the archive.
+    #[deprecated(note = "use ArchiveWriter::add_path instead")]
     pub fn add(&mut self, path: impl AsRef<Path>, compression_level: u8) -> RarResult<()> {
         self.check_cancel()?;
         let path = path.as_ref();
@@ -199,6 +206,7 @@ impl RarArchive {
     ///
     /// `arcname` overrides the entry name in the archive. For directories the
     /// children keep the same relative layout beneath `arcname`.
+    #[deprecated(note = "use ArchiveWriter::add_path_as instead")]
     pub fn add_as(
         &mut self,
         path: impl AsRef<Path>,
@@ -982,6 +990,7 @@ impl RarArchive {
     /// The entry carries no data; `redir_type` is 1 (Unix symlink),
     /// 2 (Windows symlink), 3 (Windows junction), 4 (hardlink) or
     /// 5 (file copy) and `target` is the referenced member name.
+    #[deprecated(note = "use ArchiveWriter::add_redirect instead")]
     pub fn add_redirect(&mut self, name: &str, redir_type: u64, target: &str) -> RarResult<()> {
         if self.mode != Mode::Write && self.mode != Mode::Append {
             return Err(RarError::Format(
@@ -1012,6 +1021,7 @@ impl RarArchive {
     /// Writes the directory header without traversing children. Callers that
     /// enumerate files themselves (e.g. with exclusion filtering) use this to
     /// keep empty directories and the directory structure in the archive.
+    #[deprecated(note = "use ArchiveWriter::add_directory instead")]
     pub fn add_directory_only(&mut self, path: impl AsRef<Path>, arcname: &str) -> RarResult<()> {
         self.check_cancel()?;
         let path = path.as_ref();
@@ -1222,6 +1232,7 @@ impl RarArchive {
     }
 
     /// Add raw bytes as a named file in the archive.
+    #[deprecated(note = "use ArchiveWriter::add_bytes instead")]
     pub fn add_bytes(
         &mut self,
         arcname: &str,
@@ -1387,6 +1398,7 @@ impl RarArchive {
     /// (non-solid only), while directories and solid archives fall back to
     /// the sequential path. Without the feature this is a plain sequential
     /// loop over the same `add*` calls.
+    #[deprecated(note = "use ArchiveWriter::add_batch instead")]
     pub fn add_batch(&mut self, entries: &[BatchEntry<'_>]) -> RarResult<()> {
         self.check_cancel()?;
         #[cfg(feature = "parallel")]
@@ -1426,6 +1438,9 @@ impl RarArchive {
         Ok(())
     }
 
+    // Facade batch-entry dispatcher still routes through the deprecated
+    // add*/add_as/add_directory_only entry points.
+    #[allow(deprecated)]
     fn add_batch_entry_sequential(&mut self, entry: &BatchEntry<'_>) -> RarResult<()> {
         self.check_cancel()?;
         match *entry {

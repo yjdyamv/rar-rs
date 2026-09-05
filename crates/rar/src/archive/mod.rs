@@ -19,16 +19,20 @@ mod writer;
 mod tests;
 
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::codec::DecoderState;
 use crate::crypto;
 use crate::crypto::parse_archive_encrypt_header;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::*;
+use crate::format::rar5::headers::{ArchiveHeader, main_header_locator_fields, split_main_extra};
 use crate::format::rar5::vint;
-use crate::format::rar5::*;
+use crate::format::rar5::{
+    ARCHIVE_FLAG_LOCKED, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_ARCHIVE_HEADER,
+    BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
+    BLOCK_TYPE_SERVICE_HEADER,
+};
 use crate::fs::atomic::{copy_prefix, read_write_create, replace_file, temp_sibling_path};
 use crate::version::ArchiveVersion;
 use crate::write_progress::ProgressTracker;
@@ -731,6 +735,7 @@ impl RarArchive {
     /// Lock the archive (like `rar k`): sets the `LOCKED` flag in the main
     /// archive header, making the archive read-only. Locking is
     /// irreversible.
+    #[deprecated(note = "use ArchiveEditor::lock instead")]
     pub fn lock(&mut self) -> RarResult<()> {
         if self.mode != Mode::Read {
             return Err(RarError::Format(
@@ -826,6 +831,7 @@ impl RarArchive {
     /// <percent>`), rebuilding the archive header locator. Existing
     /// members are copied verbatim; an existing recovery record is
     /// replaced.
+    #[deprecated(note = "use an EditPlan with set_recovery instead")]
     pub fn add_recovery_record(&mut self, percent: u8) -> RarResult<()> {
         if self.mode != Mode::Read {
             return Err(RarError::Format(
@@ -880,6 +886,7 @@ impl RarArchive {
     /// The archive data is staged in a temporary sibling file and moved to
     /// `path` only when [`Self::close`] succeeds, so an aborted or failed
     /// write never leaves a partial archive at `path`.
+    #[deprecated(note = "use ArchiveWriter::create_with instead")]
     pub fn create_with_options(
         path: impl AsRef<Path>,
         opts: crate::options::CreateOptions,
@@ -1086,6 +1093,7 @@ impl RarArchive {
     }
 }
 
+#[allow(deprecated)] // Drop seam: auto-close shares the deprecated facade path
 impl Drop for RarArchive {
     fn drop(&mut self) {
         let _ = self.close();

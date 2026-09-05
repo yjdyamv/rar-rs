@@ -5,7 +5,16 @@
 //!
 //! License: BSD-2-Clause
 
-use super::*;
+use super::{
+    BLOCK_CHECKSUM_SEED, DIST_CACHE_SIZE, FILTER_DELTA, HUFF_BC, HUFF_DC, HUFF_DCX, HUFF_LDC,
+    HUFF_NC, HUFF_RC, NIBBLE_ESCAPE, SYM_CACHE_BASE, SYM_FILTER, SYM_MATCH_BASE, SYM_REPEAT,
+};
+#[cfg(test)]
+use super::{
+    FILTER_ARM, FILTER_E8, FILTER_E8E9, FilterSpec, MAX_FILTER_BLOCK_LENGTH,
+    encode_with_auto_delta_filter, encode_with_auto_x86_filter, encode_with_filters,
+    pick_delta_channel,
+};
 use crate::codec::common::bitstream::BitReader;
 use crate::codec::common::filters::apply_filter_decode;
 use crate::codec::common::huffman::{DecodeTable, decode_symbol};

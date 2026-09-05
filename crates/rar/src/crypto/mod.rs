@@ -12,7 +12,12 @@ pub mod rar50;
 pub use rar15::Rar15Cipher;
 pub use rar20::{Error as Rar20Error, Rar20Cipher};
 pub use rar30::{Error as Rar30Error, Rar30Cipher};
-pub use rar50::*;
+pub(crate) use rar50::constant_time_eq;
+pub use rar50::{
+    Aes256CbcStream, DerivedKeys, EncryptionParams, MAX_KDF_COUNT_LOG, decrypt_data,
+    derive_header_key, derive_key, derive_keys, encrypt_data, is_encrypted,
+    parse_archive_encrypt_header, parse_encryption_extra, zero_padded_len,
+};
 
 /// The longest password any RAR key derivation sees.
 ///

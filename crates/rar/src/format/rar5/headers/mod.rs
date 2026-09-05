@@ -18,8 +18,18 @@ pub(crate) mod parse;
 pub(crate) mod serialize;
 
 pub use crate::model::{DataChunk, FileHeader};
-pub use parse::*;
-pub use serialize::*;
+pub use parse::read_block;
+pub(crate) use parse::{
+    block_extra_area, locator_quick_open_offset, main_header_locator_fields, parse_block_bytes,
+    parse_redirect_record, parse_service_subdata, parse_stream_params, split_main_extra,
+};
+#[cfg(unix)]
+pub(crate) use serialize::build_owner_extra_record;
+pub use serialize::hash_extra_record;
+pub(crate) use serialize::{
+    build_comment_block, build_service_block, file_time_extra_record, redirect_extra_bytes,
+    vint_fixed5,
+};
 
 /// A raw, unparsed RAR5 block as read from the archive stream.
 pub struct RawBlock {

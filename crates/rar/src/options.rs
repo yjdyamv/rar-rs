@@ -244,6 +244,13 @@ pub struct ExtractOptions {
     pub max_dict_size: Option<u64>,
 }
 
+impl ExtractOptions {
+    /// Default dictionary cap (`Some(4 GiB)`), like WinRAR, which refuses
+    /// archives whose dictionary exceeds 4 GiB (RAR7) unless `-mdx<size>`
+    /// raises the cap.
+    pub const DEFAULT_MAX_DICT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+}
+
 impl Default for ExtractOptions {
     fn default() -> Self {
         Self {
@@ -256,7 +263,7 @@ impl Default for ExtractOptions {
             keep_broken: false,
             set_creation_time: false,
             set_access_time: false,
-            max_dict_size: Some(4 * 1024 * 1024 * 1024),
+            max_dict_size: Some(Self::DEFAULT_MAX_DICT_SIZE),
         }
     }
 }

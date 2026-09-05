@@ -5,7 +5,11 @@
 //! WinRAR compression-method byte (STORE/FASTEST..=BEST) into a call on the
 //! underlying raw `decode_raw` machinery.
 
-pub use super::decoder::*;
+pub use super::decoder::{
+    BlockStat, DecodeOptions, DecoderState, MAX_STREAMING_FILTER_BUFFER, StreamAnalysis,
+    TraceSymbol, analyze_stream, decode_raw, decode_standalone, decode_standalone_to_writer,
+    decode_to_writer, trace_stream,
+};
 
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::{COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_STORE};

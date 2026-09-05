@@ -1,5 +1,7 @@
 //! Cross-validation against the official rar/unrar console tools (env-gated via SA_OFFICIAL_RAR / SA_OFFICIAL_UNRAR).
 
+#![allow(deprecated)] // legacy facade drives the official-tool fixtures
+
 #[path = "support/mod.rs"]
 mod support;
 #[allow(unused_imports)]

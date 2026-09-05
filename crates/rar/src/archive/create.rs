@@ -12,7 +12,7 @@ use super::{
 };
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::*;
+use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader};
 use crate::format::rar5::vint;
 use crate::format::rar5::{
     ARCHIVE_FLAG_RECOVERY, ARCHIVE_FLAG_SOLID, ARCHIVE_FLAG_VOLUME, BLOCK_FLAG_EXTRA_DATA,
@@ -148,6 +148,7 @@ impl RarArchive {
     }
 
     /// Finalize the archive (writes end-of-archive block in write mode).
+    #[deprecated(note = "use ArchiveWriter::finish instead")]
     pub fn close(&mut self) -> RarResult<()> {
         self.check_cancel()?;
         self.finish_writing()?;

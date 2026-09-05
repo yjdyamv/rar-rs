@@ -1,8 +1,6 @@
 //! Safe-path policy for extraction: member names are sanitized before
 //! they can reach the filesystem.
 
-use std::path::Path;
-
 use crate::error::{RarError, RarResult};
 
 /// Sanitize an archive member name for safe extraction.
@@ -49,18 +47,4 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
         )));
     }
     Ok(out)
-}
-
-/// Resolve `name` against `dest_dir` for extraction, refusing results that
-/// escape the directory.
-#[allow(dead_code)]
-pub(crate) fn contained_dest(dest_dir: &Path, name: &str) -> RarResult<std::path::PathBuf> {
-    let safe = sanitize_archive_path(name)?;
-    let dest = dest_dir.join(&safe);
-    if !dest.starts_with(dest_dir) {
-        return Err(RarError::Security(format!(
-            "entry name {name:?} escapes the destination directory"
-        )));
-    }
-    Ok(dest)
 }

@@ -3,9 +3,19 @@
 use std::io::{self, Read, Seek};
 
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::*;
+use crate::format::rar5::headers::{
+    ArchiveHeader, BlockMeta, EndOfArchiveHeader, FileHeader, RawBlock, RawHeader, RedirectSpec,
+};
 use crate::format::rar5::vint;
-use crate::format::rar5::*;
+use crate::format::rar5::{
+    ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA, COMP_INFO_DICT_MASK,
+    COMP_INFO_DICT_SHIFT, COMP_INFO_METHOD_MASK, COMP_INFO_METHOD_SHIFT, COMP_INFO_SOLID_BIT,
+    COMP_INFO_VERSION_MASK, EXTRA_FILE_HASH, EXTRA_FILE_OWNER, EXTRA_FILE_REDIRECT,
+    EXTRA_FILE_TIME, EXTRA_FILE_VERSION, EXTRA_SERVICE_SUBDATA, FILE_FLAG_CRC32,
+    FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX,
+};
+#[cfg(test)]
+use crate::format::rar5::{BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_FILE_HEADER};
 
 pub fn read_block<R: Read + Seek>(
     reader: &mut R,

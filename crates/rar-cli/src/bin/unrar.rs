@@ -375,7 +375,7 @@ fn cmd_extract(
         set_access_time: ts.save_atime,
         // WinRAR refuses dictionaries above 4 GiB unless -mdx raises
         // the cap; None here means "use the default cap".
-        max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),
+        max_dict_size: max_dict_size.or(Some(rar5::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
     let count = if args.names.is_empty() {
@@ -448,7 +448,7 @@ fn extract_to_stdout(
     let options = rar5::ExtractOptions {
         max_unpacked_bytes: None,
         max_total_unpacked_bytes: None,
-        max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),
+        max_dict_size: max_dict_size.or(Some(rar5::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
     for id in wanted {
@@ -488,7 +488,7 @@ fn cmd_extract_flat(
         keep_broken: args.keep_broken,
         set_creation_time: ts.save_ctime,
         set_access_time: ts.save_atime,
-        max_dict_size: max_dict_size.or(Some(4 * 1024 * 1024 * 1024)),
+        max_dict_size: max_dict_size.or(Some(rar5::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
     let count = if args.names.is_empty() {

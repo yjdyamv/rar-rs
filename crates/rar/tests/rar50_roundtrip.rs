@@ -1,5 +1,7 @@
 //! Self roundtrips: create/read/extract across solid, encrypted, multi-volume, batch, streaming and progress paths.
 
+#![allow(deprecated)] // legacy facade round trips; role coverage lives in tests/{archive_reader,archive_writer}.rs
+
 #[path = "support/mod.rs"]
 mod support;
 #[allow(unused_imports)]
