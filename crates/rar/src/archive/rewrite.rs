@@ -257,19 +257,44 @@ impl RarArchive {
                 "delete requires an archive opened for reading".into(),
             ));
         }
-        self.ensure_write_ctx();
-        let mut deleted = vec![false; self.entries.len()];
-        let mut count = 0usize;
+        // Resolve every name to a distinct catalog index before any rewrite
+        // starts: a missing name fails the whole call and leaves the archive
+        // untouched, and repeated names delete successive duplicate members
+        // (the legacy contract).
+        let mut selected: Vec<usize> = Vec::with_capacity(names.len());
         for name in names {
             let idx = self
                 .entries
                 .iter()
                 .enumerate()
-                .find(|(i, e)| e.name() == *name && !deleted[*i])
+                .find(|(i, e)| e.name() == *name && !selected.contains(i))
                 .map(|(i, _)| i)
                 .ok_or_else(|| RarError::MemberNotFound {
                     name: name.to_string(),
                 })?;
+            selected.push(idx);
+        }
+        self.delete_indexes(&selected)
+    }
+
+    /// Delete the members at the given catalog indexes (like `rar d`);
+    /// returns the number deleted. Index-based core shared by the
+    /// name-based [`Self::delete`] and the typed [`ArchiveEditor`].
+    pub(crate) fn delete_indexes(&mut self, indexes: &[usize]) -> RarResult<usize> {
+        if self.mode != Mode::Read {
+            return Err(RarError::Format(
+                "delete requires an archive opened for reading".into(),
+            ));
+        }
+        self.ensure_write_ctx();
+        let mut deleted = vec![false; self.entries.len()];
+        let mut count = 0usize;
+        for &idx in indexes {
+            // Out-of-range or duplicate indexes are ignored: callers resolve
+            // catalog IDs first, and the name-based path never duplicates.
+            if idx >= deleted.len() || deleted[idx] {
+                continue;
+            }
             deleted[idx] = true;
             count += 1;
         }
@@ -748,6 +773,71 @@ impl RarArchive {
             count += 1;
         }
 
+        self.apply_rename_map(map)?;
+        Ok(count)
+    }
+
+    /// Rename the members at the given catalog indexes (like `rar rn`),
+    /// expanding directory renames to their descendants; returns the number
+    /// of renamed members. Index-based core shared by the name-based
+    /// [`Self::rename`] and the typed [`ArchiveEditor`].
+    pub(crate) fn rename_indexes(&mut self, renames: &[(usize, String)]) -> RarResult<usize> {
+        if self.mode != Mode::Read {
+            return Err(RarError::Format(
+                "rename requires an archive opened for reading".into(),
+            ));
+        }
+        self.ensure_write_ctx();
+        if self.main_header_is_locked()? {
+            return Err(RarError::ArchiveLocked);
+        }
+
+        // Apply the pairs sequentially, honoring earlier renames in the same
+        // call and expanding directory renames to their descendants. The
+        // expansion rules mirror the name-based path exactly: a directory's
+        // old prefix is matched against the original member names, and
+        // already-mapped members are left alone.
+        let mut map: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+        let mut count = 0usize;
+        for (idx, new) in renames {
+            if *idx >= self.entries.len() {
+                return Err(RarError::StaleEntryId);
+            }
+            let old_norm = map
+                .get(idx)
+                .map(|n| n.as_str())
+                .unwrap_or(self.entries[*idx].name())
+                .trim_end_matches('/')
+                .to_string();
+            let is_dir = self.entries[*idx].is_dir();
+            let new_norm = new.trim_end_matches('/').to_string();
+            if is_dir {
+                map.insert(*idx, format!("{new_norm}/"));
+                let prefix = format!("{old_norm}/");
+                for (i, e) in self.entries.iter().enumerate() {
+                    if i == *idx || map.contains_key(&i) {
+                        continue;
+                    }
+                    if let Some(rest) = e.name().strip_prefix(&prefix) {
+                        map.insert(i, format!("{new_norm}/{rest}"));
+                    }
+                }
+            } else {
+                map.insert(*idx, new_norm.clone());
+            }
+            count += 1;
+        }
+        if count == 0 {
+            return Err(RarError::Format("no members to rename".into()));
+        }
+        self.apply_rename_map(map)?;
+        Ok(count)
+    }
+
+    /// Run a planned rename map (index -> new name) through the rewrite
+    /// pipeline and reload the catalog. Shared by the name- and
+    /// index-based rename paths.
+    fn apply_rename_map(&mut self, map: std::collections::HashMap<usize, String>) -> RarResult<()> {
         if self.volume_paths.len() > 1 {
             let deleted = vec![false; self.entries.len()];
             self.rewrite_multivolume(&deleted, None, Some(&map))?;
@@ -785,7 +875,7 @@ impl RarArchive {
         self.read_ctx_mut().solid_state = None;
         self.read_ctx_mut().solid_decoded_through = -1;
         self.open_read()?;
-        Ok(count)
+        Ok(())
     }
 
     /// Read the archive comment (the "CMT" service block), if any.

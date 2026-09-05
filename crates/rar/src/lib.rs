@@ -45,10 +45,10 @@ pub mod version;
 mod write_progress;
 
 pub use archive::{
-    AppendOptions, ArchiveEntry, ArchiveReader, ArchiveWriter, BatchEntry, CompressionLevel,
-    DictionarySize, Entries, EntryId, EntryMatches, EntryRef, EntryWriteOptions, OpenOptions,
-    RarArchive, ScanStrategy, SolidMode, ThreadCount, VerificationFailure, VerificationReport,
-    WriteEntry, WriteReport, WriterOptions, discover_volumes,
+    AppendOptions, ArchiveEditor, ArchiveEntry, ArchiveReader, ArchiveWriter, BatchEntry,
+    CompressionLevel, DictionarySize, Entries, EntryId, EntryMatches, EntryRef, EntryWriteOptions,
+    OpenOptions, RarArchive, ScanStrategy, SolidMode, ThreadCount, VerificationFailure,
+    VerificationReport, WriteEntry, WriteReport, WriterOptions, discover_volumes,
 };
 // Multi-threaded encoding internals used by the mtbench example and the
 // napi binding's streaming path; hidden from the public docs but stable

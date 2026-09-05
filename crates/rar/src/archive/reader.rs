@@ -18,7 +18,7 @@ use crate::options::ExtractOptions;
 
 static NEXT_CATALOG_TOKEN: AtomicU64 = AtomicU64::new(1);
 
-fn allocate_catalog_token() -> RarResult<u64> {
+pub(crate) fn allocate_catalog_token() -> RarResult<u64> {
     NEXT_CATALOG_TOKEN
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             (current != 0).then(|| current.checked_add(1).unwrap_or(0))
@@ -102,6 +102,18 @@ impl fmt::Debug for EntryId {
     }
 }
 
+impl EntryId {
+    /// Whether this ID was minted for the catalog with `token`.
+    pub(crate) const fn scoped_to(self, token: u64) -> bool {
+        self.catalog_token == token
+    }
+
+    /// Position of the member in the catalog that minted this ID.
+    pub(crate) const fn catalog_index(self) -> usize {
+        self.index
+    }
+}
+
 /// An archive entry paired with its reader-scoped [`EntryId`].
 #[derive(Clone, Copy)]
 pub struct EntryRef<'a> {
@@ -110,6 +122,10 @@ pub struct EntryRef<'a> {
 }
 
 impl<'a> EntryRef<'a> {
+    pub(crate) fn new(id: EntryId, entry: &'a ArchiveEntry) -> Self {
+        EntryRef { id, entry }
+    }
+
     /// Return the reader-scoped identity of this entry.
     pub fn id(self) -> EntryId {
         self.id
@@ -142,6 +158,15 @@ impl std::ops::Deref for EntryRef<'_> {
 pub struct Entries<'a> {
     catalog_token: u64,
     entries: std::iter::Enumerate<std::slice::Iter<'a, ArchiveEntry>>,
+}
+
+impl<'a> Entries<'a> {
+    pub(crate) fn new(catalog_token: u64, entries: &'a [ArchiveEntry]) -> Self {
+        Entries {
+            catalog_token,
+            entries: entries.iter().enumerate(),
+        }
+    }
 }
 
 impl<'a> Iterator for Entries<'a> {
@@ -185,6 +210,20 @@ pub struct EntryMatches<'reader, 'query> {
     catalog_token: u64,
     name: &'query str,
     entries: std::iter::Enumerate<std::slice::Iter<'reader, ArchiveEntry>>,
+}
+
+impl<'reader, 'query> EntryMatches<'reader, 'query> {
+    pub(crate) fn new(
+        catalog_token: u64,
+        name: &'query str,
+        entries: &'reader [ArchiveEntry],
+    ) -> Self {
+        EntryMatches {
+            catalog_token,
+            name,
+            entries: entries.iter().enumerate(),
+        }
+    }
 }
 
 impl<'reader> Iterator for EntryMatches<'reader, '_> {

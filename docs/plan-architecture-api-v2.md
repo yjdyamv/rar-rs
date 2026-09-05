@@ -155,10 +155,15 @@ unsupported (matching the legacy seam).
 
 ## Phase 4: editor API and combined transactions
 
-- [ ] Add `ArchiveEditor` catalog and ID validation.
-- [ ] Extract internal index-based delete and rename operations.
-- [ ] Add ID-based delete/rename APIs.
-- [ ] Add catalog generation invalidation after structural edits.
+Phase 4 core slice completed here: the typed `ArchiveEditor` role with a
+catalog and ID-based structural edits is in place and verified against the
+legacy rewrite engine. `EditPlan`, comment/recovery combination, and the
+binding migrations remain.
+
+- [x] Add `ArchiveEditor` catalog and ID validation.
+- [x] Extract internal index-based delete and rename operations.
+- [x] Add ID-based delete/rename APIs.
+- [x] Add catalog generation invalidation after structural edits.
 - [ ] Introduce `EditPlan` only after individual ID operations are stable.
 - [ ] Combine delete, rename, comment, and recovery changes into one rewrite.
 - [ ] Define and test multi-volume transaction/rollback behavior.
@@ -169,6 +174,27 @@ Exit criteria:
 - stale IDs are detected;
 - duplicate names can be edited independently;
 - a failed combined edit leaves all original volumes intact.
+
+### Phase 4 slice notes (recorded with the editor role)
+
+- The rewrite engine was already index-based under the hood; the legacy
+  name-based `delete`/`rename` now resolve names to catalog indexes and
+  delegate to the extracted `delete_indexes`/`rename_indexes` cores, so
+  both entry points share one implementation and byte behavior.
+- `ArchiveEditor` mirrors the reader's catalog (`entries`/`entries_named`/
+  `entry`/`unique_entry`, scoped `EntryId`s) plus `delete_entries` and
+  `rename_entries`. Each call is one atomic rewrite: a failed edit leaves
+  the archive and the catalog generation untouched; a successful edit
+  re-scans the catalog and bumps the generation so every previously
+  issued ID fails with `StaleEntryId`.
+- Directory renames expand to descendants exactly like the legacy rename;
+  delete-everything erases the archive like `rar d`; duplicate names are
+  edited independently by ID. RAR4 (legacy-container) edits are refused
+  with `Unsupported` — the rewrite engine is RAR5-only.
+- Tests: `tests/archive_editor.rs` — duplicate-safe catalog, byte parity
+  with the legacy delete/rename on twin archives, generation
+  invalidation (including foreign-editor IDs), erase-all, solid-chain
+  delete round-trip, RAR4 rejection.
 
 ## Phase 5: internal directory convergence
 
