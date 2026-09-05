@@ -108,14 +108,33 @@ pub(crate) fn replace_file(src: &Path, dest: &Path) -> RarResult<()> {
     }
 }
 
+/// Replace `dest` with `src` on WASI (this crate's only non-unix,
+/// non-windows target is `wasm32-wasip1-threads`).
+///
+/// WASI Preview 1 has no atomic "replace" primitive, yet every commit path
+/// that reaches here replaces an *existing* archive (append/delete/comment
+/// and recovery-record edits, overwrite-on-extract, repair in place).
+///
+/// Try a plain rename first: where the host rename already overwrites an
+/// existing destination it stays atomic and no extra step runs — POSIX hosts
+/// rename(2), and Node's WASI (uvwasi) maps `path_rename` to libuv's
+/// `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING)` on Windows. Only when the
+/// rename still fails and both files are present do we fall back to
+/// delete-then-rename (the pre-hardening behavior), which is required by
+/// WASI implementations whose rename refuses to overwrite (e.g. shims that
+/// surface `EXIST`). The staged temp sibling `src` always exists at commit
+/// time, so the `src.exists()` guard keeps the original destination intact
+/// on unrelated failures (the data-loss edge fixed by the atomic hardening).
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn replace_file(src: &Path, dest: &Path) -> RarResult<()> {
-    if dest.exists() {
-        return Err(RarError::Unsupported(
-            "atomic replacement is not supported on this platform".into(),
-        ));
+    match fs::rename(src, dest) {
+        Ok(()) => Ok(()),
+        Err(_) if dest.exists() && src.exists() => {
+            fs::remove_file(dest)?;
+            fs::rename(src, dest).map_err(RarError::Io)
+        }
+        Err(first) => Err(RarError::Io(first)),
     }
-    fs::rename(src, dest).map_err(RarError::Io)
 }
 
 #[cfg(test)]
