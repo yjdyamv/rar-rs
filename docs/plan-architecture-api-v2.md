@@ -323,7 +323,8 @@ preserving public paths through re-export shims until a breaking release.
 - [ ] Split CLI binaries into `src/bin` plus shared command modules
       (done: entry points moved to `src/bin/{rar,unrar}.rs`, shared modules
       stay in `src/` referenced via `#[path]`).
-- [ ] Split N-API tasks/options/error mapping out of `src/lib.rs`.
+- [ ] Split N-API tasks/options/error mapping out of `src/lib.rs`
+      (error mapping is now `src/error.rs`; options/tasks split remain).
 - [ ] Remove transitional wildcard imports and add dependency guards.
 
 ## Phase 6: breaking-release decisions
