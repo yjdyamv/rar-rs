@@ -21,6 +21,10 @@ wide = { workspace = true, optional = true }
 
 [features]
 default = []
+# Opt-in to the legacy container's low-level wire surface (`rar5::rar40`).
+# Off by default: the RAR4 wire helpers have no in-tree users and are kept
+# only for downstream raw access until the breaking release removes them.
+raw = []
 parallel = ["dep:rayon"]
 simd = ["dep:wide"]
 

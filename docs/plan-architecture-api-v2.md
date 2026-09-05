@@ -350,7 +350,9 @@ maintainer decision before execution.
 - [ ] Decide whether to rename crate `rar5`.
 - [ ] Split archive format from compression version in the public model.
 - [ ] Decide which low-level modules remain supported.
-- [ ] Move unsupported low-level APIs behind `raw`/`unstable`, if appropriate.
+- [x] Move unsupported low-level APIs behind `raw`/`unstable`, if appropriate
+      (done: `rar5::rar40` is behind a new default-off `raw` feature; `rar50`
+      stays public while in-tree wire tests use it).
 - [ ] Deprecate, then remove, legacy facade methods only after all in-tree
       consumers use API v2.
 

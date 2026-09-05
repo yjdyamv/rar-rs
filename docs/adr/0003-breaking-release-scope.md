@@ -69,10 +69,12 @@ tests/examples/fuzz. The npm package is already `rar-rs-napi`.
 3. Supported low-level modules. `rar40` (alias) has no in-tree user;
    `rar50` (alias) is used by three wire-level test files. `recovery`,
    `name_policy`, `lzss_huff` internals are used by bindings/CLI/examples.
-   Recommendation: move the wire-level `rar40`/`rar50` surfaces behind
-   `raw`/`unstable` gated modules, keep `recovery`/`name_policy`
-   doc(hidden) as-is, and keep `codec::lzss_huff` public (stable enough
-   for the mtbench/napi streaming paths).
+   Recommendation: gate the wire-level `rar40` surface behind a `raw`
+   feature (done; `rar5::rar40` is now feature-gated and `format::rar4` is
+   internal), keep `rar50` public while the in-tree wire tests still use
+   it, keep `recovery`/`name_policy` doc(hidden) as-is, and keep
+   `codec::lzss_huff` public (stable enough for the mtbench/napi streaming
+   paths).
 4. Legacy facade removal. Only the compat tests, the `rar u/f`
    version-control rename chain and `rar k` (lock) still call legacy
    mutation; read paths already use `ArchiveReader`. Recommendation:

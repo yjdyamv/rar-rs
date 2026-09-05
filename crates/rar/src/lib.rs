@@ -34,13 +34,15 @@ pub mod features;
 mod fs;
 mod model;
 // Internal home of the historical `rar40`/`rar50` module trees; the old
-// public paths remain available as re-export aliases below.
+// public paths are re-exported below. `rar40` is raw-gated (feature
+// `raw`); `rar50` stays public because in-tree wire tests still use it.
 #[doc(hidden)]
 pub mod format;
 #[doc(hidden)]
 pub mod name_policy;
 pub mod options;
 mod parallel;
+#[cfg(feature = "raw")]
 pub use crate::format::rar4 as rar40;
 pub use crate::format::rar5 as rar50;
 #[doc(hidden)]
