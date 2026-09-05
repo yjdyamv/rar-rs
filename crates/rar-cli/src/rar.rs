@@ -848,37 +848,92 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         dict_size_log,
         dict_size_bytes,
     )?;
-    let dict_size_log = if force_v70 { None } else { dict_size_log };
-    let solid_reset = match args.solid_reset.as_str() {
-        "volume" => rar5::SolidReset::PerVolume,
-        "extension" => rar5::SolidReset::PerExtension,
-        _ => rar5::SolidReset::Continuous,
+    // The typed API has no `force_v70` test seam: `-ma7` selects the Rar70
+    // format (every member v70, 32 MiB default dictionary), while
+    // `-ma5`/default with a > 4 GiB `-md` keeps the legacy auto mode (v70
+    // members only when a member's effective dictionary exceeds 4 GiB —
+    // exactly the bytes the writer produced before).
+    let typed_format = if force_v70 {
+        rar5::ArchiveVersion::Rar70
+    } else {
+        format_version
     };
-    let opts = rar5::CreateOptions {
-        format_version,
-        solid: args.solid
-            || args.solid_params.is_some()
-            || solid_reset != rar5::SolidReset::Continuous,
-        solid_reset,
-        quick_open: args.quick_open,
-        blake2: args.blake2,
-        password: password.clone(),
-        encrypt_headers: header_encrypt,
-        recovery_percent: args.recovery_percent,
-        recovery_volumes_percent,
-        recovery_volume_count,
-        volume_size: args.volume_size,
-        dict_size_log,
-        dict_size_bytes: v70_dict_bytes,
-        save_ctime: ts.save_ctime,
-        save_atime: ts.save_atime,
-        save_mtime: ts.save_mtime,
-        save_owner: misc.owner,
-        save_streams: misc.save_streams,
-        force_v70,
-        time_precision_seconds: ts.precision_seconds,
-        threads: args.threads,
+    // The `-md` dictionary in bytes. RAR4 never receives one: its writer
+    // picks the per-member window internally, and the legacy CLI silently
+    // ignored `-md` there.
+    let dictionary = if typed_format == rar5::ArchiveVersion::Rar40 {
+        None
+    } else {
+        v70_dict_bytes
+            .or(dict_size_bytes)
+            .or_else(|| dict_size_log.map(|log| (128u64 * 1024) << log))
+            .map(|bytes| {
+                rar5::DictionarySize::try_from(bytes).map_err(|e| format!("dictionary: {e}"))
+            })
+            .transpose()?
     };
+    // `--solid-reset` implies solid mode unless `-s-`-style off (the CLI
+    // has no explicit off switch, matching WinRAR: `-sd`/`-sv`/`-se` all
+    // enable solid creation).
+    let solid_mode = match (
+        args.solid_reset.as_str(),
+        args.solid || args.solid_params.is_some() || args.solid_reset != "continuous",
+    ) {
+        (_, false) => rar5::SolidMode::Disabled,
+        ("volume", _) => rar5::SolidMode::PerVolume,
+        ("extension", _) => rar5::SolidMode::PerExtension,
+        _ => rar5::SolidMode::Continuous,
+    };
+    let opts = rar5::WriterOptions::new()
+        .format_version(typed_format)
+        .solid_mode(solid_mode)
+        .quick_open(args.quick_open)
+        .blake2(args.blake2)
+        .encrypt_headers(header_encrypt);
+    let opts = if let Some(pw) = &password {
+        opts.password(pw.clone())
+    } else {
+        opts
+    };
+    let opts = if let Some(percent) = args.recovery_percent {
+        opts.recovery_percent(percent)
+    } else {
+        opts
+    };
+    let opts = if let Some(percent) = recovery_volumes_percent {
+        opts.recovery_volumes_percent(percent)
+    } else {
+        opts
+    };
+    let opts = if let Some(count) = recovery_volume_count {
+        opts.recovery_volume_count(count)
+    } else {
+        opts
+    };
+    let opts = if let Some(size) = args.volume_size {
+        opts.volume_size(size)
+    } else {
+        opts
+    };
+    let opts = if let Some(size) = dictionary {
+        opts.dictionary_size(size)
+    } else {
+        opts
+    };
+    let opts = if let Some(threads) = args.threads {
+        opts.thread_count(
+            rar5::ThreadCount::try_from(threads).map_err(|e| format!("threads: {e}"))?,
+        )
+    } else {
+        opts
+    };
+    let opts = opts
+        .save_ctime(ts.save_ctime)
+        .save_atime(ts.save_atime)
+        .save_mtime(ts.save_mtime)
+        .save_owner(misc.owner)
+        .save_streams(misc.save_streams)
+        .time_precision_seconds(ts.precision_seconds);
 
     let existing = std::path::Path::new(archive_path).exists();
     // -tk: keep the archive's original modification time on update.
@@ -889,17 +944,15 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     } else {
         None
     };
-    let dict_size_log = opts.dict_size_log;
-    let dict_size_bytes = opts.dict_size_bytes;
-    // The archive is opened lazily: for an existing archive the
+    // The writer is opened lazily: for an existing archive the
     // same-named members are replaced (deleted) first, so the append
     // handle is only opened after that rewrite; a new archive is created
     // immediately.
-    let rar: Option<rar5::RarArchive> = if existing {
+    let created: Option<rar5::ArchiveWriter> = if existing {
         None
     } else {
         Some(
-            rar5::RarArchive::create_with_options(archive_path, opts.clone())
+            rar5::ArchiveWriter::create_with(archive_path, opts.clone())
                 .map_err(|e| format!("create: {e}"))?,
         )
     };
@@ -1074,7 +1127,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     // archive untouched when every candidate was filtered out; a newly
     // created archive file is removed again.
     if collected.is_empty() && args.stdin_name.is_none() && redirects.is_empty() {
-        drop(rar);
+        drop(created);
         if !existing {
             let _ = std::fs::remove_file(archive_path);
         }
@@ -1123,28 +1176,30 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     };
     #[cfg(not(unix))]
     let ts_preserve_atimes: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
-    let entries: Vec<rar5::BatchEntry<'_>> = collected
-        .iter()
-        .map(|c| {
-            if c.is_dir {
-                rar5::BatchEntry::Directory {
-                    path: &c.path,
-                    name: Some(&c.name),
-                }
-            } else {
-                rar5::BatchEntry::File {
-                    path: &c.path,
-                    name: Some(&c.name),
-                    level: c.level,
-                }
-            }
-        })
-        .collect();
+    let mut write_entries: Vec<rar5::WriteEntry<'_>> = Vec::with_capacity(collected.len());
+    for c in &collected {
+        let options = rar5::EntryWriteOptions::new().compression_level(
+            rar5::CompressionLevel::try_from(c.level).map_err(|e| format!("level: {e}"))?,
+        );
+        if c.is_dir {
+            write_entries.push(rar5::WriteEntry::Directory {
+                path: &c.path,
+                name: Some(&c.name),
+            });
+        } else {
+            write_entries.push(rar5::WriteEntry::File {
+                path: &c.path,
+                name: Some(&c.name),
+                options,
+            });
+        }
+    }
     // WinRAR `rar a` semantics on an existing archive: members with the
-    // same name as an incoming file are replaced — deleted first, then
-    // re-added below; every other member is preserved verbatim. The
-    // append handle is opened only after the replacement rewrite.
-    let mut rar = if existing {
+    // same name as an incoming file are replaced — deleted first (legacy
+    // rewrite; Phase 4 moves this to the editor API), then re-added
+    // through the typed append below; every other member is preserved
+    // verbatim. The append handle is opened only after the rewrite.
+    let mut writer = if existing {
         use std::collections::HashSet;
         if args.volume_size.is_some() {
             return Err("appending to multi-volume archives is not supported".into());
@@ -1173,29 +1228,31 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         // Deleting every member erases the archive file (like `rar d`);
         // when the replacement removed the only members, recreate it
         // instead of appending to a file that no longer exists.
-        let mut r = if std::path::Path::new(archive_path).exists() {
-            match &password {
-                Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
-                    .map_err(|e| format!("open: {e}"))?,
-                None => {
-                    rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
-                }
+        if std::path::Path::new(archive_path).exists() {
+            let mut append_opts = rar5::AppendOptions::new();
+            if let Some(pw) = &password {
+                append_opts = append_opts.password(pw.clone());
             }
+            if let Some(size) = dictionary {
+                append_opts = append_opts.dictionary_size(size);
+            }
+            rar5::ArchiveWriter::append_with(archive_path, append_opts)
+                .map_err(|e| format!("open: {e}"))?
         } else {
-            rar5::RarArchive::create_with_options(archive_path, opts)
+            rar5::ArchiveWriter::create_with(archive_path, opts.clone())
                 .map_err(|e| format!("create: {e}"))?
-        };
-        r.set_dictionary(dict_size_log, dict_size_bytes)
-            .map_err(|e| format!("dictionary: {e}"))?;
-        r
+        }
     } else {
-        rar.expect("new archive opened above")
+        created.expect("new archive opened above")
     };
-    rar.add_batch(&entries).map_err(|e| format!("add: {e}"))?;
+    writer
+        .add_batch(&write_entries)
+        .map_err(|e| format!("add: {e}"))?;
     // Link redirects are recorded after their data members (the reference
     // target name is what matters, not the order).
     for (name, redir_type, target) in &redirects {
-        rar.add_redirect(name, *redir_type, target)
+        writer
+            .add_redirect(name, *redir_type, target)
             .map_err(|e| format!("link {name}: {e}"))?;
     }
 
@@ -1207,12 +1264,16 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
             .read_to_end(&mut data)
             .map_err(|e| format!("stdin: {e}"))?;
         let name = name.replace('\\', "/");
-        rar.add_bytes(&name, &data, args.level)
+        let stdin_options = rar5::EntryWriteOptions::new().compression_level(
+            rar5::CompressionLevel::try_from(args.level).map_err(|e| format!("level: {e}"))?,
+        );
+        writer
+            .add_bytes(&name, &data, stdin_options)
             .map_err(|e| format!("add stdin: {e}"))?;
     }
 
     let was_existing = existing;
-    rar.close().map_err(|e| format!("close: {e}"))?;
+    let write_report = writer.finish().map_err(|e| format!("close: {e}"))?;
     // -tsp: restore the source files' access times that were recorded
     // before archiving (reading the files may have refreshed them).
     if misc.ts_preserve {
@@ -1298,10 +1359,9 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         ar.close().map_err(|e| format!("close: {e}"))?;
     }
     if args.volume_size.is_some() {
-        let vols = rar5::discover_volumes(std::path::Path::new(archive_path));
         info!(
             "Created {} volume(s) ({} file(s), level {})",
-            vols.len(),
+            write_report.volume_paths().len(),
             files.len(),
             args.level
         );
@@ -1501,7 +1561,26 @@ fn cmd_update_freshen(
         dict_size_log,
         dict_size_bytes,
     )?;
-    let dict_size_log = if force_v70 { None } else { dict_size_log };
+    // The typed API has no `force_v70` seam: `-ma7` selects `Rar70` (every
+    // member v70); `-ma5`/default keep the legacy auto v50/v70 semantics
+    // for > 4 GiB `-md` requests. RAR4 never takes a dictionary.
+    let typed_format = if force_v70 {
+        rar5::ArchiveVersion::Rar70
+    } else {
+        format_version
+    };
+    let dictionary = if typed_format == rar5::ArchiveVersion::Rar40 {
+        None
+    } else {
+        v70_dict_bytes
+            .or(dict_size_bytes)
+            .or_else(|| dict_size_log.map(|log| (128u64 * 1024) << log))
+            .map(|bytes| {
+                rar5::DictionarySize::try_from(bytes)
+                    .map_err(|error| format!("dictionary: {error}"))
+            })
+            .transpose()?
+    };
     let ts = time::parse_ts_specs(&args.ts_specs)?;
     let original_mtime = if args.keep_time {
         Some(
@@ -1626,57 +1705,57 @@ fn cmd_update_freshen(
         }
 
         let mut staged = if staged_path.exists() {
-            match password {
-                Some(value) => rar5::RarArchive::open_append_with_password(staged_path, value)
-                    .map_err(|error| format!("open staged archive for append: {error}"))?,
-                None => rar5::RarArchive::open_append(staged_path)
-                    .map_err(|error| format!("open staged archive for append: {error}"))?,
+            let mut append_opts = rar5::AppendOptions::new();
+            if let Some(value) = password {
+                append_opts = append_opts.password(value.clone());
             }
+            if let Some(size) = dictionary {
+                append_opts = append_opts.dictionary_size(size);
+            }
+            rar5::ArchiveWriter::append_with(staged_path, append_opts)
+                .map_err(|error| format!("open staged archive for append: {error}"))?
         } else {
-            rar5::RarArchive::create_with_options(
-                staged_path,
-                rar5::CreateOptions {
-                    format_version,
-                    password: password.clone(),
-                    dict_size_log,
-                    dict_size_bytes: v70_dict_bytes,
-                    force_v70,
-                    save_ctime: ts.save_ctime,
-                    save_atime: ts.save_atime,
-                    save_mtime: ts.save_mtime,
-                    save_owner: misc.owner,
-                    save_streams: misc.save_streams,
-                    time_precision_seconds: ts.precision_seconds,
-                    ..Default::default()
-                },
-            )
-            .map_err(|error| format!("recreate staged archive: {error}"))?
+            let mut writer_opts = rar5::WriterOptions::new()
+                .format_version(typed_format)
+                .save_ctime(ts.save_ctime)
+                .save_atime(ts.save_atime)
+                .save_mtime(ts.save_mtime)
+                .save_owner(misc.owner)
+                .save_streams(misc.save_streams)
+                .time_precision_seconds(ts.precision_seconds);
+            if let Some(value) = password {
+                writer_opts = writer_opts.password(value.clone());
+            }
+            if let Some(size) = dictionary {
+                writer_opts = writer_opts.dictionary_size(size);
+            }
+            rar5::ArchiveWriter::create_with(staged_path, writer_opts)
+                .map_err(|error| format!("recreate staged archive: {error}"))?
         };
+        let mut write_entries: Vec<rar5::WriteEntry<'_>> = Vec::with_capacity(to_add.len());
+        for item in &to_add {
+            let options = rar5::EntryWriteOptions::new().compression_level(
+                rar5::CompressionLevel::try_from(item.level)
+                    .map_err(|error| format!("level: {error}"))?,
+            );
+            if item.is_dir {
+                write_entries.push(rar5::WriteEntry::Directory {
+                    path: &item.path,
+                    name: Some(&item.name),
+                });
+            } else {
+                write_entries.push(rar5::WriteEntry::File {
+                    path: &item.path,
+                    name: Some(&item.name),
+                    options,
+                });
+            }
+        }
         staged
-            .set_dictionary(dict_size_log, v70_dict_bytes)
-            .map_err(|error| format!("set staged dictionary: {error}"))?;
-        let entries: Vec<rar5::BatchEntry<'_>> = to_add
-            .iter()
-            .map(|item| {
-                if item.is_dir {
-                    rar5::BatchEntry::Directory {
-                        path: &item.path,
-                        name: Some(&item.name),
-                    }
-                } else {
-                    rar5::BatchEntry::File {
-                        path: &item.path,
-                        name: Some(&item.name),
-                        level: item.level,
-                    }
-                }
-            })
-            .collect();
-        staged
-            .add_batch(&entries)
+            .add_batch(&write_entries)
             .map_err(|error| format!("append staged members: {error}"))?;
         staged
-            .close()
+            .finish()
             .map_err(|error| format!("close staged archive: {error}"))?;
 
         if let Some(modified) = original_mtime {
