@@ -150,8 +150,9 @@ rar a -ma4 -v1m archive.rar file1 file2
 ```
 
 在 `rar-cli/src/rar.rs` 中：
-- `archive_format_force_v70()` 扩展支持 `"4"` → 设置 `format_version: Rar40`
-- `CreateOptions` 新增 `format_version: ArchiveVersion` 字段
+- `archive_version()` 解析 `"4"` → `ArchiveVersion::V29`（旧 `archive_format_force_v70()`，
+  2026-09 收敛为单一版本表）
+- `CreateOptions` 的 `format_version` 字段类型为 `ArchiveVersion`（`"4"` → `V29`）
 - RAR4 不兼容的选项（quick_open、blake2、recovery_record、encrypt_headers）在 `-ma4` 时报错
 
 ## 测试策略

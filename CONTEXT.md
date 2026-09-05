@@ -5,7 +5,7 @@
 ## 领域词汇
 
 - **Archive（归档）** — 一个 RAR 归档：单卷文件或 `.partN.rar` 分卷集。RAR5 容器（8 字节签名）或 RAR4 老容器（7 字节签名）。
-- **ArchiveVersion / ArchiveFormat（归档版本 / 归档格式）** — 2026-09 拆分后两个正交概念（`version.rs`）：**ArchiveFormat** 是容器家族（`Rar40` 7 字节签名 / `Rar5` 8 字节签名），写侧选容器；**ArchiveVersion** 是 RAR5 容器内的编解码版本（`Rar50` v50 codec DC 64 码 / `Rar70` v70 codec DCX 80 码），读侧按成员报告、codec 表在两者间选择。RAR4 的 1.5–4.x unpack 版本（15/20/26/29/36）放 model 的 `unpack_version`，不映射到 ArchiveVersion。`from_v70(bool)` 由成员头（读：`comp_version == 1`；写：字节级字典存在）映射；`uses_extra_dist()` 在 DC/DCX 表间选择。
+- **ArchiveVersion（归档版本）** — 2026-09 收敛后的**单一版本表**（`version.rs`；废弃 `ArchiveFormat` 公共容器轴与 `CompressionVersion`，见 ADR 0004）：`V15/V20/V26/V29/V36/V50/V70`，两位数 `vXX` 命名，`as_str()` = `"v15"`…`"v70"`。**容器由版本推导**（`is_legacy()`：v15–v36 → RAR 1.5–4.x 7 字节签名信封；v50/v70 → RAR5 8 字节签名信封），不再有公共容器类型。读侧按成员经 `ArchiveEntry::version()` 报告（RAR4 按 `unp_ver` 15/20/26/29/36；RAR5 按 `comp_version` 0/1）。写侧可写子集 `{v29, v50, v70}`（`is_writable()`），v15/v20/v26/v36 只读、validate 报 `InvalidOption`；RAR4 写管线恒产 `unp_ver 29`（v36 与 v29 同 RAR29 codec，无行为差异）。`from_v70(bool)` 由成员头映射（读：`comp_version == 1`；写：字节级字典存在）；`uses_extra_dist()` 在 DC/DCX 表间选择。
 - **Member（成员）** — 归档中的一个条目（文件 / 目录 / 重定向），对应一个文件头 + 数据区。
 - **Volume（分卷）** — 多卷归档的单个 `.partN.rar` 文件；成员数据按卷切成 Chunk。
 - **Chunk（分块）** — 跨卷成员在某卷中的数据段。非末块头携带该块密文 CRC32；末块携带（hash-key MAC 过的）明文 CRC，并携带完整 extra 记录。

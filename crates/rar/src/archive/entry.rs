@@ -3,6 +3,7 @@
 
 use crate::format::rar5::method_name;
 use crate::model::{DataChunk, FileHeader};
+use crate::version::ArchiveVersion;
 use std::path::Path;
 
 /// A single entry in the archive (public API).
@@ -163,6 +164,16 @@ impl ArchiveEntry {
     /// `1` = RAR7 (v70).
     pub fn comp_version(&self) -> u8 {
         self.header.comp_version
+    }
+
+    /// The member compression version in the unified version table. Legacy
+    /// RAR 1.5–4.x members map their `unp_ver` (`15`/`20`/`26`/`29`/`36`)
+    /// onto [`ArchiveVersion`]; RAR5 members map `comp_version` to v50/v70.
+    pub fn version(&self) -> ArchiveVersion {
+        match self.header.format_version {
+            4 => ArchiveVersion::from_unp_ver(self.header.unp_ver).unwrap_or(ArchiveVersion::V29),
+            _ => ArchiveVersion::from_v70(self.header.comp_version == 1),
+        }
     }
 
     /// Dictionary size as `log2(size/128KiB)`. Only meaningful for RAR5

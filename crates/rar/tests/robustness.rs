@@ -104,7 +104,7 @@ fn unpack50_decode_random_inputs_do_not_panic() {
             unpacked,
             dict.min(13),
             None,
-            rar_rs::ArchiveVersion::Rar50,
+            rar_rs::ArchiveVersion::V50,
         );
     }
 }

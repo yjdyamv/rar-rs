@@ -34,7 +34,6 @@ use crate::format::rar5::{
     BLOCK_TYPE_SERVICE_HEADER,
 };
 use crate::fs::atomic::{copy_prefix, read_write_create, replace_file, temp_sibling_path};
-use crate::version::ArchiveFormat;
 use crate::write_progress::ProgressTracker;
 
 pub(crate) use crate::fs::volume::{
@@ -50,8 +49,8 @@ pub use reader::{
     VerificationFailure, VerificationReport,
 };
 pub use writer::{
-    AppendOptions, ArchiveWriter, CompressionLevel, CompressionVersion, DictionarySize,
-    EntryWriteOptions, SolidMode, ThreadCount, WriteEntry, WriteReport, WriterOptions,
+    AppendOptions, ArchiveWriter, CompressionLevel, DictionarySize, EntryWriteOptions, SolidMode,
+    ThreadCount, WriteEntry, WriteReport, WriterOptions,
 };
 
 /// Maximum archive prefix buffered for inline recovery-record parity.
@@ -931,7 +930,7 @@ impl RarArchive {
     /// stream).
     fn new_with_options(path: PathBuf, opts: crate::options::CreateOptions) -> RarResult<Self> {
         opts.validate()?;
-        let is_rar4 = opts.format_version == ArchiveFormat::Rar40;
+        let is_rar4 = opts.format_version.is_legacy();
         if is_rar4 {
             // RAR4 does not support these RAR5-specific features.
             if opts.quick_open {

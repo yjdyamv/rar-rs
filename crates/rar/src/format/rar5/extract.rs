@@ -1027,7 +1027,7 @@ impl RarArchive {
                         s.unpacked_size,
                         s.dict_size_log,
                         None,
-                        crate::version::ArchiveVersion::Rar50,
+                        crate::version::ArchiveVersion::V50,
                     )
                     .map_err(|e| RarError::Format(format!("stream decode: {e}")))?
                 };

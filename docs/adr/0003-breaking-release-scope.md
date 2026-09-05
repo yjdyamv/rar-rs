@@ -87,12 +87,16 @@ tests/examples/fuzz. The npm package is already `rar-rs-napi`.
    `WriterOptions` select container and codec independently
    (`WriterOptions::format(ArchiveFormat)` + `compression(CompressionVersion)`,
    no mutual rewriting), and legacy `CreateOptions::format_version` now takes
-   `ArchiveFormat`. Nothing on the read path emitted `ArchiveVersion::Rar40`
-   (RAR4 members report raw `format_version: 4` / `unpack_version`), and the
-   codec variant positions only ever saw `Rar50`/`Rar70`; the RAR4
-   1.5–4.x unpack versions (15/20/26/29/36) live on the raw model
-   (`Entry::unpack_version`), not on `ArchiveVersion`. Reader-facing code
-   keeps reporting `ArchiveVersion` per member.
+`ArchiveFormat`. Nothing on the read path emitted `ArchiveVersion::Rar40`
+    (RAR4 members report raw `format_version: 4` / `unp_ver`), and the
+    codec variant positions only ever saw `Rar50`/`Rar70`; the RAR4
+    1.5–4.x unpack versions (15/20/26/29/36) live on the raw model
+    (`Entry::unp_ver`), not on `ArchiveVersion`. Reader-facing code
+    keeps reporting `ArchiveVersion` per member.
+    **Superseded by ADR 0004**: the two public axes were collapsed back into
+    the single `ArchiveVersion` table (`V15`–`V70`, two-digit names) with the
+    container derived from it; `ArchiveFormat` and `CompressionVersion` were
+    removed.
 3. Supported low-level modules. `rar40` (alias) has no in-tree user;
    `rar50` (alias) is used by three wire-level test files. `recovery`,
    `name_policy`, `lzss_huff` internals are used by bindings/CLI/examples.

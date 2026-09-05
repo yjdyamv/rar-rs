@@ -109,11 +109,10 @@ mod mt_tests {
                 &mut EncoderState::default(),
                 4,
                 true,
-                ArchiveVersion::Rar50,
+                ArchiveVersion::V50,
             );
-            let out =
-                decode_standalone(&packed, data.len() as u64, log, None, ArchiveVersion::Rar50)
-                    .unwrap();
+            let out = decode_standalone(&packed, data.len() as u64, log, None, ArchiveVersion::V50)
+                .unwrap();
             assert_eq!(out, data, "dict log {log}");
         }
     }
@@ -129,14 +128,14 @@ mod mt_tests {
             &mut EncoderState::default(),
             3,
             true,
-            ArchiveVersion::Rar70,
+            ArchiveVersion::V70,
         );
         let out = decode_standalone(
             &packed,
             data.len() as u64,
             6,
             Some(48 * 1024 * 1024),
-            ArchiveVersion::Rar70,
+            ArchiveVersion::V70,
         )
         .unwrap();
         assert_eq!(out, data);
@@ -156,7 +155,7 @@ mod mt_tests {
             &mut st,
             3,
             false,
-            ArchiveVersion::Rar50,
+            ArchiveVersion::V50,
         );
         packed.extend(encode_chunked_mt(
             &w2,
@@ -166,12 +165,12 @@ mod mt_tests {
             &mut st,
             3,
             true,
-            ArchiveVersion::Rar50,
+            ArchiveVersion::V50,
         ));
         let mut full = w1;
         full.extend(&w2);
         let out =
-            decode_standalone(&packed, full.len() as u64, 6, None, ArchiveVersion::Rar50).unwrap();
+            decode_standalone(&packed, full.len() as u64, 6, None, ArchiveVersion::V50).unwrap();
         assert_eq!(out, full);
     }
 
@@ -186,7 +185,7 @@ mod mt_tests {
             &mut EncoderState::default(),
             4,
             true,
-            ArchiveVersion::Rar50,
+            ArchiveVersion::V50,
         );
         let b = encode_chunked_mt(
             &data,
@@ -196,7 +195,7 @@ mod mt_tests {
             &mut EncoderState::default(),
             4,
             true,
-            ArchiveVersion::Rar50,
+            ArchiveVersion::V50,
         );
         assert_eq!(a, b);
     }
@@ -233,10 +232,10 @@ mod mt_tests {
 
         for (name, data) in &corpora {
             for (level, dict_log, extra) in [
-                (2u8, 6u8, ArchiveVersion::Rar50),
-                (3, 6, ArchiveVersion::Rar50),
-                (5, 6, ArchiveVersion::Rar50),
-                (3, 3, ArchiveVersion::Rar70),
+                (2u8, 6u8, ArchiveVersion::V50),
+                (3, 6, ArchiveVersion::V50),
+                (5, 6, ArchiveVersion::V50),
+                (3, 3, ArchiveVersion::V70),
             ] {
                 set_fast_path_enabled(true);
                 let fast = encode_chunked_mt(

@@ -587,27 +587,30 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("size is too large: {s}"))
 }
 
-/// Resolve a `-ma<ver>` archive-format request into the container family and
-/// the v70 forcing options. `-ma4` selects the legacy RAR3/4 container
-/// ([`rar_rs::ArchiveFormat::Rar40`]); `-ma5` is the default RAR5 container
-/// (a no-op, like WinRAR's accepted-but-inert `-ma5`); `-ma7` forces RAR7
-/// (v70) members with the `-md` dictionary (default 32 MiB) declared in the
-/// header — an extension beyond WinRAR 7.23, which only writes v70 above
-/// 4 GiB. Any other version is rejected like WinRAR rejects unknown options.
-/// Returns `(container, force_v70, dict_bytes)`.
-fn archive_format_force_v70(
+/// Resolve a `-ma<ver>` archive-format request into the single version
+/// table knob. `-ma4` selects the legacy RAR3/4 container through its
+/// writable unpack version [`rar_rs::ArchiveVersion::V29`]; `-ma5` is the
+/// default RAR5 v50 version (a no-op, like WinRAR's accepted-but-inert
+/// `-ma5`); `-ma7` forces RAR7 (v70) members with the `-md` dictionary
+/// (default 32 MiB) declared in the header — an extension beyond
+/// WinRAR 7.23, which only writes v70 above 4 GiB. Any other version is
+/// rejected like WinRAR rejects unknown options.
+/// Returns `(version, dict_bytes)`, where `dict_bytes` is the declared
+/// v70 byte dictionary for `-ma7` (else the plain `-md` bytes, carried
+/// for the RAR5 auto v50/v70 mode).
+fn archive_version(
     ma: Option<&str>,
     dict_size_log: Option<u8>,
     dict_size_bytes: Option<u64>,
-) -> Result<(rar_rs::ArchiveFormat, bool, Option<u64>), String> {
+) -> Result<(rar_rs::ArchiveVersion, Option<u64>), String> {
     match ma {
-        Some("4") => Ok((rar_rs::ArchiveFormat::Rar40, false, None)),
-        None | Some("5") => Ok((rar_rs::ArchiveFormat::Rar5, false, dict_size_bytes)),
+        Some("4") => Ok((rar_rs::ArchiveVersion::V29, None)),
+        None | Some("5") => Ok((rar_rs::ArchiveVersion::V50, dict_size_bytes)),
         Some("7") => {
             let bytes = dict_size_bytes
                 .or_else(|| dict_size_log.map(|l| (128u64 * 1024) << l))
                 .unwrap_or(32 * 1024 * 1024);
-            Ok((rar_rs::ArchiveFormat::Rar5, true, Some(bytes)))
+            Ok((rar_rs::ArchiveVersion::V70, Some(bytes)))
         }
         Some(other) => Err(format!("Unknown option: ma{other}")),
     }
@@ -849,20 +852,21 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         Some(s) => rar_rs::parse_dict_size(s).ok_or_else(|| format!("Unknown option: md{s}"))?,
         None => (None, None),
     };
-    let (container, force_v70, v70_dict_bytes) = archive_format_force_v70(
+    let (version, v70_dict_bytes) = archive_version(
         args.archive_format.as_deref(),
         dict_size_log,
         dict_size_bytes,
     )?;
-    // The typed API has no `force_v70` test seam: `-ma7` selects the v70
-    // compression version (every member v70, 32 MiB default dictionary),
-    // while `-ma5`/default with a > 4 GiB `-md` keeps the legacy auto mode
-    // (v70 members only when a member's effective dictionary exceeds 4 GiB —
-    // exactly the bytes the writer produced before).
-    // The `-md` dictionary in bytes. RAR4 never receives one: its writer
-    // picks the per-member window internally, and the legacy CLI silently
-    // ignored `-md` there.
-    let dictionary = if container.is_rar40() {
+    // The version table is the single write knob: `-ma4` selects v29 (the
+    // legacy RAR4 pipeline), `-ma7` v70 (every member v70, 32 MiB default
+    // dictionary), and `-ma5`/default v50 — a > 4 GiB `-md` keeps the
+    // legacy auto mode (v70 members only when a member's effective
+    // dictionary exceeds 4 GiB — exactly the bytes the writer produced
+    // before).
+    // The `-md` dictionary in bytes. The legacy v29 pipeline never
+    // receives one: its writer picks the per-member window internally,
+    // and the legacy CLI silently ignored `-md` there.
+    let dictionary = if version.is_legacy() {
         None
     } else {
         v70_dict_bytes
@@ -886,16 +890,11 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         _ => rar_rs::SolidMode::Continuous,
     };
     let opts = rar_rs::WriterOptions::new()
-        .format(container)
+        .compression(version)
         .solid_mode(solid_mode)
         .quick_open(args.quick_open)
         .blake2(args.blake2)
         .encrypt_headers(header_encrypt);
-    let opts = if force_v70 {
-        opts.compression(rar_rs::CompressionVersion::V70)
-    } else {
-        opts
-    };
     let opts = if let Some(pw) = &password {
         opts.password(pw.clone())
     } else {
@@ -1651,16 +1650,16 @@ fn cmd_update_freshen(
         }
         None => (None, None),
     };
-    let (container, force_v70, v70_dict_bytes) = archive_format_force_v70(
+    let (version, v70_dict_bytes) = archive_version(
         args.archive_format.as_deref(),
         dict_size_log,
         dict_size_bytes,
     )?;
-    // The typed API has no `force_v70` seam: `-ma7` selects the v70
-    // compression version (every member v70); `-ma5`/default keep the legacy
-    // auto v50/v70 semantics for > 4 GiB `-md` requests. RAR4 never takes a
-    // dictionary.
-    let dictionary = if container.is_rar40() {
+    // The version table is the single write knob: `-ma7` selects v70
+    // (every member v70); `-ma5`/default keep v50 with the legacy auto
+    // v50/v70 semantics for > 4 GiB `-md` requests; `-ma4` selects v29.
+    // The legacy v29 pipeline never takes a dictionary.
+    let dictionary = if version.is_legacy() {
         None
     } else {
         v70_dict_bytes
@@ -1815,16 +1814,13 @@ fn cmd_update_freshen(
                 .map_err(|error| format!("open staged archive for append: {error}"))?
         } else {
             let mut writer_opts = rar_rs::WriterOptions::new()
-                .format(container)
+                .compression(version)
                 .save_ctime(ts.save_ctime)
                 .save_atime(ts.save_atime)
                 .save_mtime(ts.save_mtime)
                 .save_owner(misc.owner)
                 .save_streams(misc.save_streams)
                 .time_precision_seconds(ts.precision_seconds);
-            if force_v70 {
-                writer_opts = writer_opts.compression(rar_rs::CompressionVersion::V70);
-            }
             if let Some(value) = password {
                 writer_opts = writer_opts.password(value.clone());
             }
@@ -1977,12 +1973,12 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
         Some(s) => rar_rs::parse_dict_size(s).ok_or_else(|| format!("Unknown option: md{s}"))?,
         None => (None, None),
     };
-    let (container, force_v70, v70_dict_bytes) = archive_format_force_v70(
+    let (version, v70_dict_bytes) = archive_version(
         args.archive_format.as_deref(),
         dict_size_log,
         dict_size_bytes,
     )?;
-    let dictionary = if container.is_rar40() {
+    let dictionary = if version.is_legacy() {
         None
     } else {
         v70_dict_bytes
@@ -2007,16 +2003,13 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
     } else {
         let ts = time::parse_ts_specs(&args.ts_specs)?;
         let mut writer_opts = rar_rs::WriterOptions::new()
-            .format(container)
+            .compression(version)
             .save_ctime(ts.save_ctime)
             .save_atime(ts.save_atime)
             .save_mtime(ts.save_mtime)
             .save_owner(misc.owner)
             .save_streams(misc.save_streams)
             .time_precision_seconds(ts.precision_seconds);
-        if force_v70 {
-            writer_opts = writer_opts.compression(rar_rs::CompressionVersion::V70);
-        }
         if let Some(pw) = password {
             writer_opts = writer_opts.password(pw.clone());
         }

@@ -103,7 +103,7 @@ codec/
 ## P2：命名、文档和仓库组织
 
 - crate `rar5` 已支持 RAR 1.5–RAR7。近期作为历史名称保留；下一个破坏性版本再评估格式中立名称。
-- `ArchiveVersion` 混合容器家族和 codec 版本。未来可拆为 `ArchiveFormat` 与 `CompressionVersion`。
+- `ArchiveVersion` 混合容器家族和 codec 版本。~~未来可拆为 `ArchiveFormat` 与 `CompressionVersion`~~（2026-09 已按相反方向收敛：单一 `ArchiveVersion` 全表 v15–v70，容器由版本推导，见 ADR 0004）。
 - CLI、N-API、Cargo description、rustdoc 中仍有“仅 RAR5”或“仅创建”的陈旧描述。
 - `rar40/mod.rs`、`version.rs`、`CreateOptions` 的注释与现有 RAR4/分卷/头加密能力矛盾。
 - `input.rs` 实际主要处理 `rarfiles.lst`，可在独立重构中改名为 `rarfiles.rs`。

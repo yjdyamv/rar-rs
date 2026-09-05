@@ -4,7 +4,7 @@ use std::fs::OpenOptions as FsOpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
 use rar_rs::{
-    ArchiveFormat, ArchiveReader, CreateOptions, ErrorCode, ExtractOptions, OpenOptions,
+    ArchiveReader, ArchiveVersion, CreateOptions, ErrorCode, ExtractOptions, OpenOptions,
     RarArchive, RarError, ScanStrategy,
 };
 
@@ -121,7 +121,7 @@ fn duplicate_entries_are_addressable_by_id() {
     );
 }
 
-fn assert_solid_reader_recovers_after_writer_failure(format: ArchiveFormat, file_name: &str) {
+fn assert_solid_reader_recovers_after_writer_failure(format: ArchiveVersion, file_name: &str) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join(file_name);
     let common = b"shared solid dictionary content with enough repetition\n".repeat(4_096);
@@ -177,12 +177,12 @@ fn assert_solid_reader_recovers_after_writer_failure(format: ArchiveFormat, file
 
 #[test]
 fn rar5_solid_reader_recovers_after_writer_failure() {
-    assert_solid_reader_recovers_after_writer_failure(ArchiveFormat::Rar5, "solid-rar5.rar");
+    assert_solid_reader_recovers_after_writer_failure(ArchiveVersion::V50, "solid-rar5.rar");
 }
 
 #[test]
 fn rar4_solid_reader_recovers_after_writer_failure() {
-    assert_solid_reader_recovers_after_writer_failure(ArchiveFormat::Rar40, "solid-rar4.rar");
+    assert_solid_reader_recovers_after_writer_failure(ArchiveVersion::V29, "solid-rar4.rar");
 }
 
 #[test]

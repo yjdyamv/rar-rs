@@ -42,7 +42,7 @@ pub struct EncodeOptions<'a> {
     /// Whether this call is the last chunk of one member: only the final
     /// chunk's last emitted block carries the end-of-stream flag.
     pub is_final: bool,
-    /// Codec variant (`ArchiveVersion::Rar70` selects the RAR7 80-entry
+    /// Codec variant (`ArchiveVersion::V70` selects the RAR7 80-entry
     /// distance table instead of the RAR5 64-entry one).
     pub variant: ArchiveVersion,
     /// Progress callback, called as `(bytes_processed, total_bytes)`.

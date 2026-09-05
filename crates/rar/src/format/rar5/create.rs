@@ -5,22 +5,6 @@
 
 use crate::DictionarySize;
 
-/// Member codec version within the RAR5 container.
-///
-/// RAR5 headers define exactly two member codec versions: `comp_version 0`
-/// (v50) and `comp_version 1` (RAR7 / v70 with the 80-entry distance
-/// table). RAR7 (v70) members are only ever written when selected
-/// explicitly.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum CompressionVersion {
-    /// RAR5 v50 members (the default). Dictionaries are limited to 4 GiB.
-    #[default]
-    V50,
-    /// RAR7 (v70) members with a declared byte dictionary.
-    V70,
-}
-
 /// Map a requested dictionary onto the legacy `(dict_size_log,
 /// dict_size_bytes)` create fields.
 ///

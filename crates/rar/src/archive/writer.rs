@@ -9,9 +9,7 @@ use std::sync::atomic::AtomicBool;
 use super::{BatchEntry, RarArchive};
 use crate::error::{RarError, RarResult};
 use crate::options::{CreateOptions, SolidReset};
-use crate::version::ArchiveFormat;
-
-pub use crate::format::rar5::create::CompressionVersion;
+use crate::version::ArchiveVersion;
 
 const MIN_DICTIONARY_BYTES: u64 = 128 * 1024;
 const MAX_RAR5_DICTIONARY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -69,11 +67,11 @@ impl TryFrom<u8> for CompressionLevel {
 /// dictionary log. Larger RAR7 sizes may use any byte count through 126 GiB.
 ///
 /// A size above 4 GiB selects RAR7 (v70) members. Under the default
-/// compression version [`CompressionVersion::V50`] that selection is
+/// compression version [`ArchiveVersion::V50`] that selection is
 /// automatic, like WinRAR's `-md`: the request is capped at twice the
 /// member size, so small members stay plain v50 and only members whose
 /// effective dictionary exceeds 4 GiB are written as v70. Use
-/// [`CompressionVersion::V70`] to force v70 members for every member.
+/// [`ArchiveVersion::V70`] to force v70 members for every member.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DictionarySize(u64);
 
@@ -181,8 +179,7 @@ pub enum SolidMode {
 /// and no validated combination is silently downgraded by the writer.
 #[derive(Clone)]
 pub struct WriterOptions {
-    format: ArchiveFormat,
-    compression: CompressionVersion,
+    compression: ArchiveVersion,
     solid_mode: SolidMode,
     quick_open: bool,
     blake2: bool,
@@ -205,8 +202,7 @@ pub struct WriterOptions {
 impl Default for WriterOptions {
     fn default() -> Self {
         Self {
-            format: ArchiveFormat::Rar5,
-            compression: CompressionVersion::V50,
+            compression: ArchiveVersion::V50,
             solid_mode: SolidMode::Disabled,
             quick_open: false,
             blake2: false,
@@ -234,22 +230,14 @@ impl WriterOptions {
         Self::default()
     }
 
-    /// Select the archive container family (`Rar5` by default). The member
-    /// compression version is chosen independently with [`Self::compression`];
-    /// setting the RAR4 container does not change the codec selection.
+    /// Select the member compression version. The container family follows
+    /// the version: `v50`/`v70` write the RAR5 container, `v29` writes the
+    /// legacy RAR4 container (per-member `unp_ver 29`, no dictionary). Only
+    /// writable versions are accepted — `v15`/`v20`/`v26`/`v36` are
+    /// read-only and rejected at validation, never silently downgraded.
+    /// The owning v50/v70 policy lives in [`crate::format::rar5::create`].
     #[must_use]
-    pub fn format(mut self, container: ArchiveFormat) -> Self {
-        self.format = container;
-        self
-    }
-
-    /// Select the member compression version (RAR5 container only). The
-    /// owning policy lives in [`crate::format::rar5::create`]; v70 members
-    /// are never produced implicitly, and the container is never rewritten
-    /// by this setter (`format` + V70 is rejected at validation, never
-    /// silently downgraded). The RAR4 container ignores this knob.
-    #[must_use]
-    pub fn compression(mut self, version: CompressionVersion) -> Self {
+    pub fn compression(mut self, version: ArchiveVersion) -> Self {
         self.compression = version;
         self
     }
@@ -324,9 +312,10 @@ impl WriterOptions {
         self
     }
 
-    /// Set the requested compression dictionary size. On `Rar50` a size
-    /// above 4 GiB keeps the auto v50/v70 semantics (see [`DictionarySize`]);
-    /// on `Rar70` every member is v70 with this size (32 MiB when unset).
+    /// Set the requested compression dictionary size. On v50 compression a
+    /// size above 4 GiB keeps the auto v50/v70 semantics (see
+    /// [`DictionarySize`]); on v70 every member is v70 with this size
+    /// (32 MiB when unset).
     #[must_use]
     pub fn dictionary_size(mut self, size: DictionarySize) -> Self {
         self.dictionary_size = Some(size);
@@ -435,15 +424,16 @@ impl WriterOptions {
             ));
         }
 
-        if self.format == ArchiveFormat::Rar40 && self.compression == CompressionVersion::V70 {
-            return Err(RarError::InvalidOption(
-                "RAR7 (v70) compression requires the RAR5 container".into(),
-            ));
+        if !self.compression.is_writable() {
+            return Err(RarError::InvalidOption(format!(
+                "only versions v29, v50 and v70 are writable, got {}",
+                self.compression
+            )));
         }
-        if self.format == ArchiveFormat::Rar40 {
+        if self.compression.is_legacy() {
             crate::format::rar4::create::validate_rar4_only(self.into())?;
         }
-        // A `Rar50` archive accepts every dictionary size; sizes above 4 GiB
+        // A v50 archive accepts every dictionary size; sizes above 4 GiB
         // keep WinRAR's auto semantics (see [`Self::into_legacy`]) instead of
         // being downgraded or rejected.
         Ok(())
@@ -457,17 +447,17 @@ impl WriterOptions {
             SolidMode::PerVolume => (true, SolidReset::PerVolume),
             SolidMode::PerExtension => (true, SolidReset::PerExtension),
         };
-        // Dictionary mapping is owned by the RAR5 format module (the RAR4
-        // container takes no dictionary; validation above refuses one).
-        let v70 = self.compression == CompressionVersion::V70;
-        let (dictionary_log, dictionary_bytes) = if self.format == ArchiveFormat::Rar40 {
+        // Dictionary mapping is owned by the RAR5 format module (the legacy
+        // v29 pipeline takes no dictionary; validation above refuses one).
+        let v70 = self.compression == ArchiveVersion::V70;
+        let (dictionary_log, dictionary_bytes) = if self.compression.is_legacy() {
             (None, None)
         } else {
             crate::format::rar5::create::dictionary_fields(v70, self.dictionary_size)
         };
 
         Ok(CreateOptions {
-            format_version: self.format,
+            format_version: self.compression,
             solid,
             solid_reset,
             quick_open: self.quick_open,
@@ -480,7 +470,7 @@ impl WriterOptions {
             volume_size: self.volume_size,
             dict_size_log: dictionary_log,
             dict_size_bytes: dictionary_bytes,
-            force_v70: self.compression == CompressionVersion::V70,
+            force_v70: self.compression == ArchiveVersion::V70,
             save_ctime: self.save_ctime,
             save_atime: self.save_atime,
             time_precision_seconds: self.time_precision_seconds,
@@ -509,7 +499,6 @@ impl From<&WriterOptions> for crate::format::rar4::create::Rar4WriteOptions {
 impl fmt::Debug for WriterOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WriterOptions")
-            .field("format", &self.format)
             .field("compression", &self.compression)
             .field("solid_mode", &self.solid_mode)
             .field("quick_open", &self.quick_open)
@@ -876,15 +865,13 @@ impl Drop for ArchiveWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CompressionVersion, DEFAULT_RAR70_DICTIONARY_BYTES, DictionarySize, WriterOptions,
-    };
-    use crate::version::ArchiveFormat;
+    use super::{DEFAULT_RAR70_DICTIONARY_BYTES, DictionarySize, WriterOptions};
+    use crate::version::ArchiveVersion;
 
     #[test]
     fn v70_compression_forces_byte_sized_default_dictionary() {
         let options = WriterOptions::new()
-            .compression(CompressionVersion::V70)
+            .compression(ArchiveVersion::V70)
             .into_legacy()
             .unwrap();
         assert!(options.force_v70);
@@ -902,7 +889,7 @@ mod tests {
             .dictionary_size(DictionarySize::try_from(64 * 1024 * 1024u64).unwrap())
             .into_legacy()
             .unwrap();
-        assert_eq!(small.format_version, ArchiveFormat::Rar5);
+        assert_eq!(small.format_version, ArchiveVersion::V50);
         assert_eq!(small.dict_size_log, Some(9)); // 64 MiB = 128 KiB << 9
         assert_eq!(small.dict_size_bytes, None);
         assert!(!small.force_v70);
@@ -914,32 +901,58 @@ mod tests {
             .dictionary_size(DictionarySize::try_from(6 * 1024 * 1024 * 1024u64).unwrap())
             .into_legacy()
             .unwrap();
-        assert_eq!(big.format_version, ArchiveFormat::Rar5);
+        assert_eq!(big.format_version, ArchiveVersion::V50);
         assert_eq!(big.dict_size_log, None);
         assert_eq!(big.dict_size_bytes, Some(6 * 1024 * 1024 * 1024));
         assert!(!big.force_v70, "v50 never forces v70");
     }
 
     #[test]
-    fn container_and_compression_are_independent() {
-        // `.format(Rar40)` leaves the codec at v50; `.compression(V70)`
-        // never rewrites the container back to RAR5.
-        assert_eq!(
-            WriterOptions::new().format(ArchiveFormat::Rar40).format,
-            ArchiveFormat::Rar40
-        );
-        assert!(
+    fn v29_selects_the_legacy_container_without_dictionary() {
+        let options = WriterOptions::new()
+            .compression(ArchiveVersion::V29)
+            .into_legacy()
+            .unwrap();
+        assert_eq!(options.format_version, ArchiveVersion::V29);
+        assert!(options.format_version.is_legacy());
+        assert_eq!(options.dict_size_log, None);
+        assert_eq!(options.dict_size_bytes, None);
+        assert!(!options.force_v70);
+    }
+
+    #[test]
+    fn read_only_versions_are_rejected_on_the_writer() {
+        for version in [
+            ArchiveVersion::V15,
+            ArchiveVersion::V20,
+            ArchiveVersion::V26,
+            ArchiveVersion::V36,
+        ] {
+            assert!(
+                WriterOptions::new()
+                    .compression(version)
+                    .validate()
+                    .is_err(),
+                "{version} must not be writable"
+            );
+        }
+        // Writable versions pass validation with default options.
+        for version in [
+            ArchiveVersion::V29,
+            ArchiveVersion::V50,
+            ArchiveVersion::V70,
+        ] {
             WriterOptions::new()
-                .format(ArchiveFormat::Rar40)
-                .compression(CompressionVersion::V70)
+                .compression(version)
                 .validate()
-                .is_err()
-        );
-        assert_eq!(
-            WriterOptions::new()
-                .compression(CompressionVersion::V70)
-                .format,
-            ArchiveFormat::Rar5
-        );
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn default_writer_is_v50() {
+        let options = WriterOptions::new().into_legacy().unwrap();
+        assert_eq!(options.format_version, ArchiveVersion::V50);
+        assert!(!options.format_version.is_legacy());
     }
 }

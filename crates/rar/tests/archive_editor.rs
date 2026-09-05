@@ -5,7 +5,7 @@
 
 #![allow(deprecated)] // legacy facade (delete/rename/lock/list/read) — kept for byte-parity checks
 
-use rar_rs::{ArchiveEditor, ArchiveFormat, ArchiveReader, EditPlan, RarArchive, RarError};
+use rar_rs::{ArchiveEditor, ArchiveReader, ArchiveVersion, EditPlan, RarArchive, RarError};
 
 fn stored_level() -> u8 {
     0
@@ -335,7 +335,7 @@ fn rar4_archives_are_refused_with_a_clear_unsupported() {
         let mut archive = RarArchive::create_with_options(
             &path,
             rar_rs::CreateOptions {
-                format_version: ArchiveFormat::Rar40,
+                format_version: ArchiveVersion::V29,
                 ..Default::default()
             },
         )

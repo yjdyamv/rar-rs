@@ -3268,7 +3268,7 @@ mod encode_tests {
                     Some(&mut state),
                     i + 1 == chunks.len(),
                     None,
-                    ArchiveVersion::Rar50,
+                    ArchiveVersion::V50,
                 )
                 .unwrap(),
             );
@@ -3284,7 +3284,7 @@ mod encode_tests {
             data.len() as u64,
             3,
             None,
-            ArchiveVersion::Rar50,
+            ArchiveVersion::V50,
         )
         .unwrap();
         assert_eq!(roundtrip, data);
@@ -3302,26 +3302,26 @@ mod encode_tests {
         // Varied data (literal-heavy) at several sizes.
         for size in [1usize, 100, 1000, 100_000, 300_000] {
             let data: Vec<u8> = (0..size).map(|i| (i.wrapping_mul(31) >> 3) as u8).collect();
-            let packed = encode_raw(&data, 3, 0, ArchiveVersion::Rar70);
+            let packed = encode_raw(&data, 3, 0, ArchiveVersion::V70);
             let back = decode_standalone(
                 &packed,
                 size as u64,
                 0,
                 Some(128 * 1024),
-                ArchiveVersion::Rar70,
+                ArchiveVersion::V70,
             )
             .unwrap();
             assert_eq!(back, data, "size {size}");
         }
         // Repeated data (match/cache-heavy).
         let data = vec![0xABu8; 300_000];
-        let packed = encode_raw(&data, 3, 0, ArchiveVersion::Rar70);
+        let packed = encode_raw(&data, 3, 0, ArchiveVersion::V70);
         let back = decode_standalone(
             &packed,
             data.len() as u64,
             0,
             Some(128 * 1024),
-            ArchiveVersion::Rar70,
+            ArchiveVersion::V70,
         )
         .unwrap();
         assert_eq!(back, data);
@@ -3360,7 +3360,7 @@ mod encode_tests {
             None,
             true,
             None,
-            ArchiveVersion::Rar50,
+            ArchiveVersion::V50,
         )
         .unwrap();
         // The copy half must compress to a small fraction; the random half
@@ -3375,7 +3375,7 @@ mod encode_tests {
         // Byte-identical round-trip (dictionary 32 MiB covers the 2 MiB
         // distance; unpacked size over the RAR5 4 GiB cap is irrelevant).
         let back =
-            decode_standalone(&packed, data.len() as u64, 8, None, ArchiveVersion::Rar50).unwrap();
+            decode_standalone(&packed, data.len() as u64, 8, None, ArchiveVersion::V50).unwrap();
         assert_eq!(back, data);
     }
 
@@ -3399,7 +3399,7 @@ mod encode_tests {
             None,
             true,
             None,
-            ArchiveVersion::Rar50,
+            ArchiveVersion::V50,
         )
         .unwrap();
         // Random half ~1:1 + copy half ~1:1 → near 4 MiB. Bail-out may
@@ -3475,7 +3475,7 @@ mod encode_tests {
                     Some(&mut state),
                     is_final,
                     None,
-                    ArchiveVersion::Rar50,
+                    ArchiveVersion::V50,
                 )
                 .unwrap(),
             );

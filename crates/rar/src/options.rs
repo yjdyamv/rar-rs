@@ -1,7 +1,7 @@
 //! Public option structs for archive creation and extraction.
 
 use crate::error::{RarError, RarResult};
-use crate::version::ArchiveFormat;
+use crate::version::ArchiveVersion;
 
 pub(crate) const MAX_COMPRESSION_THREADS: usize = 64;
 const MIN_DICTIONARY_BYTES: u64 = 128 * 1024;
@@ -35,12 +35,14 @@ pub enum SolidReset {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateOptions {
-    /// Target archive container family. `Rar40` writes the legacy RAR 3.x/4.x
-    /// container (`Rar!\x1a\x07\x00`, 7-byte signature, fixed-width headers,
-    /// 16-bit CRC). `Rar5` (default) writes the modern RAR5 container, which
-    /// hosts both v50 and RAR7 (v70) members; combine with `force_v70` (and
-    /// `dict_size_bytes`) to request v70.
-    pub format_version: ArchiveFormat,
+    /// Target member compression version. [`ArchiveVersion::V29`] selects
+    /// the legacy RAR 1.5–4.x container pipeline (`Rar!\x1a\x07\x00`,
+    /// fixed-width headers, 16-bit CRC, per-member `unp_ver 29`).
+    /// [`ArchiveVersion::V50`] (default) selects the modern RAR5 container;
+    /// combine with `force_v70` (and `dict_size_bytes`) to request v70.
+    /// Only writable versions (`v29`/`v50`/`v70`) are accepted; the
+    /// v15/v20/v26/v36 readers exist for interoperability only.
+    pub format_version: ArchiveVersion,
     /// Create a solid archive: consecutive compressed members share one
     /// LZ window (better ratio, slower random access). Solid state can remain
     /// continuous across volumes or reset according to [`SolidReset`].
@@ -125,6 +127,12 @@ pub struct CreateOptions {
 
 impl CreateOptions {
     pub(crate) fn validate(&self) -> RarResult<()> {
+        if !self.format_version.is_writable() {
+            return Err(RarError::InvalidOption(format!(
+                "only versions v29, v50 and v70 are writable, got {}",
+                self.format_version
+            )));
+        }
         validate_dictionary(self.dict_size_log, self.dict_size_bytes)?;
         validate_threads(self.threads)
     }
@@ -170,7 +178,7 @@ pub(crate) fn validate_threads(threads: Option<usize>) -> RarResult<()> {
 impl Default for CreateOptions {
     fn default() -> Self {
         Self {
-            format_version: ArchiveFormat::Rar5,
+            format_version: ArchiveVersion::V50,
             solid: false,
             solid_reset: SolidReset::Continuous,
             quick_open: false,

@@ -21,6 +21,13 @@ fn reads_winrar5_fixture_and_extracts_byte_identical_data() {
             "missing entry {name}"
         );
     }
+    for entry in entries.iter() {
+        assert_eq!(
+            entry.version(),
+            rar_rs::ArchiveVersion::V50,
+            "WinRAR 5 fixture members are v50"
+        );
+    }
 
     for (name, expected_sha) in FIXTURE_FILES {
         let data = rar.read(name).expect("read entry");
@@ -848,7 +855,7 @@ fn dense_x86_multi_chunk_roundtrips_byte_identical() {
             &data,
             rar_rs::EncodeOptions {
                 chunk_size: chunk,
-                variant: rar_rs::ArchiveVersion::Rar50,
+                variant: rar_rs::ArchiveVersion::V50,
                 ..rar_rs::EncodeOptions::new(3, dict_log)
             },
         )
@@ -858,7 +865,7 @@ fn dense_x86_multi_chunk_roundtrips_byte_identical() {
             data.len() as u64,
             dict_log,
             None,
-            rar_rs::ArchiveVersion::Rar50,
+            rar_rs::ArchiveVersion::V50,
         )
         .expect("decode");
         assert_eq!(

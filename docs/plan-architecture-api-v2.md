@@ -139,10 +139,10 @@ unsupported (matching the legacy seam).
 
 ### Migration notes (recorded with the binding migrations)
 
-- `WriterOptions` on `Rar50` accepts dictionaries above 4 GiB with WinRAR's
+- `WriterOptions` on v50 accepts dictionaries above 4 GiB with WinRAR's
   auto semantics (v50 for small members, v70 only when the effective
   dictionary exceeds 4 GiB), which the CLI's default/`-ma5` + `-md>4g`
-  combination requires for byte parity; `-ma7` maps to the `Rar70` format
+  combination requires for byte parity; `-ma7` maps to the v70 version
   (forced v70). `-ma4` keeps ignoring `-md`, as before.
 - Bindings surface typed validation errors: invalid cross-field
   combinations that the legacy layer silently downgraded or reported as
@@ -370,15 +370,13 @@ maintainer decision before execution.
       updated to `rar_rs::…`; the fuzz harness is `rar-rs-fuzz`. The
       `format::rar5`/`format/rar5` internal module paths are untouched.)
 - [x] Split archive format from compression version in the public model.
-      (done: `ArchiveFormat` is a new container-family type (`Rar40` / `Rar5`),
-      `ArchiveVersion` was reduced to the member codec versions within the RAR5
-      container (`Rar50` / `Rar70`), `CreateOptions::format_version` now selects
-      the container, and the typed `WriterOptions` takes the container and the
-      codec version independently — `WriterOptions::format(ArchiveFormat)` +
-      `WriterOptions::compression(CompressionVersion)`, no mutual rewriting.
-      `ArchiveVersion::Rar40` is gone: nothing on the read path ever emitted it
-      (RAR4 members report `format_version: 4` / `unpack_version` on the raw
-      model), and codec-table selection only ever saw `Rar50`/`Rar70`.)
+      (done, then **superseded by ADR 0004**: the two-axis split was replaced
+      by the single `ArchiveVersion` table — `V15`–`V70` two-digit variants,
+      container derived from the version, `ArchiveFormat` and
+      `CompressionVersion` removed. `CreateOptions::format_version` and
+      `WriterOptions::compression` now take `ArchiveVersion`; `ArchiveEntry::version()`
+      maps RAR4 `unp_ver` and RAR5 `comp_version` onto the table.
+      RAR4 members report `format_version: 4` / `unp_ver` on the raw model.)
 - [ ] Decide which low-level modules remain supported.
 - [x] Move unsupported low-level APIs behind `raw`/`unstable`, if appropriate
       (done: `rar_rs::rar40` is behind a new default-off `raw` feature; `rar50`

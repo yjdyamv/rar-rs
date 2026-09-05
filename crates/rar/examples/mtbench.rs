@@ -87,7 +87,7 @@ fn main() {
             &mut seed,
             threads,
             true,
-            rar_rs::ArchiveVersion::Rar50,
+            rar_rs::ArchiveVersion::V50,
         );
         let mt_ms = t1.elapsed().as_millis() as f64;
         println!(
