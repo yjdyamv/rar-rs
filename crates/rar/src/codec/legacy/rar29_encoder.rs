@@ -14,9 +14,9 @@
 
 use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::huffman::EncodeTable;
-use crate::codec::lzss_huff::DIST_CACHE_SIZE;
 use crate::codec::common::match_finder::MatchFinder;
 use crate::codec::legacy::ppmd::PpmdEncoder;
+use crate::codec::lzss_huff::DIST_CACHE_SIZE;
 use crate::error::{RarError, RarResult};
 
 // ── Table geometry ─────────────────────────────────────────────────────────
@@ -667,10 +667,12 @@ fn level_code_lengths(tokens: &[LevelToken]) -> [u8; LEVEL_COUNT] {
     // Build optimal Huffman lengths, capped at 15 bits (the 4-bit per-length
     // cap in the block header).
     let mut lengths = [0u8; LEVEL_COUNT];
-    lengths.copy_from_slice(&crate::codec::common::huffman::build_code_lengths_from_freqs(
-        &frequencies.iter().map(|&f| f as u32).collect::<Vec<_>>(),
-        15,
-    ));
+    lengths.copy_from_slice(
+        &crate::codec::common::huffman::build_code_lengths_from_freqs(
+            &frequencies.iter().map(|&f| f as u32).collect::<Vec<_>>(),
+            15,
+        ),
+    );
     lengths
 }
 
@@ -1247,8 +1249,10 @@ fn apply_rar29_filter(
             (Vec::new(), RAR3_E8E9_FILTER_BYTECODE)
         }
         Rar29FilterKind::Delta { channels } => {
-            block =
-                crate::codec::common::filters::delta_encode(&block, channels.min(u8::MAX as usize) as u8);
+            block = crate::codec::common::filters::delta_encode(
+                &block,
+                channels.min(u8::MAX as usize) as u8,
+            );
             (vec![(0, channels as u32)], RAR3_DELTA_FILTER_BYTECODE)
         }
         Rar29FilterKind::Itanium => {

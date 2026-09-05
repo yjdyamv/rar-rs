@@ -419,34 +419,15 @@ impl WriterOptions {
         }
 
         if self.format_version == ArchiveVersion::Rar40 {
-            if self.quick_open {
-                return Err(RarError::InvalidOption(
-                    "quick-open is not supported for RAR4 archives".into(),
-                ));
-            }
-            if self.blake2 {
-                return Err(RarError::InvalidOption(
-                    "BLAKE2sp hashes are not supported for RAR4 archives".into(),
-                ));
-            }
-            if self.recovery_volumes_percent.is_some() || self.recovery_volume_count.is_some() {
-                return Err(RarError::InvalidOption(
-                    "recovery volumes are not supported for RAR4 archives".into(),
-                ));
-            }
-            if self.save_owner || self.save_streams {
-                return Err(RarError::InvalidOption(
-                    "owner and stream records are not supported for RAR4 archives".into(),
-                ));
-            }
-            // The RAR4 writer selects its own per-member window (64 KiB – 4 MiB,
-            // from the member size); it has no configurable dictionary, so a
-            // requested size would be silently ignored by the legacy layer.
-            if self.dictionary_size.is_some() {
-                return Err(RarError::InvalidOption(
-                    "RAR4 archives do not support configurable dictionary sizes".into(),
-                ));
-            }
+            crate::format::rar4::create::validate_rar4_only(
+                self.quick_open,
+                self.blake2,
+                self.recovery_volumes_percent,
+                self.recovery_volume_count,
+                self.save_owner,
+                self.save_streams,
+                self.dictionary_size.is_some(),
+            )?;
         }
         // A `Rar50` archive accepts every dictionary size; sizes above 4 GiB
         // keep WinRAR's auto semantics (see [`Self::into_legacy`]) instead of
@@ -462,27 +443,13 @@ impl WriterOptions {
             SolidMode::PerVolume => (true, SolidReset::PerVolume),
             SolidMode::PerExtension => (true, SolidReset::PerExtension),
         };
-        // Dictionary mapping. `Rar70` always writes v70 members and declares
-        // an actual byte count (32 MiB when unset). `Rar50` maps a RAR5 log
-        // for sizes up to 4 GiB and otherwise passes the byte count through:
-        // like WinRAR's `-md`, a > 4 GiB request is capped at twice the file
-        // size, so small members stay plain v50 with the capped log and only
-        // members whose effective dictionary exceeds 4 GiB become v70.
-        let dictionary_log = if self.format_version == ArchiveVersion::Rar70 {
-            None
+        // Dictionary mapping is owned by the RAR5 format module (the RAR4
+        // container takes no dictionary; validation above refuses one).
+        let v70 = self.format_version == ArchiveVersion::Rar70;
+        let (dictionary_log, dictionary_bytes) = if self.format_version == ArchiveVersion::Rar40 {
+            (None, None)
         } else {
-            self.dictionary_size.and_then(DictionarySize::rar5_log)
-        };
-        let dictionary_bytes = if self.format_version == ArchiveVersion::Rar70 {
-            Some(
-                self.dictionary_size
-                    .unwrap_or(DictionarySize::DEFAULT)
-                    .bytes(),
-            )
-        } else {
-            self.dictionary_size
-                .filter(|size| size.rar5_log().is_none())
-                .map(DictionarySize::bytes)
+            crate::format::rar5::create::dictionary_fields(v70, self.dictionary_size)
         };
 
         Ok(CreateOptions {

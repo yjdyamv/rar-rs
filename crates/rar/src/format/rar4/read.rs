@@ -255,7 +255,9 @@ fn decode_member_bytes_to_inner(
             .decode_member_to(&packed, unp_size, solid, writer)
             .map_err(|error| {
                 let message = match error {
-                    crate::codec::legacy::rar15::Error::NeedMoreInput => "RAR 1.5 stream is truncated",
+                    crate::codec::legacy::rar15::Error::NeedMoreInput => {
+                        "RAR 1.5 stream is truncated"
+                    }
                     crate::codec::legacy::rar15::Error::InvalidData(message) => message,
                 };
                 map_codec_error(hdr, RarError::Format(format!("RAR 1.5 stream: {message}")))

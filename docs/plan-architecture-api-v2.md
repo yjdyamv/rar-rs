@@ -342,6 +342,12 @@ splits that still reference the old names.
 
 ## Phase 6: breaking-release decisions
 
+Per-format create policy now lives in the format modules
+(`src/format/rar4/create.rs`, `src/format/rar5/create.rs`); the shared
+`WriterOptions` delegates RAR4-only validation and RAR5/RAR7 dictionary
+mapping there, so future codec/RAR7 rule changes stay inside
+`format/rar5` instead of the shared writer layer.
+
 Decision inputs and recommendations are recorded in
 [ADR 0003](adr/0003-breaking-release-scope.md) (in-tree usage inventory,
 rename surface, low-level module users). Each bullet below needs a

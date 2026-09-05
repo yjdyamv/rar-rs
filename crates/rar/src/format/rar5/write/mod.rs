@@ -663,7 +663,8 @@ impl RarArchive {
                     if !e8.is_empty() {
                         list.push((Rar29FilterKind::E8, e8));
                     }
-                    if let Some(channels) = crate::codec::common::filters::auto_delta_filter_channels(&data)
+                    if let Some(channels) =
+                        crate::codec::common::filters::auto_delta_filter_channels(&data)
                     {
                         list.push((
                             Rar29FilterKind::Delta {
@@ -672,7 +673,8 @@ impl RarArchive {
                             std::iter::once(0..data.len()).collect(),
                         ));
                     }
-                    if let Some(channels) = crate::codec::common::filters::auto_audio_filter_channels(&data)
+                    if let Some(channels) =
+                        crate::codec::common::filters::auto_audio_filter_channels(&data)
                     {
                         list.push((
                             Rar29FilterKind::Audio { channels },
@@ -3021,7 +3023,9 @@ pub(crate) fn prepare_rar4_file_member(
     name: &str,
     level: u8,
 ) -> RarResult<Rar4PreparedMember> {
-    use crate::codec::legacy::rar29_encoder::{Rar29FilterKind, Unpack29Encoder, options_for_level};
+    use crate::codec::legacy::rar29_encoder::{
+        Rar29FilterKind, Unpack29Encoder, options_for_level,
+    };
     let meta = fs::metadata(path)?;
     let file_size = meta.len();
     let mtime = meta
@@ -3058,7 +3062,9 @@ pub(crate) fn prepare_rar4_file_member(
                 if !e8.is_empty() {
                     list.push((Rar29FilterKind::E8, e8));
                 }
-                if let Some(channels) = crate::codec::common::filters::auto_delta_filter_channels(&data) {
+                if let Some(channels) =
+                    crate::codec::common::filters::auto_delta_filter_channels(&data)
+                {
                     list.push((
                         Rar29FilterKind::Delta {
                             channels: channels as usize,
@@ -3066,7 +3072,9 @@ pub(crate) fn prepare_rar4_file_member(
                         std::iter::once(0..data.len()).collect(),
                     ));
                 }
-                if let Some(channels) = crate::codec::common::filters::auto_audio_filter_channels(&data) {
+                if let Some(channels) =
+                    crate::codec::common::filters::auto_audio_filter_channels(&data)
+                {
                     list.push((
                         Rar29FilterKind::Audio { channels },
                         std::iter::once(0..data.len()).collect(),
