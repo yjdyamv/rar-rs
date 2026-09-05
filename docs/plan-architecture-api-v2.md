@@ -324,7 +324,10 @@ preserving public paths through re-export shims until a breaking release.
       (done: entry points moved to `src/bin/{rar,unrar}.rs`, shared modules
       stay in `src/` referenced via `#[path]`).
 - [ ] Split N-API tasks/options/error mapping out of `src/lib.rs`
-      (error mapping is now `src/error.rs`; options/tasks split remain).
+      (error mapping -> `src/error.rs`; option validation/mapping and the
+      dict parser -> `src/options.rs`; a first async task + factory live in
+      `src/tasks.rs` proving cross-module `#[napi]` registration; the
+      remaining task implementations migrate next).
 - [ ] Remove transitional wildcard imports and add dependency guards.
 
 ## Phase 6: breaking-release decisions
