@@ -320,7 +320,9 @@ preserving public paths through re-export shims until a breaking release.
       remaining convergence items below are in place)
 - [x] Move filesystem policy out of format extraction/writing
       (done: `src/fs/{atomic.rs, volume.rs, safe_path.rs}` — see notes below).
-- [ ] Split CLI binaries into `src/bin` plus shared command modules.
+- [ ] Split CLI binaries into `src/bin` plus shared command modules
+      (done: entry points moved to `src/bin/{rar,unrar}.rs`, shared modules
+      stay in `src/` referenced via `#[path]`).
 - [ ] Split N-API tasks/options/error mapping out of `src/lib.rs`.
 - [ ] Remove transitional wildcard imports and add dependency guards.
 

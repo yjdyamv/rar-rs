@@ -9,11 +9,11 @@ description = "WinRAR-compatible command-line tools (rar, unrar)"
 
 [[bin]]
 name = "rar"
-path = "src/rar.rs"
+path = "src/bin/rar.rs"
 
 [[bin]]
 name = "unrar"
-path = "src/unrar.rs"
+path = "src/bin/unrar.rs"
 
 [dependencies]
 rar5 = { workspace = true, features = ["parallel"] }

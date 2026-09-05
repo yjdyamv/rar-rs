@@ -1,10 +1,16 @@
 //! unrar — extract and inspect RAR4, RAR5, and RAR7 archives.
 
+#[path = "../common.rs"]
 mod common;
+#[path = "../input.rs"]
 mod input;
+#[path = "../output.rs"]
 mod output;
+#[path = "../password.rs"]
 mod password;
+#[path = "../selector.rs"]
 mod selector;
+#[path = "../time.rs"]
 mod time;
 
 use clap::{Args, Parser, Subcommand};
