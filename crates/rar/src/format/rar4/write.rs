@@ -227,7 +227,7 @@ pub(crate) fn write_endarc(out: &mut impl std::io::Write, flags: u16) -> RarResu
 /// stored on disk as `[8-byte salt][AES-128-CBC ciphertext]`, where the
 /// ciphertext is the full block header (7-byte prefix + body) zero-padded
 /// to a 16-byte multiple. This mirrors the read side (`read_encrypted_block`
-/// in `rar40/mod.rs`), which reads the 8-byte salt, derives the key, and
+/// in `format/rar4/mod.rs`), which reads the 8-byte salt, derives the key, and
 /// decrypts `align16(head_size)` bytes back into the header.
 ///
 /// Returns the bytes to write and their on-disk length (`8 + align16`).

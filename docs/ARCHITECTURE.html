@@ -33,7 +33,7 @@
           rar-rs 架构与模块布局
         </h1>
         <p class="mt-3 text-slate-500">
-          库 crate <span class="mono text-slate-700">crates/rar</span>（公共 API：<span class="mono">rar5</span>）的内部模块地图与设计笔记。
+          库 crate <span class="mono text-slate-700">crates/rar</span>（crate 名 <span class="mono">rar-rs</span>）的内部模块地图与设计笔记。
           人类面向的概览在 <span class="mono">README.md</span>；磁盘格式见
           <span class="mono">FORMAT_RAR5_RAR7.html</span>；命令行面在 <span class="mono">CLI.md</span>。
         </p>
@@ -41,7 +41,7 @@
           <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm bg-slate-200 border border-slate-400"></span>module（模块）</span>
           <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm deep border border-slate-700"></span>核心体（容器 / 编解码 / 加密 / 恢复）</span>
           <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm border-2 border-dashed border-slate-400"></span>可选 / 特性门控（seam）</span>
-          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-1 bg-red-600"></span>拒绝 / 陷阱</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-1 bg-red-600"></span>拒绝 / 陷阱（§4 不再有，见 plan）</span>
           <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm bg-emerald-100 border border-emerald-400"></span>已实现</span>
         </div>
         <nav class="toc mt-6 rounded-lg border border-slate-200 bg-white p-4 text-sm flex flex-wrap gap-x-5 gap-y-1">
@@ -70,7 +70,7 @@ flowchart LR
         </div>
         <div class="mt-4 rounded-xl border border-slate-200 bg-white p-5">
           <div class="grid md:grid-cols-3 gap-3 mono text-xs">
-            <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">crates/rar</span><div class="text-slate-500 mt-1">库 crate（公共 API，<span class="mono">rar5</span>）</div></div>
+            <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">crates/rar</span><div class="text-slate-500 mt-1">库 crate（<span class="mono">rar-rs</span>）</div></div>
             <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">crates/rar-cli</span><div class="text-slate-500 mt-1">binary crate（<span class="mono">rar</span> + <span class="mono">unrar</span>）</div></div>
             <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">crates/rar-napi</span><div class="text-slate-500 mt-1">napi-rs 绑定（<span class="mono">rar-rs-napi</span>）</div></div>
             <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><span class="text-slate-700 font-semibold">fuzz/</span><div class="text-slate-500 mt-1">cargo-fuzz 目标（独立 crate）</div></div>
@@ -84,24 +84,30 @@ flowchart LR
       <!-- ============ 2. 模块地图 ============ -->
       <section id="s2">
         <h2 class="font-serif text-2xl font-semibold mb-1">2 · 库 crate 模块地图</h2>
-        <p class="text-sm text-slate-500 mb-4"><span class="mono">src/</span> 的模块划分为门面/状态层与四个核心子系统。词汇（块类型、块标志、extra 类型、压缩方法名）集中在 <span class="mono">rar50/mod.rs</span>，结构数据在 <span class="mono">rar50/headers/</span>（<span class="mono">parse.rs</span> / <span class="mono">serialize.rs</span> / <span class="mono">locator.rs</span>）——拆成目录使常量保持无依赖、头代码可被 crate 其余部分复用。</p>
+        <p class="text-sm text-slate-500 mb-4"><span class="mono">src/</span> 的模块划分为门面/状态层与四个核心子系统。词汇（块类型、块标志、extra 类型、压缩方法名）集中在 <span class="mono">format/rar5/mod.rs</span>，结构数据在 <span class="mono">format/rar5/headers/</span>（<span class="mono">parse.rs</span> / <span class="mono">serialize.rs</span> / <span class="mono">locator.rs</span>）——拆成目录使常量保持无依赖、头代码可被 crate 其余部分复用。</p>
 
         <div class="rounded-xl border border-slate-200 bg-white p-5">
           <div class="grid md:grid-cols-2 gap-5">
             <!-- facade / state -->
             <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
-              <p class="tag text-slate-500 mb-3">门面 & 状态（顶层）</p>
+              <p class="tag text-slate-500 mb-3">门面 & 状态（顶层 + archive/）</p>
               <ul class="mono text-xs text-slate-600 space-y-1.5">
                 <li class="mod pl-2">lib.rs — 门面 <span class="mono">RarArchive</span> + 再导出</li>
-                <li class="mod pl-2">archive.rs — <span class="mono">RarArchive</span> 共享状态 + 生命周期</li>
-                <li class="mod pl-2">rewrite.rs — 手术式 delete/rename（字节级重写）</li>
+                <li class="mod pl-2">archive/mod.rs — <span class="mono">RarArchive</span> 共享状态 + 生命周期</li>
+                <li class="mod pl-2">archive/reader.rs — 读角色门面（quick path / full scan）</li>
+                <li class="mod pl-2">archive/writer.rs — 写角色门面（单/多卷 + 加密）</li>
+                <li class="mod pl-2">archive/editor.rs — 修改角色门面（delete/rename/comment/lock）</li>
+                <li class="mod pl-2">archive/transaction.rs — 手术式 delete/rename（字节级重写）</li>
+                <li class="mod pl-2">archive/discovery.rs — 分卷发现（.partN / 老命名）</li>
+                <li class="mod pl-2">archive/create.rs + archive/entry.rs — 写生命周期 + 条目类型</li>
+                <li class="mod pl-2">model/ — 格式中立模型（entry.rs / chunk.rs）</li>
                 <li class="mod pl-2">name_policy.rs — 路径收集 + 掩码</li>
-                <li class="mod pl-2">version.rs — <span class="mono">ArchiveVersion</span>：容器<em>家族</em>（RAR5）内的编解码<em>版本</em>（v50 / v70 codec）</li>
+                <li class="mod pl-2">version.rs — <span class="mono">ArchiveVersion</span> 单一版本表（v15–v70）</li>
                 <li class="mod pl-2">features.rs — <span class="mono">FeatureSet</span>（能力报告）</li>
                 <li class="mod pl-2">options.rs — <span class="mono">CreateOptions</span> / <span class="mono">ExtractOptions</span></li>
                 <li class="mod pl-2">error.rs — <span class="mono">RarError</span> / <span class="mono">RarResult</span></li>
                 <li class="mod pl-2">write_progress.rs — 进度回调管线</li>
-                <li class="mod pl-2">io_util.rs — 原子暂存 + 有界读取</li>
+                <li class="mod pl-2">fs/ — 原子暂存 + 有界读取 + 卷命名（atomic.rs / volume.rs / safe_path.rs）</li>
                 <li class="mod pl-2">parallel.rs — <span class="mono">parallel</span> 特性的 Rayon 池</li>
                 <li class="mod pl-2">detect.rs — 签名 / SFX 扫描</li>
               </ul>
@@ -109,17 +115,14 @@ flowchart LR
 
             <!-- container layer -->
             <div class="rounded-lg border border-slate-300 bg-white p-4 core">
-              <p class="tag text-indigo-500 mb-3">容器层 · rar50/</p>
+              <p class="tag text-indigo-500 mb-3">格式层 · format/</p>
               <ul class="mono text-xs text-slate-600 space-y-1.5">
-                <li class="mod pl-2">mod.rs — 常量 + 块/头标志词汇</li>
-                <li class="mod pl-2">headers/ — 块 & 头数据结构（parse.rs / serialize.rs / locator.rs）</li>
-                <li class="mod pl-2">payload.rs — MemberDecoder（ChunkReader · read_packed · decode_member）</li>
-                <li class="mod pl-2">vint.rs — 变长整数 codec</li>
-                <li class="mod pl-2">blake2sp.rs — BLAKE2sp 成员哈希</li>
-                <li class="mod pl-2">extract.rs — 读路径：scan/list/read/extract/solid 链</li>
-                <li class="mod pl-2">write/mod.rs — writer 门面：create/add/close 管线</li>
-                <li class="mod pl-2">write/engine.rs — payload/CBC 发射机</li>
-                <li class="mod pl-2">write/layout.rs — 字典定尺 + STORE 回退探测</li>
+                <li class="mod pl-2">rar5/ — RAR5：mod.rs 常量/词汇 + headers/{parse,serialize,locator}.rs</li>
+                <li class="mod pl-2">rar5/payload.rs — MemberDecoder（ChunkReader · read_packed · decode_member）</li>
+                <li class="mod pl-2">rar5/vint.rs + blake2sp.rs — 变长整数 + BLAKE2sp 成员哈希</li>
+                <li class="mod pl-2">rar5/extract.rs — 读路径：scan/list/read/extract/solid 链</li>
+                <li class="mod pl-2">rar5/write/{mod,engine,layout}.rs — writer 门面 + payload/CBC 发射机 + 字典定尺</li>
+                <li class="mod pl-2">rar4/ — 低版本格式兄弟模块（读：mod.rs 扫描 + read.rs 解码门面；写：write.rs 管线）</li>
               </ul>
             </div>
 
@@ -127,13 +130,9 @@ flowchart LR
             <div class="rounded-lg border border-slate-300 bg-white p-4 core">
               <p class="tag text-indigo-500 mb-3">压缩 codec · codec/</p>
               <ul class="mono text-xs text-slate-600 space-y-1.5">
-                <li class="mod pl-2">mod.rs — 分发</li>
-                <li class="mod pl-2">rar50/ — mod.rs + encoder.rs + decoder.rs（LZSS+Huffman）</li>
-                <li class="mod pl-2">bitstream.rs — MSB-first 位 I/O</li>
-                <li class="mod pl-2">huffman.rs — Huffman 表构建/解码（quick-lookup）</li>
-                <li class="mod pl-2">filters.rs — Delta / E8 / E8E9 / ARM 过滤器</li>
-                <li class="mod pl-2">match_finder.rs — BT4 匹配查找</li>
-                <li class="mod pl-2">window.rs — 共享 LZ 窗口（solid 链）</li>
+                <li class="mod pl-2">modern/lzss_huff/ — RAR5 LZSS+Huffman 编码器 + 解码器（encoder.rs / decoder.rs）</li>
+                <li class="mod pl-2">legacy/ — RAR29 解码/编码（rar29.rs + rar29_encoder.rs）+ PPMd（ppmd.rs）+ 老 RAR 15/20</li>
+                <li class="mod pl-2">common/ — bitstream.rs / huffman.rs / filters.rs / match_finder.rs / window.rs</li>
               </ul>
             </div>
 
@@ -142,22 +141,22 @@ flowchart LR
               <div class="rounded-lg border border-slate-300 bg-white p-4 core">
                 <p class="tag text-indigo-500 mb-3">加密层 · crypto/</p>
                 <ul class="mono text-xs text-slate-600 space-y-1.5">
-                  <li class="mod pl-2">mod.rs — 解密辅助</li>
                   <li class="mod pl-2">rar50.rs — AES-256-CBC + KDF + hash-key MAC</li>
+                  <li class="mod pl-2">rar15.rs / rar20.rs / rar30.rs — 老族加密</li>
                 </ul>
               </div>
               <div class="rounded-lg border border-slate-300 bg-white p-4 core">
                 <p class="tag text-indigo-500 mb-3">恢复层 · recovery/</p>
                 <ul class="mono text-xs text-slate-600 space-y-1.5">
-                  <li class="mod pl-2">mod.rs — repair/rebuild 分发</li>
                   <li class="mod pl-2">rar50.rs — 内联恢复记录（RR）</li>
                   <li class="mod pl-2">rev50.rs — 恢复卷（.rev, REV5）</li>
+                  <li class="mod pl-2">legacy.rs — 老容器（PROTECT_HEAD/NEWSUB RR）修复</li>
                 </ul>
               </div>
             </div>
           </div>
           <div class="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-            💡 <strong>写路径</strong>（<span class="mono">rar50/write/*</span>）增量发射块：<span class="mono">engine.rs</span> 处理 payload +（可选）CBC 发射，<span class="mono">layout.rs</span> 决定字典大小并探测 STORE 回退。<span class="mono">rewrite.rs</span> 是手术路径：delete/rename 字节级复制保留的文件块、仅重发射变更的块，丢弃内联恢复记录并重建 quick-open 记录。
+            💡 <strong>写路径</strong>（<span class="mono">format/rar5/write/*</span>）增量发射块：<span class="mono">engine.rs</span> 处理 payload +（可选）CBC 发射，<span class="mono">layout.rs</span> 决定字典大小并探测 STORE 回退。<span class="mono">archive/transaction.rs</span> 是手术路径：delete/rename 字节级复制保留的文件块、仅重发射变更的块，丢弃内联恢复记录并重建 quick-open 记录。
           </div>
         </div>
       </section>
@@ -231,11 +230,13 @@ flowchart LR
       <!-- ============ 4. 实现状态 ============ -->
       <section id="s4">
         <h2 class="font-serif text-2xl font-semibold mb-1">4 · 实现状态</h2>
-        <p class="text-sm text-slate-500 mb-4">功能矩阵（镜像自项目计划）。<span class="text-emerald-600 font-medium">done</span> = 已实现且与 WinRAR/UnRAR 互操作；RAR4 为刻意、测试锁定的拒绝。</p>
+        <p class="text-sm text-slate-500 mb-4">功能矩阵（镜像自项目计划）。<span class="text-emerald-600 font-medium">done</span> = 已实现且与 WinRAR/UnRAR 互操作。</p>
         <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-2.5 text-sm">
           <!-- done cards -->
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">创建 RAR5 归档</span></div>
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">提取 RAR5 归档</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">创建 RAR4 归档（v29）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">提取 RAR 1.5–4.x 归档（v15–v36）</span></div>
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">原生 LZSS+Huffman 压缩</span></div>
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">自动 x86 + delta 过滤器（尺寸选通道，非 solid 成员）</span></div>
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">压缩级别 0–5</span></div>
@@ -252,7 +253,7 @@ flowchart LR
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">符号/硬链接（重定向）</span></div>
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">RAR7 宽 vint（大字典）</span></div>
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">多卷 delete/rename</span></div>
-          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">并行 rewrite 管线</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">并行手术重写管线（transaction）</span></div>
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">Quick-open（-qo+）/ open_quick</span></div>
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">BLAKE2sp（-htb）</span></div>
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">流式提取（有界内存）</span></div>
@@ -265,14 +266,13 @@ flowchart LR
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">多线程压缩（-mt）</span></div>
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">协作取消（set_cancel_flag）</span></div>
           <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">流式修复（repair_archive_path）</span></div>
-          <!-- rejected -->
-          <div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-red-500"></span><span class="text-red-700">提取 RAR4 归档 — 拒绝（清晰报错；用 7-Zip）</span></div>
+          <div class="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-slate-700">RAR4 头加密（-hp）写侧 + 成员级加密</span></div>
         </div>
-        <p class="mt-4 text-sm text-slate-500">rar-rs 产出的 RAR5 与 WinRAR / unrar 完全互操作。RAR4 刻意不在范围：以清晰 "unsupported" 错误拒绝。</p>
+        <p class="mt-4 text-sm text-slate-500">rar-rs 产出的 RAR5 与 WinRAR / unrar 完全互操作；RAR4（RAR 1.5–4.x）与 RAR7（v70）读写同样覆盖，低版本容器族在 <span class="mono">format/rar4</span>。</p>
       </section>
 
       <footer class="border-t border-slate-200 pt-6 text-xs text-slate-400">
-        内部模块参考，图优先可视化。库 crate 为 <span class="mono">rar5</span>；完整 API 见 <span class="mono">crates/rar</span>，磁盘格式见 <span class="mono">FORMAT_RAR5_RAR7.html</span>。
+        内部模块参考，图优先可视化。库 crate 为 <span class="mono">rar-rs</span>；完整 API 见 <span class="mono">crates/rar</span>，磁盘格式见 <span class="mono">FORMAT_RAR5_RAR7.html</span>。
       </footer>
     </main>
   </body>

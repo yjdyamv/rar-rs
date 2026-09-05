@@ -4,7 +4,7 @@
 //! Ported from the encode half of the `rars` project (MIT OR Apache-2.0)
 //! `codec/rar29.rs` `Unpack29Encoder`.  Produces RAR3/4-format compressed
 //! block sequences (不含 FILE_HEAD，只含压缩数据流).  The write pipeline
-//! (`rar40/write.rs`) handles headers, encryption, and multi-volume splitting.
+//! (`format/rar4/write.rs`) handles headers, encryption, and multi-volume splitting.
 //!
 //! Phase 1: LZSS only (m1–m5).  Phase 2 adds PPMd member encoding (m4/m5):
 //! a whole member is one PPMd block whose model either starts fresh

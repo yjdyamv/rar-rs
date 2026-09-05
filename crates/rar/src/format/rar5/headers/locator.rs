@@ -1,8 +1,8 @@
 //! The main-header locator record (type 0x01), owned here once so the byte
 //! rules (record layout, fixed-5-byte preallocated offset fields, relative
 //! offset patching, CRC recompute) live in a single place. Both the
-//! create/close path (`archive.rs`) and the surgical rewrite path
-//! (`rewrite.rs`) consume this module.
+//! create/close path (`archive/create.rs`) and the surgical rewrite path
+//! (`archive/transaction.rs`) consume this module.
 
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::vint_fixed5;

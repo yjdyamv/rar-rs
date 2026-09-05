@@ -22,7 +22,7 @@ Implementation sources
 ----------------------
 
 The RAR5 LZSS+Huffman codec
-(`crates/rar/src/codec/lzss_huff/`) was independently implemented from the
+(`crates/rar/src/codec/modern/lzss_huff/`) was independently implemented from the
 public RAR format and from analysis of libarchive's
 `archive_read_support_format_rar5.c` by Grzegorz Antoniak (2018), an
 independent BSD-2-Clause implementation. It is not copied from proprietary
@@ -41,7 +41,7 @@ Portions from the `rars` project
 
 The RAR5 recovery-record codec
 (`crates/rar/src/recovery/rar50.rs`), the BLAKE2sp hash
-(`crates/rar/src/rar50/blake2sp.rs`) and the RAR5 key-derivation / hash-key
+(`crates/rar/src/format/rar5/blake2sp.rs`) and the RAR5 key-derivation / hash-key
 MAC patterns (`crates/rar/src/crypto/rar50.rs`) were ported from the `rars`
 project (https://github.com/bitplane/rars, crates.io `rars`) at upstream
 revision `c08a17b`. At that revision, the `rars` workspace declared
@@ -51,13 +51,13 @@ WTFPL `COPYING` file. These portions therefore retain the upstream
 licensed under BSD-2-Clause unless otherwise noted.
 
 Further `rars` portions were ported later: the automatic x86 filter scan
-(`crates/rar/src/codec/filters.rs`, `auto_x86_filter_ranges`), the binary-tree
-match finder (`crates/rar/src/codec/match_finder.rs`, LZMA-style BT4), the
+(`crates/rar/src/codec/common/filters.rs`, `auto_x86_filter_ranges`), the binary-tree
+match finder (`crates/rar/src/codec/common/match_finder.rs`, LZMA-style BT4), the
 optimal parse and block splitter, the E8/E8E9 x86 transform normalization,
 and the RAR 3.x/4.x, RAR 2.x and RAR 1.5 member decoders. The definition-site
-notices currently identify `crates/rar/src/codec/rar29_encoder.rs` as
+notices currently identify `crates/rar/src/codec/legacy/rar29_encoder.rs` as
 MIT OR Apache-2.0, and identify the decode-side legacy codec ports in
-`rar15.rs`, `rar20.rs`, `rar29.rs`, and `ppmd.rs` as WTFPL. The `rars`
+`legacy/rar15.rs`, `legacy/rar20.rs`, `legacy/rar29.rs`, and `legacy/ppmd.rs` as WTFPL. The `rars`
 workspace metadata declares `MIT OR Apache-2.0`, while a later `COPYING` file
 in that repository declares WTFPL with a no-blame clause; this notice does not
 treat those distinct statements as interchangeable. Other ported portions
@@ -106,7 +106,7 @@ napi-rs binding (`crates/rar-napi`)
 -------------------------------------
 
 The `smart-archive-rar` napi-rs binding under `crates/rar-napi` wraps the
-`rar5` library for Node.js (native `.node` addons) and WASM
+`rar-rs` library for Node.js (native `.node` addons) and WASM
 (`wasm32-wasip1-threads`). Its code, tests, and scripts originate from the
 `smart-archive-rar` project (yjdyamv/smart-archive-rar) and remain
 BSD-2-Clause. The napi-rs / emnapi machinery is third-party and carries its

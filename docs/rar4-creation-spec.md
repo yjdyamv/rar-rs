@@ -38,12 +38,13 @@ rar-rs 支持创建 RAR3/4（unp_ver=29）归档，创建的归档**必须能被
 ### 模块结构
 
 ```
-rar40/
-  mod.rs          ← 已有：常量、flag、block 结构、LegacyDecoder
+format/rar4/
+  mod.rs          ← 已有：常量、flag、block 结构、LegacyDecoder（扫描/解析）
   read.rs         ← 已有：成员解码门面
   write.rs        ← 新建：RAR4 写管线
+  create.rs       ← 选项校验（`validate_rar4_only`）
 codec/
-  rar29_encoder.rs ← 新建：RAR29 编码器（从 rars 移植）
+  legacy/rar29_encoder.rs ← 新建：RAR29 编码器（从 rars 移植）
 ```
 
 ### 写管线流程
@@ -56,11 +57,11 @@ ArchiveWriter::open_write()
              write_archive_header()
 
 ArchiveWriter::add_file()
-  ├─ rar4? → rar40::write::add_member()
-  │          ├─ encode → Vec<u8>  (RAR29 encoder)
-  │          ├─ encrypt if -p     (Rar30Cipher)
+  ├─ rar4? → format::rar4::write 管线 + RAR29 编码器（archive/create.rs 调度）
+  │          ├─ encode → Vec<u8>        (Unpack29Encoder)
+  │          ├─ encrypt if -p           (Rar30Cipher)
   │          └─ write_file_header + data
-  └─ rar5? → rar50::write::add_file()
+  └─ rar5? → format::rar5::write 管线（write_streamed_payload）
 
 ArchiveWriter::close()
   ├─ rar4? → write_rar4_endarc()    (optional, only for -hp)
@@ -101,7 +102,7 @@ ArchiveWriter::close()
 ### 编码器接口
 
 ```rust
-// rar40/write.rs
+// format/rar4/write.rs
 pub fn encode_member(
     data: &[u8],
     solid: bool,
@@ -149,7 +150,7 @@ rar a -ma4 -p archive.rar file1 file2
 rar a -ma4 -v1m archive.rar file1 file2
 ```
 
-在 `rar-cli/src/rar.rs` 中：
+在 `crates/rar-cli/src/bin/rar.rs` 中：
 - `archive_version()` 解析 `"4"` → `ArchiveVersion::V29`（旧 `archive_format_force_v70()`，
   2026-09 收敛为单一版本表）
 - `CreateOptions` 的 `compression` 字段类型为 `ArchiveVersion`（`"4"` → `V29`，字段原名 `format_version`，2026-09 与 `WriterOptions::compression` 统一）
@@ -157,7 +158,7 @@ rar a -ma4 -v1m archive.rar file1 file2
 
 ## 测试策略
 
-### 集成测试（`crates/rar/tests/rar4_write.rs`）
+### 集成测试（`crates/rar/tests/rar4_create.rs`）
 
 1. **Roundtrip**：创建 → 解压 → diff 原始文件
 2. **WinRAR 兼容**：`unrar l` / `unrar x` 能正确处理我们创建的归档
@@ -176,7 +177,7 @@ rar a -ma4 -v1m archive.rar file1 file2
 
 ## 实现顺序
 
-1. **RAR4 头序列化**：`rar40/write.rs` 中的 `write_block_header()`、`write_file_head()`、`write_main_head()`
+1. **RAR4 头序列化**：`format/rar4/write.rs` 中的 `build_file_header()`、`write_file_header()`、`build_main_header()`
 2. **STORE-only 创建**：最简单的路径，验证头格式正确
 3. **RAR29 编码器移植**：从 rars 移植 `Unpack29Encoder`，适配 rar-rs 错误类型
 4. **LZSS 压缩创建**：m1-m5 各级别
