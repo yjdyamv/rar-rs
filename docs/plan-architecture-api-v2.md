@@ -328,7 +328,10 @@ preserving public paths through re-export shims until a breaking release.
       dict parser -> `src/options.rs`; a first async task + factory live in
       `src/tasks.rs` proving cross-module `#[napi]` registration; the
       remaining task implementations migrate next).
-- [ ] Remove transitional wildcard imports and add dependency guards.
+- [ ] Remove transitional wildcard imports and add dependency guards
+      (guards added: role facades stay off format/codec internals; fs/ and
+      model/ do not depend upward; wildcard-import cleanup follows the
+      format-module move).
 
 ## Phase 6: breaking-release decisions
 
