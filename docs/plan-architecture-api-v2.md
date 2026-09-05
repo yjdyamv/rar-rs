@@ -296,17 +296,16 @@ src/
     volume.rs
 ```
 
-Convergence seed: the edit-transaction engine moved from `archive/rewrite.rs`
-to `archive/transaction.rs` (pure crate-internal module rename; no public
-path changed). The remaining moves below are sequenced by risk, each
-preserving public paths through re-export shims until a breaking release.
-
-Codec buckets: `src/codec` now splits into `common/` (bitstream, filters,
-huffman, match_finder, window), `legacy/` (ppmd + rar15/20/29 +
-rar29_encoder) and `modern/lzss_huff`. Historical `crate::codec::<name>`
-paths are preserved as aliases in `codec/mod.rs` until the convergence is
-complete; legacy still pulls the shared `DIST_CACHE_SIZE` constant from the
-modern LZSS module (a shared-constant extraction is a later cleanup).
+Convergence: the edit-transaction engine moved from `archive/rewrite.rs` to
+`archive/transaction.rs`; `src/fs/{atomic,volume,safe_path}.rs` owns
+filesystem policy; the CLI entry points live under `src/bin`; the N-API
+binding is split across `lib.rs` (JS surface) + `options.rs` + `tasks.rs` +
+`error.rs`; codec files are bucketed under `common/`/`legacy/`/`modern`;
+and the format modules live at `src/format/rar4` + `src/format/rar5`.
+Deferred to the Phase 6 breaking release: the remaining transitional
+wildcard imports, the `#[doc(hidden)]` `rar40`/`rar50` re-export aliases
+(and the equally hidden `format` tree visibility), and low-level module
+splits that still reference the old names.
 
 ### fs/ convergence notes (recorded with the filesystem policy move)
 
