@@ -61,10 +61,17 @@ impl TryFrom<u8> for CompressionLevel {
     }
 }
 
-/// A validated dictionary size accepted by RAR5 and RAR7 writers.
+/// A validated dictionary size accepted by the RAR5 and RAR7 writers.
 ///
 /// Sizes from 128 KiB through 4 GiB must be powers of two and have a RAR5
 /// dictionary log. Larger RAR7 sizes may use any byte count through 126 GiB.
+///
+/// A size above 4 GiB selects RAR7 (v70) members. On a [`WriterOptions`]
+/// with [`ArchiveVersion::Rar50`] that selection is automatic, like
+/// WinRAR's `-md`: the request is capped at twice the member size, so
+/// small members stay plain v50 and only members whose effective
+/// dictionary exceeds 4 GiB are written as v70. Use
+/// [`ArchiveVersion::Rar70`] to force v70 members for every member.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DictionarySize(u64);
 
@@ -300,7 +307,9 @@ impl WriterOptions {
         self
     }
 
-    /// Set the requested compression dictionary size.
+    /// Set the requested compression dictionary size. On `Rar50` a size
+    /// above 4 GiB keeps the auto v50/v70 semantics (see [`DictionarySize`]);
+    /// on `Rar70` every member is v70 with this size (32 MiB when unset).
     #[must_use]
     pub fn dictionary_size(mut self, size: DictionarySize) -> Self {
         self.dictionary_size = Some(size);
@@ -439,15 +448,9 @@ impl WriterOptions {
                 ));
             }
         }
-        if self.format_version == ArchiveVersion::Rar50
-            && self
-                .dictionary_size
-                .is_some_and(|size| size.rar5_log().is_none())
-        {
-            return Err(RarError::InvalidOption(
-                "dictionary sizes above 4 GiB require RAR70".into(),
-            ));
-        }
+        // A `Rar50` archive accepts every dictionary size; sizes above 4 GiB
+        // keep WinRAR's auto semantics (see [`Self::into_legacy`]) instead of
+        // being downgraded or rejected.
         Ok(())
     }
 
@@ -459,19 +462,27 @@ impl WriterOptions {
             SolidMode::PerVolume => (true, SolidReset::PerVolume),
             SolidMode::PerExtension => (true, SolidReset::PerExtension),
         };
-        let dictionary = if self.format_version == ArchiveVersion::Rar70 {
+        // Dictionary mapping. `Rar70` always writes v70 members and declares
+        // an actual byte count (32 MiB when unset). `Rar50` maps a RAR5 log
+        // for sizes up to 4 GiB and otherwise passes the byte count through:
+        // like WinRAR's `-md`, a > 4 GiB request is capped at twice the file
+        // size, so small members stay plain v50 with the capped log and only
+        // members whose effective dictionary exceeds 4 GiB become v70.
+        let dictionary_log = if self.format_version == ArchiveVersion::Rar70 {
+            None
+        } else {
+            self.dictionary_size.and_then(DictionarySize::rar5_log)
+        };
+        let dictionary_bytes = if self.format_version == ArchiveVersion::Rar70 {
             Some(
                 self.dictionary_size
                     .unwrap_or(DictionarySize::DEFAULT)
                     .bytes(),
             )
         } else {
-            None
-        };
-        let dictionary_log = if self.format_version == ArchiveVersion::Rar70 {
-            None
-        } else {
-            self.dictionary_size.and_then(DictionarySize::rar5_log)
+            self.dictionary_size
+                .filter(|size| size.rar5_log().is_none())
+                .map(DictionarySize::bytes)
         };
 
         Ok(CreateOptions {
@@ -487,7 +498,7 @@ impl WriterOptions {
             recovery_volume_count: self.recovery_volume_count,
             volume_size: self.volume_size,
             dict_size_log: dictionary_log,
-            dict_size_bytes: dictionary,
+            dict_size_bytes: dictionary_bytes,
             force_v70: self.format_version == ArchiveVersion::Rar70,
             save_ctime: self.save_ctime,
             save_atime: self.save_atime,
@@ -753,6 +764,14 @@ impl ArchiveWriter {
         self.apply(|archive| archive.add_directory_only(path, name))
     }
 
+    /// Add a link/copy redirect member (Unix or Windows symlink, junction,
+    /// hardlink, or file copy) whose payload is a reference to another
+    /// member. Mirrors the legacy [`RarArchive::add_redirect`]; callers add
+    /// redirects after their data members, preserving archive order.
+    pub fn add_redirect(&mut self, name: &str, redir_type: u64, target: &str) -> RarResult<()> {
+        self.apply(|archive| archive.add_redirect(name, redir_type, target))
+    }
+
     /// Add borrowed entries in order, preserving duplicate names.
     pub fn add_batch(&mut self, entries: &[WriteEntry<'_>]) -> RarResult<()> {
         let legacy: Vec<_> = entries
@@ -857,7 +876,7 @@ impl Drop for ArchiveWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_RAR70_DICTIONARY_BYTES, WriterOptions};
+    use super::{DEFAULT_RAR70_DICTIONARY_BYTES, DictionarySize, WriterOptions};
     use crate::version::ArchiveVersion;
 
     #[test]
@@ -872,5 +891,32 @@ mod tests {
             options.dict_size_bytes,
             Some(DEFAULT_RAR70_DICTIONARY_BYTES)
         );
+    }
+
+    #[test]
+    fn rar50_dictionary_mapping_keeps_legacy_auto_semantics() {
+        // A RAR5 log dictionary up to 4 GiB maps to the log field.
+        let small = WriterOptions::new()
+            .format_version(ArchiveVersion::Rar50)
+            .dictionary_size(DictionarySize::try_from(64 * 1024 * 1024u64).unwrap())
+            .into_legacy()
+            .unwrap();
+        assert_eq!(small.format_version, ArchiveVersion::Rar50);
+        assert_eq!(small.dict_size_log, Some(9)); // 64 MiB = 128 KiB << 9
+        assert_eq!(small.dict_size_bytes, None);
+        assert!(!small.force_v70);
+
+        // A > 4 GiB request keeps the legacy byte-size field (auto v70:
+        // only members whose effective dictionary exceeds 4 GiB become
+        // v70; small members stay v50 with the capped log).
+        let big = WriterOptions::new()
+            .format_version(ArchiveVersion::Rar50)
+            .dictionary_size(DictionarySize::try_from(6 * 1024 * 1024 * 1024u64).unwrap())
+            .into_legacy()
+            .unwrap();
+        assert_eq!(big.format_version, ArchiveVersion::Rar50);
+        assert_eq!(big.dict_size_log, None);
+        assert_eq!(big.dict_size_bytes, Some(6 * 1024 * 1024 * 1024));
+        assert!(!big.force_v70, "Rar50 never forces v70");
     }
 }

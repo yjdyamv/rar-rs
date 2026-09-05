@@ -75,16 +75,60 @@ fn writer_options_validate_combinations_before_staging_and_redact_passwords() {
     assert!(append_debug.contains("<redacted>"));
     assert!(!append_debug.contains("append-secret"));
 
+    // A RAR4 archive cannot take a dictionary at all.
     assert!(matches!(
         ArchiveWriter::create_with(
             &path,
             WriterOptions::new()
-                .format_version(ArchiveVersion::Rar50)
-                .dictionary_size(DictionarySize::try_from(5 * 1024 * 1024 * 1024u64).unwrap())
+                .format_version(ArchiveVersion::Rar40)
+                .dictionary_size(DictionarySize::try_from(4 * 1024 * 1024).unwrap())
         ),
         Err(RarError::InvalidOption(_))
     ));
     assert!(!path.exists());
+}
+
+#[test]
+fn typed_rar50_big_dictionary_keeps_legacy_auto_semantics() {
+    // A > 4 GiB dictionary request on RAR50 is the WinRAR auto mode: the
+    // member-size cap decides v50 vs v70. For a small member the typed
+    // writer must produce the same bytes as the legacy option struct.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("payload.bin");
+    let payload: Vec<u8> = (0..1024 * 1024).map(|index| (index % 251) as u8).collect();
+    std::fs::write(&source, &payload).unwrap();
+
+    let legacy_path = dir.path().join("legacy.rar");
+    let mut legacy = RarArchive::create_with_options(
+        &legacy_path,
+        rar5::CreateOptions {
+            dict_size_bytes: Some(6 * 1024 * 1024 * 1024),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    legacy.add(&source, CompressionLevel::NORMAL.get()).unwrap();
+    legacy.close().unwrap();
+
+    let typed_path = dir.path().join("typed.rar");
+    let mut writer = ArchiveWriter::create_with(
+        &typed_path,
+        WriterOptions::new()
+            .dictionary_size(DictionarySize::try_from(6 * 1024 * 1024 * 1024u64).unwrap()),
+    )
+    .unwrap();
+    writer
+        .add_path(
+            &source,
+            EntryWriteOptions::new().compression_level(CompressionLevel::NORMAL),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+
+    assert_eq!(
+        std::fs::read(legacy_path).unwrap(),
+        std::fs::read(typed_path).unwrap()
+    );
 }
 
 #[test]
