@@ -16,7 +16,6 @@
 //! changes in one rewrite) is a later step; each call here is one
 //! transaction.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use super::RarArchive;
@@ -96,6 +95,125 @@ impl ArchiveEditor {
         }
         Ok(first.id())
     }
+}
+
+/// One structural edit in an [`EditPlan`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditOp {
+    /// Delete the member identified by the ID (like `rar d`).
+    Delete(EntryId),
+    /// Rename the member identified by the ID (like `rar rn`); a directory
+    /// rename is expanded to its descendants.
+    Rename(EntryId, String),
+}
+
+/// A sequence of structural edits applied to an [`ArchiveEditor`] in one
+/// atomic rewrite transaction.
+///
+/// Ops are validated against the catalog before anything is written: stale
+/// IDs, renaming a member the same plan deletes, and renaming a member of
+/// a solid chain that also loses a member are all rejected up front, so a
+/// failed [`ArchiveEditor::apply`] leaves every original file untouched.
+#[derive(Clone, Debug, Default)]
+pub struct EditPlan {
+    ops: Vec<EditOp>,
+}
+
+impl EditPlan {
+    /// Create an empty plan.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue a delete of the member identified by `id`.
+    #[must_use]
+    pub fn delete(mut self, id: EntryId) -> Self {
+        self.ops.push(EditOp::Delete(id));
+        self
+    }
+
+    /// Queue a rename of the member identified by `id`.
+    #[must_use]
+    pub fn rename(mut self, id: EntryId, new_name: impl Into<String>) -> Self {
+        self.ops.push(EditOp::Rename(id, new_name.into()));
+        self
+    }
+
+    /// Number of queued operations.
+    pub fn len(&self) -> usize {
+        self.ops.len()
+    }
+
+    /// Whether the plan holds no operations.
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+
+    /// The queued operations in order.
+    pub fn ops(&self) -> &[EditOp] {
+        &self.ops
+    }
+}
+
+/// Outcome of one applied [`EditPlan`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EditReport {
+    deleted: usize,
+    renamed: usize,
+}
+
+impl EditReport {
+    /// Number of members deleted.
+    pub const fn deleted(&self) -> usize {
+        self.deleted
+    }
+
+    /// Number of members renamed (explicit rename ops; directory-expanded
+    /// descendants are not counted).
+    pub const fn renamed(&self) -> usize {
+        self.renamed
+    }
+
+    /// Whether the plan changed nothing.
+    pub const fn is_empty(&self) -> bool {
+        self.deleted == 0 && self.renamed == 0
+    }
+}
+
+impl ArchiveEditor {
+    /// Apply an [`EditPlan`] as one atomic rewrite transaction.
+    ///
+    /// All operations share a single staged rewrite that replaces the
+    /// original only when every part succeeds, so a failed plan (a stale
+    /// ID, a member both deleted and renamed, or a solid-chain conflict)
+    /// leaves every original file — and the catalog generation — untouched.
+    /// On success the catalog is re-scanned and the generation changes,
+    /// making every previously issued ID stale.
+    ///
+    /// Locked archives follow the legacy rules: rename and erase-all plans
+    /// fail with [`RarError::ArchiveLocked`]. RAR4 archives are refused
+    /// with [`RarError::Unsupported`].
+    pub fn apply(&mut self, plan: EditPlan) -> RarResult<EditReport> {
+        self.ensure_rewritable()?;
+        // Resolve every operation against the current catalog before any
+        // rewrite starts; a stale ID fails the whole plan up front.
+        let mut deletes = Vec::with_capacity(plan.ops.len());
+        let mut renames = Vec::with_capacity(plan.ops.len());
+        for op in &plan.ops {
+            match op {
+                EditOp::Delete(id) => deletes.push(self.resolve_id(*id)?),
+                EditOp::Rename(id, new_name) => {
+                    renames.push((self.resolve_id(*id)?, new_name.clone()))
+                }
+            }
+        }
+        let summary = self.archive.edit_plan(&deletes, &renames)?;
+        self.catalog_token = allocate_catalog_token()?;
+        Ok(EditReport {
+            deleted: summary.deleted,
+            renamed: summary.renamed,
+        })
+    }
 
     /// Delete the members identified by `ids` (like `rar d`); returns the
     /// number deleted.
@@ -113,11 +231,11 @@ impl ArchiveEditor {
     /// RAR4 (legacy-container) archives are refused with
     /// [`RarError::Unsupported`]: the rewrite engine is RAR5-only.
     pub fn delete_entries(&mut self, ids: &[EntryId]) -> RarResult<usize> {
-        self.ensure_rewritable()?;
-        let indexes = self.resolve_ids(ids)?;
-        let count = self.archive.delete_indexes(&indexes)?;
-        self.catalog_token = allocate_catalog_token()?;
-        Ok(count)
+        let mut plan = EditPlan::new();
+        for &id in ids {
+            plan = plan.delete(id);
+        }
+        Ok(self.apply(plan)?.deleted)
     }
 
     /// Rename the members identified by `ids` (like `rar rn`); returns the
@@ -131,14 +249,11 @@ impl ArchiveEditor {
     /// RAR4 (legacy-container) archives are refused with
     /// [`RarError::Unsupported`]: the rewrite engine is RAR5-only.
     pub fn rename_entries(&mut self, renames: &[(EntryId, String)]) -> RarResult<usize> {
-        self.ensure_rewritable()?;
-        let pairs: Vec<(usize, String)> = renames
-            .iter()
-            .map(|(id, new_name)| Ok((self.resolve_id(*id)?, new_name.clone())))
-            .collect::<RarResult<_>>()?;
-        let count = self.archive.rename_indexes(&pairs)?;
-        self.catalog_token = allocate_catalog_token()?;
-        Ok(count)
+        let mut plan = EditPlan::new();
+        for (id, new_name) in renames {
+            plan = plan.rename(*id, new_name.clone());
+        }
+        Ok(self.apply(plan)?.renamed)
     }
 
     /// The surgical rewrite engine behind every edit operates on RAR5
@@ -151,20 +266,6 @@ impl ArchiveEditor {
             ));
         }
         Ok(())
-    }
-
-    /// Resolve every ID, rejecting stale ones before any edit starts and
-    /// deduplicating repeated IDs (a member can only be deleted once).
-    fn resolve_ids(&self, ids: &[EntryId]) -> RarResult<Vec<usize>> {
-        let mut indexes = Vec::with_capacity(ids.len());
-        let mut seen = HashSet::with_capacity(ids.len());
-        for &id in ids {
-            let index = self.resolve_id(id)?;
-            if seen.insert(index) {
-                indexes.push(index);
-            }
-        }
-        Ok(indexes)
     }
 
     fn resolve_id(&self, id: EntryId) -> RarResult<usize> {

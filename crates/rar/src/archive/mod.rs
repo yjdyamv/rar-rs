@@ -36,7 +36,7 @@ pub use discover::discover_volumes;
 pub(crate) use discover::{
     volume_base_of, volume_part_width, volume_path, volume_path_padded, volume_path_rar4,
 };
-pub use editor::ArchiveEditor;
+pub use editor::{ArchiveEditor, EditOp, EditPlan, EditReport};
 pub use entry::{ArchiveEntry, BatchEntry};
 #[cfg(feature = "parallel")]
 pub(crate) use entry::{BatchPrepareCtx, PreparedEntry};

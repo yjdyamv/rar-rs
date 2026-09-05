@@ -164,9 +164,10 @@ binding migrations remain.
 - [x] Extract internal index-based delete and rename operations.
 - [x] Add ID-based delete/rename APIs.
 - [x] Add catalog generation invalidation after structural edits.
-- [ ] Introduce `EditPlan` only after individual ID operations are stable.
-- [ ] Combine delete, rename, comment, and recovery changes into one rewrite.
-- [ ] Define and test multi-volume transaction/rollback behavior.
+- [x] Introduce `EditPlan` only after individual ID operations are stable.
+- [ ] Combine delete, rename, comment, and recovery changes into one rewrite
+      (delete + rename are combined; comment/recovery plan ops are next).
+- [x] Define and test multi-volume transaction/rollback behavior.
 - [ ] Migrate CLI and N-API edit operations.
 
 Exit criteria:
@@ -195,6 +196,25 @@ Exit criteria:
   with the legacy delete/rename on twin archives, generation
   invalidation (including foreign-editor IDs), erase-all, solid-chain
   delete round-trip, RAR4 rejection.
+
+### EditPlan slice notes (recorded with the combined rewrite)
+
+- `EditPlan` (`delete(id)` / `rename(id, name)` ops, one `apply` per
+  transaction) runs the whole plan through a single staged rewrite — one
+  delete mask + one rename map — so delete+rename combine atomically. The
+  core is a single `edit_plan` on `RarArchive`; the name-based
+  `delete`/`rename` and the ID-based single-op helpers all delegate to it
+  (three thin entry points, one implementation).
+- Validation happens before any rewrite: stale IDs, renaming a member the
+  same plan deletes (`InvalidOption`), and renaming a member of a solid
+  chain that also loses a member (`Unsupported` — the recompressed chain
+  would not carry the new name) all leave the archive untouched.
+- Multi-volume plans re-split the volume set in one transaction; a failed
+  plan leaves every volume byte-identical (tested by snapshot compare).
+  Delete-everything still erases the archive like `rar d`.
+- Comment/recovery changes are auto-carried by the rewrite engine (the RR
+  percentage is re-adopted, CMT is droppable) but are not yet plan ops;
+  that is the next step before the binding migrations.
 
 ## Phase 5: internal directory convergence
 

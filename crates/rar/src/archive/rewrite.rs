@@ -47,6 +47,14 @@ struct RewritePlan {
     comment: Option<Vec<u8>>,
 }
 
+/// Result of one combined structural edit: how many members were
+/// deleted and how many were renamed (explicit rename pairs only;
+/// directory-expanded descendants are not counted).
+pub(crate) struct EditSummary {
+    pub deleted: usize,
+    pub renamed: usize,
+}
+
 /// Lazily opened readers for every volume of the original archive.
 struct VolumeReaders {
     files: Vec<Option<File>>,
@@ -278,90 +286,14 @@ impl RarArchive {
     }
 
     /// Delete the members at the given catalog indexes (like `rar d`);
-    /// returns the number deleted. Index-based core shared by the
-    /// name-based [`Self::delete`] and the typed [`ArchiveEditor`].
+    /// returns the number deleted. Name-based [`Self::delete`] and the
+    /// typed [`ArchiveEditor`] resolve names or IDs to indexes and delegate
+    /// to [`Self::edit_plan`].
     pub(crate) fn delete_indexes(&mut self, indexes: &[usize]) -> RarResult<usize> {
-        if self.mode != Mode::Read {
-            return Err(RarError::Format(
-                "delete requires an archive opened for reading".into(),
-            ));
-        }
-        self.ensure_write_ctx();
-        let mut deleted = vec![false; self.entries.len()];
-        let mut count = 0usize;
-        for &idx in indexes {
-            // Out-of-range or duplicate indexes are ignored: callers resolve
-            // catalog IDs first, and the name-based path never duplicates.
-            if idx >= deleted.len() || deleted[idx] {
-                continue;
-            }
-            deleted[idx] = true;
-            count += 1;
-        }
-        if count == 0 {
+        if indexes.is_empty() {
             return Err(RarError::Format("no members to delete".into()));
         }
-
-        if count == self.entries.len() {
-            // Matching `rar d`: an archive whose every member is deleted is
-            // erased entirely (every volume for multi-volume archives).
-            if self.main_header_is_locked()? {
-                return Err(RarError::ArchiveLocked);
-            }
-            for vol in &self.volume_paths {
-                let _ = fs::remove_file(vol);
-            }
-            self.stream = None;
-            self.entries.clear();
-            self.read_ctx_mut().solid_state = None;
-            self.read_ctx_mut().solid_decoded_through = -1;
-            return Ok(count);
-        }
-
-        let first_deleted = deleted.iter().position(|d| *d).unwrap();
-        let chain = self.chain_range_around(first_deleted);
-
-        if self.volume_paths.len() > 1 {
-            // The official `rar` CLI refuses to modify multi-volume
-            // archives ("Cannot modify volume"); we re-split the volumes
-            // instead (superset).
-            self.rewrite_multivolume(&deleted, chain, None)?;
-        } else {
-            let src_path = self.path.clone();
-            let tmp_path = temp_sibling_path(&src_path);
-            let mut reader = File::open(&src_path)?;
-            self.stream = Some(Box::new(read_write_create(&tmp_path)?));
-            self.write_ctx_mut().quick_open_entries.clear();
-            // Rewriting rediscovers header encryption from the file itself.
-            self.header_encryption = false;
-            self.archive_encr = None;
-
-            let result = self.rewrite_blocks(
-                &mut reader,
-                &deleted,
-                chain,
-                None,
-                None,
-                None,
-                &src_path,
-                &tmp_path,
-            );
-
-            self.stream = None;
-            match result {
-                Ok(()) => replace_file(&tmp_path, &src_path)?,
-                Err(e) => {
-                    let _ = fs::remove_file(&tmp_path);
-                    return Err(e);
-                }
-            }
-        }
-
-        self.mode = Mode::Read;
-        self.read_ctx_mut().solid_state = None;
-        self.read_ctx_mut().solid_decoded_through = -1;
-        self.open_read()?;
-        Ok(count)
+        Ok(self.edit_plan(indexes, &[])?.deleted)
     }
 
     /// Rewrite a multi-volume archive, omitting deleted members.
@@ -773,30 +705,123 @@ impl RarArchive {
             count += 1;
         }
 
-        self.apply_rename_map(map)?;
+        self.rewrite_edit(vec![false; self.entries.len()], None, &map)?;
         Ok(count)
     }
 
-    /// Rename the members at the given catalog indexes (like `rar rn`),
-    /// expanding directory renames to their descendants; returns the number
-    /// of renamed members. Index-based core shared by the name-based
-    /// [`Self::rename`] and the typed [`ArchiveEditor`].
-    pub(crate) fn rename_indexes(&mut self, renames: &[(usize, String)]) -> RarResult<usize> {
+    /// Apply a combined structural edit — deletes plus renames — in one
+    /// atomic rewrite (a staged sibling file for single-volume archives, a
+    /// re-split staged volume set for multi-volume ones) and reload the
+    /// catalog. Returns the number of deleted and renamed members.
+    ///
+    /// Validation happens before any rewrite: out-of-range indexes fail
+    /// with [`RarError::StaleEntryId`], a member cannot be both deleted and
+    /// renamed, and renaming a member of a solid chain that also loses a
+    /// member is refused with [`RarError::Unsupported`] (the recompressed
+    /// chain would not carry the new name — split the edit instead).
+    /// Deleting every member without renames erases the archive like
+    /// `rar d`. Locked archives follow the legacy rules: rename and
+    /// erase-all are refused with [`RarError::ArchiveLocked`].
+    pub(crate) fn edit_plan(
+        &mut self,
+        delete_indexes: &[usize],
+        renames: &[(usize, String)],
+    ) -> RarResult<EditSummary> {
         if self.mode != Mode::Read {
             return Err(RarError::Format(
-                "rename requires an archive opened for reading".into(),
+                "edit requires an archive opened for reading".into(),
             ));
         }
         self.ensure_write_ctx();
-        if self.main_header_is_locked()? {
+        if !renames.is_empty() && self.main_header_is_locked()? {
             return Err(RarError::ArchiveLocked);
         }
 
-        // Apply the pairs sequentially, honoring earlier renames in the same
-        // call and expanding directory renames to their descendants. The
-        // expansion rules mirror the name-based path exactly: a directory's
-        // old prefix is matched against the original member names, and
-        // already-mapped members are left alone.
+        // Delete mask: duplicates are fine (a member can only be deleted
+        // once); out-of-range indexes are callers' bugs, so surface them.
+        let mut deleted = vec![false; self.entries.len()];
+        let mut deleted_count = 0usize;
+        for &idx in delete_indexes {
+            if idx >= deleted.len() {
+                return Err(RarError::StaleEntryId);
+            }
+            if !deleted[idx] {
+                deleted[idx] = true;
+                deleted_count += 1;
+            }
+        }
+        for (idx, _) in renames {
+            if *idx >= self.entries.len() {
+                return Err(RarError::StaleEntryId);
+            }
+            if deleted[*idx] {
+                return Err(RarError::InvalidOption(
+                    "cannot rename a member that the same edit deletes".into(),
+                ));
+            }
+        }
+
+        let (map, renamed_count) = self.build_rename_map(renames)?;
+        if deleted_count == 0 && renamed_count == 0 {
+            return Err(RarError::Format("no members to edit".into()));
+        }
+
+        if deleted_count == self.entries.len() {
+            // Matching `rar d`: deleting every member erases the archive
+            // (every volume for multi-volume archives). Renames are empty
+            // here — the disjointness check above leaves no target.
+            if self.main_header_is_locked()? {
+                return Err(RarError::ArchiveLocked);
+            }
+            for vol in &self.volume_paths {
+                let _ = fs::remove_file(vol);
+            }
+            self.stream = None;
+            self.entries.clear();
+            self.read_ctx_mut().solid_state = None;
+            self.read_ctx_mut().solid_decoded_through = -1;
+            return Ok(EditSummary {
+                deleted: deleted_count,
+                renamed: 0,
+            });
+        }
+
+        let chain = if deleted_count > 0 {
+            let first_deleted = deleted.iter().position(|d| *d).unwrap();
+            self.chain_range_around(first_deleted)
+        } else {
+            None
+        };
+        // The engine applies renames to verbatim copies only; a kept member
+        // of a recompressed chain would silently keep its old name. Refuse
+        // that combination up front. Deleted members are irrelevant (they
+        // are not emitted), so only kept members in the chain matter.
+        if let Some((start, end)) = chain {
+            for idx in map.keys() {
+                if !deleted[*idx] && (start..=end).contains(idx) {
+                    return Err(RarError::Unsupported(
+                        "renaming a member of a solid chain that also loses a member is not supported; split the edit into separate transactions"
+                            .into(),
+                    ));
+                }
+            }
+        }
+
+        self.rewrite_edit(deleted, chain, &map)?;
+        Ok(EditSummary {
+            deleted: deleted_count,
+            renamed: renamed_count,
+        })
+    }
+
+    /// Build the rename map (index -> new name) for resolved rename pairs,
+    /// expanding directory renames to their descendants with the same rules
+    /// as the name-based path. Returns the map and the number of explicit
+    /// rename pairs.
+    fn build_rename_map(
+        &self,
+        renames: &[(usize, String)],
+    ) -> RarResult<(std::collections::HashMap<usize, String>, usize)> {
         let mut map: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
         let mut count = 0usize;
         for (idx, new) in renames {
@@ -827,36 +852,39 @@ impl RarArchive {
             }
             count += 1;
         }
-        if count == 0 {
-            return Err(RarError::Format("no members to rename".into()));
-        }
-        self.apply_rename_map(map)?;
-        Ok(count)
+        Ok((map, count))
     }
 
-    /// Run a planned rename map (index -> new name) through the rewrite
-    /// pipeline and reload the catalog. Shared by the name- and
-    /// index-based rename paths.
-    fn apply_rename_map(&mut self, map: std::collections::HashMap<usize, String>) -> RarResult<()> {
+    /// Run one staged edit rewrite (delete mask + rename map) against the
+    /// original archive and reload the catalog. Single-volume archives are
+    /// rewritten through a sibling file that replaces the original only on
+    /// success; multi-volume archives are re-split at their volume size and
+    /// their .rev recovery volumes regenerated.
+    fn rewrite_edit(
+        &mut self,
+        deleted: Vec<bool>,
+        chain: Option<(usize, usize)>,
+        map: &std::collections::HashMap<usize, String>,
+    ) -> RarResult<()> {
+        let rename_map = (!map.is_empty()).then_some(map);
         if self.volume_paths.len() > 1 {
-            let deleted = vec![false; self.entries.len()];
-            self.rewrite_multivolume(&deleted, None, Some(&map))?;
+            self.rewrite_multivolume(&deleted, chain, rename_map)?;
         } else {
             let src_path = self.path.clone();
             let tmp_path = temp_sibling_path(&src_path);
             let mut reader = File::open(&src_path)?;
             self.stream = Some(Box::new(read_write_create(&tmp_path)?));
             self.write_ctx_mut().quick_open_entries.clear();
+            // Rewriting rediscovers header encryption from the file itself.
             self.header_encryption = false;
             self.archive_encr = None;
 
-            let deleted = vec![false; self.entries.len()];
             let result = self.rewrite_blocks(
                 &mut reader,
                 &deleted,
+                chain,
                 None,
-                None,
-                Some(&map),
+                rename_map,
                 None,
                 &src_path,
                 &tmp_path,

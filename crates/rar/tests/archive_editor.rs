@@ -3,7 +3,7 @@
 //! after structural edits. Byte parity with the legacy name-based
 //! operations is checked on twin archive copies.
 
-use rar5::{ArchiveEditor, ArchiveReader, ArchiveVersion, RarArchive, RarError};
+use rar5::{ArchiveEditor, ArchiveReader, ArchiveVersion, EditPlan, RarArchive, RarError};
 
 fn stored_level() -> u8 {
     0
@@ -329,4 +329,187 @@ fn rar4_archives_are_refused_with_a_clear_unsupported() {
         before,
         "refused edits must leave the archive untouched"
     );
+}
+
+#[test]
+fn combined_edit_plan_applies_all_ops_in_one_rewrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("plan.rar");
+    build_fixture(&path, dir.path());
+
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    let other = editor.unique_entry("other.txt").unwrap();
+    let dir_member = editor.unique_entry("d/").unwrap();
+    let duplicate = editor.entries_named("same.txt").next().unwrap().id();
+
+    let plan = EditPlan::new()
+        .delete(other)
+        .rename(dir_member, "renamed")
+        .rename(duplicate, "first.txt");
+    let report = editor.apply(plan).unwrap();
+    assert_eq!(report.deleted(), 1);
+    assert_eq!(report.renamed(), 2);
+    assert!(!report.is_empty());
+
+    // Everything landed in one pass: dir rename expanded to its child, the
+    // duplicate was renamed independently, and the deleted member is gone.
+    assert_eq!(
+        sorted_names(&path),
+        ["first.txt", "renamed/", "renamed/x.txt", "same.txt"]
+    );
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let first = reader.unique_entry("first.txt").unwrap();
+    assert_eq!(reader.read_entry(first).unwrap(), b"first");
+    let duplicate = reader.unique_entry("same.txt").unwrap();
+    assert_eq!(reader.read_entry(duplicate).unwrap(), b"second");
+    let child = reader.unique_entry("renamed/x.txt").unwrap();
+    assert_eq!(reader.read_entry(child).unwrap(), b"leaf payload");
+
+    // The pre-plan catalog generation is gone.
+    assert!(matches!(editor.entry(other), Err(RarError::StaleEntryId)));
+}
+
+#[test]
+fn plan_rejects_conflicts_and_solid_chain_renames_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Deleting and renaming the same member in one plan is rejected before
+    // any rewrite happens.
+    let path = dir.path().join("conflict.rar");
+    build_fixture(&path, dir.path());
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    let other = editor.unique_entry("other.txt").unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(matches!(
+        editor.apply(EditPlan::new().delete(other).rename(other, "x.txt")),
+        Err(RarError::InvalidOption(_))
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "rejected plan must not touch the archive"
+    );
+
+    // Renaming a member of a solid chain that also loses a member would
+    // silently drop the rename in the recompressed chain; refuse it.
+    let solid = dir.path().join("solid.rar");
+    {
+        let mut archive = RarArchive::create_with_options(
+            &solid,
+            rar5::CreateOptions {
+                solid: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (index, byte) in (0u8..4).enumerate() {
+            archive
+                .add_bytes(&format!("m{index}.bin"), &vec![b'a' + byte; 40 * 1024], 1)
+                .unwrap();
+        }
+        archive.close().unwrap();
+    }
+    let mut editor = ArchiveEditor::open(&solid).unwrap();
+    let m0 = editor.unique_entry("m0.bin").unwrap();
+    let m1 = editor.unique_entry("m1.bin").unwrap();
+    let before = std::fs::read(&solid).unwrap();
+    assert!(matches!(
+        editor.apply(EditPlan::new().delete(m1).rename(m0, "z0.bin")),
+        Err(RarError::Unsupported(_))
+    ));
+    assert_eq!(
+        std::fs::read(&solid).unwrap(),
+        before,
+        "refused chain edit must not touch the archive"
+    );
+
+    // The same delete without the chain rename still works.
+    let report = editor.apply(EditPlan::new().delete(m1)).unwrap();
+    assert_eq!(report.deleted(), 1);
+    let reader = ArchiveReader::open(&solid).unwrap();
+    assert_eq!(reader.entries().count(), 3);
+}
+
+#[test]
+fn multivolume_plan_is_atomic_and_failures_leave_all_volumes_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("mv.rar");
+    let mut archive = RarArchive::create_with_options(
+        &base,
+        rar5::CreateOptions {
+            volume_size: Some(48 * 1024),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    archive
+        .add_bytes("a.bin", &vec![7u8; 220 * 1024], 0)
+        .unwrap();
+    archive
+        .add_bytes("b.bin", &vec![9u8; 70 * 1024], 0)
+        .unwrap();
+    archive.close().unwrap();
+
+    // Locate the first volume (zero-padded part names).
+    let mut parts: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().contains("part"))
+                .unwrap_or(false)
+        })
+        .collect();
+    parts.sort();
+    assert!(parts.len() > 1, "expected a multi-volume set");
+    let first = parts[0].clone();
+    let snapshot = |dir: &std::path::Path| -> Vec<(String, Vec<u8>)> {
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rar"))
+            .collect();
+        files.sort();
+        files
+            .into_iter()
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                (name, std::fs::read(&path).unwrap())
+            })
+            .collect()
+    };
+    let before = snapshot(dir.path());
+
+    // A stale ID (minted on a second editor) fails the whole plan up front
+    // and must leave every volume byte-identical.
+    let mut editor = ArchiveEditor::open(&first).unwrap();
+    let foreign = ArchiveEditor::open(&first).unwrap();
+    let foreign_id = foreign.unique_entry("a.bin").unwrap();
+    assert!(matches!(
+        editor.apply(EditPlan::new().rename(foreign_id, "renamed.bin")),
+        Err(RarError::StaleEntryId)
+    ));
+    assert_eq!(
+        snapshot(dir.path()),
+        before,
+        "failed plan must not touch any volume"
+    );
+
+    // A successful combined plan re-splits the set in one transaction.
+    let a = editor.unique_entry("a.bin").unwrap();
+    let b = editor.unique_entry("b.bin").unwrap();
+    let report = editor
+        .apply(EditPlan::new().rename(a, "renamed.bin").delete(b))
+        .unwrap();
+    assert_eq!(report.deleted(), 1);
+    assert_eq!(report.renamed(), 1);
+    let mut reader = ArchiveReader::open(&first).unwrap();
+    let names: Vec<String> = reader
+        .entries()
+        .map(|entry| entry.name().to_string())
+        .collect();
+    assert_eq!(names, ["renamed.bin"]);
+    let renamed = reader.unique_entry("renamed.bin").unwrap();
+    let data = reader.read_entry(renamed).unwrap();
+    assert_eq!(data, vec![7u8; 220 * 1024]);
 }
