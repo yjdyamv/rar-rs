@@ -4,14 +4,15 @@
 //! This module is intentionally a thin seam. Read/decode lives in
 //! [`crate::rar50::extract`], the write pipeline in [`crate::rar50::write`],
 //! create/append finalization in `crate::archive::create`, and surgical
-//! rewrite (delete/rename/comment) in `crate::archive::rewrite`.
+//! edit transactions (delete/rename/comment/recovery) in
+//! `crate::archive::transaction`.
 
 mod create;
 mod discover;
 mod editor;
 mod entry;
 mod reader;
-mod rewrite;
+mod transaction;
 mod writer;
 
 #[cfg(test)]
@@ -121,7 +122,7 @@ impl Default for ReadState {
 /// Write-side state for creation, append, and rewrite.
 ///
 /// Groups fields exclusively used by write/create/append paths
-/// (write/mod.rs + rewrite.rs). Owned as `Option<WriteState>` inside
+/// (write/mod.rs + transaction.rs). Owned as `Option<WriteState>` inside
 /// [`RarArchive`]; `None` when the archive is opened for reading only.
 pub(crate) struct WriteState {
     /// Create a solid archive (shared LZ window across compressed members).

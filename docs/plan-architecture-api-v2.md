@@ -296,6 +296,11 @@ src/
     volume.rs
 ```
 
+Convergence seed: the edit-transaction engine moved from `archive/rewrite.rs`
+to `archive/transaction.rs` (pure crate-internal module rename; no public
+path changed). The remaining moves below are sequenced by risk, each
+preserving public paths through re-export shims until a breaking release.
+
 - [ ] Move format modules only after model ownership is stable.
 - [ ] Move filesystem policy out of format extraction/writing.
 - [ ] Split CLI binaries into `src/bin` plus shared command modules.
