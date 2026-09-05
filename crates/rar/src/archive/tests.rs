@@ -1,5 +1,5 @@
 use super::*;
-use crate::rar50::extract::sanitize_archive_path;
+use crate::fs::safe_path::sanitize_archive_path;
 
 fn assert_invalid_option(result: RarResult<RarArchive>) {
     match result {

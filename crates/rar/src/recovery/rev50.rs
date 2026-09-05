@@ -7,7 +7,7 @@
 
 use super::rar50::encode_parity_shards;
 use crate::error::{RarError, RarResult};
-use crate::io_util::read_up_to;
+use crate::fs::atomic::read_up_to;
 use std::fs;
 use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};

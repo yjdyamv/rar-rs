@@ -31,7 +31,7 @@ pub mod crypto;
 pub mod detect;
 pub mod error;
 pub mod features;
-mod io_util;
+mod fs;
 mod model;
 #[doc(hidden)]
 pub mod name_policy;

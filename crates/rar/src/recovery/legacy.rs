@@ -295,7 +295,7 @@ pub fn repair_legacy_archive_path(src: &std::path::Path, dst: &std::path::Path) 
         return Ok(false);
     };
     // Keep the write atomic: stage next to the destination, then rename.
-    let tmp = crate::io_util::temp_sibling_path(dst);
+    let tmp = crate::fs::atomic::temp_sibling_path(dst);
     std::fs::write(&tmp, &repaired).map_err(RarError::Io)?;
     std::fs::rename(&tmp, dst).map_err(RarError::Io)?;
     Ok(true)

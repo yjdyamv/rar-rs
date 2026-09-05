@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::codec::{DecoderState, lzss_huff as compression};
 use crate::crypto::parse_archive_encrypt_header;
-use crate::io_util::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
+use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
 use crate::rar50::headers::*;
 use crate::rar50::vint;
 

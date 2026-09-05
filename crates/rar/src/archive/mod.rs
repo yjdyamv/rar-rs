@@ -8,7 +8,7 @@
 //! `crate::archive::transaction`.
 
 mod create;
-mod discover;
+mod discovery;
 mod editor;
 mod entry;
 mod reader;
@@ -26,17 +26,17 @@ use crate::codec::DecoderState;
 use crate::crypto;
 use crate::crypto::parse_archive_encrypt_header;
 use crate::error::{RarError, RarResult};
-use crate::io_util::{copy_prefix, read_write_create, replace_file, temp_sibling_path};
+use crate::fs::atomic::{copy_prefix, read_write_create, replace_file, temp_sibling_path};
 use crate::rar50::headers::*;
 use crate::rar50::vint;
 use crate::rar50::*;
 use crate::version::ArchiveVersion;
 use crate::write_progress::ProgressTracker;
 
-pub use discover::discover_volumes;
-pub(crate) use discover::{
+pub(crate) use crate::fs::volume::{
     volume_base_of, volume_part_width, volume_path, volume_path_padded, volume_path_rar4,
 };
+pub use discovery::discover_volumes;
 pub use editor::{ArchiveEditor, EditOp, EditPlan, EditReport};
 pub use entry::{ArchiveEntry, BatchEntry};
 #[cfg(feature = "parallel")]

@@ -12,7 +12,7 @@ use super::{
 };
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::io_util::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
+use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
 use crate::rar50::headers::*;
 use crate::rar50::vint;
 use crate::rar50::{

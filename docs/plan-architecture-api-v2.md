@@ -301,8 +301,25 @@ to `archive/transaction.rs` (pure crate-internal module rename; no public
 path changed). The remaining moves below are sequenced by risk, each
 preserving public paths through re-export shims until a breaking release.
 
+### fs/ convergence notes (recorded with the filesystem policy move)
+
+- `src/fs/atomic.rs` (was `src/io_util.rs`): bounded reads, unique temp
+  sibling staging, `create_new` file opening and atomic `replace_file`.
+  The crate-internal `crate::io_util` import path moved to
+  `crate::fs::atomic`.
+- `src/fs/volume.rs`: `.partN.rar` name parsing, volume base/width and
+  the part path builders (moved out of archive discovery).
+- `src/fs/safe_path.rs`: `sanitize_archive_path` moved out of
+  `rar50/extract` so format extractors consume the policy instead of
+  owning it.
+- `archive/discovery.rs` (was `archive/discover.rs`) keeps only
+  `discover_volumes`, matching the target layout.
+
 - [ ] Move format modules only after model ownership is stable.
-- [ ] Move filesystem policy out of format extraction/writing.
+      (format modules still under `src/rar40`/`src/rar50`; deferred until the
+      remaining convergence items below are in place)
+- [x] Move filesystem policy out of format extraction/writing
+      (done: `src/fs/{atomic.rs, volume.rs, safe_path.rs}` — see notes below).
 - [ ] Split CLI binaries into `src/bin` plus shared command modules.
 - [ ] Split N-API tasks/options/error mapping out of `src/lib.rs`.
 - [ ] Remove transitional wildcard imports and add dependency guards.

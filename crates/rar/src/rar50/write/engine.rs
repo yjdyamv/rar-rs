@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::io_util::temp_suffix;
+use crate::fs::atomic::temp_suffix;
 use crate::write_progress::ProgressTracker;
 /// Wraps a writer and counts the bytes written through it.
 pub(crate) struct CountingWriter<'a> {

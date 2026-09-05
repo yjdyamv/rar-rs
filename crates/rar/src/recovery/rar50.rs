@@ -797,7 +797,7 @@ fn find_inline_recovery_chunks_in_file(
     let mut buf = vec![0u8; SCAN];
     loop {
         check_cancel(cancel)?;
-        let n = crate::io_util::read_up_to(src, &mut buf).map_err(io_err)?;
+        let n = crate::fs::atomic::read_up_to(src, &mut buf).map_err(io_err)?;
         if n == 0 {
             break;
         }

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::codec::lzss_huff;
 use crate::error::{RarError, RarResult};
-use crate::io_util::read_up_to;
+use crate::fs::atomic::read_up_to;
 
 /// WinRAR 7.23 dictionary selection for a non-solid member: the requested
 /// dictionary (`-md`, or the default 32 MiB at every compression level) is
