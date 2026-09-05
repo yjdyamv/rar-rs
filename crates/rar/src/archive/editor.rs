@@ -12,11 +12,13 @@
 //! re-scanned and its generation changes, so every ID issued before the
 //! edit becomes stale ([`crate::RarError::StaleEntryId`]).
 //!
-//! Edit *planning* (combining several delete/rename/comment/recovery
-//! changes in one rewrite) is a later step; each call here is one
-//! transaction.
+//! An [`EditPlan`] combines several delete/rename/comment/recovery changes
+//! in one rewrite; the single-op convenience methods (`delete_entries`,
+//! `rename_entries`) are thin wrappers around it.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use super::RarArchive;
 use super::reader::{Entries, EntryId, EntryMatches, EntryRef, allocate_catalog_token};
@@ -295,6 +297,35 @@ impl ArchiveEditor {
             plan = plan.rename(*id, new_name.clone());
         }
         Ok(self.apply(plan)?.renamed)
+    }
+
+    /// Delete the members identified by `ids`, reporting rewrite progress
+    /// through `progress` (`(done, total)`, monotonic, covering the whole
+    /// rewrite and reaching `total` on success).
+    pub fn delete_entries_with_progress(
+        &mut self,
+        ids: &[EntryId],
+        progress: Option<Box<dyn FnMut(u64, u64) + Send>>,
+    ) -> RarResult<usize> {
+        let saved = self.archive.progress.take();
+        self.archive.progress_member = 0;
+        if let Some(cb) = progress {
+            // The total is left unset: the rewrite loop reports the exact
+            // work byte count (kept payloads + recompressed input), which
+            // the tracker adopts as its denominator.
+            let tracker = crate::write_progress::ProgressTracker::new(Some(cb));
+            self.archive.progress =
+                Some(std::sync::Arc::new(std::sync::Mutex::new(tracker)));
+        }
+        let result = self.delete_entries(ids);
+        self.archive.progress = saved;
+        result
+    }
+
+    /// Install or clear a caller-owned cooperative cancellation flag
+    /// (checked between rewrite chunks and members).
+    pub fn set_cancel_flag(&mut self, flag: Option<Arc<AtomicBool>>) {
+        self.archive.set_cancel_flag(flag);
     }
 
     /// The surgical rewrite engine behind every edit operates on RAR5

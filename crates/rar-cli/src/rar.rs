@@ -1195,10 +1195,10 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         }
     }
     // WinRAR `rar a` semantics on an existing archive: members with the
-    // same name as an incoming file are replaced — deleted first (legacy
-    // rewrite; Phase 4 moves this to the editor API), then re-added
-    // through the typed append below; every other member is preserved
-    // verbatim. The append handle is opened only after the rewrite.
+    // same name as an incoming file are replaced — deleted first through
+    // the editor role, then re-added through the typed append below; every
+    // other member is preserved verbatim. The append handle is opened only
+    // after the rewrite.
     let mut writer = if existing {
         use std::collections::HashSet;
         if args.volume_size.is_some() {
@@ -1209,22 +1209,17 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
             .map(|c| c.name.clone())
             .chain(args.stdin_name.iter().cloned())
             .collect();
-        let mut ar = match &password {
-            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
-                .map_err(|e| format!("open: {e}"))?,
-            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
-        };
-        let to_drop: Vec<String> = ar
-            .namelist()
-            .into_iter()
-            .filter(|n| incoming.contains(*n))
-            .map(|s| s.to_string())
+        let mut editor = open_editor(archive_path, password.as_deref())?;
+        let to_drop: Vec<String> = editor
+            .entries()
+            .map(|entry| entry.name().to_string())
+            .filter(|n| incoming.contains(n))
             .collect();
         if !to_drop.is_empty() {
             let refs: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
-            ar.delete(&refs).map_err(|e| format!("replace: {e}"))?;
+            let plan = editor_delete_plan(&editor, &refs).map_err(|e| format!("replace: {e}"))?;
+            editor.apply(plan).map_err(|e| format!("replace: {e}"))?;
         }
-        ar.close().map_err(|e| format!("close: {e}"))?;
         // Deleting every member erases the archive file (like `rar d`);
         // when the replacement removed the only members, recreate it
         // instead of appending to a file that no longer exists.
@@ -1341,22 +1336,17 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
             .map(|c| c.name.clone())
             .chain(args.stdin_name.iter().cloned())
             .collect();
-        let mut ar = match &password {
-            Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
-                .map_err(|e| format!("open: {e}"))?,
-            None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
-        };
-        let stale: Vec<String> = ar
-            .namelist()
-            .into_iter()
-            .filter(|n| !keep.contains(*n))
-            .map(|n| n.to_string())
+        let mut editor = open_editor(archive_path, password.as_deref())?;
+        let stale: Vec<String> = editor
+            .entries()
+            .map(|entry| entry.name().to_string())
+            .filter(|n| !keep.contains(n))
             .collect();
         if !stale.is_empty() {
             let refs: Vec<&str> = stale.iter().map(|s| s.as_str()).collect();
-            ar.delete(&refs).map_err(|e| format!("sync: {e}"))?;
+            let plan = editor_delete_plan(&editor, &refs).map_err(|e| format!("sync: {e}"))?;
+            editor.apply(plan).map_err(|e| format!("sync: {e}"))?;
         }
-        ar.close().map_err(|e| format!("close: {e}"))?;
     }
     if args.volume_size.is_some() {
         info!(
@@ -1382,16 +1372,77 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
 }
 
 /// Delete members from an archive without rebuilding it (mirrors `rar d`).
+/// Open an [`ArchiveEditor`] for the CLI, honoring the password switch.
+fn open_editor(path: &str, password: Option<&str>) -> Result<rar5::ArchiveEditor, String> {
+    match password {
+        Some(pw) if !pw.is_empty() => {
+            rar5::ArchiveEditor::open_with_password(path, pw).map_err(|e| format!("open: {e}"))
+        }
+        _ => rar5::ArchiveEditor::open(path).map_err(|e| format!("open: {e}")),
+    }
+}
+
+/// Resolve delete names onto an [`rar5::EditPlan`] with the legacy `rar d`
+/// semantics: every name deletes the first matching member that is not
+/// already selected, so repeated names delete successive duplicates, and a
+/// missing name fails the whole plan before any rewrite starts.
+fn editor_delete_plan(
+    editor: &rar5::ArchiveEditor,
+    names: &[&str],
+) -> Result<rar5::EditPlan, rar5::RarError> {
+    let mut plan = rar5::EditPlan::new();
+    let mut chosen: Vec<rar5::EntryId> = Vec::new();
+    for name in names {
+        let id = editor
+            .entries_named(name)
+            .map(|entry| entry.id())
+            .find(|id| !chosen.contains(id))
+            .ok_or_else(|| rar5::RarError::MemberNotFound {
+                name: (*name).to_string(),
+            })?;
+        chosen.push(id);
+        plan = plan.delete(id);
+    }
+    Ok(plan)
+}
+
+/// Resolve rename pairs onto an [`rar5::EditPlan`]: each old name targets
+/// the first member with that stored name (trailing `/` ignored) that is
+/// not already renamed in the plan; directory expansion to descendants is
+/// handled by the rewrite core.
+fn editor_rename_plan(
+    editor: &rar5::ArchiveEditor,
+    pairs: &[(&str, &str)],
+) -> Result<rar5::EditPlan, rar5::RarError> {
+    let mut plan = rar5::EditPlan::new();
+    let mut chosen: Vec<rar5::EntryId> = Vec::new();
+    for (old, new) in pairs {
+        let old_norm = old.trim_end_matches('/');
+        let id = editor
+            .entries()
+            .find(|entry| {
+                entry.name().trim_end_matches('/') == old_norm && !chosen.contains(&entry.id())
+            })
+            .map(|entry| entry.id())
+            .ok_or_else(|| rar5::RarError::MemberNotFound {
+                name: (*old).to_string(),
+            })?;
+        chosen.push(id);
+        plan = plan.rename(id, (*new).to_string());
+    }
+    Ok(plan)
+}
+
 fn cmd_delete(args: &DeleteArgs) -> Result<(), String> {
     let archive_path = &args.archive;
-    let mut rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(archive_path, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        None => rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?,
-    };
     let names: Vec<&str> = args.names.iter().map(|s| s.as_str()).collect();
-    let n = rar.delete(&names).map_err(|e| format!("delete: {e}"))?;
-    info!("Deleted {n} file(s) from {archive_path}");
+    let mut editor = open_editor(archive_path, args.password.password.as_deref())?;
+    let plan = editor_delete_plan(&editor, &names).map_err(|e| format!("delete: {e}"))?;
+    let deleted = editor
+        .apply(plan)
+        .map_err(|e| format!("delete: {e}"))?
+        .deleted();
+    info!("Deleted {deleted} file(s) from {archive_path}");
     Ok(())
 }
 
@@ -1789,12 +1840,9 @@ fn cmd_lock(args: &ArchiveArgs) -> Result<(), String> {
 
 /// Add an inline recovery record (like `rar rr`).
 fn cmd_rr(args: &RecoveryArgs) -> Result<(), String> {
-    let mut rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
-    };
-    rar.add_recovery_record(args.percent)
+    let mut editor = open_editor(&args.archive, args.password.password.as_deref())?;
+    editor
+        .apply(rar5::EditPlan::new().set_recovery(args.percent))
         .map_err(|e| format!("rr: {e}"))?;
     info!(
         "Recovery record {}% added to {archive}",
@@ -1855,14 +1903,18 @@ fn cmd_rename(args: &RenameArgs) -> Result<(), String> {
         .chunks(2)
         .map(|c| (c[0].as_str(), c[1].as_str()))
         .collect();
-    let mut rar = rar5::RarArchive::open(archive_path).map_err(|e| format!("open: {e}"))?;
-    let n = rar.rename(&pairs).map_err(|e| format!("rename: {e}"))?;
-    info!("Renamed {n} file(s) in {archive_path}");
+    let mut editor = open_editor(archive_path, None)?;
+    let plan = editor_rename_plan(&editor, &pairs).map_err(|e| format!("rename: {e}"))?;
+    let renamed = editor
+        .apply(plan)
+        .map_err(|e| format!("rename: {e}"))?
+        .renamed();
+    info!("Renamed {renamed} file(s) in {archive_path}");
     Ok(())
 }
 
-/// Move files into the archive (like `rar m`): add them, then erase the
-/// sources after a successful close.
+/// Move files into the archive (like `rar m`): add them through the typed
+/// writer, then erase the sources after a successful commit.
 fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String> {
     let archive_path = &args.archive;
     let files = &args.files;
@@ -1882,42 +1934,61 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
         dict_size_log,
         dict_size_bytes,
     )?;
-    let dict_size_log = if force_v70 { None } else { dict_size_log };
-    let mut rar = if std::path::Path::new(archive_path).exists() {
-        match &password {
-            Some(pw) => rar5::RarArchive::open_append_with_password(archive_path, pw)
-                .map_err(|e| format!("open: {e}"))?,
-            None => {
-                rar5::RarArchive::open_append(archive_path).map_err(|e| format!("open: {e}"))?
-            }
+    let typed_format = if force_v70 {
+        rar5::ArchiveVersion::Rar70
+    } else {
+        format_version
+    };
+    let dictionary = if typed_format == rar5::ArchiveVersion::Rar40 {
+        None
+    } else {
+        v70_dict_bytes
+            .or(dict_size_bytes)
+            .or_else(|| dict_size_log.map(|log| (128u64 * 1024) << log))
+            .map(|bytes| {
+                rar5::DictionarySize::try_from(bytes)
+                    .map_err(|error| format!("dictionary: {error}"))
+            })
+            .transpose()?
+    };
+    let mut writer = if std::path::Path::new(archive_path).exists() {
+        let mut append_opts = rar5::AppendOptions::new();
+        if let Some(pw) = password {
+            append_opts = append_opts.password(pw.clone());
         }
+        if let Some(size) = dictionary {
+            append_opts = append_opts.dictionary_size(size);
+        }
+        rar5::ArchiveWriter::append_with(archive_path, append_opts)
+            .map_err(|e| format!("open: {e}"))?
     } else {
         let ts = time::parse_ts_specs(&args.ts_specs)?;
-        let create_opts = rar5::CreateOptions {
-            format_version,
-            password: password.clone(),
-            dict_size_log,
-            dict_size_bytes: v70_dict_bytes,
-            force_v70,
-            save_ctime: ts.save_ctime,
-            save_atime: ts.save_atime,
-            save_mtime: ts.save_mtime,
-            save_owner: misc.owner,
-            save_streams: misc.save_streams,
-            time_precision_seconds: ts.precision_seconds,
-            ..Default::default()
-        };
-        rar5::RarArchive::create_with_options(archive_path, create_opts)
+        let mut writer_opts = rar5::WriterOptions::new()
+            .format_version(typed_format)
+            .save_ctime(ts.save_ctime)
+            .save_atime(ts.save_atime)
+            .save_mtime(ts.save_mtime)
+            .save_owner(misc.owner)
+            .save_streams(misc.save_streams)
+            .time_precision_seconds(ts.precision_seconds);
+        if let Some(pw) = password {
+            writer_opts = writer_opts.password(pw.clone());
+        }
+        if let Some(size) = dictionary {
+            writer_opts = writer_opts.dictionary_size(size);
+        }
+        rar5::ArchiveWriter::create_with(archive_path, writer_opts)
             .map_err(|e| format!("create: {e}"))?
     };
-    rar.set_dictionary(dict_size_log, v70_dict_bytes)
-        .map_err(|e| format!("dictionary: {e}"))?;
+    let options = rar5::EntryWriteOptions::new()
+        .compression_level(rar5::CompressionLevel::try_from(3).map_err(|e| format!("level: {e}"))?);
     for file in files {
         let name = arg_to_name(file);
-        rar.add_as(file, &name, 3)
+        writer
+            .add_path_as(file, &name, options)
             .map_err(|e| format!("add {file}: {e}"))?;
     }
-    rar.close().map_err(|e| format!("close: {e}"))?;
+    writer.finish().map_err(|e| format!("close: {e}"))?;
     for file in files {
         let path = std::path::Path::new(file);
         if path.is_dir() {
@@ -2096,14 +2167,12 @@ fn cmd_comment_set(args: &CommentArgs) -> Result<(), String> {
             .read_to_end(&mut comment)
             .map_err(|e| format!("stdin: {e}"))?;
     }
-    let mut rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
-    };
-    rar.set_comment(&comment)
+    let mut editor = open_editor(&args.archive, args.password.password.as_deref())?;
+    let remove = comment.is_empty();
+    editor
+        .apply(rar5::EditPlan::new().set_comment(comment))
         .map_err(|e| format!("comment: {e}"))?;
-    if comment.is_empty() {
+    if remove {
         info!("Comment removed from {archive}", archive = args.archive);
     } else {
         info!("Comment added to {archive}", archive = args.archive);
@@ -2243,12 +2312,15 @@ fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
         (false, true) => rar5::name_policy::CaseKind::Upper,
         _ => return Err("usage: rar ch [-cl | -cu] <archive.rar>".into()),
     };
-    let mut rar = match &args.password.password {
-        Some(pw) => rar5::RarArchive::open_with_password(&args.archive, pw)
+    let mut editor = match &args.password.password {
+        Some(pw) if !pw.is_empty() => rar5::ArchiveEditor::open_with_password(&args.archive, pw)
             .map_err(|e| format!("open: {e}"))?,
-        None => rar5::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+        _ => rar5::ArchiveEditor::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
-    let names: Vec<String> = rar.namelist().into_iter().map(|s| s.to_string()).collect();
+    let names: Vec<String> = editor
+        .entries()
+        .map(|entry| entry.name().to_string())
+        .collect();
     let mut pairs = Vec::new();
     for name in names {
         let converted = match kind {
@@ -2267,8 +2339,15 @@ fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
         .iter()
         .map(|(a, b)| (a.as_str(), b.as_str()))
         .collect();
-    let n = rar.rename(&pairs_ref).map_err(|e| format!("ch: {e}"))?;
-    info!("Converted {n} name(s) in {archive}", archive = args.archive);
+    let plan = editor_rename_plan(&editor, &pairs_ref).map_err(|e| format!("ch: {e}"))?;
+    let renamed = editor
+        .apply(plan)
+        .map_err(|e| format!("ch: {e}"))?
+        .renamed();
+    info!(
+        "Converted {renamed} name(s) in {archive}",
+        archive = args.archive
+    );
     Ok(())
 }
 

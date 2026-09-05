@@ -167,7 +167,10 @@ binding migrations remain.
 - [x] Introduce `EditPlan` only after individual ID operations are stable.
 - [x] Combine delete, rename, comment, and recovery changes into one rewrite.
 - [x] Define and test multi-volume transaction/rollback behavior.
-- [ ] Migrate CLI and N-API edit operations.
+- [ ] Migrate CLI and N-API edit operations (CLI edit commands `d`/`rn`/`ch`/
+      `c`/`rr`/`m` and the `rar a` replacement + `-as` sync seams are
+      migrated; the staged `rar u`/`rar f` version-control rewrite and the
+      N-API `deleteEntries` task remain).
 
 Exit criteria:
 
@@ -228,6 +231,25 @@ Exit criteria:
   legacy `set_comment`/`add_recovery_record` outputs on twin archives; a
   combined delete+rename+comment+recovery plan lands atomically; refused
   ops leave every multi-volume file byte-identical.
+
+### CLI edit migration notes (recorded with the edit commands)
+
+- `rar d`, `rar rn`, `rar ch`, `rar c`, `rar rr` and `rar m` now drive
+  `ArchiveEditor`/`EditPlan`/`ArchiveWriter` instead of the legacy facade.
+  Name-based delete/rename semantics are preserved through catalog
+  resolvers that mirror the legacy first-match rules (repeated delete
+  names remove successive duplicates; a missing name fails the whole plan
+  before any rewrite). `rar m` was the last create/append path left on
+  the legacy writer and now uses `ArchiveWriter` like `rar a`/`u`/`f`.
+- `rar a` on an existing archive deletes same-named members through the
+  editor before its typed append; `-as` synchronization deletes stale
+  members through the editor too. `rar ch` now also converts directory
+  members consistently (the legacy name path failed on dir trees because
+  expansion renames made later lookups miss).
+- Remaining legacy edit surface: the staged `rar u`/`rar f`
+  version-control rewrite (rename/delete on the staged copy, tested by
+  `cli_version_control_keeps_previous_versions`) and the N-API
+  `deleteEntries` task.
 
 ## Phase 5: internal directory convergence
 
