@@ -2,7 +2,7 @@
 ///
 /// Post-processing filters applied to regions of decompressed output.
 /// Each filter has decode (inverse) and encode (forward) functions.
-use super::lzss_huff::*;
+use crate::codec::lzss_huff::*;
 
 /// Apply the inverse filter (for decompression).
 ///

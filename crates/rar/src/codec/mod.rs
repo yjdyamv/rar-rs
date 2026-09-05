@@ -6,17 +6,15 @@
 /// an independent BSD-2-Clause licensed implementation.
 ///
 /// License: BSD-2-Clause
-pub(crate) mod bitstream;
-pub(crate) mod filters;
-pub(crate) mod huffman;
-pub mod lzss_huff;
-pub(crate) mod match_finder;
-pub(crate) mod ppmd;
-pub(crate) mod rar15;
-pub(crate) mod rar20;
-pub(crate) mod rar29;
-pub(crate) mod rar29_encoder;
-pub(crate) mod window;
+pub(crate) mod common;
+pub(crate) mod legacy;
+pub(crate) mod modern;
+
+// Historical `crate::codec::<name>` paths are preserved as aliases until
+// the directory convergence is complete.
+pub(crate) use common::{bitstream, filters, huffman, match_finder, window};
+pub(crate) use legacy::{ppmd, rar15, rar20, rar29, rar29_encoder};
+pub use modern::lzss_huff;
 
 pub use lzss_huff::{
     DEFAULT_CHUNK_SIZE, DecodeOptions, DecoderState, EncodeOptions, EncoderState, FilterSpec,

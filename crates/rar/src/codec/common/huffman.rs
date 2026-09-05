@@ -3,7 +3,7 @@
 /// Two-level decode: quick table for codes up to QUICK_BITS, slower scan
 /// for longer codes. Based on the structure used in libarchive's RAR5 reader.
 use super::bitstream::{BitReader, BitWriter};
-use super::lzss_huff::{MAX_CODE_LENGTH, QUICK_BITS, QUICK_SIZE};
+use crate::codec::lzss_huff::{MAX_CODE_LENGTH, QUICK_BITS, QUICK_SIZE};
 
 /// Huffman tree node: (frequency, symbol/node id, children).
 type HuffNode = (u32, usize, Option<(usize, usize)>);

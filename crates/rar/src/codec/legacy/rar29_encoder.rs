@@ -667,7 +667,7 @@ fn level_code_lengths(tokens: &[LevelToken]) -> [u8; LEVEL_COUNT] {
     // Build optimal Huffman lengths, capped at 15 bits (the 4-bit per-length
     // cap in the block header).
     let mut lengths = [0u8; LEVEL_COUNT];
-    lengths.copy_from_slice(&super::huffman::build_code_lengths_from_freqs(
+    lengths.copy_from_slice(&crate::codec::huffman::build_code_lengths_from_freqs(
         &frequencies.iter().map(|&f| f as u32).collect::<Vec<_>>(),
         15,
     ));
@@ -755,28 +755,28 @@ fn encode_member_inner(
     {
         low_offset_frequencies[0] = 1;
     }
-    let main_lengths = super::huffman::build_code_lengths_from_freqs(
+    let main_lengths = crate::codec::huffman::build_code_lengths_from_freqs(
         &main_frequencies
             .iter()
             .map(|&f| f as u32)
             .collect::<Vec<_>>(),
         15,
     );
-    let offset_lengths = super::huffman::build_code_lengths_from_freqs(
+    let offset_lengths = crate::codec::huffman::build_code_lengths_from_freqs(
         &offset_frequencies
             .iter()
             .map(|&f| f as u32)
             .collect::<Vec<_>>(),
         15,
     );
-    let low_offset_lengths = super::huffman::build_code_lengths_from_freqs(
+    let low_offset_lengths = crate::codec::huffman::build_code_lengths_from_freqs(
         &low_offset_frequencies
             .iter()
             .map(|&f| f as u32)
             .collect::<Vec<_>>(),
         15,
     );
-    let length_lengths = super::huffman::build_code_lengths_from_freqs(
+    let length_lengths = crate::codec::huffman::build_code_lengths_from_freqs(
         &length_frequencies
             .iter()
             .map(|&f| f as u32)
