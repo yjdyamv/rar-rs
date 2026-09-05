@@ -619,7 +619,7 @@ impl RarArchive {
             self.maybe_reset_solid_for_extension(&name);
         }
         let (mut packed, method) = if (1..=5).contains(&level) {
-            use crate::codec::rar29_encoder::{
+            use crate::codec::legacy::rar29_encoder::{
                 Rar29FilterKind, Unpack29Encoder, options_for_level,
             };
             let options = options_for_level(level);
@@ -655,15 +655,15 @@ impl RarArchive {
                 // clusters or structured deltas.
                 let candidates = {
                     let mut list: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> = Vec::new();
-                    let e8e9 = crate::codec::filters::auto_x86_filter_ranges(&data, true);
+                    let e8e9 = crate::codec::common::filters::auto_x86_filter_ranges(&data, true);
                     if !e8e9.is_empty() {
                         list.push((Rar29FilterKind::E8E9, e8e9));
                     }
-                    let e8 = crate::codec::filters::auto_x86_filter_ranges(&data, false);
+                    let e8 = crate::codec::common::filters::auto_x86_filter_ranges(&data, false);
                     if !e8.is_empty() {
                         list.push((Rar29FilterKind::E8, e8));
                     }
-                    if let Some(channels) = crate::codec::filters::auto_delta_filter_channels(&data)
+                    if let Some(channels) = crate::codec::common::filters::auto_delta_filter_channels(&data)
                     {
                         list.push((
                             Rar29FilterKind::Delta {
@@ -672,7 +672,7 @@ impl RarArchive {
                             std::iter::once(0..data.len()).collect(),
                         ));
                     }
-                    if let Some(channels) = crate::codec::filters::auto_audio_filter_channels(&data)
+                    if let Some(channels) = crate::codec::common::filters::auto_audio_filter_channels(&data)
                     {
                         list.push((
                             Rar29FilterKind::Audio { channels },
@@ -3021,7 +3021,7 @@ pub(crate) fn prepare_rar4_file_member(
     name: &str,
     level: u8,
 ) -> RarResult<Rar4PreparedMember> {
-    use crate::codec::rar29_encoder::{Rar29FilterKind, Unpack29Encoder, options_for_level};
+    use crate::codec::legacy::rar29_encoder::{Rar29FilterKind, Unpack29Encoder, options_for_level};
     let meta = fs::metadata(path)?;
     let file_size = meta.len();
     let mtime = meta
@@ -3050,15 +3050,15 @@ pub(crate) fn prepare_rar4_file_member(
         if !data.is_empty() {
             let candidates = {
                 let mut list: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> = Vec::new();
-                let e8e9 = crate::codec::filters::auto_x86_filter_ranges(&data, true);
+                let e8e9 = crate::codec::common::filters::auto_x86_filter_ranges(&data, true);
                 if !e8e9.is_empty() {
                     list.push((Rar29FilterKind::E8E9, e8e9));
                 }
-                let e8 = crate::codec::filters::auto_x86_filter_ranges(&data, false);
+                let e8 = crate::codec::common::filters::auto_x86_filter_ranges(&data, false);
                 if !e8.is_empty() {
                     list.push((Rar29FilterKind::E8, e8));
                 }
-                if let Some(channels) = crate::codec::filters::auto_delta_filter_channels(&data) {
+                if let Some(channels) = crate::codec::common::filters::auto_delta_filter_channels(&data) {
                     list.push((
                         Rar29FilterKind::Delta {
                             channels: channels as usize,
@@ -3066,7 +3066,7 @@ pub(crate) fn prepare_rar4_file_member(
                         std::iter::once(0..data.len()).collect(),
                     ));
                 }
-                if let Some(channels) = crate::codec::filters::auto_audio_filter_channels(&data) {
+                if let Some(channels) = crate::codec::common::filters::auto_audio_filter_channels(&data) {
                     list.push((
                         Rar29FilterKind::Audio { channels },
                         std::iter::once(0..data.len()).collect(),

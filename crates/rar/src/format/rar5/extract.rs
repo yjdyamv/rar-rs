@@ -1584,7 +1584,7 @@ impl RarArchive {
                 // Bootstrap with a Rar29 decoder; it will be replaced on the
                 // first compressed member that reveals the actual unp_ver.
                 ctx.rar4_decoder = Some(crate::format::rar4::LegacyDecoder::Rar29(
-                    crate::codec::rar29::Rar29Decoder::new(),
+                    crate::codec::legacy::rar29::Rar29Decoder::new(),
                 ));
             }
             (ctx.rar4_decoded_through + 1) as usize
@@ -1618,7 +1618,7 @@ impl RarArchive {
                 if needs_rebuild {
                     let new_decoder = if hdr.unp_ver >= 29 {
                         crate::format::rar4::LegacyDecoder::Rar29(
-                            crate::codec::rar29::Rar29Decoder::new(),
+                            crate::codec::legacy::rar29::Rar29Decoder::new(),
                         )
                     } else if hdr.unp_ver == 20 || hdr.unp_ver == 26 {
                         crate::format::rar4::LegacyDecoder::Rar20(Box::default())

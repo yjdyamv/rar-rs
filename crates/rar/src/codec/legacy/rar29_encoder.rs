@@ -12,11 +12,11 @@
 //! matches escaped into the model where the tokeniser prices them cheaper
 //! than literals.  VM-filter integration is still out of scope.
 
-use crate::codec::bitstream::BitWriter;
-use crate::codec::huffman::EncodeTable;
+use crate::codec::common::bitstream::BitWriter;
+use crate::codec::common::huffman::EncodeTable;
 use crate::codec::lzss_huff::DIST_CACHE_SIZE;
-use crate::codec::match_finder::MatchFinder;
-use crate::codec::ppmd::PpmdEncoder;
+use crate::codec::common::match_finder::MatchFinder;
+use crate::codec::legacy::ppmd::PpmdEncoder;
 use crate::error::{RarError, RarResult};
 
 // ── Table geometry ─────────────────────────────────────────────────────────
@@ -667,7 +667,7 @@ fn level_code_lengths(tokens: &[LevelToken]) -> [u8; LEVEL_COUNT] {
     // Build optimal Huffman lengths, capped at 15 bits (the 4-bit per-length
     // cap in the block header).
     let mut lengths = [0u8; LEVEL_COUNT];
-    lengths.copy_from_slice(&crate::codec::huffman::build_code_lengths_from_freqs(
+    lengths.copy_from_slice(&crate::codec::common::huffman::build_code_lengths_from_freqs(
         &frequencies.iter().map(|&f| f as u32).collect::<Vec<_>>(),
         15,
     ));
@@ -755,28 +755,28 @@ fn encode_member_inner(
     {
         low_offset_frequencies[0] = 1;
     }
-    let main_lengths = crate::codec::huffman::build_code_lengths_from_freqs(
+    let main_lengths = crate::codec::common::huffman::build_code_lengths_from_freqs(
         &main_frequencies
             .iter()
             .map(|&f| f as u32)
             .collect::<Vec<_>>(),
         15,
     );
-    let offset_lengths = crate::codec::huffman::build_code_lengths_from_freqs(
+    let offset_lengths = crate::codec::common::huffman::build_code_lengths_from_freqs(
         &offset_frequencies
             .iter()
             .map(|&f| f as u32)
             .collect::<Vec<_>>(),
         15,
     );
-    let low_offset_lengths = crate::codec::huffman::build_code_lengths_from_freqs(
+    let low_offset_lengths = crate::codec::common::huffman::build_code_lengths_from_freqs(
         &low_offset_frequencies
             .iter()
             .map(|&f| f as u32)
             .collect::<Vec<_>>(),
         15,
     );
-    let length_lengths = crate::codec::huffman::build_code_lengths_from_freqs(
+    let length_lengths = crate::codec::common::huffman::build_code_lengths_from_freqs(
         &length_frequencies
             .iter()
             .map(|&f| f as u32)
@@ -973,7 +973,7 @@ fn encode_member_blocks(
 //  PPMd member encoding (m4/m5) — Phase 2
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn ppmd_err(e: crate::codec::ppmd::Error) -> RarError {
+fn ppmd_err(e: crate::codec::legacy::ppmd::Error) -> RarError {
     RarError::Format(format!("RAR 2.9 PPMd encode: {e}"))
 }
 
@@ -1239,16 +1239,16 @@ fn apply_rar29_filter(
     let mut block = data[range.clone()].to_vec();
     let (init_regs, code) = match kind {
         Rar29FilterKind::E8 => {
-            crate::codec::filters::e8_encode(&mut block, range.start as u64, true);
+            crate::codec::common::filters::e8_encode(&mut block, range.start as u64, true);
             (Vec::new(), RAR3_E8_FILTER_BYTECODE)
         }
         Rar29FilterKind::E8E9 => {
-            crate::codec::filters::e8_encode(&mut block, range.start as u64, false);
+            crate::codec::common::filters::e8_encode(&mut block, range.start as u64, false);
             (Vec::new(), RAR3_E8E9_FILTER_BYTECODE)
         }
         Rar29FilterKind::Delta { channels } => {
             block =
-                crate::codec::filters::delta_encode(&block, channels.min(u8::MAX as usize) as u8);
+                crate::codec::common::filters::delta_encode(&block, channels.min(u8::MAX as usize) as u8);
             (vec![(0, channels as u32)], RAR3_DELTA_FILTER_BYTECODE)
         }
         Rar29FilterKind::Itanium => {
@@ -1461,7 +1461,7 @@ fn itanium_encode(data: &mut [u8], file_offset: u32) {
 /// `rar29.rs::read_encoded_u32` for the widths this encoder emits (16..255
 /// never uses the decoder's negative-range branch, and nothing here emits
 /// 256..=65535 except via the 16-bit selector).
-fn write_encoded_u32(bits: &mut crate::codec::bitstream::BitWriter, value: u32) {
+fn write_encoded_u32(bits: &mut crate::codec::common::bitstream::BitWriter, value: u32) {
     if value < 16 {
         bits.write_bits(0, 2);
         bits.write_bits(value, 4);
@@ -1493,7 +1493,7 @@ fn encode_vm_filter_record_inner(
         return Err(enc_err("RAR 2.9 VM filter bytecode is empty"));
     }
 
-    let mut body = crate::codec::bitstream::BitWriter::new();
+    let mut body = crate::codec::common::bitstream::BitWriter::new();
     write_encoded_u32(&mut body, program_selector);
     write_encoded_u32(
         &mut body,
@@ -1684,7 +1684,7 @@ pub struct Unpack29Encoder {
     /// Boxed: the model carries ~20 KB of fixed tables (see the decoder's
     /// own `ppmd: Box<...>` note) and must not inline into `WriteState`,
     /// whose `RarArchive` frame already brushes the 1 MiB main-thread stack.
-    ppmd: Option<Box<crate::codec::ppmd::PpmdDecoder>>,
+    ppmd: Option<Box<crate::codec::legacy::ppmd::PpmdDecoder>>,
     /// Whether the last COMPRESSED member was PPMd: decides whether the next
     /// PPMd member continues the model (0x87 header) or starts fresh (0xA7).
     last_was_ppmd: bool,
@@ -1734,7 +1734,7 @@ impl Unpack29Encoder {
     /// Window: PPMd output equals the input, so `remember` is the caller's
     /// job (the LZ candidate already remembered it when both were tried).
     pub fn encode_ppmd_member_chain(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
-        use crate::codec::ppmd::PpmdEncoder;
+        use crate::codec::legacy::ppmd::PpmdEncoder;
         let continuing = self.ppmd.is_some() && self.last_was_ppmd;
         let mut out = Vec::new();
         let mut encoder = match (continuing, self.ppmd.take()) {
@@ -1884,7 +1884,7 @@ mod tests {
             input.len(),
             packed.len()
         );
-        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
         let out = decoder
             .decode_member(&packed, input.len() as u64)
             .unwrap_or_else(|e| panic!("PPMd hybrid decode: {e:?}"));
@@ -1901,7 +1901,7 @@ mod tests {
             input.len(),
             packed.len()
         );
-        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
         let out = decoder.decode_member(&packed, input.len() as u64).unwrap();
         assert_eq!(out, input, "PPMd literals roundtrip mismatch");
     }
@@ -1918,7 +1918,7 @@ mod tests {
             }
         }
         let packed = encode_ppmd_member_packed(&input, true).unwrap();
-        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
         assert_eq!(
             decoder.decode_member(&packed, input.len() as u64).unwrap(),
             input
@@ -1926,7 +1926,7 @@ mod tests {
 
         // Empty member: header + end-of-block only; decodes to nothing.
         let packed = encode_ppmd_member_packed(&[], true).unwrap();
-        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
         assert_eq!(decoder.decode_member(&packed, 0).unwrap(), Vec::<u8>::new());
     }
 
@@ -1988,7 +1988,7 @@ mod tests {
             input.len(),
             packed.len()
         );
-        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
         let out = decoder
             .decode_member(&packed, input.len() as u64)
             .unwrap_or_else(|e| panic!("E8 filtered decode: {e:?}"));
@@ -2002,7 +2002,7 @@ mod tests {
         let packed = encoder
             .encode_member_with_filter(&input, Rar29FilterKind::E8E9, None)
             .unwrap();
-        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
         assert_eq!(
             decoder.decode_member(&packed, input.len() as u64).unwrap(),
             input,
@@ -2029,7 +2029,7 @@ mod tests {
         let packed = encoder
             .encode_member_with_filter(&input, Rar29FilterKind::Delta { channels: 4 }, None)
             .unwrap();
-        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
         assert_eq!(
             decoder.decode_member(&packed, input.len() as u64).unwrap(),
             input,
@@ -2093,7 +2093,7 @@ mod tests {
         let packed = encoder
             .encode_member_with_filter(&input, Rar29FilterKind::Itanium, None)
             .unwrap();
-        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
         assert_eq!(
             decoder.decode_member(&packed, input.len() as u64).unwrap(),
             input,
@@ -2115,7 +2115,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
         assert_eq!(
             decoder.decode_member(&packed, input.len() as u64).unwrap(),
             input,
@@ -2136,7 +2136,7 @@ mod tests {
             input.len(),
             packed.len()
         );
-        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
         assert_eq!(
             decoder.decode_member(&packed, input.len() as u64).unwrap(),
             input,
@@ -2154,7 +2154,7 @@ mod tests {
         let packed = encoder
             .encode_member_with_filter(&input, Rar29FilterKind::E8, Some(range))
             .unwrap();
-        let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
         assert_eq!(
             decoder.decode_member(&packed, input.len() as u64).unwrap(),
             input,
@@ -2255,7 +2255,7 @@ mod tests {
             let mut encoder = Unpack29Encoder::with_options(options_for_level(3));
             let packed = encoder.encode_member(&input).unwrap();
 
-            let mut decoder = crate::codec::rar29::Rar29Decoder::new();
+            let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
             let out = decoder
                 .decode_member(&packed, input.len() as u64)
                 .unwrap_or_else(|e| panic!("blocks={blocks} len={} decode: {e:?}", input.len()));

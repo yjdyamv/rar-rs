@@ -6,9 +6,9 @@
 //! raw; compressed members decode through the appropriate codec. Solid chains
 //! share one decoder instance passed in by the caller via [`super::LegacyDecoder`].
 
-use crate::codec::rar15::Rar15Decoder;
-use crate::codec::rar20::Rar20Decoder;
-use crate::codec::rar29::Rar29Decoder;
+use crate::codec::legacy::rar15::Rar15Decoder;
+use crate::codec::legacy::rar20::Rar20Decoder;
+use crate::codec::legacy::rar29::Rar29Decoder;
 use crate::crc32;
 use crate::crypto::{Rar15Cipher, Rar20Cipher, Rar30Cipher};
 use crate::error::{RarError, RarResult};
@@ -210,7 +210,7 @@ fn decode_member_bytes_to_inner(
             Some(_) => Err(RarError::Format(
                 "RAR4: unp_ver >= 29 but wrong decoder type in solid chain".into(),
             )),
-            None => crate::codec::rar29::Rar29Decoder::new()
+            None => crate::codec::legacy::rar29::Rar29Decoder::new()
                 .decode_member_streaming_to(&packed, hdr.unpacked_size, writer)
                 .map_err(|e| map_codec_error(hdr, e)),
         };
@@ -223,14 +223,14 @@ fn decode_member_bytes_to_inner(
             Some(_) => Err(RarError::Format(
                 "RAR4: unp_ver 20/26 but wrong decoder type in solid chain".into(),
             )),
-            None => crate::codec::rar20::Rar20Decoder::new()
+            None => crate::codec::legacy::rar20::Rar20Decoder::new()
                 .decode_member_streaming_to(&packed, hdr.unpacked_size, writer)
                 .map_err(|e| map_codec_error(hdr, e)),
         };
     }
     if hdr.unp_ver == 15 {
         let solid = decoder.is_some();
-        let dec: &mut crate::codec::rar15::Rar15Decoder = match decoder {
+        let dec: &mut crate::codec::legacy::rar15::Rar15Decoder = match decoder {
             Some(LegacyDecoder::Rar15(dec)) => dec,
             Some(_) => {
                 return Err(RarError::Format(
@@ -238,14 +238,14 @@ fn decode_member_bytes_to_inner(
                 ));
             }
             None => {
-                return crate::codec::rar15::Rar15Decoder::new()
+                return crate::codec::legacy::rar15::Rar15Decoder::new()
                     .decode_member_to(&packed, unp_size, false, writer)
                     .map_err(|error| {
                         let message = match error {
-                            crate::codec::rar15::Error::NeedMoreInput => {
+                            crate::codec::legacy::rar15::Error::NeedMoreInput => {
                                 "RAR 1.5 stream is truncated"
                             }
-                            crate::codec::rar15::Error::InvalidData(message) => message,
+                            crate::codec::legacy::rar15::Error::InvalidData(message) => message,
                         };
                         map_codec_error(hdr, RarError::Format(format!("RAR 1.5 stream: {message}")))
                     });
@@ -255,8 +255,8 @@ fn decode_member_bytes_to_inner(
             .decode_member_to(&packed, unp_size, solid, writer)
             .map_err(|error| {
                 let message = match error {
-                    crate::codec::rar15::Error::NeedMoreInput => "RAR 1.5 stream is truncated",
-                    crate::codec::rar15::Error::InvalidData(message) => message,
+                    crate::codec::legacy::rar15::Error::NeedMoreInput => "RAR 1.5 stream is truncated",
+                    crate::codec::legacy::rar15::Error::InvalidData(message) => message,
                 };
                 map_codec_error(hdr, RarError::Format(format!("RAR 1.5 stream: {message}")))
             });

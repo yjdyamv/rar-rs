@@ -47,9 +47,9 @@ pub(crate) const FHD_EXTTIME: u16 = 0x1000;
 /// the chain either (the decoder is simply not called).
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum LegacyDecoder {
-    Rar29(crate::codec::rar29::Rar29Decoder),
-    Rar20(Box<crate::codec::rar20::Rar20Decoder>),
-    Rar15(Box<crate::codec::rar15::Rar15Decoder>),
+    Rar29(crate::codec::legacy::rar29::Rar29Decoder),
+    Rar20(Box<crate::codec::legacy::rar20::Rar20Decoder>),
+    Rar15(Box<crate::codec::legacy::rar15::Rar15Decoder>),
 }
 
 /// RAR4 compression method value for the STORE (uncompressed) method.

@@ -10,10 +10,8 @@ pub(crate) mod common;
 pub(crate) mod legacy;
 pub(crate) mod modern;
 
-// Historical `crate::codec::<name>` paths are preserved as aliases until
-// the directory convergence is complete.
-pub(crate) use common::{bitstream, filters, huffman, match_finder, window};
-pub(crate) use legacy::{ppmd, rar15, rar20, rar29, rar29_encoder};
+// The public `codec::lzss_huff` path (used by the crate re-exports and
+// examples) is kept as a re-export alias.
 pub use modern::lzss_huff;
 
 pub use lzss_huff::{

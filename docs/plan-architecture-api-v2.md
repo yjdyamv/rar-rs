@@ -337,9 +337,9 @@ modern LZSS module (a shared-constant extraction is a later cleanup).
       validation/conversion, `tasks.rs` task implementations + factories;
       `lib.rs` keeps the JS-facing structs, module wiring and re-exports).
 - [ ] Remove transitional wildcard imports and add dependency guards
-      (guards added: role facades stay off format/codec internals; fs/ and
-      model/ do not depend upward; wildcard-import cleanup follows the
-      format-module move).
+      (guards added; codec legacy/common aliases removed after bucketing;
+      remaining wildcard imports and the `#[doc(hidden)]` `rar40`/`rar50`
+      re-export aliases are dropped at the Phase 6 breaking release).
 
 ## Phase 6: breaking-release decisions
 

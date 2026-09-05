@@ -6,10 +6,10 @@
 //! License: BSD-2-Clause
 
 use super::*;
-use crate::codec::bitstream::BitReader;
-use crate::codec::filters::apply_filter_decode;
-use crate::codec::huffman::{DecodeTable, decode_symbol};
-use crate::codec::window::SlidingWindow;
+use crate::codec::common::bitstream::BitReader;
+use crate::codec::common::filters::apply_filter_decode;
+use crate::codec::common::huffman::{DecodeTable, decode_symbol};
+use crate::codec::common::window::SlidingWindow;
 use crate::error::{RarError, RarResult};
 use crate::version::ArchiveVersion;
 

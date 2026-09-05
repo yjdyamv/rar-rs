@@ -8,10 +8,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
-use crate::codec::bitstream::BitWriter;
-use crate::codec::filters::apply_filter_encode;
-use crate::codec::huffman::{EncodeTable, build_code_lengths_from_freqs, encode_symbol};
-use crate::codec::match_finder::{self, MatchFinder};
+use crate::codec::common::bitstream::BitWriter;
+use crate::codec::common::filters::apply_filter_encode;
+use crate::codec::common::huffman::{EncodeTable, build_code_lengths_from_freqs, encode_symbol};
+use crate::codec::common::match_finder::{self, MatchFinder};
 #[cfg(feature = "parallel")]
 use crate::error::RarError;
 use crate::error::RarResult;
@@ -911,7 +911,7 @@ pub fn encode_with_auto_x86_filter(
     if data.len() <= 5 {
         return Ok(None);
     }
-    let mut ranges_e9 = crate::codec::filters::auto_x86_filter_ranges(data, true);
+    let mut ranges_e9 = crate::codec::common::filters::auto_x86_filter_ranges(data, true);
     if ranges_e9.is_empty() {
         return Ok(None);
     }
@@ -928,7 +928,7 @@ pub fn encode_with_auto_x86_filter(
         })
         .collect();
 
-    let mut ranges_e8 = crate::codec::filters::auto_x86_filter_ranges(data, false);
+    let mut ranges_e8 = crate::codec::common::filters::auto_x86_filter_ranges(data, false);
     if ranges_e8.is_empty() || ranges_e8 == ranges_e9 {
         // Only one variant exists: encode it once.
         return Ok(Some(encode_with_filters_mt(
@@ -1044,7 +1044,7 @@ pub fn pick_delta_channel(
     let sample = &data[..sample_len];
     let plain = encode_with_filters(sample, method, dict_size_log, &[], variant)?;
     let mut best: Option<(u8, usize)> = None;
-    for &ch in crate::codec::filters::AUTO_DELTA_CHANNELS {
+    for &ch in crate::codec::common::filters::AUTO_DELTA_CHANNELS {
         let spec = FilterSpec::new(FILTER_DELTA, ch, 0, sample_len as u32);
         let packed = encode_with_filters(sample, method, dict_size_log, &[spec], variant)?;
         if packed.len() < plain.len() && best.is_none_or(|(_, b)| packed.len() < b) {
@@ -1075,7 +1075,7 @@ pub fn encode_with_auto_delta_filter(
 ) -> RarResult<Option<Vec<u8>>> {
     // Cheap pre-gate: skip obviously-uncorrelated (random) data so we never pay
     // for a sample encode on it.
-    if crate::codec::filters::auto_delta_filter_channels(data).is_none() {
+    if crate::codec::common::filters::auto_delta_filter_channels(data).is_none() {
         return Ok(None);
     }
     let Some(channels) = pick_delta_channel(data, method, dict_size_log, variant)? else {
@@ -3170,7 +3170,7 @@ fn write_filter_data(writer: &mut BitWriter, value: u32) {
 mod encode_tests {
     use super::decode_to_writer;
     use super::*;
-    use crate::codec::huffman::DecodeTable;
+    use crate::codec::common::huffman::DecodeTable;
 
     fn one_symbol_table(count: usize) -> Vec<u8> {
         let mut v = vec![0u8; count];
@@ -3412,7 +3412,7 @@ mod encode_tests {
     /// newest candidates keep matching.
     #[test]
     fn long_range_slides_window_and_finds() {
-        use crate::codec::match_finder::{LONG_RANGE_MAX, LongRange};
+        use crate::codec::common::match_finder::{LONG_RANGE_MAX, LongRange};
         let mut lr = LongRange::new(128 * 1024 * 1024);
         let chunk = pseudo_random(64 * 1024, 11);
         // Push enough identical 64 KiB chunks to slide the 64 MiB window
@@ -3434,7 +3434,7 @@ mod encode_tests {
     /// through the long-range table (the pair.bin scenario).
     #[test]
     fn long_range_debug_distant_copy() {
-        use crate::codec::match_finder::LongRange;
+        use crate::codec::common::match_finder::LongRange;
         let half = 2 * 1024 * 1024usize;
         let first = pseudo_random(half, 42);
         let mut lr = LongRange::new(32 * 1024 * 1024);

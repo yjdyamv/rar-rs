@@ -5,7 +5,7 @@
 //! specification as re-documented in rars' own format notes.
 //!
 //! Errors use a private enum mirroring the rars codec error so the body can
-//! stay close to the reference; [`crate::codec::rar29`] maps them.
+//! stay close to the reference; [`crate::codec::legacy::rar29`] maps them.
 
 use std::fmt;
 
