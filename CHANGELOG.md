@@ -5,7 +5,7 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version history predating this file remains available in Git history and
 `PLAN.md`.
 
-## [Unreleased]
+## [0.7.0] - 2026-09-05
 
 ### Changed
 
@@ -44,3 +44,5 @@ Version history predating this file remains available in Git history and
   the third-party source inventory, and identified license-family texts in
   release assets.
 - Required release tags to match both the N-API Cargo and package versions.
+
+## [Unreleased]

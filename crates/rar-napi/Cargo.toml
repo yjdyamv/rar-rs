@@ -1,6 +1,6 @@
 [package]
 name = "rar-rs-napi"
-version = "0.6.0"
+version = "0.7.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "RAR archive toolkit — napi-rs bindings for creating, reading, extracting, modifying, and repairing archives"

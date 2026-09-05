@@ -1,6 +1,6 @@
 {
   "name": "rar-rs-napi",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "RAR archive toolkit — napi-rs bindings for creating, reading, extracting, modifying, and repairing archives",
   "main": "index.js",
