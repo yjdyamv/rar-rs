@@ -17,6 +17,7 @@
 | 文档 | 内容 | 何时读 |
 |---|---|---|
 | [`CODE_AUDIT_2026-09-05.md`](CODE_AUDIT_2026-09-05.md) | 代码、API、CI、Release 与许可证整改基线 | 排整改优先级 / 验收审查问题 |
+| [`CODE_REVIEW_2026-09-05.md`](CODE_REVIEW_2026-09-05.md) | origin/main..HEAD 21-commit 重构双轴审查（Standards/Spec）+ 可执行修复事项表 | 处理审查发现 / 验收重构系列 |
 | [`../NOTICE`](../NOTICE) | 项目归属、上游部分和商标说明 | 发布 / 核对来源边界 |
 | [`../THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md) | 第三方来源清单；不是法律结论或完整许可证判定 | 来源审计 / 准备发行材料 |
 
