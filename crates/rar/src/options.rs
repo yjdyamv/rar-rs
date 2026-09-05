@@ -1,7 +1,7 @@
 //! Public option structs for archive creation and extraction.
 
 use crate::error::{RarError, RarResult};
-use crate::version::ArchiveVersion;
+use crate::version::ArchiveFormat;
 
 pub(crate) const MAX_COMPRESSION_THREADS: usize = 64;
 const MIN_DICTIONARY_BYTES: u64 = 128 * 1024;
@@ -35,11 +35,12 @@ pub enum SolidReset {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateOptions {
-    /// Target archive format version. `Rar40` writes the legacy RAR 3.x/4.x
+    /// Target archive container family. `Rar40` writes the legacy RAR 3.x/4.x
     /// container (`Rar!\x1a\x07\x00`, 7-byte signature, fixed-width headers,
-    /// 16-bit CRC). `Rar50` (default) writes the modern RAR5 container.
-    /// `Rar70` selects RAR5 with v70 codec members.
-    pub format_version: ArchiveVersion,
+    /// 16-bit CRC). `Rar5` (default) writes the modern RAR5 container, which
+    /// hosts both v50 and RAR7 (v70) members; combine with `force_v70` (and
+    /// `dict_size_bytes`) to request v70.
+    pub format_version: ArchiveFormat,
     /// Create a solid archive: consecutive compressed members share one
     /// LZ window (better ratio, slower random access). Solid state can remain
     /// continuous across volumes or reset according to [`SolidReset`].
@@ -169,7 +170,7 @@ pub(crate) fn validate_threads(threads: Option<usize>) -> RarResult<()> {
 impl Default for CreateOptions {
     fn default() -> Self {
         Self {
-            format_version: ArchiveVersion::Rar50,
+            format_version: ArchiveFormat::Rar5,
             solid: false,
             solid_reset: SolidReset::Continuous,
             quick_open: false,

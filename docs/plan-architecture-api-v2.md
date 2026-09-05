@@ -369,7 +369,16 @@ maintainer decision before execution.
       dependency key, and every external `use rar5::…` reference were
       updated to `rar_rs::…`; the fuzz harness is `rar-rs-fuzz`. The
       `format::rar5`/`format/rar5` internal module paths are untouched.)
-- [ ] Split archive format from compression version in the public model.
+- [x] Split archive format from compression version in the public model.
+      (done: `ArchiveFormat` is a new container-family type (`Rar40` / `Rar5`),
+      `ArchiveVersion` was reduced to the member codec versions within the RAR5
+      container (`Rar50` / `Rar70`), `CreateOptions::format_version` now selects
+      the container, and the typed `WriterOptions` takes the container and the
+      codec version independently — `WriterOptions::format(ArchiveFormat)` +
+      `WriterOptions::compression(CompressionVersion)`, no mutual rewriting.
+      `ArchiveVersion::Rar40` is gone: nothing on the read path ever emitted it
+      (RAR4 members report `format_version: 4` / `unpack_version` on the raw
+      model), and codec-table selection only ever saw `Rar50`/`Rar70`.)
 - [ ] Decide which low-level modules remain supported.
 - [x] Move unsupported low-level APIs behind `raw`/`unstable`, if appropriate
       (done: `rar_rs::rar40` is behind a new default-off `raw` feature; `rar50`

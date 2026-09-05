@@ -5,7 +5,7 @@
 ## 领域词汇
 
 - **Archive（归档）** — 一个 RAR 归档：单卷文件或 `.partN.rar` 分卷集。RAR5 容器（8 字节签名）或 RAR4 老容器（7 字节签名）。
-- **ArchiveVersion（归档版本）** — *家族 vs 版本*命名：`ArchiveVersion`（`version.rs`）取的是 RAR5 容器**家族**内的编解码**版本**，不是容器本身。现仅三变体 `Rar40`（v29 codec，LZSS+Huffman，7 字节签名）、`Rar50`（v50 codec，DC 64 码）与 `Rar70`（v70 codec，DCX 80 码），共用同一容器/签名/信封（Rar40 除外，它用独立容器）。`from_v70(bool)` 由成员头（读：`comp_version == 1`；写：字节级字典存在）映射；`uses_extra_dist()` 在 DC/DCX 表间选择。
+- **ArchiveVersion / ArchiveFormat（归档版本 / 归档格式）** — 2026-09 拆分后两个正交概念（`version.rs`）：**ArchiveFormat** 是容器家族（`Rar40` 7 字节签名 / `Rar5` 8 字节签名），写侧选容器；**ArchiveVersion** 是 RAR5 容器内的编解码版本（`Rar50` v50 codec DC 64 码 / `Rar70` v70 codec DCX 80 码），读侧按成员报告、codec 表在两者间选择。RAR4 的 1.5–4.x unpack 版本（15/20/26/29/36）放 model 的 `unpack_version`，不映射到 ArchiveVersion。`from_v70(bool)` 由成员头（读：`comp_version == 1`；写：字节级字典存在）映射；`uses_extra_dist()` 在 DC/DCX 表间选择。
 - **Member（成员）** — 归档中的一个条目（文件 / 目录 / 重定向），对应一个文件头 + 数据区。
 - **Volume（分卷）** — 多卷归档的单个 `.partN.rar` 文件；成员数据按卷切成 Chunk。
 - **Chunk（分块）** — 跨卷成员在某卷中的数据段。非末块头携带该块密文 CRC32；末块携带（hash-key MAC 过的）明文 CRC，并携带完整 extra 记录。

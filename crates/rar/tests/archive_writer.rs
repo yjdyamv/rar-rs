@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use rar_rs::{
-    AppendOptions, ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, DictionarySize,
+    AppendOptions, ArchiveFormat, ArchiveReader, ArchiveWriter, CompressionLevel, DictionarySize,
     EntryWriteOptions, RarArchive, RarError, ThreadCount, WriteEntry, WriterOptions,
 };
 
@@ -82,7 +82,7 @@ fn writer_options_validate_combinations_before_staging_and_redact_passwords() {
         ArchiveWriter::create_with(
             &path,
             WriterOptions::new()
-                .format_version(ArchiveVersion::Rar40)
+                .format(ArchiveFormat::Rar40)
                 .dictionary_size(DictionarySize::try_from(4 * 1024 * 1024).unwrap())
         ),
         Err(RarError::InvalidOption(_))
@@ -352,7 +352,7 @@ fn typed_options_reject_combos_the_legacy_layer_would_silently_downgrade() {
         (
             "rar4-dictionary.rar",
             WriterOptions::new()
-                .format_version(ArchiveVersion::Rar40)
+                .format(ArchiveFormat::Rar40)
                 .dictionary_size(DictionarySize::DEFAULT),
         ),
     ] {
@@ -373,11 +373,9 @@ fn typed_options_reject_combos_the_legacy_layer_would_silently_downgrade() {
     let source = dir.path().join("a.txt");
     std::fs::write(&source, b"a").unwrap();
     let path = dir.path().join("plain-rar4.rar");
-    let mut writer = ArchiveWriter::create_with(
-        &path,
-        WriterOptions::new().format_version(ArchiveVersion::Rar40),
-    )
-    .unwrap();
+    let mut writer =
+        ArchiveWriter::create_with(&path, WriterOptions::new().format(ArchiveFormat::Rar40))
+            .unwrap();
     writer.add_path(&source, stored()).unwrap();
     writer.finish().unwrap();
     assert!(path.exists());
@@ -391,7 +389,7 @@ fn append_rejects_rar4_archives_before_touching_the_original() {
         let mut archive = RarArchive::create_with_options(
             &path,
             rar_rs::CreateOptions {
-                format_version: ArchiveVersion::Rar40,
+                format_version: ArchiveFormat::Rar40,
                 ..Default::default()
             },
         )

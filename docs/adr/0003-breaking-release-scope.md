@@ -79,12 +79,20 @@ tests/examples/fuzz. The npm package is already `rar-rs-napi`.
    external refs) but touches every external reference, so it rides the same
    breaking release as the removals below.
 2. Split archive format from compression version. The public
-   `ArchiveVersion` conflates container (`Rar40`) with codec selection
+   `ArchiveVersion` conflated container (`Rar40`) with codec selection
    (`Rar50` v50-only vs `Rar70` forced-v70 + auto v50/v70 on Rar50).
-   Recommendation: introduce a format/container type and a codec/version
-   knob on the typed writer options (Rar70 semantics already exist as the
-   auto path); `ArchiveVersion` stays as the container enum used by
-   reader-facing code.
+   Decided and executed: `ArchiveFormat` is a new container-family type
+   (`Rar40` / `Rar5`); `ArchiveVersion` is reduced to the member codec
+   versions inside the RAR5 container (`Rar50` / `Rar70`); the typed
+   `WriterOptions` select container and codec independently
+   (`WriterOptions::format(ArchiveFormat)` + `compression(CompressionVersion)`,
+   no mutual rewriting), and legacy `CreateOptions::format_version` now takes
+   `ArchiveFormat`. Nothing on the read path emitted `ArchiveVersion::Rar40`
+   (RAR4 members report raw `format_version: 4` / `unpack_version`), and the
+   codec variant positions only ever saw `Rar50`/`Rar70`; the RAR4
+   1.5–4.x unpack versions (15/20/26/29/36) live on the raw model
+   (`Entry::unpack_version`), not on `ArchiveVersion`. Reader-facing code
+   keeps reporting `ArchiveVersion` per member.
 3. Supported low-level modules. `rar40` (alias) has no in-tree user;
    `rar50` (alias) is used by three wire-level test files. `recovery`,
    `name_policy`, `lzss_huff` internals are used by bindings/CLI/examples.
