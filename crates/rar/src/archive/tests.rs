@@ -814,30 +814,34 @@ fn rar4_volume_path_legacy_naming() {
     // volume is `x.rar`, then `x.r00`, `x.r01`, … with one extension letter
     // per hundred volumes.
     let parent = std::path::Path::new("set");
+    // Expected paths are built with `Path::join` so the assertions hold on
+    // every platform's separator (CI's cargo test runs on Linux; the RAR4
+    // naming rule — not the separator — is what this test pins).
+    let expect = |name: &str| parent.join(name).to_string_lossy().into_owned();
     assert_eq!(
         volume_path_rar4(parent, "vol", 1).to_string_lossy(),
-        r"set\vol.rar"
+        expect("vol.rar")
     );
     assert_eq!(
         volume_path_rar4(parent, "vol", 2).to_string_lossy(),
-        r"set\vol.r00"
+        expect("vol.r00")
     );
     assert_eq!(
         volume_path_rar4(parent, "vol", 3).to_string_lossy(),
-        r"set\vol.r01"
+        expect("vol.r01")
     );
     assert_eq!(
         volume_path_rar4(parent, "vol", 100).to_string_lossy(),
-        r"set\vol.r98"
+        expect("vol.r98")
     );
     assert_eq!(
         volume_path_rar4(parent, "vol", 101).to_string_lossy(),
-        r"set\vol.r99"
+        expect("vol.r99")
     );
     // Past 100 volumes the letter advances: r → s.
     assert_eq!(
         volume_path_rar4(parent, "vol", 102).to_string_lossy(),
-        r"set\vol.s00"
+        expect("vol.s00")
     );
 }
 
