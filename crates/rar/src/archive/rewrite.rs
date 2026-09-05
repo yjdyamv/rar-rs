@@ -293,7 +293,7 @@ impl RarArchive {
         if indexes.is_empty() {
             return Err(RarError::Format("no members to delete".into()));
         }
-        Ok(self.edit_plan(indexes, &[])?.deleted)
+        Ok(self.edit_plan(indexes, &[], None, None)?.deleted)
     }
 
     /// Rewrite a multi-volume archive, omitting deleted members.
@@ -705,35 +705,55 @@ impl RarArchive {
             count += 1;
         }
 
-        self.rewrite_edit(vec![false; self.entries.len()], None, &map)?;
+        self.rewrite_edit(vec![false; self.entries.len()], None, &map, None, None)?;
         Ok(count)
     }
 
-    /// Apply a combined structural edit — deletes plus renames — in one
-    /// atomic rewrite (a staged sibling file for single-volume archives, a
-    /// re-split staged volume set for multi-volume ones) and reload the
-    /// catalog. Returns the number of deleted and renamed members.
+    /// Apply a combined structural edit — deletes, renames and optional
+    /// comment/recovery-record changes — in one atomic rewrite (a staged
+    /// sibling file for single-volume archives, a re-split staged volume
+    /// set for multi-volume ones) and reload the catalog. Returns the
+    /// number of deleted and renamed members.
     ///
     /// Validation happens before any rewrite: out-of-range indexes fail
     /// with [`RarError::StaleEntryId`], a member cannot be both deleted and
     /// renamed, and renaming a member of a solid chain that also loses a
     /// member is refused with [`RarError::Unsupported`] (the recompressed
     /// chain would not carry the new name — split the edit instead).
-    /// Deleting every member without renames erases the archive like
-    /// `rar d`. Locked archives follow the legacy rules: rename and
-    /// erase-all are refused with [`RarError::ArchiveLocked`].
+    /// `comment = Some(_)` replaces the archive comment (empty bytes remove
+    /// it); `None` keeps it. `force_rr` overrides the inline recovery
+    /// record percentage (like `rar rr`); without it the record is rebuilt
+    /// at the original percentage. Comment and recovery changes require a
+    /// single-volume archive, like the legacy methods. Deleting every
+    /// member without renames erases the archive like `rar d`. Locked
+    /// archives fail with [`RarError::ArchiveLocked`].
     pub(crate) fn edit_plan(
         &mut self,
         delete_indexes: &[usize],
         renames: &[(usize, String)],
+        force_rr: Option<u8>,
+        comment: Option<&[u8]>,
     ) -> RarResult<EditSummary> {
         if self.mode != Mode::Read {
             return Err(RarError::Format(
                 "edit requires an archive opened for reading".into(),
             ));
         }
+        if force_rr.is_some_and(|percent| percent > 100) {
+            return Err(RarError::InvalidOption(
+                "recovery percent must be in 0..=100".into(),
+            ));
+        }
+        if self.volume_paths.len() > 1 && (force_rr.is_some() || comment.is_some()) {
+            return Err(RarError::Unsupported(
+                "comment and recovery-record changes are not supported for multi-volume archives"
+                    .into(),
+            ));
+        }
         self.ensure_write_ctx();
-        if !renames.is_empty() && self.main_header_is_locked()? {
+        if (!renames.is_empty() || force_rr.is_some() || comment.is_some())
+            && self.main_header_is_locked()?
+        {
             return Err(RarError::ArchiveLocked);
         }
 
@@ -762,14 +782,22 @@ impl RarArchive {
         }
 
         let (map, renamed_count) = self.build_rename_map(renames)?;
-        if deleted_count == 0 && renamed_count == 0 {
+        if deleted_count == 0 && renamed_count == 0 && force_rr.is_none() && comment.is_none() {
             return Err(RarError::Format("no members to edit".into()));
         }
 
         if deleted_count == self.entries.len() {
             // Matching `rar d`: deleting every member erases the archive
             // (every volume for multi-volume archives). Renames are empty
-            // here — the disjointness check above leaves no target.
+            // here — the disjointness check above leaves no target — and
+            // comment/recovery changes would be silently dropped, so they
+            // are refused too.
+            if force_rr.is_some() || comment.is_some() {
+                return Err(RarError::InvalidOption(
+                    "cannot combine comment or recovery-record changes with deleting every member"
+                        .into(),
+                ));
+            }
             if self.main_header_is_locked()? {
                 return Err(RarError::ArchiveLocked);
             }
@@ -807,7 +835,7 @@ impl RarArchive {
             }
         }
 
-        self.rewrite_edit(deleted, chain, &map)?;
+        self.rewrite_edit(deleted, chain, &map, force_rr, comment)?;
         Ok(EditSummary {
             deleted: deleted_count,
             renamed: renamed_count,
@@ -865,8 +893,16 @@ impl RarArchive {
         deleted: Vec<bool>,
         chain: Option<(usize, usize)>,
         map: &std::collections::HashMap<usize, String>,
+        force_rr: Option<u8>,
+        comment: Option<&[u8]>,
     ) -> RarResult<()> {
         let rename_map = (!map.is_empty()).then_some(map);
+        // Comment and recovery-record changes are validated out of the
+        // multi-volume path above (rewrite_multivolume cannot carry them).
+        debug_assert!(
+            self.volume_paths.len() <= 1 || (force_rr.is_none() && comment.is_none()),
+            "comment/recovery edits must be single-volume"
+        );
         if self.volume_paths.len() > 1 {
             self.rewrite_multivolume(&deleted, chain, rename_map)?;
         } else {
@@ -883,9 +919,9 @@ impl RarArchive {
                 &mut reader,
                 &deleted,
                 chain,
-                None,
+                force_rr,
                 rename_map,
-                None,
+                comment,
                 &src_path,
                 &tmp_path,
             );

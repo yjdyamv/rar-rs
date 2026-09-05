@@ -165,8 +165,7 @@ binding migrations remain.
 - [x] Add ID-based delete/rename APIs.
 - [x] Add catalog generation invalidation after structural edits.
 - [x] Introduce `EditPlan` only after individual ID operations are stable.
-- [ ] Combine delete, rename, comment, and recovery changes into one rewrite
-      (delete + rename are combined; comment/recovery plan ops are next).
+- [x] Combine delete, rename, comment, and recovery changes into one rewrite.
 - [x] Define and test multi-volume transaction/rollback behavior.
 - [ ] Migrate CLI and N-API edit operations.
 
@@ -215,6 +214,20 @@ Exit criteria:
 - Comment/recovery changes are auto-carried by the rewrite engine (the RR
   percentage is re-adopted, CMT is droppable) but are not yet plan ops;
   that is the next step before the binding migrations.
+
+### Comment/recovery plan-op notes (recorded with the combined rewrite)
+
+- `EditPlan` gained `set_comment(bytes)` (empty removes the comment, like
+  `rar c`) and `set_recovery(percent)` (rebuild the inline recovery
+  record, like `rar rr`); at most one of each per plan, and they combine
+  with deletes and renames in the same single rewrite.
+- The core `edit_plan` now carries `force_rr`/`comment` through to the
+  engine; comment/recovery ops are refused on multi-volume archives and
+  alongside delete-everything, mirroring the legacy methods.
+- Byte-parity tests: plan `set_comment`/`set_recovery` outputs equal the
+  legacy `set_comment`/`add_recovery_record` outputs on twin archives; a
+  combined delete+rename+comment+recovery plan lands atomically; refused
+  ops leave every multi-volume file byte-identical.
 
 ## Phase 5: internal directory convergence
 

@@ -513,3 +513,140 @@ fn multivolume_plan_is_atomic_and_failures_leave_all_volumes_intact() {
     let data = reader.read_entry(renamed).unwrap();
     assert_eq!(data, vec![7u8; 220 * 1024]);
 }
+
+#[test]
+fn comment_op_matches_legacy_set_comment_bytes_and_clears() {
+    let dir = tempfile::tempdir().unwrap();
+    let (src, twin) = fixture_pair(dir.path(), "cmt");
+    let comment = b"edited by the plan".to_vec();
+
+    let mut legacy = RarArchive::open(&src).unwrap();
+    legacy.set_comment(&comment).unwrap();
+    legacy.close().unwrap();
+
+    let mut editor = ArchiveEditor::open(&twin).unwrap();
+    editor
+        .apply(EditPlan::new().set_comment(comment.clone()))
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&src).unwrap(),
+        std::fs::read(&twin).unwrap(),
+        "plan comment must match the legacy set_comment bytes"
+    );
+
+    // Clearing with empty bytes removes the comment again.
+    let mut editor = ArchiveEditor::open(&twin).unwrap();
+    editor
+        .apply(EditPlan::new().set_comment(Vec::new()))
+        .unwrap();
+    let mut archive = RarArchive::open(&twin).unwrap();
+    assert_eq!(archive.get_comment().unwrap(), None);
+}
+
+#[test]
+fn recovery_op_matches_legacy_add_recovery_record_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (src, twin) = fixture_pair(dir.path(), "rr");
+
+    let mut legacy = RarArchive::open(&src).unwrap();
+    legacy.add_recovery_record(10).unwrap();
+    legacy.close().unwrap();
+
+    let mut editor = ArchiveEditor::open(&twin).unwrap();
+    editor.apply(EditPlan::new().set_recovery(10)).unwrap();
+    assert_eq!(
+        std::fs::read(&src).unwrap(),
+        std::fs::read(&twin).unwrap(),
+        "plan recovery record must match the legacy add_recovery_record bytes"
+    );
+}
+
+#[test]
+fn combined_plan_with_comment_and_recovery_applies_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("all-ops.rar");
+    build_fixture(&path, dir.path());
+
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    let other = editor.unique_entry("other.txt").unwrap();
+    let dir_member = editor.unique_entry("d/").unwrap();
+    let report = editor
+        .apply(
+            EditPlan::new()
+                .delete(other)
+                .rename(dir_member, "renamed")
+                .set_comment(b"combined plan".to_vec())
+                .set_recovery(25),
+        )
+        .unwrap();
+    assert_eq!((report.deleted(), report.renamed()), (1, 1));
+
+    // Members, comment and recovery record all landed in the one rewrite.
+    assert_eq!(
+        sorted_names(&path),
+        ["renamed/", "renamed/x.txt", "same.txt", "same.txt"]
+    );
+    let mut archive = RarArchive::open(&path).unwrap();
+    assert_eq!(
+        archive.get_comment().unwrap(),
+        Some(b"combined plan".to_vec())
+    );
+    // The rewritten archive still verifies (the RR record is structurally
+    // present and the main-header locator consistent).
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    assert!(reader.verify().unwrap().is_ok());
+}
+
+#[test]
+fn comment_and_recovery_ops_refuse_multivolume_archives() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("mv-cmt.rar");
+    let mut archive = RarArchive::create_with_options(
+        &base,
+        rar5::CreateOptions {
+            volume_size: Some(32 * 1024),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    archive
+        .add_bytes("a.bin", &vec![5u8; 120 * 1024], 0)
+        .unwrap();
+    archive.close().unwrap();
+    let mut parts: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().contains("part"))
+                .unwrap_or(false)
+        })
+        .collect();
+    parts.sort();
+    let first = parts.into_iter().next().expect("first volume");
+    let snapshot: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| (entry.file_name(), entry.path()))
+        .filter(|(_, path)| path.extension().is_some_and(|ext| ext == "rar"))
+        .map(|(name, path)| (name, std::fs::read(path).unwrap()))
+        .collect();
+
+    let mut editor = ArchiveEditor::open(&first).unwrap();
+    assert!(matches!(
+        editor.apply(EditPlan::new().set_comment(b"x".to_vec())),
+        Err(RarError::Unsupported(_))
+    ));
+    assert!(matches!(
+        editor.apply(EditPlan::new().set_recovery(10)),
+        Err(RarError::Unsupported(_))
+    ));
+    let after: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| (entry.file_name(), entry.path()))
+        .filter(|(_, path)| path.extension().is_some_and(|ext| ext == "rar"))
+        .map(|(name, path)| (name, std::fs::read(path).unwrap()))
+        .collect();
+    assert_eq!(after, snapshot, "refused ops must not touch any volume");
+}

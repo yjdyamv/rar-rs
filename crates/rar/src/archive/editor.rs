@@ -105,6 +105,14 @@ pub enum EditOp {
     /// Rename the member identified by the ID (like `rar rn`); a directory
     /// rename is expanded to its descendants.
     Rename(EntryId, String),
+    /// Replace the archive comment (like `rar c`); empty bytes remove the
+    /// existing comment. Only valid on single-volume archives.
+    SetComment(Vec<u8>),
+    /// Rebuild the inline recovery record protecting this percent of the
+    /// archive (like `rar rr`; 0..=100). Only valid on single-volume
+    /// archives. Without this op the record is rebuilt at its original
+    /// percentage when the archive had one.
+    SetRecovery(u8),
 }
 
 /// A sequence of structural edits applied to an [`ArchiveEditor`] in one
@@ -136,6 +144,22 @@ impl EditPlan {
     #[must_use]
     pub fn rename(mut self, id: EntryId, new_name: impl Into<String>) -> Self {
         self.ops.push(EditOp::Rename(id, new_name.into()));
+        self
+    }
+
+    /// Queue an archive-comment replacement; empty bytes remove the
+    /// existing comment (like `rar c`).
+    #[must_use]
+    pub fn set_comment(mut self, comment: impl Into<Vec<u8>>) -> Self {
+        self.ops.push(EditOp::SetComment(comment.into()));
+        self
+    }
+
+    /// Queue an inline recovery-record rebuild at `percent` (0..=100,
+    /// like `rar rr`).
+    #[must_use]
+    pub fn set_recovery(mut self, percent: u8) -> Self {
+        self.ops.push(EditOp::SetRecovery(percent));
         self
     }
 
@@ -190,24 +214,44 @@ impl ArchiveEditor {
     /// On success the catalog is re-scanned and the generation changes,
     /// making every previously issued ID stale.
     ///
-    /// Locked archives follow the legacy rules: rename and erase-all plans
-    /// fail with [`RarError::ArchiveLocked`]. RAR4 archives are refused
-    /// with [`RarError::Unsupported`].
+    /// Locked archives fail with [`RarError::ArchiveLocked`] (any rewrite
+    /// rewrites the main header, which refuses locked archives). RAR4
+    /// archives are refused with [`RarError::Unsupported`].
     pub fn apply(&mut self, plan: EditPlan) -> RarResult<EditReport> {
         self.ensure_rewritable()?;
         // Resolve every operation against the current catalog before any
         // rewrite starts; a stale ID fails the whole plan up front.
         let mut deletes = Vec::with_capacity(plan.ops.len());
         let mut renames = Vec::with_capacity(plan.ops.len());
+        let mut comment: Option<Vec<u8>> = None;
+        let mut force_rr: Option<u8> = None;
         for op in &plan.ops {
             match op {
                 EditOp::Delete(id) => deletes.push(self.resolve_id(*id)?),
                 EditOp::Rename(id, new_name) => {
                     renames.push((self.resolve_id(*id)?, new_name.clone()))
                 }
+                EditOp::SetComment(bytes) => {
+                    if comment.is_some() {
+                        return Err(RarError::InvalidOption(
+                            "an edit plan can carry only one comment change".into(),
+                        ));
+                    }
+                    comment = Some(bytes.clone());
+                }
+                EditOp::SetRecovery(percent) => {
+                    if force_rr.is_some() {
+                        return Err(RarError::InvalidOption(
+                            "an edit plan can carry only one recovery-record change".into(),
+                        ));
+                    }
+                    force_rr = Some(*percent);
+                }
             }
         }
-        let summary = self.archive.edit_plan(&deletes, &renames)?;
+        let summary = self
+            .archive
+            .edit_plan(&deletes, &renames, force_rr, comment.as_deref())?;
         self.catalog_token = allocate_catalog_token()?;
         Ok(EditReport {
             deleted: summary.deleted,
@@ -222,11 +266,8 @@ impl ArchiveEditor {
     /// pull in its children. Deleting every member erases the archive file,
     /// matching `rar d`/the legacy delete. On success every previously
     /// issued ID becomes stale; on failure the archive and the catalog
-    /// generation are untouched.
-    ///
-    /// Locked archives: like the legacy path, renaming and erasing a locked
-    /// archive is refused with [`RarError::ArchiveLocked`]; deleting a
-    /// subset of a locked archive is permitted.
+    /// generation are untouched. Locked archives fail with
+    /// [`RarError::ArchiveLocked`].
     ///
     /// RAR4 (legacy-container) archives are refused with
     /// [`RarError::Unsupported`]: the rewrite engine is RAR5-only.
