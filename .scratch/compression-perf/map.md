@@ -117,6 +117,17 @@ head/son equality + ratios + 207 tests), tsc.exe m3/dict32: seq ~9.56→9.21 s
 (−3.6%), mt8 ~2.23→2.15 s (−3.7%). Batch cheats beyond one step are still
 barred by the BT4 insertion-order invariant.
 
+MT near-window alignment (2026-09-07, issue 12): the near-window cap in
+`encode_mt_slice` is now `NEAR_WINDOW_MAX` (8 MiB, matching the sequential
+path), with the fresh-tail seed thinned to a stride over the old >2 MiB band
+(`MT_FAR_SEED_STRIDE=16`, `MT_FAR_SEED_CHAIN=2`, frontier 2 MiB, MT-only via
+`lr_shared`). Fixes the +5.2pp MT ratio divergence on compressible-tail +
+2-8 MiB exact-copy data (blockdup, mt8 converges to seq to the byte), at
+~1.4x of the old 2 MiB-cap mt8 time (full 8 MiB seeding was 3.5x); text-class
+ratio byte-identical with ~0% speed regression. `distant` (random + far
+copies) still probes incompressible and stays at 59.14% — probe-length issue,
+see issue 12 待办.
+
 ## Definitive head-to-head (2026-09-01, fixed CLI, m3, this machine)
 
 After the rar-cli parallel-feature fix (the CLI silently ran single-

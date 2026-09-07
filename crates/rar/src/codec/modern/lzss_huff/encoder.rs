@@ -65,6 +65,16 @@ pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 /// ones come from the sampled long-range history.
 const NEAR_WINDOW_MAX: usize = 8 * 1024 * 1024;
 
+/// Fresh-frame tail seeding, multi-threaded path only: the newest
+/// `MT_NEAR_TIGHT_FRONTIER` tail bytes are seeded densely, and the older
+/// tail up to `NEAR_WINDOW_MAX` at `MT_FAR_SEED_STRIDE` with a shorter
+/// descent budget. Matched copies anchor on the first seeded source position
+/// within a few bytes of the copy start and the optimal parse extends them,
+/// so the stride preserves the far reach at a fraction of the insert cost.
+const MT_NEAR_TIGHT_FRONTIER: usize = 2 * 1024 * 1024;
+const MT_FAR_SEED_STRIDE: usize = 16;
+const MT_FAR_SEED_CHAIN: usize = 2;
+
 /// A RAR5 output filter applied to a region of the decompressed member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FilterSpec {
@@ -641,12 +651,14 @@ fn encode_mt_slice(
 ) -> Vec<u8> {
     // Near-window context: the closest bytes before this slice, seeded
     // with the entry tail when the slice starts at the buffer head.
-    // Multi-threaded workers seed a fresh tree per slice, so the near
-    // window is capped well below the sequential path: distant matches
-    // come from the shared long-range table, and a shorter seed keeps
-    // the per-slice tree warm (the sequential path persists its tree and
-    // keeps the full 8 MiB window without re-seeding).
-    let want = (2 * 1024 * 1024).min(dict_size);
+    // The window cap matches the sequential path's `NEAR_WINDOW_MAX`, so
+    // matches in the (2 MiB, 8 MiB) band stay reachable instead of riding
+    // the sampled long-range table: without it, distant exact copies fell
+    // to ~STORE on small slices (window reach = tail + slice length, so
+    // mt8's 2 MiB slices couldn't see even a 4 MiB-back copy). Aligning the
+    // cap costs a longer fresh-tree seed per slice — the workers re-seed
+    // the whole tail with budget-limited descents.
+    let want = NEAR_WINDOW_MAX.min(dict_size);
     let tail_ctx: Vec<u8> = if s0 >= want {
         data[s0 - want..s0].to_vec()
     } else {
@@ -2475,10 +2487,30 @@ fn find_matches_optimal(
             // thousands of cache misses); 4 nodes per position keeps the
             // newest candidates reachable and the long-range table covers
             // the rest.
+            //
+            // The far tail is seeded at a stride, but only in the
+            // multi-threaded path (`lr_shared` decides): matched copies
+            // anchor on the first seeded source position within a few bytes
+            // of the copy start and the optimal parse then extends them, so
+            // thinning the old >2 MiB band by `MT_FAR_SEED_STRIDE` keeps
+            // the 8 MiB reach while cutting the per-slice insert count (the
+            // dominant fresh-frame cost) to a fraction. The sequential path
+            // keeps a dense seed wherever a fresh frame genuinely occurs.
+            let mt = lr_shared.is_some();
+            let tight_start = tail_len.saturating_sub(MT_NEAR_TIGHT_FRONTIER);
             let mut seed: Vec<(u32, u32)> = Vec::new();
             let tail_end = tail_len.min(combined.len().saturating_sub(4));
             for pos in 0..tail_end {
-                tree_finder.matches(&combined, pos, 4, tree_window, chain_len.min(4), &mut seed);
+                let far = mt && pos < tight_start;
+                if far && pos % MT_FAR_SEED_STRIDE != 0 {
+                    continue;
+                }
+                let budget = if far {
+                    chain_len.min(MT_FAR_SEED_CHAIN)
+                } else {
+                    chain_len.min(4)
+                };
+                tree_finder.matches(&combined, pos, 4, tree_window, budget, &mut seed);
             }
         }
     } else if state.combined_len > keep {
