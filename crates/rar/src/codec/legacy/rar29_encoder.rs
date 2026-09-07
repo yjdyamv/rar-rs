@@ -696,25 +696,53 @@ fn encode_code(table: &EncodeTable, symbol: usize) -> RarResult<(u32, u8)> {
 
 /// Encode one LZ block (or a single-block member when `more_blocks_follow` is
 /// false).
-fn encode_member_inner(
+/// Everything about one LZ block that the block-independent analysis derives
+/// up front: the parsed token stream (what gets bit-written) and the four
+/// Huffman code-length tables implied by its frequency distribution. Only the
+/// table-serialization choice (outright vs. delta against the previous
+/// block's carried levels) and the byte emission need the sequential chain
+/// state, so blocks of one member can be analyzed in parallel and serialized
+/// back in order without changing a single output byte.
+struct BlockAnalysis {
+    tokens: Vec<EncodeToken>,
+    table_lengths: [u8; TABLE_COUNT],
+}
+
+/// Parse `input` against `history` into tokens and derive the Huffman code
+/// lengths they imply. Nothing here touches cross-block state (the
+/// [`EncoderMatchState`] used for frequency counting starts fresh per block,
+/// exactly as [`encode_tokens_with_progress`] does), so this is the unit of
+/// work the multithreaded path parallelizes across blocks.
+fn analyze_block(
     input: &[u8],
     history: &[u8],
-    initial_filters: &[Vec<u8>],
+    filter_count: usize,
     options: EncodeOptions,
-    more_blocks_follow: bool,
-    previous_levels: &mut [u8; TABLE_COUNT],
     progress: Option<&mut dyn FnMut(usize) -> bool>,
-) -> RarResult<Vec<u8>> {
+) -> RarResult<BlockAnalysis> {
     let tokens = encode_tokens_with_progress(input, history, options, progress)?;
+    let table_lengths = build_block_table_lengths(&tokens, filter_count)?;
+    Ok(BlockAnalysis {
+        tokens,
+        table_lengths,
+    })
+}
 
+/// Frequency-count the token stream and build the four Huffman code-length
+/// tables. `filter_count` pre-multiplies the symbol-257 slot by the number of
+/// VM filter records this block announces at its head.
+fn build_block_table_lengths(
+    tokens: &[EncodeToken],
+    filter_count: usize,
+) -> RarResult<[u8; TABLE_COUNT]> {
     // ── Count frequencies ────────────────────────────────────────────────
     let mut main_frequencies = vec![0usize; MAIN_COUNT];
     let mut offset_frequencies = vec![0usize; OFFSET_COUNT];
     let mut low_offset_frequencies = [0usize; LOW_OFFSET_COUNT];
     let mut length_frequencies = vec![0usize; LENGTH_COUNT];
-    main_frequencies[257] += initial_filters.len();
+    main_frequencies[257] += filter_count;
     let mut match_state = EncoderMatchState::default();
-    for token in &tokens {
+    for token in tokens {
         match *token {
             EncodeToken::Literal(byte) => {
                 main_frequencies[byte as usize] += 1;
@@ -790,10 +818,28 @@ fn encode_member_inner(
     table_lengths[MAIN_COUNT + OFFSET_COUNT..MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT]
         .copy_from_slice(&low_offset_lengths);
     table_lengths[MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT..].copy_from_slice(&length_lengths);
+    Ok(table_lengths)
+}
+
+/// Serialize one analyzed block to bytes: decide outright vs. delta table
+/// encoding against the carried `previous_levels` (the single cross-block
+/// dependency), build the canonical codes and bit-write the block. Advancing
+/// `previous_levels` here keeps the state a reader holds in lockstep with the
+/// keep/delta bit a later block picks.
+fn serialize_block(
+    analysis: &BlockAnalysis,
+    initial_filters: &[Vec<u8>],
+    more_blocks_follow: bool,
+    previous_levels: &mut [u8; TABLE_COUNT],
+) -> RarResult<Vec<u8>> {
+    let BlockAnalysis {
+        table_lengths,
+        tokens,
+    } = analysis;
 
     // ── Table serialization: outright vs. delta against previous ──────────
-    let outright = encode_table_level_tokens(&table_lengths);
-    let against_previous = encode_level_tokens_against(&table_lengths, previous_levels);
+    let outright = encode_table_level_tokens(table_lengths);
+    let against_previous = encode_level_tokens_against(table_lengths, previous_levels);
     let keep_previous_tables =
         level_tokens_bit_cost(&against_previous) < level_tokens_bit_cost(&outright);
     let level_tokens = if keep_previous_tables {
@@ -801,7 +847,7 @@ fn encode_member_inner(
     } else {
         outright
     };
-    *previous_levels = table_lengths;
+    *previous_levels = *table_lengths;
 
     // ── Build canonical codes (shared EncodeTable) ─────────────────────
     let level_lengths_arr = level_code_lengths(&level_tokens);
@@ -843,7 +889,7 @@ fn encode_member_inner(
     // ── Write tokens ─────────────────────────────────────────────────────
     let mut match_state = EncoderMatchState::default();
     for token in tokens {
-        match token {
+        match *token {
             EncodeToken::Literal(byte) => {
                 let (code, cl) = encode_code(&main_codes, byte as usize)?;
                 bits.write_bits(code, cl);
@@ -913,6 +959,26 @@ fn encode_member_inner(
     Ok(bits.into_bytes())
 }
 
+/// Encode one LZ block (or a single-block member when `more_blocks_follow` is
+/// false).
+fn encode_member_inner(
+    input: &[u8],
+    history: &[u8],
+    initial_filters: &[Vec<u8>],
+    options: EncodeOptions,
+    more_blocks_follow: bool,
+    previous_levels: &mut [u8; TABLE_COUNT],
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+) -> RarResult<Vec<u8>> {
+    let analysis = analyze_block(input, history, initial_filters.len(), options, progress)?;
+    serialize_block(
+        &analysis,
+        initial_filters,
+        more_blocks_follow,
+        previous_levels,
+    )
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Multi-block splitting
 // ═══════════════════════════════════════════════════════════════════════════
@@ -941,6 +1007,10 @@ fn encode_member_blocks(
     levels: &mut [u8; TABLE_COUNT],
     mut progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> RarResult<Vec<u8>> {
+    #[cfg(feature = "parallel")]
+    if input.len() >= RAR29_PARALLEL_MEMBER_THRESHOLD {
+        return encode_member_blocks_mt(input, history, options, block_size, levels, progress);
+    }
     options.block_size = None;
     let mut out = Vec::new();
     let mut local_history = history[history.len().saturating_sub(MAX_HISTORY)..].to_vec();
@@ -967,6 +1037,125 @@ fn encode_member_blocks(
         if keep_from != 0 {
             local_history.drain(..keep_from);
         }
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Multi-block parallelism (feature `parallel`)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Members at least this large route through the block-parallel encoder: the
+/// write pipeline already holds the whole member in memory, and at 64 KiB per
+/// block the parse now outweighs the pool/scope overhead. Below this the
+/// sequential path is used unchanged.
+#[cfg(feature = "parallel")]
+const RAR29_PARALLEL_MEMBER_THRESHOLD: usize = 64 * 1024 * 1024;
+
+/// The exact history window the sequential path hands the tokeniser for the
+/// block starting at `block_start`: the last
+/// `min(max_distance, |history_tail| + block_start)` bytes of the reader's
+/// combined `history_tail ++ input[..block_start]`. `Cow` keeps the common
+/// case a borrow straight out of `input`; only blocks whose window straddles
+/// the history/input boundary (the first megabytes of a member that follows a
+/// carried/solid window) copy the few straddling bytes.
+#[cfg(feature = "parallel")]
+fn block_history<'a>(
+    history_tail: &'a [u8],
+    input: &'a [u8],
+    block_start: usize,
+    max_distance: usize,
+) -> std::borrow::Cow<'a, [u8]> {
+    let h0 = history_tail.len();
+    let combined_end = h0 + block_start;
+    let keep = combined_end.min(max_distance);
+    if keep == 0 {
+        return std::borrow::Cow::Borrowed(&[]);
+    }
+    let lo = combined_end - keep;
+    if combined_end <= h0 {
+        std::borrow::Cow::Borrowed(&history_tail[lo..combined_end])
+    } else if lo >= h0 {
+        std::borrow::Cow::Borrowed(&input[(lo - h0)..block_start])
+    } else {
+        let mut buf = Vec::with_capacity(keep);
+        buf.extend_from_slice(&history_tail[lo..h0]);
+        buf.extend_from_slice(&input[..block_start]);
+        std::borrow::Cow::Owned(buf)
+    }
+}
+
+/// Multi-threaded member encoding (feature `parallel`): every 64 KiB block is
+/// analyzed concurrently — tokenize + Huffman tables, which is where a large
+/// member's time goes (`encode_tokens_with_progress` re-inserts the whole up
+/// to 1 MiB window into the match finder per block) — then the blocks are
+/// serialized back in order with the sequential outright-vs-delta table
+/// decision. Analysis never touches the carried `levels` and serialization
+/// advances them block by block in the same order, so the output is
+/// byte-identical to [`encode_member_blocks`]; only the scheduling differs.
+/// Waves of `threads` blocks bound peak memory (each worker holds one block's
+/// tokens plus its ~1 MiB finder window) and keep the result deterministic.
+#[cfg(feature = "parallel")]
+fn encode_member_blocks_mt(
+    input: &[u8],
+    history: &[u8],
+    options: EncodeOptions,
+    block_size: usize,
+    levels: &mut [u8; TABLE_COUNT],
+    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+) -> RarResult<Vec<u8>> {
+    let mut options = options;
+    options.block_size = None;
+    let history_tail = &history[history.len().saturating_sub(MAX_HISTORY)..];
+    let block_count = input.len().div_ceil(block_size).max(1);
+    let pool = crate::parallel::compression_pool();
+    let wave = pool.current_num_threads().clamp(1, 64);
+    let mut out = Vec::new();
+    let mut completed = 0usize;
+    let mut first = 0usize;
+    while first < block_count {
+        let last = (first + wave).min(block_count);
+        let results = std::sync::Mutex::new((0..last - first).map(|_| None).collect::<Vec<_>>());
+        {
+            let results_ref = &results;
+            pool.scope(|scope| {
+                for (slot, k) in (first..last).enumerate() {
+                    let start = k * block_size;
+                    let end = ((k + 1) * block_size).min(input.len());
+                    let chunk = &input[start..end];
+                    let window =
+                        block_history(history_tail, input, start, options.max_match_distance);
+                    scope.spawn(move |_| {
+                        let analysis = analyze_block(chunk, &window, 0, options, None);
+                        *results_ref
+                            .lock()
+                            .unwrap()
+                            .get_mut(slot)
+                            .expect("wave slot") = Some(analysis);
+                    });
+                }
+            });
+        }
+        let wave_results = std::mem::take(&mut *results.lock().unwrap());
+        for (offset, result) in wave_results.into_iter().enumerate() {
+            let block_index = first + offset;
+            let analysis = result.expect("worker slot filled")?;
+            out.extend_from_slice(&serialize_block(
+                &analysis,
+                &[],
+                block_index + 1 < block_count,
+                levels,
+            )?);
+            let chunk_len =
+                (((block_index + 1) * block_size).min(input.len())) - (block_index * block_size);
+            completed = completed.saturating_add(chunk_len);
+            if let Some(cb) = progress.as_deref_mut()
+                && !cb(completed)
+            {
+                return Err(RarError::Cancelled);
+            }
+        }
+        first = last;
     }
     Ok(out)
 }
@@ -2270,5 +2459,167 @@ mod tests {
                 input.len()
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "parallel"))]
+mod parallel_tests {
+    use super::*;
+
+    /// Mixed corpus: prose (matches + frequent table deltas), pseudo-random
+    /// junk (literals + fresh tables), long same-byte runs (long zero runs in
+    /// the level tables) and repeating records that match across block and
+    /// window boundaries.
+    fn mixed_corpus(target: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(target);
+        let mut seed = 0x12345678u32;
+        let mut n = 0u32;
+        while data.len() < target {
+            match n % 4 {
+                0 => data.extend_from_slice(
+                    format!(
+                        "the quick brown fox jumps over the lazy dog and the pack-my-box with \
+                         five dozen liquor jugs gets sphinxed by the black quartz judge {n:06}\n"
+                    )
+                    .as_bytes(),
+                ),
+                1 => {
+                    let mut chunk = [0u8; 512];
+                    for slot in &mut chunk {
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        *slot = (seed >> 24) as u8;
+                    }
+                    data.extend_from_slice(&chunk);
+                }
+                2 => {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    data.extend_from_slice(&[(seed & 0xff) as u8; 4096]);
+                }
+                _ => data.extend_from_slice(
+                    format!(
+                        "record {n:08}: deterministic body with repeated tail words that match \
+                         across a couple of windows {seed:08x}\n"
+                    )
+                    .as_bytes(),
+                ),
+            }
+            n += 1;
+        }
+        data.truncate(target);
+        data
+    }
+
+    #[test]
+    fn mt_matches_sequential_bytes() {
+        // The multithreaded path must emit byte-identical blocks and leave
+        // the carried levels identical, for every level and with and without
+        // a carried cross-member window (the case that straddles the
+        // history/input buffer boundary in `block_history`).
+        let corpus = mixed_corpus(768 * 1024 + 37); // odd tail past a block boundary
+        let prior = mixed_corpus(2 * 1024 * 1024 + 64 * 1024);
+        for level in [3u8, 5u8] {
+            let options = options_for_level(level);
+            for history in [&[][..], &prior[..]] {
+                let mut levels_seq = [0u8; TABLE_COUNT];
+                let mut levels_mt = [0u8; TABLE_COUNT];
+                let seq = encode_member_blocks(
+                    &corpus,
+                    history,
+                    options,
+                    RAR29_LZ_BLOCK_SIZE,
+                    &mut levels_seq,
+                    None,
+                )
+                .unwrap();
+                let mt = encode_member_blocks_mt(
+                    &corpus,
+                    history,
+                    options,
+                    RAR29_LZ_BLOCK_SIZE,
+                    &mut levels_mt,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(
+                    seq,
+                    mt,
+                    "level {level}/history {len}: serial and parallel bytes differ",
+                    len = history.len()
+                );
+                assert_eq!(
+                    levels_seq,
+                    levels_mt,
+                    "level {level}/history {len}: carried levels diverged",
+                    len = history.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn block_history_matches_sequential_window() {
+        // `block_history` must reproduce, for every block start, exactly the
+        // prefix a sequential run accumulates in its sliding local window —
+        // the cross-buffer Cow path included.
+        let prior = mixed_corpus(5 * 1024 * 1024);
+        let input = mixed_corpus(1024 * 1024 + 13);
+        let history_tail = &prior[prior.len().saturating_sub(MAX_HISTORY)..];
+        let max_dist = MAX_ENCODER_MATCH_OFFSET;
+        let mut local: Vec<u8> = history_tail.to_vec();
+        let mut start = 0usize;
+        while start < input.len() {
+            let got = block_history(history_tail, &input, start, max_dist);
+            let expect_len = local.len().min(max_dist);
+            let expected = &local[local.len() - expect_len..];
+            assert_eq!(&got[..], expected, "start={start}");
+            let end = (start + RAR29_LZ_BLOCK_SIZE).min(input.len());
+            local.extend_from_slice(&input[start..end]);
+            if local.len() > MAX_HISTORY {
+                local.drain(..local.len() - MAX_HISTORY);
+            }
+            start = end;
+        }
+    }
+
+    #[test]
+    fn mt_dispatch_large_member_roundtrips() {
+        // Above the 64 MiB threshold the production path
+        // (`Unpack29Encoder::encode_member`) must route through the parallel
+        // encoder; the resulting member must decode back to the original
+        // bytes and equal what the parallel encoder yields when driven
+        // directly. Content is highly repetitive so the member stays cheap
+        // even on a 2-core CI runner.
+        let target = RAR29_PARALLEL_MEMBER_THRESHOLD + RAR29_LZ_BLOCK_SIZE / 2;
+        let mut input = Vec::with_capacity(target);
+        while input.len() < target {
+            input.extend_from_slice(
+                b"repeat repeat repeat repeat repeat repeat repeat repeat 0123456789abcdef\n",
+            );
+        }
+        input.truncate(target);
+
+        let mut encoder = Unpack29Encoder::with_options(options_for_level(1));
+        let packed = encoder.encode_member(&input).unwrap();
+
+        let mut levels_mt = [0u8; TABLE_COUNT];
+        let direct = encode_member_blocks_mt(
+            &input,
+            &[],
+            options_for_level(1),
+            RAR29_LZ_BLOCK_SIZE,
+            &mut levels_mt,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            packed, direct,
+            "large member did not take the parallel encode path (or drifted)"
+        );
+
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
+        let out = decoder
+            .decode_member(&packed, input.len() as u64)
+            .unwrap_or_else(|e| panic!("large MT member decode: {e:?}"));
+        assert_eq!(out, input, "large MT member content mismatch");
     }
 }

@@ -27,7 +27,7 @@
 
 ### RAR4（创建面·速度，后续）
 - [x] 多文件并行 batch（2026-09，7c07e77）：非 solid 独立成员在线程池压缩（每成员独立引擎 + 全候选 LZ/PPMd/filter/STORE），顺序 emit（`emit_rar4_prepared` 镜像 add_file_rar4 发射半）；solid/目录/超大成员落回顺序原位。字节与顺序一致（双 feature 模式测试锁定）。实测 8×2.7 MB m5 文本 2.45s vs 单线程 14.2s（~5.8x）
-- **单大成员并行（记录，未做）**：>64 MiB 单文件 `-ma4 -m5` 仍单线程（成员级并行已做、块级未做）。方向：仿 RAR5 `encode_chunked_mt` 给 RAR29 编码器做分片 MT——64 KiB LZ 块表链依赖（块间 keep/差分表）与跨块窗口语义使字节必有分歧，需先评估可接受性；或仅对 m1–m3 非最优路径做块并行
+- [x] 单大成员块级并行（2026-09，字节同等 MT）：>64 MiB 单文件 `-ma4` 成员级并行已做、块级未做 → 现在按 **字节同等** 原则做：64 KiB LZ 块拆解为 `analyze_block`（每块独立：token 解析 + 频率统计 + 建表，与串行逐块一致）+ `serialize_block`（顺序：keep/差分表决策推进 `previous_levels` + 位写入，MT/串行逐字节相同）。每块 history 窗口 = 串行 `local_history` 在该块的精确值（≤ `MAX_ENCODER_MATCH_OFFSET`，跨缓冲区用 `Cow::Owned`）；wave = 线程数（上限 64）限峰值内存，结果入 slot 数组按序序列化。阈值 `RAR29_PARALLEL_MEMBER_THRESHOLD` = 64 MiB；PPMd（m4/m5）不做块级。测试锁定：`mt_matches_sequential_bytes`（多 level/prior-history 逐字节 + carried levels 相等）、`block_history_matches_sequential_window`、`mt_dispatch_large_member_roundtrips`（64 MiB+ 生产路径触发 + 解码全量比对）
 
 
 ### RAR5（压缩面）
