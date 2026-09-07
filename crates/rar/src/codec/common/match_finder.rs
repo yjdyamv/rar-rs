@@ -1,5 +1,40 @@
 /// RAR5 LZ match finder — hash-chain match finder for LZSS compression.
+use std::sync::atomic::{AtomicU64, Ordering};
 use crate::codec::lzss_huff::DIST_CACHE_SIZE;
+
+/// Temporary collect diagnostics (read under `RAR_RS_COLLECT_STATS=1`):
+/// descent steps and position queries across a run, so the average cost per
+/// dependent son read (latency-bound vs bandwidth-bound) can be measured.
+/// Removed after the profiling task. `PROFILE_COLLECT` toggles the
+/// increments off at compile time: with them on, the shared atomic line
+/// ping-pongs across the MT workers and pollutes the timing — clean multi-
+/// thread numbers need the toggle off, single-thread counts need it on.
+pub(crate) const PROFILE_COLLECT: bool = false;
+pub(crate) static STAT_DESCENT_STEPS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_QUERIES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_SEED_INSERTS: AtomicU64 = AtomicU64::new(0);
+/// Distance buckets of descent steps (bytes): [<16K, 16K, 64K, 256K, 1M,
+/// 2M, 4M, >=8M]. Sized for the two-tier near-store sizing: how large a
+/// near window must be to cover most of the descent traffic.
+pub(crate) static STAT_STEP_BUCKETS: [AtomicU64; 8] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+pub(crate) const STEP_BUCKET_CUTS: [u64; 7] = [
+    16 * 1024,
+    64 * 1024,
+    256 * 1024,
+    1024 * 1024,
+    2 * 1024 * 1024,
+    4 * 1024 * 1024,
+    8 * 1024 * 1024,
+];
 
 /// Sampling step of the long-range hash table: one 4-byte sample per
 /// `LONG_RANGE_STEP` bytes of history. Finer steps catch more matches at
@@ -635,6 +670,14 @@ pub struct TreeMatchFinder {
     /// first, then the greater-or-equal one, in LZMA's layout.
     son: Vec<u32>,
     mask: usize,
+    /// Lever-4 probe: a descent seals and returns early after spending
+    /// `far_cut` steps on candidates farther than `far_start` bytes from
+    /// the query position, exactly as if the budget were exhausted (the
+    /// far-band tail of the candidate window is dropped, the near band
+    /// keeps full precision). `far_cut == 0` disables the probe. Present
+    /// for the speed experiment; default off, removed or promoted later.
+    far_start: usize,
+    far_cut: usize,
 }
 
 impl TreeMatchFinder {
@@ -653,7 +696,16 @@ impl TreeMatchFinder {
             // pages.
             son: vec![0; window * 2],
             mask: window - 1,
+            far_start: 0,
+            far_cut: 0,
         }
+    }
+
+    /// Configure the far-band descent budget probe (see the field docs).
+    /// `cut == 0` disables it.
+    pub fn with_far_band(&mut self, start: usize, cut: usize) {
+        self.far_start = start;
+        self.far_cut = cut;
     }
 
     /// Grow the window in place, keeping every existing link (positions
@@ -774,6 +826,9 @@ impl TreeMatchFinder {
         let hash = Self::hash4(input, pos);
         let current = resolve(pos, self.head[hash]);
         self.head[hash] = pos as u32;
+        if PROFILE_COLLECT {
+            STAT_QUERIES.fetch_add(1, Ordering::Relaxed);
+        }
         self.descent(input, pos, len_limit, max_distance, cut, out, current, None);
     }
 
@@ -855,14 +910,19 @@ impl TreeMatchFinder {
     }
 
     /// The shared descent of [`Self::matches`] and [`Self::matches_seeded`].
-    /// `seed=Some(...)` supplies the first iteration's child links (so its
-    /// step carries no load); afterwards, and for `None`, both child links
-    /// of the current node are loaded at the top of each iteration. The two
-    /// links live in one 8-byte pair so loading both is a single line, and
-    /// moving the load ahead of the byte compare is equivalent: within one
-    /// descent every node the walk compares is written only after it is
-    /// read (attachment points and the current node never alias inside a
-    /// window-sized walk), so no write sits between the load and its uses.
+    /// `pos` is both the position being inserted (its byte stream is
+    /// compared against candidates, its ring slots are the attachment
+    /// points) and the query wavefront whose distance bounds which
+    /// candidates count as matches and whether a candidate is still inside
+    /// the window. `seed=Some(...)` supplies the first iteration's child
+    /// links (so the step carries no load); afterwards, and for `None`,
+    /// both child links of the current node are loaded at the top of each
+    /// iteration. The two links live in one 8-byte pair so loading both is
+    /// a single line, and moving the load ahead of the byte compare is
+    /// equivalent: within one descent every node the walk compares is
+    /// written only after it is read (attachment points and the current
+    /// node never alias inside a window-sized walk), so no write sits
+    /// between the load and its uses.
     #[inline]
     #[allow(clippy::too_many_arguments)]
     fn descent(
@@ -890,18 +950,39 @@ impl TreeMatchFinder {
         let mut len1 = 0usize;
         let mut longest = Self::MIN_MATCH - 1;
         let mut budget = cut;
+        let mut far_steps = 0usize;
         let mut floor = pos;
         loop {
+            if PROFILE_COLLECT {
+                STAT_DESCENT_STEPS.fetch_add(1, Ordering::Relaxed);
+                let d = (pos - current) as u64;
+                let mut b = STEP_BUCKET_CUTS.len();
+                for (i, c) in STEP_BUCKET_CUTS.iter().enumerate() {
+                    if d < *c {
+                        b = i;
+                        break;
+                    }
+                }
+                STAT_STEP_BUCKETS[b].fetch_add(1, Ordering::Relaxed);
+            }
             // A candidate that does not step back is a reused slot or the
             // sentinel; one further back than the window has fallen out of
             // it. Either ends the descent, sealing both attachment points
             // so no stale link survives below them. A spent budget ends it
             // the same way, dropping whatever subtree the budget could not
             // reach.
-            if current >= floor || pos - current > self.mask || budget == 0 {
+            let far = self.far_cut > 0 && pos - current > self.far_start;
+            if current >= floor
+                || pos - current > self.mask
+                || budget == 0
+                || (far && far_steps >= self.far_cut)
+            {
                 self.son[ptr0] = NO_LINK;
                 self.son[ptr1] = NO_LINK;
                 return;
+            }
+            if far {
+                far_steps += 1;
             }
             budget -= 1;
             floor = current;

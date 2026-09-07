@@ -120,6 +120,24 @@ fn blockdup_data(target: usize) -> Vec<u8> {
     out
 }
 
+/// A real on-disk sample (e.g. an x86 executable), read up to `target`
+/// bytes. The corpus the DLL-class parse speed was measured on.
+fn file_data(path: &str, target: usize) -> Vec<u8> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {path}: {e}"));
+    let mut out = Vec::with_capacity(target);
+    let mut buf = [0u8; 65536];
+    while out.len() < target {
+        let n = f.read(&mut buf).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    out.truncate(target);
+    out
+}
+
 fn main() {
     let size_mb: usize = std::env::args()
         .nth(1)
@@ -129,7 +147,14 @@ fn main() {
     let size = size_mb * 1024 * 1024;
     const DICT_LOG: u8 = 7; // 16 MiB
     let want_corpus = std::env::args().nth(2).unwrap_or_default();
-    let corpora = [
+    let thread_csv = std::env::args()
+        .nth(3)
+        .unwrap_or_else(|| "1,8".into());
+    let thread_list = thread_csv
+        .split(',')
+        .map(|s| s.trim().parse::<usize>().expect("thread list"))
+        .collect::<Vec<_>>();
+    let mut corpora = [
         ("text", text_data(size)),
         ("distant", distant_data(size)),
         ("blockdup", blockdup_data(size)),
@@ -137,6 +162,10 @@ fn main() {
     .into_iter()
     .filter(|(name, _)| want_corpus.is_empty() || *name == want_corpus)
     .collect::<Vec<_>>();
+    if want_corpus == "file" {
+        let path = std::env::args().nth(4).unwrap_or_else(|| panic!("file corpus needs a path arg"));
+        corpora = vec![("file", file_data(&path, size.max(1024 * 1024)))];
+    }
 
     for (name, corpus) in &corpora {
         println!("== {name}: {} MiB, dict 2^{DICT_LOG} ==", corpus.len() / (1 << 20));
@@ -153,9 +182,9 @@ fn main() {
             let seq_ratio = packed.len() as f64 * 100.0 / corpus.len() as f64;
             let seq_bytes = packed.len();
 
-            // Multi-threaded, 1 and 8 threads.
+            // Multi-threaded sweep (default 1 and 8 threads).
             let mut pair = Vec::new();
-            for threads in [1usize, 8] {
+            for threads in &thread_list {
                 eprintln!("[{name} l{level}] mt{threads} ...");
                 let t1 = Instant::now();
                 let mut seed = rar_rs::EncoderState::default();
@@ -165,7 +194,7 @@ fn main() {
                     DICT_LOG,
                     4 * 1024 * 1024,
                     &mut seed,
-                    threads,
+                    *threads,
                     true,
                     rar_rs::ArchiveVersion::V50,
                 );
@@ -175,24 +204,23 @@ fn main() {
                     rar_rs::decode(&packed, level, corpus.len() as u64, DICT_LOG, None)
                         .unwrap_or_else(|e| panic!("mt {threads} decode: {e:?}"));
                 assert_eq!(out, *corpus, "mt{threads} decode mismatch");
-                pair.push((threads, mt_ms, mt_ratio, packed.len()));
+                pair.push((*threads, mt_ms, mt_ratio, packed.len()));
             }
 
-            let (mt1_ms, mt1_ratio, mt1_bytes) = (pair[0].1, pair[0].2, pair[0].3);
-            let (mt8_ms, mt8_ratio, mt8_bytes) = (pair[1].1, pair[1].2, pair[1].3);
-            let d1 = mt1_bytes as isize - seq_bytes as isize;
-            let d8 = mt8_bytes as isize - seq_bytes as isize;
+            let (first_ms, first_ratio, first_bytes) = (pair[0].1, pair[0].2, pair[0].3);
+            let d1_at = first_bytes as isize - seq_bytes as isize;
             println!(
-                "  l{level}: seq {:>6}ms {:>7.2}% ({}) | mt1 {:>6}ms {:>7.2}% ({} {:+}) | mt8 {:>6}ms {:>7.2}% ({} {:+})",
+                "  l{level}: seq {:>6}ms {:>7.2}% ({}) | mt{} {:>6}ms {:>7.2}% ({} {:+})",
                 seq_ms, seq_ratio, seq_bytes,
-                mt1_ms, mt1_ratio, mt1_bytes, d1,
-                mt8_ms, mt8_ratio, mt8_bytes, d8,
+                pair[0].0, first_ms, first_ratio, first_bytes, d1_at,
             );
-            println!(
-                "    mt8 speed {:.2}x vs seq, {:.2}x vs mt1",
-                seq_ms as f64 / mt8_ms as f64,
-                mt1_ms as f64 / mt8_ms as f64,
-            );
+            for (threads, mt_ms, mt_ratio, mt_bytes) in pair.iter().skip(1) {
+                println!(
+                    "        mt{threads} {:>6}ms {:>7.2}% ({} {:+})   x{:.2} vs seq",
+                    mt_ms, mt_ratio, mt_bytes, *mt_bytes as isize - seq_bytes as isize,
+                    seq_ms as f64 / *mt_ms as f64,
+                );
+            }
         }
     }
 }

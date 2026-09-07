@@ -15,6 +15,12 @@ Decisions so far:
 - **Measure before optimizing.** The mtprobe/ratiocheck examples are the
   regression gates; a hotspot must be confirmed by probe before any change.
 
+- 13 collect 带宽/延迟判定 + 远带候选预算前缘（2026-09-07）：远带预算 `RAR_RS_FAR_BAND`
+  是 seq opt-in 速度档（1M/2：-9% @ +0.22pp），非 mt8 解药；mt8 需每位置步数降 ~5x（架构级）。
+- 14 两制近存实测为负（2026-09-07）：近带 256 KiB L3 驻留 + 远树到期重插（`RAR_RS_TWO_TIER`，
+  env-gated 默认 off，descent 拆 node/pos 纯重构除外）——远插把每位置步数做大约 2-3x，
+  seq -75%、mt8 -98%；budget=4 采样式远插 ratio 漂 +0.54pp 仍 mt8 -66%。方向废弃，留档负例。
+
 Open frontier (see issues/):
 
 - 04 window-level incompressible skip for MT — biggest remaining speed
@@ -127,6 +133,17 @@ path), with the fresh-tail seed thinned to a stride over the old >2 MiB band
 ratio byte-identical with ~0% speed regression. `distant` (random + far
 copies) still probes incompressible and stays at 59.14% — probe-length issue,
 see issue 12 待办.
+
+Collect band/latency verdict + far-band budget frontier (2026-09-07, issue
+13): profiling (counters kept to single-thread runs; shared atomics polluted
+the mt8 timing 2x) shows seq is cache-mixed latency-bound (~46 ns/step) and
+mt8 saturates DRAM bandwidth (~121M steps/s ~ 31GB/s, scaling cliff 4->8 at
+1.39x). The ratio/traffic frontier of a far-band descent budget
+(`RAR_RS_FAR_BAND`, TreeMatchFinder.far_start/far_cut, dormant off) peaks at
+1 MiB/2 steps: tsc seq -9% at +0.22pp, but mt8 only -4% (MT slices have few
+far-band candidates) — so it is a seq speed option, not the mt8 fix. To close
+the WinRAR mt8 gap the per-position steps must drop ~5x (architecture), see
+issue 13 待办.
 
 ## Definitive head-to-head (2026-09-01, fixed CLI, m3, this machine)
 
