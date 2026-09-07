@@ -1,7 +1,7 @@
 # 11 — Software-pipelined batch descent (the collect's DRAM-latency lever)
 
 Type: task
-Status: planned — design below; implement and measure step by step
+Status: resolved — pipelined first-step value-carry implemented, tested byte-identical, and landed 2026-09-07 (see the final entry); the CLI-overhead part was closed 2026-09-07 too
 
 ## Goal
 
@@ -177,3 +177,59 @@ wave (`compression_pool_for(threads)`) and the inner MT encode
 (`compression_pool()`) resolve to the **same** cached pool instance, so no
 second pool is ever spawned. Harness: `crates/rar/examples/clioverhead.rs`
 (parallel-gated; `codec`/`writer` modes).
+
+## 2026-09-07: pipelined first-step value-carry — landed
+
+Implemented the "pipeline only the first step's loads" lever from the
+2026-09-01 note, but as a **settled value-carry** rather than a prefetch:
+the next gated position's first tree step is *read* at the end of the
+preceding iteration — `head[hash]` (via `seed_for`) and the first
+descendant's `son[pair]`/`son[pair+1]` — when those values are provably
+settled (every position through `pos` has inserted, and nothing else writes
+the tree between the seed read and the next turn). The seed is carried
+across the loop boundary and handed to `matches_seeded`, whose descent
+starts from the carried `current` + child links instead of loading them.
+
+Byte identity rests on one invariant, proven and now unit-tested: within a
+single descent every node the walk visits is written only after it is read,
+and no attachment slot aliases another slot encountered in the window, so
+reading the child pair one iteration early is value-equal to the serial
+top-of-iteration read. (The 2026-09-01 interleaved-batch failure had a
+*batch window of many positions* sharing son slots; this carries across one
+pure loop-boundary step, where no interleaving exists.)
+
+Changes:
+- `match_finder.rs`: `matches` split into `matches` + a shared `descent`;
+  new `matches_seeded`, `seed_for` (guards the pair read with the same
+  floor/window check the descent starts with), and `prefetch_head_for`
+  (x86_64 `_mm_prefetch` of the next head slot, issued at the top of the
+  gated iteration).
+- `encoder.rs::collect_block_matches`: a `pending` seed slot recomputed at
+  the end of every iteration for `pos+1`, gated by the *exact* mirror of
+  the tree-query gate using the just-updated `committed_through`/`fast_tree`
+  (so a seed exists iff the next turn will descend); consumed in the gate.
+- `examples/collectbench.rs` (parallel-gated): file-input bench toggling
+  seq/mt8, asserts the decode is byte-identical; baseline + post timings.
+- Test `seeded_first_step_is_byte_identical_to_serial`: replays 280 KiB
+  mixed (phrase repeat + zeros + random + repeated phrase) at window 2^15
+  through both paths — per-position reports equal, and the final head/son
+  tables byte-equal.
+
+Results on tsc.exe (24.5 MB, m3, dict 32 MiB), 3-5 runs each, release:
+
+| path | pre | post | Δ |
+|---|---|---|---|
+| seq  | ~9.56 s (mean) | ~9.21 s (mean) | −3.6% |
+| mt8  | ~2.23 s (mean) | ~2.15 s (mean) | −3.7% |
+
+Ratios byte-identical on both paths (seq 33.01%, mt8 33.57%); decode
+byte-identical; 207 lib tests + rar50_roundtrip/format_assertions/
+rewrite_tests green; clippy `-D warnings` clean.
+
+Verdict vs the goal: byte-identical, no quality tradeoff, but only ~1/5 of
+the hoped ~18% collect win — the seed's reads land at the end of the
+bookkeeping tail, which is too short to hide a full DRAM read; the rest of
+the step-1 latency is absorbed by the next turn's OoO overlap anyway. The
+head `_mm_prefetch` helps marginally. Landed because it is free and
+monotone; the BT4 insertion-order ceiling (2026-09-01) still stands for any
+real batch.

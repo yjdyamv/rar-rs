@@ -772,8 +772,110 @@ impl TreeMatchFinder {
             return;
         }
         let hash = Self::hash4(input, pos);
-        let mut current = resolve(pos, self.head[hash]);
+        let current = resolve(pos, self.head[hash]);
         self.head[hash] = pos as u32;
+        self.descent(input, pos, len_limit, max_distance, cut, out, current, None);
+    }
+
+    /// Like [`Self::matches`], but the first step's loads are supplied
+    /// instead of read here: `current` is the head-resolved descendant and
+    /// `son_less`/`son_greater` are the two links in that node's pair of
+    /// child slots. The caller computed them with [`Self::seed_for`] at a
+    /// point where they are guaranteed settled (every position before `pos`
+    /// has already inserted), so the descent is byte-identical to the
+    /// serial form — this is the software-pipelined first step (see the
+    /// batch-descent issue).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn matches_seeded(
+        &mut self,
+        input: &[u8],
+        pos: usize,
+        len_limit: usize,
+        max_distance: usize,
+        cut: usize,
+        out: &mut Vec<(u32, u32)>,
+        current: usize,
+        son_less: u32,
+        son_greater: u32,
+    ) {
+        if pos + Self::MIN_MATCH > input.len() {
+            return;
+        }
+        let hash = Self::hash4(input, pos);
+        self.head[hash] = pos as u32;
+        self.descent(
+            input,
+            pos,
+            len_limit,
+            max_distance,
+            cut,
+            out,
+            current,
+            Some((son_less, son_greater)),
+        );
+    }
+
+    /// The values [`Self::matches_seeded`] needs for `pos`, read up to one
+    /// position early: the head-resolved descendant and its pair of child
+    /// links. Must only be called for a position that genuinely descends
+    /// (the collector's gate); the pair computation is guarded by the same
+    /// floor/window check the descent starts with, so a head sentinel or a
+    /// wrapped link yields placeholder links that the guard then consumes.
+    pub(crate) fn seed_for(&self, input: &[u8], pos: usize) -> (usize, u32, u32) {
+        let hash = Self::hash4(input, pos);
+        let current = resolve(pos, self.head[hash]);
+        if current >= pos || pos - current > self.mask {
+            return (current, NO_LINK, NO_LINK);
+        }
+        let pair = (current & self.mask) << 1;
+        (current, self.son[pair], self.son[pair + 1])
+    }
+
+    /// Warm the head slot for `pos` (address known ahead of time) so the
+    /// early [`Self::seed_for`] read hits. No-op off x86-64; a prefetch is
+    /// also harmless on this position's own future insert (the line comes
+    /// back into L1 either way).
+    pub(crate) fn prefetch_head_for(&self, input: &[u8], pos: usize) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let hash = Self::hash4(input, pos);
+            // SAFETY: `head` is a Vec, `hash` is bounded by HASH_BITS and
+            // the caller guards `pos + 3 < input.len()`.
+            unsafe {
+                std::arch::x86_64::_mm_prefetch(
+                    self.head.as_ptr().add(hash).cast::<std::os::raw::c_char>(),
+                    std::arch::x86_64::_MM_HINT_T0,
+                );
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (input, pos);
+        }
+    }
+
+    /// The shared descent of [`Self::matches`] and [`Self::matches_seeded`].
+    /// `seed=Some(...)` supplies the first iteration's child links (so its
+    /// step carries no load); afterwards, and for `None`, both child links
+    /// of the current node are loaded at the top of each iteration. The two
+    /// links live in one 8-byte pair so loading both is a single line, and
+    /// moving the load ahead of the byte compare is equivalent: within one
+    /// descent every node the walk compares is written only after it is
+    /// read (attachment points and the current node never alias inside a
+    /// window-sized walk), so no write sits between the load and its uses.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn descent(
+        &mut self,
+        input: &[u8],
+        pos: usize,
+        len_limit: usize,
+        max_distance: usize,
+        cut: usize,
+        out: &mut Vec<(u32, u32)>,
+        mut current: usize,
+        mut seed: Option<(u32, u32)>,
+    ) {
         // The two attachment points still waiting for a subtree, starting
         // as the new position's own child slots. Each step down hangs the
         // node just compared on one of them and moves that side into the
@@ -804,6 +906,10 @@ impl TreeMatchFinder {
             budget -= 1;
             floor = current;
             let pair = (current & self.mask) << 1;
+            let (child_less, child_greater) = match seed.take() {
+                Some((less, greater)) => (less, greater),
+                None => (self.son[pair], self.son[pair + 1]),
+            };
             let mut len = len0.min(len1);
             if input[current + len] == input[pos + len] {
                 len += 1;
@@ -836,8 +942,8 @@ impl TreeMatchFinder {
                         // position's prefix, so the new position adopts its
                         // children and the node drops out as the farther of
                         // two interchangeable candidates.
-                        self.son[ptr1] = self.son[pair];
-                        self.son[ptr0] = self.son[pair + 1];
+                        self.son[ptr1] = child_less;
+                        self.son[ptr0] = child_greater;
                         return;
                     }
                 }
@@ -846,12 +952,12 @@ impl TreeMatchFinder {
                 self.son[ptr1] = current as u32;
                 ptr1 = pair + 1;
                 len1 = len;
-                current = resolve(pos, self.son[ptr1]);
+                current = resolve(pos, child_greater);
             } else {
                 self.son[ptr0] = current as u32;
                 ptr0 = pair;
                 len0 = len;
-                current = resolve(pos, self.son[ptr0]);
+                current = resolve(pos, child_less);
             }
         }
     }
@@ -941,19 +1047,70 @@ mod tests {
         );
     }
 
-    /// Sliding: once more than the window is pushed, the history drops
-    /// the oldest bytes and stays bounded while still finding matches in
-    /// the retained range.
-    #[test]
-    fn long_range_window_slides_and_stays_bounded() {
-        let mut lr = LongRange::new(64 * 1024);
-        for i in 0..8u64 {
-            lr.push(&random_bytes(i, 32 * 1024));
+// Sliding: once more than the window is pushed, the history drops
+        // the oldest bytes and stays bounded while still finding matches in
+        // the retained range.
+        #[test]
+        fn long_range_window_slides_and_stays_bounded() {
+            let mut lr = LongRange::new(64 * 1024);
+            for i in 0..8u64 {
+                lr.push(&random_bytes(i, 32 * 1024));
+            }
+            assert_eq!(lr.hist_len(), 64 * 1024, "history capped at the window");
+            assert_eq!(lr.total_pushed(), 256 * 1024);
+            // The oldest data slid out: the retained history starts at
+            // 256 KiB - 64 KiB.
+            assert_eq!(lr.hist_base(), 256 * 1024 - 64 * 1024);
         }
-        assert_eq!(lr.hist_len(), 64 * 1024, "history capped at the window");
-        assert_eq!(lr.total_pushed(), 256 * 1024);
-        // The oldest data slid out: the retained history starts at
-        // 256 KiB - 64 KiB.
-        assert_eq!(lr.hist_base(), 256 * 1024 - 64 * 1024);
-    }
+
+        /// The software-pipelined first step ([`TreeMatchFinder::seed_for`]
+        /// feeding [`TreeMatchFinder::matches_seeded`]) must be byte-identical
+        /// to the serial [`TreeMatchFinder::matches`]: the same reports and
+        /// the same tree state afterwards, across every position and window
+        /// wrap.
+        #[test]
+        fn seeded_first_step_is_byte_identical_to_serial() {
+            let mut data = Vec::with_capacity(280 * 1024);
+            let phrase = b"the quick brown fox jumps over the lazy dog ";
+            for _ in 0..(96 * 1024 / phrase.len() + 1) {
+                data.extend_from_slice(phrase);
+            }
+            data.extend(std::iter::repeat_n(0u8, 24 * 1024));
+            data.extend_from_slice(&random_bytes(0xDEAD_BEEF, 90 * 1024));
+            for _ in 0..(64 * 1024 / phrase.len() + 1) {
+                data.extend_from_slice(phrase);
+            }
+
+            let window = 1 << 15;
+            let mut serial = TreeMatchFinder::new(window);
+            let mut seeded = TreeMatchFinder::new(window);
+            for pos in 0..(data.len() - 3) {
+                let max_distance = pos.min(window);
+                let len_limit = (data.len() - pos).min(127);
+                let mut out_s = Vec::new();
+                serial.matches(&data, pos, len_limit, max_distance, 1000, &mut out_s);
+                let (current, less, greater) = seeded.seed_for(&data, pos);
+                let mut out_p = Vec::new();
+                seeded.matches_seeded(
+                    &data,
+                    pos,
+                    len_limit,
+                    max_distance,
+                    1000,
+                    &mut out_p,
+                    current,
+                    less,
+                    greater,
+                );
+                assert_eq!(out_s, out_p, "report mismatch at position {pos}");
+            }
+            assert_eq!(
+                serial.head, seeded.head,
+                "head slots diverge from the pipelined path"
+            );
+            assert_eq!(
+                serial.son, seeded.son,
+                "son slots diverge from the pipelined path"
+            );
+        }
 }

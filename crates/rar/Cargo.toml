@@ -50,3 +50,7 @@ required-features = ["parallel"]
 [[example]]
 name = "clioverhead"
 required-features = ["parallel"]
+
+[[example]]
+name = "collectbench"
+required-features = ["parallel"]

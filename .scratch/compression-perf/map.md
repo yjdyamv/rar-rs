@@ -110,6 +110,12 @@ DRAM-bound BT4 descent) — a cache-resident near-window chain finder with
 the tree as the far fallback is the designed-but-unbuilt option (see issue
 09); the CLI's ~1 s overhead is **resolved** (2026-09-07, see issue 11) —
 CLI ≈ library within ~5%, the residue is pipeline cost every caller pays.
+Issue 11's pipelined first-step value-carry (BT4 descent, DRAM latency) is
+also **landed** (2026-09-07): software-pipelined `seed_for` +
+`matches_seeded` in `collect_block_matches`, byte-identical (unit-tested
+head/son equality + ratios + 207 tests), tsc.exe m3/dict32: seq ~9.56→9.21 s
+(−3.6%), mt8 ~2.23→2.15 s (−3.7%). Batch cheats beyond one step are still
+barred by the BT4 insertion-order invariant.
 
 ## Definitive head-to-head (2026-09-01, fixed CLI, m3, this machine)
 

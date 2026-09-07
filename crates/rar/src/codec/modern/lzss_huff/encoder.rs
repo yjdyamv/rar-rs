@@ -1806,6 +1806,10 @@ fn collect_block_matches(
     let mut lr_misses = 0usize;
     let mut tree_misses = 0usize;
     let mut fast_tree = false;
+    // The next gated position's first tree step (its head-resolved
+    // descendant and that node's child pair), computed at the end of the
+    // preceding iteration so its DRAM reads overlap the bookkeeping.
+    let mut pending: Option<(usize, usize, u32, u32)> = None;
     for pos in block.clone() {
         matches.starts.push(matches.runs.len() as u32);
         let searching = pos >= committed_through;
@@ -1831,17 +1835,38 @@ fn collect_block_matches(
             && pos + 3 < combined.len()
             && (!fast_tree || (pos & (FAST_RECOVER_INTERVAL - 1)) == 0)
         {
+            // Warm the next position's head slot while this descent runs;
+            // the seed computed at the tail then hits. Harmless when the
+            // next position ends up unseeded/skipped.
+            if pos + 4 < combined.len() {
+                finder.prefetch_head_for(combined, pos + 1);
+            }
             let avail = combined.len() - pos;
             let len_limit = avail.min(NICE_MATCH_LENGTH);
             scratch.clear();
-            finder.matches(
-                combined,
-                pos,
-                len_limit,
-                max_distance,
-                chain_len,
-                &mut scratch,
-            );
+            match pending.take() {
+                Some((seed_pos, current, less, greater)) if seed_pos == pos => {
+                    finder.matches_seeded(
+                        combined,
+                        pos,
+                        len_limit,
+                        max_distance,
+                        chain_len,
+                        &mut scratch,
+                        current,
+                        less,
+                        greater,
+                    );
+                }
+                _ => finder.matches(
+                    combined,
+                    pos,
+                    len_limit,
+                    max_distance,
+                    chain_len,
+                    &mut scratch,
+                ),
+            }
             // The tree's internal ordering invariants can break when it is
             // reused across chunks (budget-limited descents against a dense
             // persistent tree — the DLL reproduction hit this: a bogus
@@ -1941,6 +1966,26 @@ fn collect_block_matches(
         let reach = longest.min(block.end - pos).min(max_match);
         if reach >= NICE_MATCH_LENGTH {
             committed_through = pos + reach;
+        }
+        // Seed the next position's first tree step. Its values are settled
+        // now (every position through `pos` has inserted and this block does
+        // nothing else to the tree), so reading them here is byte-identical
+        // to reading them at the next turn. Mirror the gate exactly using
+        // the just-updated commit/fast-tree state; the gate the next
+        // iteration evaluates reads the same values.
+        let npos = pos + 1;
+        let n_max_distance = npos.min(window);
+        let n_max_length = (block.end - npos).min(max_match);
+        if npos >= committed_through
+            && n_max_distance > 0
+            && n_max_length >= 4
+            && npos + 3 < combined.len()
+            && (!fast_tree || (npos & (FAST_RECOVER_INTERVAL - 1)) == 0)
+        {
+            let (current, less, greater) = finder.seed_for(combined, npos);
+            pending = Some((npos, current, less, greater));
+        } else {
+            pending = None;
         }
     }
     matches.starts.push(matches.runs.len() as u32);
