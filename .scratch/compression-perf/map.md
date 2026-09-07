@@ -19,8 +19,9 @@ Open frontier (see issues/):
 
 - 04 window-level incompressible skip for MT — biggest remaining speed
   lever on random data; member-level ratio safety is the open question.
-- 05 streaming-path auto filters (>64 MiB members never get delta/x86)
 - 06 solid archives stay single-threaded (speed gap on backups)
+- 15 streaming delta for >64 MiB members landed (05); x86 streaming stays
+  open (whole-member scan requirement).
 
 ## Fog
 
@@ -36,6 +37,9 @@ Open frontier (see issues/):
 - 01 matchless-block DP fast path (resolved, 3cd6b37)
 - 02 collector fast mode gating `longest==0` + thresholds 256 (resolved, 3cd6b37)
 - 03 delta filter candidate channels + sampled pre-gate (resolved, 45fa1e0)
+- 05 streaming-path auto delta filter for >64 MiB members (resolved,
+  2026-09-07; per-window piecewise transform, records relative to window
+  start, solid-chain break, regression in large_paths)
 
 ## Real head-to-head vs WinRAR 7.23 (2026-08, m3)
 
@@ -104,7 +108,8 @@ structure, not the LR sampling.
 Next levers: the per-byte parse (collect 5.3 s of the 8.4 s seq time, the
 DRAM-bound BT4 descent) — a cache-resident near-window chain finder with
 the tree as the far fallback is the designed-but-unbuilt option (see issue
-09); the CLI's ~1 s overhead deserves a profile pass (wave/MT pool nesting).
+09); the CLI's ~1 s overhead is **resolved** (2026-09-07, see issue 11) —
+CLI ≈ library within ~5%, the residue is pipeline cost every caller pays.
 
 ## Definitive head-to-head (2026-09-01, fixed CLI, m3, this machine)
 
@@ -198,7 +203,7 @@ binaries (~2-3x slower single-thread) and the ultra-repetitive-text ratio.
 - dll 单线程解析 ~6-8 s vs WinRAR 1.8 s（4.7×），mt8 7.5×；issue 09（缓存驻留近窗 finder 未建）
 - xml m2/m3 +1.5%（解析差距，非块开销）
 - text64 MT 片间分歧（6554 vs seq 6058）
-- CLI ~1 s 未记账开销（batch wave/MT 池嵌套）
+- CLI ~1 s 未记账开销（batch wave/MT 池嵌套）——**2026-09-07 实测不成立**（见 issue 11）：CLI ≈ 库 ≈ raw codec +0.3-0.5 s 管线开销（24.5 MB x86 m3/mt8），CLI 与库写作路径相差 ~3-5%，剩余是每个调用方都付的容器/哈希开销；wave 与内层 MT 共用同一缓存池，无嵌套 spawn
 
 注：两代头对头表的 dll mt1（6.5 s vs 8.09 s）不可直接比——测法不同（库核心直调 vs 修好
 后的 CLI），且 CLI 修复后测的是含 ~1 s CLI 开销的口径。上表可比行仅限同口径数字。

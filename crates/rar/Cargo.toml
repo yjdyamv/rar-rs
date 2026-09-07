@@ -46,3 +46,7 @@ required-features = ["parallel"]
 [[example]]
 name = "mtprobe"
 required-features = ["parallel"]
+
+[[example]]
+name = "clioverhead"
+required-features = ["parallel"]

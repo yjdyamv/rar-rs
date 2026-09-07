@@ -34,6 +34,40 @@ fn sha256(path: &Path) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Write `len` bytes of a 2-channel 16-bit lane walk: each lane nudges by a
+/// small random step per frame, so the inter-lane deltas stay tiny — exactly
+/// the data profile the automatic delta filter targets.
+fn write_lane_walk(path: &Path, len: usize) {
+    let mut f = std::fs::File::create(path).expect("create lane-walk file");
+    let mut rng = 42u64;
+    let mut acc = [0i64; 2];
+    let cap = 1 << 19;
+    let mut frames = Vec::with_capacity(cap);
+    let mut total = 0usize;
+    while total < len {
+        frames.clear();
+        for _ in 0..cap {
+            let mut pair = [0u8; 4];
+            for ch in 0..2 {
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                acc[ch] += (rng >> 33) as i64 % 13 - 6;
+                acc[ch] &= 0xFFFF;
+                pair[ch * 2] = (acc[ch] & 0xFF) as u8;
+                pair[ch * 2 + 1] = ((acc[ch] >> 8) & 0xFF) as u8;
+            }
+            frames.extend_from_slice(&pair);
+        }
+        if total + frames.len() > len {
+            frames.truncate(len - total);
+        }
+        use std::io::Write;
+        f.write_all(&frames).expect("write lane-walk file");
+        total += frames.len();
+    }
+}
+
 /// Create a sparse file of `size` bytes (reads as zeros, allocates almost
 /// nothing on disk).
 fn create_sparse(path: &Path, size: u64) {
@@ -145,6 +179,73 @@ fn large_streamed_encrypted_multivolume_roundtrips() {
     assert_eq!(sha256(&out.join("big.bin")), sha256(&src));
 }
 
+/// Streaming (>= 64 MiB) delta filter in a solid archive: the 64 MiB
+/// lane-walk member must cross the spill threshold, win the automatic delta
+/// filter (decided on the leading 64 KiB sample), be forward-transformed per
+/// window in independent regions (each capped at `MAX_FILTER_BLOCK_LENGTH`,
+/// aligned on absolute member coordinates, serialized relative to each
+/// window's start), and break the solid chain around itself (its window
+/// holds transformed bytes, which must never seed `b.txt`). The small
+/// members before and after pin that the chain reseeded cleanly; streamed
+/// extraction must reproduce every member byte-for-byte. `threads: 2` pins
+/// the window size (24 MiB) deterministically so the file spans several
+/// windows regardless of the host. `-m1` keeps the heavy case fast — the
+/// filter path is level-independent.
+#[test]
+fn large_streamed_delta_filter_roundtrips() {
+    let dir = make_temp_dir();
+    let size = 64 * 1024 * 1024usize; // the streaming threshold
+    let a = dir.path().join("a.txt");
+    std::fs::write(&a, b"solid member before the filtered one\nabcdef\n").unwrap();
+    let src = dir.path().join("pcm.bin");
+    write_lane_walk(&src, size);
+    let b = dir.path().join("b.txt");
+    std::fs::write(&b, b"solid member after the filtered one\n0123456789\n").unwrap();
+
+    let arc = dir.path().join("solid.rar");
+    {
+        let mut rar = rar_rs::RarArchive::create_with_options(
+            &arc,
+            rar_rs::CreateOptions {
+                solid: true,
+                threads: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&a, 1).unwrap();
+        rar.add(&src, 1).unwrap();
+        rar.add(&b, 1).unwrap();
+        rar.close().unwrap();
+    }
+    // The lane-walk member must compress hard (delta makes the lanes
+    // near-zero slopes), proving the filtered streaming path was taken.
+    let total = rar_rs::discover_volumes(&arc)
+        .iter()
+        .map(|v| std::fs::metadata(v).unwrap().len())
+        .sum::<u64>();
+    assert!(
+        total < size as u64 / 2,
+        "lane-walk delta data must compress hard, archive {total}"
+    );
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    {
+        let mut rar = RarArchive::open(&arc).unwrap();
+        rar.extract_all(&out).unwrap();
+    }
+    assert_eq!(
+        std::fs::read(out.join("a.txt")).unwrap(),
+        std::fs::read(&a).unwrap()
+    );
+    assert_eq!(sha256(&out.join("pcm.bin")), sha256(&src));
+    assert_eq!(
+        std::fs::read(out.join("b.txt")).unwrap(),
+        std::fs::read(&b).unwrap()
+    );
+}
+
 /// Long-range matching (`-mcl` semantics) at reduced scale: a 32 MiB
 /// file whose second half copies its random first half at exactly 16 MiB
 /// distance. The near finder only sees ~12 MiB of context (8 MiB tail +
@@ -210,5 +311,9 @@ fn long_range_matches_roundtrip_at_scale() {
         )
         .unwrap();
     }
+    assert_eq!(
+        std::fs::metadata(out.join("pair.bin")).unwrap().len(),
+        half as u64 * 2
+    );
     assert_eq!(sha256(&out.join("pair.bin")), sha256(&src));
 }

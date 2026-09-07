@@ -155,3 +155,25 @@ stand.
 Open: the CLI's ~1 s overhead over the library core (batch-wave + nested MT
 pool nesting) is pure waste and worth a profile pass — a lower-risk user-
 facing win than the parse core.
+
+## 2026-09-07: the CLI "~1 s overhead" is not reproducible — closed
+
+Measured with a fresh A/B (release, m3/mt8, 24.5 MB x86 corpus = tsc.exe;
+`rar-cli` enables `parallel`, the library example must rebuild with it too —
+a default-features example silently runs single-threaded):
+
+| path | median |
+|---|---|
+| raw codec (`encode_with_auto_delta_filter` → `encode_with_auto_x86_filter`, 24.5 MB as in the writer's file_origin branch) | ~4.8 s |
+| full typed writer (`ArchiveWriter::create_with` + `add_batch` + `finish`) | ~5.0 s |
+| CLI (`rar a -m3 -mt8`) | ~5.2 s |
+
+The CLI tracks the library within ~3-5%. The old claim compared the CLI
+against a bare `encode_with_auto_x86_filter` call and predated the CLI
+parallel-feature fix (38a1131); the residual pipeline cost (CRC + BLAKE2sp +
+headers + file I/O + wave write-back + finalize) is ~0.2-0.4 s and is paid
+identically by every caller. The "nested MT pool" worry is moot: the batch
+wave (`compression_pool_for(threads)`) and the inner MT encode
+(`compression_pool()`) resolve to the **same** cached pool instance, so no
+second pool is ever spawned. Harness: `crates/rar/examples/clioverhead.rs`
+(parallel-gated; `codec`/`writer` modes).

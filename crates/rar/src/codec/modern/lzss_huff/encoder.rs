@@ -205,8 +205,63 @@ pub fn encode_chunked_raw(
     chunk_size: usize,
     state: Option<&mut EncoderState>,
     is_final: bool,
+    progress: Option<&mut dyn FnMut(u64, u64)>,
+    variant: ArchiveVersion,
+) -> RarResult<Vec<u8>> {
+    encode_chunked_raw_inner(
+        data,
+        method,
+        dict_size_log,
+        chunk_size,
+        state,
+        is_final,
+        progress,
+        variant,
+        None,
+    )
+}
+
+/// Sequential variant of [`encode_chunked_raw`] that prepends `lead`
+/// symbols (filter records of a filtered member) to the first chunk's
+/// symbol stream, so the records are read before any block output. Used by
+/// the streaming writer for per-window delta filter records while keeping
+/// the persistent encoder state across chunks/windows.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_chunked_raw_with_lead(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    chunk_size: usize,
+    state: Option<&mut EncoderState>,
+    is_final: bool,
+    progress: Option<&mut dyn FnMut(u64, u64)>,
+    variant: ArchiveVersion,
+    lead: Option<&[Symbol]>,
+) -> RarResult<Vec<u8>> {
+    encode_chunked_raw_inner(
+        data,
+        method,
+        dict_size_log,
+        chunk_size,
+        state,
+        is_final,
+        progress,
+        variant,
+        lead,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_chunked_raw_inner(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    chunk_size: usize,
+    state: Option<&mut EncoderState>,
+    is_final: bool,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
     variant: ArchiveVersion,
+    lead: Option<&[Symbol]>,
 ) -> RarResult<Vec<u8>> {
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
@@ -234,7 +289,7 @@ pub fn encode_chunked_raw(
         // Levels 2-5 use the optimal (shortest-path) parse; level 1 keeps
         // the greedy+lazy matcher (it exists to be quick, like WinRAR's
         // own fastest rung).
-        let symbols = if level >= 2 {
+        let mut symbols = if level >= 2 {
             find_matches_optimal(
                 state,
                 chunk,
@@ -260,6 +315,15 @@ pub fn encode_chunked_raw(
                 long_range,
             )
         };
+        // Filter records of a filtered member lead the first chunk's symbol
+        // stream (read before any output, member-relative positions).
+        if chunk_start == 0
+            && let Some(lead) = lead
+        {
+            let mut joined = lead.to_vec();
+            joined.append(&mut symbols);
+            symbols = joined;
+        }
 
         let mut block_start = 0usize;
         while block_start < symbols.len() {
@@ -874,6 +938,46 @@ pub fn encode_with_filters_mt(
         None,
         cancel,
     )
+}
+
+/// Piecewise delta transform for one window of a streaming member.
+///
+/// The member is cut into independent delta regions at
+/// [`MAX_FILTER_BLOCK_LENGTH`] on absolute member coordinates — the same
+/// split [`encode_with_filters`] applies, where each region's lanes start
+/// fresh — and each region is forward-transformed, reproducing the layout
+/// of a whole-member front-transform exactly. Returns the transformed
+/// window bytes (the compressed blocks cover this stream in order) and the
+/// per-region specs whose records must lead the window's first symbol
+/// stream (the decoder holds them pending and applies each inverse once
+/// its region is produced).
+pub(crate) fn delta_stream_window(
+    window: &[u8],
+    base_offset: u64,
+    channels: u8,
+) -> (Vec<u8>, Vec<FilterSpec>) {
+    let mut specs = Vec::with_capacity(window.len() / MAX_FILTER_BLOCK_LENGTH as usize + 1);
+    let mut transformed = Vec::with_capacity(window.len());
+    let mut off = 0usize;
+    while off < window.len() {
+        let take = MAX_FILTER_BLOCK_LENGTH.min((window.len() - off) as u32) as usize;
+        let piece = &window[off..off + take];
+        let t = {
+            let mut buf = piece.to_vec();
+            apply_filter_encode(FILTER_DELTA, &mut buf, channels, base_offset + off as u64)
+        };
+        // delta_encode returns the lane-blocked reorder of `piece`;
+        // concatenating regions reproduces the member's transformed stream.
+        transformed.extend_from_slice(&t);
+        specs.push(FilterSpec::new(
+            FILTER_DELTA,
+            channels,
+            (base_offset + off as u64) as u32,
+            take as u32,
+        ));
+        off += take;
+    }
+    (transformed, specs)
 }
 
 /// Merge overlapping or adjacent ranges (the x86 scan can return a broad

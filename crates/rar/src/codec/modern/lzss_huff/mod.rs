@@ -17,6 +17,7 @@ pub use decode::{
     TraceSymbol, analyze_stream, decode, decode_raw, decode_standalone,
     decode_standalone_to_writer, decode_to_writer, trace_stream,
 };
+pub(crate) use encode::encode_chunked_raw_with_lead;
 #[cfg(feature = "parallel")]
 pub(crate) use encode::encode_chunked_mt_with_progress;
 #[cfg(all(test, feature = "parallel"))]
@@ -27,6 +28,7 @@ pub use encode::{
     encode_with_auto_delta_filter, encode_with_auto_x86_filter, encode_with_filters,
     encode_with_filters_mt, encode_with_progress_raw, pick_delta_channel,
 };
+pub(crate) use encoder::{Symbol, delta_stream_window};
 
 // ── Tables / format constants ──────────────────────────────────────────────
 

@@ -2739,6 +2739,42 @@ impl RarArchive {
         // long range search) work for large files.
         // WinRAR `-se`: reset the solid statistics when the extension changes.
         self.maybe_reset_solid_for_extension(name);
+
+        // Automatic delta filter for large members: decide it on the leading
+        // 64 KiB sample (the same head sample the in-memory path packs), then
+        // each window is forward-transformed in place before compression. A
+        // filtered member is written standalone — its window holds transformed
+        // bytes, so the decoder window must never seed the next member — so
+        // breaking the solid chain here. The sample gate compares delta vs
+        // plain LZSS at sample scale (a whole-member comparison is impossible
+        // without a second read+encode pass); member-relative region records
+        // keep positions correct and the `packed_size` guard below still
+        // protects against STORE.
+        let mut delta_channels: Option<u8> = None;
+        if file_size < u32::MAX as u64 {
+            let sample_len = ((64 * 1024) as u64).min(file_size) as usize;
+            let mut sample = vec![0u8; sample_len];
+            let got = {
+                let mut sf = File::open(path)?;
+                sf.read(&mut sample)?
+            };
+            sample.truncate(got);
+            if got > 0
+                && crate::codec::common::filters::auto_delta_filter_channels(&sample).is_some()
+            {
+                delta_channels = lzss_huff::pick_delta_channel(
+                    &sample,
+                    method,
+                    dsl,
+                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                )?;
+            }
+        }
+        let delta_used = delta_channels.is_some();
+        if delta_used {
+            self.reset_solid_chain();
+        }
+
         let chain_solid = self.write_ctx().solid_mode && self.write_ctx().encoder_state.is_some();
         self.write_ctx_mut()
             .encoder_state
@@ -2765,6 +2801,13 @@ impl RarArchive {
             /// `parallel` feature and enough data, the window is split
             /// across the compression pool's workers; otherwise it falls
             /// back to the byte-for-byte sequential chunk loop.
+            /// `window_start` is this window's first byte as a running
+            /// chain position (0 for the first window); `delta_specs`
+            /// carries the streaming delta filter regions of this window.
+            /// Their records ("filter symbols") lead the window's first
+            /// emitted block, and their positions are written relative to
+            /// `window_start` because the decoder adds its current write
+            /// position when it reads each record.
             #[allow(clippy::too_many_arguments)]
             fn flush_window(
                 work: &mut Vec<u8>,
@@ -2778,10 +2821,23 @@ impl RarArchive {
                 spill: &mut File,
                 packed_size: &mut u64,
                 cancel: Option<&std::sync::atomic::AtomicBool>,
+                window_start: u64,
+                delta_specs: Option<&[lzss_huff::FilterSpec]>,
             ) -> RarResult<()> {
                 if work.is_empty() {
                     return Ok(());
                 }
+                let lead: Option<Vec<lzss_huff::Symbol>> = delta_specs.map(|specs| {
+                    specs
+                        .iter()
+                        .map(|f| lzss_huff::Symbol::Filter {
+                            block_start: f.block_start - window_start as u32,
+                            block_length: f.block_length,
+                            filter_type: f.filter_type,
+                            channels: f.channels,
+                        })
+                        .collect()
+                });
                 #[cfg(not(feature = "parallel"))]
                 let _ = (chain_solid, threads);
                 #[cfg(feature = "parallel")]
@@ -2797,7 +2853,7 @@ impl RarArchive {
                         threads,
                         is_final,
                         crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                        None,
+                        lead.as_deref(),
                         None,
                         cancel,
                     )?;
@@ -2812,16 +2868,35 @@ impl RarArchive {
                         return Err(RarError::Cancelled);
                     }
                     let end = (offset + crate::codec::DEFAULT_CHUNK_SIZE).min(work.len());
-                    let compressed = lzss_huff::encode_chunked(
-                        &work[offset..end],
-                        lzss_huff::EncodeOptions {
-                            chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
-                            state: state.as_mut(),
-                            is_final: is_final && end >= work.len(),
-                            variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                            ..lzss_huff::EncodeOptions::new(method, dsl)
-                        },
-                    )?;
+                    // The filter records lead only the first chunk's symbol
+                    // stream (read before any output; the decoder holds them
+                    // pending until each region is produced).
+                    let compressed = if offset == 0 && lead.is_some() {
+                        lzss_huff::encode_chunked_raw_with_lead(
+                            &work[offset..end],
+                            method,
+                            dsl,
+                            crate::codec::DEFAULT_CHUNK_SIZE,
+                            state.as_mut(),
+                            is_final && end >= work.len(),
+                            None,
+                            crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                            lead.as_deref(),
+                        )?
+                    } else {
+                        lzss_huff::encode_chunked(
+                            &work[offset..end],
+                            lzss_huff::EncodeOptions {
+                                chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                                state: state.as_mut(),
+                                is_final: is_final && end >= work.len(),
+                                variant: crate::version::ArchiveVersion::from_v70(
+                                    dict_bytes.is_some(),
+                                ),
+                                ..lzss_huff::EncodeOptions::new(method, dsl)
+                            },
+                        )?
+                    };
                     spill.write_all(&compressed)?;
                     *packed_size += compressed.len() as u64;
                     offset = end;
@@ -2840,6 +2915,7 @@ impl RarArchive {
             let mut eof = false;
             let mut file = io::BufReader::with_capacity(1 << 20, File::open(path)?);
             let mut buf = vec![0u8; crate::codec::DEFAULT_CHUNK_SIZE];
+            let mut member_offset = 0u64;
             while !eof {
                 let n = file.read(&mut buf)?;
                 if n == 0 {
@@ -2854,6 +2930,20 @@ impl RarArchive {
                     self.report_progress(bytes_read, file_size);
                 }
                 if eof || work.len() >= mt_window {
+                    let flushed = work.len() as u64;
+                    // Streaming delta: forward-transform the window in
+                    // pieces (each piece is an independent region with fresh
+                    // lanes, capped at MAX_FILTER_BLOCK_LENGTH), collecting
+                    // the region specs whose records lead the window's first
+                    // block.
+                    let window_specs = if let Some(ch) = delta_channels {
+                        let (transformed, specs) =
+                            lzss_huff::delta_stream_window(&work, member_offset, ch);
+                        work = transformed;
+                        Some(specs)
+                    } else {
+                        None
+                    };
                     flush_window(
                         &mut work,
                         eof,
@@ -2866,7 +2956,10 @@ impl RarArchive {
                         &mut spill,
                         &mut packed_size,
                         cancel_ref,
+                        member_offset,
+                        window_specs.as_deref(),
                     )?;
+                    member_offset += flushed;
                     if packed_size >= file_size {
                         break;
                     }
@@ -2946,8 +3039,10 @@ impl RarArchive {
         )?;
         self.write_member_streams(path)?;
         // Non-solid members use an independent LZ window: drop the
-        // encoder state so the next member starts fresh.
-        if !self.write_ctx().solid_mode {
+        // encoder state so the next member starts fresh. A delta-filtered
+        // member is also standalone (its window holds transformed bytes,
+        // which must never seed the next solid member).
+        if !self.write_ctx().solid_mode || delta_used {
             self.reset_solid_chain();
         }
         self.report_progress(file_size, file_size);
