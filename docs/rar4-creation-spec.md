@@ -18,20 +18,39 @@ rar-rs 支持创建 RAR3/4（unp_ver=29）归档，创建的归档**必须能被
 | 单卷创建 | ✅ |
 | CLI -ma4 开关 | ✅ |
 
-### Phase 2（后续迭代）
+### Phase 2（已完成，2026-09）
 
 | 功能 | 状态 |
 |------|------|
-| PPMd（-m0） | ❌ |
-| 头加密（-hp） | ❌ |
+| PPMd 编码 | ✅ |
+| 头加密（-hp） | ✅ |
+| 自动 VM 过滤器（E8/E8E9/Delta/Audio 探测 + RGB/Itanium 编码） | ✅ |
+| 内联恢复记录（NEWSUB 0x7a RR）写/修 | ✅ |
+| 多文件并行 batch | ✅ |
+| solid 链 PPMd 模型延续 | ✅ |
+
+> PPMd 不是独立开关：`-m0` = STORE（WinRAR 定义）；PPMd 由 RAR29 编码器在
+> `-m4/-m5`（非 solid）按候选竞争，solid 链内作为与 LZ 并行的模型链赢者推进
+> （见 `codec/legacy/rar29_encoder.rs` 与 `PLAN.md` "RAR4 写侧 Tier 2 全闭"）。
+> 方法字节仍按 `-m` 级写（0x30+m），块内首个标志位指示 PPMd。
 
 ### 不支持（RAR4 格式无此功能）
 
 - Quick-open（QO）
-- Recovery record（RR）
 - Recovery volumes（.rev）
 - BLAKE2sp 哈希
 - RAR5 vint 编码头
+
+（内联 RR 已支持，见 `PLAN.md` "RAR4 写侧 Tier 2 全闭"。）
+
+## 验证记录（2026-09-07 CLI 实测）
+
+`rar a -ma4` 压缩创建端到端可用：2.36 MB 文本语料上 `-m0` → Store
+（2,367,201 B）、`-m3` → Normal（23,048 B，1.0%）、`-m5` → Best
+（17,497 B，0.7%）、`-ma4 -s -m5` → Best。互操作覆盖见
+`crates/rar-cli/tests/winrar_interop.rs` 的 `we_create_rar4_*`（m3/m5、
+solid PPMd、Delta 过滤器、`-p`、`-hp`、`-rr` 双字节校验）与
+`cli_behavior.rs` 的 `cli_ma4_*`。
 
 ## 架构设计
 
