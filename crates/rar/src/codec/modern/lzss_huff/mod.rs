@@ -28,7 +28,7 @@ pub use encode::{
     encode_with_auto_delta_filter, encode_with_auto_x86_filter, encode_with_filters,
     encode_with_filters_mt, encode_with_progress_raw, pick_delta_channel,
 };
-pub(crate) use encoder::{Symbol, delta_stream_window};
+pub(crate) use encoder::{Symbol, delta_stream_window, merge_ranges, x86_stream_window};
 
 // ── Tables / format constants ──────────────────────────────────────────────
 

@@ -32,7 +32,7 @@
 
 ### RAR5（压缩面）
 
-- **流式路径自动过滤器（05）**：delta/x86 过滤器只走内存路径（<64 MiB 成员）；大音频/裸盘镜像 >64 MiB 走 spill 流式路径无过滤器，ratio 远差于 WinRAR——需调研 delta 可否按窗口应用、区域保持成员相对
+- **流式路径自动过滤器（05）**：~~delta/x86 过滤器只走内存路径（<64 MiB 成员）；大音频/裸盘镜像 >64 MiB 走 spill 流式路径无过滤器，ratio 远差于 WinRAR——需调研 delta 可否按窗口应用、区域保持成员相对~~ 已完成：流式路径按窗口应用 delta（区域按绝对成员坐标、上限 `MAX_FILTER_BLOCK_LENGTH`，`delta_stream_window`）与 x86（`x86_stream_window`，样本检测的 E8/E8E9 区域按窗口裁剪并切块、`merge_ranges` 去重），E8/E8E9 变体及 delta 频道按 64 KiB 样本压缩尺寸选择；过滤成员独占 solid 链
 - **solid 归档 MT（06）**：solid 强制串行，备份类负载无多线程收益；MT 对 seq 的既有分歧（x86 +8.2%，重复距离缓存按片重置）会带进 solid，需先评估可接受性
 - 随机数据 ~800 ms 未记账开销（fast-path 循环、splitter、播种、LR 建表、片组装）尚未逐项归因
 - **dll 单线程解析速度**（map 追踪）：WinRAR m3 1.8s vs 我们 ~6s；ratio 已反超（43.90% vs 44.81%），速度仍 3x 落后

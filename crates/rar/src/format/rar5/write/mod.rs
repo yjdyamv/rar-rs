@@ -2740,17 +2740,22 @@ impl RarArchive {
         // WinRAR `-se`: reset the solid statistics when the extension changes.
         self.maybe_reset_solid_for_extension(name);
 
-        // Automatic delta filter for large members: decide it on the leading
-        // 64 KiB sample (the same head sample the in-memory path packs), then
-        // each window is forward-transformed in place before compression. A
-        // filtered member is written standalone — its window holds transformed
-        // bytes, so the decoder window must never seed the next member — so
-        // breaking the solid chain here. The sample gate compares delta vs
-        // plain LZSS at sample scale (a whole-member comparison is impossible
-        // without a second read+encode pass); member-relative region records
-        // keep positions correct and the `packed_size` guard below still
-        // protects against STORE.
+        // Automatic delta and x86 (E8/E8E9) filters for large members:
+        // decide both on the leading 64 KiB sample (the same head sample
+        // the in-memory path packs), then each window is forward-transformed
+        // in place before compression. A filtered member is written
+        // standalone — its window holds transformed bytes, so the decoder
+        // window must never seed the next member — breaking the solid chain.
+        // The sample gate compares filter vs plain LZSS at sample scale
+        // (a whole-member comparison is impossible without a second
+        // read+encode pass); member-relative region records keep positions
+        // correct and the `packed_size` guard below still protects against
+        // STORE. x86 regions detected in the sample are extended to the
+        // full file size (the E8/E8E9 encoder only touches actual opcodes
+        // within the region, so non-opcode bytes pass through unchanged).
         let mut delta_channels: Option<u8> = None;
+        let mut x86_filter_type: Option<u8> = None;
+        let mut x86_regions: Vec<std::ops::Range<usize>> = Vec::new();
         if file_size < u32::MAX as u64 {
             let sample_len = ((64 * 1024) as u64).min(file_size) as usize;
             let mut sample = vec![0u8; sample_len];
@@ -2759,19 +2764,108 @@ impl RarArchive {
                 sf.read(&mut sample)?
             };
             sample.truncate(got);
-            if got > 0
-                && crate::codec::common::filters::auto_delta_filter_channels(&sample).is_some()
-            {
-                delta_channels = lzss_huff::pick_delta_channel(
-                    &sample,
-                    method,
-                    dsl,
-                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                )?;
+            if got > 0 {
+                // Try delta filter first (cheap pre-gate on sample).
+                if crate::codec::common::filters::auto_delta_filter_channels(&sample).is_some() {
+                    delta_channels = lzss_huff::pick_delta_channel(
+                        &sample,
+                        method,
+                        dsl,
+                        crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                    )?;
+                }
+                // Try x86 filter when delta did not win (same ordering as
+                // the in-memory path: real x86 code is not multi-channel-
+                // correlated, so the cheap delta scan returns None and we
+                // fall through; for correlated audio/raw the delta filter
+                // wins outright).
+                if delta_channels.is_none() && got > 5 {
+                    let mut regions_e9 =
+                        crate::codec::common::filters::auto_x86_filter_ranges(&sample, true);
+                    if !regions_e9.is_empty() {
+                        // Merge overlapping/adjacent ranges to avoid
+                        // double-transforming the overlap.
+                        lzss_huff::merge_ranges(&mut regions_e9);
+                        let mut regions_e8 =
+                            crate::codec::common::filters::auto_x86_filter_ranges(&sample, false);
+                        if regions_e8.is_empty() {
+                            // Only E8E9 variant exists.
+                            x86_filter_type = Some(lzss_huff::FILTER_E8E9);
+                            x86_regions = regions_e9;
+                        } else {
+                            lzss_huff::merge_ranges(&mut regions_e8);
+                            if regions_e8 == regions_e9 {
+                                // E8 and E8E9 detect the same regions.
+                                x86_filter_type = Some(lzss_huff::FILTER_E8E9);
+                                x86_regions = regions_e9;
+                            } else {
+                                // Decide E8 vs E8E9 by compressed size on
+                                // the sample (same as
+                                // encode_with_auto_x86_filter).
+                                let variant = crate::version::ArchiveVersion::from_v70(
+                                    dict_bytes.is_some(),
+                                );
+                                let sample_specs_e9: Vec<lzss_huff::FilterSpec> = regions_e9
+                                    .iter()
+                                    .map(|r| {
+                                        lzss_huff::FilterSpec::new(
+                                            lzss_huff::FILTER_E8E9,
+                                            0,
+                                            r.start.min(u32::MAX as usize) as u32,
+                                            r.len().min(u32::MAX as usize) as u32,
+                                        )
+                                    })
+                                    .collect();
+                                let sample_specs_e8: Vec<lzss_huff::FilterSpec> = regions_e8
+                                    .iter()
+                                    .map(|r| {
+                                        lzss_huff::FilterSpec::new(
+                                            lzss_huff::FILTER_E8,
+                                            0,
+                                            r.start.min(u32::MAX as usize) as u32,
+                                            r.len().min(u32::MAX as usize) as u32,
+                                        )
+                                    })
+                                    .collect();
+                                let packed_e9 = lzss_huff::encode_with_filters(
+                                    &sample,
+                                    method,
+                                    dsl,
+                                    &sample_specs_e9,
+                                    variant,
+                                )?
+                                .len();
+                                let packed_e8 = lzss_huff::encode_with_filters(
+                                    &sample,
+                                    method,
+                                    dsl,
+                                    &sample_specs_e8,
+                                    variant,
+                                )?
+                                .len();
+                                if packed_e8 < packed_e9 {
+                                    x86_filter_type = Some(lzss_huff::FILTER_E8);
+                                    x86_regions = regions_e8;
+                                } else {
+                                    x86_filter_type = Some(lzss_huff::FILTER_E8E9);
+                                    x86_regions = regions_e9;
+                                }
+                            }
+                        }
+                        // Extend sample regions to the full file size:
+                        // the E8/E8E9 encoder only touches actual opcodes,
+                        // so non-opcode bytes within the extended region
+                        // pass through unchanged.
+                        for r in &mut x86_regions {
+                            r.end = r.end.max(file_size as usize);
+                        }
+                    }
+                }
             }
         }
         let delta_used = delta_channels.is_some();
-        if delta_used {
+        let x86_used = x86_filter_type.is_some();
+        if delta_used || x86_used {
             self.reset_solid_chain();
         }
 
@@ -2802,12 +2896,12 @@ impl RarArchive {
             /// across the compression pool's workers; otherwise it falls
             /// back to the byte-for-byte sequential chunk loop.
             /// `window_start` is this window's first byte as a running
-            /// chain position (0 for the first window); `delta_specs`
-            /// carries the streaming delta filter regions of this window.
-            /// Their records ("filter symbols") lead the window's first
-            /// emitted block, and their positions are written relative to
-            /// `window_start` because the decoder adds its current write
-            /// position when it reads each record.
+            /// chain position (0 for the first window); `filter_specs`
+            /// carries the streaming filter regions (delta and/or x86)
+            /// of this window. Their records ("filter symbols") lead the
+            /// window's first emitted block, and their positions are
+            /// written relative to `window_start` because the decoder
+            /// adds its current write position when it reads each record.
             #[allow(clippy::too_many_arguments)]
             fn flush_window(
                 work: &mut Vec<u8>,
@@ -2822,12 +2916,12 @@ impl RarArchive {
                 packed_size: &mut u64,
                 cancel: Option<&std::sync::atomic::AtomicBool>,
                 window_start: u64,
-                delta_specs: Option<&[lzss_huff::FilterSpec]>,
+                filter_specs: Option<&[lzss_huff::FilterSpec]>,
             ) -> RarResult<()> {
                 if work.is_empty() {
                     return Ok(());
                 }
-                let lead: Option<Vec<lzss_huff::Symbol>> = delta_specs.map(|specs| {
+                let lead: Option<Vec<lzss_huff::Symbol>> = filter_specs.map(|specs| {
                     specs
                         .iter()
                         .map(|f| lzss_huff::Symbol::Filter {
@@ -2931,19 +3025,34 @@ impl RarArchive {
                 }
                 if eof || work.len() >= mt_window {
                     let flushed = work.len() as u64;
-                    // Streaming delta: forward-transform the window in
-                    // pieces (each piece is an independent region with fresh
-                    // lanes, capped at MAX_FILTER_BLOCK_LENGTH), collecting
-                    // the region specs whose records lead the window's first
-                    // block.
-                    let window_specs = if let Some(ch) = delta_channels {
+                    // Streaming filters: apply delta (full window, lane-
+                    // blocked) then x86 (clipped to detected regions) on
+                    // the already-delta-transformed data. The decoder
+                    // applies inverse transforms in symbol-stream order
+                    // (delta first, then x86), which reverses the encode
+                    // order — both are linear and region-independent so
+                    // composition is correct regardless of overlap.
+                    let mut window_specs: Option<Vec<lzss_huff::FilterSpec>> = None;
+                    if let Some(ch) = delta_channels {
                         let (transformed, specs) =
                             lzss_huff::delta_stream_window(&work, member_offset, ch);
                         work = transformed;
-                        Some(specs)
-                    } else {
-                        None
-                    };
+                        window_specs = Some(specs);
+                    }
+                    if let Some(ft) = x86_filter_type {
+                        let (transformed, specs) = lzss_huff::x86_stream_window(
+                            &work,
+                            member_offset,
+                            ft,
+                            &x86_regions,
+                        );
+                        work = transformed;
+                        if let Some(ref mut existing) = window_specs {
+                            existing.extend(specs);
+                        } else {
+                            window_specs = Some(specs);
+                        }
+                    }
                     flush_window(
                         &mut work,
                         eof,
@@ -3039,10 +3148,10 @@ impl RarArchive {
         )?;
         self.write_member_streams(path)?;
         // Non-solid members use an independent LZ window: drop the
-        // encoder state so the next member starts fresh. A delta-filtered
-        // member is also standalone (its window holds transformed bytes,
-        // which must never seed the next solid member).
-        if !self.write_ctx().solid_mode || delta_used {
+        // encoder state so the next member starts fresh. A delta/x86-
+        // filtered member is also standalone (its window holds transformed
+        // bytes, which must never seed the next solid member).
+        if !self.write_ctx().solid_mode || delta_used || x86_used {
             self.reset_solid_chain();
         }
         self.report_progress(file_size, file_size);

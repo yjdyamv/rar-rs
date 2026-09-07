@@ -246,8 +246,169 @@ fn large_streamed_delta_filter_roundtrips() {
     );
 }
 
-/// Long-range matching (`-mcl` semantics) at reduced scale: a 32 MiB
-/// file whose second half copies its random first half at exactly 16 MiB
+/// Streaming (>= 64 MiB) x86 (E8/E8E9) filter in a solid archive: the 64
+/// MiB x86-like member must cross the spill threshold, win the automatic
+/// x86 filter (detected on the leading 64 KiB sample, regions clipped per
+/// window on absolute member coordinates, serialized relative to each
+/// window's start, E8/E8E9 variant picked by sample packed size), and break
+/// the solid chain around itself. The small members before and after pin
+/// that the chain reseeded cleanly; streamed extraction must reproduce
+/// every member byte-for-byte. `threads: 2` pins the window size (24 MiB)
+/// deterministically so the file spans several windows. `-m1` keeps the
+/// heavy case fast — the filter path is level-independent.
+#[test]
+fn large_streamed_x86_filter_roundtrips() {
+    let dir = make_temp_dir();
+    let size = 64 * 1024 * 1024usize; // the streaming threshold
+    let a = dir.path().join("a.txt");
+    std::fs::write(&a, b"solid member before the x86-filtered one\nabcdef\n").unwrap();
+    let src = dir.path().join("x86.bin");
+    let data = x86_like(size);
+    std::fs::write(&src, &data).unwrap();
+    let b = dir.path().join("b.txt");
+    std::fs::write(&b, b"solid member after the x86-filtered one\n0123456789\n").unwrap();
+
+    let arc = dir.path().join("solid_x86.rar");
+    {
+        let mut rar = rar_rs::RarArchive::create_with_options(
+            &arc,
+            rar_rs::CreateOptions {
+                solid: true,
+                threads: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&a, 1).unwrap();
+        rar.add(&src, 1).unwrap();
+        rar.add(&b, 1).unwrap();
+        rar.close().unwrap();
+    }
+    // The x86 member must compress hard (the E8 rel32 targets are
+    // 16 MB-normalised by the filter, making the high bytes near-zero),
+    // proving the filtered streaming path was taken.
+    let total = rar_rs::discover_volumes(&arc)
+        .iter()
+        .map(|v| std::fs::metadata(v).unwrap().len())
+        .sum::<u64>();
+    assert!(
+        total < size as u64 / 2,
+        "x86 data must compress hard, archive {total}"
+    );
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    {
+        let mut rar = RarArchive::open(&arc).unwrap();
+        rar.extract_all(&out).unwrap();
+    }
+    assert_eq!(
+        std::fs::read(out.join("a.txt")).unwrap(),
+        std::fs::read(&a).unwrap()
+    );
+    assert_eq!(sha256(&out.join("x86.bin")), sha256(&src));
+    assert_eq!(
+        std::fs::read(out.join("b.txt")).unwrap(),
+        std::fs::read(&b).unwrap()
+    );
+}
+
+/// Streaming (>= 64 MiB) combined delta + x86 filters: a member that is
+/// both multi-channel delta-correlated and has a dense x86 opcode region.
+/// Both filters must compose (delta first, then x86, per window on member
+/// coordinates) and the roundtrip must be byte-identical.
+#[test]
+fn large_streamed_delta_x86_combined_roundtrips() {
+    let dir = make_temp_dir();
+    let size = 64 * 1024 * 1024usize;
+    let a = dir.path().join("a.txt");
+    std::fs::write(&a, b"before\n").unwrap();
+    let src = dir.path().join("mix.bin");
+    // Delta lanes for the first third, x86-like code for the rest.
+    let mut data = vec![0u8; size];
+    {
+        let mut rng = 7u64;
+        let mut acc = [0i64; 2];
+        let third = size / 3;
+        for chunk in data[..third].as_chunks_mut::<4>().0 {
+            for ch in 0..2 {
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                acc[ch] += (rng >> 33) as i64 % 11 - 5;
+                acc[ch] &= 0xFFFF;
+                chunk[ch * 2] = (acc[ch] & 0xFF) as u8;
+                chunk[ch * 2 + 1] = ((acc[ch] >> 8) & 0xFF) as u8;
+            }
+        }
+        let x86_data = x86_like(size - third);
+        data[third..].copy_from_slice(&x86_data[..]);
+    }
+    std::fs::write(&src, &data).unwrap();
+    let b = dir.path().join("b.txt");
+    std::fs::write(&b, b"after\n").unwrap();
+
+    let arc = dir.path().join("mix.rar");
+    {
+        let mut rar = rar_rs::RarArchive::create_with_options(
+            &arc,
+            rar_rs::CreateOptions {
+                solid: true,
+                threads: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        rar.add(&a, 1).unwrap();
+        rar.add(&src, 1).unwrap();
+        rar.add(&b, 1).unwrap();
+        rar.close().unwrap();
+    }
+    let total = rar_rs::discover_volumes(&arc)
+        .iter()
+        .map(|v| std::fs::metadata(v).unwrap().len())
+        .sum::<u64>();
+    assert!(
+        total < size as u64 * 3 / 4,
+        "combined delta+x86 data must compress, archive {total}"
+    );
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    {
+        let mut rar = RarArchive::open(&arc).unwrap();
+        rar.extract_all(&out).unwrap();
+    }
+    assert_eq!(sha256(&out.join("mix.bin")), sha256(&src));
+    assert_eq!(
+        std::fs::read(out.join("a.txt")).unwrap(),
+        std::fs::read(&a).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(out.join("b.txt")).unwrap(),
+        std::fs::read(&b).unwrap()
+    );
+}
+
+/// x86-like code: NOP runs (0x90) punctuated by CALL rel32 (0xE8) with
+/// small near-zero offsets — the profile the E8/E8E9 filter targets.
+fn x86_like(size: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size);
+    let mut pos = 0u32;
+    while out.len() < size {
+        out.extend_from_slice(&[0x90; 64]); // NOP
+        pos += 64;
+        out.push(0xe8); // CALL rel32
+        out.extend_from_slice(&(pos.wrapping_mul(7) & 0x00FF_FFFF).to_le_bytes());
+        pos += 5;
+        out.extend_from_slice(&[0x41; 16]); // INC ECX
+        pos += 16;
+    }
+    out.truncate(size);
+    out
+}
+
+/// Long-range matching (`-mcl` semantics) at reduced scale: a 32 MiB file whose second half copies its random first half at exactly 16 MiB
 /// distance. The near finder only sees ~12 MiB of context (8 MiB tail +
 /// 4 MiB chunk) and the 32 MiB dictionary window bounds representable
 /// distances, so the sampled long-range history must supply the match:

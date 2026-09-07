@@ -980,10 +980,62 @@ pub(crate) fn delta_stream_window(
     (transformed, specs)
 }
 
+/// Piecewise x86 (E8/E8E9) transform for one window of a streaming member.
+///
+/// The window's portion of each auto-detected region is itself split at
+/// [`MAX_FILTER_BLOCK_LENGTH`] boundaries (RARLAB readers reject longer
+/// filter records), reproducing the layout `encode_with_filters` applies —
+/// each piece is an independent record whose E8/E8E9 inverse reads its own
+/// file-relative sign, so splitting is byte-exact. The `file_offset` passed
+/// to the encoder is each piece's absolute member offset, matching the
+/// decoder's expectation. Returns the transformed window bytes and the
+/// per-piece specs whose records lead the window's first symbol stream.
+pub(crate) fn x86_stream_window(
+    window: &[u8],
+    base_offset: u64,
+    filter_type: u8,
+    regions: &[std::ops::Range<usize>],
+) -> (Vec<u8>, Vec<FilterSpec>) {
+    let mut specs = Vec::new();
+    let mut transformed = window.to_vec();
+    for region in regions {
+        let region_start = region.start as u64;
+        let region_end = region.end as u64;
+        let win_start = base_offset;
+        let win_end = base_offset + window.len() as u64;
+        if region_end <= win_start || region_start >= win_end {
+            continue;
+        }
+        let clip_start = region_start.max(win_start);
+        let clip_end = region_end.min(win_end);
+        let mut piece_start = clip_start;
+        while piece_start < clip_end {
+            let piece_end = (piece_start + MAX_FILTER_BLOCK_LENGTH as u64).min(clip_end);
+            let local_start = (piece_start - win_start) as usize;
+            let local_end = (piece_end - win_start) as usize;
+            let t = apply_filter_encode(
+                filter_type,
+                &mut transformed[local_start..local_end],
+                0,
+                piece_start,
+            );
+            transformed[local_start..local_end].copy_from_slice(&t);
+            specs.push(FilterSpec::new(
+                filter_type,
+                0,
+                piece_start as u32,
+                (piece_end - piece_start) as u32,
+            ));
+            piece_start = piece_end;
+        }
+    }
+    (transformed, specs)
+}
+
 /// Merge overlapping or adjacent ranges (the x86 scan can return a broad
 /// span plus tighter clusters inside it; overlapping filter records would
 /// double-transform the overlap).
-fn merge_ranges(ranges: &mut Vec<std::ops::Range<usize>>) {
+pub(crate) fn merge_ranges(ranges: &mut Vec<std::ops::Range<usize>>) {
     if ranges.len() < 2 {
         return;
     }
