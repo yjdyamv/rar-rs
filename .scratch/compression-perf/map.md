@@ -145,7 +145,9 @@ path), with the fresh-tail seed thinned to a stride over the old >2 MiB band
 ~1.4x of the old 2 MiB-cap mt8 time (full 8 MiB seeding was 3.5x); text-class
 ratio byte-identical with ~0% speed regression. `distant` (random + far
 copies) still probes incompressible and stays at 59.14% — probe-length issue,
-see issue 12 待办.
+see issue 12 待办. (Superseded 2026-09-08 by the MT low-step tier: workers no
+longer build/seed the tree at all — see issue 13 verdict; the stride shape is
+dormant in `find_matches_optimal`.)
 
 Collect band/latency verdict + far-band budget frontier (2026-09-07, issue
 13): profiling (counters kept to single-thread runs; shared atomics polluted

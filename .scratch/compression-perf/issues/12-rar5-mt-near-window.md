@@ -104,3 +104,10 @@ text m3（stride 16）：mt8 3404ms（近基线 3307，回归 ~3%）、ratio 与
 - rep cache 缝的修复（wave 内 cache 携带 = 串行，无收益；缝头 re-emit = 启发非精确）
   不作为字节同等途径。
 - WinRAR 自身的单文件 MT 同样是"已知分歧"模式，字节同等不是工业常规。
+
+## 已被 issue 13 取代（2026-09-08）
+
+MT 已切到低步数链 tier（`mt_slice_symbols_low_step`，issue 13 定论）：worker 不再建/
+种树，本 issue 的近窗对齐实验（8 MiB 近窗 + stride 远种）作为历史留档；stride 形状在
+`find_matches_optimal` 里休眠（其 `lr_shared` 门在纯 seq 调点上恒 false）。近窗对齐的
+核心收益——2-8 MiB 精确拷贝不落 LR 采样——由低步数 finder 直接种 8 MiB tail 承载。

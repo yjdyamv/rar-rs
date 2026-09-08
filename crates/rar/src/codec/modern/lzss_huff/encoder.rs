@@ -65,12 +65,15 @@ pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 /// ones come from the sampled long-range history.
 const NEAR_WINDOW_MAX: usize = 8 * 1024 * 1024;
 
-/// Fresh-frame tail seeding, multi-threaded path only: the newest
-/// `MT_NEAR_TIGHT_FRONTIER` tail bytes are seeded densely, and the older
-/// tail up to `NEAR_WINDOW_MAX` at `MT_FAR_SEED_STRIDE` with a shorter
+/// Fresh-frame tail seeding shape from the MT worker path (issue 12): the
+/// newest `MT_NEAR_TIGHT_FRONTIER` tail bytes are seeded densely, and the
+/// older tail up to `NEAR_WINDOW_MAX` at `MT_FAR_SEED_STRIDE` with a shorter
 /// descent budget. Matched copies anchor on the first seeded source position
-/// within a few bytes of the copy start and the optimal parse extends them,
-/// so the stride preserves the far reach at a fraction of the insert cost.
+/// within a few bytes of the copy start, so the stride preserves the far
+/// reach at a fraction of the insert cost. (Dormant since the MT workers
+/// moved to the low-step chain tier — the `lr_shared` gate that fed the
+/// stride never fires on the remaining sequential-only callers; the shape is
+/// kept for the record.)
 const MT_NEAR_TIGHT_FRONTIER: usize = 2 * 1024 * 1024;
 const MT_FAR_SEED_STRIDE: usize = 16;
 const MT_FAR_SEED_CHAIN: usize = 2;
@@ -144,12 +147,13 @@ pub struct EncoderState {
     /// finder's links are rebased by `combined_len - keep` when the frame
     /// slides.
     combined_len: usize,
-    /// Cached hash-chain finder arrays for the MT low-step parse. They span
-    /// one frame each (the `combined` buffer is reallocated per slice, so
-    /// the query-time references cannot persist), but reusing the two
-    /// multi-MiB `head`/`prev` arrays across slices beats the 64 MiB memset
-    /// of a fresh finder per slice — on random data that allocation, not
-    /// the search, was the measured 6x per-byte cost.
+    /// Cached hash-chain finder arrays (head/prev) for the MT low-step
+    /// parse, reused across slices. The `combined` frame is reallocated per
+    /// slice (the finder borrows it), but the two multi-MiB `head`/`prev`
+    /// arrays survive in [`MatchFinder::reuse`]/[`into_parts`] — re-arming
+    /// a warm ring beats a fresh allocation + memset per slice; the random-
+    /// data A/B regression of the low-step tier is the chain's per-byte
+    /// insert, not this allocation (see issue 13).
     chain_parts: Option<(Vec<i32>, Vec<i32>)>,
 }
 
@@ -577,10 +581,10 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // packed bytes into its own slot and we collect them wave-by-wave in
     // order after the scope joins everything.
     // One persistent encoder state per worker, reused across waves: the
-    // BT4 tree's son array stays warm (a fresh 16 MiB allocation per slice
-    // cost page faults and cold-tree parse time — 6x slower per byte than
-    // the sequential path's rebased tree). Waves run sequentially so each
-    // state is used by exactly one thread at a time.
+    // low-step parse's `head`/`prev` ring arrays stay warm (a fresh 64 MiB
+    // two-array allocation per slice cost page faults and per-frame
+    // memsets). Waves run sequentially so each state is used by exactly one
+    // thread at a time.
     let mut worker_states: Vec<EncoderState> =
         (0..n_workers).map(|_| EncoderState::default()).collect();
     let mut output = Vec::new();
@@ -657,10 +661,10 @@ pub(crate) fn encode_chunked_mt_with_progress(
     Ok(output)
 }
 
-/// Cheap per-slice probe: would seeding this tail ever pay off? Samples
-/// 4-byte windows every [`MT_SEED_PROBE_STRIDE`] bytes over the tail's
-/// head. A tail whose sampled windows are (almost) all distinct has no
-/// long repeats, so the fresh-tree seeding of it is wasted work — random
+/// Cheap per-slice probe: would inserting this tail into the low-step
+/// finder ever pay off? Samples 4-byte windows every [`MT_SEED_PROBE_STRIDE`]
+/// bytes over the tail's head. A tail whose sampled windows are (almost)
+/// all distinct has no long repeats, so seeding it is wasted work — random
 /// media, compressed/encrypted data — while text, code and structured
 /// binary keep their repeated windows and seed normally.
 ///
@@ -722,8 +726,9 @@ fn encode_mt_slice(
     // the sampled long-range table: without it, distant exact copies fell
     // to ~STORE on small slices (window reach = tail + slice length, so
     // mt8's 2 MiB slices couldn't see even a 4 MiB-back copy). Aligning the
-    // cap costs a longer fresh-tree seed per slice — the workers re-seed
-    // the whole tail with budget-limited descents.
+    // cap costs a longer per-slice tail as the low-step chain's lookbehind —
+    // the far band is inserted into the finder, and the shared long-range
+    // table covers everything beyond it.
     let want = NEAR_WINDOW_MAX.min(dict_size);
     let tail_ctx: Vec<u8> = if s0 >= want {
         data[s0 - want..s0].to_vec()
@@ -739,19 +744,19 @@ fn encode_mt_slice(
 
     // The worker state is reused across waves; each slice is a fresh
     // frame (tail context as lookbehind, empty repeat-distance cache — a
-    // documented divergence from the sequential path — and the tree
-    // re-armed via `combined_len = 0` so `find_matches_optimal` clears
-    // the head and seeds the new tail). The shared long-range table is
-    // queried with this slice's absolute anchor but never extended here.
+    // documented divergence from the sequential path — plus the `chain_parts`
+    // ring arrays recycled into the low-step finder). The shared long-range
+    // table is queried with this slice's absolute anchor but never extended
+    // here.
     state.tail = tail_ctx;
     state.dist_cache = [0u32; DIST_CACHE_SIZE];
     state.last_length = 0;
     state.combined_len = 0;
-    // Seeding a fresh tree over the tail costs a random-access descent per
-    // position into the multi-MiB son array (hundreds of ms on random
-    // data, tens on text). Skip it when the tail probes incompressible:
-    // no match into it would be found anyway, and the parse's own
-    // insertions plus the shared long-range table cover everything else.
+    // Seeding the tail into the fresh finder costs one hash plus a ring
+    // link write per position — cheap, but the random probe skips it when
+    // the tail has no repeated windows anyway (no match into it would be
+    // found), so the parse inserts the slice itself and queries the shared
+    // long-range table instead.
     let seed_tail = !mt_tail_is_incompressible(&state.tail);
     // Low-step parse (MT-only): hash-chain greedy+lazy over the same
     // combined tail+slice frame the optimal parse would build. The
@@ -2572,11 +2577,11 @@ fn prices_from_frequencies(
 /// caller cuts blocks and encodes).
 ///
 /// `seed_tail` is `false` only when the caller proved the tail holds no
-/// useful matches (a multi-threaded worker whose tail probes as
-/// incompressible): the tree head is still cleared, the parse inserts the
+/// useful matches: the tree head is still cleared, the parse inserts the
 /// chunk's own positions, and within-chunk plus long-range matches are
 /// unaffected — only the wasted fresh-tree seeding of a random tail is
-/// skipped.
+/// skipped. (The multi-threaded workers do not reach this function; they
+/// run the low-step chain tier in [`mt_slice_symbols_low_step`].)
 #[allow(clippy::too_many_arguments)]
 fn find_matches_optimal(
     state: &mut EncoderState,
@@ -2632,29 +2637,23 @@ fn find_matches_optimal(
     }
     let keep = window.min(NEAR_WINDOW_MAX).min(combined.len());
     // `combined_len == 0` marks a fresh frame: the first chunk of a member
-    // (or a multi-threaded worker slice, whose state is reused across
-    // waves with the tree re-armed per slice). In that case the head must
-    // be cleared — the tree may hold links from an earlier frame — and the
-    // tail seeded. A continued frame instead rebases the links by the
-    // slide amount, keeping the tail's positions valid without re-seeding.
+    // (the multi-threaded workers no longer reach here — they run the
+    // low-step chain tier; the tree is sequential-only now). In that case
+    // the head must be cleared — the tree may hold links from an earlier
+    // frame — and the tail seeded. A continued frame instead rebases the
+    // links by the slide amount, keeping the tail's positions valid without
+    // re-seeding.
     if state.combined_len == 0 {
         tree_finder.clear_head();
         if seed_tail && tail_len > 0 {
-            // Budget-limited descents: a fresh finder only ever occurs in the
-            // multi-threaded path, where the tree is built once per slice.
-            // Full-depth seeding would walk every dense bucket (tens of
-            // thousands of cache misses); 4 nodes per position keeps the
-            // newest candidates reachable and the long-range table covers
-            // the rest.
-            //
-            // The far tail is seeded at a stride, but only in the
-            // multi-threaded path (`lr_shared` decides): matched copies
-            // anchor on the first seeded source position within a few bytes
-            // of the copy start and the optimal parse then extends them, so
-            // thinning the old >2 MiB band by `MT_FAR_SEED_STRIDE` keeps
-            // the 8 MiB reach while cutting the per-slice insert count (the
-            // dominant fresh-frame cost) to a fraction. The sequential path
-            // keeps a dense seed wherever a fresh frame genuinely occurs.
+            // Flat fresh-frame seed: every tail position is inserted with a
+            // budget-limited descent (`lr_shared` is always `None` here —
+            // the strided far-tail thinning it used to gate on lived in the
+            // MT worker path, which now runs the low-step chain tier, so
+            // `mt`/`MT_*_SEED_*` below never fire and stay as the recorded
+            // issue-12 shape). Dense buckets cost cache misses, but the
+            // budget caps the descent; the nearest `MT_NEAR_TIGHT_FRONTIER`
+            // bytes are what copies actually anchor on.
             let mt = lr_shared.is_some();
             let tight_start = tail_len.saturating_sub(MT_NEAR_TIGHT_FRONTIER);
             let mut seed: Vec<(u32, u32)> = Vec::new();

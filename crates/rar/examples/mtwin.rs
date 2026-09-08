@@ -1,11 +1,13 @@
 //! Near-window reach probe for the RAR5 MT encoder.
 //!
-//! The multi-threaded path parses each slice against a fresh tree whose
-//! near window is currently capped at 2 MiB (`want` in `encode_mt_slice`),
-//! while the sequential path keeps a persistent tree covering
-//! `NEAR_WINDOW_MAX` (8 MiB). This benchmark measures what that band
-//! (2-8 MiB backward depth) costs in ratio and what removing the cap costs
-//! in speed, on corpora that place real matches there.
+//! The multi-threaded path parses each slice with the low-step chain tier
+//! against a tail capped at `NEAR_WINDOW_MAX` (8 MiB, as in the sequential
+//! path): the slice's near window is the combined tail+slice frame the
+//! chain finder seeds. This benchmark measures what the far band of that
+//! window (2-8 MiB backward depth) contributes in ratio and what a wider
+//! reach costs in speed, on corpora that place real matches there — and
+//! how the low-step MT output diverges from the sequential bytes at each
+//! thread count.
 //!
 //! Run: cargo run --release --features parallel --example mtwin [size_mb]
 use std::time::Instant;
@@ -43,8 +45,9 @@ fn text_data(target: usize) -> Vec<u8> {
 }
 
 /// Random noise interrupted by exact copies of windows from 1/2/4/6 MiB in
-/// the past — the 2-8 MiB band the MT path's near window currently ignores
-/// (distant matches must ride the sampled long-range table instead).
+/// the past — the far band of the 8 MiB near window (within the chain
+/// finder's lookbehind), which would otherwise ride the sampled long-range
+/// table.
 ///
 /// Copy-heavy on purpose: fresh random bytes are the expensive arm of the
 /// sequential parse (which has no incompressible skip), so random is kept
@@ -81,11 +84,12 @@ fn distant_data(target: usize) -> Vec<u8> {
     out
 }
 
-/// The case the near-window cap actually governs: a compressible lookbehind
+/// The case the near-window reach governs: a compressible lookbehind
 /// (patterned header at each window boundary keeps the incompressible probe
-/// quiet) plus exact copies reach 2/4/6 MiB back. With a 2 MiB cap those
-/// copies are unreachable in the fresh per-slice tree and must ride the
-/// sampled long-range table; an 8 MiB cap puts them in the tree.
+/// quiet) plus exact copies reach 2/4/6 MiB back. Those copies are inside
+/// the 8 MiB near-window tail the low-step chain finder seeds; the copies
+/// anchor on the seeded tail positions instead of the sampled long-range
+/// table.
 fn blockdup_data(target: usize) -> Vec<u8> {
     let mut seed = 0xBEEFCAFEu64;
     let mut out = Vec::with_capacity(target);
