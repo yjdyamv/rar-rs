@@ -37,7 +37,7 @@
 
 阶段 B 进度（2026-09）：非 solid `d/u/f/a` 全部落地（见下）
 
-阶段 C 进度（2026-09）：solid `d`（及与 rn/注释/rr 组合）已落地——`repack_solid_archive` 整档 repack（逐成员带链解码 → 新 solid 档按原 level/mtime 重发 → 注释/rr 结构补 → 原子替换），对齐官方 7.21+ full repack；6.23 `UnRAR t` 通过，CLI `rar d/rn` solid 冒烟通过。已知边界：solid 档 `a/u/f`（追加需链状态延续）仍拒待后续；含目录成员/pre-RAR3 codec 成员的 solid repack 拒绝（清晰报错）。另记：排查「分节文本 solid 链第二成员解码失败」时发现并修复**既有 codec bug**（`rar29_encoder::encode_solid_member` 在 LZ 胜出时也把 levels 回滚到成员前，而解码器保留成员末表 → 下一成员 keep/delta 表头套错基准）——LZ 胜保留、PPMd 胜回滚，两臂对调；回归测试 `solid_sectioned_content_decode_regression` 转正（自家与 6.23 双向 `t` 通过）
+阶段 C 进度（2026-09）：solid `d` 与 `a/u/f` 全部落地——`repack_solid_archive` 整档 repack（逐成员带链解码 → 新 solid 档按原 level/mtime 重发 → 注释/rr 结构补 → 原子替换），对齐官方 7.21+ full repack。solid `a/u/f` 走**延迟 repack**：open_append 对 solid 置 deferred 标记（不截断/不暂存），add 阶段缓冲新成员，close 时整档 repack（既有成员 + 新成员），注释保留、rr 按原强度重建；已修 parallel 分支路由（append 档 write_ctx.solid_mode=false 曾误走并行写 → 写只读源档 os5）。6.23 `UnRAR t` 通过（d/a/u/f），CLI `rar d/rn/a/u/f` solid 冒烟通过。剩余边界：含目录成员/pre-RAR3 codec 成员的 solid repack 拒绝（清晰报错）。另记：排查「分节文本 solid 链第二成员解码失败」时发现并修复**既有 codec bug**（`rar29_encoder::encode_solid_member` 在 LZ 胜出时也把 levels 回滚到成员前，而解码器保留成员末表 → 下一成员 keep/delta 表头套错基准）——LZ 胜保留、PPMd 胜回滚，两臂对调；回归测试 `solid_sectioned_content_decode_regression` 转正（自家与 6.23 双向 `t` 通过）
 
 阶段 B+C 落地内容：`d`（`edit_rar4` 支持 delete：块拷贝跳过成员 + 既有 rr 按原强度重建；删光=抹档，与 RAR5 一致；solid 走整档 repack；rename+delete 同成员冲突拒绝）；`a/u/f`（RAR4 append：`prepare_append` rar4 分支门禁 + 截断尾部 NEWSUB/ENDARC 暂存前缀，关闭时按原强度重建 rr；`rar a/u/f` CLI 编排即 editor 删 + append 追加，格式随容器自动保持 RAR4）。6.23 双向 `UnRAR t` 通过（含 6.23 自建档删/追加/repack）；**追加后重建的 rr 可被 6.23 `Rar.exe r` 修复追加成员（逐字节还原）**
 

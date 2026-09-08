@@ -109,7 +109,7 @@ The complete feature matrix lives in
 
 ## Limitations
 
-Legacy RAR4 creation and extraction have feature-specific limitations. Editing existing RAR4 archives is implemented ([ADR 0005](docs/adr/0005-rar4-edit-architecture.md)): rename, lock, archive comments and recovery records work on solid and non-solid archives alike; member delete/append/update repacks solid archives whole and surgically rewrites non-solid ones. Multi-volume and header-encrypted (`-hp`) archives refuse edits; solid-archive member operations that need a streamed append (continuing the chain state) are not yet available.
+Legacy RAR4 creation and extraction have feature-specific limitations. Editing existing RAR4 archives is implemented ([ADR 0005](docs/adr/0005-rar4-edit-architecture.md)): rename, lock, archive comments and recovery records work on solid and non-solid archives alike, and member delete/append/update repacks solid archives whole (decode -> re-encode, mirroring WinRAR 7.21+) and surgically rewrites non-solid ones. Multi-volume and header-encrypted (`-hp`) archives refuse edits; repacking solid archives with directory members or pre-RAR3 codec members is refused with a clear error.
 Appending to multi-volume archives is not supported (the official `rar` refuses
 too). Inline recovery records have streaming limitations during repair; encrypted
 multi-volume sets cannot combine `-hp` with inline RR and must use `.rev` recovery

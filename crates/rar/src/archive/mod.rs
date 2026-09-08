@@ -11,7 +11,7 @@ mod create;
 mod discovery;
 mod editor;
 mod entry;
-mod rar4_edit;
+pub(crate) mod rar4_edit;
 mod reader;
 mod transaction;
 mod writer;
@@ -149,6 +149,14 @@ pub(crate) struct WriteState {
     /// (the record's original strength; sector counts are not recoverable
     /// from a percent).
     pub rar4_append_rr_sectors: Option<u32>,
+    /// Appending to a SOLID RAR4 archive defers to a whole-archive repack
+    /// at close: the added members are buffered here (they cannot be
+    /// streamed after a solid chain). `rar4_solid_append_entries` holds the
+    /// buffered additions.
+    pub rar4_solid_append: bool,
+    /// Buffered additions for a deferred solid-append (see
+    /// [`Self::rar4_solid_append`]).
+    pub rar4_solid_append_entries: Vec<crate::archive::rar4_edit::SolidAppendEntry>,
     /// Per-archive compression thread count (`-mt`); `None` = process-global
     /// default. The compression pool is selected per thread count, so
     /// concurrent archives with different values never interfere.
@@ -212,6 +220,8 @@ impl Default for WriteState {
             rar4_solid_encoder: None,
             rar4_solid_run_has_member: false,
             rar4_append_rr_sectors: None,
+            rar4_solid_append: false,
+            rar4_solid_append_entries: Vec::new(),
             compression_threads: None,
             dict_size_log: None,
             dict_size_bytes: None,
@@ -501,6 +511,11 @@ impl RarArchive {
         self.recovery_volumes_percent = None;
         self.recovery_volumes_count = None;
         self.recovery_percent = None;
+        if let Some(write) = self.write.as_mut() {
+            // A deferred solid append must not repack on the abort path.
+            write.rar4_solid_append = false;
+            write.rar4_solid_append_entries.clear();
+        }
         if let Some(pending) = self.write.as_mut().and_then(|write| write.pending.take()) {
             pending.cleanup(self.volume_paths.len());
         }
@@ -637,12 +652,27 @@ impl RarArchive {
             // and stage the surviving prefix into a temporary sibling.
             let prelude = crate::archive::rar4_edit::append_prelude(self)?;
             self.write_ctx_mut().rar4_append_rr_sectors = prelude.rr_sectors;
+            if prelude.solid {
+                // A solid chain cannot be streamed after: defer the append
+                // to a whole-archive repack at close (the additions are
+                // buffered in the write context). The original file is left
+                // untouched until the repack replaces it atomically.
+                self.write_ctx_mut().rar4_solid_append = true;
+                self.write_ctx_mut().rar4_solid_append_entries.clear();
+                return Ok(());
+            }
             let path = self.path.clone();
             let tmp_path = temp_sibling_path(&path);
             self.write_ctx_mut().pending = Some(PendingCommit::Single(tmp_path.clone()));
             let mut src = File::open(&path)?;
             let mut dst = read_write_create(&tmp_path)?;
-            copy_prefix(&mut src, &mut dst, prelude.truncate_pos)?;
+            copy_prefix(
+                &mut src,
+                &mut dst,
+                prelude
+                    .truncate_pos
+                    .expect("non-solid prelude carries a truncation point"),
+            )?;
             self.stream = Some(Box::new(dst));
             return Ok(());
         }
@@ -1042,6 +1072,8 @@ impl RarArchive {
                 rar4_solid_encoder: None,
                 rar4_solid_run_has_member: false,
                 rar4_append_rr_sectors: None,
+                rar4_solid_append: false,
+                rar4_solid_append_entries: Vec::new(),
                 compression_threads: opts.threads,
                 dict_size_log: opts.dict_size_log,
                 dict_size_bytes: opts.dict_size_bytes,

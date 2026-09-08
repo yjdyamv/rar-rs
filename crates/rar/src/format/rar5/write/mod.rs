@@ -636,6 +636,21 @@ impl RarArchive {
         mtime: u32,
         mtime_ns: u32,
     ) -> RarResult<()> {
+        // Deferred solid-append: the member cannot be streamed after an
+        // existing solid chain; buffer it and let close() repack the whole
+        // archive (surviving members + these additions).
+        if self.write_ctx().rar4_solid_append {
+            self.write_ctx_mut().rar4_solid_append_entries.push(
+                crate::archive::rar4_edit::SolidAppendEntry {
+                    name,
+                    data,
+                    level,
+                    mtime,
+                    mtime_ns,
+                },
+            );
+            return Ok(());
+        }
         let file_size = data.len() as u64;
         let file_crc = crate::crc32::crc32(&data);
 
@@ -1442,8 +1457,14 @@ impl RarArchive {
                 return self.add_batch_parallel(entries);
             }
             // RAR4: independent non-solid file members compress in parallel
-            // waves too (solid runs stay sequential - shared window).
-            if self.rar4 && !self.write_ctx().solid_mode && !entries.is_empty() {
+            // waves too (solid runs stay sequential - shared window; a
+            // deferred solid append buffers its additions for the close-time
+            // repack and must never stream-write).
+            if self.rar4
+                && !self.write_ctx().solid_mode
+                && !self.write_ctx().rar4_solid_append
+                && !entries.is_empty()
+            {
                 return self.add_batch_parallel_rar4(entries);
             }
         }

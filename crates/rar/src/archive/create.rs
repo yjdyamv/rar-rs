@@ -748,6 +748,27 @@ impl RarArchive {
     }
 
     fn finish_writing_rar4(&mut self) -> RarResult<()> {
+        if self.write.as_ref().is_some_and(|w| w.rar4_solid_append) {
+            // Deferred solid append: close repacks the whole archive
+            // (surviving members re-encoded in chain order + the buffered
+            // additions), preserving the original comment and rebuilding
+            // the recovery record. The original file is replaced atomically
+            // inside the repack.
+            let additions = std::mem::take(&mut self.write_ctx_mut().rar4_solid_append_entries);
+            self.write_ctx_mut().rar4_solid_append = false;
+            let none_deleted = vec![false; self.entries.len()];
+            crate::archive::rar4_edit::repack_solid_archive(
+                self,
+                &none_deleted,
+                &std::collections::HashMap::new(),
+                None,
+                None,
+                0,
+                &additions,
+            )?;
+            self.mode = Mode::Read;
+            return Ok(());
+        }
         if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
             // `-rr`: the legacy NEWSUB (0x7a) recovery record goes between
             // the last member and the end-of-archive block (single-volume

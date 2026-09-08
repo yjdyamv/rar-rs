@@ -1323,3 +1323,57 @@ fn official_unrar_validates_rar4_solid_repack() {
     let c = reader.unique_entry("c.txt").unwrap();
     assert_eq!(reader.read_entry(c).unwrap(), p3);
 }
+
+/// WinRAR 6.23 validates a solid RAR4 archive after a deferred append
+/// (members added to a solid chain are re-encoded into a fresh chain).
+#[test]
+fn official_unrar_validates_rar4_solid_append() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let dir = make_temp_dir();
+    let path = dir.path().join("solid-app.rar");
+    let line = b"the quick brown fox jumps over the lazy dog 0123456789\n";
+    let p1: Vec<u8> = varied_bytes(30_000, line);
+    let p2: Vec<u8> = varied_bytes(25_000, line);
+    {
+        let mut archive = rar_rs::RarArchive::create_with_options(
+            &path,
+            rar_rs::CreateOptions {
+                compression: rar_rs::ArchiveVersion::V29,
+                solid: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("a.txt", &p1, 3).unwrap();
+        archive.close().unwrap();
+    }
+    {
+        let mut archive = rar_rs::RarArchive::open_append(&path).unwrap();
+        archive.add_bytes("b.txt", &p2, 3).unwrap();
+        archive.close().unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected solid RAR4 append");
+    let mut reader = rar_rs::ArchiveReader::open(&path).unwrap();
+    let a = reader.unique_entry("a.txt").unwrap();
+    assert_eq!(reader.read_entry(a).unwrap(), p1);
+    let b = reader.unique_entry("b.txt").unwrap();
+    assert_eq!(reader.read_entry(b).unwrap(), p2);
+}
+
+fn varied_bytes(n: usize, line: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 0..n {
+        out.extend_from_slice(format!("{i:08}: ").as_bytes());
+        out.extend_from_slice(line);
+        out.extend_from_slice(b"--variant--\n");
+    }
+    out
+}
