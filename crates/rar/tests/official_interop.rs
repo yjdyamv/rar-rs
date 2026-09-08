@@ -637,8 +637,31 @@ fn official_sfx_cross_validation() {
         .status()
         .unwrap();
     assert!(status.success());
+    // Official `rar s` needs an SFX module. Resolve it portably: an env
+    // override (SA_OFFICIAL_SFX), default.sfx next to the official rar
+    // binary (the Linux rar tarball ships one), or the legacy developer
+    // path; without a module the official-conversion part is skipped (the
+    // reader-side SFX checks below still run on our synthetic stub).
+    let sfx_module = std::env::var_os("SA_OFFICIAL_SFX")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+        .or_else(|| {
+            std::path::Path::new(&rar_bin)
+                .parent()
+                .map(|dir| dir.join("default.sfx"))
+                .filter(|p| p.exists())
+        })
+        .or_else(|| {
+            let legacy = std::path::Path::new("/home/yuan/下载/rar/default.sfx");
+            legacy.exists().then(|| legacy.to_path_buf())
+        });
+    let Some(sfx_module) = sfx_module else {
+        return; // no official SFX module available; conversion part skipped
+    };
     let status = std::process::Command::new(&rar_bin)
-        .args(["s", "-sfx/home/yuan/下载/rar/default.sfx", "-idq"])
+        .arg("s")
+        .arg(format!("-sfx{}", sfx_module.display()))
+        .arg("-idq")
         .arg(dir.path().join("off.rar"))
         .current_dir(dir.path())
         .status()
@@ -802,7 +825,17 @@ fn official_time_and_owner_cross_validation() {
         .unwrap()
         .subsec_nanos();
     assert_eq!(entry.mtime_ns(), Some(disk_ns));
+    // `-ow` (save owner/group) is a POSIX option: the Unix rar stores an
+    // owner record (assert Some), while the Windows rar ignores it (assert
+    // None so the platform mismatch is visible, not silently skipped).
+    #[cfg(unix)]
     assert!(entry.owner().is_some(), "owner record must be parsed");
+    #[cfg(not(unix))]
+    assert_eq!(
+        entry.owner(),
+        None,
+        "Windows rar ignores -ow; no owner record is expected"
+    );
 
     // Our ns-mtime archive must be readable by the official unrar.
     let ours = dir.path().join("ours.rar");
