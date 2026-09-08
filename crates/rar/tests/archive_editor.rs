@@ -813,11 +813,12 @@ fn rar4_plan_validation_mirrors_rar5_before_any_write() {
         editor.apply(EditPlan::new().set_recovery(200)),
         Err(RarError::InvalidOption(_))
     ));
-    // Delete in a plan is refused up front for RAR4 (stage B).
+    // Deleting and renaming the same member in one plan is rejected before
+    // any rewrite (mirroring the RAR5 engine), leaving the file untouched.
     let one = editor.entries().next().unwrap().id();
     assert!(matches!(
-        editor.apply(EditPlan::new().set_recovery(10).delete(one)),
-        Err(RarError::Unsupported(_))
+        editor.apply(EditPlan::new().delete(one).rename(one, "x")),
+        Err(RarError::InvalidOption(_))
     ));
     assert_eq!(
         std::fs::read(&path).unwrap(),
@@ -827,14 +828,15 @@ fn rar4_plan_validation_mirrors_rar5_before_any_write() {
 }
 
 #[test]
-fn rar4_delete_is_still_refused_with_a_clear_unsupported() {
-    // Stage rollout (ADR 0005): header-level edits (rename, rr, lock) work
-    // on RAR4, but member deletion is a later stage; the editor must refuse
-    // it up front instead of failing mid-rewrite.
+fn rar4_delete_removes_members_and_keeps_the_rest() {
+    // Stage B (ADR 0005): non-solid RAR4 member deletion drops the
+    // FILE_HEAD + payload verbatim; the remaining members keep their data.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rar4.rar");
     let file = dir.path().join("src.txt");
-    std::fs::write(&file, b"rar4 member").unwrap();
+    let payload_a = b"rar4 member payload one ".repeat(60);
+    let payload_b = b"second member payload ".repeat(70);
+    std::fs::write(&file, &payload_a).unwrap();
     {
         let mut archive = RarArchive::create_with_options(
             &path,
@@ -845,38 +847,28 @@ fn rar4_delete_is_still_refused_with_a_clear_unsupported() {
         )
         .unwrap();
         archive.add(&file, 0).unwrap();
-        let second = dir.path().join("second.txt");
-        std::fs::write(&second, b"second rar4 member").unwrap();
-        archive.add_as(&second, "other.txt", 0).unwrap();
+        archive.add_bytes("other.txt", &payload_b, 0).unwrap();
         archive.close().unwrap();
     }
 
     let mut editor = ArchiveEditor::open(&path).unwrap();
-    // Rename now lands (stage A): members are renamed and data untouched.
+    // Rename and delete compose in one atomic rewrite.
     let one = editor.entries_named("src.txt").next().unwrap().id();
-    assert_eq!(
-        editor
-            .rename_entries(&[(one, "renamed.txt".to_string())])
-            .unwrap(),
-        1
-    );
+    let two = editor.entries_named("other.txt").next().unwrap().id();
+    let report = editor
+        .apply(
+            rar_rs::EditPlan::new()
+                .rename(one, "renamed.txt")
+                .delete(two),
+        )
+        .unwrap();
+    assert_eq!((report.deleted(), report.renamed()), (1, 1));
+
     drop(editor);
     let mut reader = ArchiveReader::open(&path).unwrap();
     let renamed = reader.unique_entry("renamed.txt").unwrap();
-    assert_eq!(reader.read_entry(renamed).unwrap(), b"rar4 member");
-
-    let mut editor = ArchiveEditor::open(&path).unwrap();
-    let two = editor.entries_named("other.txt").next().unwrap().id();
-    let before_delete = std::fs::read(&path).unwrap();
-    assert!(matches!(
-        editor.delete_entries(&[two]),
-        Err(RarError::Unsupported(_))
-    ));
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        before_delete,
-        "refused edits must leave the archive untouched"
-    );
+    assert_eq!(reader.read_entry(renamed).unwrap(), payload_a);
+    assert!(reader.entries_named("other.txt").next().is_none());
 }
 
 #[test]

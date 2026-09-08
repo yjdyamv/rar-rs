@@ -1118,3 +1118,99 @@ fn official_tools_validate_rar4_comments() {
         Some(b"official comment \xe4\xb8\xad\xe6\x96\x87".to_vec())
     );
 }
+
+/// WinRAR 6.23 validates RAR4 archives after our stage-B member deletion
+/// (both a rar-rs-built and a 6.23-built archive).
+#[test]
+fn official_unrar_validates_rar4_deletes() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let dir = make_temp_dir();
+    let f1 = dir.path().join("keep.bin");
+    let f2 = dir.path().join("drop.bin");
+    let keep: Vec<u8> = b"kept payload ".repeat(900);
+    let drop: Vec<u8> = b"dropped payload ".repeat(800);
+    std::fs::write(&f1, &keep).unwrap();
+    std::fs::write(&f2, &drop).unwrap();
+
+    // rar-rs-built archive: delete one member, 6.23 validates.
+    let ours = dir.path().join("del.rar");
+    {
+        let mut archive = rar_rs::RarArchive::create_with_options(
+            &ours,
+            rar_rs::CreateOptions {
+                compression: rar_rs::ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add(&f1, 0).unwrap();
+        archive.add(&f2, 0).unwrap();
+        archive.close().unwrap();
+    }
+    {
+        let mut editor = rar_rs::ArchiveEditor::open(&ours).unwrap();
+        let drop_id = editor
+            .entries()
+            .find(|e| e.name().ends_with("drop.bin"))
+            .unwrap()
+            .id();
+        editor.delete_entries(&[drop_id]).unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&ours)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected deleted rar-rs archive");
+    let mut reader = rar_rs::ArchiveReader::open(&ours).unwrap();
+    let kept = reader
+        .entries()
+        .find(|e| e.name().ends_with("keep.bin"))
+        .unwrap()
+        .id();
+    assert_eq!(reader.read_entry(kept).unwrap(), keep);
+
+    // 6.23-built archive: delete one member through our editor, 6.23
+    // validates the result.
+    let theirs = dir.path().join("del623.rar");
+    let status = std::process::Command::new(&rar_bin)
+        .args(["a", "-ma4", "-idq"])
+        .arg(&theirs)
+        .arg(&f1)
+        .arg(&f2)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    {
+        let mut editor = rar_rs::ArchiveEditor::open(&theirs).unwrap();
+        let drop_id = editor
+            .entries()
+            .find(|e| e.name().ends_with("drop.bin"))
+            .unwrap()
+            .id();
+        editor.delete_entries(&[drop_id]).unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&theirs)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "unrar rejected 6.23 archive deleted by rar-rs"
+    );
+    let mut reader = rar_rs::ArchiveReader::open(&theirs).unwrap();
+    let kept = reader
+        .entries()
+        .find(|e| e.name().ends_with("keep.bin"))
+        .unwrap()
+        .id();
+    assert_eq!(reader.read_entry(kept).unwrap(), keep);
+}

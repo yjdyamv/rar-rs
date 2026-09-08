@@ -35,6 +35,8 @@
 
 - **已存在 RAR4 的编辑全补（2026-09 方向定稿，分阶段实施）**：对齐官方 rar/WinRAR。机制分层：头/块级操作（`rr` 原地补/换、`k`、`rn`/`ch`、`c`/`cw` 注释读写与展示）走结构补丁——不碰压缩数据，solid 同样可做；非 solid `d/u/f/a` 走块拷贝 + RAR4 写侧重发新成员（不重压）；**solid `d/u/f/a` 走整档 repack（解码→重编）**，对齐官方 7.21+——官方 7.20 曾做 surgical 部分重处理，在 RAR4 产坏档后 7.21 回退 full repack，surgical 仅存 RAR5，不仿 7.20。v1 边界（清晰报错拒绝）：分卷、`-hp`、已锁定档。阶段 A 头级操作 → B 非 solid 成员操作 → C solid repack。验证锁定：A = WinRAR 6.23 双向 + repair 往返；B = 6.23 `t` + 与官方操作比对；C = repack 前后解出字节一致 + 6.23 `t`。缺口现状、官方依据与代码位置见 `docs/adr/0005-rar4-edit-architecture.md`。阶段 A 进度（2026-09）：`rr` 原地补/换、`k` 锁、`rn`/`ch`、`c`/`cw` 注释读写与展示已全部落地（`archive/rar4_edit.rs`；6.23 双向验证：`UnRAR t`、`Rar.exe r` 消费我们的 NEWSUB 记录且修复字节一致、6.23 `cw` 逐字节还原我们写入的注释、我们读 6.23 注释夹具一致）。注释存储约定已逆向：NEWSUB `CMT` 块、载荷 STORE 或 RAR29-LZSS、`attr` 位 0 = UTF-16LE（6.23 实证）。阶段 A 完。另记：RAR4 创建面 `add_bytes` 曾无 RAR4 分支（非 ASCII 名混入 RAR5 块产出坏档）——已修：抽 `add_rar4_data` 共享管线，bytes 走同路径（含压缩/加密/分卷），6.23 `UnRAR t` 通过（`rar4_writer_add_bytes_handles_unicode_and_ascii_names` 锁定）
 
+阶段 B 进度（2026-09）：非 solid `d` 已落地（`edit_rar4` 支持 delete：块拷贝跳过成员 + 既有 rr 按原强度重建；删光=抹档，与 RAR5 一致；solid 删除拒绝待阶段 C；rename+delete 同成员冲突拒绝）。6.23 双向 `UnRAR t` 通过（含 6.23 自建档）。`a/u/f`（append）待下一 commit
+
 ### RAR5（压缩面）
 
 - **流式路径自动过滤器（05）**：~~delta/x86 过滤器只走内存路径（<64 MiB 成员）；大音频/裸盘镜像 >64 MiB 走 spill 流式路径无过滤器，ratio 远差于 WinRAR——需调研 delta 可否按窗口应用、区域保持成员相对~~ 已完成：流式路径按窗口应用 delta（区域按绝对成员坐标、上限 `MAX_FILTER_BLOCK_LENGTH`，`delta_stream_window`）与 x86（`x86_stream_window`，样本检测的 E8/E8E9 区域按窗口裁剪并切块、`merge_ranges` 去重），E8/E8E9 变体及 delta 频道按 64 KiB 样本压缩尺寸选择；过滤成员独占 solid 链

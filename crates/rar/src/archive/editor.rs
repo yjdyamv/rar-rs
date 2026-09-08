@@ -219,9 +219,10 @@ impl ArchiveEditor {
     /// Locked archives fail with [`RarError::ArchiveLocked`] (any rewrite
     /// rewrites the main header, which refuses locked archives). RAR4
     /// archives route to the legacy-container editor (ADR 0005): stage A
-    /// supports recovery-record changes (`rar rr`); delete/rename/comment
-    /// ops are refused with [`RarError::Unsupported`] until their stages
-    /// land.
+    /// covers header-level ops (rename/comment/recovery), stage B the
+    /// member deletes on non-solid archives; delete/rename/comment on the
+    /// not-yet-staged paths are refused with
+    /// [`RarError::Unsupported`].
     pub fn apply(&mut self, plan: EditPlan) -> RarResult<EditReport> {
         if self.archive.rar4 {
             return self.apply_rar4(&plan);
@@ -274,17 +275,21 @@ impl ArchiveEditor {
     /// implemented; delete is refused with a clear
     /// [`RarError::Unsupported`] until its stage lands. A failed plan
     /// never touches the file.
+    /// Apply an [`EditPlan`] to a RAR 1.5–4.x archive (ADR 0005).
+    ///
+    /// Member deletes on non-solid archives (`rar d`), renames
+    /// (`rar rn` / `rar ch`), archive-comment changes (`rar c`) and
+    /// recovery-record changes (`rar rr`) are implemented; deleting solid
+    /// members is refused until the repack stage lands. A failed plan
+    /// never touches the file.
     fn apply_rar4(&mut self, plan: &EditPlan) -> RarResult<EditReport> {
         let mut force_rr: Option<u8> = None;
         let mut comment: Option<Vec<u8>> = None;
+        let mut deletes: Vec<usize> = Vec::with_capacity(plan.ops().len());
         let mut renames: Vec<(usize, String)> = Vec::with_capacity(plan.ops().len());
         for op in plan.ops() {
             match op {
-                EditOp::Delete(_) => {
-                    return Err(RarError::Unsupported(
-                        "deleting RAR4 members is not supported yet".into(),
-                    ));
-                }
+                EditOp::Delete(id) => deletes.push(self.resolve_id(*id)?),
                 EditOp::Rename(id, new_name) => {
                     // Resolve against the catalog like the RAR5 path: a
                     // stale ID fails the whole plan before any rewrite.
@@ -308,13 +313,18 @@ impl ArchiveEditor {
                 }
             }
         }
-        if renames.is_empty() && comment.is_none() && force_rr.is_none() {
+        if deletes.is_empty() && renames.is_empty() && comment.is_none() && force_rr.is_none() {
             return Err(RarError::Format("no members to edit".into()));
         }
-        // One atomic rewrite carries every rename, the comment change and
-        // the recovery change.
-        let summary =
-            super::rar4_edit::edit_rar4(&mut self.archive, &renames, comment.as_deref(), force_rr)?;
+        // One atomic rewrite carries every delete, rename, comment change
+        // and recovery change.
+        let summary = super::rar4_edit::edit_rar4(
+            &mut self.archive,
+            &deletes,
+            &renames,
+            comment.as_deref(),
+            force_rr,
+        )?;
         self.catalog_token = allocate_catalog_token()?;
         Ok(EditReport {
             deleted: summary.deleted,
@@ -332,8 +342,12 @@ impl ArchiveEditor {
     /// generation are untouched. Locked archives fail with
     /// [`RarError::ArchiveLocked`].
     ///
-    /// RAR4 (legacy-container) archives are refused with
-    /// [`RarError::Unsupported`]: the rewrite engine is RAR5-only.
+    /// RAR4 (legacy-container) archives are supported on non-solid
+    /// archives (ADR 0005 stage B): the member's FILE_HEAD + payload are
+    /// dropped verbatim and the trailing NEWSUB recovery record is rebuilt
+    /// over the new prefix. Deleting members of a solid RAR4 archive is
+    /// refused until the repack stage lands; multi-volume, `-hp` and
+    /// locked archives are refused.
     pub fn delete_entries(&mut self, ids: &[EntryId]) -> RarResult<usize> {
         let mut plan = EditPlan::new();
         for &id in ids {
