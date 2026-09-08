@@ -13,7 +13,7 @@ rar-rs 将补上「已存在 RAR4 归档的编辑」能力（官方 `rar`/WinRAR
 
 4. **v1 边界（清晰报错拒绝，不静默）**：
    - 分卷归档编辑：拒绝（需卷重平衡，后续）。
-   - `-hp` 头加密归档编辑：拒绝（除主头外每块 `[8B salt][AES-128-CBC]`，任何头重建/插入块都要按口令重加密，后续）。
+   - ~~`-hp` 头加密归档编辑：拒绝~~ **已解除（2026-09）**：主头是明文标记（带 MHD_PASSWORD），布局扫描用归档口令逐块解密头、重写时对重建/插入的块用新盐重加密；未改动的块整段（含密文）原样拷贝。仅剩分卷与已锁定档拒绝。
    - 已锁定归档（主头 LOCK 位）：拒绝，与 RAR5 编辑一致（`RarError::ArchiveLocked`）。
 
 5. **编辑保持 RAR4 格式输出**。官方依据（WinRAR 帮助：Archive name and parameters dialog）：update 现有归档时格式选项被忽略，沿用被更新归档的格式，不转换。
@@ -33,7 +33,9 @@ rar-rs 将补上「已存在 RAR4 归档的编辑」能力（官方 `rar`/WinRAR
 | **B 非 solid 成员操作** | `d`/`u`/`f`/`a`：块拷贝、截 ENDARC 重发新成员（复用 `emit_rar4_prepared`/`add_file_rar4` 写侧）、新 ENDARC；原带 RR 的档按官方行为处理 | 6.23 `t` + 与官方同操作结果比对（成员集合/解出字节一致） |
 | **C solid repack** | solid 档 `d/u/f/a`：全档解码→重编；跨 session 链状态由全链解码重建（读侧持久 solid 状态机制已存在）；重编参数按原成员 method 与文本探测回退默认 | self roundtrip（repack 前/后解出字节一致）+ 6.23 `t` |
 
-`-hp` 与分卷编辑为后续阶段，届时分别补「按口令重加密」与「卷重平衡」。
+~~`-hp` 与分卷编辑为后续阶段，届时分别补「按口令重加密」与「卷重平衡」。~~
+
+**`-hp` 头加密编辑已落地（2026-09）**：`format/rar4/mod.rs::decrypt_encrypted_header` 提供内存态头解密；`archive/rar4_edit.rs` 的 `scan_layout`/`read_comment`/`edit_rar4`/`append_prelude` 全部按口令工作，`recovery/legacy.rs::scan_protect_with_password` 让恢复记录在 `-hp` 档上可定位/重建（记录自身的标签表与奇偶区不加密，仍可修复）。solid repack 与 create 路径用同一口令重建保护（`-hp` 同时含数据加密，与官方一致）。写侧 `emit_pending_rar4_comment` 让注释块在 `-hp` 档里也只加密 35 字节头。仅「卷重平衡」仍待办。
 
 ## Considered Options
 
@@ -46,5 +48,5 @@ rar-rs 将补上「已存在 RAR4 归档的编辑」能力（官方 `rar`/WinRAR
 - `archive/editor.rs` `ensure_rewritable` 的 RAR4 拒绝改为按阶段路由到 RAR4 编辑路径；新增 RAR4 版 transaction/重写层（镜像 RAR5 的 plan/execute 结构，词汇是 `Rar4Block`）。
 - `rar4` 读侧扫描需输出可寻址的块流（offset/长度/类型），供结构层定位成员与 ENDARC。
 - 注释：读侧解析归档注释块与文件注释（FHD_COMMENT），暴露进公共模型（`get_comment`/列表展示）；写侧随阶段 A。
-- CLI 行为不变，报错面收窄（RAR4 不再整类 Unsupported，仅分卷/`-hp`/锁定拒绝）。
+- CLI 行为不变，报错面收窄（RAR4 不再整类 Unsupported，仅分卷/锁定拒绝；`-hp` 需口令，缺口令报 `Encrypted`）。
 - 互操作验证基准为 WinRAR 6.23 与 rar 5.30 手册；solid repack 的对照行为以 7.21+ 变更日志为准。

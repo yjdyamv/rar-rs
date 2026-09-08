@@ -722,3 +722,60 @@ fn extract_mtime_refinement(ext_time: &[u8]) -> Option<u32> {
 }
 
 pub(crate) mod create;
+
+/// Decrypt one `-hp` encrypted block header from an in-memory archive copy
+/// (the reader's streaming [`read_encrypted_block`] works on files; the
+/// edit paths operate on whole-buffer reads). Returns the decrypted header
+/// (head_size bytes), the on-disk header length (`8 + align16(head_size)`),
+/// the data-area length (`add_size` from the decrypted LONG_BLOCK), and the
+/// block's total on-disk length.
+pub(crate) fn decrypt_encrypted_header(
+    bytes: &[u8],
+    offset: usize,
+    password: &[u8],
+) -> RarResult<(Vec<u8>, usize, usize, usize)> {
+    let salt_start = offset;
+    let salt_end = salt_start + 8;
+    if salt_end > bytes.len() {
+        return Err(RarError::Format("RAR4: truncated encrypted header".into()));
+    }
+    let salt: [u8; 8] = bytes[salt_start..salt_end].try_into().unwrap();
+    let mut cipher = crate::crypto::Rar30Cipher::new(password, Some(salt))
+        .map_err(|e| RarError::Format(format!("RAR4 header key setup: {e}")))?;
+    let mut block0: [u8; 16] = [0; 16];
+    let block0_end = salt_end + 16;
+    if block0_end > bytes.len() {
+        return Err(RarError::Format("RAR4: truncated encrypted header".into()));
+    }
+    block0.copy_from_slice(&bytes[salt_end..block0_end]);
+    cipher
+        .decrypt_in_place(&mut block0)
+        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
+    let head_size = u16::from_le_bytes([block0[5], block0[6]]) as usize;
+    if head_size < 7 {
+        return Err(RarError::Format(format!(
+            "RAR4: encrypted header head_size {head_size} too small (wrong password?)"
+        )));
+    }
+    let align16 = (head_size + 15) & !15;
+    let cipher_end = salt_end + align16;
+    if cipher_end > bytes.len() {
+        return Err(RarError::Format("RAR4: truncated encrypted header".into()));
+    }
+    let mut rest = vec![0u8; align16 - 16];
+    rest.copy_from_slice(&bytes[salt_end + 16..cipher_end]);
+    cipher
+        .decrypt_in_place(&mut rest)
+        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
+    let mut header = block0.to_vec();
+    header.extend_from_slice(&rest);
+    header.truncate(head_size);
+    let flags = u16::from_le_bytes([header[3], header[4]]);
+    let add_size = if flags & LONG_BLOCK != 0 {
+        u32::from_le_bytes(header[7..11].try_into().unwrap()) as usize
+    } else {
+        0
+    };
+    let on_disk_header = 8 + align16;
+    Ok((header, on_disk_header, add_size, on_disk_header + add_size))
+}

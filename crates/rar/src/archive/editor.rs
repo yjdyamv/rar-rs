@@ -345,9 +345,10 @@ impl ArchiveEditor {
     /// RAR4 (legacy-container) archives are supported on non-solid
     /// archives (ADR 0005 stage B): the member's FILE_HEAD + payload are
     /// dropped verbatim and the trailing NEWSUB recovery record is rebuilt
-    /// over the new prefix. Deleting members of a solid RAR4 archive is
-    /// refused until the repack stage lands; multi-volume, `-hp` and
-    /// locked archives are refused.
+    /// over the new prefix. Deleting members of a solid RAR4 archive
+    /// repacks the whole archive. Multi-volume and locked archives are
+    /// refused; `-hp` archives are edited under the same header encryption
+    /// (the password is required).
     pub fn delete_entries(&mut self, ids: &[EntryId]) -> RarResult<usize> {
         let mut plan = EditPlan::new();
         for &id in ids {
@@ -366,8 +367,9 @@ impl ArchiveEditor {
     ///
     /// RAR4 (legacy-container) archives are supported (ADR 0005 stage A):
     /// the FILE_HEAD is rebuilt with the new encoded name and its CRC16
-    /// recomputed; member data is never recompressed. Multi-volume,
-    /// header-encrypted (`-hp`) and locked archives are refused.
+    /// recomputed; member data is never recompressed. Renaming on a `-hp`
+    /// archive rewrites the encrypted header with the archive password.
+    /// Multi-volume and locked archives are refused.
     pub fn rename_entries(&mut self, renames: &[(EntryId, String)]) -> RarResult<usize> {
         let mut plan = EditPlan::new();
         for (id, new_name) in renames {

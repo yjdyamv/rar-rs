@@ -59,33 +59,74 @@ pub(crate) struct Rar4ProtectScan {
 /// Find the RAR4 signature inside `bytes` (SFX stubs allowed, bounded like
 /// the reader's own scan) and walk the blocks looking for a recovery record
 /// (either the PROTECT_HEAD 0x78 or the NEWSUB 0x7a `RR` form).
+///
+/// Header-encrypted (`-hp`) archives need [`scan_protect_with_password`]:
+/// this wrapper only sees plaintext block headers.
+#[allow(dead_code)] // kept as the plaintext shortcut; tests exercise it directly
 pub(crate) fn scan_protect(bytes: &[u8]) -> RarResult<Rar4ProtectScan> {
-    const MARK_HEAD: u8 = 0x72;
+    scan_protect_with_password(bytes, None)
+}
+
+/// [`scan_protect`] for an archive that may be `-hp` header-encrypted.
+///
+/// The main header is always plaintext and carries `MHD_PASSWORD`; every
+/// block after it is `[8B salt][AES-128-CBC header][plaintext data]`, so the
+/// scan decrypts each header before reading its fields (the record's own
+/// data area — tags and parity — is never encrypted). `password` is ignored
+/// for plaintext archives and required for encrypted ones.
+pub(crate) fn scan_protect_with_password(
+    bytes: &[u8],
+    password: Option<&[u8]>,
+) -> RarResult<Rar4ProtectScan> {
     const ENDARC_HEAD: u8 = 0x7b;
 
     let sig = find_bytes(bytes, RAR4_SIGNATURE, 8 * 1024 * 1024)
         .ok_or_else(|| RarError::Format("not a RAR4 archive (signature not found)".into()))?;
     let mut pos = sig + RAR4_SIGNATURE.len();
     let mut protect = None;
+    // `-hp` flag, latched from the (plaintext) main header: every block
+    // after it has an encrypted header.
+    let mut encrypted = false;
     while pos + 7 <= bytes.len() {
         let start = pos;
-        let head_type = bytes[pos + 2];
-        let flags = u16::from_le_bytes([bytes[pos + 3], bytes[pos + 4]]);
-        let head_size = u16::from_le_bytes([bytes[pos + 5], bytes[pos + 6]]) as usize;
-        if head_size < 7 {
-            return Err(RarError::Format("RAR4: block head_size too small".into()));
-        }
-        let add_size = if flags & 0x8000 != 0 {
-            if pos + 11 > bytes.len() {
+        // `header` is always the plaintext (decrypted) header, so every
+        // field read below is indexed from the block start either way.
+        let (header, on_disk_header, add_size) = if encrypted {
+            let password = password.ok_or_else(|| {
+                RarError::Encrypted("RAR4: header-encrypted archive, a password is required".into())
+            })?;
+            let (header, on_disk, add, _total) =
+                crate::format::rar4::decrypt_encrypted_header(bytes, pos, password)?;
+            (header, on_disk, add)
+        } else {
+            let flags = u16::from_le_bytes([bytes[pos + 3], bytes[pos + 4]]);
+            let head_size = u16::from_le_bytes([bytes[pos + 5], bytes[pos + 6]]) as usize;
+            if head_size < 7 {
+                return Err(RarError::Format("RAR4: block head_size too small".into()));
+            }
+            let add_size = if flags & 0x8000 != 0 {
+                if pos + 11 > bytes.len() {
+                    return Err(RarError::Format("RAR4: truncated block".into()));
+                }
+                u32::from_le_bytes(bytes[pos + 7..pos + 11].try_into().unwrap()) as usize
+            } else {
+                0
+            };
+            if pos + head_size + add_size > bytes.len() {
                 return Err(RarError::Format("RAR4: truncated block".into()));
             }
-            u32::from_le_bytes(bytes[pos + 7..pos + 11].try_into().unwrap()) as usize
-        } else {
-            0
+            (bytes[pos..pos + head_size].to_vec(), head_size, add_size)
         };
-        let total = head_size + add_size;
-        if pos + total > bytes.len() {
+        let head_type = header[2];
+        let flags = u16::from_le_bytes([header[3], header[4]]);
+        let head_size = header.len();
+        let total = on_disk_header + add_size;
+        if start + total > bytes.len() {
             return Err(RarError::Format("RAR4: truncated block".into()));
+        }
+        if head_type == 0x73 && flags & 0x0080 != 0 {
+            // MAIN_HEAD + MHD_PASSWORD: the rest of the archive is `-hp`.
+            encrypted = true;
         }
 
         // RAR 2.5-era PROTECT_HEAD (0x78): 26-byte fixed header with the
@@ -93,12 +134,11 @@ pub(crate) fn scan_protect(bytes: &[u8]) -> RarResult<Rar4ProtectScan> {
         if head_type == 0x78
             && head_size == 26
             && flags & 0x8000 != 0
-            && bytes.get(start + 18..start + 26) == Some(b"Protect!")
+            && header.get(18..26) == Some(b"Protect!")
         {
-            let rec_sectors = u16::from_le_bytes(bytes[start + 12..start + 14].try_into().unwrap());
-            let total_blocks =
-                u32::from_le_bytes(bytes[start + 14..start + 18].try_into().unwrap());
-            let data_start = start + head_size;
+            let rec_sectors = u16::from_le_bytes(header[12..14].try_into().unwrap());
+            let total_blocks = u32::from_le_bytes(header[14..18].try_into().unwrap());
+            let data_start = start + on_disk_header;
             let data_end = start + total;
             if u64::from(total_blocks) * 2 + u64::from(rec_sectors) * 512
                 != (data_end - data_start) as u64
@@ -124,17 +164,16 @@ pub(crate) fn scan_protect(bytes: &[u8]) -> RarResult<Rar4ProtectScan> {
         if head_type == 0x7a
             && flags & 0x8000 != 0
             && head_size >= 32 + 2 + 20
-            && bytes.get(start + 7 + 25..start + 7 + 25 + 2) == Some(b"RR")
+            && header.get(32..34) == Some(b"RR")
         {
-            let body = &bytes[start + 7..start + head_size];
-            let name_size = u16::from_le_bytes(body[19..21].try_into().unwrap()) as usize;
-            let tail = start + 7 + 25 + name_size;
-            if bytes.get(tail..tail + 8) == Some(b"Protect+") {
+            let name_size = u16::from_le_bytes(header[26..28].try_into().unwrap()) as usize;
+            let tail = 32 + name_size;
+            if header.get(tail..tail + 8) == Some(b"Protect+") {
                 let rec_sectors =
-                    u32::from_le_bytes(bytes[tail + 8..tail + 12].try_into().unwrap());
+                    u32::from_le_bytes(header[tail + 8..tail + 12].try_into().unwrap());
                 let total_blocks =
-                    u32::from_le_bytes(bytes[tail + 12..tail + 16].try_into().unwrap());
-                let data_start = start + head_size;
+                    u32::from_le_bytes(header[tail + 12..tail + 16].try_into().unwrap());
+                let data_start = start + on_disk_header;
                 let data_end = start + total;
                 if u64::from(total_blocks) * 2 + u64::from(rec_sectors) * 512
                     != (data_end - data_start) as u64
@@ -157,8 +196,6 @@ pub(crate) fn scan_protect(bytes: &[u8]) -> RarResult<Rar4ProtectScan> {
         if head_type == ENDARC_HEAD {
             break;
         }
-        let _ = head_type;
-        let _ = MARK_HEAD;
         pos = start + total;
     }
     Ok(Rar4ProtectScan {
@@ -283,8 +320,20 @@ pub(crate) fn repair_protect_head(
 /// rebuilt, `Ok(false)` when the archive was already intact (nothing
 /// written), and an error when it has no usable recovery record.
 pub fn repair_legacy_archive_path(src: &std::path::Path, dst: &std::path::Path) -> RarResult<bool> {
+    repair_legacy_archive_path_with_password(src, dst, None)
+}
+
+/// [`repair_legacy_archive_path`] for a `-hp` header-encrypted archive: the
+/// recovery record's own header is encrypted like every other block, so
+/// locating it needs the archive password (the protected data — including
+/// the record's tag table and parity — is never encrypted).
+pub fn repair_legacy_archive_path_with_password(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    password: Option<&str>,
+) -> RarResult<bool> {
     let bytes = std::fs::read(src).map_err(RarError::Io)?;
-    let scan = scan_protect(&bytes)?;
+    let scan = scan_protect_with_password(&bytes, password.map(str::as_bytes))?;
     let Some(protect) = scan.protect else {
         return Err(RarError::Unsupported(
             "archive has no legacy PROTECT_HEAD recovery record".into(),

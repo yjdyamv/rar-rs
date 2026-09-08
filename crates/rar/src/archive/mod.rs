@@ -157,6 +157,11 @@ pub(crate) struct WriteState {
     /// Buffered additions for a deferred solid-append (see
     /// [`Self::rar4_solid_append`]).
     pub rar4_solid_append_entries: Vec<crate::archive::rar4_edit::SolidAppendEntry>,
+    /// Archive-comment text queued for a RAR4 create/repack writer: emitted
+    /// as a NEWSUB `CMT` block right before the first member (create writes
+    /// members to a stream, so the comment must be queued before the first
+    /// add). `None` = no comment.
+    pub rar4_writer_comment: Option<Vec<u8>>,
     /// Per-archive compression thread count (`-mt`); `None` = process-global
     /// default. The compression pool is selected per thread count, so
     /// concurrent archives with different values never interfere.
@@ -222,6 +227,7 @@ impl Default for WriteState {
             rar4_append_rr_sectors: None,
             rar4_solid_append: false,
             rar4_solid_append_entries: Vec::new(),
+            rar4_writer_comment: None,
             compression_threads: None,
             dict_size_log: None,
             dict_size_bytes: None,
@@ -652,6 +658,12 @@ impl RarArchive {
             // and stage the surviving prefix into a temporary sibling.
             let prelude = crate::archive::rar4_edit::append_prelude(self)?;
             self.write_ctx_mut().rar4_append_rr_sectors = prelude.rr_sectors;
+            if prelude.header_encrypted {
+                // `-hp`: the blocks appended below (members, recovery
+                // record, end-of-archive) are header-encrypted with the
+                // archive password, like everything already in the file.
+                self.header_encryption = true;
+            }
             if prelude.solid {
                 // A solid chain cannot be streamed after: defer the append
                 // to a whole-archive repack at close (the additions are
@@ -1074,6 +1086,7 @@ impl RarArchive {
                 rar4_append_rr_sectors: None,
                 rar4_solid_append: false,
                 rar4_solid_append_entries: Vec::new(),
+                rar4_writer_comment: None,
                 compression_threads: opts.threads,
                 dict_size_log: opts.dict_size_log,
                 dict_size_bytes: opts.dict_size_bytes,

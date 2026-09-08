@@ -628,6 +628,44 @@ impl RarArchive {
     /// encryption, and the FILE_HEAD + payload emission (single-volume or
     /// split across volumes). Shared by the file path (`add_file_rar4`,
     /// which reads the member first) and the bytes path (`add_bytes`).
+    /// Emit a queued RAR4 archive comment (`rar4_writer_comment`) as a
+    /// NEWSUB `CMT` block at the current stream position, then clear the
+    /// queue. Only the 35-byte CMT header is header-encrypted under `-hp`;
+    /// the comment payload follows as plaintext data (the same rule as
+    /// FILE members).
+    fn emit_pending_rar4_comment(&mut self) -> RarResult<()> {
+        let Some(text) = self.write_ctx_mut().rar4_writer_comment.take() else {
+            return Ok(());
+        };
+        if text.is_empty() {
+            return Ok(());
+        }
+        const CMT_HEAD: usize = crate::archive::rar4_edit::CMT_HEAD_SIZE;
+        let (payload, unicode) = crate::archive::rar4_edit::encode_comment_text(&text);
+        let block = crate::archive::rar4_edit::build_comment_block(&payload, unicode);
+        let stream = self.stream.as_mut().unwrap();
+        if self.header_encryption {
+            let password = self.password.as_deref().ok_or_else(|| {
+                RarError::Encrypted("header encryption requires a password".into())
+            })?;
+            let (ciphertext, on_disk) =
+                crate::format::rar4::write::encrypt_block_header(&block[..CMT_HEAD], password)?;
+            stream.write_all(&ciphertext)?;
+            stream.write_all(&block[CMT_HEAD..])?;
+            self.write_ctx_mut().volume_bytes_written += on_disk + (block.len() - CMT_HEAD) as u64;
+        } else {
+            stream.write_all(&block)?;
+            self.write_ctx_mut().volume_bytes_written += block.len() as u64;
+        }
+        Ok(())
+    }
+
+    /// Queue the archive comment for a RAR4 create/repack writer (emitted
+    /// before the first member).
+    pub(crate) fn set_rar4_writer_comment(&mut self, text: Option<Vec<u8>>) {
+        self.write_ctx_mut().rar4_writer_comment = text;
+    }
+
     pub(crate) fn add_rar4_data(
         &mut self,
         name: String,
@@ -651,6 +689,9 @@ impl RarArchive {
             );
             return Ok(());
         }
+        // A queued archive comment is emitted right before the first member
+        // (it must precede every member; the queue is consumed once).
+        self.emit_pending_rar4_comment()?;
         let file_size = data.len() as u64;
         let file_crc = crate::crc32::crc32(&data);
 

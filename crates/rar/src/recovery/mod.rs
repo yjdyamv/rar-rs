@@ -1,7 +1,7 @@
 //! Recovery-record and recovery-volume support (RAR5 family / v50).
 
 mod legacy;
-pub use legacy::repair_legacy_archive_path;
+pub use legacy::{repair_legacy_archive_path, repair_legacy_archive_path_with_password};
 
 /// Legacy recovery-record helpers (crate-internal): the RAR4 creation
 /// path (`archive/create.rs`) builds NEWSUB blocks through here, and the
@@ -10,6 +10,7 @@ pub use legacy::repair_legacy_archive_path;
 pub(crate) mod legacy_rr {
     pub(crate) use super::legacy::{
         build_legacy_recovery_block, recovery_sector_count, scan_protect,
+        scan_protect_with_password,
     };
 }
 pub mod rar50;

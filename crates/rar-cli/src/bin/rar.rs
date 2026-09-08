@@ -2154,9 +2154,12 @@ fn cmd_repair(args: &ArchiveArgs) -> Result<(), String> {
     // Streaming repair: bounded memory regardless of archive size; the
     // repaired archive is staged and renamed atomically by the library.
     let repaired = if is_rar4_file(std::path::Path::new(archive_path)) {
-        rar_rs::repair_legacy_archive_path(
+        // `-hp`: the recovery record's header is encrypted, so locating it
+        // needs the archive password (the protected bytes are not).
+        rar_rs::repair_legacy_archive_path_with_password(
             std::path::Path::new(archive_path),
             std::path::Path::new(&fixed_path),
+            args.password.password.as_deref(),
         )
         .map_err(|e| format!("repair: {e}"))?
     } else {

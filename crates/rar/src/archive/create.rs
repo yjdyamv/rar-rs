@@ -813,15 +813,18 @@ impl RarArchive {
         let block = crate::recovery::legacy_rr::build_legacy_recovery_block(&prefix, rec_sectors)?;
         let stream = self.stream.as_mut().unwrap();
         if self.header_encryption {
-            // `-hp`: the recovery block is header-encrypted like every other
-            // block after the main header.
+            // `-hp`: only the 54-byte NEWSUB header is encrypted (the same
+            // rule as FILE members); the tag table and parity sectors follow
+            // as plaintext data, so readers advance past the block with the
+            // decrypted head_size and the parity stays recoverable.
             let password = self.password.as_deref().ok_or_else(|| {
                 RarError::Encrypted("header encryption requires a password".into())
             })?;
             let (ciphertext, on_disk) =
-                crate::format::rar4::write::encrypt_block_header(&block, password)?;
+                crate::format::rar4::write::encrypt_block_header(&block[..54], password)?;
             stream.write_all(&ciphertext)?;
-            self.write_ctx_mut().volume_bytes_written += on_disk;
+            stream.write_all(&block[54..])?;
+            self.write_ctx_mut().volume_bytes_written += on_disk + (block.len() - 54) as u64;
         } else {
             stream.write_all(&block)?;
             self.write_ctx_mut().volume_bytes_written += block.len() as u64;

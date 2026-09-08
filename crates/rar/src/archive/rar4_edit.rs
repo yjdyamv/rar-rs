@@ -16,6 +16,12 @@
 //! NEWSUB record rebuild that record over the new prefix — the tags are
 //! offset-based, so a renamed header would otherwise leave stale tags.
 //!
+//! Header-encrypted (`-hp`) archives are editable: the main header is the
+//! plaintext marker carrying MHD_PASSWORD, so the layout scan decrypts every
+//! later block header with the archive password and the rewrite re-encrypts
+//! each block it rebuilds or inserts with a fresh salt (untouched blocks are
+//! copied as ciphertext). Only multi-volume archives are still refused.
+//!
 //! Lock (`k`) patches the 13-byte main header in place (mirroring the RAR5
 //! lock). Recovery reads the whole archive into memory — the NEWSUB record
 //! is XOR parity over the protected prefix, so the builder needs the
@@ -37,9 +43,20 @@ use crate::format::rar4::{
     MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY, MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD,
 };
 use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path};
+// `scan_protect` is the plaintext shortcut kept for the in-file tests;
+// production paths always go through the password-aware variant.
+#[allow(unused_imports)]
 use crate::recovery::legacy_rr::{
-    build_legacy_recovery_block, recovery_sector_count, scan_protect,
+    build_legacy_recovery_block, recovery_sector_count, scan_protect, scan_protect_with_password,
 };
+
+/// Header byte count of the NEWSUB `CMT` archive-comment block (32 fixed
+/// bytes + the 3-byte name `CMT`); the payload follows as data.
+pub(crate) const CMT_HEAD_SIZE: usize = 35;
+/// Header byte count of the NEWSUB `RR` recovery record built by
+/// `build_legacy_recovery_block` (32 fixed + 2-byte name + 20-byte tail);
+/// the tag table and parity sectors follow as data.
+pub(crate) const RECOVERY_HEAD_SIZE: usize = 54;
 
 /// RAR4 header CRC16: standard CRC-32 truncated to 16 bits over
 /// `bytes[2..]` (the body after the CRC field).
@@ -76,6 +93,19 @@ fn main_flags(main: &[u8]) -> RarResult<u16> {
     Ok(u16::from_le_bytes([main[3], main[4]]))
 }
 
+/// The archive password, when one is set (an empty string counts as none).
+/// `-hp` header encryption cannot be read or rewritten without it.
+fn header_password(archive: &RarArchive) -> Option<&str> {
+    archive.password.as_deref().filter(|p| !p.is_empty())
+}
+
+/// Whether the archive on disk is `-hp` header-encrypted (the main header is
+/// always plaintext and carries MHD_PASSWORD).
+fn archive_is_header_encrypted(archive: &RarArchive) -> RarResult<bool> {
+    let (_offset, main_header) = read_main_from_file(&archive.path, archive.sfx_offset)?;
+    Ok(main_flags(&main_header)? & MHD_PASSWORD != 0)
+}
+
 /// Read the archive's main header block (which starts 7 bytes after the
 /// signature, i.e. at `sfx_offset + 7`), returning its file-absolute
 /// offset and raw bytes. Works for `-hp` archives too: their main header
@@ -108,17 +138,14 @@ fn read_main_from_file(path: &Path, sfx_offset: u64) -> RarResult<(u64, Vec<u8>)
 }
 
 /// Refuse edits on multi-volume RAR4 sets (the rewrite would need volume
-/// rebalancing; see ADR 0005) and header-encrypted (`-hp`) archives (every
-/// rebuilt or inserted block would need password re-encryption).
+/// rebalancing; see ADR 0005). Header-encrypted (`-hp`) archives are
+/// supported: every rebuilt or inserted block is re-encrypted with the
+/// archive password, and a missing password surfaces as
+/// [`RarError::Encrypted`] from the layout scan.
 fn refuse_unsupported_containers(archive: &RarArchive, main_flags: u16) -> RarResult<()> {
     if archive.volume_paths.len() > 1 || main_flags & MHD_VOLUME != 0 {
         return Err(RarError::Unsupported(
             "editing multi-volume RAR4 archives is not supported".into(),
-        ));
-    }
-    if main_flags & MHD_PASSWORD != 0 {
-        return Err(RarError::Unsupported(
-            "editing header-encrypted (-hp) RAR4 archives is not supported yet".into(),
         ));
     }
     Ok(())
@@ -167,6 +194,9 @@ struct Rar4Layout {
     main_header: Vec<u8>,
     /// Parsed main flags (as stored, LONG_BLOCK included).
     main_flags: u16,
+    /// The archive is `-hp` header-encrypted: every block after the main
+    /// header is `[8B salt][AES-128-CBC header][plaintext data]`.
+    header_encrypted: bool,
     /// Absolute offset of the end-of-archive block.
     endarc_offset: usize,
     /// Every FILE_HEAD block in archive order (file-absolute offset and raw
@@ -200,11 +230,82 @@ fn block_envelope(bytes: &[u8], pos: usize) -> RarResult<(usize, u16, usize)> {
     Ok((head_size, flags, total))
 }
 
-/// Walk the plaintext block stream of an in-memory RAR4 archive. The
-/// archive must already be validated (the editor only reaches here after a
-/// successful open scan), so headers are not CRC-checked again; only the
+/// One block of an in-memory RAR4 archive, with its header in plaintext
+/// (decrypted when the archive is `-hp` header-encrypted).
+struct BlockView {
+    head_type: u8,
+    /// Plaintext header bytes (`head_size` long, 7-byte prefix included).
+    header: Vec<u8>,
+    /// Bytes the header occupies on disk: `head_size`, or
+    /// `8 + align16(head_size)` for a header-encrypted block.
+    on_disk_header: usize,
+    /// Bytes of data following the header (`add_size`).
+    add_size: usize,
+    /// Total on-disk size of the block (`on_disk_header + add_size`).
+    total: usize,
+}
+
+impl BlockView {
+    /// The block's data area (never encrypted: member payloads, parity...).
+    fn data<'a>(&self, bytes: &'a [u8], start: usize) -> &'a [u8] {
+        &bytes[start + self.on_disk_header..start + self.total]
+    }
+}
+
+/// Read the block at `pos`, transparently decrypting its header when
+/// `password` is `Some` (the caller passes it only for `-hp` archives, and
+/// only for blocks after the plaintext main header).
+fn read_block_view(bytes: &[u8], pos: usize, password: Option<&[u8]>) -> RarResult<BlockView> {
+    let (header, on_disk_header, add_size, total) = match password {
+        Some(password) => crate::format::rar4::decrypt_encrypted_header(bytes, pos, password)?,
+        None => {
+            let (head_size, _flags, total) = block_envelope(bytes, pos)?;
+            (
+                bytes[pos..pos + head_size].to_vec(),
+                head_size,
+                total - head_size,
+                total,
+            )
+        }
+    };
+    Ok(BlockView {
+        head_type: header[2],
+        header,
+        on_disk_header,
+        add_size,
+        total,
+    })
+}
+
+/// Emit a block as `header` + `data`, encrypting the header with a fresh
+/// salt when `password` is `Some` (`-hp`). The data area is never encrypted
+/// by this helper: member payloads carry their own `-p` encryption and the
+/// recovery record's tag/parity area must stay plaintext to remain
+/// repairable.
+fn emit_block(
+    out: &mut Vec<u8>,
+    header: &[u8],
+    data: &[u8],
+    password: Option<&str>,
+) -> RarResult<()> {
+    match password {
+        Some(password) => {
+            let (ciphertext, _) =
+                crate::format::rar4::write::encrypt_block_header(header, password)?;
+            out.extend_from_slice(&ciphertext);
+        }
+        None => out.extend_from_slice(header),
+    }
+    out.extend_from_slice(data);
+    Ok(())
+}
+
+/// Walk the block stream of an in-memory RAR4 archive, decrypting the
+/// headers of a `-hp` archive with `password` (ignored for plaintext ones).
+/// The archive must already be validated (the editor only reaches here after
+/// a successful open scan), so headers are not CRC-checked again; only the
 /// envelope bounds are.
-fn scan_layout(bytes: &[u8], sfx_offset: usize) -> RarResult<Rar4Layout> {
+fn scan_layout(bytes: &[u8], sfx_offset: usize, password: Option<&str>) -> RarResult<Rar4Layout> {
     let sig = &bytes[sfx_offset..sfx_offset + 7];
     if sig != crate::detect::RAR4_SIGNATURE {
         return Err(RarError::Format(
@@ -215,26 +316,31 @@ fn scan_layout(bytes: &[u8], sfx_offset: usize) -> RarResult<Rar4Layout> {
     let mut main: Option<(usize, Vec<u8>, u16)> = None;
     let mut endarc: Option<usize> = None;
     let mut files = Vec::new();
+    // Latched from the main header: `MHD_PASSWORD` means every later block
+    // header is encrypted.
+    let mut hp: Option<&[u8]> = None;
     while pos + 7 <= bytes.len() {
         let start = pos;
-        let head_type = bytes[pos + 2];
-        let (head_size, _flags, total) = block_envelope(bytes, pos)?;
-        if head_type == MAIN_HEAD && main.is_none() {
-            let header = bytes[start..start + head_size].to_vec();
-            let flags = main_flags(&header)?;
+        let view = read_block_view(bytes, pos, hp)?;
+        if view.head_type == MAIN_HEAD && main.is_none() {
+            let flags = main_flags(&view.header)?;
             if flags & MHD_PASSWORD != 0 {
-                return Err(RarError::Unsupported(
-                    "editing header-encrypted (-hp) RAR4 archives is not supported yet".into(),
-                ));
+                let password = password.ok_or_else(|| {
+                    RarError::Encrypted(
+                        "editing a header-encrypted (-hp) RAR4 archive requires its password"
+                            .into(),
+                    )
+                })?;
+                hp = Some(password.as_bytes());
             }
-            main = Some((start, header, flags));
-        } else if head_type == ENDARC_HEAD {
+            main = Some((start, view.header.clone(), flags));
+        } else if view.head_type == ENDARC_HEAD {
             endarc = Some(start);
             break;
-        } else if head_type == FILE_HEAD {
-            files.push((start, bytes[start..start + head_size].to_vec()));
+        } else if view.head_type == FILE_HEAD {
+            files.push((start, view.header.clone()));
         }
-        pos = start + total;
+        pos = start + view.total;
     }
     let (main_offset, main_header, main_flags) =
         main.ok_or_else(|| RarError::Format("RAR4: archive is missing its main header".into()))?;
@@ -246,6 +352,7 @@ fn scan_layout(bytes: &[u8], sfx_offset: usize) -> RarResult<Rar4Layout> {
         main_offset,
         main_header,
         main_flags,
+        header_encrypted: hp.is_some(),
         endarc_offset,
         files,
     })
@@ -377,7 +484,7 @@ fn build_rename_map(
 /// the CMT block's `attr` bit 0 marks a UTF-16LE payload (no BOM); pure
 /// ASCII comments are stored as raw bytes with the bit clear.
 /// Returns `(payload, is_utf16)`.
-fn encode_comment_text(bytes: &[u8]) -> (Vec<u8>, bool) {
+pub(crate) fn encode_comment_text(bytes: &[u8]) -> (Vec<u8>, bool) {
     if bytes.is_ascii() {
         return (bytes.to_vec(), false);
     }
@@ -421,7 +528,7 @@ fn decode_comment_payload(payload: &[u8], unicode: bool) -> Vec<u8> {
 /// (32 fixed bytes + the 3-byte name `CMT`) followed by the payload.
 /// `unicode` sets the comment's bit 0 of the attr field (WinRAR's marker
 /// for a UTF-16LE payload).
-fn build_comment_block(payload: &[u8], unicode: bool) -> Vec<u8> {
+pub(crate) fn build_comment_block(payload: &[u8], unicode: bool) -> Vec<u8> {
     let head_size = 32u16 + 3;
     let mut block = Vec::with_capacity(head_size as usize + payload.len());
     block.extend_from_slice(&[0u8, 0]); // header CRC, filled last
@@ -449,8 +556,8 @@ fn build_comment_block(payload: &[u8], unicode: bool) -> Vec<u8> {
 
 /// Read the archive comment (`rar cw`): locate the NEWSUB `CMT` block and
 /// decode its payload. Returns `None` when the archive has no comment.
-/// Header-encrypted (`-hp`) archives are refused (their comment block is
-/// encrypted with the header key).
+/// On a `-hp` archive the block's header is decrypted with the archive
+/// password first (only the header is encrypted; the payload is not).
 pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
     let bytes = fs::read(&archive.path).map_err(RarError::Io)?;
     let sfx_offset = archive.sfx_offset as usize;
@@ -462,62 +569,68 @@ pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
     }
     let mut pos = sfx_offset + 7;
     let mut saw_main = false;
+    let mut hp: Option<&[u8]> = None;
     while pos + 7 <= bytes.len() {
         let start = pos;
-        let head_type = bytes[pos + 2];
-        let (head_size, _flags, total) = block_envelope(&bytes, pos)?;
-        if head_type == MAIN_HEAD && !saw_main {
+        let view = read_block_view(&bytes, pos, hp)?;
+        if view.head_type == MAIN_HEAD && !saw_main {
             saw_main = true;
-            if main_flags(&bytes[start..start + head_size])? & MHD_PASSWORD != 0 {
-                return Err(RarError::Unsupported(
-                    "reading the comment of a header-encrypted (-hp) RAR4 archive is not supported yet".into(),
-                ));
+            if main_flags(&view.header)? & MHD_PASSWORD != 0 {
+                let password = header_password(archive).ok_or_else(|| {
+                    RarError::Encrypted(
+                        "reading the comment of a header-encrypted (-hp) RAR4 archive requires its password".into(),
+                    )
+                })?;
+                hp = Some(password.as_bytes());
             }
-        } else if head_type == NEWSUB_HEAD && comment_block_name_is_cmt(&bytes, start, head_size) {
-            let method = bytes[start + 25];
-            let unp = u32::from_le_bytes(bytes[start + 11..start + 15].try_into().unwrap());
-            let unicode =
-                u32::from_le_bytes(bytes[start + 28..start + 32].try_into().unwrap()) & 1 != 0;
-            let data = &bytes[start + head_size..start + total];
+        } else if view.head_type == NEWSUB_HEAD
+            && view.header.len() >= 32
+            && comment_block_name_is_cmt(&view.header)
+        {
+            let method = view.header[25];
+            let unp = u32::from_le_bytes(view.header[11..15].try_into().unwrap());
+            let unicode = u32::from_le_bytes(view.header[28..32].try_into().unwrap()) & 1 != 0;
+            let data_start = start + view.on_disk_header;
+            let data = &bytes[data_start..data_start + view.add_size];
             let payload = if method == crate::format::rar4::RAR4_METHOD_STORE {
                 data.to_vec()
             } else {
-                decode_comment_stream(&bytes, start, head_size, total, unp as usize)?
+                decode_comment_stream(&bytes, data_start, view.add_size, method, unp as usize)?
             };
             return Ok(Some(decode_comment_payload(&payload, unicode)));
         }
-        pos = start + total;
-        if head_type == ENDARC_HEAD {
+        pos = start + view.total;
+        if view.head_type == ENDARC_HEAD {
             break;
         }
     }
     Ok(None)
 }
 
-fn comment_block_name_is_cmt(bytes: &[u8], start: usize, _head_size: usize) -> bool {
-    let ns = u16::from_le_bytes([bytes[start + 26], bytes[start + 27]]) as usize;
-    bytes.get(start + 32..start + 32 + ns) == Some(b"CMT")
+/// Whether a (plaintext) NEWSUB header names the archive-comment block.
+fn comment_block_name_is_cmt(header: &[u8]) -> bool {
+    let ns = u16::from_le_bytes([header[26], header[27]]) as usize;
+    header.get(32..32 + ns) == Some(b"CMT")
 }
 
 /// Decode a compressed comment payload through the shared RAR29 member
 /// decoder (the payload is a plain single-chunk member stream).
 fn decode_comment_stream(
     bytes: &[u8],
-    start: usize,
-    head_size: usize,
-    total: usize,
+    data_start: usize,
+    packed_size: usize,
+    method: u8,
     unpacked_size: usize,
 ) -> RarResult<Vec<u8>> {
     use crate::format::rar4::{MemberDecodeOptions, decode_member_bytes};
     use crate::model::{DataChunk, FileHeader};
-    let method = bytes[start + 25];
     if !(0x31..=0x35).contains(&method) {
         return Err(RarError::Format(
             "RAR4: unsupported comment compression method".into(),
         ));
     }
-    let data_offset = (start + head_size) as u64;
-    let packed_size = (total - head_size) as u64;
+    let data_offset = data_start as u64;
+    let packed_size = packed_size as u64;
     let hdr = FileHeader {
         unpacked_size: unpacked_size as u64,
         packed_size,
@@ -565,6 +678,9 @@ pub(crate) struct AppendPrelude {
     /// record is dropped by the truncation and rebuilt at close with the
     /// same strength).
     pub rr_sectors: Option<u32>,
+    /// The archive is `-hp` header-encrypted: the appended blocks must be
+    /// header-encrypted with the archive password too.
+    pub header_encrypted: bool,
 }
 
 /// One member buffered for a deferred solid-archive append.
@@ -576,23 +692,34 @@ pub(crate) struct SolidAppendEntry {
     pub mtime_ns: u32,
 }
 
-/// Prepare an existing single-volume, plaintext RAR4 archive for appending
-/// members. The archive's main flags gate the edit (multi-volume, `-hp` and
-/// locked archives are refused). Non-solid archives truncate at the trailing
-/// NEWSUB recovery record / end-of-archive block; solid archives defer to a
-/// whole-archive repack at close (the writer cannot continue an existing
-/// chain).
+/// Prepare an existing single-volume RAR4 archive for appending members.
+/// The archive's main flags gate the edit (multi-volume and locked archives
+/// are refused). Non-solid archives truncate at the trailing NEWSUB recovery
+/// record / end-of-archive block; solid archives defer to a whole-archive
+/// repack at close (the writer cannot continue an existing chain).
+/// `-hp` archives are appended to under the same header encryption (the
+/// password is required and reported by the prelude).
 pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
     let bytes = fs::read(&archive.path).map_err(RarError::Io)?;
-    let layout = scan_layout(&bytes, archive.sfx_offset as usize)?;
+    let layout = scan_layout(
+        &bytes,
+        archive.sfx_offset as usize,
+        header_password(archive),
+    )?;
     refuse_unsupported_containers(archive, layout.main_flags)?;
     if layout.main_flags & MHD_LOCK != 0 {
         return Err(RarError::ArchiveLocked);
     }
+    let header_encrypted = layout.header_encrypted;
+    let hp = if header_encrypted {
+        header_password(archive).map(str::as_bytes)
+    } else {
+        None
+    };
     let solid = layout.main_flags & MHD_SOLID != 0;
     if solid {
         // RAR 2.5-era PROTECT_HEAD records cannot be repacked in place.
-        let rr_sectors = match scan_protect(&bytes)?.protect {
+        let rr_sectors = match scan_protect_with_password(&bytes, hp)?.protect {
             Some(protect) if &protect.mark == b"Protect+" => Some(protect.rec_sectors),
             Some(_) => {
                 return Err(RarError::Unsupported(
@@ -605,13 +732,14 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
             solid: true,
             truncate_pos: None,
             rr_sectors,
+            header_encrypted,
         });
     }
     // A trailing NEWSUB record sits between the last member and the
     // end-of-archive block; truncating at its start drops it (it cannot
     // protect members appended after it) and it is rebuilt at close. RAR
     // 2.5-era PROTECT_HEAD records cannot be rebuilt this way.
-    let (truncate_pos, rr_sectors) = match scan_protect(&bytes)?.protect {
+    let (truncate_pos, rr_sectors) = match scan_protect_with_password(&bytes, hp)?.protect {
         Some(protect)
             if &protect.mark == b"Protect+" && protect.data_end <= layout.endarc_offset =>
         {
@@ -628,6 +756,7 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
         solid: false,
         truncate_pos,
         rr_sectors,
+        header_encrypted,
     })
 }
 
@@ -656,11 +785,23 @@ pub(crate) fn edit_rar4(
         ));
     }
     let bytes = fs::read(&archive.path).map_err(RarError::Io)?;
-    let layout = scan_layout(&bytes, archive.sfx_offset as usize)?;
+    let layout = scan_layout(
+        &bytes,
+        archive.sfx_offset as usize,
+        header_password(archive),
+    )?;
     refuse_unsupported_containers(archive, layout.main_flags)?;
     if layout.main_flags & MHD_LOCK != 0 {
         return Err(RarError::ArchiveLocked);
     }
+    // `-hp`: the password that decrypts the layout also re-encrypts every
+    // block this rewrite rebuilds or inserts.
+    let hp = if layout.header_encrypted {
+        header_password(archive)
+    } else {
+        None
+    };
+    let hp_bytes = hp.map(str::as_bytes);
 
     // Delete mask: duplicates are harmless; indexes past the catalog are
     // stale. Deleting members of a solid archive needs the whole-archive
@@ -733,7 +874,7 @@ pub(crate) fn edit_rar4(
     // (written after ENDARC, or with a non-NEWSUB mark) cannot be kept
     // valid through a prefix rewrite; refuse rather than leave a stale
     // record behind.
-    let existing = match scan_protect(&bytes)?.protect {
+    let existing = match scan_protect_with_password(&bytes, hp_bytes)?.protect {
         Some(protect)
             if &protect.mark == b"Protect+" && protect.data_end <= layout.endarc_offset =>
         {
@@ -769,40 +910,51 @@ pub(crate) fn edit_rar4(
     // A comment change lands its NEWSUB `CMT` block right after the main
     // header (WinRAR's placement). `Some(empty)` removes the comment.
     let replace_comment = comment.is_some();
-    if let Some(bytes) = comment
-        && !bytes.is_empty()
+    if let Some(text) = comment
+        && !text.is_empty()
     {
-        let (payload, unicode) = encode_comment_text(bytes);
-        out.extend_from_slice(&build_comment_block(&payload, unicode));
+        let (payload, unicode) = encode_comment_text(text);
+        let block = build_comment_block(&payload, unicode);
+        // Only the 35-byte CMT header is header-encrypted; the payload
+        // follows as plaintext data (the same rule as FILE members).
+        emit_block(
+            &mut out,
+            &block[..CMT_HEAD_SIZE],
+            &block[CMT_HEAD_SIZE..],
+            hp,
+        )?;
     }
 
     let mut pos = main_end;
     let mut file_index = 0usize;
     while pos < region_end {
-        let head_type = bytes[pos + 2];
-        let (head_size, _flags, total) = block_envelope(&bytes, pos)?;
-        if head_type == FILE_HEAD {
+        let start = pos;
+        let view = read_block_view(&bytes, pos, hp_bytes)?;
+        if view.head_type == FILE_HEAD {
+            let data = view.data(&bytes, start);
             if deleted[file_index] {
                 // Drop the member's header and payload verbatim.
             } else if let Some(new_name) = rename_map.get(&file_index) {
-                let rebuilt = rename_file_header(&bytes[pos..pos + head_size], new_name)?;
-                out.extend_from_slice(&rebuilt);
-                out.extend_from_slice(&bytes[pos + head_size..pos + total]);
+                // The rebuilt header is re-encrypted with a fresh salt; the
+                // member's own payload is copied as-is.
+                let rebuilt = rename_file_header(&view.header, new_name)?;
+                emit_block(&mut out, &rebuilt, data, hp)?;
             } else {
-                out.extend_from_slice(&bytes[pos..pos + head_size]);
-                out.extend_from_slice(&bytes[pos + head_size..pos + total]);
+                // Untouched: copy the on-disk bytes (ciphertext included).
+                out.extend_from_slice(&bytes[start..start + view.total]);
             }
             file_index += 1;
         } else if replace_comment
-            && head_type == NEWSUB_HEAD
-            && comment_block_name_is_cmt(&bytes, pos, head_size)
+            && view.head_type == NEWSUB_HEAD
+            && view.header.len() >= 32
+            && comment_block_name_is_cmt(&view.header)
         {
             // A comment change replaces the existing CMT block (the new one
             // was already emitted after the main header).
         } else {
-            out.extend_from_slice(&bytes[pos..pos + total]);
+            out.extend_from_slice(&bytes[start..start + view.total]);
         }
-        pos += total;
+        pos = start + view.total;
     }
     if pos != region_end {
         return Err(RarError::Format(
@@ -827,7 +979,14 @@ pub(crate) fn edit_rar4(
             (None, None) => unreachable!("wants_record implies a source"),
         };
         let block = build_legacy_recovery_block(prefix, rec_sectors)?;
-        out.extend_from_slice(&block);
+        // `-hp`: only the 54-byte NEWSUB header is encrypted; the tag table
+        // and parity sectors stay plaintext so the record remains usable.
+        emit_block(
+            &mut out,
+            &block[..RECOVERY_HEAD_SIZE],
+            &block[RECOVERY_HEAD_SIZE..],
+            hp,
+        )?;
     }
     out.extend_from_slice(&bytes[tail_from..]);
 
@@ -903,6 +1062,24 @@ pub(crate) fn repack_solid_archive(
         Some(bytes) => Some(bytes.to_vec()),
         None => read_comment(archive)?,
     };
+    // `-hp`: the fresh archive carries the same protection — the members are
+    // re-encoded from their decrypted bytes, so both the data and the
+    // headers are re-encrypted with the archive password.
+    let hp = archive_is_header_encrypted(archive)? || archive.header_encryption;
+    let password = if hp {
+        Some(
+            header_password(archive)
+                .ok_or_else(|| {
+                    RarError::Encrypted(
+                        "repacking a header-encrypted (-hp) RAR4 archive requires its password"
+                            .into(),
+                    )
+                })?
+                .to_string(),
+        )
+    } else {
+        None
+    };
     // Recovery record strength: the explicit percent, or an approximation
     // of the original record's strength (the archive is a fresh whole, so
     // the record is rebuilt over it).
@@ -910,7 +1087,12 @@ pub(crate) fn repack_solid_archive(
         force_rr
     } else {
         let bytes = fs::read(&archive.path).map_err(RarError::Io)?;
-        match scan_protect(&bytes)?.protect {
+        let hp_bytes = if hp {
+            header_password(archive).map(str::as_bytes)
+        } else {
+            None
+        };
+        match scan_protect_with_password(&bytes, hp_bytes)?.protect {
             Some(protect) if &protect.mark == b"Protect+" => {
                 let prefix_len = protect.block_offset.max(1) as u64;
                 let percent =
@@ -957,10 +1139,15 @@ pub(crate) fn repack_solid_archive(
                 crate::options::CreateOptions {
                     compression: crate::version::ArchiveVersion::V29,
                     solid: true,
+                    password: password.clone(),
+                    encrypt_headers: hp,
                     ..Default::default()
                 },
             )
             .map_err(|e| RarError::Format(format!("repack: create staged archive: {e:?}")))?;
+            // The comment is emitted by the writer (it must precede every
+            // member and has to be header-encrypted on a `-hp` archive).
+            writer.set_rar4_writer_comment(final_comment.clone());
             for i in 0..archive.entries.len() {
                 let data = archive.rar4_decode_solid_through(i)?;
                 if let Some((_, name, level, mtime, mtime_ns)) = kept.iter().find(|k| k.0 == i) {
@@ -979,12 +1166,24 @@ pub(crate) fn repack_solid_archive(
             }
             writer.close()?;
         }
-        // Comment and recovery record land on the staged archive through
-        // the same structural engine (they are header-level; the solid
-        // members are untouched by it).
-        let mut staged = crate::archive::RarArchive::open(&tmp_path)
-            .map_err(|e| RarError::Format(format!("repack: reopen staged archive: {e:?}")))?;
-        let summary = edit_rar4(&mut staged, &[], &[], final_comment.as_deref(), rr_percent)?;
+        // The recovery record lands on the staged archive through the same
+        // structural engine (it is header-level; the solid members are
+        // untouched by it). The comment already came from the writer, so the
+        // staged rewrite is only needed when a record has to be built.
+        let summary = match rr_percent {
+            Some(percent) => {
+                let mut staged = match password.as_deref() {
+                    Some(pw) => crate::archive::RarArchive::open_with_password(&tmp_path, pw),
+                    None => crate::archive::RarArchive::open(&tmp_path),
+                }
+                .map_err(|e| RarError::Format(format!("repack: reopen staged archive: {e:?}")))?;
+                edit_rar4(&mut staged, &[], &[], None, Some(percent))?
+            }
+            None => EditSummary {
+                deleted: 0,
+                renamed: 0,
+            },
+        };
         Ok(summary)
     })();
 
@@ -1552,7 +1751,7 @@ mod append_tests {
     }
 
     #[test]
-    fn append_solid_defers_repack_and_locked_hp_refuse() {
+    fn append_solid_defers_repack_and_locked_refuse() {
         let dir = tempfile::tempdir().unwrap();
         let p = vec![0x66; 2_000];
         // Appending to a solid archive defers to a close-time repack: the
@@ -1709,7 +1908,7 @@ mod repack_tests {
         build_solid(&path, &[("a.txt", &p1), ("b.txt", &p2), ("c.txt", &p3)]);
         // Sanity: the archive really is a solid chain.
         assert!(
-            scan_layout(&fs::read(&path).unwrap(), 0)
+            scan_layout(&fs::read(&path).unwrap(), 0, None)
                 .unwrap()
                 .main_flags
                 & MHD_SOLID
@@ -1842,5 +2041,336 @@ mod repack_tests {
         let mut a = crate::archive::RarArchive::open(&path).unwrap();
         a.rar4_decode_solid_through(1)
             .expect("second solid member must decode");
+    }
+}
+
+/// `-hp` header-encrypted RAR4 archives.
+///
+/// Every block after the (plaintext) main header is `[8B salt][AES-128-CBC
+/// header][plaintext data]`, so each edit decrypts the block headers with the
+/// archive password and re-encrypts whatever it rebuilds or inserts. These
+/// tests pin that the result still opens with the password, that member data
+/// survives untouched, and that no name leaks into the clear.
+#[cfg(test)]
+mod hp_tests {
+    #![allow(deprecated)] // legacy facade add_bytes/close kept for parity
+    use super::*;
+
+    const HP: &str = "hp-secret";
+
+    /// Deterministic, incompressible payload (a 32-bit LCG byte stream).
+    fn noise(n: usize) -> Vec<u8> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    fn build_hp(path: &std::path::Path, members: &[(&str, &[u8])], solid: bool) {
+        let mut a = crate::archive::RarArchive::create_with_options(
+            path,
+            crate::options::CreateOptions {
+                compression: crate::version::ArchiveVersion::V29,
+                solid,
+                password: Some(HP.to_string()),
+                encrypt_headers: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (name, data) in members {
+            a.add_bytes(name, data, 3).unwrap();
+        }
+        a.close().unwrap();
+    }
+
+    /// Main-header flags of an SFX-free archive (the header starts at 7).
+    fn main_flags_of(bytes: &[u8]) -> u16 {
+        u16::from_le_bytes([bytes[10], bytes[11]])
+    }
+
+    /// Header encryption must hide member names from the raw bytes.
+    fn name_is_hidden(bytes: &[u8], name: &str) -> bool {
+        !bytes.windows(name.len()).any(|w| w == name.as_bytes())
+    }
+
+    #[test]
+    fn hp_rename_rewrites_the_encrypted_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hp-rename.rar");
+        let p1 = noise(6_000);
+        let p2 = noise(4_000);
+        build_hp(
+            &path,
+            &[("secret-alpha.bin", &p1), ("secret-beta.txt", &p2)],
+            false,
+        );
+        assert!(name_is_hidden(
+            &std::fs::read(&path).unwrap(),
+            "secret-alpha.bin"
+        ));
+
+        let mut editor =
+            crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+        let a = editor.unique_entry("secret-alpha.bin").unwrap();
+        let report = editor
+            .apply(
+                crate::archive::editor::EditPlan::new()
+                    .rename(a, "重命名-ünï.bin")
+                    .rename(
+                        editor.unique_entry("secret-beta.txt").unwrap(),
+                        "beta-renamed.txt",
+                    ),
+            )
+            .unwrap();
+        assert_eq!(report.renamed(), 2);
+        drop(editor);
+
+        let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
+        assert_eq!(ar.namelist(), ["重命名-ünï.bin", "beta-renamed.txt"]);
+        assert_eq!(ar.read("重命名-ünï.bin").unwrap(), p1);
+        assert_eq!(ar.read("beta-renamed.txt").unwrap(), p2);
+
+        let after = std::fs::read(&path).unwrap();
+        assert_ne!(
+            main_flags_of(&after) & MHD_PASSWORD,
+            0,
+            "still header-encrypted"
+        );
+        assert!(name_is_hidden(&after, "beta-renamed.txt"));
+        assert!(name_is_hidden(&after, "重命名-ünï.bin"));
+    }
+
+    #[test]
+    fn hp_delete_drops_the_member_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hp-del.rar");
+        let (p1, p2, p3) = (noise(3_000), noise(2_000), noise(1_500));
+        build_hp(
+            &path,
+            &[("a.bin", &p1), ("b.bin", &p2), ("c.bin", &p3)],
+            false,
+        );
+
+        let mut editor =
+            crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+        let b = editor.unique_entry("b.bin").unwrap();
+        assert_eq!(editor.delete_entries(&[b]).unwrap(), 1);
+        drop(editor);
+
+        let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
+        assert_eq!(ar.namelist(), ["a.bin", "c.bin"]);
+        assert_eq!(ar.read("a.bin").unwrap(), p1);
+        assert_eq!(ar.read("c.bin").unwrap(), p3);
+    }
+
+    #[test]
+    fn hp_comment_sets_reads_and_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hp-cmt.rar");
+        let p = noise(9_000);
+        build_hp(&path, &[("a.bin", &p)], false);
+
+        let mut editor =
+            crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+        editor
+            .apply(crate::archive::editor::EditPlan::new().set_comment("hp comment ünï".as_bytes()))
+            .unwrap();
+        drop(editor);
+        {
+            let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
+            assert_eq!(
+                ar.get_comment().unwrap(),
+                Some("hp comment ünï".as_bytes().to_vec())
+            );
+            assert_eq!(ar.read("a.bin").unwrap(), p);
+        }
+
+        let mut editor =
+            crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+        editor
+            .apply(crate::archive::editor::EditPlan::new().set_comment(Vec::new()))
+            .unwrap();
+        drop(editor);
+        let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
+        assert_eq!(ar.get_comment().unwrap(), None);
+    }
+
+    #[test]
+    fn hp_recovery_record_rebuilds_and_repairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hp-rr.rar");
+        let p = noise(200_000);
+        build_hp(&path, &[("big.bin", &p)], false);
+
+        let mut editor =
+            crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+        editor
+            .apply(crate::archive::editor::EditPlan::new().set_recovery(10))
+            .unwrap();
+        drop(editor);
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_ne!(main_flags_of(&bytes) & MHD_RECOVERY, 0);
+        // The record is only findable with the password: its header is
+        // encrypted like every other block after the main header.
+        assert!(
+            scan_protect_with_password(&bytes, Some(HP.as_bytes()))
+                .unwrap()
+                .protect
+                .is_some()
+        );
+        assert!(scan_protect(&bytes).is_err(), "no password, no record");
+
+        let mut damaged = bytes.clone();
+        damaged[1_500..1_564].fill(0x5a);
+        let dmg = dir.path().join("dmg.rar");
+        std::fs::write(&dmg, &damaged).unwrap();
+        let fixed = dir.path().join("fixed.rar");
+        assert!(
+            crate::recovery::repair_legacy_archive_path_with_password(&dmg, &fixed, Some(HP))
+                .unwrap()
+        );
+        assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
+    }
+
+    #[test]
+    fn hp_delete_rebuilds_an_existing_recovery_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hp-del-rr.rar");
+        let p1 = noise(120_000);
+        let p2 = noise(60_000);
+        build_hp(&path, &[("a.bin", &p1), ("b.bin", &p2)], false);
+        {
+            let mut editor =
+                crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+            editor
+                .apply(crate::archive::editor::EditPlan::new().set_recovery(10))
+                .unwrap();
+        }
+        // Deleting a member rewrites the prefix, so the record is stripped
+        // and rebuilt at the same strength — still under `-hp`.
+        let mut editor =
+            crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+        let a = editor.unique_entry("a.bin").unwrap();
+        assert_eq!(editor.delete_entries(&[a]).unwrap(), 1);
+        drop(editor);
+
+        let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
+        assert_eq!(ar.namelist(), ["b.bin"]);
+        assert_eq!(ar.read("b.bin").unwrap(), p2);
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_ne!(main_flags_of(&bytes) & MHD_RECOVERY, 0);
+        let scan = scan_protect_with_password(&bytes, Some(HP.as_bytes()))
+            .unwrap()
+            .protect
+            .expect("record survived the rewrite");
+        assert!(scan.rec_sectors > 0);
+
+        let mut damaged = bytes.clone();
+        damaged[1_500..1_564].fill(0x77);
+        let dmg = dir.path().join("dmg.rar");
+        std::fs::write(&dmg, &damaged).unwrap();
+        let fixed = dir.path().join("fixed.rar");
+        assert!(
+            crate::recovery::repair_legacy_archive_path_with_password(&dmg, &fixed, Some(HP))
+                .unwrap()
+        );
+        assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
+    }
+
+    #[test]
+    fn hp_lock_marks_the_archive_and_blocks_further_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hp-lock.rar");
+        let p = noise(2_000);
+        build_hp(&path, &[("a.bin", &p)], false);
+
+        let mut editor =
+            crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+        editor.lock().unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        let flags = main_flags_of(&raw);
+        assert_ne!(flags & MHD_LOCK, 0, "locked");
+        assert_ne!(flags & MHD_PASSWORD, 0, "still header-encrypted");
+
+        let mut editor =
+            crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+        let a = editor.unique_entry("a.bin").unwrap();
+        assert!(matches!(
+            editor.apply(crate::archive::editor::EditPlan::new().rename(a, "x.bin")),
+            Err(RarError::ArchiveLocked)
+        ));
+    }
+
+    #[test]
+    fn hp_append_keeps_the_header_encryption() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hp-app.rar");
+        let p1 = noise(4_000);
+        let p2 = noise(3_000);
+        build_hp(&path, &[("a.bin", &p1)], false);
+        {
+            let mut a = RarArchive::open_append_with_password(&path, HP).unwrap();
+            a.add_bytes("added-new.bin", &p2, 0).unwrap();
+            a.close().unwrap();
+        }
+        let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
+        assert_eq!(ar.namelist(), ["a.bin", "added-new.bin"]);
+        assert_eq!(ar.read("a.bin").unwrap(), p1);
+        assert_eq!(ar.read("added-new.bin").unwrap(), p2);
+
+        let raw = std::fs::read(&path).unwrap();
+        assert!(name_is_hidden(&raw, "added-new.bin"));
+    }
+
+    #[test]
+    fn hp_solid_delete_repacks_under_the_same_protection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hp-solid.rar");
+        let t1 = noise(40_000);
+        let t2 = noise(35_000);
+        build_hp(&path, &[("a.txt", &t1), ("b.txt", &t2)], true);
+
+        let mut editor =
+            crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+        let a = editor.unique_entry("a.txt").unwrap();
+        assert_eq!(editor.delete_entries(&[a]).unwrap(), 1);
+        drop(editor);
+
+        let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
+        assert_eq!(ar.namelist(), ["b.txt"]);
+        assert_eq!(ar.read("b.txt").unwrap(), t2);
+
+        let raw = std::fs::read(&path).unwrap();
+        assert_ne!(main_flags_of(&raw) & MHD_PASSWORD, 0, "repacked under -hp");
+        assert!(name_is_hidden(&raw, "b.txt"));
+    }
+
+    #[test]
+    fn hp_edits_require_the_archive_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hp-nopw.rar");
+        let p = noise(2_000);
+        build_hp(&path, &[("a.bin", &p)], false);
+        let bytes = std::fs::read(&path).unwrap();
+
+        // Without the password the layout scan cannot even read the blocks.
+        assert!(matches!(
+            scan_layout(&bytes, 0, None),
+            Err(RarError::Encrypted(_))
+        ));
+        // A wrong password decrypts to garbage (head_size sanity check).
+        assert!(scan_layout(&bytes, 0, Some("wrong")).is_err());
+        // The right one parses.
+        assert!(scan_layout(&bytes, 0, Some(HP)).is_ok());
+        // And the editor refuses to open without it.
+        assert!(crate::archive::editor::ArchiveEditor::open(&path).is_err());
     }
 }
