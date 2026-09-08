@@ -628,7 +628,7 @@ impl RarArchive {
     /// encryption, and the FILE_HEAD + payload emission (single-volume or
     /// split across volumes). Shared by the file path (`add_file_rar4`,
     /// which reads the member first) and the bytes path (`add_bytes`).
-    fn add_rar4_data(
+    pub(crate) fn add_rar4_data(
         &mut self,
         name: String,
         data: Vec<u8>,

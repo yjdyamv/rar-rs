@@ -1273,3 +1273,53 @@ fn official_unrar_validates_rar4_appends() {
     assert!(rar_rs::repair_legacy_archive_path(&dmg, &fixed).unwrap());
     assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
 }
+
+/// WinRAR 6.23 validates a solid RAR4 archive after our stage-C repack
+/// (member deletion re-encodes the whole chain).
+#[test]
+fn official_unrar_validates_rar4_solid_repack() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let dir = make_temp_dir();
+    let path = dir.path().join("solid-repack.rar");
+    let line = b"the quick brown fox jumps over the lazy dog 0123456789\n";
+    let p1: Vec<u8> = line.repeat(40_000);
+    let p2: Vec<u8> = line.repeat(35_000);
+    let p3: Vec<u8> = line.repeat(30_000);
+    {
+        let mut archive = rar_rs::RarArchive::create_with_options(
+            &path,
+            rar_rs::CreateOptions {
+                compression: rar_rs::ArchiveVersion::V29,
+                solid: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("a.txt", &p1, 3).unwrap();
+        archive.add_bytes("b.txt", &p2, 3).unwrap();
+        archive.add_bytes("c.txt", &p3, 3).unwrap();
+        archive.close().unwrap();
+    }
+    {
+        let mut editor = rar_rs::ArchiveEditor::open(&path).unwrap();
+        let b = editor.unique_entry("b.txt").unwrap();
+        editor.delete_entries(&[b]).unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "unrar rejected repacked solid RAR4 archive"
+    );
+    let mut reader = rar_rs::ArchiveReader::open(&path).unwrap();
+    let a = reader.unique_entry("a.txt").unwrap();
+    assert_eq!(reader.read_entry(a).unwrap(), p1);
+    let c = reader.unique_entry("c.txt").unwrap();
+    assert_eq!(reader.read_entry(c).unwrap(), p3);
+}

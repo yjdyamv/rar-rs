@@ -1108,3 +1108,42 @@ fn rar4_append_adds_members_and_keeps_comment() {
     assert_eq!(reader.read_entry(new).unwrap(), payload_new);
     assert_eq!(comment_of(&path), Some(b"existing comment".to_vec()));
 }
+
+/// RAR4 solid member delete (ADR 0005 stage C): the whole archive is
+/// repacked (decode -> re-encode), the kept members' data survives, and the
+/// archive stays a valid solid chain.
+#[test]
+fn rar4_solid_delete_repacks_and_keeps_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("solid4.rar");
+    let line = b"the quick brown fox jumps over the lazy dog 0123456789\n";
+    let p1: Vec<u8> = line.repeat(30_000);
+    let p2: Vec<u8> = line.repeat(25_000);
+    let p3: Vec<u8> = line.repeat(20_000);
+    {
+        let mut archive = RarArchive::create_with_options(
+            &path,
+            rar_rs::CreateOptions {
+                compression: ArchiveVersion::V29,
+                solid: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("a.txt", &p1, 3).unwrap();
+        archive.add_bytes("b.txt", &p2, 3).unwrap();
+        archive.add_bytes("c.txt", &p3, 3).unwrap();
+        archive.close().unwrap();
+    }
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    let b = editor.unique_entry("b.txt").unwrap();
+    assert_eq!(editor.delete_entries(&[b]).unwrap(), 1);
+    drop(editor);
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+    assert_eq!(names, ["a.txt", "c.txt"]);
+    let a = reader.unique_entry("a.txt").unwrap();
+    assert_eq!(reader.read_entry(a).unwrap(), p1);
+    let c = reader.unique_entry("c.txt").unwrap();
+    assert_eq!(reader.read_entry(c).unwrap(), p3);
+}

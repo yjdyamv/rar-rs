@@ -1425,7 +1425,7 @@ impl RarArchive {
 
     /// Decode a single RAR4 member in memory, verifying its CRC32. Solid
     /// chain members decode through their chain prefix (shared window).
-    fn decode_rar4_at(&mut self, idx: usize) -> RarResult<Vec<u8>> {
+    pub(crate) fn decode_rar4_at(&mut self, idx: usize) -> RarResult<Vec<u8>> {
         self.validate_entry_limits(idx)?;
         let hdr = self.entries[idx].header.clone();
         if self.is_rar4_solid_member(idx) {
@@ -1579,7 +1579,7 @@ impl RarArchive {
     /// decoded only to advance the shared window. STORE members in a RAR2.x
     /// or RAR1.5 chain do not advance the window but do not break the chain
     /// either (the decoder is simply not called).
-    fn rar4_decode_solid_through(&mut self, target_idx: usize) -> RarResult<Vec<u8>> {
+    pub(crate) fn rar4_decode_solid_through(&mut self, target_idx: usize) -> RarResult<Vec<u8>> {
         let chain_start = self.rar4_find_chain_start(target_idx);
 
         let start_from = {

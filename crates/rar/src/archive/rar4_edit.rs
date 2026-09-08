@@ -637,7 +637,8 @@ pub(crate) fn edit_rar4(
     }
 
     // Delete mask: duplicates are harmless; indexes past the catalog are
-    // stale. Deleting members of a solid archive needs the stage-C repack.
+    // stale. Deleting members of a solid archive needs the whole-archive
+    // repack of stage C (decode -> re-encode), matching WinRAR 7.21+.
     let mut deleted = vec![false; archive.entries.len()];
     let mut deleted_count = 0usize;
     for &idx in deletes {
@@ -649,11 +650,28 @@ pub(crate) fn edit_rar4(
             deleted_count += 1;
         }
     }
-    if deleted_count > 0 && layout.main_flags & MHD_SOLID != 0 {
-        return Err(RarError::Unsupported(
-            "deleting members of solid RAR4 archives is not supported yet (needs the stage-C repack)"
-                .into(),
-        ));
+    // Deleting every member erases the archive file (matching `rar d`);
+    // comment and recovery-record changes would be silently dropped, so
+    // they are refused too, exactly like the RAR5 engine. This applies to
+    // solid archives as well (no repack needed when nothing survives).
+    if deleted_count == archive.entries.len() {
+        if force_rr.is_some() || comment.is_some() || !renames.is_empty() {
+            return Err(RarError::InvalidOption(
+                "cannot combine comment, recovery-record or rename changes with deleting every member".into(),
+            ));
+        }
+        std::fs::remove_file(&archive.path).map_err(RarError::Io)?;
+        archive.entries.clear();
+        return Ok(EditSummary {
+            deleted: deleted_count,
+            renamed: 0,
+        });
+    }
+
+    let is_solid = layout.main_flags & MHD_SOLID != 0;
+    if deleted_count > 0 && is_solid {
+        let (rename_map, renamed) = build_rename_map(&archive.entries, renames)?;
+        return repack_solid_archive(archive, &deleted, &rename_map, comment, force_rr, renamed);
     }
 
     let (rename_map, renamed) = build_rename_map(&archive.entries, renames)?;
@@ -675,24 +693,6 @@ pub(crate) fn edit_rar4(
         return Err(RarError::Format(
             "RAR4: archive has no members to edit".into(),
         ));
-    }
-
-    // Deleting every member erases the archive file (matching `rar d`);
-    // comment and recovery-record changes would be silently dropped, so
-    // they are refused too, exactly like the RAR5 engine.
-    if deleted_count == archive.entries.len() {
-        if force_rr.is_some() || comment.is_some() {
-            return Err(RarError::InvalidOption(
-                "cannot combine comment or recovery-record changes with deleting every member"
-                    .into(),
-            ));
-        }
-        std::fs::remove_file(&archive.path).map_err(RarError::Io)?;
-        archive.entries.clear();
-        return Ok(EditSummary {
-            deleted: deleted_count,
-            renamed: 0,
-        });
     }
 
     // Decide the recovery-record action. A RAR 2.5-era PROTECT_HEAD record
@@ -814,6 +814,141 @@ pub(crate) fn edit_rar4(
         deleted: deleted_count,
         renamed,
     })
+}
+
+/// Whole-archive repack of a solid RAR4 archive (ADR 0005 stage C): every
+/// member is decoded in chain order through the shared window and
+/// re-encoded into a fresh solid archive — same order, minus the deleted
+/// members, with renames and each member's original compression level and
+/// timestamp — then the comment and recovery record are applied
+/// structurally and the result replaces the original atomically. Mirrors
+/// WinRAR 7.21+'s full-archive repacking for solid RAR4 edits (the surgical
+/// partial reprocess of 7.20 is not reproduced).
+#[allow(deprecated)] // role seam: the staged solid writer needs the legacy per-member time path
+fn repack_solid_archive(
+    archive: &mut RarArchive,
+    deleted: &[bool],
+    rename_map: &HashMap<usize, String>,
+    comment: Option<&[u8]>,
+    force_rr: Option<u8>,
+    renamed: usize,
+) -> RarResult<EditSummary> {
+    for idx in rename_map.keys() {
+        if deleted[*idx] {
+            return Err(RarError::InvalidOption(
+                "cannot rename a member that the same edit deletes".into(),
+            ));
+        }
+    }
+    let deleted_count = deleted.iter().filter(|d| **d).count();
+    // Shapes the fresh writer cannot reproduce yet get a clear refusal
+    // instead of a silently degraded archive.
+    if archive.entries.iter().any(|e| e.is_dir()) {
+        return Err(RarError::Unsupported(
+            "repacking solid RAR4 archives with directory members is not supported yet".into(),
+        ));
+    }
+    if archive.entries.iter().any(|e| e.header.unp_ver < 29) {
+        return Err(RarError::Unsupported(
+            "repacking solid archives with legacy (pre-RAR3) codec members is not supported".into(),
+        ));
+    }
+
+    // The final comment text: the plan's value (empty removes), or the
+    // archive's original comment preserved by the repack.
+    let final_comment: Option<Vec<u8>> = match comment {
+        Some([]) => None,
+        Some(bytes) => Some(bytes.to_vec()),
+        None => read_comment(archive)?,
+    };
+    // Recovery record strength: the explicit percent, or an approximation
+    // of the original record's strength (the archive is a fresh whole, so
+    // the record is rebuilt over it).
+    let rr_percent: Option<u8> = if force_rr.is_some() {
+        force_rr
+    } else {
+        let bytes = fs::read(&archive.path).map_err(RarError::Io)?;
+        match scan_protect(&bytes)?.protect {
+            Some(protect) if &protect.mark == b"Protect+" => {
+                let prefix_len = protect.block_offset.max(1) as u64;
+                let percent =
+                    ((u64::from(protect.rec_sectors) * 51_200) / prefix_len).clamp(1, 100);
+                Some(percent as u8)
+            }
+            Some(_) => {
+                return Err(RarError::Unsupported(
+                    "RAR4: archives with a PROTECT_HEAD recovery record cannot be repacked in place; recreate the archive".into(),
+                ));
+            }
+            None => None,
+        }
+    };
+
+    // Keep-list with the emit metadata captured up front (name, level,
+    // mtime, mtime_ns) so the decode loop below can borrow the archive
+    // mutably without aliasing its catalog.
+    let mut kept: Vec<(usize, String, u8, u32, u32)> = Vec::new();
+    for (i, entry) in archive.entries.iter().enumerate() {
+        if !deleted[i] {
+            let name = rename_map
+                .get(&i)
+                .cloned()
+                .unwrap_or_else(|| entry.header.name.clone());
+            kept.push((
+                i,
+                name,
+                entry.header.comp_method,
+                entry.header.mtime,
+                entry.header.mtime_ns.unwrap_or(0),
+            ));
+        }
+    }
+
+    let tmp_path = temp_sibling_path(&archive.path);
+    let repack = (|| -> RarResult<EditSummary> {
+        // Decode every member in chain order (deleted ones included — their
+        // compressed data references the shared window) and re-encode the
+        // kept members into a fresh solid archive.
+        {
+            let mut writer = crate::archive::RarArchive::create_with_options(
+                &tmp_path,
+                crate::options::CreateOptions {
+                    compression: crate::version::ArchiveVersion::V29,
+                    solid: true,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| RarError::Format(format!("repack: create staged archive: {e:?}")))?;
+            for i in 0..archive.entries.len() {
+                let data = archive.rar4_decode_solid_through(i)?;
+                if let Some((_, name, level, mtime, mtime_ns)) = kept.iter().find(|k| k.0 == i) {
+                    writer.add_rar4_data(name.clone(), data, *level, *mtime, *mtime_ns)?;
+                }
+            }
+            writer.close()?;
+        }
+        // Comment and recovery record land on the staged archive through
+        // the same structural engine (they are header-level; the solid
+        // members are untouched by it).
+        let mut staged = crate::archive::RarArchive::open(&tmp_path)
+            .map_err(|e| RarError::Format(format!("repack: reopen staged archive: {e:?}")))?;
+        let summary = edit_rar4(&mut staged, &[], &[], final_comment.as_deref(), rr_percent)?;
+        Ok(summary)
+    })();
+
+    match repack {
+        Ok(mut summary) => {
+            replace_file(&tmp_path, &archive.path)?;
+            summary.deleted = deleted_count;
+            summary.renamed = renamed;
+            archive.open_read()?;
+            Ok(summary)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&tmp_path);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1278,12 +1413,15 @@ mod delete_tests {
         solid_archive.add_bytes("m1.bin", &p1, 3).unwrap();
         solid_archive.add_bytes("m2.bin", &p2, 3).unwrap();
         solid_archive.close().unwrap();
+        // Solid deletes now repack (stage C): the member is removed and the
+        // survivor's data is intact.
         let mut editor = crate::archive::editor::ArchiveEditor::open(&solid).unwrap();
         let m1 = editor.unique_entry("m1.bin").unwrap();
-        assert!(matches!(
-            editor.delete_entries(&[m1]),
-            Err(RarError::Unsupported(_))
-        ));
+        assert_eq!(editor.delete_entries(&[m1]).unwrap(), 1);
+        drop(editor);
+        let mut ar = crate::archive::RarArchive::open(&solid).unwrap();
+        assert_eq!(ar.namelist(), ["m2.bin"]);
+        assert_eq!(ar.read("m2.bin").unwrap(), p2);
     }
 }
 
@@ -1395,5 +1533,184 @@ mod append_tests {
             crate::archive::RarArchive::open_append(&locked),
             Err(RarError::ArchiveLocked)
         ));
+    }
+}
+
+#[cfg(test)]
+mod repack_tests {
+    #![allow(deprecated)] // legacy facade add_bytes/close kept for parity
+    use super::*;
+
+    fn build_solid(path: &std::path::Path, payloads: &[(&str, &[u8])]) {
+        let mut a = crate::archive::RarArchive::create_with_options(
+            path,
+            crate::options::CreateOptions {
+                compression: crate::version::ArchiveVersion::V29,
+                solid: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (name, data) in payloads {
+            a.add_bytes(name, data, 3).unwrap();
+        }
+        a.close().unwrap();
+    }
+
+    fn make_text(n: usize) -> Vec<u8> {
+        // NOTE: pure repeated lines only — sectioned content around ~460 KB
+        // triggers a pre-existing solid-codec bug (see the ignored
+        // regression test at the end of this module).
+        let line = b"the quick brown fox jumps over the lazy dog 0123456789\n";
+        let mut out = Vec::with_capacity(line.len() * n);
+        for _ in 0..n {
+            out.extend_from_slice(line);
+        }
+        out
+    }
+
+    #[test]
+    fn delete_middle_of_solid_chain_repacks_and_keeps_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("solid.rar");
+        let p1 = make_text(60_000);
+        let p2 = make_text(50_000);
+        let p3 = make_text(40_000);
+        build_solid(&path, &[("a.txt", &p1), ("b.txt", &p2), ("c.txt", &p3)]);
+        // Sanity: the archive really is a solid chain.
+        assert!(
+            scan_layout(&fs::read(&path).unwrap(), 0)
+                .unwrap()
+                .main_flags
+                & MHD_SOLID
+                != 0
+        );
+
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        let b = editor.unique_entry("b.txt").unwrap();
+        let report = editor
+            .apply(crate::archive::editor::EditPlan::new().delete(b))
+            .unwrap();
+        assert_eq!((report.deleted(), report.renamed()), (1, 0));
+
+        drop(editor);
+        let mut a = RarArchive::open(&path).unwrap();
+        assert_eq!(a.namelist(), ["a.txt", "c.txt"]);
+        assert_eq!(a.read("a.txt").unwrap(), p1);
+        assert_eq!(a.read("c.txt").unwrap(), p3);
+    }
+
+    #[test]
+    fn delete_first_and_last_of_solid_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("solid2.rar");
+        let p1 = make_text(50_000);
+        let p2 = make_text(45_000);
+        let p3 = make_text(40_000);
+        build_solid(&path, &[("a.txt", &p1), ("b.txt", &p2), ("c.txt", &p3)]);
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        let a = editor.unique_entry("a.txt").unwrap();
+        let c = editor.unique_entry("c.txt").unwrap();
+        assert_eq!(editor.delete_entries(&[a, c]).unwrap(), 2);
+        drop(editor);
+        let mut ar = RarArchive::open(&path).unwrap();
+        assert_eq!(ar.namelist(), ["b.txt"]);
+        assert_eq!(ar.read("b.txt").unwrap(), p2);
+    }
+
+    #[test]
+    fn solid_delete_with_rename_rr_and_comment_compose() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("solid3.rar");
+        let p1 = make_text(120_000);
+        let p2 = make_text(100_000);
+        let p3 = make_text(80_000);
+        build_solid(&path, &[("a.txt", &p1), ("b.txt", &p2), ("c.txt", &p3)]);
+        {
+            let mut e = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+            e.apply(crate::archive::editor::EditPlan::new().set_recovery(10))
+                .unwrap();
+            let mut e = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+            let cmt = "solid chain 注释".as_bytes();
+            e.apply(crate::archive::editor::EditPlan::new().set_comment(cmt.to_vec()))
+                .unwrap();
+        }
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        let b = editor.unique_entry("b.txt").unwrap();
+        let c = editor.unique_entry("c.txt").unwrap();
+        let report = editor
+            .apply(
+                crate::archive::editor::EditPlan::new()
+                    .delete(b)
+                    .rename(c, "renamed.txt"),
+            )
+            .unwrap();
+        assert_eq!((report.deleted(), report.renamed()), (1, 1));
+
+        drop(editor);
+        let mut a = RarArchive::open(&path).unwrap();
+        assert_eq!(a.namelist(), ["a.txt", "renamed.txt"]);
+        assert_eq!(a.read("a.txt").unwrap(), p1);
+        assert_eq!(a.read("renamed.txt").unwrap(), p3);
+        // The comment and recovery record survived the repack.
+        let mut a = RarArchive::open(&path).unwrap();
+        assert_eq!(
+            a.get_comment().unwrap(),
+            Some("solid chain 注释".as_bytes().to_vec())
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(scan_protect(&bytes).unwrap().protect.is_some());
+        // (The rebuilt record's repair capability is exercised by the
+        // non-solid append/delete tests; this archive is too compressible
+        // to leave a full protected sector for a damage test.)
+    }
+
+    #[test]
+    fn solid_delete_all_erases_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("solid4.rar");
+        let p1 = make_text(10_000);
+        build_solid(&path, &[("a.txt", &p1)]);
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        let a = editor.unique_entry("a.txt").unwrap();
+        assert_eq!(editor.delete_entries(&[a]).unwrap(), 1);
+        assert!(!path.exists(), "deleting every member erases the archive");
+    }
+
+    /// Pre-existing RAR4 solid codec regression: sectioned text members
+    /// around ~460 KB fail to decode from the second member on (our own
+    /// writer's output, our own decoder, and 6.23's decoder agree the first
+    /// member decodes and the chain breaks at the second). Pure repeated
+    /// lines decode at any size. Tracked separately from the edit work.
+    #[test]
+    #[ignore = "pre-existing solid codec bug: sectioned ~460KB members break the chain decode"]
+    fn solid_sectioned_content_decode_regression() {
+        let line = b"the quick brown fox jumps over the lazy dog 0123456789\n";
+        let mut data = Vec::new();
+        for i in 0..8_000 {
+            data.extend_from_slice(line);
+            if i % 7 == 0 {
+                data.extend_from_slice(b"\n===== section =====\n");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sect.rar");
+        {
+            let mut a = crate::archive::RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    compression: crate::version::ArchiveVersion::V29,
+                    solid: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            a.add_bytes("a.txt", &data, 3).unwrap();
+            a.add_bytes("b.txt", &data, 3).unwrap();
+            a.close().unwrap();
+        }
+        let mut a = crate::archive::RarArchive::open(&path).unwrap();
+        a.rar4_decode_solid_through(1)
+            .expect("second solid member must decode");
     }
 }
