@@ -210,4 +210,11 @@ impl ArchiveEntry {
     pub fn chunks(&self) -> &[DataChunk] {
         &self.chunks
     }
+
+    /// Per-member (file) comment for RAR 3.x/4.x archives (`FHD_COMMENT`),
+    /// if the member carries one. Returns raw text bytes (UTF-8 when the
+    /// comment was ASCII, UTF-16LE decoded otherwise).
+    pub fn comment(&self) -> Option<&[u8]> {
+        self.header.comment.as_deref()
+    }
 }

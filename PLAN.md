@@ -20,7 +20,7 @@
 
 ### 老版本 RAR 只读（继续）
 - [x] solid RAR2.x/1.5 链（2026-09）：unp_ver<29 的链按归档级 MHD_SOLID+位置判定（该代编码器从不写 FHD_SOLID；rars crafted fixture 第二成员清除标志仍须共享窗口），`rar4_solid_archive` 标志接线；RAR3+ 维持 FHD_SOLID 语义。验证：solid_flag_cleared_rar15（46B→2700B 续窗）、rar250 SOLID.RAR（CRC 0x97668cf2/0x28833332 精确）b3d19a7
-- [x] EXTTIME mtime 亚秒（9845c34；RAR4 无 ctime/atime 秒基字段，亚秒无从附着——记录为格式事实）；FHD_COMMENT 跳过已做、展示留待有 API 需求
+- [x] EXTTIME mtime 亚秒（9845c34；RAR4 无 ctime/atime 秒基字段，亚秒无从附着——记录为格式事实）；FHD_COMMENT 读取已做（`format/rar4/mod.rs::parse_file_comment` 解析 COMM_HEAD 0x75 嵌套块，STORE 载荷按 UTF-8/UTF-16LE 解码），接到 `FileHeader::comment` 并经 `ArchiveEntry::comment()` 暴露，CLI `l`/`v` 显示成员注释（2026-09）
 - [x] store-in-solid 窗口语义（2026-09 实测）：WinRAR 6.23 RAR4 solid 强制压缩不产 store 成员（随机也压）；我们的写侧 STORE 断链、读侧对 store 冻结窗口（WinRAR 自产无此类，互操作无碍）
 - [x] rar154 老命名 split 集（2026-09）：random.rar+.r00+.r01 三卷 2 MiB 成员，头 CRC 0xFFFF 哨兵容忍，CRC 0x1c9eb697 精确
 - [x] 大成员流式提取（2026-09，8588302）：提取到 writer 不再整驻留——STORE 明文成员按 1 MiB 分块直拷（零整缓冲）；压缩成员（RAR29/20/15）packed 小流整读后解码器每 1 MiB flush + 窗口裁剪（峰值=窗口+一块，与成员大小无关）；VM-filter 成员整解码后还原；solid 链保持共享窗口单遍；流式 CRC 校验。验证：CLI 解 250 MB store + 67 MB m5 文本字节一致、extract 96 MiB store+压缩成员测试。错误口令提示已映射 WrongPassword（9845c34）
@@ -37,7 +37,7 @@
 
 阶段 B 进度（2026-09）：非 solid `d/u/f/a` 全部落地（见下）
 
-阶段 C 进度（2026-09）：solid `d` 与 `a/u/f` 全部落地——`repack_solid_archive` 整档 repack（逐成员带链解码 → 新 solid 档按原 level/mtime 重发 → 注释/rr 结构补 → 原子替换），对齐官方 7.21+ full repack。solid `a/u/f` 走**延迟 repack**：open_append 对 solid 置 deferred 标记（不截断/不暂存），add 阶段缓冲新成员，close 时整档 repack（既有成员 + 新成员），注释保留、rr 按原强度重建；已修 parallel 分支路由（append 档 write_ctx.solid_mode=false 曾误走并行写 → 写只读源档 os5）。6.23 `UnRAR t` 通过（d/a/u/f），CLI `rar d/rn/a/u/f` solid 冒烟通过。剩余边界：含目录成员/pre-RAR3 codec 成员的 solid repack 拒绝（清晰报错）。另记：排查「分节文本 solid 链第二成员解码失败」时发现并修复**既有 codec bug**（`rar29_encoder::encode_solid_member` 在 LZ 胜出时也把 levels 回滚到成员前，而解码器保留成员末表 → 下一成员 keep/delta 表头套错基准）——LZ 胜保留、PPMd 胜回滚，两臂对调；回归测试 `solid_sectioned_content_decode_regression` 转正（自家与 6.23 双向 `t` 通过）
+阶段 C 进度（2026-09）：solid `d` 与 `a/u/f` 全部落地——`repack_solid_archive` 整档 repack（逐成员带链解码 → 新 solid 档按原 level/mtime 重发 → 注释/rr 结构补 → 原子替换），对齐官方 7.21+ full repack。solid `a/u/f` 走**延迟 repack**：open_append 对 solid 置 deferred 标记（不截断/不暂存），add 阶段缓冲新成员，close 时整档 repack（既有成员 + 新成员），注释保留、rr 按原强度重建；已修 parallel 分支路由（append 档 write_ctx.solid_mode=false 曾误走并行写 → 写只读源档 os5）。6.23 `UnRAR t` 通过（d/a/u/f），CLI `rar d/rn/a/u/f` solid 冒烟通过。剩余边界：pre-RAR3 codec 成员的 solid repack 拒绝（清晰报错）；含目录成员的 solid repack 已支持（`add_rar4_data` 按尾部 `/` 判定目录并置 attr 0x10，repack 循环对目录成员传空数据而非解码前序运行，2026-09）。另记：排查「分节文本 solid 链第二成员解码失败」时发现并修复**既有 codec bug**（`rar29_encoder::encode_solid_member` 在 LZ 胜出时也把 levels 回滚到成员前，而解码器保留成员末表 → 下一成员 keep/delta 表头套错基准）——LZ 胜保留、PPMd 胜回滚，两臂对调；回归测试 `solid_sectioned_content_decode_regression` 转正（自家与 6.23 双向 `t` 通过）
 
 阶段 B+C 落地内容：`d`（`edit_rar4` 支持 delete：块拷贝跳过成员 + 既有 rr 按原强度重建；删光=抹档，与 RAR5 一致；solid 走整档 repack；rename+delete 同成员冲突拒绝）；`a/u/f`（RAR4 append：`prepare_append` rar4 分支门禁 + 截断尾部 NEWSUB/ENDARC 暂存前缀，关闭时按原强度重建 rr；`rar a/u/f` CLI 编排即 editor 删 + append 追加，格式随容器自动保持 RAR4）。6.23 双向 `UnRAR t` 通过（含 6.23 自建档删/追加/repack）；**追加后重建的 rr 可被 6.23 `Rar.exe r` 修复追加成员（逐字节还原）**
 

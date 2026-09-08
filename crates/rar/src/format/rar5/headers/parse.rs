@@ -447,6 +447,7 @@ impl FileHeader {
             unp_ver: 0,
             salt: None,
             legacy_head_crc: None,
+            comment: None,
         })
     }
 }

@@ -531,6 +531,9 @@ fn cmd_list(archive: &str, password: Option<&str>) -> Result<(), String> {
             entry.method_name(),
             entry.name()
         );
+        if let Some(comment) = output::format_comment_line(entry.comment()) {
+            println!("      Comment: {comment}");
+        }
     }
 
     Ok(())

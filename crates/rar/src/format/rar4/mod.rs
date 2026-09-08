@@ -32,6 +32,11 @@ pub(crate) const ENDARC_HEAD: u8 = 0x7b;
 /// comment `CMT` are both NEWSUB blocks).
 pub(crate) const NEWSUB_HEAD: u8 = 0x7a;
 
+/// COMM_HEAD: the per-file comment sub-block nested inside a `FILE_HEAD` when
+/// the `FHD_COMMENT` flag is set. Distinct from `FILE_HEAD` (0x74) and
+/// `NEWSUB_HEAD` (0x7a).
+pub(crate) const COMM_HEAD: u8 = 0x75;
+
 // ── Header flags ───────────────────────────────────────────────────────────
 
 pub(crate) const LONG_BLOCK: u16 = 0x8000;
@@ -482,14 +487,18 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         None
     };
 
-    // File comment: a nested COMM_HEAD block inside the header. Its own
-    // 16-bit CRC covers the comment data; the outer header CRC stops before
-    // it (handled by `header_crc_end`). We skip over the comment bytes here;
-    // they are not exposed in the common model.
-    if block.flags & FHD_COMMENT != 0 && pos + 2 <= head_end {
-        pos += 2;
-        // Comment data runs to the end of the header (before ext_time).
-    }
+    // File comment: a nested COMM_HEAD (0x75) subblock set by the `FHD_COMMENT`
+    // flag. Its own 16-bit CRC covers the comment data and the outer file-header
+    // CRC stops before it (see `header_crc_end`). The comment sits after any
+    // extended-time area, so we locate it by scanning for the COMM_HEAD marker
+    // and decode its payload (UTF-8 kept; an even-length non-UTF-8 payload is
+    // read as UTF-16LE). `pos` is left unchanged: the extended-time region is
+    // read from `pos` below.
+    let comment = if block.flags & FHD_COMMENT != 0 {
+        parse_file_comment(&h[pos..head_end]).0
+    } else {
+        None
+    };
 
     // Extended time: four nibbles (mtime, ctime, atime, arctime) with
     // sub-second precision. Only mtime is decoded; ctime/atime are stored
@@ -553,6 +562,7 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         unp_ver,
         salt,
         legacy_head_crc: Some(block.head_crc),
+        comment,
     };
     Ok(fh)
 }
@@ -721,7 +731,127 @@ fn extract_mtime_refinement(ext_time: &[u8]) -> Option<u32> {
     Some(ticks * TICK_NANOSECONDS)
 }
 
+/// Locate and decode a RAR 3.x/4.x per-file comment (`FHD_COMMENT`). The
+/// comment is a COMM_HEAD (0x75) subblock that follows the extended-time area
+/// at the end of the file header. Returns the decoded text and the byte length
+/// the comment block occupies (`0` when absent).
+fn parse_file_comment(tail: &[u8]) -> (Option<Vec<u8>>, usize) {
+    let mut i = 0;
+    while i + 7 <= tail.len() {
+        if tail[i + 2] == COMM_HEAD {
+            let flags = u16::from_le_bytes([tail[i + 3], tail[i + 4]]);
+            let head_size = u16::from_le_bytes([tail[i + 5], tail[i + 6]]) as usize;
+            // CommentHeader body (version, unp_ver, method, comm_crc) is 5 bytes
+            // after the 7-byte block prefix.
+            let (data_start, data_end) = if flags & LONG_BLOCK != 0 {
+                if i + 11 > tail.len() {
+                    i += 1;
+                    continue;
+                }
+                let add = u32::from_le_bytes(tail[i + 7..i + 11].try_into().unwrap()) as usize;
+                (i + 16, i + 16 + add)
+            } else {
+                (i + 12, i + head_size)
+            };
+            if data_start <= data_end && data_end <= tail.len() {
+                let method = tail[i + 9];
+                let raw = &tail[data_start..data_end];
+                // WinRAR stores file comments uncompressed (method 0x30); other
+                // methods are rare and best-effort (raw bytes) here.
+                let payload = if method == RAR4_METHOD_STORE {
+                    raw.to_vec()
+                } else {
+                    raw.to_vec()
+                };
+                return (Some(decode_comment_text(&payload)), data_end - i);
+            }
+        }
+        i += 1;
+    }
+    (None, 0)
+}
+
+/// Decode a comment payload to raw text bytes. UTF-8 is kept as-is; an
+/// even-length non-UTF-8 payload is treated as UTF-16LE (WinRAR's comment
+/// encoding for non-ASCII content).
+fn decode_comment_text(payload: &[u8]) -> Vec<u8> {
+    if std::str::from_utf8(payload).is_ok() || !payload.len().is_multiple_of(2) {
+        return payload.to_vec();
+    }
+    let (units, _) = payload.as_chunks::<2>();
+    let units: Vec<u16> = units
+        .iter()
+        .map(|p| u16::from_le_bytes([p[0], p[1]]))
+        .collect();
+    if units.iter().any(|u| (0xD800..=0xDFFF).contains(u)) {
+        return payload.to_vec();
+    }
+    String::from_utf16_lossy(&units).into_bytes()
+}
+
 pub(crate) mod create;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a COMM_HEAD (0x75) file-comment subblock wrapping `payload`.
+    fn comm_block(payload: &[u8]) -> Vec<u8> {
+        let head_size = 12 + payload.len();
+        let mut b = vec![0u8; 12];
+        b[2] = COMM_HEAD; // head type
+        b[5..7].copy_from_slice(&(head_size as u16).to_le_bytes());
+        b[7] = 0x50; // version
+        b[8] = 29; // unp ver
+        b[9] = 0x30; // method (store)
+        b.extend_from_slice(payload);
+        b
+    }
+
+    #[test]
+    fn parses_ascii_file_comment() {
+        let tail = comm_block(b"release notes");
+        let (c, len) = parse_file_comment(&tail);
+        assert_eq!(c.unwrap(), b"release notes");
+        assert_eq!(len, tail.len());
+    }
+
+    #[test]
+    fn parses_utf16_file_comment() {
+        let payload: Vec<u8> = "注".encode_utf16().fold(Vec::new(), |mut v, u| {
+            v.extend_from_slice(&u.to_le_bytes());
+            v
+        });
+        let tail = comm_block(&payload);
+        let (c, _) = parse_file_comment(&tail);
+        assert_eq!(c.unwrap(), "注".as_bytes());
+    }
+
+    #[test]
+    fn no_comment_returns_none() {
+        // A FILE_HEAD (0x74) with no trailing COMM_HEAD subblock.
+        let tail = [0u8, 1, FILE_HEAD, 0, 0, 0, 0];
+        assert!(parse_file_comment(&tail).0.is_none());
+    }
+
+    #[test]
+    fn long_block_comment_is_located() {
+        // LONG_BLOCK flag set: comment data lives in the 4-byte add_size.
+        let payload = b"long form";
+        let head_size = 7 + 4; // prefix + add_size
+        let add_size = payload.len() as u32;
+        let mut b = vec![0u8; 11];
+        b[2] = COMM_HEAD;
+        b[3..5].copy_from_slice(&(LONG_BLOCK as u16).to_le_bytes());
+        b[5..7].copy_from_slice(&(head_size as u16).to_le_bytes());
+        b[7..11].copy_from_slice(&add_size.to_le_bytes());
+        b.extend_from_slice(&[0x50, 29, 0x30, 0, 0]); // version, unp_ver, method, comm_crc
+        b.extend_from_slice(payload);
+        let (c, len) = parse_file_comment(&b);
+        assert_eq!(c.unwrap(), payload);
+        assert_eq!(len, b.len());
+    }
+}
 
 /// Decrypt one `-hp` encrypted block header from an in-memory archive copy
 /// (the reader's streaming [`read_encrypted_block`] works on files; the

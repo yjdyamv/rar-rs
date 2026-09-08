@@ -2816,6 +2816,9 @@ fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
             entry.method_name(),
             entry.name()
         );
+        if let Some(comment) = output::format_comment_line(entry.comment()) {
+            println!("      Comment: {comment}");
+        }
 
         total_size += entry.size();
         total_packed += entry.compressed_size();

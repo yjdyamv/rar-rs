@@ -26,6 +26,36 @@ pub fn extract_dest(dest: &str, archive: &str, append_dir: bool) -> std::path::P
     dest.join(base)
 }
 
+/// Render a member comment for display: decode the raw bytes to text, replace
+/// control/newline characters with spaces, and truncate to a single line.
+/// Returns `None` for absent or empty comments.
+pub fn format_comment_line(comment: Option<&[u8]>) -> Option<String> {
+    let c = comment?;
+    if c.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(c);
+    let cleaned: String = text
+        .chars()
+        .map(|ch| {
+            if ch == '\n' || ch == '\r' || (ch.is_control() && ch != '\t') {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut s = trimmed.to_string();
+    if s.chars().count() > 200 {
+        s = format!("{}…", s.chars().take(200).collect::<String>());
+    }
+    Some(s)
+}
+
 /// Print a verbose listing (like `rar v` / `unrar v`).
 pub fn print_verbose_list(rar: &rar_rs::ArchiveReader) -> Result<(), String> {
     println!(
@@ -59,6 +89,9 @@ pub fn print_verbose_list(rar: &rar_rs::ArchiveReader) -> Result<(), String> {
             entry.method_name(),
             entry.name()
         );
+        if let Some(comment) = format_comment_line(entry.comment()) {
+            println!("      Comment: {comment}");
+        }
         total_size += entry.size();
         total_packed += entry.compressed_size();
     }

@@ -1044,11 +1044,6 @@ pub(crate) fn repack_solid_archive(
     let deleted_count = deleted.iter().filter(|d| **d).count();
     // Shapes the fresh writer cannot reproduce yet get a clear refusal
     // instead of a silently degraded archive.
-    if archive.entries.iter().any(|e| e.is_dir()) {
-        return Err(RarError::Unsupported(
-            "repacking solid RAR4 archives with directory members is not supported yet".into(),
-        ));
-    }
     if archive.entries.iter().any(|e| e.header.unp_ver < 29) {
         return Err(RarError::Unsupported(
             "repacking solid archives with legacy (pre-RAR3) codec members is not supported".into(),
@@ -1148,11 +1143,16 @@ pub(crate) fn repack_solid_archive(
             // The comment is emitted by the writer (it must precede every
             // member and has to be header-encrypted on a `-hp` archive).
             writer.set_rar4_writer_comment(final_comment.clone());
-            for i in 0..archive.entries.len() {
-                let data = archive.rar4_decode_solid_through(i)?;
-                if let Some((_, name, level, mtime, mtime_ns)) = kept.iter().find(|k| k.0 == i) {
-                    writer.add_rar4_data(name.clone(), data, *level, *mtime, *mtime_ns)?;
-                }
+            for (i, name, level, mtime, mtime_ns) in &kept {
+                // Directory members are zero-byte placeholders: they contribute
+                // nothing to the solid window (the decoder skips them), so they
+                // are re-emitted with empty data rather than the decoded run.
+                let data = if archive.entries[*i].is_dir() {
+                    Vec::new()
+                } else {
+                    archive.rar4_decode_solid_through(*i)?
+                };
+                writer.add_rar4_data(name.clone(), data, *level, *mtime, *mtime_ns)?;
             }
             // Deferred solid-append additions continue the same fresh chain.
             for entry in additions {
@@ -1945,6 +1945,48 @@ mod repack_tests {
         let mut ar = RarArchive::open(&path).unwrap();
         assert_eq!(ar.namelist(), ["b.txt"]);
         assert_eq!(ar.read("b.txt").unwrap(), p2);
+    }
+
+    #[test]
+    fn solid_repack_keeps_directory_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("soliddir.rar");
+        let p1 = make_text(50_000);
+        let p2 = make_text(40_000);
+        build_solid(
+            &path,
+            &[("docs/", &[]), ("a.txt", &p1), ("b.txt", &p2)],
+        );
+
+        // The directory member is present and recognized as a directory.
+        {
+            let a = crate::archive::RarArchive::open(&path).unwrap();
+            let dir_entry = a
+                .entries
+                .iter()
+                .find(|e| e.name() == "docs/")
+                .expect("directory member present");
+            assert!(dir_entry.is_dir());
+        }
+
+        // Delete b.txt; the solid chain (including the directory) is repacked.
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        let b = editor.unique_entry("b.txt").unwrap();
+        editor
+            .apply(crate::archive::editor::EditPlan::new().delete(b))
+            .unwrap();
+        drop(editor);
+
+        let mut ar = crate::archive::RarArchive::open(&path).unwrap();
+        let names: Vec<&str> = ar.entries.iter().map(|e| e.name()).collect();
+        assert_eq!(names, ["docs/", "a.txt"]);
+        let dir_entry = ar
+            .entries
+            .iter()
+            .find(|e| e.name() == "docs/")
+            .expect("directory member survives repack");
+        assert!(dir_entry.is_dir());
+        assert_eq!(ar.read("a.txt").unwrap(), p1);
     }
 
     #[test]

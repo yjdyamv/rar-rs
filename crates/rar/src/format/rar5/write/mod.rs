@@ -692,6 +692,10 @@ impl RarArchive {
         // A queued archive comment is emitted right before the first member
         // (it must precede every member; the queue is consumed once).
         self.emit_pending_rar4_comment()?;
+        // A directory member is written as a zero-byte placeholder whose name
+        // ends in `/`; its on-disk attribute is the directory bit (0x10) rather
+        // than the regular-file archive bit (0x20).
+        let is_dir = name.ends_with('/');
         let file_size = data.len() as u64;
         let file_crc = crate::crc32::crc32(&data);
 
@@ -861,6 +865,7 @@ impl RarArchive {
             salt: Option<[u8; 8]>,
             ext_time: Option<&[u8]>,
             solid_continuation: bool,
+            is_dir: bool,
             split_before: bool,
             split_after: bool,
         ) -> RarResult<(u64, u64)> {
@@ -894,7 +899,7 @@ impl RarArchive {
                 unp_ver: 29,
                 method,
                 name: encoded_name,
-                attr: 0x20, // archive bit: regular file
+                attr: if is_dir { 0x10 } else { 0x20 }, // directory bit : regular-file archive bit
                 salt,
                 ext_time,
                 window_bits: 6, // 4 MiB dictionary
@@ -938,6 +943,7 @@ impl RarArchive {
                     salt,
                     ext_time.as_deref(),
                     solid_continuation,
+                    is_dir,
                     false,
                     false,
                 )?;
@@ -954,6 +960,7 @@ impl RarArchive {
                         format_version: 4,
                         unp_ver: 29,
                         data_offset,
+                        is_directory: is_dir,
                         flags: if salt.is_some() {
                             crate::format::rar4::FHD_PASSWORD as u64
                         } else {
@@ -1019,6 +1026,7 @@ impl RarArchive {
                         salt,
                         ext_time.as_deref(),
                         solid_continuation,
+                        is_dir,
                         split_before,
                         split_after,
                     )?;
