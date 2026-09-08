@@ -1955,10 +1955,12 @@ impl Unpack29Encoder {
     /// carried model when the last member was PPMd (the model is cloned so a
     /// losing trial never disturbs it).
     pub fn encode_solid_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
-        // LZ first (submits levels + window). If PPMd wins, the LZ table
-        // advance must be rolled back: a decoder never decodes an LZ table
-        // for a PPMd member, so its levels stay at the pre-member value, and
-        // the next LZ member's keep/delta decision must be made against that.
+        // LZ first (submits levels + window). The member's table levels must
+        // end in the state a decoder holds after reading it: an LZ member's
+        // decoder read the LZ tables (so levels are the member's final
+        // absolute tables), while a PPMd member's decoder never read them
+        // (so levels stay at the pre-member value). The next member's
+        // keep/delta table decision is made against exactly that state.
         let levels_before = self.levels;
         let lz = self.encode_member(input)?;
         // The PPMd trial may continue the carried model; try on a clone so a
@@ -1967,9 +1969,16 @@ impl Unpack29Encoder {
         let saved_flag = self.last_was_ppmd;
         let trial = self.encode_ppmd_member_chain(input);
         match trial {
-            Ok(ppmd) if ppmd.len() < lz.len() => Ok(ppmd),
-            _ => {
+            Ok(ppmd) if ppmd.len() < lz.len() => {
+                // PPMd member emitted: roll the LZ table advance back, since
+                // the decoder's levels never moved past the pre-member value.
                 self.levels = levels_before;
+                Ok(ppmd)
+            }
+            _ => {
+                // LZ member emitted: the decoder holds this member's final
+                // tables, so leave the levels exactly where `encode_member`
+                // put them. Only the failed PPMd trial is rolled back.
                 self.ppmd = saved;
                 self.last_was_ppmd = saved_flag;
                 Ok(lz)

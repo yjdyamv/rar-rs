@@ -1677,13 +1677,13 @@ mod repack_tests {
         assert!(!path.exists(), "deleting every member erases the archive");
     }
 
-    /// Pre-existing RAR4 solid codec regression: sectioned text members
-    /// around ~460 KB fail to decode from the second member on (our own
-    /// writer's output, our own decoder, and 6.23's decoder agree the first
-    /// member decodes and the chain breaks at the second). Pure repeated
-    /// lines decode at any size. Tracked separately from the edit work.
+    /// Regression: RAR4 solid chains with sectioned text members around
+    /// ~460 KB used to break from the second member on. The solid encoder
+    /// rolled its level-table state back to the pre-member value even when
+    /// an LZ member won, while the decoder keeps the member-final tables;
+    /// the next member's keep/delta table header was then applied to the
+    /// wrong base. Locked by this test (members 1 and 2 must decode).
     #[test]
-    #[ignore = "pre-existing solid codec bug: sectioned ~460KB members break the chain decode"]
     fn solid_sectioned_content_decode_regression() {
         let line = b"the quick brown fox jumps over the lazy dog 0123456789\n";
         let mut data = Vec::new();
