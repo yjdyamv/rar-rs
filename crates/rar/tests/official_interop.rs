@@ -898,3 +898,108 @@ fn official_unrar_validates_rar4_header_edits() {
         .unwrap();
     assert!(status.success(), "unrar rejected the locked archive");
 }
+
+/// WinRAR 6.23 (the last RAR4-producing official release) must accept a
+/// RAR4 archive whose members were renamed by our stage-A header surgery —
+/// both an archive built by our own writer (ASCII -> Unicode and
+/// Unicode -> ASCII) and an archive built by 6.23's Rar.exe itself.
+#[test]
+fn official_unrar_validates_rar4_renames() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let dir = make_temp_dir();
+
+    // Our writer -> our rename -> 6.23 UnRAR t.
+    let ours = dir.path().join("rn4.rar");
+    let f1 = dir.path().join("alpha.txt");
+    let f2 = dir.path().join("beta.bin");
+    let payload_1: Vec<u8> = b"first rename payload ".repeat(1_200);
+    let payload_2: Vec<u8> = b"second rename payload ".repeat(900);
+    std::fs::write(&f1, &payload_1).unwrap();
+    std::fs::write(&f2, &payload_2).unwrap();
+    {
+        let mut archive = rar_rs::RarArchive::create_with_options(
+            &ours,
+            rar_rs::CreateOptions {
+                compression: rar_rs::ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add(&f1, 0).unwrap();
+        archive.add(&f2, 0).unwrap();
+        archive.close().unwrap();
+    }
+    {
+        let mut editor = rar_rs::ArchiveEditor::open(&ours).unwrap();
+        let a = editor
+            .entries()
+            .find(|e| e.name().ends_with("alpha.txt"))
+            .unwrap()
+            .id();
+        let b = editor
+            .entries()
+            .find(|e| e.name().ends_with("beta.bin"))
+            .unwrap()
+            .id();
+        editor
+            .apply(
+                rar_rs::EditPlan::new()
+                    .rename(a, "阿尔法.txt")
+                    .rename(b, "gamma.bin"),
+            )
+            .unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&ours)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected renamed rar-rs archive");
+    let mut reader = rar_rs::ArchiveReader::open(&ours).unwrap();
+    let alpha = reader.unique_entry("阿尔法.txt").unwrap();
+    assert_eq!(reader.read_entry(alpha).unwrap(), payload_1);
+    let gamma = reader.unique_entry("gamma.bin").unwrap();
+    assert_eq!(reader.read_entry(gamma).unwrap(), payload_2);
+
+    // 6.23-built RAR4 -> our rename -> 6.23 UnRAR t.
+    let theirs = dir.path().join("official4.rar");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("m1.bin"), &payload_1).unwrap();
+    std::fs::write(src.join("m2.txt"), &payload_2).unwrap();
+    let status = std::process::Command::new(&rar_bin)
+        .args(["a", "-ma4", "-idq"])
+        .arg(&theirs)
+        .arg(src.join("m1.bin"))
+        .arg(src.join("m2.txt"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "6.23 could not create the RAR4 fixture");
+    {
+        let mut editor = rar_rs::ArchiveEditor::open(&theirs).unwrap();
+        let m1 = editor
+            .entries()
+            .find(|e| e.name().ends_with("m1.bin"))
+            .unwrap()
+            .id();
+        editor
+            .rename_entries(&[(m1, "第一.bin".to_string())])
+            .unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&theirs)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "unrar rejected 6.23 archive renamed by rar-rs"
+    );
+}

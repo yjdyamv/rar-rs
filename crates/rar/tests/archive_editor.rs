@@ -324,49 +324,6 @@ fn edition_never_mixes_ids_between_archives() {
 }
 
 #[test]
-fn rar4_archives_are_refused_with_a_clear_unsupported() {
-    // The surgical rewrite engine is RAR5-only; the editor must refuse
-    // legacy-container archives up front instead of failing mid-rewrite.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("rar4.rar");
-    let file = dir.path().join("src.txt");
-    std::fs::write(&file, b"rar4 member").unwrap();
-    {
-        let mut archive = RarArchive::create_with_options(
-            &path,
-            rar_rs::CreateOptions {
-                compression: ArchiveVersion::V29,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        archive.add(&file, 0).unwrap();
-        let second = dir.path().join("second.txt");
-        std::fs::write(&second, b"second rar4 member").unwrap();
-        archive.add_as(&second, "other.txt", 0).unwrap();
-        archive.close().unwrap();
-    }
-    let before = std::fs::read(&path).unwrap();
-
-    let mut editor = ArchiveEditor::open(&path).unwrap();
-    let one = editor.entries_named("src.txt").next().unwrap().id();
-    assert!(matches!(
-        editor.rename_entries(&[(one, "renamed.txt".to_string())]),
-        Err(RarError::Unsupported(_))
-    ));
-    let two = editor.entries_named("other.txt").next().unwrap().id();
-    assert!(matches!(
-        editor.delete_entries(&[two]),
-        Err(RarError::Unsupported(_))
-    ));
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        before,
-        "refused edits must leave the archive untouched"
-    );
-}
-
-#[test]
 fn combined_edit_plan_applies_all_ops_in_one_rewrite() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("plan.rar");
@@ -686,7 +643,7 @@ fn comment_and_recovery_ops_refuse_multivolume_archives() {
     assert_eq!(after, snapshot, "refused ops must not touch any volume");
 }
 
-// ── RAR4 header-level edits (ADR 0005, stage A: rr / k) ────────────────────
+// ── RAR4 header-level edits (ADR 0005, stage A) ────────────────────────────
 
 /// Build a single-volume RAR4 archive with two stored members (`a.bin`,
 /// ~400 KB of deterministic pseudo-random data, and `b.txt`, 60 KB of
@@ -856,7 +813,7 @@ fn rar4_plan_validation_mirrors_rar5_before_any_write() {
         editor.apply(EditPlan::new().set_recovery(200)),
         Err(RarError::InvalidOption(_))
     ));
-    // One plan may carry only one recovery-record change.
+    // Delete in a plan is refused up front for RAR4 (stage B).
     let one = editor.entries().next().unwrap().id();
     assert!(matches!(
         editor.apply(EditPlan::new().set_recovery(10).delete(one)),
@@ -867,4 +824,198 @@ fn rar4_plan_validation_mirrors_rar5_before_any_write() {
         before,
         "rejected plans must leave the archive untouched"
     );
+}
+
+#[test]
+fn rar4_delete_is_still_refused_with_a_clear_unsupported() {
+    // Stage rollout (ADR 0005): header-level edits (rename, rr, lock) work
+    // on RAR4, but member deletion is a later stage; the editor must refuse
+    // it up front instead of failing mid-rewrite.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rar4.rar");
+    let file = dir.path().join("src.txt");
+    std::fs::write(&file, b"rar4 member").unwrap();
+    {
+        let mut archive = RarArchive::create_with_options(
+            &path,
+            rar_rs::CreateOptions {
+                compression: ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add(&file, 0).unwrap();
+        let second = dir.path().join("second.txt");
+        std::fs::write(&second, b"second rar4 member").unwrap();
+        archive.add_as(&second, "other.txt", 0).unwrap();
+        archive.close().unwrap();
+    }
+
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    // Rename now lands (stage A): members are renamed and data untouched.
+    let one = editor.entries_named("src.txt").next().unwrap().id();
+    assert_eq!(
+        editor
+            .rename_entries(&[(one, "renamed.txt".to_string())])
+            .unwrap(),
+        1
+    );
+    drop(editor);
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let renamed = reader.unique_entry("renamed.txt").unwrap();
+    assert_eq!(reader.read_entry(renamed).unwrap(), b"rar4 member");
+
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    let two = editor.entries_named("other.txt").next().unwrap().id();
+    let before_delete = std::fs::read(&path).unwrap();
+    assert!(matches!(
+        editor.delete_entries(&[two]),
+        Err(RarError::Unsupported(_))
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before_delete,
+        "refused edits must leave the archive untouched"
+    );
+}
+
+#[test]
+fn rar4_rename_rewrites_headers_and_keeps_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rn4.rar");
+    // The RAR4 writer stores `add` members under their full path; build the
+    // Unicode member from a file (add_bytes with a non-ASCII name is broken
+    // in the writer — see the ignored regression below).
+    let ascii_file = dir.path().join("a.txt");
+    let unicode_file = dir.path().join("文-件名-ünï.bin");
+    let payload_a = b"renamed payload one ".repeat(800);
+    let payload_b = b"unicode payload two ".repeat(700);
+    std::fs::write(&ascii_file, &payload_a).unwrap();
+    std::fs::write(&unicode_file, &payload_b).unwrap();
+    {
+        let mut archive = RarArchive::create_with_options(
+            &path,
+            rar_rs::CreateOptions {
+                compression: ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add(&ascii_file, 0).unwrap();
+        archive.add(&unicode_file, 0).unwrap();
+        archive.close().unwrap();
+    }
+
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    let unicode_stored = editor
+        .entries()
+        .find(|e| e.name().ends_with("文-件名-ünï.bin"))
+        .expect("unicode member")
+        .id();
+    let ascii_stored = editor
+        .entries()
+        .find(|e| e.name().ends_with("a.txt"))
+        .expect("ascii member")
+        .id();
+
+    // One atomic plan: rename both members (ASCII -> Unicode and
+    // Unicode -> ASCII) and rebuild the recovery record at 10%.
+    let report = editor
+        .apply(
+            rar_rs::EditPlan::new()
+                .rename(ascii_stored, "重命名-阿尔法.txt")
+                .rename(unicode_stored, "plain.bin")
+                .set_recovery(10),
+        )
+        .unwrap();
+    assert_eq!(report.renamed(), 2);
+
+    drop(editor);
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let alpha = reader.unique_entry("重命名-阿尔法.txt").unwrap();
+    assert_eq!(reader.read_entry(alpha).unwrap(), payload_a);
+    let plain = reader.unique_entry("plain.bin").unwrap();
+    assert_eq!(reader.read_entry(plain).unwrap(), payload_b);
+
+    // The recovery record is present and repairable after the rename.
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(count_occurrences(&bytes, b"Protect+"), 1);
+    let mut damaged = bytes.clone();
+    let at = bytes.len() / 2;
+    damaged[at..at + 16].fill(0x55);
+    let damaged_path = dir.path().join("dmg.rar");
+    std::fs::write(&damaged_path, &damaged).unwrap();
+    let fixed_path = dir.path().join("fixed.rar");
+    assert!(rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path).unwrap());
+    assert_eq!(std::fs::read(&fixed_path).unwrap(), bytes);
+
+    // A stale ID (from before the rename) fails without touching the file.
+    let snapshot = std::fs::read(&path).unwrap();
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    assert!(matches!(
+        editor.rename_entries(&[(ascii_stored, "x.txt".to_string())]),
+        Err(RarError::StaleEntryId)
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), snapshot);
+}
+
+/// `rar ch` on RAR4 is case conversion through the same rename path.
+#[test]
+fn rar4_case_conversion_renames_every_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ch4.rar");
+    let file = dir.path().join("MixedCase.txt");
+    std::fs::write(&file, b"case payload").unwrap();
+    {
+        let mut archive = RarArchive::create_with_options(
+            &path,
+            rar_rs::CreateOptions {
+                compression: ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add(&file, 0).unwrap();
+        archive.close().unwrap();
+    }
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    let stored = editor.entries().next().unwrap().name().to_string();
+    let converted = if stored.contains('C') {
+        stored.to_lowercase()
+    } else {
+        stored.to_uppercase()
+    };
+    let id = editor.unique_entry(&stored).unwrap();
+    assert_eq!(
+        editor.rename_entries(&[(id, converted.clone())]).unwrap(),
+        1
+    );
+    drop(editor);
+    let reader = ArchiveReader::open(&path).unwrap();
+    assert!(reader.unique_entry(&converted).is_ok());
+    assert!(reader.entries_named(&stored).next().is_none());
+}
+
+/// RAR4 writer regression (pre-existing, unrelated to the edit engine):
+/// `add_bytes` with a non-ASCII member name emits a corrupt FILE_HEAD that
+/// the reader (and WinRAR) rejects. Members added from files (`add`) with
+/// Unicode paths are fine.
+#[test]
+#[ignore = "RAR4 writer bug: add_bytes + non-ASCII name produces a corrupt archive"]
+fn rar4_writer_add_bytes_unicode_name_is_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bug.rar");
+    {
+        let mut archive = RarArchive::create_with_options(
+            &path,
+            rar_rs::CreateOptions {
+                compression: ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("文-件名-ünï.bin", b"payload", 0).unwrap();
+        archive.close().unwrap();
+    }
+    RarArchive::open(&path).expect("archive written by add_bytes must open");
 }

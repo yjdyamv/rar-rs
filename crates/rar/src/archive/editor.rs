@@ -269,11 +269,13 @@ impl ArchiveEditor {
 
     /// Apply an [`EditPlan`] to a RAR 1.5–4.x archive (ADR 0005 stage A).
     ///
-    /// Only recovery-record changes (`rar rr`) are implemented so far;
-    /// delete/rename/comment ops are refused with a clear
-    /// [`RarError::Unsupported`] so a failed plan never touches the file.
+    /// Member renames (`rar rn` / `rar ch`) and recovery-record changes
+    /// (`rar rr`) are implemented; delete/comment ops are refused with a
+    /// clear [`RarError::Unsupported`] until their stages land. A failed
+    /// plan never touches the file.
     fn apply_rar4(&mut self, plan: &EditPlan) -> RarResult<EditReport> {
         let mut force_rr: Option<u8> = None;
+        let mut renames: Vec<(usize, String)> = Vec::with_capacity(plan.ops().len());
         for op in plan.ops() {
             match op {
                 EditOp::Delete(_) => {
@@ -281,10 +283,10 @@ impl ArchiveEditor {
                         "deleting RAR4 members is not supported yet".into(),
                     ));
                 }
-                EditOp::Rename(..) => {
-                    return Err(RarError::Unsupported(
-                        "renaming RAR4 members is not supported yet".into(),
-                    ));
+                EditOp::Rename(id, new_name) => {
+                    // Resolve against the catalog like the RAR5 path: a
+                    // stale ID fails the whole plan before any rewrite.
+                    renames.push((self.resolve_id(*id)?, new_name.clone()));
                 }
                 EditOp::SetComment(_) => {
                     return Err(RarError::Unsupported(
@@ -301,12 +303,16 @@ impl ArchiveEditor {
                 }
             }
         }
-        let Some(percent) = force_rr else {
+        if renames.is_empty() && force_rr.is_none() {
             return Err(RarError::Format("no members to edit".into()));
-        };
-        super::rar4_edit::add_or_replace_recovery(&mut self.archive, percent)?;
+        }
+        // One atomic rewrite carries every rename and the recovery change.
+        let summary = super::rar4_edit::edit_rar4(&mut self.archive, &renames, force_rr)?;
         self.catalog_token = allocate_catalog_token()?;
-        Ok(EditReport::default())
+        Ok(EditReport {
+            deleted: summary.deleted,
+            renamed: summary.renamed,
+        })
     }
 
     /// Delete the members identified by `ids` (like `rar d`); returns the
@@ -337,8 +343,10 @@ impl ArchiveEditor {
     /// member already has is allowed (duplicate names are first-class). On
     /// success every previously issued ID becomes stale.
     ///
-    /// RAR4 (legacy-container) archives are refused with
-    /// [`RarError::Unsupported`]: the rewrite engine is RAR5-only.
+    /// RAR4 (legacy-container) archives are supported (ADR 0005 stage A):
+    /// the FILE_HEAD is rebuilt with the new encoded name and its CRC16
+    /// recomputed; member data is never recompressed. Multi-volume,
+    /// header-encrypted (`-hp`) and locked archives are refused.
     pub fn rename_entries(&mut self, renames: &[(EntryId, String)]) -> RarResult<usize> {
         let mut plan = EditPlan::new();
         for (id, new_name) in renames {
