@@ -273,6 +273,8 @@ struct DeleteArgs {
 /// Archive path plus old/new name pairs.
 #[derive(Args)]
 struct RenameArgs {
+    #[command(flatten)]
+    password: password::PasswordArgs,
     #[arg(value_name = "ARCHIVE")]
     archive: String,
     #[arg(value_name = "OLD", required = true, num_args = 2..)]
@@ -1947,7 +1949,9 @@ fn cmd_rename(args: &RenameArgs) -> Result<(), String> {
         .chunks(2)
         .map(|c| (c[0].as_str(), c[1].as_str()))
         .collect();
-    let mut editor = open_editor(archive_path, None)?;
+    // A `-hp` archive needs its password: the rename rewrites the encrypted
+    // FILE_HEAD.
+    let mut editor = open_editor(archive_path, args.password.password.as_deref())?;
     let plan = editor_rename_plan(&editor, &pairs).map_err(|e| format!("rename: {e}"))?;
     let renamed = editor
         .apply(plan)
@@ -2174,8 +2178,14 @@ fn cmd_repair(args: &ArchiveArgs) -> Result<(), String> {
         return Ok(());
     }
     // The official tool refuses an obviously truncated archive with a
-    // clear error; validate the repaired bytes with our own reader.
-    if let Err(e) = rar_rs::RarArchive::open(&fixed_path) {
+    // clear error; validate the repaired bytes with our own reader. A `-hp`
+    // archive must be opened with its password, or the open fails before we
+    // even reach the members.
+    let verified = match &args.password.password {
+        Some(pw) if !pw.is_empty() => rar_rs::RarArchive::open_with_password(&fixed_path, pw),
+        _ => rar_rs::RarArchive::open(&fixed_path),
+    };
+    if let Err(e) = verified {
         let _ = std::fs::remove_file(&fixed_path);
         return Err(format!("repair produced an unreadable archive: {e}"));
     }
