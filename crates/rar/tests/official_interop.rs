@@ -820,3 +820,81 @@ fn official_time_and_owner_cross_validation() {
         .unwrap();
     assert!(status.success(), "unrar rejected our ns-mtime archive");
 }
+
+/// WinRAR 6.23 (the last RAR4-producing official release) must accept a
+/// RAR4 archive edited by our stage-A header ops: an inline NEWSUB recovery
+/// record added by `rar rr` semantics, a byte-level repair through that
+/// record, and a locked archive. 6.23's UnRAR validates every case.
+#[test]
+fn official_unrar_validates_rar4_header_edits() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return, // skipped unless the interop script sets it
+    };
+    let dir = make_temp_dir();
+    let path = dir.path().join("rar4-edit.rar");
+    let a_path = dir.path().join("a.bin");
+    let a_payload: Vec<u8> = (0..300_000u32)
+        .map(|i| ((i.wrapping_mul(2_654_435_761)) >> 13) as u8)
+        .collect();
+    std::fs::write(&a_path, &a_payload).unwrap();
+    let b_path = dir.path().join("b.txt");
+    std::fs::write(&b_path, vec![b'x'; 80_000]).unwrap();
+    {
+        let mut archive = rar_rs::RarArchive::create_with_options(
+            &path,
+            rar_rs::CreateOptions {
+                compression: rar_rs::ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add(&a_path, 0).unwrap();
+        archive.add_as(&b_path, "b.txt", 0).unwrap();
+        archive.close().unwrap();
+    }
+
+    // `rar rr 10%` semantics on the existing archive.
+    {
+        let mut editor = rar_rs::ArchiveEditor::open(&path).unwrap();
+        editor
+            .apply(rar_rs::EditPlan::new().set_recovery(10))
+            .unwrap();
+    }
+    let with_rr = std::fs::read(&path).unwrap();
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected the rr-added archive");
+
+    // Damage a protected sector; our legacy repair rebuilds it, and 6.23's
+    // UnRAR still validates the repaired bytes.
+    let mut damaged = with_rr.clone();
+    let damage_at = 150_000;
+    damaged[damage_at..damage_at + 64].fill(0x9c);
+    let damaged_path = dir.path().join("damaged.rar");
+    std::fs::write(&damaged_path, &damaged).unwrap();
+    let fixed_path = dir.path().join("fixed.rar");
+    assert!(rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path).unwrap());
+    assert_eq!(std::fs::read(&fixed_path).unwrap(), with_rr);
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&fixed_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected the repaired archive");
+
+    // `rar k` semantics: locked archives still validate.
+    {
+        let mut editor = rar_rs::ArchiveEditor::open(&fixed_path).unwrap();
+        editor.lock().unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&fixed_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected the locked archive");
+}

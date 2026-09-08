@@ -739,7 +739,7 @@ impl RarArchive {
             // MHD_RECOVERY: the archive carries a recovery record (the
             // NEWSUB `RR` block written at close). WinRAR's repair looks
             // for this bit before scanning for the record.
-            flags |= 0x0040;
+            flags |= crate::format::rar4::MHD_RECOVERY;
         }
         let buf = crate::format::rar4::write::build_main_header(flags);
         let stream = self.stream.as_mut().unwrap();

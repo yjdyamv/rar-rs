@@ -12,6 +12,7 @@ mod discovery;
 mod editor;
 mod entry;
 mod reader;
+mod rar4_edit;
 mod transaction;
 mod writer;
 

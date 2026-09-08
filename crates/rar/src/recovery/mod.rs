@@ -3,10 +3,14 @@
 mod legacy;
 pub use legacy::repair_legacy_archive_path;
 
-/// Write-side legacy recovery-block helpers (crate-internal; the RAR4
-/// creation path calls these from `archive/create.rs`).
+/// Legacy recovery-record helpers (crate-internal): the RAR4 creation
+/// path (`archive/create.rs`) builds NEWSUB blocks through here, and the
+/// RAR4 edit path (`archive/rar4_edit.rs`) scans for an existing record
+/// to strip and rebuild.
 pub(crate) mod legacy_rr {
-    pub(crate) use super::legacy::{build_legacy_recovery_block, recovery_sector_count};
+    pub(crate) use super::legacy::{
+        build_legacy_recovery_block, recovery_sector_count, scan_protect,
+    };
 }
 pub mod rar50;
 pub mod rev50;

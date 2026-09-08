@@ -218,8 +218,14 @@ impl ArchiveEditor {
     ///
     /// Locked archives fail with [`RarError::ArchiveLocked`] (any rewrite
     /// rewrites the main header, which refuses locked archives). RAR4
-    /// archives are refused with [`RarError::Unsupported`].
+    /// archives route to the legacy-container editor (ADR 0005): stage A
+    /// supports recovery-record changes (`rar rr`); delete/rename/comment
+    /// ops are refused with [`RarError::Unsupported`] until their stages
+    /// land.
     pub fn apply(&mut self, plan: EditPlan) -> RarResult<EditReport> {
+        if self.archive.rar4 {
+            return self.apply_rar4(&plan);
+        }
         self.ensure_rewritable()?;
         // Resolve every operation against the current catalog before any
         // rewrite starts; a stale ID fails the whole plan up front.
@@ -259,6 +265,48 @@ impl ArchiveEditor {
             deleted: summary.deleted,
             renamed: summary.renamed,
         })
+    }
+
+    /// Apply an [`EditPlan`] to a RAR 1.5–4.x archive (ADR 0005 stage A).
+    ///
+    /// Only recovery-record changes (`rar rr`) are implemented so far;
+    /// delete/rename/comment ops are refused with a clear
+    /// [`RarError::Unsupported`] so a failed plan never touches the file.
+    fn apply_rar4(&mut self, plan: &EditPlan) -> RarResult<EditReport> {
+        let mut force_rr: Option<u8> = None;
+        for op in plan.ops() {
+            match op {
+                EditOp::Delete(_) => {
+                    return Err(RarError::Unsupported(
+                        "deleting RAR4 members is not supported yet".into(),
+                    ));
+                }
+                EditOp::Rename(..) => {
+                    return Err(RarError::Unsupported(
+                        "renaming RAR4 members is not supported yet".into(),
+                    ));
+                }
+                EditOp::SetComment(_) => {
+                    return Err(RarError::Unsupported(
+                        "RAR4 archive comments are not supported yet".into(),
+                    ));
+                }
+                EditOp::SetRecovery(percent) => {
+                    if force_rr.is_some() {
+                        return Err(RarError::InvalidOption(
+                            "an edit plan can carry only one recovery-record change".into(),
+                        ));
+                    }
+                    force_rr = Some(*percent);
+                }
+            }
+        }
+        let Some(percent) = force_rr else {
+            return Err(RarError::Format("no members to edit".into()));
+        };
+        super::rar4_edit::add_or_replace_recovery(&mut self.archive, percent)?;
+        self.catalog_token = allocate_catalog_token()?;
+        Ok(EditReport::default())
     }
 
     /// Delete the members identified by `ids` (like `rar d`); returns the
@@ -335,6 +383,10 @@ impl ArchiveEditor {
     /// [`RarError::ArchiveLocked`] on the next [`Self::apply`].
     #[allow(deprecated)] // role seam: delegates to the legacy in-place patch
     pub fn lock(&mut self) -> RarResult<()> {
+        if self.archive.rar4 {
+            // RAR4 lock: patch the fixed-width main header (ADR 0005 stage A).
+            return super::rar4_edit::lock_archive(&self.archive);
+        }
         self.archive.lock()
     }
 

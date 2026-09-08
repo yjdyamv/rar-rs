@@ -107,6 +107,16 @@ pub(crate) const MHD_FIRSTVOLUME: u16 = 0x0100;
 #[allow(dead_code)]
 pub(crate) const MHD_SOLID: u16 = 0x0008;
 
+/// Main header flag: the archive is locked (read-only); any edit is
+/// refused until the flag is cleared (which never happens — `rar k` is
+/// irreversible).
+pub(crate) const MHD_LOCK: u16 = 0x0004;
+
+/// Main header flag: the archive carries an inline recovery record (the
+/// NEWSUB `RR` block written before the end-of-archive block). WinRAR's
+/// repair looks for this bit before scanning for the record.
+pub(crate) const MHD_RECOVERY: u16 = 0x0040;
+
 /// Cross-volume RAR4 block scan. A member split across volumes reappears as
 /// continuation file headers (FHD_SPLIT_BEFORE) in later volumes; the scan
 /// merges them into one entry with one chunk per volume segment.

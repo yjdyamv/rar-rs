@@ -685,3 +685,186 @@ fn comment_and_recovery_ops_refuse_multivolume_archives() {
         .collect();
     assert_eq!(after, snapshot, "refused ops must not touch any volume");
 }
+
+// ── RAR4 header-level edits (ADR 0005, stage A: rr / k) ────────────────────
+
+/// Build a single-volume RAR4 archive with two stored members (`a.bin`,
+/// ~400 KB of deterministic pseudo-random data, and `b.txt`, 60 KB of
+/// repeated bytes) whose total size guarantees a multi-sector protected
+/// range once a recovery record is added.
+fn build_rar4(path: &std::path::Path, dir: &std::path::Path) {
+    let a_path = dir.join("a.bin");
+    let a_payload: Vec<u8> = (0..400_000u32)
+        .map(|i| ((i.wrapping_mul(2_654_435_761)) >> 13) as u8)
+        .collect();
+    std::fs::write(&a_path, &a_payload).unwrap();
+    let b_path = dir.join("b.txt");
+    std::fs::write(&b_path, vec![b'x'; 60_000]).unwrap();
+    let mut archive = RarArchive::create_with_options(
+        path,
+        rar_rs::CreateOptions {
+            compression: ArchiveVersion::V29,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    archive.add(&a_path, 0).unwrap();
+    archive.add_as(&b_path, "b.txt", 0).unwrap();
+    archive.close().unwrap();
+}
+
+/// The RAR4 main-header flags of a non-SFX archive written by our own
+/// writer: signature at 0, main header block at 7, flags at bytes 10..12.
+fn rar4_main_flags(bytes: &[u8]) -> u16 {
+    assert_eq!(
+        &bytes[..7],
+        b"Rar!\x1a\x07\x00",
+        "expected a plain RAR4 archive"
+    );
+    u16::from_le_bytes([bytes[10], bytes[11]])
+}
+
+fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|w| *w == needle)
+        .count()
+}
+
+#[test]
+fn rar4_recovery_record_adds_replaces_and_survives_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rr4.rar");
+    build_rar4(&path, dir.path());
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(rar4_main_flags(&before) & 0x0040, 0, "no record yet");
+
+    // Sanity: an archive without a recovery record cannot be repaired.
+    let no_rr_fixed = dir.path().join("no-rr-fixed.rar");
+    assert!(matches!(
+        rar_rs::repair_legacy_archive_path(&path, &no_rr_fixed),
+        Err(RarError::Unsupported(_))
+    ));
+
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    let names_before: Vec<String> = editor.entries().map(|e| e.name().to_string()).collect();
+    let report = editor.apply(EditPlan::new().set_recovery(10)).unwrap();
+    assert!(report.is_empty(), "rr changes no members");
+
+    let with_rr = std::fs::read(&path).unwrap();
+    assert_ne!(rar4_main_flags(&with_rr) & 0x0040, 0, "MHD_RECOVERY is set");
+    assert_eq!(count_occurrences(&with_rr, b"Protect+"), 1);
+    assert!(with_rr.len() > before.len(), "record adds bytes");
+
+    // Members are unchanged and still extract byte-identically.
+    let editor = ArchiveEditor::open(&path).unwrap();
+    let names_after: Vec<String> = editor.entries().map(|e| e.name().to_string()).collect();
+    assert_eq!(names_after, names_before);
+    let payload = {
+        let a_path = dir.path().join("a.bin");
+        std::fs::read(&a_path).unwrap()
+    };
+    let mut rar = RarArchive::open(&path).unwrap();
+    assert_eq!(rar.read("a.bin").unwrap(), payload);
+
+    // Damage one protected sector deep inside the first member's data; the
+    // NEWSUB record must rebuild the exact original bytes.
+    let mut damaged = with_rr.clone();
+    let damage_at = 200_000;
+    damaged[damage_at..damage_at + 64].fill(0xab);
+    let damaged_path = dir.path().join("damaged.rar");
+    std::fs::write(&damaged_path, &damaged).unwrap();
+    let fixed_path = dir.path().join("fixed.rar");
+    assert!(
+        rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path).unwrap(),
+        "damage found and rebuilt"
+    );
+    assert_eq!(
+        std::fs::read(&fixed_path).unwrap(),
+        with_rr,
+        "repair restores the archive byte-for-byte"
+    );
+
+    // An intact archive reports nothing to repair.
+    let intact_fixed = dir.path().join("intact-fixed.rar");
+    assert!(!rar_rs::repair_legacy_archive_path(&path, &intact_fixed).unwrap());
+
+    // Replacing the record at a larger percent grows the record; exactly
+    // one record remains and the larger record still repairs damage.
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    editor.apply(EditPlan::new().set_recovery(50)).unwrap();
+    let replaced = std::fs::read(&path).unwrap();
+    assert!(replaced.len() > with_rr.len(), "50% record is bigger");
+    assert_eq!(count_occurrences(&replaced, b"Protect+"), 1, "one record");
+    let mut damaged = replaced.clone();
+    damaged[300_000..300_000 + 32].fill(0x77);
+    let damaged_path = dir.path().join("damaged2.rar");
+    std::fs::write(&damaged_path, &damaged).unwrap();
+    let fixed_path = dir.path().join("fixed2.rar");
+    assert!(rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path).unwrap());
+    assert_eq!(std::fs::read(&fixed_path).unwrap(), replaced);
+}
+
+#[test]
+fn rar4_lock_marks_the_archive_and_blocks_further_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locked4.rar");
+    build_rar4(&path, dir.path());
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(rar4_main_flags(&before) & 0x0004, 0, "not locked yet");
+
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    editor.lock().unwrap();
+    let locked = std::fs::read(&path).unwrap();
+    assert_ne!(
+        rar4_main_flags(&locked) & 0x0004,
+        0,
+        "MHD_LOCK bit is set in the main header"
+    );
+
+    // Locking is idempotent.
+    editor.lock().unwrap();
+
+    // Any further edit is refused with ArchiveLocked — including through a
+    // freshly opened editor, which re-reads the patched main header.
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    assert!(matches!(
+        editor.apply(EditPlan::new().set_recovery(10)),
+        Err(RarError::ArchiveLocked)
+    ));
+
+    // Reading and extraction still work on a locked archive.
+    let mut rar = RarArchive::open(&path).unwrap();
+    let payload = std::fs::read(dir.path().join("a.bin")).unwrap();
+    assert_eq!(rar.read("a.bin").unwrap(), payload);
+}
+
+#[test]
+fn rar4_plan_validation_mirrors_rar5_before_any_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rr4-validate.rar");
+    build_rar4(&path, dir.path());
+    let before = std::fs::read(&path).unwrap();
+
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    // Empty plan and out-of-range percent fail without touching the file.
+    assert!(matches!(
+        editor.apply(EditPlan::new()),
+        Err(RarError::Format(_))
+    ));
+    assert!(matches!(
+        editor.apply(EditPlan::new().set_recovery(200)),
+        Err(RarError::InvalidOption(_))
+    ));
+    // One plan may carry only one recovery-record change.
+    let one = editor.entries().next().unwrap().id();
+    assert!(matches!(
+        editor.apply(EditPlan::new().set_recovery(10).delete(one)),
+        Err(RarError::Unsupported(_))
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "rejected plans must leave the archive untouched"
+    );
+}
