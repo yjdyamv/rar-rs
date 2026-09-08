@@ -751,9 +751,12 @@ impl RarArchive {
         if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
             // `-rr`: the legacy NEWSUB (0x7a) recovery record goes between
             // the last member and the end-of-archive block (single-volume
-            // only, matching WinRAR's RAR4 writer).
-            if let Some(percent) = self.recovery_percent {
-                self.write_rar4_recovery_block(percent)?;
+            // only, matching WinRAR's RAR4 writer). Appending to an
+            // archive that carried a record rebuilds it over the whole new
+            // prefix at its original parity strength.
+            if self.recovery_percent.is_some() || self.write_ctx().rar4_append_rr_sectors.is_some()
+            {
+                self.write_rar4_recovery_block()?;
             }
             self.write_rar4_end_block()?;
             self.mode = Mode::Read;
@@ -765,8 +768,10 @@ impl RarArchive {
     /// everything written so far. Reads the prefix back through the staged
     /// file (the write stream is positioned at its end); the sector grid is
     /// anchored at the archive start, so the recovery block itself is the
-    /// only thing left outside the protected range.
-    fn write_rar4_recovery_block(&mut self, percent: u8) -> RarResult<()> {
+    /// only thing left outside the protected range. The parity-sector count
+    /// comes from the `-rr` percent, or — when appending to an archive that
+    /// had a record — from the original record's strength.
+    fn write_rar4_recovery_block(&mut self) -> RarResult<()> {
         let path = self.write_file_path().to_path_buf();
         let prefix_len = {
             let stream = self.stream.as_mut().unwrap();
@@ -777,7 +782,13 @@ impl RarArchive {
             let mut reader = std::fs::File::open(&path)?;
             std::io::Read::read_exact(&mut reader, &mut prefix)?;
         }
-        let rec_sectors = crate::recovery::legacy_rr::recovery_sector_count(prefix_len, percent);
+        let rec_sectors = match self.write_ctx().rar4_append_rr_sectors {
+            Some(rec) => rec,
+            None => {
+                let percent = self.recovery_percent.unwrap_or(0);
+                crate::recovery::legacy_rr::recovery_sector_count(prefix_len, percent)
+            }
+        };
         let block = crate::recovery::legacy_rr::build_legacy_recovery_block(&prefix, rec_sectors)?;
         let stream = self.stream.as_mut().unwrap();
         if self.header_encryption {

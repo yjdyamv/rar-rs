@@ -382,7 +382,10 @@ fn typed_options_reject_combos_the_legacy_layer_would_silently_downgrade() {
 }
 
 #[test]
-fn append_rejects_rar4_archives_before_touching_the_original() {
+fn append_on_rar4_archives_is_supported() {
+    // Stage B (ADR 0005): appending to a single-volume non-solid RAR4
+    // archive works through both facades; the original members and their
+    // data are preserved and the new member is readable.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rar4.rar");
     {
@@ -399,23 +402,39 @@ fn append_rejects_rar4_archives_before_touching_the_original() {
         archive.add(&source, 0).unwrap();
         archive.close().unwrap();
     }
-    let original = std::fs::read(&path).unwrap();
+    let payload_new = b"appended member payload".repeat(120);
 
-    for attempt in [
-        ArchiveWriter::append(&path).map(|_| ()),
-        RarArchive::open_append(&path).map(|_| ()),
-    ] {
-        match attempt {
-            Err(RarError::Unsupported(_)) => {}
-            Err(error) => panic!("expected Unsupported, got {error:?}"),
-            Ok(()) => panic!("append of a RAR4 archive must be rejected"),
-        }
+    // ArchiveWriter::append (the `rar a` path).
+    {
+        let mut writer = ArchiveWriter::append(&path).unwrap();
+        writer
+            .add_bytes(
+                "b.txt",
+                &payload_new,
+                rar_rs::EntryWriteOptions::new()
+                    .compression_level(rar_rs::CompressionLevel::try_from(0).unwrap()),
+            )
+            .unwrap();
+        writer.finish().unwrap();
     }
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        original,
-        "rejected append must leave the original archive untouched"
-    );
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let b = reader.unique_entry("b.txt").unwrap();
+    assert_eq!(reader.read_entry(b).unwrap(), payload_new);
+    let a = reader
+        .entries()
+        .find(|e| e.name().ends_with("a.txt"))
+        .unwrap()
+        .id();
+    assert_eq!(reader.read_entry(a).unwrap(), b"original");
+
+    // The legacy RarArchive::open_append facade is still usable.
+    {
+        let mut archive = RarArchive::open_append(&path).unwrap();
+        archive.add_bytes("c.txt", b"third", 0).unwrap();
+        archive.close().unwrap();
+    }
+    let reader = ArchiveReader::open(&path).unwrap();
+    assert!(reader.unique_entry("c.txt").is_ok());
 }
 
 #[test]

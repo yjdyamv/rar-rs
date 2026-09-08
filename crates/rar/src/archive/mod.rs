@@ -11,8 +11,8 @@ mod create;
 mod discovery;
 mod editor;
 mod entry;
-mod reader;
 mod rar4_edit;
+mod reader;
 mod transaction;
 mod writer;
 
@@ -144,6 +144,11 @@ pub(crate) struct WriteState {
     /// True once the current RAR4 solid run has emitted a member, so the next
     /// compressed member is flagged as a chain continuation (`FHD_SOLID`).
     pub rar4_solid_run_has_member: bool,
+    /// Appending to an existing RAR4 archive that carried a NEWSUB recovery
+    /// record: rebuild the record at close with this parity-sector count
+    /// (the record's original strength; sector counts are not recoverable
+    /// from a percent).
+    pub rar4_append_rr_sectors: Option<u32>,
     /// Per-archive compression thread count (`-mt`); `None` = process-global
     /// default. The compression pool is selected per thread count, so
     /// concurrent archives with different values never interfere.
@@ -206,6 +211,7 @@ impl Default for WriteState {
             encoder_state: None,
             rar4_solid_encoder: None,
             rar4_solid_run_has_member: false,
+            rar4_append_rr_sectors: None,
             compression_threads: None,
             dict_size_log: None,
             dict_size_bytes: None,
@@ -625,10 +631,20 @@ impl RarArchive {
         // archives up front with a clear error instead of misparsing their
         // fixed-width headers.
         if self.rar4 {
-            return Err(RarError::Unsupported(
-                "appending to RAR4 archives is not supported; append requires the RAR5 container"
-                    .into(),
-            ));
+            // RAR4 append (ADR 0005 stage B): gate on the main-header
+            // flags, drop the trailing NEWSUB record / end-of-archive block
+            // (rebuilding the record at close when the archive had one),
+            // and stage the surviving prefix into a temporary sibling.
+            let prelude = crate::archive::rar4_edit::append_prelude(self)?;
+            self.write_ctx_mut().rar4_append_rr_sectors = prelude.rr_sectors;
+            let path = self.path.clone();
+            let tmp_path = temp_sibling_path(&path);
+            self.write_ctx_mut().pending = Some(PendingCommit::Single(tmp_path.clone()));
+            let mut src = File::open(&path)?;
+            let mut dst = read_write_create(&tmp_path)?;
+            copy_prefix(&mut src, &mut dst, prelude.truncate_pos)?;
+            self.stream = Some(Box::new(dst));
+            return Ok(());
         }
         if self.volume_paths.len() > 1 {
             return Err(RarError::Unsupported(
@@ -1025,6 +1041,7 @@ impl RarArchive {
                 encoder_state: None,
                 rar4_solid_encoder: None,
                 rar4_solid_run_has_member: false,
+                rar4_append_rr_sectors: None,
                 compression_threads: opts.threads,
                 dict_size_log: opts.dict_size_log,
                 dict_size_bytes: opts.dict_size_bytes,

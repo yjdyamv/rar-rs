@@ -552,6 +552,59 @@ fn decode_comment_stream(
 
 // ── Edit engine ────────────────────────────────────────────────────────────
 
+/// Result of preparing an existing RAR4 archive for append: where the new
+/// members start and whether a trailing NEWSUB record must be rebuilt.
+pub(crate) struct AppendPrelude {
+    /// Absolute byte offset where the append starts (the first byte of the
+    /// trailing NEWSUB `RR` record, or of the end-of-archive block).
+    pub truncate_pos: u64,
+    /// Parity-sector count of the archive's NEWSUB record, if any (the
+    /// record is dropped by the truncation and rebuilt at close with the
+    /// same strength).
+    pub rr_sectors: Option<u32>,
+}
+
+/// Prepare an existing single-volume, plaintext, non-solid RAR4 archive
+/// for appending members. The archive's main flags gate the edit
+/// (multi-volume, `-hp` and locked archives are refused; appending to a
+/// solid archive needs the stage-C repack); the trailing NEWSUB recovery
+/// record and the end-of-archive block are the truncation point.
+pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
+    let bytes = fs::read(&archive.path).map_err(RarError::Io)?;
+    let layout = scan_layout(&bytes, archive.sfx_offset as usize)?;
+    refuse_unsupported_containers(archive, layout.main_flags)?;
+    if layout.main_flags & MHD_LOCK != 0 {
+        return Err(RarError::ArchiveLocked);
+    }
+    if layout.main_flags & MHD_SOLID != 0 {
+        return Err(RarError::Unsupported(
+            "appending to solid RAR4 archives is not supported yet (needs the stage-C repack)"
+                .into(),
+        ));
+    }
+    // A trailing NEWSUB record sits between the last member and the
+    // end-of-archive block; truncating at its start drops it (it cannot
+    // protect members appended after it) and it is rebuilt at close. RAR
+    // 2.5-era PROTECT_HEAD records cannot be rebuilt this way.
+    let (truncate_pos, rr_sectors) = match scan_protect(&bytes)?.protect {
+        Some(protect)
+            if &protect.mark == b"Protect+" && protect.data_end <= layout.endarc_offset =>
+        {
+            (protect.block_offset as u64, Some(protect.rec_sectors))
+        }
+        Some(_) => {
+            return Err(RarError::Unsupported(
+                "RAR4: archives with a PROTECT_HEAD recovery record cannot be appended to in place; recreate the archive".into(),
+            ));
+        }
+        None => (layout.endarc_offset as u64, None),
+    };
+    Ok(AppendPrelude {
+        truncate_pos,
+        rr_sectors,
+    })
+}
+
 /// Apply one combined RAR4 edit transaction: delete members, rename
 /// members, set/remove the archive comment, and/or add or rebuild the
 /// recovery record, then atomically replace the archive and re-scan it.
@@ -1230,6 +1283,117 @@ mod delete_tests {
         assert!(matches!(
             editor.delete_entries(&[m1]),
             Err(RarError::Unsupported(_))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod append_tests {
+    #![allow(deprecated)] // legacy facade add_bytes/close kept for parity
+    use super::*;
+
+    fn build_rar4(path: &std::path::Path, payloads: &[(&str, &[u8])]) {
+        let mut a = crate::archive::RarArchive::create_with_options(
+            path,
+            crate::options::CreateOptions {
+                compression: crate::version::ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (name, data) in payloads {
+            a.add_bytes(name, data, 0).unwrap();
+        }
+        a.close().unwrap();
+    }
+
+    #[test]
+    fn append_adds_members_and_keeps_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ap.rar");
+        let p1 = vec![0x11; 4_000];
+        let p2 = vec![0x22; 3_000];
+        let p3 = vec![0x33; 2_000];
+        build_rar4(&path, &[("a.bin", &p1), ("b.bin", &p2)]);
+        {
+            let mut a = crate::archive::RarArchive::open_append(&path).unwrap();
+            a.add_bytes("c.bin", &p3, 0).unwrap();
+            a.close().unwrap();
+        }
+        let mut a = crate::archive::RarArchive::open(&path).unwrap();
+        assert_eq!(a.namelist(), ["a.bin", "b.bin", "c.bin"]);
+        assert_eq!(a.read("a.bin").unwrap(), p1);
+        assert_eq!(a.read("b.bin").unwrap(), p2);
+        assert_eq!(a.read("c.bin").unwrap(), p3);
+    }
+
+    #[test]
+    fn append_rebuilds_existing_rr_over_the_new_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ap2.rar");
+        let p1 = vec![0x44; 40_000];
+        let p2 = vec![0x55; 30_000];
+        build_rar4(&path, &[("a.bin", &p1)]);
+        {
+            let mut e = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+            e.apply(crate::archive::editor::EditPlan::new().set_recovery(10))
+                .unwrap();
+        }
+        {
+            let mut a = crate::archive::RarArchive::open_append(&path).unwrap();
+            a.add_bytes("b.bin", &p2, 0).unwrap();
+            a.close().unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(scan_protect(&bytes).unwrap().protect.is_some());
+        // Damage a protected sector inside the appended member: the rebuilt
+        // record must restore the exact original bytes.
+        let mut damaged = bytes.clone();
+        let at = bytes.len() - 8_000;
+        damaged[at..at + 64].fill(0x7e);
+        let dmg_path = dir.path().join("dmg.rar");
+        std::fs::write(&dmg_path, &damaged).unwrap();
+        let fixed = dir.path().join("fixed.rar");
+        assert!(crate::recovery::repair_legacy_archive_path(&dmg_path, &fixed).unwrap());
+        assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
+        let mut a = crate::archive::RarArchive::open(&path).unwrap();
+        assert_eq!(a.namelist(), ["a.bin", "b.bin"]);
+        assert_eq!(a.read("b.bin").unwrap(), p2);
+    }
+
+    #[test]
+    fn append_refuses_solid_locked_and_hp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = vec![0x66; 2_000];
+        // Solid archive.
+        let solid = dir.path().join("solid.rar");
+        {
+            let mut a = crate::archive::RarArchive::create_with_options(
+                &solid,
+                crate::options::CreateOptions {
+                    compression: crate::version::ArchiveVersion::V29,
+                    solid: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            a.add_bytes("m.bin", &p, 3).unwrap();
+            a.close().unwrap();
+        }
+        assert!(matches!(
+            crate::archive::RarArchive::open_append(&solid),
+            Err(RarError::Unsupported(_))
+        ));
+        // Locked archive.
+        let locked = dir.path().join("locked.rar");
+        build_rar4(&locked, &[("m.bin", &p)]);
+        {
+            let mut e = crate::archive::editor::ArchiveEditor::open(&locked).unwrap();
+            e.lock().unwrap();
+        }
+        assert!(matches!(
+            crate::archive::RarArchive::open_append(&locked),
+            Err(RarError::ArchiveLocked)
         ));
     }
 }

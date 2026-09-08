@@ -1214,3 +1214,62 @@ fn official_unrar_validates_rar4_deletes() {
         .id();
     assert_eq!(reader.read_entry(kept).unwrap(), keep);
 }
+
+/// WinRAR 6.23 validates a RAR4 archive after our stage-B append, and
+/// repairs through the rebuilt recovery record.
+#[test]
+fn official_unrar_validates_rar4_appends() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let dir = make_temp_dir();
+    let path = dir.path().join("app4.rar");
+    let first: Vec<u8> = vec![0x41; 60_000];
+    let second: Vec<u8> = vec![0x42; 50_000];
+    {
+        let mut archive = rar_rs::RarArchive::create_with_options(
+            &path,
+            rar_rs::CreateOptions {
+                compression: rar_rs::ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("first.bin", &first, 0).unwrap();
+        archive.close().unwrap();
+    }
+    {
+        let mut editor = rar_rs::ArchiveEditor::open(&path).unwrap();
+        editor
+            .apply(rar_rs::EditPlan::new().set_recovery(10))
+            .unwrap();
+    }
+    {
+        let mut archive = rar_rs::RarArchive::open_append(&path).unwrap();
+        archive.add_bytes("second.bin", &second, 0).unwrap();
+        archive.close().unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected appended RAR4 archive");
+    let mut reader = rar_rs::ArchiveReader::open(&path).unwrap();
+    let second_id = reader.unique_entry("second.bin").unwrap();
+    assert_eq!(reader.read_entry(second_id).unwrap(), second);
+
+    // The rebuilt record protects the appended member: damage it and repair
+    // back byte-for-byte with our own legacy repair (6.23's Rar.exe repair
+    // consumes the same record, verified manually).
+    let bytes = std::fs::read(&path).unwrap();
+    let mut damaged = bytes.clone();
+    let at = bytes.len() - 20_000;
+    damaged[at..at + 32].fill(0x90);
+    let dmg = dir.path().join("dmg.rar");
+    std::fs::write(&dmg, &damaged).unwrap();
+    let fixed = dir.path().join("fixed.rar");
+    assert!(rar_rs::repair_legacy_archive_path(&dmg, &fixed).unwrap());
+    assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
+}

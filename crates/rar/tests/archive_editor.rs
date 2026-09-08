@@ -1078,3 +1078,33 @@ fn comment_of(path: impl AsRef<std::path::Path>) -> Option<Vec<u8>> {
     let mut rar = RarArchive::open(path).unwrap();
     rar.get_comment().unwrap()
 }
+
+/// RAR4 append (`rar a` on an existing archive, ADR 0005 stage B): new
+/// members land after the existing ones, a set comment survives, and the
+/// appended archive stays fully readable.
+#[test]
+fn rar4_append_adds_members_and_keeps_comment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("append4.rar");
+    build_rar4(&path, dir.path());
+    {
+        let mut editor = ArchiveEditor::open(&path).unwrap();
+        editor
+            .apply(rar_rs::EditPlan::new().set_comment(b"existing comment".to_vec()))
+            .unwrap();
+    }
+    let payload_new = vec![0x99; 30_000];
+    {
+        let mut archive = RarArchive::open_append(&path).unwrap();
+        archive.add_bytes("new.bin", &payload_new, 0).unwrap();
+        archive.close().unwrap();
+    }
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+    assert_eq!(names, ["a.bin", "b.txt", "new.bin"]);
+    let a = reader.unique_entry("a.bin").unwrap();
+    assert_eq!(reader.read_entry(a).unwrap().len(), 400_000);
+    let new = reader.unique_entry("new.bin").unwrap();
+    assert_eq!(reader.read_entry(new).unwrap(), payload_new);
+    assert_eq!(comment_of(&path), Some(b"existing comment".to_vec()));
+}
