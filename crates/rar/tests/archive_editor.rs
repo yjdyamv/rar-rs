@@ -996,15 +996,16 @@ fn rar4_case_conversion_renames_every_member() {
     assert!(reader.entries_named(&stored).next().is_none());
 }
 
-/// RAR4 writer regression (pre-existing, unrelated to the edit engine):
-/// `add_bytes` with a non-ASCII member name emits a corrupt FILE_HEAD that
-/// the reader (and WinRAR) rejects. Members added from files (`add`) with
-/// Unicode paths are fine.
+/// RAR4 writer regression: `add_bytes` with a non-ASCII member name used to
+/// fall into the RAR5 bytes path and emit a corrupt mixed archive. The bytes
+/// path now routes through the RAR4 pipeline (`add_rar4_data`); this locks
+/// Unicode and ASCII names, stored and compressed members, and readback.
 #[test]
-#[ignore = "RAR4 writer bug: add_bytes + non-ASCII name produces a corrupt archive"]
-fn rar4_writer_add_bytes_unicode_name_is_corrupt() {
+fn rar4_writer_add_bytes_handles_unicode_and_ascii_names() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("bug.rar");
+    let path = dir.path().join("bytes4.rar");
+    let unicode_payload = b"unicode bytes payload ".repeat(600);
+    let ascii_payload = b"ascii bytes payload ".repeat(700);
     {
         let mut archive = RarArchive::create_with_options(
             &path,
@@ -1014,8 +1015,15 @@ fn rar4_writer_add_bytes_unicode_name_is_corrupt() {
             },
         )
         .unwrap();
-        archive.add_bytes("文-件名-ünï.bin", b"payload", 0).unwrap();
+        archive
+            .add_bytes("文-件名-ünï.bin", &unicode_payload, 0)
+            .unwrap();
+        archive.add_bytes("plain.bin", &ascii_payload, 3).unwrap();
         archive.close().unwrap();
     }
-    RarArchive::open(&path).expect("archive written by add_bytes must open");
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let unicode = reader.unique_entry("文-件名-ünï.bin").unwrap();
+    assert_eq!(reader.read_entry(unicode).unwrap(), unicode_payload);
+    let plain = reader.unique_entry("plain.bin").unwrap();
+    assert_eq!(reader.read_entry(plain).unwrap(), ascii_payload);
 }

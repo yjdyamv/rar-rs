@@ -1003,3 +1003,44 @@ fn official_unrar_validates_rar4_renames() {
         "unrar rejected 6.23 archive renamed by rar-rs"
     );
 }
+
+/// WinRAR 6.23 validates RAR4 archives whose members were added through
+/// `add_bytes` (the path that used to fall into the RAR5 writer), with
+/// Unicode and compressed members.
+#[test]
+fn official_unrar_validates_rar4_add_bytes() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let dir = make_temp_dir();
+    let path = dir.path().join("bytes4.rar");
+    let unicode_payload: Vec<u8> = b"unicode interop payload ".repeat(900);
+    let ascii_payload: Vec<u8> = b"ascii interop payload ".repeat(700);
+    {
+        let mut archive = rar_rs::RarArchive::create_with_options(
+            &path,
+            rar_rs::CreateOptions {
+                compression: rar_rs::ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive
+            .add_bytes("文-件名-ünï.bin", &unicode_payload, 0)
+            .unwrap();
+        archive.add_bytes("plain.bin", &ascii_payload, 3).unwrap();
+        archive.close().unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar rejected add_bytes RAR4 archive");
+    let mut reader = rar_rs::ArchiveReader::open(&path).unwrap();
+    let unicode = reader.unique_entry("文-件名-ünï.bin").unwrap();
+    assert_eq!(reader.read_entry(unicode).unwrap(), unicode_payload);
+    let plain = reader.unique_entry("plain.bin").unwrap();
+    assert_eq!(reader.read_entry(plain).unwrap(), ascii_payload);
+}

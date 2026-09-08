@@ -613,6 +613,30 @@ impl RarArchive {
         let mut reader = File::open(path)?;
         let mut data = Vec::with_capacity(file_size as usize);
         std::io::Read::read_to_end(&mut reader, &mut data)?;
+
+        let mtime_ns = meta
+            .modified()
+            .unwrap_or(SystemTime::now())
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        self.add_rar4_data(name, data, level, mtime, mtime_ns)
+    }
+
+    /// Encode one RAR4 member from in-memory bytes: CRC, then the smallest
+    /// of LZ / PPMd (m4+) / auto-filter candidates / STORE, per-member
+    /// encryption, and the FILE_HEAD + payload emission (single-volume or
+    /// split across volumes). Shared by the file path (`add_file_rar4`,
+    /// which reads the member first) and the bytes path (`add_bytes`).
+    fn add_rar4_data(
+        &mut self,
+        name: String,
+        data: Vec<u8>,
+        level: u8,
+        mtime: u32,
+        mtime_ns: u32,
+    ) -> RarResult<()> {
+        let file_size = data.len() as u64;
         let file_crc = crate::crc32::crc32(&data);
 
         // Compress with the RAR29 LZSS encoder (m1–m5).  If compressing does
@@ -738,12 +762,6 @@ impl RarArchive {
             self.write_ctx_mut().rar4_solid_run_has_member = true;
         }
 
-        let mtime_ns = meta
-            .modified()
-            .unwrap_or(SystemTime::now())
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
         let ext_time = crate::format::rar4::write::build_ext_time(Some(mtime_ns));
 
         // Member-level encryption (WinRAR `-p`): every member gets its own
@@ -1240,6 +1258,23 @@ impl RarArchive {
         compression_level: u8,
     ) -> RarResult<()> {
         self.check_cancel()?;
+        if self.rar4 {
+            // RAR4 members are encoded through the same pipeline as
+            // `add_file_rar4` (CRC, LZ/PPMd/filter/STORE candidates,
+            // per-member encryption, volume splitting) with the current
+            // time as the timestamp.
+            let name = arcname.replace('\\', "/");
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            return self.add_rar4_data(
+                name,
+                data.to_vec(),
+                compression_level,
+                now.as_secs() as u32,
+                now.subsec_nanos(),
+            );
+        }
         let name = arcname.replace('\\', "/");
         let plain_crc = {
             let mut h = crc32fast::Hasher::new();
@@ -2802,9 +2837,8 @@ impl RarArchive {
                                 // Decide E8 vs E8E9 by compressed size on
                                 // the sample (same as
                                 // encode_with_auto_x86_filter).
-                                let variant = crate::version::ArchiveVersion::from_v70(
-                                    dict_bytes.is_some(),
-                                );
+                                let variant =
+                                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
                                 let sample_specs_e9: Vec<lzss_huff::FilterSpec> = regions_e9
                                     .iter()
                                     .map(|r| {
@@ -3040,12 +3074,8 @@ impl RarArchive {
                         window_specs = Some(specs);
                     }
                     if let Some(ft) = x86_filter_type {
-                        let (transformed, specs) = lzss_huff::x86_stream_window(
-                            &work,
-                            member_offset,
-                            ft,
-                            &x86_regions,
-                        );
+                        let (transformed, specs) =
+                            lzss_huff::x86_stream_window(&work, member_offset, ft, &x86_regions);
                         work = transformed;
                         if let Some(ref mut existing) = window_specs {
                             existing.extend(specs);
