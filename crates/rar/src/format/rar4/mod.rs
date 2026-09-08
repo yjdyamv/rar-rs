@@ -28,6 +28,10 @@ pub(crate) const MAIN_HEAD: u8 = 0x73;
 pub(crate) const FILE_HEAD: u8 = 0x74;
 pub(crate) const ENDARC_HEAD: u8 = 0x7b;
 
+/// NEWSUB: sub-block (the RAR 3.x/4.x recovery record `RR` and the archive
+/// comment `CMT` are both NEWSUB blocks).
+pub(crate) const NEWSUB_HEAD: u8 = 0x7a;
+
 // ── Header flags ───────────────────────────────────────────────────────────
 
 pub(crate) const LONG_BLOCK: u16 = 0x8000;

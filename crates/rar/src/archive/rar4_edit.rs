@@ -34,7 +34,7 @@ use crate::error::{RarError, RarResult};
 use crate::format::rar4::write::encode_file_name;
 use crate::format::rar4::{
     ENDARC_HEAD, FHD_COMMENT, FHD_LARGE, FHD_SALT, FHD_UNICODE, FILE_HEAD, LONG_BLOCK, MAIN_HEAD,
-    MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY, MHD_VOLUME,
+    MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY, MHD_VOLUME, NEWSUB_HEAD,
 };
 use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path};
 use crate::recovery::legacy_rr::{
@@ -364,15 +364,205 @@ fn build_rename_map(
     Ok((map, count))
 }
 
+// ── Archive comment (RAR 3.x/4.x NEWSUB `CMT`) ─────────────────────────────
+
+/// A RAR 3.x/4.x archive comment is a NEWSUB (0x7a) block named `CMT`,
+/// placed right after the main header (WinRAR 6.23 layout). The payload is
+/// either STORE bytes or a RAR29-LZSS stream (`method` 0x31–0x35). WinRAR
+/// stores the comment as UTF-16LE (no BOM) when it carries characters
+/// outside the single-byte range and as raw bytes otherwise; `rar cw`
+/// writes the text back out.
+///
+/// Encode comment text for storage, mirroring WinRAR 6.23's convention:
+/// the CMT block's `attr` bit 0 marks a UTF-16LE payload (no BOM); pure
+/// ASCII comments are stored as raw bytes with the bit clear.
+/// Returns `(payload, is_utf16)`.
+fn encode_comment_text(bytes: &[u8]) -> (Vec<u8>, bool) {
+    if bytes.is_ascii() {
+        return (bytes.to_vec(), false);
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = Vec::with_capacity(text.len() * 2);
+    for unit in text.encode_utf16() {
+        out.extend_from_slice(&unit.to_le_bytes());
+    }
+    (out, true)
+}
+
+/// Decode a comment payload back to UTF-8 bytes. The block's `attr` bit 0
+/// (WinRAR's unicode marker) selects UTF-16LE decoding; otherwise valid
+/// UTF-8 is kept as-is and an even-length non-UTF-8 payload falls back to
+/// the UTF-16 heuristic (for writers that omit the marker).
+fn decode_comment_payload(payload: &[u8], unicode: bool) -> Vec<u8> {
+    if unicode {
+        let (units, _) = payload.as_chunks::<2>();
+        let units: Vec<u16> = units
+            .iter()
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        return String::from_utf16_lossy(&units).into_bytes();
+    }
+    if std::str::from_utf8(payload).is_ok() || !payload.len().is_multiple_of(2) {
+        return payload.to_vec();
+    }
+    let (units, _) = payload.as_chunks::<2>();
+    let units: Vec<u16> = units
+        .iter()
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    if units.iter().any(|u| (0xD800..=0xDFFF).contains(u)) {
+        return payload.to_vec();
+    }
+    String::from_utf16_lossy(&units).into_bytes()
+}
+
+/// Build a NEWSUB `CMT` block carrying `payload` uncompressed (method
+/// STORE), shaped like WinRAR's comment block: a FILE_HEAD-form header
+/// (32 fixed bytes + the 3-byte name `CMT`) followed by the payload.
+/// `unicode` sets the comment's bit 0 of the attr field (WinRAR's marker
+/// for a UTF-16LE payload).
+fn build_comment_block(payload: &[u8], unicode: bool) -> Vec<u8> {
+    let head_size = 32u16 + 3;
+    let mut block = Vec::with_capacity(head_size as usize + payload.len());
+    block.extend_from_slice(&[0u8, 0]); // header CRC, filled last
+    block.push(0x7a); // NEWSUB_HEAD
+    block.extend_from_slice(&LONG_BLOCK.to_le_bytes());
+    block.extend_from_slice(&head_size.to_le_bytes());
+    let len = payload.len() as u32;
+    block.extend_from_slice(&len.to_le_bytes()); // packed
+    block.extend_from_slice(&len.to_le_bytes()); // unpacked
+    block.push(2); // host_os: Windows
+    block.extend_from_slice(&crate::crc32::crc32(payload).to_le_bytes()); // file_crc
+    block.extend_from_slice(&0u32.to_le_bytes()); // file_time
+    block.push(29); // unp_ver
+    block.push(crate::format::rar4::RAR4_METHOD_STORE); // method
+    block.extend_from_slice(&3u16.to_le_bytes()); // name_size
+    block.extend_from_slice(&u32::from(unicode).to_le_bytes()); // attr: bit 0 = UTF-16 payload
+    block.extend_from_slice(b"CMT");
+    block.extend_from_slice(payload);
+    // Header CRC16 covers the 35-byte header body only (like WinRAR's
+    // block, whose payload follows the covered region).
+    let crc = header_crc16(&block[2..head_size as usize]);
+    block[..2].copy_from_slice(&crc.to_le_bytes());
+    block
+}
+
+/// Read the archive comment (`rar cw`): locate the NEWSUB `CMT` block and
+/// decode its payload. Returns `None` when the archive has no comment.
+/// Header-encrypted (`-hp`) archives are refused (their comment block is
+/// encrypted with the header key).
+pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
+    let bytes = fs::read(&archive.path).map_err(RarError::Io)?;
+    let sfx_offset = archive.sfx_offset as usize;
+    let sig = &bytes[sfx_offset..sfx_offset + 7];
+    if sig != crate::detect::RAR4_SIGNATURE {
+        return Err(RarError::Format(
+            "RAR4: signature mismatch while reading the comment".into(),
+        ));
+    }
+    let mut pos = sfx_offset + 7;
+    let mut saw_main = false;
+    while pos + 7 <= bytes.len() {
+        let start = pos;
+        let head_type = bytes[pos + 2];
+        let (head_size, _flags, total) = block_envelope(&bytes, pos)?;
+        if head_type == MAIN_HEAD && !saw_main {
+            saw_main = true;
+            if main_flags(&bytes[start..start + head_size])? & MHD_PASSWORD != 0 {
+                return Err(RarError::Unsupported(
+                    "reading the comment of a header-encrypted (-hp) RAR4 archive is not supported yet".into(),
+                ));
+            }
+        } else if head_type == NEWSUB_HEAD && comment_block_name_is_cmt(&bytes, start, head_size) {
+            let method = bytes[start + 25];
+            let unp = u32::from_le_bytes(bytes[start + 11..start + 15].try_into().unwrap());
+            let unicode =
+                u32::from_le_bytes(bytes[start + 28..start + 32].try_into().unwrap()) & 1 != 0;
+            let data = &bytes[start + head_size..start + total];
+            let payload = if method == crate::format::rar4::RAR4_METHOD_STORE {
+                data.to_vec()
+            } else {
+                decode_comment_stream(&bytes, start, head_size, total, unp as usize)?
+            };
+            return Ok(Some(decode_comment_payload(&payload, unicode)));
+        }
+        pos = start + total;
+        if head_type == ENDARC_HEAD {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+fn comment_block_name_is_cmt(bytes: &[u8], start: usize, _head_size: usize) -> bool {
+    let ns = u16::from_le_bytes([bytes[start + 26], bytes[start + 27]]) as usize;
+    bytes.get(start + 32..start + 32 + ns) == Some(b"CMT")
+}
+
+/// Decode a compressed comment payload through the shared RAR29 member
+/// decoder (the payload is a plain single-chunk member stream).
+fn decode_comment_stream(
+    bytes: &[u8],
+    start: usize,
+    head_size: usize,
+    total: usize,
+    unpacked_size: usize,
+) -> RarResult<Vec<u8>> {
+    use crate::format::rar4::{MemberDecodeOptions, decode_member_bytes};
+    use crate::model::{DataChunk, FileHeader};
+    let method = bytes[start + 25];
+    if !(0x31..=0x35).contains(&method) {
+        return Err(RarError::Format(
+            "RAR4: unsupported comment compression method".into(),
+        ));
+    }
+    let data_offset = (start + head_size) as u64;
+    let packed_size = (total - head_size) as u64;
+    let hdr = FileHeader {
+        unpacked_size: unpacked_size as u64,
+        packed_size,
+        comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
+        data_offset,
+        format_version: 4,
+        unp_ver: 29,
+        ..Default::default()
+    };
+    let chunk = DataChunk {
+        volume_index: 0,
+        data_offset,
+        packed_size,
+        crc32_val: None,
+        is_final: true,
+        extra_data: Vec::new(),
+    };
+    let stream = std::io::Cursor::new(bytes.to_vec());
+    decode_member_bytes(
+        &mut stream.clone(),
+        &[],
+        &[chunk],
+        &hdr,
+        MemberDecodeOptions {
+            password: None,
+            decoder: None,
+            max_alloc_packed_bytes: 64 << 20,
+            max_stream_packed_bytes: 64 << 20,
+        },
+    )
+}
+
 // ── Edit engine ────────────────────────────────────────────────────────────
 
-/// Apply one combined RAR4 edit transaction: rename members and/or add or
-/// rebuild the recovery record, then atomically replace the archive and
-/// re-scan it. All edits share one staged rewrite, so a failure leaves the
-/// original file untouched.
+/// Apply one combined RAR4 edit transaction: rename members, set/remove the
+/// archive comment, and/or add or rebuild the recovery record, then
+/// atomically replace the archive and re-scan it. All edits share one
+/// staged rewrite, so a failure leaves the original file untouched.
+///
+/// `comment` mirrors the RAR5 engine's semantics: `None` keeps the existing
+/// comment untouched, `Some(bytes)` installs it (empty bytes remove it).
 pub(crate) fn edit_rar4(
     archive: &mut RarArchive,
     renames: &[(usize, String)],
+    comment: Option<&[u8]>,
     force_rr: Option<u8>,
 ) -> RarResult<EditSummary> {
     if force_rr.is_some_and(|percent| percent > 100) {
@@ -436,6 +626,16 @@ pub(crate) fn edit_rar4(
     let mut out = Vec::with_capacity(bytes.len() + 4096);
     out.extend_from_slice(&bytes[..layout.main_offset]);
     out.extend_from_slice(&patched_main);
+    // A comment change lands its NEWSUB `CMT` block right after the main
+    // header (WinRAR's placement). `Some(empty)` removes the comment.
+    let replace_comment = comment.is_some();
+    if let Some(bytes) = comment
+        && !bytes.is_empty()
+    {
+        let (payload, unicode) = encode_comment_text(bytes);
+        out.extend_from_slice(&build_comment_block(&payload, unicode));
+    }
+
     let mut pos = main_end;
     let mut file_index = 0usize;
     while pos < region_end {
@@ -450,6 +650,12 @@ pub(crate) fn edit_rar4(
             }
             out.extend_from_slice(&bytes[pos + head_size..pos + total]);
             file_index += 1;
+        } else if replace_comment
+            && head_type == NEWSUB_HEAD
+            && comment_block_name_is_cmt(&bytes, pos, head_size)
+        {
+            // A comment change replaces the existing CMT block (the new one
+            // was already emitted after the main header).
         } else {
             out.extend_from_slice(&bytes[pos..pos + total]);
         }
@@ -692,5 +898,97 @@ mod tests {
         let fixed_path = dir.path().join("fixed.rar");
         assert!(crate::recovery::repair_legacy_archive_path(&damaged_path, &fixed_path).unwrap());
         assert_eq!(std::fs::read(&fixed_path).unwrap(), rewritten);
+    }
+
+    /// A genuine WinRAR 6.23 RAR4 archive carrying a UTF-8 comment stored as
+    /// UTF-16LE must decode back to the exact text `rar cw` would emit.
+    #[test]
+    fn reads_winrar_623_rar4_comment() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/rar40/comment/comment_zh.rar"
+        );
+        let expected = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/rar40/comment/comment.txt"
+        ))
+        .unwrap();
+        let mut archive = RarArchive::open(fixture).unwrap();
+        assert_eq!(archive.get_comment().unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn comment_set_replace_and_remove_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cmt.rar");
+        let payload = vec![0x44; 9_000];
+        std::fs::write(&path, archive_bytes(&[file_block("a.bin", &payload)])).unwrap();
+
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        // No comment yet.
+        {
+            let mut archive = RarArchive::open(&path).unwrap();
+            assert_eq!(archive.get_comment().unwrap(), None);
+        }
+        // Set an ASCII comment.
+        editor
+            .apply(crate::archive::editor::EditPlan::new().set_comment(b"first comment"))
+            .unwrap();
+        {
+            let mut archive = RarArchive::open(&path).unwrap();
+            assert_eq!(
+                archive.get_comment().unwrap(),
+                Some(b"first comment".to_vec())
+            );
+        }
+        // Replace it with a Unicode one, combined with rr in the same plan.
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        let a = editor.unique_entry("a.bin").unwrap();
+        editor
+            .apply(
+                crate::archive::editor::EditPlan::new()
+                    .set_comment("第二段注释 ünï".as_bytes())
+                    .set_recovery(10)
+                    .rename(a, "renamed.bin"),
+            )
+            .unwrap();
+        {
+            let mut archive = RarArchive::open(&path).unwrap();
+            assert_eq!(archive.namelist(), ["renamed.bin"]);
+            assert_eq!(
+                archive.get_comment().unwrap(),
+                Some("第二段注释 ünï".as_bytes().to_vec())
+            );
+            // The combined rewrite kept the recovery record repairable.
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(scan_protect(&bytes).unwrap().protect.is_some());
+        }
+        // Empty comment removes it.
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        editor
+            .apply(crate::archive::editor::EditPlan::new().set_comment(Vec::new()))
+            .unwrap();
+        let mut archive = RarArchive::open(&path).unwrap();
+        assert_eq!(archive.get_comment().unwrap(), None);
+    }
+
+    #[test]
+    fn comment_encode_decode_symmetry() {
+        for text in [b"plain ascii".as_slice(), "第二段注释 ünï".as_bytes(), b""] {
+            let (payload, unicode) = encode_comment_text(text);
+            assert_eq!(decode_comment_payload(&payload, unicode), text);
+            assert_eq!(unicode, !text.is_ascii());
+        }
+        // A WinRAR UTF-16LE payload (attr marker set) decodes to the text.
+        let utf16: Vec<u8> = "中文测试"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(decode_comment_payload(&utf16, true), "中文测试".as_bytes());
+        // Without the marker a valid-UTF-8 payload is returned untouched.
+        assert_eq!(
+            decode_comment_payload("中文测试".as_bytes(), false),
+            "中文测试".as_bytes()
+        );
     }
 }

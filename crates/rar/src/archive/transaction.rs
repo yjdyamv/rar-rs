@@ -960,11 +960,15 @@ impl RarArchive {
         Ok(())
     }
 
-    /// Read the archive comment (the "CMT" service block), if any.
+    /// Read the archive comment (the "CMT" service block for RAR5, the
+    /// NEWSUB `CMT` block for RAR 1.5–4.x), if any.
     ///
     /// Header-encrypted archives store the comment encrypted; reading it
     /// requires the password and is not supported yet.
     pub fn get_comment(&mut self) -> RarResult<Option<Vec<u8>>> {
+        if self.rar4 {
+            return super::rar4_edit::read_comment(self);
+        }
         let mut reader = File::open(&self.path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         while let Some(meta) = crate::format::rar5::headers::read_block(

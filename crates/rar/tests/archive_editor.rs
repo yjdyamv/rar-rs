@@ -1027,3 +1027,62 @@ fn rar4_writer_add_bytes_handles_unicode_and_ascii_names() {
     let plain = reader.unique_entry("plain.bin").unwrap();
     assert_eq!(reader.read_entry(plain).unwrap(), ascii_payload);
 }
+
+/// RAR4 archive comments (ADR 0005 stage A): set / replace / remove through
+/// the editor, readback through get_comment, and reading a genuine
+/// WinRAR 6.23 comment fixture.
+#[test]
+fn rar4_archive_comments_roundtrip_and_read_623_fixture() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cmt4.rar");
+    build_rar4(&path, dir.path());
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    assert_eq!(comment_of(&path), None);
+
+    editor
+        .apply(rar_rs::EditPlan::new().set_comment(b"ascii note".to_vec()))
+        .unwrap();
+    assert_eq!(comment_of(&path), Some(b"ascii note".to_vec()));
+
+    // Replace with Unicode text and remove, through the editor API.
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    editor
+        .apply(rar_rs::EditPlan::new().set_comment("中文注释 ünï".as_bytes().to_vec()))
+        .unwrap();
+    assert_eq!(comment_of(&path), Some("中文注释 ünï".as_bytes().to_vec()));
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    editor
+        .apply(rar_rs::EditPlan::new().set_comment(Vec::new()))
+        .unwrap();
+    assert_eq!(comment_of(&path), None);
+
+    // The member data survives every comment edit.
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let a = reader.unique_entry("a.bin").unwrap();
+    assert_eq!(reader.read_entry(a).unwrap().len(), 400_000);
+    let b = reader.unique_entry("b.txt").unwrap();
+    assert_eq!(reader.read_entry(b).unwrap().len(), 60_000);
+
+    // A real WinRAR 6.23 archive with a UTF-8 comment (stored UTF-16LE)
+    // decodes back to the exact text.
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/rar40/comment/comment_zh.rar"
+    );
+    assert_eq!(
+        comment_of(fixture),
+        Some(
+            std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/rar40/comment/comment.txt"
+            ))
+            .unwrap()
+        )
+    );
+}
+
+/// Open the archive and return its comment (helper for the tests above).
+fn comment_of(path: impl AsRef<std::path::Path>) -> Option<Vec<u8>> {
+    let mut rar = RarArchive::open(path).unwrap();
+    rar.get_comment().unwrap()
+}

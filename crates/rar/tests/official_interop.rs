@@ -1044,3 +1044,77 @@ fn official_unrar_validates_rar4_add_bytes() {
     let plain = reader.unique_entry("plain.bin").unwrap();
     assert_eq!(reader.read_entry(plain).unwrap(), ascii_payload);
 }
+
+/// Comment cross-validation: WinRAR 6.23 reads a comment our editor set on
+/// a RAR4 archive (`rar cw` reproduces the text byte-for-byte), and we read
+/// the comment from a 6.23-created archive.
+#[test]
+fn official_tools_validate_rar4_comments() {
+    let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return,
+    };
+    let dir = make_temp_dir();
+    let path = dir.path().join("cmt4.rar");
+    let file = dir.path().join("f.txt");
+    std::fs::write(&file, b"payload").unwrap();
+    {
+        let mut archive = rar_rs::RarArchive::create_with_options(
+            &path,
+            rar_rs::CreateOptions {
+                compression: rar_rs::ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add(&file, 0).unwrap();
+        archive.close().unwrap();
+    }
+    let comment: &[u8] = "归档注释 with ünï and 中文".as_bytes();
+    {
+        let mut editor = rar_rs::ArchiveEditor::open(&path).unwrap();
+        editor
+            .apply(rar_rs::EditPlan::new().set_comment(comment.to_vec()))
+            .unwrap();
+    }
+    // 6.23's `cw` must reproduce the exact comment we stored.
+    let out = dir.path().join("extracted.txt");
+    let status = std::process::Command::new(&rar_bin)
+        .args(["cw", "-idq"])
+        .arg(&path)
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success(), "6.23 cw failed on our commented archive");
+    assert_eq!(std::fs::read(&out).unwrap(), comment, "6.23 cw mismatch");
+
+    // 6.23 sets a comment; we read it back.
+    let theirs = dir.path().join("official-comment.rar");
+    let comment_file = dir.path().join("theirs.txt");
+    std::fs::write(&comment_file, b"official comment \xe4\xb8\xad\xe6\x96\x87").unwrap();
+    {
+        let mut archive = rar_rs::RarArchive::create_with_options(
+            &theirs,
+            rar_rs::CreateOptions {
+                compression: rar_rs::ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add(&file, 0).unwrap();
+        archive.close().unwrap();
+    }
+    let status = std::process::Command::new(&rar_bin)
+        .arg("c")
+        .arg("-idq")
+        .arg(format!("-z{}", comment_file.display()))
+        .arg(&theirs)
+        .status()
+        .unwrap();
+    assert!(status.success(), "6.23 could not set the comment");
+    let mut archive = rar_rs::RarArchive::open(&theirs).unwrap();
+    assert_eq!(
+        archive.get_comment().unwrap(),
+        Some(b"official comment \xe4\xb8\xad\xe6\x96\x87".to_vec())
+    );
+}

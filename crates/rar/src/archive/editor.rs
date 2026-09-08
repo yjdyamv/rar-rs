@@ -269,12 +269,14 @@ impl ArchiveEditor {
 
     /// Apply an [`EditPlan`] to a RAR 1.5–4.x archive (ADR 0005 stage A).
     ///
-    /// Member renames (`rar rn` / `rar ch`) and recovery-record changes
-    /// (`rar rr`) are implemented; delete/comment ops are refused with a
-    /// clear [`RarError::Unsupported`] until their stages land. A failed
-    /// plan never touches the file.
+    /// Member renames (`rar rn` / `rar ch`), archive-comment changes
+    /// (`rar c` / removal) and recovery-record changes (`rar rr`) are
+    /// implemented; delete is refused with a clear
+    /// [`RarError::Unsupported`] until its stage lands. A failed plan
+    /// never touches the file.
     fn apply_rar4(&mut self, plan: &EditPlan) -> RarResult<EditReport> {
         let mut force_rr: Option<u8> = None;
+        let mut comment: Option<Vec<u8>> = None;
         let mut renames: Vec<(usize, String)> = Vec::with_capacity(plan.ops().len());
         for op in plan.ops() {
             match op {
@@ -288,10 +290,13 @@ impl ArchiveEditor {
                     // stale ID fails the whole plan before any rewrite.
                     renames.push((self.resolve_id(*id)?, new_name.clone()));
                 }
-                EditOp::SetComment(_) => {
-                    return Err(RarError::Unsupported(
-                        "RAR4 archive comments are not supported yet".into(),
-                    ));
+                EditOp::SetComment(bytes) => {
+                    if comment.is_some() {
+                        return Err(RarError::InvalidOption(
+                            "an edit plan can carry only one comment change".into(),
+                        ));
+                    }
+                    comment = Some(bytes.clone());
                 }
                 EditOp::SetRecovery(percent) => {
                     if force_rr.is_some() {
@@ -303,11 +308,13 @@ impl ArchiveEditor {
                 }
             }
         }
-        if renames.is_empty() && force_rr.is_none() {
+        if renames.is_empty() && comment.is_none() && force_rr.is_none() {
             return Err(RarError::Format("no members to edit".into()));
         }
-        // One atomic rewrite carries every rename and the recovery change.
-        let summary = super::rar4_edit::edit_rar4(&mut self.archive, &renames, force_rr)?;
+        // One atomic rewrite carries every rename, the comment change and
+        // the recovery change.
+        let summary =
+            super::rar4_edit::edit_rar4(&mut self.archive, &renames, comment.as_deref(), force_rr)?;
         self.catalog_token = allocate_catalog_token()?;
         Ok(EditReport {
             deleted: summary.deleted,
