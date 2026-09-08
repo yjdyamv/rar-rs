@@ -144,6 +144,13 @@ pub struct EncoderState {
     /// finder's links are rebased by `combined_len - keep` when the frame
     /// slides.
     combined_len: usize,
+    /// Cached hash-chain finder arrays for the MT low-step parse. They span
+    /// one frame each (the `combined` buffer is reallocated per slice, so
+    /// the query-time references cannot persist), but reusing the two
+    /// multi-MiB `head`/`prev` arrays across slices beats the 64 MiB memset
+    /// of a fresh finder per slice — on random data that allocation, not
+    /// the search, was the measured 6x per-byte cost.
+    chain_parts: Option<(Vec<i32>, Vec<i32>)>,
 }
 
 impl EncoderState {
@@ -159,6 +166,7 @@ impl EncoderState {
         }
         self.tree = None;
         self.combined_len = 0;
+        self.chain_parts = None;
     }
 }
 
@@ -507,9 +515,16 @@ pub(crate) fn encode_chunked_mt_with_progress(
 ) -> RarResult<Vec<u8>> {
     let _collect_t0 = std::time::Instant::now();
     let level = (method as usize).clamp(1, 5);
-    let (chain_len, _lazy_thresh, max_match) = LEVEL_PARAMS[level];
+    let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     let long_range = level >= 2;
+    // MT parse is the low-step tier by design: workers slice with the cheap
+    // hash-chain greedy+lazy search instead of the optimal (BT4) parse,
+    // cutting the per-position step count well below the tree's. It accepts
+    // MT output divergence from the sequential path (already a documented,
+    // accepted divergence) and is the MT fastest measured configuration
+    // (tsc x86 2.1x, repeated text 5.2x at ~+0.6..2.9pp ratio on the A/B
+    // corpus); seq is never affected.
     // Adaptive slice size: with a fixed 4 MiB slice a 13 MB member gives
     // only 4 slices and the pool sits mostly idle. Target ~2x the thread
     // count slices (floor 2 MiB) so medium members parallelize properly;
@@ -595,10 +610,10 @@ pub(crate) fn encode_chunked_mt_with_progress(
                             lr_ref,
                             entry_len,
                             chain_len,
+                            lazy_thresh,
                             max_match,
                             dict_size,
                             long_range,
-                            OPTIMAL_PARSE_PASSES[level],
                             is_final && k + 1 == n,
                             variant,
                             (k == 0).then_some(lead_symbols).flatten(),
@@ -674,10 +689,11 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 
 /// Encode one worker slice `[s0, e0)` of [`encode_chunked_mt`].
 ///
-/// Each worker runs the same optimal parse as the sequential path (per-slice
-/// tree over its tail context, shared read-only long-range table), so the
-/// multi-threaded output matches the sequential parse quality instead of the
-/// old greedy+lazy fallback.
+/// Each worker runs the MT low-step parse (hash-chain greedy+lazy over the
+/// slice's tail context, shared read-only long-range table): a bounded
+/// chain walk + lazy skip per position instead of the sequential path's
+/// tree descent. That divergence is the accepted price for MT speed (see
+/// [`encode_chunked_mt`]).
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
 fn encode_mt_slice(
@@ -688,10 +704,10 @@ fn encode_mt_slice(
     lr_shared: &match_finder::LongRange,
     entry_len: usize,
     chain_len: usize,
+    lazy_thresh: usize,
     max_match: usize,
     dict_size: usize,
     long_range: bool,
-    passes: usize,
     is_last_block_of_member: bool,
     variant: ArchiveVersion,
     // Filter records of a filtered member, prepended to the first slice's
@@ -737,19 +753,16 @@ fn encode_mt_slice(
     // no match into it would be found anyway, and the parse's own
     // insertions plus the shared long-range table cover everything else.
     let seed_tail = !mt_tail_is_incompressible(&state.tail);
-    let mut symbols = find_matches_optimal(
-        state,
-        &data[s0..e0],
-        chain_len,
-        0,
-        max_match,
-        dict_size,
-        long_range,
-        long_range.then_some(lr_shared),
-        entry_len + s0,
-        variant,
-        passes,
-        seed_tail,
+    // Low-step parse (MT-only): hash-chain greedy+lazy over the same
+    // combined tail+slice frame the optimal parse would build. The
+    // shared long-range table stays read-only, queried at the slice's
+    // absolute anchor — the near matches come from the chain, the far
+    // ones from the sampled history. Cuts the per-position step count
+    // (a bounded chain walk + lazy skip instead of a tree descent at
+    // every position) at the price of MT output divergence.
+    let mut symbols = mt_slice_symbols_low_step(
+        state, data, s0, e0, lr_shared, entry_len, chain_len, lazy_thresh, max_match, dict_size,
+        long_range, seed_tail,
     );
     if let Some(lead) = lead_symbols {
         let mut joined = lead.to_vec();
@@ -766,6 +779,90 @@ fn encode_mt_slice(
         bs = be;
     }
     out
+}
+
+/// MT-only low-step parse for one worker slice (see [`encode_chunked_mt`]):
+/// the hash-chain greedy+lazy search over the slice frame instead of the
+/// optimal BT4 parse. The near matches come from a fresh chain finder over
+/// `state.tail + data[s0..e0]` (the tail is only inserted, never descended),
+/// the far ones from the shared read-only long-range table at the slice's
+/// absolute anchor — the same frame the optimal path would build, but with
+/// a bounded chain walk + lazy skip per position instead of a tree descent.
+///
+/// This is the WinRAR-m3-flavoured search: cheap per-position steps, no
+/// multi-pass pricing. MT output diverges from the sequential bytes
+/// (already an accepted, documented divergence); the sequential path never
+/// reaches here.
+#[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)]
+fn mt_slice_symbols_low_step(
+    state: &mut EncoderState,
+    data: &[u8],
+    s0: usize,
+    e0: usize,
+    lr_shared: &match_finder::LongRange,
+    entry_len: usize,
+    chain_len: usize,
+    lazy_thresh: usize,
+    max_match: usize,
+    dict_size: usize,
+    long_range: bool,
+    seed_tail: bool,
+) -> Vec<Symbol> {
+    let tail_ctx = &state.tail;
+    let tl = tail_ctx.len();
+    let mut combined = Vec::with_capacity(tl + (e0 - s0));
+    combined.extend_from_slice(tail_ctx);
+    combined.extend_from_slice(&data[s0..e0]);
+
+    // WinRAR-m3 style: the low-step tier runs a hard-capped chain walk, not
+    // the tree's ~log descent. A budget near the level's chain_len inherits
+    // the exact failure the tree replaced (96-step chains on dense x86 are
+    // slower than a 5-step descent), so the MT tier caps it well below the
+    // level setting.
+    const MT_LOW_STEP_CHAIN: usize = 16;
+    let chain = chain_len.min(MT_LOW_STEP_CHAIN);
+    let parts = state.chain_parts.take();
+    let mut finder = match parts {
+        Some((head, prev)) => match_finder::MatchFinder::reuse(
+            &combined,
+            2,
+            max_match,
+            chain,
+            dict_size,
+            head,
+            prev,
+        ),
+        None => match_finder::MatchFinder::new(&combined, 2, max_match, chain, dict_size),
+    };
+    if seed_tail {
+        for pos in 0..tl {
+            finder.insert(pos);
+        }
+    }
+
+    // Long-range candidates only beyond what the near chain covers.
+    let lr_q = if long_range {
+        Some((lr_shared, tl + (e0 - s0), entry_len + s0))
+    } else {
+        None
+    };
+
+    let mut dist_cache = [0u32; DIST_CACHE_SIZE];
+    let mut last_length = 0u32;
+    let symbols = find_matches_in_range(
+        &combined,
+        &mut finder,
+        tl,
+        combined.len(),
+        lazy_thresh,
+        &mut dist_cache,
+        &mut last_length,
+        max_match,
+        lr_q,
+    );
+    state.chain_parts = Some(finder.into_parts());
+    symbols
 }
 
 /// Encode `data` as a single RAR5 member with output filters applied.

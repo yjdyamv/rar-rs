@@ -17,6 +17,11 @@ Decisions so far:
 
 - 13 collect 带宽/延迟判定 + 远带候选预算前缘（2026-09-07）：远带预算 `RAR_RS_FAR_BAND`
   是 seq opt-in 速度档（1M/2：-9% @ +0.22pp），非 mt8 解药；mt8 需每位置步数降 ~5x（架构级）。
+- 13 定论（2026-09-08）：**MT-only 低步数 m3 搜索落地为 MT 默认**（`mt_slice_symbols_low_step`，
+  hash-chain greedy+lazy，链预算 16，head/prev 数组跨 slice 复用 `chain_parts`；seq 不动）。
+  mt8 tsc 2791→1569 ms（1.78x，ratio +2.43pp）、text 1075→238 ms（4.5x，+0.49pp）；random
+  0.34x（STORE 兜底，有界）。vs WinRAR m3/mt8：text 反超（238 vs 251 ms / +0.53pp），tsc
+  仍差（2.6x 慢 / +5pp，DRAM 带宽悬崖，架构级）。
 - 09 双环/逐级 son-pair prefetch 扩展（2026-09-08）：最后一个未试的字节级流水杠杆
   （descent 内异步预取两候选子对的 son 对）20 样本 A/B 中性偏负（tsc6 med 3048 vs 3078），
   与既有 T0 son+input 拒绝一致——未取分支的缓存行在稠密二进制 L2 上是净污染。BT4
@@ -30,6 +35,9 @@ Open frontier (see issues/):
 
 - 04 window-level incompressible skip for MT — biggest remaining speed
   lever on random data; member-level ratio safety is the open question.
+  (The MT low-step tier closed most of the compressible-tail gap but random
+  through the chain is still ~3x slower than the matchless fast path —
+  see issue 13 verdict.)
 - 06 solid archives stay single-threaded (speed gap on backups)
 - 15 streaming delta for >64 MiB members landed (05); x86 streaming stays
   open (whole-member scan requirement).

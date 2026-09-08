@@ -79,3 +79,51 @@ text 16 MiB：1M/2 → seq -16.9% / +0.39pp（文本类远带匹配密度高，�
   （显式 MT 输出分歧，seq 契约不动）；或 RAR_RS_FAR_BAND 作为 opt-in 速度档就绪。
 - 清理：PROFILE_COLLECT 与三个原子计数器、`RAR_RS_FAR_BAND` 开关在定论后移除或将
   远带预算升格为正式选项。
+
+## 定论（2026-09-08）：MT-only 低步数 m3 搜索落地，方向 2 胜出
+
+选了待办第一行第三个方向：**接受 MT 分歧、把 MT slice 解析做成独立的低步数搜索**
+（WinRAR 式 m3 检索）。实现与 A/B：
+
+### 实现
+
+- `encode_mt_slice` 的低步数分支（`mt_slice_symbols_low_step`）：hash-chain
+  greedy+lazy（`find_matches_in_range`），链预算 `MT_LOW_STEP_CHAIN = 16`
+  （远景：m3 的 96 会重演被树替换前的老失败）；窗口帧仍是 `state.tail + slice`
+  与 LR 共享只读表绝对锚点。seq 路径不动（`find_matches_optimal` 仍只在 seq 用）。
+- 链数组跨 slice 复用：`MatchFinder::reuse`/`into_parts`（head/prev 两数组缓存进
+  `EncoderState.chain_parts`），避免每 slice 一个 64 MiB `prev` 新分配——但随机数据
+  的回归是搜索本身（链逐字节 insert vs 最优路径 matchless 快路径跳走），不是分配；
+  实测复用对随机无变化。
+- 由 env-gated A/B（`RAR_RS_MT_LOW_STEP=1`）测通后**升格为 MT 默认**（删 env 与
+  flag 参数，直接调低步数分支）。
+
+### A/B 结果（mt8 m3，本机，interleaved medians）
+
+| 语料 | 最优 MT | 低步数 MT | 速度 | ratio Δ |
+|---|---|---|---|---|
+| tsc 24 MiB x86 | 2791 ms / 33.50% | 1569 ms (chain16) / 35.93% | **1.78x** | +2.43pp |
+| text 17 MiB | 1075 ms / 4.01% | 238 ms / 4.50% | **4.5x** | +0.49pp |
+| rand 16 MiB | 141 ms / 100.0% | ~420 ms (chain16) | 0.34x | ~0（STORE 兜底） |
+
+- chain 8 再快一档（tsc 1340 ms / +2.85pp，text 205 ms）+0.42pp 更多——按用户
+  决定维持 16（速度快、ratio 损失中位）。
+- chain-8/chain-16 均 decode 字节级回环通过（tsc/text/rand）。
+- vs WinRAR m3/mt8 锚点：text 251 ms/3.97% —— 低步数后我们**更快**（238/205 ms）、
+  ratio +0.53pp；tsc 517 ms/30.89% —— 仍 2.6x 慢、ratio +5.04pp 差（DRAM 带宽悬崖，
+  架构级，见下）。
+
+### 结论
+
+1. **mt8 每位置步数降 ~5x 的目标在 MT-only 档内兑现量级**：可压缩语料 1.8-4.5x，
+   代价是 MT ratio 漂（tsc +2.43pp、text +0.49pp），且 MT 输出再进一步偏离 seq
+   （本已是文档化接受的分歧）。WinRAR 的 tsc m3 是 517 ms/30.89% —— 我们既慢
+   (2.6x) 又 ratio 差 (+5pp)，差距是引擎级（每次 descent 散读 ~4 行 vs WinRAR
+   的链/紧凑窗口），低步数档已到 MT 收益前缘。
+2. **远带预算（RAR_RS_FAR_BAND）不是 mt8 解药** 维持：MT slice 树远带候选稀少，
+   削尾打不到带宽大头。它仍是 seq 的 opt-in 温和加速档（留档）。
+3. **随机语料 3x 回归是有界且可接受的**：此类输入 ratio ~100% 走 STORE 兜底，
+   实际写出路径不亏；回归源于链路径逐字节 insert 没有最优路径的 matchless
+   快路径跳走（0.34x 是文档化 MT 行为的一部分）。
+4. 遗留：PROFILE_COLLECT 原子计数器与 `RAR_RS_FAR_BAND` 仍 env-gated（off）——
+   tsc 字节级复现已验证 off 状态安全，留作可选测量/速度档为定论后的合理状态。

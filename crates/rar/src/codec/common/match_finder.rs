@@ -480,6 +480,58 @@ impl<'a> MatchFinder<'a> {
         }
     }
 
+    /// Rebuild a finder over fresh `data` reusing preallocated `head`/`prev`
+    /// arrays (the two multi-MiB allocations of [`MatchFinder::new`]). The
+    /// caller hands back the arrays via [`MatchFinder::into_parts`] and
+    /// caches them across parses — the multi-threaded workers parse one
+    /// slice per frame and re-arming a warm ring beats a fresh multi-MiB
+    /// allocation per slice (the per-frame memset/alloc is pure overhead
+    /// next to the search; the allocation fix alone did not move the
+    /// random-data A/B — the per-byte chain insert vs the optimal path's
+    /// matchless fast-path skip is the remaining gap, see issue 13).
+    ///
+    /// The arrays are resized in place when the frame needs more room;
+    /// extra capacity is kept for the next reuse. `head` is always cleared
+    /// (it must be — a stale entry would chain into the previous frame),
+    /// `prev` only when it grows.
+    #[cfg(feature = "parallel")]
+    pub fn reuse(
+        data: &'a [u8],
+        min_match: usize,
+        max_match: usize,
+        chain_len: usize,
+        window: usize,
+        mut head: Vec<i32>,
+        mut prev: Vec<i32>,
+    ) -> Self {
+        head.resize(HASH_SIZE, -1);
+        head.fill(-1);
+        let prev_size = window.min(data.len()).next_power_of_two().max(1 << 17);
+        let grew = prev.len() != prev_size;
+        prev.resize(prev_size, -1);
+        if grew {
+            prev.fill(-1);
+        }
+        MatchFinder {
+            data,
+            size: data.len(),
+            head,
+            prev,
+            min_match,
+            max_match,
+            chain_len,
+            window,
+            hash_mask: HASH_SIZE - 1,
+            prev_mask: prev_size - 1,
+        }
+    }
+
+    /// Hand back the `head`/`prev` arrays for caching across parses.
+    #[cfg(feature = "parallel")]
+    pub fn into_parts(self) -> (Vec<i32>, Vec<i32>) {
+        (self.head, self.prev)
+    }
+
     #[inline]
     fn hash4(&self, pos: usize) -> usize {
         let d = self.data;
