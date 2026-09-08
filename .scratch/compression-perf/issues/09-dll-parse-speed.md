@@ -85,3 +85,33 @@ software pipelining (batch several positions' descents so one position's
 DRAM read overlaps another's compute) — the designed but unbuilt next lever.
 Also on the list: the CLI's ~1 s overhead over the library core (the
 batch-wave + nested MT pool nesting), which is pure waste.
+
+## 2026-09-08: son-pair prefetch extension — measured negative, keeps the
+## BT4 ceiling (issue 11 already killed the interleaved batch on the
+## insertion-order invariant; this was the last untried value-neutral lever)
+
+Tried the one remaining byte-identical pipelining step: within `descent`,
+after reading the current node's `(child_less, child_greater)` pair,
+prefetch BOTH children's son pairs (`T1`/L2 hint, son-only — the rejected
+`T0` run prefetched son+input together) so whichever the byte compare
+picks is already in L2 next iteration. Value-neutral by construction
+(prefetch touches nothing), byte-identity trivially preserved: 210 lib
+tests green, seq/mt1 ratio identical, decode byte-identical.
+
+A/B on tsc.exe 6 MiB x86 prefix (m3, dict 32 MiB), 20 interleaved samples
+each, release: baseline median 3048 ms vs prefetch median 3078 ms
+(≈ +1% slower, inside the ±10% machine noise but not a win on either
+median or min). On full 24.5 MiB tsc.exe it flip-flopped with the same
+signature. The untaken-branch line pollutes L2 on dense binaries, and the
+dependent `input[current+len]` compare reads (the other ~50% of step
+traffic) are not prefetchable ahead of the branch. Consistent with the
+earlier `T0` son+input rejection — the MLP issued ahead of the branch is
+50% wasted, and every level of cache here is already contended by the
+13-24 MiB working set.
+
+Closing: the pipelined-first-step value-carry (landed −3.6%) is the full
+extent of byte-identical BT4 pipelining. The interleaved batch (issue 11)
+and both prefetch variants are measured negative. Any further per-position
+step reduction requires the leaves specified in issue 13 待办 (MT-only low-
+step search with accepted divergence, or a `RAR_RS_FAR_BAND` opt-in speed
+tier) — neither is byte-identical, so both are explicit-tradeoff options.

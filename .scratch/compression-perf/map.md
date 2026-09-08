@@ -17,6 +17,11 @@ Decisions so far:
 
 - 13 collect 带宽/延迟判定 + 远带候选预算前缘（2026-09-07）：远带预算 `RAR_RS_FAR_BAND`
   是 seq opt-in 速度档（1M/2：-9% @ +0.22pp），非 mt8 解药；mt8 需每位置步数降 ~5x（架构级）。
+- 09 双环/逐级 son-pair prefetch 扩展（2026-09-08）：最后一个未试的字节级流水杠杆
+  （descent 内异步预取两候选子对的 son 对）20 样本 A/B 中性偏负（tsc6 med 3048 vs 3078），
+  与既有 T0 son+input 拒绝一致——未取分支的缓存行在稠密二进制 L2 上是净污染。BT4
+  字节级流水已封顶（首步 value-carry -3.6% 即全量）；再降每位置步数只剩显式取舍项
+  （MT-only 低步数搜索 / FAR_BAND opt-in），见 issue 13 待办。
 - 14 两制近存实测为负（2026-09-07）：近带 256 KiB L3 驻留 + 远树到期重插（`RAR_RS_TWO_TIER`，
   env-gated 默认 off，descent 拆 node/pos 纯重构除外）——远插把每位置步数做大约 2-3x，
   seq -75%、mt8 -98%；budget=4 采样式远插 ratio 漂 +0.54pp 仍 mt8 -66%。方向废弃，留档负例。
