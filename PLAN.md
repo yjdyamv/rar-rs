@@ -31,6 +31,10 @@
 - [x] 单大成员块级并行（2026-09，字节同等 MT）：>64 MiB 单文件 `-ma4` 成员级并行已做、块级未做 → 现在按 **字节同等** 原则做：64 KiB LZ 块拆解为 `analyze_block`（每块独立：token 解析 + 频率统计 + 建表，与串行逐块一致）+ `serialize_block`（顺序：keep/差分表决策推进 `previous_levels` + 位写入，MT/串行逐字节相同）。每块 history 窗口 = 串行 `local_history` 在该块的精确值（≤ `MAX_ENCODER_MATCH_OFFSET`，跨缓冲区用 `Cow::Owned`）；wave = 线程数（上限 64）限峰值内存，结果入 slot 数组按序序列化。阈值 `RAR29_PARALLEL_MEMBER_THRESHOLD` = 64 MiB；PPMd（m4/m5）不做块级。测试锁定：`mt_matches_sequential_bytes`（多 level/prior-history 逐字节 + carried levels 相等）、`block_history_matches_sequential_window`、`mt_dispatch_large_member_roundtrips`（64 MiB+ 生产路径触发 + 解码全量比对）
 
 
+### RAR4（编辑面，方向已定 2026-09，实施见 ADR 0005）
+
+- **已存在 RAR4 的编辑全补（2026-09 方向定稿，分阶段实施）**：对齐官方 rar/WinRAR。机制分层：头/块级操作（`rr` 原地补/换、`k`、`rn`/`ch`、`c`/`cw` 注释读写与展示）走结构补丁——不碰压缩数据，solid 同样可做；非 solid `d/u/f/a` 走块拷贝 + RAR4 写侧重发新成员（不重压）；**solid `d/u/f/a` 走整档 repack（解码→重编）**，对齐官方 7.21+——官方 7.20 曾做 surgical 部分重处理，在 RAR4 产坏档后 7.21 回退 full repack，surgical 仅存 RAR5，不仿 7.20。v1 边界（清晰报错拒绝）：分卷、`-hp`、已锁定档。阶段 A 头级操作 → B 非 solid 成员操作 → C solid repack。验证锁定：A = WinRAR 6.23 双向 + repair 往返；B = 6.23 `t` + 与官方操作比对；C = repack 前后解出字节一致 + 6.23 `t`。缺口现状、官方依据与代码位置见 `docs/adr/0005-rar4-edit-architecture.md`
+
 ### RAR5（压缩面）
 
 - **流式路径自动过滤器（05）**：~~delta/x86 过滤器只走内存路径（<64 MiB 成员）；大音频/裸盘镜像 >64 MiB 走 spill 流式路径无过滤器，ratio 远差于 WinRAR——需调研 delta 可否按窗口应用、区域保持成员相对~~ 已完成：流式路径按窗口应用 delta（区域按绝对成员坐标、上限 `MAX_FILTER_BLOCK_LENGTH`，`delta_stream_window`）与 x86（`x86_stream_window`，样本检测的 E8/E8E9 区域按窗口裁剪并切块、`merge_ranges` 去重），E8/E8E9 变体及 delta 频道按 64 KiB 样本压缩尺寸选择；过滤成员独占 solid 链
