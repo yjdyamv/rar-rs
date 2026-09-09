@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::archive::{
-    ArchiveEntry, DecryptedPayload, MAX_DICT_SIZE_LOG, RarArchive, StreamRecord, discover_volumes,
+    ArchiveEntry, ArchiveStream, DecryptedPayload, MAX_DICT_SIZE_LOG, RarArchive, StreamRecord,
+    discover_volumes,
 };
 use crate::codec::DecoderState;
 use crate::crypto;
@@ -83,6 +84,21 @@ impl Write for IntegritySink<'_> {
     }
 }
 
+/// Borrow the archive's underlying volume stream, surfacing a clean error
+/// instead of panicking if it is somehow absent. `open_read` / `open_read_quick`
+/// always set `RarArchive::stream`, so `None` is an internal invariant violation
+/// — but reporting it as [`RarError::InvalidState`] keeps a malformed or
+/// mis-constructed reader from aborting the process. Takes the `Option` by field
+/// reference so callers keep the disjoint-borrow advantage of `self.stream`
+/// (they can still borrow `self.password` / `self.volume_paths` on the same line).
+fn stream_mut(
+    stream: &mut Option<Box<dyn ArchiveStream>>,
+) -> RarResult<&mut Box<dyn ArchiveStream>> {
+    stream.as_mut().ok_or_else(|| {
+        RarError::InvalidState("archive reader has no underlying stream".into())
+    })
+}
+
 impl RarArchive {
     pub(crate) fn open_read(&mut self) -> RarResult<()> {
         self.volume_paths = discover_volumes(&self.path);
@@ -122,7 +138,7 @@ impl RarArchive {
             // `try_quick_open_entries` may have consumed the leading
             // plaintext blocks (e.g. a -hp encryption header); rewind to
             // the archive start so the full scan sees them again.
-            let stream = self.stream.as_mut().unwrap();
+            let stream = stream_mut(&mut self.stream)?;
             stream.seek(SeekFrom::Start(
                 self.sfx_offset + RAR5_SIGNATURE.len() as u64,
             ))?;
@@ -139,7 +155,7 @@ impl RarArchive {
         // Header-encrypted archives never carry a QO record, and reading
         // their main header would need the derived key — bail out early.
         let first =
-            match crate::format::rar5::headers::read_block(self.stream.as_mut().unwrap(), None)? {
+            match crate::format::rar5::headers::read_block(stream_mut(&mut self.stream)?, None)? {
                 Some(meta) => meta,
                 None => return Ok(false),
             };
@@ -156,7 +172,7 @@ impl RarArchive {
             .checked_add(RAR5_SIGNATURE.len() as u64)
             .and_then(|base| base.checked_add(qo_rel))
             .unwrap_or(u64::MAX);
-        let stream = self.stream.as_mut().unwrap();
+        let stream = stream_mut(&mut self.stream)?;
         stream.seek(SeekFrom::Start(qo_abs))?;
         let Some(qo) = crate::format::rar5::headers::read_block(stream, None)? else {
             return Ok(false);
@@ -194,7 +210,7 @@ impl RarArchive {
         // The signature must appear at the start for plain archives and
         // after the embedded stub for SFX archives (scan up to 8 MiB,
         // like the reference readers).
-        let stream = self.stream.as_mut().unwrap();
+        let stream = stream_mut(&mut self.stream)?;
         let file_size = stream.seek(SeekFrom::End(0))?;
         stream.seek(SeekFrom::Start(0))?;
         let scan = file_size.min(SFX_SCAN_LIMIT as u64) as usize;
@@ -243,12 +259,12 @@ impl RarArchive {
         let mut last_file_index: Option<usize> = None;
 
         while let Some(meta) = crate::format::rar5::headers::read_block(
-            self.stream.as_mut().unwrap(),
+            stream_mut(&mut self.stream)?,
             encr_key.as_ref(),
         )? {
             self.check_cancel()?;
             let raw = &meta.raw;
-            let stream_pos = self.stream.as_mut().unwrap().stream_position()?;
+            let stream_pos = stream_mut(&mut self.stream)?.stream_position()?;
 
             match raw.block_type {
                 BLOCK_TYPE_ARCHIVE_HEADER => {
@@ -329,7 +345,7 @@ impl RarArchive {
         // after the signature (SFX-aware). Later volumes open fresh and each
         // starts with its own 7-byte signature.
         scan.scan_volume(
-            self.stream.as_mut().unwrap(),
+            stream_mut(&mut self.stream)?,
             0,
             self.password.as_deref(),
             &mut out,
@@ -1015,7 +1031,7 @@ impl RarArchive {
                 // Read the stream payload (possibly RAR5-compressed).
                 let mut packed = vec![0u8; s.data_size as usize];
                 {
-                    let stream = self.stream.as_mut().unwrap();
+                    let stream = stream_mut(&mut self.stream)?;
                     stream.seek(SeekFrom::Start(s.data_offset))?;
                     stream.read_exact(&mut packed)?;
                 }
@@ -1276,7 +1292,7 @@ impl RarArchive {
         let password = self.password.as_deref();
         let cancel = &self.cancel;
         let mut reader = crate::format::rar5::payload::StreamReader {
-            stream: self.stream.as_mut().unwrap(),
+            stream: stream_mut(&mut self.stream)?,
             volume_paths: &self.volume_paths,
         };
         crate::format::rar5::payload::read_packed(
@@ -1467,7 +1483,7 @@ impl RarArchive {
         let max_alloc_packed_bytes = self.max_packed_bytes();
         let max_stream_packed_bytes = self.max_stream_packed_bytes();
         let (written, crc) = crate::format::rar4::decode_member_bytes_to(
-            self.stream.as_mut().unwrap(),
+            stream_mut(&mut self.stream)?,
             &self.volume_paths,
             &entry.chunks,
             &entry.header,
@@ -1502,7 +1518,7 @@ impl RarArchive {
         let entry = self.entries[idx].clone();
         let max_packed_bytes = self.max_packed_bytes();
         crate::format::rar4::decode_member_bytes(
-            self.stream.as_mut().unwrap(),
+            stream_mut(&mut self.stream)?,
             &self.volume_paths,
             &entry.chunks,
             &entry.header,
@@ -1647,7 +1663,7 @@ impl RarArchive {
             let mut decoder = self.read_ctx_mut().rar4_decoder.take();
             let max_packed_bytes = self.max_packed_bytes();
             let data = match crate::format::rar4::decode_member_bytes(
-                self.stream.as_mut().unwrap(),
+                stream_mut(&mut self.stream)?,
                 &self.volume_paths,
                 &chunks,
                 &hdr,
