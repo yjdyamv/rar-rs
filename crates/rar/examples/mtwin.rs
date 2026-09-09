@@ -23,9 +23,33 @@ fn lcg(seed: &mut u64) -> u8 {
 fn text_data(target: usize) -> Vec<u8> {
     use std::fmt::Write;
     let words = [
-        "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "lorem", "ipsum",
-        "dolor", "sit", "amet", "consectetur", "adipiscing", "elit", "sed", "do", "eiusmod",
-        "tempor", "incididunt", "ut", "labore", "et", "dolore", "magna", "aliqua",
+        "the",
+        "quick",
+        "brown",
+        "fox",
+        "jumps",
+        "over",
+        "lazy",
+        "dog",
+        "lorem",
+        "ipsum",
+        "dolor",
+        "sit",
+        "amet",
+        "consectetur",
+        "adipiscing",
+        "elit",
+        "sed",
+        "do",
+        "eiusmod",
+        "tempor",
+        "incididunt",
+        "ut",
+        "labore",
+        "et",
+        "dolore",
+        "magna",
+        "aliqua",
     ];
     let mut seed = 12345u64;
     let mut out = String::with_capacity(target);
@@ -132,7 +156,9 @@ fn file_data(path: &str, target: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(target);
     let mut buf = [0u8; 65536];
     while out.len() < target {
-        let n = f.read(&mut buf).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let n = f
+            .read(&mut buf)
+            .unwrap_or_else(|e| panic!("read {path}: {e}"));
         if n == 0 {
             break;
         }
@@ -151,9 +177,7 @@ fn main() {
     let size = size_mb * 1024 * 1024;
     const DICT_LOG: u8 = 7; // 16 MiB
     let want_corpus = std::env::args().nth(2).unwrap_or_default();
-    let thread_csv = std::env::args()
-        .nth(3)
-        .unwrap_or_else(|| "1,8".into());
+    let thread_csv = std::env::args().nth(3).unwrap_or_else(|| "1,8".into());
     let thread_list = thread_csv
         .split(',')
         .map(|s| s.trim().parse::<usize>().expect("thread list"))
@@ -167,12 +191,17 @@ fn main() {
     .filter(|(name, _)| want_corpus.is_empty() || *name == want_corpus)
     .collect::<Vec<_>>();
     if want_corpus == "file" {
-        let path = std::env::args().nth(4).unwrap_or_else(|| panic!("file corpus needs a path arg"));
+        let path = std::env::args()
+            .nth(4)
+            .unwrap_or_else(|| panic!("file corpus needs a path arg"));
         corpora = vec![("file", file_data(&path, size.max(1024 * 1024)))];
     }
 
     for (name, corpus) in &corpora {
-        println!("== {name}: {} MiB, dict 2^{DICT_LOG} ==", corpus.len() / (1 << 20));
+        println!(
+            "== {name}: {} MiB, dict 2^{DICT_LOG} ==",
+            corpus.len() / (1 << 20)
+        );
         println!();
         for level in [3u8, 5] {
             // Sequential baseline: persistent tree, cache carried across the
@@ -180,8 +209,7 @@ fn main() {
             eprintln!("[{name} l{level}] seq ...");
             let t0 = Instant::now();
             let opts = rar_rs::EncodeOptions::new(level, DICT_LOG);
-            let packed =
-                rar_rs::encode_chunked(corpus, opts).expect("sequential encode failed");
+            let packed = rar_rs::encode_chunked(corpus, opts).expect("sequential encode failed");
             let seq_ms = t0.elapsed().as_millis();
             let seq_ratio = packed.len() as f64 * 100.0 / corpus.len() as f64;
             let seq_bytes = packed.len();
@@ -204,9 +232,8 @@ fn main() {
                 );
                 let mt_ms = t1.elapsed().as_millis();
                 let mt_ratio = packed.len() as f64 * 100.0 / corpus.len() as f64;
-                let out =
-                    rar_rs::decode(&packed, level, corpus.len() as u64, DICT_LOG, None)
-                        .unwrap_or_else(|e| panic!("mt {threads} decode: {e:?}"));
+                let out = rar_rs::decode(&packed, level, corpus.len() as u64, DICT_LOG, None)
+                    .unwrap_or_else(|e| panic!("mt {threads} decode: {e:?}"));
                 assert_eq!(out, *corpus, "mt{threads} decode mismatch");
                 pair.push((*threads, mt_ms, mt_ratio, packed.len()));
             }
@@ -215,13 +242,15 @@ fn main() {
             let d1_at = first_bytes as isize - seq_bytes as isize;
             println!(
                 "  l{level}: seq {:>6}ms {:>7.2}% ({}) | mt{} {:>6}ms {:>7.2}% ({} {:+})",
-                seq_ms, seq_ratio, seq_bytes,
-                pair[0].0, first_ms, first_ratio, first_bytes, d1_at,
+                seq_ms, seq_ratio, seq_bytes, pair[0].0, first_ms, first_ratio, first_bytes, d1_at,
             );
             for (threads, mt_ms, mt_ratio, mt_bytes) in pair.iter().skip(1) {
                 println!(
                     "        mt{threads} {:>6}ms {:>7.2}% ({} {:+})   x{:.2} vs seq",
-                    mt_ms, mt_ratio, mt_bytes, *mt_bytes as isize - seq_bytes as isize,
+                    mt_ms,
+                    mt_ratio,
+                    mt_bytes,
+                    *mt_bytes as isize - seq_bytes as isize,
                     seq_ms as f64 / *mt_ms as f64,
                 );
             }

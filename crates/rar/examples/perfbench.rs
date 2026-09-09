@@ -65,11 +65,31 @@ impl Rng {
 }
 
 const WORDS: &[&str] = &[
-    "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "lorem", "ipsum", "dolor",
-    "sit", "amet", "consectetur", "adipiscing", "elit", "sed", "do", "eiusmod", "tempor",
+    "the",
+    "quick",
+    "brown",
+    "fox",
+    "jumps",
+    "over",
+    "lazy",
+    "dog",
+    "lorem",
+    "ipsum",
+    "dolor",
+    "sit",
+    "amet",
+    "consectetur",
+    "adipiscing",
+    "elit",
+    "sed",
+    "do",
+    "eiusmod",
+    "tempor",
 ];
 
-const TAGS: &[&str] = &["record", "entry", "item", "node", "row", "cell", "field", "value"];
+const TAGS: &[&str] = &[
+    "record", "entry", "item", "node", "row", "cell", "field", "value",
+];
 
 const STRINGS: &[&str] = &[
     "kernel32.dll",
@@ -196,7 +216,12 @@ fn dll_like_data(size: usize) -> Vec<u8> {
     out.extend_from_slice(b"\x0b\x02\x0e\x14");
     out.extend_from_slice(&[0u8; 112]);
     // Four 40-byte section headers.
-    for name in [b".text\0\0\0", b".rdata\0\0", b".data\0\0\0", b".rsrc\0\0\0"] {
+    for name in [
+        b".text\0\0\0",
+        b".rdata\0\0",
+        b".data\0\0\0",
+        b".rsrc\0\0\0",
+    ] {
         out.extend_from_slice(name);
         out.extend_from_slice(&[0u8; 32]);
     }
@@ -273,8 +298,11 @@ fn dict_log_for(size: usize) -> u8 {
 /// archive-level cost.
 fn time_codec(data: &[u8], level: u8) -> (f64, usize) {
     let t = Instant::now();
-    let packed = rar_rs::encode(data, rar_rs::EncodeOptions::new(level, dict_log_for(data.len())))
-        .expect("codec encode");
+    let packed = rar_rs::encode(
+        data,
+        rar_rs::EncodeOptions::new(level, dict_log_for(data.len())),
+    )
+    .expect("codec encode");
     (t.elapsed().as_secs_f64() * 1000.0, packed.len())
 }
 
@@ -294,7 +322,8 @@ fn time_archive(dir: &Path, tag: &str, data: &[u8], level: u8, solid: bool) -> (
         if solid {
             let chunk = (data.len() / SOLID_MEMBERS).max(1);
             for (i, part) in data.chunks(chunk).enumerate() {
-                ar.add_bytes(&format!("m{i}.bin"), part, level).expect("add");
+                ar.add_bytes(&format!("m{i}.bin"), part, level)
+                    .expect("add");
             }
         } else {
             ar.add_bytes("data.bin", data, level).expect("add");
@@ -313,14 +342,7 @@ fn crc32(data: &[u8]) -> u32 {
     h.finalize()
 }
 
-fn run_corpus(
-    dir: &Path,
-    name: &str,
-    data: &[u8],
-    level: u8,
-    repeats: usize,
-    with_solid: bool,
-) {
+fn run_corpus(dir: &Path, name: &str, data: &[u8], level: u8, repeats: usize, with_solid: bool) {
     let mb = data.len() as f64 / 1048576.0;
     let mut codec = Vec::with_capacity(repeats);
     let mut archive = Vec::with_capacity(repeats);
@@ -344,10 +366,7 @@ fn run_corpus(
 
     let solid_part = if with_solid {
         let s = stats(solid);
-        format!(
-            "  solid {:>6.0}/{:>6.0}",
-            s.min, s.median
-        )
+        format!("  solid {:>6.0}/{:>6.0}", s.min, s.median)
     } else {
         String::new()
     };
@@ -417,8 +436,16 @@ fn main() {
     );
     println!(
         "{:<10} {:>8}  {:>8}  {:>8} {:>8}  {:>8} {:>8}  {:>8}  {:>7}  {:>7}",
-        "corpus", "MiB", "crc32", "codec.min", "codec.med", "arch.min", "arch.med", "delta",
-        "ratio", "MiB/s"
+        "corpus",
+        "MiB",
+        "crc32",
+        "codec.min",
+        "codec.med",
+        "arch.min",
+        "arch.med",
+        "delta",
+        "ratio",
+        "MiB/s"
     );
 
     let mut corpora: Vec<(String, Vec<u8>)> = vec![

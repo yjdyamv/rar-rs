@@ -286,10 +286,15 @@ fn dump_collect_stats(tag: &str, start: std::time::Instant) {
     let q = match_finder::STAT_QUERIES.swap(0, Ordering::Relaxed);
     let st = match_finder::STAT_DESCENT_STEPS.swap(0, Ordering::Relaxed);
     let si = match_finder::STAT_SEED_INSERTS.swap(0, Ordering::Relaxed);
-    let buckets: [u64; 8] = core::array::from_fn(|i| match_finder::STAT_STEP_BUCKETS[i].swap(0, Ordering::Relaxed));
+    let buckets: [u64; 8] =
+        core::array::from_fn(|i| match_finder::STAT_STEP_BUCKETS[i].swap(0, Ordering::Relaxed));
     let millis = el.as_secs_f64() * 1000.0;
     let steps_per_q = if q > 0 { st as f64 / q as f64 } else { 0.0 };
-    let ns_per_step = if st > 0 { el.as_secs_f64() * 1e9 / st as f64 } else { 0.0 };
+    let ns_per_step = if st > 0 {
+        el.as_secs_f64() * 1e9 / st as f64
+    } else {
+        0.0
+    };
     eprintln!(
         "[collect {tag}] wall={millis:.0}ms queries={q} steps={st} seed_ins={si} steps/q={steps_per_q:.2} ns/step={ns_per_step:.1}"
     );
@@ -319,6 +324,12 @@ fn dump_collect_stats(tag: &str, start: std::time::Instant) {
     }
 }
 
+// Private entry point of the encoder: one argument per encode dimension
+// (input, method, dictionary, chunking, solid state, finality, progress,
+// codec variant, solid lead-in). Bundling them into a struct would add a layer
+// to the hottest path for no behaviour change; the audit defers codec hot-path
+// restructuring to the breaking release.
+#[allow(clippy::too_many_arguments)]
 fn encode_chunked_raw_inner(
     data: &[u8],
     method: u8,
@@ -766,8 +777,18 @@ fn encode_mt_slice(
     // (a bounded chain walk + lazy skip instead of a tree descent at
     // every position) at the price of MT output divergence.
     let mut symbols = mt_slice_symbols_low_step(
-        state, data, s0, e0, lr_shared, entry_len, chain_len, lazy_thresh, max_match, dict_size,
-        long_range, seed_tail,
+        state,
+        data,
+        s0,
+        e0,
+        lr_shared,
+        entry_len,
+        chain_len,
+        lazy_thresh,
+        max_match,
+        dict_size,
+        long_range,
+        seed_tail,
     );
     if let Some(lead) = lead_symbols {
         let mut joined = lead.to_vec();
@@ -829,15 +850,9 @@ fn mt_slice_symbols_low_step(
     let chain = chain_len.min(MT_LOW_STEP_CHAIN);
     let parts = state.chain_parts.take();
     let mut finder = match parts {
-        Some((head, prev)) => match_finder::MatchFinder::reuse(
-            &combined,
-            2,
-            max_match,
-            chain,
-            dict_size,
-            head,
-            prev,
-        ),
+        Some((head, prev)) => {
+            match_finder::MatchFinder::reuse(&combined, 2, max_match, chain, dict_size, head, prev)
+        }
         None => match_finder::MatchFinder::new(&combined, 2, max_match, chain, dict_size),
     };
     if seed_tail {

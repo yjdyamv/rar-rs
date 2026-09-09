@@ -34,8 +34,8 @@ fn main() {
         let entry_opt = rar_rs::EntryWriteOptions::new().compression_level(
             rar_rs::CompressionLevel::try_from(level).map_err(|e| format!("level: {e}"))?,
         );
-        let mut w = rar_rs::ArchiveWriter::create_with(&out, opts)
-            .map_err(|e| format!("create: {e}"))?;
+        let mut w =
+            rar_rs::ArchiveWriter::create_with(&out, opts).map_err(|e| format!("create: {e}"))?;
         w.add_batch(&[rar_rs::WriteEntry::File {
             path: Path::new(file),
             name: None,
@@ -43,7 +43,9 @@ fn main() {
         }])
         .map_err(|e| format!("add: {e}"))?;
         w.finish().map_err(|e| format!("finish: {e}"))?;
-        Ok(std::fs::metadata(&out).map(|m| m.len() as usize).unwrap_or(0))
+        Ok(std::fs::metadata(&out)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0))
     })();
     let writer_ms = t1.elapsed().as_secs_f64() * 1000.0;
     match writer {

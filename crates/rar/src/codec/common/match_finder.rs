@@ -1,6 +1,6 @@
+use crate::codec::lzss_huff::DIST_CACHE_SIZE;
 /// RAR5 LZ match finder — hash-chain match finder for LZSS compression.
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::codec::lzss_huff::DIST_CACHE_SIZE;
 
 /// Temporary collect diagnostics (read under `RAR_RS_COLLECT_STATS=1`):
 /// descent steps and position queries across a run, so the average cost per
@@ -1180,70 +1180,70 @@ mod tests {
         );
     }
 
-// Sliding: once more than the window is pushed, the history drops
-        // the oldest bytes and stays bounded while still finding matches in
-        // the retained range.
-        #[test]
-        fn long_range_window_slides_and_stays_bounded() {
-            let mut lr = LongRange::new(64 * 1024);
-            for i in 0..8u64 {
-                lr.push(&random_bytes(i, 32 * 1024));
-            }
-            assert_eq!(lr.hist_len(), 64 * 1024, "history capped at the window");
-            assert_eq!(lr.total_pushed(), 256 * 1024);
-            // The oldest data slid out: the retained history starts at
-            // 256 KiB - 64 KiB.
-            assert_eq!(lr.hist_base(), 256 * 1024 - 64 * 1024);
+    // Sliding: once more than the window is pushed, the history drops
+    // the oldest bytes and stays bounded while still finding matches in
+    // the retained range.
+    #[test]
+    fn long_range_window_slides_and_stays_bounded() {
+        let mut lr = LongRange::new(64 * 1024);
+        for i in 0..8u64 {
+            lr.push(&random_bytes(i, 32 * 1024));
+        }
+        assert_eq!(lr.hist_len(), 64 * 1024, "history capped at the window");
+        assert_eq!(lr.total_pushed(), 256 * 1024);
+        // The oldest data slid out: the retained history starts at
+        // 256 KiB - 64 KiB.
+        assert_eq!(lr.hist_base(), 256 * 1024 - 64 * 1024);
+    }
+
+    /// The software-pipelined first step ([`TreeMatchFinder::seed_for`]
+    /// feeding [`TreeMatchFinder::matches_seeded`]) must be byte-identical
+    /// to the serial [`TreeMatchFinder::matches`]: the same reports and
+    /// the same tree state afterwards, across every position and window
+    /// wrap.
+    #[test]
+    fn seeded_first_step_is_byte_identical_to_serial() {
+        let mut data = Vec::with_capacity(280 * 1024);
+        let phrase = b"the quick brown fox jumps over the lazy dog ";
+        for _ in 0..(96 * 1024 / phrase.len() + 1) {
+            data.extend_from_slice(phrase);
+        }
+        data.extend(std::iter::repeat_n(0u8, 24 * 1024));
+        data.extend_from_slice(&random_bytes(0xDEAD_BEEF, 90 * 1024));
+        for _ in 0..(64 * 1024 / phrase.len() + 1) {
+            data.extend_from_slice(phrase);
         }
 
-        /// The software-pipelined first step ([`TreeMatchFinder::seed_for`]
-        /// feeding [`TreeMatchFinder::matches_seeded`]) must be byte-identical
-        /// to the serial [`TreeMatchFinder::matches`]: the same reports and
-        /// the same tree state afterwards, across every position and window
-        /// wrap.
-        #[test]
-        fn seeded_first_step_is_byte_identical_to_serial() {
-            let mut data = Vec::with_capacity(280 * 1024);
-            let phrase = b"the quick brown fox jumps over the lazy dog ";
-            for _ in 0..(96 * 1024 / phrase.len() + 1) {
-                data.extend_from_slice(phrase);
-            }
-            data.extend(std::iter::repeat_n(0u8, 24 * 1024));
-            data.extend_from_slice(&random_bytes(0xDEAD_BEEF, 90 * 1024));
-            for _ in 0..(64 * 1024 / phrase.len() + 1) {
-                data.extend_from_slice(phrase);
-            }
-
-            let window = 1 << 15;
-            let mut serial = TreeMatchFinder::new(window);
-            let mut seeded = TreeMatchFinder::new(window);
-            for pos in 0..(data.len() - 3) {
-                let max_distance = pos.min(window);
-                let len_limit = (data.len() - pos).min(127);
-                let mut out_s = Vec::new();
-                serial.matches(&data, pos, len_limit, max_distance, 1000, &mut out_s);
-                let (current, less, greater) = seeded.seed_for(&data, pos);
-                let mut out_p = Vec::new();
-                seeded.matches_seeded(
-                    &data,
-                    pos,
-                    len_limit,
-                    max_distance,
-                    1000,
-                    &mut out_p,
-                    current,
-                    less,
-                    greater,
-                );
-                assert_eq!(out_s, out_p, "report mismatch at position {pos}");
-            }
-            assert_eq!(
-                serial.head, seeded.head,
-                "head slots diverge from the pipelined path"
+        let window = 1 << 15;
+        let mut serial = TreeMatchFinder::new(window);
+        let mut seeded = TreeMatchFinder::new(window);
+        for pos in 0..(data.len() - 3) {
+            let max_distance = pos.min(window);
+            let len_limit = (data.len() - pos).min(127);
+            let mut out_s = Vec::new();
+            serial.matches(&data, pos, len_limit, max_distance, 1000, &mut out_s);
+            let (current, less, greater) = seeded.seed_for(&data, pos);
+            let mut out_p = Vec::new();
+            seeded.matches_seeded(
+                &data,
+                pos,
+                len_limit,
+                max_distance,
+                1000,
+                &mut out_p,
+                current,
+                less,
+                greater,
             );
-            assert_eq!(
-                serial.son, seeded.son,
-                "son slots diverge from the pipelined path"
-            );
+            assert_eq!(out_s, out_p, "report mismatch at position {pos}");
         }
+        assert_eq!(
+            serial.head, seeded.head,
+            "head slots diverge from the pipelined path"
+        );
+        assert_eq!(
+            serial.son, seeded.son,
+            "son slots diverge from the pipelined path"
+        );
+    }
 }

@@ -7,9 +7,9 @@
 
 #[cfg(feature = "parallel")]
 pub(crate) use super::encoder::encode_chunked_mt_with_progress;
+pub(crate) use super::encoder::encode_chunked_raw_with_lead;
 #[cfg(all(test, feature = "parallel"))]
 pub(crate) use super::encoder::set_fast_path_enabled;
-pub(crate) use super::encoder::encode_chunked_raw_with_lead;
 pub use super::encoder::{
     DEFAULT_CHUNK_SIZE, EncoderState, FilterSpec, MAX_FILTER_BLOCK_LENGTH, encode_chunked_mt,
     encode_chunked_raw, encode_raw, encode_with_auto_delta_filter, encode_with_auto_x86_filter,

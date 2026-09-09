@@ -1136,6 +1136,12 @@ struct KeptMember {
 // One parameter per edit dimension the repack has to honour (deletes,
 // renames, archive comment, recovery, additions, member comments).
 #[allow(clippy::too_many_arguments)]
+// The repack drives the legacy create facade on purpose: it needs the RAR4
+// member writer (`add_rar4_data`) and the RAR4 comment queue
+// (`set_rar4_writer_comment`), neither of which the typed `ArchiveWriter`
+// exposes. Routing RAR4 writing through its own module is the breaking-release
+// boundary work (audit P1), not a deprecation fix.
+#[allow(deprecated)]
 pub(crate) fn repack_solid_archive(
     archive: &mut RarArchive,
     deleted: &[bool],
@@ -2167,10 +2173,7 @@ mod repack_tests {
         let path = dir.path().join("soliddir.rar");
         let p1 = make_text(50_000);
         let p2 = make_text(40_000);
-        build_solid(
-            &path,
-            &[("docs/", &[]), ("a.txt", &p1), ("b.txt", &p2)],
-        );
+        build_solid(&path, &[("docs/", &[]), ("a.txt", &p1), ("b.txt", &p2)]);
 
         // The directory member is present and recognized as a directory.
         {

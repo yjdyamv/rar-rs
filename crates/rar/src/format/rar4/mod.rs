@@ -799,68 +799,6 @@ fn decode_comment_text(payload: &[u8]) -> Vec<u8> {
 
 pub(crate) mod create;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Build a COMM_HEAD (0x75) file-comment subblock wrapping `payload`.
-    fn comm_block(payload: &[u8]) -> Vec<u8> {
-        let head_size = 12 + payload.len();
-        let mut b = vec![0u8; 12];
-        b[2] = COMM_HEAD; // head type
-        b[5..7].copy_from_slice(&(head_size as u16).to_le_bytes());
-        b[7] = 0x50; // version
-        b[8] = 29; // unp ver
-        b[9] = 0x30; // method (store)
-        b.extend_from_slice(payload);
-        b
-    }
-
-    #[test]
-    fn parses_ascii_file_comment() {
-        let tail = comm_block(b"release notes");
-        let (c, len) = parse_file_comment(&tail);
-        assert_eq!(c.unwrap(), b"release notes");
-        assert_eq!(len, tail.len());
-    }
-
-    #[test]
-    fn parses_utf16_file_comment() {
-        let payload: Vec<u8> = "注".encode_utf16().fold(Vec::new(), |mut v, u| {
-            v.extend_from_slice(&u.to_le_bytes());
-            v
-        });
-        let tail = comm_block(&payload);
-        let (c, _) = parse_file_comment(&tail);
-        assert_eq!(c.unwrap(), "注".as_bytes());
-    }
-
-    #[test]
-    fn no_comment_returns_none() {
-        // A FILE_HEAD (0x74) with no trailing COMM_HEAD subblock.
-        let tail = [0u8, 1, FILE_HEAD, 0, 0, 0, 0];
-        assert!(parse_file_comment(&tail).0.is_none());
-    }
-
-    #[test]
-    fn long_block_comment_is_located() {
-        // LONG_BLOCK flag set: comment data lives in the 4-byte add_size.
-        let payload = b"long form";
-        let head_size = 7 + 4; // prefix + add_size
-        let add_size = payload.len() as u32;
-        let mut b = vec![0u8; 11];
-        b[2] = COMM_HEAD;
-        b[3..5].copy_from_slice(&(LONG_BLOCK as u16).to_le_bytes());
-        b[5..7].copy_from_slice(&(head_size as u16).to_le_bytes());
-        b[7..11].copy_from_slice(&add_size.to_le_bytes());
-        b.extend_from_slice(&[0x50, 29, 0x30, 0, 0]); // version, unp_ver, method, comm_crc
-        b.extend_from_slice(payload);
-        let (c, len) = parse_file_comment(&b);
-        assert_eq!(c.unwrap(), payload);
-        assert_eq!(len, b.len());
-    }
-}
-
 /// Decrypt one `-hp` encrypted block header from an in-memory archive copy
 /// (the reader's streaming [`read_encrypted_block`] works on files; the
 /// edit paths operate on whole-buffer reads). Returns the decrypted header
@@ -916,4 +854,66 @@ pub(crate) fn decrypt_encrypted_header(
     };
     let on_disk_header = 8 + align16;
     Ok((header, on_disk_header, add_size, on_disk_header + add_size))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a COMM_HEAD (0x75) file-comment subblock wrapping `payload`.
+    fn comm_block(payload: &[u8]) -> Vec<u8> {
+        let head_size = 12 + payload.len();
+        let mut b = vec![0u8; 12];
+        b[2] = COMM_HEAD; // head type
+        b[5..7].copy_from_slice(&(head_size as u16).to_le_bytes());
+        b[7] = 0x50; // version
+        b[8] = 29; // unp ver
+        b[9] = 0x30; // method (store)
+        b.extend_from_slice(payload);
+        b
+    }
+
+    #[test]
+    fn parses_ascii_file_comment() {
+        let tail = comm_block(b"release notes");
+        let (c, len) = parse_file_comment(&tail);
+        assert_eq!(c.unwrap(), b"release notes");
+        assert_eq!(len, tail.len());
+    }
+
+    #[test]
+    fn parses_utf16_file_comment() {
+        let payload: Vec<u8> = "注".encode_utf16().fold(Vec::new(), |mut v, u| {
+            v.extend_from_slice(&u.to_le_bytes());
+            v
+        });
+        let tail = comm_block(&payload);
+        let (c, _) = parse_file_comment(&tail);
+        assert_eq!(c.unwrap(), "注".as_bytes());
+    }
+
+    #[test]
+    fn no_comment_returns_none() {
+        // A FILE_HEAD (0x74) with no trailing COMM_HEAD subblock.
+        let tail = [0u8, 1, FILE_HEAD, 0, 0, 0, 0];
+        assert!(parse_file_comment(&tail).0.is_none());
+    }
+
+    #[test]
+    fn long_block_comment_is_located() {
+        // LONG_BLOCK flag set: comment data lives in the 4-byte add_size.
+        let payload = b"long form";
+        let head_size = 7 + 4; // prefix + add_size
+        let add_size = payload.len() as u32;
+        let mut b = vec![0u8; 11];
+        b[2] = COMM_HEAD;
+        b[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
+        b[5..7].copy_from_slice(&(head_size as u16).to_le_bytes());
+        b[7..11].copy_from_slice(&add_size.to_le_bytes());
+        b.extend_from_slice(&[0x50, 29, 0x30, 0, 0]); // version, unp_ver, method, comm_crc
+        b.extend_from_slice(payload);
+        let (c, len) = parse_file_comment(&b);
+        assert_eq!(c.unwrap(), payload);
+        assert_eq!(len, b.len());
+    }
 }

@@ -28,8 +28,7 @@ fn main() {
     const DICT: u8 = 8; // 32 MiB, WinRAR default
 
     let t = Instant::now();
-    let packed_seq =
-        rar_rs::encode(&data, rar_rs::EncodeOptions::new(level, DICT)).unwrap();
+    let packed_seq = rar_rs::encode(&data, rar_rs::EncodeOptions::new(level, DICT)).unwrap();
     let seq_ms = t.elapsed().as_secs_f64() * 1000.0;
     println!(
         "seq   l{level} {:>6.1} MiB {}: {:>7.0} ms  {:>5.1} MiB/s  ratio {:>6.2}%",
