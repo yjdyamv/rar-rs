@@ -295,14 +295,13 @@ fn dict_log_for(size: usize) -> u8 {
 }
 
 /// Raw codec encode, in memory: isolates parse + entropy coding from every
-/// archive-level cost.
-fn time_codec(data: &[u8], level: u8) -> (f64, usize) {
+/// archive-level cost. `dict_override` pins the dictionary (log2(size/128 KiB))
+/// instead of letting it follow the corpus size — used to attribute the cost of
+/// a large match-finder tree on incompressible data.
+fn time_codec(data: &[u8], level: u8, dict_override: Option<u8>) -> (f64, usize) {
+    let log = dict_override.unwrap_or_else(|| dict_log_for(data.len()));
     let t = Instant::now();
-    let packed = rar_rs::encode(
-        data,
-        rar_rs::EncodeOptions::new(level, dict_log_for(data.len())),
-    )
-    .expect("codec encode");
+    let packed = rar_rs::encode(data, rar_rs::EncodeOptions::new(level, log)).expect("codec encode");
     (t.elapsed().as_secs_f64() * 1000.0, packed.len())
 }
 
@@ -342,7 +341,15 @@ fn crc32(data: &[u8]) -> u32 {
     h.finalize()
 }
 
-fn run_corpus(dir: &Path, name: &str, data: &[u8], level: u8, repeats: usize, with_solid: bool) {
+fn run_corpus(
+    dir: &Path,
+    name: &str,
+    data: &[u8],
+    level: u8,
+    repeats: usize,
+    with_solid: bool,
+    dict_override: Option<u8>,
+) {
     let mb = data.len() as f64 / 1048576.0;
     let mut codec = Vec::with_capacity(repeats);
     let mut archive = Vec::with_capacity(repeats);
@@ -350,7 +357,7 @@ fn run_corpus(dir: &Path, name: &str, data: &[u8], level: u8, repeats: usize, wi
     let mut packed = 0usize;
 
     for _ in 0..repeats {
-        let (ms, n) = time_codec(data, level);
+        let (ms, n) = time_codec(data, level, dict_override);
         codec.push(ms);
         packed = n;
         archive.push(time_archive(dir, &format!("{name}-s"), data, level, false).0);
@@ -394,12 +401,13 @@ fn main() {
     let mut only: Option<Vec<String>> = None;
     let mut extra: Option<PathBuf> = None;
     let mut with_solid = true;
+    let mut dict_override: Option<u8> = None;
 
     let value = |i: usize, args: &[String]| -> Option<String> { args.get(i + 1).cloned() };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--size-mb" | "--level" | "--repeats" | "--only" | "--file" => {
+            "--size-mb" | "--level" | "--repeats" | "--only" | "--file" | "--dict-log" => {
                 let Some(v) = value(i, &args) else {
                     i += 1;
                     continue;
@@ -409,6 +417,9 @@ fn main() {
                     "--level" => level = v.parse().unwrap_or(level),
                     "--repeats" => repeats = v.parse().unwrap_or(repeats),
                     "--only" => only = Some(v.split(',').map(|p| p.trim().to_string()).collect()),
+                    "--dict-log" => {
+                        dict_override = v.parse::<usize>().ok().map(|n| n.clamp(0, 15) as u8)
+                    }
                     _ => extra = Some(PathBuf::from(v)),
                 }
                 i += 2;
@@ -431,8 +442,13 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("temp dir");
 
     println!(
-        "rar-rs perf baseline — level m{level}, dict min(32 MiB, 2*floor_pow2(size)), \
-         {size_mb} MiB corpora, {repeats} repeats (min/median ms)"
+        "rar-rs perf baseline — level m{level}, dict {dict}, \
+         {size_mb} MiB corpora, {repeats} repeats (min/median ms)",
+        dict = if let Some(d) = dict_override {
+            format!("pinned 128KiB<<{d}")
+        } else {
+            "min(32 MiB, 2*floor_pow2(size))".into()
+        }
     );
     println!(
         "{:<10} {:>8}  {:>8}  {:>8} {:>8}  {:>8} {:>8}  {:>8}  {:>7}  {:>7}",
@@ -477,7 +493,7 @@ fn main() {
     }
 
     for (name, data) in &corpora {
-        run_corpus(&dir, name, data, level, repeats, with_solid);
+        run_corpus(&dir, name, data, level, repeats, with_solid, dict_override);
     }
 
     println!(
@@ -490,6 +506,8 @@ fn main() {
          #           large NEGATIVE delta (compression skipped, not work avoided).\n\
          #           Read it on compressible corpora (xml/wordtext/dll-like) only.\n\
          # ratio   = archive packed / input. MiB/s is from the codec median.\n\
-         # crc32   = corpus fingerprint; identical across machines if the seed holds"
+         # crc32    = corpus fingerprint; identical across machines if the seed holds\n\
+         # --dict-log N pins the dictionary to 128 KiB << N for every corpus (incl. the\n\
+         #           raw codec column) — use it to attribute a large match-finder tree."
     );
 }
