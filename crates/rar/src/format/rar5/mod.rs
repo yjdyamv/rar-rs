@@ -26,6 +26,23 @@ pub(crate) mod write;
 
 pub use headers::{DataChunk, FileHeader};
 
+/// Borrow an archive's underlying volume stream, surfacing a clean error instead
+/// of panicking if it is somehow absent. `RarArchive::stream` is always set by
+/// the open / create paths, so `None` is an internal invariant violation — but
+/// reporting it as [`crate::error::RarError::InvalidState`] keeps a malformed or
+/// mis-constructed archive handle from aborting the process.
+///
+/// Takes the `Option` by field reference (not `&mut self`) so callers keep the
+/// field-level disjoint borrow of `archive.stream`: they can still borrow other
+/// fields of the same archive (e.g. `password`, `volume_paths`) on the same line.
+pub(crate) fn stream_mut(
+    stream: &mut Option<Box<dyn crate::archive::ArchiveStream>>,
+) -> crate::error::RarResult<&mut Box<dyn crate::archive::ArchiveStream>> {
+    stream.as_mut().ok_or_else(|| {
+        crate::error::RarError::InvalidState("archive has no underlying stream".into())
+    })
+}
+
 // ── Archive Signature ──────────────────────────────────────────────────────
 /// RAR5 magic number (8 bytes).
 pub const RAR5_SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";

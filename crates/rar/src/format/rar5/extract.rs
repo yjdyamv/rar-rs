@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::archive::{
-    ArchiveEntry, ArchiveStream, DecryptedPayload, MAX_DICT_SIZE_LOG, RarArchive, StreamRecord,
-    discover_volumes,
+    ArchiveEntry, DecryptedPayload, MAX_DICT_SIZE_LOG, RarArchive, StreamRecord, discover_volumes,
 };
+use super::stream_mut;
 use crate::codec::DecoderState;
 use crate::crypto;
 use crate::detect::{SFX_SCAN_LIMIT, find_bytes};
@@ -82,21 +82,6 @@ impl Write for IntegritySink<'_> {
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
     }
-}
-
-/// Borrow the archive's underlying volume stream, surfacing a clean error
-/// instead of panicking if it is somehow absent. `open_read` / `open_read_quick`
-/// always set `RarArchive::stream`, so `None` is an internal invariant violation
-/// — but reporting it as [`RarError::InvalidState`] keeps a malformed or
-/// mis-constructed reader from aborting the process. Takes the `Option` by field
-/// reference so callers keep the disjoint-borrow advantage of `self.stream`
-/// (they can still borrow `self.password` / `self.volume_paths` on the same line).
-fn stream_mut(
-    stream: &mut Option<Box<dyn ArchiveStream>>,
-) -> RarResult<&mut Box<dyn ArchiveStream>> {
-    stream.as_mut().ok_or_else(|| {
-        RarError::InvalidState("archive reader has no underlying stream".into())
-    })
 }
 
 impl RarArchive {

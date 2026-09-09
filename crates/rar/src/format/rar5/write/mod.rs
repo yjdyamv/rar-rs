@@ -36,6 +36,7 @@ use crate::format::rar5::{
     ENCR_PBKDF2_ITER_LOG, FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX,
     level_to_method,
 };
+use crate::format::rar5::stream_mut;
 pub(crate) mod engine;
 pub(crate) mod layout;
 #[cfg(windows)]
@@ -643,7 +644,7 @@ impl RarArchive {
         const CMT_HEAD: usize = crate::archive::rar4_edit::CMT_HEAD_SIZE;
         let (payload, unicode) = crate::archive::rar4_edit::encode_comment_text(&text);
         let block = crate::archive::rar4_edit::build_comment_block(&payload, unicode);
-        let stream = self.stream.as_mut().unwrap();
+        let stream = stream_mut(&mut self.stream)?;
         if self.header_encryption {
             let password = self.password.as_deref().ok_or_else(|| {
                 RarError::Encrypted("header encryption requires a password".into())
@@ -927,7 +928,7 @@ impl RarArchive {
                 let crc = (crate::crc32::crc32(&hdr[2..crc_end]) & 0xFFFF) as u16;
                 hdr[0..2].copy_from_slice(&crc.to_le_bytes());
             }
-            let stream = this.stream.as_mut().unwrap();
+            let stream = stream_mut(&mut this.stream)?;
             // `-hp`: the file-header block is header-encrypted like every
             // other block after the main header. The member payload (data)
             // itself is NOT part of the ciphertext; it follows the encrypted
@@ -1231,7 +1232,7 @@ impl RarArchive {
                 self.start_next_volume()?;
             }
         }
-        let stream = self.stream.as_mut().unwrap();
+        let stream = stream_mut(&mut self.stream)?;
         stream.write_all(&hdr)?;
         self.write_ctx_mut().volume_bytes_written += hdr.len() as u64;
         let head_crc = u16::from_le_bytes([hdr[0], hdr[1]]);
@@ -2193,13 +2194,13 @@ impl RarArchive {
             // Single-volume
             let hdr_bytes = fh_base.to_bytes();
             if self.write_ctx().quick_open {
-                let pos = self.stream.as_mut().unwrap().stream_position()?;
+                let pos = stream_mut(&mut self.stream)?.stream_position()?;
                 self.write_ctx_mut()
                     .quick_open_entries
                     .push((pos, hdr_bytes.clone()));
             }
             self.write_block_header(&hdr_bytes)?;
-            let stream = self.stream.as_mut().unwrap();
+            let stream = stream_mut(&mut self.stream)?;
             stream.write_all(packed_data)?;
             let data_offset = stream.stream_position()? - packed_data.len() as u64;
             let chunk = DataChunk {
@@ -2237,7 +2238,7 @@ impl RarArchive {
         if total_needed <= remaining {
             // Fits entirely
             self.write_block_header(&hdr_bytes)?;
-            let stream = self.stream.as_mut().unwrap();
+            let stream = stream_mut(&mut self.stream)?;
             stream.write_all(packed_data)?;
             let data_offset = stream.stream_position()? - total_packed;
             self.write_ctx_mut().volume_bytes_written += hdr_on_disk + total_packed;
@@ -2292,7 +2293,7 @@ impl RarArchive {
                 SplitPhase::Write => {
                     let chunk_packed =
                         &packed_data[offset as usize..(offset + chunk_size) as usize];
-                    let stream = this.stream.as_mut().unwrap();
+                    let stream = stream_mut(&mut this.stream)?;
                     stream.write_all(chunk_packed)?;
                     let data_offset = stream.stream_position()? - chunk_size;
                     Ok(data_offset)
@@ -2657,14 +2658,14 @@ impl RarArchive {
             // ── Single-volume ──
             let hdr_bytes = fh_base.to_bytes();
             if self.write_ctx().quick_open {
-                let pos = self.stream.as_mut().unwrap().stream_position()?;
+                let pos = stream_mut(&mut self.stream)?.stream_position()?;
                 self.write_ctx_mut()
                     .quick_open_entries
                     .push((pos, hdr_bytes.clone()));
             }
             self.write_block_header(&hdr_bytes)?;
             let written = {
-                let stream = self.stream.as_mut().unwrap();
+                let stream = stream_mut(&mut self.stream)?;
                 if progress {
                     let mut sink = ProgressWriter {
                         inner: stream,
@@ -2689,7 +2690,7 @@ impl RarArchive {
                     ),
                 )));
             }
-            let stream = self.stream.as_mut().unwrap();
+            let stream = stream_mut(&mut self.stream)?;
             let data_offset = stream.stream_position()? - packed_size;
             self.entries.push(ArchiveEntry {
                 header: FileHeader {
@@ -2753,7 +2754,7 @@ impl RarArchive {
                 }
                 SplitPhase::Write => {
                     {
-                        let stream = this.stream.as_mut().unwrap();
+                        let stream = stream_mut(&mut this.stream)?;
                         if progress {
                             let mut sink = ProgressWriter {
                                 inner: stream,
@@ -2779,7 +2780,7 @@ impl RarArchive {
                             )?;
                         }
                     }
-                    let stream = this.stream.as_mut().unwrap();
+                    let stream = stream_mut(&mut this.stream)?;
                     let data_offset = stream.stream_position()? - chunk_size;
                     Ok(data_offset)
                 }
@@ -3324,7 +3325,7 @@ impl RarArchive {
                     crate::format::rar5::BLOCK_FLAG_DEPENDS_PREV,
                 );
                 self.write_block_header(&hdr)?;
-                let stream = self.stream.as_mut().unwrap();
+                let stream = stream_mut(&mut self.stream)?;
                 stream.write_all(&data)?;
                 self.write_ctx_mut().volume_bytes_written = self
                     .write_ctx()
@@ -3553,7 +3554,7 @@ impl RarArchive {
                 window_bits: 6,
             };
             let hdr = build_file_header(&params)?;
-            let stream = this.stream.as_mut().unwrap();
+            let stream = stream_mut(&mut this.stream)?;
             let (header_bytes, header_on_disk) = if this.header_encryption {
                 let password = this.password.as_deref().ok_or_else(|| {
                     RarError::Encrypted("header encryption requires a password".into())
