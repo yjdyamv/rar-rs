@@ -8,7 +8,9 @@
 
 use crate::crc32;
 use crate::error::{RarError, RarResult};
-use crate::format::rar4::{ENDARC_HEAD, FHD_UNICODE, FILE_HEAD, LONG_BLOCK, MAIN_HEAD};
+use crate::format::rar4::{
+    COMM_HEAD, ENDARC_HEAD, FHD_UNICODE, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, RAR4_METHOD_STORE,
+};
 
 /// RAR 1.5–4.x signature (7 bytes, not a real block header).
 pub(crate) const RAR4_SIGNATURE: &[u8; 7] = b"Rar!\x1a\x07\x00";
@@ -187,6 +189,28 @@ pub(crate) fn build_file_header(p: &FileHeaderParams<'_>) -> RarResult<Vec<u8>> 
     // Patch CRC16.
     patch_crc16(&mut buf, 0);
     Ok(buf)
+}
+
+/// Build a RAR 3.x/4.x per-file comment block (`FHD_COMMENT`): a nested
+/// `COMM_HEAD` (0x75) subblock appended after the extended-time area of a
+/// `FILE_HEAD`. The comment is stored uncompressed (method `0x30`); the payload
+/// is the raw text bytes (UTF-8). Layout:
+/// `HEAD_CRC(2) HEAD_TYPE(1)=0x75 HEAD_FLAGS(2) HEAD_SIZE(2) VERSION(1)=0x50
+///  UNP_VER(1) METHOD(1)=0x30 COMM_CRC(2) payload`.
+pub(crate) fn build_file_comment_block(comment: &[u8]) -> Vec<u8> {
+    let head_size = 12 + comment.len();
+    let mut buf = Vec::with_capacity(head_size);
+    buf.extend_from_slice(&[0u8; 2]); // HEAD_CRC placeholder
+    buf.push(COMM_HEAD);
+    buf.extend_from_slice(&0u16.to_le_bytes()); // HEAD_FLAGS
+    buf.extend_from_slice(&(head_size as u16).to_le_bytes()); // HEAD_SIZE
+    buf.push(0x50); // VERSION
+    buf.push(29); // UNP_VER (RAR4)
+    buf.push(RAR4_METHOD_STORE); // METHOD (store)
+    buf.extend_from_slice(&header_crc16(comment).to_le_bytes()); // COMM_CRC
+    buf.extend_from_slice(comment);
+    patch_crc16(&mut buf, 0);
+    buf
 }
 
 /// Write a FILE_HEAD block to the output stream.

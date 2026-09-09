@@ -620,7 +620,7 @@ impl RarArchive {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
-        self.add_rar4_data(name, data, level, mtime, mtime_ns)
+        self.add_rar4_data(name, data, level, mtime, mtime_ns, None)
     }
 
     /// Encode one RAR4 member from in-memory bytes: CRC, then the smallest
@@ -673,6 +673,7 @@ impl RarArchive {
         level: u8,
         mtime: u32,
         mtime_ns: u32,
+        comment: Option<Vec<u8>>,
     ) -> RarResult<()> {
         // Deferred solid-append: the member cannot be streamed after an
         // existing solid chain; buffer it and let close() repack the whole
@@ -866,12 +867,16 @@ impl RarArchive {
             ext_time: Option<&[u8]>,
             solid_continuation: bool,
             is_dir: bool,
+            comment: Option<Vec<u8>>,
             split_before: bool,
             split_after: bool,
         ) -> RarResult<(u64, u64)> {
-            use crate::format::rar4::write::{FileHeaderParams, build_file_header};
+            use crate::format::rar4::write::{
+                FileHeaderParams, build_file_comment_block, build_file_header,
+            };
             use crate::format::rar4::{
-                FHD_EXTTIME, FHD_PASSWORD, FHD_SALT, FHD_SOLID, FHD_SPLIT_AFTER, FHD_SPLIT_BEFORE,
+                FHD_COMMENT, FHD_EXTTIME, FHD_PASSWORD, FHD_SALT, FHD_SOLID, FHD_SPLIT_AFTER,
+                FHD_SPLIT_BEFORE,
             };
             let mut fhd = name_flags;
             if split_before {
@@ -889,6 +894,9 @@ impl RarArchive {
             if solid_continuation {
                 fhd |= FHD_SOLID;
             }
+            if comment.is_some() {
+                fhd |= FHD_COMMENT;
+            }
             let params = FileHeaderParams {
                 flags: fhd,
                 packed_size,
@@ -904,7 +912,21 @@ impl RarArchive {
                 ext_time,
                 window_bits: 6, // 4 MiB dictionary
             };
-            let hdr = build_file_header(&params)?;
+            let mut hdr = build_file_header(&params)?;
+            // Append the per-file comment subblock (COMM_HEAD 0x75) after the
+            // extended-time area and fix the outer head size + head CRC.
+            if let Some(comment) = &comment {
+                let block = build_file_comment_block(comment);
+                let new_head = u16::from_le_bytes([hdr[5], hdr[6]]) as usize + block.len();
+                hdr[5..7].copy_from_slice(&(new_head as u16).to_le_bytes());
+                hdr.extend_from_slice(&block);
+                // A FILE_HEAD carrying a nested comment stops its CRC before
+                // the trailing extended-time/comment area (matches the
+                // reader's `header_crc_end`).
+                let crc_end = crate::format::rar4::file_header_crc_end(&hdr);
+                let crc = (crate::crc32::crc32(&hdr[2..crc_end]) & 0xFFFF) as u16;
+                hdr[0..2].copy_from_slice(&crc.to_le_bytes());
+            }
             let stream = this.stream.as_mut().unwrap();
             // `-hp`: the file-header block is header-encrypted like every
             // other block after the main header. The member payload (data)
@@ -944,6 +966,7 @@ impl RarArchive {
                     ext_time.as_deref(),
                     solid_continuation,
                     is_dir,
+                    comment.clone(),
                     false,
                     false,
                 )?;
@@ -968,6 +991,7 @@ impl RarArchive {
                         },
                         salt,
                         extra_data: ext_time.unwrap_or_default(),
+                        comment: comment.clone(),
                         ..Default::default()
                     },
                     chunks: vec![crate::model::DataChunk {
@@ -1027,6 +1051,7 @@ impl RarArchive {
                         ext_time.as_deref(),
                         solid_continuation,
                         is_dir,
+                        comment.clone(),
                         split_before,
                         split_after,
                     )?;
@@ -1337,6 +1362,7 @@ impl RarArchive {
                 compression_level,
                 now.as_secs() as u32,
                 now.subsec_nanos(),
+                None,
             );
         }
         let name = arcname.replace('\\', "/");

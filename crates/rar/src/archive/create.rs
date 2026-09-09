@@ -765,6 +765,7 @@ impl RarArchive {
                 None,
                 0,
                 &additions,
+                &[],
             )?;
             self.mode = Mode::Read;
             return Ok(());

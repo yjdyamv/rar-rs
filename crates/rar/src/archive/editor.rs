@@ -110,6 +110,11 @@ pub enum EditOp {
     /// Replace the archive comment (like `rar c`); empty bytes remove the
     /// existing comment. Only valid on single-volume archives.
     SetComment(Vec<u8>),
+    /// Set or clear the per-member (file) comment of the member identified by
+    /// the ID (like `rar cf`). Empty bytes remove the member's existing
+    /// comment. RAR 3.x/4.x only: the comment is a `FHD_COMMENT` block
+    /// appended to the member header.
+    SetMemberComment(EntryId, Vec<u8>),
     /// Rebuild the inline recovery record protecting this percent of the
     /// archive (like `rar rr`; 0..=100). Only valid on single-volume
     /// archives. Without this op the record is rebuilt at its original
@@ -154,6 +159,14 @@ impl EditPlan {
     #[must_use]
     pub fn set_comment(mut self, comment: impl Into<Vec<u8>>) -> Self {
         self.ops.push(EditOp::SetComment(comment.into()));
+        self
+    }
+
+    /// Queue a per-member comment change for the member identified by `id`
+    /// (like `rar cf`); empty bytes remove the member's comment.
+    #[must_use]
+    pub fn set_member_comment(mut self, id: EntryId, comment: impl Into<Vec<u8>>) -> Self {
+        self.ops.push(EditOp::SetMemberComment(id, comment.into()));
         self
     }
 
@@ -248,6 +261,11 @@ impl ArchiveEditor {
                     }
                     comment = Some(bytes.clone());
                 }
+                EditOp::SetMemberComment(_, _) => {
+                    return Err(RarError::Unsupported(
+                        "per-member comments are only supported for RAR 1.5-4.x archives".into(),
+                    ));
+                }
                 EditOp::SetRecovery(percent) => {
                     if force_rr.is_some() {
                         return Err(RarError::InvalidOption(
@@ -287,6 +305,7 @@ impl ArchiveEditor {
         let mut comment: Option<Vec<u8>> = None;
         let mut deletes: Vec<usize> = Vec::with_capacity(plan.ops().len());
         let mut renames: Vec<(usize, String)> = Vec::with_capacity(plan.ops().len());
+        let mut member_comments: Vec<(usize, Option<Vec<u8>>)> = Vec::new();
         for op in plan.ops() {
             match op {
                 EditOp::Delete(id) => deletes.push(self.resolve_id(*id)?),
@@ -303,6 +322,18 @@ impl ArchiveEditor {
                     }
                     comment = Some(bytes.clone());
                 }
+                EditOp::SetMemberComment(id, bytes) => {
+                    // Empty bytes clear the member's comment; both the
+                    // non-solid rebuild and the solid repack honour the
+                    // override (see `edit_rar4`).
+                    let idx = self.resolve_id(*id)?;
+                    let value = if bytes.is_empty() {
+                        None
+                    } else {
+                        Some(bytes.clone())
+                    };
+                    member_comments.push((idx, value));
+                }
                 EditOp::SetRecovery(percent) => {
                     if force_rr.is_some() {
                         return Err(RarError::InvalidOption(
@@ -313,7 +344,12 @@ impl ArchiveEditor {
                 }
             }
         }
-        if deletes.is_empty() && renames.is_empty() && comment.is_none() && force_rr.is_none() {
+        if deletes.is_empty()
+            && renames.is_empty()
+            && comment.is_none()
+            && force_rr.is_none()
+            && member_comments.is_empty()
+        {
             return Err(RarError::Format("no members to edit".into()));
         }
         // One atomic rewrite carries every delete, rename, comment change
@@ -324,6 +360,7 @@ impl ArchiveEditor {
             &renames,
             comment.as_deref(),
             force_rr,
+            &member_comments,
         )?;
         self.catalog_token = allocate_catalog_token()?;
         Ok(EditReport {

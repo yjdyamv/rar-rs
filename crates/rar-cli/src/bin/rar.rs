@@ -97,6 +97,9 @@ enum Command {
     /// Write the archive comment to stdout
     #[command(visible_alias = "cw")]
     CommentWrite(ArchiveArgs),
+    /// Set a member's file comment (from stdin, or `-z<file>`)
+    #[command(visible_alias = "cf")]
+    CommentFileSet(FileCommentArgs),
     /// Print file to stdout (like `rar p`)
     #[command(visible_alias = "p")]
     Print(PrintArgs),
@@ -190,6 +193,21 @@ struct CommentArgs {
     password: password::PasswordArgs,
     #[arg(value_name = "ARCHIVE")]
     archive: String,
+    /// Read the comment from a file (like `-z<file>`)
+    #[arg(long = "comment-file")]
+    comment_file: Option<String>,
+}
+
+/// Per-member comment setting: stdin by default, or `-z<file>`.
+#[derive(Args)]
+struct FileCommentArgs {
+    #[command(flatten)]
+    password: password::PasswordArgs,
+    #[arg(value_name = "ARCHIVE")]
+    archive: String,
+    /// The archive member to annotate
+    #[arg(value_name = "MEMBER")]
+    member: String,
     /// Read the comment from a file (like `-z<file>`)
     #[arg(long = "comment-file")]
     comment_file: Option<String>,
@@ -737,6 +755,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::SfxStrip(args) => cmd_sfx_strip(&args),
         Command::CommentSet(args) => cmd_comment_set(&args),
         Command::CommentWrite(args) => cmd_comment_write(&args),
+        Command::CommentFileSet(args) => cmd_file_comment_set(&args),
         Command::Print(args) => cmd_print(&args),
         Command::Extract(args) => cmd_extract(&args),
         Command::ExtractFlat(args) => cmd_extract_flat(&args),
@@ -2231,6 +2250,45 @@ fn cmd_comment_set(args: &CommentArgs) -> Result<(), String> {
         info!("Comment removed from {archive}", archive = args.archive);
     } else {
         info!("Comment added to {archive}", archive = args.archive);
+    }
+    Ok(())
+}
+
+/// Set a member's file comment (like `rar cf`), from stdin or `-z<file>`;
+/// empty input removes the member's comment. RAR 1.5–4.x only (RAR5 has no
+/// per-member comment block).
+fn cmd_file_comment_set(args: &FileCommentArgs) -> Result<(), String> {
+    use std::io::Read;
+    let mut comment = Vec::new();
+    if let Some(file) = &args.comment_file {
+        std::fs::File::open(file)
+            .and_then(|mut f| f.read_to_end(&mut comment))
+            .map_err(|e| format!("read comment file {file}: {e}"))?;
+    } else {
+        std::io::stdin()
+            .read_to_end(&mut comment)
+            .map_err(|e| format!("stdin: {e}"))?;
+    }
+    let mut editor = open_editor(&args.archive, args.password.password.as_deref())?;
+    let id = editor
+        .unique_entry(&args.member)
+        .map_err(|e| format!("cf: {}: {e}", args.member))?;
+    let remove = comment.is_empty();
+    editor
+        .apply(rar_rs::EditPlan::new().set_member_comment(id, comment))
+        .map_err(|e| format!("cf: {e}"))?;
+    if remove {
+        info!(
+            "Comment removed from {member} in {archive}",
+            member = args.member,
+            archive = args.archive
+        );
+    } else {
+        info!(
+            "Comment added to {member} in {archive}",
+            member = args.member,
+            archive = args.archive
+        );
     }
     Ok(())
 }

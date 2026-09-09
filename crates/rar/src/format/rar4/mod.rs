@@ -407,7 +407,7 @@ fn header_crc_end(header: &[u8], head_type: u8, flags: u16) -> usize {
     }
 }
 
-fn file_header_crc_end(header: &[u8]) -> usize {
+pub(crate) fn file_header_crc_end(header: &[u8]) -> usize {
     // Named blocks end at name (+ salt + large high sizes), before the
     // trailing comment block.
     let mut end = FILE_HEADER_FIXED;
@@ -731,11 +731,12 @@ fn extract_mtime_refinement(ext_time: &[u8]) -> Option<u32> {
     Some(ticks * TICK_NANOSECONDS)
 }
 
-/// Locate and decode a RAR 3.x/4.x per-file comment (`FHD_COMMENT`). The
-/// comment is a COMM_HEAD (0x75) subblock that follows the extended-time area
-/// at the end of the file header. Returns the decoded text and the byte length
-/// the comment block occupies (`0` when absent).
-fn parse_file_comment(tail: &[u8]) -> (Option<Vec<u8>>, usize) {
+/// Locate the nested `COMM_HEAD` (0x75) file-comment subblock in a `FILE_HEAD`'s
+/// trailing area. `tail` must start at the first byte that can begin a comment
+/// block (i.e. the extended-time region). Returns
+/// `(block_start, data_start, data_end)` as offsets relative to `tail`, or
+/// `None` when no comment block is present.
+pub(crate) fn find_comment_block_start(tail: &[u8]) -> Option<(usize, usize, usize)> {
     let mut i = 0;
     while i + 7 <= tail.len() {
         if tail[i + 2] == COMM_HEAD {
@@ -754,21 +755,28 @@ fn parse_file_comment(tail: &[u8]) -> (Option<Vec<u8>>, usize) {
                 (i + 12, i + head_size)
             };
             if data_start <= data_end && data_end <= tail.len() {
-                let method = tail[i + 9];
-                let raw = &tail[data_start..data_end];
-                // WinRAR stores file comments uncompressed (method 0x30); other
-                // methods are rare and best-effort (raw bytes) here.
-                let payload = if method == RAR4_METHOD_STORE {
-                    raw.to_vec()
-                } else {
-                    raw.to_vec()
-                };
-                return (Some(decode_comment_text(&payload)), data_end - i);
+                return Some((i, data_start, data_end));
             }
         }
         i += 1;
     }
-    (None, 0)
+    None
+}
+
+/// Locate and decode a RAR 3.x/4.x per-file comment (`FHD_COMMENT`). The
+/// comment is a COMM_HEAD (0x75) subblock that follows the extended-time area
+/// at the end of the file header. Returns the decoded text and the byte length
+/// the comment block occupies (`0` when absent).
+fn parse_file_comment(tail: &[u8]) -> (Option<Vec<u8>>, usize) {
+    match find_comment_block_start(tail) {
+        Some((i, data_start, data_end)) => {
+            // WinRAR stores file comments uncompressed (method 0x30); other
+            // methods are rare and best-effort (raw bytes) here.
+            let raw = &tail[data_start..data_end];
+            (Some(decode_comment_text(raw)), data_end - i)
+        }
+        None => (None, 0),
+    }
 }
 
 /// Decode a comment payload to raw text bytes. UTF-8 is kept as-is; an

@@ -428,6 +428,88 @@ fn rename_file_header(header: &[u8], new_name: &str) -> RarResult<Vec<u8>> {
     Ok(out)
 }
 
+/// Append a RAR4 per-file comment (`COMM_HEAD`) subblock to an already-built
+/// `FILE_HEAD` and fix the outer head size + head CRC. Mirrors the logic in
+/// `add_rar4_data`'s `emit_segment`.
+fn append_rar4_comment_block(header: &mut Vec<u8>, comment: &[u8]) {
+    let block = crate::format::rar4::write::build_file_comment_block(comment);
+    let new_head = u16::from_le_bytes([header[5], header[6]]) as usize + block.len();
+    header[5..7].copy_from_slice(&(new_head as u16).to_le_bytes());
+    header.extend_from_slice(&block);
+    // A FILE_HEAD carrying a nested comment stops its CRC coverage before the
+    // trailing extended-time/comment area (mirrors `rename_file_header` and the
+    // reader's `header_crc_end`).
+    let crc_end = crate::format::rar4::file_header_crc_end(header);
+    let crc = header_crc16(&header[2..crc_end]);
+    header[0..2].copy_from_slice(&crc.to_le_bytes());
+}
+
+/// Rebuild a `FILE_HEAD` block, optionally renaming it and/or setting or
+/// removing its per-file comment. Used by the non-solid edit path when a
+/// member's name or comment changes: the compressed payload is copied as-is,
+/// so only the header is rewritten. `new_comment` is `None` to keep the
+/// existing comment, `Some(None)` to remove it, `Some(Some(bytes))` to set it.
+///
+/// Everything except the name and the trailing comment area is preserved
+/// byte-identically (high sizes, salt, extended time, flags), matching the
+/// stage-A rename.
+fn rebuild_rar4_header(
+    header: &[u8],
+    new_name: Option<&str>,
+    new_comment: Option<Option<&[u8]>>,
+) -> RarResult<Vec<u8>> {
+    let mut out = match new_name {
+        Some(name) => rename_file_header(header, name)?,
+        None => header.to_vec(),
+    };
+    match new_comment {
+        None => {}
+        Some(None) => out = strip_rar4_comment(&out),
+        Some(Some(comment)) => out = set_rar4_comment(&out, comment)?,
+    }
+    Ok(out)
+}
+
+/// Remove a `FILE_HEAD`'s nested comment subblock (`FHD_COMMENT`): truncate the
+/// block, clear the flag and recompute the header CRC over the shortened header.
+fn strip_rar4_comment(header: &[u8]) -> Vec<u8> {
+    let mut out = header.to_vec();
+    if out.len() < 7 {
+        return out;
+    }
+    let flags = u16::from_le_bytes([out[3], out[4]]);
+    if flags & FHD_COMMENT == 0 {
+        return out;
+    }
+    // The comment is the last thing in the header; it starts at or after the
+    // end of the name/salt area (the extended-time area sits in between).
+    let scan_from = crate::format::rar4::file_header_crc_end(&out).min(out.len());
+    if let Some((start, _, _)) = crate::format::rar4::find_comment_block_start(&out[scan_from..]) {
+        out.truncate(scan_from + start);
+    }
+    let new_flags = flags & !FHD_COMMENT;
+    let new_len = out.len() as u16;
+    out[3..5].copy_from_slice(&new_flags.to_le_bytes());
+    out[5..7].copy_from_slice(&new_len.to_le_bytes());
+    let crc = header_crc16(&out[2..]);
+    out[0..2].copy_from_slice(&crc.to_le_bytes());
+    out
+}
+
+/// Set (or replace) a `FILE_HEAD`'s nested comment subblock.
+fn set_rar4_comment(header: &[u8], comment: &[u8]) -> RarResult<Vec<u8>> {
+    let mut out = strip_rar4_comment(header);
+    if out.len() < 7 {
+        return Err(RarError::Format(
+            "RAR4: file header block is malformed".into(),
+        ));
+    }
+    let flags = u16::from_le_bytes([out[3], out[4]]) | FHD_COMMENT;
+    out[3..5].copy_from_slice(&flags.to_le_bytes());
+    append_rar4_comment_block(&mut out, comment);
+    Ok(out)
+}
+
 /// Resolve rename pairs (entry index -> new name) into a map, expanding
 /// directory renames to their descendants exactly like the RAR5 engine
 /// (`transaction.rs`): each directory member keeps a trailing `/`, every
@@ -778,6 +860,7 @@ pub(crate) fn edit_rar4(
     renames: &[(usize, String)],
     comment: Option<&[u8]>,
     force_rr: Option<u8>,
+    member_comments: &[(usize, Option<Vec<u8>>)],
 ) -> RarResult<EditSummary> {
     if force_rr.is_some_and(|percent| percent > 100) {
         return Err(RarError::InvalidOption(
@@ -846,6 +929,7 @@ pub(crate) fn edit_rar4(
             force_rr,
             renamed,
             &[],
+            member_comments,
         );
     }
 
@@ -934,14 +1018,25 @@ pub(crate) fn edit_rar4(
             let data = view.data(&bytes, start);
             if deleted[file_index] {
                 // Drop the member's header and payload verbatim.
-            } else if let Some(new_name) = rename_map.get(&file_index) {
-                // The rebuilt header is re-encrypted with a fresh salt; the
-                // member's own payload is copied as-is.
-                let rebuilt = rename_file_header(&view.header, new_name)?;
-                emit_block(&mut out, &rebuilt, data, hp)?;
             } else {
-                // Untouched: copy the on-disk bytes (ciphertext included).
-                out.extend_from_slice(&bytes[start..start + view.total]);
+                let new_name = rename_map.get(&file_index);
+                let new_comment = member_comments
+                    .iter()
+                    .find(|(i, _)| *i == file_index)
+                    .map(|(_, c)| c.as_deref());
+                if new_name.is_some() || new_comment.is_some() {
+                    // The rebuilt header (rename and/or comment) is re-encrypted
+                    // with a fresh salt; the member's payload is copied as-is.
+                    let rebuilt = rebuild_rar4_header(
+                        &view.header,
+                        new_name.map(|s| s.as_str()),
+                        new_comment,
+                    )?;
+                    emit_block(&mut out, &rebuilt, data, hp)?;
+                } else {
+                    // Untouched: copy the on-disk bytes (ciphertext included).
+                    out.extend_from_slice(&bytes[start..start + view.total]);
+                }
             }
             file_index += 1;
         } else if replace_comment
@@ -1033,6 +1128,7 @@ pub(crate) fn repack_solid_archive(
     force_rr: Option<u8>,
     renamed: usize,
     additions: &[SolidAppendEntry],
+    member_comments: &[(usize, Option<Vec<u8>>)],
 ) -> RarResult<EditSummary> {
     for idx in rename_map.keys() {
         if deleted[*idx] {
@@ -1106,19 +1202,28 @@ pub(crate) fn repack_solid_archive(
     // Keep-list with the emit metadata captured up front (name, level,
     // mtime, mtime_ns) so the decode loop below can borrow the archive
     // mutably without aliasing its catalog.
-    let mut kept: Vec<(usize, String, u8, u32, u32)> = Vec::new();
+    let mut kept: Vec<(usize, String, u8, u32, u32, Option<Vec<u8>>)> = Vec::new();
     for (i, entry) in archive.entries.iter().enumerate() {
         if !deleted[i] {
             let name = rename_map
                 .get(&i)
                 .cloned()
                 .unwrap_or_else(|| entry.header.name.clone());
+            // A queued SetMemberComment overrides the stored comment for the
+            // solid repack (the non-solid path applies the same override in its
+            // own rebuild loop below).
+            let comment = member_comments
+                .iter()
+                .find(|(idx, _)| *idx == i)
+                .map(|(_, c)| c.clone())
+                .unwrap_or_else(|| entry.header.comment.clone());
             kept.push((
                 i,
                 name,
                 entry.header.comp_method,
                 entry.header.mtime,
                 entry.header.mtime_ns.unwrap_or(0),
+                comment,
             ));
         }
     }
@@ -1143,7 +1248,7 @@ pub(crate) fn repack_solid_archive(
             // The comment is emitted by the writer (it must precede every
             // member and has to be header-encrypted on a `-hp` archive).
             writer.set_rar4_writer_comment(final_comment.clone());
-            for (i, name, level, mtime, mtime_ns) in &kept {
+            for (i, name, level, mtime, mtime_ns, comment) in &kept {
                 // Directory members are zero-byte placeholders: they contribute
                 // nothing to the solid window (the decoder skips them), so they
                 // are re-emitted with empty data rather than the decoded run.
@@ -1152,7 +1257,7 @@ pub(crate) fn repack_solid_archive(
                 } else {
                     archive.rar4_decode_solid_through(*i)?
                 };
-                writer.add_rar4_data(name.clone(), data, *level, *mtime, *mtime_ns)?;
+                writer.add_rar4_data(name.clone(), data, *level, *mtime, *mtime_ns, comment.clone())?;
             }
             // Deferred solid-append additions continue the same fresh chain.
             for entry in additions {
@@ -1162,6 +1267,7 @@ pub(crate) fn repack_solid_archive(
                     entry.level,
                     entry.mtime,
                     entry.mtime_ns,
+                    None,
                 )?;
             }
             writer.close()?;
@@ -1177,7 +1283,7 @@ pub(crate) fn repack_solid_archive(
                     None => crate::archive::RarArchive::open(&tmp_path),
                 }
                 .map_err(|e| RarError::Format(format!("repack: reopen staged archive: {e:?}")))?;
-                edit_rar4(&mut staged, &[], &[], None, Some(percent))?
+                edit_rar4(&mut staged, &[], &[], None, Some(percent), &[])?
             }
             None => EditSummary {
                 deleted: 0,
@@ -1945,6 +2051,91 @@ mod repack_tests {
         let mut ar = RarArchive::open(&path).unwrap();
         assert_eq!(ar.namelist(), ["b.txt"]);
         assert_eq!(ar.read("b.txt").unwrap(), p2);
+    }
+
+    #[test]
+    fn member_comment_set_and_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cf.rar");
+        let payload = b"payload for the commented member".to_vec();
+        {
+            let mut a = crate::archive::RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    compression: crate::version::ArchiveVersion::V29,
+                    solid: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            a.add_bytes("a.txt", &payload, 3).unwrap();
+            a.close().unwrap();
+        }
+
+        // Set a per-file comment (like `rar cf`).
+        {
+            let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+            let a = editor.unique_entry("a.txt").unwrap();
+            editor
+                .apply(
+                    crate::archive::editor::EditPlan::new()
+                        .set_member_comment(a, b"release notes".to_vec()),
+                )
+                .unwrap();
+        }
+        {
+            let mut archive = RarArchive::open(&path).unwrap();
+            assert_eq!(
+                archive.entries[0].comment().unwrap(),
+                b"release notes".as_slice()
+            );
+            assert_eq!(archive.read("a.txt").unwrap(), payload);
+        }
+
+        // Empty bytes clear the comment again.
+        {
+            let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+            let a = editor.unique_entry("a.txt").unwrap();
+            editor
+                .apply(crate::archive::editor::EditPlan::new().set_member_comment(a, Vec::new()))
+                .unwrap();
+        }
+        let mut archive = RarArchive::open(&path).unwrap();
+        assert!(archive.entries[0].comment().is_none());
+        assert_eq!(archive.read("a.txt").unwrap(), payload);
+    }
+
+    #[test]
+    fn solid_repack_preserves_member_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cf_solid.rar");
+        let p1 = make_text(50_000);
+        let p2 = make_text(40_000);
+        build_solid(&path, &[("a.txt", &p1), ("b.txt", &p2)]);
+
+        // Give a.txt a comment.
+        {
+            let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+            let a = editor.unique_entry("a.txt").unwrap();
+            editor
+                .apply(
+                    crate::archive::editor::EditPlan::new()
+                        .set_member_comment(a, b"keep me".to_vec()),
+                )
+                .unwrap();
+        }
+        // Deleting b.txt repacks the whole solid chain; a.txt keeps its comment.
+        {
+            let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+            let b = editor.unique_entry("b.txt").unwrap();
+            editor
+                .apply(crate::archive::editor::EditPlan::new().delete(b))
+                .unwrap();
+        }
+        let mut archive = RarArchive::open(&path).unwrap();
+        assert_eq!(archive.namelist(), ["a.txt"]);
+        assert_eq!(archive.entries[0].comment().unwrap(), b"keep me".as_slice());
+        assert_eq!(archive.read("a.txt").unwrap(), p1);
     }
 
     #[test]
