@@ -1113,6 +1113,19 @@ pub(crate) fn edit_rar4(
 /// WinRAR 7.21+'s full-archive repacking for solid RAR4 edits (the surgical
 /// partial reprocess of 7.20 is not reproduced).
 #[allow(deprecated)] // role seam: the staged solid writer needs the legacy per-member time path
+/// One surviving member of a solid repack: the metadata needed to re-emit it
+/// (name, level, timestamps, comment), captured before the decode loop borrows
+/// the archive mutably.
+struct KeptMember {
+    /// Index into the original catalog.
+    index: usize,
+    name: String,
+    level: u8,
+    mtime: u32,
+    mtime_ns: u32,
+    comment: Option<Vec<u8>>,
+}
+
 /// Repack a solid RAR4 archive (ADR 0005 stage C): every member is decoded
 /// in chain order and re-encoded into a fresh solid archive, then the
 /// comment and recovery record are applied structurally and the result
@@ -1120,6 +1133,9 @@ pub(crate) fn edit_rar4(
 /// repacking. `additions` (used by the deferred solid-append path) are
 /// emitted after the surviving members; `deleted`/`rename_map`/`comment`/
 /// `force_rr` carry the editor transaction.
+// One parameter per edit dimension the repack has to honour (deletes,
+// renames, archive comment, recovery, additions, member comments).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn repack_solid_archive(
     archive: &mut RarArchive,
     deleted: &[bool],
@@ -1200,9 +1216,9 @@ pub(crate) fn repack_solid_archive(
     };
 
     // Keep-list with the emit metadata captured up front (name, level,
-    // mtime, mtime_ns) so the decode loop below can borrow the archive
-    // mutably without aliasing its catalog.
-    let mut kept: Vec<(usize, String, u8, u32, u32, Option<Vec<u8>>)> = Vec::new();
+    // mtime, mtime_ns, comment) so the decode loop below can borrow the
+    // archive mutably without aliasing its catalog.
+    let mut kept: Vec<KeptMember> = Vec::new();
     for (i, entry) in archive.entries.iter().enumerate() {
         if !deleted[i] {
             let name = rename_map
@@ -1217,14 +1233,14 @@ pub(crate) fn repack_solid_archive(
                 .find(|(idx, _)| *idx == i)
                 .map(|(_, c)| c.clone())
                 .unwrap_or_else(|| entry.header.comment.clone());
-            kept.push((
-                i,
+            kept.push(KeptMember {
+                index: i,
                 name,
-                entry.header.comp_method,
-                entry.header.mtime,
-                entry.header.mtime_ns.unwrap_or(0),
+                level: entry.header.comp_method,
+                mtime: entry.header.mtime,
+                mtime_ns: entry.header.mtime_ns.unwrap_or(0),
                 comment,
-            ));
+            });
         }
     }
 
@@ -1248,16 +1264,23 @@ pub(crate) fn repack_solid_archive(
             // The comment is emitted by the writer (it must precede every
             // member and has to be header-encrypted on a `-hp` archive).
             writer.set_rar4_writer_comment(final_comment.clone());
-            for (i, name, level, mtime, mtime_ns, comment) in &kept {
+            for kept_member in &kept {
                 // Directory members are zero-byte placeholders: they contribute
                 // nothing to the solid window (the decoder skips them), so they
                 // are re-emitted with empty data rather than the decoded run.
-                let data = if archive.entries[*i].is_dir() {
+                let data = if archive.entries[kept_member.index].is_dir() {
                     Vec::new()
                 } else {
-                    archive.rar4_decode_solid_through(*i)?
+                    archive.rar4_decode_solid_through(kept_member.index)?
                 };
-                writer.add_rar4_data(name.clone(), data, *level, *mtime, *mtime_ns, comment.clone())?;
+                writer.add_rar4_data(
+                    kept_member.name.clone(),
+                    data,
+                    kept_member.level,
+                    kept_member.mtime,
+                    kept_member.mtime_ns,
+                    kept_member.comment.clone(),
+                )?;
             }
             // Deferred solid-append additions continue the same fresh chain.
             for entry in additions {

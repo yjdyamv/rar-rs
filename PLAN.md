@@ -49,6 +49,11 @@
 - **solid 归档 MT（06）**：solid 强制串行，备份类负载无多线程收益；MT 对 seq 的既有分歧（x86 +8.2%，重复距离缓存按片重置）会带进 solid，需先评估可接受性
 - 随机数据 ~800 ms 未记账开销（fast-path 循环、splitter、播种、LR 建表、片组装）尚未逐项归因
 - **dll 单线程解析速度**（map 追踪）：WinRAR m3 1.8s vs 我们 ~6s；ratio 已反超（43.90% vs 44.81%），速度仍 3x 落后
+- [x] **可复现基准 `crates/rar/examples/perfbench.rs`（2026-09）**：上述三项都没有可复现的基线（`bench.rs` 语料临时合成无指纹，`collectbench`/`mtbench` 需外部语料文件 + `parallel`）。新基准：语料全部由固定种子生成并打印 CRC32（跨机逐字节可校验）、`--repeats` 取 min/中位数、字典按 `min(32 MiB, 2*floor_pow2(size))` 裁剪（与归档路径一致，否则裸 codec 为 2 MiB 输入建 32 MiB 匹配树，`random` 出现负开销）。三口径：`codec`（裸 `rar_rs::encode`）、`archive`（完整 create+add_bytes+close，RAR5 v50）、`solid`（同数据切 4 成员）。语料 `text`/`mixed`/`x86syn` 沿用 `bench.rs` 的 lorem/xorshift/假 x86 定义以便与 PLAN 数字对齐，另加 `wordtext`（20 词随机散文，比 lorem 难得多）、`xml`、`dll-like`（PE 形：MZ/PE 头 + 密集 E8/E9 的 .text + 字符串 .rdata + 不可压缩块 + 对齐零填充）；`--file <path>` 可测真实文件。
+  复现：`cargo run --release --example perfbench -- --size-mb 8 --repeats 3`（`--only <kind>`/`--level`/`--no-solid`）。
+  实测（8 MiB、m3、3 次；ms 依机器，ratio 与 crc32 可移植）：text 198/304/393、wordtext 7669/7748/8476、xml 1794/2356/4404、random 466/49/140、mixed 448/492/224、x86syn 284/348/475、dll-like 1894/2220/3135（codec/archive/solid 中位数）；ratio 0.01%/16.85%/7.91%/100.02%/50.01%/1.89%/32.83%。
+  结论与纠偏：① `text`/`mixed`/`x86syn` 与 `bench.rs` 及 PLAN 的 30/14/19 MiB/s 吻合，基准可信；② **`random` 的 `delta` 恒为负不是异常**——归档路径有 STORE 回退预检（`format/rar5/write/layout.rs`），64 MiB 随机下 codec 5546 ms 而 archive 仅 101 ms（纯拷贝），故「随机数据 ~800 ms 未记账开销」应改为追**真正尝试压缩的 codec 路径**（64 MiB 随机 5.5 s），而非归档层开销；③ PLAN「WinRAR 1.8s vs 我们 ~6s」出自 5.75 MB 真实 DLL，合成 `dll-like`（8 MiB codec 1894 ms / 4.2 MiB/s）只是代理，无法证实该数字，须用 `--file <真实 DLL>` 复测；④ **8 MiB/4 成员下 solid 比非 solid 明显慢**（xml 4404 vs 2356、wordtext 8476 vs 7748）——这是 solid MT（06）的起点基线。
+  附注（既有，非本次引入）：`cargo clippy -- -D warnings` 仍有 3 处既有失败（`rar4_edit.rs` 两处 deprecated `create_with_options`/`close`，`codec/.../encoder.rs:322` 9 参），CI 的 clippy 步骤本就受其影响
 
 ## 已取消 / 不做
 
