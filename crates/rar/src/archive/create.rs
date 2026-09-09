@@ -309,26 +309,21 @@ impl RarArchive {
         let percent = self.recovery_percent.unwrap_or(0) as u64;
         let stream = self.stream.as_mut().unwrap();
         let archive_size = stream.stream_position()?;
-        if archive_size > super::MAX_RECOVERY_PREFIX_BYTES {
-            return Err(RarError::LimitExceeded {
-                limit: super::MAX_RECOVERY_PREFIX_BYTES,
-                context: format!(
-                    "recovery record prefix is {archive_size} bytes; streaming recovery records are not supported"
-                ),
-            });
-        }
-
-        // Read the archive prefix (everything written so far). The write
-        // stream is write-only (File::create), so use a separate handle.
-        let mut prefix = vec![0u8; archive_size as usize];
-        {
-            let mut reader = std::fs::File::open(prefix_path)?;
-            reader.read_exact(&mut prefix)?;
-        }
-
-        let rr_data =
-            crate::recovery::rar50::build_structural_inline_recovery_data(&prefix, percent)
-                .map_err(|e| RarError::Format(format!("recovery record encode: {e}")))?;
+        // Stream the recovery parity from disk instead of buffering the entire
+        // prefix in memory, so arbitrarily large archives can carry a recovery
+        // record without a multi-gigabyte RAM buffer.
+        let rr_data = {
+            let reader = std::fs::File::open(prefix_path)?;
+            let mut limited = reader.take(archive_size);
+            crate::recovery::rar50::build_structural_inline_recovery_data_streaming(
+                &mut limited,
+                archive_size,
+                percent,
+                None,
+                1,
+            )
+            .map_err(|e| RarError::Format(format!("recovery record encode: {e}")))?
+        };
 
         // RR service header: type 3, name "RR", SubData = percent byte.
         let subdata = {
