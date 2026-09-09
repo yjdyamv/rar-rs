@@ -218,6 +218,23 @@ mod mt_tests {
 
         let mut corpora: Vec<(String, Vec<u8>)> = Vec::new();
         corpora.push(("random".into(), prng_block(3 * DEFAULT_CHUNK_SIZE, 42)));
+        // Large dict + many chunks: 4-byte hash collisions are dense here, so the
+        // *relaxed* matchless path (not the strict one) is what fires.
+        corpora.push(("random-big".into(), prng_block(8 * DEFAULT_CHUNK_SIZE, 42)));
+        // Sparse 4-byte repeats at pseudo-random distances over random data:
+        // isolated length-4 matches whose first occurrence has a dead repeat
+        // cache. This is exactly the case the relaxed path must still get
+        // byte-identical — if a length-4 match can beat four literals there, the
+        // relaxation is too aggressive and this assertion fails.
+        {
+            let mut s = prng_block(DEFAULT_CHUNK_SIZE * 3, 123);
+            for i in (0..s.len()).step_by(137).take(4000) {
+                if i + 4 <= s.len() {
+                    s[i..i + 4].copy_from_slice(b"ZAP!");
+                }
+            }
+            corpora.push(("sparse-4byte".into(), s));
+        }
         corpora.push((
             "text".into(),
             b"the quick brown fox jumps over the lazy dog\n".repeat(200_000),
@@ -238,6 +255,11 @@ mod mt_tests {
                 (3, 6, ArchiveVersion::V50),
                 (5, 6, ArchiveVersion::V50),
                 (3, 3, ArchiveVersion::V70),
+                (2, 15, ArchiveVersion::V50),
+                (3, 15, ArchiveVersion::V50),
+                (5, 15, ArchiveVersion::V50),
+                (3, 15, ArchiveVersion::V70),
+                (5, 15, ArchiveVersion::V70),
             ] {
                 set_fast_path_enabled(true);
                 let fast = encode_chunked_mt(

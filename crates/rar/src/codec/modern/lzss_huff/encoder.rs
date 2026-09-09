@@ -1728,6 +1728,16 @@ static DISABLE_MATCHLESS_FAST_PATH: AtomicBool = AtomicBool::new(false);
 pub(crate) fn set_fast_path_enabled(enabled: bool) {
     DISABLE_MATCHLESS_FAST_PATH.store(!enabled, Ordering::Relaxed);
 }
+
+/// Relaxed matchless fast path: a block whose longest candidate match is at
+/// most this many bytes (and that has no live repeat distance) parses to
+/// all-literals, exactly like the strict matchless path. The collector only
+/// ever reports matches of length >= 4 (`collect_block_matches`), so the value
+/// below separates *accidental* 4-byte hash-collision matches (incompressible
+/// data, where a 4-byte match can never beat four literals) from real signal.
+/// Raising it would also skip genuinely useful short matches on compressible
+/// data, so keep it at the collector's floor.
+const RELAXED_MATCHLESS_MAX_LEN: usize = 4;
 /// Estimated cost of a literal before any block has been priced, in the
 /// same bit units as the match cost estimates (a main-table symbol out of
 /// 256 plus the odds that the table is skewed).
@@ -2821,46 +2831,72 @@ fn parse_one_block(
     // incompressible data, where the per-position price bookkeeping (a
     // 1 MiB arrive_reps array plus four more arrays per pass) dominated
     // the parse.
-    if matches.runs.is_empty() && !DISABLE_MATCHLESS_FAST_PATH.load(Ordering::Relaxed) {
-        let span = block.end - block.start;
-        // With no live cached distance the repeat probes are no-ops at
-        // every position, so the all-literal conclusion needs no
-        // per-position check at all — the common case on incompressible
-        // data (no match has ever been emitted, so the entry reps stay
-        // zero from the member head). A live rep re-arms the per-position
-        // probe loop, which the pricing pass would also run.
-        let reps_live = state.reps.iter().take(2).any(|&r| r != 0);
-        let mut all_literal = !reps_live;
-        if reps_live {
-            'probe: for index in 0..span {
-                let pos = block.start + index;
-                let max_distance = pos.min(window);
-                let max_length = (block.end - pos).min(max_match);
-                if max_distance == 0 || max_length < 4 {
-                    continue;
-                }
-                // Literals leave the distance memory untouched, so the reps
-                // here are the block-entry reps at every position, exactly
-                // what the pricing pass would probe with.
-                for &repeat in state.reps.iter().take(2) {
-                    if repeat == 0 || repeat > max_distance as u32 {
-                        continue;
-                    }
-                    if match_length_at(combined, pos, repeat as usize, max_length) >= 4 {
-                        all_literal = false;
-                        break 'probe;
+    if !DISABLE_MATCHLESS_FAST_PATH.load(Ordering::Relaxed) {
+        let longest = matches
+            .runs
+            .iter()
+            .map(|&(l, _)| l as usize)
+            .max()
+            .unwrap_or(0);
+        // Strict matchless: not a single candidate. Relaxed matchless: only
+        // trivially-short candidates (<= RELAXED_MATCHLESS_MAX_LEN == the
+        // collector's length floor) and no live repeat distance. In both the
+        // pricing passes resolve to all-literals — accidental 4-byte
+        // hash-collision matches on incompressible data can never beat four
+        // literals, and a dead repeat cache means no beneficial cached-distance
+        // match either — so skipping the DP is byte-identical (proven by
+        // `DISABLE_MATCHLESS_FAST_PATH` + the matchless_fast_path_is_byte_identical
+        // test). Random data has ~10^-4 4-byte collisions per position, so this
+        // fires for essentially every block there and recovers the DP cost
+        // otherwise spent over noise.
+        let strict = matches.runs.is_empty();
+        let relaxed = !strict
+            && longest <= RELAXED_MATCHLESS_MAX_LEN
+            && state.reps.iter().take(2).all(|&r| r == 0);
+        if strict || relaxed {
+            let span = block.end - block.start;
+            let mut all_literal = true;
+            if strict {
+                // With no live cached distance the repeat probes are no-ops at
+                // every position, so the all-literal conclusion needs no
+                // per-position check at all — the common case on incompressible
+                // data (no match has ever been emitted, so the entry reps stay
+                // zero from the member head). A live rep re-arms the
+                // per-position probe loop, which the pricing pass would also run.
+                let reps_live = state.reps.iter().take(2).any(|&r| r != 0);
+                all_literal = !reps_live;
+                if reps_live {
+                    'probe: for index in 0..span {
+                        let pos = block.start + index;
+                        let max_distance = pos.min(window);
+                        let max_length = (block.end - pos).min(max_match);
+                        if max_distance == 0 || max_length < 4 {
+                            continue;
+                        }
+                        // Literals leave the distance memory untouched, so the reps
+                        // here are the block-entry reps at every position, exactly
+                        // what the pricing pass would probe with.
+                        for &repeat in state.reps.iter().take(2) {
+                            if repeat == 0 || repeat > max_distance as u32 {
+                                continue;
+                            }
+                            if match_length_at(combined, pos, repeat as usize, max_length) >= 4 {
+                                all_literal = false;
+                                break 'probe;
+                            }
+                        }
                     }
                 }
             }
-        }
-        if all_literal {
-            let mut symbols = Vec::with_capacity(span);
-            for index in 0..span {
-                symbols.push(Symbol::Literal(combined[block.start + index]));
+            if all_literal {
+                let mut symbols = Vec::with_capacity(span);
+                for index in 0..span {
+                    symbols.push(Symbol::Literal(combined[block.start + index]));
+                }
+                // Literals leave the repeat cache and last-length exactly as
+                // the pricing passes would have.
+                return symbols;
             }
-            // Literals leave the repeat cache and last-length exactly as
-            // the pricing passes would have.
-            return symbols;
         }
     }
 
