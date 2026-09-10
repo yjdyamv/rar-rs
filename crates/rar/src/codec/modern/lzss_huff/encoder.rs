@@ -157,7 +157,8 @@ pub struct EncoderState {
     chain_parts: Option<(Vec<i32>, Vec<i32>)>,
 }
 
-impl EncoderState {    /// Reset the solid chain. Call after any member that does not
+impl EncoderState {
+    /// Reset the solid chain. Call after any member that does not
     /// participate in the LZ window (directories, STORE files, empty
     /// files).
     pub fn reset(&mut self) {
@@ -199,7 +200,7 @@ impl EncoderState {    /// Reset the solid chain. Call after any member that doe
             && self
                 .long_range
                 .as_ref()
-                .map_or(true, |lr| lr.total_pushed() == 0)
+                .is_none_or(|lr| lr.total_pushed() == 0)
     }
 }
 
@@ -302,57 +303,6 @@ pub(crate) fn encode_chunked_raw_with_lead(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Temporary collect diagnostic: dumps the match-finder counters and the
-/// wall time (ns/step discriminates DRAM-latency-bound from -bandwidth-
-/// bound). Gated on `RAR_RS_COLLECT_STATS=1`; removed after the profiling
-/// task.
-fn dump_collect_stats(tag: &str, start: std::time::Instant) {
-    if std::env::var("RAR_RS_COLLECT_STATS").is_err() {
-        return;
-    }
-    let el = start.elapsed();
-    let q = match_finder::STAT_QUERIES.swap(0, Ordering::Relaxed);
-    let st = match_finder::STAT_DESCENT_STEPS.swap(0, Ordering::Relaxed);
-    let si = match_finder::STAT_SEED_INSERTS.swap(0, Ordering::Relaxed);
-    let buckets: [u64; 8] =
-        core::array::from_fn(|i| match_finder::STAT_STEP_BUCKETS[i].swap(0, Ordering::Relaxed));
-    let millis = el.as_secs_f64() * 1000.0;
-    let steps_per_q = if q > 0 { st as f64 / q as f64 } else { 0.0 };
-    let ns_per_step = if st > 0 {
-        el.as_secs_f64() * 1e9 / st as f64
-    } else {
-        0.0
-    };
-    eprintln!(
-        "[collect {tag}] wall={millis:.0}ms queries={q} steps={st} seed_ins={si} steps/q={steps_per_q:.2} ns/step={ns_per_step:.1}"
-    );
-    if st > 0 {
-        let mut cum = 0u64;
-        let mut line = String::from("[collect {tag}  step-dist] <16K");
-        for (i, b) in buckets.iter().enumerate() {
-            let pct = *b as f64 * 100.0 / st as f64;
-            let label = match i {
-                0 => "<16K",
-                1 => "16-64K",
-                2 => "64-256K",
-                3 => "256K-1M",
-                4 => "1-2M",
-                5 => "2-4M",
-                6 => "4-8M",
-                _ => ">=8M",
-            };
-            line.push_str(&format!(" {label}={pct:.1}%"));
-            cum += *b;
-        }
-        line.push_str(&format!(" cum<=1M={:.1}%", cum as f64 * 100.0 / st as f64));
-        eprintln!(
-            "{line} cum<=4M={:.1}%",
-            (buckets[..7].iter().sum::<u64>()) as f64 * 100.0 / st as f64
-        );
-    }
-}
-
 // Private entry point of the encoder: one argument per encode dimension
 // (input, method, dictionary, chunking, solid state, finality, progress,
 // codec variant, solid lead-in). Bundling them into a struct would add a layer
@@ -373,7 +323,6 @@ fn encode_chunked_raw_inner(
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
     }
-    let _collect_t0 = std::time::Instant::now();
 
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
@@ -459,8 +408,6 @@ fn encode_chunked_raw_inner(
             next_report = chunk_end as u64 + 0x10000;
         }
     }
-
-    dump_collect_stats("seq", _collect_t0);
 
     Ok(output)
 }
@@ -557,7 +504,6 @@ pub(crate) fn encode_chunked_mt_with_progress(
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> RarResult<Vec<u8>> {
-    let _collect_t0 = std::time::Instant::now();
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
@@ -719,7 +665,6 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // already fixed once for cross-chunk growth).
     seed.tree = None;
     seed.combined_len = 0;
-    dump_collect_stats("mt", _collect_t0);
     Ok(output)
 }
 
@@ -2757,9 +2702,6 @@ fn find_matches_optimal(
                 } else {
                     chain_len.min(4)
                 };
-                if match_finder::PROFILE_COLLECT {
-                    match_finder::STAT_SEED_INSERTS.fetch_add(1, Ordering::Relaxed);
-                }
                 tree_finder.matches(&combined, pos, 4, tree_window, budget, &mut seed);
             }
         }

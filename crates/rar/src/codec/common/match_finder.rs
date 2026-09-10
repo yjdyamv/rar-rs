@@ -1,40 +1,4 @@
 use crate::codec::lzss_huff::DIST_CACHE_SIZE;
-/// RAR5 LZ match finder — hash-chain match finder for LZSS compression.
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Temporary collect diagnostics (read under `RAR_RS_COLLECT_STATS=1`):
-/// descent steps and position queries across a run, so the average cost per
-/// dependent son read (latency-bound vs bandwidth-bound) can be measured.
-/// Removed after the profiling task. `PROFILE_COLLECT` toggles the
-/// increments off at compile time: with them on, the shared atomic line
-/// ping-pongs across the MT workers and pollutes the timing — clean multi-
-/// thread numbers need the toggle off, single-thread counts need it on.
-pub(crate) const PROFILE_COLLECT: bool = false;
-pub(crate) static STAT_DESCENT_STEPS: AtomicU64 = AtomicU64::new(0);
-pub(crate) static STAT_QUERIES: AtomicU64 = AtomicU64::new(0);
-pub(crate) static STAT_SEED_INSERTS: AtomicU64 = AtomicU64::new(0);
-/// Distance buckets of descent steps (bytes): [<16K, 16K, 64K, 256K, 1M,
-/// 2M, 4M, >=8M]. Sized for the two-tier near-store sizing: how large a
-/// near window must be to cover most of the descent traffic.
-pub(crate) static STAT_STEP_BUCKETS: [AtomicU64; 8] = [
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-];
-pub(crate) const STEP_BUCKET_CUTS: [u64; 7] = [
-    16 * 1024,
-    64 * 1024,
-    256 * 1024,
-    1024 * 1024,
-    2 * 1024 * 1024,
-    4 * 1024 * 1024,
-    8 * 1024 * 1024,
-];
 
 /// Sampling step of the long-range hash table: one 4-byte sample per
 /// `LONG_RANGE_STEP` bytes of history. Finer steps catch more matches at
@@ -893,9 +857,6 @@ impl TreeMatchFinder {
         let hash = Self::hash4(input, pos);
         let current = resolve(pos, self.head[hash]);
         self.head[hash] = pos as u32;
-        if PROFILE_COLLECT {
-            STAT_QUERIES.fetch_add(1, Ordering::Relaxed);
-        }
         self.descent(input, pos, len_limit, max_distance, cut, out, current, None);
     }
 
@@ -1020,18 +981,6 @@ impl TreeMatchFinder {
         let mut far_steps = 0usize;
         let mut floor = pos;
         loop {
-            if PROFILE_COLLECT {
-                STAT_DESCENT_STEPS.fetch_add(1, Ordering::Relaxed);
-                let d = (pos - current) as u64;
-                let mut b = STEP_BUCKET_CUTS.len();
-                for (i, c) in STEP_BUCKET_CUTS.iter().enumerate() {
-                    if d < *c {
-                        b = i;
-                        break;
-                    }
-                }
-                STAT_STEP_BUCKETS[b].fetch_add(1, Ordering::Relaxed);
-            }
             // A candidate that does not step back is a reused slot or the
             // sentinel; one further back than the window has fallen out of
             // it. Either ends the descent, sealing both attachment points
