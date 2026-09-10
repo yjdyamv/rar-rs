@@ -93,7 +93,18 @@ impl CreateArchiveOptions {
         ));
       }
       Some(s) => {
-        let (dict_log, dict_bytes) = parse_dict_size(s)?;
+        // `rar7` may use any byte dictionary (like `-ma7`), including
+        // non-power-of-two sizes through 4 GiB; `rar5` keeps the strict
+        // power-of-two rule because a plain v50 log has no way to carry
+        // them.
+        let parsed = if format == "rar7" {
+          rar_rs::parse_dict_size(s)
+            .or_else(|| rar_rs::parse_dict_bytes(s).map(|bytes| (None, Some(bytes))))
+            .ok_or_else(|| Error::new(Status::InvalidArg, format!("invalid dictionary size: {s}")))
+        } else {
+          parse_dict_size(s)
+        };
+        let (dict_log, dict_bytes) = parsed?;
         let bytes = dict_bytes
           .or_else(|| dict_log.map(|log| (128u64 * 1024) << log))
           .expect("dictionary parse returns a log or a byte count");

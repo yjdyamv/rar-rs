@@ -293,6 +293,12 @@ impl Default for ExtractOptions {
 /// anything above 4 GiB is accepted as-is (RAR7 v70 members), capped at the
 /// exactly encodable maximum of 126 GiB (a 64 GiB base plus 31/32).
 ///
+/// Non-power-of-two sizes through 4 GiB are rejected here (`None`): a plain
+/// v50 header has no way to carry them, matching WinRAR. Callers that
+/// force v70 members (the `-ma7` extension, `format: "rar7"`) should fall
+/// back to [`parse_dict_bytes`], which accepts any byte count in the
+/// supported range for the v70 byte-dictionary header field.
+///
 /// Returns `None` for empty, unparsable or out-of-range values.
 pub fn parse_dict_size(s: &str) -> Option<(Option<u8>, Option<u64>)> {
     let s = s.trim();
@@ -323,9 +329,33 @@ pub fn parse_dict_size(s: &str) -> Option<(Option<u8>, Option<u64>)> {
     Some((None, Some(bytes)))
 }
 
+/// Parse a WinRAR-style dictionary size into a raw byte count without the
+/// RAR5 power-of-two gate: the escape hatch for forces v70 (`-ma7` /
+/// `format: "rar7"`) that need a small non-power-of-two dictionary such as
+/// 6 MiB. Any supported range passes; returns `None` for empty, unparsable
+/// or out-of-range values.
+pub fn parse_dict_bytes(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num, mult) = match s.chars().last() {
+        Some('k') | Some('K') => (&s[..s.len() - 1], 1024u64),
+        Some('m') | Some('M') => (&s[..s.len() - 1], 1024 * 1024),
+        Some('g') | Some('G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        _ => (s, 1024 * 1024),
+    };
+    let bytes = num
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(mult))
+        .filter(|b| (MIN_DICTIONARY_BYTES..=MAX_RAR7_DICTIONARY_BYTES).contains(b))?;
+    Some(bytes)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MAX_RAR7_DICTIONARY_BYTES, parse_dict_size};
+    use super::{MAX_RAR7_DICTIONARY_BYTES, parse_dict_bytes, parse_dict_size};
 
     #[test]
     fn dict_size_parses_rar5_range() {
@@ -364,5 +394,21 @@ mod tests {
         );
         assert_eq!(parse_dict_size("127g"), None);
         assert_eq!(parse_dict_size("128g"), None);
+    }
+
+    #[test]
+    fn dict_bytes_parses_non_power_of_two_for_v70() {
+        // The v70 escape hatch accepts the sizes parse_dict_size rejects.
+        assert_eq!(parse_dict_bytes("6m"), Some(6 * 1024 * 1024));
+        assert_eq!(parse_dict_bytes("6M"), Some(6 * 1024 * 1024));
+        assert_eq!(parse_dict_bytes("3g"), Some(3 * 1024 * 1024 * 1024));
+        assert_eq!(parse_dict_bytes("128k"), Some(128 * 1024));
+        assert_eq!(parse_dict_bytes("32m"), Some(32 * 1024 * 1024));
+        assert_eq!(parse_dict_bytes("126g"), Some(MAX_RAR7_DICTIONARY_BYTES));
+        // Out of range / unparsable still rejected.
+        assert_eq!(parse_dict_bytes("1k"), None);
+        assert_eq!(parse_dict_bytes("127g"), None);
+        assert_eq!(parse_dict_bytes("abc"), None);
+        assert_eq!(parse_dict_bytes(""), None);
     }
 }

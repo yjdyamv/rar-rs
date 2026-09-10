@@ -11,9 +11,9 @@
 //!
 //! Note on sizes: the declared dictionary is capped at twice the member
 //! size (WinRAR's selection rule), so members here are >= 4 MiB to keep
-//! the requested 8 MiB dictionary intact. (Dictionary sizes through 4 GiB
-//! must be powers of two; the 1/32 increment bits for non-power sizes are
-//! exercised at > 4 GiB elsewhere.)
+//! the requested 8 MiB dictionary intact. Non-power-of-two byte counts
+//! through 4 GiB (`6m`) are v70-only — the 5-bit base plus 1/32 increment
+//! header encodes them exactly — and are exercised here too.
 
 use rar_rs::ArchiveReader;
 
@@ -107,6 +107,67 @@ fn v70_forced_headers_and_roundtrip() {
     assert_eq!(entry.comp_version(), 0, "still v50 without the seam");
     assert_eq!(entry.dict_size_bytes(), None, "no v70 dict declared");
     assert_eq!(rar.read_entry(id).unwrap(), b"plain v50");
+}
+
+/// A non-power-of-two dictionary through 4 GiB (`6m`) is a v70-only byte
+/// size: the header's 5-bit base plus 1/32 increment encodes it exactly,
+/// and the member round trips byte-identically. The same 6 MiB request
+/// without the `compression(V70)` seam cannot be declared by a plain v50
+/// log, so the writer rounds the RAR5 log up (6 MiB -> 8 MiB) and emits a
+/// plain v50 member.
+#[test]
+fn v70_forced_non_power_of_two_dictionary() {
+    let dir = make_temp_dir();
+    let arc = dir.path().join("v70_6m.rar");
+    let dict = 6 * 1024 * 1024u64;
+    // Member size must clear the 2x-file-size cap (>= 3 MiB) so the
+    // requested 6 MiB dictionary is declared in full.
+    let a = compressible(51, 6 * 1024 * 1024);
+    {
+        let mut rar = rar_rs::ArchiveWriter::create_with(
+            &arc,
+            rar_rs::WriterOptions::default()
+                .dictionary_size(rar_rs::DictionarySize::try_from(dict).unwrap())
+                .compression(rar_rs::version::ArchiveVersion::V70),
+        )
+        .unwrap();
+        let opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap());
+        rar.add_bytes("a.bin", &a, opts).unwrap();
+        rar.finish().unwrap();
+    }
+    let mut rar = ArchiveReader::open(&arc).unwrap();
+    let id = rar.unique_entry("a.bin").unwrap();
+    let entry = rar.entry(id).unwrap();
+    assert_eq!(entry.comp_version(), 1, "v70 header for 6 MiB dict");
+    assert_eq!(
+        entry.dict_size_bytes(),
+        Some(dict),
+        "non-power-of-two dictionary round trips exactly"
+    );
+    assert_eq!(&rar.read_entry(id).unwrap(), &a, "bytes");
+
+    // Same request, no seam: still a legal v50 member (log rounds up).
+    let dir = make_temp_dir();
+    let arc = dir.path().join("v50_6m.rar");
+    {
+        let mut rar = rar_rs::ArchiveWriter::create_with(
+            &arc,
+            rar_rs::WriterOptions::default()
+                .dictionary_size(rar_rs::DictionarySize::try_from(dict).unwrap()),
+        )
+        .unwrap();
+        let opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap());
+        rar.add_bytes("a.bin", &a, opts).unwrap();
+        rar.finish().unwrap();
+    }
+    let mut rar = ArchiveReader::open(&arc).unwrap();
+    let id = rar.unique_entry("a.bin").unwrap();
+    let entry = rar.entry(id).unwrap();
+    assert_eq!(entry.comp_version(), 0, "plain v50 without the seam");
+    assert_eq!(entry.dict_size_bytes(), None, "no v70 dict declared");
+    assert_eq!(&rar.read_entry(id).unwrap(), &a, "bytes");
 }
 
 /// v70 + solid: the shared LZ window carries the DCX member state across

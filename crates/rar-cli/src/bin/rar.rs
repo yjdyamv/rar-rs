@@ -617,7 +617,9 @@ fn parse_size(s: &str) -> Result<u64, String> {
 /// rejected like WinRAR rejects unknown options.
 /// Returns `(version, dict_bytes)`, where `dict_bytes` is the declared
 /// v70 byte dictionary for `-ma7` (else the plain `-md` bytes, carried
-/// for the RAR5 auto v50/v70 mode).
+/// for the RAR5 auto v50/v70 mode). Under `-ma7` the dictionary may be
+/// any supported byte count; non-power-of-two sizes through 4 GiB land
+/// here through [`resolve_dict_switch`].
 fn archive_version(
     ma: Option<&str>,
     dict_size_log: Option<u8>,
@@ -634,6 +636,24 @@ fn archive_version(
         }
         Some(other) => Err(format!("Unknown option: ma{other}")),
     }
+}
+
+/// Parse a `-md<size>` switch, resolving it strictly for the RAR5 range
+/// (powers of two only, matching WinRAR's rejection of e.g. `-md3m`) and
+/// falling back to a raw byte count when the `-ma7` extension forces v70:
+/// a non-power-of-two size through 4 GiB (like `6m`) is representable
+/// exactly in the v70 byte-dictionary header, so the `-ma7` path accepts
+/// it while plain v50 (`-ma5`/default) still reports "Unknown option".
+fn resolve_dict_switch(spec: &str, ma: Option<&str>) -> Result<(Option<u8>, Option<u64>), String> {
+    if let Some(parsed) = rar_rs::parse_dict_size(spec) {
+        return Ok(parsed);
+    }
+    if ma == Some("7")
+        && let Some(bytes) = rar_rs::parse_dict_bytes(spec)
+    {
+        return Ok((None, Some(bytes)));
+    }
+    Err(format!("Unknown option: md{spec}"))
 }
 
 /// Whether an archive member name matches one `-ms<list>` entry: a bare
@@ -870,7 +890,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     let files = &args.files;
 
     let (dict_size_log, dict_size_bytes) = match args.dict_size.as_deref() {
-        Some(s) => rar_rs::parse_dict_size(s).ok_or_else(|| format!("Unknown option: md{s}"))?,
+        Some(s) => resolve_dict_switch(s, args.archive_format.as_deref())?,
         None => (None, None),
     };
     let (version, v70_dict_bytes) = archive_version(
@@ -1666,9 +1686,7 @@ fn cmd_update_freshen(
 
     // Validate all operation options before allocating the staged copy.
     let (dict_size_log, dict_size_bytes) = match args.dict_size.as_deref() {
-        Some(spec) => {
-            rar_rs::parse_dict_size(spec).ok_or_else(|| format!("Unknown option: md{spec}"))?
-        }
+        Some(spec) => resolve_dict_switch(spec, args.archive_format.as_deref())?,
         None => (None, None),
     };
     let (version, v70_dict_bytes) = archive_version(
@@ -1993,7 +2011,7 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
         }
     }
     let (dict_size_log, dict_size_bytes) = match args.dict_size.as_deref() {
-        Some(s) => rar_rs::parse_dict_size(s).ok_or_else(|| format!("Unknown option: md{s}"))?,
+        Some(s) => resolve_dict_switch(s, args.archive_format.as_deref())?,
         None => (None, None),
     };
     let (version, v70_dict_bytes) = archive_version(

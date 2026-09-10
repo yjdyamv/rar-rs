@@ -978,6 +978,33 @@ test('createArchive format selects rar4, rar5, and rar7 containers', async () =>
     assert.equal(r7meta[0].version, 'v70')
     assert.equal(r7meta[0].dictSizeBytes, 128 * 1024, 'v70 declares a floor dict of 128 KiB')
     assert.deepEqual(await readMember(r7, 'a.txt'), sevenPayload)
+
+    // rar7 accepts non-power-of-two dictionaries through 4 GiB (`-ma7
+    // -md6m` semantics): the member must clear the 2x-file-size cap so the
+    // full 6 MiB is declared.
+    const bigPayload = Buffer.alloc(4 * 1024 * 1024, 0x61)
+    const r7six = join(dir, 'seven6m.rar')
+    await createArchive({
+      outPath: r7six,
+      format: 'rar7',
+      dictSize: '6m',
+      entries: [{ kind: 'bytes', name: 'a.bin', data: bigPayload }],
+    })
+    const r7sixMeta = await listEntriesDetailed(r7six)
+    assert.equal(r7sixMeta[0].version, 'v70')
+    assert.equal(r7sixMeta[0].dictSizeBytes, 6 * 1024 * 1024, '6 MiB declared exactly')
+    assert.deepEqual(await readMember(r7six, 'a.bin'), bigPayload)
+
+    // rar5 keeps the strict power-of-two rule (WinRAR rejects -md6m).
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'x.rar'),
+        format: 'rar5',
+        dictSize: '6m',
+        entries: [{ kind: 'bytes', name: 'a.bin', data: bigPayload }],
+      }),
+      (error) => error.message.includes('dictionary'),
+    )
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

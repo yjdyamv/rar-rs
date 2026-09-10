@@ -63,15 +63,19 @@ impl TryFrom<u8> for CompressionLevel {
 
 /// A validated dictionary size accepted by the RAR5 and RAR7 writers.
 ///
-/// Sizes from 128 KiB through 4 GiB must be powers of two and have a RAR5
-/// dictionary log. Larger RAR7 sizes may use any byte count through 126 GiB.
+/// Sizes from 128 KiB through 4 GiB may be powers of two (with a RAR5
+/// dictionary log) or arbitrary byte counts (RAR7-only, declared with the
+/// 5-bit base plus 1/32 increment encoding). Any byte count through
+/// 126 GiB is supported.
 ///
 /// A size above 4 GiB selects RAR7 (v70) members. Under the default
 /// compression version [`ArchiveVersion::V50`] that selection is
 /// automatic, like WinRAR's `-md`: the request is capped at twice the
 /// member size, so small members stay plain v50 and only members whose
 /// effective dictionary exceeds 4 GiB are written as v70. Use
-/// [`ArchiveVersion::V70`] to force v70 members for every member.
+/// [`ArchiveVersion::V70`] to force v70 members for every member — this
+/// is the only way to get a non-power-of-two dictionary through 4 GiB,
+/// since a plain v50 member's `comp_dict_size` field is a log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DictionarySize(u64);
 
@@ -98,9 +102,11 @@ impl DictionarySize {
         self.0
     }
 
-    /// Return the RAR5 dictionary log, or `None` for a RAR7-only size.
+    /// Return the RAR5 dictionary log, or `None` for a RAR7-only size
+    /// (any request above 4 GiB or a non-power-of-two byte count, which
+    /// only a v70 header can declare exactly).
     pub const fn rar5_log(self) -> Option<u8> {
-        if self.0 <= MAX_RAR5_DICTIONARY_BYTES {
+        if self.0 <= MAX_RAR5_DICTIONARY_BYTES && self.0.is_power_of_two() {
             Some((self.0.trailing_zeros() - MIN_DICTIONARY_BYTES.trailing_zeros()) as u8)
         } else {
             None
@@ -115,11 +121,6 @@ impl TryFrom<u64> for DictionarySize {
         if !(MIN_DICTIONARY_BYTES..=MAX_DICTIONARY_BYTES).contains(&value) {
             return Err(RarError::InvalidOption(format!(
                 "dictionary size must be in {MIN_DICTIONARY_BYTES}..={MAX_DICTIONARY_BYTES} bytes, got {value}"
-            )));
-        }
-        if value <= MAX_RAR5_DICTIONARY_BYTES && !value.is_power_of_two() {
-            return Err(RarError::InvalidOption(format!(
-                "dictionary sizes through 4 GiB must be powers of two, got {value} bytes"
             )));
         }
         Ok(Self(value))

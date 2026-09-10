@@ -69,7 +69,7 @@ pub use crypto::{EncryptionParams, decrypt_data, derive_keys, encrypt_data};
 pub use detect::sfx_offset_of;
 pub use error::{ErrorCode, RarError, RarResult};
 pub use features::{Feature, FeatureSet};
-pub use options::{CreateOptions, ExtractOptions, SolidReset, parse_dict_size};
+pub use options::{CreateOptions, ExtractOptions, SolidReset, parse_dict_bytes, parse_dict_size};
 pub use parallel::{set_compression_threads, set_extraction_threads};
 pub use recovery::{
     rebuild_missing_volumes, rebuild_missing_volumes_with, repair_archive, repair_archive_path,

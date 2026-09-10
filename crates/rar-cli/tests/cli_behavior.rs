@@ -2512,6 +2512,47 @@ fn cli_archive_format_ma_switch() {
         "-md16m declared"
     );
 
+    // -ma7 with a non-power-of-two -md through 4 GiB: the 1/32 increment
+    // header encodes it exactly (an extension; WinRAR rejects -md6m only
+    // because it cannot be a v50 log).
+    let archive = dir.path().join("ma7md6m.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma7", "-md6m", "-idq"])
+        .arg(&archive)
+        .arg("f.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "-ma7 -md6m must be accepted");
+    let rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let e = rar.entry(rar.unique_entry("f.bin").unwrap()).unwrap();
+    assert_eq!(e.comp_version(), 1, "v70 header");
+    assert_eq!(
+        e.dict_size_bytes(),
+        Some(6 * 1024 * 1024),
+        "-md6m declared exactly"
+    );
+
+    // The same -md6m without -ma7 stays rejected (plain v50 cannot carry
+    // it), matching WinRAR.
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a", "-md6m", "-idq"])
+        .arg(dir.path().join("bad6m.rar"))
+        .arg("f.bin")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "-md6m alone must be rejected");
+    let msg = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        msg.contains("Unknown option") && msg.contains("md6m"),
+        "-md6m alone: unexpected message {msg}"
+    );
+
     // -ma5 equals the default output byte-for-byte.
     let ma5 = dir.path().join("ma5.rar");
     let status = std::process::Command::new(RAR_CLI)

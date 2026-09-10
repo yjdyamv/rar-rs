@@ -36,7 +36,27 @@ fn validated_value_types_enforce_boundaries_and_mappings() {
     );
     assert_eq!(DictionarySize::from_rar5_log(15).unwrap().bytes(), rar5_max);
     assert!(DictionarySize::from_rar5_log(16).is_err());
-    assert!(DictionarySize::try_from(3 * 1024 * 1024u64).is_err());
+    // Non-power-of-two sizes through 4 GiB are legal as RAR7-only byte
+    // dictionaries: the constructor accepts the byte count but reports no
+    // RAR5 log (a plain v50 header could not carry it exactly).
+    assert_eq!(
+        DictionarySize::try_from(3 * 1024 * 1024u64)
+            .unwrap()
+            .bytes(),
+        3 * 1024 * 1024
+    );
+    assert_eq!(
+        DictionarySize::try_from(3 * 1024 * 1024u64)
+            .unwrap()
+            .rar5_log(),
+        None
+    );
+    assert_eq!(
+        DictionarySize::try_from(6 * 1024 * 1024u64)
+            .unwrap()
+            .rar5_log(),
+        None
+    );
     assert_eq!(
         DictionarySize::try_from(rar5_max).unwrap().rar5_log(),
         Some(15)

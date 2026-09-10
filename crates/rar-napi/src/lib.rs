@@ -50,8 +50,10 @@ pub struct CreateArchiveOptions {
   /// Reject the operation when the summed input size exceeds this.
   pub max_total_bytes: Option<f64>,
   /// Dictionary size (like WinRAR `-md<size>[k|m|g]`, no unit = MiB).
-  /// Values up to 4 GiB must be powers of two (128 KiB .. 4 GiB); values
-  /// above 4 GiB are accepted as-is and produce RAR7 (v70) archives.
+  /// Values up to 4 GiB must be powers of two (128 KiB .. 4 GiB) under
+  /// `format: 'rar5'`; values above 4 GiB, and any size under
+  /// `format: 'rar7'`, are accepted as byte counts (including
+  /// non-power-of-two values like `6m`) and produce RAR7 (v70) members.
   pub dict_size: Option<String>,
   /// Create a solid archive (better ratio, slower random access).
   pub solid: Option<bool>,
