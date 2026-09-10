@@ -38,9 +38,13 @@ Open frontier (see issues/):
   (The MT low-step tier closed most of the compressible-tail gap but random
   through the chain is still ~3x slower than the matchless fast path —
   see issue 13 verdict.)
-- 06 solid archives stay single-threaded (speed gap on backups)
-- 15 streaming delta for >64 MiB members landed (05); x86 streaming stays
-  open (whole-member scan requirement).
+- 09 dll single-threaded parse speed (~5.9x behind WinRAR -mt1 on a real
+  DLL; BT4 descent steps are structurally locked, see issue 09)
+
+Closed: 05 streaming delta + x86 landed (`delta_stream_window` /
+`x86_stream_window`, PLAN RAR5·压缩面, 2026-09); 06 solid-mt member-level gap
+is structural (chunk-level MT landed; member-level parallelism needs a shared
+window, PLAN 定论 2026-09).
 
 ## Fog
 
