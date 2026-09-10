@@ -2,8 +2,6 @@
 //! create/extract at the next per-member or per-chunk check point with
 //! `RarError::Cancelled`.
 
-#![allow(deprecated)] // cancellation applies to the legacy facade too
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -25,10 +23,14 @@ fn create_aborts_immediately_when_flag_already_set() {
     let path = dir.path().join("cancel.rar");
     let flag = Arc::new(AtomicBool::new(true));
 
-    let mut rar = rar_rs::RarArchive::create_with_options(&path, rar_rs::CreateOptions::default())
-        .expect("create");
-    rar.set_cancel_flag(Some(flag.clone()));
-    let res = rar.add_bytes("a.bin", &payload(), 3);
+    let mut rar = rar_rs::ArchiveWriter::create(&path).expect("create");
+    let _ = rar.set_cancel_flag(Some(flag.clone()));
+    let res = rar.add_bytes(
+        "a.bin",
+        &payload(),
+        rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap()),
+    );
     assert!(
         matches!(res, Err(RarError::Cancelled)),
         "expected Cancelled, got {res:?}"
@@ -43,14 +45,18 @@ fn extract_aborts_immediately_when_flag_already_set() {
     let dir = temp_dir();
     let path = dir.path().join("cancel.rar");
     {
-        let mut rar =
-            rar_rs::RarArchive::create_with_options(&path, rar_rs::CreateOptions::default())
-                .expect("create");
-        rar.add_bytes("a.bin", &payload(), 3).expect("add");
-        rar.close().expect("close");
+        let mut rar = rar_rs::ArchiveWriter::create(&path).expect("create");
+        rar.add_bytes(
+            "a.bin",
+            &payload(),
+            rar_rs::EntryWriteOptions::new()
+                .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap()),
+        )
+        .expect("add");
+        rar.finish().expect("close");
     }
     let flag = Arc::new(AtomicBool::new(true));
-    let mut rar = rar_rs::RarArchive::open(&path).expect("open");
+    let mut rar = rar_rs::ArchiveReader::open(&path).expect("open");
     rar.set_cancel_flag(Some(flag.clone()));
     let res =
         rar.extract_all_with_options(dir.path().join("out"), rar_rs::ExtractOptions::default());
@@ -69,32 +75,33 @@ fn batch_aborts_midway_when_flag_flips_during_first_member() {
     let flag_for_cb = flag.clone();
     let member: Vec<u8> = payload();
 
-    let mut rar = rar_rs::RarArchive::create_with_options(&path, rar_rs::CreateOptions::default())
-        .expect("create");
-    rar.set_cancel_flag(Some(flag.clone()));
+    let mut rar = rar_rs::ArchiveWriter::create(&path).expect("create");
+    let _ = rar.set_cancel_flag(Some(flag.clone()));
     // Flip the flag on the first progress event (fired when the first
     // member's encoding starts): the next member's check point must abort.
-    rar.set_progress_callback(Some(Box::new(move |done, total| {
+    let _ = rar.set_progress_callback(Some(Box::new(move |done, total| {
         if done > 0 && total > 0 {
             flag_for_cb.store(true, Ordering::Relaxed);
         }
     })));
 
+    let opts = rar_rs::EntryWriteOptions::new()
+        .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap());
     let batch = [
-        rar_rs::BatchEntry::Bytes {
+        rar_rs::WriteEntry::Bytes {
             name: "a.bin",
             data: &member,
-            level: 3,
+            options: opts,
         },
-        rar_rs::BatchEntry::Bytes {
+        rar_rs::WriteEntry::Bytes {
             name: "b.bin",
             data: &member,
-            level: 3,
+            options: opts,
         },
-        rar_rs::BatchEntry::Bytes {
+        rar_rs::WriteEntry::Bytes {
             name: "c.bin",
             data: &member,
-            level: 3,
+            options: opts,
         },
     ];
     let res = rar.add_batch(&batch);
@@ -109,13 +116,18 @@ fn batch_aborts_midway_when_flag_flips_during_first_member() {
 fn unset_flag_allows_completion() {
     let dir = temp_dir();
     let path = dir.path().join("cancel.rar");
-    let mut rar = rar_rs::RarArchive::create_with_options(&path, rar_rs::CreateOptions::default())
-        .expect("create");
-    rar.set_cancel_flag(Some(Arc::new(AtomicBool::new(false))));
-    rar.add_bytes("a.bin", &payload(), 3).expect("add");
-    rar.close().expect("close");
+    let mut rar = rar_rs::ArchiveWriter::create(&path).expect("create");
+    let _ = rar.set_cancel_flag(Some(Arc::new(AtomicBool::new(false))));
+    rar.add_bytes(
+        "a.bin",
+        &payload(),
+        rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap()),
+    )
+    .expect("add");
+    rar.finish().expect("close");
 
-    let mut rar = rar_rs::RarArchive::open(&path).expect("open");
+    let mut rar = rar_rs::ArchiveReader::open(&path).expect("open");
     rar.set_cancel_flag(Some(Arc::new(AtomicBool::new(false))));
     rar.extract_all_with_options(dir.path().join("out"), rar_rs::ExtractOptions::default())
         .expect("extract");

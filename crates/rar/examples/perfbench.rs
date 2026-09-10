@@ -17,22 +17,15 @@
 //!     for the solid MT lever (solid is serial today).
 //!
 //! `codec` runs the raw codec in memory (`rar_rs::encode`); `archive` runs the
-//! full create + `add_bytes` + `close` path; `solid` is the same data split
-//! into 4 members with `CreateOptions::solid`.
+//! full create + `add_bytes` + `finish` path; `solid` is the same data split
+//! into 4 members with `WriterOptions::solid_mode`.
 //!
 //! Run:
 //!   cargo run --release --example perfbench [--size-mb N] [--level L]
 //!        [--repeats R] [--only KIND[,KIND]] [--file PATH] [--no-solid]
 
-// Like `bench.rs`: this drives the legacy create facade, which is the only
-// surface exposing `CreateOptions::solid` directly (`WriterOptions` keeps its
-// fields private and has no solid builder).
-#![allow(deprecated)]
-
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-
-use rar_rs::{CreateOptions, RarArchive};
 
 /// Default dictionary ceiling (`-md32m`), matching WinRAR's default; the
 /// effective dictionary is clipped per corpus — see `dict_log_for`.
@@ -310,24 +303,27 @@ fn time_archive(dir: &Path, tag: &str, data: &[u8], level: u8, solid: bool) -> (
     let path = dir.join(format!("perfbench-{tag}.rar"));
     let t = Instant::now();
     {
-        let mut ar = RarArchive::create_with_options(
+        let mode = if solid {
+            rar_rs::SolidMode::Continuous
+        } else {
+            rar_rs::SolidMode::Disabled
+        };
+        let mut ar = rar_rs::ArchiveWriter::create_with(
             &path,
-            CreateOptions {
-                solid,
-                ..Default::default()
-            },
+            rar_rs::WriterOptions::default().solid_mode(mode),
         )
         .expect("create");
+        let opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(level).expect("level"));
         if solid {
             let chunk = (data.len() / SOLID_MEMBERS).max(1);
             for (i, part) in data.chunks(chunk).enumerate() {
-                ar.add_bytes(&format!("m{i}.bin"), part, level)
-                    .expect("add");
+                ar.add_bytes(&format!("m{i}.bin"), part, opts).expect("add");
             }
         } else {
-            ar.add_bytes("data.bin", data, level).expect("add");
+            ar.add_bytes("data.bin", data, opts).expect("add");
         }
-        ar.close().expect("close");
+        ar.finish().expect("close");
     }
     let ms = t.elapsed().as_secs_f64() * 1000.0;
     let packed = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -499,7 +495,7 @@ fn main() {
     println!(
         "\n# codec  = raw rar_rs::encode (parse + coding only)\n\
          # archive = full create + add_bytes + close (RAR5 v50)\n\
-         # solid   = same data split into {SOLID_MEMBERS} members, CreateOptions::solid\n\
+         # solid   = same data split into {SOLID_MEMBERS} members, solid_mode(Continuous)\n\
          # delta   = archive.med - codec.med. NOT pure I/O overhead: the archive path also\n\
          #           (a) spends time on filter candidate probing the raw codec may skip and\n\
          #           (b) falls back to STORE for incompressible data, so `random` shows a\n\

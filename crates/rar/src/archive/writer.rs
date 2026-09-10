@@ -661,8 +661,6 @@ pub struct ArchiveWriter {
 
 // The typed writer role delegates to the legacy write facade (create, add*,
 // close). The deprecation targets external users; the delegation seam stays
-// allowed until the facade is removed at the breaking release.
-#[allow(deprecated)]
 impl ArchiveWriter {
     /// Begin creating an archive with default [`WriterOptions`].
     pub fn create(path: impl AsRef<Path>) -> RarResult<Self> {

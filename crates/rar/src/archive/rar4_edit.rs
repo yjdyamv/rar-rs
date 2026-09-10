@@ -1112,7 +1112,6 @@ pub(crate) fn edit_rar4(
 /// structurally and the result replaces the original atomically. Mirrors
 /// WinRAR 7.21+'s full-archive repacking for solid RAR4 edits (the surgical
 /// partial reprocess of 7.20 is not reproduced).
-#[allow(deprecated)] // role seam: the staged solid writer needs the legacy per-member time path
 /// One surviving member of a solid repack: the metadata needed to re-emit it
 /// (name, level, timestamps, comment), captured before the decode loop borrows
 /// the archive mutably.
@@ -1141,7 +1140,6 @@ struct KeptMember {
 // (`set_rar4_writer_comment`), neither of which the typed `ArchiveWriter`
 // exposes. Routing RAR4 writing through its own module is the breaking-release
 // boundary work (audit P1), not a deprecation fix.
-#[allow(deprecated)]
 pub(crate) fn repack_solid_archive(
     archive: &mut RarArchive,
     deleted: &[bool],
@@ -1339,7 +1337,6 @@ pub(crate) fn repack_solid_archive(
 
 #[cfg(test)]
 mod tests {
-    #![allow(deprecated)] // legacy facade namelist/read kept for byte-parity checks
     use super::*;
     use crate::format::rar4::RAR4_METHOD_STORE;
     use crate::format::rar4::write::{FileHeaderParams, build_endarc, build_file_header};
@@ -1444,7 +1441,7 @@ mod tests {
         .unwrap();
 
         let archive = RarArchive::open(&path).unwrap();
-        assert_eq!(archive.namelist(), ["a.bin", "b.txt"]);
+        assert_eq!(archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["a.bin", "b.txt"]);
 
         let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
         let a = editor.unique_entry("a.bin").unwrap();
@@ -1460,9 +1457,9 @@ mod tests {
 
         drop(editor);
         let mut archive = RarArchive::open(&path).unwrap();
-        assert_eq!(archive.namelist(), ["alpha.bin", "贝塔.txt"]);
-        assert_eq!(archive.read("alpha.bin").unwrap(), a_payload);
-        assert_eq!(archive.read("贝塔.txt").unwrap(), b_payload);
+        assert_eq!(archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["alpha.bin", "贝塔.txt"]);
+        assert_eq!(archive.read_with_options("alpha.bin", Default::default()).unwrap(), a_payload);
+        assert_eq!(archive.read_with_options("贝塔.txt", Default::default()).unwrap(), b_payload);
     }
 
     #[test]
@@ -1513,8 +1510,8 @@ mod tests {
 
         drop(editor);
         let mut archive = RarArchive::open(&path).unwrap();
-        assert_eq!(archive.namelist(), ["renamed/", "renamed/x.txt"]);
-        assert_eq!(archive.read("renamed/x.txt").unwrap(), x_payload);
+        assert_eq!(archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["renamed/", "renamed/x.txt"]);
+        assert_eq!(archive.read_with_options("renamed/x.txt", Default::default()).unwrap(), x_payload);
 
         // The archive still carries a valid, repairable recovery record
         // (rebuilt over the renamed prefix): damage a protected sector and
@@ -1584,7 +1581,7 @@ mod tests {
             .unwrap();
         {
             let mut archive = RarArchive::open(&path).unwrap();
-            assert_eq!(archive.namelist(), ["renamed.bin"]);
+            assert_eq!(archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["renamed.bin"]);
             assert_eq!(
                 archive.get_comment().unwrap(),
                 Some("第二段注释 ünï".as_bytes().to_vec())
@@ -1625,7 +1622,6 @@ mod tests {
 
 #[cfg(test)]
 mod delete_tests {
-    #![allow(deprecated)] // legacy facade namelist/read kept for byte-parity checks
     use super::*;
     use crate::format::rar4::RAR4_METHOD_STORE;
     use crate::format::rar4::write::{FileHeaderParams, build_endarc, build_file_header};
@@ -1699,9 +1695,9 @@ mod delete_tests {
 
         drop(editor);
         let mut archive = RarArchive::open(&path).unwrap();
-        assert_eq!(archive.namelist(), ["a.bin", "c.bin"]);
-        assert_eq!(archive.read("a.bin").unwrap(), p1);
-        assert_eq!(archive.read("c.bin").unwrap(), p3);
+        assert_eq!(archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["a.bin", "c.bin"]);
+        assert_eq!(archive.read_with_options("a.bin", Default::default()).unwrap(), p1);
+        assert_eq!(archive.read_with_options("c.bin", Default::default()).unwrap(), p3);
 
         // The rebuilt record still protects the new prefix.
         let bytes = std::fs::read(&path).unwrap();
@@ -1743,8 +1739,8 @@ mod delete_tests {
         );
         drop(editor);
         let mut archive = RarArchive::open(&path).unwrap();
-        assert_eq!(archive.namelist(), ["b.bin"]);
-        assert_eq!(archive.read("b.bin").unwrap(), p2);
+        assert_eq!(archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["b.bin"]);
+        assert_eq!(archive.read_with_options("b.bin", Default::default()).unwrap(), p2);
     }
 
     #[test]
@@ -1806,14 +1802,13 @@ mod delete_tests {
         assert_eq!(editor.delete_entries(&[m1]).unwrap(), 1);
         drop(editor);
         let mut ar = crate::archive::RarArchive::open(&solid).unwrap();
-        assert_eq!(ar.namelist(), ["m2.bin"]);
-        assert_eq!(ar.read("m2.bin").unwrap(), p2);
+        assert_eq!(ar.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["m2.bin"]);
+        assert_eq!(ar.read_with_options("m2.bin", Default::default()).unwrap(), p2);
     }
 }
 
 #[cfg(test)]
 mod append_tests {
-    #![allow(deprecated)] // legacy facade add_bytes/close kept for parity
     use super::*;
 
     fn build_rar4(path: &std::path::Path, payloads: &[(&str, &[u8])]) {
@@ -1845,10 +1840,10 @@ mod append_tests {
             a.close().unwrap();
         }
         let mut a = crate::archive::RarArchive::open(&path).unwrap();
-        assert_eq!(a.namelist(), ["a.bin", "b.bin", "c.bin"]);
-        assert_eq!(a.read("a.bin").unwrap(), p1);
-        assert_eq!(a.read("b.bin").unwrap(), p2);
-        assert_eq!(a.read("c.bin").unwrap(), p3);
+        assert_eq!(a.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["a.bin", "b.bin", "c.bin"]);
+        assert_eq!(a.read_with_options("a.bin", Default::default()).unwrap(), p1);
+        assert_eq!(a.read_with_options("b.bin", Default::default()).unwrap(), p2);
+        assert_eq!(a.read_with_options("c.bin", Default::default()).unwrap(), p3);
     }
 
     #[test]
@@ -1881,8 +1876,8 @@ mod append_tests {
         assert!(crate::recovery::repair_legacy_archive_path(&dmg_path, &fixed).unwrap());
         assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
         let mut a = crate::archive::RarArchive::open(&path).unwrap();
-        assert_eq!(a.namelist(), ["a.bin", "b.bin"]);
-        assert_eq!(a.read("b.bin").unwrap(), p2);
+        assert_eq!(a.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["a.bin", "b.bin"]);
+        assert_eq!(a.read_with_options("b.bin", Default::default()).unwrap(), p2);
     }
 
     #[test]
@@ -1912,9 +1907,9 @@ mod append_tests {
             a.close().unwrap();
         }
         let mut ar = crate::archive::RarArchive::open(&solid).unwrap();
-        assert_eq!(ar.namelist(), ["old.bin", "new.bin"]);
-        assert_eq!(ar.read("old.bin").unwrap(), p);
-        assert_eq!(ar.read("new.bin").unwrap(), added);
+        assert_eq!(ar.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["old.bin", "new.bin"]);
+        assert_eq!(ar.read_with_options("old.bin", Default::default()).unwrap(), p);
+        assert_eq!(ar.read_with_options("new.bin", Default::default()).unwrap(), added);
         // Locked archive.
         let locked = dir.path().join("locked.rar");
         build_rar4(&locked, &[("m.bin", &p)]);
@@ -1965,9 +1960,9 @@ mod append_tests {
             a.close().unwrap();
         }
         let mut ar = crate::archive::RarArchive::open(&path).unwrap();
-        assert_eq!(ar.namelist(), ["a.txt", "b.txt"]);
-        assert_eq!(ar.read("a.txt").unwrap(), p1);
-        assert_eq!(ar.read("b.txt").unwrap(), p2);
+        assert_eq!(ar.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["a.txt", "b.txt"]);
+        assert_eq!(ar.read_with_options("a.txt", Default::default()).unwrap(), p1);
+        assert_eq!(ar.read_with_options("b.txt", Default::default()).unwrap(), p2);
         assert_eq!(
             ar.get_comment().unwrap(),
             Some("solid append 注释".as_bytes().to_vec())
@@ -2002,7 +1997,6 @@ mod append_tests {
 
 #[cfg(test)]
 mod repack_tests {
-    #![allow(deprecated)] // legacy facade add_bytes/close kept for parity
     use super::*;
 
     fn build_solid(path: &std::path::Path, payloads: &[(&str, &[u8])]) {
@@ -2059,9 +2053,9 @@ mod repack_tests {
 
         drop(editor);
         let mut a = RarArchive::open(&path).unwrap();
-        assert_eq!(a.namelist(), ["a.txt", "c.txt"]);
-        assert_eq!(a.read("a.txt").unwrap(), p1);
-        assert_eq!(a.read("c.txt").unwrap(), p3);
+        assert_eq!(a.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["a.txt", "c.txt"]);
+        assert_eq!(a.read_with_options("a.txt", Default::default()).unwrap(), p1);
+        assert_eq!(a.read_with_options("c.txt", Default::default()).unwrap(), p3);
     }
 
     #[test]
@@ -2078,8 +2072,8 @@ mod repack_tests {
         assert_eq!(editor.delete_entries(&[a, c]).unwrap(), 2);
         drop(editor);
         let mut ar = RarArchive::open(&path).unwrap();
-        assert_eq!(ar.namelist(), ["b.txt"]);
-        assert_eq!(ar.read("b.txt").unwrap(), p2);
+        assert_eq!(ar.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["b.txt"]);
+        assert_eq!(ar.read_with_options("b.txt", Default::default()).unwrap(), p2);
     }
 
     #[test]
@@ -2118,7 +2112,7 @@ mod repack_tests {
                 archive.entries[0].comment().unwrap(),
                 b"release notes".as_slice()
             );
-            assert_eq!(archive.read("a.txt").unwrap(), payload);
+            assert_eq!(archive.read_with_options("a.txt", Default::default()).unwrap(), payload);
         }
 
         // Empty bytes clear the comment again.
@@ -2131,7 +2125,7 @@ mod repack_tests {
         }
         let mut archive = RarArchive::open(&path).unwrap();
         assert!(archive.entries[0].comment().is_none());
-        assert_eq!(archive.read("a.txt").unwrap(), payload);
+        assert_eq!(archive.read_with_options("a.txt", Default::default()).unwrap(), payload);
     }
 
     #[test]
@@ -2162,9 +2156,9 @@ mod repack_tests {
                 .unwrap();
         }
         let mut archive = RarArchive::open(&path).unwrap();
-        assert_eq!(archive.namelist(), ["a.txt"]);
+        assert_eq!(archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["a.txt"]);
         assert_eq!(archive.entries[0].comment().unwrap(), b"keep me".as_slice());
-        assert_eq!(archive.read("a.txt").unwrap(), p1);
+        assert_eq!(archive.read_with_options("a.txt", Default::default()).unwrap(), p1);
     }
 
     #[test]
@@ -2203,7 +2197,7 @@ mod repack_tests {
             .find(|e| e.name() == "docs/")
             .expect("directory member survives repack");
         assert!(dir_entry.is_dir());
-        assert_eq!(ar.read("a.txt").unwrap(), p1);
+        assert_eq!(ar.read_with_options("a.txt", Default::default()).unwrap(), p1);
     }
 
     #[test]
@@ -2237,9 +2231,9 @@ mod repack_tests {
 
         drop(editor);
         let mut a = RarArchive::open(&path).unwrap();
-        assert_eq!(a.namelist(), ["a.txt", "renamed.txt"]);
-        assert_eq!(a.read("a.txt").unwrap(), p1);
-        assert_eq!(a.read("renamed.txt").unwrap(), p3);
+        assert_eq!(a.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["a.txt", "renamed.txt"]);
+        assert_eq!(a.read_with_options("a.txt", Default::default()).unwrap(), p1);
+        assert_eq!(a.read_with_options("renamed.txt", Default::default()).unwrap(), p3);
         // The comment and recovery record survived the repack.
         let mut a = RarArchive::open(&path).unwrap();
         assert_eq!(
@@ -2312,7 +2306,6 @@ mod repack_tests {
 /// survives untouched, and that no name leaks into the clear.
 #[cfg(test)]
 mod hp_tests {
-    #![allow(deprecated)] // legacy facade add_bytes/close kept for parity
     use super::*;
 
     const HP: &str = "hp-secret";
@@ -2391,9 +2384,9 @@ mod hp_tests {
         drop(editor);
 
         let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
-        assert_eq!(ar.namelist(), ["重命名-ünï.bin", "beta-renamed.txt"]);
-        assert_eq!(ar.read("重命名-ünï.bin").unwrap(), p1);
-        assert_eq!(ar.read("beta-renamed.txt").unwrap(), p2);
+        assert_eq!(ar.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["重命名-ünï.bin", "beta-renamed.txt"]);
+        assert_eq!(ar.read_with_options("重命名-ünï.bin", Default::default()).unwrap(), p1);
+        assert_eq!(ar.read_with_options("beta-renamed.txt", Default::default()).unwrap(), p2);
 
         let after = std::fs::read(&path).unwrap();
         assert_ne!(
@@ -2423,9 +2416,9 @@ mod hp_tests {
         drop(editor);
 
         let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
-        assert_eq!(ar.namelist(), ["a.bin", "c.bin"]);
-        assert_eq!(ar.read("a.bin").unwrap(), p1);
-        assert_eq!(ar.read("c.bin").unwrap(), p3);
+        assert_eq!(ar.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["a.bin", "c.bin"]);
+        assert_eq!(ar.read_with_options("a.bin", Default::default()).unwrap(), p1);
+        assert_eq!(ar.read_with_options("c.bin", Default::default()).unwrap(), p3);
     }
 
     #[test]
@@ -2447,7 +2440,7 @@ mod hp_tests {
                 ar.get_comment().unwrap(),
                 Some("hp comment ünï".as_bytes().to_vec())
             );
-            assert_eq!(ar.read("a.bin").unwrap(), p);
+            assert_eq!(ar.read_with_options("a.bin", Default::default()).unwrap(), p);
         }
 
         let mut editor =
@@ -2521,8 +2514,8 @@ mod hp_tests {
         drop(editor);
 
         let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
-        assert_eq!(ar.namelist(), ["b.bin"]);
-        assert_eq!(ar.read("b.bin").unwrap(), p2);
+        assert_eq!(ar.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["b.bin"]);
+        assert_eq!(ar.read_with_options("b.bin", Default::default()).unwrap(), p2);
 
         let bytes = std::fs::read(&path).unwrap();
         assert_ne!(main_flags_of(&bytes) & MHD_RECOVERY, 0);
@@ -2581,9 +2574,9 @@ mod hp_tests {
             a.close().unwrap();
         }
         let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
-        assert_eq!(ar.namelist(), ["a.bin", "added-new.bin"]);
-        assert_eq!(ar.read("a.bin").unwrap(), p1);
-        assert_eq!(ar.read("added-new.bin").unwrap(), p2);
+        assert_eq!(ar.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["a.bin", "added-new.bin"]);
+        assert_eq!(ar.read_with_options("a.bin", Default::default()).unwrap(), p1);
+        assert_eq!(ar.read_with_options("added-new.bin", Default::default()).unwrap(), p2);
 
         let raw = std::fs::read(&path).unwrap();
         assert!(name_is_hidden(&raw, "added-new.bin"));
@@ -2604,8 +2597,8 @@ mod hp_tests {
         drop(editor);
 
         let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
-        assert_eq!(ar.namelist(), ["b.txt"]);
-        assert_eq!(ar.read("b.txt").unwrap(), t2);
+        assert_eq!(ar.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["b.txt"]);
+        assert_eq!(ar.read_with_options("b.txt", Default::default()).unwrap(), t2);
 
         let raw = std::fs::read(&path).unwrap();
         assert_ne!(main_flags_of(&raw) & MHD_PASSWORD, 0, "repacked under -hp");

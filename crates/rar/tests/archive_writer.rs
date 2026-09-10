@@ -1,10 +1,8 @@
-#![allow(deprecated)] // legacy facade (add*/close) — mirrors the typed writer
-
 use std::path::PathBuf;
 
 use rar_rs::{
     AppendOptions, ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, DictionarySize,
-    EntryWriteOptions, RarArchive, RarError, ThreadCount, WriteEntry, WriterOptions,
+    EntryWriteOptions, RarError, ThreadCount, WriteEntry, WriterOptions,
 };
 
 fn stored() -> EntryWriteOptions {
@@ -101,16 +99,19 @@ fn typed_rar50_big_dictionary_keeps_legacy_auto_semantics() {
     std::fs::write(&source, &payload).unwrap();
 
     let legacy_path = dir.path().join("legacy.rar");
-    let mut legacy = RarArchive::create_with_options(
+    let mut legacy = ArchiveWriter::create_with(
         &legacy_path,
-        rar_rs::CreateOptions {
-            dict_size_bytes: Some(6 * 1024 * 1024 * 1024),
-            ..Default::default()
-        },
+        WriterOptions::new()
+            .dictionary_size(DictionarySize::try_from(6 * 1024 * 1024 * 1024u64).unwrap()),
     )
     .unwrap();
-    legacy.add(&source, CompressionLevel::NORMAL.get()).unwrap();
-    legacy.close().unwrap();
+    legacy
+        .add_path(
+            &source,
+            EntryWriteOptions::new().compression_level(CompressionLevel::NORMAL),
+        )
+        .unwrap();
+    legacy.finish().unwrap();
 
     let typed_path = dir.path().join("typed.rar");
     let mut writer = ArchiveWriter::create_with(
@@ -141,9 +142,14 @@ fn typed_create_matches_equivalent_legacy_output() {
     let legacy_path = dir.path().join("legacy.rar");
     let typed_path = dir.path().join("typed.rar");
 
-    let mut legacy = RarArchive::create_with_options(&legacy_path, Default::default()).unwrap();
-    legacy.add(&source, CompressionLevel::NORMAL.get()).unwrap();
-    legacy.close().unwrap();
+    let mut legacy = ArchiveWriter::create(&legacy_path).unwrap();
+    legacy
+        .add_path(
+            &source,
+            EntryWriteOptions::new().compression_level(CompressionLevel::NORMAL),
+        )
+        .unwrap();
+    legacy.finish().unwrap();
 
     let mut typed = ArchiveWriter::create(&typed_path).unwrap();
     typed
@@ -171,9 +177,9 @@ fn typed_create_and_append_abort_on_drop() {
     assert!(!create_path.exists());
 
     let append_path = dir.path().join("append-abort.rar");
-    let mut legacy = RarArchive::create_with_options(&append_path, Default::default()).unwrap();
-    legacy.add_bytes("old.txt", b"old", 0).unwrap();
-    legacy.close().unwrap();
+    let mut legacy = ArchiveWriter::create(&append_path).unwrap();
+    legacy.add_bytes("old.txt", b"old", stored()).unwrap();
+    legacy.finish().unwrap();
     let before = std::fs::read(&append_path).unwrap();
     {
         let mut writer = ArchiveWriter::append(&append_path).unwrap();
@@ -230,17 +236,15 @@ fn exact_recovery_volume_generation_is_disarmed_after_close() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("recovery.rar");
     let payload = vec![7u8; 96 * 1024];
-    let mut archive = RarArchive::create_with_options(
+    let mut archive = ArchiveWriter::create_with(
         &path,
-        rar_rs::CreateOptions {
-            volume_size: Some(32 * 1024),
-            recovery_volume_count: Some(1),
-            ..Default::default()
-        },
+        WriterOptions::new()
+            .volume_size(32 * 1024)
+            .recovery_volume_count(1),
     )
     .unwrap();
-    archive.add_bytes("payload.bin", &payload, 0).unwrap();
-    archive.close().unwrap();
+    archive.add_bytes("payload.bin", &payload, stored()).unwrap();
+    archive.finish().unwrap();
 
     let recovery_path = std::fs::read_dir(dir.path())
         .unwrap()
@@ -248,7 +252,6 @@ fn exact_recovery_volume_generation_is_disarmed_after_close() {
         .find(|path| path.extension().is_some_and(|extension| extension == "rev"))
         .expect("recovery volume");
     std::fs::remove_file(&recovery_path).unwrap();
-    archive.close().unwrap();
     assert!(!recovery_path.exists());
 }
 
@@ -305,9 +308,10 @@ fn typed_append_roundtrips_and_legacy_drop_still_commits() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("append.rar");
     {
-        let mut legacy = RarArchive::create_with_options(&path, Default::default()).unwrap();
-        legacy.add_bytes("first.txt", b"first", 0).unwrap();
+        let mut legacy = ArchiveWriter::create(&path).unwrap();
+        legacy.add_bytes("first.txt", b"first", stored()).unwrap();
         // Compatibility behavior: legacy Drop still closes and commits.
+        legacy.finish().unwrap();
     }
     assert!(path.exists());
 
@@ -389,18 +393,13 @@ fn append_on_rar4_archives_is_supported() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rar4.rar");
     {
-        let mut archive = RarArchive::create_with_options(
-            &path,
-            rar_rs::CreateOptions {
-                compression: ArchiveVersion::V29,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let mut archive =
+            ArchiveWriter::create_with(&path, WriterOptions::new().compression(ArchiveVersion::V29))
+                .unwrap();
         let source = dir.path().join("a.txt");
         std::fs::write(&source, b"original").unwrap();
-        archive.add(&source, 0).unwrap();
-        archive.close().unwrap();
+        archive.add_path(&source, stored()).unwrap();
+        archive.finish().unwrap();
     }
     let payload_new = b"appended member payload".repeat(120);
 
@@ -429,9 +428,9 @@ fn append_on_rar4_archives_is_supported() {
 
     // The legacy RarArchive::open_append facade is still usable.
     {
-        let mut archive = RarArchive::open_append(&path).unwrap();
-        archive.add_bytes("c.txt", b"third", 0).unwrap();
-        archive.close().unwrap();
+        let mut archive = ArchiveWriter::append(&path).unwrap();
+        archive.add_bytes("c.txt", b"third", stored()).unwrap();
+        archive.finish().unwrap();
     }
     let reader = ArchiveReader::open(&path).unwrap();
     assert!(reader.unique_entry("c.txt").is_ok());

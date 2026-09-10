@@ -34,7 +34,7 @@ use crate::format::rar5::{
     BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
     BLOCK_TYPE_SERVICE_HEADER,
 };
-use crate::fs::atomic::{copy_prefix, read_write_create, replace_file, temp_sibling_path};
+use crate::fs::atomic::{copy_prefix, read_write_create, temp_sibling_path};
 use crate::write_progress::ProgressTracker;
 
 pub(crate) use crate::fs::volume::{
@@ -793,8 +793,7 @@ impl RarArchive {
     /// Lock the archive (like `rar k`): sets the `LOCKED` flag in the main
     /// archive header, making the archive read-only. Locking is
     /// irreversible.
-    #[deprecated(note = "use ArchiveEditor::lock instead")]
-    pub fn lock(&mut self) -> RarResult<()> {
+    pub(crate) fn lock(&mut self) -> RarResult<()> {
         if self.mode != Mode::Read {
             return Err(RarError::Format(
                 "lock requires an archive opened for reading".into(),
@@ -885,54 +884,7 @@ impl RarArchive {
         Ok(())
     }
 
-    /// Add an inline recovery record to an existing archive (like `rar rr
-    /// <percent>`), rebuilding the archive header locator. Existing
-    /// members are copied verbatim; an existing recovery record is
-    /// replaced.
-    #[deprecated(note = "use an EditPlan with set_recovery instead")]
-    pub fn add_recovery_record(&mut self, percent: u8) -> RarResult<()> {
-        if self.mode != Mode::Read {
-            return Err(RarError::Format(
-                "add_recovery_record requires an archive opened for reading".into(),
-            ));
-        }
-        self.ensure_write_ctx();
-        if self.volume_paths.len() > 1 {
-            return Err(RarError::Unsupported(
-                "recovery records are not supported for multi-volume archives".into(),
-            ));
-        }
-        let deleted = vec![false; self.entries.len()];
-        let src_path = self.path.clone();
-        let tmp_path = temp_sibling_path(&src_path);
-        let mut reader = File::open(&src_path)?;
-        self.stream = Some(Box::new(read_write_create(&tmp_path)?));
-        self.write_ctx_mut().quick_open_entries.clear();
-        self.header_encryption = false;
-        self.archive_encr = None;
-
-        let result = self.rewrite_blocks(
-            &mut reader,
-            &deleted,
-            None,
-            Some(percent.min(100)),
-            None,
-            None,
-            &src_path,
-            &tmp_path,
-        );
-        self.stream = None;
-        match result {
-            Ok(()) => replace_file(&tmp_path, &src_path)?,
-            Err(e) => {
-                let _ = fs::remove_file(&tmp_path);
-                return Err(e);
-            }
-        }
-        self.mode = Mode::Read;
-        self.open_read()?;
-        Ok(())
-    }
+    
 
     /// Create a new RAR archive with explicit options (overwrites an
     /// existing file).
@@ -944,8 +896,7 @@ impl RarArchive {
     /// The archive data is staged in a temporary sibling file and moved to
     /// `path` only when [`Self::close`] succeeds, so an aborted or failed
     /// write never leaves a partial archive at `path`.
-    #[deprecated(note = "use ArchiveWriter::create_with instead")]
-    pub fn create_with_options(
+    pub(crate) fn create_with_options(
         path: impl AsRef<Path>,
         opts: crate::options::CreateOptions,
     ) -> RarResult<Self> {
@@ -1155,7 +1106,6 @@ impl RarArchive {
     }
 }
 
-#[allow(deprecated)] // Drop seam: auto-close shares the deprecated facade path
 impl Drop for RarArchive {
     fn drop(&mut self) {
         let _ = self.close();

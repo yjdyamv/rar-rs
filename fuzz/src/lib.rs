@@ -5,8 +5,6 @@
 //! (`#[cfg(fuzzing)]`) and the standalone mutation loop (`standalone`),
 //! so the targets run on stable Rust without libFuzzer.
 
-#![allow(deprecated)] // fuzz targets exercise the legacy facade entry points
-
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Deterministic xorshift64* PRNG (no external deps).
@@ -171,10 +169,12 @@ pub fn parse(data: &[u8]) {
     };
 
     // Plain read path: scan + list + read every member + extract all.
-    if let Ok(mut a) = rar_rs::RarArchive::open(&path) {
-        let names: Vec<String> = a.namelist().into_iter().map(|s| s.to_string()).collect();
+    if let Ok(mut a) = rar_rs::ArchiveReader::open(&path) {
+        let names: Vec<String> = a.entries().map(|e| e.name().to_string()).collect();
         for name in &names {
-            let _ = a.read_with_options(name, opts);
+            if let Some(id) = a.entries_named(name).next().map(|e| e.id()) {
+                let _ = a.read_entry_with_options(id, opts);
+            }
         }
         let _ = a.extract_all_with_options(dir.path().join("x"), opts);
     }
@@ -251,22 +251,40 @@ pub fn write_roundtrip(data: &[u8]) {
     } else {
         (None, false)
     };
-    let opts = rar_rs::CreateOptions {
-        solid: h[3].is_multiple_of(2),
-        blake2: h[4].is_multiple_of(2),
-        quick_open: h[4] % 4 < 3,
-        password: h[5].is_multiple_of(2).then(|| "fuzz".into()),
+    let mut opts = rar_rs::WriterOptions::default()
+        .solid_mode(if h[3].is_multiple_of(2) {
+            rar_rs::SolidMode::Continuous
+        } else {
+            rar_rs::SolidMode::Disabled
+        })
+        .blake2(h[4].is_multiple_of(2))
+        .quick_open(h[4] % 4 < 3);
+    if h[5].is_multiple_of(2) {
         // h[5] % 4 == 2 is even, so header encryption always carries a
         // password here; -hp works for single- and multi-volume alike.
-        encrypt_headers: h[5] % 4 == 2,
-        recovery_percent: (!multivolume && h[6].is_multiple_of(4)).then(|| h[6] % 15),
-        recovery_volume_count: create_rev,
-        volume_size,
-        dict_size_log: Some(7 + h[7] % 3), // 128K/256K/512K windows
-        dict_size_bytes,
-        force_v70,
-        ..Default::default()
-    };
+        opts = opts.password("fuzz");
+    }
+    if h[5] % 4 == 2 {
+        opts = opts.encrypt_headers(true);
+    }
+    if !multivolume && h[6].is_multiple_of(4) {
+        opts = opts.recovery_percent(h[6] % 15);
+    }
+    if let Some(count) = create_rev {
+        opts = opts.recovery_volume_count(count);
+    }
+    if let Some(size) = volume_size {
+        opts = opts.volume_size(size);
+    }
+    let dict = dict_size_bytes
+        .and_then(|bytes| rar_rs::DictionarySize::try_from(bytes).ok())
+        .or_else(|| rar_rs::DictionarySize::from_rar5_log(7 + h[7] % 3).ok());
+    if let Some(dict) = dict {
+        opts = opts.dictionary_size(dict);
+    }
+    if force_v70 {
+        opts = opts.compression(rar_rs::version::ArchiveVersion::V70);
+    }
 
     // Member payloads: deterministic tiles (bounded work — the fuzzer
     // targets code paths, not allocation sizes).
@@ -280,7 +298,7 @@ pub fn write_roundtrip(data: &[u8]) {
     let dir = tempfile::tempdir().expect("tempdir");
     let arc = dir.path().join("w.rar");
     let created = (|| -> rar_rs::RarResult<()> {
-        let mut rar = rar_rs::RarArchive::create_with_options(&arc, opts.clone())?;
+        let mut rar = rar_rs::ArchiveWriter::create_with(&arc, opts.clone())?;
         for (i, (name, payload)) in members.iter().enumerate() {
             // Multi-volume members are STORED (level 0): the compressible
             // tile pattern would otherwise collapse below one volume and
@@ -291,9 +309,11 @@ pub fn write_roundtrip(data: &[u8]) {
             } else {
                 ((h[0] as usize + i) % 6) as u8
             };
-            rar.add_bytes(name, payload, level)?;
+            let entry_opts = rar_rs::EntryWriteOptions::new()
+                .compression_level(rar_rs::CompressionLevel::try_from(level).unwrap());
+            rar.add_bytes(name, payload, entry_opts)?;
         }
-        rar.close()?;
+        rar.finish()?;
         Ok(())
     })();
     if created.is_err() {
@@ -302,14 +322,16 @@ pub fn write_roundtrip(data: &[u8]) {
 
     // Round trip: read every member back and compare byte-for-byte.
     let volumes = rar_rs::discover_volumes(&arc);
-    let pw = opts.password.as_deref();
-    let opened = match pw {
-        Some(pw) => rar_rs::RarArchive::open_with_password(&volumes[0], pw),
-        None => rar_rs::RarArchive::open(&volumes[0]),
+    let opened = if h[5].is_multiple_of(2) {
+        rar_rs::ArchiveReader::open_with(&volumes[0], rar_rs::OpenOptions::new().password("fuzz"))
+    } else {
+        rar_rs::ArchiveReader::open(&volumes[0])
     };
     if let Ok(mut ar) = opened {
         for (name, payload) in &members {
-            if let Ok(got) = ar.read(name) {
+            if let Ok(id) = ar.unique_entry(name)
+                && let Ok(got) = ar.read_entry(id)
+            {
                 assert_eq!(
                     &got[..],
                     &payload[..],
@@ -366,35 +388,41 @@ pub fn rewrite(data: &[u8]) {
     let solid = data[0].is_multiple_of(2);
 
     {
-        let mut rar = rar_rs::RarArchive::create_with_options(
+        let mut rar = rar_rs::ArchiveWriter::create_with(
             &path,
-            rar_rs::CreateOptions {
-                solid,
-                quick_open: true,
-                ..Default::default()
-            },
+            rar_rs::WriterOptions::default()
+                .solid_mode(if solid {
+                    rar_rs::SolidMode::Continuous
+                } else {
+                    rar_rs::SolidMode::Disabled
+                })
+                .quick_open(true),
         )
         .unwrap();
-        rar.add_bytes("a.bin", a, 3).unwrap();
-        rar.add_bytes("b.bin", b, 3).unwrap();
-        rar.add_bytes("c.bin", c, 3).unwrap();
-        rar.close().unwrap();
+        let lv3 = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap());
+        rar.add_bytes("a.bin", a, lv3).unwrap();
+        rar.add_bytes("b.bin", b, lv3).unwrap();
+        rar.add_bytes("c.bin", c, lv3).unwrap();
+        rar.finish().unwrap();
     }
 
     let mut expected: Vec<(&str, &[u8])> = vec![("a.bin", a), ("b.bin", b), ("c.bin", c)];
 
     // 1. Delete b.bin.
     {
-        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
-        rar.delete(&["b.bin"]).unwrap();
+        let mut rar = rar_rs::ArchiveEditor::open(&path).unwrap();
+        let id = rar.unique_entry("b.bin").unwrap();
+        rar.delete_entries(&[id]).unwrap();
     }
     expected.retain(|(n, _)| *n != "b.bin");
     verify_members(&path, &expected);
 
     // 2. Rename a.bin -> z.bin.
     if data[1].is_multiple_of(2) {
-        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
-        rar.rename(&[("a.bin", "z.bin")]).unwrap();
+        let mut rar = rar_rs::ArchiveEditor::open(&path).unwrap();
+        let id = rar.unique_entry("a.bin").unwrap();
+        rar.rename_entries(&[(id, "z.bin".to_string())]).unwrap();
         for e in &mut expected {
             if e.0 == "a.bin" {
                 e.0 = "z.bin";
@@ -405,17 +433,23 @@ pub fn rewrite(data: &[u8]) {
 
     // 3. Append d.bin.
     if data[2].is_multiple_of(3) {
-        let mut rar = rar_rs::RarArchive::open_append(&path).unwrap();
-        rar.add_bytes("d.bin", d, 0).unwrap();
-        rar.close().unwrap();
+        let mut rar = rar_rs::ArchiveWriter::append_with(&path, rar_rs::AppendOptions::default())
+            .unwrap();
+        let opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(0).unwrap());
+        rar.add_bytes("d.bin", d, opts).unwrap();
+        rar.finish().unwrap();
         expected.push(("d.bin", d));
         verify_members(&path, &expected);
     }
 
     // 4. Comment round trip.
     if data[3].is_multiple_of(2) {
-        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
-        rar.set_comment(b"fuzz comment").unwrap();
+        {
+            let mut rar = rar_rs::ArchiveEditor::open(&path).unwrap();
+            rar.apply(rar_rs::EditPlan::new().set_comment(b"fuzz comment"))
+                .unwrap();
+        }
         let mut rar = rar_rs::RarArchive::open(&path).unwrap();
         assert_eq!(
             rar.get_comment().unwrap().as_deref(),
@@ -428,12 +462,13 @@ pub fn rewrite(data: &[u8]) {
     // 5. Lock (irreversible — must be last): further rewrites refuse.
     if data[4].is_multiple_of(2) {
         {
-            let mut rar = rar_rs::RarArchive::open(&path).unwrap();
+            let mut rar = rar_rs::ArchiveEditor::open(&path).unwrap();
             rar.lock().unwrap();
         }
         verify_members(&path, &expected);
-        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
-        match rar.rename(&[(expected[0].0, "locked-check.bin")]) {
+        let mut rar = rar_rs::ArchiveEditor::open(&path).unwrap();
+        let id = rar.unique_entry(expected[0].0).unwrap();
+        match rar.rename_entries(&[(id, "locked-check.bin".to_string())]) {
             Err(rar_rs::RarError::ArchiveLocked) => {}
             other => panic!("expected ArchiveLocked, got {other:?}"),
         }
@@ -443,8 +478,8 @@ pub fn rewrite(data: &[u8]) {
 /// Open `path` and assert that exactly the `expected` members exist with
 /// byte-identical content.
 fn verify_members(path: &std::path::Path, expected: &[(&str, &[u8])]) {
-    let mut ar = rar_rs::RarArchive::open(path).unwrap();
-    let names: Vec<String> = ar.namelist().into_iter().map(|s| s.to_string()).collect();
+    let mut ar = rar_rs::ArchiveReader::open(path).unwrap();
+    let names: Vec<String> = ar.entries().map(|e| e.name().to_string()).collect();
     assert_eq!(
         names.len(),
         expected.len(),
@@ -455,7 +490,7 @@ fn verify_members(path: &std::path::Path, expected: &[(&str, &[u8])]) {
             names.iter().any(|n| n == name),
             "member {name} missing after rewrite: {names:?}"
         );
-        let got = ar.read(name).unwrap();
+        let got = ar.read_entry(ar.unique_entry(name).unwrap()).unwrap();
         assert_eq!(&got[..], *bytes, "member {name} changed after rewrite");
     }
 }

@@ -2,11 +2,7 @@
 //!
 //! Run:  cargo run --release --example bench [size_mb]
 
-#![allow(deprecated)] // benchmarks the legacy create path
-
 use std::time::Instant;
-
-use rar_rs::RarArchive;
 
 fn text_data(size: usize) -> Vec<u8> {
     let lorem = b"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam.\n";
@@ -45,9 +41,17 @@ fn bench(name: &str, data: &[u8]) {
         let out = dir.join(format!("{name}-l{level}.rar"));
         let t0 = Instant::now();
         let result = (|| -> rar_rs::RarResult<()> {
-            let mut rar = RarArchive::create_with_options(&out, rar_rs::CreateOptions::default())?;
-            rar.add_bytes("data.bin", data, level)?;
-            rar.close()?;
+            let mut writer = rar_rs::ArchiveWriter::create_with(
+                &out,
+                rar_rs::WriterOptions::default(),
+            )?;
+            writer.add_bytes(
+                "data.bin",
+                data,
+                rar_rs::EntryWriteOptions::new()
+                    .compression_level(rar_rs::CompressionLevel::try_from(level).unwrap()),
+            )?;
+            writer.finish()?;
             Ok(())
         })();
         let elapsed = t0.elapsed();
@@ -123,13 +127,14 @@ fn bench_many(name: &str, data: &[u8], member_count: usize) {
     let seq = dir.join("seq.rar");
     let t0 = std::time::Instant::now();
     {
-        let mut ar =
-            rar_rs::RarArchive::create_with_options(&seq, rar_rs::CreateOptions::default())
-                .unwrap();
+        let mut ar = rar_rs::ArchiveWriter::create_with(&seq, rar_rs::WriterOptions::default())
+            .unwrap();
+        let opts =
+            || rar_rs::EntryWriteOptions::new().compression_level(rar_rs::CompressionLevel::try_from(3).unwrap());
         for (i, member) in members.iter().enumerate() {
-            ar.add_bytes(&names[i], member, 3).unwrap();
+            ar.add_bytes(&names[i], member, opts()).unwrap();
         }
-        ar.close().unwrap();
+        ar.finish().unwrap();
     }
     let seq_elapsed = t0.elapsed();
     let _ = std::fs::remove_file(&seq);
@@ -137,20 +142,20 @@ fn bench_many(name: &str, data: &[u8], member_count: usize) {
     let batch = dir.join("batch.rar");
     let t1 = std::time::Instant::now();
     {
-        let mut ar =
-            rar_rs::RarArchive::create_with_options(&batch, rar_rs::CreateOptions::default())
-                .unwrap();
-        let entries: Vec<rar_rs::BatchEntry<'_>> = members
+        let mut ar = rar_rs::ArchiveWriter::create_with(&batch, rar_rs::WriterOptions::default())
+            .unwrap();
+        let entries: Vec<rar_rs::WriteEntry<'_>> = members
             .iter()
             .enumerate()
-            .map(|(i, member)| rar_rs::BatchEntry::Bytes {
+            .map(|(i, member)| rar_rs::WriteEntry::Bytes {
                 name: &names[i],
                 data: member,
-                level: 3,
+                options: rar_rs::EntryWriteOptions::new()
+                    .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap()),
             })
             .collect();
         ar.add_batch(&entries).unwrap();
-        ar.close().unwrap();
+        ar.finish().unwrap();
     }
     let batch_elapsed = t1.elapsed();
     let _ = std::fs::remove_file(&batch);
@@ -181,11 +186,16 @@ fn bench_batch(name: &str, data: &[u8]) {
         let t0 = std::time::Instant::now();
         let seq_bytes = (|| -> rar_rs::RarResult<usize> {
             let mut ar =
-                rar_rs::RarArchive::create_with_options(&seq, rar_rs::CreateOptions::default())?;
+                rar_rs::ArchiveWriter::create_with(&seq, rar_rs::WriterOptions::default())?;
             for (i, member) in members.iter().enumerate() {
-                ar.add_bytes(&format!("m{i}.bin"), member, level)?;
+                ar.add_bytes(
+                    &format!("m{i}.bin"),
+                    member,
+                    rar_rs::EntryWriteOptions::new()
+                        .compression_level(rar_rs::CompressionLevel::try_from(level).unwrap()),
+                )?;
             }
-            ar.close()?;
+            ar.finish()?;
             Ok(std::fs::metadata(&seq)?.len() as usize)
         })();
         let seq_elapsed = t0.elapsed();
@@ -194,20 +204,23 @@ fn bench_batch(name: &str, data: &[u8]) {
         let batch = dir.join(format!("batch-l{level}.rar"));
         let t1 = std::time::Instant::now();
         let batch_bytes = (|| -> rar_rs::RarResult<usize> {
-            let mut ar =
-                rar_rs::RarArchive::create_with_options(&batch, rar_rs::CreateOptions::default())?;
+            let mut ar = rar_rs::ArchiveWriter::create_with(
+                &batch,
+                rar_rs::WriterOptions::default(),
+            )?;
             let names: Vec<String> = (0..members.len()).map(|i| format!("m{i}.bin")).collect();
-            let entries: Vec<rar_rs::BatchEntry<'_>> = members
+            let entries: Vec<rar_rs::WriteEntry<'_>> = members
                 .iter()
                 .enumerate()
-                .map(|(i, member)| rar_rs::BatchEntry::Bytes {
+                .map(|(i, member)| rar_rs::WriteEntry::Bytes {
                     name: &names[i],
                     data: member,
-                    level,
+                    options: rar_rs::EntryWriteOptions::new()
+                        .compression_level(rar_rs::CompressionLevel::try_from(level).unwrap()),
                 })
                 .collect();
             ar.add_batch(&entries)?;
-            ar.close()?;
+            ar.finish()?;
             Ok(std::fs::metadata(&batch)?.len() as usize)
         })();
         let batch_elapsed = t1.elapsed();
@@ -243,22 +256,21 @@ fn bench_extract(name: &str, data: &[u8]) {
     let names: Vec<String> = (0..members.len()).map(|i| format!("m{i}.bin")).collect();
     let archive_path = dir.join("bench-extract.rar");
     {
-        let mut ar = rar_rs::RarArchive::create_with_options(
-            &archive_path,
-            rar_rs::CreateOptions::default(),
-        )
-        .unwrap();
-        let entries: Vec<rar_rs::BatchEntry<'_>> = members
+        let mut ar =
+            rar_rs::ArchiveWriter::create_with(&archive_path, rar_rs::WriterOptions::default())
+                .unwrap();
+        let entries: Vec<rar_rs::WriteEntry<'_>> = members
             .iter()
             .enumerate()
-            .map(|(i, member)| rar_rs::BatchEntry::Bytes {
+            .map(|(i, member)| rar_rs::WriteEntry::Bytes {
                 name: &names[i],
                 data: member,
-                level: 3,
+                options: rar_rs::EntryWriteOptions::new()
+                    .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap()),
             })
             .collect();
         ar.add_batch(&entries).unwrap();
-        ar.close().unwrap();
+        ar.finish().unwrap();
     }
     let packed = std::fs::metadata(&archive_path).unwrap().len();
 
@@ -267,7 +279,8 @@ fn bench_extract(name: &str, data: &[u8]) {
     {
         let mut ar = rar_rs::RarArchive::open(&archive_path).unwrap();
         ar.set_progress_callback(Some(Box::new(|_, _| {})));
-        ar.extract_all(&seq_out).unwrap();
+        ar.extract_all_with_options(&seq_out, rar_rs::ExtractOptions::default())
+            .unwrap();
     }
     let seq_elapsed = t0.elapsed();
 
@@ -275,7 +288,8 @@ fn bench_extract(name: &str, data: &[u8]) {
     let t1 = std::time::Instant::now();
     {
         let mut ar = rar_rs::RarArchive::open(&archive_path).unwrap();
-        ar.extract_all(&par_out).unwrap();
+        ar.extract_all_with_options(&par_out, rar_rs::ExtractOptions::default())
+            .unwrap();
     }
     let par_elapsed = t1.elapsed();
 

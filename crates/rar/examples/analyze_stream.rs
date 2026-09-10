@@ -7,8 +7,6 @@
 //! global length/distance histograms. The same input compressed by WinRAR and
 //! by rar-rs can be compared to locate parse-level differences.
 
-#![allow(deprecated)] // reads members through the legacy facade
-
 use std::io::{Read, Seek, SeekFrom};
 
 fn main() {
@@ -18,14 +16,14 @@ fn main() {
 }
 
 fn analyze(path: &str) {
-    let rar = match rar_rs::RarArchive::open(path) {
+    let reader = match rar_rs::ArchiveReader::open(path) {
         Ok(r) => r,
         Err(e) => {
             println!("{path}: cannot open: {e}");
             return;
         }
     };
-    let entries = rar.list().to_vec();
+    let entries: Vec<rar_rs::EntryRef<'_>> = reader.entries().collect();
     let mut f = std::fs::File::open(path).unwrap();
     println!("== {path}: {} member(s)", entries.len());
     for e in &entries {
@@ -55,7 +53,6 @@ fn analyze(path: &str) {
             Err(err) => println!("    analyze: {err}"),
         }
     }
-    let _ = rar; // keep the archive handle alive (entry list borrows it)
 }
 
 fn print_analysis(a: &rar_rs::codec::lzss_huff::StreamAnalysis, packed: &[u8]) {

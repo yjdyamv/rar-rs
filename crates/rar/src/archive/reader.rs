@@ -523,9 +523,9 @@ impl ArchiveReader {
     }
 
     /// Extract all archive entries with safe default options.
-    #[allow(deprecated)] // role seam: delegates to the legacy extractor facade
     pub fn extract_all(&mut self, destination: impl AsRef<Path>) -> RarResult<()> {
-        self.archive.extract_all(destination)
+        self.archive
+            .extract_all_with_options(destination, ExtractOptions::default())
     }
 
     /// Extract all archive entries with explicit options.

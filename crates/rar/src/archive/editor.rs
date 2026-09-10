@@ -449,7 +449,6 @@ impl ArchiveEditor {
     /// [`RarError::Unsupported`] (lock the first volume instead), matching
     /// the legacy method. Editing an already-locked archive fails with
     /// [`RarError::ArchiveLocked`] on the next [`Self::apply`].
-    #[allow(deprecated)] // role seam: delegates to the legacy in-place patch
     pub fn lock(&mut self) -> RarResult<()> {
         if self.archive.rar4 {
             // RAR4 lock: patch the fixed-width main header (ADR 0005 stage A).

@@ -1,11 +1,9 @@
-#![allow(deprecated)] // legacy facade (list/read via RarArchive) — mirrors the typed reader
-
 use std::fs::OpenOptions as FsOpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
 use rar_rs::{
-    ArchiveReader, ArchiveVersion, CreateOptions, ErrorCode, ExtractOptions, OpenOptions,
-    RarArchive, RarError, ScanStrategy,
+    ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, EntryWriteOptions, ErrorCode,
+    ExtractOptions, OpenOptions, RarArchive, RarError, ScanStrategy, SolidMode, WriterOptions,
 };
 
 struct FailAfter {
@@ -31,21 +29,16 @@ impl Write for FailAfter {
 }
 
 fn create_duplicate_archive(path: &std::path::Path) {
-    let mut archive = RarArchive::create_with_options(
-        path,
-        CreateOptions {
-            quick_open: true,
-            ..Default::default()
-        },
-    )
-    .expect("create archive");
+    let opts = EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0u8).unwrap());
+    let mut archive =
+        ArchiveWriter::create_with(path, WriterOptions::default().quick_open(true)).expect("create archive");
     archive
-        .add_bytes("same.bin", b"first payload", 0)
+        .add_bytes("same.bin", b"first payload", opts)
         .expect("add first duplicate");
     archive
-        .add_bytes("same.bin", b"second payload", 0)
+        .add_bytes("same.bin", b"second payload", opts)
         .expect("add second duplicate");
-    archive.close().expect("close archive");
+    archive.finish().expect("close archive");
 }
 
 #[test]
@@ -54,9 +47,14 @@ fn duplicate_entries_are_addressable_by_id() {
     let path = dir.path().join("duplicates.rar");
     create_duplicate_archive(&path);
 
-    let mut legacy = RarArchive::open(&path).expect("legacy open");
+    let mut legacy = ArchiveReader::open(&path).expect("legacy open");
+    let first = legacy
+        .entries_named("same.bin")
+        .next()
+        .expect("legacy first duplicate")
+        .id();
     assert_eq!(
-        legacy.read("same.bin").expect("legacy read"),
+        legacy.read_entry(first).expect("legacy read"),
         b"first payload"
     );
 
@@ -133,21 +131,20 @@ fn assert_solid_reader_recovers_after_writer_failure(version: ArchiveVersion, fi
 
     let source_dir = dir.path().join("src");
     std::fs::create_dir(&source_dir).expect("create source directory");
-    let mut archive = RarArchive::create_with_options(
+    let mut archive = ArchiveWriter::create_with(
         &path,
-        CreateOptions {
-            compression: version,
-            solid: true,
-            ..Default::default()
-        },
+        WriterOptions::default()
+            .compression(version)
+            .solid_mode(SolidMode::Continuous),
     )
     .expect("create solid archive");
+    let opts = EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap());
     for (name, payload) in ["a.txt", "b.txt", "c.txt"].into_iter().zip(&payloads) {
         let source = source_dir.join(name);
         std::fs::write(&source, payload).expect("write solid source");
-        archive.add(&source, 3).expect("add solid member");
+        archive.add_path(&source, opts).expect("add solid member");
     }
-    archive.close().expect("close solid archive");
+    archive.finish().expect("close solid archive");
 
     let mut reader =
         ArchiveReader::open(&path).unwrap_or_else(|err| panic!("open {file_name}: {err}"));

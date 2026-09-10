@@ -1,21 +1,21 @@
-//! RAR7 (v70) at small scale via the `CreateOptions::force_v70` test seam.
+//! RAR7 (v70) at small scale via the `compression(V70)` writer seam.
 //!
 //! WinRAR only writes v70 members when the dictionary exceeds 4 GiB (the
 //! `-md8g` tests need a > 4 GiB source and stay `#[ignore]`d), so the v70
-//! header paths, the 5+5-bit dictionary encoding and the DCX distance
-//! table had no default-suite coverage. `force_v70` writes legal v70
-//! headers (`comp_version` 1) with any declared dictionary — the format
-//! does not require > 4 GiB — letting these tests run the v70 archive
-//! I/O at small scale. WinRAR compatibility at this scale is not part of
-//! the validated surface; the seam is for our own round trips.
+//! header paths and the DCX distance table had no default-suite coverage.
+//! `compression(V70)` writes legal v70 headers (`comp_version` 1) with any
+//! supported dictionary — the format does not require > 4 GiB — letting
+//! these tests run the v70 archive I/O at small scale. WinRAR
+//! compatibility at this scale is not part of the validated surface; the
+//! seam is for our own round trips.
 //!
 //! Note on sizes: the declared dictionary is capped at twice the member
 //! size (WinRAR's selection rule), so members here are >= 4 MiB to keep
-//! the requested 6-8 MiB dictionaries intact.
+//! the requested 8 MiB dictionary intact. (Dictionary sizes through 4 GiB
+//! must be powers of two; the 1/32 increment bits for non-power sizes are
+//! exercised at > 4 GiB elsewhere.)
 
-#![allow(deprecated)] // legacy add/close/read for v70 fixture construction
-
-use rar_rs::RarArchive;
+use rar_rs::ArchiveReader;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -48,41 +48,41 @@ fn distant_copy(seed: u8, half: usize) -> Vec<u8> {
     data
 }
 
-/// v70 members: `comp_version` 1, exact `dict_size_bytes` round trip
-/// (both a power of two and a non-power exercising the 1/32 increment
-/// bits), and byte-identical reads. Without `force_v70` the same small
+/// v70 members: `comp_version` 1, exact `dict_size_bytes` round trip,
+/// and byte-identical reads. Without `compression(V70)` the same small
 /// dictionary must stay a plain v50 member.
 #[test]
 fn v70_forced_headers_and_roundtrip() {
-    for dict in [6u64 * 1024 * 1024, 8 * 1024 * 1024] {
+    for dict in [4u64 * 1024 * 1024, 8 * 1024 * 1024] {
         let dir = make_temp_dir();
         let arc = dir.path().join("v70.rar");
         let a = compressible(11, 4 * 1024 * 1024);
         let b = distant_copy(12, 2 * 1024 * 1024);
         {
-            let mut rar = RarArchive::create_with_options(
+            let mut rar = rar_rs::ArchiveWriter::create_with(
                 &arc,
-                rar_rs::CreateOptions {
-                    dict_size_bytes: Some(dict),
-                    force_v70: true,
-                    ..Default::default()
-                },
+                rar_rs::WriterOptions::default()
+                    .dictionary_size(rar_rs::DictionarySize::try_from(dict).unwrap())
+                    .compression(rar_rs::version::ArchiveVersion::V70),
             )
             .unwrap();
-            rar.add_bytes("a.bin", &a, 3).unwrap();
-            rar.add_bytes("b.bin", &b, 3).unwrap();
-            rar.close().unwrap();
+            let opts = rar_rs::EntryWriteOptions::new()
+                .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap());
+            rar.add_bytes("a.bin", &a, opts).unwrap();
+            rar.add_bytes("b.bin", &b, opts).unwrap();
+            rar.finish().unwrap();
         }
-        let mut rar = RarArchive::open(&arc).unwrap();
+        let mut rar = ArchiveReader::open(&arc).unwrap();
         for (name, expected) in [("a.bin", &a), ("b.bin", &b)] {
-            let entry = rar.get_entry(name).unwrap();
+            let id = rar.unique_entry(name).unwrap();
+            let entry = rar.entry(id).unwrap();
             assert_eq!(entry.comp_version(), 1, "v70 header for {name}");
             assert_eq!(
                 entry.dict_size_bytes(),
                 Some(dict),
                 "declared dictionary round trip for {name}"
             );
-            assert_eq!(&rar.read(name).unwrap(), expected, "bytes for {name}");
+            assert_eq!(&rar.read_entry(id).unwrap(), expected, "bytes for {name}");
         }
     }
 
@@ -90,23 +90,23 @@ fn v70_forced_headers_and_roundtrip() {
     let dir = make_temp_dir();
     let arc = dir.path().join("v50.rar");
     {
-        let mut rar = RarArchive::create_with_options(
+        let mut rar = rar_rs::ArchiveWriter::create_with(
             &arc,
-            rar_rs::CreateOptions {
-                dict_size_bytes: Some(6 * 1024 * 1024),
-                force_v70: false,
-                ..Default::default()
-            },
+            rar_rs::WriterOptions::default()
+                .dictionary_size(rar_rs::DictionarySize::try_from(8 * 1024 * 1024).unwrap()),
         )
         .unwrap();
-        rar.add_bytes("a.bin", b"plain v50", 3).unwrap();
-        rar.close().unwrap();
+        let opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap());
+        rar.add_bytes("a.bin", b"plain v50", opts).unwrap();
+        rar.finish().unwrap();
     }
-    let mut rar = RarArchive::open(&arc).unwrap();
-    let entry = rar.get_entry("a.bin").unwrap();
+    let mut rar = ArchiveReader::open(&arc).unwrap();
+    let id = rar.unique_entry("a.bin").unwrap();
+    let entry = rar.entry(id).unwrap();
     assert_eq!(entry.comp_version(), 0, "still v50 without the seam");
     assert_eq!(entry.dict_size_bytes(), None, "no v70 dict declared");
-    assert_eq!(rar.read("a.bin").unwrap(), b"plain v50");
+    assert_eq!(rar.read_entry(id).unwrap(), b"plain v50");
 }
 
 /// v70 + solid: the shared LZ window carries the DCX member state across
@@ -120,32 +120,36 @@ fn v70_forced_solid_roundtrip() {
     let b = distant_copy(22, 2 * 1024 * 1024);
     let c = compressible(23, 4 * 1024 * 1024);
     {
-        let mut rar = RarArchive::create_with_options(
+        let mut rar = rar_rs::ArchiveWriter::create_with(
             &arc,
-            rar_rs::CreateOptions {
-                solid: true,
-                dict_size_bytes: Some(8 * 1024 * 1024),
-                force_v70: true,
-                ..Default::default()
-            },
+            rar_rs::WriterOptions::default()
+                .solid_mode(rar_rs::SolidMode::Continuous)
+                .dictionary_size(rar_rs::DictionarySize::try_from(8 * 1024 * 1024).unwrap())
+                .compression(rar_rs::version::ArchiveVersion::V70),
         )
         .unwrap();
-        rar.add_bytes("a.bin", &a, 3).unwrap();
-        rar.add_bytes("b.bin", &b, 3).unwrap();
-        rar.add_bytes("c.bin", &c, 3).unwrap();
-        rar.close().unwrap();
+        let opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap());
+        rar.add_bytes("a.bin", &a, opts).unwrap();
+        rar.add_bytes("b.bin", &b, opts).unwrap();
+        rar.add_bytes("c.bin", &c, opts).unwrap();
+        rar.finish().unwrap();
     }
-    let mut rar = RarArchive::open(&arc).unwrap();
-    assert_eq!(rar.namelist(), ["a.bin", "b.bin", "c.bin"]);
+    let mut rar = ArchiveReader::open(&arc).unwrap();
+    assert_eq!(
+        rar.entries().map(|e| e.name().to_string()).collect::<Vec<String>>(),
+        ["a.bin", "b.bin", "c.bin"]
+    );
     for (name, expected) in [("a.bin", &a), ("b.bin", &b), ("c.bin", &c)] {
-        let entry = rar.get_entry(name).unwrap();
+        let id = rar.unique_entry(name).unwrap();
+        let entry = rar.entry(id).unwrap();
         assert_eq!(entry.comp_version(), 1, "v70 solid member {name}");
         assert_eq!(
             entry.dict_size_bytes(),
             Some(8 * 1024 * 1024),
             "solid member {name} dictionary"
         );
-        assert_eq!(&rar.read(name).unwrap(), expected, "solid bytes for {name}");
+        assert_eq!(&rar.read_entry(id).unwrap(), expected, "solid bytes for {name}");
     }
 }
 
@@ -161,25 +165,26 @@ fn v70_forced_multivolume_roundtrip() {
     let mut a = compressible(31, 8 * 1024 * 1024);
     a.extend_from_slice(&pseudo_random(8 * 1024 * 1024, 32));
     {
-        let mut rar = RarArchive::create_with_options(
+        let mut rar = rar_rs::ArchiveWriter::create_with(
             &arc,
-            rar_rs::CreateOptions {
-                volume_size: Some(2 * 1024 * 1024),
-                dict_size_bytes: Some(8 * 1024 * 1024),
-                force_v70: true,
-                ..Default::default()
-            },
+            rar_rs::WriterOptions::default()
+                .volume_size(2 * 1024 * 1024)
+                .dictionary_size(rar_rs::DictionarySize::try_from(8 * 1024 * 1024).unwrap())
+                .compression(rar_rs::version::ArchiveVersion::V70),
         )
         .unwrap();
-        rar.add_bytes("a.bin", &a, 3).unwrap();
-        rar.close().unwrap();
+        let opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap());
+        rar.add_bytes("a.bin", &a, opts).unwrap();
+        rar.finish().unwrap();
     }
     let volumes = rar_rs::discover_volumes(&arc);
     assert!(volumes.len() >= 2, "precondition: multi-volume set");
-    let mut rar = RarArchive::open(&volumes[0]).unwrap();
-    let entry = rar.get_entry("a.bin").unwrap();
+    let mut rar = ArchiveReader::open(&volumes[0]).unwrap();
+    let id = rar.unique_entry("a.bin").unwrap();
+    let entry = rar.entry(id).unwrap();
     assert_eq!(entry.comp_version(), 1, "v70 multi-volume member");
-    assert_eq!(&rar.read("a.bin").unwrap(), &a);
+    assert_eq!(&rar.read_entry(id).unwrap(), &a);
 }
 
 /// v70 + file-level encryption: the payload encryption path is
@@ -191,21 +196,23 @@ fn v70_forced_encrypted_roundtrip() {
     let arc = dir.path().join("v70e.rar");
     let a = compressible(41, 4 * 1024 * 1024);
     {
-        let mut rar = RarArchive::create_with_options(
+        let mut rar = rar_rs::ArchiveWriter::create_with(
             &arc,
-            rar_rs::CreateOptions {
-                password: Some("s3cret".into()),
-                dict_size_bytes: Some(6 * 1024 * 1024),
-                force_v70: true,
-                ..Default::default()
-            },
+            rar_rs::WriterOptions::default()
+                .password("s3cret")
+                .dictionary_size(rar_rs::DictionarySize::try_from(8 * 1024 * 1024).unwrap())
+                .compression(rar_rs::version::ArchiveVersion::V70),
         )
         .unwrap();
-        rar.add_bytes("a.bin", &a, 3).unwrap();
-        rar.close().unwrap();
+        let opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap());
+        rar.add_bytes("a.bin", &a, opts).unwrap();
+        rar.finish().unwrap();
     }
-    let mut rar = RarArchive::open_with_password(&arc, "s3cret").unwrap();
-    let entry = rar.get_entry("a.bin").unwrap();
+    let mut rar =
+        ArchiveReader::open_with(&arc, rar_rs::OpenOptions::new().password("s3cret")).unwrap();
+    let id = rar.unique_entry("a.bin").unwrap();
+    let entry = rar.entry(id).unwrap();
     assert_eq!(entry.comp_version(), 1, "v70 encrypted member");
-    assert_eq!(&rar.read("a.bin").unwrap(), &a);
+    assert_eq!(&rar.read_entry(id).unwrap(), &a);
 }

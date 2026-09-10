@@ -1,13 +1,11 @@
 //! Byte-level container assertions: locator records, quick-open caches and FILE_TIME extra records.
 
-#![allow(deprecated)] // legacy facade used for control archives
-
 #[path = "support/mod.rs"]
 mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar_rs::RarArchive;
+use rar_rs::{CompressionLevel, EntryWriteOptions};
 
 #[test]
 fn quick_open_record_written_with_correct_relative_locator() {
@@ -15,22 +13,23 @@ fn quick_open_record_written_with_correct_relative_locator() {
     let path = dir.path().join("qo.rar");
     let payload = b"quick open payload ".repeat(1000);
     {
-        let mut rar = rar_rs::RarArchive::create_with_options(
+        let mut rar = rar_rs::ArchiveWriter::create_with(
             &path,
-            rar_rs::CreateOptions {
-                quick_open: true,
-                ..Default::default()
-            },
+            rar_rs::WriterOptions::default().quick_open(true),
         )
         .unwrap();
-        rar.add_bytes("f1.bin", &payload, 3).unwrap();
-        rar.add_bytes("f2.bin", &vec![7u8; 4096], 0).unwrap();
-        rar.close().unwrap();
+        rar.add_bytes("f1.bin", &payload, EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap()))
+            .unwrap();
+        rar.add_bytes("f2.bin", &vec![7u8; 4096], EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0u8).unwrap()))
+            .unwrap();
+        rar.finish().unwrap();
     }
 
-    let mut rar = rar_rs::RarArchive::open(&path).unwrap();
-    assert_eq!(rar.read("f1.bin").unwrap(), payload);
-    assert_eq!(rar.read("f2.bin").unwrap(), vec![7u8; 4096]);
+    let mut rar = rar_rs::ArchiveReader::open(&path).unwrap();
+    let id1 = rar.unique_entry("f1.bin").unwrap();
+    assert_eq!(rar.read_entry(id1).unwrap(), payload);
+    let id2 = rar.unique_entry("f2.bin").unwrap();
+    assert_eq!(rar.read_entry(id2).unwrap(), vec![7u8; 4096]);
 
     let bytes = std::fs::read(&path).unwrap();
     let qo_pos = service_offset(&bytes, "QO");
@@ -48,17 +47,14 @@ fn recovery_locator_offset_is_relative_to_archive_start() {
     let dir = make_temp_dir();
     let path = dir.path().join("rr.rar");
     {
-        let mut rar = rar_rs::RarArchive::create_with_options(
+        let mut rar = rar_rs::ArchiveWriter::create_with(
             &path,
-            rar_rs::CreateOptions {
-                recovery_percent: Some(10),
-                ..Default::default()
-            },
+            rar_rs::WriterOptions::default().recovery_percent(10),
         )
         .unwrap();
-        rar.add_bytes("a.bin", &b"recovery test payload ".repeat(1000), 3)
+        rar.add_bytes("a.bin", &b"recovery test payload ".repeat(1000), EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap()))
             .unwrap();
-        rar.close().unwrap();
+        rar.finish().unwrap();
     }
     let bytes = std::fs::read(&path).unwrap();
     let rr_pos = service_offset(&bytes, "RR");
@@ -94,9 +90,9 @@ fn nanosecond_mtime_roundtrip() {
     let path = dir.path().join("ns.rar");
     {
         let mut rar =
-            RarArchive::create_with_options(&path, rar_rs::CreateOptions::default()).unwrap();
-        rar.add(&src, 3).unwrap();
-        rar.close().unwrap();
+            rar_rs::ArchiveWriter::create(&path).unwrap();
+        rar.add_path(&src, EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap())).unwrap();
+        rar.finish().unwrap();
     }
     // The writer emits the FILE_TIME extra record (byte-identical to the
     // official `rar` format: flags 0x13 + seconds + nanoseconds).
@@ -157,9 +153,10 @@ fn nanosecond_mtime_roundtrip() {
     // Reading it back restores the nanosecond mtime on extraction.
     let out = dir.path().join("out");
     {
-        let mut rar = RarArchive::open(&path).unwrap();
-        assert_eq!(rar.get_entry("ns.bin").unwrap().mtime_ns(), Some(disk_ns));
-        rar.extract("ns.bin", &out).unwrap();
+        let mut rar = rar_rs::ArchiveReader::open(&path).unwrap();
+        let id = rar.unique_entry("ns.bin").unwrap();
+        assert_eq!(rar.entry(id).unwrap().mtime_ns(), Some(disk_ns));
+        rar.extract_entry(id, &out).unwrap();
     }
     let extracted = std::fs::metadata(out.join("ns.bin")).unwrap();
     let restored = extracted

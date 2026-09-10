@@ -469,34 +469,6 @@ impl RarArchive {
         Ok(())
     }
 
-    // ── Public API: listing ────────────────────────────────────────────────
-
-    /// Return all entries in the archive.
-    #[deprecated(note = "use ArchiveReader::entries instead")]
-    pub fn list(&self) -> &[ArchiveEntry] {
-        &self.entries
-    }
-
-    /// Find an entry by name.
-    #[deprecated(note = "use ArchiveReader::entries_named instead")]
-    pub fn get_entry(&self, name: &str) -> Option<&ArchiveEntry> {
-        self.entries.iter().find(|e| e.name() == name)
-    }
-
-    /// Return a list of all entry names.
-    #[deprecated(note = "use ArchiveReader::entries instead")]
-    pub fn namelist(&self) -> Vec<&str> {
-        self.entries.iter().map(|e| e.name()).collect()
-    }
-
-    // ── Public API: reading ────────────────────────────────────────────────
-
-    /// Read and return the uncompressed content of a member.
-    #[deprecated(note = "use ArchiveReader::read_entry instead")]
-    pub fn read(&mut self, name: &str) -> RarResult<Vec<u8>> {
-        self.read_with_options(name, crate::options::ExtractOptions::default())
-    }
-
     /// Read a member with explicit limits (see [`crate::ExtractOptions`]).
     pub fn read_with_options(
         &mut self,
@@ -608,12 +580,6 @@ impl RarArchive {
             }
         }
         Ok((checked, failed))
-    }
-
-    /// Extract all archive contents to `dest_dir` (safe defaults).
-    #[deprecated(note = "use ArchiveReader::extract_all instead")]
-    pub fn extract_all(&mut self, dest_dir: impl AsRef<Path>) -> RarResult<()> {
-        self.extract_all_with_options(dest_dir, crate::options::ExtractOptions::default())
     }
 
     /// Extract all archive contents with explicit options.
@@ -821,12 +787,6 @@ impl RarArchive {
             self.extract_member_streams(member.idx, &dest_path)?;
         }
         Ok(true)
-    }
-
-    /// Extract a single entry to `dest_dir` (safe defaults).
-    #[deprecated(note = "use ArchiveReader::extract_entry instead")]
-    pub fn extract(&mut self, name: &str, dest_dir: impl AsRef<Path>) -> RarResult<PathBuf> {
-        self.extract_with_options(name, dest_dir, crate::options::ExtractOptions::default())
     }
 
     /// Extract a single entry with explicit options.

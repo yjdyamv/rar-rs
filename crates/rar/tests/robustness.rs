@@ -6,8 +6,6 @@
 //! errors are expected and swallowed, and the goal is only to catch panics,
 //! overflows, OOM aborts and unbounded loops.
 
-#![allow(deprecated)] // exercises the legacy facade under malformed input
-
 use rar_rs::recovery::rar50 as recovery;
 use rar_rs::{EncryptionParams, decrypt_data};
 
@@ -63,17 +61,18 @@ fn archive_parse_random_inputs_do_not_panic() {
         let data = random_bytes(&mut rng, 256 * 1024);
         std::fs::write(&path, &data).expect("write archive input");
 
-        let mut archive = match rar_rs::RarArchive::open(&path) {
+        let mut archive = match rar_rs::ArchiveReader::open(&path) {
             Ok(a) => a,
             Err(_) => continue,
         };
         let names: Vec<String> = archive
-            .namelist()
-            .into_iter()
-            .map(|s| s.to_string())
+            .entries()
+            .map(|e| e.name().to_string())
             .collect();
-        for name in names {
-            let _ = archive.read_with_options(&name, opts);
+        for name in &names {
+            if let Ok(id) = archive.unique_entry(name) {
+                let _ = archive.read_entry_with_options(id, opts);
+            }
         }
     }
 }

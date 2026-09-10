@@ -3,37 +3,41 @@
 //! after structural edits. Byte parity with the legacy name-based
 //! operations is checked on twin archive copies.
 
-#![allow(deprecated)] // legacy facade (delete/rename/lock/list/read) — kept for byte-parity checks
+use rar_rs::{
+    ArchiveEditor, ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, EditPlan,
+    EntryWriteOptions, RarArchive, RarError, SolidMode, WriterOptions,
+};
 
-use rar_rs::{ArchiveEditor, ArchiveReader, ArchiveVersion, EditPlan, RarArchive, RarError};
+fn stored() -> EntryWriteOptions {
+    EntryWriteOptions::new().compression_level(CompressionLevel::STORE)
+}
 
-fn stored_level() -> u8 {
-    0
+fn level(level: u8) -> EntryWriteOptions {
+    EntryWriteOptions::new().compression_level(CompressionLevel::try_from(level).unwrap())
 }
 
 /// Build `path` with duplicate members plus a directory tree:
 /// `same.txt` x2 ("first", "second"), `other.txt`, `d/`, `d/x.txt`.
 fn build_fixture(path: &std::path::Path, dir: &std::path::Path) {
-    let mut archive = RarArchive::create_with_options(path, rar_rs::CreateOptions::default())
-        .expect("create fixture");
+    let mut archive = ArchiveWriter::create(path).expect("create fixture");
     archive
-        .add_bytes("same.txt", b"first", stored_level())
+        .add_bytes("same.txt", b"first", stored())
         .expect("add dup 1");
     archive
-        .add_bytes("same.txt", b"second", stored_level())
+        .add_bytes("same.txt", b"second", stored())
         .expect("add dup 2");
     archive
-        .add_bytes("other.txt", b"other", stored_level())
+        .add_bytes("other.txt", b"other", stored())
         .expect("add other");
     archive
-        .add_directory_only(dir, "d")
+        .add_directory(dir, "d")
         .expect("add dir member");
     let leaf = dir.join("leaf.txt");
     std::fs::write(&leaf, b"leaf payload").unwrap();
     archive
-        .add_as(&leaf, "d/x.txt", stored_level())
+        .add_path_as(&leaf, "d/x.txt", stored())
         .expect("add child");
-    archive.close().expect("close fixture");
+    archive.finish().expect("close fixture");
 }
 
 fn names(path: &std::path::Path) -> Vec<String> {
@@ -113,9 +117,9 @@ fn delete_entries_matches_legacy_output_bytes() {
     let (src, twin) = fixture_pair(dir.path(), "del");
 
     // Legacy deletes by name; the editor deletes the same member by ID.
-    let mut legacy = RarArchive::open(&src).unwrap();
-    legacy.delete(&["other.txt"]).unwrap();
-    legacy.close().unwrap();
+    let mut legacy = ArchiveEditor::open(&src).unwrap();
+    let legacy_id = legacy.unique_entry("other.txt").unwrap();
+    legacy.delete_entries(&[legacy_id]).unwrap();
 
     let mut editor = ArchiveEditor::open(&twin).unwrap();
     let id = editor.unique_entry("other.txt").unwrap();
@@ -133,9 +137,11 @@ fn rename_entries_matches_legacy_output_bytes_with_dir_expansion() {
     let dir = tempfile::tempdir().unwrap();
     let (src, twin) = fixture_pair(dir.path(), "ren");
 
-    let mut legacy = RarArchive::open(&src).unwrap();
-    legacy.rename(&[("d", "renamed")]).unwrap();
-    legacy.close().unwrap();
+    let mut legacy = ArchiveEditor::open(&src).unwrap();
+    let legacy_dir = legacy.unique_entry("d/").unwrap();
+    legacy
+        .rename_entries(&[(legacy_dir, "renamed".to_string())])
+        .unwrap();
 
     let mut editor = ArchiveEditor::open(&twin).unwrap();
     let dir_id = editor.unique_entry("d/").unwrap();
@@ -160,7 +166,7 @@ fn lock_matches_legacy_locked_archive_and_refuses_further_edits() {
     let dir = tempfile::tempdir().unwrap();
     let (src, twin) = fixture_pair(dir.path(), "lock");
 
-    let mut legacy = RarArchive::open(&src).unwrap();
+    let mut legacy = ArchiveEditor::open(&src).unwrap();
     legacy.lock().unwrap();
     drop(legacy);
 
@@ -243,10 +249,9 @@ fn structural_edits_invalidate_previously_issued_ids() {
 fn deleting_every_member_erases_the_archive_like_rar_d() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("erase.rar");
-    let mut archive =
-        RarArchive::create_with_options(&path, rar_rs::CreateOptions::default()).unwrap();
-    archive.add_bytes("only.txt", b"only", 0).unwrap();
-    archive.close().unwrap();
+    let mut archive = ArchiveWriter::create(&path).unwrap();
+    archive.add_bytes("only.txt", b"only", stored()).unwrap();
+    archive.finish().unwrap();
 
     let mut editor = ArchiveEditor::open(&path).unwrap();
     let id = editor.unique_entry("only.txt").unwrap();
@@ -268,20 +273,17 @@ fn solid_chain_delete_roundtrips_and_refreshes_catalog() {
         vec![b'c'; 48 * 1024],
     ];
     {
-        let mut archive = RarArchive::create_with_options(
+        let mut archive = ArchiveWriter::create_with(
             &path,
-            rar_rs::CreateOptions {
-                solid: true,
-                ..Default::default()
-            },
+            WriterOptions::new().solid_mode(SolidMode::Continuous),
         )
         .unwrap();
         for (index, payload) in payloads.iter().enumerate() {
             archive
-                .add_bytes(&format!("m{index}.bin"), payload, 1)
+                .add_bytes(&format!("m{index}.bin"), payload, level(1))
                 .unwrap();
         }
-        archive.close().unwrap();
+        archive.finish().unwrap();
     }
 
     let mut editor = ArchiveEditor::open(&path).unwrap();
@@ -306,10 +308,9 @@ fn edition_never_mixes_ids_between_archives() {
     let b = dir.path().join("b.rar");
     build_fixture(&a, dir.path());
     {
-        let mut archive =
-            RarArchive::create_with_options(&b, rar_rs::CreateOptions::default()).unwrap();
-        archive.add_bytes("same.txt", b"from b", 0).unwrap();
-        archive.close().unwrap();
+        let mut archive = ArchiveWriter::create(&b).unwrap();
+        archive.add_bytes("same.txt", b"from b", stored()).unwrap();
+        archive.finish().unwrap();
     }
     let editor_a = ArchiveEditor::open(&a).unwrap();
     let mut editor_b = ArchiveEditor::open(&b).unwrap();
@@ -386,20 +387,17 @@ fn plan_rejects_conflicts_and_solid_chain_renames_atomically() {
     // silently drop the rename in the recompressed chain; refuse it.
     let solid = dir.path().join("solid.rar");
     {
-        let mut archive = RarArchive::create_with_options(
+        let mut archive = ArchiveWriter::create_with(
             &solid,
-            rar_rs::CreateOptions {
-                solid: true,
-                ..Default::default()
-            },
+            WriterOptions::new().solid_mode(SolidMode::Continuous),
         )
         .unwrap();
         for (index, byte) in (0u8..4).enumerate() {
             archive
-                .add_bytes(&format!("m{index}.bin"), &vec![b'a' + byte; 40 * 1024], 1)
+                .add_bytes(&format!("m{index}.bin"), &vec![b'a' + byte; 40 * 1024], level(1))
                 .unwrap();
         }
-        archive.close().unwrap();
+        archive.finish().unwrap();
     }
     let mut editor = ArchiveEditor::open(&solid).unwrap();
     let m0 = editor.unique_entry("m0.bin").unwrap();
@@ -426,21 +424,18 @@ fn plan_rejects_conflicts_and_solid_chain_renames_atomically() {
 fn multivolume_plan_is_atomic_and_failures_leave_all_volumes_intact() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("mv.rar");
-    let mut archive = RarArchive::create_with_options(
+    let mut archive = ArchiveWriter::create_with(
         &base,
-        rar_rs::CreateOptions {
-            volume_size: Some(48 * 1024),
-            ..Default::default()
-        },
+        WriterOptions::new().volume_size(48 * 1024),
     )
     .unwrap();
     archive
-        .add_bytes("a.bin", &vec![7u8; 220 * 1024], 0)
+        .add_bytes("a.bin", &vec![7u8; 220 * 1024], stored())
         .unwrap();
     archive
-        .add_bytes("b.bin", &vec![9u8; 70 * 1024], 0)
+        .add_bytes("b.bin", &vec![9u8; 70 * 1024], stored())
         .unwrap();
-    archive.close().unwrap();
+    archive.finish().unwrap();
 
     // Locate the first volume (zero-padded part names).
     let mut parts: Vec<_> = std::fs::read_dir(dir.path())
@@ -512,9 +507,8 @@ fn comment_op_matches_legacy_set_comment_bytes_and_clears() {
     let (src, twin) = fixture_pair(dir.path(), "cmt");
     let comment = b"edited by the plan".to_vec();
 
-    let mut legacy = RarArchive::open(&src).unwrap();
-    legacy.set_comment(&comment).unwrap();
-    legacy.close().unwrap();
+    let mut legacy = ArchiveEditor::open(&src).unwrap();
+    legacy.apply(EditPlan::new().set_comment(comment.clone())).unwrap();
 
     let mut editor = ArchiveEditor::open(&twin).unwrap();
     editor
@@ -540,9 +534,8 @@ fn recovery_op_matches_legacy_add_recovery_record_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let (src, twin) = fixture_pair(dir.path(), "rr");
 
-    let mut legacy = RarArchive::open(&src).unwrap();
-    legacy.add_recovery_record(10).unwrap();
-    legacy.close().unwrap();
+    let mut legacy = ArchiveEditor::open(&src).unwrap();
+    legacy.apply(EditPlan::new().set_recovery(10)).unwrap();
 
     let mut editor = ArchiveEditor::open(&twin).unwrap();
     editor.apply(EditPlan::new().set_recovery(10)).unwrap();
@@ -593,18 +586,15 @@ fn combined_plan_with_comment_and_recovery_applies_atomically() {
 fn comment_and_recovery_ops_refuse_multivolume_archives() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("mv-cmt.rar");
-    let mut archive = RarArchive::create_with_options(
+    let mut archive = ArchiveWriter::create_with(
         &base,
-        rar_rs::CreateOptions {
-            volume_size: Some(32 * 1024),
-            ..Default::default()
-        },
+        WriterOptions::new().volume_size(32 * 1024),
     )
     .unwrap();
     archive
-        .add_bytes("a.bin", &vec![5u8; 120 * 1024], 0)
+        .add_bytes("a.bin", &vec![5u8; 120 * 1024], stored())
         .unwrap();
-    archive.close().unwrap();
+    archive.finish().unwrap();
     let mut parts: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -657,17 +647,14 @@ fn build_rar4(path: &std::path::Path, dir: &std::path::Path) {
     std::fs::write(&a_path, &a_payload).unwrap();
     let b_path = dir.join("b.txt");
     std::fs::write(&b_path, vec![b'x'; 60_000]).unwrap();
-    let mut archive = RarArchive::create_with_options(
+    let mut archive = ArchiveWriter::create_with(
         path,
-        rar_rs::CreateOptions {
-            compression: ArchiveVersion::V29,
-            ..Default::default()
-        },
+        WriterOptions::new().compression(ArchiveVersion::V29),
     )
     .unwrap();
-    archive.add(&a_path, 0).unwrap();
-    archive.add_as(&b_path, "b.txt", 0).unwrap();
-    archive.close().unwrap();
+    archive.add_path(&a_path, stored()).unwrap();
+    archive.add_path_as(&b_path, "b.txt", stored()).unwrap();
+    archive.finish().unwrap();
 }
 
 /// The RAR4 main-header flags of a non-SFX archive written by our own
@@ -721,8 +708,9 @@ fn rar4_recovery_record_adds_replaces_and_survives_repair() {
         let a_path = dir.path().join("a.bin");
         std::fs::read(&a_path).unwrap()
     };
-    let mut rar = RarArchive::open(&path).unwrap();
-    assert_eq!(rar.read("a.bin").unwrap(), payload);
+    let mut rar = ArchiveReader::open(&path).unwrap();
+    let a = rar.unique_entry("a.bin").unwrap();
+    assert_eq!(rar.read_entry(a).unwrap(), payload);
 
     // Damage one protected sector deep inside the first member's data; the
     // NEWSUB record must rebuild the exact original bytes.
@@ -791,9 +779,10 @@ fn rar4_lock_marks_the_archive_and_blocks_further_edits() {
     ));
 
     // Reading and extraction still work on a locked archive.
-    let mut rar = RarArchive::open(&path).unwrap();
+    let mut rar = ArchiveReader::open(&path).unwrap();
     let payload = std::fs::read(dir.path().join("a.bin")).unwrap();
-    assert_eq!(rar.read("a.bin").unwrap(), payload);
+    let a = rar.unique_entry("a.bin").unwrap();
+    assert_eq!(rar.read_entry(a).unwrap(), payload);
 }
 
 #[test]
@@ -838,17 +827,14 @@ fn rar4_delete_removes_members_and_keeps_the_rest() {
     let payload_b = b"second member payload ".repeat(70);
     std::fs::write(&file, &payload_a).unwrap();
     {
-        let mut archive = RarArchive::create_with_options(
+        let mut archive = ArchiveWriter::create_with(
             &path,
-            rar_rs::CreateOptions {
-                compression: ArchiveVersion::V29,
-                ..Default::default()
-            },
+            WriterOptions::new().compression(ArchiveVersion::V29),
         )
         .unwrap();
-        archive.add(&file, 0).unwrap();
-        archive.add_bytes("other.txt", &payload_b, 0).unwrap();
-        archive.close().unwrap();
+        archive.add_path(&file, stored()).unwrap();
+        archive.add_bytes("other.txt", &payload_b, stored()).unwrap();
+        archive.finish().unwrap();
     }
 
     let mut editor = ArchiveEditor::open(&path).unwrap();
@@ -885,17 +871,14 @@ fn rar4_rename_rewrites_headers_and_keeps_data() {
     std::fs::write(&ascii_file, &payload_a).unwrap();
     std::fs::write(&unicode_file, &payload_b).unwrap();
     {
-        let mut archive = RarArchive::create_with_options(
+        let mut archive = ArchiveWriter::create_with(
             &path,
-            rar_rs::CreateOptions {
-                compression: ArchiveVersion::V29,
-                ..Default::default()
-            },
+            WriterOptions::new().compression(ArchiveVersion::V29),
         )
         .unwrap();
-        archive.add(&ascii_file, 0).unwrap();
-        archive.add(&unicode_file, 0).unwrap();
-        archive.close().unwrap();
+        archive.add_path(&ascii_file, stored()).unwrap();
+        archive.add_path(&unicode_file, stored()).unwrap();
+        archive.finish().unwrap();
     }
 
     let mut editor = ArchiveEditor::open(&path).unwrap();
@@ -959,16 +942,13 @@ fn rar4_case_conversion_renames_every_member() {
     let file = dir.path().join("MixedCase.txt");
     std::fs::write(&file, b"case payload").unwrap();
     {
-        let mut archive = RarArchive::create_with_options(
+        let mut archive = ArchiveWriter::create_with(
             &path,
-            rar_rs::CreateOptions {
-                compression: ArchiveVersion::V29,
-                ..Default::default()
-            },
+            WriterOptions::new().compression(ArchiveVersion::V29),
         )
         .unwrap();
-        archive.add(&file, 0).unwrap();
-        archive.close().unwrap();
+        archive.add_path(&file, stored()).unwrap();
+        archive.finish().unwrap();
     }
     let mut editor = ArchiveEditor::open(&path).unwrap();
     let stored = editor.entries().next().unwrap().name().to_string();
@@ -999,19 +979,16 @@ fn rar4_writer_add_bytes_handles_unicode_and_ascii_names() {
     let unicode_payload = b"unicode bytes payload ".repeat(600);
     let ascii_payload = b"ascii bytes payload ".repeat(700);
     {
-        let mut archive = RarArchive::create_with_options(
+        let mut archive = ArchiveWriter::create_with(
             &path,
-            rar_rs::CreateOptions {
-                compression: ArchiveVersion::V29,
-                ..Default::default()
-            },
+            WriterOptions::new().compression(ArchiveVersion::V29),
         )
         .unwrap();
         archive
-            .add_bytes("文-件名-ünï.bin", &unicode_payload, 0)
+            .add_bytes("文-件名-ünï.bin", &unicode_payload, stored())
             .unwrap();
-        archive.add_bytes("plain.bin", &ascii_payload, 3).unwrap();
-        archive.close().unwrap();
+        archive.add_bytes("plain.bin", &ascii_payload, level(3)).unwrap();
+        archive.finish().unwrap();
     }
     let mut reader = ArchiveReader::open(&path).unwrap();
     let unicode = reader.unique_entry("文-件名-ünï.bin").unwrap();
@@ -1095,9 +1072,11 @@ fn rar4_append_adds_members_and_keeps_comment() {
     }
     let payload_new = vec![0x99; 30_000];
     {
-        let mut archive = RarArchive::open_append(&path).unwrap();
-        archive.add_bytes("new.bin", &payload_new, 0).unwrap();
-        archive.close().unwrap();
+        let mut archive = ArchiveWriter::append(&path).unwrap();
+        archive
+            .add_bytes("new.bin", &payload_new, stored())
+            .unwrap();
+        archive.finish().unwrap();
     }
     let mut reader = ArchiveReader::open(&path).unwrap();
     let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
@@ -1121,19 +1100,17 @@ fn rar4_solid_delete_repacks_and_keeps_data() {
     let p2: Vec<u8> = line.repeat(25_000);
     let p3: Vec<u8> = line.repeat(20_000);
     {
-        let mut archive = RarArchive::create_with_options(
+        let mut archive = ArchiveWriter::create_with(
             &path,
-            rar_rs::CreateOptions {
-                compression: ArchiveVersion::V29,
-                solid: true,
-                ..Default::default()
-            },
+            WriterOptions::new()
+                .compression(ArchiveVersion::V29)
+                .solid_mode(SolidMode::Continuous),
         )
         .unwrap();
-        archive.add_bytes("a.txt", &p1, 3).unwrap();
-        archive.add_bytes("b.txt", &p2, 3).unwrap();
-        archive.add_bytes("c.txt", &p3, 3).unwrap();
-        archive.close().unwrap();
+        archive.add_bytes("a.txt", &p1, level(3)).unwrap();
+        archive.add_bytes("b.txt", &p2, level(3)).unwrap();
+        archive.add_bytes("c.txt", &p3, level(3)).unwrap();
+        archive.finish().unwrap();
     }
     let mut editor = ArchiveEditor::open(&path).unwrap();
     let b = editor.unique_entry("b.txt").unwrap();

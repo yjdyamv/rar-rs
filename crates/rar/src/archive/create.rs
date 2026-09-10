@@ -148,8 +148,7 @@ impl RarArchive {
     }
 
     /// Finalize the archive (writes end-of-archive block in write mode).
-    #[deprecated(note = "use ArchiveWriter::finish instead")]
-    pub fn close(&mut self) -> RarResult<()> {
+    pub(crate) fn close(&mut self) -> RarResult<()> {
         self.check_cancel()?;
         self.finish_writing()?;
         self.stream = None;

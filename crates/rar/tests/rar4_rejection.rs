@@ -1,4 +1,3 @@
-#![allow(deprecated)] // legacy constructor family; use create_with_options
 //! RAR4 containers are now accepted and decoded.
 
 #[path = "support/mod.rs"]
