@@ -10,7 +10,7 @@ mod options;
 mod tasks;
 
 pub use tasks::{
-  append_entries, create_archive, delete_entries, extract_archive, list_entries,
+  append_entries, create_archive, delete_entries, extract_archive, extract_member, list_entries,
   list_entries_detailed, list_entries_quick, lock_archive, read_member, rebuild_missing_volumes,
   rename_entries, repair_archive, set_comment, set_recovery, test_archive,
 };
@@ -72,6 +72,14 @@ pub struct CreateArchiveOptions {
   pub save_owner: Option<bool>,
   /// Save NTFS alternate data streams (like WinRAR `-os`; Windows only).
   pub save_streams: Option<bool>,
+  /// Request a specific archive format: "rar5" (default), "rar7", or
+  /// "rar4". "rar5" auto-promotes an individual member to RAR7 (v70) when
+  /// its effective dictionary exceeds 4 GiB. "rar7" forces v70 members at
+  /// any dictionary (32 MiB by default). "rar4" writes a legacy RAR 4.x
+  /// archive; the dictionary (`dict_size`) and other RAR5-only options
+  /// (quick-open, BLAKE2sp, owner/stream records, recovery volumes) are
+  /// rejected there.
+  pub format: Option<String>,
 }
 #[napi(object)]
 pub struct ProgressData {
@@ -153,6 +161,18 @@ pub struct ExtractArchiveOptions {
   /// WinRAR-compatible default: 4 GiB (RAR7 v70 members with larger
   /// dictionaries are refused). Pass 0 for no limit.
   pub max_dict_size: Option<f64>,
+  /// Skip members whose destination path already exists (like `-o-`).
+  pub skip_existing: Option<bool>,
+  /// Rename colliding outputs `name(1).ext` instead of overwriting
+  /// (like `-or`).
+  pub auto_rename: Option<bool>,
+  /// Keep partially written files after a decode error (like `-k`);
+  /// otherwise the partial file is removed.
+  pub keep_broken: Option<bool>,
+  /// Restore the creation time on extracted files.
+  pub set_creation_time: Option<bool>,
+  /// Restore the last-access time on extracted files.
+  pub set_access_time: Option<bool>,
 }
 
 #[cfg(test)]

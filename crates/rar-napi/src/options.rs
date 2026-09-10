@@ -73,7 +73,25 @@ impl CreateArchiveOptions {
     let threads =
       checked_optional_js_integer(self.threads, "threads", 1, 64)?.map(|value| value as usize);
     let password = self.password.as_deref().filter(|p| !p.is_empty());
+    let format = self.format.as_deref().unwrap_or("rar5");
+    let compression = match format {
+      "rar5" => None,
+      "rar7" => Some(rar_rs::ArchiveVersion::V70),
+      "rar4" => Some(rar_rs::ArchiveVersion::V29),
+      other => {
+        return Err(Error::new(
+          Status::InvalidArg,
+          format!("unknown format: `{other}` (expected rar5, rar7, or rar4)"),
+        ));
+      }
+    };
     let dictionary = match self.dict_size.as_deref() {
+      Some(_) if format == "rar4" => {
+        return Err(Error::new(
+          Status::InvalidArg,
+          "RAR4 archives do not support configurable dictionary sizes",
+        ));
+      }
       Some(s) => {
         let (dict_log, dict_bytes) = parse_dict_size(s)?;
         let bytes = dict_bytes
@@ -128,6 +146,11 @@ impl CreateArchiveOptions {
     } else {
       opts
     };
+    let opts = if let Some(version) = compression {
+      opts.compression(version)
+    } else {
+      opts
+    };
     let opts = if let Some(threads) = threads {
       opts.thread_count(
         rar_rs::ThreadCount::try_from(threads)
@@ -161,11 +184,16 @@ impl ExtractArchiveOptions {
       Some(value) => Some(value),
     };
     Ok(rar_rs::ExtractOptions {
+      safe_paths: true,
       flat_paths: self.flat.unwrap_or(false),
       max_unpacked_bytes: None,
       max_total_unpacked_bytes: None,
       max_dict_size,
-      ..Default::default()
+      skip_existing: self.skip_existing.unwrap_or(false),
+      auto_rename: self.auto_rename.unwrap_or(false),
+      keep_broken: self.keep_broken.unwrap_or(false),
+      set_creation_time: self.set_creation_time.unwrap_or(false),
+      set_access_time: self.set_access_time.unwrap_or(false),
     })
   }
 }

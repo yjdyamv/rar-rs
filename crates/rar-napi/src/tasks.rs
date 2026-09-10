@@ -1039,6 +1039,76 @@ pub fn extract_archive(
   )
 }
 
+/// Extract one member into `dest_dir` by its archive name, streaming to
+/// disk (bounded memory, so arbitrarily large members work). The name must
+/// identify the member uniquely. Returns the resolved output path inside
+/// `dest_dir`.
+#[napi(ts_return_type = "Promise<string>")]
+pub fn extract_member(
+  archive_path: String,
+  name: String,
+  dest_dir: String,
+  password: Option<String>,
+  signal: Option<AbortSignal>,
+) -> AsyncTask<ExtractMemberTask> {
+  AsyncTask::with_optional_signal(
+    ExtractMemberTask {
+      archive_path,
+      name,
+      dest_dir,
+      password,
+      cancel: abort_flag(signal.as_ref()),
+    },
+    signal,
+  )
+}
+
+pub struct ExtractMemberTask {
+  archive_path: String,
+  name: String,
+  dest_dir: String,
+  password: Option<String>,
+  cancel: Option<Arc<AtomicBool>>,
+}
+
+#[napi]
+impl Task for ExtractMemberTask {
+  type Output = String;
+  type JsValue = String;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let mut options = rar_rs::OpenOptions::new();
+    if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
+      options = options.password(pw);
+    }
+    let mut archive =
+      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+    archive.set_cancel_flag(self.cancel.take());
+    let id = archive.unique_entry(&self.name).map_err(to_napi_error)?;
+    let dest = Path::new(&self.dest_dir);
+    if !dest.is_dir() {
+      fs::create_dir_all(dest)
+        .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
+    }
+    // Streaming extract: no per-member or total size caps (only the default
+    // 4 GiB dictionary cap, matching extract_archive).
+    let extract_opts = rar_rs::ExtractOptions {
+      max_unpacked_bytes: None,
+      max_total_unpacked_bytes: None,
+      max_dict_size: Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE),
+      ..Default::default()
+    };
+    let path = archive
+      .extract_entry_with_options(id, dest, extract_opts)
+      .map_err(to_napi_error)?;
+    Ok(path.to_string_lossy().into_owned())
+  }
+
+  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output)
+  }
+}
+
 /// Read one member's uncompressed content into memory (like previewing a
 /// file inside the archive). Bounded by the library's default 4 GiB
 /// per-member read limit; use `extractArchive` for arbitrarily large

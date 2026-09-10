@@ -913,3 +913,160 @@ test('listEntriesDetailed reports extended metadata (crc32, dates, version, soli
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('createArchive format selects rar4, rar5, and rar7 containers', async () => {
+  const dir = tempDir()
+  try {
+    const { listEntriesDetailed, readMember } = await import('../index.js')
+
+    // RAR4 (legacy 7-byte signature, unp_ver 29 from the RAR4 pipeline).
+    const r4 = join(dir, 'legacy.rar')
+    await createArchive({
+      outPath: r4,
+      format: 'rar4',
+      entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('legacy body') }],
+    })
+    const r4head = await readFileHead(r4, 7)
+    assert.deepEqual(
+      r4head,
+      Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00]),
+      'RAR4 7-byte signature',
+    )
+    assert.deepEqual(await readMember(r4, 'a.txt'), Buffer.from('legacy body'))
+    const r4meta = await listEntriesDetailed(r4)
+    assert.equal(r4meta[0].version, 'v29')
+
+    // RAR4 rejects RAR5-only options up front.
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'x.rar'),
+        format: 'rar4',
+        dictSize: '64m',
+        entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('x') }],
+      }),
+      (error) => error.message.includes('dictionary'),
+    )
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'x.rar'),
+        format: 'nope',
+        entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('x') }],
+      }),
+      (error) => error.message.includes('nope'),
+    )
+
+    // RAR5 default stays RAR5.
+    const r5 = join(dir, 'five.rar')
+    await createArchive({
+      outPath: r5,
+      entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('five') }],
+    })
+    assert.equal((await listEntriesDetailed(r5))[0].version, 'v50')
+
+    // Explicit rar7 forces v70 members at a small dictionary. Use
+    // compressible data so the member takes the LZSS path (stored members
+    // carry no compression and stay comp_version 0).
+    const sevenPayload = Buffer.from('seven '.repeat(1000))
+    const r7 = join(dir, 'seven.rar')
+    await createArchive({
+      outPath: r7,
+      format: 'rar7',
+      dictSize: '64m',
+      entries: [{ kind: 'bytes', name: 'a.txt', data: sevenPayload }],
+    })
+    const r7meta = await listEntriesDetailed(r7)
+    assert.equal(r7meta[0].version, 'v70')
+    assert.equal(r7meta[0].dictSizeBytes, 128 * 1024, 'v70 declares a floor dict of 128 KiB')
+    assert.deepEqual(await readMember(r7, 'a.txt'), sevenPayload)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('extractMember streams one member to a directory', async () => {
+  const dir = tempDir()
+  try {
+    const payload = Buffer.from('extract-me '.repeat(1000))
+    const out = join(dir, 'mm.rar')
+    await createArchive({
+      outPath: out,
+      entries: [
+        { kind: 'bytes', name: 'sub/target.txt', data: payload },
+        { kind: 'bytes', name: 'other.txt', data: Buffer.from('unrelated') },
+      ],
+    })
+
+    const { extractMember } = await import('../index.js')
+    const dest = join(dir, 'out')
+    const pending = extractMember(out, 'sub/target.txt', dest)
+    assert.equal(typeof pending.then, 'function', 'extractMember must be async')
+    const written = await pending
+    const normalized = (p) => p.replaceAll('\\', '/')
+    assert.equal(
+      normalized(written),
+      normalized(join(dest, 'sub', 'target.txt')),
+      'returns the resolved path',
+    )
+    assert.deepEqual(readFileSync(written), payload, 'content round-trips')
+    assert.equal(existsSync(join(dest, 'other.txt')), false, 'only the requested member')
+
+    await assert.rejects(
+      extractMember(out, 'missing.txt', dest),
+      (error) => error.message.includes('missing.txt'),
+    )
+
+    // Cancellation aborts mid-extract with a cancellation error.
+    const ctrl = new AbortController()
+    const cancelled = extractMember(out, 'sub/target.txt', dest, undefined, ctrl.signal)
+    ctrl.abort()
+    await assert.rejects(cancelled, (error) => error.code === 'Cancelled')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('extractArchive honors overwrite policies (skipExisting, autoRename)', async () => {
+  const dir = tempDir()
+  try {
+    const out = join(dir, 'ow.rar')
+    await createArchive({
+      outPath: out,
+      entries: [{ kind: 'bytes', name: 'notes/a.txt', data: Buffer.from('new conent ') }],
+    })
+
+    const { extractArchive, readMember } = await import('../index.js')
+
+    // flat: true so members land directly in the destination (basename) and
+    // the pre-seeded files below collide with the extraction targets.
+    const flat = { flat: true }
+
+    // Default: existing file is overwritten.
+    const d1 = join(dir, 'd1')
+    mkdirSync(d1)
+    writeFileSync(join(d1, 'a.txt'), 'old content here')
+    await extractArchive(out, { destPath: d1, ...flat })
+    assert.equal(readFileSync(join(d1, 'a.txt'), 'utf8'), 'new conent ')
+    await assert.rejects(
+      readMember(out, 'notes/missing.txt'),
+      (error) => error.message.includes('missing'),
+    )
+
+    // skipExisting: the existing file is left untouched.
+    const d2 = join(dir, 'd2')
+    mkdirSync(d2)
+    writeFileSync(join(d2, 'a.txt'), 'keep me')
+    await extractArchive(out, { destPath: d2, skipExisting: true, ...flat })
+    assert.equal(readFileSync(join(d2, 'a.txt'), 'utf8'), 'keep me')
+
+    // autoRename: collision produces a(1).txt next to the original.
+    const d3 = join(dir, 'd3')
+    mkdirSync(d3)
+    writeFileSync(join(d3, 'a.txt'), 'original')
+    await extractArchive(out, { destPath: d3, autoRename: true, ...flat })
+    assert.equal(readFileSync(join(d3, 'a.txt'), 'utf8'), 'original')
+    assert.equal(existsSync(join(d3, 'a(1).txt')), true, 'colliding member renamed')
+    assert.equal(readFileSync(join(d3, 'a(1).txt'), 'utf8'), 'new conent ')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
