@@ -12,6 +12,11 @@ import {
   mapAppendOptions,
   mapDeleteArgs,
   mapListArgs,
+  mapExtractMemberArgs,
+  mapRenameArgs,
+  mapCommentArgs,
+  mapRecoveryArgs,
+  mapLockArgs,
 } from '../wasi-path-map.cjs'
 
 test('win32 absolute paths map to guest /<DRIVE>:/ paths', () => {
@@ -133,6 +138,46 @@ test('rebuilt volume paths map back to the host in original order', () => {
   )
 })
 
+test('extractMember args map archive, dest dir, and preserve name/password/signal', () => {
+  const signal = new AbortController().signal
+  assert.deepEqual(
+    mapExtractMemberArgs(
+      'C:\\a.rar',
+      'sub/file.txt',
+      'C:\\out',
+      'pw',
+      signal,
+      'win32',
+    ),
+    ['/C:/a.rar', 'sub/file.txt', '/C:/out', 'pw', signal],
+  )
+})
+
+test('rename args map the archive path and pass renames through', () => {
+  const renames = [{ from: 'a.txt', to: 'b.txt' }]
+  const signal = new AbortController().signal
+  assert.deepEqual(
+    mapRenameArgs('C:\\a.rar', renames, 'pw', signal, 'win32'),
+    ['/C:/a.rar', renames, 'pw', signal],
+  )
+  assert.deepEqual(
+    mapRenameArgs('/tmp/a.rar', renames, null, null, 'linux'),
+    ['/tmp/a.rar', renames, null, null],
+  )
+})
+
+test('comment, recovery, and lock args map the archive path only', () => {
+  assert.deepEqual(
+    mapCommentArgs('C:\\a.rar', 'note', 'pw', 'win32'),
+    ['/C:/a.rar', 'note', 'pw'],
+  )
+  assert.deepEqual(
+    mapRecoveryArgs('C:\\a.rar', 10, 'pw', 'win32'),
+    ['/C:/a.rar', 10, 'pw'],
+  )
+  assert.deepEqual(mapLockArgs('C:\\a.rar', 'pw', 'win32'), ['/C:/a.rar', 'pw'])
+})
+
 test('WASI patch templates keep async operation contracts', () => {
   const source = readFileSync(
     new URL('../scripts/patch-wasi-loader.mjs', import.meta.url),
@@ -150,4 +195,19 @@ test('WASI patch templates keep async operation contracts', () => {
     source,
     /rebuildMissingVolumes[\s\S]*?\.then\(\(paths\) => __wasiPathMap\.mapPathsToHost\(paths\)\)/,
   )
+  // The editor-op + member-extract exports added since the loader patch
+  // was first written must keep their own path mapping wrappers.
+  assert.match(
+    source,
+    /mapExtractMemberArgs[\s\S]*?destDir,[\s\S]*?password,[\s\S]*?signal,[\s\S]*?\)[\s\S]*?\.then\(\(path\) => __wasiPathMap\.toHostPath\(path\)\)/,
+  )
+  for (const fn of ['renameEntries', 'setComment', 'setRecovery', 'lockArchive']) {
+    assert.match(
+      source,
+      new RegExp(`module\\.exports\\.${fn} = function __wasi${fn
+        .charAt(0)
+        .toUpperCase()}${fn.slice(1)}Wrapper`),
+      `${fn} must be wrapped`,
+    )
+  }
 })

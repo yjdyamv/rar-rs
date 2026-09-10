@@ -51,6 +51,11 @@ const LOADER_EXPORT_LINES = [
   'module.exports.readMember = __napiModule.exports.readMember',
   'module.exports.rebuildMissingVolumes = __napiModule.exports.rebuildMissingVolumes',
   'module.exports.testArchive = __napiModule.exports.testArchive',
+  'module.exports.extractMember = __napiModule.exports.extractMember',
+  'module.exports.renameEntries = __napiModule.exports.renameEntries',
+  'module.exports.setComment = __napiModule.exports.setComment',
+  'module.exports.setRecovery = __napiModule.exports.setRecovery',
+  'module.exports.lockArchive = __napiModule.exports.lockArchive',
 ]
 const LOADER_EXPORTS_CREATE_NEW = `const __wasiCreateArchive = __napiModule.exports.createArchive
 module.exports.createArchive = function __wasiCreateArchiveWrapper(
@@ -181,6 +186,69 @@ module.exports.testArchive = function __wasiTestArchiveWrapper(
     ...__wasiPathMap.mapListArgs(archivePath, password),
   )
 }`
+const LOADER_EXPORTS_EXTRACT_MEMBER_NEW = `const __wasiExtractMember = __napiModule.exports.extractMember
+module.exports.extractMember = function __wasiExtractMemberWrapper(
+  archivePath,
+  name,
+  destDir,
+  password,
+  signal,
+) {
+  return __wasiExtractMember(
+    ...__wasiPathMap.mapExtractMemberArgs(
+      archivePath,
+      name,
+      destDir,
+      password,
+      signal,
+    ),
+  ).then((path) => __wasiPathMap.toHostPath(path))
+}`
+const LOADER_EXPORTS_RENAME_NEW = `const __wasiRenameEntries = __napiModule.exports.renameEntries
+module.exports.renameEntries = function __wasiRenameEntriesWrapper(
+  archivePath,
+  renames,
+  password,
+  signal,
+) {
+  return __wasiRenameEntries(
+    ...__wasiPathMap.mapRenameArgs(
+      archivePath,
+      renames,
+      password,
+      signal,
+    ),
+  )
+}`
+const LOADER_EXPORTS_SET_COMMENT_NEW = `const __wasiSetComment = __napiModule.exports.setComment
+module.exports.setComment = function __wasiSetCommentWrapper(
+  archivePath,
+  comment,
+  password,
+) {
+  return __wasiSetComment(
+    ...__wasiPathMap.mapCommentArgs(archivePath, comment, password),
+  )
+}`
+const LOADER_EXPORTS_SET_RECOVERY_NEW = `const __wasiSetRecovery = __napiModule.exports.setRecovery
+module.exports.setRecovery = function __wasiSetRecoveryWrapper(
+  archivePath,
+  percent,
+  password,
+) {
+  return __wasiSetRecovery(
+    ...__wasiPathMap.mapRecoveryArgs(archivePath, percent, password),
+  )
+}`
+const LOADER_EXPORTS_LOCK_NEW = `const __wasiLockArchive = __napiModule.exports.lockArchive
+module.exports.lockArchive = function __wasiLockArchiveWrapper(
+  archivePath,
+  password,
+) {
+  return __wasiLockArchive(
+    ...__wasiPathMap.mapLockArgs(archivePath, password),
+  )
+}`
 
 const WORKER_PREOPEN_OLD = `      preopens: {
         [__rootDir]: __rootDir,
@@ -226,6 +294,17 @@ function patchLoader(source) {
     LOADER_EXPORTS_REBUILD_NEW,
   )
   source = source.replace(LOADER_EXPORT_LINES[10], LOADER_EXPORTS_TEST_ARCHIVE_NEW)
+  source = source.replace(
+    LOADER_EXPORT_LINES[11],
+    LOADER_EXPORTS_EXTRACT_MEMBER_NEW,
+  )
+  source = source.replace(LOADER_EXPORT_LINES[12], LOADER_EXPORTS_RENAME_NEW)
+  source = source.replace(LOADER_EXPORT_LINES[13], LOADER_EXPORTS_SET_COMMENT_NEW)
+  source = source.replace(
+    LOADER_EXPORT_LINES[14],
+    LOADER_EXPORTS_SET_RECOVERY_NEW,
+  )
+  source = source.replace(LOADER_EXPORT_LINES[15], LOADER_EXPORTS_LOCK_NEW)
   return source
 }
 

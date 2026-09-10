@@ -174,6 +174,81 @@ function mapExtractArgs(archivePath, options, platform = process.platform) {
   ]
 }
 
+function mapExtractMemberArgs(
+  archivePath,
+  name,
+  destDir,
+  password,
+  signal,
+  platform = process.platform,
+) {
+  return [
+    typeof archivePath === 'string'
+      ? toGuestPath(archivePath, platform)
+      : archivePath,
+    name,
+    typeof destDir === 'string' ? toGuestPath(destDir, platform) : destDir,
+    password,
+    signal,
+  ]
+}
+
+function mapRenameArgs(
+  archivePath,
+  renames,
+  password,
+  signal,
+  platform = process.platform,
+) {
+  return [
+    typeof archivePath === 'string'
+      ? toGuestPath(archivePath, platform)
+      : archivePath,
+    renames,
+    password,
+    signal,
+  ]
+}
+
+function mapCommentArgs(
+  archivePath,
+  comment,
+  password,
+  platform = process.platform,
+) {
+  return [
+    typeof archivePath === 'string'
+      ? toGuestPath(archivePath, platform)
+      : archivePath,
+    comment,
+    password,
+  ]
+}
+
+function mapRecoveryArgs(
+  archivePath,
+  percent,
+  password,
+  platform = process.platform,
+) {
+  return [
+    typeof archivePath === 'string'
+      ? toGuestPath(archivePath, platform)
+      : archivePath,
+    percent,
+    password,
+  ]
+}
+
+function mapLockArgs(archivePath, password, platform = process.platform) {
+  return [
+    typeof archivePath === 'string'
+      ? toGuestPath(archivePath, platform)
+      : archivePath,
+    password,
+  ]
+}
+
 module.exports = {
   toGuestPath,
   toHostPath,
@@ -186,4 +261,9 @@ module.exports = {
   mapDeleteArgs,
   mapListArgs,
   mapExtractArgs,
+  mapExtractMemberArgs,
+  mapRenameArgs,
+  mapCommentArgs,
+  mapRecoveryArgs,
+  mapLockArgs,
 }
