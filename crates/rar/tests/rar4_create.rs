@@ -7,7 +7,10 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar_rs::{ArchiveVersion, ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions, ExtractOptions, OpenOptions, SolidMode, WriterOptions, discover_volumes};
+use rar_rs::{
+    ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, EntryWriteOptions,
+    ExtractOptions, OpenOptions, SolidMode, WriterOptions, discover_volumes,
+};
 use std::io::Write;
 
 fn ewo(level: u8) -> EntryWriteOptions {
@@ -34,7 +37,11 @@ fn create_rar4_store_single_roundtrip() {
     std::fs::write(&src, content).unwrap();
     let arc = dir.path().join("out.rar");
 
-    let mut archive = ArchiveWriter::create_with(&arc, WriterOptions::default().compression(ArchiveVersion::V29)).expect("create");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default().compression(ArchiveVersion::V29),
+    )
+    .expect("create");
     archive.add_path(&src, ewo(0)).expect("add STORE member");
     archive.finish().expect("close");
 
@@ -47,7 +54,9 @@ fn create_rar4_store_single_roundtrip() {
     assert_eq!(entries[0].crc32(), Some(crate_crc(content)));
     assert_eq!(entries[0].version(), ArchiveVersion::V29);
 
-    let out = archive.read_entry(archive.unique_entry("hello.txt").unwrap()).expect("read back");
+    let out = archive
+        .read_entry(archive.unique_entry("hello.txt").unwrap())
+        .expect("read back");
     assert_eq!(&out, content);
 }
 
@@ -75,8 +84,18 @@ fn create_rar4_store_multiple_files() {
     let mut names: Vec<&str> = entries.iter().map(|e| e.name()).collect();
     names.sort();
     assert_eq!(names, vec!["a.txt", "b.txt"]);
-    assert_eq!(&archive.read_entry(archive.unique_entry("a.txt").unwrap()).unwrap(), b"content A\n");
-    assert_eq!(&archive.read_entry(archive.unique_entry("b.txt").unwrap()).unwrap(), b"content B is longer\n");
+    assert_eq!(
+        &archive
+            .read_entry(archive.unique_entry("a.txt").unwrap())
+            .unwrap(),
+        b"content A\n"
+    );
+    assert_eq!(
+        &archive
+            .read_entry(archive.unique_entry("b.txt").unwrap())
+            .unwrap(),
+        b"content B is longer\n"
+    );
 }
 
 #[test]
@@ -110,7 +129,11 @@ fn create_rar4_compressed_roundtrip_all_levels() {
 
     for level in 1..=5u8 {
         let arc = dir.path().join(format!("c{level}.rar"));
-        let mut archive = ArchiveWriter::create_with(&arc, WriterOptions::default().compression(ArchiveVersion::V29)).expect("create");
+        let mut archive = ArchiveWriter::create_with(
+            &arc,
+            WriterOptions::default().compression(ArchiveVersion::V29),
+        )
+        .expect("create");
         archive.add_path(&src, ewo(level)).expect("add");
         archive.finish().expect("close");
 
@@ -132,7 +155,9 @@ fn create_rar4_compressed_roundtrip_all_levels() {
         );
         assert_eq!(entries[0].crc32(), Some(crate_crc(&content)));
 
-        let out = archive.read_entry(archive.unique_entry("compressible.txt").unwrap()).expect("read back");
+        let out = archive
+            .read_entry(archive.unique_entry("compressible.txt").unwrap())
+            .expect("read back");
         assert_eq!(&out, &content, "level {level} roundtrip mismatch");
     }
 }
@@ -168,7 +193,11 @@ fn create_rar4_ppmd_wins_on_text_m5() {
     // Level 3 never tries PPMd; level 5 does.
     let make = |level: u8, name: &str| -> u64 {
         let arc = dir.path().join(name);
-        let mut archive = ArchiveWriter::create_with(&arc, WriterOptions::default().compression(ArchiveVersion::V29)).expect("create");
+        let mut archive = ArchiveWriter::create_with(
+            &arc,
+            WriterOptions::default().compression(ArchiveVersion::V29),
+        )
+        .expect("create");
         archive.add_path(&src, ewo(level)).expect("add");
         archive.finish().expect("close");
         std::fs::metadata(&arc).unwrap().len()
@@ -184,7 +213,10 @@ fn create_rar4_ppmd_wins_on_text_m5() {
     let mut archive = ArchiveReader::open(dir.path().join("ppmd_m5.rar")).expect("reopen");
     assert_eq!(archive.entries().next().unwrap().method(), 5);
     assert_eq!(
-        archive.read_entry(archive.unique_entry("textmix.txt").unwrap()).expect("read").as_slice(),
+        archive
+            .read_entry(archive.unique_entry("textmix.txt").unwrap())
+            .expect("read")
+            .as_slice(),
         &content[..]
     );
 }
@@ -205,7 +237,11 @@ fn create_rar4_compressed_store_fallback_random() {
 
     for level in 1..=5u8 {
         let arc = dir.path().join(format!("r{level}.rar"));
-        let mut archive = ArchiveWriter::create_with(&arc, WriterOptions::default().compression(ArchiveVersion::V29)).expect("create");
+        let mut archive = ArchiveWriter::create_with(
+            &arc,
+            WriterOptions::default().compression(ArchiveVersion::V29),
+        )
+        .expect("create");
         archive.add_path(&src, ewo(level)).expect("add");
         archive.finish().expect("close");
 
@@ -216,7 +252,9 @@ fn create_rar4_compressed_store_fallback_random() {
             0,
             "level {level}: incompressible data must STORE"
         );
-        let out = archive.read_entry(archive.unique_entry("random.bin").unwrap()).expect("read back");
+        let out = archive
+            .read_entry(archive.unique_entry("random.bin").unwrap())
+            .expect("read back");
         assert_eq!(&out, &content, "level {level} mismatch");
     }
 }
@@ -239,7 +277,9 @@ fn create_rar4_compressed_multivolume_split_member() {
 
     let mut archive = ArchiveWriter::create_with(
         &arc,
-        WriterOptions::default().compression(ArchiveVersion::V29).volume_size(20_000),
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .volume_size(20_000),
     )
     .expect("create");
     archive.add_path(&src, ewo(3)).expect("add");
@@ -274,7 +314,9 @@ fn create_rar4_compressed_multivolume_split_member() {
         chunks.iter().map(|chunk| chunk.packed_size).sum::<u64>(),
         entries[0].compressed_size()
     );
-    let out = archive.read_entry(archive.unique_entry("big.txt").unwrap()).expect("read split member");
+    let out = archive
+        .read_entry(archive.unique_entry("big.txt").unwrap())
+        .expect("read split member");
     assert_eq!(&out, &content);
 }
 
@@ -290,7 +332,9 @@ fn create_rar4_store_multivolume_split_member() {
 
     let mut archive = ArchiveWriter::create_with(
         &arc,
-        WriterOptions::default().compression(ArchiveVersion::V29).volume_size(5_000),
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .volume_size(5_000),
     )
     .expect("create");
     archive.add_path(&src, ewo(0)).expect("add");
@@ -327,7 +371,9 @@ fn create_rar4_store_multivolume_split_member() {
         entries[0].compressed_size()
     );
 
-    let out = archive.read_entry(archive.unique_entry("big.bin").unwrap()).expect("read split member");
+    let out = archive
+        .read_entry(archive.unique_entry("big.bin").unwrap())
+        .expect("read split member");
     assert_eq!(&out, &content);
 }
 
@@ -419,7 +465,9 @@ fn create_rar4_directory_tree_roundtrip() {
         "src/sub/emptydir",
         "src/资料",
     ] {
-        let entry = archive.entry(archive.unique_entry(name).unwrap()).expect("dir entry");
+        let entry = archive
+            .entry(archive.unique_entry(name).unwrap())
+            .expect("dir entry");
         assert!(entry.is_dir(), "{name} must list as a directory");
         assert_eq!(entry.size(), 0, "{name} must have zero size");
     }
@@ -429,7 +477,12 @@ fn create_rar4_directory_tree_roundtrip() {
         ("src/sub/deep/leaf.txt", b"leaf".as_slice()),
         ("src/资料/note.txt", b"note".as_slice()),
     ] {
-        assert_eq!(&archive.read_entry(archive.unique_entry(name).unwrap()).unwrap(), content);
+        assert_eq!(
+            &archive
+                .read_entry(archive.unique_entry(name).unwrap())
+                .unwrap(),
+            content
+        );
     }
 
     // Raw-byte conventions (WinRAR/UnRAR classify RAR4 directories by the
@@ -480,10 +533,14 @@ fn create_rar4_directory_multivolume() {
 
     let mut archive = ArchiveWriter::create_with(
         &arc,
-        WriterOptions::default().compression(ArchiveVersion::V29).volume_size(8_000),
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .volume_size(8_000),
     )
     .expect("create");
-    archive.add_path(&src, ewo(0)).expect("add tree across volumes");
+    archive
+        .add_path(&src, ewo(0))
+        .expect("add tree across volumes");
     archive.finish().expect("close");
 
     let volumes = discover_volumes(&arc);
@@ -506,9 +563,24 @@ fn create_rar4_directory_multivolume() {
             "src/small.txt".to_string(),
         ]
     );
-    assert_eq!(archive.read_entry(archive.unique_entry("src/deep/big.txt").unwrap()).unwrap(), content);
-    assert_eq!(archive.read_entry(archive.unique_entry("src/small.txt").unwrap()).unwrap(), b"small");
-    assert!(archive.entry(archive.unique_entry("src/emptydir").unwrap()).unwrap().is_dir());
+    assert_eq!(
+        archive
+            .read_entry(archive.unique_entry("src/deep/big.txt").unwrap())
+            .unwrap(),
+        content
+    );
+    assert_eq!(
+        archive
+            .read_entry(archive.unique_entry("src/small.txt").unwrap())
+            .unwrap(),
+        b"small"
+    );
+    assert!(
+        archive
+            .entry(archive.unique_entry("src/emptydir").unwrap())
+            .unwrap()
+            .is_dir()
+    );
 }
 
 /// Member-level encryption (`-p`): every member carries FHD_PASSWORD plus an
@@ -525,8 +597,16 @@ fn create_rar4_encrypted_members_roundtrip() {
     std::fs::write(&src, &content).unwrap();
     let arc = dir.path().join("enc.rar");
 
-    let mut archive = ArchiveWriter::create_with(&arc, WriterOptions::default().compression(ArchiveVersion::V29).password("hunter2")).expect("create");
-    archive.add_path(&src, ewo(3)).expect("add encrypted member");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .password("hunter2"),
+    )
+    .expect("create");
+    archive
+        .add_path(&src, ewo(3))
+        .expect("add encrypted member");
     archive.finish().expect("close");
 
     // Raw bytes: FHD_PASSWORD (0x04) and FHD_SALT (0x0400) flags set, an
@@ -545,20 +625,32 @@ fn create_rar4_encrypted_members_roundtrip() {
     );
 
     // Read back with the password.
-    let mut archive = ArchiveReader::open_with(&arc, OpenOptions::new().password("hunter2")).expect("reopen");
+    let mut archive =
+        ArchiveReader::open_with(&arc, OpenOptions::new().password("hunter2")).expect("reopen");
     assert_eq!(
-        archive.read_entry(archive.unique_entry("secret.txt").unwrap()).expect("read").as_slice(),
+        archive
+            .read_entry(archive.unique_entry("secret.txt").unwrap())
+            .expect("read")
+            .as_slice(),
         &content[..]
     );
 
     // Wrong / missing password fails.
-    let mut archive = ArchiveReader::open_with(&arc, OpenOptions::new().password("wrong")).expect("reopen");
+    let mut archive =
+        ArchiveReader::open_with(&arc, OpenOptions::new().password("wrong")).expect("reopen");
     assert!(
-        archive.read_entry(archive.unique_entry("secret.txt").unwrap()).is_err(),
+        archive
+            .read_entry(archive.unique_entry("secret.txt").unwrap())
+            .is_err(),
         "wrong password must fail"
     );
     let mut archive = ArchiveReader::open(&arc).expect("reopen-no-pw");
-    assert!(archive.read_entry(archive.unique_entry("secret.txt").unwrap()).is_err(), "no password must fail");
+    assert!(
+        archive
+            .read_entry(archive.unique_entry("secret.txt").unwrap())
+            .is_err(),
+        "no password must fail"
+    );
 }
 
 /// Encrypted members split across volumes still decrypt: the per-member salt
@@ -579,10 +671,15 @@ fn create_rar4_encrypted_multivolume() {
 
     let mut archive = ArchiveWriter::create_with(
         &arc,
-        WriterOptions::default().compression(ArchiveVersion::V29).password("volpw").volume_size(4_000),
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .password("volpw")
+            .volume_size(4_000),
     )
     .expect("create");
-    archive.add_path(&src, ewo(0)).expect("add encrypted split member"); // STORE: keeps size predictable
+    archive
+        .add_path(&src, ewo(0))
+        .expect("add encrypted split member"); // STORE: keeps size predictable
     archive.finish().expect("close");
 
     let volumes = discover_volumes(&arc);
@@ -590,9 +687,13 @@ fn create_rar4_encrypted_multivolume() {
         volumes.len() >= 2,
         "expected multiple volumes, got {volumes:?}"
     );
-    let mut archive = ArchiveReader::open_with(&arc, OpenOptions::new().password("volpw")).expect("reopen");
+    let mut archive =
+        ArchiveReader::open_with(&arc, OpenOptions::new().password("volpw")).expect("reopen");
     assert_eq!(
-        archive.read_entry(archive.unique_entry("big.bin").unwrap()).expect("read").as_slice(),
+        archive
+            .read_entry(archive.unique_entry("big.bin").unwrap())
+            .expect("read")
+            .as_slice(),
         &content[..]
     );
 }
@@ -612,7 +713,10 @@ fn create_rar4_header_encrypted_roundtrip() {
 
     let mut archive = ArchiveWriter::create_with(
         &arc,
-        WriterOptions::default().compression(ArchiveVersion::V29).encrypt_headers(true).password("hunter2"),
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .encrypt_headers(true)
+            .password("hunter2"),
     )
     .expect("create");
     archive.add_path(&src, ewo(3)).expect("add");
@@ -642,9 +746,13 @@ fn create_rar4_header_encrypted_roundtrip() {
     );
 
     // Read back with the correct password.
-    let mut archive = ArchiveReader::open_with(&arc, OpenOptions::new().password("hunter2")).expect("reopen");
+    let mut archive =
+        ArchiveReader::open_with(&arc, OpenOptions::new().password("hunter2")).expect("reopen");
     assert_eq!(
-        archive.read_entry(archive.unique_entry("top-secret.txt").unwrap()).expect("read").as_slice(),
+        archive
+            .read_entry(archive.unique_entry("top-secret.txt").unwrap())
+            .expect("read")
+            .as_slice(),
         content
     );
 
@@ -707,14 +815,21 @@ fn create_rar4_exttime_mtime_ns_roundtrip() {
     // Reading back reproduces the sub-second fraction to 100 ns resolution
     // (None when the fraction rounds to a whole second on coarse filesystems).
     let mut archive = ArchiveReader::open(&arc).expect("reopen");
-    let entry = archive.entry(archive.unique_entry("stamp.bin").unwrap()).expect("entry");
+    let entry = archive
+        .entry(archive.unique_entry("stamp.bin").unwrap())
+        .expect("entry");
     let expect = (disk_ns / 100) * 100;
     assert_eq!(
         entry.mtime_ns(),
         (expect > 0).then_some(expect),
         "mtime_ns must round-trip to 100 ns resolution"
     );
-    assert_eq!(archive.read_entry(archive.unique_entry("stamp.bin").unwrap()).unwrap(), b"timestamped payload");
+    assert_eq!(
+        archive
+            .read_entry(archive.unique_entry("stamp.bin").unwrap())
+            .unwrap(),
+        b"timestamped payload"
+    );
 }
 
 /// RAR4 solid (`-s`): one persistent encoder carries the LZ window and Huffman
@@ -738,7 +853,9 @@ fn create_rar4_solid_chain() {
     let solid_arc = dir.path().join("solid.rar");
     let mut archive = ArchiveWriter::create_with(
         &solid_arc,
-        WriterOptions::default().compression(ArchiveVersion::V29).solid_mode(SolidMode::Continuous),
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .solid_mode(SolidMode::Continuous),
     )
     .expect("create");
     archive.add_path(&src, ewo(3)).expect("add solid tree");
@@ -763,7 +880,10 @@ fn create_rar4_solid_chain() {
     let mut archive = ArchiveReader::open(&solid_arc).expect("reopen");
     for i in 0..8u32 {
         assert_eq!(
-            archive.read_entry(archive.unique_entry(&format!("t/f{i}.txt")).unwrap()).unwrap().as_slice(),
+            archive
+                .read_entry(archive.unique_entry(&format!("t/f{i}.txt")).unwrap())
+                .unwrap()
+                .as_slice(),
             &contents[i as usize][..]
         );
     }
@@ -772,7 +892,9 @@ fn create_rar4_solid_chain() {
     let ns_arc = dir.path().join("nonsolid.rar");
     let mut archive = ArchiveWriter::create_with(
         &ns_arc,
-        WriterOptions::default().compression(ArchiveVersion::V29).solid_mode(SolidMode::Disabled),
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .solid_mode(SolidMode::Disabled),
     )
     .expect("create");
     archive.add_path(&src, ewo(3)).expect("add non-solid tree");
@@ -801,7 +923,9 @@ fn create_rar4_solid_extension_reset() {
     let arc = dir.path().join("se.rar");
     let mut archive = ArchiveWriter::create_with(
         &arc,
-        WriterOptions::default().compression(ArchiveVersion::V29).solid_mode(SolidMode::PerExtension),
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .solid_mode(SolidMode::PerExtension),
     )
     .expect("create");
     archive.add_path(&src, ewo(3)).expect("add");
@@ -826,7 +950,9 @@ fn create_rar4_solid_extension_reset() {
     let mut archive = ArchiveReader::open(&arc).expect("reopen");
     for (name, _ext) in [("a.txt", 0), ("b.bin", 1), ("c.txt", 2), ("d.bin", 3)] {
         assert!(
-            archive.read_entry(archive.unique_entry(&format!("se/{name}")).unwrap()).is_ok(),
+            archive
+                .read_entry(archive.unique_entry(&format!("se/{name}")).unwrap())
+                .is_ok(),
             "{name} readable"
         );
     }
@@ -848,7 +974,9 @@ fn rar4_second_solid_run_starts_at_its_own_chain_head() {
     }
     let mut archive = ArchiveWriter::create_with(
         &arc,
-        WriterOptions::default().compression(ArchiveVersion::V29).solid_mode(SolidMode::PerExtension),
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .solid_mode(SolidMode::PerExtension),
     )
     .expect("create");
     for name in ["a1.txt", "a2.txt", "b1.bin", "b2.bin"] {
@@ -904,7 +1032,13 @@ fn create_rar4_recovery_record_repairs_periodic_damage() {
     std::fs::write(&src, &content).unwrap();
     let arc = dir.path().join("periodic_rr.rar");
 
-    let mut archive = ArchiveWriter::create_with(&arc, WriterOptions::default().compression(ArchiveVersion::V29).recovery_percent(10)).expect("create");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .recovery_percent(10),
+    )
+    .expect("create");
     archive.add_path(&src, ewo(0)).expect("add"); // STORE: keeps the sector grid stable
     archive.finish().expect("close");
 
@@ -929,7 +1063,12 @@ fn create_rar4_recovery_record_repairs_periodic_damage() {
 
     // And the restored archive reads back fine.
     let mut archive = ArchiveReader::open(&fixed_path).expect("reopen fixed");
-    assert_eq!(archive.read_entry(archive.unique_entry("periodic.bin").unwrap()).unwrap(), content);
+    assert_eq!(
+        archive
+            .read_entry(archive.unique_entry("periodic.bin").unwrap())
+            .unwrap(),
+        content
+    );
 }
 
 /// Auto delta filter on structured sample data: the RAR3 DELTA bytecode must
@@ -956,7 +1095,11 @@ fn create_rar4_auto_delta_filter_on_samples() {
     std::fs::write(&src, &content).unwrap();
 
     let arc = dir.path().join("auto_delta.rar");
-    let mut archive = ArchiveWriter::create_with(&arc, WriterOptions::default().compression(ArchiveVersion::V29)).expect("create");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default().compression(ArchiveVersion::V29),
+    )
+    .expect("create");
     archive.add_path(&src, ewo(3)).expect("add");
     archive.finish().expect("close");
 
@@ -972,7 +1115,10 @@ fn create_rar4_auto_delta_filter_on_samples() {
 
     let mut archive = ArchiveReader::open(&arc).expect("reopen");
     assert_eq!(
-        archive.read_entry(archive.unique_entry("samples.bin").unwrap()).expect("read").as_slice(),
+        archive
+            .read_entry(archive.unique_entry("samples.bin").unwrap())
+            .expect("read")
+            .as_slice(),
         &content[..]
     );
 }
@@ -996,7 +1142,11 @@ fn create_rar4_auto_audio_filter_on_waveform() {
     std::fs::write(&src, &content).unwrap();
 
     let arc = dir.path().join("auto_audio.rar");
-    let mut archive = ArchiveWriter::create_with(&arc, WriterOptions::default().compression(ArchiveVersion::V29)).expect("create");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default().compression(ArchiveVersion::V29),
+    )
+    .expect("create");
     archive.add_path(&src, ewo(3)).expect("add");
     archive.finish().expect("close");
 
@@ -1008,7 +1158,10 @@ fn create_rar4_auto_audio_filter_on_waveform() {
     );
     let mut archive = ArchiveReader::open(&arc).expect("reopen");
     assert_eq!(
-        archive.read_entry(archive.unique_entry("voice8.bin").unwrap()).expect("read").as_slice(),
+        archive
+            .read_entry(archive.unique_entry("voice8.bin").unwrap())
+            .expect("read")
+            .as_slice(),
         &content[..]
     );
 }
@@ -1038,8 +1191,18 @@ fn create_rar4_solid_ppmd_text_chain() {
 
     let make = |solid: bool, name: &str| -> u64 {
         let arc = dir.path().join(name);
-        let solid_mode = if solid { SolidMode::Continuous } else { SolidMode::Disabled };
-        let mut archive = ArchiveWriter::create_with(&arc, WriterOptions::default().compression(ArchiveVersion::V29).solid_mode(solid_mode)).expect("create");
+        let solid_mode = if solid {
+            SolidMode::Continuous
+        } else {
+            SolidMode::Disabled
+        };
+        let mut archive = ArchiveWriter::create_with(
+            &arc,
+            WriterOptions::default()
+                .compression(ArchiveVersion::V29)
+                .solid_mode(solid_mode),
+        )
+        .expect("create");
         for (src, _) in &sources {
             archive.add_path(src, ewo(5)).expect("add");
         }
@@ -1060,7 +1223,9 @@ fn create_rar4_solid_ppmd_text_chain() {
         .collect();
     assert_eq!(names.len(), 4);
     for (index, (_, content)) in sources.iter().enumerate() {
-        let out = archive.read_entry(archive.unique_entry(&names[index]).unwrap()).unwrap();
+        let out = archive
+            .read_entry(archive.unique_entry(&names[index]).unwrap())
+            .unwrap();
         assert_eq!(
             &out, content,
             "{} solid-PPMd roundtrip mismatch",
@@ -1101,15 +1266,21 @@ fn create_rar4_large_members_stream_on_extract() {
     std::fs::write(&text, &body).unwrap();
 
     let arc = dir.path().join("stream.rar");
-    let mut archive = ArchiveWriter::create_with(&arc, WriterOptions::default().compression(ArchiveVersion::V29)).expect("create");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default().compression(ArchiveVersion::V29),
+    )
+    .expect("create");
     archive.add_path(&store, ewo(0)).expect("store member");
     archive.add_path(&text, ewo(5)).expect("compressed member");
     archive.finish().expect("close");
 
     let out = dir.path().join("out");
     let mut ar = ArchiveReader::open(&arc).expect("reopen");
-    ar.extract_entry(ar.unique_entry("disk.bin").unwrap(), &out).expect("extract store");
-    ar.extract_entry(ar.unique_entry("stream.txt").unwrap(), &out).expect("extract compressed");
+    ar.extract_entry(ar.unique_entry("disk.bin").unwrap(), &out)
+        .expect("extract store");
+    ar.extract_entry(ar.unique_entry("stream.txt").unwrap(), &out)
+        .expect("extract compressed");
     assert_eq!(
         std::fs::read(out.join("disk.bin")).unwrap(),
         std::fs::read(&store).unwrap()
@@ -1154,7 +1325,11 @@ fn rar4_batch_matches_sequential_bytes() {
 
     let mk = |name: &str| -> std::path::PathBuf {
         let arc = dir.path().join(name);
-        let mut archive = ArchiveWriter::create_with(&arc, WriterOptions::default().compression(ArchiveVersion::V29)).expect("create");
+        let mut archive = ArchiveWriter::create_with(
+            &arc,
+            WriterOptions::default().compression(ArchiveVersion::V29),
+        )
+        .expect("create");
         archive.add_path(&bin, ewo(3)).expect("audio member");
         for (p, _) in &paths {
             archive.add_path(p, ewo(5)).expect("text member");
@@ -1167,7 +1342,11 @@ fn rar4_batch_matches_sequential_bytes() {
     // Batch: same members, same order, via add_batch.
     let bat_arc = dir.path().join("batch.rar");
     {
-        let mut archive = ArchiveWriter::create_with(&bat_arc, WriterOptions::default().compression(ArchiveVersion::V29)).expect("create");
+        let mut archive = ArchiveWriter::create_with(
+            &bat_arc,
+            WriterOptions::default().compression(ArchiveVersion::V29),
+        )
+        .expect("create");
         let mut entries: Vec<rar_rs::WriteEntry<'_>> = Vec::new();
         entries.push(rar_rs::WriteEntry::File {
             path: &bin,

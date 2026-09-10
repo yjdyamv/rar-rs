@@ -29,6 +29,7 @@ use crate::write_progress::ProgressTracker;
 #[cfg(unix)]
 use crate::format::rar5::headers::build_owner_extra_record;
 use crate::format::rar5::headers::{file_time_extra_record, redirect_extra_bytes};
+use crate::format::rar5::stream_mut;
 #[cfg(windows)]
 use crate::format::rar5::vint;
 use crate::format::rar5::{
@@ -36,7 +37,6 @@ use crate::format::rar5::{
     ENCR_PBKDF2_ITER_LOG, FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX,
     level_to_method,
 };
-use crate::format::rar5::stream_mut;
 pub(crate) mod engine;
 pub(crate) mod layout;
 #[cfg(windows)]
@@ -249,9 +249,9 @@ impl RarArchive {
                 data, method, dsl, variant, threads, cancel,
             )? {
                 Some(f) => Some(f),
-                None => {
-                    lzss_huff::encode_with_auto_x86_filter(data, method, dsl, variant, threads, cancel)?
-                }
+                None => lzss_huff::encode_with_auto_x86_filter(
+                    data, method, dsl, variant, threads, cancel,
+                )?,
             },
         )
     }
@@ -1125,7 +1125,12 @@ impl RarArchive {
     /// The entry carries no data; `redir_type` is 1 (Unix symlink),
     /// 2 (Windows symlink), 3 (Windows junction), 4 (hardlink) or
     /// 5 (file copy) and `target` is the referenced member name.
-    pub(crate) fn add_redirect(&mut self, name: &str, redir_type: u64, target: &str) -> RarResult<()> {
+    pub(crate) fn add_redirect(
+        &mut self,
+        name: &str,
+        redir_type: u64,
+        target: &str,
+    ) -> RarResult<()> {
         if self.mode != Mode::Write && self.mode != Mode::Append {
             return Err(RarError::Format(
                 "add_redirect requires an archive being written".into(),
@@ -1155,7 +1160,11 @@ impl RarArchive {
     /// Writes the directory header without traversing children. Callers that
     /// enumerate files themselves (e.g. with exclusion filtering) use this to
     /// keep empty directories and the directory structure in the archive.
-    pub(crate) fn add_directory_only(&mut self, path: impl AsRef<Path>, arcname: &str) -> RarResult<()> {
+    pub(crate) fn add_directory_only(
+        &mut self,
+        path: impl AsRef<Path>,
+        arcname: &str,
+    ) -> RarResult<()> {
         self.check_cancel()?;
         let path = path.as_ref();
         self.reset_solid_chain();

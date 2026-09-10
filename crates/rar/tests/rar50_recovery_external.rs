@@ -24,8 +24,14 @@ fn winrar_rar5_recovery_record_parses_and_decodes() {
     // Guard: the fixture really carries an inline recovery record.
     let raw = include_bytes!("fixtures/rar50/winrar5_with_recovery_rr5.rar");
     let text = String::from_utf8_lossy(raw);
-    assert!(text.contains("RR"), "fixture must contain an RR service header");
-    assert!(text.contains("{RB}"), "fixture must contain an {{RB}} recovery chunk");
+    assert!(
+        text.contains("RR"),
+        "fixture must contain an RR service header"
+    );
+    assert!(
+        text.contains("{RB}"),
+        "fixture must contain an {{RB}} recovery chunk"
+    );
 
     // Our reader must decode WinRAR's members correctly.
     let mut reader = ArchiveReader::open(fixture_path()).expect("open WinRAR RAR5 archive");

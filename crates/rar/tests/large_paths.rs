@@ -9,8 +9,8 @@
 //! default suite still catches regressions in them.
 
 use rar_rs::{
-    ArchiveReader, ArchiveWriter, CompressionLevel, DictionarySize, EntryWriteOptions,
-    OpenOptions, WriterOptions,
+    ArchiveReader, ArchiveWriter, CompressionLevel, DictionarySize, EntryWriteOptions, OpenOptions,
+    WriterOptions,
 };
 use std::path::Path;
 
@@ -89,9 +89,12 @@ fn large_sparse_streamed_compression_roundtrips() {
 
     let arc = dir.path().join("big.rar");
     {
-        let mut rar =
-            ArchiveWriter::create(&arc).unwrap();
-        rar.add_path(&src, EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap())).unwrap();
+        let mut rar = ArchiveWriter::create(&arc).unwrap();
+        rar.add_path(
+            &src,
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
     assert!(
@@ -140,7 +143,11 @@ fn large_streamed_encrypted_multivolume_roundtrips() {
                 .volume_size(vol_size),
         )
         .unwrap();
-        rar.add_path(&src, EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0u8).unwrap())).unwrap();
+        rar.add_path(
+            &src,
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0u8).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
     let volumes = rar_rs::discover_volumes(&arc);
@@ -160,7 +167,8 @@ fn large_streamed_encrypted_multivolume_roundtrips() {
     let out = dir.path().join("out");
     std::fs::create_dir_all(&out).unwrap();
     {
-        let mut rar = ArchiveReader::open_with(&volumes[0], OpenOptions::new().password("s3cret")).unwrap();
+        let mut rar =
+            ArchiveReader::open_with(&volumes[0], OpenOptions::new().password("s3cret")).unwrap();
         let id = rar.unique_entry("big.bin").unwrap();
         rar.extract_entry_with_options(
             id,
@@ -205,7 +213,8 @@ fn large_streamed_delta_filter_roundtrips() {
 
     let arc = dir.path().join("solid.rar");
     {
-        let opts = EntryWriteOptions::new().compression_level(CompressionLevel::try_from(1u8).unwrap());
+        let opts =
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(1u8).unwrap());
         let mut rar = ArchiveWriter::create_with(
             &arc,
             WriterOptions::default()
@@ -233,7 +242,8 @@ fn large_streamed_delta_filter_roundtrips() {
     std::fs::create_dir_all(&out).unwrap();
     {
         let mut rar = ArchiveReader::open(&arc).unwrap();
-        rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default()).unwrap();
+        rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default())
+            .unwrap();
     }
     assert_eq!(
         std::fs::read(out.join("a.txt")).unwrap(),
@@ -270,7 +280,8 @@ fn large_streamed_x86_filter_roundtrips() {
 
     let arc = dir.path().join("solid_x86.rar");
     {
-        let opts = EntryWriteOptions::new().compression_level(CompressionLevel::try_from(1u8).unwrap());
+        let opts =
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(1u8).unwrap());
         let mut rar = ArchiveWriter::create_with(
             &arc,
             WriterOptions::default()
@@ -299,7 +310,8 @@ fn large_streamed_x86_filter_roundtrips() {
     std::fs::create_dir_all(&out).unwrap();
     {
         let mut rar = ArchiveReader::open(&arc).unwrap();
-        rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default()).unwrap();
+        rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default())
+            .unwrap();
     }
     assert_eq!(
         std::fs::read(out.join("a.txt")).unwrap(),
@@ -349,7 +361,8 @@ fn large_streamed_delta_x86_combined_roundtrips() {
 
     let arc = dir.path().join("mix.rar");
     {
-        let opts = EntryWriteOptions::new().compression_level(CompressionLevel::try_from(1u8).unwrap());
+        let opts =
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(1u8).unwrap());
         let mut rar = ArchiveWriter::create_with(
             &arc,
             WriterOptions::default()
@@ -375,7 +388,8 @@ fn large_streamed_delta_x86_combined_roundtrips() {
     std::fs::create_dir_all(&out).unwrap();
     {
         let mut rar = ArchiveReader::open(&arc).unwrap();
-        rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default()).unwrap();
+        rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default())
+            .unwrap();
     }
     assert_eq!(sha256(&out.join("mix.bin")), sha256(&src));
     assert_eq!(
@@ -436,11 +450,14 @@ fn long_range_matches_roundtrip_at_scale() {
     {
         let mut rar = ArchiveWriter::create_with(
             &arc,
-            WriterOptions::default()
-                .dictionary_size(DictionarySize::from_rar5_log(8).unwrap()),
+            WriterOptions::default().dictionary_size(DictionarySize::from_rar5_log(8).unwrap()),
         )
         .unwrap();
-        rar.add_path(&src, EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap())).unwrap();
+        rar.add_path(
+            &src,
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
     // The distant copy must compress away: the random first half alone

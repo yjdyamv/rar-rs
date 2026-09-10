@@ -10,7 +10,8 @@ use rar_rs::ArchiveWriter;
 use std::sync::{Arc, Mutex};
 
 fn opts(level: u8) -> rar_rs::EntryWriteOptions {
-    rar_rs::EntryWriteOptions::new().compression_level(rar_rs::CompressionLevel::try_from(level).unwrap())
+    rar_rs::EntryWriteOptions::new()
+        .compression_level(rar_rs::CompressionLevel::try_from(level).unwrap())
 }
 
 #[test]
@@ -33,7 +34,9 @@ fn reads_winrar5_fixture_and_extracts_byte_identical_data() {
     }
 
     for (name, expected_sha) in FIXTURE_FILES {
-        let data = rar.read_entry(rar.unique_entry(name).unwrap()).expect("read entry");
+        let data = rar
+            .read_entry(rar.unique_entry(name).unwrap())
+            .expect("read entry");
         assert_eq!(sha256(&data), *expected_sha, "content mismatch for {name}");
     }
 }
@@ -68,10 +71,22 @@ fn solid_archive_roundtrips_with_interleaved_directories_and_store() {
         rar.finish().unwrap();
     }
     let mut rar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(), payload_a);
-    assert_eq!(rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(), payload_b);
-    assert_eq!(rar.read_entry(rar.unique_entry("c.txt").unwrap()).unwrap(), b"small");
-    assert_eq!(rar.read_entry(rar.unique_entry("d.bin").unwrap()).unwrap(), payload_a);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(),
+        payload_a
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(),
+        payload_b
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("c.txt").unwrap()).unwrap(),
+        b"small"
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("d.bin").unwrap()).unwrap(),
+        payload_a
+    );
 
     // The main archive header must carry ARCHIVE_FLAG_SOLID (0x0004).
     let bytes = std::fs::read(&path).unwrap();
@@ -110,7 +125,11 @@ fn blake2_roundtrip_and_tamper_detection() {
         rar.finish().unwrap();
     }
     let mut rar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("data.bin").unwrap()).unwrap(), payload);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("data.bin").unwrap())
+            .unwrap(),
+        payload
+    );
 
     // Corrupt one payload byte: BLAKE2sp (and CRC) must reject the read.
     let mut bytes = std::fs::read(&path).unwrap();
@@ -119,7 +138,8 @@ fn blake2_roundtrip_and_tamper_detection() {
     std::fs::write(&path, &bytes).unwrap();
     let mut rar = ArchiveReader::open(&path).unwrap();
     assert!(
-        rar.read_entry(rar.unique_entry("data.bin").unwrap()).is_err(),
+        rar.read_entry(rar.unique_entry("data.bin").unwrap())
+            .is_err(),
         "tampered data must fail verification"
     );
 }
@@ -146,8 +166,13 @@ fn encrypted_tamper_detected_via_mac_checksum() {
         rar.add_bytes("data.bin", &payload, opts(3)).unwrap();
         rar.finish().unwrap();
     }
-    let mut rar = ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("secret")).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("data.bin").unwrap()).unwrap(), payload);
+    let mut rar =
+        ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("secret")).unwrap();
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("data.bin").unwrap())
+            .unwrap(),
+        payload
+    );
 
     // Flip a ciphertext byte: decryption produces garbage which must fail
     // the MAC'd CRC verification.
@@ -158,9 +183,11 @@ fn encrypted_tamper_detected_via_mac_checksum() {
         *byte ^= (i as u8).wrapping_add(0x5A);
     }
     std::fs::write(&path, &bytes).unwrap();
-    let mut rar = ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("secret")).unwrap();
+    let mut rar =
+        ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("secret")).unwrap();
     assert!(
-        rar.read_entry(rar.unique_entry("data.bin").unwrap()).is_err(),
+        rar.read_entry(rar.unique_entry("data.bin").unwrap())
+            .is_err(),
         "corrupted encrypted data must fail"
     );
 }
@@ -175,13 +202,14 @@ fn extract_rejects_unsafe_entry_names() {
             .path()
             .join(format!("evil-{}.rar", bad.replace(['/', ':'], "_")));
         {
-            let mut rar =
-                rar_rs::ArchiveWriter::create(&path).unwrap();
+            let mut rar = rar_rs::ArchiveWriter::create(&path).unwrap();
             rar.add_bytes(bad, b"nope", opts(0)).unwrap();
             rar.finish().unwrap();
         }
         let mut rar = ArchiveReader::open(&path).unwrap();
-        let err = rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default()).unwrap_err();
+        let err = rar
+            .extract_all_with_options(&out, rar_rs::ExtractOptions::default())
+            .unwrap_err();
         assert!(err.to_string().contains("security"), "{bad}: {err}");
     }
     assert!(!out.join("evil.txt").exists());
@@ -193,8 +221,7 @@ fn extract_with_safe_paths_false_preserves_legacy_behavior() {
     let dir = make_temp_dir();
     let path = dir.path().join("flat.rar");
     {
-        let mut rar =
-            rar_rs::ArchiveWriter::create(&path).unwrap();
+        let mut rar = rar_rs::ArchiveWriter::create(&path).unwrap();
         rar.add_bytes("nested/file.txt", b"hello", opts(0)).unwrap();
         rar.finish().unwrap();
     }
@@ -213,8 +240,7 @@ fn flat_extraction_flattens_names_and_never_escapes() {
     let dir = make_temp_dir();
     let path = dir.path().join("flat.rar");
     {
-        let mut rar =
-            rar_rs::ArchiveWriter::create(&path).unwrap();
+        let mut rar = rar_rs::ArchiveWriter::create(&path).unwrap();
         rar.add_bytes("dir/sub/file.txt", b"flat", opts(0)).unwrap();
         rar.add_bytes("top.txt", b"top", opts(0)).unwrap();
         rar.finish().unwrap();
@@ -241,8 +267,7 @@ fn flat_extraction_flattens_names_and_never_escapes() {
     // safe-path policy applies before the basename is used.
     let evil = dir.path().join("evil.rar");
     {
-        let mut rar =
-            rar_rs::ArchiveWriter::create(&evil).unwrap();
+        let mut rar = rar_rs::ArchiveWriter::create(&evil).unwrap();
         rar.add_bytes("good.txt", b"ok", opts(0)).unwrap();
         rar.add_bytes("..", b"escape", opts(0)).unwrap();
         rar.finish().unwrap();
@@ -275,8 +300,7 @@ fn extract_limits_reject_oversized_members() {
     let path = dir.path().join("lim.rar");
     let payload = vec![7u8; 1_000_000];
     {
-        let mut rar =
-            rar_rs::ArchiveWriter::create(&path).unwrap();
+        let mut rar = rar_rs::ArchiveWriter::create(&path).unwrap();
         rar.add_bytes("f.bin", &payload, opts(0)).unwrap();
         rar.finish().unwrap();
     }
@@ -358,7 +382,8 @@ fn solid_multivolume_roundtrips_with_exact_volumes() {
     let out = dir.path().join("out");
     std::fs::create_dir_all(&out).unwrap();
     let mut rar = ArchiveReader::open(&volumes[0]).unwrap();
-    rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default()).unwrap();
+    rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default())
+        .unwrap();
     assert_eq!(std::fs::read(out.join("a.bin")).unwrap(), data_a);
     assert_eq!(std::fs::read(out.join("b.bin")).unwrap(), data_b);
 }
@@ -384,9 +409,16 @@ fn combined_solid_quickopen_blake2_recovery_password_roundtrip() {
         rar.add_bytes("b.bin", &b, opts(3)).unwrap();
         rar.finish().unwrap();
     }
-    let mut rar = ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("pw")).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(), a);
-    assert_eq!(rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(), b);
+    let mut rar =
+        ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("pw")).unwrap();
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(),
+        a
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(),
+        b
+    );
 
     let bytes = std::fs::read(&path).unwrap();
     assert!(service_offset(&bytes, "QO") > 0);
@@ -415,13 +447,14 @@ fn large_store_file_streams_roundtrip() {
 
     let path = dir.path().join("big.rar");
     {
-        let mut rar =
-            rar_rs::ArchiveWriter::create(&path).unwrap();
+        let mut rar = rar_rs::ArchiveWriter::create(&path).unwrap();
         rar.add_path(&src, opts(5)).unwrap(); // incompressible -> streaming STORE
         rar.finish().unwrap();
     }
     let mut rar = ArchiveReader::open(&path).unwrap();
-    let data = rar.read_entry(rar.unique_entry("big.bin").unwrap()).unwrap();
+    let data = rar
+        .read_entry(rar.unique_entry("big.bin").unwrap())
+        .unwrap();
     assert_eq!(data.len(), 32 * 1024 * 1024);
     let src_data = std::fs::read(&src).unwrap();
     assert_eq!(data, src_data);
@@ -429,7 +462,9 @@ fn large_store_file_streams_roundtrip() {
     // Streamed extraction must match too.
     let out = dir.path().join("out");
     let mut rar = ArchiveReader::open(&path).unwrap();
-    let extracted = rar.extract_entry(rar.unique_entry("big.bin").unwrap(), &out).unwrap();
+    let extracted = rar
+        .extract_entry(rar.unique_entry("big.bin").unwrap(), &out)
+        .unwrap();
     assert_eq!(std::fs::read(extracted).unwrap(), src_data);
 }
 
@@ -440,8 +475,7 @@ fn create_read_roundtrip_matches_input() {
     let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
 
     {
-        let mut rar = ArchiveWriter::create(&path)
-            .expect("create");
+        let mut rar = ArchiveWriter::create(&path).expect("create");
         rar.add_bytes("data.bin", &payload, opts(5)).expect("add");
         rar.add_bytes("note.txt", b"hello", opts(5)).expect("add");
         rar.finish().expect("close");
@@ -449,9 +483,15 @@ fn create_read_roundtrip_matches_input() {
 
     let mut rar = ArchiveReader::open(&path).expect("open");
     assert_eq!(rar.entries().count(), 2);
-    let out = rar.read_entry(rar.unique_entry("data.bin").unwrap()).expect("read");
+    let out = rar
+        .read_entry(rar.unique_entry("data.bin").unwrap())
+        .expect("read");
     assert_eq!(out, payload);
-    assert_eq!(rar.read_entry(rar.unique_entry("note.txt").unwrap()).expect("read"), b"hello");
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("note.txt").unwrap())
+            .expect("read"),
+        b"hello"
+    );
 }
 
 #[test]
@@ -461,11 +501,9 @@ fn encrypted_archive_roundtrip() {
     let payload = b"classified content".repeat(1000);
 
     {
-        let mut rar = ArchiveWriter::create_with(
-            &path,
-            rar_rs::WriterOptions::default().password("hunter2"),
-        )
-        .expect("create encrypted");
+        let mut rar =
+            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default().password("hunter2"))
+                .expect("create encrypted");
         rar.add_bytes("secret.txt", &payload, opts(3)).expect("add");
         rar.finish().expect("close");
     }
@@ -473,13 +511,19 @@ fn encrypted_archive_roundtrip() {
     // Without the password the entry must refuse to decrypt.
     let mut rar = ArchiveReader::open(&path).expect("open");
     assert!(
-        rar.read_entry(rar.unique_entry("secret.txt").unwrap()).is_err(),
+        rar.read_entry(rar.unique_entry("secret.txt").unwrap())
+            .is_err(),
         "reading an encrypted entry without a password must fail"
     );
 
     // With the password it must round-trip.
-    let mut rar = ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("hunter2")).expect("open encrypted");
-    assert_eq!(rar.read_entry(rar.unique_entry("secret.txt").unwrap()).expect("read"), payload);
+    let mut rar = ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("hunter2"))
+        .expect("open encrypted");
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("secret.txt").unwrap())
+            .expect("read"),
+        payload
+    );
 }
 
 #[test]
@@ -519,7 +563,9 @@ fn multivolume_creation_roundtrip() {
 
     let mut rar = ArchiveReader::open(&base).expect("open first volume");
     {
-        let entry = rar.entry(rar.unique_entry("big.bin").unwrap()).expect("entry");
+        let entry = rar
+            .entry(rar.unique_entry("big.bin").unwrap())
+            .expect("entry");
         let chunks = entry.chunks();
         assert!(chunks.len() > 1);
         assert!(
@@ -538,7 +584,11 @@ fn multivolume_creation_roundtrip() {
             entry.compressed_size()
         );
     }
-    assert_eq!(rar.read_entry(rar.unique_entry("big.bin").unwrap()).expect("read"), payload);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("big.bin").unwrap())
+            .expect("read"),
+        payload
+    );
 }
 
 #[test]
@@ -550,8 +600,7 @@ fn add_as_uses_custom_archive_name() {
 
     let path = dir.path().join("named.rar");
     {
-        let mut rar = ArchiveWriter::create(&path)
-            .expect("create");
+        let mut rar = ArchiveWriter::create(&path).expect("create");
         rar.add_path_as(src.join("a.txt"), "docs/renamed.txt", opts(3))
             .expect("add");
         rar.add_path_as(src, "root", opts(3)).expect("add");
@@ -572,7 +621,11 @@ fn add_as_uses_custom_archive_name() {
         names.iter().any(|n| n == "root/sub/"),
         "missing nested dir entry: {names:?}"
     );
-    assert_eq!(rar.read_entry(rar.unique_entry("docs/renamed.txt").unwrap()).expect("read"), b"aaa".to_vec());
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("docs/renamed.txt").unwrap())
+            .expect("read"),
+        b"aaa".to_vec()
+    );
 }
 
 #[test]
@@ -585,8 +638,7 @@ fn add_directory_only_writes_dir_entries_without_children() {
 
     let path = dir.path().join("dironly.rar");
     {
-        let mut rar = ArchiveWriter::create(&path)
-            .expect("create");
+        let mut rar = ArchiveWriter::create(&path).expect("create");
         // Directory entry only — the child must NOT be pulled in.
         rar.add_directory(&src, "tree").expect("add dir");
         rar.add_path_as(src.join("top.txt"), "tree/top.txt", opts(3))
@@ -605,13 +657,16 @@ fn add_directory_only_writes_dir_entries_without_children() {
         !names.iter().any(|n| n.contains("empty")),
         "add_directory_only must not recurse: {names:?}"
     );
-    assert_eq!(rar.read_entry(rar.unique_entry("tree/top.txt").unwrap()).expect("read"), b"y".to_vec());
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("tree/top.txt").unwrap())
+            .expect("read"),
+        b"y".to_vec()
+    );
 
     // An explicitly added empty directory entry IS preserved.
     let path2 = dir.path().join("dironly2.rar");
     {
-        let mut rar = ArchiveWriter::create(&path2)
-            .expect("create");
+        let mut rar = ArchiveWriter::create(&path2).expect("create");
         rar.add_directory(&src, "tree").expect("add dir");
         rar.add_directory(src.join("empty"), "tree/empty")
             .expect("add empty dir");
@@ -633,8 +688,7 @@ fn progress_callback_reports_monotonic_progress() {
 
     let events: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
     {
-        let mut rar = ArchiveWriter::create(&path)
-            .expect("create");
+        let mut rar = ArchiveWriter::create(&path).expect("create");
         let sink = events.clone();
         let cb: Box<dyn FnMut(u64, u64) + Send> = Box::new(move |done, total| {
             sink.lock().expect("lock").push((done, total));
@@ -685,8 +739,7 @@ fn progress_callback_reports_exact_deltas_across_batch_files() {
 
     let events: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
     {
-        let mut rar = ArchiveWriter::create(&path)
-            .expect("create");
+        let mut rar = ArchiveWriter::create(&path).expect("create");
         let sink = events.clone();
         let cb: Box<dyn FnMut(u64, u64) + Send> = Box::new(move |done, total| {
             sink.lock().expect("lock").push((done, total));
@@ -748,14 +801,18 @@ fn lz_tail_match_fixture_roundtrips_without_panic() {
     let path = dir.path().join("tail.rar");
 
     {
-        let mut rar = ArchiveWriter::create(&path)
-            .expect("create");
+        let mut rar = ArchiveWriter::create(&path).expect("create");
         rar.add_bytes("tail.json", data, opts(3)).expect("add");
         rar.finish().expect("close");
     }
 
     let mut rar = ArchiveReader::open(&path).expect("open");
-    assert_eq!(rar.read_entry(rar.unique_entry("tail.json").unwrap()).expect("read").as_slice(), &data[..]);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("tail.json").unwrap())
+            .expect("read")
+            .as_slice(),
+        &data[..]
+    );
 }
 
 #[test]
@@ -771,14 +828,17 @@ fn large_file_exceeding_1MiB_window_roundtrips() {
     let path = dir.path().join("large.rar");
 
     {
-        let mut rar = ArchiveWriter::create(&path)
-            .expect("create");
+        let mut rar = ArchiveWriter::create(&path).expect("create");
         rar.add_bytes("big.bin", &payload, opts(5)).expect("add");
         rar.finish().expect("close");
     }
 
     let mut rar = ArchiveReader::open(&path).expect("open");
-    assert_eq!(rar.read_entry(rar.unique_entry("big.bin").unwrap()).expect("read"), payload);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("big.bin").unwrap())
+            .expect("read"),
+        payload
+    );
 }
 
 #[test]
@@ -791,18 +851,23 @@ fn multi_chunk_compressed_file_roundtrips() {
     let dir = make_temp_dir();
     let path = dir.path().join("multi-chunk.rar");
     {
-        let mut rar =
-            ArchiveWriter::create(&path).unwrap();
+        let mut rar = ArchiveWriter::create(&path).unwrap();
         rar.add_bytes("big.bin", &payload, opts(5)).unwrap();
         rar.finish().unwrap();
     }
     let mut rar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("big.bin").unwrap()).unwrap(), payload);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("big.bin").unwrap())
+            .unwrap(),
+        payload
+    );
 
     // Streaming extraction must produce the same bytes.
     let out = dir.path().join("out");
     let mut rar = ArchiveReader::open(&path).unwrap();
-    let extracted = rar.extract_entry(rar.unique_entry("big.bin").unwrap(), &out).unwrap();
+    let extracted = rar
+        .extract_entry(rar.unique_entry("big.bin").unwrap(), &out)
+        .unwrap();
     assert_eq!(std::fs::read(extracted).unwrap(), payload);
 }
 
@@ -873,14 +938,17 @@ fn incompressible_large_file_roundtrips_via_store() {
     let dir = make_temp_dir();
     let path = dir.path().join("rand.rar");
     {
-        let mut rar = ArchiveWriter::create(&path)
-            .expect("create");
+        let mut rar = ArchiveWriter::create(&path).expect("create");
         rar.add_bytes("rand.bin", &payload, opts(3)).expect("add");
         rar.finish().expect("close");
     }
 
     let mut rar = ArchiveReader::open(&path).expect("open");
-    assert_eq!(rar.read_entry(rar.unique_entry("rand.bin").unwrap()).expect("read"), payload);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("rand.bin").unwrap())
+            .expect("read"),
+        payload
+    );
 }
 
 /// Parallel extraction (feature `parallel`) must produce byte-identical
@@ -892,8 +960,7 @@ fn parallel_extraction_matches_sequential() {
     let dir = make_temp_dir();
     let path = dir.path().join("par.rar");
     {
-        let mut rar = ArchiveWriter::create(&path)
-            .expect("create");
+        let mut rar = ArchiveWriter::create(&path).expect("create");
         for i in 0..4u8 {
             let mut data = Vec::with_capacity(20 * 1024 * 1024);
             let base = b"parallel member payload 0123456789abcdefghijklmnopqrstuvwxyz\n";
@@ -906,7 +973,8 @@ fn parallel_extraction_matches_sequential() {
                     *b = b.wrapping_add(i);
                 }
             }
-            rar.add_bytes(&format!("m{i}.bin"), &data, opts(3)).expect("add");
+            rar.add_bytes(&format!("m{i}.bin"), &data, opts(3))
+                .expect("add");
         }
         rar.finish().expect("close");
     }
@@ -915,11 +983,13 @@ fn parallel_extraction_matches_sequential() {
     let par_dir = dir.path().join("par");
     {
         let mut rar = ArchiveReader::open(&path).expect("open");
-        rar.extract_all_with_options(&seq_dir, rar_rs::ExtractOptions::default()).expect("sequential extract");
+        rar.extract_all_with_options(&seq_dir, rar_rs::ExtractOptions::default())
+            .expect("sequential extract");
     }
     {
         let mut rar = ArchiveReader::open(&path).expect("open");
-        rar.extract_all_with_options(&par_dir, rar_rs::ExtractOptions::default()).expect("parallel extract");
+        rar.extract_all_with_options(&par_dir, rar_rs::ExtractOptions::default())
+            .expect("parallel extract");
     }
     for i in 0..4u8 {
         let a = std::fs::read(seq_dir.join(format!("m{i}.bin"))).unwrap();
@@ -974,8 +1044,7 @@ fn batch_archive_matches_sequential_bytes() {
 
     let seq_path = dir.path().join("seq.rar");
     {
-        let mut ar =
-            ArchiveWriter::create(&seq_path).unwrap();
+        let mut ar = ArchiveWriter::create(&seq_path).unwrap();
         ar.add_directory(&src_dir, "folder").unwrap();
         ar.add_path(&small, opts(3)).unwrap();
         ar.add_path_as(&big, "renamed.bin", opts(3)).unwrap();
@@ -984,8 +1053,7 @@ fn batch_archive_matches_sequential_bytes() {
     }
     let batch_path = dir.path().join("batch.rar");
     {
-        let mut ar =
-            ArchiveWriter::create(&batch_path).unwrap();
+        let mut ar = ArchiveWriter::create(&batch_path).unwrap();
         ar.add_batch(&entries).unwrap();
         ar.finish().unwrap();
     }
@@ -997,9 +1065,20 @@ fn batch_archive_matches_sequential_bytes() {
     );
 
     let mut ar = ArchiveReader::open(&batch_path).unwrap();
-    assert_eq!(ar.read_entry(ar.unique_entry("small.bin").unwrap()).unwrap(), small_payload);
-    assert_eq!(ar.read_entry(ar.unique_entry("renamed.bin").unwrap()).unwrap(), big_payload);
-    assert_eq!(ar.read_entry(ar.unique_entry("copy.bin").unwrap()).unwrap(), small_payload);
+    assert_eq!(
+        ar.read_entry(ar.unique_entry("small.bin").unwrap())
+            .unwrap(),
+        small_payload
+    );
+    assert_eq!(
+        ar.read_entry(ar.unique_entry("renamed.bin").unwrap())
+            .unwrap(),
+        big_payload
+    );
+    assert_eq!(
+        ar.read_entry(ar.unique_entry("copy.bin").unwrap()).unwrap(),
+        small_payload
+    );
 }
 
 #[cfg(feature = "parallel")]
@@ -1022,15 +1101,14 @@ fn batch_encrypted_archive_roundtrips() {
         },
     ];
     {
-        let mut ar = ArchiveWriter::create_with(
-            &path,
-            rar_rs::WriterOptions::default().password("pw"),
-        )
-        .unwrap();
+        let mut ar =
+            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default().password("pw"))
+                .unwrap();
         ar.add_batch(&entries).unwrap();
         ar.finish().unwrap();
     }
-    let mut ar = ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("pw")).unwrap();
+    let mut ar =
+        ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("pw")).unwrap();
     assert_eq!(ar.read_entry(ar.unique_entry("a.bin").unwrap()).unwrap(), a);
     assert_eq!(ar.read_entry(ar.unique_entry("b.bin").unwrap()).unwrap(), b);
 }
@@ -1068,16 +1146,31 @@ fn batch_large_member_uses_sequential_path() {
         },
     ];
     {
-        let mut ar =
-            ArchiveWriter::create(&path).unwrap();
+        let mut ar = ArchiveWriter::create(&path).unwrap();
         ar.add_batch(&entries).unwrap();
         ar.finish().unwrap();
     }
     let mut ar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(ar.entries().map(|e| e.name().to_string()).collect::<Vec<String>>(), ["before.bin", "huge.bin", "after.bin"]);
-    assert_eq!(ar.read_entry(ar.unique_entry("before.bin").unwrap()).unwrap(), small);
-    assert_eq!(ar.read_entry(ar.unique_entry("huge.bin").unwrap()).unwrap(), big_payload);
-    assert_eq!(ar.read_entry(ar.unique_entry("after.bin").unwrap()).unwrap(), small);
+    assert_eq!(
+        ar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<String>>(),
+        ["before.bin", "huge.bin", "after.bin"]
+    );
+    assert_eq!(
+        ar.read_entry(ar.unique_entry("before.bin").unwrap())
+            .unwrap(),
+        small
+    );
+    assert_eq!(
+        ar.read_entry(ar.unique_entry("huge.bin").unwrap()).unwrap(),
+        big_payload
+    );
+    assert_eq!(
+        ar.read_entry(ar.unique_entry("after.bin").unwrap())
+            .unwrap(),
+        small
+    );
 }
 
 #[cfg(feature = "parallel")]
@@ -1092,15 +1185,13 @@ fn batch_large_file_matches_sequential_bytes() {
 
     let seq_path = dir.path().join("seq.rar");
     {
-        let mut ar =
-            ArchiveWriter::create(&seq_path).unwrap();
+        let mut ar = ArchiveWriter::create(&seq_path).unwrap();
         ar.add_path(&big, opts(3)).unwrap();
         ar.finish().unwrap();
     }
     let batch_path = dir.path().join("batch.rar");
     {
-        let mut ar =
-            ArchiveWriter::create(&batch_path).unwrap();
+        let mut ar = ArchiveWriter::create(&batch_path).unwrap();
         ar.add_batch(&[rar_rs::WriteEntry::File {
             path: &big,
             name: None,
@@ -1117,7 +1208,10 @@ fn batch_large_file_matches_sequential_bytes() {
     );
 
     let mut ar = ArchiveReader::open(&batch_path).unwrap();
-    assert_eq!(ar.read_entry(ar.unique_entry("huge.bin").unwrap()).unwrap(), big_payload);
+    assert_eq!(
+        ar.read_entry(ar.unique_entry("huge.bin").unwrap()).unwrap(),
+        big_payload
+    );
 }
 
 #[cfg(feature = "parallel")]
@@ -1182,15 +1276,15 @@ fn streaming_extract_roundtrips_large_filtered_member() {
     let path = dir.path().join("x86-large.rar");
     let data = x86_like(8 * 1024 * 1024);
     {
-        let mut ar =
-            ArchiveWriter::create(&path).unwrap();
+        let mut ar = ArchiveWriter::create(&path).unwrap();
         ar.add_bytes("x86.bin", &data, opts(3)).unwrap();
         ar.finish().unwrap();
     }
     let out = dir.path().join("out");
     {
         let mut ar = ArchiveReader::open(&path).unwrap();
-        ar.extract_all_with_options(&out, rar_rs::ExtractOptions::default()).unwrap();
+        ar.extract_all_with_options(&out, rar_rs::ExtractOptions::default())
+            .unwrap();
     }
     assert_eq!(std::fs::read(out.join("x86.bin")).unwrap(), data);
 }
@@ -1233,14 +1327,18 @@ fn create_options_threads_produces_valid_archive() {
     {
         let mut ar = ArchiveWriter::create_with(
             &path,
-            rar_rs::WriterOptions::default().thread_count(rar_rs::ThreadCount::try_from(4).unwrap()),
+            rar_rs::WriterOptions::default()
+                .thread_count(rar_rs::ThreadCount::try_from(4).unwrap()),
         )
         .unwrap();
         ar.add_bytes("m.bin", &payload, opts(3)).unwrap();
         ar.finish().unwrap();
     }
     let mut ar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(ar.read_entry(ar.unique_entry("m.bin").unwrap()).unwrap(), payload);
+    assert_eq!(
+        ar.read_entry(ar.unique_entry("m.bin").unwrap()).unwrap(),
+        payload
+    );
 }
 
 /// Concurrent creates with different thread counts must not interfere: each
@@ -1270,14 +1368,18 @@ fn concurrent_creates_with_different_threads_are_isolated() {
                 {
                     let mut ar = ArchiveWriter::create_with(
                         &path,
-                        rar_rs::WriterOptions::default().thread_count(rar_rs::ThreadCount::try_from(threads).unwrap()),
+                        rar_rs::WriterOptions::default()
+                            .thread_count(rar_rs::ThreadCount::try_from(threads).unwrap()),
                     )
                     .unwrap();
                     ar.add_bytes("m.bin", &payload, opts(3)).unwrap();
                     ar.finish().unwrap();
                 }
                 let mut ar = ArchiveReader::open(&path).unwrap();
-                (threads, ar.read_entry(ar.unique_entry("m.bin").unwrap()).unwrap())
+                (
+                    threads,
+                    ar.read_entry(ar.unique_entry("m.bin").unwrap()).unwrap(),
+                )
             })
         })
         .collect();
@@ -1304,8 +1406,7 @@ fn read_to_writer_matches_read_and_streams() {
     let path = dir.path().join("rtw.rar");
     let payload: Vec<u8> = (0..500_000u32).map(|i| (i % 251) as u8).collect();
     {
-        let mut ar =
-            ArchiveWriter::create(&path).unwrap();
+        let mut ar = ArchiveWriter::create(&path).unwrap();
         ar.add_bytes("m.bin", &payload, opts(3)).unwrap();
         ar.finish().unwrap();
     }
@@ -1350,8 +1451,7 @@ fn test_reports_member_integrity() {
     let a: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
     let b: Vec<u8> = (0..70_000u32).map(|i| (i % 253) as u8).collect();
     {
-        let mut ar =
-            ArchiveWriter::create(&path).unwrap();
+        let mut ar = ArchiveWriter::create(&path).unwrap();
         ar.add_bytes("a.bin", &a, opts(3)).unwrap();
         ar.add_bytes("b.bin", &b, opts(0)).unwrap();
         ar.finish().unwrap();

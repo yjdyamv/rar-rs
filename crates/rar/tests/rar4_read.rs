@@ -205,9 +205,7 @@ fn rar4_rar300_solid_archives() {
 #[test]
 fn rar4_encrypted_members_need_password() {
     let mut archive = ArchiveReader::open(format!("{W591}c_pw.rar")).expect("open");
-    match archive
-        .read_entry(archive.unique_entry("repeat.txt").unwrap())
-    {
+    match archive.read_entry(archive.unique_entry("repeat.txt").unwrap()) {
         Err(RarError::Encrypted(msg)) => assert!(msg.contains("no password")),
         other => panic!("expected Encrypted without password, got {other:?}"),
     }
@@ -239,9 +237,11 @@ fn rar4_wrong_password_fails() {
         rar_rs::OpenOptions::new().password("not-the-password"),
     )
     .expect("open");
-    assert!(archive
-        .read_entry(archive.unique_entry("repeat.txt").unwrap())
-        .is_err());
+    assert!(
+        archive
+            .read_entry(archive.unique_entry("repeat.txt").unwrap())
+            .is_err()
+    );
 }
 
 // ── Standard VM filters (RAR 3.0 fixtures from the rars corpus) ───────────
@@ -374,8 +374,7 @@ fn rar4_multivolume_sets_decode() {
         if let Some(p) = password {
             options = options.password(p);
         }
-        let mut archive =
-            ArchiveReader::open_with(format!("{MVOL}{file}"), options).expect("open");
+        let mut archive = ArchiveReader::open_with(format!("{MVOL}{file}"), options).expect("open");
         let snaps = snapshots(&archive);
         assert!(!snaps.is_empty(), "{file}");
         for (name, size, crc) in snaps {
@@ -442,10 +441,9 @@ fn rar4_rar154_fixtures_decode() {
 fn rar4_rar154_encrypted_members_decode_with_password() {
     // RAR 1.5 member data encrypted with the legacy RAR15 stream cipher;
     // the decrypted README matches the unencrypted fixture byte for byte.
-    let mut archive = ArchiveReader::open(format!("{RAR154}readme_154_password.rar")).expect("open");
-    match archive
-        .read_entry(archive.unique_entry("README.md").unwrap())
-    {
+    let mut archive =
+        ArchiveReader::open(format!("{RAR154}readme_154_password.rar")).expect("open");
+    match archive.read_entry(archive.unique_entry("README.md").unwrap()) {
         Err(RarError::Encrypted(_)) => {}
         other => panic!("expected Encrypted without password, got {other:?}"),
     }
@@ -476,9 +474,11 @@ fn rar4_rar154_wrong_password_fails() {
         rar_rs::OpenOptions::new().password("wrong-password"),
     )
     .expect("open");
-    assert!(archive
-        .read_entry(archive.unique_entry("README.md").unwrap())
-        .is_err());
+    assert!(
+        archive
+            .read_entry(archive.unique_entry("README.md").unwrap())
+            .is_err()
+    );
 }
 
 // ── RAR 2.x (unp_ver 20/26, from the rars fixture corpus) ─────────────────
@@ -512,9 +512,7 @@ fn rar4_rar202_encrypted_members_decode_with_password() {
     // RAR 2.0 member data encrypted with the legacy RAR20 block cipher;
     // contents pinned from the rars fixture corpus.
     let mut archive = ArchiveReader::open(format!("{RAR2}comment_psw.rar")).expect("open");
-    match archive
-        .read_entry(archive.unique_entry("FILE1.TXT").unwrap())
-    {
+    match archive.read_entry(archive.unique_entry("FILE1.TXT").unwrap()) {
         Err(RarError::Encrypted(_)) => {}
         other => panic!("expected Encrypted without password, got {other:?}"),
     }
@@ -544,9 +542,11 @@ fn rar4_rar202_wrong_password_fails() {
         rar_rs::OpenOptions::new().password("wrong-password"),
     )
     .expect("open");
-    assert!(archive
-        .read_entry(archive.unique_entry("FILE1.TXT").unwrap())
-        .is_err());
+    assert!(
+        archive
+            .read_entry(archive.unique_entry("FILE1.TXT").unwrap())
+            .is_err()
+    );
 }
 
 // ── PPMd (RAR 3.0 m5 members from the rars fixture corpus) ────────────────
@@ -554,8 +554,7 @@ fn rar4_rar202_wrong_password_fails() {
 #[test]
 fn rar4_ppmd_members_decode() {
     // A 127 KiB lorem member compressed with PPMd by genuine RAR 3.0.
-    let mut archive =
-        ArchiveReader::open(format!("{RAR300}ppmd_lorem_rar300.rar")).expect("open");
+    let mut archive = ArchiveReader::open(format!("{RAR300}ppmd_lorem_rar300.rar")).expect("open");
     let (name, size, crc) = snapshots(&archive).into_iter().next().unwrap();
     assert_eq!(name, "lorem_127k.txt");
     assert_eq!(size, 130_048);

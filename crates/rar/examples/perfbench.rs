@@ -294,7 +294,8 @@ fn dict_log_for(size: usize) -> u8 {
 fn time_codec(data: &[u8], level: u8, dict_override: Option<u8>) -> (f64, usize) {
     let log = dict_override.unwrap_or_else(|| dict_log_for(data.len()));
     let t = Instant::now();
-    let packed = rar_rs::encode(data, rar_rs::EncodeOptions::new(level, log)).expect("codec encode");
+    let packed =
+        rar_rs::encode(data, rar_rs::EncodeOptions::new(level, log)).expect("codec encode");
     (t.elapsed().as_secs_f64() * 1000.0, packed.len())
 }
 

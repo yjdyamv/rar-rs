@@ -208,8 +208,6 @@ impl CopyPipeline {
 impl RarArchive {
     // ── Public API: deletion ───────────────────────────────────────────────
 
-    
-
     /// Rewrite a multi-volume archive, omitting deleted members.
     ///
     /// Kept members keep their exact compressed payloads but are re-split
@@ -554,8 +552,6 @@ impl RarArchive {
         Ok(())
     }
 
-    
-
     /// Apply a combined structural edit — deletes, renames and optional
     /// comment/recovery-record changes — in one atomic rewrite (a staged
     /// sibling file for single-volume archives, a re-split staged volume
@@ -821,8 +817,6 @@ impl RarArchive {
         }
         Ok(None)
     }
-
-    
 
     /// Parse the main archive header and report whether the archive is
     /// locked. Runs before any destructive step of [`Self::delete`] so the

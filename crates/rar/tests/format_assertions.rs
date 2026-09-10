@@ -18,10 +18,18 @@ fn quick_open_record_written_with_correct_relative_locator() {
             rar_rs::WriterOptions::default().quick_open(true),
         )
         .unwrap();
-        rar.add_bytes("f1.bin", &payload, EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap()))
-            .unwrap();
-        rar.add_bytes("f2.bin", &vec![7u8; 4096], EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0u8).unwrap()))
-            .unwrap();
+        rar.add_bytes(
+            "f1.bin",
+            &payload,
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap()),
+        )
+        .unwrap();
+        rar.add_bytes(
+            "f2.bin",
+            &vec![7u8; 4096],
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0u8).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
 
@@ -52,8 +60,12 @@ fn recovery_locator_offset_is_relative_to_archive_start() {
             rar_rs::WriterOptions::default().recovery_percent(10),
         )
         .unwrap();
-        rar.add_bytes("a.bin", &b"recovery test payload ".repeat(1000), EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap()))
-            .unwrap();
+        rar.add_bytes(
+            "a.bin",
+            &b"recovery test payload ".repeat(1000),
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
     let bytes = std::fs::read(&path).unwrap();
@@ -89,9 +101,12 @@ fn nanosecond_mtime_roundtrip() {
 
     let path = dir.path().join("ns.rar");
     {
-        let mut rar =
-            rar_rs::ArchiveWriter::create(&path).unwrap();
-        rar.add_path(&src, EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap())).unwrap();
+        let mut rar = rar_rs::ArchiveWriter::create(&path).unwrap();
+        rar.add_path(
+            &src,
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
     // The writer emits the FILE_TIME extra record (byte-identical to the

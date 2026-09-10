@@ -69,8 +69,8 @@ impl<'a> EncodeOptions<'a> {
             variant: ArchiveVersion::default(),
             progress: None,
             skip_incompressible_probe: false,
-            }
-            }
+        }
+    }
 }
 
 impl Default for EncodeOptions<'_> {

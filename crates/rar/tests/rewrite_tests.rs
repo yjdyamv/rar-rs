@@ -19,13 +19,11 @@ fn delete_kept_members_preserve_exact_bytes() {
         ("e.bin".into(), vec![0x3Cu8; 50_000]), // STORE (level 0)
     ];
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         for (name, data) in &files {
             let level = if name.ends_with(".bin") { 0 } else { 3 };
-            let opts = rar_rs::EntryWriteOptions::new().compression_level(
-                rar_rs::CompressionLevel::try_from(level).unwrap(),
-            );
+            let opts = rar_rs::EntryWriteOptions::new()
+                .compression_level(rar_rs::CompressionLevel::try_from(level).unwrap());
             rar.add_bytes(name, data, opts).unwrap();
         }
         rar.finish().unwrap();
@@ -62,7 +60,10 @@ fn delete_kept_members_preserve_exact_bytes() {
             continue;
         }
         let mut rar = ArchiveReader::open(&path).unwrap();
-        assert_eq!(&rar.read_entry(rar.unique_entry(name).unwrap()).unwrap(), data);
+        assert_eq!(
+            &rar.read_entry(rar.unique_entry(name).unwrap()).unwrap(),
+            data
+        );
     }
 }
 
@@ -71,11 +72,9 @@ fn delete_rebuilds_quick_open_record() {
     let dir = make_temp_dir();
     let path = dir.path().join("del-qo.rar");
     {
-        let mut rar = ArchiveWriter::create_with(
-            &path,
-            rar_rs::WriterOptions::default().quick_open(true),
-        )
-        .unwrap();
+        let mut rar =
+            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default().quick_open(true))
+                .unwrap();
         let opts3 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(3u8).unwrap());
         rar.add_bytes("f1.txt", &compressible(1, 50_000), opts3)
@@ -87,7 +86,10 @@ fn delete_rebuilds_quick_open_record() {
         rar.finish().unwrap();
     }
     let mut ed = ArchiveEditor::open(&path).unwrap();
-    let ids: Vec<_> = ["f2.txt"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["f2.txt"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     ed.delete_entries(&ids).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
@@ -128,7 +130,10 @@ fn delete_rebuilds_recovery_record() {
     // rebuilt over the rewritten archive (a superset of `rar d`, which
     // drops it).
     let mut ed = ArchiveEditor::open(&path).unwrap();
-    let ids: Vec<_> = ["f1.txt"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["f1.txt"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     ed.delete_entries(&ids).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
@@ -142,7 +147,12 @@ fn delete_rebuilds_recovery_record() {
     let (_, _, rr) = main_header_locator(&bytes);
     assert_eq!(rr.unwrap(), rr_pos as u64 - 8, "RR offset out of date");
     let rar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(rar.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(), ["f2.txt"]);
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["f2.txt"]
+    );
 
     // The rebuilt record must actually repair the archive (official rar).
     if let (Some(unrar), Some(rar_bin)) = (
@@ -209,14 +219,21 @@ fn delete_from_solid_archive_recompresses_chain() {
     // Delete a mid-chain member: the chain is recompressed from its start,
     // and the stored member after it is copied verbatim.
     let mut ed = ArchiveEditor::open(&path).unwrap();
-    let ids: Vec<_> = ["b.bin"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["b.bin"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     ed.delete_entries(&ids).unwrap();
     for (name, data) in &files {
         if name == "b.bin" {
             continue;
         }
         let mut rar = ArchiveReader::open(&path).unwrap();
-        assert_eq!(&rar.read_entry(rar.unique_entry(name).unwrap()).unwrap(), data, "content of {name} lost");
+        assert_eq!(
+            &rar.read_entry(rar.unique_entry(name).unwrap()).unwrap(),
+            data,
+            "content of {name} lost"
+        );
     }
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(member_names(&bytes), ["a.bin", "c.bin", "d.bin", "e.txt"]);
@@ -234,12 +251,20 @@ fn delete_from_solid_archive_recompresses_chain() {
     let bytes = std::fs::read(&path).unwrap();
     let (s_del, _e_del) = file_block_span(&bytes, "d.bin");
     let mut ed = ArchiveEditor::open(&path).unwrap();
-    let ids: Vec<_> = ["d.bin"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["d.bin"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     ed.delete_entries(&ids).unwrap();
     let bytes2 = std::fs::read(&path).unwrap();
     assert_eq!(&bytes[..s_del], &bytes2[..s_del], "prefix must be verbatim");
     let rar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(rar.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(), ["a.bin", "c.bin", "e.txt"]);
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["a.bin", "c.bin", "e.txt"]
+    );
 }
 
 #[test]
@@ -248,11 +273,9 @@ fn delete_from_encrypted_archives_roundtrips() {
     let path = dir.path().join("del-enc.rar");
     let payload = compressible(7, 60_000);
     {
-        let mut rar = ArchiveWriter::create_with(
-            &path,
-            rar_rs::WriterOptions::default().password("s3cret"),
-        )
-        .unwrap();
+        let mut rar =
+            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default().password("s3cret"))
+                .unwrap();
         let opts3 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(3u8).unwrap());
         rar.add_bytes("f1.txt", &payload, opts3).unwrap();
@@ -261,19 +284,36 @@ fn delete_from_encrypted_archives_roundtrips() {
         rar.finish().unwrap();
     }
     let mut ed = ArchiveEditor::open_with_password(&path, "s3cret").unwrap();
-    let ids: Vec<_> = ["f2.txt"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["f2.txt"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     ed.delete_entries(&ids).unwrap();
-    let mut rar = ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("s3cret")).unwrap();
-    assert_eq!(rar.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(), ["f1.txt", "f3.txt"]);
-    assert_eq!(rar.read_entry(rar.unique_entry("f1.txt").unwrap()).unwrap(), payload);
-    assert_eq!(rar.read_entry(rar.unique_entry("f3.txt").unwrap()).unwrap(), payload);
+    let mut rar =
+        ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("s3cret")).unwrap();
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["f1.txt", "f3.txt"]
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("f1.txt").unwrap()).unwrap(),
+        payload
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("f3.txt").unwrap()).unwrap(),
+        payload
+    );
 
     // Header-encrypted archives.
     let path2 = dir.path().join("del-hp.rar");
     {
         let mut rar = ArchiveWriter::create_with(
             &path2,
-            rar_rs::WriterOptions::default().password("s3cret").encrypt_headers(true),
+            rar_rs::WriterOptions::default()
+                .password("s3cret")
+                .encrypt_headers(true),
         )
         .unwrap();
         let opts3 = rar_rs::EntryWriteOptions::new()
@@ -283,11 +323,23 @@ fn delete_from_encrypted_archives_roundtrips() {
         rar.finish().unwrap();
     }
     let mut ed = ArchiveEditor::open_with_password(&path2, "s3cret").unwrap();
-    let ids: Vec<_> = ["g1.txt"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["g1.txt"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     ed.delete_entries(&ids).unwrap();
-    let mut rar = ArchiveReader::open_with(&path2, rar_rs::OpenOptions::new().password("s3cret")).unwrap();
-    assert_eq!(rar.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(), ["g2.txt"]);
-    assert_eq!(rar.read_entry(rar.unique_entry("g2.txt").unwrap()).unwrap(), payload);
+    let mut rar =
+        ArchiveReader::open_with(&path2, rar_rs::OpenOptions::new().password("s3cret")).unwrap();
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["g2.txt"]
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("g2.txt").unwrap()).unwrap(),
+        payload
+    );
 }
 
 #[test]
@@ -295,8 +347,7 @@ fn delete_all_members_erases_archive() {
     let dir = make_temp_dir();
     let path = dir.path().join("del-all.rar");
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
         rar.add_bytes("f1.txt", b"one", opts0).unwrap();
@@ -304,7 +355,10 @@ fn delete_all_members_erases_archive() {
         rar.finish().unwrap();
     }
     let mut ed = ArchiveEditor::open(&path).unwrap();
-    let ids: Vec<_> = ["f1.txt", "f2.txt"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["f1.txt", "f2.txt"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     let n = ed.delete_entries(&ids).unwrap();
     assert_eq!(n, 2);
     assert!(!path.exists(), "archive must be erased when empty");
@@ -315,8 +369,7 @@ fn delete_rejects_missing_members_and_multivolume() {
     let dir = make_temp_dir();
     let path = dir.path().join("del-err.rar");
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
         rar.add_bytes("f1.txt", b"one", opts0).unwrap();
@@ -329,7 +382,12 @@ fn delete_rejects_missing_members_and_multivolume() {
     }
     // Archive unchanged after a failed delete.
     let rar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(rar.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(), ["f1.txt"]);
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["f1.txt"]
+    );
 
     // The official `rar` CLI refuses to modify multi-volume archives
     // ("Cannot modify volume"); rar-rs re-splits the volumes instead.
@@ -337,11 +395,9 @@ fn delete_rejects_missing_members_and_multivolume() {
     let payload_a: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
     let payload_b: Vec<u8> = (0..40_000u32).map(|i| (i % 253) as u8).collect();
     {
-        let mut rar = ArchiveWriter::create_with(
-            &vol,
-            rar_rs::WriterOptions::default().volume_size(30_000),
-        )
-        .unwrap();
+        let mut rar =
+            ArchiveWriter::create_with(&vol, rar_rs::WriterOptions::default().volume_size(30_000))
+                .unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
         rar.add_bytes("a.bin", &payload_a, opts0).unwrap();
@@ -352,18 +408,37 @@ fn delete_rejects_missing_members_and_multivolume() {
     let volumes = rar_rs::discover_volumes(&vol);
     assert!(volumes.len() > 1, "precondition: multi-volume archive");
     let rar = ArchiveReader::open(&volumes[0]).unwrap();
-    assert_eq!(rar.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(), ["a.bin", "b.bin", "c.bin"]);
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["a.bin", "b.bin", "c.bin"]
+    );
     let mut ed = ArchiveEditor::open(&volumes[0]).unwrap();
-    let ids: Vec<_> = ["b.bin"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["b.bin"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     let n = ed.delete_entries(&ids).unwrap();
     assert_eq!(n, 1);
 
     // Content survives and the volume set is readable again.
     let volumes = rar_rs::discover_volumes(&vol);
     let mut rar = ArchiveReader::open(&volumes[0]).unwrap();
-    assert_eq!(rar.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(), ["a.bin", "c.bin"]);
-    assert_eq!(rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(), payload_a);
-    assert_eq!(rar.read_entry(rar.unique_entry("c.bin").unwrap()).unwrap(), payload_a);
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["a.bin", "c.bin"]
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(),
+        payload_a
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("c.bin").unwrap()).unwrap(),
+        payload_a
+    );
 }
 
 #[test]
@@ -371,8 +446,7 @@ fn delete_rejects_locked_archive() {
     let dir = make_temp_dir();
     let path = dir.path().join("del-locked.rar");
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
         rar.add_bytes("f1.txt", b"one", opts0).unwrap();
@@ -405,7 +479,10 @@ fn delete_rejects_locked_archive() {
     std::fs::write(&path, &out).unwrap();
 
     let mut ed = ArchiveEditor::open(&path).unwrap();
-    let ids: Vec<_> = ["f1.txt"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["f1.txt"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     match ed.delete_entries(&ids) {
         Err(rar_rs::RarError::ArchiveLocked) => {}
         other => panic!("expected ArchiveLocked, got {other:?}"),
@@ -422,7 +499,9 @@ fn append_preserves_existing_members_and_rebuilds_records() {
     {
         let mut rar = ArchiveWriter::create_with(
             &path,
-            rar_rs::WriterOptions::default().quick_open(true).recovery_percent(10),
+            rar_rs::WriterOptions::default()
+                .quick_open(true)
+                .recovery_percent(10),
         )
         .unwrap();
         let opts3 = rar_rs::EntryWriteOptions::new()
@@ -460,9 +539,18 @@ fn append_preserves_existing_members_and_rebuilds_records() {
     assert_eq!(qo_cached_names(&after), ["a.bin", "b.bin", "c.bin"]);
 
     let mut rar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(), a);
-    assert_eq!(rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(), b);
-    assert_eq!(rar.read_entry(rar.unique_entry("c.bin").unwrap()).unwrap(), c);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(),
+        a
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(),
+        b
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("c.bin").unwrap()).unwrap(),
+        c
+    );
 }
 
 #[test]
@@ -470,8 +558,7 @@ fn append_rejects_locked_archive() {
     let dir = make_temp_dir();
     let path = dir.path().join("app-locked.rar");
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
         rar.add_bytes("a.bin", b"x", opts0).unwrap();
@@ -489,14 +576,20 @@ fn append_rejects_locked_archive() {
         Ok(_) => panic!("expected ArchiveLocked"),
     }
     let mut ed = ArchiveEditor::open(&path).unwrap();
-    let ids: Vec<_> = ["a.bin"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["a.bin"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     match ed.delete_entries(&ids) {
         Err(rar_rs::RarError::ArchiveLocked) => {}
         other => panic!("expected ArchiveLocked, got {other:?}"),
     }
     // Content still readable after the lock.
     let mut rar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(), b"x");
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(),
+        b"x"
+    );
 }
 
 #[test]
@@ -505,8 +598,7 @@ fn add_recovery_record_to_existing_archive() {
     let path = dir.path().join("rr-new.rar");
     let payload = compressible(31, 80_000);
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         let opts3 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(3u8).unwrap());
         rar.add_bytes("f1.bin", &payload, opts3).unwrap();
@@ -530,7 +622,10 @@ fn add_recovery_record_to_existing_archive() {
     let (s1, e1) = file_block_span(&bytes, "f1.bin");
     assert_eq!(&before[s0..e0], &bytes[s1..e1]);
     let mut rar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("f1.bin").unwrap()).unwrap(), payload);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("f1.bin").unwrap()).unwrap(),
+        payload
+    );
 
     // The added record must repair the archive (official rar).
     if let (Some(unrar), Some(rar_bin)) = (
@@ -574,7 +669,9 @@ fn delete_multivolume_rebuilds_recovery_volumes() {
     {
         let mut rar = ArchiveWriter::create_with(
             &path,
-            rar_rs::WriterOptions::default().volume_size(30_000).recovery_volume_count(1),
+            rar_rs::WriterOptions::default()
+                .volume_size(30_000)
+                .recovery_volume_count(1),
         )
         .unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
@@ -591,15 +688,26 @@ fn delete_multivolume_rebuilds_recovery_volumes() {
 
     {
         let mut ed = ArchiveEditor::open(&volumes_before[0]).unwrap();
-        let ids: Vec<_> = ["b.bin"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+        let ids: Vec<_> = ["b.bin"]
+            .iter()
+            .map(|n| ed.unique_entry(n).unwrap())
+            .collect();
         ed.delete_entries(&ids).unwrap();
     }
     // The .rev set is regenerated over the new volumes.
     let volumes_after = rar_rs::discover_volumes(&path);
     assert!(rev.exists(), ".rev files must be regenerated");
     let mut rar = ArchiveReader::open(&volumes_after[0]).unwrap();
-    assert_eq!(rar.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(), ["a.bin", "c.bin"]);
-    assert_eq!(rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(), payload_a);
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["a.bin", "c.bin"]
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(),
+        payload_a
+    );
 
     // Official `rar rc` must reconstruct a deleted volume from them.
     if let (Some(unrar), Some(rar_bin)) = (
@@ -624,8 +732,14 @@ fn delete_multivolume_rebuilds_recovery_volumes() {
                 .unwrap();
             assert!(status.success(), "reconstructed set fails unrar test");
             let mut rar = ArchiveReader::open(&vols[0]).unwrap();
-            assert_eq!(rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(), payload_a);
-            assert_eq!(rar.read_entry(rar.unique_entry("c.bin").unwrap()).unwrap(), payload_a);
+            assert_eq!(
+                rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(),
+                payload_a
+            );
+            assert_eq!(
+                rar.read_entry(rar.unique_entry("c.bin").unwrap()).unwrap(),
+                payload_a
+            );
         }
     }
 }
@@ -639,7 +753,9 @@ fn rename_preserves_payloads_and_rebuilds_records() {
     {
         let mut rar = ArchiveWriter::create_with(
             &path,
-            rar_rs::WriterOptions::default().quick_open(true).recovery_percent(10),
+            rar_rs::WriterOptions::default()
+                .quick_open(true)
+                .recovery_percent(10),
         )
         .unwrap();
         let opts3 = rar_rs::EntryWriteOptions::new()
@@ -652,7 +768,9 @@ fn rename_preserves_payloads_and_rebuilds_records() {
 
     let mut ed = ArchiveEditor::open(&path).unwrap();
     let id = ed.unique_entry("a.bin").unwrap();
-    let n = ed.rename_entries(&[(id, "renamed.bin".to_string())]).unwrap();
+    let n = ed
+        .rename_entries(&[(id, "renamed.bin".to_string())])
+        .unwrap();
     assert_eq!(n, 1);
 
     let after = std::fs::read(&path).unwrap();
@@ -677,8 +795,15 @@ fn rename_preserves_payloads_and_rebuilds_records() {
     assert_eq!(qo_cached_names(&after), ["renamed.bin", "b.bin"]);
 
     let mut rar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("renamed.bin").unwrap()).unwrap(), a);
-    assert_eq!(rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(), b);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("renamed.bin").unwrap())
+            .unwrap(),
+        a
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(),
+        b
+    );
 
     // The rebuilt recovery record must still repair the archive.
     if let (Some(unrar), Some(rar_bin)) = (
@@ -718,8 +843,7 @@ fn rename_directory_renames_descendants() {
     let dir = make_temp_dir();
     let path = dir.path().join("rn-dir.rar");
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         rar.add_directory(dir.path(), "old").unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
@@ -728,19 +852,27 @@ fn rename_directory_renames_descendants() {
     }
     let mut ed = ArchiveEditor::open(&path).unwrap();
     assert_eq!(
-        ed.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(),
+        ed.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
         ["old/", "old/sub/f.txt"]
     );
     let id = ed.unique_entry("old/").unwrap();
     let n = ed.rename_entries(&[(id, "new".to_string())]).unwrap();
     assert_eq!(n, 1);
     assert_eq!(
-        ed.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(),
+        ed.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
         ["new/", "new/sub/f.txt"],
         "descendant prefix renamed"
     );
     let mut rar = ArchiveReader::open(&path).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("new/sub/f.txt").unwrap()).unwrap(), b"hello");
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("new/sub/f.txt").unwrap())
+            .unwrap(),
+        b"hello"
+    );
 }
 
 #[test]
@@ -763,12 +895,23 @@ fn rename_multivolume_keeps_content() {
     assert!(volumes.len() > 1, "precondition: multi-volume set");
     let mut ed = ArchiveEditor::open(&volumes[0]).unwrap();
     let id = ed.unique_entry("big.bin").unwrap();
-    let n = ed.rename_entries(&[(id, "renamed.bin".to_string())]).unwrap();
+    let n = ed
+        .rename_entries(&[(id, "renamed.bin".to_string())])
+        .unwrap();
     assert_eq!(n, 1);
     let volumes = rar_rs::discover_volumes(&path);
     let mut rar = ArchiveReader::open(&volumes[0]).unwrap();
-    assert_eq!(rar.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(), ["renamed.bin"]);
-    assert_eq!(rar.read_entry(rar.unique_entry("renamed.bin").unwrap()).unwrap(), payload);
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["renamed.bin"]
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("renamed.bin").unwrap())
+            .unwrap(),
+        payload
+    );
 }
 
 #[test]
@@ -776,8 +919,7 @@ fn rename_rejects_missing_and_locked() {
     let dir = make_temp_dir();
     let path = dir.path().join("rn-err.rar");
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
         rar.add_bytes("a.bin", b"x", opts0).unwrap();
@@ -834,9 +976,7 @@ fn repair_archive_restores_damaged_members() {
     // An archive without a recovery record fails cleanly.
     let plain = dir.path().join("plain.rar");
     {
-        let mut rar =
-            ArchiveWriter::create_with(&plain, rar_rs::WriterOptions::default())
-                .unwrap();
+        let mut rar = ArchiveWriter::create_with(&plain, rar_rs::WriterOptions::default()).unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
         rar.add_bytes("a.bin", b"x", opts0).unwrap();
@@ -855,7 +995,9 @@ fn rebuild_missing_volumes_from_rev_files() {
     {
         let mut rar = ArchiveWriter::create_with(
             &path,
-            rar_rs::WriterOptions::default().volume_size(60_000).recovery_volume_count(2),
+            rar_rs::WriterOptions::default()
+                .volume_size(60_000)
+                .recovery_volume_count(2),
         )
         .unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
@@ -876,9 +1018,20 @@ fn rebuild_missing_volumes_from_rev_files() {
     assert!(rebuilt.contains(&victim), "middle volume rebuilt");
     let volumes = rar_rs::discover_volumes(&path);
     let mut rar = ArchiveReader::open(&volumes[0]).unwrap();
-    assert_eq!(rar.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(), ["a.bin", "b.bin"]);
-    assert_eq!(rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(), payload_a);
-    assert_eq!(rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(), payload_b);
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["a.bin", "b.bin"]
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(),
+        payload_a
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(),
+        payload_b
+    );
 
     // Everything present -> nothing to rebuild.
     assert!(
@@ -893,9 +1046,7 @@ fn comment_set_get_roundtrip() {
     let dir = make_temp_dir();
     let path = dir.path().join("cmt.rar");
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default())
-                .unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
         rar.add_bytes("a.bin", b"x", opts0).unwrap();
@@ -905,14 +1056,19 @@ fn comment_set_get_roundtrip() {
         let mut rar = rar_rs::RarArchive::open(&path).unwrap();
         assert_eq!(rar.get_comment().unwrap(), None);
         let mut ed = ArchiveEditor::open(&path).unwrap();
-        ed.apply(rar_rs::EditPlan::new().set_comment(b"my comment\n")).unwrap();
+        ed.apply(rar_rs::EditPlan::new().set_comment(b"my comment\n"))
+            .unwrap();
     }
     {
         let mut rar = rar_rs::RarArchive::open(&path).unwrap();
         assert_eq!(rar.get_comment().unwrap(), Some(b"my comment\n".to_vec()));
         // The member survives the comment rewrite.
         let mut rar2 = ArchiveReader::open(&path).unwrap();
-        assert_eq!(rar2.read_entry(rar2.unique_entry("a.bin").unwrap()).unwrap(), b"x");
+        assert_eq!(
+            rar2.read_entry(rar2.unique_entry("a.bin").unwrap())
+                .unwrap(),
+            b"x"
+        );
         // An empty comment removes the existing one.
         let mut ed = ArchiveEditor::open(&path).unwrap();
         ed.apply(rar_rs::EditPlan::new().set_comment(b"")).unwrap();
@@ -926,7 +1082,8 @@ fn comment_set_get_roundtrip() {
     if let Some(rar_bin) = std::env::var_os("SA_OFFICIAL_RAR") {
         {
             let mut ed = ArchiveEditor::open(&path).unwrap();
-            ed.apply(rar_rs::EditPlan::new().set_comment(b"interop comment")).unwrap();
+            ed.apply(rar_rs::EditPlan::new().set_comment(b"interop comment"))
+                .unwrap();
         }
         let out = std::process::Command::new(&rar_bin)
             .arg("cw")
@@ -947,8 +1104,7 @@ fn sfx_archives_open_read_and_modify_with_stub_preserved() {
     let payload = compressible(61, 30_000);
     let payload2 = compressible(62, 20_000);
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         let opts3 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(3u8).unwrap());
         let opts0 = rar_rs::EntryWriteOptions::new()
@@ -965,23 +1121,38 @@ fn sfx_archives_open_read_and_modify_with_stub_preserved() {
     // Reading an SFX archive.
     let mut rar = ArchiveReader::open(&sfx_path).unwrap();
     assert_eq!(rar.entries().count(), 2);
-    assert_eq!(rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(), payload);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(),
+        payload
+    );
 
     // Extracting from an SFX archive.
     let out = dir.path().join("out");
-    rar.extract_entry(rar.unique_entry("a.bin").unwrap(), &out).unwrap();
+    rar.extract_entry(rar.unique_entry("a.bin").unwrap(), &out)
+        .unwrap();
     assert_eq!(std::fs::read(out.join("a.bin")).unwrap(), payload);
 
     // Deleting from an SFX archive preserves the stub.
     let mut ed = ArchiveEditor::open(&sfx_path).unwrap();
-    let ids: Vec<_> = ["a.bin"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["a.bin"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     ed.delete_entries(&ids).unwrap();
     let after = std::fs::read(&sfx_path).unwrap();
     assert_eq!(&after[..stub_len], &with_stub(&[], stub_len)[..stub_len]);
     let rar = ArchiveReader::open(&sfx_path).unwrap();
-    assert_eq!(rar.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(), ["c.bin"]);
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["c.bin"]
+    );
     let mut rar = ArchiveReader::open(&sfx_path).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("c.bin").unwrap()).unwrap(), payload2);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("c.bin").unwrap()).unwrap(),
+        payload2
+    );
 
     // Renaming keeps the stub too.
     let sfx2 = dir.path().join("sfx2.sfx");
@@ -994,7 +1165,10 @@ fn sfx_archives_open_read_and_modify_with_stub_preserved() {
     let rar = ArchiveReader::open(&sfx2).unwrap();
     assert!(rar.entries().any(|e| e.name() == "b.bin"));
     let mut rar = ArchiveReader::open(&sfx2).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(), payload);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(),
+        payload
+    );
 }
 
 #[test]
@@ -1003,8 +1177,7 @@ fn symlink_and_hardlink_redirects_extract() {
     let dir = make_temp_dir();
     let path = dir.path().join("links.rar");
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
         rar.add_bytes("dir/target.txt", b"target content", opts0)
@@ -1048,7 +1221,9 @@ fn zero_padded_volume_sets_discover_and_rebuild() {
     {
         let mut rar = ArchiveWriter::create_with(
             &path,
-            rar_rs::WriterOptions::default().volume_size(20_000).recovery_volume_count(3),
+            rar_rs::WriterOptions::default()
+                .volume_size(20_000)
+                .recovery_volume_count(3),
         )
         .unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
@@ -1095,7 +1270,10 @@ fn zero_padded_volume_sets_discover_and_rebuild() {
     let rebuilt = rar_rs::rebuild_missing_volumes(&padded_first).unwrap();
     assert!(rebuilt.contains(&victim), "padded middle volume rebuilt");
     let mut rar = ArchiveReader::open(&padded_first).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(), payload);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(),
+        payload
+    );
 }
 
 /// Streaming path repair (`repair_archive_path`) must agree with the
@@ -1150,14 +1328,15 @@ fn repair_archive_path_streams_and_matches_in_memory() {
 
     // The repaired archive must open and extract byte-identically.
     let mut rar = ArchiveReader::open(&out).unwrap();
-    assert_eq!(rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(), payload);
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("a.bin").unwrap()).unwrap(),
+        payload
+    );
 
     // No recovery record -> clean error, and the output stays absent.
     let plain = dir.path().join("plain.rar");
     {
-        let mut rar =
-            ArchiveWriter::create_with(&plain, rar_rs::WriterOptions::default())
-                .unwrap();
+        let mut rar = ArchiveWriter::create_with(&plain, rar_rs::WriterOptions::default()).unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
         rar.add_bytes("a.bin", b"x", opts0).unwrap();
@@ -1264,7 +1443,9 @@ fn rebuild_missing_volumes_with_reports_progress_and_cancels() {
     {
         let mut rar = ArchiveWriter::create_with(
             &path,
-            rar_rs::WriterOptions::default().volume_size(60_000).recovery_volume_count(2),
+            rar_rs::WriterOptions::default()
+                .volume_size(60_000)
+                .recovery_volume_count(2),
         )
         .unwrap();
         let opts0 = rar_rs::EntryWriteOptions::new()
@@ -1310,8 +1491,7 @@ fn delete_with_progress_reports_monotonic_progress() {
     let dir = make_temp_dir();
     let path = dir.path().join("del-prog.rar");
     {
-        let mut rar =
-            ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
         let opts3 = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(3u8).unwrap());
         for i in 0..4u8 {
@@ -1323,7 +1503,10 @@ fn delete_with_progress_reports_monotonic_progress() {
     let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(u64, u64)>::new()));
     let mut ed = ArchiveEditor::open(&path).unwrap();
     let cb_reports = reports.clone();
-    let ids: Vec<_> = ["m1.bin", "m2.bin"].iter().map(|n| ed.unique_entry(n).unwrap()).collect();
+    let ids: Vec<_> = ["m1.bin", "m2.bin"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
     let n = ed
         .delete_entries_with_progress(
             &ids,
@@ -1354,6 +1537,9 @@ fn delete_with_progress_reports_monotonic_progress() {
     for name in ["m0.bin", "m3.bin"] {
         let mut rar = ArchiveReader::open(&path).unwrap();
         let data: Vec<u8> = (0..60_000u32).map(|k| (k % 251) as u8).collect();
-        assert_eq!(rar.read_entry(rar.unique_entry(name).unwrap()).unwrap(), data);
+        assert_eq!(
+            rar.read_entry(rar.unique_entry(name).unwrap()).unwrap(),
+            data
+        );
     }
 }

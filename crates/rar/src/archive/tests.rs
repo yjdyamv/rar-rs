@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::fs::safe_path::sanitize_archive_path;
 
@@ -129,7 +128,11 @@ fn encrypted_store_roundtrip() {
     }
     {
         let mut ar = RarArchive::open_with_password(&path, "secret").unwrap();
-        assert_eq!(ar.read_with_options("test.txt", Default::default()).unwrap(), data);
+        assert_eq!(
+            ar.read_with_options("test.txt", Default::default())
+                .unwrap(),
+            data
+        );
     }
     std::fs::remove_file(&path).ok();
 }
@@ -153,7 +156,11 @@ fn encrypted_compressed_roundtrip() {
     }
     {
         let mut ar = RarArchive::open_with_password(&path, "pw").unwrap();
-        assert_eq!(ar.read_with_options("test.txt", Default::default()).unwrap(), data);
+        assert_eq!(
+            ar.read_with_options("test.txt", Default::default())
+                .unwrap(),
+            data
+        );
     }
     std::fs::remove_file(&path).ok();
 }
@@ -176,7 +183,10 @@ fn encrypted_wrong_password_fails() {
     }
     {
         let mut ar = RarArchive::open_with_password(&path, "wrong").unwrap();
-        assert!(ar.read_with_options("test.txt", Default::default()).is_err());
+        assert!(
+            ar.read_with_options("test.txt", Default::default())
+                .is_err()
+        );
     }
     std::fs::remove_file(&path).ok();
 }
@@ -202,9 +212,18 @@ fn encrypted_multiple_files() {
     }
     {
         let mut ar = RarArchive::open_with_password(&path, "multi").unwrap();
-        assert_eq!(ar.read_with_options("a.txt", Default::default()).unwrap(), b"First");
-        assert_eq!(ar.read_with_options("b.txt", Default::default()).unwrap(), b"Second ".repeat(50));
-        assert_eq!(ar.read_with_options("c.bin", Default::default()).unwrap(), (0..=255u8).collect::<Vec<_>>());
+        assert_eq!(
+            ar.read_with_options("a.txt", Default::default()).unwrap(),
+            b"First"
+        );
+        assert_eq!(
+            ar.read_with_options("b.txt", Default::default()).unwrap(),
+            b"Second ".repeat(50)
+        );
+        assert_eq!(
+            ar.read_with_options("c.bin", Default::default()).unwrap(),
+            (0..=255u8).collect::<Vec<_>>()
+        );
     }
     std::fs::remove_file(&path).ok();
 }
@@ -415,7 +434,10 @@ fn recovery_record_roundtrip_and_repair() {
     assert!(raw.windows(4).any(|w| w == b"{RB}"));
     // The plaintext must not be touched by the recovery record.
     let mut ar = RarArchive::open(&path).unwrap();
-    assert_eq!(ar.read_with_options("a.bin", Default::default()).unwrap(), data);
+    assert_eq!(
+        ar.read_with_options("a.bin", Default::default()).unwrap(),
+        data
+    );
 
     // Damage bytes inside ONE data shard (NR parity shards can repair
     // up to NR damaged shards; the archive here is ~21 KiB → D=21,
@@ -549,7 +571,11 @@ fn recovery_record_with_password_and_headers() {
     let raw = std::fs::read(&path).unwrap();
     assert!(raw.windows(4).any(|w| w == b"{RB}"));
     let mut ar = RarArchive::open_with_password(&path, "pw").unwrap();
-    assert_eq!(ar.read_with_options("secret.bin", Default::default()).unwrap(), data);
+    assert_eq!(
+        ar.read_with_options("secret.bin", Default::default())
+            .unwrap(),
+        data
+    );
     std::fs::remove_file(&path).ok();
 }
 
@@ -579,7 +605,11 @@ fn header_encryption_roundtrip() {
     );
     {
         let mut ar = RarArchive::open_with_password(&path, "hdr-pw").unwrap();
-        assert_eq!(ar.read_with_options("secret/name.txt", Default::default()).unwrap(), data);
+        assert_eq!(
+            ar.read_with_options("secret/name.txt", Default::default())
+                .unwrap(),
+            data
+        );
     }
     // Wrong password must be rejected by the header check value.
     let err = RarArchive::open_with_password(&path, "nope").err();
@@ -658,8 +688,14 @@ fn in_memory_sink_archive_is_well_formed() {
     let path = dir.path().join("mem.rar");
     std::fs::write(&path, &bytes).unwrap();
     let mut rar = RarArchive::open(&path).unwrap();
-    assert_eq!(rar.read_with_options("a.txt", Default::default()).unwrap(), b"hello");
-    assert_eq!(rar.read_with_options("b.bin", Default::default()).unwrap(), vec![7u8; 1000]);
+    assert_eq!(
+        rar.read_with_options("a.txt", Default::default()).unwrap(),
+        b"hello"
+    );
+    assert_eq!(
+        rar.read_with_options("b.bin", Default::default()).unwrap(),
+        vec![7u8; 1000]
+    );
 }
 
 #[test]
@@ -698,8 +734,15 @@ fn multivolume_create_store_roundtrip() {
         let entries = ar.entries.clone();
         assert_eq!(entries.len(), 2);
 
-        assert_eq!(ar.read_with_options("big.bin", Default::default()).unwrap(), rng_data);
-        assert_eq!(ar.read_with_options("small.txt", Default::default()).unwrap(), small.to_vec());
+        assert_eq!(
+            ar.read_with_options("big.bin", Default::default()).unwrap(),
+            rng_data
+        );
+        assert_eq!(
+            ar.read_with_options("small.txt", Default::default())
+                .unwrap(),
+            small.to_vec()
+        );
     }
 }
 
@@ -730,8 +773,16 @@ fn multivolume_create_compressed_roundtrip() {
 
     {
         let mut ar = RarArchive::open(&vols[0]).unwrap();
-        assert_eq!(ar.read_with_options("data.txt", Default::default()).unwrap(), data);
-        assert_eq!(ar.read_with_options("small.txt", Default::default()).unwrap(), small.to_vec());
+        assert_eq!(
+            ar.read_with_options("data.txt", Default::default())
+                .unwrap(),
+            data
+        );
+        assert_eq!(
+            ar.read_with_options("small.txt", Default::default())
+                .unwrap(),
+            small.to_vec()
+        );
     }
 }
 
@@ -767,9 +818,20 @@ fn header_encrypted_multivolume_self_roundtrip() {
 
     {
         let mut ar = RarArchive::open_with_password(&vols[0], "pw").unwrap();
-        assert_eq!(ar.entries.iter().map(|e| e.name()).collect::<Vec<_>>(), ["store.bin", "comp.bin"]);
-        assert_eq!(ar.read_with_options("store.bin", Default::default()).unwrap(), store_data);
-        assert_eq!(ar.read_with_options("comp.bin", Default::default()).unwrap(), comp_data);
+        assert_eq!(
+            ar.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+            ["store.bin", "comp.bin"]
+        );
+        assert_eq!(
+            ar.read_with_options("store.bin", Default::default())
+                .unwrap(),
+            store_data
+        );
+        assert_eq!(
+            ar.read_with_options("comp.bin", Default::default())
+                .unwrap(),
+            comp_data
+        );
     }
     // Wrong password must be rejected.
     assert!(RarArchive::open_with_password(&vols[0], "nope").is_err());
@@ -866,7 +928,11 @@ fn multivolume_open_from_any_part() {
     // Open from part2
     let part2 = dir.path().join("anypart.part2.rar");
     let mut ar = RarArchive::open(&part2).unwrap();
-    assert_eq!(ar.read_with_options("data.bin", Default::default()).unwrap(), data);
+    assert_eq!(
+        ar.read_with_options("data.bin", Default::default())
+            .unwrap(),
+        data
+    );
 }
 
 #[test]
@@ -924,7 +990,10 @@ fn create_is_not_visible_until_close_and_leaves_no_temp() {
     assert!(path.exists());
     assert!(temp_leftovers(dir.path()).is_empty());
     let mut rar = RarArchive::open(&path).unwrap();
-    assert_eq!(rar.read_with_options("a.txt", Default::default()).unwrap(), b"data");
+    assert_eq!(
+        rar.read_with_options("a.txt", Default::default()).unwrap(),
+        b"data"
+    );
 }
 
 #[test]
@@ -940,7 +1009,10 @@ fn dropped_write_is_finalized_and_committed() {
     assert!(path.exists());
     assert!(temp_leftovers(dir.path()).is_empty());
     let mut rar = RarArchive::open(&path).unwrap();
-    assert_eq!(rar.read_with_options("a.txt", Default::default()).unwrap(), b"data");
+    assert_eq!(
+        rar.read_with_options("a.txt", Default::default()).unwrap(),
+        b"data"
+    );
 }
 
 #[test]
@@ -985,8 +1057,14 @@ fn append_keeps_original_untouched_until_close() {
     assert_ne!(std::fs::read(&path).unwrap(), original);
     assert!(temp_leftovers(dir.path()).is_empty());
     let mut rar = RarArchive::open(&path).unwrap();
-    assert_eq!(rar.read_with_options("a.txt", Default::default()).unwrap(), b"original");
-    assert_eq!(rar.read_with_options("b.txt", Default::default()).unwrap(), b"appended");
+    assert_eq!(
+        rar.read_with_options("a.txt", Default::default()).unwrap(),
+        b"original"
+    );
+    assert_eq!(
+        rar.read_with_options("b.txt", Default::default()).unwrap(),
+        b"appended"
+    );
 }
 
 #[test]
@@ -1012,8 +1090,18 @@ fn quick_open_only_archive_can_be_appended() {
     }
 
     let mut archive = RarArchive::open(&path).unwrap();
-    assert_eq!(archive.read_with_options("a.txt", Default::default()).unwrap(), b"original");
-    assert_eq!(archive.read_with_options("b.txt", Default::default()).unwrap(), b"appended");
+    assert_eq!(
+        archive
+            .read_with_options("a.txt", Default::default())
+            .unwrap(),
+        b"original"
+    );
+    assert_eq!(
+        archive
+            .read_with_options("b.txt", Default::default())
+            .unwrap(),
+        b"appended"
+    );
 }
 
 #[test]
@@ -1039,7 +1127,11 @@ fn multivolume_creation_stages_volumes_until_close() {
     assert!(dir.path().join("mv.part2.rar").exists());
     assert!(temp_leftovers(dir.path()).is_empty());
     let mut rar = RarArchive::open(&path).unwrap();
-    assert_eq!(rar.read_with_options("data.bin", Default::default()).unwrap(), data);
+    assert_eq!(
+        rar.read_with_options("data.bin", Default::default())
+            .unwrap(),
+        data
+    );
 }
 
 fn all_files(dir: &Path) -> Vec<String> {

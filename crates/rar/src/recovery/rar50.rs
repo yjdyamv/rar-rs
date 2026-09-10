@@ -1508,11 +1508,10 @@ mod tests {
 
     use super::{
         Error, Gf16, InlineRecoveryPlan, MAX_WINRAR602_DATA_SHARDS, apply_inverse_matrix,
-        build_structural_inline_recovery_data,
-        build_structural_inline_recovery_data_streaming, crc64_rar_state, crc64_xz,
-        encode_inline_recovery_parity, encode_parity_shards, invert_linear_system_matrix,
-        make_encoder_matrix, plan_inline_recovery, reconstruct_data_shards,
-        repair_inline_recovery_archive, repair_inline_recovery_prefix,
+        build_structural_inline_recovery_data, build_structural_inline_recovery_data_streaming,
+        crc64_rar_state, crc64_xz, encode_inline_recovery_parity, encode_parity_shards,
+        invert_linear_system_matrix, make_encoder_matrix, plan_inline_recovery,
+        reconstruct_data_shards, repair_inline_recovery_archive, repair_inline_recovery_prefix,
         repair_inline_recovery_prefix_shards, shared_gf16, split_prefix_shard_ranges,
         split_prefix_shards,
     };

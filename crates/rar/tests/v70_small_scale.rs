@@ -137,7 +137,9 @@ fn v70_forced_solid_roundtrip() {
     }
     let mut rar = ArchiveReader::open(&arc).unwrap();
     assert_eq!(
-        rar.entries().map(|e| e.name().to_string()).collect::<Vec<String>>(),
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<String>>(),
         ["a.bin", "b.bin", "c.bin"]
     );
     for (name, expected) in [("a.bin", &a), ("b.bin", &b), ("c.bin", &c)] {
@@ -149,7 +151,11 @@ fn v70_forced_solid_roundtrip() {
             Some(8 * 1024 * 1024),
             "solid member {name} dictionary"
         );
-        assert_eq!(&rar.read_entry(id).unwrap(), expected, "solid bytes for {name}");
+        assert_eq!(
+            &rar.read_entry(id).unwrap(),
+            expected,
+            "solid bytes for {name}"
+        );
     }
 }
 

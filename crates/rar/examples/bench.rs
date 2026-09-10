@@ -41,10 +41,8 @@ fn bench(name: &str, data: &[u8]) {
         let out = dir.join(format!("{name}-l{level}.rar"));
         let t0 = Instant::now();
         let result = (|| -> rar_rs::RarResult<()> {
-            let mut writer = rar_rs::ArchiveWriter::create_with(
-                &out,
-                rar_rs::WriterOptions::default(),
-            )?;
+            let mut writer =
+                rar_rs::ArchiveWriter::create_with(&out, rar_rs::WriterOptions::default())?;
             writer.add_bytes(
                 "data.bin",
                 data,
@@ -127,10 +125,12 @@ fn bench_many(name: &str, data: &[u8], member_count: usize) {
     let seq = dir.join("seq.rar");
     let t0 = std::time::Instant::now();
     {
-        let mut ar = rar_rs::ArchiveWriter::create_with(&seq, rar_rs::WriterOptions::default())
-            .unwrap();
-        let opts =
-            || rar_rs::EntryWriteOptions::new().compression_level(rar_rs::CompressionLevel::try_from(3).unwrap());
+        let mut ar =
+            rar_rs::ArchiveWriter::create_with(&seq, rar_rs::WriterOptions::default()).unwrap();
+        let opts = || {
+            rar_rs::EntryWriteOptions::new()
+                .compression_level(rar_rs::CompressionLevel::try_from(3).unwrap())
+        };
         for (i, member) in members.iter().enumerate() {
             ar.add_bytes(&names[i], member, opts()).unwrap();
         }
@@ -142,8 +142,8 @@ fn bench_many(name: &str, data: &[u8], member_count: usize) {
     let batch = dir.join("batch.rar");
     let t1 = std::time::Instant::now();
     {
-        let mut ar = rar_rs::ArchiveWriter::create_with(&batch, rar_rs::WriterOptions::default())
-            .unwrap();
+        let mut ar =
+            rar_rs::ArchiveWriter::create_with(&batch, rar_rs::WriterOptions::default()).unwrap();
         let entries: Vec<rar_rs::WriteEntry<'_>> = members
             .iter()
             .enumerate()
@@ -204,10 +204,8 @@ fn bench_batch(name: &str, data: &[u8]) {
         let batch = dir.join(format!("batch-l{level}.rar"));
         let t1 = std::time::Instant::now();
         let batch_bytes = (|| -> rar_rs::RarResult<usize> {
-            let mut ar = rar_rs::ArchiveWriter::create_with(
-                &batch,
-                rar_rs::WriterOptions::default(),
-            )?;
+            let mut ar =
+                rar_rs::ArchiveWriter::create_with(&batch, rar_rs::WriterOptions::default())?;
             let names: Vec<String> = (0..members.len()).map(|i| format!("m{i}.bin")).collect();
             let entries: Vec<rar_rs::WriteEntry<'_>> = members
                 .iter()

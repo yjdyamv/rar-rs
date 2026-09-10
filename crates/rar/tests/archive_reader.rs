@@ -30,8 +30,8 @@ impl Write for FailAfter {
 
 fn create_duplicate_archive(path: &std::path::Path) {
     let opts = EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0u8).unwrap());
-    let mut archive =
-        ArchiveWriter::create_with(path, WriterOptions::default().quick_open(true)).expect("create archive");
+    let mut archive = ArchiveWriter::create_with(path, WriterOptions::default().quick_open(true))
+        .expect("create archive");
     archive
         .add_bytes("same.bin", b"first payload", opts)
         .expect("add first duplicate");

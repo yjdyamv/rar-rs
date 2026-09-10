@@ -29,9 +29,7 @@ fn build_fixture(path: &std::path::Path, dir: &std::path::Path) {
     archive
         .add_bytes("other.txt", b"other", stored())
         .expect("add other");
-    archive
-        .add_directory(dir, "d")
-        .expect("add dir member");
+    archive.add_directory(dir, "d").expect("add dir member");
     let leaf = dir.join("leaf.txt");
     std::fs::write(&leaf, b"leaf payload").unwrap();
     archive
@@ -394,7 +392,11 @@ fn plan_rejects_conflicts_and_solid_chain_renames_atomically() {
         .unwrap();
         for (index, byte) in (0u8..4).enumerate() {
             archive
-                .add_bytes(&format!("m{index}.bin"), &vec![b'a' + byte; 40 * 1024], level(1))
+                .add_bytes(
+                    &format!("m{index}.bin"),
+                    &vec![b'a' + byte; 40 * 1024],
+                    level(1),
+                )
                 .unwrap();
         }
         archive.finish().unwrap();
@@ -424,11 +426,8 @@ fn plan_rejects_conflicts_and_solid_chain_renames_atomically() {
 fn multivolume_plan_is_atomic_and_failures_leave_all_volumes_intact() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("mv.rar");
-    let mut archive = ArchiveWriter::create_with(
-        &base,
-        WriterOptions::new().volume_size(48 * 1024),
-    )
-    .unwrap();
+    let mut archive =
+        ArchiveWriter::create_with(&base, WriterOptions::new().volume_size(48 * 1024)).unwrap();
     archive
         .add_bytes("a.bin", &vec![7u8; 220 * 1024], stored())
         .unwrap();
@@ -508,7 +507,9 @@ fn comment_op_matches_legacy_set_comment_bytes_and_clears() {
     let comment = b"edited by the plan".to_vec();
 
     let mut legacy = ArchiveEditor::open(&src).unwrap();
-    legacy.apply(EditPlan::new().set_comment(comment.clone())).unwrap();
+    legacy
+        .apply(EditPlan::new().set_comment(comment.clone()))
+        .unwrap();
 
     let mut editor = ArchiveEditor::open(&twin).unwrap();
     editor
@@ -586,11 +587,8 @@ fn combined_plan_with_comment_and_recovery_applies_atomically() {
 fn comment_and_recovery_ops_refuse_multivolume_archives() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("mv-cmt.rar");
-    let mut archive = ArchiveWriter::create_with(
-        &base,
-        WriterOptions::new().volume_size(32 * 1024),
-    )
-    .unwrap();
+    let mut archive =
+        ArchiveWriter::create_with(&base, WriterOptions::new().volume_size(32 * 1024)).unwrap();
     archive
         .add_bytes("a.bin", &vec![5u8; 120 * 1024], stored())
         .unwrap();
@@ -647,11 +645,9 @@ fn build_rar4(path: &std::path::Path, dir: &std::path::Path) {
     std::fs::write(&a_path, &a_payload).unwrap();
     let b_path = dir.join("b.txt");
     std::fs::write(&b_path, vec![b'x'; 60_000]).unwrap();
-    let mut archive = ArchiveWriter::create_with(
-        path,
-        WriterOptions::new().compression(ArchiveVersion::V29),
-    )
-    .unwrap();
+    let mut archive =
+        ArchiveWriter::create_with(path, WriterOptions::new().compression(ArchiveVersion::V29))
+            .unwrap();
     archive.add_path(&a_path, stored()).unwrap();
     archive.add_path_as(&b_path, "b.txt", stored()).unwrap();
     archive.finish().unwrap();
@@ -833,7 +829,9 @@ fn rar4_delete_removes_members_and_keeps_the_rest() {
         )
         .unwrap();
         archive.add_path(&file, stored()).unwrap();
-        archive.add_bytes("other.txt", &payload_b, stored()).unwrap();
+        archive
+            .add_bytes("other.txt", &payload_b, stored())
+            .unwrap();
         archive.finish().unwrap();
     }
 
@@ -987,7 +985,9 @@ fn rar4_writer_add_bytes_handles_unicode_and_ascii_names() {
         archive
             .add_bytes("文-件名-ünï.bin", &unicode_payload, stored())
             .unwrap();
-        archive.add_bytes("plain.bin", &ascii_payload, level(3)).unwrap();
+        archive
+            .add_bytes("plain.bin", &ascii_payload, level(3))
+            .unwrap();
         archive.finish().unwrap();
     }
     let mut reader = ArchiveReader::open(&path).unwrap();

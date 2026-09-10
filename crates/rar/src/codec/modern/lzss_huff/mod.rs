@@ -200,7 +200,7 @@ mod mt_tests {
     #[test]
     fn sequential_solid_chain_random_shared_blocks() {
         const LOG: u8 = 7; // 16 MiB dict -> 8 MiB near-finder window
-        let shared = prng_block(1 * 1024 * 1024, 11);
+        let shared = prng_block(1024 * 1024, 11);
         let mk = |seed: u64| {
             let mut m = shared.clone();
             m.extend(prng_block(11 * 1024 * 1024, seed));
@@ -271,11 +271,11 @@ mod mt_tests {
             m.extend(&shared);
             m
         };
-        let members = vec![mk(1), mk(2), mk(3)];
+        let members = [mk(1), mk(2), mk(3)];
         let mut st = EncoderState::default();
         let mut packed = Vec::new();
         let mut sizes = Vec::new();
-        for (_i, member) in members.iter().enumerate() {
+        for member in &members {
             st.begin_member();
             let mut bytes_read = 0u64;
             let mut member_packed = Vec::new();
@@ -364,8 +364,8 @@ mod mt_tests {
 
         let mut full = first;
         full.extend(&second);
-        let out = decode_standalone(&packed, full.len() as u64, LOG, None, ArchiveVersion::V50)
-            .unwrap();
+        let out =
+            decode_standalone(&packed, full.len() as u64, LOG, None, ArchiveVersion::V50).unwrap();
         assert_eq!(out, full);
     }
 
@@ -414,9 +414,8 @@ mod mt_tests {
                     );
                 }
             }
-            let out =
-                decode_standalone(&packed, full.len() as u64, LOG, None, ArchiveVersion::V50)
-                    .unwrap();
+            let out = decode_standalone(&packed, full.len() as u64, LOG, None, ArchiveVersion::V50)
+                .unwrap();
             assert_eq!(out, full, "mt_first={mt_first}");
         }
     }
@@ -463,8 +462,8 @@ mod mt_tests {
         for m in &members {
             full.extend(m);
         }
-        let out = decode_standalone(&packed, full.len() as u64, LOG, None, ArchiveVersion::V50)
-            .unwrap();
+        let out =
+            decode_standalone(&packed, full.len() as u64, LOG, None, ArchiveVersion::V50).unwrap();
         assert_eq!(out, full);
         // Every member after the first is one copy of the shared block plus
         // its own filler; losing the window costs the whole shared block.

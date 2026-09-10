@@ -243,7 +243,9 @@ fn exact_recovery_volume_generation_is_disarmed_after_close() {
             .recovery_volume_count(1),
     )
     .unwrap();
-    archive.add_bytes("payload.bin", &payload, stored()).unwrap();
+    archive
+        .add_bytes("payload.bin", &payload, stored())
+        .unwrap();
     archive.finish().unwrap();
 
     let recovery_path = std::fs::read_dir(dir.path())
@@ -393,9 +395,11 @@ fn append_on_rar4_archives_is_supported() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rar4.rar");
     {
-        let mut archive =
-            ArchiveWriter::create_with(&path, WriterOptions::new().compression(ArchiveVersion::V29))
-                .unwrap();
+        let mut archive = ArchiveWriter::create_with(
+            &path,
+            WriterOptions::new().compression(ArchiveVersion::V29),
+        )
+        .unwrap();
         let source = dir.path().join("a.txt");
         std::fs::write(&source, b"original").unwrap();
         archive.add_path(&source, stored()).unwrap();

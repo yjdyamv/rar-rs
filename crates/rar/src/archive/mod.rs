@@ -884,8 +884,6 @@ impl RarArchive {
         Ok(())
     }
 
-    
-
     /// Create a new RAR archive with explicit options (overwrites an
     /// existing file).
     ///

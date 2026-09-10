@@ -33,9 +33,20 @@ fn make_tree(dir: &std::path::Path) {
 }
 
 fn create_duplicate_archive(path: &Path) {
-    let mut rar = rar_rs::ArchiveWriter::create_with(path, rar_rs::WriterOptions::default()).unwrap();
-    rar.add_bytes("same.bin", b"first payload", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
-    rar.add_bytes("same.bin", b"second payload", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
+    let mut rar =
+        rar_rs::ArchiveWriter::create_with(path, rar_rs::WriterOptions::default()).unwrap();
+    rar.add_bytes(
+        "same.bin",
+        b"first payload",
+        EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+    )
+    .unwrap();
+    rar.add_bytes(
+        "same.bin",
+        b"second payload",
+        EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+    )
+    .unwrap();
     rar.finish().unwrap();
 }
 
@@ -258,7 +269,11 @@ fn cli_ch_converts_member_case_like_winrar() {
     {
         let mut rar =
             rar_rs::ArchiveWriter::create_with(&archive, rar_rs::WriterOptions::default()).unwrap();
-        rar.add_path(dir.path().join("MiXeD.TXT"), EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3).unwrap())).unwrap();
+        rar.add_path(
+            dir.path().join("MiXeD.TXT"),
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
     assert_eq!(cli_names(&archive), ["MiXeD.TXT"]);
@@ -281,7 +296,12 @@ fn cli_print_writes_member_to_stdout() {
     {
         let mut rar =
             rar_rs::ArchiveWriter::create_with(&archive, rar_rs::WriterOptions::default()).unwrap();
-        rar.add_bytes("a.txt", b"hello p", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
+        rar.add_bytes(
+            "a.txt",
+            b"hello p",
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
     let out = std::process::Command::new(RAR_CLI)
@@ -331,9 +351,21 @@ fn cli_print_preserves_duplicate_members_and_reports_no_match() {
     }
 
     let exact_archive = dir.path().join("exact-print.rar");
-    let mut rar = rar_rs::ArchiveWriter::create_with(&exact_archive, rar_rs::WriterOptions::default()).unwrap();
-    rar.add_bytes("same.bin", b"exact", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
-    rar.add_bytes("dir/same.bin", b"basename only", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
+    let mut rar =
+        rar_rs::ArchiveWriter::create_with(&exact_archive, rar_rs::WriterOptions::default())
+            .unwrap();
+    rar.add_bytes(
+        "same.bin",
+        b"exact",
+        EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+    )
+    .unwrap();
+    rar.add_bytes(
+        "dir/same.bin",
+        b"basename only",
+        EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+    )
+    .unwrap();
     rar.finish().unwrap();
     for binary in [RAR_CLI, UNRAR_CLI] {
         let out = std::process::Command::new(binary)
@@ -391,7 +423,12 @@ fn cli_overwrite_never_skips_existing_files() {
     {
         let mut rar =
             rar_rs::ArchiveWriter::create_with(&archive, rar_rs::WriterOptions::default()).unwrap();
-        rar.add_bytes("f.txt", b"new", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
+        rar.add_bytes(
+            "f.txt",
+            b"new",
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
     let out = dir.path().join("out");
@@ -419,7 +456,12 @@ fn cli_comment_file_sets_comment() {
     {
         let mut rar =
             rar_rs::ArchiveWriter::create_with(&archive, rar_rs::WriterOptions::default()).unwrap();
-        rar.add_bytes("f.txt", b"x", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
+        rar.add_bytes(
+            "f.txt",
+            b"x",
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
     std::fs::write(dir.path().join("note.txt"), b"file comment").unwrap();
@@ -446,8 +488,18 @@ fn unrar_list_variants_bare_and_technical() {
     {
         let mut rar =
             rar_rs::ArchiveWriter::create_with(&archive, rar_rs::WriterOptions::default()).unwrap();
-        rar.add_bytes("a.txt", b"aaa", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
-        rar.add_bytes("b.bin", b"bbbb", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
+        rar.add_bytes(
+            "a.txt",
+            b"aaa",
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+        )
+        .unwrap();
+        rar.add_bytes(
+            "b.bin",
+            b"bbbb",
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
     let bare = std::process::Command::new(UNRAR_CLI)
@@ -669,7 +721,8 @@ fn cli_links_ol_stores_symlink_redirects() {
     let entry = rar.entry(lnk_id).unwrap();
     assert_eq!(entry.size(), 0);
     let out = dir.path().join("out");
-    rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default()).unwrap();
+    rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default())
+        .unwrap();
     let link = std::fs::read_link(out.join("lnk/lnk.txt")).unwrap();
     assert_eq!(link, std::path::Path::new("target.txt"));
 }
@@ -844,7 +897,9 @@ fn cli_stdin_name_reads_stdin() {
 
     let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
     assert_eq!(
-        rar.entries().map(|e| e.name().to_string()).collect::<Vec<String>>(),
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<String>>(),
         ["in.txt"]
     );
     let in_id = rar.unique_entry("in.txt").unwrap();
@@ -924,7 +979,11 @@ fn cli_clear_password_and_no_comment_switches() {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut rar = rar_rs::ArchiveReader::open_with(&long_password_archive, rar_rs::OpenOptions::new().password("secret")).unwrap();
+    let mut rar = rar_rs::ArchiveReader::open_with(
+        &long_password_archive,
+        rar_rs::OpenOptions::new().password("secret"),
+    )
+    .unwrap();
     let f_id = rar.unique_entry("f.txt").unwrap();
     assert_eq!(rar.read_entry(f_id).unwrap(), b"x");
 
@@ -938,7 +997,11 @@ fn cli_clear_password_and_no_comment_switches() {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut rar = rar_rs::ArchiveReader::open_with(&attached_password_archive, rar_rs::OpenOptions::new().password("secret")).unwrap();
+    let mut rar = rar_rs::ArchiveReader::open_with(
+        &attached_password_archive,
+        rar_rs::OpenOptions::new().password("secret"),
+    )
+    .unwrap();
     let f_id = rar.unique_entry("f.txt").unwrap();
     assert_eq!(rar.read_entry(f_id).unwrap(), b"x");
 
@@ -1013,7 +1076,12 @@ fn cli_append_dir_extracts_under_archive_name() {
     {
         let mut rar =
             rar_rs::ArchiveWriter::create_with(&archive, rar_rs::WriterOptions::default()).unwrap();
-        rar.add_bytes("f.txt", b"x", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
+        rar.add_bytes(
+            "f.txt",
+            b"x",
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
     let out = dir.path().join("out");
@@ -1293,7 +1361,9 @@ fn cli_exclude_prefix_ep4_strips_prefix() {
     assert!(status.success());
     let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
     assert_eq!(
-        rar.entries().map(|e| e.name().to_string()).collect::<Vec<String>>(),
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<String>>(),
         ["dir/f.txt"]
     );
     let dir_id = rar.unique_entry("dir/f.txt").unwrap();
@@ -1322,7 +1392,9 @@ fn cli_sync_archive_as_drops_stale_members() {
     assert!(run(&["a.txt"])); // keep.txt is stale now
     let rar = rar_rs::ArchiveReader::open(&archive).unwrap();
     assert_eq!(
-        rar.entries().map(|e| e.name().to_string()).collect::<Vec<String>>(),
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<String>>(),
         ["a.txt"]
     );
 }
@@ -1909,7 +1981,10 @@ fn cli_update_and_freshen_expand_directory_arguments() {
     assert_eq!(rar.read_entry(changed_id).unwrap(), b"new");
     let unchanged_id = rar.unique_entry("freshen-tree/unchanged.txt").unwrap();
     assert_eq!(rar.read_entry(unchanged_id).unwrap(), b"same");
-    assert!(!rar.entries().any(|e| e.name() == "freshen-tree/missing.txt"));
+    assert!(
+        !rar.entries()
+            .any(|e| e.name() == "freshen-tree/missing.txt")
+    );
 }
 
 #[test]
@@ -2011,9 +2086,24 @@ fn cli_member_selection_uses_exact_paths_or_basenames() {
     {
         let mut rar =
             rar_rs::ArchiveWriter::create_with(&archive, rar_rs::WriterOptions::default()).unwrap();
-rar.add_bytes("a", b"A", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
-    rar.add_bytes("dir/base.txt", b"BASE", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
-    rar.add_bytes("full/path.txt", b"FULL", EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap())).unwrap();
+        rar.add_bytes(
+            "a",
+            b"A",
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+        )
+        .unwrap();
+        rar.add_bytes(
+            "dir/base.txt",
+            b"BASE",
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+        )
+        .unwrap();
+        rar.add_bytes(
+            "full/path.txt",
+            b"FULL",
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0).unwrap()),
+        )
+        .unwrap();
         rar.finish().unwrap();
     }
 
@@ -2759,7 +2849,9 @@ fn cli_se_preserves_input_order() {
     // Input order a.txt, b.bin, c.txt, d.bin must be preserved exactly.
     let mut rar = rar_rs::ArchiveReader::open(&arc).unwrap();
     assert_eq!(
-        rar.entries().map(|e| e.name().to_string()).collect::<Vec<String>>(),
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<String>>(),
         vec!["a.txt", "b.bin", "c.txt", "d.bin"],
         "-se must not reorder members by extension"
     );
@@ -2882,7 +2974,9 @@ fn cli_ma4_rejects_rar5_only_switches() {
         "-ma4 -hpsecret must be accepted (header encryption on RAR4)"
     );
 
-    let mut rar = rar_rs::ArchiveReader::open_with(&arc2, rar_rs::OpenOptions::new().password("secret")).unwrap();
+    let mut rar =
+        rar_rs::ArchiveReader::open_with(&arc2, rar_rs::OpenOptions::new().password("secret"))
+            .unwrap();
     let f_id = rar.unique_entry("f.txt").unwrap();
     assert_eq!(rar.read_entry(f_id).unwrap(), b"payload");
 

@@ -9,10 +9,10 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use super::stream_mut;
 use crate::archive::{
     ArchiveEntry, DecryptedPayload, MAX_DICT_SIZE_LOG, RarArchive, StreamRecord, discover_volumes,
 };
-use super::stream_mut;
 use crate::codec::DecoderState;
 use crate::crypto;
 use crate::detect::{SFX_SCAN_LIMIT, find_bytes};
