@@ -400,9 +400,8 @@ fn run_corpus(
         archive.push(ms_a);
         packed = n_a as usize;
         if with_solid {
-            solid.push(
-                time_archive(dir, &format!("{name}-d"), &input_members, level, true, None).0,
-            );
+            solid
+                .push(time_archive(dir, &format!("{name}-d"), &input_members, level, true, None).0);
         }
     }
 
@@ -435,13 +434,7 @@ fn run_corpus(
     );
 }
 
-fn run_solid_mt_bench(
-    dir: &Path,
-    name: &str,
-    data: &[u8],
-    level: u8,
-    repeats: usize,
-) {
+fn run_solid_mt_bench(dir: &Path, name: &str, data: &[u8], level: u8, repeats: usize) {
     let mb = data.len() as f64 / 1048576.0;
     let thread_counts: &[usize] = &[1, 2, 4, 8];
 

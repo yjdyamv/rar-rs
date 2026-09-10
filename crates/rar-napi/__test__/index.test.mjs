@@ -751,3 +751,165 @@ test('repairArchive streams a damaged archive back to byte-exact', async () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('renameEntries renames members by name (like rar rn)', async () => {
+  const dir = tempDir()
+  try {
+    const out = join(dir, 'rn.rar')
+    await createArchive({
+      outPath: out,
+      entries: [
+        { kind: 'bytes', name: 'alpha.txt', data: Buffer.from('alpha ') },
+        { kind: 'bytes', name: 'sub/beta.txt', data: Buffer.from('beta ') },
+      ],
+    })
+
+    const { renameEntries, listEntries, readMember } = await import('../index.js')
+    const pendingRename = renameEntries(out, [{ from: 'alpha.txt', to: 'renamed.txt' }])
+    assert.equal(typeof pendingRename.then, 'function', 'renameEntries must be async')
+    assert.equal(await pendingRename, 1)
+    let names = (await listEntries(out)).sort()
+    assert.deepEqual(names, ['renamed.txt', 'sub/beta.txt'])
+    assert.deepEqual(await readMember(out, 'renamed.txt'), Buffer.from('alpha '))
+
+    // Duplicate target names are allowed (duplicates are first-class).
+    assert.equal(await renameEntries(out, [{ from: 'renamed.txt', to: 'sub/beta.txt' }]), 1)
+
+    // A name matching nothing fails the plan before any rewrite.
+    await assert.rejects(
+      renameEntries(out, [{ from: 'missing.txt', to: 'x.txt' }]),
+      (error) => error.message.includes('missing.txt'),
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('setComment sets and removes the archive comment (like rar c)', async () => {
+  const dir = tempDir()
+  try {
+    const out = join(dir, 'cmt.rar')
+    await createArchive({
+      outPath: out,
+      entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('alpha') }],
+    })
+
+    const { setComment } = await import('../index.js')
+    const pendingComment = setComment(out, 'my-comment-marker-42')
+    assert.equal(typeof pendingComment.then, 'function', 'setComment must be async')
+
+    // The RAR5 archive comment is stored plaintext in a CMT block, so its
+    // presence is structurally checkable in the raw bytes.
+    await pendingComment
+    let bytes = Buffer.from(readFileSync(out))
+    assert.ok(bytes.includes(Buffer.from('my-comment-marker-42')), 'comment bytes present')
+
+    // Null removes the comment.
+    await setComment(out, null)
+    bytes = Buffer.from(readFileSync(out))
+    assert.ok(!bytes.includes(Buffer.from('my-comment-marker-42')), 'comment bytes gone')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('setRecovery rebuilds the inline recovery record (like rar rr)', async () => {
+  const dir = tempDir()
+  try {
+    const src = join(dir, 'data.bin')
+    const out = Buffer.alloc(1 << 20)
+    let x = 0x9e3779b9
+    for (let i = 0; i < out.length; i++) {
+      x ^= x << 13; x ^= x >>> 17; x ^= x << 5
+      out[i] = x & 0xff
+    }
+    writeFileSync(src, out)
+    const good = join(dir, 'good.rar')
+    // No recovery record yet.
+    await createArchive({ outPath: good, entries: [{ kind: 'file', path: src }] })
+
+    const { setRecovery, repairArchive } = await import('../index.js')
+    await setRecovery(good, 10)
+
+    // Corrupt protected data and repair: must now be byte-exact.
+    const bytes = Buffer.from(readFileSync(good))
+    bytes[500] ^= 0xff
+    const damaged = join(dir, 'damaged.rar')
+    writeFileSync(damaged, bytes)
+    const fixed = join(dir, 'fixed.rar')
+    assert.equal(await repairArchive(damaged, fixed), true, 'damage must be repairable')
+    assert.deepEqual(readFileSync(fixed), readFileSync(good), 'byte-exact restore')
+
+    // An out-of-range percent is rejected up front.
+    await assert.rejects(setRecovery(good, 101), (error) => {
+      assert.equal(error.code, 'InvalidArg')
+      return true
+    })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('lockArchive makes the archive read-only (like rar k)', async () => {
+  const dir = tempDir()
+  try {
+    const out = join(dir, 'lk.rar')
+    await createArchive({
+      outPath: out,
+      entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('alpha') }],
+    })
+
+    const { lockArchive, deleteEntries } = await import('../index.js')
+    await lockArchive(out)
+    await assert.rejects(deleteEntries(out, ['a.txt']), (error) => {
+      assert.equal(error.code, 'GenericFailure')
+      return true
+    })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listEntriesDetailed reports extended metadata (crc32, dates, version, solid)', async () => {
+  const dir = tempDir()
+  try {
+    const out = join(dir, 'meta.rar')
+    await createArchive({
+      outPath: out,
+      solid: true,
+      entries: [
+        { kind: 'bytes', name: 'a.txt', data: Buffer.from('hello '.repeat(500)) },
+        { kind: 'bytes', name: 'd.txt', data: Buffer.from('world '.repeat(500)) },
+      ],
+    })
+
+    const { listEntriesDetailed } = await import('../index.js')
+    const entries = await listEntriesDetailed(out)
+    assert.equal(entries.length, 2)
+    const a = entries.find((e) => e.name === 'a.txt')
+    assert.equal(typeof a.crc32, 'number', 'crc32 present for a computed member')
+    assert.ok(a.crc32 >= 0)
+    assert.equal(a.version, 'v50')
+    assert.equal(a.compVersion, 0)
+    assert.ok(
+      entries.some((e) => e.solid),
+      'a solid archive marks at least one member as solid',
+    )
+    assert.equal(typeof a.hostOs, 'number')
+    assert.equal(typeof a.attributes, 'number')
+    assert.ok(
+      a.dictSizeBytes == null || typeof a.dictSizeBytes === 'number',
+      'dictSizeBytes is null/undefined or a number',
+    )
+    assert.equal(a.comment, undefined, 'no member comment was written')
+    for (const field of ['ctime', 'atime']) {
+      assert.ok(
+        a[field] == null || typeof a[field] === 'number',
+        `${field} is null/undefined or a number`,
+      )
+    }
+    assert.ok(a.mtime > 0, 'mtime set')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -11,8 +11,8 @@ mod tasks;
 
 pub use tasks::{
   append_entries, create_archive, delete_entries, extract_archive, list_entries,
-  list_entries_detailed, list_entries_quick, read_member, rebuild_missing_volumes, repair_archive,
-  test_archive,
+  list_entries_detailed, list_entries_quick, lock_archive, read_member, rebuild_missing_volumes,
+  rename_entries, repair_archive, set_comment, set_recovery, test_archive,
 };
 
 #[napi(object)]
@@ -109,6 +109,37 @@ pub struct EntryInfo {
   pub is_dir: bool,
   /// Modification time as Unix seconds (0 when unknown).
   pub mtime: f64,
+  /// CRC32 of the member (undefined when unknown, e.g. while streaming).
+  pub crc32: Option<u32>,
+  /// Creation time as Unix seconds (undefined for members without a
+  /// FILE_TIME extra record).
+  pub ctime: Option<f64>,
+  /// Last-access time as Unix seconds (undefined when not recorded).
+  pub atime: Option<f64>,
+  /// Host OS of the producing archiver (0 = MS-DOS, 1 = OS/2, 2 = Win32,
+  /// 3 = Unix/32-bit, 6 = Unix/64-bit, 7 = macOS).
+  pub host_os: f64,
+  /// Raw attribute word stored in the header (platform specific).
+  pub attributes: f64,
+  /// RAR5/RAR7 compression version: 0 = RAR5, 1 = RAR7; RAR4 legacy
+  /// members report their `unp_ver` (15/20/26/29/36).
+  pub comp_version: u8,
+  /// Member version name ("v15" .. "v70").
+  pub version: String,
+  /// Compressed dictionary size in bytes (undefined when unknown).
+  pub dict_size_bytes: Option<f64>,
+  /// Per-member comment bytes (undefined when absent; RAR5 only).
+  pub comment: Option<Buffer>,
+  /// Whether the member belongs to a solid chain (shares a window with
+  /// its predecessor).
+  pub solid: bool,
+}
+#[napi(object)]
+pub struct RenameEntry {
+  /// Existing member name (full stored path or basename).
+  pub from: String,
+  /// New name.
+  pub to: String,
 }
 #[napi(object)]
 pub struct ExtractArchiveOptions {

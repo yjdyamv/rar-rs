@@ -2,9 +2,8 @@
 
 rar-rs ships two binaries, `rar` and `unrar`, modelled on the WinRAR 7.x
 console tools. Every official command is implemented. Switches follow
-WinRAR 7.23 semantics; unsupported switches are either rejected (e.g.
-`-ma4`) or accepted as no-ops where WinRAR does the same. This page is the usage
-reference.
+WinRAR 7.23 semantics; unsupported switches are either rejected or accepted
+as no-ops where WinRAR does the same. This page is the usage reference.
 
 ---
 
@@ -39,6 +38,7 @@ never a silent dump into a `<name>/` folder.
 | `s-` | | Strip the SFX module from an SFX archive |
 | `c` | | Set the archive comment (stdin, or `-z<file>`) |
 | `cw` | | Write the archive comment to stdout |
+| `cf` | | Set/remove a per-member comment (RAR4 only; the library rejects it for RAR5, which has no member-comment block) |
 | `p` | | Print a member to stdout |
 | `x` | | Extract with full paths |
 | `e` | | Extract without paths (flat) |

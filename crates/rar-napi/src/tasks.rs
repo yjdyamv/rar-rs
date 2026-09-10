@@ -11,10 +11,10 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
-use crate::options::parse_dict_size;
+use crate::options::{checked_js_integer, parse_dict_size};
 use crate::{
   AppendArchiveOptions, CreateArchiveOptions, CreateResult, EntryInfo, EntryInput,
-  ExtractArchiveOptions, ProgressData,
+  ExtractArchiveOptions, ProgressData, RenameEntry,
 };
 
 /// Maximum per-file size read into memory by the rar-rs library (4 GiB).
@@ -790,8 +790,202 @@ fn entry_infos(archive: &rar_rs::ArchiveReader) -> Vec<EntryInfo> {
       method: e.method(),
       is_dir: e.is_dir(),
       mtime: e.mtime() as f64,
+      crc32: e.crc32(),
+      ctime: e.ctime().map(|(secs, ns)| secs as f64 + ns as f64 / 1e9),
+      atime: e.atime().map(|(secs, ns)| secs as f64 + ns as f64 / 1e9),
+      host_os: e.host_os() as f64,
+      attributes: e.attributes() as f64,
+      comp_version: e.comp_version(),
+      version: e.version().as_str().to_string(),
+      dict_size_bytes: e.dict_size_bytes().map(|bytes| bytes as f64),
+      comment: e.comment().map(|bytes| bytes.to_vec().into()),
+      solid: e.comp_solid(),
     })
     .collect()
+}
+
+/// Open an [`rar_rs::ArchiveEditor`] with the given password, mirroring the
+/// other edit entry points (empty/absent password opens unencrypted).
+fn open_editor(archive_path: &str, password: Option<&str>) -> Result<rar_rs::ArchiveEditor> {
+  match password {
+    Some(pw) if !pw.is_empty() => {
+      rar_rs::ArchiveEditor::open_with_password(archive_path, pw).map_err(to_napi_error)
+    }
+    _ => rar_rs::ArchiveEditor::open(archive_path).map_err(to_napi_error),
+  }
+}
+
+/// Rename members of an archive (like `rar rn`). Each `RenameEntry`
+/// targets the first member whose stored name matches `from` (directory
+/// names expand to their descendants, exactly like the CLI). Returns the
+/// number of members renamed.
+#[napi(ts_return_type = "Promise<number>")]
+pub fn rename_entries(
+  archive_path: String,
+  renames: Vec<RenameEntry>,
+  password: Option<String>,
+  signal: Option<AbortSignal>,
+) -> AsyncTask<RenameEntriesTask> {
+  AsyncTask::with_optional_signal(
+    RenameEntriesTask {
+      archive_path,
+      renames,
+      password,
+      cancel: abort_flag(signal.as_ref()),
+    },
+    signal,
+  )
+}
+
+pub struct RenameEntriesTask {
+  archive_path: String,
+  renames: Vec<RenameEntry>,
+  password: Option<String>,
+  cancel: Option<Arc<AtomicBool>>,
+}
+
+#[napi]
+impl Task for RenameEntriesTask {
+  type Output = u32;
+  type JsValue = u32;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
+    editor.set_cancel_flag(self.cancel.take());
+    // Mirror the CLI `rar rn` name resolution: the first member matching
+    // each `from`, with repeated names skipping already-chosen matches.
+    let mut chosen: Vec<rar_rs::EntryId> = Vec::with_capacity(self.renames.len());
+    let mut ids: Vec<(rar_rs::EntryId, String)> = Vec::with_capacity(self.renames.len());
+    for pair in &self.renames {
+      let from_norm = pair.from.trim_end_matches('/');
+      let id = editor
+        .entries()
+        .find(|entry| {
+          entry.name().trim_end_matches('/') == from_norm && !chosen.contains(&entry.id())
+        })
+        .map(|entry| entry.id())
+        .ok_or_else(|| {
+          to_napi_error(rar_rs::RarError::MemberNotFound {
+            name: pair.from.clone(),
+          })
+        })?;
+      chosen.push(id);
+      ids.push((id, pair.to.clone()));
+    }
+    let renamed = editor.rename_entries(&ids).map_err(to_napi_error)? as u32;
+    Ok(renamed)
+  }
+
+  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output)
+  }
+}
+
+/// Replace the archive comment (`None`/empty removes it, like `rar c`).
+#[napi(ts_return_type = "Promise<void>")]
+pub fn set_comment(
+  archive_path: String,
+  comment: Option<String>,
+  password: Option<String>,
+) -> AsyncTask<SetCommentTask> {
+  AsyncTask::new(SetCommentTask {
+    archive_path,
+    comment,
+    password,
+  })
+}
+
+pub struct SetCommentTask {
+  archive_path: String,
+  comment: Option<String>,
+  password: Option<String>,
+}
+
+#[napi]
+impl Task for SetCommentTask {
+  type Output = ();
+  type JsValue = ();
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
+    let plan =
+      rar_rs::EditPlan::new().set_comment(self.comment.clone().unwrap_or_default().into_bytes());
+    editor.apply(plan).map_err(to_napi_error)?;
+    Ok(())
+  }
+
+  fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+    Ok(())
+  }
+}
+
+/// Rebuild the inline recovery record at `percent` (0..=100, like
+/// `rar rr`).
+#[napi(ts_return_type = "Promise<void>")]
+pub fn set_recovery(
+  archive_path: String,
+  percent: f64,
+  password: Option<String>,
+) -> AsyncTask<SetRecoveryTask> {
+  AsyncTask::new(SetRecoveryTask {
+    archive_path,
+    percent,
+    password,
+  })
+}
+
+pub struct SetRecoveryTask {
+  archive_path: String,
+  percent: f64,
+  password: Option<String>,
+}
+
+#[napi]
+impl Task for SetRecoveryTask {
+  type Output = ();
+  type JsValue = ();
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let percent = checked_js_integer(self.percent, "percent", 0, 100)? as u8;
+    let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
+    let plan = rar_rs::EditPlan::new().set_recovery(percent);
+    editor.apply(plan).map_err(to_napi_error)?;
+    Ok(())
+  }
+
+  fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+    Ok(())
+  }
+}
+
+/// Lock the archive read-only (like `rar k`). Irreversible.
+#[napi(ts_return_type = "Promise<void>")]
+pub fn lock_archive(archive_path: String, password: Option<String>) -> AsyncTask<LockArchiveTask> {
+  AsyncTask::new(LockArchiveTask {
+    archive_path,
+    password,
+  })
+}
+
+pub struct LockArchiveTask {
+  archive_path: String,
+  password: Option<String>,
+}
+
+#[napi]
+impl Task for LockArchiveTask {
+  type Output = ();
+  type JsValue = ();
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
+    editor.lock().map_err(to_napi_error)?;
+    Ok(())
+  }
+
+  fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+    Ok(())
+  }
 }
 
 pub struct ExtractArchiveTask {
