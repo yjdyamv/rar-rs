@@ -17,15 +17,21 @@ pub use tasks::{
 
 #[napi(object)]
 pub struct EntryInput {
-  /// "file" | "dir" | "bytes"
+  /// "file" | "dir" | "bytes" | "redirect"
   pub kind: String,
   /// Filesystem path for "file" and "dir" entries.
   pub path: Option<String>,
   /// Archive entry name. For "file"/"dir" defaults to the basename, for
-  /// "bytes" it is required.
+  /// "bytes" it is required, for "redirect" it is the archive member name.
   pub name: Option<String>,
   /// Byte payload for "bytes" entries.
   pub data: Option<Buffer>,
+  /// Redirect type 1..=5 for "redirect" entries: 1 = Unix symlink,
+  /// 2 = Windows symlink, 3 = Windows junction, 4 = hardlink, 5 = file
+  /// copy. The entry carries no data.
+  pub redir_type: Option<f64>,
+  /// Redirect target archive member name for "redirect" entries.
+  pub target: Option<String>,
 }
 #[napi(object)]
 pub struct CreateArchiveOptions {

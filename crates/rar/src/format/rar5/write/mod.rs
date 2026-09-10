@@ -1131,6 +1131,11 @@ impl RarArchive {
         redir_type: u64,
         target: &str,
     ) -> RarResult<()> {
+        if self.rar4 {
+            return Err(RarError::Unsupported(
+                "redirect members are not supported for RAR4 archives".into(),
+            ));
+        }
         if self.mode != Mode::Write && self.mode != Mode::Append {
             return Err(RarError::Format(
                 "add_redirect requires an archive being written".into(),

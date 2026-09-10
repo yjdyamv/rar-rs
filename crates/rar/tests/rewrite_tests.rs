@@ -1209,6 +1209,27 @@ fn symlink_and_hardlink_redirects_extract() {
     }
 }
 
+/// Redirect members are RAR5-only: the RAR4 writer has no redirect extra
+/// record, and smuggling a RAR5 header into a RAR4 stream would corrupt it.
+#[test]
+fn rar4_rejects_redirect_members() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("rar4_links.rar");
+    let mut rar = ArchiveWriter::create_with(
+        &path,
+        rar_rs::WriterOptions::default().compression(rar_rs::ArchiveVersion::V29),
+    )
+    .unwrap();
+    let opts0 = rar_rs::EntryWriteOptions::new()
+        .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
+    rar.add_bytes("target.txt", b"x", opts0).unwrap();
+    let err = rar.add_redirect("lnk.txt", 5, "target.txt").unwrap_err();
+    assert!(matches!(err, rar_rs::RarError::Unsupported(_)));
+    assert!(err.to_string().contains("redirect"), "got: {err}");
+    let err = rar.finish().unwrap_err();
+    assert!(err.to_string().contains("aborted"), "got: {err}");
+}
+
 /// WinRAR zero-pads volume part numbers to the digit count of the total
 /// volume count (part01..part15). The writer now emits the same padding
 /// for sets of 10+ volumes, and discovery, `.rev` naming and rebuild

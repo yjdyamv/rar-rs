@@ -373,6 +373,64 @@ test('rejects unknown entry kinds', async () => {
   }
 })
 
+test('creates redirect members (file copy) after the data batch', async () => {
+  const dir = tempDir()
+  try {
+    const { extractArchive, listEntries } = await import('../index.js')
+    const out = join(dir, 'links.rar')
+    await createArchive({
+      outPath: out,
+      entries: [
+        { kind: 'bytes', name: 'target.txt', data: Buffer.from('target content') },
+        { kind: 'redirect', name: 'copy.txt', redirType: 5, target: 'target.txt' },
+      ],
+    })
+    const names = await listEntries(out)
+    assert.deepEqual(names.sort(), ['copy.txt', 'target.txt'])
+
+    // File-copy redirects extract as real files on every platform.
+    const dest = join(dir, 'out')
+    await extractArchive(out, { destPath: dest })
+    assert.deepEqual(readFileSync(join(dest, 'target.txt')), Buffer.from('target content'))
+    assert.deepEqual(readFileSync(join(dest, 'copy.txt')), Buffer.from('target content'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('rejects invalid or RAR4-context redirect entries', async () => {
+  const dir = tempDir()
+  try {
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'x.rar'),
+        entries: [{ kind: 'redirect', name: 'a', redirType: 9, target: 't' }],
+      }),
+      /redir_type/,
+    )
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'x.rar'),
+        entries: [{ kind: 'redirect', name: 'a', redirType: 5 }],
+      }),
+      /redirect entry missing `target`/,
+    )
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'x.rar'),
+        format: 'rar4',
+        entries: [
+          { kind: 'bytes', name: 't.txt', data: Buffer.from('x') },
+          { kind: 'redirect', name: 'a', redirType: 5, target: 't.txt' },
+        ],
+      }),
+      /redirect members are not supported for RAR4 archives/,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('appendEntries keeps existing members and listEntries/deleteEntries work', async () => {
   const dir = tempDir()
   try {

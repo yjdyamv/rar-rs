@@ -27,6 +27,8 @@ struct PlannedEntry {
   path: Option<PathBuf>,
   name: String,
   data: Option<Vec<u8>>,
+  redir_type: Option<u64>,
+  target: Option<String>,
 }
 
 pub struct CreateArchiveTask {
@@ -75,6 +77,8 @@ fn plan_entries(entries: &[EntryInput]) -> Result<Vec<PlannedEntry>> {
           name: e.name.clone().unwrap_or_else(|| basename(&path)),
           path: Some(path),
           data: None,
+          redir_type: None,
+          target: None,
         });
       }
       "dir" => {
@@ -94,6 +98,8 @@ fn plan_entries(entries: &[EntryInput]) -> Result<Vec<PlannedEntry>> {
           name: e.name.clone().unwrap_or_else(|| basename(&path)),
           path: Some(path),
           data: None,
+          redir_type: None,
+          target: None,
         });
       }
       "bytes" => {
@@ -115,6 +121,33 @@ fn plan_entries(entries: &[EntryInput]) -> Result<Vec<PlannedEntry>> {
           name,
           path: None,
           data: Some(data),
+          redir_type: None,
+          target: None,
+        });
+      }
+      "redirect" => {
+        let redir_type = checked_js_integer(e.redir_type.unwrap_or(f64::NAN), "redir_type", 1, 5)?;
+        let name = e
+          .name
+          .clone()
+          .ok_or_else(|| Error::new(Status::InvalidArg, "redirect entry missing `name`"))?;
+        let target = e
+          .target
+          .clone()
+          .ok_or_else(|| Error::new(Status::InvalidArg, "redirect entry missing `target`"))?;
+        if name.is_empty() || target.is_empty() {
+          return Err(Error::new(
+            Status::InvalidArg,
+            "redirect entry `name` and `target` must be non-empty",
+          ));
+        }
+        planned.push(PlannedEntry {
+          kind: "redirect".into(),
+          name,
+          path: None,
+          data: None,
+          redir_type: Some(redir_type),
+          target: Some(target),
         });
       }
       other => {
@@ -147,6 +180,8 @@ fn entry_size(e: &PlannedEntry) -> Result<u64> {
     // explicit file entries, so counting the tree again would double-count
     // the progress denominator (and the 32 GiB budget).
     "dir" => Ok(0),
+    // Redirect entries write no payload, only the redirect extra record.
+    "redirect" => Ok(0),
     _ => Ok(0),
   }
 }
@@ -206,10 +241,29 @@ fn write_entries(planned: &[PlannedEntry], level: u8) -> Result<Vec<rar_rs::Writ
           options,
         });
       }
+      // Redirect entries are written after the batch by the caller (they
+      // carry no payload, mirroring the CLI `-ol`/`-oh` ordering).
+      "redirect" => {}
       _ => {}
     }
   }
   Ok(batch)
+}
+
+/// Extract the redirect entries (name, redir type, target) from a plan, in
+/// order, for `ArchiveWriter::add_redirect` after the data batch.
+fn planned_redirects(planned: &[PlannedEntry]) -> Vec<(String, u64, String)> {
+  planned
+    .iter()
+    .filter(|e| e.kind == "redirect")
+    .map(|e| {
+      (
+        e.name.clone(),
+        e.redir_type.expect("redirect type"),
+        e.target.clone().expect("redirect target"),
+      )
+    })
+    .collect()
 }
 
 /// Add the members through the typed writer and commit with `finish()`,
@@ -220,6 +274,7 @@ fn write_entries(planned: &[PlannedEntry], level: u8) -> Result<Vec<rar_rs::Writ
 fn write_transaction(
   mut writer: rar_rs::ArchiveWriter,
   batch: &[rar_rs::WriteEntry<'_>],
+  redirects: &[(String, u64, String)],
   total_bytes: u64,
   progress: Option<ThreadsafeFunction<ProgressData, ()>>,
 ) -> Result<rar_rs::WriteReport> {
@@ -242,6 +297,13 @@ fn write_transaction(
       .map_err(to_napi_error)?;
   }
   writer.add_batch(batch).map_err(to_napi_error)?;
+  // Redirect members are recorded after their data members (the reference
+  // target name is what matters, not the archive order).
+  for (name, redir_type, target) in redirects {
+    writer
+      .add_redirect(name, *redir_type, target)
+      .map_err(to_napi_error)?;
+  }
   let report = writer.finish().map_err(to_napi_error)?;
   if let Some(tsfn) = terminal {
     // Terminal 100% event after the archive is fully closed (including
@@ -299,6 +361,7 @@ impl Task for CreateArchiveTask {
       ));
     }
     let level = self.opts.level()?;
+    let redirected = planned_redirects(&planned);
     let batch = write_entries(&planned, level)?;
     let out = Path::new(&self.opts.out_path);
     if let Some(parent) = out.parent() {
@@ -315,7 +378,13 @@ impl Task for CreateArchiveTask {
       .set_cancel_flag(self.cancel.take())
       .map_err(to_napi_error)?;
 
-    let report = write_transaction(writer, &batch, total_bytes, self.progress.take())?;
+    let report = write_transaction(
+      writer,
+      &batch,
+      &redirected,
+      total_bytes,
+      self.progress.take(),
+    )?;
 
     Ok(CreateResult {
       files: report_files(report),
@@ -483,6 +552,7 @@ impl Task for AppendArchiveTask {
     })?;
 
     let level = self.opts.level()?;
+    let redirected = planned_redirects(&planned);
     let batch = write_entries(&planned, level)?;
     let mut append_opts = rar_rs::AppendOptions::new();
     if let Some(pw) = self.opts.password.as_deref().filter(|pw| !pw.is_empty()) {
@@ -507,7 +577,13 @@ impl Task for AppendArchiveTask {
       .set_cancel_flag(self.cancel.take())
       .map_err(to_napi_error)?;
 
-    let report = write_transaction(writer, &batch, total_bytes, self.progress.take())?;
+    let report = write_transaction(
+      writer,
+      &batch,
+      &redirected,
+      total_bytes,
+      self.progress.take(),
+    )?;
 
     Ok(CreateResult {
       files: report_files(report),

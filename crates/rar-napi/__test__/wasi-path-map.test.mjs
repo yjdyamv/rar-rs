@@ -138,6 +138,34 @@ test('rebuilt volume paths map back to the host in original order', () => {
   )
 })
 
+test('create/append entry mappers pass redirect entries through untouched', () => {
+  const redirect = {
+    kind: 'redirect',
+    name: 'lnk.txt',
+    redirType: 5,
+    target: 'target.txt',
+  }
+  // Redirect entries carry no host path, so the win32 mapper must not
+  // touch them (only `path` string fields are translated).
+  assert.deepEqual(
+    mapCreateArchiveOptions(
+      {
+        outPath: 'C:\\a.rar',
+        entries: [{ kind: 'bytes', name: 't.txt', data: [1] }, redirect],
+      },
+      'win32',
+    ),
+    {
+      outPath: '/C:/a.rar',
+      entries: [{ kind: 'bytes', name: 't.txt', data: [1] }, redirect],
+    },
+  )
+  assert.deepEqual(
+    mapAppendOptions({ archivePath: 'C:\\a.rar', entries: [redirect] }, 'win32'),
+    { archivePath: '/C:/a.rar', entries: [redirect] },
+  )
+})
+
 test('extractMember args map archive, dest dir, and preserve name/password/signal', () => {
   const signal = new AbortController().signal
   assert.deepEqual(
