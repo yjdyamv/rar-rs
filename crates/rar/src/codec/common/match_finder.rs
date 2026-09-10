@@ -304,6 +304,7 @@ impl LongRange {
     }
 
     /// Maximum match distance this table was built for.
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
     pub(crate) fn window(&self) -> usize {
         self.window
     }

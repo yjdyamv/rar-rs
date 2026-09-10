@@ -16,9 +16,10 @@
 //!   * **solid baseline** — `solid` column vs `archive`, the starting point
 //!     for the solid MT lever (solid is serial today).
 //!
-//! `codec` runs the raw codec in memory (`rar_rs::encode`); `archive` runs the
-//! full create + `add_bytes` + `finish` path; `solid` is the same data split
-//! into 4 members with `WriterOptions::solid_mode`.
+//! `codec` runs the raw codec in memory (`rar_rs::encode`, no filters);
+//! `archive` runs the full create + `add_file` on prepared spill inputs
+//! (delta/x86 filters active, as a real CLI `rar a` run) + `finish`; `solid`
+//! is the same data split into 4 members with `WriterOptions::solid_mode`.
 //!
 //! Run:
 //!   cargo run --release --example perfbench [--size-mb N] [--level L]
@@ -299,8 +300,20 @@ fn time_codec(data: &[u8], level: u8, dict_override: Option<u8>) -> (f64, usize)
     (t.elapsed().as_secs_f64() * 1000.0, packed.len())
 }
 
-/// Full archive creation for one member.
-fn time_archive(dir: &Path, tag: &str, data: &[u8], level: u8, solid: bool) -> (f64, u64) {
+/// Full archive creation for one member set. `inputs` maps archive member
+/// names to spill files written by [`prepare_inputs`]; the archive is created
+/// with `add_file` semantics (the automatic delta/x86 filters run and are
+/// kept when they beat plain LZSS), so the `archive` column measures the real
+/// product path — not the unfiltered `add_bytes` shortcut. The spill-file
+/// write happens before the clock starts; archive *reading* of the prepared
+/// input is part of the measured cost, exactly as a real `rar a` run.
+fn time_archive(
+    dir: &Path,
+    tag: &str,
+    inputs: &[(String, PathBuf)],
+    level: u8,
+    solid: bool,
+) -> (f64, u64) {
     let path = dir.join(format!("perfbench-{tag}.rar"));
     let t = Instant::now();
     {
@@ -316,13 +329,8 @@ fn time_archive(dir: &Path, tag: &str, data: &[u8], level: u8, solid: bool) -> (
         .expect("create");
         let opts = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(level).expect("level"));
-        if solid {
-            let chunk = (data.len() / SOLID_MEMBERS).max(1);
-            for (i, part) in data.chunks(chunk).enumerate() {
-                ar.add_bytes(&format!("m{i}.bin"), part, opts).expect("add");
-            }
-        } else {
-            ar.add_bytes("data.bin", data, opts).expect("add");
+        for (name, src) in inputs {
+            ar.add_path_as(src, name, opts).expect("add");
         }
         ar.finish().expect("close");
     }
@@ -330,6 +338,17 @@ fn time_archive(dir: &Path, tag: &str, data: &[u8], level: u8, solid: bool) -> (
     let packed = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let _ = std::fs::remove_file(&path);
     (ms, packed)
+}
+
+/// Write `data` to a spill file under `dir`, returning `(arcname, path)`.
+/// Called once per corpus (outside the timed window); repeated archive passes
+/// then re-read the same prepared input, matching a real CLI run.
+fn prepare_input(dir: &Path, sub: &str, arcname: &str, data: &[u8]) -> (String, PathBuf) {
+    let subdir = dir.join(format!("input-{sub}"));
+    std::fs::create_dir_all(&subdir).expect("input dir");
+    let path = subdir.join(format!("{arcname}.bin"));
+    std::fs::write(&path, data).expect("write input");
+    (arcname.to_string(), path)
 }
 
 fn crc32(data: &[u8]) -> u32 {
@@ -353,15 +372,37 @@ fn run_corpus(
     let mut solid = Vec::with_capacity(repeats);
     let mut packed = 0usize;
 
+    // Prepare the spill inputs once; the archive column measures add_file on
+    // these (filters active), re-reading the same files across repeats.
+    let input_one = prepare_input(dir, name, "data", data);
+    let input_members: Vec<(String, PathBuf)> = if with_solid {
+        let chunk = (data.len() / SOLID_MEMBERS).max(1);
+        data.chunks(chunk)
+            .enumerate()
+            .map(|(i, part)| prepare_input(dir, name, &format!("m{i}"), part))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     for _ in 0..repeats {
-        let (ms, n) = time_codec(data, level, dict_override);
+        let (ms, _n) = time_codec(data, level, dict_override);
         codec.push(ms);
-        packed = n;
-        archive.push(time_archive(dir, &format!("{name}-s"), data, level, false).0);
+        let (ms_a, n_a) = time_archive(
+            dir,
+            &format!("{name}-s"),
+            std::slice::from_ref(&input_one),
+            level,
+            false,
+        );
+        archive.push(ms_a);
+        packed = n_a as usize;
         if with_solid {
-            solid.push(time_archive(dir, &format!("{name}-d"), data, level, true).0);
+            solid.push(time_archive(dir, &format!("{name}-d"), &input_members, level, true).0);
         }
     }
+
+    let _ = std::fs::remove_dir_all(dir.join(format!("input-{name}")));
 
     let c = stats(codec);
     let a = stats(archive);
@@ -494,8 +535,9 @@ fn main() {
     }
 
     println!(
-        "\n# codec  = raw rar_rs::encode (parse + coding only)\n\
-         # archive = full create + add_bytes + close (RAR5 v50)\n\
+        "\n# codec  = raw rar_rs::encode (parse + coding only, no filters)\n\
+         # archive = full create + add_file on spill inputs (delta/x86 filters\n\
+         #           active, kept when they beat plain LZSS) + close (RAR5 v50)\n\
          # solid   = same data split into {SOLID_MEMBERS} members, solid_mode(Continuous)\n\
          # delta   = archive.med - codec.med. NOT pure I/O overhead: the archive path also\n\
          #           (a) spends time on filter candidate probing the raw codec may skip and\n\
