@@ -5,5 +5,6 @@
 pub(crate) mod bitstream;
 pub(crate) mod filters;
 pub(crate) mod huffman;
+pub(crate) mod incompressible;
 pub(crate) mod match_finder;
 pub(crate) mod window;

@@ -157,8 +157,7 @@ pub struct EncoderState {
     chain_parts: Option<(Vec<i32>, Vec<i32>)>,
 }
 
-impl EncoderState {
-    /// Reset the solid chain. Call after any member that does not
+impl EncoderState {    /// Reset the solid chain. Call after any member that does not
     /// participate in the LZ window (directories, STORE files, empty
     /// files).
     pub fn reset(&mut self) {
@@ -171,6 +170,36 @@ impl EncoderState {
         self.tree = None;
         self.combined_len = 0;
         self.chain_parts = None;
+    }
+
+    /// Start a new member on this state.
+    ///
+    /// The persistent tree stores links as offsets into the *frame* it was
+    /// built for (`tail + chunk`), so it only survives inside one frame
+    /// sequence: the next member slides that frame away, and rebasing assumes
+    /// a continuation that does not hold across a member boundary (measured:
+    /// the third member of a solid chain silently stopped finding matches at
+    /// all). Dropping it costs one re-seed per member and nothing else — the
+    /// window tail, repeat cache and long-range history still carry over.
+    pub(crate) fn begin_member(&mut self) {
+        self.tree = None;
+        self.combined_len = 0;
+    }
+
+    /// Whether this state carries no history yet — i.e. nothing precedes
+    /// the data about to be encoded. Only then may a call STORE the data
+    /// wholesale: once a window exists, skipping the encode would silently
+    /// drop members that could have matched into it.
+    pub(crate) fn is_fresh(&self) -> bool {
+        self.tail.is_empty()
+            && self.combined_len == 0
+            && self.tree.is_none()
+            && self.dist_cache == [0; DIST_CACHE_SIZE]
+            && self.last_length == 0
+            && self
+                .long_range
+                .as_ref()
+                .map_or(true, |lr| lr.total_pushed() == 0)
     }
 }
 
@@ -554,15 +583,27 @@ pub(crate) fn encode_chunked_mt_with_progress(
 
     // Shared long-range table over entry history plus this window; built
     // once, read-only afterwards (workers query with absolute anchors).
-    let entry_hist = seed
-        .long_range
-        .as_ref()
-        .map(|l| l.hist_bytes().to_vec())
-        .unwrap_or_default();
-    let mut lr_shared = match_finder::LongRange::new(dict_size);
-    lr_shared.push(&entry_hist);
+    // Take over the existing history instead of copying it: each wave used
+    // to duplicate up to 128 MiB of retained bytes and re-index them before
+    // every member of a solid chain, which cost more than the parallel
+    // encode saved. Only a different dictionary forces a rebuild (the
+    // window bounds every candidate, so a stale one would be wrong).
+    let mut lr_shared = match seed.long_range.take() {
+        Some(lr) if lr.window() == dict_size => lr,
+        Some(lr) => {
+            let mut rebuilt = match_finder::LongRange::new(dict_size);
+            rebuilt.push(lr.hist_bytes());
+            rebuilt
+        }
+        None => match_finder::LongRange::new(dict_size),
+    };
+    // Absolute stream position of `data[0]`. It is the *pushed* total, not
+    // the retained history length: once the sampled window has slid, `hist`
+    // starts at `hist_base() > 0` and the two differ by exactly that much —
+    // using `hist_len()` here anchors every worker query short and silently
+    // drops long-range matches later in a chain.
+    let entry_len = lr_shared.total_pushed();
     lr_shared.push(data);
-    let entry_len = entry_hist.len();
     let seed_tail = std::mem::take(&mut seed.tail);
 
     // Slice boundaries: one fixed chunk per slice keeps the near-window
@@ -633,6 +674,9 @@ pub(crate) fn encode_chunked_mt_with_progress(
                             variant,
                             (k == 0).then_some(lead_symbols).flatten(),
                             state,
+                            // Only the first slice sees chain history as its
+                            // lookbehind; later slices look into this window.
+                            k == 0 && !tail_ref.is_empty(),
                         );
                         results_ref.lock().unwrap()[i] = Some(blocks);
                     });
@@ -668,6 +712,13 @@ pub(crate) fn encode_chunked_mt_with_progress(
     seed.dist_cache = [0u32; DIST_CACHE_SIZE];
     seed.last_length = 0;
     seed.long_range = Some(lr_shared);
+    // Worker slices are independent frames, so the sequential path's
+    // persistent tree must not survive a window the MT path consumed: its
+    // links are frame offsets, and a later sequential member would rebase
+    // them against the wrong history (the silent corruption this project
+    // already fixed once for cross-chunk growth).
+    seed.tree = None;
+    seed.combined_len = 0;
     dump_collect_stats("mt", _collect_t0);
     Ok(output)
 }
@@ -729,6 +780,15 @@ fn encode_mt_slice(
     // symbol stream so they precede all output (member-relative positions).
     lead_symbols: Option<&[Symbol]>,
     state: &mut EncoderState,
+    // Seed the lookbehind even when its sampled windows look random. The
+    // probe above only measures whether the tail repeats *inside itself*,
+    // which says nothing about how the slice relates to bytes that came from
+    // an earlier member of a solid chain (or an earlier window). Skipping the
+    // seed there leaves a hole: the near finder never sees those positions
+    // and the long-range table rejects the same distances, because its
+    // `min_dist` assumes the near finder covered them — cross-member
+    // duplicates then silently stop compressing.
+    force_seed_tail: bool,
 ) -> Vec<u8> {
     // Near-window context: the closest bytes before this slice, seeded
     // with the entry tail when the slice starts at the buffer head.
@@ -768,7 +828,11 @@ fn encode_mt_slice(
     // the tail has no repeated windows anyway (no match into it would be
     // found), so the parse inserts the slice itself and queries the shared
     // long-range table instead.
-    let seed_tail = !mt_tail_is_incompressible(&state.tail);
+    let seed_tail = if force_seed_tail {
+        true
+    } else {
+        !mt_tail_is_incompressible(&state.tail)
+    };
     // Low-step parse (MT-only): hash-chain greedy+lazy over the same
     // combined tail+slice frame the optimal parse would build. The
     // shared long-range table stays read-only, queried at the slice's

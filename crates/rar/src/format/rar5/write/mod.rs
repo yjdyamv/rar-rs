@@ -231,6 +231,31 @@ impl RarArchive {
         }
     }
 
+    /// Try the automatic delta (multimedia) and then the x86 (E8/E8E9)
+    /// filter, returning the packed bytes of whichever the scan found worth
+    /// filtering — or `None` when plain LZSS should handle the member.
+    fn try_auto_filters(
+        &mut self,
+        data: &[u8],
+        method: u8,
+        dsl: u8,
+        dict_bytes: Option<u64>,
+    ) -> RarResult<Option<Vec<u8>>> {
+        let variant = crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
+        let threads = self.effective_threads();
+        let cancel = self.cancel.as_deref();
+        Ok(
+            match lzss_huff::encode_with_auto_delta_filter(
+                data, method, dsl, variant, threads, cancel,
+            )? {
+                Some(f) => Some(f),
+                None => {
+                    lzss_huff::encode_with_auto_x86_filter(data, method, dsl, variant, threads, cancel)?
+                }
+            },
+        )
+    }
+
     fn add_file(&mut self, path: &Path, arcname: Option<&str>, level: u8) -> RarResult<()> {
         self.check_cancel()?;
         if self.rar4 {
@@ -366,6 +391,19 @@ impl RarArchive {
         let plain_crc = crc_hasher.finalize();
         let plain_blake = blake_hasher.map(|h| h.finalize());
 
+        // WinRAR `-se`: reset the solid statistics when the extension changes.
+        self.maybe_reset_solid_for_extension(&name);
+        let chain_solid = self.write_ctx().solid_mode && self.write_ctx().encoder_state.is_some();
+        self.write_ctx_mut()
+            .encoder_state
+            .get_or_insert_with(Default::default);
+        // Each member starts its own frame; see `EncoderState::begin_member`.
+        self.write_ctx_mut()
+            .encoder_state
+            .as_mut()
+            .expect("encoder state seeded")
+            .begin_member();
+
         // Try the automatic delta (multimedia) filter first, then the x86
         // (E8/E8E9) filter. Ordering matters: real x86 code is not
         // multi-channel-correlated, so the cheap delta scan returns `None`
@@ -376,24 +414,15 @@ impl RarArchive {
         // can steal a member from the better transform or from plain LZSS.
         // The caller's `< file_size` guard only accepts a filter when it also
         // beats STORE.
-        let cancel_ref = self.cancel.as_deref();
-        let filtered = match lzss_huff::encode_with_auto_delta_filter(
-            &whole,
-            method,
-            dsl,
-            crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-            self.effective_threads(),
-            cancel_ref,
-        )? {
-            Some(f) => Some(f),
-            None => lzss_huff::encode_with_auto_x86_filter(
-                &whole,
-                method,
-                dsl,
-                crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                self.effective_threads(),
-                cancel_ref,
-            )?,
+        //
+        // A filtered member cannot share the LZ window (see above), so a
+        // solid archive never tries one: the first member would leave the
+        // chain immediately and every later member would follow it, leaving
+        // `-s` to buy nothing.
+        let filtered = if self.write_ctx().solid_mode {
+            None
+        } else {
+            self.try_auto_filters(&whole, method, dsl, dict_bytes)?
         };
         if let Some(filtered) = filtered
             && (filtered.len() as u64) < file_size
@@ -441,19 +470,15 @@ impl RarArchive {
         // members). The persistent state also carries the long-range match
         // history across chunk boundaries (WinRAR's `-mcl` long range
         // search).
-        // WinRAR `-se`: reset the solid statistics when the extension changes.
-        self.maybe_reset_solid_for_extension(&name);
-        let chain_solid = self.write_ctx().solid_mode && self.write_ctx().encoder_state.is_some();
-        self.write_ctx_mut()
-            .encoder_state
-            .get_or_insert_with(Default::default);
-
-        // Mid-size members (2-64 MiB) get the same windowed MT encode as the
-        // streaming path, matching WinRAR's per-file parallelization; the
-        // measured ratio divergence from the sequential chunk loop on the
-        // corpus is within ±0.3% (the repeat-distance cache resets per
-        // slice). Filter members stay sequential (the transform runs over
-        // the whole buffer), as do solid chains.
+        // Mid-size members (>= MT_MIN) get the same windowed MT encode as
+        // the streaming path, matching WinRAR's per-file parallelization;
+        // the measured ratio divergence from the sequential chunk loop on
+        // the corpus is within ±0.3% (the repeat-distance cache resets per
+        // slice). Solid chains take it too: the window still carries over
+        // through the shared tail and long-range table, so only the parse
+        // tier differs from the sequential chain — the same documented MT
+        // divergence, now visible inside a chain as well. Filter members
+        // stay sequential (the transform runs over the whole buffer).
         #[cfg(feature = "parallel")]
         const MT_MIN: usize = 3 * crate::codec::DEFAULT_CHUNK_SIZE;
         #[cfg(feature = "parallel")]
@@ -464,7 +489,7 @@ impl RarArchive {
         let use_mt = {
             #[cfg(feature = "parallel")]
             {
-                !chain_solid && threads > 1 && whole.len() >= MT_MIN
+                threads > 1 && whole.len() >= MT_MIN
             }
             #[cfg(not(feature = "parallel"))]
             {
@@ -502,6 +527,10 @@ impl RarArchive {
                         state,
                         is_final: bytes_read >= whole.len() as u64,
                         variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                        // `add_path` already probed the file before reading
+                        // it; re-probing here would sample-encode every
+                        // member twice.
+                        skip_incompressible_probe: true,
                         ..lzss_huff::EncodeOptions::new(method, dsl)
                     },
                 )?;
@@ -1442,6 +1471,8 @@ impl RarArchive {
                     is_final: true,
                     variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
                     progress,
+                    // Already probed above (`sample_is_incompressible`).
+                    skip_incompressible_probe: true,
                     ..lzss_huff::EncodeOptions::new(method, dsl)
                 },
             )?;
@@ -2997,6 +3028,12 @@ impl RarArchive {
         self.write_ctx_mut()
             .encoder_state
             .get_or_insert_with(Default::default);
+        // Each member starts its own frame; see `EncoderState::begin_member`.
+        self.write_ctx_mut()
+            .encoder_state
+            .as_mut()
+            .expect("encoder state seeded")
+            .begin_member();
 
         let mut crc_hasher = crc32fast::Hasher::new();
         let mut blake_hasher = if self.write_ctx().blake2 {
@@ -3030,7 +3067,6 @@ impl RarArchive {
             fn flush_window(
                 work: &mut Vec<u8>,
                 is_final: bool,
-                chain_solid: bool,
                 threads: usize,
                 method: u8,
                 dsl: u8,
@@ -3057,11 +3093,15 @@ impl RarArchive {
                         .collect()
                 });
                 #[cfg(not(feature = "parallel"))]
-                let _ = (chain_solid, threads);
+                let _ = threads;
                 #[cfg(feature = "parallel")]
                 const MT_MIN: usize = 3 * crate::codec::DEFAULT_CHUNK_SIZE;
+                // Solid windows take the MT path as well: the shared state
+                // still carries the previous window's tail and long-range
+                // table into the parallel slices, so the chain survives —
+                // only the parse tier (documented MT divergence) differs.
                 #[cfg(feature = "parallel")]
-                if !chain_solid && work.len() >= MT_MIN && threads > 1 {
+                if work.len() >= MT_MIN && threads > 1 {
                     let packed = crate::codec::lzss_huff::encode_chunked_mt_with_progress(
                         work,
                         method,
@@ -3111,6 +3151,7 @@ impl RarArchive {
                                 variant: crate::version::ArchiveVersion::from_v70(
                                     dict_bytes.is_some(),
                                 ),
+                                skip_incompressible_probe: true,
                                 ..lzss_huff::EncodeOptions::new(method, dsl)
                             },
                         )?
@@ -3176,7 +3217,6 @@ impl RarArchive {
                     flush_window(
                         &mut work,
                         eof,
-                        chain_solid,
                         threads,
                         method,
                         dsl,
