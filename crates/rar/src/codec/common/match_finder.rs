@@ -295,7 +295,17 @@ impl LongRange {
             return;
         }
         if self.hist.len() + chunk.len() > self.max_hist {
-            let drop = (self.hist.len() + chunk.len() - self.max_hist / 2).min(self.hist.len());
+            // Keep the full `max_hist` window rather than halving it. The
+            // near finder (tail + chunk) already covers distances up to
+            // `near_max`; this table must cover everything beyond that, up to
+            // the dictionary window. If it only kept `max_hist/2`, its whole
+            // retained history would sit inside the near finder's reach, while
+            // its *minimum* candidate distance (`near_max + 1`) would fall
+            // short of that history — so it could never return a match. That
+            // left the third member of a solid chain (whose only references to
+            // the previous member sit near the dictionary edge) unable to chain
+            // at all.
+            let drop = (self.hist.len() + chunk.len() - self.max_hist).min(self.hist.len());
             self.hist.drain(0..drop);
             self.rebuild_table();
         }
@@ -327,6 +337,11 @@ impl LongRange {
     /// history end).
     pub(crate) fn total_pushed(&self) -> usize {
         self.total_pushed
+    }
+
+    /// Maximum match distance this table was built for.
+    pub(crate) fn window(&self) -> usize {
+        self.window
     }
 
     /// Read-only view of the retained history bytes (callers seed a fresh

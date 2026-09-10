@@ -176,6 +176,307 @@ mod mt_tests {
         assert_eq!(out, full);
     }
 
+    /// Two members that share content: `second` opens with a verbatim copy of
+    /// `first`'s last 512 KiB and continues with fresh incompressible bytes.
+    /// Both halves are uncompressible on their own, so an encoder that really
+    /// keeps the window across the member boundary collapses the copied half
+    /// into one long match while an independent member has to emit it raw.
+    fn shared_pair() -> (Vec<u8>, Vec<u8>) {
+        let borrow = 512 * 1024;
+        let first = prng_block(3 * 1024 * 1024, 4242);
+        let mut second = first[first.len() - borrow..].to_vec();
+        second.extend(prng_block(borrow, 99));
+        (first, second)
+    }
+
+    /// Reproduces the e2e3 corpus: three *identical* members, each
+    /// `[shared 1 MiB][unique 11 MiB incompressible][shared 1 MiB]`. At 13 MiB a
+    /// member is larger than the near finder's reach (8 MiB tail + 4 MiB chunk =
+    /// 12 MiB), so the third member's only reference to the previous member sits
+    /// at `~|member|` (here 13 MiB) — squarely in the long-range table's slot.
+    /// That table must retain the full window; if it drops to half (its old
+    /// behaviour) the third member loses the reference and stops chaining, falling
+    /// back to re-compressing the whole member independently.
+    #[test]
+    fn sequential_solid_chain_random_shared_blocks() {
+        const LOG: u8 = 7; // 16 MiB dict -> 8 MiB near-finder window
+        let shared = prng_block(1 * 1024 * 1024, 11);
+        let mk = |seed: u64| {
+            let mut m = shared.clone();
+            m.extend(prng_block(11 * 1024 * 1024, seed));
+            m.extend(&shared);
+            m
+        };
+        // Identical members (e2e3 copies one buffer three times).
+        let members = vec![mk(1), mk(1), mk(1)];
+        let mut st = EncoderState::default();
+        let mut packed = Vec::new();
+        let last = members.len() - 1;
+        let mut sizes = Vec::new();
+        for (i, member) in members.iter().enumerate() {
+            st.begin_member();
+            let out = encode_chunked(
+                member,
+                EncodeOptions {
+                    chunk_size: DEFAULT_CHUNK_SIZE,
+                    state: Some(&mut st),
+                    is_final: i == last,
+                    variant: ArchiveVersion::V50,
+                    ..EncodeOptions::new(3, LOG)
+                },
+            )
+            .unwrap();
+            sizes.push(out.len());
+            packed.extend(out);
+        }
+        println!("serial chain member sizes: {sizes:?}");
+
+        let mut full = Vec::new();
+        for m in &members {
+            full.extend(m);
+        }
+        let out =
+            decode_standalone(&packed, full.len() as u64, LOG, None, ArchiveVersion::V50).unwrap();
+        assert_eq!(out, full);
+        // Every member after the first is one copy of the previous member, so a
+        // working chain collapses it to a few dozen KiB (just the copy/flag
+        // overhead). The long-range table must retain the full window to reach
+        // across `|member|`; if it sheds half of it, the third member can no
+        // longer reference the previous member and falls back to re-compressing
+        // the whole ~13 MiB member independently (~5 MiB).
+        assert!(
+            sizes[1] < 256 * 1024,
+            "2nd member lost the window: {} bytes",
+            sizes[1]
+        );
+        assert!(
+            sizes[2] < 256 * 1024,
+            "3rd member lost the window: {} bytes",
+            sizes[2]
+        );
+    }
+
+    /// Simulates exactly what `add_file` does: chunk the member *externally*
+    /// and call `encode_chunked` once per chunk (with `skip_incompressible_probe`
+    /// set, as the write path does), instead of once per whole member. If the
+    /// chain breaks on member three here too, the bug is in how the state is
+    /// carried across those repeated calls.
+    #[test]
+    fn cli_like_external_chunking_serial_chain() {
+        const LOG: u8 = 7;
+        let shared = prng_block(2 * 1024 * 1024, 11);
+        let mk = |seed: u64| {
+            let mut m = shared.clone();
+            m.extend(prng_block(10 * 1024 * 1024, seed));
+            m.extend(&shared);
+            m
+        };
+        let members = vec![mk(1), mk(2), mk(3)];
+        let mut st = EncoderState::default();
+        let mut packed = Vec::new();
+        let mut sizes = Vec::new();
+        for (_i, member) in members.iter().enumerate() {
+            st.begin_member();
+            let mut bytes_read = 0u64;
+            let mut member_packed = Vec::new();
+            for chunk in member.chunks(DEFAULT_CHUNK_SIZE) {
+                bytes_read += chunk.len() as u64;
+                let out = encode_chunked(
+                    chunk,
+                    EncodeOptions {
+                        chunk_size: DEFAULT_CHUNK_SIZE,
+                        state: Some(&mut st),
+                        is_final: bytes_read >= member.len() as u64,
+                        variant: ArchiveVersion::V50,
+                        skip_incompressible_probe: true,
+                        ..EncodeOptions::new(3, LOG)
+                    },
+                )
+                .unwrap();
+                member_packed.extend(out);
+            }
+            sizes.push(member_packed.len());
+            packed.extend(member_packed);
+        }
+        println!("cli-like external-chunk sizes: {sizes:?}");
+        // External chunking yields concatenated per-chunk streams; the decoder
+        // keeps state across them, so the whole member still decodes — but
+        // `decode_standalone` treats the concatenation as a single block
+        // stream and fails here. We only assert on the compression ratio,
+        // which is what the solid chain is about.
+        assert!(
+            sizes[2] + 256 * 1024 < sizes[0],
+            "3rd member lost the window (cli-like chunking): {} vs {}",
+            sizes[2],
+            sizes[0]
+        );
+    }
+
+    /// A solid chain whose members are all MT-encoded: the seed state must
+    /// carry the window from one `encode_chunked_mt` call into the next
+    /// (tail + long-range table), not just within one window.
+    #[test]
+    fn solid_members_share_the_window_through_mt() {
+        const LOG: u8 = 6; // 8 MiB window: covers all of `first` as lookbehind
+        const BORROW: usize = 512 * 1024;
+        let borrow_margin = BORROW / 2;
+        let (first, second) = shared_pair();
+        let mut st = EncoderState::default();
+        let mut packed = encode_chunked_mt(
+            &first,
+            3,
+            LOG,
+            DEFAULT_CHUNK_SIZE,
+            &mut st,
+            4,
+            false,
+            ArchiveVersion::V50,
+        );
+        let chained = encode_chunked_mt(
+            &second,
+            3,
+            LOG,
+            DEFAULT_CHUNK_SIZE,
+            &mut st,
+            4,
+            true,
+            ArchiveVersion::V50,
+        );
+        // The second member must actually reach back into the first: an
+        // independent member (fresh window) cannot find those matches.
+        let alone = encode_chunked_mt(
+            &second,
+            3,
+            LOG,
+            DEFAULT_CHUNK_SIZE,
+            &mut EncoderState::default(),
+            4,
+            true,
+            ArchiveVersion::V50,
+        );
+        assert!(
+            chained.len() + borrow_margin < alone.len(),
+            "second member did not share the window: chained {} vs alone {}",
+            chained.len(),
+            alone.len()
+        );
+        packed.extend(chained);
+
+        let mut full = first;
+        full.extend(&second);
+        let out = decode_standalone(&packed, full.len() as u64, LOG, None, ArchiveVersion::V50)
+            .unwrap();
+        assert_eq!(out, full);
+    }
+
+    /// A chain may switch parse tiers mid-way (only members above the write
+    /// path's size threshold go MT, and STORE/small members stay
+    /// sequential). Both orders must decode: the MT window leaves the seed's
+    /// persistent tree keyed to a discarded frame, which the sequential
+    /// member would otherwise rebase against the wrong history.
+    #[test]
+    fn chain_survives_switching_between_mt_and_sequential() {
+        const LOG: u8 = 6;
+        let (first, second) = shared_pair();
+        let mut full = first.clone();
+        full.extend(&second);
+
+        for mt_first in [true, false] {
+            let mut st = EncoderState::default();
+            let mut packed = Vec::new();
+            for (i, member) in [&first, &second].iter().enumerate() {
+                let is_final = i == 1;
+                let mt = if mt_first { i == 0 } else { i == 1 };
+                if mt {
+                    packed.extend(encode_chunked_mt(
+                        member,
+                        3,
+                        LOG,
+                        DEFAULT_CHUNK_SIZE,
+                        &mut st,
+                        4,
+                        is_final,
+                        ArchiveVersion::V50,
+                    ));
+                } else {
+                    packed.extend(
+                        encode_chunked(
+                            member,
+                            EncodeOptions {
+                                chunk_size: DEFAULT_CHUNK_SIZE,
+                                state: Some(&mut st),
+                                is_final,
+                                variant: ArchiveVersion::V50,
+                                ..EncodeOptions::new(3, LOG)
+                            },
+                        )
+                        .unwrap(),
+                    );
+                }
+            }
+            let out =
+                decode_standalone(&packed, full.len() as u64, LOG, None, ArchiveVersion::V50)
+                    .unwrap();
+            assert_eq!(out, full, "mt_first={mt_first}");
+        }
+    }
+
+    /// Sequential solid chain, three members deep: the second member must
+    /// match into the first, and — the case that used to regress — so must
+    /// the third. Members share one incompressible block, so anything that
+    /// loses the window shows up immediately as a ~-sized member.
+    #[test]
+    fn sequential_chain_keeps_matching_every_member() {
+        const LOG: u8 = 5; // 4 MiB window, comfortably past one member
+        let shared = prng_block(512 * 1024, 77);
+        let filler: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let members: Vec<Vec<u8>> = (0..3)
+            .map(|_| {
+                let mut m = shared.clone();
+                m.extend_from_slice(&filler);
+                m
+            })
+            .collect();
+
+        let mut st = EncoderState::default();
+        let mut packed = Vec::new();
+        let mut sizes = Vec::new();
+        let last = members.len() - 1;
+        for (i, member) in members.iter().enumerate() {
+            st.begin_member();
+            let out = encode_chunked(
+                member,
+                EncodeOptions {
+                    chunk_size: DEFAULT_CHUNK_SIZE,
+                    state: Some(&mut st),
+                    is_final: i == last,
+                    ..EncodeOptions::new(3, LOG)
+                },
+            )
+            .unwrap();
+            sizes.push(out.len());
+            packed.extend(out);
+        }
+        println!("sequential chain member sizes: {sizes:?}");
+
+        let mut full = Vec::new();
+        for m in &members {
+            full.extend(m);
+        }
+        let out = decode_standalone(&packed, full.len() as u64, LOG, None, ArchiveVersion::V50)
+            .unwrap();
+        assert_eq!(out, full);
+        // Every member after the first is one copy of the shared block plus
+        // its own filler; losing the window costs the whole shared block.
+        for (i, size) in sizes.iter().enumerate().skip(1) {
+            assert!(
+                *size + 256 * 1024 < sizes[0],
+                "member {i} lost the shared window: {size} vs {}",
+                sizes[0]
+            );
+        }
+    }
+
     #[test]
     fn deterministic_across_runs() {
         let data = mixed_data();
