@@ -46,3 +46,32 @@ Version history predating this file remains available in Git history and
 - Required release tags to match both the N-API Cargo and package versions.
 
 ## [Unreleased]
+
+### Added
+
+- Added sample-based incompressibility probing that short-circuits
+  incompressible inputs (media, archives, random data) to STORE after a few
+  small sample encodes, instead of paying for full match finding that would
+  only end up stored anyway. The archive write path probes the file on disk
+  before reading it; a long-range-repeat escape hatch keeps files whose
+  incompressible-looking regions are distant copies of each other
+  compressing rather than stored.
+
+### Changed
+
+- Hardened solid-chain carry-over between members and windows. The encoder now
+  drops the per-frame hash-chain tree at member boundaries while preserving the
+  window tail, repeat cache, and long-range history; the parallel path reuses
+  the existing long-range history instead of copying and re-indexing up to
+  128 MiB per member, seeds the lookbehind even when the tail looks
+  incompressible, and lets solid windows use the parallel encoder.
+
+### Fixed
+
+- Fixed solid (continuous) archives losing the shared LZ window on the third
+  and later members with a 16 MiB dictionary. The sampled long-range history
+  was trimmed to half its window, leaving its retained span inside the near
+  finder's reach while its minimum candidate distance fell short of that span,
+  so it returned no matches. Solid chains now keep matching across all members
+  (e.g. three identical 14 MiB members compress the 2nd and 3rd to ~8.5 KiB
+  instead of the 3rd regressing to ~2.1 MiB).
