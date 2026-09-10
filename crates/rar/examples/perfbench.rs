@@ -313,6 +313,7 @@ fn time_archive(
     inputs: &[(String, PathBuf)],
     level: u8,
     solid: bool,
+    threads: Option<usize>,
 ) -> (f64, u64) {
     let path = dir.join(format!("perfbench-{tag}.rar"));
     let t = Instant::now();
@@ -322,15 +323,15 @@ fn time_archive(
         } else {
             rar_rs::SolidMode::Disabled
         };
-        let mut ar = rar_rs::ArchiveWriter::create_with(
-            &path,
-            rar_rs::WriterOptions::default().solid_mode(mode),
-        )
-        .expect("create");
-        let opts = rar_rs::EntryWriteOptions::new()
+        let mut opts = rar_rs::WriterOptions::default().solid_mode(mode);
+        if let Some(n) = threads {
+            opts = opts.thread_count(rar_rs::ThreadCount::try_from(n).expect("threads"));
+        }
+        let mut ar = rar_rs::ArchiveWriter::create_with(&path, opts).expect("create");
+        let entry_opts = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(level).expect("level"));
         for (name, src) in inputs {
-            ar.add_path_as(src, name, opts).expect("add");
+            ar.add_path_as(src, name, entry_opts).expect("add");
         }
         ar.finish().expect("close");
     }
@@ -394,11 +395,14 @@ fn run_corpus(
             std::slice::from_ref(&input_one),
             level,
             false,
+            None,
         );
         archive.push(ms_a);
         packed = n_a as usize;
         if with_solid {
-            solid.push(time_archive(dir, &format!("{name}-d"), &input_members, level, true).0);
+            solid.push(
+                time_archive(dir, &format!("{name}-d"), &input_members, level, true, None).0,
+            );
         }
     }
 
@@ -431,6 +435,58 @@ fn run_corpus(
     );
 }
 
+fn run_solid_mt_bench(
+    dir: &Path,
+    name: &str,
+    data: &[u8],
+    level: u8,
+    repeats: usize,
+) {
+    let mb = data.len() as f64 / 1048576.0;
+    let thread_counts: &[usize] = &[1, 2, 4, 8];
+
+    // Prepare the spill inputs once (same 4-member split as the solid column).
+    let chunk = (data.len() / SOLID_MEMBERS).max(1);
+    let inputs: Vec<(String, PathBuf)> = data
+        .chunks(chunk)
+        .enumerate()
+        .map(|(i, part)| prepare_input(dir, name, &format!("m{i}"), part))
+        .collect();
+
+    println!("solid-mt {name}  {mb:.1} MiB  level m{level}  {repeats} reps");
+
+    let mut baseline = 0.0f64;
+
+    for &threads in thread_counts {
+        let mut times = Vec::with_capacity(repeats);
+        let mut packed = 0u64;
+        for _ in 0..repeats {
+            let (ms, n) = time_archive(
+                dir,
+                &format!("{name}-mt{threads}"),
+                &inputs,
+                level,
+                true,
+                Some(threads),
+            );
+            times.push(ms);
+            packed = n;
+        }
+        let s = stats(times);
+        let ratio = packed as f64 * 100.0 / data.len() as f64;
+        if baseline == 0.0 {
+            baseline = s.median;
+        }
+        let speedup = baseline / s.median;
+        println!(
+            "  mt{:<2}  {:>6.0}/{:>6.0} ms  {:>6.2}%  {speedup:.2}x",
+            threads, s.min, s.median, ratio,
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(dir.join(format!("input-{name}")));
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut size_mb: usize = 8;
@@ -440,6 +496,7 @@ fn main() {
     let mut extra: Option<PathBuf> = None;
     let mut with_solid = true;
     let mut dict_override: Option<u8> = None;
+    let mut solid_mt_scan = false;
 
     let value = |i: usize, args: &[String]| -> Option<String> { args.get(i + 1).cloned() };
     let mut i = 0;
@@ -464,6 +521,10 @@ fn main() {
             }
             "--no-solid" => {
                 with_solid = false;
+                i += 1;
+            }
+            "--solid-mt" => {
+                solid_mt_scan = true;
                 i += 1;
             }
             other => {
@@ -532,6 +593,14 @@ fn main() {
 
     for (name, data) in &corpora {
         run_corpus(&dir, name, data, level, repeats, with_solid, dict_override);
+    }
+
+    if solid_mt_scan {
+        println!();
+        for (name, data) in &corpora {
+            run_solid_mt_bench(&dir, name, data, level, repeats);
+            println!();
+        }
     }
 
     println!(
