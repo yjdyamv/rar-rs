@@ -59,12 +59,29 @@ Version history predating this file remains available in Git history and
 
 ### Changed
 
+- Consolidated the legacy (RAR 1.5–4.x) option policy into the single rule set
+  owned by the format module, so the plain and typed write options surfaces
+  reject the same combinations with the same error. A missing password for
+  header encryption is now reported as `invalid_option` instead of `encrypted`.
+- Extracted symbolic-link and junction members on Windows through
+  `symlink_file`/`symlink_dir` instead of refusing them; junctions are created
+  as directory links. Creating symbolic links on Windows still requires the
+  usual privilege (developer mode or an elevated process).
 - Hardened solid-chain carry-over between members and windows. The encoder now
   drops the per-frame hash-chain tree at member boundaries while preserving the
   window tail, repeat cache, and long-range history; the parallel path reuses
   the existing long-range history instead of copying and re-indexing up to
   128 MiB per member, seeds the lookbehind even when the tail looks
   incompressible, and lets solid windows use the parallel encoder.
+
+### Security
+
+- Validated redirect (symbolic-link and junction) targets against the
+  extraction root under the safe-path policy. Targets that walk above the
+  destination, absolute paths and Windows drive/UNC prefixes are now rejected
+  with `security` instead of being materialized; targets that stay inside the
+  root — including `..` that resolves back under it — keep working. The
+  existing `safe_paths: false` option remains the trusted-archive escape hatch.
 
 ### Fixed
 
