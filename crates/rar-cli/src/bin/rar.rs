@@ -6,6 +6,8 @@ mod common;
 mod input;
 #[path = "../name_policy.rs"]
 mod name_policy;
+#[path = "../ops.rs"]
+mod ops;
 #[path = "../output.rs"]
 mod output;
 #[path = "../password.rs"]
@@ -1378,8 +1380,8 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     // -t: test the archive right after creating it without materializing
     // member contents or extracting to a temporary directory.
     if args.test_after {
-        let mut ar =
-            open_reader(archive_path, password.as_deref()).map_err(|e| format!("open: {e}"))?;
+        let mut ar = ops::open_reader(archive_path, password.as_deref())
+            .map_err(|e| format!("open: {e}"))?;
         let report: rar_rs::VerificationReport =
             ar.verify().map_err(|e| format!("test failed: {e}"))?;
         if report.failed() != 0 {
@@ -1741,8 +1743,8 @@ fn cmd_update_freshen(
         3,
         &args.archive,
     )?;
-    let archive =
-        open_reader(archive_path, password.as_deref()).map_err(|error| format!("open: {error}"))?;
+    let archive = ops::open_reader(archive_path, password.as_deref())
+        .map_err(|error| format!("open: {error}"))?;
     let mut to_delete = Vec::new();
     let mut to_add = Vec::new();
     for item in &collected {
@@ -2135,7 +2137,7 @@ fn cmd_find(cmd: &str, args: &[String]) -> Result<(), String> {
     if needle.is_empty() {
         return Err("empty search string".into());
     }
-    let mut rar = open_reader(archive_path, None).map_err(|e| format!("open: {e}"))?;
+    let mut rar = ops::open_reader(archive_path, None).map_err(|e| format!("open: {e}"))?;
     let entries: Vec<(rar_rs::EntryId, String)> = rar
         .entries()
         .filter(|e| !e.is_dir())
@@ -2177,22 +2179,10 @@ fn cmd_find(cmd: &str, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn open_reader(
-    path: impl AsRef<std::path::Path>,
-    password: Option<&str>,
-) -> Result<rar_rs::ArchiveReader, rar_rs::RarError> {
-    let mut options = rar_rs::OpenOptions::new();
-    if let Some(password) = password {
-        options = options.password(password);
-    }
-    rar_rs::ArchiveReader::open_with(path, options)
-}
-
 /// Verbose list (like `rar v`): adds the packed size, ratio and checksum
 /// columns.
 fn cmd_verbose_list(args: &ArchiveArgs) -> Result<(), String> {
-    let rar = open_reader(&args.archive, args.password.password.as_deref())
-        .map_err(|e| format!("{e}"))?;
+    let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     output::print_verbose_list(&rar)
 }
 
@@ -2497,43 +2487,8 @@ fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
 
 /// Print a member to stdout (like `rar p`).
 fn cmd_print(args: &PrintArgs) -> Result<(), String> {
-    use std::io::Write;
-    let mut rar = open_reader(&args.archive, args.password.password.as_deref())
-        .map_err(|e| format!("open: {e}"))?;
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let options = rar_rs::ExtractOptions {
-        max_unpacked_bytes: None,
-        max_total_unpacked_bytes: None,
-        ..Default::default()
-    };
-    let wanted: Vec<_> = if let Some(file) = &args.file {
-        rar.entries_named(file)
-            .filter(|entry| !entry.is_dir())
-            .map(|entry| entry.id())
-            .collect()
-    } else {
-        rar.entries()
-            .filter(|entry| !entry.is_dir())
-            .map(|entry| entry.id())
-            .collect()
-    };
-    if wanted.is_empty() && args.file.is_some() {
-        let file = args.file.as_deref().unwrap_or_default();
-        return Err(format!(
-            "no archive members matched the requested name(s): {file}"
-        ));
-    }
-    for id in wanted {
-        let name = rar
-            .entry(id)
-            .map_err(|e| format!("resolve archive member: {e}"))?
-            .name()
-            .to_string();
-        rar.copy_entry_to_with_options(id, &mut out, options)
-            .map_err(|e| format!("{name}: {e}"))?;
-    }
-    out.flush().map_err(|e| format!("stdout: {e}"))
+    let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
+    ops::print_members(&mut rar, args.file.as_deref())
 }
 
 /// Extract with full paths (like `rar x`).
@@ -2542,65 +2497,20 @@ fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
         rar_rs::set_extraction_threads(threads);
     }
     let dest = extract_dest(args)?;
-    let mut rar = open_reader(&args.archive, args.password.password.as_deref())
-        .map_err(|e| format!("open: {e}"))?;
+    let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     // `-so`: write the extracted members to stdout (one stream) instead of
     // to disk — handy for piping. Directories carry no data.
     if args.stdout {
-        return extract_to_stdout(&mut rar, &args.names);
+        return ops::extract_to_stdout(&mut rar, &args.names, None);
     }
     let skip = args.overwrite.as_deref() == Some("never");
-    let count = if args.names.is_empty() {
-        rar.extract_all_with_options(
-            &dest,
-            rar_rs::ExtractOptions {
-                skip_existing: skip,
-                ..Default::default()
-            },
-        )
-        .map_err(|e| format!("{e}"))?;
-        rar.entries().len()
-    } else {
-        extract_selected(&mut rar, &dest, &args.names, false, skip)?
-    };
-    info!("Extracted {count} file(s) to {}", dest.display());
-    Ok(())
-}
-
-/// Extract every file member of an archive to stdout, concatenated, like
-/// `rar/unrar x -so`. Informational messages are suppressed so the stream
-/// stays clean.
-fn extract_to_stdout(rar: &mut rar_rs::ArchiveReader, names: &[String]) -> Result<(), String> {
-    use std::io::Write;
-    let wanted = selector::select_entries(
-        rar.entries()
-            .filter(|entry| !entry.is_dir())
-            .map(|entry| (entry.id(), entry.metadata().name())),
-        names,
-    );
-    if wanted.is_empty() && !names.is_empty() {
-        return Err(format!(
-            "no archive members matched the requested name(s): {}",
-            names.join(", ")
-        ));
-    }
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
     let options = rar_rs::ExtractOptions {
-        max_unpacked_bytes: None,
-        max_total_unpacked_bytes: None,
+        skip_existing: skip,
         ..Default::default()
     };
-    for id in wanted {
-        let name = rar
-            .entry(id)
-            .map_err(|e| format!("resolve archive member: {e}"))?
-            .name()
-            .to_string();
-        rar.copy_entry_to_with_options(id, &mut out, options)
-            .map_err(|e| format!("read {name}: {e}"))?;
-    }
-    out.flush().map_err(|e| format!("stdout: {e}"))
+    let count = ops::extract_members(&mut rar, &dest, &args.names, options)?;
+    info!("Extracted {count} file(s) to {}", dest.display());
+    Ok(())
 }
 
 /// Destination directory, honoring `-ad` (append the archive base name).
@@ -2612,78 +2522,30 @@ fn extract_dest(args: &ExtractArgs) -> Result<std::path::PathBuf, String> {
     ))
 }
 
-/// Extract only the members whose name matches one of `names` (full stored
-/// path or basename). Errors clearly when no member matches, so a mistyped
-/// name is never silently swallowed or treated as a destination directory.
-fn extract_selected(
-    rar: &mut rar_rs::ArchiveReader,
-    dest: &std::path::Path,
-    names: &[String],
-    flat: bool,
-    skip_existing: bool,
-) -> Result<usize, String> {
-    let wanted = selector::select_entries(
-        rar.entries()
-            .filter(|entry| !entry.is_dir())
-            .map(|entry| (entry.id(), entry.metadata().name())),
-        names,
-    );
-    if wanted.is_empty() {
-        return Err(format!(
-            "no archive members matched the requested name(s): {}",
-            names.join(", ")
-        ));
-    }
-    for &id in &wanted {
-        let member = rar
-            .entry(id)
-            .map_err(|e| format!("resolve archive member: {e}"))?
-            .name()
-            .to_string();
-        let opts = rar_rs::ExtractOptions {
-            flat_paths: flat,
-            skip_existing,
-            ..Default::default()
-        };
-        rar.extract_entry_with_options(id, dest, opts)
-            .map_err(|e| format!("extract {member}: {e}"))?;
-    }
-    Ok(wanted.len())
-}
-
 /// Extract without archived paths (like `rar e`).
 fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
     let dest = extract_dest(args)?;
-    let mut rar = open_reader(&args.archive, args.password.password.as_deref())
-        .map_err(|e| format!("open: {e}"))?;
+    let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     if args.stdout {
-        return extract_to_stdout(&mut rar, &args.names);
+        return ops::extract_to_stdout(&mut rar, &args.names, None);
     }
     let skip = args.overwrite.as_deref() == Some("never");
-    let count = if args.names.is_empty() {
-        rar.extract_all_with_options(
-            &dest,
-            rar_rs::ExtractOptions {
-                flat_paths: true,
-                skip_existing: skip,
-                ..Default::default()
-            },
-        )
-        .map_err(|e| format!("{e}"))?;
-        rar.entries().len()
-    } else {
-        extract_selected(&mut rar, &dest, &args.names, true, skip)?
+    let options = rar_rs::ExtractOptions {
+        flat_paths: true,
+        skip_existing: skip,
+        ..Default::default()
     };
+    let count = ops::extract_members(&mut rar, &dest, &args.names, options)?;
     info!("Extracted {count} file(s) to {}", dest.display());
     Ok(())
 }
 
 /// Test archive contents (like `rar t`).
 fn cmd_test(args: &ArchiveArgs) -> Result<(), String> {
-    let mut rar = open_reader(&args.archive, args.password.password.as_deref())
+    let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())
         .map_err(|e| format!("open: {e}"))?;
     let report: rar_rs::VerificationReport = rar.verify().map_err(|e| format!("test: {e}"))?;
     info!("{} OK, {} failed", report.passed(), report.failed());
@@ -2873,126 +2735,28 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 }
 
 fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
-    let rar = open_reader(&args.archive, args.password.password.as_deref())
-        .map_err(|e| format!("{e}"))?;
-
-    println!(
-        "{:>10}  {:>10}  {:>6}  {:<8}  Name",
-        "Size", "Packed", "Ratio", "Method"
-    );
-    println!("{}", "-".repeat(60));
-
-    let mut total_size = 0u64;
-    let mut total_packed = 0u64;
-
-    for entry in rar.entries() {
-        let ratio = if entry.is_dir() {
-            "  dir".to_string()
-        } else if entry.size() > 0 {
-            format!(
-                "{:.1}%",
-                entry.compressed_size() as f64 / entry.size() as f64 * 100.0
-            )
-        } else {
-            " 0.0%".to_string()
-        };
-
-        println!(
-            "{:>10}  {:>10}  {:>6}  {:<8}  {}",
-            entry.size(),
-            entry.compressed_size(),
-            ratio,
-            entry.method_name(),
-            entry.name()
-        );
-        if let Some(comment) = output::format_comment_line(entry.comment()) {
-            println!("      Comment: {comment}");
-        }
-
-        total_size += entry.size();
-        total_packed += entry.compressed_size();
-    }
-
-    println!("{}", "-".repeat(60));
-    let overall = if total_size > 0 {
-        format!("{:.1}%", total_packed as f64 / total_size as f64 * 100.0)
-    } else {
-        " 0.0%".to_string()
-    };
-    println!(
-        "{total_size:>10}  {total_packed:>10}  {overall:>6}  {:<8}  {} file(s)",
-        "",
-        rar.entries().len()
-    );
-
+    let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
+    ops::list_entries(&rar, true);
     Ok(())
 }
 
 /// Bare list (`lb` / `vb`): member names only.
 fn cmd_list_bare(args: &ArchiveArgs) -> Result<(), String> {
-    let rar = open_reader(&args.archive, args.password.password.as_deref())
-        .map_err(|e| format!("{e}"))?;
-    for entry in rar.entries() {
-        println!("{}", entry.name());
-    }
+    let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
+    ops::list_bare(&rar);
     Ok(())
 }
 
 /// Technical list (`lt` / `vt`): mtime, attributes, sizes, ratio, CRC and
 /// method per member, in the spirit of the official `rar lt`.
 fn cmd_list_technical(args: &ArchiveArgs) -> Result<(), String> {
-    let rar = open_reader(&args.archive, args.password.password.as_deref())
-        .map_err(|e| format!("{e}"))?;
-    println!(
-        "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {:<19}  Name",
-        "Size", "Packed", "Ratio", "Checksum", "Method", "Modified"
-    );
-    println!("{}", "-".repeat(86));
-    for entry in rar.entries() {
-        let ratio = if entry.is_dir() {
-            "  dir".to_string()
-        } else if entry.size() > 0 {
-            format!(
-                "{:.1}%",
-                entry.compressed_size() as f64 / entry.size() as f64 * 100.0
-            )
-        } else {
-            " 0.0%".to_string()
-        };
-        let checksum = entry
-            .crc32()
-            .map(|c| format!("{c:08X}"))
-            .unwrap_or_else(|| "-".to_string());
-        let secs = entry.mtime();
-        let days = (secs as i64) / 86400;
-        let tod = secs % 86400;
-        let (y, mo, d) = time::civil_from_days(days);
-        let modified = format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            y,
-            mo,
-            d,
-            tod / 3600,
-            (tod % 3600) / 60,
-            tod % 60
-        );
-        println!(
-            "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {:<19}  {}",
-            entry.size(),
-            entry.compressed_size(),
-            ratio,
-            checksum,
-            entry.method_name(),
-            modified,
-            entry.name()
-        );
-    }
+    let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
+    ops::list_technical(&rar);
     Ok(())
 }
 
 fn cmd_info(args: &ArchiveArgs) -> Result<(), String> {
-    let rar = open_reader(&args.archive, args.password.password.as_deref())
-        .map_err(|e| format!("{e}"))?;
+    let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
 
     let files: Vec<_> = rar.entries().filter(|e| !e.is_dir()).collect();
     let dirs: Vec<_> = rar.entries().filter(|e| e.is_dir()).collect();

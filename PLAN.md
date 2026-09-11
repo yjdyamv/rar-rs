@@ -48,8 +48,12 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   已收敛，文件级拆分没做。
 - **双 options 面**：`WriterOptions`（私有字段 builder，完整校验）与 `CreateOptions`（公开字段，弱校验）
   并存且都从 `lib.rs` 导出；RAR4 规则已共用，结构仍在。
-- **CLI 两个二进制仍有重复**：`selector.rs` / `password.rs` 已抽出共享，成员选择、提取、列表编排
-  仍各写一份。
+- **CLI 两个二进制（2026-09，主体去重）**：`selector.rs` / `password.rs` 已有；新增共享
+  `ops.rs`（`#[path]` 双二进制共用）：`open_reader`、`extract_members`（整档/选成员）、
+  `extract_to_stdout`（`-so`）、`print_members`（`p`）、列表三态（`list_entries` /
+  `list_bare` / `list_technical`）与时间格式化。两个二进制只留开关面与消息措辞（`rar l`
+  多一行 totals，`t` 措辞不同）。剩余：`t` 的编排可再抽（仅文案不同）、`extract_dest`
+  的 base 解析近似。
 - **多卷事务（错误路径已闭环 2026-09）**：单卷是 staging + `replace_file` 原子替换。多卷提交
   现在是一个事务（`fs::atomic::commit_files`）：先把已存在的目标卷 park 到隐藏旁路，再安装
   暂存集，任一步失败即整体回滚（不再留下新旧混排的卷集）；更短的覆盖还会 retire 旧集的

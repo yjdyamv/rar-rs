@@ -4,6 +4,8 @@
 mod common;
 #[path = "../input.rs"]
 mod input;
+#[path = "../ops.rs"]
+mod ops;
 #[path = "../output.rs"]
 mod output;
 #[path = "../password.rs"]
@@ -250,7 +252,7 @@ fn run_inner(cli: Cli) -> Result<(), String> {
         Command::ListBare(args) => cmd_list_bare(&args.archive, password),
         Command::ListTechnical(args) => cmd_list_technical(&args.archive, password),
         Command::VerboseList(args) => {
-            output::print_verbose_list(&open_archive(&args.archive, password)?)
+            output::print_verbose_list(&ops::open_reader(&args.archive, password)?)
         }
         Command::VerboseListBare(args) => cmd_list_bare(&args.archive, password),
         Command::VerboseListTechnical(args) => cmd_list_technical(&args.archive, password),
@@ -269,74 +271,17 @@ fn run_inner(cli: Cli) -> Result<(), String> {
 
 /// Bare list (`lb` / `vb`): member names only.
 fn cmd_list_bare(archive: &str, password: Option<&str>) -> Result<(), String> {
-    let rar = open_archive(archive, password)?;
-    for entry in rar.entries() {
-        println!("{}", entry.name());
-    }
+    let rar = ops::open_reader(archive, password)?;
+    ops::list_bare(&rar);
     Ok(())
 }
 
-/// Technical list (`lt` / `vt`): mtime, attributes, sizes, ratio, CRC and
-/// method per member, in the spirit of UnRAR's `lt`.
+/// Technical list (`lt` / `vt`): mtime, sizes, ratio, CRC and method per
+/// member, in the spirit of UnRAR's `lt`.
 fn cmd_list_technical(archive: &str, password: Option<&str>) -> Result<(), String> {
-    let rar = open_archive(archive, password)?;
-    println!(
-        "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {:<19}  Name",
-        "Size", "Packed", "Ratio", "Checksum", "Method", "Modified"
-    );
-    println!("{}", "-".repeat(86));
-    for entry in rar.entries() {
-        let ratio = if entry.is_dir() {
-            "  dir".to_string()
-        } else if entry.size() > 0 {
-            format!(
-                "{:.1}%",
-                entry.compressed_size() as f64 / entry.size() as f64 * 100.0
-            )
-        } else {
-            " 0.0%".to_string()
-        };
-        let checksum = entry
-            .crc32()
-            .map(|c| format!("{c:08X}"))
-            .unwrap_or_else(|| "-".to_string());
-        let modified = format_unix_time(entry.mtime());
-        println!(
-            "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  {:<19}  {}",
-            entry.size(),
-            entry.compressed_size(),
-            ratio,
-            checksum,
-            entry.method_name(),
-            modified,
-            entry.name()
-        );
-    }
+    let rar = ops::open_reader(archive, password)?;
+    ops::list_technical(&rar);
     Ok(())
-}
-
-fn format_unix_time(secs: u32) -> String {
-    // Simple UTC rendering of a unix timestamp (no chrono dependency).
-    let days = secs as i64 / 86400;
-    let secs_of_day = secs % 86400;
-    let (y, m, d) = time::civil_from_days(days);
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        y,
-        m,
-        d,
-        secs_of_day / 3600,
-        (secs_of_day % 3600) / 60,
-        secs_of_day % 60
-    )
-}
-
-fn open_archive(path: &str, password: Option<&str>) -> Result<rar_rs::ArchiveReader, String> {
-    let mut options = rar_rs::OpenOptions::new();
-    if let Some(password) = password {
-        options = options.password(password);
-    }
-    rar_rs::ArchiveReader::open_with(path, options).map_err(|e| format!("{e}"))
 }
 
 fn cmd_extract(
@@ -354,15 +299,15 @@ fn cmd_extract(
         .or_else(|| args.dest.clone())
         .unwrap_or_else(|| ".".to_string());
     let dest = output::extract_dest(&base, &args.archive, args.append_dir);
-    let mut rar = open_archive(&args.archive, password)?;
+    let mut rar = ops::open_reader(&args.archive, password)?;
 
     // `-so`: write the extracted members to stdout (one stream) instead of
     // to disk — handy for piping. Directories carry no data.
     if args.stdout {
-        return extract_to_stdout(&mut rar, &args.names, max_dict_size);
+        return ops::extract_to_stdout(&mut rar, &args.names, max_dict_size);
     }
 
-    let opts = rar_rs::ExtractOptions {
+    let options = rar_rs::ExtractOptions {
         // Extraction is fully streaming: no per-member or total
         // size caps (WinRAR's UnRAR extracts any size).
         max_unpacked_bytes: None,
@@ -378,89 +323,9 @@ fn cmd_extract(
         max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
-    let count = if args.names.is_empty() {
-        rar.extract_all_with_options(&dest, opts)
-            .map_err(|e| format!("{e}"))?;
-        rar.entries().len()
-    } else {
-        extract_selected(&mut rar, &dest, &args.names, &opts)?
-    };
+    let count = ops::extract_members(&mut rar, &dest, &args.names, options)?;
     info!("Extracted {count} entries to {}", dest.display());
     Ok(())
-}
-
-/// Extract only the members whose name matches one of `names` (full stored
-/// path or basename). Errors clearly when no member matches, so a mistyped
-/// name is never silently swallowed or treated as a destination directory.
-fn extract_selected(
-    rar: &mut rar_rs::ArchiveReader,
-    dest: &std::path::Path,
-    names: &[String],
-    opts: &rar_rs::ExtractOptions,
-) -> Result<usize, String> {
-    let wanted = selector::select_entries(
-        rar.entries()
-            .filter(|entry| !entry.is_dir())
-            .map(|entry| (entry.id(), entry.metadata().name())),
-        names,
-    );
-    if wanted.is_empty() {
-        return Err(format!(
-            "no archive members matched the requested name(s): {}",
-            names.join(", ")
-        ));
-    }
-    for &id in &wanted {
-        let member = rar
-            .entry(id)
-            .map_err(|e| format!("resolve archive member: {e}"))?
-            .name()
-            .to_string();
-        rar.extract_entry_with_options(id, dest, *opts)
-            .map_err(|e| format!("extract {member}: {e}"))?;
-    }
-    Ok(wanted.len())
-}
-
-/// Extract every file member of an archive to stdout, concatenated, like
-/// `rar/unrar x -so`. Informational messages are suppressed so the stream
-/// stays clean.
-fn extract_to_stdout(
-    rar: &mut rar_rs::ArchiveReader,
-    names: &[String],
-    max_dict_size: Option<u64>,
-) -> Result<(), String> {
-    use std::io::Write;
-    let wanted = selector::select_entries(
-        rar.entries()
-            .filter(|entry| !entry.is_dir())
-            .map(|entry| (entry.id(), entry.metadata().name())),
-        names,
-    );
-    if wanted.is_empty() && !names.is_empty() {
-        return Err(format!(
-            "no archive members matched the requested name(s): {}",
-            names.join(", ")
-        ));
-    }
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let options = rar_rs::ExtractOptions {
-        max_unpacked_bytes: None,
-        max_total_unpacked_bytes: None,
-        max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
-        ..Default::default()
-    };
-    for id in wanted {
-        let name = rar
-            .entry(id)
-            .map_err(|e| format!("resolve archive member: {e}"))?
-            .name()
-            .to_string();
-        rar.copy_entry_to_with_options(id, &mut out, options)
-            .map_err(|e| format!("read {name}: {e}"))?;
-    }
-    out.flush().map_err(|e| format!("stdout: {e}"))
 }
 
 fn cmd_extract_flat(
@@ -475,11 +340,11 @@ fn cmd_extract_flat(
         .or_else(|| args.dest.clone())
         .unwrap_or_else(|| ".".to_string());
     let dest = output::extract_dest(&base, &args.archive, args.append_dir);
-    let mut rar = open_archive(&args.archive, password)?;
+    let mut rar = ops::open_reader(&args.archive, password)?;
     if args.stdout {
-        return extract_to_stdout(&mut rar, &args.names, max_dict_size);
+        return ops::extract_to_stdout(&mut rar, &args.names, max_dict_size);
     }
-    let opts = rar_rs::ExtractOptions {
+    let options = rar_rs::ExtractOptions {
         flat_paths: true,
         max_unpacked_bytes: None,
         max_total_unpacked_bytes: None,
@@ -491,56 +356,19 @@ fn cmd_extract_flat(
         max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
-    let count = if args.names.is_empty() {
-        rar.extract_all_with_options(&dest, opts)
-            .map_err(|e| format!("{e}"))?;
-        rar.entries().len()
-    } else {
-        extract_selected(&mut rar, &dest, &args.names, &opts)?
-    };
+    let count = ops::extract_members(&mut rar, &dest, &args.names, options)?;
     info!("Extracted {count} entries to {}", dest.display());
     Ok(())
 }
 
 fn cmd_list(archive: &str, password: Option<&str>) -> Result<(), String> {
-    let rar = open_archive(archive, password)?;
-
-    println!(
-        "{:>10}  {:>10}  {:>6}  {:<8}  Name",
-        "Size", "Packed", "Ratio", "Method"
-    );
-    println!("{}", "-".repeat(60));
-
-    for entry in rar.entries() {
-        let ratio = if entry.is_dir() {
-            "  dir".to_string()
-        } else if entry.size() > 0 {
-            format!(
-                "{:.1}%",
-                entry.compressed_size() as f64 / entry.size() as f64 * 100.0
-            )
-        } else {
-            " 0.0%".to_string()
-        };
-
-        println!(
-            "{:>10}  {:>10}  {:>6}  {:<8}  {}",
-            entry.size(),
-            entry.compressed_size(),
-            ratio,
-            entry.method_name(),
-            entry.name()
-        );
-        if let Some(comment) = output::format_comment_line(entry.comment()) {
-            println!("      Comment: {comment}");
-        }
-    }
-
+    let rar = ops::open_reader(archive, password)?;
+    ops::list_entries(&rar, false);
     Ok(())
 }
 
 fn cmd_test(archive: &str, password: Option<&str>) -> Result<(), String> {
-    let mut rar = open_archive(archive, password)?;
+    let mut rar = ops::open_reader(archive, password)?;
 
     let report: rar_rs::VerificationReport = rar.verify().map_err(|e| format!("test: {e}"))?;
     info!();
@@ -564,36 +392,6 @@ fn cmd_test(archive: &str, password: Option<&str>) -> Result<(), String> {
 }
 
 fn cmd_print(args: &PrintArgs, password: Option<&str>) -> Result<(), String> {
-    use std::io::Write;
-    let mut rar = open_archive(&args.archive, password)?;
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let options = rar_rs::ExtractOptions {
-        max_unpacked_bytes: None,
-        max_total_unpacked_bytes: None,
-        ..Default::default()
-    };
-    let wanted: Vec<_> = if let Some(file) = &args.file {
-        rar.entries_named(file)
-            .filter(|entry| !entry.is_dir())
-            .map(|entry| entry.id())
-            .collect()
-    } else {
-        rar.entries()
-            .filter(|entry| !entry.is_dir())
-            .map(|entry| entry.id())
-            .collect()
-    };
-    if wanted.is_empty() && args.file.is_some() {
-        let file = args.file.as_deref().unwrap_or_default();
-        return Err(format!(
-            "no archive members matched the requested name(s): {file}"
-        ));
-    }
-    for id in wanted {
-        rar.copy_entry_to_with_options(id, &mut out, options)
-            .map_err(|e| format!("{e}"))?;
-    }
-
-    out.flush().map_err(|e| format!("stdout: {e}"))
+    let mut rar = ops::open_reader(&args.archive, password)?;
+    ops::print_members(&mut rar, args.file.as_deref())
 }
