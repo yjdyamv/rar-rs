@@ -3031,6 +3031,128 @@ fn cli_ma2_ma15_create_legacy_rar4_members() {
     }
 }
 
+/// `-p` member encryption on the legacy writers: `-ma2`/`-ma15` members
+/// encrypt with the RAR20 block / RAR15 stream cipher (no salt), and the
+/// password round-trips through our `unrar` and the library reader.
+#[test]
+fn cli_ma2_ma15_password_roundtrips() {
+    let dir = make_temp_dir();
+    let a = dir.path().join("a.txt");
+    let payload = b"legacy CLI encrypted member payload ".repeat(2000);
+    std::fs::write(&a, &payload).unwrap();
+
+    for flag in ["-ma2", "-ma15"] {
+        let arc = dir
+            .path()
+            .join(format!("{}-pw.rar", flag.trim_start_matches('-')));
+
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", flag, "-ppw", "-idq"])
+            .arg(&arc)
+            .arg("a.txt")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "rar a {flag} -ppw failed");
+
+        // Our own unrar verifies the encrypted member with the password.
+        let res = std::process::Command::new(UNRAR_CLI)
+            .args(["t", "-ppw", "-idq"])
+            .arg(&arc)
+            .output()
+            .unwrap();
+        assert!(
+            res.status.success(),
+            "unrar t -ppw rejected our {flag} encrypted archive:\n{}",
+            String::from_utf8_lossy(&res.stderr)
+        );
+
+        // And without it the listed member must fail to decode.
+        let res = std::process::Command::new(UNRAR_CLI)
+            .args(["t", "-p-", "-idq"])
+            .arg(&arc)
+            .output()
+            .unwrap();
+        assert!(
+            !res.status.success(),
+            "unrar t without password should have failed on {flag}"
+        );
+
+        let mut rar =
+            rar_rs::ArchiveReader::open_with(&arc, rar_rs::OpenOptions::new().password("pw"))
+                .unwrap();
+        assert_eq!(
+            rar.read_entry(rar.unique_entry("a.txt").unwrap()).unwrap(),
+            payload,
+            "{flag} -ppw content mismatch"
+        );
+    }
+}
+
+/// Legacy RAR 1.5/2.x members that span volume boundaries keep their member
+/// version (`-ma2`/`-ma15`) in every emitted entry header — the multivol
+/// emit path must not fall back to the default RAR29 header. The set is
+/// discovered, listed and verified entry-by-entry across the volume chunks.
+#[test]
+fn cli_ma2_ma15_multivolume_members_keep_version() {
+    let dir = make_temp_dir();
+    // Near-incompressible data so the stored member really spans 64k volumes.
+    let expected_bytes: Vec<u8> = (0..260_000u32)
+        .map(|i| (i.wrapping_mul(1_103_515_245) >> 16) as u8)
+        .collect();
+    let big = dir.path().join("rnd.bin");
+    std::fs::write(&big, &expected_bytes).unwrap();
+
+    for (flag, expected) in [
+        ("-ma2", rar_rs::ArchiveVersion::V20),
+        ("-ma15", rar_rs::ArchiveVersion::V15),
+    ] {
+        let arc = dir
+            .path()
+            .join(format!("{}-multivol.rar", flag.trim_start_matches('-')));
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", flag, "-m0", "-v64k", "-idq"])
+            .arg(&arc)
+            .arg("rnd.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "rar a {flag} -m0 -v64k failed");
+
+        let volumes = rar_rs::discover_volumes(&arc);
+        assert!(
+            volumes.len() > 1,
+            "{flag}: expected a multi-volume set, got {}",
+            volumes.len()
+        );
+
+        let mut rar = rar_rs::ArchiveReader::open(volumes[0].as_path()).unwrap();
+        let entry = rar.unique_entry("rnd.bin").unwrap();
+        assert_eq!(
+            rar.entry(entry).unwrap().version(),
+            expected,
+            "{flag}: multi-volume member must report {expected}"
+        );
+        assert_eq!(
+            rar.read_entry(entry).unwrap(),
+            expected_bytes,
+            "{flag}: cross-volume content mangled"
+        );
+
+        // Our own unrar verifies every volume in the set.
+        let res = std::process::Command::new(UNRAR_CLI)
+            .args(["t", "-idq"])
+            .arg(&arc)
+            .output()
+            .unwrap();
+        assert!(
+            res.status.success(),
+            "unrar t rejected multi-volume {flag} archive:\n{}",
+            String::from_utf8_lossy(&res.stderr)
+        );
+    }
+}
+
 /// RAR5-only creation switches are rejected when combined with `-ma4`, since
 /// the RAR4 container cannot express them. `-hp` and `-rr` are now supported
 /// on RAR4 too, so they are verified positively instead.

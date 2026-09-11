@@ -1301,41 +1301,154 @@ fn old_format_writers_roundtrip_at_every_level() {
     }
 }
 
-/// Phase 1 keeps the v15/v20 writers non-solid and unencrypted; asking for
-/// either is refused at create/open time rather than silently downgraded.
+/// Solid RAR 1.5/2.x chains round-trip: one persistent encoder carries the
+/// adaptive tables (and RAR 2.x window) across the members of the run, the
+/// read side reports them as solid, and extraction is byte-identical.
 #[test]
-fn old_format_solid_and_password_are_rejected() {
+fn old_format_solid_roundtrip_at_every_level() {
     for version in [rar_rs::ArchiveVersion::V15, rar_rs::ArchiveVersion::V20] {
-        let dir = make_temp_dir();
-        let solid = dir.path().join(format!("{version}-solid.rar"));
-        let err = match ArchiveWriter::create_with(
-            &solid,
-            rar_rs::WriterOptions::default()
-                .compression(version)
-                .solid_mode(rar_rs::SolidMode::Continuous),
-        ) {
-            Ok(_) => panic!("{version} solid should have been rejected"),
-            Err(e) => e,
-        };
-        assert!(
-            matches!(err, rar_rs::RarError::Unsupported(_)),
-            "{version} solid: {err}"
-        );
+        for level in 1..=5u8 {
+            let dir = make_temp_dir();
+            let path = dir.path().join(format!("solid-{version}-m{level}.rar"));
+            let payloads: Vec<(&str, Vec<u8>)> = vec![
+                ("first.txt", support::compressible(11, 24_000)),
+                (
+                    "second.txt",
+                    b"solid chain shares the window, shared phrases repeat ".repeat(1200),
+                ),
+                ("run.bin", vec![b'z'; 40_000]),
+            ];
+            {
+                let mut rar = ArchiveWriter::create_with(
+                    &path,
+                    rar_rs::WriterOptions::default()
+                        .compression(version)
+                        .solid_mode(rar_rs::SolidMode::Continuous),
+                )
+                .unwrap_or_else(|e| panic!("create solid {version} m{level}: {e}"));
+                let opts = rar_rs::EntryWriteOptions::new()
+                    .compression_level(rar_rs::CompressionLevel::try_from(level).unwrap());
+                for (name, data) in &payloads {
+                    rar.add_bytes(name, data, opts)
+                        .unwrap_or_else(|e| panic!("add solid {version} m{level} {name}: {e}"));
+                }
+                rar.finish().unwrap();
+            }
+            let mut reader = ArchiveReader::open(&path)
+                .unwrap_or_else(|e| panic!("open solid {version} m{level}: {e}"));
+            let entries: Vec<_> = reader.entries().collect();
+            assert_eq!(entries.len(), payloads.len(), "solid {version} m{level}");
+            entries.iter().for_each(|entry| {
+                assert_eq!(
+                    entry.version(),
+                    version,
+                    "solid {version} m{level} {}",
+                    entry.name()
+                );
+                // Pre-RAR3 writers never flag FHD_SOLID (the read side
+                // derives chains from the archive-level MHD_SOLID), so
+                // `comp_solid()` stays false by design; the chain itself is
+                // exercised by the byte round-trip below (the v20 encoder's
+                // window matches back into earlier members).
+                assert_ne!(
+                    entry.metadata().method(),
+                    0,
+                    "solid {version} m{level} {}",
+                    entry.name()
+                );
+            });
+            let ids: Vec<_> = entries.into_iter().map(|e| e.id()).collect();
+            for (i, (name, expected)) in payloads.iter().enumerate() {
+                let got = reader
+                    .read_entry(ids[i])
+                    .unwrap_or_else(|e| panic!("read solid {version} m{level} {name}: {e}"));
+                assert_eq!(got, *expected, "solid {version} m{level} {name}");
+            }
+        }
+    }
+}
 
-        let encrypted = dir.path().join(format!("{version}-pw.rar"));
-        let err = match ArchiveWriter::create_with(
-            &encrypted,
-            rar_rs::WriterOptions::default()
-                .compression(version)
-                .password("secret"),
-        ) {
-            Ok(_) => panic!("{version} password should have been rejected"),
-            Err(e) => e,
-        };
-        assert!(
-            matches!(err, rar_rs::RarError::Unsupported(_)),
-            "{version} password: {err}"
-        );
+/// Member-level encryption (`-p`) works for the v15/v20 writers too, with
+/// the historical ciphers: RAR 1.5 members use the RAR15 stream XOR and
+/// RAR 2.x the RAR20 block cipher (16-byte padded, no salt), so no
+/// `FHD_SALT` is ever attached. Round-trips through both `-p` and `-hp`.
+#[test]
+fn old_format_password_roundtrip_at_every_level() {
+    let payload = support::compressible(13, 24_000);
+    for version in [rar_rs::ArchiveVersion::V15, rar_rs::ArchiveVersion::V20] {
+        for (suffix, hp) in [("pw", false), ("hp", true)] {
+            for level in [1u8, 3, 5] {
+                let dir = make_temp_dir();
+                let path = dir.path().join(format!("{version}-{suffix}-m{level}.rar"));
+                let opts = rar_rs::WriterOptions::default()
+                    .compression(version)
+                    .password("hunter2")
+                    .encrypt_headers(hp);
+                {
+                    let mut rar = ArchiveWriter::create_with(&path, opts)
+                        .unwrap_or_else(|e| panic!("create {version} {suffix} m{level}: {e}"));
+                    let level = rar_rs::CompressionLevel::try_from(level).unwrap();
+                    let eo = rar_rs::EntryWriteOptions::new().compression_level(level);
+                    rar.add_bytes("a.bin", &payload, eo).unwrap();
+                    rar.add_bytes("b.bin", &payload[..payload.len() / 2], eo)
+                        .unwrap();
+                    rar.finish().unwrap();
+                }
+                let mut reader =
+                    ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("hunter2"))
+                        .unwrap_or_else(|e| panic!("open {version} {suffix} m{level}: {e}"));
+                assert_eq!(
+                    reader
+                        .entry(reader.unique_entry("a.bin").unwrap())
+                        .unwrap()
+                        .version(),
+                    version,
+                    "{version} {suffix} m{level}"
+                );
+                assert_eq!(
+                    reader
+                        .read_entry(reader.unique_entry("a.bin").unwrap())
+                        .unwrap(),
+                    payload,
+                    "{version} {suffix} m{level} a.bin"
+                );
+                assert_eq!(
+                    reader
+                        .read_entry(reader.unique_entry("b.bin").unwrap())
+                        .unwrap(),
+                    payload[..payload.len() / 2],
+                    "{version} {suffix} m{level} b.bin"
+                );
+
+                // The wrong password must not decode (member decrypt fails,
+                // not a silent empty read); `-hp` errors already at open
+                // because the headers themselves cannot be scanned.
+                let wrong =
+                    ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("wrong"));
+                if hp {
+                    assert!(
+                        wrong.is_err(),
+                        "{version} {suffix} m{level}: -hp must reject at open"
+                    );
+                } else {
+                    let mut wrong = wrong.unwrap_or_else(|e| {
+                        panic!("open wrong-pw {version} {suffix} m{level}: {e}")
+                    });
+                    let err = wrong
+                        .read_entry(wrong.unique_entry("a.bin").unwrap())
+                        .unwrap_err();
+                    // Wrong-password decode either fails the decrypt stage
+                    // (reported as WrongPassword) or, for the saltless old
+                    // stream/block ciphers, scrambles data into a CRC
+                    // mismatch — never a silent wrong read.
+                    let msg = err.to_string();
+                    assert!(
+                        msg.contains("password") || msg.contains("CRC"),
+                        "{version} {suffix} m{level} wrong-pw: {err}"
+                    );
+                }
+            }
+        }
     }
 }
 
