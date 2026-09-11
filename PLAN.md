@@ -60,12 +60,6 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   `list_bare` / `list_technical`）与时间格式化。两个二进制只留开关面与消息措辞（`rar l`
   多一行 totals，`t` 措辞不同）。剩余：`t` 的编排可再抽（仅文案不同）、`extract_dest`
   的 base 解析近似。
-- **多卷事务（错误路径已闭环 2026-09）**：单卷是 staging + `replace_file` 原子替换。多卷提交
-  现在是一个事务（`fs::atomic::commit_files`）：先把已存在的目标卷 park 到隐藏旁路，再安装
-  暂存集，任一步失败即整体回滚（不再留下新旧混排的卷集）；更短的覆盖还会 retire 旧集的
-  残留分卷。仍未闭环：进程在 rename 序列中途被 kill 的恢复需要磁盘 journal / undo log
-  ——当前只保证**错误路径**原子；旧集的 `.rev` 残留（新写不产恢复卷时）也尚未清理。
-
 ## 待办（下一批；未关闭 issue：04、09，见 `docs/issues/compression-perf/`）
 
 - **未关闭议题**：04（MT 随机数据的窗口级不可压缩跳过）、09（DLL 单线程解析速度）。
@@ -136,6 +130,14 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
 - **分块读取限流**：`VolumeReaders` 改为边读边长 + `take`，与另两个 `ChunkReader` 实现一致。
 
 ## 已完成（要点）
+
+- **多卷提交事务全闭环（2026-09）**：单卷是 staging + `replace_file` 原子替换；多卷提交走
+  `fs::atomic::commit_files`（park 已存在目标卷 → 安装暂存集 → 失败整体回滚 → 成功删旁路），
+  更短的覆盖 retire 旧集残留分卷，旧集 `.rev` 也一并 retire。提交写
+  `.{base}.rar5commit.journal` + committed 标记，进程在 rename 中途被 kill 后，下次写打开
+  （`open_write`/`open_write_rar4`/`prepare_append`/`rewrite_multivolume`）会回滚未完成提交
+  或收尾已完成提交；恢复只在写路径触发（读打开不动盘）。单测覆盖 prepared 回滚与
+  committed 收尾两条路径。
 
 - **低层公开面已收敛（2026-09）**：`format` / `recovery` / `crypto` 三棵树 + `rar40`/`rar50` 别名
   已 `raw` 门控；`codec` 子树里 `common` / `legacy` / `modern` 全是 `pub(crate)`，唯一公开的

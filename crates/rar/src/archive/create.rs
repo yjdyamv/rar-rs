@@ -20,13 +20,18 @@ use crate::format::rar5::{
     RAR5_SIGNATURE,
 };
 use crate::fs::atomic::{
-    commit_files, read_write_create, replace_file, temp_sibling_path, temp_suffix,
+    commit_files, read_write_create, recover_interrupted_commit, replace_file, temp_sibling_path,
+    temp_suffix,
 };
 
 impl RarArchive {
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
     pub(super) fn open_write(&mut self) -> RarResult<()> {
+        // Finish or roll back a multi-volume commit that a previous process
+        // was killed in the middle of, before staging anything new.
+        let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        recover_interrupted_commit(&parent, &volume_base_of(&self.path))?;
         if self.rar4 {
             return self.open_write_rar4();
         }
@@ -288,7 +293,7 @@ impl RarArchive {
                 let keep: Vec<PathBuf> = install.iter().map(|(_, f)| f.clone()).collect();
                 let retire =
                     crate::fs::volume::stale_volume_paths(parent, final_base, self.rar4, &keep);
-                let result = commit_files(&install, &retire);
+                let result = commit_files(parent, final_base, &install, &retire);
                 if result.is_ok() {
                     self.volume_paths = keep;
                 }

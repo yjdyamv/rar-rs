@@ -117,13 +117,28 @@ fn part_volume_base(name: &str) -> Option<&str> {
     Some(base)
 }
 
+/// Base name of a `{base}.partN.rev` recovery-volume file, if the name parses
+/// as one.
+fn part_recovery_base(name: &str) -> Option<&str> {
+    let stem = name
+        .strip_suffix(".rev")
+        .or_else(|| name.strip_suffix(".REV"))?;
+    let (base, tail) = stem.rsplit_once(".part")?;
+    if base.is_empty() || tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(base)
+}
+
 /// Existing volume files of the set based at `base` that `keep` does not
 /// cover, in the naming family selected by `rar4`.
 ///
-/// The multi-volume commit uses this to retire leftover volumes from a
-/// previous, longer set: a shrinking overwrite must not leave stale parts
-/// behind. Only files that parse as volumes of `base` are returned, so the
-/// new set's own staged temporaries (named `.tmp.partN.rar`) never match.
+/// The multi-volume commit uses this to retire leftover files from a
+/// previous set: a shrinking overwrite must not leave stale parts behind,
+/// and an overwrite that no longer requests recovery volumes must not leave
+/// the old `.rev` files behind either. Only files that parse as volumes (or
+/// RAR5 `.rev` recovery volumes) of `base` are returned, so the new set's
+/// own staged temporaries never match.
 pub(crate) fn stale_volume_paths(
     parent: &Path,
     base: &str,
@@ -158,7 +173,9 @@ pub(crate) fn stale_volume_paths(
         let matches = if rar4 {
             legacy_volume_base(name).as_deref() == Some(base)
         } else {
-            part_volume_base(name) == Some(base)
+            // The old set's `.rev` recovery volumes go with it: they are
+            // regenerated after the new data volumes commit.
+            part_volume_base(name) == Some(base) || part_recovery_base(name) == Some(base)
         };
         if matches {
             stale.push(path);

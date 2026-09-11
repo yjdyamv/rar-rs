@@ -251,6 +251,9 @@ impl RarArchive {
 
         let base = volume_base_of(&self.path);
         let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        // Recover a multi-volume commit another process was killed in the
+        // middle of before staging this rewrite.
+        crate::fs::atomic::recover_interrupted_commit(&parent, &base)?;
         // Write to a temporary volume base and rename over the originals
         // only after every volume succeeded (a failure never destroys the
         // original set).

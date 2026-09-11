@@ -669,6 +669,13 @@ impl RarArchive {
     /// the rebuilt quick-open record, and truncate the trailing end /
     /// quick-open / recovery blocks.
     fn prepare_append(&mut self) -> RarResult<()> {
+        // Recover a multi-volume commit another process was killed in the
+        // middle of before touching this archive.
+        let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        crate::fs::atomic::recover_interrupted_commit(
+            &parent,
+            &crate::fs::volume::volume_base_of(&self.path),
+        )?;
         // The RAR5 path stages a rewrite: re-parse RAR5 block headers,
         // rebuild the quick-open record and patch the RAR5 main-header
         // locator. The RAR4 path (ADR 0005 stage B) has its own prelude

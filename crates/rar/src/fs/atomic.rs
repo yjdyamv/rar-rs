@@ -160,70 +160,181 @@ fn restore_file(src: &Path, dest: &Path) -> io::Result<()> {
     }
 }
 
-/// Commit a multi-file write as one unit.
+/// Journal file recording an in-flight multi-file commit, next to the archive
+/// being replaced. One per base name: writes to the same archive are
+/// serialized by the caller.
+fn journal_path(parent: &Path, base: &str) -> PathBuf {
+    parent.join(format!(".{base}.rar5commit.journal"))
+}
+
+/// Marker written after every staged file is installed, before the backups
+/// are dropped. Its presence tells recovery the new set won.
+fn commit_done_path(parent: &Path, base: &str) -> PathBuf {
+    parent.join(format!(".{base}.rar5commit.done"))
+}
+
+/// Serialize the commit plan: one `backup`/`install` record per file, names
+/// relative to `parent`. Written before anything moves, via a sibling rename
+/// so a torn write cannot leave a half journal for recovery to misread.
+fn write_commit_journal(
+    parent: &Path,
+    base: &str,
+    backups: &[(PathBuf, PathBuf)],
+    install: &[(PathBuf, PathBuf)],
+) -> RarResult<()> {
+    let mut text = String::from("rar5commit v1\n");
+    let mut push = |kind: &str, from: &Path, to: &Path| {
+        if let (Some(from), Some(to)) = (from.file_name(), to.file_name()) {
+            text.push_str(kind);
+            text.push('\t');
+            text.push_str(&from.to_string_lossy());
+            text.push('\t');
+            text.push_str(&to.to_string_lossy());
+            text.push('\n');
+        }
+    };
+    for (backup, final_path) in backups {
+        push("backup", backup, final_path);
+    }
+    for (staged, final_path) in install {
+        push("install", staged, final_path);
+    }
+    let path = journal_path(parent, base);
+    let tmp = path.with_extension("journal.tmp");
+    fs::write(&tmp, text.as_bytes())?;
+    fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Roll back or finish an interrupted multi-file commit, if a journal is
+/// present next to `base`.
+///
+/// Called before a write stages new output, so a process killed mid-commit
+/// never leaves a mixed volume set behind. With the done marker present the
+/// new set won and the parked originals are dropped; without it the commit had
+/// not finished, so newly installed files are removed, parked originals are
+/// restored, and leftover staged files are discarded. A corrupt journal is
+/// left untouched (recovery never guesses).
+pub(crate) fn recover_interrupted_commit(parent: &Path, base: &str) -> RarResult<()> {
+    let journal = journal_path(parent, base);
+    // A crash between writing and renaming the journal leaves only this.
+    let _ = fs::remove_file(journal.with_extension("journal.tmp"));
+    let Ok(text) = fs::read_to_string(&journal) else {
+        return Ok(());
+    };
+    if !text.starts_with("rar5commit v1") {
+        return Ok(());
+    }
+    let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut installs: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for line in text.lines().skip(1) {
+        let mut fields = line.split('\t');
+        match (fields.next(), fields.next(), fields.next()) {
+            (Some("backup"), Some(from), Some(to)) => {
+                backups.push((parent.join(from), parent.join(to)));
+            }
+            (Some("install"), Some(from), Some(to)) => {
+                installs.push((parent.join(from), parent.join(to)));
+            }
+            _ => {}
+        }
+    }
+    if commit_done_path(parent, base).exists() {
+        for (backup, _) in &backups {
+            let _ = fs::remove_file(backup);
+        }
+    } else {
+        for (_, final_path) in &installs {
+            let _ = fs::remove_file(final_path);
+        }
+        for (backup, final_path) in &backups {
+            let _ = restore_file(backup, final_path);
+        }
+        for (staged, _) in &installs {
+            let _ = fs::remove_file(staged);
+        }
+    }
+    let _ = fs::remove_file(&journal);
+    let _ = fs::remove_file(commit_done_path(parent, base));
+    Ok(())
+}
+
+/// Commit a multi-file write as one unit, journaled so a process kill between
+/// the renames is recoverable (see [`recover_interrupted_commit`]).
 ///
 /// `install` holds `(staged, final)` pairs; `retire` holds existing final
-/// paths the new set does not overwrite (a previous, longer volume set).
-/// Every pre-existing final is first parked on a hidden sibling, then the
-/// staged files are moved onto their final names (the retired files stay
-/// parked). A failure at any step rolls the whole set back: installed files
-/// return to their staged names and every parked original returns to its
-/// final name. The caller therefore observes either the complete new set or
-/// the untouched old set, never a mix. On success the parked files (replaced
-/// originals and retired extras) are deleted.
+/// paths the new set does not overwrite (a previous, longer volume set, or
+/// stale `.rev` files). Every pre-existing final is first parked on a hidden
+/// sibling, then the staged files are moved onto their final names (the
+/// retired files stay parked). A failure at any step rolls the whole set back:
+/// installed files return to their staged names and every parked original
+/// returns to its final name. The caller therefore observes either the
+/// complete new set or the untouched old set, never a mix. On success the
+/// parked files (replaced originals and retired extras) are deleted.
 ///
 /// Staged files that were not installed are left in place for the caller's
-/// cleanup. This is atomic with respect to *errors*; surviving a process kill
-/// between renames still needs an on-disk journal.
-pub(crate) fn commit_files(install: &[(PathBuf, PathBuf)], retire: &[PathBuf]) -> RarResult<()> {
+/// cleanup. A process kill is covered by the journal, not by this function.
+pub(crate) fn commit_files(
+    parent: &Path,
+    base: &str,
+    install: &[(PathBuf, PathBuf)],
+    retire: &[PathBuf],
+) -> RarResult<()> {
     if install.is_empty() && retire.is_empty() {
         return Ok(());
     }
     let suffix = temp_suffix();
-    // (parked path, final path) for everything that must be restored.
-    let mut parked: Vec<(PathBuf, PathBuf)> = Vec::new();
-    // (final path, staged path) for everything already installed.
-    let mut installed: Vec<(PathBuf, PathBuf)> = Vec::new();
-
-    let rollback = |parked: &[(PathBuf, PathBuf)], installed: &[(PathBuf, PathBuf)]| {
-        for (final_path, staged) in installed.iter().rev() {
-            let _ = restore_file(final_path, staged);
-        }
-        for (backup, final_path) in parked.iter().rev() {
-            let _ = restore_file(backup, final_path);
-        }
-    };
-
-    // Phase 1: park every pre-existing final (replaced or retired).
+    // Plan the backups up front so the journal can name them before any file
+    // moves.
+    let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
     for final_path in install
         .iter()
         .map(|(_, final_path)| final_path)
         .chain(retire.iter())
     {
-        if !final_path.exists() {
-            continue;
+        if final_path.exists() {
+            backups.push((backup_sibling_path(final_path, &suffix), final_path.clone()));
         }
-        let backup = backup_sibling_path(final_path, &suffix);
-        if let Err(error) = fs::rename(final_path, &backup) {
-            rollback(&parked, &installed);
+    }
+    write_commit_journal(parent, base, &backups, install)?;
+
+    // (final path, staged path) for everything already installed.
+    let mut installed: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let rollback = |backups: &[(PathBuf, PathBuf)], installed: &[(PathBuf, PathBuf)]| {
+        for (final_path, staged) in installed.iter().rev() {
+            let _ = restore_file(final_path, staged);
+        }
+        for (backup, final_path) in backups.iter().rev() {
+            let _ = restore_file(backup, final_path);
+        }
+    };
+
+    // Phase 1: park every pre-existing final (replaced or retired).
+    for (backup, final_path) in &backups {
+        if let Err(error) = fs::rename(final_path, backup) {
+            rollback(&backups, &installed);
+            let _ = fs::remove_file(journal_path(parent, base));
             return Err(RarError::Io(error));
         }
-        parked.push((backup, final_path.clone()));
     }
 
     // Phase 2: install the staged files.
     for (staged, final_path) in install {
         if let Err(error) = replace_file(staged, final_path) {
-            rollback(&parked, &installed);
+            rollback(&backups, &installed);
+            let _ = fs::remove_file(journal_path(parent, base));
             return Err(error);
         }
         installed.push((final_path.clone(), staged.clone()));
     }
 
-    // Phase 3: success — the parked originals and retired extras are garbage.
-    for (backup, _) in &parked {
+    // Phase 3: mark committed, then drop the parked originals.
+    let _ = fs::write(commit_done_path(parent, base), b"");
+    for (backup, _) in &backups {
         let _ = fs::remove_file(backup);
     }
+    let _ = fs::remove_file(journal_path(parent, base));
+    let _ = fs::remove_file(commit_done_path(parent, base));
     Ok(())
 }
 
@@ -269,7 +380,7 @@ mod tests {
             (staged_first.clone(), first.clone()),
             (staged_second, second.clone()),
         ];
-        assert!(commit_files(&install, &[]).is_err());
+        assert!(commit_files(dir.path(), "set", &install, &[]).is_err());
 
         assert_eq!(std::fs::read(&first).unwrap(), b"old-1");
         assert_eq!(std::fs::read(&second).unwrap(), b"old-2");
@@ -294,9 +405,81 @@ mod tests {
         let staged = dir.path().join(".stage-1");
         std::fs::write(&staged, b"new-1").unwrap();
 
-        commit_files(&[(staged, keep.clone())], std::slice::from_ref(&extra)).unwrap();
+        commit_files(
+            dir.path(),
+            "set",
+            &[(staged, keep.clone())],
+            std::slice::from_ref(&extra),
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&keep).unwrap(), b"new-1");
         assert!(!extra.exists());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("rar5commit") || name.contains("rar5bak"))
+            .collect();
+        assert!(leftovers.is_empty(), "commit leftovers: {leftovers:?}");
+    }
+
+    #[test]
+    fn recovery_rolls_back_a_prepared_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        let final_path = parent.join("set.part1.rar");
+        // The old file was parked and the new one installed, then the writer
+        // was killed before the done marker was written.
+        let backup = parent.join(".set.part1.rar.rar5bak-x");
+        let staged = parent.join(".set.part1.rar.rar5tmp-x.part1.rar");
+        std::fs::write(&backup, b"old").unwrap();
+        std::fs::write(&final_path, b"new").unwrap();
+        std::fs::write(
+            super::journal_path(parent, "set"),
+            format!(
+                "rar5commit v1\nbackup\t{}\t{}\ninstall\t{}\t{}\n",
+                backup.file_name().unwrap().to_string_lossy(),
+                final_path.file_name().unwrap().to_string_lossy(),
+                staged.file_name().unwrap().to_string_lossy(),
+                final_path.file_name().unwrap().to_string_lossy(),
+            ),
+        )
+        .unwrap();
+
+        super::recover_interrupted_commit(parent, "set").unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"old");
+        assert!(!backup.exists());
+        assert!(!super::journal_path(parent, "set").exists());
+    }
+
+    #[test]
+    fn recovery_keeps_the_new_set_when_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        let final_path = parent.join("set.part1.rar");
+        let backup = parent.join(".set.part1.rar.rar5bak-y");
+        let staged = parent.join(".set.part1.rar.rar5tmp-y.part1.rar");
+        std::fs::write(&backup, b"old").unwrap();
+        std::fs::write(&final_path, b"new").unwrap();
+        std::fs::write(
+            super::journal_path(parent, "set"),
+            format!(
+                "rar5commit v1\nbackup\t{}\t{}\ninstall\t{}\t{}\n",
+                backup.file_name().unwrap().to_string_lossy(),
+                final_path.file_name().unwrap().to_string_lossy(),
+                staged.file_name().unwrap().to_string_lossy(),
+                final_path.file_name().unwrap().to_string_lossy(),
+            ),
+        )
+        .unwrap();
+        std::fs::write(super::commit_done_path(parent, "set"), b"").unwrap();
+
+        super::recover_interrupted_commit(parent, "set").unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"new");
+        assert!(!backup.exists());
+        assert!(!super::commit_done_path(parent, "set").exists());
+        assert!(!super::journal_path(parent, "set").exists());
     }
 
     #[test]

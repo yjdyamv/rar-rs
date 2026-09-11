@@ -772,13 +772,14 @@ impl ArchiveWriter {
     /// atomically (the whole file is moved into place). A multi-volume set is
     /// committed as one transaction: pre-existing volumes are parked, the
     /// staged set is installed, and any error restores the previous set, so a
-    /// failed commit never leaves a mix of old and new parts (a shorter
-    /// overwrite also retires the leftovers of a longer previous set). A
-    /// process kill between the individual renames is still not covered;
-    /// that needs an on-disk journal. `.rev` recovery volumes, when
-    /// requested, are generated only after every data volume is committed;
-    /// if that step fails, `finish` returns the error but the data volumes
-    /// are already on disk.
+    /// failed commit never leaves a mix of old and new parts. A shorter
+    /// overwrite retires the leftovers of a longer previous set, and the
+    /// stale `.rev` files of an overwritten set go with it. The commit is
+    /// journaled, so a process killed between the renames is rolled back or
+    /// completed the next time the archive is written. `.rev` recovery
+    /// volumes, when requested, are generated only after every data volume is
+    /// committed; if that step fails, `finish` returns the error but the data
+    /// volumes are already on disk.
     pub fn finish(mut self) -> RarResult<WriteReport> {
         let mut archive = self.archive.take().ok_or_else(Self::poisoned_error)?;
         if let Err(error) = archive.close() {

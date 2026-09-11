@@ -572,6 +572,44 @@ fn shrinking_multivolume_overwrite_retires_stale_parts() {
     assert_eq!(parts.len(), 1, "stale parts left behind: {parts:?}");
 }
 
+/// Overwriting a volume set without recovery volumes must retire the
+/// previous set's stale `.rev` files, not leave them pointing at data
+/// volumes they no longer protect.
+#[test]
+fn overwriting_a_volume_set_retires_stale_recovery_volumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rv.rar");
+    let payload: Vec<u8> = (0..9 * 32 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect();
+
+    let mut writer = ArchiveWriter::create_with(
+        &base,
+        WriterOptions::new()
+            .volume_size(32 * 1024)
+            .recovery_volume_count(1),
+    )
+    .unwrap();
+    writer.add_bytes("many.bin", &payload, stored()).unwrap();
+    writer.finish().unwrap();
+    let revs = |dir: &std::path::Path| -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".rev"))
+            .collect()
+    };
+    assert!(!revs(dir.path()).is_empty(), "expected .rev volumes");
+
+    let mut writer =
+        ArchiveWriter::create_with(&base, WriterOptions::new().volume_size(32 * 1024)).unwrap();
+    writer.add_bytes("many.bin", &payload, stored()).unwrap();
+    writer.finish().unwrap();
+
+    let revs = revs(dir.path());
+    assert!(revs.is_empty(), "stale .rev left behind: {revs:?}");
+}
+
 /// Part number parsed out of a `....partN.rar` staging name.
 fn part_number(path: &std::path::Path) -> u64 {
     path.file_name()
