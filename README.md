@@ -127,7 +127,7 @@ Full index in **[docs/README.md](docs/README.md)**. Highlights:
 - **Roadmap / status** — [PLAN.md](PLAN.md) (also carries the hardening log)
 - **Security policy** — [SECURITY.md](SECURITY.md)
 - **Testing & suite cost** — [docs/testing.md](docs/testing.md)
-- **Code audit baseline** — [docs/CODE_AUDIT_2026-09-05.md](docs/CODE_AUDIT_2026-09-05.md)
+- **Technical debt** — [PLAN.md](PLAN.md) (the one-off audit baseline was folded in there)
 
 ## Legal
 

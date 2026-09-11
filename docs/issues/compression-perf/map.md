@@ -55,6 +55,26 @@ window, PLAN 定论 2026-09).
 - The pre-gate for delta (`auto_delta_filter_channels`) is sample-based
   since 45fa1e0; candidates are the PCM frame sizes.
 
+## Closed issues (verdicts)
+
+The individual ticket files were folded into this table once they closed; the
+open ones (04, 09) still have their own file.
+
+| # | Issue | Verdict |
+|---|---|---|
+| 01 | Matchless-block DP fast path | Landed, byte-identical |
+| 02 | Collector fast-mode gating | Landed (`longest == 0`, threshold 256) |
+| 03 | Delta candidate channels + sampled pre-gate | Landed |
+| 05 | Auto delta/x86 filters on the streaming path | Landed |
+| 06 | Member-level solid MT | Structurally abandoned; chunk-level MT landed instead (a shared window cannot be parallelized across members) |
+| 07 | Skip re-pricing on literal-heavy blocks | Rejected: the gate only fires where parsing is already cheap (the matchless fast path covers the all-literal case), never on the dense-match blocks that dominate DLL time, yet it changed DLL bytes |
+| 08 | Persistent tree corruption across chunk grows | Fixed (`grow_to` copies links, `rebase` migrates slots) plus a per-byte verification net in the collector |
+| 10 | 2-3 byte short matches | Rejected: short-match slot code lengths depend on a frequency bootstrap (WinRAR emits 315 K of them), which two-pass pricing cannot reproduce safely — every variant lost ratio. The analyzer tooling that found this was kept |
+| 11 | BT4 first-step value carry | Landed (-3.6%); batch cheats beyond one step stay barred by the insertion-order invariant |
+| 12 | MT near-window alignment | Landed, then superseded by 13's low-step tier |
+| 13 | Far-band budget + MT bandwidth cliff | Verdict: MT-only low-step search became the MT default; the far-band budget only helps seq and is dormant |
+| 14 | Two-tier near window | Measured negative (seq -75%, mt8 -98%), abandoned and kept as a negative example |
+
 ## Completed
 
 - 01 matchless-block DP fast path (resolved, 3cd6b37)

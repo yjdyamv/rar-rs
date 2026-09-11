@@ -109,6 +109,14 @@ tests/examples/fuzz. The npm package is already `rar-rs-napi`.
    it, keep `recovery`/`name_policy` doc(hidden) as-is, and keep
    `codec::lzss_huff` public (stable enough for the mtbench/napi streaming
    paths).
+   **2026-09 executed (partially):** the `format` tree is now hidden by
+   default — `pub` only with the `raw` feature, otherwise `pub(crate)` — and
+   both `rar40` and `rar50` aliases are `raw`-gated. In-tree tests still cross
+   that seam on purpose, so `crates/rar` dev-depends on itself with `raw` to
+   turn the feature on for the dev/test graph only. `recovery` follows the same
+   rule, with its two CLI-facing helpers promoted to crate-root re-exports.
+   `name_policy` moved out of the library entirely into `rar-cli`, which was
+   its only consumer. `codec::lzss_huff` stays public as decided.
 4. Legacy facade removal. The typed roles now cover the full surface
    including the previously blocking seams: `archive u/f` version control
    runs on `ArchiveEditor` (chained rename + delete, two applies) and

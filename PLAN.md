@@ -18,6 +18,23 @@
 - 架构：workspace `crates/rar`（库 crate `rar-rs`）+ `crates/rar-cli`（rar/unrar）+ `crates/rar-napi`（native/WASI binding），按 rars 分层——词汇见 `CONTEXT.md`，格式细节见 `docs/FORMAT_RAR5_RAR7.html`。
 - **已废弃 API 面移除（2026-09，Phase 6 收尾）**：全仓库不再有 `#[deprecated]` 标注；`RarArchive` 写侧方法（`create_with_options`/`add`/`add_as`/`add_bytes`/`add_directory_only`/`add_batch`/`close`/`open_append*`）降 `pub(crate)`，读侧 `list`/`get_entry`/`namelist`/`read`/`extract`/`extract_all` 与事务方法/`lock` 已删除。所有期货已迁到角色门面：`ArchiveWriter`（`create_with`/`append`/`add_path`/`add_bytes`/`add_directory`/`add_redirect`/`add_batch`/`finish()`，消费 self）+ `ArchiveReader`（`unique_entry`/`entries[_named]`/`read_entry[_with_options]`/`copy_entry_to[_with_options]`/`extract_entry`）+ `ArchiveEditor`（`delete_entries`/`rename_entries`/`apply(EditPlan)`/`set_comment`/`set_recovery`/`lock`）。**测试共 31 文件 2600+/2760− 行改**，examples/fuzz 同步；`RarArchive` 保留面仅剩 `open`（+`open_with`/`extract_all_with_options`/`read_with_options`/`set_cancel_flag`/`set_progress_callback`/`get_comment`）供有绑定兼容需求的调用方。**迁移中两处语义回归已修**：① 旧 `read(name)` 对重名成员取第一个，新 `unique_entry` 报 `AmbiguousMember`——重名场景改用 `entries_named(name).next()`；② v70 非 2 的幂小字典已解锁（见「已完成」首个条目）；此前非幂 1/32 增量位覆盖仅在 >4 GiB（`-md8g`/writer 单测）。**验证**：`cargo check --workspace --all-features --all-targets` 零 error、`cargo clippy --workspace --all-features --all-targets -- -D warnings` 全绿（含全部测试 target）、`cargo test --workspace --all-features` 全过（rar-rs 247 lib + 17 集成 + rar-cli 58+37 incl. 本机 WinRAR 互操作 + rar-napi 3）、fuzz 独立 workspace `cargo check` 通过。15 个测试文件的 `#![allow(deprecated)]` 已全部移除（库内已无 deprecated 项，属惰性标记）。逐文件迁移记录见 git 历史。
 
+## 技术债（2026-09 审查的未闭环项）
+
+`docs/CODE_AUDIT_2026-09-05.md` 已删除（一次性基线，结论归到这里）。仍未闭环的：
+
+- **热点文件拆分**：`format/rar5/write/mod.rs` 3879 行、`codec/modern/lzss_huff/encoder.rs` 3732、
+  `archive/rar4_edit.rs` 2661、`codec/legacy/rar29_encoder.rs` 2471。分层（`archive` / `codec` / `format`）
+  已收敛，文件级拆分没做。
+- **双 options 面**：`WriterOptions`（私有字段 builder，完整校验）与 `CreateOptions`（公开字段，弱校验）
+  并存且都从 `lib.rs` 导出；RAR4 规则已共用，结构仍在。
+- **低层 `codec` / `crypto` 公开面未收敛**：两者是完全 `pub`（连 `doc(hidden)` 都没有）。
+  `format` / `recovery` 已 `raw` 门控，这两个要再一轮 —— 前置是把 examples/tests
+  对 `rar_rs::codec::…` 的引用迁到根重导出。
+- **CLI 两个二进制仍有重复**：`selector.rs` / `password.rs` 已抽出共享，成员选择、提取、列表编排
+  仍各写一份。
+- **多卷事务非原子**：单卷是 staging + `replace_file` 原子替换，多卷是逐卷替换 —— 中途失败会留下
+  新旧混排的卷集，且没有回滚。真做需要 journal / undo log。
+
 ## 待办（下一批，issue 见 `docs/issues/compression-perf/`）
 
 ### 老版本 RAR 只读（继续）
