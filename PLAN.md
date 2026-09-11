@@ -247,7 +247,7 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
 ## 一致拒绝（别"修"）
 
 - 分卷 + 内联恢复记录（`-rr`）——WinRAR 分卷只能用 `.rev`
-- 分卷 append；分卷 lock / 注释——官方 rar 同样拒绝或受限
+- 分卷 append、分卷删除：官方 `rar` 同样拒绝（"Cannot modify volume"）。分卷的重命名/改名与锁**不是**拒绝项：官方支持，我们也已支持（逐卷重写）。
 
 ## 已知小差异（记录，互操作无碍）
 

@@ -4,9 +4,11 @@
 //! conversion which routes through the same rename path), inline
 //! recovery-record add/replace (`rar rr`) and lock (`rar k`). All are pure
 //! header/block surgery — no member data is decoded or recompressed, so
-//! solid and non-solid archives are handled identically. The edits are
-//! refused up front for multi-volume and header-encrypted (`-hp`)
-//! archives, which the later stages of the RAR4 edit rollout will cover.
+//! solid and non-solid archives are handled identically. Multi-volume sets
+//! are edited per volume for renames and lock (official `rar` rewrites each
+//! volume without rebalancing, so a volume may grow past `-v`); delete and
+//! append on a set are refused exactly like the official "Cannot modify
+//! volume", and comment/recovery edits on a set are not supported yet.
 //!
 //! Rename rebuilds each FILE_HEAD's encoded name field in place (keeping
 //! every other field byte-identical, including salt / nested comment /
@@ -20,7 +22,7 @@
 //! plaintext marker carrying MHD_PASSWORD, so the layout scan decrypts every
 //! later block header with the archive password and the rewrite re-encrypts
 //! each block it rebuilds or inserts with a fresh salt (untouched blocks are
-//! copied as ciphertext). Only multi-volume archives are still refused.
+//! copied as ciphertext). Multi-volume sets follow the same per-volume rule.
 //!
 //! Lock (`k`) patches the 13-byte main header in place (mirroring the RAR5
 //! lock). Recovery reads the whole archive into memory — the NEWSUB record
@@ -29,10 +31,10 @@
 //! stages a rewritten copy next to the archive before replacing it
 //! atomically.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::RarArchive;
 use super::transaction::EditSummary;
@@ -42,7 +44,8 @@ use crate::format::rar4::{
     ENDARC_HEAD, FHD_COMMENT, FHD_LARGE, FHD_SALT, FHD_UNICODE, FILE_HEAD, LONG_BLOCK, MAIN_HEAD,
     MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY, MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD,
 };
-use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path};
+use crate::fs::atomic::{commit_files, read_write_create, replace_file, temp_sibling_path};
+use crate::fs::volume::volume_base_of;
 // `scan_protect` is the plaintext shortcut kept for the in-file tests;
 // production paths always go through the password-aware variant.
 #[allow(unused_imports)]
@@ -137,11 +140,9 @@ fn read_main_from_file(path: &Path, sfx_offset: u64) -> RarResult<(u64, Vec<u8>)
     Ok((sfx_offset + 7, header))
 }
 
-/// Refuse edits on multi-volume RAR4 sets (the rewrite would need volume
-/// rebalancing; see ADR 0005). Header-encrypted (`-hp`) archives are
-/// supported: every rebuilt or inserted block is re-encrypted with the
-/// archive password, and a missing password surfaces as
-/// [`RarError::Encrypted`] from the layout scan.
+/// Refuse edits on multi-volume RAR4 sets. Used by the append path: like
+/// official `rar`, appending to a volume set is refused ("Cannot modify
+/// volume"); header-level renames and lock are handled per volume instead.
 fn refuse_unsupported_containers(archive: &RarArchive, main_flags: u16) -> RarResult<()> {
     if archive.volume_paths.len() > 1 || main_flags & MHD_VOLUME != 0 {
         return Err(RarError::Unsupported(
@@ -155,15 +156,10 @@ fn refuse_unsupported_containers(archive: &RarArchive, main_flags: u16) -> RarRe
 /// recompute its CRC16, patching the 13-byte block in place. Locking is
 /// irreversible; an already-locked archive is a no-op.
 pub(crate) fn lock_archive(archive: &RarArchive) -> RarResult<()> {
-    if archive.volume_paths.len() > 1 {
-        return Err(RarError::Unsupported(
-            "locking multi-volume RAR4 archives is not supported (lock the first volume instead)"
-                .into(),
-        ));
-    }
+    // Multi-volume sets lock the first volume's main header, which is what
+    // official `rar k` does (the later volumes' headers stay untouched).
     let (main_offset, main_header) = read_main_from_file(&archive.path, archive.sfx_offset)?;
     let flags = main_flags(&main_header)?;
-    refuse_unsupported_containers(archive, flags)?;
     if flags & MHD_LOCK != 0 {
         return Ok(()); // already locked; nothing to do
     }
@@ -426,6 +422,121 @@ fn rename_file_header(header: &[u8], new_name: &str) -> RarResult<Vec<u8>> {
     let crc = header_crc16(&out[2..crc_end]);
     out[..2].copy_from_slice(&crc.to_le_bytes());
     Ok(out)
+}
+
+/// Decode a FILE_HEAD block's member name (honoring `FHD_UNICODE`), used by
+/// the name-keyed multi-volume rename.
+fn file_header_name(header: &[u8]) -> RarResult<String> {
+    if header.len() < 32 || header[2] != FILE_HEAD {
+        return Err(RarError::Format(
+            "RAR4: file header block is malformed".into(),
+        ));
+    }
+    let flags = u16::from_le_bytes([header[3], header[4]]);
+    let name_start = 32 + if flags & FHD_LARGE != 0 { 8 } else { 0 };
+    if name_start + 2 > header.len() {
+        return Err(RarError::Format(
+            "RAR4: file header is missing its name field".into(),
+        ));
+    }
+    let name_size = u16::from_le_bytes([header[26], header[27]]) as usize;
+    let name_end = name_start + name_size;
+    if name_end > header.len() {
+        return Err(RarError::Format(
+            "RAR4: file name extends past header".into(),
+        ));
+    }
+    Ok(crate::format::rar4::decode_file_name(
+        &header[name_start..name_end],
+        flags,
+    ))
+}
+
+/// Rename members across a multi-volume RAR4 set: each volume is rewritten as
+/// its own block stream (official `rar rn` does not rebalance volumes, so a
+/// volume may grow past `-v`). Every FILE_HEAD carrying a renamed member's
+/// name is rebuilt — a split member repeats its name in each volume's chunk
+/// header — and the whole set is committed through the shared multi-file
+/// transaction, so a failure restores the previous volumes.
+fn apply_multivolume_renames(
+    archive: &mut RarArchive,
+    rename_map: &HashMap<usize, String>,
+) -> RarResult<EditSummary> {
+    let mut by_name: HashMap<String, String> = HashMap::new();
+    for (idx, new_name) in rename_map {
+        let entry = archive.entries.get(*idx).ok_or(RarError::StaleEntryId)?;
+        by_name.insert(
+            entry.name().trim_end_matches('/').to_string(),
+            new_name.clone(),
+        );
+    }
+    let password = header_password(archive);
+    let password_bytes = password.map(str::as_bytes);
+    let mut matched: HashSet<String> = HashSet::new();
+    let mut install: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for volume in archive.volume_paths.clone() {
+        let bytes = fs::read(&volume).map_err(RarError::Io)?;
+        let sig = if volume == archive.path {
+            archive.sfx_offset as usize
+        } else {
+            crate::detect::find_bytes(&bytes, crate::detect::RAR4_SIGNATURE).ok_or_else(|| {
+                RarError::Format(format!(
+                    "RAR4: {} has no archive signature",
+                    volume.display()
+                ))
+            })?
+        };
+        let mut out = Vec::with_capacity(bytes.len() + 64);
+        out.extend_from_slice(&bytes[..sig + 7]);
+        let mut pos = sig + 7;
+        let mut hp: Option<&[u8]> = None;
+        while pos + 7 <= bytes.len() {
+            let start = pos;
+            let view = read_block_view(&bytes, pos, hp)?;
+            if view.head_type == MAIN_HEAD {
+                let flags = main_flags(&view.header)?;
+                if flags & MHD_PASSWORD != 0 {
+                    hp = password_bytes;
+                }
+                out.extend_from_slice(&bytes[start..start + view.total]);
+            } else if view.head_type == FILE_HEAD {
+                let name = file_header_name(&view.header)?;
+                let key = name.trim_end_matches('/');
+                if let Some(new_name) = by_name.get(key) {
+                    let new_header = rename_file_header(&view.header, new_name)?;
+                    emit_block(&mut out, &new_header, view.data(&bytes, start), password)?;
+                    matched.insert(key.to_string());
+                } else {
+                    out.extend_from_slice(&bytes[start..start + view.total]);
+                }
+            } else {
+                out.extend_from_slice(&bytes[start..start + view.total]);
+            }
+            pos = start + view.total;
+        }
+        let tmp = temp_sibling_path(&volume);
+        fs::write(&tmp, &out).map_err(RarError::Io)?;
+        install.push((tmp, volume));
+    }
+    let parent = archive
+        .path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    let base = volume_base_of(&archive.path);
+    if let Err(error) = commit_files(&parent, &base, &install, &[]) {
+        for (tmp, _) in &install {
+            let _ = fs::remove_file(tmp);
+        }
+        return Err(error);
+    }
+    // Re-scan the committed set so the in-memory catalog and every rebuilt
+    // header CRC reflect the new bytes.
+    archive.open_read()?;
+    Ok(EditSummary {
+        deleted: 0,
+        renamed: matched.len(),
+    })
 }
 
 /// Append a RAR4 per-file comment (`COMM_HEAD`) subblock to an already-built
@@ -873,7 +984,6 @@ pub(crate) fn edit_rar4(
         archive.sfx_offset as usize,
         header_password(archive),
     )?;
-    refuse_unsupported_containers(archive, layout.main_flags)?;
     if layout.main_flags & MHD_LOCK != 0 {
         return Err(RarError::ArchiveLocked);
     }
@@ -916,6 +1026,26 @@ pub(crate) fn edit_rar4(
             deleted: deleted_count,
             renamed: 0,
         });
+    }
+
+    // Multi-volume sets: official `rar` supports the header-level edits on a
+    // volume set (rewriting each volume without rebalancing) but refuses
+    // member delete/append ("Cannot modify volume"). Ours mirrors that:
+    // renames are handled per volume; delete and the not-yet-supported
+    // comment/recovery changes are refused clearly.
+    if archive.volume_paths.len() > 1 || layout.main_flags & MHD_VOLUME != 0 {
+        if deleted_count > 0 {
+            return Err(RarError::Unsupported(
+                "cannot delete members from a multi-volume RAR4 archive (volume rebalancing is required; official rar refuses too)".into(),
+            ));
+        }
+        if comment.is_some() || force_rr.is_some() || !member_comments.is_empty() {
+            return Err(RarError::Unsupported(
+                "comment and recovery-record edits on multi-volume RAR4 archives are not supported yet".into(),
+            ));
+        }
+        let (rename_map, _) = build_rename_map(&archive.entries, renames)?;
+        return apply_multivolume_renames(archive, &rename_map);
     }
 
     let is_solid = layout.main_flags & MHD_SOLID != 0;
