@@ -27,6 +27,7 @@ use crate::codec::DecoderState;
 use crate::crypto;
 use crate::crypto::parse_archive_encrypt_header;
 use crate::error::{RarError, RarResult};
+use crate::format::rar4::create::Rar4WriteOptions;
 use crate::format::rar5::headers::{ArchiveHeader, main_header_locator_fields, split_main_extra};
 use crate::format::rar5::vint;
 use crate::format::rar5::{
@@ -962,49 +963,15 @@ impl RarArchive {
         opts.validate()?;
         let is_rar4 = opts.compression.is_legacy();
         if is_rar4 {
-            // RAR4 does not support these RAR5-specific features.
-            if opts.quick_open {
-                return Err(RarError::Unsupported(
-                    "quick-open is not supported for RAR4 archives".into(),
-                ));
-            }
-            if opts.blake2 {
-                return Err(RarError::Unsupported(
-                    "BLAKE2sp hashes are not supported for RAR4 archives".into(),
-                ));
-            }
-            // Inline recovery records are now supported on single-volume
-            // RAR4 archives too (the NEWSUB 0x7a form WinRAR writes); the
-            // multi-volume rejection below still applies, matching WinRAR.
-            if opts.recovery_percent.is_some() && opts.volume_size.is_some() {
-                return Err(RarError::Unsupported(
-                    "recovery records are not supported for multi-volume archives".into(),
-                ));
-            }
-            if opts.recovery_volumes_percent.is_some() || opts.recovery_volume_count.is_some() {
-                return Err(RarError::Unsupported(
-                    "recovery volumes are not supported for RAR4 archives".into(),
-                ));
-            }
-            if opts.save_owner {
-                return Err(RarError::Unsupported(
-                    "owner/group records are not supported for RAR4 archives".into(),
-                ));
-            }
-            if opts.save_streams {
-                return Err(RarError::Unsupported(
-                    "NTFS stream records are not supported for RAR4 archives".into(),
-                ));
-            }
-            if opts.dict_size_bytes.is_some() {
-                return Err(RarError::Unsupported(
-                    "RAR4 does not support RAR7 dictionary sizes".into(),
-                ));
-            }
+            // The RAR4 container's own policy: options it cannot express are
+            // rejected by the format module that owns them, so this layer
+            // carries no duplicated RAR4 rule set (and reports the same
+            // `InvalidOption` error the typed `WriterOptions` surface does).
+            crate::format::rar4::create::validate_rar4_only(Rar4WriteOptions::from(&opts))?;
         }
         if opts.encrypt_headers && opts.password.as_deref().is_none_or(|pw| pw.is_empty()) {
-            return Err(RarError::Encrypted(
-                "header encryption requires a password".into(),
+            return Err(RarError::InvalidOption(
+                "header encryption requires a non-empty password".into(),
             ));
         }
         // Header encryption is supported for multi-volume archives: every
@@ -1128,6 +1095,25 @@ impl RarArchive {
                 .lock()
                 .expect("progress lock")
                 .report(member, done, member_total);
+        }
+    }
+}
+
+/// Project the plain [`crate::options::CreateOptions`] struct onto the
+/// RAR4-only policy the legacy format module owns, so both write surfaces
+/// are checked by the same rule set.
+impl From<&crate::options::CreateOptions> for Rar4WriteOptions {
+    fn from(options: &crate::options::CreateOptions) -> Self {
+        Self {
+            quick_open: options.quick_open,
+            blake2: options.blake2,
+            recovery_volumes_percent: options.recovery_volumes_percent,
+            recovery_volume_count: options.recovery_volume_count,
+            save_owner: options.save_owner,
+            save_streams: options.save_streams,
+            // The legacy pipeline picks its own per-member window, so either
+            // dictionary field would be silently ignored — reject both.
+            has_dictionary: options.dict_size_log.is_some() || options.dict_size_bytes.is_some(),
         }
     }
 }
