@@ -4,9 +4,10 @@
 //! AES-256-CBC stack (PBKDF2-style key derivation, hash-key MAC, streaming
 //! CBC). Later format families add their own `crypto/rar*.rs` modules.
 
-// Only public with the `raw` feature, and only the archive layer calls in, so
-// helpers that exist for raw access are dead without it.
-#![cfg_attr(not(feature = "raw"), allow(dead_code))]
+// Only public with the `raw` feature, and the archive layer is the only caller
+// either way, so without it the helpers kept for raw access are dead and the
+// re-exports below have no importer.
+#![cfg_attr(not(feature = "raw"), allow(dead_code, unused_imports))]
 
 pub mod rar15;
 pub mod rar20;

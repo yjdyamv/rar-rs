@@ -63,3 +63,8 @@ required-features = ["parallel"]
 name = "collectbench"
 required-features = ["parallel"]
 
+# Uses `EncoderState` / `encode_chunked_mt`, both `parallel`-gated.
+[[example]]
+name = "mtwin"
+required-features = ["parallel"]
+
