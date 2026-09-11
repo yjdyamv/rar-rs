@@ -31,6 +31,15 @@ dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
 
+# Test profile: the compression paths (match finding, PPMd, AES) are pure CPU
+# work and run an order of magnitude slower unoptimized, which put the full
+# suite past eight minutes of test execution. Optimizing test targets only —
+# `cargo build` keeps the debug profile — while still inheriting
+# `debug_assertions` and `overflow-checks` from `dev`, so arithmetic panics
+# and `debug_assert!` keep firing exactly as before.
+[profile.test]
+opt-level = 2
+
 # Shared release profile (binding .node binaries and CLI releases): LTO +
 # symbol stripping keep artifacts small; overridden per-crate if needed.
 [profile.release]
