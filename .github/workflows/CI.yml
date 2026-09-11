@@ -59,6 +59,21 @@ jobs:
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
       - name: Clippy (workspace, all features and targets)
         run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - name: Clippy (rar-rs, every feature combination)
+        # The workspace build unifies features across crates (rar-rs-napi
+        # pulls in parallel + simd), which hides targets that use a gated API
+        # without declaring `required-features` for it — the mtwin example
+        # failed `cargo check -p rar-rs --all-targets` for that reason while
+        # the workspace check stayed green. Check the library on its own so
+        # each combination is seen in isolation.
+        run: |
+          set -euo pipefail
+          for f in "" raw parallel simd raw,parallel raw,simd parallel,simd raw,parallel,simd; do
+            echo "::group::features='$f'"
+            cargo clippy -p rar-rs --no-default-features --features "$f" --all-targets --locked -- -D warnings
+            echo "::endgroup::"
+          done
+        shell: bash
       - name: Cargo test (workspace)
         run: cargo test --workspace --all-features --locked
       - name: Install binding dependencies

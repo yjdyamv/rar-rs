@@ -48,11 +48,13 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   已收敛，文件级拆分没做。
 - **双 options 面**：`WriterOptions`（私有字段 builder，完整校验）与 `CreateOptions`（公开字段，弱校验）
   并存且都从 `lib.rs` 导出；RAR4 规则已共用，结构仍在。
-- **`codec` 保持完全 `pub`（未收敛，按 ADR 0003 决策 3 维持）**：`codec::lzss_huff` 与根上的
-  `encode` / `decode` / `EncodeOptions` / `EncoderState` / `encode_chunked*` 被 examples 依赖；
-  ADR 明确它「stable enough」暂不门控。真要收敛，前置是把 `examples/`（analyze_stream、
-  clioverhead、mtbench 等）改用根重导出或加 `required-features`。
-  （`crypto` 已收敛：零外部消费者，`raw` 门控，根上的 4 个重导出同步门控。）
+- **（已闭环）低层公开面收敛**：`format` / `recovery` / `crypto` 三棵树 + `rar40`/`rar50` 别名
+  已 `raw` 门控；`codec` 子树里 `common` / `legacy` / `modern` 全是 `pub(crate)`，唯一公开的
+  `codec::lzss_huff`（及根上的 `encode` / `decode` / `EncodeOptions` / `EncoderState` /
+  `encode_chunked*`）是 ADR 0003 决策 3 明确「stable enough」要保留的，examples 依赖它。
+  剩下的低层公开面只有 `detect`（`sfx_offset_of` 是正经 API，留着）。
+  若将来要把 `lzss_huff` 也门控，前置是把 `examples/`（analyze_stream、clioverhead、mtbench 等）
+  改用根重导出或加 `required-features` —— 目前按 ADR 不做。
 - **CLI 两个二进制仍有重复**：`selector.rs` / `password.rs` 已抽出共享，成员选择、提取、列表编排
   仍各写一份。
 - **多卷事务非原子**：单卷是 staging + `replace_file` 原子替换，多卷是逐卷替换 —— 中途失败会留下
