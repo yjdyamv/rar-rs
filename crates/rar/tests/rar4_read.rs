@@ -337,6 +337,65 @@ fn rar4_header_encrypted_archives_decode() {
 }
 
 #[test]
+fn rar4_rar30_long_password_kdf_decodes() {
+    // RAR3/4 member encryption takes the mutate-in-place slow KDF once the
+    // UTF-16 password plus its 8-byte salt crosses a SHA-1 block (>= 28
+    // chars). This fixture is genuine Rar 6.23 output with a 49-char
+    // password, so the branch is checked against an external writer instead
+    // of being compared to itself.
+    const PW: &str = "0123456789012345678901234567890123456789012345678";
+
+    let mut archive = ArchiveReader::open(format!("{ENC}rar4_longpw_p.rar")).expect("open");
+    assert!(matches!(
+        archive.read_entry(archive.unique_entry("longpw.txt").unwrap()),
+        Err(RarError::Encrypted(_))
+    ));
+
+    let mut archive = ArchiveReader::open_with(
+        format!("{ENC}rar4_longpw_p.rar"),
+        rar_rs::OpenOptions::new().password(PW),
+    )
+    .expect("open with password");
+    let data = archive
+        .read_entry(archive.unique_entry("longpw.txt").unwrap())
+        .expect("decrypt with the long password");
+    assert_eq!(data, b"rar-rs long password fixture\n");
+
+    // One character different must fail the integrity check.
+    let mut wrong = ArchiveReader::open_with(
+        format!("{ENC}rar4_longpw_p.rar"),
+        rar_rs::OpenOptions::new().password("0123456789012345678901234567890123456789012345679"),
+    )
+    .expect("open");
+    assert!(
+        wrong
+            .read_entry(wrong.unique_entry("longpw.txt").unwrap())
+            .is_err()
+    );
+}
+
+#[test]
+fn rar4_rar30_long_password_header_encryption_decodes() {
+    // -hp uses the same KDF without a salt, so the slow branch starts at 32
+    // UTF-16 chars; this fixture uses the same 49-char password.
+    const PW: &str = "0123456789012345678901234567890123456789012345678";
+
+    assert!(matches!(
+        RarArchive::open(format!("{ENC}rar4_longpw_hp.rar")),
+        Err(RarError::Encrypted(_))
+    ));
+    let mut archive = ArchiveReader::open_with(
+        format!("{ENC}rar4_longpw_hp.rar"),
+        rar_rs::OpenOptions::new().password(PW),
+    )
+    .expect("open with password");
+    let data = archive
+        .read_entry(archive.unique_entry("longpw.txt").unwrap())
+        .expect("decrypt header and member");
+    assert_eq!(data, b"rar-rs long password fixture\n");
+}
+
+#[test]
 fn rar4_header_encrypted_multivol_decode() {
     let mut archive = ArchiveReader::open_with(
         format!("{ENC}header_encrypted_multivol_rar300.rar"),

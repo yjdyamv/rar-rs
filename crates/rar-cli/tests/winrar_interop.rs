@@ -2742,6 +2742,67 @@ fn we_create_rar4_encrypted_members_winrar_valid() {
     }
 }
 
+/// RAR 2.x (`-ma2`, unp_ver 20) member encryption with a password longer
+/// than the 16-byte cipher block: the key schedule chains blocks, which the
+/// old 8-byte-password fixtures never exercised. WinRAR cannot write RAR2.x,
+/// so the oracle is UnRAR reading our output.
+#[test]
+fn we_create_rar2_long_password_members_winrar_valid() {
+    const PW: &str = "abcdefghijklmnopqrst"; // 20 bytes > one cipher block
+    let dir = temp_dir();
+    let src = dir.path().join("longpw.bin");
+    let content = b"rar2 long password payload\n".repeat(2000);
+    std::fs::write(&src, &content).unwrap();
+
+    let arc = dir.path().join("rar2-longpw.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma2", "-m3", "-idq"])
+        .arg(format!("-p{PW}"))
+        .arg(&arc)
+        .arg("longpw.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "our rar -ma2 -p failed:\n{out}");
+
+    // Our own reader decrypts with the long password and rejects a wrong one.
+    {
+        let mut ar = ArchiveReader::open_with(&arc, OpenOptions::new().password(PW)).unwrap();
+        assert_eq!(
+            ar.read_entry(ar.unique_entry("longpw.bin").unwrap())
+                .unwrap(),
+            content
+        );
+        let mut ar = ArchiveReader::open_with(&arc, OpenOptions::new().password("wrong")).unwrap();
+        assert!(
+            ar.read_entry(ar.unique_entry("longpw.bin").unwrap())
+                .is_err(),
+            "wrong password must fail"
+        );
+    }
+
+    // UnRAR must reproduce the source bytes from the >16-byte key schedule.
+    if let Some(unrar) = unrar_bin() {
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["t", "-idq"])
+            .arg(format!("-p{PW}"))
+            .arg(&arc));
+        assert!(ok, "UnRAR t with the long password failed:\n{out}");
+
+        let out_dir = dir.path().join("out_longpw");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(format!("-p{PW}"))
+            .arg(&arc)
+            .arg(&out_dir));
+        assert!(ok, "UnRAR x with the long password failed:\n{out}");
+        assert_eq!(
+            file_sha256(&out_dir.join("longpw.bin")),
+            file_sha256(&src),
+            "UnRAR decrypted different bytes"
+        );
+    }
+}
+
 /// We create a RAR4 archive with header encryption (`-ma4 -hp`) and WinRAR's
 /// UnRAR must decrypt the headers: `t`/`x` with the password succeed and
 /// reproduce the source bytes, while a wrong or missing password fails even

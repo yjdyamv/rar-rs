@@ -20,7 +20,7 @@
 
 ## 独立审计 2026-09-11（不看 backlog 的优先级）
 
-一次“假设没有 PLAN/issues”的健康与风险审计的结论。做法：全量测试 + 真跑五个 fuzz 目标 + 逐行读三条最危险路径（写、读/解、恢复/加密）。全量测试绿（lib 266、CLI 62、WinRAR 互操作 32），但发现的问题大多不在本文件里，而且比压缩性能更该先做。**[读码确认]** = 逐行读过源码；**[待复现]** = 尚未写成失败测试。**P0/P1 已于 2026-09-11 修复（见各条“已修”）；P2 部分已修（未修条目均注明理由）。**
+一次“假设没有 PLAN/issues”的健康与风险审计的结论。做法：全量测试 + 真跑五个 fuzz 目标 + 逐行读三条最危险路径（写、读/解、恢复/加密）。全量测试绿（lib 266、CLI 62、WinRAR 互操作 32），但发现的问题大多不在本文件里，而且比压缩性能更该先做。**[读码确认]** = 逐行读过源码；**[待复现]** = 尚未写成失败测试。**P0/P1 已于 2026-09-11 修复（见各条“已修”）；P2：1/3/4/7 已修，2/5/6 记录理由。**
 
 ### P0（现在做，成本 S，影响大）
 
@@ -44,7 +44,7 @@
 - create 路径 quick-open 只缓存文件头（`write/mod.rs:2334,2800`），目录/重定向不缓存，而 append（`archive/mod.rs:783`）与 rewrite（`archive/transaction.rs:1195`）全缓存 → `open_quick`/`list_entries_quick` 少列成员。**[待复现]** **已修（2026-09-11）**：redirect/dir_only/dir 三个直接写头处补 QO 缓存；测试 `quick_open_listing::open_quick_lists_directories_like_the_full_scan`。
 - STORE 成员先 `hash_file` 再重读同一路径（`write/mod.rs:321` vs `:334,2810`），只比字节数 → 同尺寸改写真会写出旧 CRC/BLAKE2。**[待复现]** **未修（接受）**：单遍 STORE 必须先写头再流式，回填头需要 patching（`-hp` 还要重加密），影响面大于收益；记为已接受的竞态。
 - Windows STM 流名（`extract.rs:1020`）是唯一没过 `sanitize_archive_path` 的命名记录（是否真能逃出目标目录未在 Windows 实测）。**[待复现]** **已修（2026-09-11）**：`valid_stream_name`（只允许单个前导 `:`，禁分隔符/保留字符）+ 单测；`write_windows_stream` 拒绝非法名。
-- 未被真实夹具覆盖的 crypto 分支：RAR3 慢 KDF 的单测是同义反复（`crypto/rar30.rs:288-301`，长度 `<64` 时 `update_password_data_sha1` 分支根本不跑）、RAR20 >16 字节口令链只有 8 字节口令覆盖。**[待复现]** **未修**：需 WinRAR 生成 >40B / >16B 口令夹具；失败模式是 `WrongPassword`/CRC 而非静默错误，属覆盖率。
+- 未被真实夹具覆盖的 crypto 分支：RAR3 慢 KDF 的单测是同义反复（`crypto/rar30.rs:288-301`，长度 `<64` 时 `update_password_data_sha1` 分支根本不跑）、RAR20 >16 字节口令链只有 8 字节口令覆盖。**[待复现]** **已补覆盖（2026-09-11）**：用本机 Rar 6.23 生成 49 字符口令的 `-ma4 -p` / `-ma4 -hp` 夹具（`rar40/encrypted/rar4_longpw_{p,hp}.rar`）+ `rar4_read` 两测试，外部验证 RAR30 慢 KDF 分支；`-ma2 -p<20 字节>` 由我们写、由 UnRAR 读出（`winrar_interop::we_create_rar2_long_password_members_winrar_valid`），覆盖 RAR20 >16B 密钥链。
 - legacy 修复对“最后不满 512 B 的扇区”报 "All OK" 却不修（`recovery/legacy.rs:252-265`）。**[读码确认]** **未修（记录）**：尾扇区写侧对零填充算 tag，本就无法校验真实字节，无法检测其损坏；只能改措辞或接受该未保护区。
 - 恒真/自比校验（可顺手删）：`recovery/rar50.rs:1190`、`:640`、`:1277`。**[读码确认]** **未修（低价值）**：纯恒真比较，不影响行为。
 - **发布就绪**：`rar-cli` 因 workspace path 依赖缺 version 无法打包（`cargo package -p rar-cli` 实测报 “does not specify a version”）；三个 crate 都没有 `readme`/`keywords`/`documentation`；SPDX/逐文件来源审计仍未闭环。 **部分已修（2026-09-11）**：workspace 依赖补 `version`，`rar-rs` 增 `readme`/`documentation`/`keywords`/`categories`，`cargo package -p rar-rs` 打包并验证通过（含 README）；`rar-cli` 现在只因 `rar-rs` 未发布而无法解析，属发布顺序。SPDX 仍需法务。
