@@ -144,3 +144,84 @@ default `compression_pool()`; that is a library-only configuration (the CLI
 always sets the global), so it is not part of this claim. The residue over
 the raw codec is container/hash/pipeline cost every caller pays. No fix is
 warranted; the map verdict (2026-09-07) stands.
+
+## 2026-09-11: design — per-bucket software-pipelined collector
+
+### Why the obvious batching failed
+
+Issue 11 rejected interleaved batch descents: a position's descent reads the
+tree state that *every earlier position's insertion* wrote, so processing
+positions out of order changes which candidates they see. The prefetch
+variants (T0 son+input, the son-pair T1 follow-up) were measured negative:
+the untaken branch's line pollutes L2, and half the step traffic
+(`input[current+len]`) cannot be fetched ahead of the compare that chooses
+it. The pipelined-first-step value-carry (`seed_for` / `matches_seeded`) is
+the full extent of *within-one-descent* byte-identical pipelining.
+
+### The lever that is left: overlap independent descents
+
+Each BT4 bucket (positions sharing `hash4`) is its own binary tree. A descent
+that starts from `head[h]` only ever visits positions whose hash is `h`
+(every node is reachable only through the bucket it was inserted into), so
+the `son` slots it reads and rewrites are disjoint from every other bucket's.
+The only tree writes that can affect a descent from bucket `h` are insertions
+of positions whose hash is `h`. Therefore:
+
+- descents with **different hashes are fully independent** and may be
+  interleaved with byte-identical results;
+- descents with the **same hash must stay strictly ordered**.
+
+That is the correctness argument the earlier batch attempts lacked. Keeping
+`W` descents in flight gives the CPU's out-of-order window `W` independent
+`son[pair]` loads to overlap, instead of one dependent chain of ~5.5 loads
+per query (~85-100 ns each, the measured 46 ns/step DRAM latency).
+
+Simple prefetch hints did not help because they do not create independent
+*dependent* chains; interleaving whole descents in one instruction stream
+does, because each slot's next load is independent of the others'.
+
+### Shape
+
+`collect_block_matches` currently runs, per position: `seed_for(pos)` then
+`matches_seeded(pos, ...)` then emits. Replace the serial loop with a small
+window scheduler:
+
+- one slot per in-flight position holding the resumable descent state
+  (`current`, `(child_less, child_greater)`, `ptr0`/`ptr1`, `len0`/`len1`,
+  `budget`, `out`, and `depends_on` = the previous in-flight position with
+  the same hash);
+- a slot may start once its `depends_on` has completed (same-bucket order);
+  otherwise it starts immediately;
+- each outer iteration advances every runnable slot by exactly one node, so
+  the compiler emits the loads back to back and the OoO engine overlaps
+  them; results are written back in position order.
+
+The existing `seed_for` / `matches_seeded` first-step pipeline is the depth-1
+special case and stays.
+
+### Cost / risk
+
+- **Complexity**: `TreeMatchFinder::descent` must be split into "load the
+  next pair" and "consume the pair" without changing a single decision
+  (floor/budget/far-band guards, the child choice, attachment-point
+  rewiring).
+- **Memory**: `W` slot states of a few tens of bytes — negligible;
+  `out` vectors are per position either way.
+- **Ratio**: byte-identical by construction (same tree, same per-bucket
+  order). The `matchless_fast_path_is_byte_identical` unit test and the
+  solid/MT byte comparisons are the gate.
+- **Independence**: consecutive positions collide in a bucket with
+  probability ~2^-20, so ~W independent descents are available except in
+  pathological repetitive data (already covered by the fast paths).
+
+### Validation plan
+
+1. Prototype behind `RAR_RS_PIPE_DEPTH` (env, default 0 = current serial
+   path), no default behavior change;
+2. byte-identity: `cargo test --lib` plus decode-and-diff on the A/B corpora
+   (tsc.exe prefix, ntoskrnl, text64, xml, random);
+3. speed: `collectbench` / `perfbench` A/B, 20 interleaved samples, medians;
+   success bar >= 15% collect on the dense DLL with identical bytes;
+4. only then wire it into the default path and decide the MT interaction
+   (MT slices reset the tree per slice, so the same collector applies
+   inside a slice).
