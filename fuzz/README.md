@@ -15,14 +15,11 @@ Seed corpus embeds genuine WinRAR output
 tail-match regression input, so mutations reach deep parser paths that
 raw random bytes almost never touch.
 
-> **Known state (2026-09-11):** this crate does not currently build. The
-> targets use the `raw` wire surface, but the `rar-rs` dependency below is
-> missing that feature, so `cargo check --manifest-path fuzz/Cargo.toml`
-> (the CI step) fails with 9 errors and none of the targets run. Adding
-> `"raw"` to the `rar-rs` features in `Cargo.toml` makes all five targets
-> build; a short standalone run (parse/crypto/recovery 20k, write/rewrite
-> 2k) then passes with no panics. Tracked in `PLAN.md` "独立审计
-> 2026-09-11".
+> **The fuzz crate needs the `raw` feature** on its `rar-rs` dependency (the
+> targets assert the wire-level surface). It was missing until 2026-09-11,
+> which broke the build and the CI fuzz check; `fuzz/Cargo.toml` now lists
+> it, and CI runs a bounded standalone smoke (5k iterations for
+> parse/crypto/recovery, 500 for write/rewrite) in addition to the check.
 
 ## Standalone (stable Rust, no extra toolchain)
 

@@ -16,7 +16,10 @@ description = "Fuzz targets for the rar-rs library — libFuzzer-compatible, run
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [dependencies]
-rar-rs = { path = "../crates/rar", features = ["parallel", "simd"] }
+# `raw` is required: the targets assert the wire-level surface (block
+# envelope, crypto record parsing, recovery chunks), which is gated behind
+# the feature. Without it the crate does not compile (2026-09-11 audit).
+rar-rs = { path = "../crates/rar", features = ["parallel", "simd", "raw"] }
 tempfile = "3"
 libfuzzer-sys = { version = "0.4", optional = true }
 

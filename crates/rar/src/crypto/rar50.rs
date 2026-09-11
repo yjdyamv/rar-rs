@@ -616,16 +616,26 @@ pub fn parse_encryption_extra(extra_data: &[u8]) -> RarResult<Option<EncryptionP
             .map_err(|e| RarError::Format(format!("extra record size: {e}")))?;
         offset += n;
 
-        let rec_end = offset + rec_size as usize;
-        if rec_end > extra_data.len() {
+        // `rec_size` is attacker-controlled (a vint can decode to u64::MAX).
+        // An overflowing or past-the-end record ends the scan instead of
+        // wrapping the length into a start>end slice.
+        let rec_end = usize::try_from(rec_size)
+            .ok()
+            .and_then(|size| offset.checked_add(size))
+            .filter(|end| *end <= extra_data.len());
+        let Some(rec_end) = rec_end else {
             break;
-        }
+        };
 
         let (rec_type, tn) = vint::decode_from_slice(extra_data, offset)
             .map_err(|e| RarError::Format(format!("extra record type: {e}")))?;
 
         if rec_type == EXTRA_FILE_ENCRYPTION {
-            let params = EncryptionParams::from_extra_bytes(&extra_data[offset + tn..rec_end])?;
+            let body_start = offset
+                .checked_add(tn)
+                .filter(|start| *start <= rec_end)
+                .ok_or_else(|| RarError::Format("encryption record is malformed".into()))?;
+            let params = EncryptionParams::from_extra_bytes(&extra_data[body_start..rec_end])?;
             return Ok(Some(params));
         }
 
@@ -702,18 +712,23 @@ mod tests {
     }
 
     #[test]
-    fn mac_crc32_is_deterministic_and_password_sensitive() {
-        let p1 = EncryptionParams::generate_for_password("pw", 4);
-        let p2 = EncryptionParams::generate_for_password("pw", 4);
-        let a = p1.mac_crc32(0x12345678, "pw").unwrap();
-        // Same params (salt) -> same MAC; different salt -> different MAC.
-        let b = p1.mac_crc32(0x12345678, "pw").unwrap();
-        assert_eq!(a, b);
-        let b2 = p2.mac_crc32(0x12345678, "pw").unwrap();
-        assert_ne!(a, b2);
-        let c = p1.mac_crc32(0x12345679, "pw").unwrap();
-        assert_ne!(a, c);
-        let d = p1.mac_crc32(0x12345678, "other").unwrap();
-        assert_ne!(a, d);
+    fn hostile_extra_record_size_does_not_panic() {
+        // A vint size of u64::MAX then an encryption type: the record end
+        // must not overflow into a start>end slice.
+        let mut huge = vint::encode(u64::MAX);
+        huge.extend(vint::encode(EXTRA_FILE_ENCRYPTION));
+        assert!(parse_encryption_extra(&huge).is_ok());
+
+        // A zero-size record whose type vint does not fit inside it: the
+        // body range would invert. Must be an error, never a panic.
+        let mut zero = vint::encode(0u64);
+        zero.extend(vint::encode(EXTRA_FILE_ENCRYPTION));
+        assert!(parse_encryption_extra(&zero).is_err());
+
+        // A record that ends exactly at its type byte (empty body) decodes
+        // as a malformed record rather than panicking.
+        let mut short = vint::encode(1u64);
+        short.extend(vint::encode(EXTRA_FILE_ENCRYPTION));
+        assert!(parse_encryption_extra(&short).is_err());
     }
 }

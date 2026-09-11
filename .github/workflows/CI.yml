@@ -57,6 +57,17 @@ jobs:
         run: cargo check -p rar-rs --no-default-features --locked
       - name: Cargo check (fuzz workspace)
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
+      - name: Fuzz smoke (standalone mutation loop)
+        # Bounded run so the targets are exercised, not just compiled: the
+        # read-side targets are cheap, the write-side ones do real file I/O.
+        run: |
+          set -euo pipefail
+          for t in parse crypto recovery; do
+            FUZZ_ITERATIONS=5000 cargo run --release --locked --manifest-path fuzz/Cargo.toml --bin "$t"
+          done
+          for t in write rewrite; do
+            FUZZ_ITERATIONS=500 cargo run --release --locked --manifest-path fuzz/Cargo.toml --bin "$t"
+          done
       - name: Clippy (workspace, all features and targets)
         run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
       - name: Clippy (rar-rs, every feature combination)

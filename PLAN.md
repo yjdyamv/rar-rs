@@ -20,16 +20,16 @@
 
 ## 独立审计 2026-09-11（不看 backlog 的优先级）
 
-一次“假设没有 PLAN/issues”的健康与风险审计的结论。做法：全量测试 + 真跑五个 fuzz 目标 + 逐行读三条最危险路径（写、读/解、恢复/加密）。全量测试绿（lib 266、CLI 62、WinRAR 互操作 32），但发现的问题大多不在本文件里，而且比压缩性能更该先做。**[读码确认]** = 逐行读过源码；**[待复现]** = 尚未写成失败测试。
+一次“假设没有 PLAN/issues”的健康与风险审计的结论。做法：全量测试 + 真跑五个 fuzz 目标 + 逐行读三条最危险路径（写、读/解、恢复/加密）。全量测试绿（lib 266、CLI 62、WinRAR 互操作 32），但发现的问题大多不在本文件里，而且比压缩性能更该先做。**[读码确认]** = 逐行读过源码；**[待复现]** = 尚未写成失败测试。**P0 已于 2026-09-11 修复（见各条“已修”）；P1/P2 待办。**
 
 ### P0（现在做，成本 S，影响大）
 
-- **fuzz 工程缺 `raw` → 五目标全部失效、CI 的 fuzz check 必红** **[读码确认，已实测]**：`fuzz/Cargo.toml` 依赖 `rar-rs = { features = ["parallel","simd"] }`；`raw` 门控（见「为什么要有 `raw` feature」那次改动）只给 `crates/rar` 的 dev-dep 补了 `raw`，漏了 fuzz。`cargo check --manifest-path fuzz/Cargo.toml` 报 9 个 E0433/E0425/E0603，即 `.github/workflows/CI.yml` 第 58 行必红。补 `raw` 后 5 个目标（parse/crypto/recovery 各 20k、write/rewrite 各 2k）全部无 panic 通过。修：1 行 + CI 加真跑。
+- **fuzz 工程缺 `raw` → 五目标全部失效、CI 的 fuzz check 必红** **[读码确认，已实测]**：`fuzz/Cargo.toml` 依赖 `rar-rs = { features = ["parallel","simd"] }`；`raw` 门控（见「为什么要有 `raw` feature」那次改动）只给 `crates/rar` 的 dev-dep 补了 `raw`，漏了 fuzz。`cargo check --manifest-path fuzz/Cargo.toml` 报 9 个 E0433/E0425/E0603，即 `.github/workflows/CI.yml` 第 58 行必红。补 `raw` 后 5 个目标（parse/crypto/recovery 各 20k、write/rewrite 各 2k）全部无 panic 通过。修：1 行 + CI 加真跑。 **已修（2026-09-11）**：`fuzz/Cargo.toml` 补 `raw`；CI 增 `Fuzz smoke` 步骤（parse/crypto/recovery 5k + write/rewrite 500）；`cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked` 与五目标短跑均通过。
 - **两处恶意归档可触发的 panic（进程 abort；napi/WASM 绑定同样暴露）** **[读码确认，待复现]**：
   - `crypto/rar50.rs:619`：`let rec_end = offset + rec_size as usize;` 未检查；`rec_size` 是 vint（可达 `u64::MAX`），release 回绕后 `&extra_data[offset + tn..rec_end]` 出现 start>end → panic。任何带 extra 的文件头都会进 `read_packed`。
   - `recovery/legacy.rs:173-175`：只用 `header.get(tail..tail+8) == Some(b"Protect+")` 证明 8 字节存在，随即索引 `tail+8..tail+16`；`name_size = header[26..28]` 攻击者可控（`head_size=54, name_size=14` 即越界）。`rar r` 与 RAR4 create/edit 的 `scan_protect*` 都可达。
-  修：`checked_add`/`get` + 两个单测。
-- **缓冲读 / `t` / 并行提取缺字典上限（分配型 DoS）** **[读码确认，待复现]**：`format/rar5/extract.rs:1410 decode_file_at`（及并行 worker）没调 `member_dict_window`（`decode_file_to:1483` 调了）；`codec/modern/lzss_huff/decoder.rs:210 checked_dict_size` 对 `dict_size_bytes` 无上界 → `codec/common/window.rs:20 vec![0u8; size]`。伪造 v70 头声明 ~2^48 B 即可让 `test`/`read` 分配失败 abort（streaming 路径有 4 GiB `-mdx` 上限，此处没有）。修：两处补 `member_dict_window` + 测试。
+  修：`checked_add`/`get` + 两个单测。 **已修（2026-09-11）**：加上边界检查；复现测试 `crypto::rar50::tests::hostile_extra_record_size_does_not_panic`、`recovery::legacy::tests::crafted_rr_name_size_does_not_panic`。
+- **缓冲读 / `t` / 并行提取缺字典上限（分配型 DoS）** **[读码确认，待复现]**：`format/rar5/extract.rs:1410 decode_file_at`（及并行 worker）没调 `member_dict_window`（`decode_file_to:1483` 调了）；`codec/modern/lzss_huff/decoder.rs:210 checked_dict_size` 对 `dict_size_bytes` 无上界 → `codec/common/window.rs:20 vec![0u8; size]`。伪造 v70 头声明 ~2^48 B 即可让 `test`/`read` 分配失败 abort（streaming 路径有 4 GiB `-mdx` 上限，此处没有）。修：两处补 `member_dict_window` + 测试。 **已修（2026-09-11）**：抽出 `capped_dict_bytes`，`decode_file_at` 与并行 worker 共用；测试 `rar50_roundtrip::buffered_read_enforces_the_dictionary_cap`（1 字节 cap 拒绝、默认 cap 可读）。
 
 ### P1（静默产出坏档案 / 回归）
 

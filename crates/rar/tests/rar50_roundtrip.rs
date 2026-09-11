@@ -1476,3 +1476,29 @@ fn test_reports_member_integrity() {
     assert_eq!(checked, 2);
     assert_eq!(failed, 1, "corrupted a.bin must fail");
 }
+
+/// The buffered read path must enforce the `-mdx` dictionary cap too, not
+/// just the streaming one: a RAR7 header can declare a multi-TiB dictionary
+/// and the decoder allocates the window up front.
+#[test]
+fn buffered_read_enforces_the_dictionary_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dict-cap.rar");
+    let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let mut writer = ArchiveWriter::create(&path).unwrap();
+    writer.add_bytes("m.bin", &payload, opts(3)).unwrap();
+    writer.finish().unwrap();
+
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let id = reader.unique_entry("m.bin").unwrap();
+    let capped = rar_rs::ExtractOptions {
+        max_dict_size: Some(1),
+        ..Default::default()
+    };
+    assert!(matches!(
+        reader.read_entry_with_options(id, capped),
+        Err(rar_rs::RarError::LimitExceeded { .. })
+    ));
+    // The default cap (4 GiB) still reads it.
+    assert_eq!(reader.read_entry(id).unwrap(), payload);
+}

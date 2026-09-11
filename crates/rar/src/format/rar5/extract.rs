@@ -86,6 +86,31 @@ impl Write for IntegritySink<'_> {
     }
 }
 
+/// The dictionary size a member declares, after enforcing the extraction cap
+/// (`ExtractOptions::max_dict_size`, WinRAR's `-mdx`).
+///
+/// RAR5 uses `128 KiB << comp_dict_size`; RAR7 carries the byte count
+/// directly, and a hostile header can push that to a multi-TiB value, so
+/// every decode entry point must go through this before allocating.
+fn capped_dict_bytes(hdr: &FileHeader, max_dict_size: Option<u64>) -> RarResult<u64> {
+    let bytes = match hdr.dict_size_bytes {
+        Some(bytes) => bytes,
+        None => (128u64 * 1024) << hdr.comp_dict_size,
+    };
+    if let Some(cap) = max_dict_size
+        && bytes > cap
+    {
+        return Err(RarError::LimitExceeded {
+            limit: cap,
+            context: format!(
+                "{}: dictionary size {bytes} bytes exceeds the extraction cap (use -mdx to raise it)",
+                hdr.name
+            ),
+        });
+    }
+    Ok(bytes)
+}
+
 impl RarArchive {
     pub(crate) fn open_read(&mut self) -> RarResult<()> {
         self.volume_paths = discover_volumes(&self.path);
@@ -705,6 +730,9 @@ impl RarArchive {
                             ),
                         });
                     }
+                    // The RAR7 byte dictionary bypasses the 4-bit log: enforce
+                    // the extraction cap here too.
+                    let _ = capped_dict_bytes(hdr, opts.max_dict_size)?;
                     if let Some(limit) = opts.max_unpacked_bytes
                         && hdr.unpacked_size > limit
                     {
@@ -1410,6 +1438,7 @@ impl RarArchive {
         state: Option<&mut DecoderState>,
     ) -> RarResult<Vec<u8>> {
         self.validate_entry_limits(idx)?;
+        let _ = self.member_dict_window(idx)?; // enforces the -mdx cap
         let hdr = &self.entries[idx].header;
 
         // Empty files / directories
@@ -1450,21 +1479,7 @@ impl RarArchive {
     /// (`ExtractOptions::max_dict_size`, WinRAR's `-mdx`).
     fn member_dict_window(&self, idx: usize) -> RarResult<usize> {
         let hdr = &self.entries[idx].header;
-        let bytes = match hdr.dict_size_bytes {
-            Some(b) => b,
-            None => (128u64 * 1024) << hdr.comp_dict_size,
-        };
-        if let Some(cap) = self.read_ctx().extract_options.max_dict_size
-            && bytes > cap
-        {
-            return Err(RarError::LimitExceeded {
-                limit: cap,
-                context: format!(
-                    "{}: dictionary size {bytes} bytes exceeds the extraction cap (use -mdx to raise it)",
-                    hdr.name
-                ),
-            });
-        }
+        let bytes = capped_dict_bytes(hdr, self.read_ctx().extract_options.max_dict_size)?;
         let bytes = usize::try_from(bytes)
             .map_err(|_| RarError::Format("dictionary size overflows host address space".into()))?;
         bytes

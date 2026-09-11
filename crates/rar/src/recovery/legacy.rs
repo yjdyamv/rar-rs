@@ -169,10 +169,17 @@ pub(crate) fn scan_protect_with_password(
             let name_size = u16::from_le_bytes(header[26..28].try_into().unwrap()) as usize;
             let tail = 32 + name_size;
             if header.get(tail..tail + 8) == Some(b"Protect+") {
-                let rec_sectors =
-                    u32::from_le_bytes(header[tail + 8..tail + 12].try_into().unwrap());
-                let total_blocks =
-                    u32::from_le_bytes(header[tail + 12..tail + 16].try_into().unwrap());
+                // `name_size` is attacker-controlled, so "Protect+" can sit at
+                // the very end of the header; the two four-byte fields that
+                // follow need their own bounds check.
+                let Some(rec_bytes) = header.get(tail + 8..tail + 12) else {
+                    return Err(RarError::Format("RAR4: recovery header truncated".into()));
+                };
+                let Some(total_bytes) = header.get(tail + 12..tail + 16) else {
+                    return Err(RarError::Format("RAR4: recovery header truncated".into()));
+                };
+                let rec_sectors = u32::from_le_bytes(rec_bytes.try_into().unwrap());
+                let total_blocks = u32::from_le_bytes(total_bytes.try_into().unwrap());
                 let data_start = start + on_disk_header;
                 let data_end = start + total;
                 if u64::from(total_blocks) * 2 + u64::from(rec_sectors) * 512
@@ -462,6 +469,26 @@ pub(crate) fn build_legacy_recovery_block(prefix: &[u8], rec_sectors: u32) -> Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A NEWSUB `RR` block whose `name_size` pushes `Protect+` to the end of
+    /// its own header must be rejected, not index past it.
+    #[test]
+    fn crafted_rr_name_size_does_not_panic() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(RAR4_SIGNATURE);
+        let head_size = 54usize;
+        let mut header = vec![0u8; head_size];
+        header[2] = 0x7a; // NEWSUB_HEAD
+        header[3..5].copy_from_slice(&0x8000u16.to_le_bytes()); // LONG_BLOCK
+        header[5..7].copy_from_slice(&(head_size as u16).to_le_bytes());
+        header[7..11].copy_from_slice(&0u32.to_le_bytes()); // no data area
+        header[26..28].copy_from_slice(&14u16.to_le_bytes()); // name_size -> tail 46
+        header[32..34].copy_from_slice(b"RR");
+        header[46..54].copy_from_slice(b"Protect+"); // tail..tail+8
+        bytes.extend_from_slice(&header);
+
+        assert!(scan_protect(&bytes).is_err());
+    }
 
     #[test]
     fn protect_scan_finds_and_repairs_damage() {
