@@ -41,6 +41,43 @@ revision. In particular, do not infer that workspace-level metadata and a
 later repository-level copying file apply interchangeably; `NOTICE` records
 that issue without resolving it.
 
+### File-level `rars` port notices
+
+Each row is the provenance line carried in the file's own header (inventoried
+2026-09-11). The upstream files have **not** been diffed against a checked-out
+`rars` repository as part of this review, so treat a row as the in-tree claim,
+not as verified copying.
+
+| Our file | Upstream (`rars` @ `c08a17b`) | License stated in-file |
+|---|---|---|
+| `crates/rar/src/codec/legacy/rar15.rs` | decode half, `codec/rar13.rs` | WTFPL |
+| `crates/rar/src/codec/legacy/rar15_encoder.rs` | encode half, `codec/rar13.rs` | MIT OR Apache-2.0 |
+| `crates/rar/src/codec/legacy/rar20.rs` | decode half, `codec/rar20.rs` | WTFPL |
+| `crates/rar/src/codec/legacy/rar20_encoder.rs` | encode half | MIT OR Apache-2.0 |
+| `crates/rar/src/codec/legacy/rar29.rs` | decode half, `codec/rar29.rs` | WTFPL |
+| `crates/rar/src/codec/legacy/rar29_encoder.rs` | encode half | MIT OR Apache-2.0 |
+| `crates/rar/src/codec/legacy/ppmd.rs` | `codec/ppmd.rs` | WTFPL |
+| `crates/rar/src/codec/common/match_finder.rs` | `codec/match_finder.rs` (LZMA BT4) | MIT OR Apache-2.0 |
+| `crates/rar/src/codec/common/filters.rs` | `codec/filters.rs`, `x86_filter_scan.rs`, RAR4 audio gate | MIT OR Apache-2.0 |
+| `crates/rar/src/codec/modern/lzss_huff/encoder.rs` | `codec/rar50.rs` (`optimal_tokens` / `TokenPrices`) | MIT OR Apache-2.0 |
+| `crates/rar/src/format/rar5/blake2sp.rs` | `crates/rars/src/rar50/blake2sp.rs` | MIT OR Apache-2.0 |
+| `crates/rar/src/crypto/rar50.rs` | RAR5 KDF / hash-key MAC patterns | MIT OR Apache-2.0 (notice added 2026-09-11) |
+| `crates/rar/src/recovery/rar50.rs` | inline recovery-record codec | MIT OR Apache-2.0 (notice added 2026-09-11) |
+| `crates/rar/src/recovery/legacy.rs` | `repair_protect_head_bytes` | **not stated in-file — open item** |
+
+Files derived from analysis of the libarchive RAR5 reader (BSD-2-Clause)
+carry a BSD-2-Clause notice: `crates/rar/src/codec/mod.rs`,
+`crates/rar/src/codec/modern/lzss_huff/mod.rs` and `encoder.rs`;
+`crates/rar/src/codec/common/huffman.rs` states the same basis
+("based on the structure used in libarchive's RAR5 reader") without a license
+line, so it is covered by that umbrella rather than by its own notice.
+
+Two items therefore remain for the maintainer/legal review before a final
+SPDX expression: (1) the `rars` workspace-metadata (`MIT OR Apache-2.0`) vs
+later `COPYING` (WTFPL) conflict, which is why the decode-side files carry
+WTFPL and the encode-side files carry MIT OR Apache-2.0; and (2) the license
+line missing from `recovery/legacy.rs`.
+
 ## Registry dependencies
 
 Exact resolved versions and transitive sources are recorded in `Cargo.lock`,

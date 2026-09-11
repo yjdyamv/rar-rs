@@ -1,3 +1,10 @@
+//! RAR5 inline recovery records: the `"RR"` service block carries GF(2^16)
+//! Cauchy parity over the archive prefix.
+//!
+//! Ported from the `rars` project (https://github.com/bitplane/rars), licensed
+//! MIT OR Apache-2.0, at upstream revision `c08a17b`. See NOTICE for
+//! attribution and the unresolved workspace-metadata/COPYING difference.
+
 const CRC64_XZ_POLY: u64 = 0xc96c_5795_d787_0f42;
 const CRC64_XZ_INIT: u64 = 0xffff_ffff_ffff_ffff;
 const FIELD_SIZE: usize = 65_535;

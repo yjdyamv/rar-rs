@@ -60,8 +60,17 @@ MIT OR Apache-2.0, and identify the decode-side legacy codec ports in
 `legacy/rar15.rs`, `legacy/rar20.rs`, `legacy/rar29.rs`, and `legacy/ppmd.rs` as WTFPL. The `rars`
 workspace metadata declares `MIT OR Apache-2.0`, while a later `COPYING` file
 in that repository declares WTFPL with a no-blame clause; this notice does not
-treat those distinct statements as interchangeable. Other ported portions
-must be checked against their corresponding upstream file and revision.
+treat those distinct statements as interchangeable. The file-level inventory
+of these in-tree notices (and the two gaps it exposed) is recorded in
+`THIRD_PARTY_LICENSES.md` under "File-level `rars` port notices"; diffing the
+upstream files themselves remains pending.
+
+The RAR5 key-derivation / hash-key MAC patterns in
+`crates/rar/src/crypto/rar50.rs` and the recovery-record codec in
+`crates/rar/src/recovery/rar50.rs` are `rars` ports under the same terms; they
+now carry their own provenance headers. `crates/rar/src/recovery/legacy.rs`
+states its `rars` port without a license line, which is listed as an open
+item in `THIRD_PARTY_LICENSES.md`.
 
 The legacy fixture directories under `crates/rar/tests/fixtures/rar40/`
 (`rar300/`, `rar2/`, `rar154/`, `multivol/`, `rarvm/`) contain archive files
