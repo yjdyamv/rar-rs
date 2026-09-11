@@ -144,7 +144,9 @@ pub struct EntryInfo {
   pub version: String,
   /// Compressed dictionary size in bytes (undefined when unknown).
   pub dict_size_bytes: Option<f64>,
-  /// Per-member comment bytes (undefined when absent; RAR5 only).
+  /// Per-member comment bytes (undefined when absent; RAR4 only — RAR5
+  /// has no member-comment block, so those members always report
+  /// `undefined`).
   pub comment: Option<Buffer>,
   /// Whether the member belongs to a solid chain (shares a window with
   /// its predecessor).
