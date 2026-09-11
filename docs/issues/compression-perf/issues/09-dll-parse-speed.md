@@ -147,6 +147,9 @@ warranted; the map verdict (2026-09-07) stands.
 
 ## 2026-09-11: design — per-bucket software-pipelined collector
 
+**Status: prototyped, not pursued — see the result and disposition at the
+end. The implementation was reverted; only this record remains.**
+
 ### Why the obvious batching failed
 
 Issue 11 rejected interleaved batch descents: a position's descent reads the
@@ -225,3 +228,59 @@ special case and stays.
 4. only then wire it into the default path and decide the MT interaction
    (MT slices reset the tree per slice, so the same collector applies
    inside a slice).
+
+## 2026-09-11: prototype result — probes are byte-identical, the probe ring
+## is a regression (the per-step scheduler is still unbuilt)
+
+Implemented the first half of the design behind `RAR_RS_PIPE_DEPTH` (default
+`1` = the serial path):
+
+- `TreeMatchFinder::plan_for` is a read-only twin of `matches`: it computes
+  the same matches and records the exact `son` writes without touching the
+  tree;
+- `apply_probe` replays that plan after re-checking the bucket head, so a
+  same-hash insertion in between forces the serial fallback;
+- the collector keeps up to `depth` probes in a ring and replays them in
+  place of the serial descent.
+
+**Correctness.** `planned_descent_matches_serial_byte_for_byte` compares the
+whole `head` table and `son` array against the serial finder over 96 KiB of
+random plus repeated data; `pipelined_collector_is_byte_identical_to_serial`
+encodes four corpora at four level/dictionary/variant settings at depth 1 vs
+6 and asserts identical packed bytes that decode back. All identical.
+
+**Speed** (`collectbench`, ntoskrnl 12.5 MiB, m3, dict 32 MiB, 3 rounds,
+medians):
+
+| depth | seq ms | ratio |
+|---|---|---|
+| 1 (serial) | 6405 | 46.65% |
+| 2 | 7595 | 46.65% |
+| 4 | 7676 | 46.65% |
+| 8 | 7745 | 46.65% |
+
+~+19% slower with identical bytes. Two causes, in order of size:
+
+1. The ring probes whole descents **sequentially** (`plan_for` runs a
+   complete descent per position), so there is no instruction-level
+   interleaving and therefore no memory-level parallelism — the only thing
+   the design was for. It pays the plan/replay bookkeeping and loses the
+   depth-1 `seed_for` first-step pipeline (landed at -3.6%).
+2. Per-position `Vec` allocation: the first version was +48%; reusing the
+   plan/matches buffers behind a free list brought it to +19%.
+
+**Conclusion.** The lever cannot be evaluated without the per-step
+scheduler described above — a resumable `descent` state advanced one node
+per slot per outer iteration, so `W` descents' loads are in flight together.
+Given every prefetch A/B so far was negative and this probe-ring variant is
+itself a regression, the expected value is uncertain and this is not on the
+critical path.
+
+**Disposition (2026-09-11).** The prototype code (`TreeMatchFinder::plan_for`
+/ `apply_probe`, the `RAR_RS_PIPE_DEPTH` probe ring in the collector, and the
+`set_pipe_depth` test seam) was **reverted**; the tree carries none of it and
+there is no environment knob. This section is the only record, so a future
+attempt starts from the conclusion instead of re-deriving it. Re-adding the
+lever means building the per-step scheduler first; the probe/replay
+primitives are straightforward to re-create from this record and are not a
+reason to carry a default-off regression path.
