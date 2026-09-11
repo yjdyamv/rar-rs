@@ -196,12 +196,25 @@ impl ExtractArchiveOptions {
       Some(0) => None,
       Some(value) => Some(value),
     };
+    // Same encoding as `maxDictSize`: unset keeps the default ceiling,
+    // 0 removes it.
+    let max_metadata_bytes = match checked_optional_js_integer(
+      self.max_metadata_bytes,
+      "maxMetadataBytes",
+      0,
+      JS_MAX_SAFE_INTEGER as u64,
+    )? {
+      None => Some(rar_rs::ExtractOptions::DEFAULT_MAX_METADATA_BYTES),
+      Some(0) => None,
+      Some(value) => Some(value),
+    };
     Ok(rar_rs::ExtractOptions {
       safe_paths: true,
       flat_paths: self.flat.unwrap_or(false),
       max_unpacked_bytes: None,
       max_total_unpacked_bytes: None,
       max_dict_size,
+      max_metadata_bytes,
       skip_existing: self.skip_existing.unwrap_or(false),
       auto_rename: self.auto_rename.unwrap_or(false),
       keep_broken: self.keep_broken.unwrap_or(false),

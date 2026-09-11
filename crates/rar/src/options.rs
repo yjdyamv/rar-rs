@@ -270,6 +270,22 @@ pub struct ExtractOptions {
     /// refuses archives whose dictionary exceeds 4 GiB (RAR7) unless
     /// `-mdx<size>` raises the cap.
     pub max_dict_size: Option<u64>,
+    /// Ceiling on the *declared* size of a service payload that has to be
+    /// buffered whole to be interpreted: the archive comment (`CMT`) and NTFS
+    /// alternate data streams (`STM`).
+    ///
+    /// Those sizes come from the block header and only the header CRC is
+    /// checked — which a hand-made archive can compute for any value — so
+    /// without a ceiling a hostile block makes the reader allocate the
+    /// declared size and abort instead of failing. Defaults to
+    /// [`Self::DEFAULT_MAX_METADATA_BYTES`] (64 MiB); raise it for archives
+    /// with genuinely large alternate data streams, or pass `None` to remove
+    /// the bound entirely for archives you trust.
+    ///
+    /// The quick-open record is not covered: it is consumed while the archive
+    /// is being opened, before any caller options apply, so it always uses
+    /// the default ceiling.
+    pub max_metadata_bytes: Option<u64>,
 }
 
 impl ExtractOptions {
@@ -277,6 +293,16 @@ impl ExtractOptions {
     /// archives whose dictionary exceeds 4 GiB (RAR7) unless `-mdx<size>`
     /// raises the cap.
     pub const DEFAULT_MAX_DICT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+
+    /// Default service-payload ceiling (64 MiB): generous enough for real
+    /// comments and alternate data streams, small enough that a forged size
+    /// cannot drive an enormous allocation.
+    pub const DEFAULT_MAX_METADATA_BYTES: u64 = crate::format::rar5::MAX_METADATA_BYTES;
+
+    /// The effective service-payload ceiling; `None` means unbounded.
+    pub(crate) fn metadata_limit(&self) -> u64 {
+        self.max_metadata_bytes.unwrap_or(u64::MAX)
+    }
 }
 
 impl Default for ExtractOptions {
@@ -292,6 +318,7 @@ impl Default for ExtractOptions {
             set_creation_time: false,
             set_access_time: false,
             max_dict_size: Some(Self::DEFAULT_MAX_DICT_SIZE),
+            max_metadata_bytes: Some(Self::DEFAULT_MAX_METADATA_BYTES),
         }
     }
 }

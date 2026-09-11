@@ -20,8 +20,7 @@ use crate::format::rar5::{
     ARCHIVE_FLAG_LOCKED, ARCHIVE_FLAG_RECOVERY, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_DEPENDS_PREV,
     BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_ENCRYPT_HEADER,
     BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER, COMP_METHOD_STORE,
-    FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, MAX_METADATA_BYTES, OS_UNIX,
-    RAR5_SIGNATURE,
+    FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX, RAR5_SIGNATURE,
 };
 use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
 
@@ -811,9 +810,10 @@ impl RarArchive {
                     // archive can declare any size and still pass the CRC) and
                     // narrowed with `try_from` so 32-bit targets report an
                     // error instead of silently truncating the comment.
-                    if meta.raw.data_size > MAX_METADATA_BYTES {
+                    let limit = self.read_ctx().extract_options.metadata_limit();
+                    if meta.raw.data_size > limit {
                         return Err(RarError::LimitExceeded {
-                            limit: MAX_METADATA_BYTES,
+                            limit,
                             context: format!(
                                 "archive comment declares {} bytes",
                                 meta.raw.data_size
@@ -822,7 +822,7 @@ impl RarArchive {
                     }
                     let declared = usize::try_from(meta.raw.data_size).map_err(|_| {
                         RarError::LimitExceeded {
-                            limit: MAX_METADATA_BYTES,
+                            limit,
                             context: "archive comment size does not fit in usize".into(),
                         }
                     })?;
@@ -1682,6 +1682,36 @@ mod tests {
         std::fs::write(&path, archive_with_comment(2, b"hi")).unwrap();
 
         let mut archive = RarArchive::open(&path).unwrap();
+        assert_eq!(archive.get_comment().unwrap().as_deref(), Some(&b"hi"[..]));
+    }
+
+    /// The ceiling is a caller option, not a constant: a two-byte comment is
+    /// fine by default, rejected when the caller lowers the cap, and accepted
+    /// again when the caller removes it for an archive it trusts.
+    #[test]
+    fn comment_size_cap_follows_the_extract_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cmt-capped.rar");
+        std::fs::write(&path, archive_with_comment(2, b"hi")).unwrap();
+
+        let mut archive = RarArchive::open(&path).unwrap();
+        archive.read_ctx_mut().extract_options = crate::options::ExtractOptions {
+            max_metadata_bytes: Some(1),
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                archive.get_comment().unwrap_err(),
+                RarError::LimitExceeded { .. }
+            ),
+            "a cap below the declared size must reject the block"
+        );
+
+        let mut archive = RarArchive::open(&path).unwrap();
+        archive.read_ctx_mut().extract_options = crate::options::ExtractOptions {
+            max_metadata_bytes: None,
+            ..Default::default()
+        };
         assert_eq!(archive.get_comment().unwrap().as_deref(), Some(&b"hi"[..]));
     }
 

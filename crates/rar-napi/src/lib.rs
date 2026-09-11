@@ -169,6 +169,11 @@ pub struct ExtractArchiveOptions {
   /// WinRAR-compatible default: 4 GiB (RAR7 v70 members with larger
   /// dictionaries are refused). Pass 0 for no limit.
   pub max_dict_size: Option<f64>,
+  /// Ceiling on the declared size of a service payload buffered whole
+  /// while reading: the archive comment and NTFS alternate data streams.
+  /// Default: 64 MiB. Raise it for archives with large alternate data
+  /// streams; pass 0 for no limit (trusted archives only).
+  pub max_metadata_bytes: Option<f64>,
   /// Skip members whose destination path already exists (like `-o-`).
   pub skip_existing: Option<bool>,
   /// Rename colliding outputs `name(1).ext` instead of overwriting

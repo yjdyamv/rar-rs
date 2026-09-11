@@ -49,6 +49,13 @@ Version history predating this file remains available in Git history and
 
 ### Added
 
+- Added `ExtractOptions::max_metadata_bytes` (and the napi
+  `maxMetadataBytes` option): the ceiling on the declared size of a service
+  payload buffered while reading — the archive comment and NTFS alternate
+  data streams. It defaults to 64 MiB; raise it for archives with large
+  alternate data streams, or pass `None` (0 in the binding) to remove the
+  bound for archives you trust.
+
 - Added sample-based incompressibility probing that short-circuits
   incompressible inputs (media, archives, random data) to STORE after a few
   small sample encodes, instead of paying for full match finding that would

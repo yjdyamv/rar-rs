@@ -981,9 +981,10 @@ impl RarArchive {
                 // before it can drive an allocation, and narrowed with
                 // `try_from` so a 32-bit target reports an error instead of
                 // silently truncating the buffer.
-                if s.data_size > MAX_METADATA_BYTES {
+                let limit = self.read_ctx().extract_options.metadata_limit();
+                if s.data_size > limit {
                     return Err(RarError::LimitExceeded {
-                        limit: MAX_METADATA_BYTES,
+                        limit,
                         context: format!(
                             "NTFS stream {:?} declares {} packed bytes",
                             s.name, s.data_size
@@ -992,7 +993,7 @@ impl RarArchive {
                 }
                 let declared =
                     usize::try_from(s.data_size).map_err(|_| RarError::LimitExceeded {
-                        limit: MAX_METADATA_BYTES,
+                        limit,
                         context: format!(
                             "NTFS stream {:?} packed size does not fit in usize",
                             s.name
