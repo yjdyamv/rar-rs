@@ -21,7 +21,9 @@ zeroize = { version = "1.9", features = ["alloc", "derive"] }
 rayon = "1.12"
 wide = "1"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_IO", "Win32_System_Registry"] }
-rar-rs = { path = "crates/rar" }
+# `version` is required for `cargo package`/`publish` of the dependents
+# (rar-cli, rar-napi); the path is what local builds use.
+rar-rs = { version = "0.1.2", path = "crates/rar" }
 
 [workspace.lints.rust]
 unused_must_use = "deny"

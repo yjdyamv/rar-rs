@@ -1270,6 +1270,12 @@ impl RarArchive {
             ..Default::default()
         };
         let hdr_bytes = fh.to_bytes();
+        if self.write_ctx().quick_open {
+            let pos = stream_mut(&mut self.stream)?.stream_position()?;
+            self.write_ctx_mut()
+                .quick_open_entries
+                .push((pos, hdr_bytes.clone()));
+        }
         self.write_block_header(&hdr_bytes)?;
         self.entries.push(ArchiveEntry {
             header: fh,
@@ -1330,6 +1336,12 @@ impl RarArchive {
         };
 
         let hdr_bytes = fh.to_bytes();
+        if self.write_ctx().quick_open {
+            let pos = stream_mut(&mut self.stream)?.stream_position()?;
+            self.write_ctx_mut()
+                .quick_open_entries
+                .push((pos, hdr_bytes.clone()));
+        }
         self.write_block_header(&hdr_bytes)?;
         self.write_ctx_mut().volume_bytes_written +=
             self.on_disk_header_len(hdr_bytes.len() as u64);
@@ -1465,6 +1477,12 @@ impl RarArchive {
             };
 
             let hdr_bytes = fh.to_bytes();
+            if self.write_ctx().quick_open {
+                let pos = stream_mut(&mut self.stream)?.stream_position()?;
+                self.write_ctx_mut()
+                    .quick_open_entries
+                    .push((pos, hdr_bytes.clone()));
+            }
             self.write_block_header(&hdr_bytes)?;
             self.write_ctx_mut().volume_bytes_written +=
                 self.on_disk_header_len(hdr_bytes.len() as u64);

@@ -202,3 +202,48 @@ fn open_quick_handles_encrypted_archives() {
         payloads()[0].1
     );
 }
+
+/// Directory (and redirect) headers are members too: the quick-open record
+/// must cache them or `open_quick` lists fewer members than the full scan.
+#[test]
+fn open_quick_lists_directories_like_the_full_scan() {
+    let dir = temp_dir();
+    let path = dir.path().join("qo-dir.rar");
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).expect("mkdir");
+    {
+        let mut rar = rar_rs::ArchiveWriter::create_with(
+            &path,
+            rar_rs::WriterOptions::default().quick_open(true),
+        )
+        .expect("create");
+        rar.add_directory(&sub, "sub").expect("add dir");
+        rar.add_bytes("sub/a.bin", b"data", rar_rs::EntryWriteOptions::new())
+            .expect("add file");
+        rar.finish().expect("close");
+    }
+
+    let list = |reader: &ArchiveReader| -> Vec<(String, bool)> {
+        reader
+            .entries()
+            .map(|entry| (entry.name().to_string(), entry.is_dir()))
+            .collect()
+    };
+    let full = ArchiveReader::open(&path).expect("open");
+    let quick = ArchiveReader::open_with(
+        &path,
+        rar_rs::OpenOptions::new().scan_strategy(rar_rs::ScanStrategy::PreferQuickOpen),
+    )
+    .expect("open_quick");
+
+    let full_list = list(&full);
+    assert!(
+        full_list.iter().any(|(_, is_dir)| *is_dir),
+        "full scan sees the directory"
+    );
+    assert_eq!(
+        list(&quick),
+        full_list,
+        "QO listing must match the full scan"
+    );
+}

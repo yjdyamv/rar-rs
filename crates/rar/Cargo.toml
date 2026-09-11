@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description.workspace = true
+readme = "../../README.md"
+documentation = "https://docs.rs/rar-rs"
+keywords = ["rar", "archive", "compression", "extract"]
+categories = ["compression", "encoding"]
 
 [dependencies]
 crc32fast = { workspace = true }

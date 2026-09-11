@@ -6,10 +6,33 @@ use std::path::Path;
 
 use crate::error::{RarError, RarResult};
 
+/// Whether an archive-supplied NTFS stream name is safe to append to a
+/// destination path. The on-disk form is `:stream`; only a single leading
+/// colon is allowed, and no path separator or Windows-reserved character may
+/// appear (a `\` or embedded `:` in the name is what could steer the
+/// `CreateFileW` call off the intended file).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn valid_stream_name(name: &str) -> bool {
+    let rest = name.strip_prefix(':').unwrap_or(name);
+    !rest.is_empty()
+        && rest.chars().all(|c| {
+            c >= ' '
+                && c != ':'
+                && c != '\\'
+                && c != '/'
+                && !matches!(c, '*' | '?' | '"' | '<' | '>' | '|')
+        })
+}
+
 /// Write an NTFS alternate data stream (`path` + `stream_name` like
 /// `:custom1`) on Windows.
 #[cfg(windows)]
 pub(crate) fn write_windows_stream(path: &Path, stream_name: &str, data: &[u8]) -> RarResult<()> {
+    if !valid_stream_name(stream_name) {
+        return Err(RarError::Format(format!(
+            "invalid NTFS stream name {stream_name:?}"
+        )));
+    }
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -201,4 +224,21 @@ pub(crate) fn enumerate_windows_streams(path: &Path) -> RarResult<Vec<(String, u
     }
     unsafe { CloseHandle(handle) };
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_stream_name;
+
+    #[test]
+    fn stream_names_reject_path_separators_and_embedded_colons() {
+        assert!(valid_stream_name(":Zone.Identifier"));
+        assert!(valid_stream_name("Zone.Identifier"));
+        assert!(!valid_stream_name(""));
+        assert!(!valid_stream_name(":"));
+        assert!(!valid_stream_name(":..\\..\\evil"));
+        assert!(!valid_stream_name(":a/b"));
+        assert!(!valid_stream_name(":a:b"));
+        assert!(!valid_stream_name(":a*b"));
+    }
 }
