@@ -30,8 +30,8 @@ never a silent dump into a `<name>/` folder.
 | `rn` | | Rename archived members |
 | `ch` | | Change parameters (`-cl`/`-cu` name case conversion) |
 | `k` | | Lock the archive (read-only) |
-| `rr[N]` | | Add an inline recovery record (N = percent) |
-| `rv[N]` | | Create `.rev` recovery volumes for an existing set |
+| `rr` | | Add an inline recovery record (percent is a trailing argument: `rar rr archive.rar 10`, default 10%) |
+| `rv[N]` | | Create `.rev` recovery volumes for an existing set (`rv3` / `rv10%`, default 10%) |
 | `r` | | Repair the archive with its recovery record |
 | `rc` | | Rebuild missing volumes from `.rev` files |
 | `s` | | Convert the archive to self-extracting (SFX) |
@@ -61,7 +61,9 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 | `-m0` … `-m5` | Compression level (Store … Best) |
 | `-ma5` | RAR5 format (default; v50, with a > 4 GiB `-md` keeping WinRAR's auto v50/v70 semantics) |
 | `-ma7` | Force RAR7 (v70) members at any dictionary size — an extension beyond WinRAR 7.23, which only switches to v70 above a 4 GiB dictionary |
-| `-ma4` | Legacy RAR3/4 container (v29): full write-side since 2026-09 — STORE + LZSS m1–m5 + PPMd, VM filters, -hp, RR, solid chains; members round-trip through WinRAR 7.23 |
+| `-ma4` | Legacy RAR3/4 container (v29): full write-side since 2026-09 — STORE + LZSS m1–m5 + PPMd, VM filters, -hp, RR, solid chains; byte-verified against WinRAR 6.23 (the last RAR4 producer) and read by 7.23/UnRAR |
+| `-ma2` | Legacy RAR 2.x container (v20) member writer |
+| `-ma15` | Legacy RAR 1.5 container (v15) member writer |
 | `-md<size>` | Dictionary size (incl. RAR7 >4 GiB when `-ma7`); follows `-md`, default 32 MiB, capped at 2× member size |
 | `-mdx<size>` | Decompression dictionary cap (default 4 GiB) |
 | `-mt<threads>` | Compression/decompression thread count |
@@ -74,7 +76,7 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 
 | Switch | Meaning |
 |---|---|
-| `-p<password>` / `-p-` | Set / clear password (file-level AES-256) |
+| `-p<password>` / `-p-` | Set / clear password (file-level; AES-256 for RAR5, the legacy per-generation ciphers for RAR 1.5–4.x) |
 | `-hp<password>` | Encrypt headers too (`-hp`); multi-volume sets repeat the plaintext encryption header on every volume |
 | `-htb` | BLAKE2sp hash records (verified on read) |
 | `-htc` | CRC32 hash (default; accepted) |
@@ -84,15 +86,16 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 | Switch | Meaning |
 |---|---|
 | `-v<size>` | Multi-volume (e.g. `-v1m` ≈ 1 MB, `-v100k` ≈ 100 KB); sets of 10+ volumes use zero-padded `part01` names like WinRAR |
-| `-rr[N]` / `-rv[N]` | Inline recovery record / recovery volumes; N = count or `N%` percent, default 10%, capped at 10× the volume count |
-| `-qo+` / `-qo-` | Enable / disable quick-open records |
+| `-rr[N]` | Inline recovery record; N = count or `N%` percent, default 10% (the `-rv` switch below takes a **required** value, no default) |
+| `-rv<N\|N%>` | Recovery volumes; capped at 10× the volume count |
+| `-qo` | Enable quick-open records (there is no `-qo-` disable form; quick-open is opt-in) |
 
 ### Paths, time & misc
 
 `-r`/`-r0`/`-r-` (recurse), `-ep`/`-ep1`/`-ep2`/`-ep3`/`-ep4<path>` (path
 strip), `-ap<path>` (archive path prefix), `-x`/`-x@` (exclude),
-`-n`/`-n@` (include), `-ed`/`-as`/`-ad`/`-am` (empty dirs / sync / per-attr
-dir / move-to-archive), `-ol`/`-oh` (store sym/hard links as links),
+`-n`/`-n@` (include), `-ed`/`-as`/`-ad`/`-am` (empty dirs / sync / append archive
+name to dest / archive metadata), `-ol`/`-oh` (store sym/hard links as links),
 `-op<path>`/`-or` (output path / auto-rename), `-os`/`-ow` (NTFS streams /
 owner), `-df`/`-kb`/`-si<name>` (delete sources / keep broken / stdin
 member), `-ta`/`-tb`/`-tn`/`-to` (time filters), `-tl`/`-tk` (set archive
@@ -102,8 +105,10 @@ source access time), `-ver[n]` (versioning), `-ag[fmt]` (auto-name),
 mode), `-ierr`/`-ilog`/`-iver`, `-cfg-`/`-sc<charset>`.
 
 Switches that are Windows-only or interactive in WinRAR (e.g. `-ac`, `-dh`,
-`-dr`, `-dw`, `-ieml`, `-ioff`, `-isnd`, `-ri`, `-mlp`, `-oc`, `-oni`,
-`-oi`) are **accepted as no-ops**. `-log` and `-om` are not implemented.
+`-ieml`, `-ioff`, `-isnd`, `-ri`, `-mlp`, `-oc`, `-oni`, `-oi`) are
+**accepted as no-ops**. `-dr` (recycle bin) and `-dw` (wipe) are **rejected
+with an error** rather than silently ignored, since they would otherwise
+imply source deletion. `-log` and `-om` are not implemented.
 
 ---
 
@@ -125,6 +130,7 @@ folder.
 | `l` | List contents |
 | `t` | Test integrity |
 | `p` | Print a member to stdout |
+| `v` / `lb` / `lt` / `vb` / `vt` | Verbose list / list bare / list technical / verbose bare / verbose technical |
 
 `unrar` accepts the same password/path/time switches as `rar` where they
 apply (e.g. `-p<password>`, `-o±`, `-y`, `-kb`).
@@ -141,7 +147,7 @@ rar a -m5 backup.rar src/ notes.txt
 rar a -ma7 -md1g backup.rar bigfile.bin
 
 # Multi-volume, 100 MB per volume, with recovery volumes
-rar a -v100m -rv backup.part1.rar data/
+rar a -v100m -rv10% backup.part1.rar data/
 rar rv backup.part1.rar          # (re)create .rev volumes
 rar rc backup.part1.rar          # rebuild a missing volume from .rev
 
@@ -154,7 +160,7 @@ rar a -pSecret secret.rar docs/
 rar a -hpSecret secret.rar docs/
 
 # Recovery record + repair
-rar rr10 backup.rar
+rar rr backup.rar 10                # or: rar a -rr10 backup.rar data/
 rar r backup.rar                 # streaming repair
 
 # SFX
@@ -174,7 +180,7 @@ unrar t backup.rar               # test
 
 `rar d` removes members without recompressing the rest: kept file blocks
 (header + compressed payload) are copied byte-for-byte, so the operation
-scales with the archive size — not with the remaining data. Solid archives
-recompress only the chain affected by the deletion; inline recovery records
-are dropped and the quick-open record is rebuilt, matching the official
-`rar d`.
+scales with the archive size — not with the remaining data. RAR5 solid
+archives recompress only the chain affected by the deletion. Solid RAR4
+archives are fully repacked (decode → re-encode), matching WinRAR 7.21+.
+Inline recovery records are dropped and the quick-open record is rebuilt.

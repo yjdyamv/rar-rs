@@ -669,11 +669,10 @@ impl RarArchive {
     /// the rebuilt quick-open record, and truncate the trailing end /
     /// quick-open / recovery blocks.
     fn prepare_append(&mut self) -> RarResult<()> {
-        // Appending is implemented for the RAR5 container only: the staged
-        // rewrite below re-parses RAR5 block headers, rebuilds the quick-open
-        // record and patches the RAR5 main-header locator. Reject RAR4
-        // archives up front with a clear error instead of misparsing their
-        // fixed-width headers.
+        // The RAR5 path stages a rewrite: re-parse RAR5 block headers,
+        // rebuild the quick-open record and patch the RAR5 main-header
+        // locator. The RAR4 path (ADR 0005 stage B) has its own prelude
+        // below instead of misparsing fixed-width headers.
         if self.rar4 {
             // RAR4 append (ADR 0005 stage B): gate on the main-header
             // flags, drop the trailing NEWSUB record / end-of-archive block

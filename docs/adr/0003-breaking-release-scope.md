@@ -1,7 +1,7 @@
 # ADR 0003: Phase 6 breaking-release scope
 
-Status: proposed (decision inputs recorded; each decision needs maintainer
-sign-off before execution).
+Status: accepted (executed in the Phase 6 breaking release, 2026-09);
+decision 2 superseded by [ADR 0004](0004-single-archive-version-table.md).
 
 ## Context
 

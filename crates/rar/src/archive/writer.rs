@@ -679,16 +679,16 @@ impl ArchiveWriter {
         })
     }
 
-    /// Begin appending to an existing single-volume RAR5 (RAR50/RAR70)
-    /// archive with default [`AppendOptions`]. RAR4 archives are rejected
-    /// with [`RarError::Unsupported`]: appending requires the RAR5 container.
+    /// Begin appending to an existing single-volume archive (RAR5, or the
+    /// legacy RAR 1.5–4.x container through its append path) with default
+    /// [`AppendOptions`]. Multi-volume archives are rejected.
     pub fn append(path: impl AsRef<Path>) -> RarResult<Self> {
         Self::append_with(path, AppendOptions::default())
     }
 
-    /// Validate options and begin appending to an existing archive. RAR4
-    /// archives are rejected with [`RarError::Unsupported`]: appending
-    /// requires the RAR5 container.
+    /// Validate options and begin appending to an existing archive. Works for
+    /// single-volume RAR5 and legacy RAR4 containers; multi-volume archives
+    /// are rejected.
     pub fn append_with(path: impl AsRef<Path>, options: AppendOptions) -> RarResult<Self> {
         let mut archive = match options.password.as_deref() {
             Some(password) => RarArchive::open_append_with_password(path, password)?,

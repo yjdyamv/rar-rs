@@ -2,7 +2,7 @@
 
 ## 目标
 
-rar-rs 支持创建 RAR3/4（unp_ver=29）归档，创建的归档**必须能被 WinRAR 6.23 解压**。
+rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver 15/20/29）归档，创建的归档**必须能被 WinRAR 6.23 解压**。
 
 ## 范围
 
@@ -110,11 +110,11 @@ ArchiveWriter::close()
 11    4    unpacked_size (原始大小)
 15    4    host_os = 0 (Windows)
 19    4    file_crc32
-23    1    unp_ver = 29
+23    1    unp_ver (29 default; 15/20 for -ma15/-ma2)
 24    1    method (0x30=STORE, 0x31-0x35=m1-m5)
 25    2    name_size
 27    N    filename (UTF-16LE if FHD_UNICODE)
-27+N  8    salt (if FHD_PASSWORD)
+27+N  8    salt (if FHD_PASSWORD; v29 only — v15/v20 are saltless)
 35+N  ?    exttime (if FHD_EXTTIME)
 ```
 
@@ -146,18 +146,26 @@ RAR4 多卷切分点在成员边界：
 
 ### 加密
 
-RAR4 成员级加密（-p）：
-- 每个成员生成 8 字节随机 salt
-- 密钥派生：PBKDF2(password, salt, 0x100000 iterations)
-- 加密：AES-256-CBC，IV = 0
-- 加密范围：FILE_HEAD 中的文件头（从 packed_size 字段之后开始）+ 数据区
-- 未加密的 FILE_HEAD 字段（CRC、大小等）保持明文
+RAR4 成员级加密（-p）按代分派（`archive/create.rs` 的 `rar4_member_encrypt`）：
+
+- **v29（RAR3/4，`crypto/rar30.rs`）**：每成员 8 字节随机 salt；密钥/IV 由 SHA-1
+  链式 KDF（`HASH_ROUNDS = 0x40000`）从口令 + salt 派生（AES-128-CBC，非 PBKDF2）；
+  加密范围为 FILE_HEAD 中 `packed_size` 之后的头字段 + 数据区，未加密字段保持明文。
+- **v20（RAR2.x）**：块密码，16 字节对齐，无 salt。
+- **v15（RAR1.5）**：流式 XOR 密码，无 salt、无 padding。
+
+仅 v29 置 `FHD_SALT`；v15/v20 只置 `FHD_PASSWORD`。`-hp` 头加密与成员版本无关，
+读写两侧统一 AES-128（`Rar30Cipher`），只加密头（每块 `[8B salt][密文]`）。
 
 ### CLI 集成
 
 ```bash
 # 创建 RAR3/4 归档
 rar a -ma4 archive.rar file1 file2
+
+# 创建 RAR 2.x / 1.5 归档
+rar a -ma2 archive.rar file1 file2
+rar a -ma15 archive.rar file1 file2
 
 # 创建 solid RAR3/4 归档
 rar a -ma4 -ms archive.rar file1 file2
@@ -173,7 +181,7 @@ rar a -ma4 -v1m archive.rar file1 file2
 - `archive_version()` 解析 `"4"` → `ArchiveVersion::V29`（旧 `archive_format_force_v70()`，
   2026-09 收敛为单一版本表）
 - `CreateOptions` 的 `compression` 字段类型为 `ArchiveVersion`（`"4"` → `V29`，字段原名 `format_version`，2026-09 与 `WriterOptions::compression` 统一）
-- RAR4 不兼容的选项（quick_open、blake2、recovery_record、encrypt_headers）在 `-ma4` 时报错
+- RAR4 不兼容的选项（quick_open、blake2、`.rev` 恢复卷、owner/streams、RAR7 字典）在 `-ma4` 时报错；内联 RR（`-rr`）与头加密（`-hp`）**已支持**
 
 ## 测试策略
 

@@ -620,8 +620,8 @@ fn parse_size(s: &str) -> Result<u64, String> {
 /// Resolve a `-ma<ver>` archive-format request into the single version
 /// table knob. `-ma4` selects the legacy RAR3/4 container through its
 /// writable unpack version [`rar_rs::ArchiveVersion::V29`]; `-ma2` and
-/// `-ma15` write RAR 2.x (v20) and RAR 1.5 (v15) members (non-solid,
-/// unencrypted); `-ma5` is the default RAR5 v50 version (a no-op, like
+/// `-ma15` write RAR 2.x (v20) and RAR 1.5 (v15) members through the legacy
+/// pipeline (solid chains and `-p`/`-hp` encryption included); `-ma5` is the default RAR5 v50 version (a no-op, like
 /// WinRAR's accepted-but-inert `-ma5`); `-ma7` forces RAR7 (v70) members
 /// with the `-md` dictionary
 /// (default 32 MiB) declared in the header — an extension beyond

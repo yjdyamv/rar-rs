@@ -112,6 +112,7 @@ earlier `T0` son+input rejection — the MLP issued ahead of the branch is
 Closing: the pipelined-first-step value-carry (landed −3.6%) is the full
 extent of byte-identical BT4 pipelining. The interleaved batch (issue 11)
 and both prefetch variants are measured negative. Any further per-position
-step reduction requires the leaves specified in issue 13 待办 (MT-only low-
-step search with accepted divergence, or a `RAR_RS_FAR_BAND` opt-in speed
-tier) — neither is byte-identical, so both are explicit-tradeoff options.
+step reduction requires the tradeoffs settled in the issue 13 verdict
+(MT-only low-step search became the MT default; `RAR_RS_FAR_BAND` is a
+dormant seq opt-in) — neither is byte-identical, so both are explicit-tradeoff
+options.

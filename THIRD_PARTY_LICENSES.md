@@ -8,7 +8,7 @@ exact source revision, copied files, modifications, and applicable terms before
 redistribution.
 
 The root Cargo `license = "BSD-2-Clause"` metadata remains unchanged while the
-per-file audit described in `docs/CODE_AUDIT_2026-09-05.md` is open. That field
+per-file provenance audit tracked in `PLAN.md` (「技术债」) is open. That field
 must not be read as overriding terms attached to third-party portions. A final
 repository-wide SPDX expression requires maintainer or legal review.
 

@@ -1,4 +1,8 @@
-# RAR4 Edit Architecture
+# ADR 0005: RAR4 Edit Architecture
+
+- Status: accepted (phases A–C landed 2026-09)
+- Date: 2026-09-08 (original), 2026-09 (phases A–C landed)
+- Related: [ADR 0001](0001-rar4-creation-architecture.md) (creation side), [ADR 0004](0004-single-archive-version-table.md) (version table)
 
 rar-rs 将补上「已存在 RAR4 归档的编辑」能力（官方 `rar`/WinRAR 的 `u/f/d/rn/ch/k/c/rr` 作用于 RAR4）。核心决策：
 
@@ -18,7 +22,7 @@ rar-rs 将补上「已存在 RAR4 归档的编辑」能力（官方 `rar`/WinRAR
 
 5. **编辑保持 RAR4 格式输出**。官方依据（WinRAR 帮助：Archive name and parameters dialog）：update 现有归档时格式选项被忽略，沿用被更新归档的格式，不转换。
 
-## 现状代码位置（本次要改的拒绝点）
+## 现状代码位置（2026-09 实施前快照；阶段 A–C 已落地，见下）
 
 - `archive/editor.rs` `ensure_rewritable`（`archive.rar4` → `Unsupported`，拦 `d/rn/k/c/rr`）
 - `archive/writer.rs` `append_with`（拦 `a/u/f`）

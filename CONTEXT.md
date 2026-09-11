@@ -38,16 +38,16 @@
 ## 分层结构（镜像参考架构 rars）
 
 - **格式层 `format/rar5/`**：容器常量 + 头类型/解析（mod.rs + headers/{parse,serialize,locator}.rs）、成员读/解码门面（payload.rs）、读路径（extract.rs）、写管线（write/{mod,engine,layout}.rs）、vint/blake2sp。低版本格式兄弟模块 `format/rar4/`（读：mod.rs 扫描/头解析 + read.rs 成员解码门面；写：write.rs 固定宽度头序列化 + RAR29 编码器调度 + create.rs 选项校验）。
-- **编解码层 `codec/`**：一族一目录/一文件——`modern/lzss_huff/`（RAR5 LZSS+Huffman 编码器+解码器）、`legacy/`（`rar29.rs` RAR3/4 成员解码器：LZSS+Huffman+PPMd 块、`rar29_encoder.rs` RAR3/4 编码器：从 rars 移植的 Unpack29Encoder、`ppmd.rs` PPMd 变体 H 解码器，rar29 引用）、`common/`（bitstream/huffman/filters/match_finder/window 共享原语；`legacy/rar29.rs`/`ppmd.rs` 自含位读器/错误，不动 RAR5 原语）。
+- **编解码层 `codec/`**：一族一目录/一文件——`modern/lzss_huff/`（RAR5 LZSS+Huffman 编码器+解码器）、`legacy/`（`rar29.rs` RAR3/4 成员解码器：LZSS+Huffman+PPMd 块、`rar29_encoder.rs` RAR3/4 编码器：从 rars 移植的 Unpack29Encoder、`ppmd.rs` PPMd 变体 H 解码器，rar29 引用）、`common/`（bitstream/huffman/filters/incompressible/match_finder/window 共享原语；`legacy/rar29.rs`/`ppmd.rs` 自含位读器/错误，不动 RAR5 原语）。
 - **加密层 `crypto/`**：一族一文件（crypto/rar50.rs；老族 crypto/rar15.rs、rar20.rs、rar30.rs）。
 - **恢复层 `recovery/`**：rar50.rs（内联 RR）+ rev50.rs（.rev 卷）+ legacy.rs（RAR 1.5–4.x PROTECT_HEAD/NEWSUB RR 修复）。
 - **基础设施**：detect.rs（签名/SFX 扫描）、parallel.rs（Rayon 池）、fs/（atomic.rs 原子暂存/有界读、volume.rs 卷命名、safe_path.rs 安全路径）、version.rs/features.rs（薄词汇模块）、options.rs/error.rs/write_progress.rs。
-- **CLI 层 `crates/rar-cli`**：rar/unrar 两二进制；common.rs（WinRAR 开关/配置兼容核心）+ input/password/output/time 模块。
+- **CLI 层 `crates/rar-cli`**：rar/unrar 两二进制；common.rs（WinRAR 开关/配置兼容核心）+ input/password/output/time 模块 + `selector.rs`（成员选择）+ `name_policy.rs`（路径收集与掩码）。
 
 ## 项目事实
 
 - Cargo workspace：库 crate `rar-rs`（读取 RAR 1.5–4.x/RAR5/RAR7，创建 RAR4/RAR5/RAR7）+ CLI crate `rar-cli`（`rar` 创建/修改/提取、`unrar` 提取/列表）+ `rar-rs-napi`（native/WASI binding）。
-- 库热点已拆解：`archive/` 目录是 facade 层（`mod.rs` 结构体/构造器/生命周期，`reader.rs`/`writer.rs`/`editor.rs` 角色门面，`create.rs` 写生命周期，`transaction.rs` 外科重写，`entry.rs` 条目类型，`discovery.rs` 分卷发现）；读写路径分别在 `format/rar5/extract.rs` 与 `format/rar5/write/`。
+- `archive/` 已拆为 facade 层（`mod.rs` 结构体/构造器/生命周期，`reader.rs`/`writer.rs`/`editor.rs` 角色门面，`create.rs` 写生命周期，`transaction.rs` 外科重写，`entry.rs` 条目类型，`discovery.rs` 分卷发现）；`format`/`codec` 的热点文件（`format/rar5/write/mod.rs` 等，约 4k 行）尚未文件级拆分，见 `PLAN.md` 技术债；读写路径分别在 `format/rar5/extract.rs` 与 `format/rar5/write/`。
 - 互操作测试：`crates/rar/tests/{rar50_roundtrip,format_assertions,rewrite_tests,official_interop,rar4_rejection,cancel_flag,quick_open_listing}.rs`（官方 rar/unrar 用 SA_OFFICIAL_RAR/UNRAR env 门控）、`crates/rar-cli/tests/cli_behavior.rs`（CARGO_BIN_EXE 需随二进制所在 crate）、`crates/rar-cli/tests/winrar_interop.rs`（Windows 本机 WinRAR 双向验证）。
 - fuzz：`fuzz/` 独立 crate（不在 workspace），五目标 parse/crypto/recovery（读侧）+ write/rewrite（写侧），standalone 变异循环 + `cargo +nightly fuzz run <t> --features fuzzing` 双模式；语料嵌入真实 WinRAR fixture。
 - 回归验证：根 `.github/workflows/CI.yml` 执行 workspace fmt、默认/无默认 feature check、全 target clippy `-D warnings`、测试、独立 fuzz workspace check，以及 native/WASI binding 构建与测试；官方二进制互操作仍由 `SA_OFFICIAL_RAR`/`SA_OFFICIAL_UNRAR` 手动门控。

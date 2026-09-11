@@ -26,7 +26,7 @@
 | 文档 | 内容 |
 |---|---|
 | [`adr/0001-rar4-creation-architecture.md`](adr/0001-rar4-creation-architecture.md) | RAR4 创建架构决策 |
-| [`adr/0002-format-neutral-model-and-api-v2.md`](adr/0002-format-neutral-model-and-api-v2.md) | 格式中立模型、依赖方向、API v2 兼容策略（版本轴部分已被 0004 取代） |
+| [`adr/0002-format-neutral-model-and-api-v2.md`](adr/0002-format-neutral-model-and-api-v2.md) | 格式中立模型、依赖方向、API v2 兼容策略（版本轴拆分由 0003 决策 2 承接，再被 0004 取代） |
 | [`adr/0003-breaking-release-scope.md`](adr/0003-breaking-release-scope.md) | 公开面收敛范围：`raw` 门控、破坏性发布清单 |
 | [`adr/0004-single-archive-version-table.md`](adr/0004-single-archive-version-table.md) | 单一 `ArchiveVersion` 表（v15–v70），废弃容器轴与 `CompressionVersion` |
 | [`adr/0005-rar4-edit-architecture.md`](adr/0005-rar4-edit-architecture.md) | RAR4 编辑架构（对齐官方、solid 整档 repack、分卷/-hp 边界） |
@@ -41,6 +41,15 @@
 | [`issues/compression-perf/issues/`](issues/compression-perf/issues/) | 仅存**未关闭**议题（04、09）；已关闭的结论见 map.md 表格 | 接手未关闭的性能议题 |
 | [`../fuzz/README.md`](../fuzz/README.md) | fuzz 五目标与双模式运行 | 跑 fuzz / 加模糊目标 |
 | [`../crates/rar/tests/fixtures/rar50/README.md`](../crates/rar/tests/fixtures/rar50/README.md) | 真实 WinRAR fixture 的来源与用途 | 理解互操作测试数据 |
+
+## 法务与许可
+
+| 文档 | 内容 |
+|---|---|
+| [`../LICENSE`](../LICENSE) | 原始项目部分许可（BSD-2-Clause） |
+| [`../NOTICE`](../NOTICE) | 归属、许可边界与第三方部分范围 |
+| [`../THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md) | 来源清单（provenance inventory） |
+| [`../LICENSES/`](../LICENSES/) | MIT / Apache-2.0 / WTFPL 标准文本 |
 
 ## 约定
 

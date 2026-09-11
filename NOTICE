@@ -30,7 +30,7 @@ RARLAB source code.
 
 RAR4 support combines original project code with the upstream-derived decoder
 portions identified in the `rars` section below. The current implementation
-supports RAR 1.5–4.x reading and RAR4 archive creation, including the relevant
+supports RAR 1.5–4.x reading and RAR 1.5 / 2.x / 4.x archive creation, including the relevant
 legacy codecs, filters, encryption, solid chains, and volume handling. It does
 not contain, link to, or derive from the proprietary `unrar` source code
 distributed by RARLAB. Archive structures are implemented from public format
@@ -87,7 +87,9 @@ This software:
     than the native tool in many real-world scenarios.
 
   - Provides RAR5/RAR7 read and write support, plus RAR 1.5–4.x reading and
-    RAR4 archive creation. RAR3 and earlier archive creation is not provided.
+    RAR 1.5 / 2.x / 4.x archive creation (legacy `-ma15` / `-ma2` / `-ma4`).
+    The intermediate RAR2.6/RAR3.x members (v26/v36) are written as their base
+    versions (`v20`/`v29`).
     Legacy-format support has feature-specific limitations documented by the
     library and CLI.
 

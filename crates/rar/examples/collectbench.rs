@@ -1,8 +1,8 @@
 //! BT4-collect bench: times the sequential and MT encodes on a FILE corpus
 //! (the real DLL/x86 path), verifying the packed output decodes back
 //! byte-identically. Collect work dominates these encodes, so this is the
-//! harness for the pipelined-descent lever (`.scratch/compression-perf/
-//! issues/11-batch-descent.md`).
+//! harness for the pipelined-descent lever (issue 11 verdict in
+//! `docs/issues/compression-perf/map.md`).
 //!
 //! Requires the `parallel` feature.
 //! Run: cargo run --release --features parallel --example collectbench -- <file> <level> <threads>

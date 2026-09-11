@@ -26,7 +26,7 @@ Decisions so far:
   （descent 内异步预取两候选子对的 son 对）20 样本 A/B 中性偏负（tsc6 med 3048 vs 3078），
   与既有 T0 son+input 拒绝一致——未取分支的缓存行在稠密二进制 L2 上是净污染。BT4
   字节级流水已封顶（首步 value-carry -3.6% 即全量）；再降每位置步数只剩显式取舍项
-  （MT-only 低步数搜索 / FAR_BAND opt-in），见 issue 13 待办。
+  （MT-only 低步数搜索 / FAR_BAND opt-in），见 issue 13 判决（下表行 13）。
 - 14 两制近存实测为负（2026-09-07）：近带 256 KiB L3 驻留 + 远树到期重插（`RAR_RS_TWO_TIER`，
   env-gated 默认 off，descent 拆 node/pos 纯重构除外）——远插把每位置步数做大约 2-3x，
   seq -75%、mt8 -98%；budget=4 采样式远插 ratio 漂 +0.54pp 仍 mt8 -66%。方向废弃，留档负例。
@@ -182,7 +182,7 @@ mt8 saturates DRAM bandwidth (~121M steps/s ~ 31GB/s, scaling cliff 4->8 at
 1 MiB/2 steps: tsc seq -9% at +0.22pp, but mt8 only -4% (MT slices have few
 far-band candidates) — so it is a seq speed option, not the mt8 fix. To close
 the WinRAR mt8 gap the per-position steps must drop ~5x (architecture), see
-issue 13 待办.
+the issue 13 verdict row below.
 
 ## Definitive head-to-head (2026-09-01, fixed CLI, m3, this machine)
 

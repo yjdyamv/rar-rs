@@ -29,8 +29,8 @@ covering every member codec version this library reads and writes:
 
 | Version | Codec                          | Container    | Writable |
 |---------|--------------------------------|--------------|----------|
-| `v15`   | RAR15 (adaptive-Huffman LZ)    | RAR 1.5–4.x  | —        |
-| `v20`   | RAR20 (LZSS + Huffman)         | RAR 1.5–4.x  | —        |
+| `v15`   | RAR15 (adaptive-Huffman LZ)    | RAR 1.5–4.x  | yes (2026-09) |
+| `v20`   | RAR20 (LZSS + Huffman)         | RAR 1.5–4.x  | yes (2026-09) |
 | `v26`   | RAR20 (LZSS + Huffman)         | RAR 1.5–4.x  | —        |
 | `v29`   | RAR29 (LZSS + Huffman + PPMd)  | RAR 1.5–4.x  | yes      |
 | `v36`   | RAR29 (same codec as `v29`)    | RAR 1.5–4.x  | —        |
@@ -46,6 +46,10 @@ covering every member codec version this library reads and writes:
   `WriterOptions::compression(ArchiveVersion)` knob; the writable subset is
   `{v29, v50, v70}` and read-only versions are rejected at validation
   (`InvalidOption`) rather than silently downgraded.
+  **Amended 2026-09**: after porting the rars `Unpack15Encoder` /
+  `Unpack20Encoder`, the writable subset grew to `{v15, v20, v29, v50, v70}`;
+  `v26`/`v36` remain read-only and are written as their base versions. CLI
+  `-ma15`/`-ma2` map to `v15`/`v20`.
 - `CreateOptions.compression` becomes `ArchiveVersion` (default `v50`); the field
   was renamed from `format_version` so the single version axis carries one name
   across both surfaces (`WriterOptions::compression`). The raw model keeps

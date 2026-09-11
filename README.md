@@ -118,7 +118,9 @@ members is refused with a clear error.
 Appending to multi-volume archives is not supported (the official `rar` refuses
 too). Inline recovery records have streaming limitations during repair; encrypted
 multi-volume sets cannot combine `-hp` with inline RR and must use `.rev` recovery
-volumes. Solid and multithreaded compression are mutually exclusive; filter types
+volumes. RAR5 solid chains do participate in multithreaded compression
+(chunk-level, with a small documented ratio divergence from sequential
+encoding); RAR4 solid chains stay sequential. Filter types
 4–7 are rejected; KDF strength is capped at 2²⁴ iterations (default 2¹⁵).
 
 ## Documentation
@@ -146,6 +148,6 @@ see [LICENSE](LICENSE).
 
 The workspace's current `BSD-2-Clause` Cargo metadata is not intended to
 supersede terms attached to third-party portions. A final repository-wide SPDX
-expression remains pending the per-file audit documented in the code-audit
-baseline; the metadata is deliberately unchanged until that review is
-complete.
+expression remains pending the per-file provenance audit tracked in
+[PLAN.md](PLAN.md) (「技术债」); the metadata is deliberately unchanged until
+that review is complete.

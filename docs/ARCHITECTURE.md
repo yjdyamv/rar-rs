@@ -26,6 +26,7 @@
 | 模块 | 作用 |
 |---|---|
 | `lib.rs` | 公开面：角色门面 + 选项/错误/版本 + `raw` 门控的 wire 面 |
+| `crc32.rs` | crate 级 CRC32 实现（`pub(crate)`） |
 | `archive/reader.rs` / `writer.rs` / `editor.rs` | 读 / 写 / 改三个角色门面 |
 | `archive/mod.rs` | `RarArchive` 共享状态与生命周期（内部） |
 | `archive/transaction.rs` | 手术式 delete / rename（字节级重写） |
@@ -45,10 +46,10 @@
 
 | 模块 | 可见性 | 内容 |
 |---|---|---|
-| `format/rar5/` | **`raw` 门控** | 常量与词汇（`mod.rs`）、`headers/{parse,serialize,locator}`、`payload.rs`（MemberDecoder）、`vint.rs`、`blake2sp.rs`、`extract.rs`（读路径）、`write/{mod,engine,layout}` |
+| `format/rar5/` | **`raw` 门控** | 常量与词汇（`mod.rs`）、`create.rs`（字典字段策略）、`headers/{parse,serialize,locator}`、`payload.rs`（MemberDecoder）、`vint.rs`、`blake2sp.rs`、`extract.rs`（读路径）、`write/{mod,engine,layout,windows}` |
 | `format/rar4/` | **`raw` 门控** | 老容器族：扫描 / 头解析、解码门面、写管线 |
 | `codec/modern/lzss_huff/` | **公开** | RAR5 LZSS+Huffman 编解码器。ADR 0003 决策 3 明确保留（`examples/` 依赖根上的 `encode` / `decode` / `EncoderState` / `encode_chunked*`） |
-| `codec/legacy/`、`codec/common/` | `pub(crate)` | 老代编解码器与 PPMd；bitstream / huffman / filters / match_finder / window |
+| `codec/legacy/`、`codec/common/` | `pub(crate)` | 老代编解码器与 PPMd；bitstream / huffman / filters / incompressible / match_finder / window |
 | `crypto/` | **`raw` 门控** | `rar50`（AES-256-CBC + KDF + hash-key MAC）、`rar15` / `rar20` / `rar30` |
 | `recovery/` | **`raw` 门控** | `rar50`（内联 RR）、`rev50`（.rev 恢复卷）、`legacy`（PROTECT_HEAD / NEWSUB 修复）。受支持的入口在 crate 根重导出（`repair_archive_path`、`rebuild_missing_volumes`、`build_recovery_volumes_for_set` 等） |
 
@@ -72,10 +73,11 @@ packed 大小加一个发射块，而不是正比于整个文件的符号表。
 与总大小上限 → 临时兄弟文件 + 完整性校验后 rename。加密成员校验 MAC'd 校验和，损坏密文必定
 被检出。只有对可信归档才应放宽这些默认。
 
-**Solid 与 `-mt` 互斥（写路径）。** 连续压缩成员共享一个 LZ 窗口（更好的比率），因此写路径
-保持 solid 串行；`-mt` 走每个成员独立窗口的并行路径。`add_batch_parallel` 只在非 solid 时
-启用。codec 里有 chunk 级的 solid 并行（见 `docs/issues/compression-perf` 的 issue 06），
-但目前只用于基准，不接进写路径。
+**Solid 与 `-mt`（写路径）。** 连续压缩成员共享一个 LZ 窗口（更好的比率）。RAR5 solid 链
+同样走 chunk 级 MT（`encode_chunked_mt`）：窗口经共享 tail 与长距离表延续，只有解析层与
+顺序路径分歧（已文档化的小幅 ratio 差异）。非 solid 成员各自独立窗口，`add_batch_parallel`
+只在非 solid 时启用；RAR4 老编码器的 solid 链保持串行。结论与实测见
+`docs/issues/compression-perf/map.md` 的 issue 06 判决行。
 
 **Quick-open 与取消。** `open_quick` 只读主头 + QO 记录，列目录是 O(QO) 而非 O(归档)；
 没有 QO 时回退全扫。长任务通过共享 `AtomicBool` 协作取消，下一个检查点返回
