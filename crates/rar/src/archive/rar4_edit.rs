@@ -8,10 +8,10 @@
 //! are edited per volume for renames and lock (official `rar` rewrites each
 //! volume without rebalancing, so a volume may grow past `-v`); delete and
 //! append on a set are refused exactly like the official "Cannot modify
-//! volume", and archive comments are supported (the `CMT` block lands right
-//! after the first volume's main header); recovery-record and per-member
-//! comment edits on a set are refused (a volume set uses `.rev` recovery
-//! volumes).
+//! volume", archive comments are supported (the `CMT` block lands right after
+//! the first volume's main header); recovery-record and per-member-comment
+//! edits on a set are refused (a volume set uses `.rev` recovery volumes,
+//! and RAR4 member comments are not interoperable — see `PLAN.md`).
 //!
 //! Rename rebuilds each FILE_HEAD's encoded name field in place (keeping
 //! every other field byte-identical, including salt / nested comment /
@@ -44,8 +44,8 @@ use super::transaction::EditSummary;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::write::encode_file_name;
 use crate::format::rar4::{
-    ENDARC_HEAD, FHD_COMMENT, FHD_LARGE, FHD_SALT, FHD_UNICODE, FILE_HEAD, LONG_BLOCK, MAIN_HEAD,
-    MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY, MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD,
+    ENDARC_HEAD, FHD_COMMENT, FHD_LARGE, FHD_UNICODE, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, MHD_LOCK,
+    MHD_PASSWORD, MHD_RECOVERY, MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD,
 };
 use crate::fs::atomic::{commit_files, read_write_create, replace_file, temp_sibling_path};
 use crate::fs::volume::volume_base_of;
@@ -412,13 +412,11 @@ fn rename_file_header(header: &[u8], new_name: &str) -> RarResult<Vec<u8>> {
     out[3..5].copy_from_slice(&new_flags.to_le_bytes());
     out[5..7].copy_from_slice(&(new_head_size as u16).to_le_bytes());
 
+    // With a nested comment the covered region runs up to the comment start
+    // (fixed fields + name + salt + extended time); without one the whole
+    // header body is covered.
     let crc_end = if new_flags & FHD_COMMENT != 0 {
-        let mut end = 32 + if new_flags & FHD_LARGE != 0 { 8 } else { 0 };
-        end += new_name_size;
-        if new_flags & FHD_SALT != 0 {
-            end += 8;
-        }
-        end.min(out.len())
+        crate::format::rar4::file_header_crc_end(&out)
     } else {
         out.len()
     };

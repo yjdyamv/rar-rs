@@ -198,18 +198,27 @@ pub(crate) fn build_file_header(p: &FileHeaderParams<'_>) -> RarResult<Vec<u8>> 
 /// `HEAD_CRC(2) HEAD_TYPE(1)=0x75 HEAD_FLAGS(2) HEAD_SIZE(2) VERSION(1)=0x50
 ///  UNP_VER(1) METHOD(1)=0x30 COMM_CRC(2) payload`.
 pub(crate) fn build_file_comment_block(comment: &[u8]) -> Vec<u8> {
-    let head_size = 12 + comment.len();
+    // Layout verified against a genuine RAR2 archive comment
+    // (`tests/fixtures/rar40/rar2/comment_nopsw.rar`): HEAD_CRC(2) +
+    // HEAD_TYPE(1) + HEAD_FLAGS(2) + HEAD_SIZE(2) + UNP_SIZE(2) + UNP_VER(1)
+    // + METHOD(1) + COMM_CRC(2), then the payload. UnRAR rejected the previous
+    // 12-byte variant (no UNP_SIZE) with "file header is corrupt".
+    let head_size = 13 + comment.len();
     let mut buf = Vec::with_capacity(head_size);
     buf.extend_from_slice(&[0u8; 2]); // HEAD_CRC placeholder
     buf.push(COMM_HEAD);
     buf.extend_from_slice(&0u16.to_le_bytes()); // HEAD_FLAGS
     buf.extend_from_slice(&(head_size as u16).to_le_bytes()); // HEAD_SIZE
-    buf.push(0x50); // VERSION
+    buf.extend_from_slice(&(comment.len() as u16).to_le_bytes()); // UNP_SIZE
     buf.push(29); // UNP_VER (RAR4)
     buf.push(RAR4_METHOD_STORE); // METHOD (store)
     buf.extend_from_slice(&header_crc16(comment).to_le_bytes()); // COMM_CRC
     buf.extend_from_slice(comment);
-    patch_crc16(&mut buf, 0);
+    // HEAD_CRC covers the 11-byte subblock header body only; the comment
+    // payload follows the covered region (verified against a genuine block:
+    // its stored CRC matching `crc32(body[2:13])`, not `[2:head_size]`).
+    let crc = header_crc16(&buf[2..13]);
+    buf[..2].copy_from_slice(&crc.to_le_bytes());
     buf
 }
 

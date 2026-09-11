@@ -251,6 +251,8 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
 
 ## 已知小差异（记录，互操作无碍）
 
+- **RAR4 成员注释（`cf`）不是互操作保证（2026-09-11 实测）**：WinRAR 6.23 命令行没有成员注释命令（`cf` 输出用法即退）；我们写出的 RAR4（unp_ver 29）成员注释，UnRAR/Rar 6.23 与 7.23 的 `t` 均报 `Total errors: 2`（exit 3，数据仍可解出）。真实的成员注释只有 RAR2 时代样本（`rar40/rar2/comment_nopsw.rar`，UnRAR `t` 通过）。据此：格式层按该样本修正了 COMM_HEAD（13 字节固定头：HEAD_SIZE + UNP_SIZE + UNP_VER + METHOD + COMM_CRC）与三条 CRC 规则（FILE_HEAD 到 name(+salt+exttime)，COMM_HEAD 到 11 字节子块头，COMM_CRC = crc32(payload)&0xffff），读取侧新增测试能正确解出 `file1comment`/`file2comment`；但 RAR4 写侧 `cf` 属自洽扩展，**多卷成员注释因此继续拒绝**。
+
 - solid 且无 rarfiles.lst 时：WinRAR 按扩展名/名字启发式排序，我们按参数顺序
 - 目录条目名带尾斜杠
 - **WinRAR 6.23/7.23 的 RAR4 修复对周期数据的缺陷（2026-09 实测）**：当归档的恢复记录块本身落入其保护的最后部分扇区（必然如此——RR 在归档尾，`total_blocks` 覆盖到 RR 头）且成员数据是短周期重复（如 64B pattern）时，WinRAR 自己的 `rar r` 会把 RR 尾部修坏（产物 `Unexpected end of archive`），无论记录是其自产还是我们产——实测 6.23 与 7.23 行为一致。我们的写侧把部分尾扇区排除出 parity 组、读侧只重建完整扇区，故我们能正确修复同样损坏（字节级回环）。互操作测试因此用伪随机成员数据；这是 WinRAR 侧缺陷，不追平。

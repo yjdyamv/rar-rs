@@ -608,6 +608,31 @@ fn rar4_rar202_wrong_password_fails() {
     );
 }
 
+/// Genuine RAR 2.x per-file comments (nested `COMM_HEAD` 0x75). The covered
+/// subblock layout and its CRC ranges were verified against this fixture, so
+/// it guards the parse offset.
+#[test]
+fn rar4_rar2x_member_comments_decode() {
+    let archive = ArchiveReader::open(format!("{RAR2}comment_nopsw.rar")).expect("open");
+    let comments: Vec<(String, Option<Vec<u8>>)> = archive
+        .entries()
+        .map(|entry| {
+            (
+                entry.name().to_string(),
+                entry.comment().map(|c| c.to_vec()),
+            )
+        })
+        .collect();
+    let find = |name: &str| {
+        comments
+            .iter()
+            .find(|(n, _)| n == name)
+            .and_then(|(_, comment)| comment.clone())
+    };
+    assert_eq!(find("FILE1.TXT").as_deref(), Some(&b"file1comment"[..]));
+    assert_eq!(find("FILE2.TXT").as_deref(), Some(&b"file2comment"[..]));
+}
+
 // ── PPMd (RAR 3.0 m5 members from the rars fixture corpus) ────────────────
 
 #[test]

@@ -434,6 +434,16 @@ pub(crate) fn file_header_crc_end(header: &[u8]) -> usize {
     if flags & FHD_SALT != 0 {
         end += 8;
     }
+    // With a trailing comment the covered region runs up to where the comment
+    // subblock starts: everything before it, including the extended-time area
+    // (verified against a genuine FILE_HEAD+comment block: HEAD_CRC over
+    // `head_size - comment_size`).
+    if flags & FHD_COMMENT != 0
+        && end <= header.len()
+        && let Some((comment_start, _, _)) = find_comment_block_start(&header[end..])
+    {
+        return end + comment_start;
+    }
     end.min(header.len())
 }
 
@@ -753,17 +763,19 @@ pub(crate) fn find_comment_block_start(tail: &[u8]) -> Option<(usize, usize, usi
         if tail[i + 2] == COMM_HEAD {
             let flags = u16::from_le_bytes([tail[i + 3], tail[i + 4]]);
             let head_size = u16::from_le_bytes([tail[i + 5], tail[i + 6]]) as usize;
-            // CommentHeader body (version, unp_ver, method, comm_crc) is 5 bytes
-            // after the 7-byte block prefix.
+            // CommentHeader body (unp_size, unp_ver, method, comm_crc) is 6
+            // bytes after the 7-byte block prefix; a LONG_BLOCK inserts a
+            // 4-byte ADD_SIZE before it (verified against a genuine comment
+            // block: HEAD_SIZE 38 with a 10-byte payload).
             let (data_start, data_end) = if flags & LONG_BLOCK != 0 {
                 if i + 11 > tail.len() {
                     i += 1;
                     continue;
                 }
                 let add = u32::from_le_bytes(tail[i + 7..i + 11].try_into().unwrap()) as usize;
-                (i + 16, i + 16 + add)
+                (i + 17, i + 17 + add)
             } else {
-                (i + 12, i + head_size)
+                (i + 13, i + head_size)
             };
             if data_start <= data_end && data_end <= tail.len() {
                 return Some((i, data_start, data_end));
@@ -872,14 +884,15 @@ mod tests {
     use super::*;
 
     /// Build a COMM_HEAD (0x75) file-comment subblock wrapping `payload`.
+    /// Layout verified against a genuine RAR2 comment block.
     fn comm_block(payload: &[u8]) -> Vec<u8> {
-        let head_size = 12 + payload.len();
-        let mut b = vec![0u8; 12];
+        let head_size = 13 + payload.len();
+        let mut b = vec![0u8; 13];
         b[2] = COMM_HEAD; // head type
         b[5..7].copy_from_slice(&(head_size as u16).to_le_bytes());
-        b[7] = 0x50; // version
-        b[8] = 29; // unp ver
-        b[9] = 0x30; // method (store)
+        b[7..9].copy_from_slice(&(payload.len() as u16).to_le_bytes()); // unp_size
+        b[9] = 29; // unp ver
+        b[10] = 0x30; // method (store)
         b.extend_from_slice(payload);
         b
     }
@@ -912,16 +925,16 @@ mod tests {
 
     #[test]
     fn long_block_comment_is_located() {
-        // LONG_BLOCK flag set: comment data lives in the 4-byte add_size.
+        // LONG_BLOCK: prefix + 4-byte add_size, then the 6-byte comment body.
         let payload = b"long form";
-        let head_size = 7 + 4; // prefix + add_size
         let add_size = payload.len() as u32;
+        let head_size = 17 + payload.len();
         let mut b = vec![0u8; 11];
         b[2] = COMM_HEAD;
         b[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
         b[5..7].copy_from_slice(&(head_size as u16).to_le_bytes());
         b[7..11].copy_from_slice(&add_size.to_le_bytes());
-        b.extend_from_slice(&[0x50, 29, 0x30, 0, 0]); // version, unp_ver, method, comm_crc
+        b.extend_from_slice(&[0, 0, 29, 0x30, 0, 0]); // unp_size, unp_ver, method, comm_crc
         b.extend_from_slice(payload);
         let (c, len) = parse_file_comment(&b);
         assert_eq!(c.unwrap(), payload);
