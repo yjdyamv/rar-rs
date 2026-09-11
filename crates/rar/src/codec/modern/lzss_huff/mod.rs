@@ -197,6 +197,10 @@ mod mt_tests {
     /// That table must retain the full window; if it drops to half (its old
     /// behaviour) the third member loses the reference and stops chaining, falling
     /// back to re-compressing the whole member independently.
+    ///
+    /// Cost: three 13 MiB members against a 16 MiB dictionary is ~20s of
+    /// encoding — one of the few tests that dominate suite runtime (see
+    /// `docs/testing.md`).
     #[test]
     fn sequential_solid_chain_random_shared_blocks() {
         const LOG: u8 = 7; // 16 MiB dict -> 8 MiB near-finder window
@@ -261,6 +265,8 @@ mod mt_tests {
     /// set, as the write path does), instead of once per whole member. If the
     /// chain breaks on member three here too, the bug is in how the state is
     /// carried across those repeated calls.
+    /// Cost: three 14 MiB members chunked externally is ~22s (see
+    /// `docs/testing.md`).
     #[test]
     fn cli_like_external_chunking_serial_chain() {
         const LOG: u8 = 7;
@@ -506,6 +512,13 @@ mod mt_tests {
     /// passes: toggle it off, encode every corpus, toggle it back on, and
     /// compare. Corpora cover the fast path's trigger (random), its
     /// fallback triggers (text, repeats, structured data) and mixes.
+    ///
+    /// Cost: the matrix is seven corpora (~89 MiB) x nine
+    /// level/dictionary/variant combinations x two arms (fast path on and
+    /// off), so it encodes ~1.6 GiB — the single largest test in the suite
+    /// (see `docs/testing.md`). It is deliberately neither shrunk nor
+    /// ignored: this is the guard that the fast path never diverges from the
+    /// full pricing passes.
     #[test]
     fn matchless_fast_path_is_byte_identical() {
         struct Guard;

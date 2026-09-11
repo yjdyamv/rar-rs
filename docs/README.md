@@ -46,6 +46,7 @@
 
 | 文档 | 内容 | 何时读 |
 |---|---|---|
+| [`testing.md`](testing.md) | 测试怎么跑、耗时花在哪（三个大用例占 80%）、`[profile.test]` 为什么开优化、nextest 的坑 | 跑测试 / 觉得套件慢 / 想改测试 |
 | [`agents/issue-tracker.md`](agents/issue-tracker.md) | markdown issue 跟踪约定（`docs/issues/<feature>/`）与 `.scratch/` 的身份边界 | 用 triage/to-tickets/to-spec / 跟踪工作 |
 | [`issues/compression-perf/map.md`](issues/compression-perf/map.md) | 压缩性能议题地图：结论、Open frontier、与 WinRAR 7.23 的头对头实测 | 排压缩性能工作 / 查 issue 01–14 结论 |
 | [`../fuzz/README.md`](../fuzz/README.md) | fuzz 五目标（parse/crypto/recovery/write/rewrite）与双模式运行 | 跑 fuzz / 加模糊目标 |
