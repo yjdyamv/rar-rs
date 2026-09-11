@@ -232,10 +232,12 @@ impl WriterOptions {
     }
 
     /// Select the member compression version. The container family follows
-    /// the version: `v50`/`v70` write the RAR5 container, `v29` writes the
-    /// legacy RAR4 container (per-member `unp_ver 29`, no dictionary). Only
-    /// writable versions are accepted — `v15`/`v20`/`v26`/`v36` are
-    /// read-only and rejected at validation, never silently downgraded.
+    /// the version: `v50`/`v70` write the RAR5 container,
+    /// `v15`/`v20`/`v29` write the legacy RAR 1.5–4.x container with
+    /// per-member `unp_ver 15`/`20`/`29` (`-ma15` / `-ma2` / `-ma4`) and no
+    /// configurable dictionary. Only writable versions are accepted — `v26`
+    /// and `v36` are read-only and rejected at validation, never silently
+    /// downgraded (see [`ArchiveVersion::is_writable`]).
     /// The owning v50/v70 policy lives in [`crate::format::rar5::create`].
     #[must_use]
     pub fn compression(mut self, version: ArchiveVersion) -> Self {

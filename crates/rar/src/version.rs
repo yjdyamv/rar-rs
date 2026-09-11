@@ -26,8 +26,9 @@
 //! RAR29 codec as `v29`, read-only) exist for interoperability, and the
 //! legacy writers only produce their upstream equivalents (`v20` for v26,
 //! `v29` for v36), matching how WinRAR's newer writable profiles map onto
-//! the oldest repack format. The `v15`/`v20` writers produce non-solid
-//! archives without member encryption (2026-09, Phase 1).
+//! the oldest repack format. The `v15`/`v20` writers cover the same
+//! feature set as the `v29` pipeline (solid chains, `-p` member
+//! encryption and `-hp` header encryption; 2026-09).
 
 /// A member compression version in the archive version table.
 ///

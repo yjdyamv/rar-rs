@@ -80,13 +80,13 @@ pub struct CreateArchiveOptions {
   pub save_owner: Option<bool>,
   /// Save NTFS alternate data streams (like WinRAR `-os`; Windows only).
   pub save_streams: Option<bool>,
-  /// Request a specific archive format: "rar5" (default), "rar7", or
-  /// "rar4". "rar5" auto-promotes an individual member to RAR7 (v70) when
-  /// its effective dictionary exceeds 4 GiB. "rar7" forces v70 members at
-  /// any dictionary (32 MiB by default). "rar4" writes a legacy RAR 4.x
-  /// archive; the dictionary (`dict_size`) and other RAR5-only options
-  /// (quick-open, BLAKE2sp, owner/stream records, recovery volumes) are
-  /// rejected there.
+  /// Request a specific archive format: "rar5" (default), "rar7", "rar4",
+  /// "rar2" or "rar15". "rar5" auto-promotes an individual member to RAR7
+  /// (v70) when its effective dictionary exceeds 4 GiB. "rar7" forces v70
+  /// members at any dictionary (32 MiB by default). "rar4"/"rar2"/"rar15"
+  /// write a legacy RAR 4.x / 2.x / 1.5 archive; the dictionary
+  /// (`dict_size`) and other RAR5-only options (quick-open, BLAKE2sp,
+  /// owner/stream records, recovery volumes) are rejected there.
   pub format: Option<String>,
 }
 #[napi(object)]

@@ -7,10 +7,6 @@ pub(crate) const MAX_COMPRESSION_THREADS: usize = 64;
 const MIN_DICTIONARY_BYTES: u64 = 128 * 1024;
 pub(crate) const MAX_RAR7_DICTIONARY_BYTES: u64 = 126 * 1024 * 1024 * 1024;
 
-/// Options controlling RAR archive creation.
-///
-/// All fields default to the plain unencrypted single-volume create
-/// behavior; enable only the features you need.
 /// How the solid compression chain is split (WinRAR `-s` modifiers).
 ///
 /// A solid archive packs several consecutive members as one continuous LZ
@@ -33,15 +29,30 @@ pub enum SolidReset {
     PerExtension,
 }
 
+/// Options controlling RAR archive creation.
+///
+/// All fields default to the plain unencrypted single-volume create
+/// behavior; enable only the features you need.
+///
+/// This is the plain-struct entry point kept for source compatibility;
+/// [`crate::WriterOptions`] is the typed builder and validates the full
+/// combination of format, dictionary, threads, recovery and encryption
+/// options before the archive is opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateOptions {
-    /// Target member compression version. [`ArchiveVersion::V29`] selects
-    /// the legacy RAR 1.5–4.x container pipeline (`Rar!\x1a\x07\x00`,
-    /// fixed-width headers, 16-bit CRC, per-member `unp_ver 29`).
-    /// [`ArchiveVersion::V50`] (default) selects the modern RAR5 container;
-    /// combine with `force_v70` (and `dict_size_bytes`) to request v70.
-    /// Only writable versions (`v29`/`v50`/`v70`) are accepted; the
-    /// v15/v20/v26/v36 readers exist for interoperability only.
+    /// Target member compression version. [`ArchiveVersion::V50`]
+    /// (default) selects the modern RAR5 container; combine with
+    /// `force_v70` (and `dict_size_bytes`) to request v70. The legacy
+    /// RAR 1.5–4.x container pipeline (`Rar!\x1a\x07\x00`, fixed-width
+    /// headers, 16-bit CRC) is selected by [`ArchiveVersion::V29`]
+    /// (per-member `unp_ver 29`), [`ArchiveVersion::V20`] (`unp_ver 20`)
+    /// or [`ArchiveVersion::V15`] (`unp_ver 15`).
+    ///
+    /// Only writable versions are accepted: `v15`, `v20`, `v29`, `v50` and
+    /// `v70` (see [`ArchiveVersion::is_writable`]). `v26` and `v36` are
+    /// read-only — their codecs are identical to `v20`/`v29` and writers
+    /// emit the upstream base version instead, so they are rejected rather
+    /// than silently downgraded.
     pub compression: ArchiveVersion,
     /// Create a solid archive: consecutive compressed members share one
     /// LZ window (better ratio, slower random access). Solid state can remain

@@ -2,7 +2,7 @@
 //! `-x` / `-n` / `-cl` / `-cu` / `-r-` semantics of the `rar a` command.
 //!
 //! The CLI collects its arguments through [`collect`] and hands the result
-//! to [`crate::RarArchive::add_batch`]; library users and tests can drive
+//! to [`crate::ArchiveWriter::add_batch`]; library users and tests can drive
 //! the same policy directly instead of through a subprocess.
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
