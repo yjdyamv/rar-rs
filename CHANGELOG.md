@@ -82,6 +82,21 @@ Version history predating this file remains available in Git history and
   with `security` instead of being materialized; targets that stay inside the
   root — including `..` that resolves back under it — keep working. The
   existing `safe_paths: false` option remains the trusted-archive escape hatch.
+- Capped every buffered service payload (archive comment "CMT", NTFS stream
+  "STM", quick-open "QO") at a shared 64 MiB ceiling. The declared size comes
+  from the block header and only its CRC is checked, so a hand-made archive
+  could previously make the reader allocate the declared size before reading a
+  single byte and abort instead of failing. Sizes are now also narrowed with
+  `usize::try_from`, so 32-bit targets report an error instead of silently
+  truncating the buffer.
+- Checked destination containment before creating a member's parent directory,
+  so a rejected name no longer leaves directories behind, and rejecting the
+  path no longer depends on directories the extractor just created.
+- Rejected path components that mean something different on Windows than in
+  the archive: names with a trailing dot or space (which Win32 normalizes, so
+  `".. "` would open as `".."`) and the legacy device names (`CON`, `PRN`,
+  `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) including with an extension.
+  The check is compiled for Windows only, where the hazard exists.
 
 ### Fixed
 
