@@ -22,6 +22,27 @@
 
 `docs/CODE_AUDIT_2026-09-05.md` 已删除（一次性基线，结论归到这里）。仍未闭环的：
 
+### 为什么要有 `raw` feature
+
+它存在的唯一目的：**让内部实现可以自由重构，而不背 SemVer 破坏性变更的包袱。**
+
+Rust 的 SemVer 规则是硬的 —— 只要一个 `pub` 项能从 crate 根到达，改它的路径 / 名字 /
+签名就是破坏性变更。`#[doc(hidden)]` 不算数：它只是不显示在文档里，项照样可达。
+`raw` 把 `format` / `recovery` / `crypto` 三棵树从「默认可达」变成「默认不可达」：
+
+- 默认用户（CLI、napi、下游）只能依赖受支持的那一层 → 内部结构可以随便改；
+- 需要 wire 级访问的人（**目前只有我们自己的测试**）显式开 `raw`，自己承担破坏风险。
+
+代价（都只在 dev 图里，不污染下游）：`crates/rar` dev-depend 自己来给测试图开 `raw`
+（是个 workaround，为的是 `tests/support` 能继续跨 `read_block` 这个 seam 而不去
+重新实现块信封）；以及 `format` / `recovery` / `crypto` 三处
+`allow(dead_code, unused_imports)` —— 默认配置下那批代码是死的，只为 `raw` 存在。
+
+**什么时候该删掉它**：如果确定这个库永远只服务我们自己的 CLI 和 napi、不会有外部代码
+`use rar_rs::format::…`，那 `raw` 就是纯仪式，可以把三个模块直接降 `pub(crate)` 并删除
+feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么自己实现块信封解析
+（会漂移），要么 11 个依赖它的测试目标另想办法。
+
 - **热点文件拆分**：`format/rar5/write/mod.rs` 3879 行、`codec/modern/lzss_huff/encoder.rs` 3732、
   `archive/rar4_edit.rs` 2661、`codec/legacy/rar29_encoder.rs` 2471。分层（`archive` / `codec` / `format`）
   已收敛，文件级拆分没做。
