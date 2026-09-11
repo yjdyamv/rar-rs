@@ -104,3 +104,106 @@ pub(crate) fn volume_path_padded(
 ) -> PathBuf {
     parent.join(format!("{base}.part{part_num:0width$}.rar"))
 }
+
+/// Base name of a `{base}.partN.rar` volume file, if the name parses as one.
+fn part_volume_base(name: &str) -> Option<&str> {
+    let stem = name
+        .strip_suffix(".rar")
+        .or_else(|| name.strip_suffix(".RAR"))?;
+    let (base, tail) = stem.rsplit_once(".part")?;
+    if base.is_empty() || tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(base)
+}
+
+/// Existing volume files of the set based at `base` that `keep` does not
+/// cover, in the naming family selected by `rar4`.
+///
+/// The multi-volume commit uses this to retire leftover volumes from a
+/// previous, longer set: a shrinking overwrite must not leave stale parts
+/// behind. Only files that parse as volumes of `base` are returned, so the
+/// new set's own staged temporaries (named `.tmp.partN.rar`) never match.
+pub(crate) fn stale_volume_paths(
+    parent: &Path,
+    base: &str,
+    rar4: bool,
+    keep: &[PathBuf],
+) -> Vec<PathBuf> {
+    // A bare archive name has an empty `parent()`; it still means the current
+    // directory, and the `keep` paths were built the same way, so compare by
+    // file name rather than by (differently prefixed) full path.
+    let dir = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let keep_names: Vec<&std::ffi::OsStr> =
+        keep.iter().filter_map(|path| path.file_name()).collect();
+    let mut stale = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return stale;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(file_name) = path.file_name() else {
+            continue;
+        };
+        if keep_names.contains(&file_name) {
+            continue;
+        }
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let matches = if rar4 {
+            legacy_volume_base(name).as_deref() == Some(base)
+        } else {
+            part_volume_base(name) == Some(base)
+        };
+        if matches {
+            stale.push(path);
+        }
+    }
+    stale.sort();
+    stale
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stale_volume_paths;
+
+    #[test]
+    fn stale_scan_ignores_staged_temporaries_and_kept_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        std::fs::write(parent.join("set.part01.rar"), b"old").unwrap();
+        std::fs::write(parent.join("set.part02.rar"), b"old").unwrap();
+        std::fs::write(parent.join(".set.rar.rar5tmp-1.part1.rar"), b"stage").unwrap();
+        std::fs::write(parent.join("other.part01.rar"), b"other").unwrap();
+
+        let keep = vec![parent.join("set.part01.rar")];
+        let stale = stale_volume_paths(parent, "set", false, &keep);
+        let names: Vec<String> = stale
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["set.part02.rar"]);
+    }
+
+    #[test]
+    fn stale_scan_matches_legacy_rar4_volume_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        std::fs::write(parent.join("set.rar"), b"first").unwrap();
+        std::fs::write(parent.join("set.r00"), b"second").unwrap();
+        std::fs::write(parent.join("set.r01"), b"third").unwrap();
+
+        let keep = vec![parent.join("set.rar")];
+        let stale = stale_volume_paths(parent, "set", true, &keep);
+        let names: Vec<String> = stale
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["set.r00", "set.r01"]);
+    }
+}

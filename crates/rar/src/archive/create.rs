@@ -4,7 +4,7 @@
 //! `crate::archive::mod` for the shared state).
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{
     Mode, PendingCommit, RarArchive, volume_base_of, volume_path, volume_path_padded,
@@ -19,7 +19,9 @@ use crate::format::rar5::{
     BLOCK_TYPE_ARCHIVE_HEADER, ENCR_IV_SIZE, ENCR_PBKDF2_ITER_LOG, END_FLAG_NEXT_VOLUME,
     RAR5_SIGNATURE,
 };
-use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path, temp_suffix};
+use crate::fs::atomic::{
+    commit_files, read_write_create, replace_file, temp_sibling_path, temp_suffix,
+};
 
 impl RarArchive {
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -267,8 +269,7 @@ impl RarArchive {
                 // `.rev` naming (write_recovery_volumes) follows it.
                 let nd = self.volume_paths.len();
                 let width = nd.to_string().len().max(1);
-                let mut last = Ok(());
-                let mut final_paths = Vec::with_capacity(nd);
+                let mut install = Vec::with_capacity(nd);
                 for n in 1..=nd {
                     let tmp = volume_path(parent, tmp_base, n);
                     // RAR4 volume sets use the legacy `.rar`/`.rNN` naming;
@@ -278,16 +279,20 @@ impl RarArchive {
                     } else {
                         volume_path_padded(parent, final_base, n, width)
                     };
-                    if let Err(e) = replace_file(&tmp, &final_path) {
-                        last = Err(e);
-                        break;
-                    }
-                    final_paths.push(final_path);
+                    install.push((tmp, final_path));
                 }
-                if last.is_ok() {
-                    self.volume_paths = final_paths;
+                // A shorter overwrite must not leave parts of the previous,
+                // longer set behind: retire every existing volume the new
+                // set does not replace. The commit below parks them with the
+                // replaced originals and restores them if it rolls back.
+                let keep: Vec<PathBuf> = install.iter().map(|(_, f)| f.clone()).collect();
+                let retire =
+                    crate::fs::volume::stale_volume_paths(parent, final_base, self.rar4, &keep);
+                let result = commit_files(&install, &retire);
+                if result.is_ok() {
+                    self.volume_paths = keep;
                 }
-                last
+                result
             }
         };
         match result {

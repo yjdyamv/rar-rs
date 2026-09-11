@@ -487,3 +487,97 @@ fn abort_on_drop_leaves_no_data_or_recovery_volume_files() {
         "aborted transaction left files: {leftovers:?}"
     );
 }
+
+/// A failed multi-volume commit must restore the previous volume set
+/// byte-for-byte instead of leaving a mix of old and new parts.
+#[test]
+fn failed_multivolume_commit_restores_the_previous_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("atomic.rar");
+    let payload: Vec<u8> = (0..9 * 32 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect();
+
+    // First set: commit normally and remember its bytes.
+    let mut writer =
+        ArchiveWriter::create_with(&base, WriterOptions::new().volume_size(32 * 1024)).unwrap();
+    writer.add_bytes("many.bin", &payload, stored()).unwrap();
+    let old_paths = writer.finish().unwrap().into_volume_paths();
+    assert!(old_paths.len() > 1, "expected a real volume set");
+    let old_bytes: Vec<Vec<u8>> = old_paths
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
+
+    // Second write over the same base. Remove one staged volume that is not
+    // the one still open, so the commit fails partway through the install
+    // phase after earlier volumes already landed.
+    let mut writer =
+        ArchiveWriter::create_with(&base, WriterOptions::new().volume_size(32 * 1024)).unwrap();
+    writer.add_bytes("many.bin", &payload, stored()).unwrap();
+    let mut staged: Vec<PathBuf> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().contains("rar5tmp"))
+        .collect();
+    staged.sort_by_key(|path| part_number(path));
+    assert!(staged.len() > 1, "expected staged volumes: {staged:?}");
+    std::fs::remove_file(&staged[staged.len() - 2]).unwrap();
+
+    assert!(writer.finish().is_err());
+
+    for (path, bytes) in old_paths.iter().zip(&old_bytes) {
+        assert_eq!(
+            &std::fs::read(path).unwrap(),
+            bytes,
+            "{} changed after the failed commit",
+            path.display()
+        );
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("rar5tmp") || name.contains("rar5bak"))
+        .collect();
+    assert!(leftovers.is_empty(), "staging leftovers: {leftovers:?}");
+}
+
+/// Overwriting a long volume set with a shorter one must retire the leftover
+/// parts of the previous set instead of leaving a mixed, unreadable set.
+#[test]
+fn shrinking_multivolume_overwrite_retires_stale_parts() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("shrink.rar");
+    let payload: Vec<u8> = (0..9 * 32 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect();
+
+    let mut writer =
+        ArchiveWriter::create_with(&base, WriterOptions::new().volume_size(32 * 1024)).unwrap();
+    writer.add_bytes("many.bin", &payload, stored()).unwrap();
+    let old = writer.finish().unwrap().into_volume_paths();
+    assert!(old.len() > 1);
+
+    let mut writer =
+        ArchiveWriter::create_with(&base, WriterOptions::new().volume_size(32 * 1024)).unwrap();
+    writer.add_bytes("small.bin", b"tiny", stored()).unwrap();
+    let report = writer.finish().unwrap();
+    assert_eq!(report.volume_paths().len(), 1);
+
+    let parts: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("shrink.part"))
+        .collect();
+    assert_eq!(parts.len(), 1, "stale parts left behind: {parts:?}");
+}
+
+/// Part number parsed out of a `....partN.rar` staging name.
+fn part_number(path: &std::path::Path) -> u64 {
+    path.file_name()
+        .unwrap()
+        .to_string_lossy()
+        .rsplit_once(".part")
+        .and_then(|(_, tail)| tail.trim_end_matches(".rar").parse().ok())
+        .unwrap()
+}

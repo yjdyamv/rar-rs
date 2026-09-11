@@ -808,13 +808,16 @@ impl ArchiveWriter {
     /// path(s), returning the final data paths in volume order.
     ///
     /// Commit granularity: a single-volume archive appears at its final path
-    /// atomically (the whole file is moved into place). Multi-volume output is
-    /// moved volume by volume — every volume file is individually complete
-    /// once moved, but an interruption between renames can leave a partial
-    /// set at the final names. `.rev` recovery volumes, when requested, are
-    /// generated only after every data volume is committed; if that step
-    /// fails, `finish` returns the error but the data volumes are already on
-    /// disk.
+    /// atomically (the whole file is moved into place). A multi-volume set is
+    /// committed as one transaction: pre-existing volumes are parked, the
+    /// staged set is installed, and any error restores the previous set, so a
+    /// failed commit never leaves a mix of old and new parts (a shorter
+    /// overwrite also retires the leftovers of a longer previous set). A
+    /// process kill between the individual renames is still not covered;
+    /// that needs an on-disk journal. `.rev` recovery volumes, when
+    /// requested, are generated only after every data volume is committed;
+    /// if that step fails, `finish` returns the error but the data volumes
+    /// are already on disk.
     pub fn finish(mut self) -> RarResult<WriteReport> {
         let mut archive = self.archive.take().ok_or_else(Self::poisoned_error)?;
         if let Err(error) = archive.close() {

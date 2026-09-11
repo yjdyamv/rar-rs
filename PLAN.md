@@ -50,8 +50,11 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   并存且都从 `lib.rs` 导出；RAR4 规则已共用，结构仍在。
 - **CLI 两个二进制仍有重复**：`selector.rs` / `password.rs` 已抽出共享，成员选择、提取、列表编排
   仍各写一份。
-- **多卷事务非原子**：单卷是 staging + `replace_file` 原子替换，多卷是逐卷替换 —— 中途失败会留下
-  新旧混排的卷集，且没有回滚。真做需要 journal / undo log。
+- **多卷事务（错误路径已闭环 2026-09）**：单卷是 staging + `replace_file` 原子替换。多卷提交
+  现在是一个事务（`fs::atomic::commit_files`）：先把已存在的目标卷 park 到隐藏旁路，再安装
+  暂存集，任一步失败即整体回滚（不再留下新旧混排的卷集）；更短的覆盖还会 retire 旧集的
+  残留分卷。仍未闭环：进程在 rename 序列中途被 kill 的恢复需要磁盘 journal / undo log
+  ——当前只保证**错误路径**原子；旧集的 `.rev` 残留（新写不产恢复卷时）也尚未清理。
 
 ## 待办（下一批；未关闭 issue：04、09，见 `docs/issues/compression-perf/`）
 
