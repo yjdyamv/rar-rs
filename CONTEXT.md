@@ -49,7 +49,7 @@
 - Cargo workspace：库 crate `rar-rs`（读取 RAR 1.5–4.x/RAR5/RAR7，创建 RAR4/RAR5/RAR7）+ CLI crate `rar-cli`（`rar` 创建/修改/提取、`unrar` 提取/列表）+ `rar-rs-napi`（native/WASI binding）。
 - `archive/` 已拆为 facade 层（`mod.rs` 结构体/构造器/生命周期，`reader.rs`/`writer.rs`/`editor.rs` 角色门面，`create.rs` 写生命周期，`transaction.rs` 外科重写，`entry.rs` 条目类型，`discovery.rs` 分卷发现）；`format`/`codec` 的热点文件（`format/rar5/write/mod.rs` 等，约 4k 行）尚未文件级拆分，见 `PLAN.md` 技术债；读写路径分别在 `format/rar5/extract.rs` 与 `format/rar5/write/`。
 - 互操作测试：`crates/rar/tests/{rar50_roundtrip,format_assertions,rewrite_tests,official_interop,rar4_rejection,cancel_flag,quick_open_listing}.rs`（官方 rar/unrar 用 SA_OFFICIAL_RAR/UNRAR env 门控）、`crates/rar-cli/tests/cli_behavior.rs`（CARGO_BIN_EXE 需随二进制所在 crate）、`crates/rar-cli/tests/winrar_interop.rs`（Windows 本机 WinRAR 双向验证）。
-- fuzz：`fuzz/` 独立 crate（不在 workspace），五目标 parse/crypto/recovery（读侧）+ write/rewrite（写侧），standalone 变异循环 + `cargo +nightly fuzz run <t> --features fuzzing` 双模式；语料嵌入真实 WinRAR fixture。
+- fuzz：`fuzz/` 独立 crate（不在 workspace），五目标 parse/crypto/recovery（读侧）+ write/rewrite（写侧），standalone 变异循环 + `cargo +nightly fuzz run <t> --features fuzzing` 双模式；语料嵌入真实 WinRAR fixture。**2026-09-11 审计：`raw` 门控后 fuzz 依赖未补 `raw`，工程编译失败、五目标失效（见 `PLAN.md` 独立审计）**。
 - 回归验证：根 `.github/workflows/CI.yml` 执行 workspace fmt、默认/无默认 feature check、全 target clippy `-D warnings`、测试、独立 fuzz workspace check，以及 native/WASI binding 构建与测试；官方二进制互操作仍由 `SA_OFFICIAL_RAR`/`SA_OFFICIAL_UNRAR` 手动门控。
 - 迁移记录：仿 rars 架构重构的完整计划与决策（见 `PLAN.md` 与 git 历史）。
 - 文档索引：`docs/README.md`（所有文档的导航入口）；格式细节见 `docs/FORMAT_RAR5_RAR7.html`（以本实现为准，冲突处对照 rars）。

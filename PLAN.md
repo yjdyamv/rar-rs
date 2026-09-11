@@ -18,6 +18,39 @@
 - 架构：workspace `crates/rar`（库 crate `rar-rs`）+ `crates/rar-cli`（rar/unrar）+ `crates/rar-napi`（native/WASI binding），按 rars 分层——词汇见 `CONTEXT.md`，格式细节见 `docs/FORMAT_RAR5_RAR7.html`。
 - **已废弃 API 面移除（2026-09，Phase 6 收尾）**：全仓库不再有 `#[deprecated]` 标注；`RarArchive` 写侧方法（`create_with_options`/`add`/`add_as`/`add_bytes`/`add_directory_only`/`add_batch`/`close`）降 `pub(crate)`，读侧 `list`/`get_entry`/`namelist`/`read`/`extract`/`extract_all` 与事务方法/`lock` 已删除。所有期货已迁到角色门面：`ArchiveWriter`（`create_with`/`append`/`add_path`/`add_bytes`/`add_directory`/`add_redirect`/`add_batch`/`finish()`，消费 self）+ `ArchiveReader`（`unique_entry`/`entries[_named]`/`read_entry[_with_options]`/`copy_entry_to[_with_options]`/`extract_entry`）+ `ArchiveEditor`（`delete_entries`/`rename_entries`/`apply(EditPlan)`/`set_comment`/`set_recovery`/`lock`）。**测试共 31 文件 2600+/2760− 行改**，examples/fuzz 同步；`RarArchive` 保留构造器（`open`/`open_quick`/`open_with_password`/`open_quick_with_password`/`open_append`/`open_append_with_password`）、配置（`set_password`/`set_dictionary`/`set_compression_threads`）与钩子（`set_cancel_flag`/`set_progress_callback`/`set_progress_total`）供有绑定兼容需求的调用方；读侧便捷方法都在 `ArchiveReader` 上。**迁移中两处语义回归已修**：① 旧 `read(name)` 对重名成员取第一个，新 `unique_entry` 报 `AmbiguousMember`——重名场景改用 `entries_named(name).next()`；② v70 非 2 的幂小字典已解锁（见「已完成」首个条目）；此前非幂 1/32 增量位覆盖仅在 >4 GiB（`-md8g`/writer 单测）。**验证**：`cargo check --workspace --all-features --all-targets` 零 error、`cargo clippy --workspace --all-features --all-targets -- -D warnings` 全绿（含全部测试 target）、`cargo test --workspace --all-features` 全过（rar-rs 247 lib + 17 集成 + rar-cli 58+37 incl. 本机 WinRAR 互操作 + rar-napi 3）、fuzz 独立 workspace `cargo check` 通过。15 个测试文件的 `#![allow(deprecated)]` 已全部移除（库内已无 deprecated 项，属惰性标记）。逐文件迁移记录见 git 历史。
 
+## 独立审计 2026-09-11（不看 backlog 的优先级）
+
+一次“假设没有 PLAN/issues”的健康与风险审计的结论。做法：全量测试 + 真跑五个 fuzz 目标 + 逐行读三条最危险路径（写、读/解、恢复/加密）。全量测试绿（lib 266、CLI 62、WinRAR 互操作 32），但发现的问题大多不在本文件里，而且比压缩性能更该先做。**[读码确认]** = 逐行读过源码；**[待复现]** = 尚未写成失败测试。
+
+### P0（现在做，成本 S，影响大）
+
+- **fuzz 工程缺 `raw` → 五目标全部失效、CI 的 fuzz check 必红** **[读码确认，已实测]**：`fuzz/Cargo.toml` 依赖 `rar-rs = { features = ["parallel","simd"] }`；`raw` 门控（见「为什么要有 `raw` feature」那次改动）只给 `crates/rar` 的 dev-dep 补了 `raw`，漏了 fuzz。`cargo check --manifest-path fuzz/Cargo.toml` 报 9 个 E0433/E0425/E0603，即 `.github/workflows/CI.yml` 第 58 行必红。补 `raw` 后 5 个目标（parse/crypto/recovery 各 20k、write/rewrite 各 2k）全部无 panic 通过。修：1 行 + CI 加真跑。
+- **两处恶意归档可触发的 panic（进程 abort；napi/WASM 绑定同样暴露）** **[读码确认，待复现]**：
+  - `crypto/rar50.rs:619`：`let rec_end = offset + rec_size as usize;` 未检查；`rec_size` 是 vint（可达 `u64::MAX`），release 回绕后 `&extra_data[offset + tn..rec_end]` 出现 start>end → panic。任何带 extra 的文件头都会进 `read_packed`。
+  - `recovery/legacy.rs:173-175`：只用 `header.get(tail..tail+8) == Some(b"Protect+")` 证明 8 字节存在，随即索引 `tail+8..tail+16`；`name_size = header[26..28]` 攻击者可控（`head_size=54, name_size=14` 即越界）。`rar r` 与 RAR4 create/edit 的 `scan_protect*` 都可达。
+  修：`checked_add`/`get` + 两个单测。
+- **缓冲读 / `t` / 并行提取缺字典上限（分配型 DoS）** **[读码确认，待复现]**：`format/rar5/extract.rs:1410 decode_file_at`（及并行 worker）没调 `member_dict_window`（`decode_file_to:1483` 调了）；`codec/modern/lzss_huff/decoder.rs:210 checked_dict_size` 对 `dict_size_bytes` 无上界 → `codec/common/window.rs:20 vec![0u8; size]`。伪造 v70 头声明 ~2^48 B 即可让 `test`/`read` 分配失败 abort（streaming 路径有 4 GiB `-mdx` 上限，此处没有）。修：两处补 `member_dict_window` + 测试。
+
+### P1（静默产出坏档案 / 回归）
+
+- **RAR4 >4 GiB 成员被 `as u32` 静默截断进头** **[读码确认]**：`format/rar5/write/mod.rs:901,987`（单/多卷）与 `:3829,3904`（并行）把 `packed_size`/`unpacked_size`/`chunk_size` 直接 `as u32`；`add_file_rar4` 与 `validate_rar4_only` 都没有大小守卫。RAR4 尺寸字段本就是 32 位，正确行为是**拒绝**而不是写出头尺寸与载荷不符的归档。
+- **`-v` 过小 → 卷循环零进展、无限建文件** **[读码确认]**：RAR5 `write/mod.rs:2520-2524`（`bytes_for_data == 0` 时 `start_next_volume(); continue;` 且不推进 offset）、RAR4 `:958-969`（剩余 ≤7 时同样死循环）。目前只拒绝 `volume_size == 0`，`rar a -v50 big.rar` 会挂住并写满磁盘。修：最小卷大小校验。
+- **流式 RAR5 修复校验弱于其缓冲孪生** **[读码确认]**：`recovery/rar50.rs:645-650` 的交叉校验少了 `data_shard_states` 项（缓冲版 `:475-479` 有），且 `:748-752` 解完不按 `first.data_shard_states` 校验 CRC64 → 含两代 RR 块的文件可能解出“貌似合理但错误”的字节，写进 `fixed.*` 并报 Repaired（CLI 只用 `RarArchive::open` 验头）。修：2 行 + 解后校验。
+- **RAR4 多卷不预留 FILE_HEAD** **[读码确认]**：`write/mod.rs:966-967` 只减 7（EOA），`emit_segment` 写头+数据 → 每卷超出 `-v` 约一个头长，`-v` 契约失效。
+- **截断/损坏 `.rev` 使重建 panic** **[读码确认]**：`recovery/rev50.rs:266`（`data[16 + hsize..]`）与 `:298`（`&payload[start..start+want]`）无边界检查；`rar rc`、`rebuild_missing_volumes`、napi 均可达。
+
+### P2（健壮性 / 覆盖率 / 发布）
+
+- create 路径 quick-open 只缓存文件头（`write/mod.rs:2334,2800`），目录/重定向不缓存，而 append（`archive/mod.rs:783`）与 rewrite（`archive/transaction.rs:1195`）全缓存 → `open_quick`/`list_entries_quick` 少列成员。**[待复现]**
+- STORE 成员先 `hash_file` 再重读同一路径（`write/mod.rs:321` vs `:334,2810`），只比字节数 → 同尺寸改写真会写出旧 CRC/BLAKE2。**[待复现]**
+- Windows STM 流名（`extract.rs:1020`）是唯一没过 `sanitize_archive_path` 的命名记录（是否真能逃出目标目录未在 Windows 实测）。**[待复现]**
+- 未被真实夹具覆盖的 crypto 分支：RAR3 慢 KDF 的单测是同义反复（`crypto/rar30.rs:288-301`，长度 `<64` 时 `update_password_data_sha1` 分支根本不跑）、RAR20 >16 字节口令链只有 8 字节口令覆盖。**[待复现]**
+- legacy 修复对“最后不满 512 B 的扇区”报 "All OK" 却不修（`recovery/legacy.rs:252-265`）。**[读码确认]**
+- 恒真/自比校验（可顺手删）：`recovery/rar50.rs:1190`、`:640`、`:1277`。**[读码确认]**
+- **发布就绪**：`rar-cli` 因 workspace path 依赖缺 version 无法打包（`cargo package -p rar-cli` 实测报 “does not specify a version”）；三个 crate 都没有 `readme`/`keywords`/`documentation`；SPDX/逐文件来源审计仍未闭环。
+
+**与 backlog 的差异**：以上 P0/P1 基本都不在本文件原有条目里——文档把我引向 BT4 压缩性能深挖（已证否），而真正的风险是“CI 已红 + 两处 panic + 字典 DoS + 几个静默产坏档的守卫”。建议先按本节 P0/P1 排序推进，压缩性能线（issue 09/04）暂缓。
+
 ## 技术债（2026-09 审查的未闭环项）
 
 `docs/CODE_AUDIT_2026-09-05.md` 已删除（一次性基线，结论归到这里）。仍未闭环的：
@@ -201,7 +234,7 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
 ### 工程里程碑
 
 - [x] fmt/clippy 双门：workspace 全量 `cargo fmt --check` + `cargo clippy --all-features -- -D warnings`（codec 热路径的 `too_many_arguments` 用针对性 allow，不做风险重构）
-- [x] fuzz：`fuzz/` 独立 crate 五目标（parse/crypto/recovery 读侧 + write/rewrite 写侧），standalone 变异循环 + libFuzzer 双模式；种子语料嵌入真实 WinRAR fixture
+- [x] fuzz：`fuzz/` 独立 crate 五目标（parse/crypto/recovery 读侧 + write/rewrite 写侧），standalone 变异循环 + libFuzzer 双模式；种子语料嵌入真实 WinRAR fixture。**2026-09-11 审计：`raw` 门控后 fuzz 依赖未补 `raw`，工程编译失败、五目标失效、CI 的 fuzz check 红——见「独立审计 2026-09-11」**
 - [x] 根 CI 恢复（2026-08）：`.github/workflows/CI.yml` 运行 workspace fmt/check/clippy/test、独立 fuzz workspace check、native/WASI binding 构建测试与 tag release；官方互操作测试继续由 `SA_OFFICIAL_*`/本机 WinRAR 门控手动跑
 - [x] 取消钩子 `RarArchive::set_cancel_flag(Arc<AtomicBool>)`：创建/提取/重写/分卷全检查点，`RarError::Cancelled`；binding 的 AbortSignal 接上
 - [x] QO 快路径 `RarArchive::open_quick`：只读主头 + QO 记录即可列出（无 QO 回退全扫）；binding `listEntriesQuick`
