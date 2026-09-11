@@ -270,6 +270,70 @@ fn winrar_validates_streamed_compressed_archives() {
     }
 }
 
+/// The RAR4 write side can emit legacy RAR 1.5 (unp_ver 15) and RAR 2.x
+/// (unp_ver 20) members via `ArchiveVersion::V15`/`V20`. Real WinRAR
+/// UnRAR still carries the old unpack tables (versions 15..36), so it must
+/// test and extract such members byte-for-byte — an external
+/// cross-validation of the rars encoder ports beyond our own decoders.
+#[test]
+fn winrar_validates_our_legacy_version_writers() {
+    let Some(_unrar) = unrar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    // Repetitive text, a long literal run (RAR 1.5 `st` run mode) and
+    // correlated PCM (RAR 2.x audio blocks: m2+ enable try_audio).
+    let text = b"legacy writer interop payload ".repeat(4000);
+    let run = vec![b'a'; 64_000];
+    let pcm_path = dir.path().join("pcm.bin");
+    write_correlated_pcm(&pcm_path, 2, 20_000);
+    let pcm = std::fs::read(&pcm_path).unwrap();
+
+    for (name, version) in [
+        ("legacy15.rar", ArchiveVersion::V15),
+        ("legacy20.rar", ArchiveVersion::V20),
+    ] {
+        let arc = dir.path().join(name);
+        {
+            let mut rar =
+                ArchiveWriter::create_with(&arc, WriterOptions::default().compression(version))
+                    .unwrap();
+            let opts = EntryWriteOptions::new()
+                .compression_level(CompressionLevel::try_from(3u8).unwrap());
+            rar.add_bytes("text.txt", &text, opts).unwrap();
+            rar.add_bytes("run.bin", &run, opts).unwrap();
+            rar.add_bytes("pcm.bin", &pcm, opts).unwrap();
+            rar.finish().unwrap();
+        }
+
+        // Members report the requested version and actually compress.
+        let ar = ArchiveReader::open(&arc).unwrap();
+        for e in ar.entries() {
+            assert_eq!(e.version(), version, "{name}: {}", e.name());
+            assert_ne!(
+                e.metadata().method(),
+                0,
+                "{name}: {} did not compress",
+                e.name()
+            );
+        }
+
+        let (ok, out) = unrar_test(&arc, None);
+        assert!(ok, "WinRAR rejected {name}:\n{out}");
+        let dest = dir.path().join(format!("out-{name}"));
+        std::fs::create_dir_all(&dest).unwrap();
+        let (ok, out) = unrar_extract(&arc, &dest, None);
+        assert!(ok, "WinRAR failed to extract {name}:\n{out}");
+        assert_eq!(
+            file_sha256(&dest.join("text.txt")),
+            file_sha256_bytes(&text)
+        );
+        assert_eq!(file_sha256(&dest.join("run.bin")), file_sha256_bytes(&run));
+        assert_eq!(file_sha256(&dest.join("pcm.bin")), file_sha256_bytes(&pcm));
+    }
+}
+
 /// Correlated multi-channel samples (small per-sample deltas) of the kind
 /// WinRAR's delta filter targets. We emit a delta filter for this data and
 /// the real UnRAR must decode it byte-for-byte.

@@ -1014,7 +1014,7 @@ impl RarArchive {
                         comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
                         host_os: 0,
                         format_version: 4,
-                        unp_ver: 29,
+                        unp_ver: self.write_ctx().rar4_unp_ver,
                         data_offset: 0,
                         flags: if salt.is_some() {
                             crate::format::rar4::FHD_PASSWORD as u64
@@ -1055,54 +1055,7 @@ impl RarArchive {
             return Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE));
         }
         let method = crate::format::rar4::RAR4_METHOD_STORE + level;
-        let packed = match unp_ver {
-            20 => {
-                use crate::codec::legacy::rar20_encoder::EncodeOptions;
-                let candidates = match level {
-                    1 => 16,
-                    2 => 64,
-                    3 => 256,
-                    4 => 512,
-                    _ => 1024,
-                };
-                let options = EncodeOptions::new(candidates)
-                    .with_lazy_matching(true)
-                    .with_lazy_lookahead(2)
-                    .with_optimal_parse(level >= 4)
-                    .with_try_audio(level > 1);
-                crate::codec::legacy::rar20_encoder::unpack20_encode_auto_with_options(
-                    data, options,
-                )?
-            }
-            15 => {
-                use crate::codec::legacy::rar15_encoder::{EncodeOptions, Unpack15Encoder};
-                let options = match level {
-                    1 => EncodeOptions::new()
-                        .with_old_distance_tokens(false)
-                        .with_lazy_matching(false)
-                        .with_stmode_literal_runs(false)
-                        .with_max_long_match_distance(4 * 1024),
-                    2 => EncodeOptions::new()
-                        .with_old_distance_tokens(false)
-                        .with_lazy_matching(false)
-                        .with_stmode_literal_runs(false)
-                        .with_max_long_match_distance(8 * 1024),
-                    3 => EncodeOptions::new()
-                        .with_lazy_matching(false)
-                        .with_max_long_match_distance(16 * 1024),
-                    4 => EncodeOptions::new()
-                        .with_lazy_matching(false)
-                        .with_max_long_match_distance(24 * 1024),
-                    _ => EncodeOptions::new().with_lazy_matching(false),
-                };
-                Unpack15Encoder::with_options(options).encode_member(data)?
-            }
-            other => {
-                return Err(RarError::Unsupported(format!(
-                    "RAR4 write dispatch: unp_ver {other} has no encoder"
-                )));
-            }
-        };
+        let packed = encode_legacy_codec_member(data, level, unp_ver)?;
         if packed.len() < data.len() {
             Ok((packed, method))
         } else {
@@ -3498,6 +3451,61 @@ pub(crate) struct Rar4PreparedMember {
     pub method: u8,
 }
 
+/// Encode a non-solid RAR4 member with the legacy codecs (unp_ver 15/20),
+/// mirroring the `rars` legacy writers' level ladders exactly. Shared by
+/// the sequential member writer (`encode_rar4_member`) and the parallel
+/// batch preparation (`prepare_rar4_file_member`). STORE fallback stays
+/// with the callers' size comparison.
+fn encode_legacy_codec_member(data: &[u8], level: u8, unp_ver: u8) -> RarResult<Vec<u8>> {
+    let packed = match unp_ver {
+        20 => {
+            use crate::codec::legacy::rar20_encoder::EncodeOptions;
+            let candidates = match level {
+                1 => 16,
+                2 => 64,
+                3 => 256,
+                4 => 512,
+                _ => 1024,
+            };
+            let options = EncodeOptions::new(candidates)
+                .with_lazy_matching(true)
+                .with_lazy_lookahead(2)
+                .with_optimal_parse(level >= 4)
+                .with_try_audio(level > 1);
+            crate::codec::legacy::rar20_encoder::unpack20_encode_auto_with_options(data, options)?
+        }
+        15 => {
+            use crate::codec::legacy::rar15_encoder::{EncodeOptions, Unpack15Encoder};
+            let options = match level {
+                1 => EncodeOptions::new()
+                    .with_old_distance_tokens(false)
+                    .with_lazy_matching(false)
+                    .with_stmode_literal_runs(false)
+                    .with_max_long_match_distance(4 * 1024),
+                2 => EncodeOptions::new()
+                    .with_old_distance_tokens(false)
+                    .with_lazy_matching(false)
+                    .with_stmode_literal_runs(false)
+                    .with_max_long_match_distance(8 * 1024),
+                3 => EncodeOptions::new()
+                    .with_lazy_matching(false)
+                    .with_max_long_match_distance(16 * 1024),
+                4 => EncodeOptions::new()
+                    .with_lazy_matching(false)
+                    .with_max_long_match_distance(24 * 1024),
+                _ => EncodeOptions::new().with_lazy_matching(false),
+            };
+            Unpack15Encoder::with_options(options).encode_member(data)?
+        }
+        other => {
+            return Err(RarError::Unsupported(format!(
+                "RAR4 write dispatch: unp_ver {other} has no encoder"
+            )));
+        }
+    };
+    Ok(packed)
+}
+
 /// Compress one RAR4 file member (non-solid, independent engine state)
 /// without touching the archive stream: read + CRC + the smallest of
 /// LZ / PPMd (m4+) / auto-filter candidates / STORE. Runs on the pool;
@@ -3507,6 +3515,7 @@ pub(crate) fn prepare_rar4_file_member(
     path: &Path,
     name: &str,
     level: u8,
+    unp_ver: u8,
 ) -> RarResult<Rar4PreparedMember> {
     use crate::codec::legacy::rar29_encoder::{
         Rar29FilterKind, Unpack29Encoder, options_for_level,
@@ -3530,7 +3539,14 @@ pub(crate) fn prepare_rar4_file_member(
     std::io::Read::read_to_end(&mut reader, &mut data)?;
     let file_crc = crate::crc32::crc32(&data);
 
-    let (packed, method) = if (1..=5).contains(&level) {
+    let (packed, method) = if (1..=5).contains(&level) && unp_ver != 29 {
+        let packed = encode_legacy_codec_member(&data, level, unp_ver)?;
+        if packed.len() < data.len() {
+            (packed, crate::format::rar4::RAR4_METHOD_STORE + level)
+        } else {
+            (data, crate::format::rar4::RAR4_METHOD_STORE)
+        }
+    } else if (1..=5).contains(&level) {
         let options = options_for_level(level);
         let lz = Unpack29Encoder::with_options(options).encode_member(&data)?;
         let mut best_len = lz.len();
@@ -3652,6 +3668,7 @@ impl RarArchive {
             file_crc: u32,
             dos_time: u32,
             method: u8,
+            unp_ver: u8,
             packed_size: u32,
             unpacked_size: u32,
             data: &[u8],
@@ -3684,7 +3701,7 @@ impl RarArchive {
                 host_os: 0,
                 file_crc,
                 file_time: dos_time,
-                unp_ver: 29,
+                unp_ver,
                 method,
                 name: encoded_name,
                 attr: 0x20,
@@ -3718,6 +3735,7 @@ impl RarArchive {
                     file_crc,
                     dos_time,
                     method,
+                    self.write_ctx().rar4_unp_ver,
                     packed_size as u32,
                     unpacked_size as u32,
                     &packed,
@@ -3791,6 +3809,7 @@ impl RarArchive {
                         head_crc,
                         dos_time,
                         method,
+                        self.write_ctx().rar4_unp_ver,
                         chunk_size as u32,
                         unpacked_size as u32,
                         segment,
@@ -3820,7 +3839,7 @@ impl RarArchive {
                         comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
                         host_os: 0,
                         format_version: 4,
-                        unp_ver: 29,
+                        unp_ver: self.write_ctx().rar4_unp_ver,
                         data_offset: 0,
                         flags: if salt.is_some() {
                             crate::format::rar4::FHD_PASSWORD as u64
@@ -3873,6 +3892,7 @@ impl RarArchive {
             if !wave.is_empty() {
                 let threads = self.effective_threads();
                 let pool = crate::parallel::compression_pool_for(threads);
+                let unp_ver = self.write_ctx().rar4_unp_ver;
                 let prepared: Vec<RarResult<(usize, Rar4PreparedMember)>> = pool.install(|| {
                     wave.par_iter()
                         .map(|&(idx, entry)| {
@@ -3887,7 +3907,7 @@ impl RarArchive {
                                     .to_string_lossy()
                                     .into_owned(),
                             };
-                            prepare_rar4_file_member(path, &name, level).map(|p| (idx, p))
+                            prepare_rar4_file_member(path, &name, level, unp_ver).map(|p| (idx, p))
                         })
                         .collect()
                 });

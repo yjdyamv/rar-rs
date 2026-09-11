@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { createArchive } from '../index.js'
 
 const RAR5_SIG = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00])
+const RAR4_SIG = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00])
 
 // Regression fixture from rar-rs tests/fixtures/tail-match-362.bin: a 362-byte
 // JSON file whose final two bytes match an earlier position at a cached
@@ -426,6 +427,46 @@ test('rejects invalid or RAR4-context redirect entries', async () => {
       }),
       /redirect members are not supported for RAR4 archives/,
     )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('creates and reads back legacy RAR 1.5/2.x members (format rar15/rar2)', async () => {
+  const dir = tempDir()
+  try {
+    for (const [fmt, version] of [
+      ['rar2', 'v20'],
+      ['rar15', 'v15'],
+    ]) {
+      const out = join(dir, `${fmt}.rar`)
+      const run = Buffer.alloc(64_000, 0x61)
+      await createArchive({
+        outPath: out,
+        format: fmt,
+        level: 3,
+        entries: [
+          { kind: 'bytes', name: 'text.txt', data: Buffer.from('legacy napi smoke ') },
+          { kind: 'bytes', name: 'run.bin', data: run },
+        ],
+      })
+
+      // The RAR4 container carries the 7-byte `Rar!\x1a\x07\x00` signature.
+      assert.deepEqual(await readFileHead(out, 7), RAR4_SIG)
+
+      const { listEntriesDetailed, extractArchive } = await import('../index.js')
+      const entries = await listEntriesDetailed(out)
+      assert.equal(entries.length, 2)
+      const text = entries.find((e) => e.name === 'text.txt')
+      assert.equal(text.version, version)
+      const runMember = entries.find((e) => e.name === 'run.bin')
+      assert.equal(runMember.version, version)
+      assert.ok(runMember.packedSize < runMember.size, `${fmt}: run must compress`)
+
+      const dest = join(dir, `out-${fmt}`)
+      await extractArchive(out, { destPath: dest })
+      assert.deepEqual(readFileSync(join(dest, 'run.bin')), run)
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

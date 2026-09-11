@@ -2976,6 +2976,61 @@ fn cli_ma4_creates_rar4_archive() {
     );
 }
 
+/// `-ma2`/`-ma15` select the legacy RAR 2.x / RAR 1.5 member versions
+/// inside the RAR4 container. Members round-trip through our own reader
+/// and the `unrar` CLI, and read-back reports the requested version.
+#[test]
+fn cli_ma2_ma15_create_legacy_rar4_members() {
+    let dir = make_temp_dir();
+    let a = dir.path().join("a.txt");
+    std::fs::write(&a, b"legacy CLI member payload ".repeat(2000)).unwrap();
+
+    for (flag, expected) in [
+        ("-ma2", rar_rs::ArchiveVersion::V20),
+        ("-ma15", rar_rs::ArchiveVersion::V15),
+    ] {
+        let arc = dir
+            .path()
+            .join(format!("{}.rar", flag.trim_start_matches('-')));
+
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", flag, "-idq"])
+            .arg(&arc)
+            .arg("a.txt")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "rar a {flag} failed");
+
+        // The RAR4 container carries the 7-byte `Rar!\x1a\x07\x00` signature.
+        let head = std::fs::read(&arc).unwrap();
+        assert_eq!(
+            &head[..7],
+            b"Rar!\x1a\x07\x00",
+            "{flag}: archive must carry the RAR4 signature"
+        );
+
+        let rar = rar_rs::ArchiveReader::open(&arc).unwrap();
+        let entry = rar.unique_entry("a.txt").unwrap();
+        assert_eq!(
+            rar.entry(entry).unwrap().version(),
+            expected,
+            "{flag}: member must report {expected}"
+        );
+
+        let res = std::process::Command::new(UNRAR_CLI)
+            .args(["t", "-idq"])
+            .arg(&arc)
+            .output()
+            .unwrap();
+        assert!(
+            res.status.success(),
+            "unrar t rejected our {flag} archive:\n{}",
+            String::from_utf8_lossy(&res.stderr)
+        );
+    }
+}
+
 /// RAR5-only creation switches are rejected when combined with `-ma4`, since
 /// the RAR4 container cannot express them. `-hp` and `-rr` are now supported
 /// on RAR4 too, so they are verified positively instead.

@@ -1258,6 +1258,9 @@ fn old_format_writers_roundtrip_at_every_level() {
                         .collect(),
                 ),
                 ("audio.bin", audio_signal.clone()),
+                // A long single-byte run: the RAR 1.5 encoder's `st` literal
+                // run mode (enabled from m3 up) and RAR 2.x long matches.
+                ("run.bin", vec![b'a'; 64_000]),
             ];
             {
                 let mut rar = ArchiveWriter::create_with(
