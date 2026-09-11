@@ -31,6 +31,8 @@ use crate::format::rar5::{
     BLOCK_TYPE_SERVICE_HEADER, RAR5_SIGNATURE,
 };
 use crate::fs::atomic::{replace_file, temp_sibling_path};
+#[cfg(any(unix, windows))]
+use crate::fs::safe_path::resolve_redirect_target;
 use crate::fs::safe_path::sanitize_archive_path;
 use crate::model::{DataChunk, FileHeader};
 #[cfg(feature = "parallel")]
@@ -1061,11 +1063,31 @@ impl RarArchive {
                 if let Some(parent) = dest_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
+                // The link body is an attacker-controlled string, so it goes
+                // through the safe-path policy just like member names do:
+                // a link whose target escapes the destination would let a
+                // later member (or any other consumer of the tree) write
+                // through it. `safe_paths = false` opts out, which is the
+                // documented "trusted archive" escape hatch.
                 #[cfg(unix)]
                 {
+                    self.check_link_target(dest_dir, dest_path, &redir.target)?;
                     std::os::unix::fs::symlink(&redir.target, dest_path)?;
                 }
-                #[cfg(not(unix))]
+                #[cfg(windows)]
+                {
+                    // Windows must know whether the link points at a
+                    // directory before it is created; a junction always does.
+                    let resolved = self.resolved_link_target(dest_dir, dest_path, &redir.target)?;
+                    let is_dir = redir.redir_type == REDIR_WINDOWS_JUNCTION
+                        || resolved.as_deref().is_some_and(Path::is_dir);
+                    if is_dir {
+                        std::os::windows::fs::symlink_dir(&redir.target, dest_path)?;
+                    } else {
+                        std::os::windows::fs::symlink_file(&redir.target, dest_path)?;
+                    }
+                }
+                #[cfg(not(any(unix, windows)))]
                 {
                     return Err(RarError::Unsupported(
                         "symbolic links are not supported on this platform".into(),
@@ -1093,6 +1115,48 @@ impl RarArchive {
             }
         }
         Ok(dest_path.to_path_buf())
+    }
+
+    /// Reject a link target that escapes the extraction root (safe-path
+    /// policy). The check is lexical, so it also accepts targets that do not
+    /// exist on disk yet.
+    #[cfg(unix)]
+    fn check_link_target(&self, dest_dir: &Path, dest_path: &Path, target: &str) -> RarResult<()> {
+        if self.read_ctx().extract_options.safe_paths {
+            resolve_redirect_target(&Self::link_dir_of(dest_dir, dest_path), target)?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::check_link_target`] plus the on-disk path the target names
+    /// under the extraction root. `None` when the safe-path policy is off,
+    /// in which case the target is deliberately unconstrained.
+    #[cfg(windows)]
+    fn resolved_link_target(
+        &self,
+        dest_dir: &Path,
+        dest_path: &Path,
+        target: &str,
+    ) -> RarResult<Option<PathBuf>> {
+        if !self.read_ctx().extract_options.safe_paths {
+            return Ok(None);
+        }
+        let mut resolved = dest_dir.to_path_buf();
+        for part in resolve_redirect_target(&Self::link_dir_of(dest_dir, dest_path), target)? {
+            resolved.push(part);
+        }
+        Ok(Some(resolved))
+    }
+
+    /// The archive-relative, slash-separated directory that holds a link
+    /// member — the base a redirect target resolves against.
+    #[cfg(any(unix, windows))]
+    fn link_dir_of(dest_dir: &Path, dest_path: &Path) -> String {
+        dest_path
+            .parent()
+            .and_then(|parent| parent.strip_prefix(dest_dir).ok())
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default()
     }
 
     /// Compute the destination path for an entry name, applying the safe

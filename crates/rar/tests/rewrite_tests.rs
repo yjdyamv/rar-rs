@@ -1209,6 +1209,116 @@ fn symlink_and_hardlink_redirects_extract() {
     }
 }
 
+/// A redirect target is attacker-controlled data, so it goes through the
+/// same containment policy as member names: links that point outside the
+/// extraction root must be rejected instead of materialized, otherwise a
+/// later member (or any other consumer) could write through them.
+#[test]
+fn symlink_targets_escaping_the_destination_are_rejected() {
+    for target in [
+        "../../outside.txt",
+        "../../../outside.txt",
+        // Windows spellings go through the same normalizer.
+        "..\\..\\outside.txt",
+        // Absolute paths and drive prefixes can never resolve inside.
+        "/etc/passwd",
+        "//server/share",
+        "C:/Windows/win.ini",
+        "\\\\?\\C:\\Windows",
+    ] {
+        let dir = make_temp_dir();
+        let path = dir.path().join("escape.rar");
+        {
+            let mut rar =
+                ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+            let opts0 = rar_rs::EntryWriteOptions::new()
+                .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
+            rar.add_bytes("dir/target.txt", b"target content", opts0)
+                .unwrap();
+            rar.add_redirect("dir/lnk", 1, target).unwrap();
+            rar.finish().unwrap();
+        }
+
+        let out = dir.path().join("out");
+        let mut rar = ArchiveReader::open(&path).unwrap();
+        let err = rar.extract_all(&out).unwrap_err();
+        assert!(
+            matches!(err, rar_rs::RarError::Security(_)),
+            "target {target:?} should be rejected as a security violation, got {err}"
+        );
+        // No link was created, so nothing outside the destination is
+        // reachable through the extracted tree.
+        assert!(
+            std::fs::symlink_metadata(out.join("dir/lnk")).is_err(),
+            "target {target:?}: a link was left behind"
+        );
+    }
+}
+
+/// Redirect targets that stay inside the extraction root must keep working,
+/// including the ones that walk up out of the link's own directory.
+#[test]
+#[cfg(unix)]
+fn contained_symlink_targets_extract() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("contained.rar");
+    {
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let opts0 = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
+        rar.add_bytes("dir/target.txt", b"target content", opts0)
+            .unwrap();
+        rar.add_redirect("dir/nested/up", 1, "../target.txt")
+            .unwrap();
+        rar.add_redirect("dir/sideways", 1, "sub/../target.txt")
+            .unwrap();
+        rar.finish().unwrap();
+    }
+
+    let out = dir.path().join("out");
+    let mut rar = ArchiveReader::open(&path).unwrap();
+    rar.extract_all(&out).unwrap();
+    for link in ["dir/nested/up", "dir/sideways"] {
+        let target = std::fs::read_link(out.join(link)).unwrap();
+        // The stored target string is preserved verbatim (relative links stay
+        // relative); only containment is enforced.
+        assert!(
+            std::fs::read(out.join(link)).unwrap() == b"target content",
+            "{link}: {target:?}"
+        );
+    }
+}
+
+/// `safe_paths = false` is the documented "trusted archive" escape hatch: an
+/// absolute link target is then created as-is.
+#[test]
+#[cfg(unix)]
+fn unsafe_symlink_targets_are_allowed_when_safe_paths_are_off() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("trusted.rar");
+    {
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        rar.add_redirect("lnk", 1, "/etc/passwd").unwrap();
+        rar.finish().unwrap();
+    }
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let mut rar = ArchiveReader::open(&path).unwrap();
+    rar.extract_all_with_options(
+        &out,
+        rar_rs::ExtractOptions {
+            safe_paths: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_link(out.join("lnk")).unwrap(),
+        std::path::Path::new("/etc/passwd")
+    );
+}
+
 /// Redirect members are RAR5-only: the RAR4 writer has no redirect extra
 /// record, and smuggling a RAR5 header into a RAR4 stream would corrupt it.
 #[test]
