@@ -3356,3 +3356,57 @@ fn cli_rar4_multivolume_rename_and_lock() {
         "a locked RAR4 volume set must refuse edits"
     );
 }
+
+/// Archive comments are header-level too: official `rar c` puts the `CMT`
+/// block after the first volume's main header (and no other volume changes);
+/// set/replace/clear must keep the set valid.
+#[test]
+fn cli_rar4_multivolume_archive_comment_roundtrips() {
+    let dir = make_temp_dir();
+    for i in 1u8..=3 {
+        std::fs::write(dir.path().join(format!("t{i}.txt")), vec![b'a' + i; 9000]).unwrap();
+    }
+    let first = dir.path().join("cmt.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-m0", "-v20k", "-idq"])
+        .arg(&first)
+        .args(["t1.txt", "t2.txt", "t3.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "create a RAR4 volume set");
+    assert!(
+        dir.path().join("cmt.r00").exists(),
+        "expected a second volume"
+    );
+
+    let comment = dir.path().join("comment.txt");
+    let set_comment = |body: &[u8]| {
+        std::fs::write(&comment, body).unwrap();
+        std::process::Command::new(RAR_CLI)
+            .args(["c", "-idq"])
+            .arg(format!("-z{}", comment.display()))
+            .arg(&first)
+            .status()
+            .unwrap()
+            .success()
+    };
+    let read_comment = || {
+        let out = std::process::Command::new(RAR_CLI)
+            .args(["cw"])
+            .arg(&first)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    assert!(set_comment(b"multi-volume comment\n"));
+    assert_eq!(read_comment(), "multi-volume comment");
+    assert!(set_comment(b"replaced\n"));
+    assert_eq!(read_comment(), "replaced");
+    assert!(set_comment(b""));
+    assert_eq!(read_comment(), "");
+
+    let reader = rar_rs::ArchiveReader::open(&first).unwrap();
+    assert_eq!(reader.entries().count(), 3);
+}

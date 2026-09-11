@@ -8,7 +8,10 @@
 //! are edited per volume for renames and lock (official `rar` rewrites each
 //! volume without rebalancing, so a volume may grow past `-v`); delete and
 //! append on a set are refused exactly like the official "Cannot modify
-//! volume", and comment/recovery edits on a set are not supported yet.
+//! volume", and archive comments are supported (the `CMT` block lands right
+//! after the first volume's main header); recovery-record and per-member
+//! comment edits on a set are refused (a volume set uses `.rev` recovery
+//! volumes).
 //!
 //! Rename rebuilds each FILE_HEAD's encoded name field in place (keeping
 //! every other field byte-identical, including salt / nested comment /
@@ -452,16 +455,20 @@ fn file_header_name(header: &[u8]) -> RarResult<String> {
     ))
 }
 
-/// Rename members across a multi-volume RAR4 set: each volume is rewritten as
-/// its own block stream (official `rar rn` does not rebalance volumes, so a
-/// volume may grow past `-v`). Every FILE_HEAD carrying a renamed member's
-/// name is rebuilt — a split member repeats its name in each volume's chunk
-/// header — and the whole set is committed through the shared multi-file
-/// transaction, so a failure restores the previous volumes.
-fn apply_multivolume_renames(
+/// Header-level edits across a multi-volume RAR4 set: rename and archive
+/// comment. Each volume is rewritten as its own block stream (official `rar`
+/// does not rebalance volumes, so a volume may grow past `-v`). Every
+/// FILE_HEAD carrying a renamed member's name is rebuilt — a split member
+/// repeats its name in each volume's chunk header — and a comment change
+/// inserts/removes the `CMT` block right after the first volume's main
+/// header (WinRAR's placement). The whole set is committed through the shared
+/// multi-file transaction, so a failure restores the previous volumes.
+fn apply_multivolume_edits(
     archive: &mut RarArchive,
     rename_map: &HashMap<usize, String>,
+    comment: Option<&[u8]>,
 ) -> RarResult<EditSummary> {
+    let replace_comment = comment.is_some();
     let mut by_name: HashMap<String, String> = HashMap::new();
     for (idx, new_name) in rename_map {
         let entry = archive.entries.get(*idx).ok_or(RarError::StaleEntryId)?;
@@ -499,6 +506,21 @@ fn apply_multivolume_renames(
                     hp = password_bytes;
                 }
                 out.extend_from_slice(&bytes[start..start + view.total]);
+                // A comment change inserts its CMT block right after the
+                // first volume's main header (WinRAR's placement).
+                if volume == archive.path
+                    && let Some(text) = comment
+                    && !text.is_empty()
+                {
+                    let (payload, unicode) = encode_comment_text(text);
+                    let block = build_comment_block(&payload, unicode);
+                    emit_block(
+                        &mut out,
+                        &block[..CMT_HEAD_SIZE],
+                        &block[CMT_HEAD_SIZE..],
+                        password,
+                    )?;
+                }
             } else if view.head_type == FILE_HEAD {
                 let name = file_header_name(&view.header)?;
                 let key = name.trim_end_matches('/');
@@ -509,6 +531,12 @@ fn apply_multivolume_renames(
                 } else {
                     out.extend_from_slice(&bytes[start..start + view.total]);
                 }
+            } else if replace_comment
+                && view.head_type == NEWSUB_HEAD
+                && view.header.len() >= 32
+                && comment_block_name_is_cmt(&view.header)
+            {
+                // Dropped: the replacement was emitted after the main header.
             } else {
                 out.extend_from_slice(&bytes[start..start + view.total]);
             }
@@ -1039,13 +1067,13 @@ pub(crate) fn edit_rar4(
                 "cannot delete members from a multi-volume RAR4 archive (volume rebalancing is required; official rar refuses too)".into(),
             ));
         }
-        if comment.is_some() || force_rr.is_some() || !member_comments.is_empty() {
+        if force_rr.is_some() || !member_comments.is_empty() {
             return Err(RarError::Unsupported(
-                "comment and recovery-record edits on multi-volume RAR4 archives are not supported yet".into(),
+                "recovery-record and per-member-comment edits on multi-volume RAR4 archives are not supported (a volume set uses .rev recovery volumes)".into(),
             ));
         }
         let (rename_map, _) = build_rename_map(&archive.entries, renames)?;
-        return apply_multivolume_renames(archive, &rename_map);
+        return apply_multivolume_edits(archive, &rename_map, comment);
     }
 
     let is_solid = layout.main_flags & MHD_SOLID != 0;

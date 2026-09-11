@@ -16,7 +16,7 @@ rar-rs 将补上「已存在 RAR4 归档的编辑」能力（官方 `rar`/WinRAR
 3. **solid 编辑机制 = 整档 repack，不做 surgical 部分重处理**。官方依据（rarlab What's New）：WinRAR 7.20 曾对 solid 删除做「无关数据原样拷贝、只重处理变更部分」的优化，在 **RAR4 格式上产出坏档**；7.21 起回退为「deleting files in solid RAR4 archives now involves the full archive repacking, similar to WinRAR versions preceding 7.20. It doesn't affect archives in the modern RAR5 format」——surgical 仅存于 RAR5。我们照 7.21+ 行为实现，不仿 7.20。
 
 4. **v1 边界（清晰报错拒绝，不静默）**：
-   - 分卷归档编辑：`rn`/`ch` 与 `k` **已支持（2026-09）**——逐卷重写，官方同样不重平衡（卷可能超过 `-v`）；`d`/`a` 与官方一致拒绝（"Cannot modify volume"）；注释/RR 官方支持，我们暂缓。
+   - 分卷归档编辑：`rn`/`ch`、`k` 与**归档注释**（`c`/`cw`）**已支持（2026-09）**——逐卷重写，官方同样不重平衡（卷可能超过 `-v`），注释 `CMT` 块插在 vol1 主头之后（官方同位置）；`d`/`a` 与官方一致拒绝（"Cannot modify volume"）；**分卷内联 RR 继续拒绝**：官方 6.23 自己的 `rar r` 在带内联 RR 的分卷集上挂死（可产出 0 字节 fixed），分卷应使用 `.rev`。
    - ~~`-hp` 头加密归档编辑：拒绝~~ **已解除（2026-09）**：主头是明文标记（带 MHD_PASSWORD），布局扫描用归档口令逐块解密头、重写时对重建/插入的块用新盐重加密；未改动的块整段（含密文）原样拷贝。仅剩分卷与已锁定档拒绝。
    - 已锁定归档（主头 LOCK 位）：拒绝，与 RAR5 编辑一致（`RarError::ArchiveLocked`）。
 
@@ -39,7 +39,7 @@ rar-rs 将补上「已存在 RAR4 归档的编辑」能力（官方 `rar`/WinRAR
 
 ~~`-hp` 与分卷编辑为后续阶段，届时分别补「按口令重加密」与「卷重平衡」。~~ 两者均已落地：`-hp` 见下；分卷的 `rn`/`ch`/`k` 逐卷重写，官方也**不做**卷重平衡（卷可超过 `-v`），`d`/`a` 官方同样拒绝。
 
-**`-hp` 头加密编辑已落地（2026-09）**：`format/rar4/mod.rs::decrypt_encrypted_header` 提供内存态头解密；`archive/rar4_edit.rs` 的 `scan_layout`/`read_comment`/`edit_rar4`/`append_prelude` 全部按口令工作，`recovery/legacy.rs::scan_protect_with_password` 让恢复记录在 `-hp` 档上可定位/重建（记录自身的标签表与奇偶区不加密，仍可修复）。solid repack 与 create 路径用同一口令重建保护（`-hp` 同时含数据加密，与官方一致）。写侧 `emit_pending_rar4_comment` 让注释块在 `-hp` 档里也只加密 35 字节头。**分卷编辑已落地（2026-09-11，阶段 D）**：官方 6.23 实测确认了行为边界——`rn`/`ch`/`k`/`c`/`rr` 在 RAR4 分卷集上成功，`d`/`a` 报 "Cannot modify volume"；且官方**不做卷重平衡**（改名后 vol1 长 31 字节、注释 +65，卷可超过 `-v`）。我们照此实现 `rn`/`ch` 与 `k`：逐卷独立扫描块流（每卷自己签名/主头），对名字匹配的 FILE_HEAD（含跨卷 chunk 头，它们重复成员名）用 `rename_file_header` 重建，未改动块连密文原样拷贝（`-hp` 下重建头用新盐重加密），最后经 `fs::atomic::commit_files` 整体提交换卷（失败回滚 + journal）；`k` 只补第一版主头的 LOCK 位（与官方一致）。`d`/`a` 保持拒绝，`c`/`rr` 官方支持但我们暂缓。
+**`-hp` 头加密编辑已落地（2026-09）**：`format/rar4/mod.rs::decrypt_encrypted_header` 提供内存态头解密；`archive/rar4_edit.rs` 的 `scan_layout`/`read_comment`/`edit_rar4`/`append_prelude` 全部按口令工作，`recovery/legacy.rs::scan_protect_with_password` 让恢复记录在 `-hp` 档上可定位/重建（记录自身的标签表与奇偶区不加密，仍可修复）。solid repack 与 create 路径用同一口令重建保护（`-hp` 同时含数据加密，与官方一致）。写侧 `emit_pending_rar4_comment` 让注释块在 `-hp` 档里也只加密 35 字节头。**分卷编辑已落地（2026-09-11，阶段 D）**：官方 6.23 实测确认了行为边界——`rn`/`ch`/`k`/`c`/`rr` 在 RAR4 分卷集上成功，`d`/`a` 报 "Cannot modify volume"；且官方**不做卷重平衡**（改名后 vol1 长 31 字节、注释 +65，卷可超过 `-v`）。我们照此实现 `rn`/`ch` 与 `k`：逐卷独立扫描块流（每卷自己签名/主头），对名字匹配的 FILE_HEAD（含跨卷 chunk 头，它们重复成员名）用 `rename_file_header` 重建，未改动块连密文原样拷贝（`-hp` 下重建头用新盐重加密），最后经 `fs::atomic::commit_files` 整体提交换卷（失败回滚 + journal）；`k` 只补第一版主头的 LOCK 位（与官方一致）。`d`/`a` 保持拒绝，注释已支持（`CMT` 插在首卷主头后）；`rr` 继续拒绝（官方自身的多卷 RR 修复挂死，见上）。
 
 ## Considered Options
 
