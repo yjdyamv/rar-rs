@@ -1368,6 +1368,54 @@ fn old_format_solid_roundtrip_at_every_level() {
     }
 }
 
+/// Solid chains and member encryption compose on the v15/v20 writers: the
+/// persistent legacy encoder carries the window/tables across the run while
+/// each member's packed bytes are encrypted with its generation cipher
+/// (per-member decrypt, then in-chain decode without a salt).
+#[test]
+fn old_format_solid_password_roundtrip() {
+    let payloads: Vec<(&str, Vec<u8>)> = vec![
+        ("first.bin", support::compressible(9, 20_000)),
+        (
+            "second.bin",
+            b"solid encrypted shared phrase repeats across members ".repeat(900),
+        ),
+    ];
+    for version in [rar_rs::ArchiveVersion::V15, rar_rs::ArchiveVersion::V20] {
+        let dir = make_temp_dir();
+        let path = dir.path().join(format!("{version}-solid-pw.rar"));
+        {
+            let mut rar = ArchiveWriter::create_with(
+                &path,
+                rar_rs::WriterOptions::default()
+                    .compression(version)
+                    .solid_mode(rar_rs::SolidMode::Continuous)
+                    .password("hunter2"),
+            )
+            .unwrap_or_else(|e| panic!("create {version} solid+password: {e}"));
+            let opts = rar_rs::EntryWriteOptions::new()
+                .compression_level(rar_rs::CompressionLevel::try_from(3u8).unwrap());
+            for (name, data) in &payloads {
+                rar.add_bytes(name, data, opts)
+                    .unwrap_or_else(|e| panic!("add {version} solid+password {name}: {e}"));
+            }
+            rar.finish().unwrap();
+        }
+        let mut reader =
+            ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("hunter2"))
+                .unwrap_or_else(|e| panic!("open {version} solid+password: {e}"));
+        for (name, expected) in &payloads {
+            assert_eq!(
+                reader
+                    .read_entry(reader.unique_entry(name).unwrap())
+                    .unwrap(),
+                *expected,
+                "{version} solid+password {name}"
+            );
+        }
+    }
+}
+
 /// Member-level encryption (`-p`) works for the v15/v20 writers too, with
 /// the historical ciphers: RAR 1.5 members use the RAR15 stream XOR and
 /// RAR 2.x the RAR20 block cipher (16-byte padded, no salt), so no

@@ -363,8 +363,16 @@ struct CreateArgs {
     /// Quick-open record
     #[arg(long = "quick-open")]
     quick_open: bool,
-    /// Header encryption (optionally with a password)
-    #[arg(long = "header-encrypt", num_args = 0..=1, default_missing_value = "")]
+    /// Header encryption (optionally with a password as `-hp{pwd}` /
+    /// `--header-encrypt={pwd}`; a bare `-hp` turns it on with the `-p`
+    /// password). The value is attached (WinRAR style), so a following
+    /// position argument is never swallowed.
+    #[arg(
+        long = "header-encrypt",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ""
+    )]
     header_encrypt: Option<String>,
     /// Dictionary size for compression (like `-md<size>[k|m|g]`; no unit
     /// means MiB, valid values 128K..4G powers of two)

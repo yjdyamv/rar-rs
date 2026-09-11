@@ -3089,6 +3089,66 @@ fn cli_ma2_ma15_password_roundtrips() {
     }
 }
 
+/// `-hp` is a WinRAR-style attached-value switch: a bare `-hp` (anywhere in
+/// the command line, including right before the archive path) must not
+/// swallow the next position argument, and `-hp{pwd}` sets its own header
+/// password. The header-encrypted archive round-trips through `unrar` and
+/// the library reader with the password.
+#[test]
+fn cli_header_encrypt_switch_position_and_attached_password() {
+    let dir = make_temp_dir();
+    let a = dir.path().join("hp.txt");
+    let payload = b"header encrypted legacy content ".repeat(1800);
+    std::fs::write(&a, &payload).unwrap();
+
+    // Bare `-hp` between the `-p` password switch and the archive path.
+    let arc_bare = dir.path().join("hp-bare.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma15", "-ppw", "-hp", "-idq"])
+        .arg(&arc_bare)
+        .arg("hp.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "rar a -hp before the archive path must not swallow it"
+    );
+
+    // Attached `-hp{pwd}` supplies its own password (WinRAR syntax).
+    let arc_pw = dir.path().join("hp-pw.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-hppw2", "-idq"])
+        .arg(&arc_pw)
+        .arg("hp.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "rar a -hppw2 failed");
+
+    for (arc, password) in [(&arc_bare, "pw"), (&arc_pw, "pw2")] {
+        let res = std::process::Command::new(UNRAR_CLI)
+            .args(["t", &format!("-p{password}"), "-idq"])
+            .arg(arc)
+            .output()
+            .unwrap();
+        assert!(
+            res.status.success(),
+            "unrar t -p{password} rejected {arc:?}:\n{}",
+            String::from_utf8_lossy(&res.stderr)
+        );
+
+        let mut rar =
+            rar_rs::ArchiveReader::open_with(arc, rar_rs::OpenOptions::new().password(password))
+                .unwrap();
+        assert_eq!(
+            rar.read_entry(rar.unique_entry("hp.txt").unwrap()).unwrap(),
+            payload,
+            "{arc:?} content mismatch"
+        );
+    }
+}
+
 /// Legacy RAR 1.5/2.x members that span volume boundaries keep their member
 /// version (`-ma2`/`-ma15`) in every emitted entry header — the multivol
 /// emit path must not fall back to the default RAR29 header. The set is
