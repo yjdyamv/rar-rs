@@ -4,6 +4,8 @@
 mod common;
 #[path = "../input.rs"]
 mod input;
+#[path = "../name_policy.rs"]
+mod name_policy;
 #[path = "../output.rs"]
 mod output;
 #[path = "../password.rs"]
@@ -675,13 +677,13 @@ fn resolve_dict_switch(spec: &str, ma: Option<&str>) -> Result<(Option<u8>, Opti
 /// ensuring a directory argument never feeds the destination archive back
 /// into the operation.
 fn collect_inputs(
-    policy: &rar_rs::name_policy::NamePolicy,
+    policy: &crate::name_policy::NamePolicy,
     files: &[String],
     level: u8,
     archive_path: &str,
-) -> Result<Vec<rar_rs::name_policy::Collected>, String> {
+) -> Result<Vec<crate::name_policy::Collected>, String> {
     let mut collected =
-        rar_rs::name_policy::collect(policy, files, level).map_err(|e| format!("collect: {e}"))?;
+        crate::name_policy::collect(policy, files, level).map_err(|e| format!("collect: {e}"))?;
     if let Ok(abs_archive) = std::fs::canonicalize(archive_path) {
         collected.retain(
             |item| !matches!(std::fs::canonicalize(&item.path), Ok(path) if path == abs_archive),
@@ -849,8 +851,8 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         }
     }
     let case = match (args.lowercase, args.uppercase) {
-        (true, false) => Some(rar_rs::name_policy::CaseKind::Lower),
-        (false, true) => Some(rar_rs::name_policy::CaseKind::Upper),
+        (true, false) => Some(crate::name_policy::CaseKind::Lower),
+        (false, true) => Some(crate::name_policy::CaseKind::Upper),
         _ => None,
     };
     let header_encrypt = args.header_encrypt.is_some();
@@ -1023,7 +1025,7 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     for file in &args.exclude_list_files {
         exclude_masks.extend(read_mask_file(file)?);
     }
-    let policy = rar_rs::name_policy::NamePolicy {
+    let policy = crate::name_policy::NamePolicy {
         path_prefix: args.path_prefix.clone(),
         exclude_prefix: args.exclude_prefix.clone(),
         basename_only: args.basename_only,
@@ -1033,8 +1035,8 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
         no_recurse: args.no_recurse,
         wildcard_top_only: args.recurse_zero,
         case: case.map(|c| match c {
-            rar_rs::name_policy::CaseKind::Lower => rar_rs::name_policy::CaseKind::Lower,
-            rar_rs::name_policy::CaseKind::Upper => rar_rs::name_policy::CaseKind::Upper,
+            crate::name_policy::CaseKind::Lower => crate::name_policy::CaseKind::Lower,
+            crate::name_policy::CaseKind::Upper => crate::name_policy::CaseKind::Upper,
         }),
         include_masks,
         exclude_masks,
@@ -1734,7 +1736,7 @@ fn cmd_update_freshen(
     };
 
     let collected = collect_inputs(
-        &rar_rs::name_policy::NamePolicy::default(),
+        &crate::name_policy::NamePolicy::default(),
         &args.files,
         3,
         &args.archive,
@@ -1971,14 +1973,13 @@ fn cmd_recovery_volumes(args: &RecoveryVolumesArgs) -> Result<(), String> {
         if pct > 1000 {
             return Err(format!("invalid recovery percent: {spec}"));
         }
-        rar_rs::recovery::rev50::plan_recovery_volume_count(nd, pct)
-            .map_err(|e| format!("rv: {e}"))?
+        rar_rs::plan_recovery_volume_count(nd, pct).map_err(|e| format!("rv: {e}"))?
     } else {
         spec.parse::<usize>()
             .map_err(|_| format!("invalid recovery volume count: {spec}"))?
     };
 
-    let written = rar_rs::recovery::rev50::build_recovery_volumes_for_set(&volumes, rec_count)
+    let written = rar_rs::build_recovery_volumes_for_set(&volumes, rec_count)
         .map_err(|e| format!("rv: {e}"))?;
     for path in &written {
         info!("Creating {}", path.display());
@@ -2451,8 +2452,8 @@ fn find_sfx_module() -> Option<String> {
 /// with `-cl` / `-cu`.
 fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
     let kind = match (args.lowercase, args.uppercase) {
-        (true, false) => rar_rs::name_policy::CaseKind::Lower,
-        (false, true) => rar_rs::name_policy::CaseKind::Upper,
+        (true, false) => crate::name_policy::CaseKind::Lower,
+        (false, true) => crate::name_policy::CaseKind::Upper,
         _ => return Err("usage: rar ch [-cl | -cu] <archive.rar>".into()),
     };
     let mut editor = match &args.password.password {
@@ -2467,8 +2468,8 @@ fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
     let mut pairs = Vec::new();
     for name in names {
         let converted = match kind {
-            rar_rs::name_policy::CaseKind::Lower => name.to_lowercase(),
-            rar_rs::name_policy::CaseKind::Upper => name.to_uppercase(),
+            crate::name_policy::CaseKind::Lower => name.to_lowercase(),
+            crate::name_policy::CaseKind::Upper => name.to_uppercase(),
         };
         if converted != name {
             pairs.push((name, converted));
@@ -2703,7 +2704,7 @@ fn cmd_test(args: &ArchiveArgs) -> Result<(), String> {
 /// Normalize a path argument into an archive name: relative paths stay as
 /// given, absolute paths drop the leading slash (like `rar`).
 fn arg_to_name(arg: &str) -> String {
-    rar_rs::name_policy::arg_to_name(arg)
+    crate::name_policy::arg_to_name(arg)
 }
 
 /// Read one mask per line from a filter list file (like `-x@listfile`);
@@ -3021,7 +3022,7 @@ fn cmd_info(args: &ArchiveArgs) -> Result<(), String> {
 /// `$default`, or to the end when there is no `$default`. The sort is
 /// stable, so files inside a group keep their collection order.
 fn apply_rarfiles_order(
-    collected: &mut Vec<rar_rs::name_policy::Collected>,
+    collected: &mut Vec<crate::name_policy::Collected>,
     masks: &[Option<String>],
 ) {
     use std::cmp::Ordering;
@@ -3038,7 +3039,7 @@ fn apply_rarfiles_order(
                 .enumerate()
                 .filter(|(_, c)| {
                     pat.is_some_and(|p| {
-                        rar_rs::name_policy::mask_match(p, c.name.trim_start_matches("./"))
+                        crate::name_policy::mask_match(p, c.name.trim_start_matches("./"))
                     })
                 })
                 .map(|(i, _)| i)
@@ -3056,7 +3057,7 @@ fn apply_rarfiles_order(
                 .enumerate()
                 .filter(|(_, m)| {
                     m.as_deref().is_some_and(|p| {
-                        rar_rs::name_policy::mask_match(p, c.name.trim_start_matches("./"))
+                        crate::name_policy::mask_match(p, c.name.trim_start_matches("./"))
                     })
                 })
                 .map(|(mi, _)| mi)
@@ -3081,7 +3082,7 @@ fn apply_rarfiles_order(
 
     let mut order: Vec<usize> = (0..collected.len()).collect();
     order.sort_by_key(|&i| best[i]);
-    let reordered: Vec<rar_rs::name_policy::Collected> =
+    let reordered: Vec<crate::name_policy::Collected> =
         order.into_iter().map(|i| collected[i].clone()).collect();
     *collected = reordered;
 }

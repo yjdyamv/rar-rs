@@ -2,8 +2,8 @@
 //! `-x` / `-n` / `-cl` / `-cu` / `-r-` semantics of the `rar a` command.
 //!
 //! The CLI collects its arguments through [`collect`] and hands the result
-//! to [`crate::ArchiveWriter::add_batch`]; library users and tests can drive
-//! the same policy directly instead of through a subprocess.
+//! to [`rar_rs::ArchiveWriter::add_batch`]; this module lives with the CLI
+//! because the CLI is its only consumer.
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -98,7 +98,7 @@ impl NamePolicy {
     }
 }
 
-/// One collected add target, ready to convert into a [`crate::BatchEntry`].
+/// One collected add target, ready to convert into a [`rar_rs::BatchEntry`].
 #[derive(Debug, Clone)]
 pub struct Collected {
     pub path: PathBuf,

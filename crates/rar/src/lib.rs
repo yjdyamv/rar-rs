@@ -34,20 +34,35 @@ pub mod error;
 pub mod features;
 mod fs;
 mod model;
-// Internal home of the historical `rar40`/`rar50` module trees; the old
-// public paths are re-exported below. `rar40` is raw-gated (feature
-// `raw`); `rar50` stays public because in-tree wire tests still use it.
+// Internal home of the `rar4` / `rar5` module trees. Always compiled — every
+// in-crate path goes through `crate::format::…` — but only *publicly*
+// reachable with the `raw` feature: the wire-level helpers are not part of
+// the supported API, and the visibility is what stops downstream callers
+// from building on them by accident.
+#[cfg(feature = "raw")]
 #[doc(hidden)]
 pub mod format;
-#[doc(hidden)]
-pub mod name_policy;
+#[cfg(not(feature = "raw"))]
+pub(crate) mod format;
+
 pub mod options;
 mod parallel;
 #[cfg(feature = "raw")]
+#[doc(hidden)]
 pub use crate::format::rar4 as rar40;
+#[cfg(feature = "raw")]
+#[doc(hidden)]
 pub use crate::format::rar5 as rar50;
+
+// Recovery-record and recovery-volume support. The supported entry points are
+// re-exported at the crate root; the module tree itself follows the same
+// `raw` rule as `format`.
+#[cfg(feature = "raw")]
 #[doc(hidden)]
 pub mod recovery;
+#[cfg(not(feature = "raw"))]
+pub(crate) mod recovery;
+
 pub mod version;
 mod write_progress;
 
@@ -71,6 +86,7 @@ pub use error::{ErrorCode, RarError, RarResult};
 pub use features::{Feature, FeatureSet};
 pub use options::{CreateOptions, ExtractOptions, SolidReset, parse_dict_bytes, parse_dict_size};
 pub use parallel::{set_compression_threads, set_extraction_threads};
+pub use recovery::rev50::{build_recovery_volumes_for_set, plan_recovery_volume_count};
 pub use recovery::{
     rebuild_missing_volumes, rebuild_missing_volumes_with, repair_archive, repair_archive_path,
     repair_archive_path_with, repair_legacy_archive_path, repair_legacy_archive_path_with_password,

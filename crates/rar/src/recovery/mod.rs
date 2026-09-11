@@ -1,5 +1,9 @@
 //! Recovery-record and recovery-volume support (RAR5 family / v50).
 
+// Same rule as `format`: the module tree is only public with the `raw`
+// feature, and without it a few helpers have no in-tree caller.
+#![cfg_attr(not(feature = "raw"), allow(dead_code))]
+
 mod legacy;
 pub use legacy::{repair_legacy_archive_path, repair_legacy_archive_path_with_password};
 

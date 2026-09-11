@@ -24,6 +24,9 @@ pub(crate) mod payload;
 pub mod vint;
 pub(crate) mod write;
 
+// Re-exported for the `rar50` alias; without `raw` nothing outside the crate
+// (and nothing in-tree) reaches this path, so the import is unused there.
+#[cfg_attr(not(feature = "raw"), allow(unused_imports))]
 pub use headers::{DataChunk, FileHeader};
 
 /// Borrow an archive's underlying volume stream, surfacing a clean error instead

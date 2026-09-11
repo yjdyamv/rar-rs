@@ -596,6 +596,7 @@ dependencies = [
  "crc32fast",
  "hmac",
  "rand",
+ "rar-rs",
  "rayon",
  "sha1",
  "sha2",
