@@ -140,7 +140,16 @@ impl CreateOptions {
     pub(crate) fn validate(&self) -> RarResult<()> {
         require_writable_version(self.compression)?;
         validate_dictionary(self.dict_size_log, self.dict_size_bytes)?;
-        validate_threads(self.threads)
+        validate_threads(self.threads)?;
+        validate_combinations(CombinationRules {
+            quick_open: self.quick_open,
+            encrypt_headers: self.encrypt_headers,
+            password: self.password.as_deref(),
+            recovery_percent: self.recovery_percent,
+            recovery_volumes_percent: self.recovery_volumes_percent,
+            recovery_volume_count: self.recovery_volume_count,
+            volume_size: self.volume_size,
+        })
     }
 }
 
@@ -190,6 +199,73 @@ pub(crate) fn validate_threads(threads: Option<usize>) -> RarResult<()> {
         return Err(RarError::InvalidOption(format!(
             "compression threads must be in 0..={MAX_COMPRESSION_THREADS}, got {threads}"
         )));
+    }
+    Ok(())
+}
+
+/// The create-time combination rules shared by the plain [`CreateOptions`]
+/// struct and the typed [`WriterOptions`](crate::WriterOptions) builder.
+///
+/// The typed builder refuses combinations the writer would otherwise silently
+/// drop; validating the plain struct with the same rules keeps the two public
+/// surfaces from disagreeing about what is legal.
+pub(crate) struct CombinationRules<'a> {
+    pub quick_open: bool,
+    pub encrypt_headers: bool,
+    pub password: Option<&'a str>,
+    pub recovery_percent: Option<u8>,
+    pub recovery_volumes_percent: Option<u8>,
+    pub recovery_volume_count: Option<u32>,
+    pub volume_size: Option<u64>,
+}
+
+pub(crate) fn validate_combinations(rules: CombinationRules<'_>) -> RarResult<()> {
+    if rules.quick_open && rules.encrypt_headers {
+        return Err(RarError::InvalidOption(
+            "quick-open cannot be combined with header encryption".into(),
+        ));
+    }
+    if rules.quick_open && rules.volume_size.is_some() {
+        return Err(RarError::InvalidOption(
+            "quick-open cannot be combined with data volumes".into(),
+        ));
+    }
+    for (name, percent) in [
+        ("recovery percent", rules.recovery_percent),
+        ("recovery-volume percent", rules.recovery_volumes_percent),
+    ] {
+        if percent.is_some_and(|value| value > 100) {
+            return Err(RarError::InvalidOption(format!(
+                "{name} must be in 0..=100"
+            )));
+        }
+    }
+    if rules.volume_size == Some(0) {
+        return Err(RarError::InvalidOption(
+            "volume size must be greater than zero".into(),
+        ));
+    }
+    if rules.encrypt_headers && rules.password.is_none_or(str::is_empty) {
+        return Err(RarError::InvalidOption(
+            "header encryption requires a non-empty password".into(),
+        ));
+    }
+    if rules.recovery_percent.is_some() && rules.volume_size.is_some() {
+        return Err(RarError::InvalidOption(
+            "inline recovery records cannot be combined with data volumes".into(),
+        ));
+    }
+    if rules.recovery_volumes_percent.is_some() && rules.recovery_volume_count.is_some() {
+        return Err(RarError::InvalidOption(
+            "recovery-volume percent and exact count are mutually exclusive".into(),
+        ));
+    }
+    if (rules.recovery_volumes_percent.is_some() || rules.recovery_volume_count.is_some())
+        && rules.volume_size.is_none()
+    {
+        return Err(RarError::InvalidOption(
+            "recovery volumes require a data-volume size".into(),
+        ));
     }
     Ok(())
 }

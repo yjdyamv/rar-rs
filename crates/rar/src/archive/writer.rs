@@ -376,57 +376,18 @@ impl WriterOptions {
     }
 
     fn validate(&self) -> RarResult<()> {
-        // The legacy writer silently skips quick-open for header-encrypted or
-        // multi-volume archives; a validated typed option must never be
-        // silently dropped, so those combinations are rejected up front.
-        if self.quick_open && self.encrypt_headers {
-            return Err(RarError::InvalidOption(
-                "quick-open cannot be combined with header encryption".into(),
-            ));
-        }
-        if self.quick_open && self.volume_size.is_some() {
-            return Err(RarError::InvalidOption(
-                "quick-open cannot be combined with data volumes".into(),
-            ));
-        }
-        for (name, percent) in [
-            ("recovery percent", self.recovery_percent),
-            ("recovery-volume percent", self.recovery_volumes_percent),
-        ] {
-            if percent.is_some_and(|value| value > 100) {
-                return Err(RarError::InvalidOption(format!(
-                    "{name} must be in 0..=100"
-                )));
-            }
-        }
-        if self.volume_size == Some(0) {
-            return Err(RarError::InvalidOption(
-                "volume size must be greater than zero".into(),
-            ));
-        }
-        if self.encrypt_headers && self.password.as_deref().is_none_or(str::is_empty) {
-            return Err(RarError::InvalidOption(
-                "header encryption requires a non-empty password".into(),
-            ));
-        }
-        if self.recovery_percent.is_some() && self.volume_size.is_some() {
-            return Err(RarError::InvalidOption(
-                "inline recovery records cannot be combined with data volumes".into(),
-            ));
-        }
-        if self.recovery_volumes_percent.is_some() && self.recovery_volume_count.is_some() {
-            return Err(RarError::InvalidOption(
-                "recovery-volume percent and exact count are mutually exclusive".into(),
-            ));
-        }
-        if (self.recovery_volumes_percent.is_some() || self.recovery_volume_count.is_some())
-            && self.volume_size.is_none()
-        {
-            return Err(RarError::InvalidOption(
-                "recovery volumes require a data-volume size".into(),
-            ));
-        }
-
+        // The combination rules live in `options` so the plain
+        // `CreateOptions` struct rejects exactly the same set: a validated
+        // typed option must never be silently dropped or clamped.
+        crate::options::validate_combinations(crate::options::CombinationRules {
+            quick_open: self.quick_open,
+            encrypt_headers: self.encrypt_headers,
+            password: self.password.as_deref(),
+            recovery_percent: self.recovery_percent,
+            recovery_volumes_percent: self.recovery_volumes_percent,
+            recovery_volume_count: self.recovery_volume_count,
+            volume_size: self.volume_size,
+        })?;
         crate::options::require_writable_version(self.compression)?;
         if self.compression.is_legacy() {
             crate::format::rar4::create::validate_rar4_only(self.into())?;

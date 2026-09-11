@@ -48,6 +48,52 @@ fn create_options_reject_invalid_dictionary_and_thread_values() {
 }
 
 #[test]
+fn create_options_reject_the_same_combinations_as_the_typed_builder() {
+    // The plain struct used to silently drop or clamp these; it now shares
+    // the typed builder's rule set (see `options::validate_combinations`).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid-combo.rar");
+    for options in [
+        crate::options::CreateOptions {
+            quick_open: true,
+            encrypt_headers: true,
+            password: Some("pw".into()),
+            ..Default::default()
+        },
+        crate::options::CreateOptions {
+            quick_open: true,
+            volume_size: Some(32 * 1024),
+            ..Default::default()
+        },
+        crate::options::CreateOptions {
+            recovery_percent: Some(5),
+            volume_size: Some(32 * 1024),
+            ..Default::default()
+        },
+        crate::options::CreateOptions {
+            recovery_volume_count: Some(1),
+            ..Default::default()
+        },
+        crate::options::CreateOptions {
+            recovery_volumes_percent: Some(5),
+            recovery_volume_count: Some(1),
+            volume_size: Some(32 * 1024),
+            ..Default::default()
+        },
+        crate::options::CreateOptions {
+            encrypt_headers: true,
+            ..Default::default()
+        },
+        crate::options::CreateOptions {
+            volume_size: Some(0),
+            ..Default::default()
+        },
+    ] {
+        assert_invalid_option(RarArchive::create_with_options(&path, options));
+    }
+}
+
+#[test]
 fn archive_local_zero_threads_use_automatic_sizing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("auto-threads.rar");

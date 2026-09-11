@@ -968,31 +968,14 @@ impl RarArchive {
             // `InvalidOption` error the typed `WriterOptions` surface does).
             crate::format::rar4::create::validate_rar4_only(Rar4WriteOptions::from(&opts))?;
         }
-        if opts.encrypt_headers && opts.password.as_deref().is_none_or(|pw| pw.is_empty()) {
-            return Err(RarError::InvalidOption(
-                "header encryption requires a non-empty password".into(),
-            ));
-        }
         // Header encryption is supported for multi-volume archives: every
         // volume starts with the plaintext encryption header and all
         // subsequent blocks are `[IV][AES-256-CBC header]` (WinRAR -hp
-        // convention).
-        if opts.recovery_percent.is_some() && opts.volume_size.is_some() {
-            return Err(RarError::Unsupported(
-                "recovery records are not supported for multi-volume archives".into(),
-            ));
-        }
-        if (opts.recovery_volumes_percent.is_some() || opts.recovery_volume_count.is_some())
-            && opts.volume_size.is_none()
-        {
-            return Err(RarError::Unsupported(
-                "recovery volumes require a volume size".into(),
-            ));
-        }
-        // Quick-open only applies to single-volume archives without header
-        // encryption; otherwise it is silently skipped (matching the
-        // reference writer behavior).
-        let quick_open = opts.quick_open && !opts.encrypt_headers && opts.volume_size.is_none();
+        // convention). The combination rules (header encryption without a
+        // password, quick-open with volumes or header encryption, recovery
+        // records or volumes with the wrong volume setting) were already
+        // rejected by `validate` with the same wording as `WriterOptions`.
+        let quick_open = opts.quick_open;
 
         let archive = RarArchive {
             path,
@@ -1005,8 +988,8 @@ impl RarArchive {
             password: opts.password,
             header_encryption: opts.encrypt_headers,
             archive_encr: None,
-            recovery_percent: opts.recovery_percent.map(|p| p.min(100)),
-            recovery_volumes_percent: opts.recovery_volumes_percent.map(|p| p.min(100)),
+            recovery_percent: opts.recovery_percent,
+            recovery_volumes_percent: opts.recovery_volumes_percent,
             recovery_volumes_count: opts.recovery_volume_count,
             cancel: None,
             volume_paths: Vec::new(),

@@ -46,8 +46,14 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
 - **热点文件拆分**：`format/rar5/write/mod.rs` 4025 行、`codec/modern/lzss_huff/encoder.rs` 3940、
   `archive/rar4_edit.rs` 2809、`codec/legacy/rar29_encoder.rs` 2634。分层（`archive` / `codec` / `format`）
   已收敛，文件级拆分没做。
-- **双 options 面**：`WriterOptions`（私有字段 builder，完整校验）与 `CreateOptions`（公开字段，弱校验）
-  并存且都从 `lib.rs` 导出；RAR4 规则已共用，结构仍在。
+- **双 options 面（2026-09，校验已收敛）**：`WriterOptions`（私有字段 builder）与
+  `CreateOptions`（公开字段）仍并存且都从 `lib.rs` 导出，但组合规则已抽到
+  `options::validate_combinations` 由两者共用——`CreateOptions` 不再静默丢弃/钳制（quick-open×分卷
+  或 -hp、内联 RR×分卷、rv 无分卷、recovery>100、`volume_size=0`、-hp 无口令现在同样报
+  `InvalidOption`），`new_with_options` 里的重复检查与 `min(100)`/quick-open 静默降级已删。
+  剩余：两者结构仍在；`CreateOptions` 目前没有任何公开入口接收它
+  （`RarArchive::create_with_options` 是 `pub(crate)`，napi 用 `WriterOptions`），属死的公开类型，
+  其去留是破坏性决策，待 ADR。
 - **CLI 两个二进制（2026-09，主体去重）**：`selector.rs` / `password.rs` 已有；新增共享
   `ops.rs`（`#[path]` 双二进制共用）：`open_reader`、`extract_members`（整档/选成员）、
   `extract_to_stdout`（`-so`）、`print_members`（`p`）、列表三态（`list_entries` /
