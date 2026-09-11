@@ -2,8 +2,8 @@
 
 **Pure-Rust RAR archive library and command-line tools.** Create, read,
 extract, and modify RAR5/RAR7 archives, read legacy RAR 1.5–4.x archives,
-and create RAR4 archives with native Rust codecs. No external RAR/UNRAR
-binary is required at runtime.
+and create RAR 1.5 / 2.x / 4.x archives with native Rust codecs. No external
+RAR/UNRAR binary is required at runtime.
 
 > Licensed under BSD-2-Clause for original project portions. This is an
 > independent implementation with separately identified upstream portions —
@@ -17,8 +17,9 @@ binary is required at runtime.
 - **Pure Rust** implementation with no external RAR/UNRAR runtime binary.
 - **RAR5 (v50) and RAR7 (v70)** read/write support with WinRAR/UnRAR
   interoperability testing.
-- **Legacy support** for reading RAR 1.5–4.x archives and creating RAR4
-  archives, including legacy codecs, encryption, solid chains, and volumes.
+- **Legacy support** for reading RAR 1.5–4.x archives and creating RAR 1.5 /
+  2.x / 4.x archives (`-ma15` / `-ma2` / `-ma4`), including legacy codecs,
+  encryption, solid chains, and volumes.
 - **Archive operations** — append, update, delete, rename, freshen, move, lock,
   repair, comments, SFX handling, and multi-volume processing.
 - **Recovery** — inline recovery records and `.rev` recovery volumes, with
@@ -67,21 +68,23 @@ the full reference in
 ### Library
 
 ```rust
-use rar_rs::RarArchive;
+use rar_rs::{ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions};
 
-// Create
-let mut rar = RarArchive::create_with_options("backup.rar", Default::default())?;
-rar.add("src/", 3)?;
-rar.add_bytes("notes.txt", b"Some notes", 3)?;
-rar.close()?;
+// Create — `finish()` consumes the writer and commits the archive
+let mut writer = ArchiveWriter::create("backup.rar")?;
+let opts = EntryWriteOptions::new().compression_level(CompressionLevel::NORMAL);
+writer.add_path("src/", opts)?;
+writer.add_bytes("notes.txt", b"Some notes", opts)?;
+writer.finish()?;
 
 // Extract
-let mut rar = RarArchive::open("backup.rar")?;
-rar.extract_all("/tmp/output/")?;
+let mut reader = ArchiveReader::open("backup.rar")?;
+reader.extract_all("/tmp/output/")?;
 
 // Read a single member
-let mut rar = RarArchive::open("backup.rar")?;
-let data = rar.read("notes.txt")?;
+let mut reader = ArchiveReader::open("backup.rar")?;
+let id = reader.unique_entry("notes.txt")?;
+let data = reader.read_entry(id)?;
 ```
 
 The crate is `rar-rs`; see `crates/rar` for the full API and
@@ -92,7 +95,7 @@ including solid archives, quick-open, BLAKE2sp, safe extraction,
 ## Feature highlights
 
 - **Formats:** RAR5 (v50) and RAR7 (v70) create/read/write; RAR 1.5–4.x
-  read/extract; and RAR4 archive creation.
+  read/extract; and RAR 1.5 / 2.x / 4.x creation (`-ma15` / `-ma2` / `-ma4`).
 - **Compression:** native LZSS+Huffman and PPMd codecs, levels 0–5,
   dictionary controls, filters, solid archives, and parallel compression.
 - **Integrity:** CRC32, BLAKE2sp (`-htb`), recovery records, recovery volumes,
@@ -109,7 +112,10 @@ The complete feature matrix lives in
 
 ## Limitations
 
-Legacy RAR4 creation and extraction have feature-specific limitations. Editing existing RAR4 archives is implemented ([ADR 0005](docs/adr/0005-rar4-edit-architecture.md)): rename, lock, archive comments and recovery records work on solid and non-solid archives alike, and member delete/append/update repacks solid archives whole (decode -> re-encode, mirroring WinRAR 7.21+) and surgically rewrites non-solid ones. Multi-volume and header-encrypted (`-hp`) archives refuse edits; repacking solid archives with directory members or pre-RAR3 codec members is refused with a clear error.
+Legacy RAR4 creation and extraction have feature-specific limitations. Editing existing RAR4 archives is implemented ([ADR 0005](docs/adr/0005-rar4-edit-architecture.md)): rename, lock, archive comments and recovery records work on solid and non-solid archives alike, and member delete/append/update repacks solid archives whole (decode -> re-encode, mirroring WinRAR 7.21+) and surgically rewrites non-solid ones. Multi-volume archives refuse edits. Header-encrypted (`-hp`) archives are editable
+given the password — rename, delete, comments, recovery records, lock, append and
+solid repack all work. Repacking a solid archive that contains pre-RAR3 codec
+members is refused with a clear error.
 Appending to multi-volume archives is not supported (the official `rar` refuses
 too). Inline recovery records have streaming limitations during repair; encrypted
 multi-volume sets cannot combine `-hp` with inline RR and must use `.rev` recovery
