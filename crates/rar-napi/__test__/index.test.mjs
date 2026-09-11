@@ -472,6 +472,54 @@ test('creates and reads back legacy RAR 1.5/2.x members (format rar15/rar2)', as
   }
 })
 
+test('legacy rar15/rar2 writers compose solid + member password + header encryption', async () => {
+  const dir = tempDir()
+  try {
+    const { listEntriesDetailed, extractArchive } = await import('../index.js')
+    for (const [fmt, version] of [
+      ['rar2', 'v20'],
+      ['rar15', 'v15'],
+    ]) {
+      const out = join(dir, `${fmt}-solid-pw.rar`)
+      const payloads = [
+        Buffer.from('legacy solid encrypted shared phrase '.repeat(300)),
+        Buffer.alloc(64_000 * 2, 0x62).fill(0x63, 32_000),
+      ]
+      await createArchive({
+        outPath: out,
+        format: fmt,
+        level: 3,
+        solid: true,
+        password: 'napi-hunter2',
+        encryptHeaders: true,
+        entries: [
+          { kind: 'bytes', name: 'a.txt', data: payloads[0] },
+          { kind: 'bytes', name: 'b.bin', data: payloads[1] },
+        ],
+      })
+
+      const entries = await listEntriesDetailed(out, 'napi-hunter2')
+      assert.equal(entries.length, 2, `${fmt}: two members`)
+      for (const e of entries) {
+        assert.equal(e.version, version, `${fmt}: member version`)
+      }
+
+      const dest = join(dir, `out-${fmt}`)
+      await extractArchive(out, { destPath: dest, password: 'napi-hunter2' })
+      assert.deepEqual(readFileSync(join(dest, 'a.txt')), payloads[0])
+      assert.deepEqual(readFileSync(join(dest, 'b.bin')), payloads[1])
+
+      await assert.rejects(
+        extractArchive(out, { destPath: join(dir, `bad-${fmt}`), password: 'wrong' }),
+        /password|decrypt|CRC|crc/i,
+        `${fmt}: wrong password must fail`,
+      )
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('appendEntries keeps existing members and listEntries/deleteEntries work', async () => {
   const dir = tempDir()
   try {

@@ -1500,6 +1500,38 @@ fn old_format_password_roundtrip_at_every_level() {
     }
 }
 
+/// A tiny `-hp` archive opened with the wrong password must report
+/// `WrongPassword`, not a bare I/O error: the garbage `head_size` from
+/// the mis-decrypted header drives the encrypted-block reader past EOF
+/// (regression for a short-read surfacing as "failed to fill whole buffer").
+#[test]
+fn old_format_hp_wrong_password_is_wrong_password() {
+    for version in [rar_rs::ArchiveVersion::V15, rar_rs::ArchiveVersion::V20] {
+        let dir = make_temp_dir();
+        let path = dir.path().join(format!("{version}-hp-tiny.rar"));
+        {
+            let mut rar = ArchiveWriter::create_with(
+                &path,
+                rar_rs::WriterOptions::default()
+                    .compression(version)
+                    .password("hunter2")
+                    .encrypt_headers(true),
+            )
+            .unwrap_or_else(|e| panic!("create {version} tiny -hp: {e}"));
+            rar.add_bytes("a.txt", b"hello", rar_rs::EntryWriteOptions::new())
+                .unwrap();
+            rar.finish().unwrap();
+        }
+        let err = ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("wrong"))
+            .err()
+            .unwrap_or_else(|| panic!("{version} tiny -hp wrong pw must fail at open"));
+        assert!(
+            matches!(err, rar_rs::RarError::WrongPassword),
+            "{version}: expected WrongPassword, got {err:?}"
+        );
+    }
+}
+
 /// WinRAR zero-pads volume part numbers to the digit count of the total
 /// volume count (part01..part15). The writer now emits the same padding
 /// for sets of 10+ volumes, and discovery, `.rev` naming and rebuild

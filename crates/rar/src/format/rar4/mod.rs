@@ -330,7 +330,18 @@ fn read_encrypted_block(
     }
     let align16 = ((head_size as usize) + 15) & !15;
     let mut rest = vec![0u8; align16 - 16];
-    read_exact(stream, &mut rest)?;
+    read_exact(stream, &mut rest).map_err(|err| {
+        // A wrong password yields garbage `head_size` from the first
+        // decrypted block; following it reads past the end of the archive.
+        // Surface that as a clear password problem instead of a bare I/O
+        // error, mirroring the RAR5 wrong-password stage.
+        match err {
+            RarError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                RarError::WrongPassword
+            }
+            other => other,
+        }
+    })?;
     cipher
         .decrypt_in_place(&mut rest)
         .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;

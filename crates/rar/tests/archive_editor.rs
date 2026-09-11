@@ -1124,3 +1124,51 @@ fn rar4_solid_delete_repacks_and_keeps_data() {
     let c = reader.unique_entry("c.txt").unwrap();
     assert_eq!(reader.read_entry(c).unwrap(), p3);
 }
+
+/// Pre-RAR3 (v15/v20) codec members cannot be repacked for a solid archive
+/// edit (ADR 0005 stage C boundary): with our writers now able to *create*
+/// those archives, the clear `Unsupported` refusal for solid delete and
+/// solid append must fire before any write (the archive file is untouched,
+/// so the append probe below sees the same pristine archive).
+#[test]
+fn rar4_solid_legacy_members_refuse_delete_and_append() {
+    for version in [ArchiveVersion::V15, ArchiveVersion::V20] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-solid.rar");
+        let p1: Vec<u8> = b"legacy solid chain payload a ".repeat(500);
+        let p2: Vec<u8> = b"legacy solid chain payload b ".repeat(400);
+        {
+            let mut archive = ArchiveWriter::create_with(
+                &path,
+                WriterOptions::new()
+                    .compression(version)
+                    .solid_mode(SolidMode::Continuous),
+            )
+            .unwrap();
+            archive.add_bytes("a.txt", &p1, level(3)).unwrap();
+            archive.add_bytes("b.txt", &p2, level(3)).unwrap();
+            archive.finish().unwrap();
+        }
+
+        // Solid deletion needs a whole-archive repack, which the fresh
+        // RAR4 writer cannot reproduce for legacy codec members.
+        let mut editor = ArchiveEditor::open(&path).unwrap();
+        let b = editor.unique_entry("b.txt").unwrap();
+        let err = editor.delete_entries(&[b]).unwrap_err();
+        assert!(
+            matches!(&err, rar_rs::RarError::Unsupported(msg) if msg.contains("pre-RAR3")),
+            "{version:?}: expected Unsupported solid-delete refusal, got {err:?}"
+        );
+        drop(editor);
+
+        // The refused delete wrote nothing; appending to the same solid
+        // archive defers to the repack and refuses at close.
+        let mut append = ArchiveWriter::append(&path).unwrap();
+        append.add_bytes("c.txt", &p2, level(3)).unwrap();
+        let err = append.finish().unwrap_err();
+        assert!(
+            matches!(&err, rar_rs::RarError::Unsupported(msg) if msg.contains("pre-RAR3")),
+            "{version:?}: expected Unsupported solid-append refusal, got {err:?}"
+        );
+    }
+}
