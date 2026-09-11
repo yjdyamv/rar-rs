@@ -640,10 +640,11 @@ where
     if first.protected_size != protected_size as u64 {
         return Err(Error::BadRecoveryChunk);
     }
-    if chunks
-        .iter()
-        .any(|chunk| chunk.plan != first.plan || chunk.protected_size != first.protected_size)
-    {
+    if chunks.iter().any(|chunk| {
+        chunk.plan != first.plan
+            || chunk.protected_size != first.protected_size
+            || chunk.data_shard_states != first.data_shard_states
+    }) {
         return Err(Error::BadRecoveryChunk);
     }
 
@@ -745,11 +746,18 @@ where
         }
     }
 
-    Ok(damaged
-        .into_iter()
-        .zip(repaired)
-        .map(|(index, data)| (shard_ranges[index].clone(), data))
-        .collect())
+    // Verify every solved shard against the state recorded in the record
+    // before returning it: the RS solve can mix parity rows from a different
+    // archive generation when the file carries two RR chunks whose plan and
+    // protected size happen to match.
+    let mut verified = Vec::with_capacity(repaired.len());
+    for (index, data) in damaged.into_iter().zip(repaired) {
+        if crc64_rar_state(&data) != first.data_shard_states[index] {
+            return Err(Error::BadRecoveryChunk);
+        }
+        verified.push((shard_ranges[index].clone(), data));
+    }
+    Ok(verified)
 }
 
 fn damaged_lookup(data_count: usize, damaged: &[usize]) -> Result<Vec<bool>> {
@@ -1981,6 +1989,30 @@ mod tests {
         }
 
         assert_eq!(repaired, prefix);
+    }
+
+    /// Two RR generations of the same protected size have the same plan, so
+    /// only the recorded data-shard states distinguish them. Mixing their
+    /// chunk streams must be rejected rather than solved into the wrong
+    /// bytes.
+    #[test]
+    fn rar5_inline_recovery_rejects_mismatched_generations() {
+        let prefix_a: Vec<u8> = (0..32_000).map(|index| (index * 13) as u8).collect();
+        let prefix_b: Vec<u8> = (0..32_000).map(|index| (index * 13 + 1) as u8).collect();
+        let mut recovery = build_structural_inline_recovery_data(&prefix_a, 20).unwrap();
+        recovery.extend_from_slice(&build_structural_inline_recovery_data(&prefix_b, 20).unwrap());
+        let mut damaged = prefix_a.clone();
+        damaged[1024..1300].fill(0xa5);
+
+        assert!(matches!(
+            repair_inline_recovery_prefix_shards(
+                prefix_a.len(),
+                &recovery,
+                |range| Ok(damaged[range].to_vec()),
+                None,
+            ),
+            Err(Error::BadRecoveryChunk)
+        ));
     }
 
     #[test]

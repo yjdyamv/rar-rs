@@ -1502,3 +1502,36 @@ fn buffered_read_enforces_the_dictionary_cap() {
     // The default cap (4 GiB) still reads it.
     assert_eq!(reader.read_entry(id).unwrap(), payload);
 }
+
+/// A truncated `.rev` (interrupted copy, partial download) must fail the
+/// rebuild with an error, not panic on an out-of-range slice.
+#[test]
+fn truncated_recovery_volume_errors_instead_of_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rv.rar");
+    let payload: Vec<u8> = (0..6 * 32 * 1024).map(|i| (i % 251) as u8).collect();
+    let mut writer = ArchiveWriter::create_with(
+        &base,
+        rar_rs::WriterOptions::new()
+            .volume_size(32 * 1024)
+            .recovery_volume_count(1),
+    )
+    .unwrap();
+    writer.add_bytes("a.bin", &payload, opts(0)).unwrap();
+    writer.finish().unwrap();
+
+    // Drop the first data volume so a rebuild is attempted, then truncate the
+    // recovery volume after its signature so the payload is short.
+    let volumes = rar_rs::discover_volumes(&base);
+    assert!(volumes.len() > 1, "expected a volume set");
+    std::fs::remove_file(&volumes[0]).unwrap();
+    let rev = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "rev"))
+        .expect("recovery volume");
+    let bytes = std::fs::read(&rev).unwrap();
+    std::fs::write(&rev, &bytes[..40]).unwrap();
+
+    assert!(rar_rs::rebuild_missing_volumes(&base).is_err());
+}

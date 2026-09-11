@@ -19,7 +19,7 @@ pub(crate) const RAR4_SIGNATURE: &[u8; 7] = b"Rar!\x1a\x07\x00";
 const MAIN_HEADER_SIZE: u16 = 13;
 
 /// Base file header size (before name, salt, ext-time).
-const FILE_HEADER_FIXED_SIZE: u16 = 32;
+pub(crate) const FILE_HEADER_FIXED_SIZE: u16 = 32;
 
 /// End-of-archive header size.
 const ENDARC_HEADER_SIZE: u16 = 7;

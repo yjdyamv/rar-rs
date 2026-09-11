@@ -1375,3 +1375,35 @@ fn rar4_batch_matches_sequential_bytes() {
         "batch (parallel-capable) must be byte-identical to sequential"
     );
 }
+
+/// Every emitted RAR4 volume must respect `-v`: the FILE_HEAD is written
+/// ahead of the segment, so it has to be part of the split budget.
+#[test]
+fn rar4_multivolume_volumes_do_not_exceed_the_requested_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("payload.bin");
+    let payload: Vec<u8> = (0..200_000u32).map(|index| (index % 251) as u8).collect();
+    std::fs::write(&src, &payload).unwrap();
+    let base = dir.path().join("mv.rar");
+    let volume_size = 8_000u64;
+    let mut archive = ArchiveWriter::create_with(
+        &base,
+        WriterOptions::new()
+            .compression(ArchiveVersion::V29)
+            .volume_size(volume_size),
+    )
+    .expect("create");
+    archive.add_path(&src, ewo(0)).expect("add");
+    archive.finish().expect("close");
+
+    let volumes = discover_volumes(&base);
+    assert!(volumes.len() > 1, "expected multiple volumes");
+    for path in &volumes {
+        let len = std::fs::metadata(path).unwrap().len();
+        assert!(
+            len <= volume_size,
+            "{} is {len} bytes, over the {volume_size}-byte volume size",
+            path.display()
+        );
+    }
+}

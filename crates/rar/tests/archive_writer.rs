@@ -610,6 +610,46 @@ fn overwriting_a_volume_set_retires_stale_recovery_volumes() {
     assert!(revs.is_empty(), "stale .rev left behind: {revs:?}");
 }
 
+/// A volume size that cannot fit a member header plus the end block must be
+/// rejected instead of spinning the splitter forever.
+#[test]
+fn tiny_volume_size_is_rejected_instead_of_looping() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("m.bin");
+    std::fs::write(&source, vec![7u8; 64 * 1024]).unwrap();
+    let level = EntryWriteOptions::new().compression_level(CompressionLevel::NORMAL);
+
+    // Smaller than a member header plus the end block: before the guard this
+    // rolled to a fresh volume forever (16 bytes cannot hold the next header
+    // either, so neither offset nor volume state ever changes).
+    let rar5 = dir.path().join("tiny5.rar");
+    let mut writer =
+        ArchiveWriter::create_with(&rar5, WriterOptions::new().volume_size(16)).unwrap();
+    assert!(writer.add_path(&source, level).is_err());
+    drop(writer);
+
+    let rar4 = dir.path().join("tiny4.rar");
+    let mut writer = ArchiveWriter::create_with(
+        &rar4,
+        WriterOptions::new()
+            .compression(ArchiveVersion::V29)
+            .volume_size(16),
+    )
+    .unwrap();
+    assert!(writer.add_path(&source, level).is_err());
+    drop(writer);
+
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name != "m.bin")
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "tiny-volume run left files: {leftovers:?}"
+    );
+}
+
 /// Part number parsed out of a `....partN.rar` staging name.
 fn part_number(path: &std::path::Path) -> u64 {
     path.file_name()

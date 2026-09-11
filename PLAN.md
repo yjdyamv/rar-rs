@@ -20,7 +20,7 @@
 
 ## 独立审计 2026-09-11（不看 backlog 的优先级）
 
-一次“假设没有 PLAN/issues”的健康与风险审计的结论。做法：全量测试 + 真跑五个 fuzz 目标 + 逐行读三条最危险路径（写、读/解、恢复/加密）。全量测试绿（lib 266、CLI 62、WinRAR 互操作 32），但发现的问题大多不在本文件里，而且比压缩性能更该先做。**[读码确认]** = 逐行读过源码；**[待复现]** = 尚未写成失败测试。**P0 已于 2026-09-11 修复（见各条“已修”）；P1/P2 待办。**
+一次“假设没有 PLAN/issues”的健康与风险审计的结论。做法：全量测试 + 真跑五个 fuzz 目标 + 逐行读三条最危险路径（写、读/解、恢复/加密）。全量测试绿（lib 266、CLI 62、WinRAR 互操作 32），但发现的问题大多不在本文件里，而且比压缩性能更该先做。**[读码确认]** = 逐行读过源码；**[待复现]** = 尚未写成失败测试。**P0/P1 已于 2026-09-11 修复（见各条“已修”）；P2 待办。**
 
 ### P0（现在做，成本 S，影响大）
 
@@ -33,11 +33,11 @@
 
 ### P1（静默产出坏档案 / 回归）
 
-- **RAR4 >4 GiB 成员被 `as u32` 静默截断进头** **[读码确认]**：`format/rar5/write/mod.rs:901,987`（单/多卷）与 `:3829,3904`（并行）把 `packed_size`/`unpacked_size`/`chunk_size` 直接 `as u32`；`add_file_rar4` 与 `validate_rar4_only` 都没有大小守卫。RAR4 尺寸字段本就是 32 位，正确行为是**拒绝**而不是写出头尺寸与载荷不符的归档。
-- **`-v` 过小 → 卷循环零进展、无限建文件** **[读码确认]**：RAR5 `write/mod.rs:2520-2524`（`bytes_for_data == 0` 时 `start_next_volume(); continue;` 且不推进 offset）、RAR4 `:958-969`（剩余 ≤7 时同样死循环）。目前只拒绝 `volume_size == 0`，`rar a -v50 big.rar` 会挂住并写满磁盘。修：最小卷大小校验。
-- **流式 RAR5 修复校验弱于其缓冲孪生** **[读码确认]**：`recovery/rar50.rs:645-650` 的交叉校验少了 `data_shard_states` 项（缓冲版 `:475-479` 有），且 `:748-752` 解完不按 `first.data_shard_states` 校验 CRC64 → 含两代 RR 块的文件可能解出“貌似合理但错误”的字节，写进 `fixed.*` 并报 Repaired（CLI 只用 `RarArchive::open` 验头）。修：2 行 + 解后校验。
-- **RAR4 多卷不预留 FILE_HEAD** **[读码确认]**：`write/mod.rs:966-967` 只减 7（EOA），`emit_segment` 写头+数据 → 每卷超出 `-v` 约一个头长，`-v` 契约失效。
-- **截断/损坏 `.rev` 使重建 panic** **[读码确认]**：`recovery/rev50.rs:266`（`data[16 + hsize..]`）与 `:298`（`&payload[start..start+want]`）无边界检查；`rar rc`、`rebuild_missing_volumes`、napi 均可达。
+- **RAR4 >4 GiB 成员被 `as u32` 静默截断进头** **[读码确认]**：`format/rar5/write/mod.rs:901,987`（单/多卷）与 `:3829,3904`（并行）把 `packed_size`/`unpacked_size`/`chunk_size` 直接 `as u32`；`add_file_rar4` 与 `validate_rar4_only` 都没有大小守卫。RAR4 尺寸字段本就是 32 位，正确行为是**拒绝**而不是写出头尺寸与载荷不符的归档。 **已修（2026-09-11）**：`format/rar4/create.rs::ensure_member_size` 在 `add_rar4_data` 入口拒绝 >u32::MAX，带单测。
+- **`-v` 过小 → 卷循环零进展、无限建文件** **[读码确认]**：RAR5 `write/mod.rs:2520-2524`（`bytes_for_data == 0` 时 `start_next_volume(); continue;` 且不推进 offset）、RAR4 `:958-969`（剩余 ≤7 时同样死循环）。目前只拒绝 `volume_size == 0`，`rar a -v50 big.rar` 会挂住并写满磁盘。修：最小卷大小校验。 **已修（2026-09-11）**：两处 split 循环加“一次 roll 无进展即报错”守卫（RAR5 `rolled` / RAR4 同样）；测试 `archive_writer::tiny_volume_size_is_rejected_instead_of_looping`（`volume_size(16)`）。
+- **流式 RAR5 修复校验弱于其缓冲孪生** **[读码确认]**：`recovery/rar50.rs:645-650` 的交叉校验少了 `data_shard_states` 项（缓冲版 `:475-479` 有），且 `:748-752` 解完不按 `first.data_shard_states` 校验 CRC64 → 含两代 RR 块的文件可能解出“貌似合理但错误”的字节，写进 `fixed.*` 并报 Repaired（CLI 只用 `RarArchive::open` 验头）。修：2 行 + 解后校验。 **已修（2026-09-11）**：流式路径补上 `data_shard_states` 交叉项，并在返回前按 `first.data_shard_states` 校验每个解出的 shard；单测 `rar5_inline_recovery_rejects_mismatched_generations`。
+- **RAR4 多卷不预留 FILE_HEAD** **[读码确认]**：`write/mod.rs:966-967` 只减 7（EOA），`emit_segment` 写头+数据 → 每卷超出 `-v` 约一个头长，`-v` 契约失效。 **已修（2026-09-11）**：split 预算改为 `7 + FILE_HEAD（32+名+盐+exttime，`-hp` 含加密块）`；测试 `rar4_create::rar4_multivolume_volumes_do_not_exceed_the_requested_size`。
+- **截断/损坏 `.rev` 使重建 panic** **[读码确认]**：`recovery/rev50.rs:266`（`data[16 + hsize..]`）与 `:298`（`&payload[start..start+want]`）无边界检查；`rar rc`、`rebuild_missing_volumes`、napi 均可达。 **已修（2026-09-11）**：`data[16+hsize..]` 与 `payload[start..start+want]` 改为 `get` + 报错；测试 `rar50_roundtrip::truncated_recovery_volume_errors_instead_of_panicking`。
 
 ### P2（健壮性 / 覆盖率 / 发布）
 

@@ -53,3 +53,28 @@ pub(crate) fn validate_rar4_only(options: Rar4WriteOptions) -> RarResult<()> {
     }
     Ok(())
 }
+
+/// Reject a member the RAR4 container cannot describe: its FILE_HEAD stores
+/// the packed and unpacked sizes in 32-bit fields, so a larger member would
+/// be written in full while its header declares a truncated length.
+pub(crate) fn ensure_member_size(unpacked: u64) -> RarResult<()> {
+    if unpacked > u32::MAX as u64 {
+        return Err(RarError::InvalidOption(format!(
+            "RAR4 members cannot exceed {} bytes (got {unpacked})",
+            u32::MAX
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_member_size;
+
+    #[test]
+    fn rar4_member_size_above_u32_is_rejected() {
+        assert!(ensure_member_size(0).is_ok());
+        assert!(ensure_member_size(u32::MAX as u64).is_ok());
+        assert!(ensure_member_size(u32::MAX as u64 + 1).is_err());
+    }
+}

@@ -264,7 +264,18 @@ pub fn rebuild_missing_volumes_with(
             )));
         }
         let hsize = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
-        rev_payloads.push(data[16 + hsize..].to_vec());
+        // A truncated `.rev` (interrupted copy, partial download) must be an
+        // error, not a slice past the buffer.
+        let Some(payload) = 16usize
+            .checked_add(hsize)
+            .and_then(|start| data.get(start..))
+        else {
+            return Err(RarError::Format(format!(
+                "{}: truncated recovery volume",
+                rev_path.display()
+            )));
+        };
+        rev_payloads.push(payload.to_vec());
     }
 
     let mut offset = 0u64;
@@ -295,7 +306,13 @@ pub fn rebuild_missing_volumes_with(
         let mut recovery_shards: Vec<(usize, &[u8])> = Vec::with_capacity(rec_count);
         for (k, payload) in rev_payloads.iter().enumerate() {
             let start = offset as usize;
-            recovery_shards.push((k, &payload[start..start + want]));
+            let Some(shard) = payload.get(start..start + want) else {
+                return Err(RarError::Format(format!(
+                    "recovery volume {} is shorter than the volume set it protects",
+                    k + 1
+                )));
+            };
+            recovery_shards.push((k, shard));
         }
         let all = reconstruct_data_shards(&data_refs, &recovery_shards)
             .map_err(|e| RarError::Format(format!("recovery volume reconstruction: {e}")))?;

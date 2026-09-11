@@ -703,6 +703,7 @@ impl RarArchive {
         mtime_ns: u32,
         comment: Option<Vec<u8>>,
     ) -> RarResult<()> {
+        crate::format::rar4::create::ensure_member_size(data.len() as u64)?;
         // Deferred solid-append: the member cannot be streamed after an
         // existing solid chain; buffer it and let close() repack the whole
         // archive (surviving members + these additions).
@@ -952,18 +953,38 @@ impl RarArchive {
                 let mut sent = 0u64;
                 let mut vol_index = self.write_ctx().current_volume - 1;
                 let mut split_before = false;
+                // Reserve the FILE_HEAD (fixed 32 bytes + name + salt +
+                // exttime, plus the `-hp` encryption block) before the data:
+                // it is written ahead of the segment, so budgeting only the
+                // 7-byte end block lets every volume exceed `-v` by a header.
+                let mut header_reserve =
+                    u64::from(crate::format::rar4::write::FILE_HEADER_FIXED_SIZE)
+                        + encoded_name.len() as u64
+                        + if salt.is_some() { 8 } else { 0 }
+                        + ext_time.as_ref().map_or(0, |extra| extra.len() as u64);
+                if self.header_encryption {
+                    header_reserve = 8 + header_reserve.next_multiple_of(16);
+                }
+                let needed = 7 + header_reserve;
                 while sent < packed_size {
-                    // Roll to a volume with room for at least 7 bytes (EOA).
+                    // Roll to a volume with room for the header and the EOA.
+                    let mut rolled = false;
                     loop {
                         let used = self.write_ctx().volume_bytes_written;
-                        if volume_size.saturating_sub(used) > 7 {
+                        if volume_size.saturating_sub(used) > needed {
                             break;
+                        }
+                        if rolled {
+                            return Err(RarError::InvalidOption(format!(
+                                "volume size {volume_size} is too small for a RAR4 member header"
+                            )));
                         }
                         self.start_next_volume()?;
                         vol_index = self.write_ctx().current_volume - 1;
+                        rolled = true;
                     }
                     let used = self.write_ctx().volume_bytes_written;
-                    let available = volume_size - used - 7;
+                    let available = volume_size - used - needed;
                     let chunk_size = (packed_size - sent).min(available);
                     let split_after = sent + chunk_size < packed_size;
                     let segment = &packed[sent as usize..(sent + chunk_size) as usize];
@@ -2460,6 +2481,10 @@ impl RarArchive {
         let mut offset = 0u64;
         let mut chunks = Vec::new();
         let mut is_first = true;
+        // Set when the previous iteration rolled to a new volume without
+        // emitting anything: a second empty start means the volume size
+        // cannot fit a header, so rolling can never make progress.
+        let mut rolled = false;
 
         // Encrypted members: every chunk header carries the encryption
         // extra record (WinRAR repeats it on every volume). Non-final
@@ -2519,10 +2544,17 @@ impl RarArchive {
 
             let bytes_for_data = remaining_vol.saturating_sub(hdr_size + eoa_size);
             if bytes_for_data == 0 {
+                if rolled {
+                    return Err(RarError::InvalidOption(format!(
+                        "volume size {volume_size} is too small for a member header ({hdr_size} bytes) plus the end block"
+                    )));
+                }
                 self.start_next_volume()?;
                 is_first = false;
+                rolled = true;
                 continue;
             }
+            rolled = false;
 
             let chunk_size = bytes_for_data.min(total_packed - offset);
             let is_last = offset + chunk_size >= total_packed;
