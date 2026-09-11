@@ -36,6 +36,11 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
                 "entry name {name:?} contains a ':' (drive/ADS) component"
             )));
         }
+        if component_is_ambiguous(comp) {
+            return Err(RarError::Security(format!(
+                "entry name {name:?} contains the platform-ambiguous component {comp:?}"
+            )));
+        }
         if !out.is_empty() {
             out.push('/');
         }
@@ -68,6 +73,46 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
 ///
 /// A target that merely moves sideways inside the root (`sub/../target.txt`)
 /// is accepted, matching the member-name policy in [`sanitize_archive_path`].
+/// Whether a path component means something different on this platform than
+/// it does on POSIX.
+///
+/// Windows normalizes paths in two ways the generic checks above cannot see:
+///
+/// - trailing dots and spaces are stripped, so `".. "` opens as `".."` and a
+///   name like `"report."` opens under a different name than it was written
+///   with;
+/// - the legacy device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+///   `LPT1`–`LPT9`) refer to devices regardless of any extension, so
+///   `"CON.txt"` writes to the console rather than to a file.
+///
+/// Both are host hazards rather than archive-format hazards, so the check is
+/// compiled for Windows only — POSIX accepts these names and nothing about
+/// them is ambiguous there.
+#[cfg(windows)]
+fn component_is_ambiguous(component: &str) -> bool {
+    if component.ends_with('.') || component.ends_with(' ') {
+        return true;
+    }
+    // `CON.txt` is the console just as `CON` is, so only the stem matters.
+    let stem = component.split('.').next().unwrap_or(component);
+    let stem = stem.to_ascii_uppercase();
+    let bytes = stem.as_bytes();
+    if matches!(bytes, b"CON" | b"PRN" | b"AUX" | b"NUL") {
+        return true;
+    }
+    bytes.len() == 4
+        && matches!(&bytes[..3], b"COM" | b"LPT")
+        && bytes[3].is_ascii_digit()
+        && bytes[3] != b'0'
+}
+
+/// POSIX has no device names and no trailing-dot normalization, so every
+/// component that survived the checks above is unambiguous.
+#[cfg(not(windows))]
+fn component_is_ambiguous(_component: &str) -> bool {
+    false
+}
+
 pub(crate) fn resolve_redirect_target(link_dir: &str, target: &str) -> RarResult<Vec<String>> {
     if target.is_empty() {
         return Err(RarError::Security("redirect target is empty".into()));
@@ -112,7 +157,7 @@ pub(crate) fn resolve_redirect_target(link_dir: &str, target: &str) -> RarResult
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_redirect_target, sanitize_archive_path};
+    use super::{component_is_ambiguous, resolve_redirect_target, sanitize_archive_path};
 
     #[test]
     fn sanitize_rejects_unsafe_member_names() {
@@ -124,6 +169,48 @@ mod tests {
         assert!(sanitize_archive_path("C:/x").is_err());
         // Redundant components are dropped, not rejected.
         assert_eq!(sanitize_archive_path("a/./b//c").unwrap(), "a/b/c");
+    }
+
+    /// On Windows these names either open a device or get normalized into a
+    /// different path than the one that was written, so they must be refused
+    /// rather than silently redirected.
+    #[test]
+    #[cfg(windows)]
+    fn windows_ambiguous_components_are_rejected() {
+        for component in [
+            // Trailing dots and spaces are stripped by Win32, so `".. "`
+            // opens as `".."`.
+            ".. ", "...", "report.", "name ",
+            // Legacy device names, with and without an extension.
+            "CON", "con", "NUL.txt", "aux", "COM1", "com9", "LPT1.log",
+        ] {
+            assert!(
+                component_is_ambiguous(component),
+                "{component:?} should be ambiguous on Windows"
+            );
+            assert!(
+                sanitize_archive_path(component).is_err(),
+                "{component:?} should be rejected"
+            );
+        }
+        // `con.txt.bak` is a device too (only the stem matters), so it is not
+        // in this list; `COM0` and `LPT10` are not reserved names.
+        for component in ["report", "COM", "COM0", "LPT10", "a.b"] {
+            assert!(
+                !component_is_ambiguous(component),
+                "{component:?} should be a plain name"
+            );
+        }
+    }
+
+    /// POSIX has neither device names nor trailing-dot normalization, so the
+    /// same names stay legal there — the check is platform-scoped on purpose.
+    #[test]
+    #[cfg(not(windows))]
+    fn posix_accepts_names_windows_would_reject() {
+        assert!(!component_is_ambiguous("CON"));
+        assert!(!component_is_ambiguous("report."));
+        assert_eq!(sanitize_archive_path("report.").unwrap(), "report.");
     }
 
     #[test]

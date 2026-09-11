@@ -28,7 +28,7 @@ use crate::format::rar5::write as rar5_write;
 use crate::format::rar5::{
     BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, BLOCK_TYPE_ARCHIVE_HEADER,
     BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
-    BLOCK_TYPE_SERVICE_HEADER, RAR5_SIGNATURE,
+    BLOCK_TYPE_SERVICE_HEADER, MAX_METADATA_BYTES, RAR5_SIGNATURE,
 };
 use crate::fs::atomic::{replace_file, temp_sibling_path};
 #[cfg(any(unix, windows))]
@@ -167,14 +167,15 @@ impl RarArchive {
         if qo.block_type != BLOCK_TYPE_SERVICE_HEADER {
             return Ok(false);
         }
-        // The QO payload must fit entirely in memory; cap at 64 MiB like
-        // the reader's other bounded buffers.
-        const QO_PAYLOAD_CAP: u64 = 64 * 1024 * 1024;
-        if qo.raw.data_size > QO_PAYLOAD_CAP {
+        // The QO payload must fit entirely in memory; a hand-made header can
+        // declare any size, so it is capped like every other service payload.
+        if qo.raw.data_size > MAX_METADATA_BYTES {
             return Ok(false);
         }
         stream.seek(SeekFrom::Start(qo.data_offset))?;
-        let mut payload = Vec::with_capacity(qo.raw.data_size as usize);
+        // Grown by the read rather than pre-sized: `take` bounds how much can
+        // arrive, so the declared size alone never drives an allocation.
+        let mut payload = Vec::new();
         stream
             .take(qo.raw.data_size)
             .read_to_end(&mut payload)
@@ -975,8 +976,29 @@ impl RarArchive {
                 .cloned()
                 .collect();
             for s in owned {
-                // Read the stream payload (possibly RAR5-compressed).
-                let mut packed = vec![0u8; s.data_size as usize];
+                // Read the stream payload (possibly RAR5-compressed). The
+                // size comes from the "STM" service header, so it is capped
+                // before it can drive an allocation, and narrowed with
+                // `try_from` so a 32-bit target reports an error instead of
+                // silently truncating the buffer.
+                if s.data_size > MAX_METADATA_BYTES {
+                    return Err(RarError::LimitExceeded {
+                        limit: MAX_METADATA_BYTES,
+                        context: format!(
+                            "NTFS stream {:?} declares {} packed bytes",
+                            s.name, s.data_size
+                        ),
+                    });
+                }
+                let declared =
+                    usize::try_from(s.data_size).map_err(|_| RarError::LimitExceeded {
+                        limit: MAX_METADATA_BYTES,
+                        context: format!(
+                            "NTFS stream {:?} packed size does not fit in usize",
+                            s.name
+                        ),
+                    })?;
+                let mut packed = vec![0u8; declared];
                 {
                     let stream = stream_mut(&mut self.stream)?;
                     stream.seek(SeekFrom::Start(s.data_offset))?;
@@ -1171,9 +1193,15 @@ impl RarArchive {
         if self.read_ctx().extract_options.safe_paths
             && let Some(parent) = dest_path.parent()
         {
-            fs::create_dir_all(parent)?;
+            // Containment is checked *before* the member's parent directory
+            // is created: a rejected name then leaves nothing behind, and the
+            // check cannot be satisfied by a directory we just created. The
+            // parent usually does not exist yet, so its nearest existing
+            // ancestor is canonicalized (resolving any symlink on the way)
+            // and the remaining plain components are appended verbatim.
+            fs::create_dir_all(dest_dir)?;
             let canon_dest = dest_dir.canonicalize()?;
-            let canon_parent = parent.canonicalize()?;
+            let canon_parent = Self::canonicalize_with_tail(parent, dest_dir);
             if !canon_parent.starts_with(&canon_dest) {
                 return Err(RarError::Security(format!(
                     "entry {name:?} resolves outside the destination directory"
@@ -1181,6 +1209,35 @@ impl RarArchive {
             }
         }
         Ok(dest_path)
+    }
+
+    /// Canonicalize `path` even when its last components do not exist yet:
+    /// the nearest existing ancestor is canonicalized — so a symlink placed
+    /// by an earlier member is resolved — and the remaining components are
+    /// appended verbatim, since they are already known to be plain names.
+    ///
+    /// `root` stops the upward walk; when it is reached without finding an
+    /// existing ancestor the unresolved path is returned, which then fails
+    /// the containment check instead of being trusted.
+    fn canonicalize_with_tail(path: &Path, root: &Path) -> PathBuf {
+        let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+        let mut cursor = path;
+        let mut resolved = loop {
+            if let Ok(canonical) = cursor.canonicalize() {
+                break canonical;
+            }
+            match (cursor.file_name(), cursor.parent()) {
+                (Some(component), Some(parent)) if cursor != root => {
+                    tail.push(component);
+                    cursor = parent;
+                }
+                _ => return path.to_path_buf(),
+            }
+        };
+        for component in tail.iter().rev() {
+            resolved.push(component);
+        }
+        resolved
     }
 
     /// Check if entry at `idx` is in a solid chain (is solid itself, or

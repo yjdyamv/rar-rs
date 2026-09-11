@@ -153,4 +153,18 @@ pub const ENCR_IV_SIZE: usize = 16;
 pub const ENCR_KEY_SIZE: usize = 32;
 pub const ENCR_PBKDF2_ITER_LOG: u8 = 15;
 
+// ── Resource Limits ───────────────────────────────────────────────────────
+
+/// Upper bound on a block's *declared* data size when the payload has to be
+/// buffered in memory to be interpreted (archive comment "CMT", NTFS stream
+/// "STM", quick-open "QO").
+///
+/// `read_block` only validates the header CRC, so a hand-made archive can
+/// declare an arbitrarily large data area — a buffer sized straight from that
+/// field would abort the process on allocation instead of returning an error.
+/// Service payloads are metadata, not member data (member data goes through
+/// the caller-configurable `ExtractOptions` limits), so one fixed ceiling
+/// covers all of them.
+pub const MAX_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+
 pub mod create;
