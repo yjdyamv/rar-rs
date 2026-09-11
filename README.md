@@ -88,7 +88,7 @@ let data = reader.read_entry(id)?;
 ```
 
 The crate is `rar-rs`; see `crates/rar` for the full API and
-[docs/ARCHITECTURE.html](docs/ARCHITECTURE.html) for advanced usage,
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for advanced usage,
 including solid archives, quick-open, BLAKE2sp, safe extraction,
 `open_quick`, cancellation, streaming repair, and multi-volume processing.
 
@@ -107,8 +107,7 @@ including solid archives, quick-open, BLAKE2sp, safe extraction,
 - **Streaming and safety:** bounded-memory extraction, path sanitization,
   atomic writes, and cooperative cancellation.
 
-The complete feature matrix lives in
-[docs/ARCHITECTURE.html](docs/ARCHITECTURE.html).
+The complete feature matrix lives in [PLAN.md](PLAN.md).
 
 ## Limitations
 
@@ -127,7 +126,7 @@ volumes. Solid and multithreaded compression are mutually exclusive; filter type
 Full index in **[docs/README.md](docs/README.md)**. Highlights:
 
 - **Format reference** — [visual diagram (HTML)](docs/FORMAT_RAR5_RAR7.html) (authoritative)
-- **Architecture & module layout** — [docs/ARCHITECTURE.html](docs/ARCHITECTURE.html)
+- **Architecture & module layout** — [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **CLI reference** — [docs/CLI.md](docs/CLI.md)
 - **Domain vocabulary** — [CONTEXT.md](CONTEXT.md)
 - **Roadmap / status** — [PLAN.md](PLAN.md) (also carries the hardening log)

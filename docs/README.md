@@ -18,7 +18,7 @@
 | 文档 | 内容 | 何时读 |
 |---|---|---|
 | [`FORMAT_RAR5_RAR7.html`](FORMAT_RAR5_RAR7.html) | 磁盘格式**权威参考**：块流、逐字节拆解、Extra、压缩/加密/多卷/恢复/Solid/RAR7、常量速查 | 需要格式细节 / 校验字节布局 |
-| [`ARCHITECTURE.html`](ARCHITECTURE.html) | 库 crate 模块地图、workspace、设计笔记（有界内存/安全提取/solid 链）、特性矩阵 | 理解分层 / 定位模块 |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 库 crate 模块地图（含 `raw` 门控标注）、workspace、设计笔记（有界内存 / 安全提取 / solid 与 MT / QO / 流式修复） | 理解分层 / 定位模块 |
 | [`CLI.md`](CLI.md) | `rar` / `unrar` 全量开关与命令参考 | 用 CLI / 实现新开关 |
 
 ## 决策记录（ADR 与规格）

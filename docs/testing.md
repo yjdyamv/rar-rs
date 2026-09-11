@@ -37,13 +37,17 @@ profile. `debug-assertions` and `overflow-checks` are still inherited from
 Measured on a 16-core host with `--all-features`, after the optimization above
 (per-test times from `cargo nextest run`):
 
+The numbers below are a snapshot measured on one host, not a contract. They are
+here to tell you *which* tests dominate, so you can filter — re-measure with
+`cargo nextest run` instead of updating this table when they drift.
+
 | Test | Time | What it does |
 |---|---|---|
-| `codec::modern::lzss_huff::mt_tests::matchless_fast_path_is_byte_identical` | ~109 s | 7 corpora (~89 MiB) × 9 (level, dictionary, variant) combos × 2 (fast path on/off): ~1.6 GiB encoded |
-| `...::mt_tests::cli_like_external_chunking_serial_chain` | ~22 s | three 14 MiB members, chunked the way `add_file` does |
-| `...::mt_tests::sequential_solid_chain_random_shared_blocks` | ~20 s | three 13 MiB members against a 16 MiB dictionary |
+| `codec::modern::lzss_huff::mt_tests::matchless_fast_path_is_byte_identical` | ~89 s | 7 corpora (~89 MiB) × 9 (level, dictionary, variant) combos × 2 (fast path on/off): ~1.6 GiB encoded |
+| `...::mt_tests::cli_like_external_chunking_serial_chain` | ~20 s | three 14 MiB members, chunked the way `add_file` does |
+| `...::mt_tests::sequential_solid_chain_random_shared_blocks` | ~18 s | three 13 MiB members against a 16 MiB dictionary |
 | `rar50_roundtrip` (3 tests) | ~22 s | large-file batch, parallel extraction, per-archive thread counts |
-| everything else (≈585 tests) | ~40 s | |
+| everything else | ~40 s | |
 
 About 80% of the wall clock is three tests. They are **not** shrunk and **not**
 marked `#[ignore]`, on purpose: each one guards a regression that already

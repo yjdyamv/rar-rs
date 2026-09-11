@@ -47,6 +47,8 @@ This keeps `rar_rs::rar50::headers::FileHeader` and
 `rar_rs::rar50::FileHeader` source-compatible while internal consumers migrate to
 `crate::model`.
 
+> 2026-09：这两个重导出路径现在只在 `raw` feature 下可达，见 ADR 0003 决策 3。
+
 ### 2. Keep format-specific wire structures in format modules
 
 `RawBlock`, `BlockMeta`, `ArchiveHeader`, header parsing, and serialization stay
