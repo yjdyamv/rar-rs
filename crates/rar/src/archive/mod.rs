@@ -141,6 +141,11 @@ pub(crate) struct WriteState {
     /// Persistent RAR4 LZSS encoder for solid archives; the sliding window
     /// and Huffman table state carry across the members of a solid run.
     pub rar4_solid_encoder: Option<crate::codec::legacy::rar29_encoder::Unpack29Encoder>,
+    /// The legacy member `unp_ver` the RAR4 write pipeline emits for this
+    /// archive: 29 (RAR29, default) when the archive targets `v29`/`v36`,
+    /// 20 for `v20`, 15 for `v15`. Drives member-codec dispatch in
+    /// `add_rar4_data` and stamps every FILE_HEAD it writes.
+    pub rar4_unp_ver: u8,
     /// True once the current RAR4 solid run has emitted a member, so the next
     /// compressed member is flagged as a chain continuation (`FHD_SOLID`).
     pub rar4_solid_run_has_member: bool,
@@ -223,6 +228,7 @@ impl Default for WriteState {
             last_solid_ext: None,
             encoder_state: None,
             rar4_solid_encoder: None,
+            rar4_unp_ver: 29,
             rar4_solid_run_has_member: false,
             rar4_append_rr_sectors: None,
             rar4_solid_append: false,
@@ -940,6 +946,20 @@ impl RarArchive {
         opts.validate()?;
         let is_rar4 = opts.compression.is_legacy();
         if is_rar4 {
+            // The v15/v20 writers are non-solid and unencrypted (Phase 1,
+            // mirroring the rars legacy writers' feature set at this level).
+            let old_codec = opts.compression == crate::version::ArchiveVersion::V15
+                || opts.compression == crate::version::ArchiveVersion::V20;
+            if old_codec && opts.solid {
+                return Err(RarError::Unsupported(
+                    "solid archives are not supported for RAR 1.5/2.x members yet".into(),
+                ));
+            }
+            if old_codec && (opts.password.is_some() || opts.encrypt_headers) {
+                return Err(RarError::Unsupported(
+                    "password encryption is not supported for RAR 1.5/2.x members yet".into(),
+                ));
+            }
             // RAR4 does not support these RAR5-specific features.
             if opts.quick_open {
                 return Err(RarError::Unsupported(
@@ -1031,6 +1051,11 @@ impl RarArchive {
                 last_solid_ext: None,
                 encoder_state: None,
                 rar4_solid_encoder: None,
+                rar4_unp_ver: if is_rar4 {
+                    opts.compression.to_unp_ver().unwrap_or(29)
+                } else {
+                    0
+                },
                 rar4_solid_run_has_member: false,
                 rar4_append_rr_sectors: None,
                 rar4_solid_append: false,

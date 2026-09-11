@@ -1230,6 +1230,112 @@ fn rar4_rejects_redirect_members() {
     assert!(err.to_string().contains("aborted"), "got: {err}");
 }
 
+/// The legacy pre-RAR3 writers (v15 RAR 1.5 adaptive-Huffman, v20 RAR 2.x
+/// LZSS+Huffman with audio traps) produce members the library's own
+/// decoders round-trip byte-for-byte, and read-back reports the requested
+/// member version per member.
+#[test]
+fn old_format_writers_roundtrip_at_every_level() {
+    let audio_signal: Vec<u8> = {
+        let mut v = 0u8;
+        (0..8_000u32)
+            .map(|i| {
+                v = v.wrapping_add(((i % 17) * 3 + 1) as u8);
+                v
+            })
+            .collect()
+    };
+    for version in [rar_rs::ArchiveVersion::V15, rar_rs::ArchiveVersion::V20] {
+        for level in 1..=5u8 {
+            let dir = make_temp_dir();
+            let path = dir.path().join(format!("roundtrip-{version}-m{level}.rar"));
+            let payloads: Vec<(&str, Vec<u8>)> = vec![
+                ("repeat.txt", support::compressible(7, 32_000)),
+                (
+                    "random.bin",
+                    (0..4_096u32)
+                        .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
+                        .collect(),
+                ),
+                ("audio.bin", audio_signal.clone()),
+            ];
+            {
+                let mut rar = ArchiveWriter::create_with(
+                    &path,
+                    rar_rs::WriterOptions::default().compression(version),
+                )
+                .unwrap_or_else(|e| panic!("create {version} m{level}: {e}"));
+                let opts = rar_rs::EntryWriteOptions::new()
+                    .compression_level(rar_rs::CompressionLevel::try_from(level).unwrap());
+                for (name, data) in &payloads {
+                    rar.add_bytes(name, data, opts)
+                        .unwrap_or_else(|e| panic!("add {version} m{level} {name}: {e}"));
+                }
+                rar.finish().unwrap();
+            }
+            let mut reader = ArchiveReader::open(&path)
+                .unwrap_or_else(|e| panic!("open {version} m{level}: {e}"));
+            let entries: Vec<_> = reader.entries().collect();
+            assert_eq!(entries.len(), payloads.len(), "{version} m{level}");
+            entries.iter().for_each(|entry| {
+                assert_eq!(
+                    entry.version(),
+                    version,
+                    "{version} m{level} {}",
+                    entry.name()
+                );
+            });
+            // The repetitive text member must actually compress.
+            assert_ne!(entries[0].metadata().method(), 0, "{version} m{level}");
+            let ids: Vec<_> = entries.into_iter().map(|e| e.id()).collect();
+            for (i, (name, expected)) in payloads.iter().enumerate() {
+                let got = reader
+                    .read_entry(ids[i])
+                    .unwrap_or_else(|e| panic!("read {version} m{level} {name}: {e}"));
+                assert_eq!(got, *expected, "{version} m{level} {name}");
+            }
+        }
+    }
+}
+
+/// Phase 1 keeps the v15/v20 writers non-solid and unencrypted; asking for
+/// either is refused at create/open time rather than silently downgraded.
+#[test]
+fn old_format_solid_and_password_are_rejected() {
+    for version in [rar_rs::ArchiveVersion::V15, rar_rs::ArchiveVersion::V20] {
+        let dir = make_temp_dir();
+        let solid = dir.path().join(format!("{version}-solid.rar"));
+        let err = match ArchiveWriter::create_with(
+            &solid,
+            rar_rs::WriterOptions::default()
+                .compression(version)
+                .solid_mode(rar_rs::SolidMode::Continuous),
+        ) {
+            Ok(_) => panic!("{version} solid should have been rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, rar_rs::RarError::Unsupported(_)),
+            "{version} solid: {err}"
+        );
+
+        let encrypted = dir.path().join(format!("{version}-pw.rar"));
+        let err = match ArchiveWriter::create_with(
+            &encrypted,
+            rar_rs::WriterOptions::default()
+                .compression(version)
+                .password("secret"),
+        ) {
+            Ok(_) => panic!("{version} password should have been rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, rar_rs::RarError::Unsupported(_)),
+            "{version} password: {err}"
+        );
+    }
+}
+
 /// WinRAR zero-pads volume part numbers to the digit count of the total
 /// volume count (part01..part15). The writer now emits the same padding
 /// for sets of 10+ volumes, and discovery, `.rev` naming and rebuild

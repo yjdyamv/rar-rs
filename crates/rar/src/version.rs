@@ -7,8 +7,8 @@
 //!
 //! | Version | Codec                        | Container          | Writable |
 //! |---------|------------------------------|--------------------|----------|
-//! | `v15`   | RAR15 (adaptive-Huffman LZ)  | RAR 1.5–4.x        | —        |
-//! | `v20`   | RAR20 (LZSS + Huffman)       | RAR 1.5–4.x        | —        |
+//! | `v15`   | RAR15 (adaptive-Huffman LZ)  | RAR 1.5–4.x        | yes      |
+//! | `v20`   | RAR20 (LZSS + Huffman)       | RAR 1.5–4.x        | yes      |
 //! | `v26`   | RAR20 (LZSS + Huffman)       | RAR 1.5–4.x        | —        |
 //! | `v29`   | RAR29 (LZSS + Huffman + PPMd)| RAR 1.5–4.x        | yes      |
 //! | `v36`   | RAR29 (same codec as `v29`)  | RAR 1.5–4.x        | —        |
@@ -21,9 +21,13 @@
 //! 8-byte-signature RAR5 container. Readers report a version per member
 //! ([`crate::ArchiveEntry::version`]); writers select the version on the
 //! writer options ([`crate::WriterOptions::compression`] /
-//! `CreateOptions::compression`). Only `v29`, `v50` and `v70` are
-//! writable: the v15/v20/v26/v36 readers exist for interoperability, and
-//! writers reject them.
+//! `CreateOptions::compression`). `v15`, `v20`, `v29`, `v50` and `v70` are
+//! writable; `v26` (same RAR20 codec as `v20`, read-only) and `v36` (same
+//! RAR29 codec as `v29`, read-only) exist for interoperability, and the
+//! legacy writers only produce their upstream equivalents (`v20` for v26,
+//! `v29` for v36), matching how WinRAR's newer writable profiles map onto
+//! the oldest repack format. The `v15`/`v20` writers produce non-solid
+//! archives without member encryption (2026-09, Phase 1).
 
 /// A member compression version in the archive version table.
 ///
@@ -97,11 +101,29 @@ impl ArchiveVersion {
         )
     }
 
-    /// Whether the version is writable with the current writers. Only
-    /// `v29` (legacy RAR4 pipeline), `v50` and `v70` (RAR5 pipeline) can
-    /// be produced; the v15/v20/v26/v36 readers exist for interop only.
+    /// Whether the version is writable with the current writers: `v15`
+    /// (legacy RAR 1.5 adaptive-Huffman writer), `v20` (legacy RAR 2.x
+    /// writer), `v29` (legacy RAR4 pipeline), `v50` and `v70` (RAR5
+    /// pipeline). `v26`/`v36` remain read-only: their codecs are identical
+    /// to `v20`/`v29` and writers emit the upstream base version instead.
     pub const fn is_writable(self) -> bool {
-        matches!(self, Self::V29 | Self::V50 | Self::V70)
+        matches!(
+            self,
+            Self::V15 | Self::V20 | Self::V29 | Self::V50 | Self::V70
+        )
+    }
+
+    /// Map the version to its legacy member `unp_ver` field value (`15`/
+    /// `20`/`26`/`29`/`36`), or `None` for the RAR5 family versions.
+    pub const fn to_unp_ver(self) -> Option<u8> {
+        match self {
+            ArchiveVersion::V15 => Some(15),
+            ArchiveVersion::V20 => Some(20),
+            ArchiveVersion::V26 => Some(26),
+            ArchiveVersion::V29 => Some(29),
+            ArchiveVersion::V36 => Some(36),
+            ArchiveVersion::V50 | ArchiveVersion::V70 => None,
+        }
     }
 
     /// Whether this version selects the RAR7 (v70) extended distance code
@@ -175,21 +197,34 @@ mod tests {
     }
 
     #[test]
-    fn only_v29_v50_v70_are_writable() {
+    fn only_v26_and_v36_are_read_only() {
         for version in [
+            ArchiveVersion::V15,
+            ArchiveVersion::V20,
             ArchiveVersion::V29,
             ArchiveVersion::V50,
             ArchiveVersion::V70,
         ] {
             assert!(version.is_writable(), "{version}");
         }
-        for version in [
-            ArchiveVersion::V15,
-            ArchiveVersion::V20,
-            ArchiveVersion::V26,
-            ArchiveVersion::V36,
-        ] {
+        for version in [ArchiveVersion::V26, ArchiveVersion::V36] {
             assert!(!version.is_writable(), "{version}");
+        }
+    }
+
+    #[test]
+    fn to_unp_ver_maps_the_legacy_versions_back() {
+        for (version, unp_ver) in [
+            (ArchiveVersion::V15, 15),
+            (ArchiveVersion::V20, 20),
+            (ArchiveVersion::V26, 26),
+            (ArchiveVersion::V29, 29),
+            (ArchiveVersion::V36, 36),
+        ] {
+            assert_eq!(version.to_unp_ver(), Some(unp_ver));
+        }
+        for version in [ArchiveVersion::V50, ArchiveVersion::V70] {
+            assert_eq!(version.to_unp_ver(), None);
         }
     }
 

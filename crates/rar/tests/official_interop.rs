@@ -9,6 +9,47 @@ use rar_rs::{CompressionLevel, EntryWriteOptions};
 
 /// Official UNRAR (e.g. /home/yuan/下载/rar/unrar) validates archives
 /// produced by rar-rs with every new feature combination.
+/// The official UnRAR console tools still decode RAR 1.5/2.x members (their
+/// decoder table keeps unpack versions 15..36), so an env-gated `unrar t`
+/// validates the legacy writers end-to-end. Gated on SA_OFFICIAL_UNRAR like
+/// [`official_unrar_validates_our_feature_archives`].
+#[test]
+fn official_unrar_validates_old_format_writers() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return, // skipped unless the interop script sets it
+    };
+    for version in [rar_rs::ArchiveVersion::V15, rar_rs::ArchiveVersion::V20] {
+        let dir = make_temp_dir();
+        let path = dir.path().join(format!("legacy-{version}.rar"));
+        {
+            let mut rar = rar_rs::ArchiveWriter::create_with(
+                &path,
+                rar_rs::WriterOptions::default().compression(version),
+            )
+            .unwrap_or_else(|e| panic!("create {version}: {e}"));
+            let opts = rar_rs::EntryWriteOptions::new()
+                .compression_level(rar_rs::CompressionLevel::try_from(5u8).unwrap());
+            rar.add_bytes(
+                "text.txt",
+                &b"legacy writer unrar interop ".repeat(4000),
+                opts,
+            )
+            .unwrap();
+            let bin: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+            rar.add_bytes("bin.dat", &bin, opts).unwrap();
+            rar.finish().unwrap();
+        }
+        let status = std::process::Command::new(&unrar)
+            .arg("t")
+            .arg("-idq")
+            .arg(path.as_os_str())
+            .status()
+            .expect("spawn unrar");
+        assert!(status.success(), "unrar t {version} failed");
+    }
+}
+
 #[test]
 #[allow(clippy::type_complexity)]
 fn official_unrar_validates_our_feature_archives() {

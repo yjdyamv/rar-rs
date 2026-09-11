@@ -133,13 +133,14 @@ impl CreateOptions {
     }
 }
 
-/// Refuse archive versions the writer cannot produce (`v15`/`v20`/`v26`/
-/// `v36` read backward for interoperability only). Shared by `CreateOptions`
-/// and `WriterOptions` so both surfaces report the same error text.
+/// Refuse archive versions the writer cannot produce. `v26` and `v36` are
+/// read-only (their codecs match `v20`/`v29` and writers emit the base
+/// version); shared by `CreateOptions` and `WriterOptions` so both surfaces
+/// report the same error text.
 pub(crate) fn require_writable_version(version: ArchiveVersion) -> RarResult<()> {
     if !version.is_writable() {
         return Err(RarError::InvalidOption(format!(
-            "only versions v29, v50 and v70 are writable, got {version}"
+            "only versions v15, v20, v29, v50 and v70 are writable, got {version}"
         )));
     }
     Ok(())

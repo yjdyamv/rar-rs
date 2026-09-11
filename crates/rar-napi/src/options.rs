@@ -78,15 +78,17 @@ impl CreateArchiveOptions {
       "rar5" => None,
       "rar7" => Some(rar_rs::ArchiveVersion::V70),
       "rar4" => Some(rar_rs::ArchiveVersion::V29),
+      "rar2" => Some(rar_rs::ArchiveVersion::V20),
+      "rar15" => Some(rar_rs::ArchiveVersion::V15),
       other => {
         return Err(Error::new(
           Status::InvalidArg,
-          format!("unknown format: `{other}` (expected rar5, rar7, or rar4)"),
+          format!("unknown format: `{other}` (expected rar5, rar7, rar4, rar2, or rar15)"),
         ));
       }
     };
     let dictionary = match self.dict_size.as_deref() {
-      Some(_) if format == "rar4" => {
+      Some(_) if format == "rar4" || format == "rar2" || format == "rar15" => {
         return Err(Error::new(
           Status::InvalidArg,
           "RAR4 archives do not support configurable dictionary sizes",

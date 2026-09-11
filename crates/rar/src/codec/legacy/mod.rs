@@ -3,6 +3,8 @@
 
 pub(crate) mod ppmd;
 pub(crate) mod rar15;
+pub(crate) mod rar15_encoder;
 pub(crate) mod rar20;
+pub(crate) mod rar20_encoder;
 pub(crate) mod rar29;
 pub(crate) mod rar29_encoder;

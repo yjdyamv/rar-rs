@@ -916,12 +916,7 @@ mod tests {
 
     #[test]
     fn read_only_versions_are_rejected_on_the_writer() {
-        for version in [
-            ArchiveVersion::V15,
-            ArchiveVersion::V20,
-            ArchiveVersion::V26,
-            ArchiveVersion::V36,
-        ] {
+        for version in [ArchiveVersion::V26, ArchiveVersion::V36] {
             assert!(
                 WriterOptions::new()
                     .compression(version)
@@ -932,6 +927,8 @@ mod tests {
         }
         // Writable versions pass validation with default options.
         for version in [
+            ArchiveVersion::V15,
+            ArchiveVersion::V20,
             ArchiveVersion::V29,
             ArchiveVersion::V50,
             ArchiveVersion::V70,
