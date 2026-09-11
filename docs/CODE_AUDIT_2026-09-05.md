@@ -109,6 +109,8 @@ codec/
 - `input.rs` 实际主要处理 `rarfiles.lst`，可在独立重构中改名为 `rarfiles.rs`。
 - `.scratch` 同时被声明为本地忽略目录和已跟踪计划来源，必须明确其正式身份。
 - 建议增加 `CHANGELOG.md`、`SECURITY.md`、贡献指南，并将完成的实施日志从 `PLAN.md` 迁入历史文档。
+  （2026-09 后记：`SECURITY.md` 已补；`CHANGELOG.md` 曾补上但随后删除 —— 它的版本序列与 crate
+  版本不同源且与 `PLAN.md` 重复维护，改动记录已并入 `PLAN.md` 的「加固记录」一节。）
 
 ## CI 与测试基线
 

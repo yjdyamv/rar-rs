@@ -124,9 +124,9 @@ Full index in **[docs/README.md](docs/README.md)**. Highlights:
 - **Architecture & module layout** — [docs/ARCHITECTURE.html](docs/ARCHITECTURE.html)
 - **CLI reference** — [docs/CLI.md](docs/CLI.md)
 - **Domain vocabulary** — [CONTEXT.md](CONTEXT.md)
-- **Roadmap / status** — [PLAN.md](PLAN.md)
+- **Roadmap / status** — [PLAN.md](PLAN.md) (also carries the hardening log)
 - **Security policy** — [SECURITY.md](SECURITY.md)
-- **Release history** — [CHANGELOG.md](CHANGELOG.md)
+- **Testing & suite cost** — [docs/testing.md](docs/testing.md)
 - **Code audit baseline** — [docs/CODE_AUDIT_2026-09-05.md](docs/CODE_AUDIT_2026-09-05.md)
 
 ## Legal

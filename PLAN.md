@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-完成一项勾掉一项。本文件只留**结论**与**警告**；验证过程和工程细节见 git 历史（旧版详单：`git show d9201cf:PLAN.md`）。
+完成一项勾掉一项。本文件只留**结论**与**警告**；验证过程和工程细节见 git 历史（旧版详单：`git show d9201cf:PLAN.md`）。已落地的加固记在文末「加固记录」，不再单独维护 CHANGELOG。
 
 ## 现状
 
@@ -63,6 +63,26 @@
 
 - RAR 1.3/1.4（`RE~^` 族）：rars 支持但本实现不追（夹具稀少、DOS 时代）
 - unrar `s`（转 SFX）：官方 UnRAR 7.23 无此命令，非差距
+
+## 加固记录（原 CHANGELOG，2026-09 迁入本文件）
+
+`CHANGELOG.md` 已删除：它的版本序列与 crate 版本不同源，且与本文件重复维护、容易漂移。
+改动记录归位到**本文件的这一节（结论级）+ git 历史（过程级）**。
+
+- **不可压缩采样预检**：不可压缩输入（媒体 / 归档 / 随机数据）采样编码后直接落 STORE，不再跑完整
+  匹配查找；长距离重复兜底保证「看似随机、彼此却是远端副本」的文件仍被压缩。
+- **solid 链跨成员 / 跨窗口加固**：成员边界丢弃逐帧 hash-chain 树，保留窗口尾、重复缓存与长距离
+  历史；修掉 16 MiB 字典下第 3 个及以后成员丢失共享窗口的问题。
+- **重定向目标包含性**：symlink / junction 的 target 是归档可控数据，按安全路径策略做词法包含性
+  校验（拒绝绝对路径、盘符 / UNC、爬出根目录的 `..`）；Windows 侧改用 `symlink_file` /
+  `symlink_dir` 实际创建，不再一律 `Unsupported`。
+- **服务块声明大小上限**：CMT 注释 / STM 交替数据流 / QO 记录共用 64 MiB 上限，`as usize` 换
+  `usize::try_from`；`ExtractOptions::max_metadata_bytes`（napi `maxMetadataBytes`）可上调或取消。
+  背景：头里的 `data_size` 只被 CRC 保护，而 CRC 是打包方自算的，不是防篡改。
+- **目标目录包含性先于建目录**：被拒绝的成员名不再留下空目录，判定也不再依赖刚创建的目录。
+- **Windows 歧义名**：拒绝尾点 / 尾空格分量与保留设备名（CON / PRN / AUX / NUL / COM1-9 /
+  LPT1-9，带扩展名也算），仅 Windows 编译进。
+- **分块读取限流**：`VolumeReaders` 改为边读边长 + `take`，与另两个 `ChunkReader` 实现一致。
 
 ## 已完成（要点）
 
