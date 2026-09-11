@@ -91,8 +91,14 @@ impl VolumeReaders {
         }
         let f = file.as_mut().unwrap();
         f.seek(SeekFrom::Start(offset))?;
-        let mut buf = vec![0u8; len as usize];
-        f.read_exact(&mut buf)?;
+        // Grown by the read rather than pre-sized, like the other
+        // `ChunkReader` implementations: `len` is a declared size, so it must
+        // not drive an allocation on its own, and `take` bounds how much can
+        // actually arrive. `try_from` keeps 32-bit targets honest.
+        let len = usize::try_from(len)
+            .map_err(|_| RarError::Format("chunk size does not fit in usize".into()))?;
+        let mut buf = Vec::new();
+        f.take(len as u64).read_to_end(&mut buf)?;
         Ok(buf)
     }
 }
