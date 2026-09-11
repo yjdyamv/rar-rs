@@ -141,9 +141,12 @@ idle. CLI head-to-head at m3/mt8 (user default):
 | mixed | 912 ms | 369 ms | 10492341 | 10509703 |
 
 Library core (encode_with_auto_x86_filter direct): dll mt8 2638 -> 1329 ms
-(-50%); CLI adds ~1 s of overhead (batch-wave + delta attempt 129 ms +
-blake2 + container — the nesting of the wave pool and the MT pool is the
-largest chunk, unaccounted). MT divergence on the dll grew from +2% to
+(-50%); the CLI added ~1 s of overhead in this 2026-09-01 run (batch-wave +
+delta attempt 129 ms + blake2 + container — the nesting of the wave pool and
+the MT pool was the suspected largest chunk). **That ~1 s was later
+disproven** (2026-09-07; re-measured 2026-09-11 in issue 09): the wave pool
+and the MT pool are the same cached pool, and the CLI tracks the library
+within ~5-15%. MT divergence on the dll grew from +2% to
 +3.3% (mt8 vs mt1) with the adaptive slices; a denser LR (step 8) recovered
 only 2 KB of the +65 KB — the divergence is the slice-boundary parse
 structure, not the LR sampling.
@@ -151,7 +154,7 @@ structure, not the LR sampling.
 Next levers: the per-byte parse (collect 5.3 s of the 8.4 s seq time, the
 DRAM-bound BT4 descent) — a cache-resident near-window chain finder with
 the tree as the far fallback is the designed-but-unbuilt option (see issue
-09); the CLI's ~1 s overhead is **resolved** (2026-09-07, see issue 11) —
+09); the CLI's ~1 s overhead is **resolved** (2026-09-07, see issue 09) —
 CLI ≈ library within ~5%, the residue is pipeline cost every caller pays.
 Issue 11's pipelined first-step value-carry (BT4 descent, DRAM latency) is
 also **landed** (2026-09-07): software-pipelined `seed_for` +
@@ -276,7 +279,7 @@ binaries (~2-3x slower single-thread) and the ultra-repetitive-text ratio.
 - dll 单线程解析 ~6-8 s vs WinRAR 1.8 s（4.7×），mt8 7.5×；issue 09（缓存驻留近窗 finder 未建）
 - xml m2/m3 +1.5%（解析差距，非块开销）
 - text64 MT 片间分歧（6554 vs seq 6058）
-- CLI ~1 s 未记账开销（batch wave/MT 池嵌套）——**2026-09-07 实测不成立**（见 issue 11）：CLI ≈ 库 ≈ raw codec +0.3-0.5 s 管线开销（24.5 MB x86 m3/mt8），CLI 与库写作路径相差 ~3-5%，剩余是每个调用方都付的容器/哈希开销；wave 与内层 MT 共用同一缓存池，无嵌套 spawn
+- CLI ~1 s 未记账开销（batch wave/MT 池嵌套）——**2026-09-07 实测不成立**（见 issue 09）：CLI ≈ 库 ≈ raw codec +0.3-0.5 s 管线开销（24.5 MB x86 m3/mt8），CLI 与库写作路径相差 ~3-5%，剩余是每个调用方都付的容器/哈希开销；CLI 口径（`-mt` 设进程全局）下 wave 与内层 MT 共用同一缓存池，无嵌套 spawn（仅 `WriterOptions::threads` 每归档覆盖且异于全局时会配对两个池，属库用法）。**2026-09-11 复测**（64 MiB 文本 / 5.7 MiB DLL / 256×256 KiB 批，m3 -mt8）：CLI−writer ~70-75 ms，writer−裸 codec ~50-260 ms，256 文件批 mt8 ~0.62 s vs mt1 ~1.9 s（3x，字节同），覆盖已存归档 ~0.63 s
 
 注：两代头对头表的 dll mt1（6.5 s vs 8.09 s）不可直接比——测法不同（库核心直调 vs 修好
-后的 CLI），且 CLI 修复后测的是含 ~1 s CLI 开销的口径。上表可比行仅限同口径数字。
+后的 CLI），且 CLI 修复后测的是当时以为含 ~1 s CLI 开销的口径（2026-09-11 复测该开销不成立）。上表可比行仅限同口径数字。

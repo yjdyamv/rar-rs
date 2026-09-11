@@ -83,8 +83,9 @@ Verdict: the BT4 descent is genuinely DRAM-latency-bound (12 M queries x
 faster and is likely hand-assembly-tuned; matching it in pure Rust needs
 software pipelining (batch several positions' descents so one position's
 DRAM read overlaps another's compute) — the designed but unbuilt next lever.
-Also on the list: the CLI's ~1 s overhead over the library core (the
-batch-wave + nested MT pool nesting), which is pure waste.
+Also on the list at the time was a claimed ~1 s CLI overhead over the library
+core (batch-wave + nested MT pool nesting); that was **disproven on
+2026-09-07** and re-measured on 2026-09-11 — see the last section.
 
 ## 2026-09-08: son-pair prefetch extension — measured negative, keeps the
 ## BT4 ceiling (issue 11 already killed the interleaved batch on the
@@ -116,3 +117,30 @@ step reduction requires the tradeoffs settled in the issue 13 verdict
 (MT-only low-step search became the MT default; `RAR_RS_FAR_BAND` is a
 dormant seq opt-in) — neither is byte-identical, so both are explicit-tradeoff
 options.
+
+## 2026-09-11: CLI orchestration overhead re-measured — not reproducible
+
+The ~1 s CLI overhead claimed above does not reproduce. Release build,
+16-core host, three runs each (`clioverhead` = raw codec vs full typed
+writer; `rar` = the whole process), m3, `-mt8` unless noted:
+
+| workload | codec | writer | CLI | CLI - writer |
+|---|---|---|---|---|
+| 64 MiB text | ~200 ms | ~260 ms | ~328 ms | ~70 ms |
+| 5.7 MiB DLL (auto x86 filter) | ~320 ms | ~580 ms | ~655 ms | ~75 ms |
+
+Extra checks: 256 x 256 KiB text files (many batch waves) m3 mt8 ~620 ms vs
+mt1 ~1900 ms (clean 3x scaling, identical packed size); re-adding the same
+set over the existing archive ~630 ms (the editor/append path adds nothing
+measurable); a 256-file solid chain gives mt8 ~= mt1 (~4.15 s) — structural
+(issue 06), not waste.
+
+The CLI tracks the typed writer within ~15%, and the wave pool and the
+inner MT pool are the same cached pool (`compression_pool_for(threads)` ==
+`compression_pool()` once `-mt` sets the global), so there is no nested
+spawn. An archive-local `WriterOptions::threads` override that differs from
+the global would still pair `compression_pool_for(override)` with the
+default `compression_pool()`; that is a library-only configuration (the CLI
+always sets the global), so it is not part of this claim. The residue over
+the raw codec is container/hash/pipeline cost every caller pays. No fix is
+warranted; the map verdict (2026-09-07) stands.
