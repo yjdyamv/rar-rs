@@ -27,9 +27,11 @@
   已收敛，文件级拆分没做。
 - **双 options 面**：`WriterOptions`（私有字段 builder，完整校验）与 `CreateOptions`（公开字段，弱校验）
   并存且都从 `lib.rs` 导出；RAR4 规则已共用，结构仍在。
-- **低层 `codec` / `crypto` 公开面未收敛**：两者是完全 `pub`（连 `doc(hidden)` 都没有）。
-  `format` / `recovery` 已 `raw` 门控，这两个要再一轮 —— 前置是把 examples/tests
-  对 `rar_rs::codec::…` 的引用迁到根重导出。
+- **`codec` 保持完全 `pub`（未收敛，按 ADR 0003 决策 3 维持）**：`codec::lzss_huff` 与根上的
+  `encode` / `decode` / `EncodeOptions` / `EncoderState` / `encode_chunked*` 被 examples 依赖；
+  ADR 明确它「stable enough」暂不门控。真要收敛，前置是把 `examples/`（analyze_stream、
+  clioverhead、mtbench 等）改用根重导出或加 `required-features`。
+  （`crypto` 已收敛：零外部消费者，`raw` 门控，根上的 4 个重导出同步门控。）
 - **CLI 两个二进制仍有重复**：`selector.rs` / `password.rs` 已抽出共享，成员选择、提取、列表编排
   仍各写一份。
 - **多卷事务非原子**：单卷是 staging + `replace_file` 原子替换，多卷是逐卷替换 —— 中途失败会留下

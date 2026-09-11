@@ -28,7 +28,16 @@
 pub mod archive;
 pub mod codec;
 pub(crate) mod crc32;
+
+// Codec-independent AES-256-CBC / PBKDF2 primitives. Nothing outside the
+// crate consumes them — the archive layer is the only caller — so the module
+// follows the same `raw` rule as `format` and `recovery`.
+#[cfg(feature = "raw")]
+#[doc(hidden)]
 pub mod crypto;
+#[cfg(not(feature = "raw"))]
+pub(crate) mod crypto;
+
 pub mod detect;
 pub mod error;
 pub mod features;
@@ -80,6 +89,8 @@ pub use codec::lzss_huff::{EncodeOptions, decode, decode_standalone, encode, enc
 #[doc(hidden)]
 #[cfg(feature = "parallel")]
 pub use codec::lzss_huff::{EncoderState, encode_chunked_mt};
+#[cfg(feature = "raw")]
+#[doc(hidden)]
 pub use crypto::{EncryptionParams, decrypt_data, derive_keys, encrypt_data};
 pub use detect::sfx_offset_of;
 pub use error::{ErrorCode, RarError, RarResult};

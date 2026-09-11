@@ -116,7 +116,10 @@ tests/examples/fuzz. The npm package is already `rar-rs-napi`.
    turn the feature on for the dev/test graph only. `recovery` follows the same
    rule, with its two CLI-facing helpers promoted to crate-root re-exports.
    `name_policy` moved out of the library entirely into `rar-cli`, which was
-   its only consumer. `codec::lzss_huff` stays public as decided.
+   its only consumer. `codec::lzss_huff` stays public as decided. `crypto` was
+   not named in the decision but had zero consumers outside the crate, so it
+   follows the same `raw` rule, with its four root re-exports gated alongside
+   it.
 4. Legacy facade removal. The typed roles now cover the full surface
    including the previously blocking seams: `archive u/f` version control
    runs on `ArchiveEditor` (chained rename + delete, two applies) and
