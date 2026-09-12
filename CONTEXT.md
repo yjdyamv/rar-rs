@@ -17,7 +17,7 @@
 - **Streaming payload（流式负载）** — `write_streamed_payload`（`format/rar5/write/stream.rs`）：统一流式写路径（单卷/分卷 + 可选流式 AES-256-CBC），`write_stored_file` 是其 STORE 特例。
 - **CbcRangeEmitter** — `format/rar5/write/engine.rs` 中连续 CBC 密文按任意字节区间发出的机制（read-ahead 到块边界 + ≤15B carry），使加密分块边界任意、卷大小仍精确（与 WinRAR 字节级一致）。
 - **Header encryption（-hp）** — 归档级加密头（每卷开头明文），其后所有块为 `[IV][AES-256-CBC 加密头]`。
-- **Recovery record（恢复记录）** — 单卷内联 "RR" 服务块，奇偶校验保护归档前缀（GF(2^16) Cauchy 矩阵，见 `recovery/rar50.rs`）。
+- **Recovery record（恢复记录）** — 单卷内联 "RR" 服务块，奇偶校验保护归档前缀（GF(2^16) Cauchy 矩阵，见 `recovery/rar50/`：`plan`/`gf16`/`encode`/`repair`/`stream` 角色模块）。
 - **Recovery volumes（.rev 恢复卷）** — 分卷集的 Reed-Solomon 奇偶校验卷，可重建缺失卷（`recovery/rev50.rs`）。
 - **Quick-open（QO）** — 主头 locator + 末尾 "QO" 服务块，缓存文件头副本加速列表。
 - **BLAKE2sp / hash-key MAC** — 成员哈希记录（`-htb`）；加密成员的校验和用 hash key MAC 保护（`format/rar5/blake2sp.rs`、`crypto/rar50.rs`）。
@@ -40,7 +40,7 @@
 - **格式层 `format/rar5/`**：容器常量 + 头类型/解析（mod.rs + headers/{parse,serialize,locator}.rs）、成员读/解码门面（payload.rs）、读路径（extract.rs）、写管线（write/{add,emit,stream,batch,engine,layout}.rs，只含 RAR5）、vint/blake2sp。低版本格式兄弟模块 `format/rar4/`（读：mod.rs 扫描/头解析 + read.rs 成员解码门面；写：write/{mod,pipeline,cbc}.rs + create.rs 选项校验）。跨格式写机制在 `format/shared/`：通用 writer 适配器（engine.rs）、流访问（stream.rs）、格式中性的成员写门面（write_ops.rs：add/add_as/add_file/add_bytes/add_directory*/add_batch 分发 + solid 链重置）。
 - **编解码层 `codec/`**：一族一目录/一文件——`modern/lzss_huff/`（RAR5 LZSS+Huffman 编码器（`encoder/` 目录：`mod`/`chunked`/`parse`/`emit`/`filter`）+ 解码器（`decoder/` 目录：`mod`/`engine`/`analysis`/`tables`））、`legacy/`（`rar29.rs` RAR3/4 成员解码器：LZSS+Huffman+PPMd 块、`rar29_encoder.rs` RAR3/4 编码器：从 rars 移植的 Unpack29Encoder、`ppmd.rs` PPMd 变体 H 解码器，rar29 引用）、`common/`（bitstream/huffman/filters/incompressible/match_finder/window 共享原语；解码器 `legacy/{rar29,rar20,rar15}.rs`/`ppmd.rs` 自含位读器/错误，不动 RAR5 原语；写侧 `rar20_encoder`/`rar15_encoder` 统一用 `common::bitstream::BitWriter`，`legacy/tables.rs` 共享 RAR20/29 相同的 LENGTH 槽表（OFFSET 槽数不同故各留副本），match finder 仍按 codec 各自保留）。
 - **加密层 `crypto/`**：一族一文件（crypto/rar50.rs；老族 crypto/rar15.rs、rar20.rs、rar30.rs）。
-- **恢复层 `recovery/`**：rar50.rs（内联 RR）+ rev50.rs（.rev 卷）+ legacy.rs（RAR 1.5–4.x PROTECT_HEAD/NEWSUB RR 修复）。
+- **恢复层 `recovery/`**：`rar50/`（内联 RR；`plan` 几何/`gf16` 域与 Cauchy/`encode` 构建/`repair` 内存修复/`stream` 流式修复）+ rev50.rs（.rev 卷）+ legacy.rs（RAR 1.5–4.x PROTECT_HEAD/NEWSUB RR 修复）。
 - **基础设施**：detect.rs（签名/SFX 扫描）、parallel.rs（Rayon 池）、fs/（atomic.rs 原子暂存/有界读、volume.rs 卷命名、safe_path.rs 安全路径）、version.rs/features.rs（薄词汇模块）、options.rs/error.rs/write_progress.rs。
 - **CLI 层 `crates/rar-cli`**：rar/unrar 两二进制；common.rs（WinRAR 开关/配置兼容核心）+ input/password/output/time 模块 + `selector.rs`（成员选择）+ `name_policy.rs`（路径收集与掩码）+ `ops.rs`（两二进制共享的打开/提取/列表/打印编排）。
 

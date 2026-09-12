@@ -62,7 +62,7 @@ not as verified copying.
 | `crates/rar/src/codec/modern/lzss_huff/encoder/parse.rs` | `codec/rar50.rs` (`optimal_tokens` / `TokenPrices`) | MIT OR Apache-2.0 |
 | `crates/rar/src/format/rar5/blake2sp.rs` | `crates/rars/src/rar50/blake2sp.rs` | MIT OR Apache-2.0 |
 | `crates/rar/src/crypto/rar50.rs` | RAR5 KDF / hash-key MAC patterns | MIT OR Apache-2.0 (notice added 2026-09-11) |
-| `crates/rar/src/recovery/rar50.rs` | inline recovery-record codec | MIT OR Apache-2.0 (notice added 2026-09-11) |
+| `crates/rar/src/recovery/rar50/` | inline recovery-record codec (`codec/rar50.rs`; ported core in `gf16.rs`) | MIT OR Apache-2.0 (notice added 2026-09-11) |
 | `crates/rar/src/recovery/legacy.rs` | `repair_protect_head_bytes` | **not stated in-file — open item** |
 
 Files derived from analysis of the libarchive RAR5 reader (BSD-2-Clause)

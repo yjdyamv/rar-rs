@@ -9,7 +9,7 @@ pub use legacy::{repair_legacy_archive_path, repair_legacy_archive_path_with_pas
 
 /// Legacy recovery-record helpers (crate-internal): the RAR4 creation
 /// path (`archive/create.rs`) builds NEWSUB blocks through here, and the
-/// RAR4 edit path (`archive/rar4_edit.rs`) scans for an existing record
+/// RAR4 edit path (`archive/rar4_edit/`) scans for an existing record
 /// to strip and rebuild.
 pub(crate) mod legacy_rr {
     pub(crate) use super::legacy::{

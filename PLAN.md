@@ -35,7 +35,7 @@
 
 - **RAR4 >4 GiB 成员被 `as u32` 静默截断进头** **[读码确认]**：`format/rar5/write/mod.rs:901,987`（单/多卷）与 `:3829,3904`（并行）把 `packed_size`/`unpacked_size`/`chunk_size` 直接 `as u32`；`add_file_rar4` 与 `validate_rar4_only` 都没有大小守卫。RAR4 尺寸字段本就是 32 位，正确行为是**拒绝**而不是写出头尺寸与载荷不符的归档。 **已修（2026-09-11）**：`format/rar4/create.rs::ensure_member_size` 在 `add_rar4_data` 入口拒绝 >u32::MAX，带单测。
 - **`-v` 过小 → 卷循环零进展、无限建文件** **[读码确认]**：RAR5 `write/mod.rs:2520-2524`（`bytes_for_data == 0` 时 `start_next_volume(); continue;` 且不推进 offset）、RAR4 `:958-969`（剩余 ≤7 时同样死循环）。目前只拒绝 `volume_size == 0`，`rar a -v50 big.rar` 会挂住并写满磁盘。修：最小卷大小校验。 **已修（2026-09-11）**：两处 split 循环加“一次 roll 无进展即报错”守卫（RAR5 `rolled` / RAR4 同样）；测试 `archive_writer::tiny_volume_size_is_rejected_instead_of_looping`（`volume_size(16)`）。
-- **流式 RAR5 修复校验弱于其缓冲孪生** **[读码确认]**：`recovery/rar50.rs:645-650` 的交叉校验少了 `data_shard_states` 项（缓冲版 `:475-479` 有），且 `:748-752` 解完不按 `first.data_shard_states` 校验 CRC64 → 含两代 RR 块的文件可能解出“貌似合理但错误”的字节，写进 `fixed.*` 并报 Repaired（CLI 只用 `RarArchive::open` 验头）。修：2 行 + 解后校验。 **已修（2026-09-11）**：流式路径补上 `data_shard_states` 交叉项，并在返回前按 `first.data_shard_states` 校验每个解出的 shard；单测 `rar5_inline_recovery_rejects_mismatched_generations`。
+- **流式 RAR5 修复校验弱于其缓冲孪生** **[读码确认]**：`recovery/rar50/`（`stream.rs`）的交叉校验少了 `data_shard_states` 项（缓冲版 `repair.rs` 有），且流式解完不按 `first.data_shard_states` 校验 CRC64 → 含两代 RR 块的文件可能解出“貌似合理但错误”的字节，写进 `fixed.*` 并报 Repaired（CLI 只用 `RarArchive::open` 验头）。修：2 行 + 解后校验。 **已修（2026-09-11）**：流式路径补上 `data_shard_states` 交叉项，并在返回前按 `first.data_shard_states` 校验每个解出的 shard；单测 `rar5_inline_recovery_rejects_mismatched_generations`。
 - **RAR4 多卷不预留 FILE_HEAD** **[读码确认]**：`write/mod.rs:966-967` 只减 7（EOA），`emit_segment` 写头+数据 → 每卷超出 `-v` 约一个头长，`-v` 契约失效。 **已修（2026-09-11）**：split 预算改为 `7 + FILE_HEAD（32+名+盐+exttime，`-hp` 含加密块）`；测试 `rar4_create::rar4_multivolume_volumes_do_not_exceed_the_requested_size`。
 - **截断/损坏 `.rev` 使重建 panic** **[读码确认]**：`recovery/rev50.rs:266`（`data[16 + hsize..]`）与 `:298`（`&payload[start..start+want]`）无边界检查；`rar rc`、`rebuild_missing_volumes`、napi 均可达。 **已修（2026-09-11）**：`data[16+hsize..]` 与 `payload[start..start+want]` 改为 `get` + 报错；测试 `rar50_roundtrip::truncated_recovery_volume_errors_instead_of_panicking`。
 
@@ -46,7 +46,7 @@
 - Windows STM 流名（`extract.rs:1020`）是唯一没过 `sanitize_archive_path` 的命名记录（是否真能逃出目标目录未在 Windows 实测）。**[待复现]** **已修（2026-09-11）**：`valid_stream_name`（只允许单个前导 `:`，禁分隔符/保留字符）+ 单测；`write_windows_stream` 拒绝非法名。
 - 未被真实夹具覆盖的 crypto 分支：RAR3 慢 KDF 的单测是同义反复（`crypto/rar30.rs:288-301`，长度 `<64` 时 `update_password_data_sha1` 分支根本不跑）、RAR20 >16 字节口令链只有 8 字节口令覆盖。**[待复现]** **已补覆盖（2026-09-11）**：用本机 Rar 6.23 生成 49 字符口令的 `-ma4 -p` / `-ma4 -hp` 夹具（`rar40/encrypted/rar4_longpw_{p,hp}.rar`）+ `rar4_read` 两测试，外部验证 RAR30 慢 KDF 分支；`-ma2 -p<20 字节>` 由我们写、由 UnRAR 读出（`winrar_interop::we_create_rar2_long_password_members_winrar_valid`），覆盖 RAR20 >16B 密钥链。
 - legacy 修复对“最后不满 512 B 的扇区”报 "All OK" 却不修（`recovery/legacy.rs:252-265`）。**[读码确认]** **未修（记录）**：尾扇区写侧对零填充算 tag，本就无法校验真实字节，无法检测其损坏；只能改措辞或接受该未保护区。
-- 恒真/自比校验（可顺手删）：`recovery/rar50.rs:1190`、`:640`、`:1277`。**[读码确认]** **未修（低价值）**：纯恒真比较，不影响行为。
+- 恒真/自比校验（可顺手删）：`recovery/rar50/`（恒真/自比比较）。**[读码确认]** **未修（低价值）**：纯恒真比较，不影响行为。
 - **发布就绪**：`rar-cli` 因 workspace path 依赖缺 version 无法打包（`cargo package -p rar-cli` 实测报 “does not specify a version”）；三个 crate 都没有 `readme`/`keywords`/`documentation`；SPDX/逐文件来源审计仍未闭环。 **部分已修（2026-09-11）**：workspace 依赖补 `version`，`rar-rs` 增 `readme`/`documentation`/`keywords`/`categories`，`cargo package -p rar-rs` 打包并验证通过（含 README）；`rar-cli` 现在只因 `rar-rs` 未发布而无法解析，属发布顺序。SPDX 仍需法务。**逐文件出处清单已完成（2026-09-11）**：`THIRD_PARTY_LICENSES.md` 新增「File-level `rars` port notices」表（每个 rars 移植文件的 in-file 声明），并给缺失声明的 `crypto/rar50.rs`、`recovery/rar50.rs` 补了出处头（NOTICE 同步）。剩下明确为两项法律裁定：① rars workspace metadata（MIT OR Apache-2.0）vs 后来 COPYING（WTFPL）的冲突（即解码侧 WTFPL / 编码侧 MIT OR Apache-2.0 的来源）；② `recovery/legacy.rs` 声明了 rars 移植但无许可行。
 
 **与 backlog 的差异**：以上 P0/P1 基本都不在本文件原有条目里——文档把我引向 BT4 压缩性能深挖（已证否），而真正的风险是“CI 已红 + 两处 panic + 字典 DoS + 几个静默产坏档的守卫”。建议先按本节 P0/P1 排序推进，压缩性能线（issue 09/04）暂缓。
@@ -81,7 +81,8 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   `format/shared/{write_ops,engine,stream}.rs`；`codec/modern/lzss_huff/{encoder,decoder}.rs`（3940/1736）拆为
   `encoder/{mod,chunked,parse,emit,filter,tests}.rs` 与 `decoder/{mod,engine,analysis,tables,tests}.rs`
   （mod.rs 共享词汇 + 角色模块，公开路径与输出不变）；`archive/rar4_edit.rs`（2924）拆为
-  `archive/rar4_edit/{mod,layout,headers,comment,engine,repack}.rs` + `tests/`（五个用例文件）。
+  `archive/rar4_edit/{mod,layout,headers,comment,engine,repack}.rs` + `tests/`（五个用例文件）；
+  `recovery/rar50.rs`（2141）拆为 `recovery/rar50/{mod,plan,gf16,encode,repair,stream}.rs`（rars 移植核心保留在 `gf16`）。
   剩余大文件：`codec/legacy/rar29_encoder.rs` 2747（按 CONTEXT 是 rars 移植的
   逐文件隔离，拆分收益低）。
 - **双 options 面（2026-09 收敛，ADR 0006）**：`WriterOptions`（私有字段 builder）是唯一公开构造器；
