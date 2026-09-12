@@ -162,14 +162,19 @@ fn file_sha256_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// 96 MiB of compressible data — comfortably over the streaming
-/// compression threshold (64 MiB) and over one small volume.
-const STREAM_SIZE: u64 = 96 * 1024 * 1024;
+/// 72 MiB of compressible data — comfortably over the streaming
+/// compression threshold (64 MiB) and over four 16 MiB volumes. Kept just
+/// past both boundaries: the interop cases run WinRAR over this file
+/// several times, so size directly bounds the test runtime.
+const STREAM_SIZE: u64 = 72 * 1024 * 1024;
 
 // ── rar-rs creates, WinRAR validates ─────────────────────────────────────────
 
-#[test]
-fn winrar_validates_streamed_compressed_archives() {
+/// One streamed-compression interop case: write `stream.bin` with `opts` at
+/// `level`, then WinRAR must test and extract it byte-identically and our
+/// own reader must round-trip it too. Split per case so the harness can run
+/// the cases in parallel — each one spends most of its time inside WinRAR.
+fn streamed_compressed_case(opts: WriterOptions, password: Option<&str>, level: u8) {
     let Some(unrar) = unrar_bin() else {
         eprintln!("skipped: WinRAR not found");
         return;
@@ -178,103 +183,114 @@ fn winrar_validates_streamed_compressed_archives() {
     let dir = temp_dir();
     let src = dir.path().join("stream.bin");
     write_pattern_file(&src, STREAM_SIZE, 3);
-
-    let cases: Vec<(&str, WriterOptions, Option<&str>)> = vec![
-        // Single-volume compressed streaming (spill file path).
-        ("stream.rar", WriterOptions::default(), None),
-        // Multi-volume compressed streaming (chunk splits mid-stream).
-        (
-            "stream-vol.rar",
-            WriterOptions::default().volume_size(16 * 1024 * 1024),
-            None,
-        ),
-        // Encrypted streaming (single-volume, chained CBC).
-        (
-            "stream-enc.rar",
-            WriterOptions::default().password("s3cret"),
-            Some("s3cret"),
-        ),
-        // Encrypted streaming multi-volume: per-chunk ciphertext CRCs and
-        // per-chunk encryption records.
-        (
-            "stream-enc-vol.rar",
-            WriterOptions::default()
-                .password("s3cret")
-                .volume_size(16 * 1024 * 1024),
-            Some("s3cret"),
-        ),
-        // Header-encrypted multi-volume + STORE (level 0): exercises the
-        // on-disk header accounting in the streaming writer.
-        (
-            "stream-hp-vol.rar",
-            WriterOptions::default()
-                .password("s3cret")
-                .encrypt_headers(true)
-                .volume_size(16 * 1024 * 1024),
-            Some("s3cret"),
-        ),
-        // Header-encrypted multi-volume + compressed.
-        (
-            "stream-hp-vol-comp.rar",
-            WriterOptions::default()
-                .password("s3cret")
-                .encrypt_headers(true)
-                .volume_size(16 * 1024 * 1024),
-            Some("s3cret"),
-        ),
-    ];
-
-    for (name, opts, password) in cases {
-        let arc = dir.path().join(name);
-        let level = if name.contains("hp-vol") && name.ends_with("comp.rar") {
-            3
-        } else if name.contains("hp-vol") {
-            0
-        } else {
-            3
-        };
-        {
-            let mut rar = ArchiveWriter::create_with(&arc, opts).unwrap();
-            rar.add_path(
-                &src,
-                EntryWriteOptions::new()
-                    .compression_level(CompressionLevel::try_from(level).unwrap()),
-            )
-            .unwrap();
-            rar.finish().unwrap();
-        }
-        // Multi-volume archives live in `name.partN.rar` files; the base
-        // path itself never exists.
-        let first = rar_rs::discover_volumes(&arc)[0].clone();
-        let (ok, out) = unrar_test(&first, password);
-        assert!(ok, "WinRAR rejected {name}:\n{out}");
-
-        // WinRAR extraction must produce byte-identical data.
-        let dest = dir.path().join(format!("out-{name}"));
-        std::fs::create_dir_all(&dest).unwrap();
-        let (ok, out) = unrar_extract(&first, &dest, password);
-        assert!(ok, "WinRAR failed to extract {name}:\n{out}");
-        assert_eq!(
-            file_sha256(&dest.join("stream.bin")),
-            file_sha256(&src),
-            "WinRAR extracted different bytes for {name}"
-        );
-
-        // rar-rs must read its own streaming output back too.
-        let mut rar = match password {
-            Some(pw) => ArchiveReader::open_with(&first, OpenOptions::new().password(pw)).unwrap(),
-            None => ArchiveReader::open(&first).unwrap(),
-        };
-        let out_path = dir.path().join(format!("ours-{name}"));
-        std::fs::create_dir_all(&out_path).unwrap();
-        rar.extract_entry(rar.unique_entry("stream.bin").unwrap(), &out_path)
-            .unwrap();
-        assert_eq!(
-            file_sha256(&out_path.join("stream.bin")),
-            file_sha256(&src),
-            "rar-rs round-trip mismatch for {name}"
-        );
+    let name = "stream.rar";
+    let arc = dir.path().join(name);
+    {
+        let mut rar = ArchiveWriter::create_with(&arc, opts).unwrap();
+        rar.add_path(
+            &src,
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(level).unwrap()),
+        )
+        .unwrap();
+        rar.finish().unwrap();
     }
+    // Multi-volume archives live in `name.partN.rar` files; the base path
+    // itself never exists.
+    let first = rar_rs::discover_volumes(&arc)[0].clone();
+    let (ok, out) = unrar_test(&first, password);
+    assert!(ok, "WinRAR rejected {name}:\n{out}");
+
+    // WinRAR extraction must produce byte-identical data.
+    let dest = dir.path().join("winrar-out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let (ok, out) = unrar_extract(&first, &dest, password);
+    assert!(ok, "WinRAR failed to extract {name}:\n{out}");
+    assert_eq!(
+        file_sha256(&dest.join("stream.bin")),
+        file_sha256(&src),
+        "WinRAR extracted different bytes for {name}"
+    );
+
+    // rar-rs must read its own streaming output back too.
+    let mut rar = match password {
+        Some(pw) => ArchiveReader::open_with(&first, OpenOptions::new().password(pw)).unwrap(),
+        None => ArchiveReader::open(&first).unwrap(),
+    };
+    let out_path = dir.path().join("ours-out");
+    std::fs::create_dir_all(&out_path).unwrap();
+    rar.extract_entry(rar.unique_entry("stream.bin").unwrap(), &out_path)
+        .unwrap();
+    assert_eq!(
+        file_sha256(&out_path.join("stream.bin")),
+        file_sha256(&src),
+        "rar-rs round-trip mismatch for {name}"
+    );
+}
+
+/// Single-volume compressed streaming (spill-file path).
+#[test]
+fn winrar_validates_streamed_compressed_single_volume() {
+    streamed_compressed_case(WriterOptions::default(), None, 3);
+}
+
+/// Multi-volume compressed streaming (chunk splits mid-stream).
+#[test]
+fn winrar_validates_streamed_compressed_multivolume() {
+    streamed_compressed_case(
+        WriterOptions::default().volume_size(16 * 1024 * 1024),
+        None,
+        3,
+    );
+}
+
+/// Encrypted streaming (single-volume, chained CBC).
+#[test]
+fn winrar_validates_streamed_encrypted() {
+    streamed_compressed_case(
+        WriterOptions::default().password("s3cret"),
+        Some("s3cret"),
+        3,
+    );
+}
+
+/// Encrypted streaming multi-volume: per-chunk ciphertext CRCs and
+/// per-chunk encryption records.
+#[test]
+fn winrar_validates_streamed_encrypted_multivolume() {
+    streamed_compressed_case(
+        WriterOptions::default()
+            .password("s3cret")
+            .volume_size(16 * 1024 * 1024),
+        Some("s3cret"),
+        3,
+    );
+}
+
+/// Header-encrypted multi-volume + STORE (level 0): exercises the on-disk
+/// header accounting in the streaming writer.
+#[test]
+fn winrar_validates_streamed_hp_store_multivolume() {
+    streamed_compressed_case(
+        WriterOptions::default()
+            .password("s3cret")
+            .encrypt_headers(true)
+            .volume_size(16 * 1024 * 1024),
+        Some("s3cret"),
+        0,
+    );
+}
+
+/// Header-encrypted multi-volume + compressed.
+#[test]
+fn winrar_validates_streamed_hp_compressed_multivolume() {
+    streamed_compressed_case(
+        WriterOptions::default()
+            .password("s3cret")
+            .encrypt_headers(true)
+            .volume_size(16 * 1024 * 1024),
+        Some("s3cret"),
+        3,
+    );
 }
 
 /// The RAR4 write side can emit legacy RAR 1.5 (unp_ver 15) and RAR 2.x
@@ -685,88 +701,113 @@ fn solid_multivolume_interops_with_winrar() {
 
 // ── rar-rs reads, WinRAR creates ────────────────────────────────────────────
 
-#[test]
-fn we_read_winrar_created_archives() {
+/// One `we_read_winrar_created_*` case: WinRAR creates an archive with
+/// `switches`, then rar-rs must list it, read both members and stream
+/// `a.bin` back byte-identically. Split per case so the harness can run
+/// them in parallel — each one spends most of its time inside WinRAR.
+fn winrar_created_case(switches: &[&str]) {
     let Some(rar_bin) = rar_bin() else {
         eprintln!("skipped: WinRAR not found");
         return;
     };
     let dir = temp_dir();
-    let src = dir.path().join("src");
-    std::fs::create_dir_all(&src).unwrap();
     let a = dir.path().join("a.bin");
     let b = dir.path().join("b.bin");
     write_pattern_file(&a, STREAM_SIZE, 11);
     write_pattern_file(&b, 2 * 1024 * 1024, 13);
 
-    let cases: Vec<(&str, Vec<&str>)> = vec![
-        // (name, rar switches)
-        ("plain.rar", vec!["-m3", "-idq"]),
-        ("solid.rar", vec!["-m3", "-s", "-htb", "-idq"]),
-        ("enc.rar", vec!["-m3", "-ppw", "-idq"]),
-        ("hp.rar", vec!["-m3", "-ppw", "-hp", "-idq"]),
-        ("vol.rar", vec!["-m0", "-v16m", "-idq"]),
-        ("vol-enc.rar", vec!["-m0", "-v16m", "-ppw", "-idq"]),
-        ("vol-hp.rar", vec!["-m0", "-v16m", "-ppw", "-hp", "-idq"]),
-    ];
-    for (name, switches) in cases {
-        let arc = dir.path().join(name);
-        let mut cmd = Command::new(&rar_bin);
-        cmd.arg("a");
-        for sw in &switches {
-            cmd.arg(sw);
-        }
-        cmd.arg(&arc).arg(&a).arg(&b);
-        cmd.current_dir(dir.path());
-        let (ok, out) = run(&mut cmd);
-        assert!(ok, "WinRAR failed to create {name}:\n{out}");
-
-        // Read back with rar-rs (password when the switches set one).
-        let password = switches.iter().any(|s| s.starts_with("-p")).then_some("pw");
-        let first = rar_rs::discover_volumes(&arc)[0].clone();
-        let mut rar = match password {
-            Some(pw) => ArchiveReader::open_with(&first, OpenOptions::new().password(pw)).unwrap(),
-            None => ArchiveReader::open(&first).unwrap(),
-        };
-        let names: Vec<String> = rar.entries().map(|e| e.name().to_string()).collect();
-        let a_name = names
-            .iter()
-            .find(|n| n.ends_with("a.bin"))
-            .unwrap_or_else(|| panic!("{name}: member a.bin missing from {names:?}"))
-            .clone();
-        let b_name = names
-            .iter()
-            .find(|n| n.ends_with("b.bin"))
-            .unwrap_or_else(|| panic!("{name}: member b.bin missing from {names:?}"))
-            .clone();
-        let extracted_a = rar.read_entry(rar.unique_entry(&a_name).unwrap()).unwrap();
-        let extracted_b = rar.read_entry(rar.unique_entry(&b_name).unwrap()).unwrap();
-        assert_eq!(
-            extracted_a.len(),
-            STREAM_SIZE as usize,
-            "{name}: a.bin size"
-        );
-        assert_eq!(
-            extracted_b,
-            std::fs::read(&b).unwrap(),
-            "{name}: b.bin bytes"
-        );
-        // Verify a.bin content without loading it fully: compare a streamed
-        // extraction hash.
-        let out_dir = dir.path().join(format!("out-{name}"));
-        std::fs::create_dir_all(&out_dir).unwrap();
-        let mut rar = match password {
-            Some(pw) => ArchiveReader::open_with(&first, OpenOptions::new().password(pw)).unwrap(),
-            None => ArchiveReader::open(&first).unwrap(),
-        };
-        rar.extract_entry(rar.unique_entry(&a_name).unwrap(), &out_dir)
-            .unwrap();
-        assert_eq!(
-            file_sha256(&out_dir.join(&a_name)),
-            file_sha256(&a),
-            "{name}: extracted a.bin differs"
-        );
+    let name = "case.rar";
+    let arc = dir.path().join(name);
+    let mut cmd = Command::new(&rar_bin);
+    cmd.arg("a");
+    for sw in switches {
+        cmd.arg(sw);
     }
+    cmd.arg(&arc).arg(&a).arg(&b);
+    cmd.current_dir(dir.path());
+    let (ok, out) = run(&mut cmd);
+    assert!(ok, "WinRAR failed to create {name}:\n{out}");
+
+    // Read back with rar-rs (password when the switches set one).
+    let password = switches.iter().any(|s| s.starts_with("-p")).then_some("pw");
+    let first = rar_rs::discover_volumes(&arc)[0].clone();
+    let mut rar = match password {
+        Some(pw) => ArchiveReader::open_with(&first, OpenOptions::new().password(pw)).unwrap(),
+        None => ArchiveReader::open(&first).unwrap(),
+    };
+    let names: Vec<String> = rar.entries().map(|e| e.name().to_string()).collect();
+    let a_name = names
+        .iter()
+        .find(|n| n.ends_with("a.bin"))
+        .unwrap_or_else(|| panic!("{name}: member a.bin missing from {names:?}"))
+        .clone();
+    let b_name = names
+        .iter()
+        .find(|n| n.ends_with("b.bin"))
+        .unwrap_or_else(|| panic!("{name}: member b.bin missing from {names:?}"))
+        .clone();
+    let extracted_a = rar.read_entry(rar.unique_entry(&a_name).unwrap()).unwrap();
+    let extracted_b = rar.read_entry(rar.unique_entry(&b_name).unwrap()).unwrap();
+    assert_eq!(
+        extracted_a.len(),
+        STREAM_SIZE as usize,
+        "{name}: a.bin size"
+    );
+    assert_eq!(
+        extracted_b,
+        std::fs::read(&b).unwrap(),
+        "{name}: b.bin bytes"
+    );
+    // Verify a.bin content without loading it fully: compare a streamed
+    // extraction hash.
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let mut rar = match password {
+        Some(pw) => ArchiveReader::open_with(&first, OpenOptions::new().password(pw)).unwrap(),
+        None => ArchiveReader::open(&first).unwrap(),
+    };
+    rar.extract_entry(rar.unique_entry(&a_name).unwrap(), &out_dir)
+        .unwrap();
+    assert_eq!(
+        file_sha256(&out_dir.join(&a_name)),
+        file_sha256(&a),
+        "{name}: extracted a.bin differs"
+    );
+}
+
+#[test]
+fn we_read_winrar_created_plain() {
+    winrar_created_case(&["-m3", "-idq"]);
+}
+
+#[test]
+fn we_read_winrar_created_solid() {
+    winrar_created_case(&["-m3", "-s", "-htb", "-idq"]);
+}
+
+#[test]
+fn we_read_winrar_created_encrypted() {
+    winrar_created_case(&["-m3", "-ppw", "-idq"]);
+}
+
+#[test]
+fn we_read_winrar_created_header_encrypted() {
+    winrar_created_case(&["-m3", "-ppw", "-hp", "-idq"]);
+}
+
+#[test]
+fn we_read_winrar_created_multivolume() {
+    winrar_created_case(&["-m0", "-v16m", "-idq"]);
+}
+
+#[test]
+fn we_read_winrar_created_multivolume_encrypted() {
+    winrar_created_case(&["-m0", "-v16m", "-ppw", "-idq"]);
+}
+
+#[test]
+fn we_read_winrar_created_multivolume_header_encrypted() {
+    winrar_created_case(&["-m0", "-v16m", "-ppw", "-hp", "-idq"]);
 }
 
 // ── >4 GiB single-file creation (P4 acceptance) ─────────────────────────────

@@ -993,8 +993,15 @@ fn cli_keep_time_preserves_archive_mtime() {
         .status()
         .unwrap();
     assert!(status.success());
-    let before = std::fs::metadata(&archive).unwrap().modified().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    // Pin the archive mtime instead of sleeping: a broken -tk (which would
+    // stamp "now") then differs by years, not by a sub-second sliver.
+    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&archive)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
     let status = std::process::Command::new(RAR_CLI)
         .args(["a", "-tk", "-idq"])
         .arg(&archive)
@@ -1004,10 +1011,9 @@ fn cli_keep_time_preserves_archive_mtime() {
         .unwrap();
     assert!(status.success());
     let after = std::fs::metadata(&archive).unwrap().modified().unwrap();
-    let kept = after.duration_since(before).unwrap_or_default();
-    assert!(
-        kept < std::time::Duration::from_secs(1),
-        "-tk must keep the archive mtime, changed by {kept:?}"
+    assert_eq!(
+        after, past,
+        "-tk must keep the archive mtime unchanged, got {after:?}"
     );
 }
 
@@ -1775,9 +1781,19 @@ fn cli_ts_saves_and_restores_file_times() {
 fn cli_version_control_keeps_previous_versions() {
     let dir = make_temp_dir();
     let file = dir.path().join("ver.txt");
-    std::fs::write(&file, b"v1").unwrap();
     let archive = dir.path().join("ver.rar");
+    let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
 
+    // Pin the source mtimes instead of sleeping between updates: `u`
+    // compares them with the archive's stored stamps, so crossing a
+    // second boundary is all that matters.
+    std::fs::write(&file, b"v1").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(base)
+        .unwrap();
     let status = std::process::Command::new(RAR_CLI)
         .args(["a", "-idq"])
         .arg(&archive)
@@ -1787,17 +1803,26 @@ fn cli_version_control_keeps_previous_versions() {
         .unwrap();
     assert!(status.success());
 
+    let update = |content: &[u8], seconds: u64, flag: &str| {
+        std::fs::write(&file, content).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(base + std::time::Duration::from_secs(seconds))
+            .unwrap();
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["u", flag, "-idq"])
+            .arg(&archive)
+            .arg("ver.txt")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "u {flag} must succeed");
+    };
+
     // First update with -ver: old version kept as `ver.txt;1`.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(&file, b"v2").unwrap();
-    let status = std::process::Command::new(RAR_CLI)
-        .args(["u", "-ver", "-idq"])
-        .arg(&archive)
-        .arg("ver.txt")
-        .current_dir(dir.path())
-        .status()
-        .unwrap();
-    assert!(status.success());
+    update(b"v2", 10, "-ver");
     {
         let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
         let vt_id = rar.unique_entry("ver.txt").unwrap();
@@ -1807,16 +1832,7 @@ fn cli_version_control_keeps_previous_versions() {
     }
 
     // Second update: the chain shifts (ver.txt;1 -> ver.txt;2).
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(&file, b"v3").unwrap();
-    let status = std::process::Command::new(RAR_CLI)
-        .args(["u", "-ver", "-idq"])
-        .arg(&archive)
-        .arg("ver.txt")
-        .current_dir(dir.path())
-        .status()
-        .unwrap();
-    assert!(status.success());
+    update(b"v3", 20, "-ver");
     {
         let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
         let vt_id = rar.unique_entry("ver.txt").unwrap();
@@ -1828,16 +1844,7 @@ fn cli_version_control_keeps_previous_versions() {
     }
 
     // -ver1 caps the history at one previous version.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(&file, b"v4").unwrap();
-    let status = std::process::Command::new(RAR_CLI)
-        .args(["u", "-ver1", "-idq"])
-        .arg(&archive)
-        .arg("ver.txt")
-        .current_dir(dir.path())
-        .status()
-        .unwrap();
-    assert!(status.success());
+    update(b"v4", 30, "-ver1");
     {
         let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
         let vt_id = rar.unique_entry("ver.txt").unwrap();
