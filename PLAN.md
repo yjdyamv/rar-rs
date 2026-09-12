@@ -41,7 +41,7 @@
 
 ### P2（健壮性 / 覆盖率 / 发布）
 
-- create 路径 quick-open 只缓存文件头（`write/mod.rs:2334,2800`），目录/重定向不缓存，而 append（`archive/mod.rs:783`）与 rewrite（`archive/transaction.rs:1195`）全缓存 → `open_quick`/`list_entries_quick` 少列成员。**[待复现]** **已修（2026-09-11）**：redirect/dir_only/dir 三个直接写头处补 QO 缓存；测试 `quick_open_listing::open_quick_lists_directories_like_the_full_scan`。
+- create 路径 quick-open 只缓存文件头（`write/mod.rs:2334,2800`），目录/重定向不缓存，而 append（`archive/mod.rs:783`）与 rewrite（`archive/transaction/`）全缓存 → `open_quick`/`list_entries_quick` 少列成员。**[待复现]** **已修（2026-09-11）**：redirect/dir_only/dir 三个直接写头处补 QO 缓存；测试 `quick_open_listing::open_quick_lists_directories_like_the_full_scan`。
 - STORE 成员先 `hash_file` 再重读同一路径（`write/mod.rs:321` vs `:334,2810`），只比字节数 → 同尺寸改写真会写出旧 CRC/BLAKE2。**[待复现]** **未修（接受）**：单遍 STORE 必须先写头再流式，回填头需要 patching（`-hp` 还要重加密），影响面大于收益；记为已接受的竞态。
 - Windows STM 流名（`extract.rs:1020`）是唯一没过 `sanitize_archive_path` 的命名记录（是否真能逃出目标目录未在 Windows 实测）。**[待复现]** **已修（2026-09-11）**：`valid_stream_name`（只允许单个前导 `:`，禁分隔符/保留字符）+ 单测；`write_windows_stream` 拒绝非法名。
 - 未被真实夹具覆盖的 crypto 分支：RAR3 慢 KDF 的单测是同义反复（`crypto/rar30.rs:288-301`，长度 `<64` 时 `update_password_data_sha1` 分支根本不跑）、RAR20 >16 字节口令链只有 8 字节口令覆盖。**[待复现]** **已补覆盖（2026-09-11）**：用本机 Rar 6.23 生成 49 字符口令的 `-ma4 -p` / `-ma4 -hp` 夹具（`rar40/encrypted/rar4_longpw_{p,hp}.rar`）+ `rar4_read` 两测试，外部验证 RAR30 慢 KDF 分支；`-ma2 -p<20 字节>` 由我们写、由 UnRAR 读出（`winrar_interop::we_create_rar2_long_password_members_winrar_valid`），覆盖 RAR20 >16B 密钥链。
@@ -84,9 +84,10 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   `archive/rar4_edit/{mod,layout,headers,comment,engine,repack}.rs` + `tests/`（五个用例文件）；
   `recovery/rar50.rs`（2141）拆为 `recovery/rar50/{mod,plan,gf16,encode,repair,stream}.rs`（rars 移植核心保留在 `gf16`）；
   `format/rar5/extract.rs`（1975）拆为 `extract/{mod,open,read,members,dest,solid,decode,verify}.rs`（共享导入留在 `mod.rs`，
-  角色文件各持 `impl RarArchive` 分片）。
-  剩余大文件：`codec/legacy/rar29_encoder.rs` 2747（按 CONTEXT 是 rars 移植的
-  逐文件隔离，拆分收益低）。
+  角色文件各持 `impl RarArchive` 分片）；`archive/transaction.rs`（1728）拆为
+  `archive/transaction/{mod,multivolume,edit,plan,execute,header}.rs` + `tests.rs`。
+  至此自研大文件清零，剩余大文件均为 rars 移植的逐文件隔离（`codec/legacy/rar29_encoder.rs` 2747、
+  `rar20_encoder` 1902、`ppmd` 1737、`rar15_encoder` 1585、`rar29` 1421），拆分收益低。
 - **双 options 面（2026-09 收敛，ADR 0006）**：`WriterOptions`（私有字段 builder）是唯一公开构造器；
   `CreateOptions` 已降为 `pub(crate)` 并从 crate 根移除（此前是零公开入口的死类型）。组合规则仍由
   `options::validate_combinations` 共用，`CreateOptions` 不静默丢弃/钳制（quick-open×分卷或 -hp、

@@ -29,7 +29,7 @@
 | `crc32.rs` | crate 级 CRC32 实现（`pub(crate)`） |
 | `archive/reader.rs` / `writer.rs` / `editor.rs` | 读 / 写 / 改三个角色门面 |
 | `archive/mod.rs` | `RarArchive` 共享状态与生命周期（内部） |
-| `archive/transaction.rs` | 手术式 delete / rename（字节级重写） |
+| `archive/transaction/` | 手术式 delete / rename（字节级重写；`multivolume`/`edit`/`plan`/`execute`/`header` 角色模块） |
 | `archive/create.rs` / `entry.rs` / `discovery.rs` | 写生命周期、条目类型、分卷发现 |
 | `archive/rar4_edit/` | RAR4 编辑（rename / delete / comment / RR / lock / append / solid repack，含 `-hp`；`layout`/`headers`/`comment`/`engine`/`repack` 角色模块） |
 | `model/` | 格式中立模型（`entry.rs` / `chunk.rs`） |
@@ -57,7 +57,7 @@
 理由与取舍见 `PLAN.md`「为什么要有 `raw` feature」。
 
 **写路径**：`format/rar5/write/*` 增量发射块 —— `engine.rs` 处理 payload 与（可选）CBC
-发射，`layout.rs` 决定字典大小并探测 STORE 回退。`archive/transaction.rs` 是手术路径：
+发射，`layout.rs` 决定字典大小并探测 STORE 回退。`archive/transaction/` 是手术路径：
 delete / rename 字节级复制保留的块、只重发射变更的块，丢弃内联恢复记录并重建 quick-open
 记录。
 

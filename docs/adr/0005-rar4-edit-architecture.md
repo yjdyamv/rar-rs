@@ -45,7 +45,7 @@ rar-rs 将补上「已存在 RAR4 归档的编辑」能力（官方 `rar`/WinRAR
 
 - **接受「RAR4 = 只读 + 创建」边界**：被拒。项目定位为对齐官方 `rar` 命令面，官方对 RAR4 编辑全部支持（仅 solid 更新慢），边界会留下真实命令缺口。
 - **solid 编辑只做受影响段的 surgical 部分重处理**：被拒。官方 7.20 已试并在 RAR4 上产坏档、7.21 回退为整档 repack；不仿已证伪的方案。
-- **复用 RAR5 编辑引擎（`archive/transaction.rs`）**：被拒。其词汇（RAR5 block/CRC32/BLAKE2/service block、surgical 重写）与 RAR4 固定宽度 CRC16 头完全不同；RAR4 需要自己的 transaction 编排层，仅 CLI 契约（`ArchiveEditor`/append 角色）与错误语义对齐。
+- **复用 RAR5 编辑引擎（`archive/transaction/`）**：被拒。其词汇（RAR5 block/CRC32/BLAKE2/service block、surgical 重写）与 RAR4 固定宽度 CRC16 头完全不同；RAR4 需要自己的 transaction 编排层，仅 CLI 契约（`ArchiveEditor`/append 角色）与错误语义对齐。
 
 ## Consequences
 
