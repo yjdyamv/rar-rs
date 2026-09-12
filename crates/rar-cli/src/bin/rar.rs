@@ -1621,7 +1621,8 @@ impl Drop for StagedArchive {
 
 #[cfg(unix)]
 fn replace_archive_file(staged: &std::path::Path, original: &std::path::Path) -> CliResult<()> {
-    std::fs::rename(staged, original).map_err(|error| format!("replace archive: {error}"))
+    std::fs::rename(staged, original).map_err(|error| format!("replace archive: {error}"))?;
+    Ok(())
 }
 
 #[cfg(windows)]

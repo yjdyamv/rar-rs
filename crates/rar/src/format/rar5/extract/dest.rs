@@ -2,16 +2,14 @@
 //! safe-path policy.
 
 use std::fs;
-use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::archive::{RarArchive, StreamRecord};
+use crate::archive::RarArchive;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::RedirectSpec;
 #[cfg(windows)]
 use crate::format::rar5::write as rar5_write;
-use crate::format::shared::stream_mut;
 #[cfg(any(unix, windows))]
 use crate::fs::safe_path::resolve_redirect_target;
 use crate::fs::safe_path::sanitize_archive_path;
@@ -22,7 +20,11 @@ impl RarArchive {
     pub(super) fn extract_member_streams(&mut self, idx: usize, dest_path: &Path) -> RarResult<()> {
         #[cfg(windows)]
         {
-            use std::io::Read;
+            use std::io::{Read, Seek, SeekFrom};
+
+            use crate::archive::StreamRecord;
+            use crate::format::shared::stream_mut;
+
             let owned: Vec<StreamRecord> = self
                 .read_ctx()
                 .streams
