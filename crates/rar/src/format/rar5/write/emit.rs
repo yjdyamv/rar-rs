@@ -74,12 +74,13 @@ impl RarArchive {
             ..Default::default()
         };
 
-        if self.write_ctx().volume_size.is_none() {
+        if self.write_ctx().output.volume_size.is_none() {
             // Single-volume
             let hdr_bytes = fh_base.to_bytes();
-            if self.write_ctx().quick_open {
+            if self.write_ctx().locator.quick_open {
                 let pos = stream_mut(&mut self.stream)?.stream_position()?;
                 self.write_ctx_mut()
+                    .locator
                     .quick_open_entries
                     .push((pos, hdr_bytes.clone()));
             }
@@ -106,7 +107,7 @@ impl RarArchive {
         }
 
         // Multi-volume splitting
-        let volume_size = self.write_ctx().volume_size.unwrap();
+        let volume_size = self.write_ctx().output.volume_size.unwrap();
         // End-of-archive block: 8 plaintext bytes, or `[IV][padded]` when
         // header encryption wraps every block.
         let eoa_plain: u64 = 8;
@@ -117,7 +118,7 @@ impl RarArchive {
         let hdr_bytes = fh_base.to_bytes();
         let hdr_on_disk = self.on_disk_header_len(hdr_bytes.len() as u64);
         let total_needed = hdr_on_disk + total_packed + eoa_size;
-        let remaining = volume_size.saturating_sub(self.write_ctx().volume_bytes_written);
+        let remaining = volume_size.saturating_sub(self.write_ctx().output.bytes_written);
 
         if total_needed <= remaining {
             // Fits entirely
@@ -125,9 +126,9 @@ impl RarArchive {
             let stream = stream_mut(&mut self.stream)?;
             stream.write_all(packed_data)?;
             let data_offset = stream.stream_position()? - total_packed;
-            self.write_ctx_mut().volume_bytes_written += hdr_on_disk + total_packed;
+            self.write_ctx_mut().output.bytes_written += hdr_on_disk + total_packed;
             let chunk = DataChunk {
-                volume_index: self.write_ctx().current_volume - 1,
+                volume_index: self.write_ctx().output.current_volume - 1,
                 data_offset,
                 packed_size: total_packed,
                 crc32_val: Some(file_crc),
@@ -242,7 +243,7 @@ impl RarArchive {
 
         while offset < total_packed {
             self.check_cancel()?;
-            let remaining_vol = volume_size.saturating_sub(self.write_ctx().volume_bytes_written);
+            let remaining_vol = volume_size.saturating_sub(self.write_ctx().output.bytes_written);
 
             // Build chunk flags
             let mut block_flags: u64 = 0;
@@ -318,10 +319,10 @@ impl RarArchive {
             let final_hdr_disk = self.on_disk_header_len(final_hdr.len() as u64);
             self.write_block_header(&final_hdr)?;
             let data_offset = phase(self, SplitPhase::Write, offset, chunk_size, is_last)?;
-            self.write_ctx_mut().volume_bytes_written += final_hdr_disk + chunk_size;
+            self.write_ctx_mut().output.bytes_written += final_hdr_disk + chunk_size;
 
             chunks.push(DataChunk {
-                volume_index: self.write_ctx().current_volume - 1,
+                volume_index: self.write_ctx().output.current_volume - 1,
                 data_offset,
                 packed_size: chunk_size,
                 crc32_val: Some(chunk_crc),

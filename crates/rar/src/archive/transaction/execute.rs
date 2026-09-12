@@ -187,6 +187,7 @@ impl RarArchive {
                     let out_pos = self.stream.as_mut().unwrap().stream_position()?;
                     if let Some(qh) = qo_header {
                         self.write_ctx_mut()
+                            .locator
                             .quick_open_entries
                             .push((out_pos, qh.clone()));
                     }
@@ -255,7 +256,7 @@ impl RarArchive {
 
         // Quick-open record (rebuilt from the kept headers), locator patch
         // (with the recovery offset), recovery record and end block.
-        let qo_pos = if self.write_ctx().quick_open {
+        let qo_pos = if self.write_ctx().locator.quick_open {
             Some(self.write_quick_open_record()?)
         } else {
             None

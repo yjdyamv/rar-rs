@@ -35,7 +35,7 @@ impl RarArchive {
         if self.rar4 {
             return self.open_write_rar4();
         }
-        if let Some(volume_size) = self.write_ctx().volume_size {
+        if let Some(volume_size) = self.write_ctx().output.volume_size {
             if volume_size == 0 {
                 return Err(RarError::Format(
                     "volume size must be greater than zero".into(),
@@ -47,8 +47,8 @@ impl RarArchive {
             // moved over the final `{base}.partN.rar` names on close.
             let tmp_base = format!(".{base}.rar5tmp-{}", temp_suffix());
             self.volume_paths = vec![volume_path(&parent, &base, 1)];
-            self.write_ctx_mut().current_volume = 1;
-            self.write_ctx_mut().pending = Some(PendingCommit::Volumes {
+            self.write_ctx_mut().output.current_volume = 1;
+            self.write_ctx_mut().output.pending = Some(PendingCommit::Volumes {
                 parent: parent.clone(),
                 tmp_base: tmp_base.clone(),
                 final_base: base,
@@ -58,7 +58,7 @@ impl RarArchive {
             self.write_signature()?;
             self.write_archive_encryption_header_if_needed()?;
             self.write_archive_header_vol(None)?;
-            self.write_ctx_mut().volume_bytes_written =
+            self.write_ctx_mut().output.bytes_written =
                 self.stream.as_mut().unwrap().stream_position()?;
             return Ok(());
         }
@@ -68,7 +68,7 @@ impl RarArchive {
         // creation never leaves a partial archive at the target path.
         self.volume_paths = vec![self.path.clone()];
         let tmp_path = temp_sibling_path(&self.path);
-        self.write_ctx_mut().pending = Some(PendingCommit::Single(tmp_path.clone()));
+        self.write_ctx_mut().output.pending = Some(PendingCommit::Single(tmp_path.clone()));
         let f = read_write_create(&tmp_path)?;
         self.stream = Some(Box::new(f));
         self.write_signature()?;
@@ -178,7 +178,7 @@ impl RarArchive {
             return self.finish_writing_rar4();
         }
         if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
-            let qo_offset = if self.write_ctx().quick_open {
+            let qo_offset = if self.write_ctx().locator.quick_open {
                 Some(self.write_quick_open_record()?)
             } else {
                 None
@@ -194,7 +194,7 @@ impl RarArchive {
                 // protects the raw archive bytes including the main header.
                 self.patch_main_header_locator(qo_offset, rr_offset)?;
                 self.write_recovery_record()?;
-            } else if self.write_ctx().quick_open {
+            } else if self.write_ctx().locator.quick_open {
                 self.patch_main_header_locator(qo_offset, None)?;
             }
             self.write_end_block()?;
@@ -245,7 +245,7 @@ impl RarArchive {
     /// The file currently being written: the staged temporary sibling
     /// during an uncommitted create/append, the final path otherwise.
     pub(super) fn write_file_path(&self) -> &Path {
-        match &self.write_ctx().pending {
+        match &self.write_ctx().output.pending {
             Some(PendingCommit::Single(tmp)) => tmp,
             _ => &self.path,
         }
@@ -258,7 +258,7 @@ impl RarArchive {
         // An archive opened purely for reading has no write context (and no
         // staged pending commit); `close` runs on every `Drop`, so this
         // must be a no-op there rather than panic in `write_ctx_mut`.
-        let Some(pending) = self.write.as_mut().and_then(|w| w.pending.take()) else {
+        let Some(pending) = self.write.as_mut().and_then(|w| w.output.pending.take()) else {
             return Ok(());
         };
         let result = match &pending {
@@ -305,7 +305,7 @@ impl RarArchive {
             Err(e) => {
                 // Keep the pending state so the drop guard removes any
                 // staged files that were not committed.
-                self.write_ctx_mut().pending = Some(pending);
+                self.write_ctx_mut().output.pending = Some(pending);
                 Err(e)
             }
         }
@@ -364,7 +364,7 @@ impl RarArchive {
         let qo_pos = stream.stream_position()?;
 
         let mut payload = Vec::new();
-        for (offset, header) in &self.write_ctx().quick_open_entries {
+        for (offset, header) in &self.write_ctx().locator.quick_open_entries {
             let rel = qo_pos.checked_sub(*offset).ok_or_else(|| {
                 RarError::Format("quick-open cached header is after the QO record".into())
             })?;
@@ -414,6 +414,7 @@ impl RarArchive {
     ) -> RarResult<()> {
         let start = self
             .write_ctx()
+            .locator
             .main_header_start
             .ok_or_else(|| RarError::Format("main header position unknown".into()))?;
 
@@ -469,8 +470,14 @@ impl RarArchive {
             &mut new_header,
             qo_offset,
             rr_offset,
-            self.write_ctx().qo_offset_field_pos.map(|p| p as usize),
-            self.write_ctx().rr_offset_field_pos.map(|p| p as usize),
+            self.write_ctx()
+                .locator
+                .qo_offset_field_pos
+                .map(|p| p as usize),
+            self.write_ctx()
+                .locator
+                .rr_offset_field_pos
+                .map(|p| p as usize),
             base,
         )?;
 
@@ -510,11 +517,11 @@ impl RarArchive {
     // ── Writing ────────────────────────────────────────────────────────────
 
     pub(super) fn write_archive_header(&mut self) -> RarResult<()> {
-        if self.recovery_percent.is_some() || self.write_ctx().quick_open {
+        if self.recovery_percent.is_some() || self.write_ctx().locator.quick_open {
             return self.write_archive_header_with_locators();
         }
         let hdr = ArchiveHeader {
-            flags: if self.write_ctx().solid_mode {
+            flags: if self.write_ctx().solid.mode {
                 ARCHIVE_FLAG_SOLID
             } else {
                 0
@@ -537,7 +544,7 @@ impl RarArchive {
         // Locator record body: [flags vint][qo offset vint][rr offset vint]
         // (only the offsets whose flags are set). The byte rules live once
         // in headers::locator.
-        let quick_open = self.write_ctx().quick_open;
+        let quick_open = self.write_ctx().locator.quick_open;
         let recovery = self.recovery_percent.is_some();
         let (locator, qo_field_pos, rr_field_pos) =
             crate::format::rar5::headers::locator::build_locator_body(quick_open, recovery);
@@ -551,7 +558,7 @@ impl RarArchive {
         if self.recovery_percent.is_some() {
             arch_flags |= ARCHIVE_FLAG_RECOVERY;
         }
-        if self.write_ctx().solid_mode {
+        if self.write_ctx().solid.mode {
             arch_flags |= ARCHIVE_FLAG_SOLID;
         }
 
@@ -580,7 +587,7 @@ impl RarArchive {
 
         let main_header_start = self.stream.as_mut().unwrap().stream_position()?;
         self.write_block_header(&out)?;
-        self.write_ctx_mut().main_header_start = Some(main_header_start);
+        self.write_ctx_mut().locator.main_header_start = Some(main_header_start);
         // Plaintext-relative index of the locator body (flags vint then
         // the preallocated offset fields): crc(4) + hsize vint + block
         // type + block flags + extra size + archive flags + record size +
@@ -594,10 +601,10 @@ impl RarArchive {
             + vint::encoded_size(locator.len() as u64) as u64
             + vint::encoded_size(crate::format::rar5::headers::locator::LOCATOR_TYPE) as u64;
         if let Some(p) = qo_field_pos {
-            self.write_ctx_mut().qo_offset_field_pos = Some(field_base + p as u64);
+            self.write_ctx_mut().locator.qo_offset_field_pos = Some(field_base + p as u64);
         }
         if let Some(p) = rr_field_pos {
-            self.write_ctx_mut().rr_offset_field_pos = Some(field_base + p as u64);
+            self.write_ctx_mut().locator.rr_offset_field_pos = Some(field_base + p as u64);
         }
         Ok(())
     }
@@ -629,17 +636,17 @@ impl RarArchive {
         }
         // WinRAR `-sv`: always reset the solid statistics at the start of a
         // new volume so each volume is an independent solid group.
-        if self.write_ctx().solid_mode
-            && self.write_ctx().solid_reset == crate::options::SolidReset::PerVolume
+        if self.write_ctx().solid.mode
+            && self.write_ctx().solid.reset == crate::options::SolidReset::PerVolume
         {
-            self.write_ctx_mut().encoder_state = None;
-            self.write_ctx_mut().last_solid_ext = None;
+            self.write_ctx_mut().solid.encoder_state = None;
+            self.write_ctx_mut().solid.last_ext = None;
         }
         self.write_end_block_flags(true)?;
         // Close current volume
         self.stream = None;
-        self.write_ctx_mut().current_volume += 1;
-        let (parent, tmp_base, final_base) = match &self.write_ctx().pending {
+        self.write_ctx_mut().output.current_volume += 1;
+        let (parent, tmp_base, final_base) = match &self.write_ctx().output.pending {
             Some(PendingCommit::Volumes {
                 parent,
                 tmp_base,
@@ -655,8 +662,8 @@ impl RarArchive {
         };
         // The volume is staged under the temporary base and moved over its
         // final name on close.
-        let tmp_vol = volume_path(&parent, &tmp_base, self.write_ctx().current_volume);
-        let final_vol = volume_path(&parent, &final_base, self.write_ctx().current_volume);
+        let tmp_vol = volume_path(&parent, &tmp_base, self.write_ctx().output.current_volume);
+        let final_vol = volume_path(&parent, &final_base, self.write_ctx().output.current_volume);
         self.volume_paths.push(final_vol);
         let f = read_write_create(&tmp_vol)?;
         self.stream = Some(Box::new(f));
@@ -666,9 +673,9 @@ impl RarArchive {
         // generated once and shared across volumes.
         self.write_archive_encryption_header_if_needed()?;
         // Volume number: part2 → 1, part3 → 2, etc.
-        let vol_num = (self.write_ctx().current_volume - 1) as u64;
+        let vol_num = (self.write_ctx().output.current_volume - 1) as u64;
         self.write_archive_header_vol(Some(vol_num))?;
-        self.write_ctx_mut().volume_bytes_written =
+        self.write_ctx_mut().output.bytes_written =
             self.stream.as_mut().unwrap().stream_position()?;
         Ok(())
     }
@@ -676,7 +683,7 @@ impl RarArchive {
     // ── RAR4 write path ──────────────────────────────────────────────────
 
     fn open_write_rar4(&mut self) -> RarResult<()> {
-        if let Some(volume_size) = self.write_ctx().volume_size {
+        if let Some(volume_size) = self.write_ctx().output.volume_size {
             if volume_size == 0 {
                 return Err(RarError::Format(
                     "volume size must be greater than zero".into(),
@@ -686,8 +693,8 @@ impl RarArchive {
             let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
             let tmp_base = format!(".{base}.rar4tmp-{}", temp_suffix());
             self.volume_paths = vec![volume_path_rar4(&parent, &base, 1)];
-            self.write_ctx_mut().current_volume = 1;
-            self.write_ctx_mut().pending = Some(PendingCommit::Volumes {
+            self.write_ctx_mut().output.current_volume = 1;
+            self.write_ctx_mut().output.pending = Some(PendingCommit::Volumes {
                 parent: parent.clone(),
                 tmp_base: tmp_base.clone(),
                 final_base: base,
@@ -696,14 +703,14 @@ impl RarArchive {
             self.stream = Some(Box::new(f));
             self.write_rar4_signature()?;
             self.write_rar4_main_header()?;
-            self.write_ctx_mut().volume_bytes_written =
+            self.write_ctx_mut().output.bytes_written =
                 self.stream.as_mut().unwrap().stream_position()?;
             return Ok(());
         }
 
         self.volume_paths = vec![self.path.clone()];
         let tmp_path = temp_sibling_path(&self.path);
-        self.write_ctx_mut().pending = Some(PendingCommit::Single(tmp_path.clone()));
+        self.write_ctx_mut().output.pending = Some(PendingCommit::Single(tmp_path.clone()));
         let f = read_write_create(&tmp_path)?;
         self.stream = Some(Box::new(f));
         self.write_rar4_signature()?;
@@ -719,8 +726,8 @@ impl RarArchive {
 
     fn write_rar4_main_header(&mut self) -> RarResult<()> {
         use crate::format::rar4::{MHD_FIRSTVOLUME, MHD_SOLID, MHD_VOLUME};
-        let is_solid = self.write_ctx().solid_mode;
-        let is_multivolume = self.write_ctx().volume_size.is_some();
+        let is_solid = self.write_ctx().solid.mode;
+        let is_multivolume = self.write_ctx().output.volume_size.is_some();
         let mut flags: u16 = 0;
         if is_solid {
             flags |= MHD_SOLID;
@@ -729,7 +736,7 @@ impl RarArchive {
             flags |= MHD_VOLUME;
             // The first volume of a RAR4 set flags MHD_FIRSTVOLUME alongside
             // MHD_VOLUME (matches WinRAR's convention).
-            if self.write_ctx().current_volume == 1 {
+            if self.write_ctx().output.current_volume == 1 {
                 flags |= MHD_FIRSTVOLUME;
             }
         }
@@ -752,14 +759,14 @@ impl RarArchive {
     }
 
     fn finish_writing_rar4(&mut self) -> RarResult<()> {
-        if self.write.as_ref().is_some_and(|w| w.rar4_solid_append) {
+        if self.write.as_ref().is_some_and(|w| w.rar4.solid_append) {
             // Deferred solid append: close repacks the whole archive
             // (surviving members re-encoded in chain order + the buffered
             // additions), preserving the original comment and rebuilding
             // the recovery record. The original file is replaced atomically
             // inside the repack.
-            let additions = std::mem::take(&mut self.write_ctx_mut().rar4_solid_append_entries);
-            self.write_ctx_mut().rar4_solid_append = false;
+            let additions = std::mem::take(&mut self.write_ctx_mut().rar4.solid_append_entries);
+            self.write_ctx_mut().rar4.solid_append = false;
             let none_deleted = vec![false; self.entries.len()];
             crate::archive::rar4_edit::repack_solid_archive(
                 self,
@@ -780,8 +787,7 @@ impl RarArchive {
             // only, matching WinRAR's RAR4 writer). Appending to an
             // archive that carried a record rebuilds it over the whole new
             // prefix at its original parity strength.
-            if self.recovery_percent.is_some() || self.write_ctx().rar4_append_rr_sectors.is_some()
-            {
+            if self.recovery_percent.is_some() || self.write_ctx().rar4.rr_sectors.is_some() {
                 self.write_rar4_recovery_block()?;
             }
             self.write_rar4_end_block()?;
@@ -808,7 +814,7 @@ impl RarArchive {
             let mut reader = std::fs::File::open(&path)?;
             std::io::Read::read_exact(&mut reader, &mut prefix)?;
         }
-        let rec_sectors = match self.write_ctx().rar4_append_rr_sectors {
+        let rec_sectors = match self.write_ctx().rar4.rr_sectors {
             Some(rec) => rec,
             None => {
                 let percent = self.recovery_percent.unwrap_or(0);
@@ -829,10 +835,10 @@ impl RarArchive {
                 crate::format::rar4::write::encrypt_block_header(&block[..54], password)?;
             stream.write_all(&ciphertext)?;
             stream.write_all(&block[54..])?;
-            self.write_ctx_mut().volume_bytes_written += on_disk + (block.len() - 54) as u64;
+            self.write_ctx_mut().output.bytes_written += on_disk + (block.len() - 54) as u64;
         } else {
             stream.write_all(&block)?;
-            self.write_ctx_mut().volume_bytes_written += block.len() as u64;
+            self.write_ctx_mut().output.bytes_written += block.len() as u64;
         }
         Ok(())
     }
@@ -849,10 +855,10 @@ impl RarArchive {
             let (ciphertext, on_disk) =
                 crate::format::rar4::write::encrypt_block_header(&buf, password)?;
             stream.write_all(&ciphertext)?;
-            self.write_ctx_mut().volume_bytes_written += on_disk;
+            self.write_ctx_mut().output.bytes_written += on_disk;
         } else {
             stream.write_all(&buf)?;
-            self.write_ctx_mut().volume_bytes_written += buf.len() as u64;
+            self.write_ctx_mut().output.bytes_written += buf.len() as u64;
         }
         Ok(())
     }
@@ -860,8 +866,8 @@ impl RarArchive {
     fn start_next_volume_rar4(&mut self) -> RarResult<()> {
         self.write_rar4_end_block()?;
         self.stream = None;
-        self.write_ctx_mut().current_volume += 1;
-        let (parent, tmp_base, final_base) = match &self.write_ctx().pending {
+        self.write_ctx_mut().output.current_volume += 1;
+        let (parent, tmp_base, final_base) = match &self.write_ctx().output.pending {
             Some(PendingCommit::Volumes {
                 parent,
                 tmp_base,
@@ -873,14 +879,15 @@ impl RarArchive {
                 ));
             }
         };
-        let tmp_vol = volume_path(&parent, &tmp_base, self.write_ctx().current_volume);
-        let final_vol = volume_path_rar4(&parent, &final_base, self.write_ctx().current_volume);
+        let tmp_vol = volume_path(&parent, &tmp_base, self.write_ctx().output.current_volume);
+        let final_vol =
+            volume_path_rar4(&parent, &final_base, self.write_ctx().output.current_volume);
         self.volume_paths.push(final_vol);
         let f = read_write_create(&tmp_vol)?;
         self.stream = Some(Box::new(f));
         self.write_rar4_signature()?;
         self.write_rar4_main_header()?;
-        self.write_ctx_mut().volume_bytes_written =
+        self.write_ctx_mut().output.bytes_written =
             self.stream.as_mut().unwrap().stream_position()?;
         Ok(())
     }

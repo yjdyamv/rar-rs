@@ -102,7 +102,7 @@ fn emit_rar4_segment(
         host_os: 0,
         file_crc,
         file_time: dos_time,
-        unp_ver: this.write_ctx().rar4_unp_ver,
+        unp_ver: this.write_ctx().solid.rar4_unp_ver,
         method,
         name: encoded_name,
         attr: if is_dir { 0x10 } else { 0x20 }, // directory bit : regular-file archive bit
@@ -144,7 +144,7 @@ fn emit_rar4_segment(
     let data_offset = stream.stream_position()? + header_on_disk;
     stream.write_all(&header_bytes)?;
     stream.write_all(data)?;
-    this.write_ctx_mut().volume_bytes_written += header_on_disk + data.len() as u64;
+    this.write_ctx_mut().output.bytes_written += header_on_disk + data.len() as u64;
     Ok((data_offset, data.len() as u64))
 }
 
@@ -222,13 +222,13 @@ fn emit_rar4_split<'a>(
     );
     let mut chunks = Vec::new();
     let mut sent = 0u64;
-    let mut vol_index = this.write_ctx().current_volume - 1;
+    let mut vol_index = this.write_ctx().output.current_volume - 1;
     let mut split_before = false;
     while sent < packed_size {
         // Roll to a volume with room for the header and the EOA.
         let mut rolled = false;
         loop {
-            let used = this.write_ctx().volume_bytes_written;
+            let used = this.write_ctx().output.bytes_written;
             if volume_size.saturating_sub(used) > needed {
                 break;
             }
@@ -238,10 +238,10 @@ fn emit_rar4_split<'a>(
                 )));
             }
             this.start_next_volume()?;
-            vol_index = this.write_ctx().current_volume - 1;
+            vol_index = this.write_ctx().output.current_volume - 1;
             rolled = true;
         }
-        let used = this.write_ctx().volume_bytes_written;
+        let used = this.write_ctx().output.bytes_written;
         let available = volume_size - used - needed;
         let chunk_size = (packed_size - sent).min(available);
         let split_after = sent + chunk_size < packed_size;
@@ -294,16 +294,16 @@ impl RarArchive {
     /// derives solid continuation from the archive-level `MHD_SOLID` and
     /// member position instead.
     fn track_rar4_solid_member(&mut self, method: u8, unpacked_size: u64) -> bool {
-        let continuation = self.write_ctx().solid_mode
+        let continuation = self.write_ctx().solid.mode
             && method != crate::format::rar4::RAR4_METHOD_STORE
-            && self.write_ctx().rar4_solid_run_has_member
-            && self.write_ctx().rar4_unp_ver == 29;
+            && self.write_ctx().solid.rar4_run_has_member
+            && self.write_ctx().solid.rar4_unp_ver == 29;
         if method == crate::format::rar4::RAR4_METHOD_STORE {
-            self.write_ctx_mut().rar4_solid_encoder = None;
-            self.write_ctx_mut().legacy_solid_encoder = None;
-            self.write_ctx_mut().rar4_solid_run_has_member = false;
+            self.write_ctx_mut().solid.rar4_encoder = None;
+            self.write_ctx_mut().solid.legacy_encoder = None;
+            self.write_ctx_mut().solid.rar4_run_has_member = false;
         } else if unpacked_size != 0 {
-            self.write_ctx_mut().rar4_solid_run_has_member = true;
+            self.write_ctx_mut().solid.rar4_run_has_member = true;
         }
         continuation
     }
@@ -340,7 +340,7 @@ impl RarArchive {
                 comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
                 host_os: 0,
                 format_version: 4,
-                unp_ver: self.write_ctx().rar4_unp_ver,
+                unp_ver: self.write_ctx().solid.rar4_unp_ver,
                 data_offset,
                 is_directory: is_dir,
                 flags: if password {
@@ -400,8 +400,8 @@ impl RarArchive {
         // solid append keep the buffered path — their encoders need the whole
         // input.
         if file_size >= STREAM_COMPRESS_THRESHOLD
-            && self.write_ctx().rar4_unp_ver == 29
-            && !self.write_ctx().rar4_solid_append
+            && self.write_ctx().solid.rar4_unp_ver == 29
+            && !self.write_ctx().rar4.solid_append
         {
             return self.add_rar4_file_streaming(path, &name, file_size, mtime, mtime_ns, level);
         }
@@ -434,7 +434,7 @@ impl RarArchive {
         self.check_cancel()?;
         crate::format::rar4::create::ensure_member_size(file_size)?;
         self.emit_pending_rar4_comment()?;
-        if self.write_ctx().solid_mode {
+        if self.write_ctx().solid.mode {
             self.maybe_reset_solid_for_extension(name);
         }
 
@@ -501,10 +501,11 @@ impl RarArchive {
                     }
                     true
                 };
-                if self.write_ctx().solid_mode {
+                if self.write_ctx().solid.mode {
                     let encoder =
                         self.write_ctx_mut()
-                            .rar4_solid_encoder
+                            .solid
+                            .rar4_encoder
                             .get_or_insert_with(|| {
                                 crate::codec::legacy::rar29_encoder::Unpack29Encoder::with_options(
                                     options,
@@ -587,7 +588,7 @@ impl RarArchive {
         let unpacked_size = file_size;
         let mut chunks = Vec::<crate::model::DataChunk>::new();
 
-        match self.write_ctx().volume_size {
+        match self.write_ctx().output.volume_size {
             None => {
                 // Header first (packed size is known), then stream the
                 // payload in bounded chunks.
@@ -617,7 +618,7 @@ impl RarArchive {
                     let end = (pos + COPY).min(packed_size);
                     let chunk = source.read_range(pos, end)?;
                     stream_mut(&mut self.stream)?.write_all(&chunk)?;
-                    self.write_ctx_mut().volume_bytes_written += chunk.len() as u64;
+                    self.write_ctx_mut().output.bytes_written += chunk.len() as u64;
                     pos = end;
                     self.report_progress(pos, file_size);
                 }
@@ -692,7 +693,7 @@ impl RarArchive {
     /// the comment payload follows as plaintext data (the same rule as
     /// FILE members).
     fn emit_pending_rar4_comment(&mut self) -> RarResult<()> {
-        let Some(text) = self.write_ctx_mut().rar4_writer_comment.take() else {
+        let Some(text) = self.write_ctx_mut().rar4.writer_comment.take() else {
             return Ok(());
         };
         if text.is_empty() {
@@ -710,10 +711,10 @@ impl RarArchive {
                 crate::format::rar4::write::encrypt_block_header(&block[..CMT_HEAD], password)?;
             stream.write_all(&ciphertext)?;
             stream.write_all(&block[CMT_HEAD..])?;
-            self.write_ctx_mut().volume_bytes_written += on_disk + (block.len() - CMT_HEAD) as u64;
+            self.write_ctx_mut().output.bytes_written += on_disk + (block.len() - CMT_HEAD) as u64;
         } else {
             stream.write_all(&block)?;
-            self.write_ctx_mut().volume_bytes_written += block.len() as u64;
+            self.write_ctx_mut().output.bytes_written += block.len() as u64;
         }
         Ok(())
     }
@@ -721,7 +722,7 @@ impl RarArchive {
     /// Queue the archive comment for a RAR4 create/repack writer (emitted
     /// before the first member).
     pub(crate) fn set_rar4_writer_comment(&mut self, text: Option<Vec<u8>>) {
-        self.write_ctx_mut().rar4_writer_comment = text;
+        self.write_ctx_mut().rar4.writer_comment = text;
     }
 
     pub(crate) fn add_rar4_data(
@@ -738,8 +739,8 @@ impl RarArchive {
         // Deferred solid-append: the member cannot be streamed after an
         // existing solid chain; buffer it and let close() repack the whole
         // archive (surviving members + these additions).
-        if self.write_ctx().rar4_solid_append {
-            self.write_ctx_mut().rar4_solid_append_entries.push(
+        if self.write_ctx().rar4.solid_append {
+            self.write_ctx_mut().rar4.solid_append_entries.push(
                 crate::archive::rar4_edit::SolidAppendEntry {
                     name,
                     data,
@@ -768,7 +769,7 @@ impl RarArchive {
         // could still produce PPMd blocks.  `method` is the on-disk byte
         // (0x30 = store, 0x31–0x35 = m1–m5); `packed` is what the write
         // pipeline emits; `unpacked_size` is always the original size.
-        if self.write_ctx().solid_mode {
+        if self.write_ctx().solid.mode {
             self.maybe_reset_solid_for_extension(&name);
         }
         let (mut packed, method) = self.encode_rar4_member(&data, level)?;
@@ -800,7 +801,7 @@ impl RarArchive {
         let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
         let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(&name);
 
-        match self.write_ctx().volume_size {
+        match self.write_ctx().output.volume_size {
             None => {
                 // ── Single-volume ──
                 let (data_offset, _) = emit_rar4_segment(
@@ -902,7 +903,7 @@ impl RarArchive {
     /// RAR 2.x window) carry over — historical WinRAR produced solid
     /// RAR 1.5/2.x archives this way too.
     fn encode_rar4_member(&mut self, data: &[u8], level: u8) -> RarResult<(Vec<u8>, u8)> {
-        let unp_ver = self.write_ctx().rar4_unp_ver;
+        let unp_ver = self.write_ctx().solid.rar4_unp_ver;
         if unp_ver == 29 {
             return self.encode_rar29_member(data, level);
         }
@@ -910,13 +911,13 @@ impl RarArchive {
             return Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE));
         }
         let method = crate::format::rar4::RAR4_METHOD_STORE + level;
-        let packed = if self.write_ctx().solid_mode {
-            if self.write_ctx().legacy_solid_encoder.is_none() {
+        let packed = if self.write_ctx().solid.mode {
+            if self.write_ctx().solid.legacy_encoder.is_none() {
                 let encoder = build_legacy_solid_encoder(unp_ver, level)?;
-                self.write_ctx_mut().legacy_solid_encoder = Some(encoder);
+                self.write_ctx_mut().solid.legacy_encoder = Some(encoder);
             }
             use crate::archive::LegacySolidEncoder;
-            match self.write_ctx_mut().legacy_solid_encoder.as_mut().unwrap() {
+            match self.write_ctx_mut().solid.legacy_encoder.as_mut().unwrap() {
                 LegacySolidEncoder::Rar15(encoder) => encoder.encode_member(data)?,
                 LegacySolidEncoder::Rar20(encoder) => encoder.encode_member(data)?,
             }
@@ -941,7 +942,7 @@ impl RarArchive {
         let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) else {
             return Ok(None);
         };
-        match self.write_ctx().rar4_unp_ver {
+        match self.write_ctx().solid.rar4_unp_ver {
             15 => {
                 crate::crypto::Rar15Cipher::new(pw.as_bytes()).crypt_in_place(packed);
                 Ok(None)
@@ -980,7 +981,7 @@ impl RarArchive {
         if !(1..=5).contains(&level) {
             return Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE));
         }
-        if !self.write_ctx().solid_mode {
+        if !self.write_ctx().solid.mode {
             return Ok(match best_rar29_member(data, level)? {
                 Some(best) => best,
                 None => (data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE),
@@ -996,7 +997,8 @@ impl RarArchive {
         use crate::codec::legacy::rar29_encoder::{Unpack29Encoder, options_for_level};
         let encoder = self
             .write_ctx_mut()
-            .rar4_solid_encoder
+            .solid
+            .rar4_encoder
             .get_or_insert_with(|| Unpack29Encoder::with_options(options_for_level(level)));
         let lz = if data.is_empty() {
             encoder.encode_member(data)?
@@ -1054,10 +1056,10 @@ impl RarArchive {
         // 7-byte end-of-archive block (same rule as file members). A volume
         // too small for even a fresh header must error instead of rolling
         // forever.
-        if let Some(volume_size) = self.write_ctx().volume_size {
+        if let Some(volume_size) = self.write_ctx().output.volume_size {
             let mut rolled = false;
             loop {
-                let used = self.write_ctx().volume_bytes_written;
+                let used = self.write_ctx().output.bytes_written;
                 if volume_size.saturating_sub(used) > 7 + hdr.len() as u64 {
                     break;
                 }
@@ -1072,7 +1074,7 @@ impl RarArchive {
         }
         let stream = stream_mut(&mut self.stream)?;
         stream.write_all(&hdr)?;
-        self.write_ctx_mut().volume_bytes_written += hdr.len() as u64;
+        self.write_ctx_mut().output.bytes_written += hdr.len() as u64;
         let head_crc = u16::from_le_bytes([hdr[0], hdr[1]]);
         self.entries.push(ArchiveEntry {
             header: FileHeader {
@@ -1373,7 +1375,7 @@ impl RarArchive {
         let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
         let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(&name);
 
-        match self.write_ctx().volume_size {
+        match self.write_ctx().output.volume_size {
             None => {
                 let (data_offset, _) = emit_rar4_segment(
                     self,
@@ -1498,7 +1500,7 @@ impl RarArchive {
             if !wave.is_empty() {
                 let threads = self.effective_threads();
                 let pool = crate::parallel::compression_pool_for(threads);
-                let unp_ver = self.write_ctx().rar4_unp_ver;
+                let unp_ver = self.write_ctx().solid.rar4_unp_ver;
                 let prepared: Vec<RarResult<(usize, Rar4PreparedMember)>> = pool.install(|| {
                     wave.par_iter()
                         .map(|&(idx, entry)| {

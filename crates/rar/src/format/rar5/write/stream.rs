@@ -136,12 +136,13 @@ impl RarArchive {
         let mut write_src = payload_stream(&key_iv);
         let mut probe_src = payload_stream(&key_iv);
 
-        if self.write_ctx().volume_size.is_none() {
+        if self.write_ctx().output.volume_size.is_none() {
             // ── Single-volume ──
             let hdr_bytes = fh_base.to_bytes();
-            if self.write_ctx().quick_open {
+            if self.write_ctx().locator.quick_open {
                 let pos = stream_mut(&mut self.stream)?.stream_position()?;
                 self.write_ctx_mut()
+                    .locator
                     .quick_open_entries
                     .push((pos, hdr_bytes.clone()));
             }
@@ -192,7 +193,7 @@ impl RarArchive {
         }
 
         // ── Multi-volume splitting ──
-        let volume_size = self.write_ctx().volume_size.unwrap();
+        let volume_size = self.write_ctx().output.volume_size.unwrap();
         // End-of-archive block: 8 plaintext bytes, or `[IV][padded]` when
         // header encryption wraps every block.
         let eoa_size: u64 = self.on_disk_header_len(8);
@@ -482,19 +483,22 @@ impl RarArchive {
             self.reset_solid_chain();
         }
 
-        let chain_solid = self.write_ctx().solid_mode && self.write_ctx().encoder_state.is_some();
+        let chain_solid =
+            self.write_ctx().solid.mode && self.write_ctx().solid.encoder_state.is_some();
         self.write_ctx_mut()
+            .solid
             .encoder_state
             .get_or_insert_with(Default::default);
         // Each member starts its own frame; see `EncoderState::begin_member`.
         self.write_ctx_mut()
+            .solid
             .encoder_state
             .as_mut()
             .expect("encoder state seeded")
             .begin_member();
 
         let mut crc_hasher = crc32fast::Hasher::new();
-        let mut blake_hasher = if self.write_ctx().blake2 {
+        let mut blake_hasher = if self.write_ctx().meta.blake2 {
             Some(crate::format::rar5::blake2sp::Hasher::new())
         } else {
             None
@@ -679,7 +683,7 @@ impl RarArchive {
                         method,
                         dsl,
                         dict_bytes,
-                        &mut self.write_ctx_mut().encoder_state,
+                        &mut self.write_ctx_mut().solid.encoder_state,
                         &mut spill,
                         &mut packed_size,
                         cancel_ref,
@@ -769,7 +773,7 @@ impl RarArchive {
         // encoder state so the next member starts fresh. A delta/x86-
         // filtered member is also standalone (its window holds transformed
         // bytes, which must never seed the next solid member).
-        if !self.write_ctx().solid_mode || delta_used || x86_used {
+        if !self.write_ctx().solid.mode || delta_used || x86_used {
             self.reset_solid_chain();
         }
         self.report_progress(file_size, file_size);
@@ -779,7 +783,7 @@ impl RarArchive {
     /// Write the NTFS alternate data streams of `path` as "STM" service
     /// records right after the member's file block (WinRAR `-os`).
     pub(super) fn write_member_streams(&mut self, path: &Path) -> RarResult<()> {
-        if !self.write_ctx().save_streams {
+        if !self.write_ctx().meta.streams {
             return Ok(());
         }
         #[cfg(windows)]
@@ -818,9 +822,10 @@ impl RarArchive {
                 self.write_block_header(&hdr)?;
                 let stream = stream_mut(&mut self.stream)?;
                 stream.write_all(&data)?;
-                self.write_ctx_mut().volume_bytes_written = self
+                self.write_ctx_mut().output.bytes_written = self
                     .write_ctx()
-                    .volume_bytes_written
+                    .output
+                    .bytes_written
                     .saturating_add(self.on_disk_header_len(hdr.len() as u64))
                     .saturating_add(data.len() as u64);
             }

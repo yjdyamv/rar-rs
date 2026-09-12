@@ -164,7 +164,7 @@ impl RarArchive {
             let tmp_path = temp_sibling_path(&src_path);
             let mut reader = File::open(&src_path)?;
             self.stream = Some(Box::new(read_write_create(&tmp_path)?));
-            self.write_ctx_mut().quick_open_entries.clear();
+            self.write_ctx_mut().locator.quick_open_entries.clear();
             // Rewriting rediscovers header encryption from the file itself.
             self.header_encryption = false;
             self.archive_encr = None;

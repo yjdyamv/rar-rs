@@ -147,23 +147,41 @@ pub(crate) enum LegacySolidEncoder {
 /// Groups fields exclusively used by write/create/append paths
 /// (write/mod.rs + transaction.rs). Owned as `Option<WriteState>` inside
 /// [`RarArchive`]; `None` when the archive is opened for reading only.
+///
+/// The fields are grouped by role: [`SolidChain`] carries the shared LZ
+/// window and its reset policy, [`Rar4Append`] the legacy append
+/// bookkeeping, [`CompressionSettings`] the `-mt`/`-md` knobs,
+/// [`MetadataSettings`] the `-ts*`/`-ow`/`-os`/`-htb` policy,
+/// [`LocatorState`] the quick-open/recovery offset backfill and
+/// [`OutputState`] the staged commit and volume counters.
+#[derive(Default)]
 pub(crate) struct WriteState {
+    pub solid: SolidChain,
+    pub rar4: Rar4Append,
+    pub compression: CompressionSettings,
+    pub meta: MetadataSettings,
+    pub locator: LocatorState,
+    pub output: OutputState,
+}
+
+/// Shared solid-chain state for one run (RAR5 and the legacy codecs).
+pub(crate) struct SolidChain {
     /// Create a solid archive (shared LZ window across compressed members).
-    pub solid_mode: bool,
+    pub mode: bool,
     /// How the solid chain is split (WinRAR `-s` modifiers `-sd`/`-sv`/`-se`).
-    pub solid_reset: crate::options::SolidReset,
+    pub reset: crate::options::SolidReset,
     /// File extension of the last member added to the solid chain; used by
     /// `SolidReset::PerExtension` to detect when to reset the statistics.
-    pub last_solid_ext: Option<String>,
+    pub last_ext: Option<String>,
     /// Persistent RAR5 encoder state for solid archives.
     pub encoder_state: Option<crate::codec::EncoderState>,
     /// Persistent RAR4 LZSS encoder for solid archives; the sliding window
     /// and Huffman table state carry across the members of a solid run.
-    pub rar4_solid_encoder: Option<crate::codec::legacy::rar29_encoder::Unpack29Encoder>,
+    pub rar4_encoder: Option<crate::codec::legacy::rar29_encoder::Unpack29Encoder>,
     /// Persistent legacy (RAR 1.5/2.x) encoder for solid archives; see
     /// [`LegacySolidEncoder`]. `None` when the run has not started (STORE
     /// members and solid-extension resets drop it, rebuilding the chain).
-    pub legacy_solid_encoder: Option<LegacySolidEncoder>,
+    pub legacy_encoder: Option<LegacySolidEncoder>,
     /// The legacy member `unp_ver` the RAR4 write pipeline emits for this
     /// archive: 29 (RAR29, default) when the archive targets `v29`/`v36`,
     /// 20 for `v20`, 15 for `v15`. Drives member-codec dispatch in
@@ -171,29 +189,54 @@ pub(crate) struct WriteState {
     pub rar4_unp_ver: u8,
     /// True once the current RAR4 solid run has emitted a member, so the next
     /// compressed member is flagged as a chain continuation (`FHD_SOLID`).
-    pub rar4_solid_run_has_member: bool,
+    pub rar4_run_has_member: bool,
+}
+
+impl Default for SolidChain {
+    fn default() -> Self {
+        Self {
+            mode: false,
+            reset: crate::options::SolidReset::Continuous,
+            last_ext: None,
+            encoder_state: None,
+            rar4_encoder: None,
+            legacy_encoder: None,
+            rar4_unp_ver: 29,
+            rar4_run_has_member: false,
+        }
+    }
+}
+
+/// Legacy (RAR 1.5–4.x) append bookkeeping.
+#[derive(Default)]
+pub(crate) struct Rar4Append {
     /// Appending to an existing RAR4 archive that carried a NEWSUB recovery
     /// record: rebuild the record at close with this parity-sector count
     /// (the record's original strength; sector counts are not recoverable
     /// from a percent).
-    pub rar4_append_rr_sectors: Option<u32>,
+    pub rr_sectors: Option<u32>,
     /// Appending to a SOLID RAR4 archive defers to a whole-archive repack
     /// at close: the added members are buffered here (they cannot be
-    /// streamed after a solid chain). `rar4_solid_append_entries` holds the
+    /// streamed after a solid chain). `solid_append_entries` holds the
     /// buffered additions.
-    pub rar4_solid_append: bool,
+    pub solid_append: bool,
     /// Buffered additions for a deferred solid-append (see
-    /// [`Self::rar4_solid_append`]).
-    pub rar4_solid_append_entries: Vec<crate::archive::rar4_edit::SolidAppendEntry>,
+    /// [`Self::solid_append`]).
+    pub solid_append_entries: Vec<crate::archive::rar4_edit::SolidAppendEntry>,
     /// Archive-comment text queued for a RAR4 create/repack writer: emitted
     /// as a NEWSUB `CMT` block right before the first member (create writes
     /// members to a stream, so the comment must be queued before the first
     /// add). `None` = no comment.
-    pub rar4_writer_comment: Option<Vec<u8>>,
+    pub writer_comment: Option<Vec<u8>>,
+}
+
+/// Compression knobs (`-mt`, `-md`, and the RAR7 test seam).
+#[derive(Default)]
+pub(crate) struct CompressionSettings {
     /// Per-archive compression thread count (`-mt`); `None` = process-global
     /// default. The compression pool is selected per thread count, so
     /// concurrent archives with different values never interfere.
-    pub compression_threads: Option<usize>,
+    pub threads: Option<usize>,
     /// Requested dictionary log for compression (WinRAR `-md`);
     /// `None` = default selection.
     pub dict_size_log: Option<u8>,
@@ -203,20 +246,43 @@ pub(crate) struct WriteState {
     /// Force RAR7 (v70) member headers even below the 4 GiB threshold
     /// (test seam; see `CreateOptions::force_v70`).
     pub force_v70: bool,
+}
+
+/// Member metadata policy (`-ts*`, `-ow`, `-os`, `-htb`).
+pub(crate) struct MetadataSettings {
     /// Save creation/change time in the FILE_TIME extra record (`-tsc`).
-    pub save_ctime: bool,
+    pub ctime: bool,
     /// Save last access time in the FILE_TIME extra record (`-tsa`).
-    pub save_atime: bool,
+    pub atime: bool,
     /// Save the modification time (`-tsm`; false with `-tsm-`/`-ts-`).
-    pub save_mtime: bool,
+    pub mtime: bool,
     /// Save owner/group on Unix (`-ow`).
-    pub save_owner: bool,
+    pub owner: bool,
     /// Save NTFS alternate data streams (`-os`; Windows only).
-    pub save_streams: bool,
+    pub streams: bool,
     /// Store timestamps at 1-second precision (`-ts...1`).
     pub time_precision_seconds: bool,
     /// Write BLAKE2sp hash records for members.
     pub blake2: bool,
+}
+
+impl Default for MetadataSettings {
+    fn default() -> Self {
+        Self {
+            ctime: false,
+            atime: false,
+            mtime: true,
+            owner: false,
+            streams: false,
+            time_precision_seconds: false,
+            blake2: false,
+        }
+    }
+}
+
+/// Quick-open and recovery locator backfill positions.
+#[derive(Default)]
+pub(crate) struct LocatorState {
     /// Write a quick-open ("QO") service record at close time.
     pub quick_open: bool,
     /// Cached (offset, full header bytes) of file headers for quick-open.
@@ -230,56 +296,22 @@ pub(crate) struct WriteState {
     /// File offset of the recovery-record offset vint inside the main
     /// header's locator record (preallocated, patched at close time).
     pub rr_offset_field_pos: Option<u64>,
+}
+
+/// Staged-commit and volume counters.
+#[derive(Default)]
+pub(crate) struct OutputState {
     /// Staged write target during an uncommitted create/append: the data
     /// goes to temporary sibling files and is moved over the final paths
-    /// only after [`Self::close`] succeeds, so a failed or interrupted
-    /// operation never leaves a partial archive at the final path.
+    /// only after `close` succeeds, so a failed or interrupted operation
+    /// never leaves a partial archive at the final path.
     pub pending: Option<PendingCommit>,
     /// Volume size limit for multi-volume creation (None = single volume).
     pub volume_size: Option<u64>,
     /// Current volume number during creation (1-indexed).
     pub current_volume: usize,
     /// Bytes written in the current volume during creation.
-    pub volume_bytes_written: u64,
-}
-
-impl Default for WriteState {
-    fn default() -> Self {
-        Self {
-            solid_mode: false,
-            solid_reset: crate::options::SolidReset::Continuous,
-            last_solid_ext: None,
-            encoder_state: None,
-            rar4_solid_encoder: None,
-            legacy_solid_encoder: None,
-            rar4_unp_ver: 29,
-            rar4_solid_run_has_member: false,
-            rar4_append_rr_sectors: None,
-            rar4_solid_append: false,
-            rar4_solid_append_entries: Vec::new(),
-            rar4_writer_comment: None,
-            compression_threads: None,
-            dict_size_log: None,
-            dict_size_bytes: None,
-            force_v70: false,
-            save_ctime: false,
-            save_atime: false,
-            save_mtime: true,
-            save_owner: false,
-            save_streams: false,
-            time_precision_seconds: false,
-            blake2: false,
-            quick_open: false,
-            quick_open_entries: Vec::new(),
-            qo_offset_field_pos: None,
-            main_header_start: None,
-            rr_offset_field_pos: None,
-            pending: None,
-            volume_size: None,
-            current_volume: 0,
-            volume_bytes_written: 0,
-        }
-    }
+    pub bytes_written: u64,
 }
 
 /// Legacy RAR archive engine: the shared implementation behind
@@ -480,7 +512,7 @@ impl RarArchive {
             .write
             .as_mut()
             .ok_or_else(|| RarError::InvalidState("write context is not available".into()))?;
-        write.compression_threads = threads;
+        write.compression.threads = threads;
         Ok(())
     }
 
@@ -489,7 +521,7 @@ impl RarArchive {
     pub(crate) fn effective_threads(&self) -> usize {
         #[cfg(feature = "parallel")]
         {
-            crate::parallel::compression_threads_for(self.write_ctx().compression_threads)
+            crate::parallel::compression_threads_for(self.write_ctx().compression.threads)
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -557,10 +589,14 @@ impl RarArchive {
         self.recovery_percent = None;
         if let Some(write) = self.write.as_mut() {
             // A deferred solid append must not repack on the abort path.
-            write.rar4_solid_append = false;
-            write.rar4_solid_append_entries.clear();
+            write.rar4.solid_append = false;
+            write.rar4.solid_append_entries.clear();
         }
-        if let Some(pending) = self.write.as_mut().and_then(|write| write.pending.take()) {
+        if let Some(pending) = self
+            .write
+            .as_mut()
+            .and_then(|write| write.output.pending.take())
+        {
             pending.cleanup(self.volume_paths.len());
         }
     }
@@ -658,8 +694,8 @@ impl RarArchive {
             .write
             .as_mut()
             .ok_or_else(|| RarError::InvalidState("write context is not available".into()))?;
-        write.dict_size_log = dict_size_log;
-        write.dict_size_bytes = dict_size_bytes;
+        write.compression.dict_size_log = dict_size_log;
+        write.compression.dict_size_bytes = dict_size_bytes;
         Ok(())
     }
 
@@ -701,7 +737,7 @@ impl RarArchive {
             // (rebuilding the record at close when the archive had one),
             // and stage the surviving prefix into a temporary sibling.
             let prelude = crate::archive::rar4_edit::append_prelude(self)?;
-            self.write_ctx_mut().rar4_append_rr_sectors = prelude.rr_sectors;
+            self.write_ctx_mut().rar4.rr_sectors = prelude.rr_sectors;
             if prelude.header_encrypted {
                 // `-hp`: the blocks appended below (members, recovery
                 // record, end-of-archive) are header-encrypted with the
@@ -713,13 +749,13 @@ impl RarArchive {
                 // to a whole-archive repack at close (the additions are
                 // buffered in the write context). The original file is left
                 // untouched until the repack replaces it atomically.
-                self.write_ctx_mut().rar4_solid_append = true;
-                self.write_ctx_mut().rar4_solid_append_entries.clear();
+                self.write_ctx_mut().rar4.solid_append = true;
+                self.write_ctx_mut().rar4.solid_append_entries.clear();
                 return Ok(());
             }
             let path = self.path.clone();
             let tmp_path = temp_sibling_path(&path);
-            self.write_ctx_mut().pending = Some(PendingCommit::Single(tmp_path.clone()));
+            self.write_ctx_mut().output.pending = Some(PendingCommit::Single(tmp_path.clone()));
             let mut src = File::open(&path)?;
             let mut dst = read_write_create(&tmp_path)?;
             copy_prefix(
@@ -770,10 +806,10 @@ impl RarArchive {
         }
         let (had_qo, had_rr, _) = split_main_extra(&ah.extra_data)?;
         let (qo_field_pos, rr_field_pos) = main_header_locator_fields(&main_meta)?;
-        self.write_ctx_mut().main_header_start = Some(main_meta.block_start);
-        self.write_ctx_mut().qo_offset_field_pos = qo_field_pos.map(|p| p as u64);
-        self.write_ctx_mut().rr_offset_field_pos = rr_field_pos.map(|p| p as u64);
-        self.write_ctx_mut().quick_open = had_qo && !self.header_encryption;
+        self.write_ctx_mut().locator.main_header_start = Some(main_meta.block_start);
+        self.write_ctx_mut().locator.qo_offset_field_pos = qo_field_pos.map(|p| p as u64);
+        self.write_ctx_mut().locator.rr_offset_field_pos = rr_field_pos.map(|p| p as u64);
+        self.write_ctx_mut().locator.quick_open = had_qo && !self.header_encryption;
 
         // Walk the remaining blocks: cache existing headers for the rebuilt
         // quick-open record and find the truncation point (the first
@@ -793,8 +829,9 @@ impl RarArchive {
                     break;
                 }
                 BLOCK_TYPE_FILE_HEADER => {
-                    if self.write_ctx().quick_open {
+                    if self.write_ctx().locator.quick_open {
                         self.write_ctx_mut()
+                            .locator
                             .quick_open_entries
                             .push((meta.block_start, meta.header_bytes.clone()));
                     }
@@ -826,7 +863,7 @@ impl RarArchive {
         // over the archive on close, so a failed or interrupted append
         // never truncates or corrupts the original archive.
         let tmp_path = temp_sibling_path(&path);
-        self.write_ctx_mut().pending = Some(PendingCommit::Single(tmp_path.clone()));
+        self.write_ctx_mut().output.pending = Some(PendingCommit::Single(tmp_path.clone()));
         let mut src = File::open(&path)?;
         let mut dst = read_write_create(&tmp_path)?;
         copy_prefix(&mut src, &mut dst, truncate_pos)?;
@@ -1019,42 +1056,49 @@ impl RarArchive {
             progress_member: 0,
             read: None,
             write: Some(WriteState {
-                solid_mode: opts.solid,
-                solid_reset: opts.solid_reset,
-                last_solid_ext: None,
-                encoder_state: None,
-                rar4_solid_encoder: None,
-                legacy_solid_encoder: None,
-                rar4_unp_ver: if is_rar4 {
-                    opts.compression.to_unp_ver().unwrap_or(29)
-                } else {
-                    0
+                solid: SolidChain {
+                    mode: opts.solid,
+                    reset: opts.solid_reset,
+                    last_ext: None,
+                    encoder_state: None,
+                    rar4_encoder: None,
+                    legacy_encoder: None,
+                    rar4_unp_ver: if is_rar4 {
+                        opts.compression.to_unp_ver().unwrap_or(29)
+                    } else {
+                        0
+                    },
+                    rar4_run_has_member: false,
                 },
-                rar4_solid_run_has_member: false,
-                rar4_append_rr_sectors: None,
-                rar4_solid_append: false,
-                rar4_solid_append_entries: Vec::new(),
-                rar4_writer_comment: None,
-                compression_threads: opts.threads,
-                dict_size_log: opts.dict_size_log,
-                dict_size_bytes: opts.dict_size_bytes,
-                force_v70: opts.force_v70,
-                save_ctime: opts.save_ctime,
-                save_atime: opts.save_atime,
-                save_mtime: opts.save_mtime,
-                save_owner: opts.save_owner,
-                save_streams: opts.save_streams,
-                time_precision_seconds: opts.time_precision_seconds,
-                blake2: opts.blake2,
-                quick_open,
-                quick_open_entries: Vec::new(),
-                qo_offset_field_pos: None,
-                main_header_start: None,
-                rr_offset_field_pos: None,
-                pending: None,
-                volume_size: opts.volume_size,
-                current_volume: 0,
-                volume_bytes_written: 0,
+                rar4: Rar4Append::default(),
+                compression: CompressionSettings {
+                    threads: opts.threads,
+                    dict_size_log: opts.dict_size_log,
+                    dict_size_bytes: opts.dict_size_bytes,
+                    force_v70: opts.force_v70,
+                },
+                meta: MetadataSettings {
+                    ctime: opts.save_ctime,
+                    atime: opts.save_atime,
+                    mtime: opts.save_mtime,
+                    owner: opts.save_owner,
+                    streams: opts.save_streams,
+                    time_precision_seconds: opts.time_precision_seconds,
+                    blake2: opts.blake2,
+                },
+                locator: LocatorState {
+                    quick_open,
+                    quick_open_entries: Vec::new(),
+                    qo_offset_field_pos: None,
+                    main_header_start: None,
+                    rr_offset_field_pos: None,
+                },
+                output: OutputState {
+                    pending: None,
+                    volume_size: opts.volume_size,
+                    current_volume: 0,
+                    bytes_written: 0,
+                },
             }),
         };
         Ok(archive)
@@ -1129,7 +1173,7 @@ impl Drop for RarArchive {
         // staged files that were not committed so a failed or interrupted
         // write leaves no garbage behind and never a partial archive at
         // the final path. A read-only archive has no write context.
-        if let Some(pending) = self.write.as_mut().and_then(|w| w.pending.take()) {
+        if let Some(pending) = self.write.as_mut().and_then(|w| w.output.pending.take()) {
             pending.cleanup(self.volume_paths.len());
         }
     }

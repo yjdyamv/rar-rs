@@ -106,7 +106,7 @@ fn archive_local_zero_threads_use_automatic_sizing() {
     )
     .unwrap();
 
-    assert_eq!(archive.write_ctx().compression_threads, Some(0));
+    assert_eq!(archive.write_ctx().compression.threads, Some(0));
     #[cfg(feature = "parallel")]
     assert_eq!(
         archive.effective_threads(),
@@ -151,8 +151,8 @@ fn setters_reject_invalid_values_without_mutating_state() {
         archive.set_dictionary(Some(16), None),
         Err(RarError::InvalidOption(_))
     ));
-    assert_eq!(archive.write_ctx().compression_threads, Some(0));
-    assert_eq!(archive.write_ctx().dict_size_log, None);
+    assert_eq!(archive.write_ctx().compression.threads, Some(0));
+    assert_eq!(archive.write_ctx().compression.dict_size_log, None);
 }
 
 #[test]

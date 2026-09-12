@@ -215,7 +215,7 @@ impl RarArchive {
         self.check_cancel()?;
         #[cfg(feature = "parallel")]
         {
-            if !self.rar4 && !self.write_ctx().solid_mode && !entries.is_empty() {
+            if !self.rar4 && !self.write_ctx().solid.mode && !entries.is_empty() {
                 return self.add_batch_parallel(entries);
             }
             // RAR4: independent non-solid file members compress in parallel
@@ -223,8 +223,8 @@ impl RarArchive {
             // deferred solid append buffers its additions for the close-time
             // repack and must never stream-write).
             if self.rar4
-                && !self.write_ctx().solid_mode
-                && !self.write_ctx().rar4_solid_append
+                && !self.write_ctx().solid.mode
+                && !self.write_ctx().rar4.solid_append
                 && !entries.is_empty()
             {
                 return self.add_batch_parallel_rar4(entries);
@@ -283,11 +283,11 @@ impl RarArchive {
     /// not participate in the LZ window: directories, STORE files, empty
     /// files, or when compression fell back to STORE).
     pub(crate) fn reset_solid_chain(&mut self) {
-        self.write_ctx_mut().encoder_state = None;
-        self.write_ctx_mut().rar4_solid_encoder = None;
-        self.write_ctx_mut().legacy_solid_encoder = None;
-        self.write_ctx_mut().rar4_solid_run_has_member = false;
-        self.write_ctx_mut().last_solid_ext = None;
+        self.write_ctx_mut().solid.encoder_state = None;
+        self.write_ctx_mut().solid.rar4_encoder = None;
+        self.write_ctx_mut().solid.legacy_encoder = None;
+        self.write_ctx_mut().solid.rar4_run_has_member = false;
+        self.write_ctx_mut().solid.last_ext = None;
     }
 
     /// Reset the solid chain when the next member's file extension differs
@@ -296,21 +296,21 @@ impl RarArchive {
     /// break the chain through `reset_solid_chain`, which also clears
     /// `last_solid_ext`, so this only needs to run for compressed members.
     pub(crate) fn maybe_reset_solid_for_extension(&mut self, name: &str) {
-        if !self.write_ctx().solid_mode
-            || self.write_ctx().solid_reset != crate::options::SolidReset::PerExtension
+        if !self.write_ctx().solid.mode
+            || self.write_ctx().solid.reset != crate::options::SolidReset::PerExtension
         {
             return;
         }
         let base = name.trim_end_matches('/');
         let ext = base.rsplit('.').next().unwrap_or("");
-        match &self.write_ctx().last_solid_ext {
+        match &self.write_ctx().solid.last_ext {
             Some(prev) if prev == ext => {}
             _ => {
-                self.write_ctx_mut().encoder_state = None;
-                self.write_ctx_mut().rar4_solid_encoder = None;
-                self.write_ctx_mut().legacy_solid_encoder = None;
-                self.write_ctx_mut().rar4_solid_run_has_member = false;
-                self.write_ctx_mut().last_solid_ext = Some(ext.to_string());
+                self.write_ctx_mut().solid.encoder_state = None;
+                self.write_ctx_mut().solid.rar4_encoder = None;
+                self.write_ctx_mut().solid.legacy_encoder = None;
+                self.write_ctx_mut().solid.rar4_run_has_member = false;
+                self.write_ctx_mut().solid.last_ext = Some(ext.to_string());
             }
         }
     }

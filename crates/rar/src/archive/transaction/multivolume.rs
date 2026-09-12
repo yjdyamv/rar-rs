@@ -138,11 +138,11 @@ impl RarArchive {
         // volume naming itself comes from the staged `pending` set.
         let saved_path = self.path.clone();
         self.path = tmp_base_path;
-        self.write_ctx_mut().volume_size = Some(volume_size);
+        self.write_ctx_mut().output.volume_size = Some(volume_size);
         self.volume_paths = vec![volume_path(&parent, &base, 1)];
-        self.write_ctx_mut().current_volume = 1;
-        self.write_ctx_mut().volume_bytes_written = 0;
-        self.write_ctx_mut().pending = Some(PendingCommit::Volumes {
+        self.write_ctx_mut().output.current_volume = 1;
+        self.write_ctx_mut().output.bytes_written = 0;
+        self.write_ctx_mut().output.pending = Some(PendingCommit::Volumes {
             parent: parent.clone(),
             tmp_base: tmp_base.clone(),
             final_base: base.clone(),
@@ -152,7 +152,7 @@ impl RarArchive {
         ))?));
         self.write_signature()?;
         self.write_archive_header_vol(None)?;
-        self.write_ctx_mut().volume_bytes_written =
+        self.write_ctx_mut().output.bytes_written =
             self.stream.as_mut().unwrap().stream_position()?;
 
         let mut readers = VolumeReaders::new(&orig_volumes);
@@ -257,7 +257,7 @@ impl RarArchive {
         }
         self.write_end_block()?;
         self.stream = None;
-        self.write_ctx_mut().volume_size = None;
+        self.write_ctx_mut().output.volume_size = None;
         self.path = saved_path;
 
         // Move the new volumes (and regenerated `.rev` recovery volumes)
@@ -312,7 +312,7 @@ impl RarArchive {
         // `commit_files` installed the staged files (or restored them to
         // their staged names on rollback), so the drop guard must not touch
         // them again.
-        self.write_ctx_mut().pending = None;
+        self.write_ctx_mut().output.pending = None;
         if result.is_err() {
             for path in &staged_paths {
                 let _ = fs::remove_file(path);

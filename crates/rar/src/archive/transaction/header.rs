@@ -28,7 +28,7 @@ impl RarArchive {
             return Err(RarError::ArchiveLocked);
         }
         let (had_qo, _had_rr, mut extra) = split_main_extra(&ah.extra_data)?;
-        self.write_ctx_mut().quick_open = had_qo && !self.header_encryption;
+        self.write_ctx_mut().locator.quick_open = had_qo && !self.header_encryption;
         // The recovery record is rebuilt when the original archive had one
         // (or when the caller forces it, e.g. the `rr` command).
         self.recovery_percent = rr_percent;
@@ -38,7 +38,7 @@ impl RarArchive {
             arch_flags |= ARCHIVE_FLAG_RECOVERY;
         }
 
-        let quick_open = self.write_ctx().quick_open;
+        let quick_open = self.write_ctx().locator.quick_open;
         let recovery = self.recovery_percent.is_some();
         let (locator, qo_field_pos, rr_field_pos) =
             crate::format::rar5::headers::locator::build_locator_body(quick_open, recovery);
