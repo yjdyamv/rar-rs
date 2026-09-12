@@ -7,7 +7,6 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.88"
 license = "BSD-2-Clause"
 repository = "https://codeberg.org/librar/rar-rs"
 description = "Pure-Rust library and tools for RAR 1.5-4.x, RAR5, and RAR7 archives"

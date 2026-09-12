@@ -87,6 +87,10 @@ jobs:
         shell: bash
       - name: Cargo test (workspace)
         run: cargo test --workspace --all-features --locked
+      - name: Cargo doc (workspace)
+        # Build-only: several pre-existing public docs link to private
+        # internals, so `-D warnings` is not on yet.
+        run: cargo doc --workspace --no-deps --locked
       - name: Install binding dependencies
         working-directory: crates/rar-napi
         run: npm ci
@@ -125,21 +129,6 @@ jobs:
         # The CLI's Windows-only paths (ReplaceFileW, registry SFX lookup)
         # are never exercised by the ubuntu lint job.
         run: cargo test -p rar-cli --locked
-  msrv-docs:
-    name: MSRV + docs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install MSRV toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
-      - name: Cargo check (workspace, MSRV)
-        run: cargo check --workspace --locked
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cargo doc (workspace)
-        # Build-only: several pre-existing public docs link to private
-        # internals, so `-D warnings` is not on yet.
-        run: cargo doc --workspace --no-deps --locked
   build:
     name: build - ${{ matrix.settings.target }} - node@24
     runs-on: ${{ matrix.settings.host }}

@@ -32,9 +32,8 @@ RAR/UNRAR binary is required at runtime.
 
 ## Build
 
-The workspace requires Rust 1.88, matching the standard-library APIs used by
-the implementation. CI validates the current stable toolchain; release checks
-should also keep the declared MSRV buildable as dependencies evolve.
+The workspace targets current stable Rust (`edition = "2024"`); no fixed MSRV
+is declared, and CI runs the full stable validation matrix.
 
 ```bash
 cargo build --release --locked
