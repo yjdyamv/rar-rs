@@ -18,7 +18,7 @@
 | 文档 | 内容 | 何时读 |
 |---|---|---|
 | [`FORMAT_RAR5_RAR7.html`](FORMAT_RAR5_RAR7.html) | 磁盘格式**权威参考**：块流、逐字节拆解、Extra、压缩/加密/多卷/恢复/Solid/RAR7、常量速查 | 需要格式细节 / 校验字节布局 |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 库 crate 模块地图（含 `raw` 门控标注）、workspace、设计笔记（有界内存 / 安全提取 / solid 与 MT / QO / 流式修复） | 理解分层 / 定位模块 |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 库 crate 模块地图（含 `wire` 导出标注）、workspace、设计笔记（有界内存 / 安全提取 / solid 与 MT / QO / 流式修复） | 理解分层 / 定位模块 |
 | [`CLI.md`](CLI.md) | `rar` / `unrar` 全量开关与命令参考 | 用 CLI / 实现新开关 |
 
 ## 决策记录（ADR 与规格）
@@ -27,9 +27,11 @@
 |---|---|
 | [`adr/0001-rar4-creation-architecture.md`](adr/0001-rar4-creation-architecture.md) | RAR4 创建架构决策 |
 | [`adr/0002-format-neutral-model-and-api-v2.md`](adr/0002-format-neutral-model-and-api-v2.md) | 格式中立模型、依赖方向、API v2 兼容策略（版本轴拆分由 0003 决策 2 承接，再被 0004 取代） |
-| [`adr/0003-breaking-release-scope.md`](adr/0003-breaking-release-scope.md) | 公开面收敛范围：`raw` 门控、破坏性发布清单 |
+| [`adr/0003-breaking-release-scope.md`](adr/0003-breaking-release-scope.md) | 公开面收敛范围：破坏性发布清单（`raw` 门控已被 ADR 0007 取代） |
 | [`adr/0004-single-archive-version-table.md`](adr/0004-single-archive-version-table.md) | 单一 `ArchiveVersion` 表（v15–v70），废弃容器轴与 `CompressionVersion` |
 | [`adr/0005-rar4-edit-architecture.md`](adr/0005-rar4-edit-architecture.md) | RAR4 编辑架构（对齐官方、solid 整档 repack、分卷/-hp 边界） |
+| [`adr/0006-public-api-convergence.md`](adr/0006-public-api-convergence.md) | 公开面收敛到角色门面（ADR 0006）|
+| [`adr/0007-raw-feature-retired.md`](adr/0007-raw-feature-retired.md) | 删除 `raw` feature，常驻 `wire` 模块承接受支持子集 |
 | [`rar4-creation-spec.md`](rar4-creation-spec.md) | RAR4 创建行为与格式规格 |
 
 ## 过程与工具

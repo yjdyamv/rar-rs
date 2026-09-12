@@ -29,54 +29,6 @@ pub fn plan_recovery_volume_count(data_count: usize, rec_percent: u64) -> RarRes
     Ok(nr as usize)
 }
 
-/// Encode the parity payloads for the recovery volumes.
-///
-/// Returns `(rec_count, payloads)` where `payloads[k]` is the payload of
-/// the k-th `.rev` file. Shards are padded with zeros to the largest
-/// volume size (rounded up to an even byte count for the 16-bit codec).
-pub fn encode_recovery_volumes(
-    volume_data: &[&[u8]],
-    rec_percent: u64,
-) -> RarResult<(usize, Vec<Vec<u8>>)> {
-    let rec_count = plan_recovery_volume_count(volume_data.len(), rec_percent)?;
-    Ok((
-        rec_count,
-        encode_recovery_volumes_exact(volume_data, rec_count)?,
-    ))
-}
-
-/// Encode exactly `rec_count` recovery-volume parity payloads (caller is
-/// responsible for capping `rec_count` at the data volume count).
-pub fn encode_recovery_volumes_exact(
-    volume_data: &[&[u8]],
-    rec_count: usize,
-) -> RarResult<Vec<Vec<u8>>> {
-    if volume_data.is_empty() {
-        return Err(RarError::Format(
-            "no data volumes for recovery volumes".into(),
-        ));
-    }
-    if volume_data.len() > 65535 {
-        return Err(RarError::Format(format!(
-            "too many data volumes ({}) for recovery volumes; maximum is 65535",
-            volume_data.len()
-        )));
-    }
-    let rec_count = rec_count.min(volume_data.len()).max(1);
-    let maxlen = volume_data.iter().map(|d| d.len()).max().unwrap_or(0);
-    let maxlen = if maxlen % 2 == 0 { maxlen } else { maxlen + 1 };
-    let mut padded: Vec<Vec<u8>> = Vec::with_capacity(volume_data.len());
-    for d in volume_data {
-        let mut v = d.to_vec();
-        v.resize(maxlen, 0);
-        padded.push(v);
-    }
-    let refs: Vec<&[u8]> = padded.iter().map(|v| v.as_slice()).collect();
-    let parity = encode_parity_shards(&refs, rec_count)
-        .map_err(|e| RarError::Format(format!("recovery volumes encode: {e}")))?;
-    Ok(parity)
-}
-
 /// Serialize one `.rev` file: signature, header (with the per-volume
 /// metadata table) and the parity payload.
 pub fn build_recovery_volume_file(
@@ -113,16 +65,6 @@ pub fn build_recovery_volume_file(
     out.extend(header_content);
     out.extend(payload);
     out
-}
-
-/// Rebuild missing volumes of a multi-volume set from its `.rev` recovery
-/// volumes (like `rar rc`).
-///
-/// `first_volume` is any path of the volume set (e.g. `archive.part1.rar`);
-/// the surviving volumes and the `.rev` files are discovered next to it.
-/// Returns the paths of the rebuilt volumes.
-pub fn rebuild_missing_volumes(first_volume: &Path) -> RarResult<Vec<PathBuf>> {
-    rebuild_missing_volumes_with(first_volume, None, None)
 }
 
 /// [`rebuild_missing_volumes`] with a cancellation flag and progress

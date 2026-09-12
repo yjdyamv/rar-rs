@@ -352,7 +352,7 @@ pub fn write_roundtrip(data: &[u8]) {
         let rev_ok = if create_rev.is_some() {
             true // create-time .rev already on disk
         } else {
-            rar_rs::recovery::rev50::build_recovery_volumes_for_set(&volumes, 1 + (h[7] as usize % 2))
+            rar_rs::build_recovery_volumes_for_set(&volumes, 1 + (h[7] as usize % 2))
                 .is_ok()
         };
         if rev_ok {
@@ -512,9 +512,9 @@ pub fn crypto(data: &[u8]) {
     iv.copy_from_slice(&data[17..33]);
     let plain = &data[33..];
 
-    if let Ok(keys) = rar_rs::derive_keys("fuzz", &salt, strength) {
-        let ct = rar_rs::encrypt_data(plain, &keys.key, &iv);
-        let pt = rar_rs::decrypt_data(&ct, &keys.key, &iv).expect("decrypt must succeed");
+    if let Ok(keys) = rar_rs::wire::derive_keys("fuzz", &salt, strength) {
+        let ct = rar_rs::wire::encrypt_data(plain, &keys.key, &iv);
+        let pt = rar_rs::wire::decrypt_data(&ct, &keys.key, &iv).expect("decrypt must succeed");
         assert_eq!(
             &pt[..plain.len()],
             plain,
@@ -523,7 +523,7 @@ pub fn crypto(data: &[u8]) {
     }
     // Parameter parser over arbitrary extra-record bytes (vints, salt,
     // IV, checksum).
-    let _ = rar_rs::EncryptionParams::from_extra_bytes(data);
+    let _ = rar_rs::wire::EncryptionParams::from_extra_bytes(data);
 }
 
 /// Recovery surface: inline `{RB}` build/parse/repair, the GF(2^16)
@@ -539,7 +539,7 @@ pub fn recovery(data: &[u8]) {
         // one-byte-corrupted prefix (one damaged shard, one parity
         // shard: reconstruct must succeed).
         let pct = (data[0] % 101) as u64;
-        if let Ok(rr) = rar_rs::recovery::rar50::build_structural_inline_recovery_data(data, pct) {
+        if let Ok(rr) = rar_rs::wire::build_structural_inline_recovery_data(data, pct) {
             let mut full = data.to_vec();
             full.extend_from_slice(&rr);
             let _ = rar_rs::repair_archive(&full);
@@ -549,8 +549,8 @@ pub fn recovery(data: &[u8]) {
         }
     }
 
-    let _ = rar_rs::recovery::rar50::crc64_xz(data);
-    let _ = rar_rs::recovery::rar50::crc64_rar_state(data);
+    let _ = rar_rs::wire::crc64_xz(data);
+    let _ = rar_rs::wire::crc64_rar_state(data);
 
     // `.rev` serialization: sizes/CRCs need not be meaningful for the
     // writer to produce a file.
@@ -558,6 +558,6 @@ pub fn recovery(data: &[u8]) {
         let sizes = [data.len() as u64];
         let crcs = [u32::from_le_bytes(data[0..4].try_into().unwrap())];
         let payload = &data[..data.len() / 2];
-        let _ = rar_rs::recovery::rev50::build_recovery_volume_file(0, 1, &sizes, &crcs, payload);
+        let _ = rar_rs::wire::build_recovery_volume_file(0, 1, &sizes, &crcs, payload);
     }
 }

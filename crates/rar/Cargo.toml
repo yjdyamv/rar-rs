@@ -24,24 +24,11 @@ wide = { workspace = true, optional = true }
 
 [features]
 default = []
-# Opt-in to the low-level wire surface: the `format` tree and its `rar40` /
-# `rar50` aliases. Off by default — those helpers are not part of the
-# supported API and are kept only for downstream raw access, plus the
-# in-tree tests that assert wire-level compatibility.
-raw = []
 parallel = ["dep:rayon"]
 simd = ["dep:wide"]
 
 [dev-dependencies]
 tempfile = "3"
-# The wire-level surface (`format` tree, `rar40`/`rar50` aliases) is hidden
-# behind the `raw` feature, but the in-tree tests still cross that seam on
-# purpose — re-implementing the block envelope in `tests/support` would be a
-# second, drifting copy of the format. Depending on ourselves with `raw`
-# turns the feature on for the dev/test graph only, so downstream users keep
-# the clean default surface.
-rar-rs = { path = ".", features = ["raw"] }
-
 
 [lints]
 workspace = true

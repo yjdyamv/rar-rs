@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 use super::encode::{
     build_structural_inline_recovery_data, build_structural_inline_recovery_data_streaming,
-    encode_inline_recovery_parity,
+    encode_inline_recovery_parity_with_progress,
 };
 use super::gf16::{
     Gf16, apply_inverse_matrix, encode_parity_shards, invert_linear_system_matrix,
@@ -243,7 +243,7 @@ fn rar5_parity_encoder_applies_cauchy_matrix_coefficients() {
 #[test]
 fn rar5_inline_recovery_parity_splits_and_encodes_prefix() {
     let prefix = b"RAR5 inline recovery parity payload input";
-    let (plan, parity) = encode_inline_recovery_parity(prefix, 10).unwrap();
+    let (plan, parity) = encode_inline_recovery_parity_with_progress(prefix, 10, None, 1).unwrap();
 
     assert_eq!(plan, plan_inline_recovery(prefix.len() as u64, 10).unwrap());
     assert_eq!(parity.len(), plan.recovery_shards as usize);
@@ -264,7 +264,7 @@ fn rar5_inline_recovery_parity_splits_and_encodes_prefix() {
 #[test]
 fn rar5_structural_inline_recovery_data_writes_chunks_and_crc64() {
     let prefix = b"RAR5 structural inline recovery data";
-    let (plan, parity) = encode_inline_recovery_parity(prefix, 10).unwrap();
+    let (plan, parity) = encode_inline_recovery_parity_with_progress(prefix, 10, None, 1).unwrap();
     let data = build_structural_inline_recovery_data(prefix, 10).unwrap();
 
     assert_eq!(data.len(), plan.payload_size().unwrap() as usize);
@@ -388,7 +388,7 @@ fn rar5_streaming_recovery_record_matches_buffered() {
 #[test]
 fn rar5_structural_inline_recovery_uses_shared_final_state() {
     let prefix: Vec<u8> = (0..(256 * 1024)).map(|index| index as u8).collect();
-    let (plan, parity) = encode_inline_recovery_parity(&prefix, 20).unwrap();
+    let (plan, parity) = encode_inline_recovery_parity_with_progress(&prefix, 20, None, 1).unwrap();
     assert!(plan.recovery_shards > 1);
     let data = build_structural_inline_recovery_data(&prefix, 20).unwrap();
     let expected = crc64_rar_state(&parity[0]);

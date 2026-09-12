@@ -47,7 +47,8 @@ This keeps `rar_rs::rar50::headers::FileHeader` and
 `rar_rs::rar50::FileHeader` source-compatible while internal consumers migrate to
 `crate::model`.
 
-> 2026-09：这两个重导出路径现在只在 `raw` feature 下可达，见 ADR 0003 决策 3。
+> 2026-09：这两个重导出路径先后经 `raw` feature（ADR 0003 决策 3）与 `wire` 模块
+> （ADR 0007）承接；`rar40`/`rar50` 别名已随 `raw` 一并删除，`wire` 直接导出模型结构。
 
 ### 2. Keep format-specific wire structures in format modules
 

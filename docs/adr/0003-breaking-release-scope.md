@@ -120,6 +120,12 @@ tests/examples/fuzz. The npm package is already `rar-rs-napi`.
    not named in the decision but had zero consumers outside the crate, so it
    follows the same `raw` rule, with its four root re-exports gated alongside
    it.
+   **2026-09 superseded by [ADR 0007](0007-raw-feature-retired.md):** the
+   `raw` feature and the `rar40`/`rar50` aliases were deleted. The three
+   trees are permanently `pub(crate)`; the small subset the in-tree tests
+   and fuzz actually use is re-exported from the always-public `wire` module,
+   and the self dev-dependency plus the module-level `allow(dead_code,
+   unused_imports)` sites are gone.
 4. Legacy facade removal. The typed roles now cover the full surface
    including the previously blocking seams: `archive u/f` version control
    runs on `ArchiveEditor` (chained rename + delete, two applies) and

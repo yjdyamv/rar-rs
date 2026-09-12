@@ -155,13 +155,18 @@ pub fn derive_keys(
     Ok(result)
 }
 
-/// Derive a 32-byte AES-256 key (kept for API compatibility).
+/// Derive a 32-byte AES-256 key with the PBKDF2-HMAC-SHA256 fallback.
+///
+/// Test oracle for the production KDF (`derive_keys`): the fallback mirrors
+/// the legacy single-block derivation, not the RAR5 tap chain.
+#[cfg(test)]
 pub fn derive_key(password: &str, salt: &[u8], iterations: u32) -> [u8; ENCR_KEY_SIZE] {
     let mut key = [0u8; ENCR_KEY_SIZE];
     pbkdf2_fallback(password, salt, iterations, &mut key);
     key
 }
 
+#[cfg(test)]
 fn pbkdf2_fallback(password: &str, salt: &[u8], iterations: u32, out: &mut [u8; 32]) {
     // Legacy compatibility helper: PBKDF2-HMAC-SHA256 block 1.
     let mut first_input = Vec::with_capacity(salt.len() + 4);
@@ -179,7 +184,6 @@ fn pbkdf2_fallback(password: &str, salt: &[u8], iterations: u32, out: &mut [u8; 
     u.zeroize();
     acc.zeroize();
 }
-
 // ── Encryption / Decryption ──────────────────────────────────────────────────
 
 /// AES-256-CBC state for RAR5, whose IV advances block by block and whose
@@ -605,13 +609,6 @@ pub fn derive_header_key(
         return Err(RarError::WrongPassword);
     }
     params.get_key(password)
-}
-
-/// Check if a file header's extra area contains an encryption record.
-pub fn is_encrypted(extra_data: &[u8]) -> bool {
-    parse_encryption_extra(extra_data)
-        .map(|p| p.is_some())
-        .unwrap_or(false)
 }
 
 /// Parse the extra area of a file header to find encryption parameters.

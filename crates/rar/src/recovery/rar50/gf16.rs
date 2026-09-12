@@ -122,6 +122,7 @@ impl Gf16 {
         }
     }
 
+    #[allow(dead_code)] // rars GF(2^16) parity: add is implied by xor in our callers
     pub fn add(&self, left: u16, right: u16) -> u16 {
         left ^ right
     }
@@ -142,6 +143,7 @@ impl Gf16 {
         Ok(self.exp[index as usize])
     }
 
+    #[allow(dead_code)] // rars GF(2^16) parity: our callers multiply by inverses
     pub fn div(&self, numerator: u16, denominator: u16) -> Result<u16> {
         Ok(self.mul(numerator, self.inv(denominator)?))
     }

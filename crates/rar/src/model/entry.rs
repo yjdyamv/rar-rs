@@ -62,7 +62,6 @@ pub struct FileHeader {
     /// RAR 1.5–4.x raw header CRC (16-bit); `None` for RAR5 members, which
     /// use the 32-bit header CRC32.
     // Only read through the wire surface, which is `raw`-gated.
-    #[cfg_attr(not(feature = "raw"), allow(dead_code))]
     pub legacy_head_crc: Option<u16>,
     /// Per-member (file) comment (`FHD_COMMENT`) for RAR 3.x/4.x archives.
     /// `None` when the member carries no comment. Decoded to raw text bytes

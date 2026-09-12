@@ -24,7 +24,6 @@ pub(crate) enum WriteProgressEvent {
     },
     /// Absolute progress within the current operation or pass.
     // Only emitted by the wire-level write path, which is `raw`-gated.
-    #[cfg_attr(not(feature = "raw"), allow(dead_code))]
     Advanced {
         operation: WriteOperation,
         completed_bytes: u64,

@@ -6,7 +6,6 @@
 // `lib.rs`). Without it they are crate-internal and a fair number of wire
 // constants and helpers have no in-tree caller — they exist for downstream
 // raw access, so silence dead-code for that configuration only.
-#![cfg_attr(not(feature = "raw"), allow(dead_code))]
 
 pub mod rar4;
 pub mod rar5;

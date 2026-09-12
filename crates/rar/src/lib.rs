@@ -29,13 +29,9 @@ pub mod archive;
 pub mod codec;
 pub(crate) mod crc32;
 
-// Codec-independent AES-256-CBC / PBKDF2 primitives. Nothing outside the
-// crate consumes them — the archive layer is the only caller — so the module
-// follows the same `raw` rule as `format` and `recovery`.
-#[cfg(feature = "raw")]
-#[doc(hidden)]
-pub mod crypto;
-#[cfg(not(feature = "raw"))]
+// Codec-independent AES-256-CBC / PBKDF2 primitives. The archive layer is
+// the only in-crate caller; the public entry points are re-exported through
+// [`wire`].
 pub(crate) mod crypto;
 
 pub mod detect;
@@ -43,36 +39,20 @@ pub mod error;
 pub mod features;
 mod fs;
 mod model;
-// Internal home of the `rar4` / `rar5` module trees. Always compiled — every
-// in-crate path goes through `crate::format::…` — but only *publicly*
-// reachable with the `raw` feature: the wire-level helpers are not part of
-// the supported API, and the visibility is what stops downstream callers
-// from building on them by accident.
-#[cfg(feature = "raw")]
-#[doc(hidden)]
-pub mod format;
-#[cfg(not(feature = "raw"))]
+// Internal home of the `rar4` / `rar5` module trees. Every in-crate path
+// goes through `crate::format::…`; the wire-level helpers that external
+// tools need are re-exported through [`wire`].
 pub(crate) mod format;
 
 pub mod options;
 mod parallel;
-#[cfg(feature = "raw")]
-#[doc(hidden)]
-pub use crate::format::rar4 as rar40;
-#[cfg(feature = "raw")]
-#[doc(hidden)]
-pub use crate::format::rar5 as rar50;
 
-// Recovery-record and recovery-volume support. The supported entry points are
-// re-exported at the crate root; the module tree itself follows the same
-// `raw` rule as `format`.
-#[cfg(feature = "raw")]
-#[doc(hidden)]
-pub mod recovery;
-#[cfg(not(feature = "raw"))]
+// Recovery-record and recovery-volume support. The supported entry points
+// are re-exported at the crate root and through [`wire`].
 pub(crate) mod recovery;
 
 pub mod version;
+pub mod wire;
 mod write_progress;
 
 pub use archive::{
@@ -89,9 +69,6 @@ pub use codec::lzss_huff::{EncodeOptions, decode, decode_standalone, encode, enc
 #[doc(hidden)]
 #[cfg(feature = "parallel")]
 pub use codec::lzss_huff::{EncoderState, encode_chunked_mt};
-#[cfg(feature = "raw")]
-#[doc(hidden)]
-pub use crypto::{EncryptionParams, decrypt_data, derive_keys, encrypt_data};
 pub use detect::sfx_offset_of;
 pub use error::{ErrorCode, RarError, RarResult};
 pub use features::{Feature, FeatureSet};

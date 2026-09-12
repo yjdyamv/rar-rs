@@ -6,8 +6,8 @@
 //! errors are expected and swallowed, and the goal is only to catch panics,
 //! overflows, OOM aborts and unbounded loops.
 
-use rar_rs::recovery::rar50 as recovery;
-use rar_rs::{EncryptionParams, decrypt_data};
+use rar_rs::wire;
+use rar_rs::wire::{EncryptionParams, decrypt_data};
 
 /// xorshift64* PRNG with a fixed seed, matching `tests/interop.rs`.
 struct Rng(u64);
@@ -117,8 +117,8 @@ fn exercise_crypto(data: &[u8]) {
     let strength = data[1] % 8;
 
     let mut extra: Vec<u8> = Vec::new();
-    extra.extend_from_slice(&rar_rs::rar50::vint::encode(1)); // version
-    extra.extend_from_slice(&rar_rs::rar50::vint::encode(if with_checksum {
+    extra.extend_from_slice(&rar_rs::wire::vint::encode(1)); // version
+    extra.extend_from_slice(&rar_rs::wire::vint::encode(if with_checksum {
         0x02
     } else {
         0x00
@@ -181,9 +181,9 @@ fn rar5_recovery_random_inputs_do_not_panic() {
     for _ in 0..500 {
         let data = random_bytes(&mut rng, 256 * 1024);
         if data.len() > 8 {
-            let _ = recovery::crc64_xz(&data);
-            let _ = recovery::crc64_rar_state(&data);
+            let _ = wire::crc64_xz(&data);
+            let _ = wire::crc64_rar_state(&data);
         }
-        let _ = recovery::repair_inline_recovery_archive(&data);
+        let _ = rar_rs::repair_archive(&data);
     }
 }

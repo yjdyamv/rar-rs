@@ -11,14 +11,7 @@ use super::{Error, Result, shared_gf16};
 use crate::write_progress::ProgressReporter;
 use crate::write_progress::{WriteOperation, WriteProgressEvent};
 
-pub fn encode_inline_recovery_parity(
-    archive_prefix: &[u8],
-    recovery_percent: u64,
-) -> Result<(InlineRecoveryPlan, Vec<Vec<u8>>)> {
-    encode_inline_recovery_parity_with_progress(archive_prefix, recovery_percent, None, 1)
-}
-
-fn encode_inline_recovery_parity_with_progress(
+pub(super) fn encode_inline_recovery_parity_with_progress(
     archive_prefix: &[u8],
     recovery_percent: u64,
     progress: Option<ProgressReporter<'_>>,

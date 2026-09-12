@@ -79,7 +79,7 @@ jobs:
         # each combination is seen in isolation.
         run: |
           set -euo pipefail
-          for f in "" raw parallel simd raw,parallel raw,simd parallel,simd raw,parallel,simd; do
+          for f in "" parallel simd parallel,simd; do
             echo "::group::features='$f'"
             cargo clippy -p rar-rs --no-default-features --features "$f" --all-targets --locked -- -D warnings
             echo "::endgroup::"

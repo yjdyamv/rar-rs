@@ -25,7 +25,7 @@
 
 | 模块 | 作用 |
 |---|---|
-| `lib.rs` | 公开面：角色门面 + 选项/错误/版本 + `raw` 门控的 wire 面 |
+| `lib.rs` | 公开面：角色门面 + 选项/错误/版本 + `wire` 工具箱（块信封 / varint / 模型结构 / 恢复构建 / 加密原语） |
 | `crc32.rs` | crate 级 CRC32 实现（`pub(crate)`） |
 | `archive/reader.rs` / `writer.rs` / `editor.rs` | 读 / 写 / 改三个角色门面 |
 | `archive/mod.rs` | `RarArchive` 共享状态与生命周期（内部） |
@@ -47,15 +47,16 @@
 
 | 模块 | 可见性 | 内容 |
 |---|---|---|
-| `format/rar5/` | **`raw` 门控** | 常量与词汇（`mod.rs`）、`create.rs`（字典字段策略）、`headers/{parse,serialize,locator}`、`payload.rs`（MemberDecoder）、`vint.rs`、`blake2sp.rs`、`extract/`（读路径：`open`/`read`/`members`/`dest`/`solid`/`decode`/`verify`）、`write/{mod,engine,layout,windows}` |
-| `format/rar4/` | **`raw` 门控** | 老容器族：扫描 / 头解析、解码门面、写管线 |
+| `format/rar5/` | 内部（`wire` 导出受支持子集） | 常量与词汇（`mod.rs`）、`create.rs`（字典字段策略）、`headers/{parse,serialize,locator}`、`payload.rs`（MemberDecoder）、`vint.rs`、`blake2sp.rs`、`extract/`（读路径：`open`/`read`/`members`/`dest`/`solid`/`decode`/`verify`）、`write/{mod,engine,layout,windows}` |
+| `format/rar4/` | 内部 | 老容器族：扫描 / 头解析、解码门面、写管线 |
 | `codec/modern/lzss_huff/` | **公开** | RAR5 LZSS+Huffman 编解码器。ADR 0003 决策 3 明确保留（`examples/` 依赖根上的 `encode` / `decode` / `EncoderState` / `encode_chunked*`） |
 | `codec/legacy/`、`codec/common/` | `pub(crate)` | 老代编解码器与 PPMd；bitstream / huffman / filters / incompressible / match_finder / window |
-| `crypto/` | **`raw` 门控** | `rar50`（AES-256-CBC + KDF + hash-key MAC）、`rar15` / `rar20` / `rar30` |
-| `recovery/` | **`raw` 门控** | `rar50`（内联 RR）、`rev50`（.rev 恢复卷）、`legacy`（PROTECT_HEAD / NEWSUB 修复）。受支持的入口在 crate 根重导出（`repair_archive_path`、`rebuild_missing_volumes`、`build_recovery_volumes_for_set` 等） |
+| `crypto/` | 内部（AES/KDF 原语经 `wire` 导出） | `rar50`（AES-256-CBC + KDF + hash-key MAC）、`rar15` / `rar20` / `rar30` |
+| `recovery/` | 内部（受支持入口在 crate 根与 `wire` 重导出） | `rar50`（内联 RR）、`rev50`（.rev 恢复卷）、`legacy`（PROTECT_HEAD / NEWSUB 修复）。受支持的入口在 crate 根重导出（`repair_archive_path`、`rebuild_missing_volumes`、`build_recovery_volumes_for_set` 等） |
 
-`raw` 默认关闭：这些是 wire 级与底层原语，不属于受支持的 API，显式开启才可达。
-理由与取舍见 `PLAN.md`「为什么要有 `raw` feature」。
+三棵树默认 `pub(crate)`（2026-09 删除 `raw` feature 后永久如此）：它们是 wire 级与底层
+原语，不属于受支持的 API；外部真正需要的子集（块信封 + varint + 模型结构 + 恢复构建 +
+加密原语）经常驻 `wire` 模块导出。理由与取舍见 `docs/adr/0007-raw-feature-retired.md`。
 
 **写路径**：`format/rar5/write/*` 增量发射块 —— `engine.rs` 处理 payload 与（可选）CBC
 发射，`layout.rs` 决定字典大小并探测 STORE 回退。`archive/transaction/` 是手术路径：
