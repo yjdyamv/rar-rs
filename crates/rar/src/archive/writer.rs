@@ -561,6 +561,7 @@ impl EntryWriteOptions {
 
 /// One borrowed entry to add with [`ArchiveWriter::add_batch`].
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum WriteEntry<'a> {
     /// In-memory bytes stored under `name`.
     Bytes {
@@ -621,6 +622,21 @@ impl WriteReport {
 /// can commit output to final paths.
 pub struct ArchiveWriter {
     archive: Option<RarArchive>,
+}
+
+impl std::fmt::Debug for ArchiveWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArchiveWriter")
+            .field(
+                "path",
+                &self.archive.as_ref().map(|archive| archive.path.as_path()),
+            )
+            .field(
+                "entries",
+                &self.archive.as_ref().map(|archive| archive.entries.len()),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 // The typed writer role delegates to the legacy `RarArchive` engine

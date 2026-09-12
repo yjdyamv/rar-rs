@@ -18,9 +18,8 @@ rar-rs = { workspace = true, features = ["parallel", "simd"] }
 [build-dependencies]
 napi-build = "2"
 
-[lints.rust]
-# MSVC's link.exe writes its "Creating library ..." notice to stdout; the
-# linker_messages lint surfaces that as a warning on every DLL build. The
-# message is informational, so silence the lint (scoped to this crate, the
-# only one that exports a cdylib).
-linker_messages = "allow"
+[lints]
+# Inherit the workspace lint set (unused_must_use = deny, the clippy
+# dbg/todo/unimplemented set, and the workspace-wide `linker_messages` allow
+# that exists for this crate's cdylib build).
+workspace = true

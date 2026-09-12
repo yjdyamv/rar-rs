@@ -24,6 +24,7 @@ pub struct ArchiveEntry {
 /// preparation, and file entries are read (up to the batch member cap)
 /// before compression.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum BatchEntry<'a> {
     /// In-memory payload added under `name`.
     Bytes {

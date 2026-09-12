@@ -16,6 +16,7 @@ pub(crate) const MAX_RAR7_DICTIONARY_BYTES: u64 = 126 * 1024 * 1024 * 1024;
 /// this implementation's default (and WinRAR's `-sd`): the statistics are
 /// kept across the whole archive, including volume boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum SolidReset {
     /// Keep the solid statistics across the whole archive (WinRAR `-sd`).
     #[default]

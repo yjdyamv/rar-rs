@@ -137,8 +137,9 @@ pub struct EntryInfo {
   pub host_os: f64,
   /// Raw attribute word stored in the header (platform specific).
   pub attributes: f64,
-  /// RAR5/RAR7 compression version: 0 = RAR5, 1 = RAR7; RAR4 legacy
-  /// members report their `unp_ver` (15/20/26/29/36).
+  /// RAR5/RAR7 compression version: 0 = RAR5, 1 = RAR7. RAR4 legacy members
+  /// always report 0; their unpack version (15/20/26/29/36) is exposed as
+  /// `version` instead.
   pub comp_version: u8,
   /// Member version name ("v15" .. "v70").
   pub version: String,

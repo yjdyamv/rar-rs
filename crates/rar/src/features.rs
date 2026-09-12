@@ -40,6 +40,7 @@ impl Feature {
 /// Mirrors the reference `FeatureSet`: store-only archives support none of
 /// the optional capabilities.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FeatureSet {
     pub solid: bool,
     pub header_encryption: bool,

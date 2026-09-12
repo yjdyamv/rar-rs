@@ -36,6 +36,15 @@ pub struct ArchiveEditor {
     catalog_token: u64,
 }
 
+impl std::fmt::Debug for ArchiveEditor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArchiveEditor")
+            .field("path", &self.archive.path)
+            .field("entries", &self.archive.entries.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl ArchiveEditor {
     /// Open an archive for editing with a full scan and no password.
     pub fn open(path: impl AsRef<Path>) -> RarResult<Self> {
@@ -101,6 +110,7 @@ impl ArchiveEditor {
 
 /// One structural edit in an [`EditPlan`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EditOp {
     /// Delete the member identified by the ID (like `rar d`).
     Delete(EntryId),

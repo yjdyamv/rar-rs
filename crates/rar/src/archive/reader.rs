@@ -334,6 +334,15 @@ pub struct ArchiveReader {
     catalog_token: u64,
 }
 
+impl std::fmt::Debug for ArchiveReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArchiveReader")
+            .field("path", &self.archive.path)
+            .field("entries", &self.archive.entries.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl ArchiveReader {
     /// Open an archive with a full scan and no password.
     pub fn open(path: impl AsRef<Path>) -> RarResult<Self> {

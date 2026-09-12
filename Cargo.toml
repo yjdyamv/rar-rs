@@ -1,6 +1,9 @@
 [workspace]
 members = ["crates/rar", "crates/rar-cli", "crates/rar-napi"]
-resolver = "2"
+# Resolver 3 (edition 2024 generation): dev-dependency features no longer
+# leak into normal builds. This is what lets `crates/rar` dev-depend on
+# itself with the `raw` feature for the test graph only.
+resolver = "3"
 
 [workspace.package]
 edition = "2024"
@@ -27,6 +30,10 @@ rar-rs = { version = "0.1.2", path = "crates/rar" }
 
 [workspace.lints.rust]
 unused_must_use = "deny"
+# MSVC's link.exe writes its "Creating library ..." notice to stdout, which
+# `linker_messages` surfaces as a warning on every cdylib build (only
+# rar-rs-napi exports one; harmless elsewhere).
+linker_messages = "allow"
 
 [workspace.lints.clippy]
 dbg_macro = "warn"
