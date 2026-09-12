@@ -92,6 +92,10 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   reset 策略）、`rar4: Rar4Append`（老容器追加记账）、`compression: CompressionSettings`（`-mt`/`-md`/v70 seam）、
   `meta: MetadataSettings`（`-ts*`/`-ow`/`-os`/`-htb`）、`locator: LocatorState`（QO/RR 回填位）、
   `output: OutputState`（staged commit + 卷计数）；调用点经 `write_ctx()/write_ctx_mut()` 统一迁移，行为不变。
+- **PPMd 直接单测（2026-09）**：`codec/legacy/ppmd.rs` 新增 8 个同文件单测：字面量/转义字面量 roundtrip、
+  match(4)/repeat(5) 命令布局展开（按 rar29 解释器口径）、续模型块（`finish_keeping_model` +
+  `PpmdEncoder::continuing` + 非 reset `decode_init`）、无模型续块/非法 order/dict/参数/截断/保留 range code
+  错误路径、24 KiB 偏斜负载经 suballocator/glue 的 roundtrip；模块文档同步（编码半已用于 `rar29_encoder`）。
 - **双 options 面（2026-09 收敛，ADR 0006）**：`WriterOptions`（私有字段 builder）是唯一公开构造器；
   `CreateOptions` 已降为 `pub(crate)` 并从 crate 根移除（此前是零公开入口的死类型）。组合规则仍由
   `options::validate_combinations` 共用，`CreateOptions` 不静默丢弃/钳制（quick-open×分卷或 -hp、

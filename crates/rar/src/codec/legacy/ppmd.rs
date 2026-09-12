@@ -1,7 +1,9 @@
-//! PPMd variant H decoder (RAR 3.x/4.x m5 members), ported from the decode
-//! half of bitplane's `rars` (WTFPL) `codec/ppmd.rs`, which is validated
-//! against genuine WinRAR archives. The encoder and its tests are not
-//! ported; the shared Suballocator + context model follow the RAR PPMd
+//! PPMd variant H codec (RAR 3.x/4.x m5 members), ported from bitplane's
+//! `rars` (WTFPL) `codec/ppmd.rs`, which is validated against genuine
+//! WinRAR archives. The decoder drives RAR4 reads and the encoder half is
+//! used by [`crate::codec::legacy::rar29_encoder`] for m4/m5 member
+//! writes; the direct encoder/decoder tests live at the bottom of this
+//! file. The shared Suballocator + context model follow the RAR PPMd
 //! specification as re-documented in rars' own format notes.
 //!
 //! Errors use a private enum mirroring the rars codec error so the body can
@@ -1733,5 +1735,265 @@ impl PpmdEncoder {
     /// price escape tokens against the literals they would replace.
     pub(crate) fn spent_bits(&self) -> f64 {
         8.0 * self.range.out.len() as f64 - f64::from(self.range.range.max(1)).log2()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The RAR3/4 PPMd parameters rars (and WinRAR) use for m4/m5 members.
+    const ORDER: usize = 8;
+    const ESC: u8 = 2;
+    const MB: usize = 1;
+
+    struct SliceReader<'a> {
+        data: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> SliceReader<'a> {
+        fn new(data: &'a [u8]) -> Self {
+            Self { data, pos: 0 }
+        }
+    }
+
+    impl PpmdByteReader for SliceReader<'_> {
+        fn read_ppmd_byte(&mut self) -> Result<u8> {
+            let byte = *self.data.get(self.pos).ok_or(Error::NeedMoreInput)?;
+            self.pos += 1;
+            Ok(byte)
+        }
+    }
+
+    /// Fresh-block header: reset flag + order (no explicit escape byte).
+    fn fresh_header() -> u8 {
+        0x80 | 0x20 | (ORDER as u8 - 1)
+    }
+
+    /// Continuing-block header: same order, model kept from the previous block.
+    fn continuing_header() -> u8 {
+        0x80 | (ORDER as u8 - 1)
+    }
+
+    /// The bytes a fresh block feeds the range decoder: the max-MB byte
+    /// (`dictionary_mb - 1`), then the packed range stream.
+    fn fresh_stream(packed: &[u8]) -> Vec<u8> {
+        let mut stream = vec![(MB - 1) as u8];
+        stream.extend_from_slice(packed);
+        stream
+    }
+
+    fn required(decoder: &mut PpmdDecoder, reader: &mut SliceReader<'_>) -> Result<u8> {
+        decoder
+            .decode_symbol(reader)?
+            .ok_or(Error::InvalidData("PPMd stream ended early"))
+    }
+
+    fn copy_match(out: &mut Vec<u8>, offset: usize, length: usize) {
+        for _ in 0..length {
+            let byte = out[out.len() - offset];
+            out.push(byte);
+        }
+    }
+
+    /// Decode a PPMd symbol stream exactly like `rar29::decode_ppmd` does:
+    /// literals pass through, escapes introduce a command (1 = literal
+    /// escape, 2/None = end, 4 = match, 5 = offset-one repeat).
+    fn decode_block(decoder: &mut PpmdDecoder, reader: &mut SliceReader<'_>) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        while let Some(symbol) = decoder.decode_symbol(reader)? {
+            if symbol != ESC {
+                out.push(symbol);
+                continue;
+            }
+            let Some(command) = decoder.decode_symbol(reader)? else {
+                break;
+            };
+            match command {
+                0 | 2 => break,
+                1 | 6..=u8::MAX => out.push(ESC),
+                4 => {
+                    let mut offset = 0usize;
+                    for _ in 0..3 {
+                        offset = (offset << 8) | required(decoder, reader)? as usize;
+                    }
+                    let length = required(decoder, reader)? as usize + 32;
+                    copy_match(&mut out, offset + 2, length);
+                }
+                5 => {
+                    let length = required(decoder, reader)? as usize + 4;
+                    copy_match(&mut out, 1, length);
+                }
+                unexpected => panic!("unknown PPMd escape command {unexpected}"),
+            }
+        }
+        Ok(out)
+    }
+
+    fn encode_all(payload: &[u8]) -> Vec<u8> {
+        let mut encoder = PpmdEncoder::new(ORDER, ESC, MB).unwrap();
+        for &byte in payload {
+            encoder.encode_literal(byte).unwrap();
+        }
+        encoder.finish_keeping_model().unwrap().0
+    }
+
+    fn decode_fresh(packed: &[u8]) -> Result<Vec<u8>> {
+        let mut decoder = PpmdDecoder::new();
+        let mut esc = ESC;
+        let stream = fresh_stream(packed);
+        let mut reader = SliceReader::new(&stream);
+        decoder.decode_init(fresh_header(), &mut reader, &mut esc)?;
+        decode_block(&mut decoder, &mut reader)
+    }
+
+    #[test]
+    fn literals_roundtrip_through_the_range_coder() {
+        let payload = b"the quick brown fox jumps over the lazy dog, again and again";
+        let decoded = decode_fresh(&encode_all(payload)).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn literal_equal_to_the_escape_byte_is_escaped() {
+        let payload = [b'a', ESC, b'b'];
+        let decoded = decode_fresh(&encode_all(&payload)).unwrap();
+        assert_eq!(decoded, [b'a', ESC, b'b']);
+    }
+
+    #[test]
+    fn match_and_repeat_commands_expand_to_the_original_output() {
+        let mut expected = Vec::new();
+        let mut encoder = PpmdEncoder::new(ORDER, ESC, MB).unwrap();
+        for &byte in b"banana" {
+            encoder.encode_literal(byte).unwrap();
+            expected.push(byte);
+        }
+        // Copy from distance 6 (the whole "banana") and then extend the last
+        // byte eight times.
+        encoder.encode_match(6, 40).unwrap();
+        copy_match(&mut expected, 6, 40);
+        encoder.encode_repeat_offset_one(8).unwrap();
+        copy_match(&mut expected, 1, 8);
+        encoder.encode_literal(b'z').unwrap();
+        expected.push(b'z');
+        let (packed, _) = encoder.finish_keeping_model().unwrap();
+
+        let decoded = decode_fresh(&packed).unwrap();
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn a_continuing_block_keeps_the_model_from_the_previous_block() {
+        let mut first = PpmdEncoder::new(ORDER, ESC, MB).unwrap();
+        for &byte in b"first block content " {
+            first.encode_literal(byte).unwrap();
+        }
+        let (packed_a, model) = first.finish_keeping_model().unwrap();
+
+        let mut second = PpmdEncoder::continuing(model, ESC);
+        for &byte in b"second block content" {
+            second.encode_literal(byte).unwrap();
+        }
+        let (packed_b, _) = second.finish_keeping_model().unwrap();
+
+        let mut decoder = PpmdDecoder::new();
+        let mut esc = ESC;
+        let stream_a = fresh_stream(&packed_a);
+        let mut reader_a = SliceReader::new(&stream_a);
+        decoder
+            .decode_init(fresh_header(), &mut reader_a, &mut esc)
+            .unwrap();
+        assert_eq!(
+            decode_block(&mut decoder, &mut reader_a).unwrap(),
+            b"first block content "
+        );
+
+        let mut reader_b = SliceReader::new(&packed_b);
+        decoder
+            .decode_init(continuing_header(), &mut reader_b, &mut esc)
+            .unwrap();
+        assert_eq!(
+            decode_block(&mut decoder, &mut reader_b).unwrap(),
+            b"second block content"
+        );
+    }
+
+    #[test]
+    fn a_continuing_header_without_a_model_is_rejected() {
+        let mut decoder = PpmdDecoder::new();
+        let mut esc = ESC;
+        let mut reader = SliceReader::new(&[0, 0, 0, 0]);
+        let error = decoder
+            .decode_init(continuing_header(), &mut reader, &mut esc)
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidData(_)), "{error:?}");
+    }
+
+    #[test]
+    fn invalid_headers_and_encoder_arguments_are_rejected() {
+        // Order bits 0 encode order 1, which the format does not allow.
+        let stream = fresh_stream(&[0, 0, 0, 0]);
+        let mut decoder = PpmdDecoder::new();
+        let mut esc = ESC;
+        let mut reader = SliceReader::new(&stream);
+        assert!(matches!(
+            decoder.decode_init(0x80 | 0x20, &mut reader, &mut esc),
+            Err(Error::InvalidData(_))
+        ));
+        assert!(matches!(
+            PpmdEncoder::new(1, ESC, MB),
+            Err(Error::InvalidData(_))
+        ));
+        assert!(matches!(
+            PpmdEncoder::new(ORDER, ESC, 0),
+            Err(Error::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn truncated_and_out_of_range_streams_error_instead_of_panicking() {
+        let mut decoder = PpmdDecoder::new();
+        let mut esc = ESC;
+        // Only the max-MB byte: the range code needs four more.
+        let mut short = SliceReader::new(&[0]);
+        assert!(matches!(
+            decoder.decode_init(fresh_header(), &mut short, &mut esc),
+            Err(Error::NeedMoreInput)
+        ));
+        // A range code of all ones is the reserved invalid value.
+        let stream = fresh_stream(&[0xff; 4]);
+        let mut all_ones = SliceReader::new(&stream);
+        assert!(matches!(
+            decoder.decode_init(fresh_header(), &mut all_ones, &mut esc),
+            Err(Error::InvalidData(_))
+        ));
+
+        let mut encoder = PpmdEncoder::new(ORDER, ESC, MB).unwrap();
+        assert!(matches!(
+            encoder.encode_match(1, 40),
+            Err(Error::InvalidData(_))
+        ));
+        assert!(matches!(
+            encoder.encode_match(3, 31),
+            Err(Error::InvalidData(_))
+        ));
+        assert!(matches!(
+            encoder.encode_repeat_offset_one(3),
+            Err(Error::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn a_large_skewed_payload_roundtrips_through_the_suballocator() {
+        let mut payload = Vec::with_capacity(24 * 1024);
+        let line = b"the model keeps allocating contexts for this repeated line\n";
+        while payload.len() < 24 * 1024 {
+            payload.extend_from_slice(line);
+        }
+        payload.truncate(24 * 1024);
+        let decoded = decode_fresh(&encode_all(&payload)).unwrap();
+        assert_eq!(decoded, payload);
     }
 }
