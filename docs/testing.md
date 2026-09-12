@@ -65,8 +65,9 @@ cargo nextest run -E 'not test(/mt_tests::/)'
 
 ## Traps
 
-- **`rarfiles_lst_lock()` is process-local.** `crates/rar-cli/tests/cli_behavior.rs`
-  guards the tests that read `rarfiles.lst` with a `static OnceLock<Mutex<()>>`.
+- **`rarfiles_lst_lock()` is process-local.** `crates/rar-cli/tests/cli_behavior/`
+  guards the tests that read `rarfiles.lst` with a `static OnceLock<Mutex<()>>`
+  in its `support` module.
   That works under `cargo test` (one process per test binary) but not under
   `cargo nextest` (one process per test), where those tests can race and fail
   intermittently. It is a test-isolation artifact, not a product defect — but

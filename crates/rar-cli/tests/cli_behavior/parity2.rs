@@ -1,0 +1,203 @@
+use crate::support::{RAR_CLI, make_temp_dir};
+// ── WinRAR CLI parity batch 2: -x@/-n@, -ta/-tb, -ag, -ep2/-ep3, -r0 ──────
+
+#[test]
+fn cli_mask_list_file_excludes_loaded_masks() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("keep.txt"), b"k").unwrap();
+    std::fs::write(src.join("drop.tmp"), b"d").unwrap();
+    std::fs::write(dir.path().join("masks.lst"), b"*.tmp\n").unwrap();
+
+    let archive = dir.path().join("x.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(format!("-x@{}", dir.path().join("masks.lst").display()))
+        .arg(&archive)
+        .arg("src")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let names: Vec<String> = rar.entries().map(|e| e.name().to_string()).collect();
+    assert!(names.iter().any(|n| n == "src/keep.txt"), "{names:?}");
+    assert!(
+        !names.iter().any(|n| n == "src/drop.tmp"),
+        "mask list must exclude *.tmp: {names:?}"
+    );
+}
+
+#[test]
+fn cli_time_filter_after_only_adds_newer_files() {
+    let dir = make_temp_dir();
+    let old = dir.path().join("old.txt");
+    let new = dir.path().join("new.txt");
+    std::fs::write(&old, b"o").unwrap();
+    std::fs::write(&new, b"n").unwrap();
+    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+    let times = std::fs::FileTimes::new().set_modified(past);
+    std::fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
+
+    let archive = dir.path().join("ta.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ta20200101", "-idq"])
+        .arg(&archive)
+        .arg("old.txt")
+        .arg("new.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let names: Vec<String> = rar.entries().map(|e| e.name().to_string()).collect();
+    assert!(names.iter().any(|n| n == "new.txt"), "{names:?}");
+    assert!(
+        !names.iter().any(|n| n == "old.txt"),
+        "-ta must drop older files: {names:?}"
+    );
+}
+
+#[test]
+fn cli_auto_name_inserts_date_stamp() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ag", "-idq"])
+        .arg(dir.path().join("auto.rar"))
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    // The stamp (YYYYMMDDHHMMSS) is inserted before the extension.
+    let created: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("auto") && n.ends_with(".rar") && n.len() > "auto.rar".len()
+        })
+        .collect();
+    assert_eq!(created.len(), 1, "one stamped archive expected");
+    let name = created[0].file_name().to_string_lossy().into_owned();
+    let stamp = &name["auto".len()..name.len() - ".rar".len()];
+    assert_eq!(stamp.len(), 14, "stamp must be YYYYMMDDHHMMSS: {name}");
+    assert!(stamp.chars().all(|c| c.is_ascii_digit()), "{name}");
+}
+
+#[test]
+fn cli_full_paths_ep2_ep3() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("f.txt"), b"f").unwrap();
+
+    let archive = dir.path().join("ep2.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ep2", "-idq"])
+        .arg(&archive)
+        .arg(src.join("f.txt"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let names: Vec<String> = rar.entries().map(|e| e.name().to_string()).collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+    let _stored = names[0].clone();
+    #[cfg(windows)]
+    assert!(
+        !_stored.starts_with([
+            'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q',
+            'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'
+        ]) || !_stored.contains(":/"),
+        "-ep2 must drop the drive letter: {_stored}"
+    );
+
+    let archive3 = dir.path().join("ep3.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ep3", "-idq"])
+        .arg(&archive3)
+        .arg(src.join("f.txt"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let rar = rar_rs::ArchiveReader::open(&archive3).unwrap();
+    let _stored = rar.entries().next().unwrap().name().to_string();
+    #[cfg(windows)]
+    assert!(
+        _stored.contains("_/") || _stored.contains("_/"),
+        "-ep3 must keep the drive as X_: {_stored}"
+    );
+}
+
+#[test]
+fn cli_recurse_zero_does_not_descend_wildcards() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("r0src");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::write(src.join("top.txt"), b"t").unwrap();
+    std::fs::write(src.join("sub").join("deep.txt"), b"d").unwrap();
+
+    let archive = dir.path().join("r0.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-r0", "-idq"])
+        .arg(&archive)
+        .arg("r0src/*")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let names: Vec<String> = rar.entries().map(|e| e.name().to_string()).collect();
+    assert!(
+        names.iter().any(|n| n == "r0src/top.txt"),
+        "-r0 must match top-level files: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("deep.txt")),
+        "-r0 must not descend into matched dirs: {names:?}"
+    );
+}
+
+/// `-ol` stores symbolic links as redirect records (unix-only: creating
+/// the source symlink needs symlink(2)).
+#[test]
+#[cfg(unix)]
+fn cli_links_ol_stores_symlink_redirects() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("lnk");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("target.txt"), b"target").unwrap();
+    std::os::unix::fs::symlink("target.txt", src.join("lnk.txt")).unwrap();
+
+    let archive = dir.path().join("ol.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ol", "-idq"])
+        .arg(&archive)
+        .arg("lnk")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let names: Vec<String> = rar.entries().map(|e| e.name().to_string()).collect();
+    assert!(names.iter().any(|n| n == "lnk/target.txt"), "{names:?}");
+    assert!(names.iter().any(|n| n == "lnk/lnk.txt"), "{names:?}");
+    // The link member carries no data (redirect record), and extraction
+    // recreates the symlink.
+    let lnk_id = rar.unique_entry("lnk/lnk.txt").unwrap();
+    let entry = rar.entry(lnk_id).unwrap();
+    assert_eq!(entry.size(), 0);
+    let out = dir.path().join("out");
+    rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default())
+        .unwrap();
+    let link = std::fs::read_link(out.join("lnk/lnk.txt")).unwrap();
+    assert_eq!(link, std::path::Path::new("target.txt"));
+}
