@@ -67,7 +67,7 @@ not as verified copying.
 
 Files derived from analysis of the libarchive RAR5 reader (BSD-2-Clause)
 carry a BSD-2-Clause notice: `crates/rar/src/codec/mod.rs`,
-`crates/rar/src/codec/modern/lzss_huff/mod.rs` and the `encoder/` role modules;
+`crates/rar/src/codec/modern/lzss_huff/mod.rs` and the `encoder/`/`decoder/` role modules;
 `crates/rar/src/codec/common/huffman.rs` states the same basis
 ("based on the structure used in libarchive's RAR5 reader") without a license
 line, so it is covered by that umbrella rather than by its own notice.

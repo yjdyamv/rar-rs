@@ -78,8 +78,9 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
 
 - **热点文件拆分（2026-09 完成）**：`format/rar5/write/mod.rs` 已拆为 `write/{mod,add,emit,stream,batch,engine,layout}.rs`
   （只含 RAR5，mod.rs 22 行门面），RAR4 编排回到 `format/rar4/write/{mod,pipeline,cbc}.rs`，格式中性写机制在
-  `format/shared/{write_ops,engine,stream}.rs`；`codec/modern/lzss_huff/encoder.rs`（3940）拆为
-  `encoder/{mod,chunked,parse,emit,filter,tests}.rs`（mod.rs 共享词汇 + 角色模块，公开路径与输出不变）。
+  `format/shared/{write_ops,engine,stream}.rs`；`codec/modern/lzss_huff/{encoder,decoder}.rs`（3940/1736）拆为
+  `encoder/{mod,chunked,parse,emit,filter,tests}.rs` 与 `decoder/{mod,engine,analysis,tables,tests}.rs`
+  （mod.rs 共享词汇 + 角色模块，公开路径与输出不变）。
   剩余大文件：`archive/rar4_edit.rs` 2924、`codec/legacy/rar29_encoder.rs` 2747（按 CONTEXT 是 rars 移植的
   逐文件隔离，拆分收益低）。
 - **双 options 面（2026-09 收敛，ADR 0006）**：`WriterOptions`（私有字段 builder）是唯一公开构造器；
