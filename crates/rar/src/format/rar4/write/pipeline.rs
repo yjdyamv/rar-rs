@@ -285,6 +285,78 @@ fn emit_rar4_split<'a>(
 }
 
 impl RarArchive {
+    /// RAR4 solid-chain bookkeeping for one member: returns whether the
+    /// member continues the run and advances the run state. A stored member
+    /// ends the run (dropping the carried encoder state the trial may have
+    /// advanced); a non-empty compressed member marks the run as started.
+    ///
+    /// Pre-RAR3 writers (unp_ver < 29) never flag `FHD_SOLID`: the reader
+    /// derives solid continuation from the archive-level `MHD_SOLID` and
+    /// member position instead.
+    fn track_rar4_solid_member(&mut self, method: u8, unpacked_size: u64) -> bool {
+        let continuation = self.write_ctx().solid_mode
+            && method != crate::format::rar4::RAR4_METHOD_STORE
+            && self.write_ctx().rar4_solid_run_has_member
+            && self.write_ctx().rar4_unp_ver == 29;
+        if method == crate::format::rar4::RAR4_METHOD_STORE {
+            self.write_ctx_mut().rar4_solid_encoder = None;
+            self.write_ctx_mut().legacy_solid_encoder = None;
+            self.write_ctx_mut().rar4_solid_run_has_member = false;
+        } else if unpacked_size != 0 {
+            self.write_ctx_mut().rar4_solid_run_has_member = true;
+        }
+        continuation
+    }
+
+    /// Push the catalog entry for one emitted RAR4 member. Shared by the
+    /// buffered, streaming and parallel emission paths so the header fields
+    /// (including the nanosecond mtime) stay in lockstep.
+    #[allow(clippy::too_many_arguments)]
+    fn push_rar4_entry(
+        &mut self,
+        name: String,
+        unpacked_size: u64,
+        packed_size: u64,
+        file_crc: u32,
+        mtime: u32,
+        mtime_ns: u32,
+        method: u8,
+        password: bool,
+        salt: Option<[u8; 8]>,
+        ext_time: Option<Vec<u8>>,
+        comment: Option<Vec<u8>>,
+        is_dir: bool,
+        data_offset: u64,
+        chunks: Vec<crate::model::DataChunk>,
+    ) {
+        self.entries.push(crate::archive::ArchiveEntry {
+            header: crate::model::FileHeader {
+                name,
+                unpacked_size,
+                packed_size,
+                crc32_val: Some(file_crc),
+                mtime,
+                mtime_ns: Some(mtime_ns),
+                comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
+                host_os: 0,
+                format_version: 4,
+                unp_ver: self.write_ctx().rar4_unp_ver,
+                data_offset,
+                is_directory: is_dir,
+                flags: if password {
+                    crate::format::rar4::FHD_PASSWORD as u64
+                } else {
+                    0
+                },
+                salt,
+                extra_data: ext_time.unwrap_or_default(),
+                comment,
+                ..Default::default()
+            },
+            chunks,
+        });
+    }
+
     /// RAR4 STORE path: write a member in the legacy container — STORE or
     /// LZSS-compressed (m1–m5), optionally AES-encrypted with the member
     /// password. A single-volume member is one FILE_HEAD + data; in a
@@ -507,17 +579,7 @@ impl RarArchive {
 
         // Solid-chain bookkeeping mirrors the buffered path: STORE ends the
         // run (and drops the encoder state the trial may have advanced).
-        let solid_continuation = self.write_ctx().solid_mode
-            && method != crate::format::rar4::RAR4_METHOD_STORE
-            && self.write_ctx().rar4_solid_run_has_member
-            && self.write_ctx().rar4_unp_ver == 29;
-        if method == crate::format::rar4::RAR4_METHOD_STORE {
-            self.write_ctx_mut().rar4_solid_encoder = None;
-            self.write_ctx_mut().legacy_solid_encoder = None;
-            self.write_ctx_mut().rar4_solid_run_has_member = false;
-        } else if file_size != 0 {
-            self.write_ctx_mut().rar4_solid_run_has_member = true;
-        }
+        let solid_continuation = self.track_rar4_solid_member(method, file_size);
 
         let ext_time = crate::format::rar4::write::build_ext_time(Some(mtime_ns));
         let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
@@ -599,30 +661,22 @@ impl RarArchive {
             }
         }
 
-        self.entries.push(crate::archive::ArchiveEntry {
-            header: crate::model::FileHeader {
-                name: name.to_string(),
-                unpacked_size,
-                packed_size,
-                crc32_val: Some(file_crc),
-                mtime,
-                mtime_ns: Some(mtime_ns),
-                comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
-                host_os: 0,
-                format_version: 4,
-                unp_ver: self.write_ctx().rar4_unp_ver,
-                data_offset: 0,
-                flags: if password {
-                    crate::format::rar4::FHD_PASSWORD as u64
-                } else {
-                    0
-                },
-                salt,
-                extra_data: ext_time.unwrap_or_default(),
-                ..Default::default()
-            },
+        self.push_rar4_entry(
+            name.to_string(),
+            unpacked_size,
+            packed_size,
+            file_crc,
+            mtime,
+            mtime_ns,
+            method,
+            password,
+            salt,
+            ext_time,
+            None,
+            false,
+            0,
             chunks,
-        });
+        );
         self.report_progress(file_size, file_size);
         Ok(())
     }
@@ -717,9 +771,6 @@ impl RarArchive {
         if self.write_ctx().solid_mode {
             self.maybe_reset_solid_for_extension(&name);
         }
-        if self.write_ctx().solid_mode && (1..=5).contains(&level) {
-            self.maybe_reset_solid_for_extension(&name);
-        }
         let (mut packed, method) = self.encode_rar4_member(&data, level)?;
         let unpacked_size = file_size;
 
@@ -729,20 +780,7 @@ impl RarArchive {
         // encoder and ends the run. The reader keeps its window/tables across
         // members flagged `FHD_SOLID`, so the flags and the encoder must stay
         // in lockstep.
-        let solid_continuation = self.write_ctx().solid_mode
-            && method != crate::format::rar4::RAR4_METHOD_STORE
-            && self.write_ctx().rar4_solid_run_has_member
-            // Pre-RAR3 writers (unp_ver < 29) never flag FHD_SOLID: the
-            // reader derives solid continuation from the archive-level
-            // MHD_SOLID and member position.
-            && self.write_ctx().rar4_unp_ver == 29;
-        if method == crate::format::rar4::RAR4_METHOD_STORE {
-            self.write_ctx_mut().rar4_solid_encoder = None;
-            self.write_ctx_mut().legacy_solid_encoder = None;
-            self.write_ctx_mut().rar4_solid_run_has_member = false;
-        } else if unpacked_size != 0 {
-            self.write_ctx_mut().rar4_solid_run_has_member = true;
-        }
+        let solid_continuation = self.track_rar4_solid_member(method, unpacked_size);
 
         let ext_time = crate::format::rar4::write::build_ext_time(Some(mtime_ns));
 
@@ -784,31 +822,21 @@ impl RarArchive {
                     false,
                     false,
                 )?;
-                self.entries.push(crate::archive::ArchiveEntry {
-                    header: crate::model::FileHeader {
-                        name,
-                        unpacked_size,
-                        packed_size,
-                        crc32_val: Some(file_crc),
-                        mtime,
-                        mtime_ns: Some(mtime_ns),
-                        comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
-                        host_os: 0,
-                        format_version: 4,
-                        unp_ver: self.write_ctx().rar4_unp_ver,
-                        data_offset,
-                        is_directory: is_dir,
-                        flags: if password_encrypted {
-                            crate::format::rar4::FHD_PASSWORD as u64
-                        } else {
-                            0
-                        },
-                        salt,
-                        extra_data: ext_time.unwrap_or_default(),
-                        comment: comment.clone(),
-                        ..Default::default()
-                    },
-                    chunks: vec![crate::model::DataChunk {
+                self.push_rar4_entry(
+                    name,
+                    unpacked_size,
+                    packed_size,
+                    file_crc,
+                    mtime,
+                    mtime_ns,
+                    method,
+                    password_encrypted,
+                    salt,
+                    ext_time,
+                    comment,
+                    is_dir,
+                    data_offset,
+                    vec![crate::model::DataChunk {
                         volume_index: 0,
                         data_offset,
                         packed_size,
@@ -816,7 +844,7 @@ impl RarArchive {
                         is_final: true,
                         extra_data: Vec::new(),
                     }],
-                });
+                );
                 self.report_progress(file_size, file_size);
                 Ok(())
             }
@@ -843,29 +871,22 @@ impl RarArchive {
                         ))
                     })?
                 };
-                self.entries.push(crate::archive::ArchiveEntry {
-                    header: crate::model::FileHeader {
-                        name,
-                        unpacked_size,
-                        packed_size,
-                        crc32_val: Some(file_crc),
-                        mtime,
-                        comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
-                        host_os: 0,
-                        format_version: 4,
-                        unp_ver: self.write_ctx().rar4_unp_ver,
-                        data_offset: 0,
-                        flags: if password_encrypted {
-                            crate::format::rar4::FHD_PASSWORD as u64
-                        } else {
-                            0
-                        },
-                        salt,
-                        extra_data: ext_time.unwrap_or_default(),
-                        ..Default::default()
-                    },
+                self.push_rar4_entry(
+                    name,
+                    unpacked_size,
+                    packed_size,
+                    file_crc,
+                    mtime,
+                    mtime_ns,
+                    method,
+                    password_encrypted,
+                    salt,
+                    ext_time,
+                    comment,
+                    is_dir,
+                    0,
                     chunks,
-                });
+                );
                 self.report_progress(file_size, file_size);
                 Ok(())
             }
@@ -1423,29 +1444,21 @@ impl RarArchive {
                     false,
                     false,
                 )?;
-                self.entries.push(crate::archive::ArchiveEntry {
-                    header: crate::model::FileHeader {
-                        name,
-                        unpacked_size,
-                        packed_size,
-                        crc32_val: Some(file_crc),
-                        mtime,
-                        mtime_ns: Some(mtime_ns),
-                        comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
-                        host_os: 0,
-                        format_version: 4,
-                        unp_ver: self.write_ctx().rar4_unp_ver,
-                        data_offset: 0,
-                        flags: if password_encrypted {
-                            crate::format::rar4::FHD_PASSWORD as u64
-                        } else {
-                            0
-                        },
-                        salt,
-                        extra_data: ext_time.unwrap_or_default(),
-                        ..Default::default()
-                    },
-                    chunks: vec![crate::model::DataChunk {
+                self.push_rar4_entry(
+                    name,
+                    unpacked_size,
+                    packed_size,
+                    file_crc,
+                    mtime,
+                    mtime_ns,
+                    method,
+                    password_encrypted,
+                    salt,
+                    ext_time,
+                    None,
+                    false,
+                    0,
+                    vec![crate::model::DataChunk {
                         volume_index: 0,
                         data_offset,
                         packed_size,
@@ -1453,7 +1466,7 @@ impl RarArchive {
                         is_final: true,
                         extra_data: Vec::new(),
                     }],
-                });
+                );
                 self.report_progress(file_size, file_size);
                 Ok(())
             }
@@ -1479,29 +1492,22 @@ impl RarArchive {
                         ))
                     })?
                 };
-                self.entries.push(crate::archive::ArchiveEntry {
-                    header: crate::model::FileHeader {
-                        name,
-                        unpacked_size,
-                        packed_size,
-                        crc32_val: Some(file_crc),
-                        mtime,
-                        comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
-                        host_os: 0,
-                        format_version: 4,
-                        unp_ver: self.write_ctx().rar4_unp_ver,
-                        data_offset: 0,
-                        flags: if password_encrypted {
-                            crate::format::rar4::FHD_PASSWORD as u64
-                        } else {
-                            0
-                        },
-                        salt,
-                        extra_data: ext_time.unwrap_or_default(),
-                        ..Default::default()
-                    },
+                self.push_rar4_entry(
+                    name,
+                    unpacked_size,
+                    packed_size,
+                    file_crc,
+                    mtime,
+                    mtime_ns,
+                    method,
+                    password_encrypted,
+                    salt,
+                    ext_time,
+                    None,
+                    false,
+                    0,
                     chunks,
-                });
+                );
                 self.report_progress(file_size, file_size);
                 Ok(())
             }

@@ -101,6 +101,10 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   `emit_pending_rar4_comment`）。回归测试：`rar5_directory_header_rolls_to_a_fresh_volume`、
   `tiny_volume_size_rejects_directory_and_redirect_members`、
   `rar4_writer_comment_precedes_a_directory_first_member`（三者均验证过撤掉修复即失败）。
+- **审查三修（2026-09，solid/entry 组装去重）**：RAR4 三处 solid 记账收敛为
+  `track_rar4_solid_member`（并删掉 `add_rar4_data` 里重复的 `maybe_reset_solid_for_extension`
+  调用）；五处 `ArchiveEntry` 组装收敛为 `push_rar4_entry`，顺带修正两处多卷 push 丢失 `mtime_ns`
+  的不一致（回归测试 `rar4_multivolume_entry_keeps_nanosecond_mtime`，验证过撤掉修复即失败）。
 - **审查续修（2026-09，结构 + 文档 + 死代码）**：RAR4 三份重复的分卷切分循环（流式/缓冲/并行）收敛为
   单一驱动 `emit_rar4_split` + `Rar4SplitParams`（`Cow` 源闭包；流式路径在闭包内报进度），
   `pipeline.rs` 1616→1535 行且漂移源归一；修 `safe_path.rs` 错挂文档、`rar5/mod.rs` 孤儿

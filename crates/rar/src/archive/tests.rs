@@ -1258,6 +1258,32 @@ fn abort_disarms_the_legacy_drop_auto_commit() {
     assert!(all_files(dir.path()).is_empty());
 }
 
+/// The catalog entry of a multi-volume RAR4 member must carry the same
+/// sub-second mtime as the single-volume paths (the split push sites used to
+/// drop it).
+#[test]
+fn rar4_multivolume_entry_keeps_nanosecond_mtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mv-ns.rar");
+    let mut archive = RarArchive::create_with_options(
+        &path,
+        crate::options::CreateOptions {
+            compression: crate::version::ArchiveVersion::V29,
+            volume_size: Some(64 * 1024),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    archive
+        .add_bytes("big.bin", &vec![7u8; 200 * 1024], 0)
+        .unwrap();
+    assert!(
+        archive.entries[0].header.mtime_ns.is_some(),
+        "multi-volume RAR4 entry lost its nanosecond mtime"
+    );
+    archive.abort();
+}
+
 /// A queued RAR4 archive comment must land before the first member even when
 /// that member is a directory: the `CMT` block precedes the directory header
 /// on disk (and the comment still reads back).
