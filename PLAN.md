@@ -93,6 +93,14 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   位宽调用点改 u8）；新增 `codec/legacy/tables.rs` 共享 RAR20/29 完全相同的 LENGTH 槽表，OFFSET 表因
   槽数不同（48 vs 60）各留副本。解码器与 match finder 按 rars 逐文件隔离设计不动。验证：全量测试 +
   本机 WinRAR 互操作（35/6）字节不变。
+- **审查修复（2026-09，三项正确性 + 一项契约）**：① RAR4 目录头滚动循环补 `rolled` 守卫
+  （`format/rar4/write/pipeline.rs`，`-v` 过小不再死循环，报 `InvalidOption`）；② RAR5 目录/重定向
+  头新增 `ensure_rar5_volume_space`（预留 EOA、必要时滚卷、装不下报错），并补上重定向头缺失的
+  `volume_bytes_written` 记账；③ 删除 `ArchiveEditor::ensure_rewritable` 死检查，修正 RAR4/RAR5 编辑
+  文档的矛盾描述；④ RAR4 队列注释在目录成员前落盘（`write_rar4_dir_entry` 调
+  `emit_pending_rar4_comment`）。回归测试：`rar5_directory_header_rolls_to_a_fresh_volume`、
+  `tiny_volume_size_rejects_directory_and_redirect_members`、
+  `rar4_writer_comment_precedes_a_directory_first_member`（三者均验证过撤掉修复即失败）。
 - **CLI 两个二进制（2026-09，主体去重）**：`selector.rs` / `password.rs` 已有；新增共享
   `ops.rs`（`#[path]` 双二进制共用）：`open_reader`、`extract_members`（整档/选成员）、
   `extract_to_stdout`（`-so`）、`print_members`（`p`）、列表三态（`list_entries` /

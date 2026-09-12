@@ -1064,6 +1064,9 @@ impl RarArchive {
         use crate::format::rar4::write::{
             FileHeaderParams, build_ext_time, build_file_header, encode_file_name, unix_to_dos_time,
         };
+        // A queued archive comment must precede the first member, whichever
+        // kind it is; directories reached before any file flush it here.
+        self.emit_pending_rar4_comment()?;
         let (encoded_name, name_flags) = encode_file_name(name);
         let ext_time = build_ext_time(Some(mtime_ns));
         let mut flags = name_flags;
@@ -1090,14 +1093,23 @@ impl RarArchive {
         };
         let hdr = build_file_header(&params)?;
         // Multi-volume: roll to a volume with room for this head plus the
-        // 7-byte end-of-archive block (same rule as file members).
+        // 7-byte end-of-archive block (same rule as file members). A volume
+        // too small for even a fresh header must error instead of rolling
+        // forever.
         if let Some(volume_size) = self.write_ctx().volume_size {
+            let mut rolled = false;
             loop {
                 let used = self.write_ctx().volume_bytes_written;
                 if volume_size.saturating_sub(used) > 7 + hdr.len() as u64 {
                     break;
                 }
+                if rolled {
+                    return Err(RarError::InvalidOption(format!(
+                        "volume size {volume_size} is too small for a RAR4 directory header"
+                    )));
+                }
                 self.start_next_volume()?;
+                rolled = true;
             }
         }
         let stream = stream_mut(&mut self.stream)?;

@@ -231,16 +231,14 @@ impl ArchiveEditor {
     ///
     /// Locked archives fail with [`RarError::ArchiveLocked`] (any rewrite
     /// rewrites the main header, which refuses locked archives). RAR4
-    /// archives route to the legacy-container editor (ADR 0005): stage A
-    /// covers header-level ops (rename/comment/recovery), stage B the
-    /// member deletes on non-solid archives; delete/rename/comment on the
-    /// not-yet-staged paths are refused with
-    /// [`RarError::Unsupported`].
+    /// archives route to the legacy-container editor (ADR 0005), which
+    /// implements deletes (non-solid, plus solid chains through a
+    /// whole-archive repack), renames, archive/member comments and recovery
+    /// changes.
     pub fn apply(&mut self, plan: EditPlan) -> RarResult<EditReport> {
         if self.archive.rar4 {
             return self.apply_rar4(&plan);
         }
-        self.ensure_rewritable()?;
         // Resolve every operation against the current catalog before any
         // rewrite starts; a stale ID fails the whole plan up front.
         let mut deletes = Vec::with_capacity(plan.ops.len());
@@ -286,20 +284,12 @@ impl ArchiveEditor {
         })
     }
 
-    /// Apply an [`EditPlan`] to a RAR 1.5–4.x archive (ADR 0005 stage A).
-    ///
-    /// Member renames (`rar rn` / `rar ch`), archive-comment changes
-    /// (`rar c` / removal) and recovery-record changes (`rar rr`) are
-    /// implemented; delete is refused with a clear
-    /// [`RarError::Unsupported`] until its stage lands. A failed plan
-    /// never touches the file.
     /// Apply an [`EditPlan`] to a RAR 1.5–4.x archive (ADR 0005).
     ///
-    /// Member deletes on non-solid archives (`rar d`), renames
-    /// (`rar rn` / `rar ch`), archive-comment changes (`rar c`) and
-    /// recovery-record changes (`rar rr`) are implemented; deleting solid
-    /// members is refused until the repack stage lands. A failed plan
-    /// never touches the file.
+    /// Member deletes (`rar d`; solid chains through a whole-archive repack),
+    /// renames (`rar rn` / `rar ch`), archive- and member-comment changes
+    /// (`rar c` / `rar cf`) and recovery-record changes (`rar rr`) are
+    /// implemented. A failed plan never touches the file.
     fn apply_rar4(&mut self, plan: &EditPlan) -> RarResult<EditReport> {
         let mut force_rr: Option<u8> = None;
         let mut comment: Option<Vec<u8>> = None;
@@ -455,18 +445,6 @@ impl ArchiveEditor {
             return super::rar4_edit::lock_archive(&self.archive);
         }
         self.archive.lock()
-    }
-
-    /// The surgical rewrite engine behind every edit operates on RAR5
-    /// blocks; refuse legacy-container archives up front with a clear error
-    /// instead of a confusing parse failure mid-rewrite.
-    fn ensure_rewritable(&self) -> RarResult<()> {
-        if self.archive.rar4 {
-            return Err(RarError::Unsupported(
-                "editing RAR4 archives is not supported; the rewrite engine is RAR5-only".into(),
-            ));
-        }
-        Ok(())
     }
 
     fn resolve_id(&self, id: EntryId) -> RarResult<usize> {

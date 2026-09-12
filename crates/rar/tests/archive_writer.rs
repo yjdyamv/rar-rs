@@ -650,6 +650,80 @@ fn tiny_volume_size_is_rejected_instead_of_looping() {
     );
 }
 
+/// Directory headers and redirect members must hit the same tiny-volume
+/// guard as file members: reject instead of looping forever (RAR4) or
+/// overflowing the volume (RAR5).
+#[test]
+fn tiny_volume_size_rejects_directory_and_redirect_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+
+    let rar5 = dir.path().join("tinydir5.rar");
+    let mut writer =
+        ArchiveWriter::create_with(&rar5, WriterOptions::new().volume_size(16)).unwrap();
+    assert!(writer.add_path(&sub, stored()).is_err());
+    drop(writer);
+
+    let rar4 = dir.path().join("tinydir4.rar");
+    let mut writer = ArchiveWriter::create_with(
+        &rar4,
+        WriterOptions::new()
+            .compression(ArchiveVersion::V29)
+            .volume_size(16),
+    )
+    .unwrap();
+    assert!(writer.add_path(&sub, stored()).is_err());
+    drop(writer);
+
+    let redir = dir.path().join("tinyredir.rar");
+    let mut writer =
+        ArchiveWriter::create_with(&redir, WriterOptions::new().volume_size(16)).unwrap();
+    assert!(writer.add_redirect("link", 1, "target.bin").is_err());
+    drop(writer);
+}
+
+/// A RAR5 directory header must roll to a fresh volume when the current one
+/// cannot also hold the end-of-archive reserve; the volume limit still holds.
+#[test]
+fn rar5_directory_header_rolls_to_a_fresh_volume() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("dirmv.rar");
+    let volume_size = 4096u64;
+    let payload = vec![0x5Au8; (volume_size - 80) as usize];
+    let sub = dir.path().join("directory_with_a_long_name");
+    std::fs::create_dir(&sub).unwrap();
+
+    let mut writer =
+        ArchiveWriter::create_with(&base, WriterOptions::new().volume_size(volume_size)).unwrap();
+    writer.add_bytes("a.bin", &payload, stored()).unwrap();
+    writer
+        .add_directory(&sub, "directory_with_a_long_name")
+        .unwrap();
+    writer.finish().unwrap();
+
+    let volumes = rar_rs::discover_volumes(&base);
+    assert!(
+        volumes.len() >= 2,
+        "expected the directory header to roll to a fresh volume"
+    );
+    for path in &volumes {
+        let len = std::fs::metadata(path).unwrap().len();
+        assert!(
+            len <= volume_size,
+            "{} is {len} bytes, over the {volume_size}-byte volume size",
+            path.display()
+        );
+    }
+    let mut reader = ArchiveReader::open(&base).unwrap();
+    assert_eq!(
+        reader
+            .read_entry(reader.unique_entry("a.bin").unwrap())
+            .unwrap(),
+        payload
+    );
+}
+
 /// Part number parsed out of a `....partN.rar` staging name.
 fn part_number(path: &std::path::Path) -> u64 {
     path.file_name()

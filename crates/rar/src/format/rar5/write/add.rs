@@ -535,6 +535,30 @@ impl RarArchive {
         Ok(())
     }
 
+    /// Roll to a fresh volume until `needed` on-disk bytes fit; `needed`
+    /// already includes the end-of-archive reserve. No-op for single-volume
+    /// archives, and a volume too small for one header errors instead of
+    /// rolling forever (matching the file-member splitter).
+    fn ensure_rar5_volume_space(&mut self, needed: u64) -> RarResult<()> {
+        let Some(volume_size) = self.write_ctx().volume_size else {
+            return Ok(());
+        };
+        let mut rolled = false;
+        loop {
+            let used = self.write_ctx().volume_bytes_written;
+            if volume_size.saturating_sub(used) >= needed {
+                return Ok(());
+            }
+            if rolled {
+                return Err(RarError::InvalidOption(format!(
+                    "volume size {volume_size} is too small for a RAR5 member header"
+                )));
+            }
+            self.start_next_volume()?;
+            rolled = true;
+        }
+    }
+
     /// The entry carries no data; `redir_type` is 1 (Unix symlink),
     /// 2 (Windows symlink), 3 (Windows junction), 4 (hardlink) or
     /// 5 (file copy) and `target` is the referenced member name.
@@ -565,6 +589,8 @@ impl RarArchive {
             ..Default::default()
         };
         let hdr_bytes = fh.to_bytes();
+        let hdr_on_disk = self.on_disk_header_len(hdr_bytes.len() as u64);
+        self.ensure_rar5_volume_space(hdr_on_disk + self.on_disk_header_len(8))?;
         if self.write_ctx().quick_open {
             let pos = stream_mut(&mut self.stream)?.stream_position()?;
             self.write_ctx_mut()
@@ -572,6 +598,7 @@ impl RarArchive {
                 .push((pos, hdr_bytes.clone()));
         }
         self.write_block_header(&hdr_bytes)?;
+        self.write_ctx_mut().volume_bytes_written += hdr_on_disk;
         self.entries.push(ArchiveEntry {
             header: fh,
             chunks: Vec::new(),
@@ -610,6 +637,8 @@ impl RarArchive {
         };
 
         let hdr_bytes = fh.to_bytes();
+        let hdr_on_disk = self.on_disk_header_len(hdr_bytes.len() as u64);
+        self.ensure_rar5_volume_space(hdr_on_disk + self.on_disk_header_len(8))?;
         if self.write_ctx().quick_open {
             let pos = stream_mut(&mut self.stream)?.stream_position()?;
             self.write_ctx_mut()
@@ -617,8 +646,7 @@ impl RarArchive {
                 .push((pos, hdr_bytes.clone()));
         }
         self.write_block_header(&hdr_bytes)?;
-        self.write_ctx_mut().volume_bytes_written +=
-            self.on_disk_header_len(hdr_bytes.len() as u64);
+        self.write_ctx_mut().volume_bytes_written += hdr_on_disk;
         self.entries.push(ArchiveEntry {
             header: fh,
             chunks: Vec::new(),

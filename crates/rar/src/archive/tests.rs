@@ -1257,3 +1257,50 @@ fn abort_disarms_the_legacy_drop_auto_commit() {
     assert!(!path.exists());
     assert!(all_files(dir.path()).is_empty());
 }
+
+/// A queued RAR4 archive comment must land before the first member even when
+/// that member is a directory: the `CMT` block precedes the directory header
+/// on disk (and the comment still reads back).
+#[test]
+fn rar4_writer_comment_precedes_a_directory_first_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("comment-dir.rar");
+    let sub = dir.path().join("subdir");
+    std::fs::create_dir(&sub).unwrap();
+    {
+        let mut archive = RarArchive::create_with_options(
+            &path,
+            crate::options::CreateOptions {
+                compression: crate::version::ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.set_rar4_writer_comment(Some(b"queued comment".to_vec()));
+        archive.add(&sub, 0).unwrap();
+        archive.add_bytes("a.txt", b"data", 0).unwrap();
+        archive.close().unwrap();
+    }
+
+    let mut archive = RarArchive::open(&path).unwrap();
+    assert_eq!(
+        archive.get_comment().unwrap().as_deref(),
+        Some(b"queued comment".as_slice()),
+        "the created archive must carry the queued comment"
+    );
+    drop(archive);
+
+    let bytes = std::fs::read(&path).unwrap();
+    let comment_at = bytes
+        .windows(b"queued comment".len())
+        .position(|window| window == b"queued comment")
+        .expect("comment payload in the archive");
+    let dir_at = bytes
+        .windows(b"subdir".len())
+        .position(|window| window == b"subdir")
+        .expect("directory header in the archive");
+    assert!(
+        comment_at < dir_at,
+        "comment at {comment_at} must precede the directory header at {dir_at}"
+    );
+}
