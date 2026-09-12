@@ -46,7 +46,7 @@
 
 | 模块 | 可见性 | 内容 |
 |---|---|---|
-| `format/rar5/` | **`raw` 门控** | 常量与词汇（`mod.rs`）、`create.rs`（字典字段策略）、`headers/{parse,serialize,locator}`、`payload.rs`（MemberDecoder）、`vint.rs`、`blake2sp.rs`、`extract.rs`（读路径）、`write/{mod,engine,layout,windows}` |
+| `format/rar5/` | **`raw` 门控** | 常量与词汇（`mod.rs`）、`create.rs`（字典字段策略）、`headers/{parse,serialize,locator}`、`payload.rs`（MemberDecoder）、`vint.rs`、`blake2sp.rs`、`extract/`（读路径：`open`/`read`/`members`/`dest`/`solid`/`decode`/`verify`）、`write/{mod,engine,layout,windows}` |
 | `format/rar4/` | **`raw` 门控** | 老容器族：扫描 / 头解析、解码门面、写管线 |
 | `codec/modern/lzss_huff/` | **公开** | RAR5 LZSS+Huffman 编解码器。ADR 0003 决策 3 明确保留（`examples/` 依赖根上的 `encode` / `decode` / `EncoderState` / `encode_chunked*`） |
 | `codec/legacy/`、`codec/common/` | `pub(crate)` | 老代编解码器与 PPMd；bitstream / huffman / filters / incompressible / match_finder / window |

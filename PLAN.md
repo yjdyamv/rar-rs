@@ -29,7 +29,7 @@
   - `crypto/rar50.rs:619`：`let rec_end = offset + rec_size as usize;` 未检查；`rec_size` 是 vint（可达 `u64::MAX`），release 回绕后 `&extra_data[offset + tn..rec_end]` 出现 start>end → panic。任何带 extra 的文件头都会进 `read_packed`。
   - `recovery/legacy.rs:173-175`：只用 `header.get(tail..tail+8) == Some(b"Protect+")` 证明 8 字节存在，随即索引 `tail+8..tail+16`；`name_size = header[26..28]` 攻击者可控（`head_size=54, name_size=14` 即越界）。`rar r` 与 RAR4 create/edit 的 `scan_protect*` 都可达。
   修：`checked_add`/`get` + 两个单测。 **已修（2026-09-11）**：加上边界检查；复现测试 `crypto::rar50::tests::hostile_extra_record_size_does_not_panic`、`recovery::legacy::tests::crafted_rr_name_size_does_not_panic`。
-- **缓冲读 / `t` / 并行提取缺字典上限（分配型 DoS）** **[读码确认，待复现]**：`format/rar5/extract.rs:1410 decode_file_at`（及并行 worker）没调 `member_dict_window`（`decode_file_to:1483` 调了）；`codec/modern/lzss_huff/decoder.rs:210 checked_dict_size` 对 `dict_size_bytes` 无上界 → `codec/common/window.rs:20 vec![0u8; size]`。伪造 v70 头声明 ~2^48 B 即可让 `test`/`read` 分配失败 abort（streaming 路径有 4 GiB `-mdx` 上限，此处没有）。修：两处补 `member_dict_window` + 测试。 **已修（2026-09-11）**：抽出 `capped_dict_bytes`，`decode_file_at` 与并行 worker 共用；测试 `rar50_roundtrip::buffered_read_enforces_the_dictionary_cap`（1 字节 cap 拒绝、默认 cap 可读）。
+- **缓冲读 / `t` / 并行提取缺字典上限（分配型 DoS）** **[读码确认，待复现]**：`format/rar5/extract/`（`decode_file_at`，及并行 worker）没调 `member_dict_window`（`decode_file_to` 调了）；`codec/modern/lzss_huff/decoder.rs:210 checked_dict_size` 对 `dict_size_bytes` 无上界 → `codec/common/window.rs:20 vec![0u8; size]`。伪造 v70 头声明 ~2^48 B 即可让 `test`/`read` 分配失败 abort（streaming 路径有 4 GiB `-mdx` 上限，此处没有）。修：两处补 `member_dict_window` + 测试。 **已修（2026-09-11）**：抽出 `capped_dict_bytes`，`decode_file_at` 与并行 worker 共用；测试 `rar50_roundtrip::buffered_read_enforces_the_dictionary_cap`（1 字节 cap 拒绝、默认 cap 可读）。
 
 ### P1（静默产出坏档案 / 回归）
 
@@ -82,7 +82,9 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   `encoder/{mod,chunked,parse,emit,filter,tests}.rs` 与 `decoder/{mod,engine,analysis,tables,tests}.rs`
   （mod.rs 共享词汇 + 角色模块，公开路径与输出不变）；`archive/rar4_edit.rs`（2924）拆为
   `archive/rar4_edit/{mod,layout,headers,comment,engine,repack}.rs` + `tests/`（五个用例文件）；
-  `recovery/rar50.rs`（2141）拆为 `recovery/rar50/{mod,plan,gf16,encode,repair,stream}.rs`（rars 移植核心保留在 `gf16`）。
+  `recovery/rar50.rs`（2141）拆为 `recovery/rar50/{mod,plan,gf16,encode,repair,stream}.rs`（rars 移植核心保留在 `gf16`）；
+  `format/rar5/extract.rs`（1975）拆为 `extract/{mod,open,read,members,dest,solid,decode,verify}.rs`（共享导入留在 `mod.rs`，
+  角色文件各持 `impl RarArchive` 分片）。
   剩余大文件：`codec/legacy/rar29_encoder.rs` 2747（按 CONTEXT 是 rars 移植的
   逐文件隔离，拆分收益低）。
 - **双 options 面（2026-09 收敛，ADR 0006）**：`WriterOptions`（私有字段 builder）是唯一公开构造器；
