@@ -1534,3 +1534,52 @@ fn match_length_scalar(
     }
     length
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::legacy::rar15::Rar15Decoder;
+
+    fn roundtrip(data: &[u8], options: EncodeOptions) {
+        let mut encoder = Unpack15Encoder::with_options(options);
+        let packed = encoder.encode_member(data).expect("rar15 encode");
+        let mut decoder = Rar15Decoder::new();
+        let mut out = Vec::new();
+        decoder
+            .decode_member_to(&packed, data.len(), false, &mut out)
+            .expect("rar15 decode");
+        assert_eq!(out, data, "roundtrip mismatch");
+    }
+
+    fn pseudo_random(len: usize) -> Vec<u8> {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        (0..len)
+            .map(|_| {
+                state ^= state >> 12;
+                state ^= state << 25;
+                state ^= state >> 27;
+                (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8
+            })
+            .collect()
+    }
+
+    /// The RAR 1.5 codec's three table regimes (default, old-distance off,
+    /// st-mode runs off) must each encode a stream the matching decoder
+    /// reproduces.
+    #[test]
+    fn roundtrip_text_binary_and_empty() {
+        let text = b"the quick brown fox jumps over the lazy dog 0123456789\n".repeat(2_000);
+        let binary = pseudo_random(120_000);
+        let inputs: [&[u8]; 3] = [&text, &binary, &[]];
+        for options in [
+            EncodeOptions::new(),
+            EncodeOptions::new()
+                .with_old_distance_tokens(false)
+                .with_stmode_literal_runs(false),
+        ] {
+            for data in inputs {
+                roundtrip(data, options);
+            }
+        }
+    }
+}

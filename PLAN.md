@@ -101,6 +101,12 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   `emit_pending_rar4_comment`）。回归测试：`rar5_directory_header_rolls_to_a_fresh_volume`、
   `tiny_volume_size_rejects_directory_and_redirect_members`、
   `rar4_writer_comment_precedes_a_directory_first_member`（三者均验证过撤掉修复即失败）。
+- **审查四修（2026-09，候选选择/重命名映射去重 + 老编码器单测）**：RAR29 非 solid 候选选择
+  （LZ/自动过滤器/PPMd/STORE 回退）抽为 `best_rar29_member`，缓冲编码与并行准备两处共用（返回
+  `None` 让拥有缓冲的调用方零拷贝回退 STORE）；`archive/rename.rs::build_rename_map` 统一 RAR4/RAR5
+  编辑引擎逐字相同的两份实现；`write_progress` 的 `WriteOperation`/`WriteProgressEvent`/
+  `WriteProgress` 降为 `pub(crate)`（模块私有且无 re-export）；`rar15_encoder`/`rar20_encoder` 首次
+  补直接 roundtrip 单测（文本/二进制/音频/空 × 各主要选项档）。
 - **审查三修（2026-09，solid/entry 组装去重）**：RAR4 三处 solid 记账收敛为
   `track_rar4_solid_member`（并删掉 `add_rar4_data` 里重复的 `maybe_reset_solid_for_extension`
   调用）；五处 `ArchiveEntry` 组装收敛为 `push_rar4_entry`，顺带修正两处多卷 push 丢失 `mtime_ns`

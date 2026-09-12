@@ -655,7 +655,7 @@ impl RarArchive {
             }
         }
 
-        let (map, renamed_count) = self.build_rename_map(renames)?;
+        let (map, renamed_count) = super::rename::build_rename_map(&self.entries, renames)?;
         if deleted_count == 0 && renamed_count == 0 && force_rr.is_none() && comment.is_none() {
             return Err(RarError::Format("no members to edit".into()));
         }
@@ -720,43 +720,6 @@ impl RarArchive {
     /// expanding directory renames to their descendants with the same rules
     /// as the name-based path. Returns the map and the number of explicit
     /// rename pairs.
-    fn build_rename_map(
-        &self,
-        renames: &[(usize, String)],
-    ) -> RarResult<(std::collections::HashMap<usize, String>, usize)> {
-        let mut map: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-        let mut count = 0usize;
-        for (idx, new) in renames {
-            if *idx >= self.entries.len() {
-                return Err(RarError::StaleEntryId);
-            }
-            let old_norm = map
-                .get(idx)
-                .map(|n| n.as_str())
-                .unwrap_or(self.entries[*idx].name())
-                .trim_end_matches('/')
-                .to_string();
-            let is_dir = self.entries[*idx].is_dir();
-            let new_norm = new.trim_end_matches('/').to_string();
-            if is_dir {
-                map.insert(*idx, format!("{new_norm}/"));
-                let prefix = format!("{old_norm}/");
-                for (i, e) in self.entries.iter().enumerate() {
-                    if i == *idx || map.contains_key(&i) {
-                        continue;
-                    }
-                    if let Some(rest) = e.name().strip_prefix(&prefix) {
-                        map.insert(i, format!("{new_norm}/{rest}"));
-                    }
-                }
-            } else {
-                map.insert(*idx, new_norm.clone());
-            }
-            count += 1;
-        }
-        Ok((map, count))
-    }
-
     /// Run one staged edit rewrite (delete mask + rename map) against the
     /// original archive and reload the catalog. Single-volume archives are
     /// rewritten through a sibling file that replaces the original only on

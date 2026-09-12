@@ -19,6 +19,7 @@ mod editor;
 mod entry;
 pub(crate) mod rar4_edit;
 mod reader;
+mod rename;
 mod transaction;
 mod writer;
 

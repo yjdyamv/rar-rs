@@ -4,7 +4,7 @@
 /// A high-level archive-writing operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum WriteOperation {
+pub(crate) enum WriteOperation {
     /// Building a RAR 5 recovery record.
     Recovery,
 }
@@ -14,7 +14,7 @@ pub enum WriteOperation {
 /// Callbacks can be invoked concurrently when parallel compression is enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum WriteProgressEvent {
+pub(crate) enum WriteProgressEvent {
     /// An operation has started.
     OperationStarted {
         operation: WriteOperation,
@@ -41,7 +41,7 @@ pub enum WriteProgressEvent {
 }
 
 /// Receives archive-writing progress events.
-pub trait WriteProgress: Send + Sync {
+pub(crate) trait WriteProgress: Send + Sync {
     fn report(&self, event: WriteProgressEvent);
 
     /// Returns true when the caller wants the active write operation to stop.

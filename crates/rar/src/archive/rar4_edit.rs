@@ -647,49 +647,6 @@ fn set_rar4_comment(header: &[u8], comment: &[u8]) -> RarResult<Vec<u8>> {
     Ok(out)
 }
 
-/// Resolve rename pairs (entry index -> new name) into a map, expanding
-/// directory renames to their descendants exactly like the RAR5 engine
-/// (`transaction.rs`): each directory member keeps a trailing `/`, every
-/// other member whose name starts with `old/` is rewritten to `new/rest`,
-/// and renaming the same member twice chains (the later pair sees the
-/// earlier one's result as the old name).
-fn build_rename_map(
-    entries: &[crate::archive::ArchiveEntry],
-    renames: &[(usize, String)],
-) -> RarResult<(HashMap<usize, String>, usize)> {
-    let mut map: HashMap<usize, String> = HashMap::new();
-    let mut count = 0usize;
-    for (idx, new) in renames {
-        if *idx >= entries.len() {
-            return Err(RarError::StaleEntryId);
-        }
-        let old_norm = map
-            .get(idx)
-            .map(|n| n.as_str())
-            .unwrap_or(entries[*idx].name())
-            .trim_end_matches('/')
-            .to_string();
-        let is_dir = entries[*idx].is_dir();
-        let new_norm = new.trim_end_matches('/').to_string();
-        if is_dir {
-            map.insert(*idx, format!("{new_norm}/"));
-            let prefix = format!("{old_norm}/");
-            for (i, e) in entries.iter().enumerate() {
-                if i == *idx || map.contains_key(&i) {
-                    continue;
-                }
-                if let Some(rest) = e.name().strip_prefix(&prefix) {
-                    map.insert(i, format!("{new_norm}/{rest}"));
-                }
-            }
-        } else {
-            map.insert(*idx, new_norm.clone());
-        }
-        count += 1;
-    }
-    Ok((map, count))
-}
-
 // ── Archive comment (RAR 3.x/4.x NEWSUB `CMT`) ─────────────────────────────
 
 /// A RAR 3.x/4.x archive comment is a NEWSUB (0x7a) block named `CMT`,
@@ -1070,13 +1027,13 @@ pub(crate) fn edit_rar4(
                 "recovery-record and per-member-comment edits on multi-volume RAR4 archives are not supported (a volume set uses .rev recovery volumes)".into(),
             ));
         }
-        let (rename_map, _) = build_rename_map(&archive.entries, renames)?;
+        let (rename_map, _) = super::rename::build_rename_map(&archive.entries, renames)?;
         return apply_multivolume_edits(archive, &rename_map, comment);
     }
 
     let is_solid = layout.main_flags & MHD_SOLID != 0;
     if deleted_count > 0 && is_solid {
-        let (rename_map, renamed) = build_rename_map(&archive.entries, renames)?;
+        let (rename_map, renamed) = super::rename::build_rename_map(&archive.entries, renames)?;
         return repack_solid_archive(
             archive,
             &deleted,
@@ -1089,7 +1046,7 @@ pub(crate) fn edit_rar4(
         );
     }
 
-    let (rename_map, renamed) = build_rename_map(&archive.entries, renames)?;
+    let (rename_map, renamed) = super::rename::build_rename_map(&archive.entries, renames)?;
     for (idx, _) in renames {
         if deleted[*idx] {
             return Err(RarError::InvalidOption(

@@ -1835,3 +1835,68 @@ impl Rar20MatchFinder {
         older
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::legacy::rar20::Rar20Decoder;
+
+    fn roundtrip(data: &[u8], options: EncodeOptions) {
+        let mut encoder = Unpack20Encoder::with_options(options);
+        let packed = encoder.encode_member(data).expect("rar20 encode");
+        let mut decoder = Rar20Decoder::new();
+        let out = decoder
+            .decode_member(&packed, data.len() as u64)
+            .expect("rar20 decode");
+        assert_eq!(out, data, "roundtrip mismatch");
+    }
+
+    fn pseudo_random(len: usize) -> Vec<u8> {
+        let mut state = 0x9E37_9B97_7F4A_7C15u64;
+        (0..len)
+            .map(|_| {
+                state ^= state >> 12;
+                state ^= state << 25;
+                state ^= state >> 27;
+                (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8
+            })
+            .collect()
+    }
+
+    /// Interleaved 16-bit stereo with a slow random walk, the shape the
+    /// audio predictor is meant to catch.
+    fn waveform(frames: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(frames * 4);
+        let (mut l, mut r) = (0i16, 0i16);
+        let mut seed = 7u32;
+        for _ in 0..frames {
+            l = l.wrapping_add(((seed >> 16) & 0x3f) as i16 - 30);
+            r = r.wrapping_add(((seed >> 8) & 0x3f) as i16 - 20);
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            out.extend_from_slice(&l.to_le_bytes());
+            out.extend_from_slice(&r.to_le_bytes());
+        }
+        out
+    }
+
+    /// LZ, optimal-parse and audio-block paths must each roundtrip.
+    #[test]
+    fn roundtrip_text_binary_audio_and_empty() {
+        let text = b"the quick brown fox jumps over the lazy dog 0123456789\n".repeat(2_000);
+        let binary = pseudo_random(120_000);
+        let audio = waveform(40_000);
+        for options in [
+            EncodeOptions::new(256),
+            EncodeOptions::new(256)
+                .with_lazy_matching(true)
+                .with_lazy_lookahead(2),
+            EncodeOptions::new(512)
+                .with_optimal_parse(true)
+                .with_try_audio(true),
+        ] {
+            for data in [text.as_slice(), binary.as_slice(), audio.as_slice(), &[]] {
+                roundtrip(data, options);
+            }
+        }
+    }
+}
