@@ -59,7 +59,7 @@ not as verified copying.
 | `crates/rar/src/codec/legacy/ppmd.rs` | `codec/ppmd.rs` | WTFPL |
 | `crates/rar/src/codec/common/match_finder.rs` | `codec/match_finder.rs` (LZMA BT4) | MIT OR Apache-2.0 |
 | `crates/rar/src/codec/common/filters.rs` | `codec/filters.rs`, `x86_filter_scan.rs`, RAR4 audio gate | MIT OR Apache-2.0 |
-| `crates/rar/src/codec/modern/lzss_huff/encoder.rs` | `codec/rar50.rs` (`optimal_tokens` / `TokenPrices`) | MIT OR Apache-2.0 |
+| `crates/rar/src/codec/modern/lzss_huff/encoder/parse.rs` | `codec/rar50.rs` (`optimal_tokens` / `TokenPrices`) | MIT OR Apache-2.0 |
 | `crates/rar/src/format/rar5/blake2sp.rs` | `crates/rars/src/rar50/blake2sp.rs` | MIT OR Apache-2.0 |
 | `crates/rar/src/crypto/rar50.rs` | RAR5 KDF / hash-key MAC patterns | MIT OR Apache-2.0 (notice added 2026-09-11) |
 | `crates/rar/src/recovery/rar50.rs` | inline recovery-record codec | MIT OR Apache-2.0 (notice added 2026-09-11) |
@@ -67,7 +67,7 @@ not as verified copying.
 
 Files derived from analysis of the libarchive RAR5 reader (BSD-2-Clause)
 carry a BSD-2-Clause notice: `crates/rar/src/codec/mod.rs`,
-`crates/rar/src/codec/modern/lzss_huff/mod.rs` and `encoder.rs`;
+`crates/rar/src/codec/modern/lzss_huff/mod.rs` and the `encoder/` role modules;
 `crates/rar/src/codec/common/huffman.rs` states the same basis
 ("based on the structure used in libarchive's RAR5 reader") without a license
 line, so it is covered by that umbrella rather than by its own notice.

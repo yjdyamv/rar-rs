@@ -10,7 +10,7 @@
 - **Volume（分卷）** — 多卷归档的单个 `.partN.rar` 文件；成员数据按卷切成 Chunk。
 - **Chunk（分块）** — 跨卷成员在某卷中的数据段。非末块头携带该块密文 CRC32；末块携带（hash-key MAC 过的）明文 CRC，并携带完整 extra 记录。
 - **Solid chain（固态链）** — 连续压缩成员共享一个 LZ 窗口；EncoderState/DecoderState 跨成员保持。单卷与分卷均已支持。
-- **EncoderState / DecoderState** — 跨块/跨成员保持的编解码状态（lookbehind tail、dist cache、last length、Huffman 表），定义在 `codec/modern/lzss_huff/encoder.rs` 与 `decoder.rs`。
+- **EncoderState / DecoderState** — 跨块/跨成员保持的编解码状态（lookbehind tail、dist cache、last length、Huffman 表），定义在 `codec/modern/lzss_huff/encoder/`（`mod.rs` 共享词汇 + `chunked`/`parse`/`emit`/`filter` 角色模块）与 `decoder.rs`。
 - **Emitted block（发射块）/ parse block（解析块）** — 压缩流两种块：写侧把 LZSS 符号流切成**发射块**（≤ 4 MiB，局部字面量/距离/长度分布漂移时提前闭合，每块独立 Huffman 表）；解析/预算侧分块上限仍 128 KiB（`MAX_BLOCK_SIZE`）。发射块大小与解析块解耦（自适应发射块，2026-09）。
 - **MemberDecoder** — `format/rar5/payload.rs`：统一成员读/解码门面（`ChunkReader` trait + `read_packed` + `decode_member`），STORE 直通与压缩解码共用。
 - **Spill file（溢出文件）** — 大文件（≥ `STREAM_COMPRESS_THRESHOLD`，64 MiB）压缩路径的临时落盘文件：压缩流先溢出，头写出后再流式进归档，保证内存有界。
@@ -38,7 +38,7 @@
 ## 分层结构（镜像参考架构 rars）
 
 - **格式层 `format/rar5/`**：容器常量 + 头类型/解析（mod.rs + headers/{parse,serialize,locator}.rs）、成员读/解码门面（payload.rs）、读路径（extract.rs）、写管线（write/{add,emit,stream,batch,engine,layout}.rs，只含 RAR5）、vint/blake2sp。低版本格式兄弟模块 `format/rar4/`（读：mod.rs 扫描/头解析 + read.rs 成员解码门面；写：write/{mod,pipeline,cbc}.rs + create.rs 选项校验）。跨格式写机制在 `format/shared/`：通用 writer 适配器（engine.rs）、流访问（stream.rs）、格式中性的成员写门面（write_ops.rs：add/add_as/add_file/add_bytes/add_directory*/add_batch 分发 + solid 链重置）。
-- **编解码层 `codec/`**：一族一目录/一文件——`modern/lzss_huff/`（RAR5 LZSS+Huffman 编码器+解码器）、`legacy/`（`rar29.rs` RAR3/4 成员解码器：LZSS+Huffman+PPMd 块、`rar29_encoder.rs` RAR3/4 编码器：从 rars 移植的 Unpack29Encoder、`ppmd.rs` PPMd 变体 H 解码器，rar29 引用）、`common/`（bitstream/huffman/filters/incompressible/match_finder/window 共享原语；解码器 `legacy/{rar29,rar20,rar15}.rs`/`ppmd.rs` 自含位读器/错误，不动 RAR5 原语；写侧 `rar20_encoder`/`rar15_encoder` 统一用 `common::bitstream::BitWriter`，`legacy/tables.rs` 共享 RAR20/29 相同的 LENGTH 槽表（OFFSET 槽数不同故各留副本），match finder 仍按 codec 各自保留）。
+- **编解码层 `codec/`**：一族一目录/一文件——`modern/lzss_huff/`（RAR5 LZSS+Huffman 编码器（`encoder/` 目录：`mod`/`chunked`/`parse`/`emit`/`filter`）+ 解码器）、`legacy/`（`rar29.rs` RAR3/4 成员解码器：LZSS+Huffman+PPMd 块、`rar29_encoder.rs` RAR3/4 编码器：从 rars 移植的 Unpack29Encoder、`ppmd.rs` PPMd 变体 H 解码器，rar29 引用）、`common/`（bitstream/huffman/filters/incompressible/match_finder/window 共享原语；解码器 `legacy/{rar29,rar20,rar15}.rs`/`ppmd.rs` 自含位读器/错误，不动 RAR5 原语；写侧 `rar20_encoder`/`rar15_encoder` 统一用 `common::bitstream::BitWriter`，`legacy/tables.rs` 共享 RAR20/29 相同的 LENGTH 槽表（OFFSET 槽数不同故各留副本），match finder 仍按 codec 各自保留）。
 - **加密层 `crypto/`**：一族一文件（crypto/rar50.rs；老族 crypto/rar15.rs、rar20.rs、rar30.rs）。
 - **恢复层 `recovery/`**：rar50.rs（内联 RR）+ rev50.rs（.rev 卷）+ legacy.rs（RAR 1.5–4.x PROTECT_HEAD/NEWSUB RR 修复）。
 - **基础设施**：detect.rs（签名/SFX 扫描）、parallel.rs（Rayon 池）、fs/（atomic.rs 原子暂存/有界读、volume.rs 卷命名、safe_path.rs 安全路径）、version.rs/features.rs（薄词汇模块）、options.rs/error.rs/write_progress.rs。
