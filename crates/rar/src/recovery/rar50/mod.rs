@@ -21,12 +21,20 @@ mod stream;
 mod tests;
 
 pub(crate) use encode::build_structural_inline_recovery_data_streaming;
+// The buffered builder, the planning/geometry helpers and the in-memory
+// prefix repair are reachable through the public `raw` surface and the
+// in-crate tests; without `raw` they have no in-tree caller (the
+// module-level `allow(dead_code)` covers the items, this covers the
+// re-export bindings).
+#[cfg_attr(not(feature = "raw"), allow(unused_imports))]
 pub use encode::{build_structural_inline_recovery_data, encode_inline_recovery_parity};
 pub use gf16::{Gf16, encode_parity_shards, make_encoder_matrix};
+#[cfg_attr(not(feature = "raw"), allow(unused_imports))]
 pub use plan::{
     InlineRecoveryPlan, crc64_rar_state, crc64_xz, plan_inline_recovery, split_prefix_shard_ranges,
     split_prefix_shards,
 };
+#[cfg_attr(not(feature = "raw"), allow(unused_imports))]
 pub use repair::{
     reconstruct_data_shards, repair_inline_recovery_archive, repair_inline_recovery_prefix,
     repair_inline_recovery_prefix_shards,

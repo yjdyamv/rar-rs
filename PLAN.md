@@ -86,7 +86,9 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   `format/rar5/extract.rs`（1975）拆为 `extract/{mod,open,read,members,dest,solid,decode,verify}.rs`（共享导入留在 `mod.rs`，
   角色文件各持 `impl RarArchive` 分片）；`archive/transaction.rs`（1728）拆为
   `archive/transaction/{mod,multivolume,edit,plan,execute,header}.rs` + `tests.rs`；`archive/mod.rs`（1180）拆出
-  `archive/state.rs`（`ReadState`/`WriteState` + 六组 + `Mode`/`PendingCommit`/`StreamRecord`），mod.rs 只留引擎与生命周期。
+  `archive/state.rs`（`ReadState`/`WriteState` + 六组 + `Mode`/`PendingCommit`/`StreamRecord`），mod.rs 只留引擎与生命周期；
+  `rar-cli` 的 `bin/rar.rs`（2930）拆为 `bin/rar/{main,args,create,edit,update,list,extract,comment,recovery,sfx,filters,staging}.rs`
+  （+ `tests.rs`，`cargo` bin path 随之更新）。
   至此自研大文件清零，剩余大文件均为 rars 移植的逐文件隔离（`codec/legacy/rar29_encoder.rs` 2747、
   `rar20_encoder` 1902、`ppmd` 1737、`rar15_encoder` 1585、`rar29` 1421），拆分收益低。
 - **WriteState 字段分组（2026-09）**：`WriteState`（32 字段）按角色拆为 `solid: SolidChain`（共享 LZ 窗口与

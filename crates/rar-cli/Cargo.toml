@@ -8,7 +8,7 @@ description = "WinRAR-compatible command-line tools (rar, unrar)"
 
 [[bin]]
 name = "rar"
-path = "src/bin/rar.rs"
+path = "src/bin/rar/main.rs"
 
 [[bin]]
 name = "unrar"

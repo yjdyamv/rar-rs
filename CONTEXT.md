@@ -42,7 +42,7 @@
 - **加密层 `crypto/`**：一族一文件（crypto/rar50.rs；老族 crypto/rar15.rs、rar20.rs、rar30.rs）。
 - **恢复层 `recovery/`**：`rar50/`（内联 RR；`plan` 几何/`gf16` 域与 Cauchy/`encode` 构建/`repair` 内存修复/`stream` 流式修复）+ rev50.rs（.rev 卷）+ legacy.rs（RAR 1.5–4.x PROTECT_HEAD/NEWSUB RR 修复）。
 - **基础设施**：detect.rs（签名/SFX 扫描）、parallel.rs（Rayon 池）、fs/（atomic.rs 原子暂存/有界读、volume.rs 卷命名、safe_path.rs 安全路径）、version.rs/features.rs（薄词汇模块）、options.rs/error.rs/write_progress.rs。
-- **CLI 层 `crates/rar-cli`**：rar/unrar 两二进制；common.rs（WinRAR 开关/配置兼容核心）+ input/password/output/time 模块 + `selector.rs`（成员选择）+ `name_policy.rs`（路径收集与掩码）+ `ops.rs`（两二进制共享的打开/提取/列表/打印编排）。
+- **CLI 层 `crates/rar-cli`**：rar/unrar 两二进制；common.rs（WinRAR 开关/配置兼容核心）+ input/password/output/time 模块 + `selector.rs`（成员选择）+ `name_policy.rs`（路径收集与掩码）+ `ops.rs`（两二进制共享的打开/提取/列表/打印编排）；`bin/rar/` 按角色拆分（`args` 命令树与开关解析、`create`/`edit`/`update`/`list`/`extract`/`comment`/`recovery`/`sfx` 子命令、`filters` 时间/掩码过滤、`staging` 事务式替换、`main` 入口）。
 
 ## 项目事实
 
