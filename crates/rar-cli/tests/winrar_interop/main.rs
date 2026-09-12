@@ -10,6 +10,7 @@
 mod compression;
 mod filters;
 mod large;
+mod links;
 mod misc;
 mod rar4_create;
 mod rar4_edit;

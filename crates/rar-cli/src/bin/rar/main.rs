@@ -25,6 +25,7 @@ mod create;
 mod edit;
 mod extract;
 mod filters;
+mod links;
 mod list;
 mod recovery;
 mod sfx;

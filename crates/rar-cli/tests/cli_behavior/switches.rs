@@ -528,3 +528,80 @@ fn cli_save_streams_encrypts_with_password() {
         "no plaintext stream may be written without the password"
     );
 }
+
+// ── -oh hard links ──────────────────────────────────────────────────────────
+
+/// `rar a -oh` stores the second path of a hard-link group as a redirect
+/// (zero packed bytes) and extraction recreates one on-disk file; `-ma4`
+/// has no redirect records and stores both files in full, like WinRAR.
+#[cfg(any(unix, windows))]
+#[test]
+fn cli_hardlink_flag_stores_redirects() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("h1.txt"), b"hardlink body").unwrap();
+    std::fs::hard_link(dir.path().join("h1.txt"), dir.path().join("h2.txt")).unwrap();
+
+    let archive = dir.path().join("oh.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-oh", "-idq"])
+        .arg(&archive)
+        .args(["h1.txt", "h2.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let reader = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let packed = |name: &str| {
+        reader
+            .entry(reader.unique_entry(name).unwrap())
+            .unwrap()
+            .compressed_size()
+    };
+    assert!(packed("h1.txt") > 0);
+    assert_eq!(
+        packed("h2.txt"),
+        0,
+        "the second hard link must be a redirect"
+    );
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-idq", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(out.join("h1.txt"))
+            .unwrap();
+        f.write_all(b"!").unwrap();
+    }
+    assert_eq!(
+        std::fs::read(out.join("h2.txt")).unwrap(),
+        b"hardlink body!",
+        "extraction must recreate the hard link"
+    );
+
+    // RAR4 has no redirect records: `-ma4 -oh` stores both members fully.
+    let archive4 = dir.path().join("oh4.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-oh", "-idq"])
+        .arg(&archive4)
+        .args(["h1.txt", "h2.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let reader4 = rar_rs::ArchiveReader::open(&archive4).unwrap();
+    let packed4 = |name: &str| {
+        reader4
+            .entry(reader4.unique_entry(name).unwrap())
+            .unwrap()
+            .compressed_size()
+    };
+    assert!(packed4("h1.txt") > 0 && packed4("h2.txt") > 0);
+}

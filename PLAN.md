@@ -142,7 +142,7 @@ fuzz 使用一个可枚举的小子集，于是删除 feature 与 `rar40`/`rar50
 以本机 WinRAR 7.23（`Rar.exe`/`UnRAR.exe`）+ `Rar.txt` 为基准逐项实测的功能差距（04/09 性能线不在此列）：
 
 - [x] **`-os` NTFS ADS 写侧完整化（2026-09）**：CLI `-os` 接线；流块补明文 CRC32、`-p` 时每流独立 ENCR（flags=1，不 MAC）+ 加密载荷；batch 并行在 `meta.streams` 时强制顺序。读侧 `StreamRecord` 增 `crc32`/`params`，密码改为读取时校验/派生（锁定档可正常列表）；`extract/decode.rs::read_member_streams` 统一读取/解密/CRC 校验（Linux 可测）。官方双向互操作（明文与 `-ppw`）+ 两个官方 `-os` 夹具单测。
-- [ ] `-oh` 硬链接写侧：官方存 "Hard link" redirect，我们目前存完整文件（读/解已支持）。
+- [x] **`-oh` 硬链接写侧（2026-09）**：`rar a`/`u`/`f` 按文件身份（Unix `dev/ino`、Windows `GetFileInformationByHandle` 的卷序列+文件索引）把同组后续路径写成 type-4 "Hard link" redirect（`bin/rar/links.rs`）；`-ma4` 与官方一致地存完整文件（RAR4 无 redirect 记录）；官方 UnRAR 双向互操作 + `cli_behavior` 硬链接回环测试。
 - [ ] `-oi` 相同文件引用：CLI 接受但无实现。
 - [ ] `-om` MOTW / `-log` / `-mes`：CLI 直接拒绝或未接线。
 - [ ] `-mc<par>` 高级压缩参数 no-op。

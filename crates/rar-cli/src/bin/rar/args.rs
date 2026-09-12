@@ -264,6 +264,12 @@ pub(crate) struct FilesArgs {
     /// (like `-tk`)
     #[arg(long = "keep-time")]
     pub(crate) keep_time: bool,
+    /// Save symbolic links as links instead of the file (like `-ol`)
+    #[arg(long = "links")]
+    pub(crate) store_links: bool,
+    /// Save hard links as links instead of the file (like `-oh`)
+    #[arg(long = "hardlinks")]
+    pub(crate) store_hardlinks: bool,
 }
 
 /// Archive path plus the members to delete.

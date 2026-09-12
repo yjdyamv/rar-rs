@@ -101,15 +101,23 @@ fn cmd_update_freshen(
         if let Some(entry) = archive.entries_named(&item.name).next() {
             if source_mtime > entry.mtime() {
                 to_delete.push(item.name.clone());
-                to_add.push(item);
+                to_add.push(item.clone());
             }
         } else if !freshen {
-            to_add.push(item);
+            to_add.push(item.clone());
         }
     }
     drop(archive);
 
-    if to_delete.is_empty() && to_add.is_empty() {
+    // -ol / -oh: symlinks and hard links become redirect members (RAR4 has
+    // no redirect records, and WinRAR's `-ma4 -oh` stores full files).
+    let (to_add, redirects) = crate::links::split_link_redirects(
+        to_add,
+        args.store_links,
+        args.store_hardlinks && !version.is_legacy(),
+    );
+
+    if to_delete.is_empty() && to_add.is_empty() && redirects.is_empty() {
         info!("{}: no files to {verb}", archive_path.display());
         return Ok(());
     }
@@ -250,6 +258,11 @@ fn cmd_update_freshen(
         staged
             .add_batch(&write_entries)
             .map_err(|error| format!("append staged members: {error}"))?;
+        for (name, redir_type, target) in &redirects {
+            staged
+                .add_redirect(name, *redir_type, target)
+                .map_err(|error| format!("link {name}: {error}"))?;
+        }
         staged
             .finish()
             .map_err(|error| format!("close staged archive: {error}"))?;

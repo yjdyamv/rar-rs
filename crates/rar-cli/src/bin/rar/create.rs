@@ -331,53 +331,13 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // -ol / -oh: symbolic links and hard links are stored as redirect
     // records instead of their data. The data member of a hard-link group
     // (first occurrence) is archived normally; the rest reference it.
-    let mut redirects: Vec<(String, u64, String)> = Vec::new();
-    if args.store_links {
-        let mut keep = Vec::with_capacity(collected.len());
-        for c in collected.drain(..) {
-            if c.is_dir {
-                keep.push(c);
-                continue;
-            }
-            match std::fs::symlink_metadata(&c.path) {
-                Ok(m) if m.file_type().is_symlink() => {
-                    if let Ok(target) = std::fs::read_link(&c.path) {
-                        redirects.push((c.name.clone(), 1, target.to_string_lossy().into_owned()));
-                        continue;
-                    }
-                    keep.push(c);
-                }
-                _ => keep.push(c),
-            }
-        }
-        collected = keep;
-    }
-    if args.store_hardlinks {
-        #[cfg(unix)]
-        let mut seen: std::collections::HashMap<(u64, u64), String> =
-            std::collections::HashMap::new();
-        let mut keep = Vec::with_capacity(collected.len());
-        for c in collected.drain(..) {
-            if c.is_dir {
-                keep.push(c);
-                continue;
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if let Ok(m) = std::fs::metadata(&c.path) {
-                    let key = (m.dev(), m.ino());
-                    if let Some(first) = seen.get(&key) {
-                        redirects.push((c.name.clone(), 4, first.clone()));
-                        continue;
-                    }
-                    seen.insert(key, c.name.clone());
-                }
-            }
-            keep.push(c);
-        }
-        collected = keep;
-    }
+    // RAR4 has no redirect records, and WinRAR's `-ma4 -oh` likewise stores
+    // the files in full, so `-oh` is a no-op for the legacy pipeline.
+    let (collected, redirects) = crate::links::split_link_redirects(
+        collected,
+        args.store_links,
+        args.store_hardlinks && !version.is_legacy(),
+    );
     // WinRAR aborts with "WARNING: No files" (exit code 10) and leaves the
     // archive untouched when every candidate was filtered out; a newly
     // created archive file is removed again.

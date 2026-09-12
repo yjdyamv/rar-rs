@@ -95,7 +95,9 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 `-r`/`-r0`/`-r-` (recurse), `-ep`/`-ep1`/`-ep2`/`-ep3`/`-ep4<path>` (path
 strip), `-ap<path>` (archive path prefix), `-x`/`-x@` (exclude),
 `-n`/`-n@` (include), `-ed`/`-as`/`-ad`/`-am` (empty dirs / sync / append archive
-name to dest / archive metadata), `-ol`/`-oh` (store sym/hard links as links),
+name to dest / archive metadata), `-ol`/`-oh` (store sym/hard links as links:
+symlinks become redirects, hard-link groups store the first path and
+redirect the rest — Windows and Unix, RAR5 only),
 `-op<path>`/`-or` (output path / auto-rename), `-os`/`-ow` (NTFS streams /
 owner), `-df`/`-kb`/`-si<name>` (delete sources / keep broken / stdin
 member), `-ta`/`-tb`/`-tn`/`-to` (time filters), `-tl`/`-tk` (set archive
