@@ -13,9 +13,13 @@ pub use legacy::{repair_legacy_archive_path, repair_legacy_archive_path_with_pas
 /// to strip and rebuild.
 pub(crate) mod legacy_rr {
     pub(crate) use super::legacy::{
-        build_legacy_recovery_block, recovery_sector_count, scan_protect,
-        scan_protect_with_password,
+        build_legacy_recovery_block, recovery_sector_count, scan_protect_with_password,
     };
+    // The plaintext shortcut has no production caller left (the edit path
+    // always goes through the password-aware variant); the RAR4 edit tests
+    // still use it to assert a record is present.
+    #[cfg(test)]
+    pub(crate) use super::legacy::scan_protect;
 }
 pub mod rar50;
 pub mod rev50;

@@ -31,7 +31,7 @@
 | `archive/mod.rs` | `RarArchive` 共享状态与生命周期（内部） |
 | `archive/transaction.rs` | 手术式 delete / rename（字节级重写） |
 | `archive/create.rs` / `entry.rs` / `discovery.rs` | 写生命周期、条目类型、分卷发现 |
-| `archive/rar4_edit.rs` | RAR4 编辑（rename / delete / comment / RR / lock / append / solid repack，含 `-hp`） |
+| `archive/rar4_edit/` | RAR4 编辑（rename / delete / comment / RR / lock / append / solid repack，含 `-hp`；`layout`/`headers`/`comment`/`engine`/`repack` 角色模块） |
 | `model/` | 格式中立模型（`entry.rs` / `chunk.rs`） |
 | `version.rs` | `ArchiveVersion` 单一版本表（v15–v70） |
 | `options.rs` / `error.rs` / `features.rs` / `write_progress.rs` | 选项、错误、能力报告、进度 |
