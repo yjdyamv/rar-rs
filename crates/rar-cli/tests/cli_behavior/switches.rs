@@ -437,3 +437,94 @@ fn cli_append_dir_extracts_under_archive_name() {
         "-ad must extract under a subdirectory named after the archive"
     );
 }
+
+// ── -os NTFS alternate data streams (Windows only) ──────────────────────────
+
+/// `rar a -os` stores a file's NTFS streams and `rar x -os` restores them.
+#[cfg(windows)]
+#[test]
+fn cli_save_streams_roundtrips_ntfs_ads() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("ads.bin");
+    std::fs::write(&src, b"main stream data").unwrap();
+    let stream = format!("{}{}", src.display(), ":meta");
+    std::fs::write(&stream, b"alternate payload").unwrap();
+
+    let archive = dir.path().join("ads.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-os", "-idq"])
+        .arg(&archive)
+        .arg("ads.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-os", "-idq", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let restored = format!("{}{}", out.join("ads.bin").display(), ":meta");
+    assert_eq!(std::fs::read(restored).unwrap(), b"alternate payload");
+}
+
+/// `-p` streams are encrypted individually (`-os -ppw`); extraction with the
+/// password restores them, extraction without it fails instead of writing
+/// plaintext.
+#[cfg(windows)]
+#[test]
+fn cli_save_streams_encrypts_with_password() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("ads.bin");
+    std::fs::write(&src, b"main stream data").unwrap();
+    let stream = format!("{}{}", src.display(), ":secret");
+    std::fs::write(&stream, b"encrypted alternate payload").unwrap();
+
+    let archive = dir.path().join("ads_p.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-os", "-ppw", "-idq"])
+        .arg(&archive)
+        .arg("ads.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-os", "-ppw", "-idq", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let restored = format!("{}{}", out.join("ads.bin").display(), ":secret");
+    assert_eq!(
+        std::fs::read(restored).unwrap(),
+        b"encrypted alternate payload"
+    );
+
+    let no_pw = dir.path().join("out_no_pw");
+    std::fs::create_dir_all(&no_pw).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-os", "-idq", "--dest"])
+        .arg(&no_pw)
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(
+        !status.success(),
+        "extraction without the password must fail"
+    );
+    assert!(
+        !no_pw.join("ads.bin").exists()
+            || std::fs::read(format!("{}{}", no_pw.join("ads.bin").display(), ":secret")).is_err(),
+        "no plaintext stream may be written without the password"
+    );
+}

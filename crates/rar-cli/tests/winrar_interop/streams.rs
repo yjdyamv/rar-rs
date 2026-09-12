@@ -2,7 +2,7 @@
 use std::process::Command;
 
 use rar_rs::{
-    ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions, ExtractOptions,
+    ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions, ExtractOptions, OpenOptions,
     WriterOptions,
 };
 
@@ -79,6 +79,134 @@ fn os_streams_interop_with_winrar() {
             restored.unwrap(),
             stream_data,
             "we must restore WinRAR's stream"
+        );
+    }
+}
+
+/// The `rar` CLI's `-os` flag stores streams; WinRAR restores them and our
+/// CLI restores WinRAR's. The library path is covered above; this pins the
+/// CLI wiring.
+#[cfg(windows)]
+#[test]
+fn os_streams_cli_interop_with_winrar() {
+    let dir = temp_dir();
+    let src = dir.path().join("ads.bin");
+    std::fs::write(&src, b"main stream data").unwrap();
+    let stream_name = ":cli1";
+    let stream_data = b"cli alternate payload".to_vec();
+    std::fs::write(format!("{}{}", src.display(), stream_name), &stream_data).unwrap();
+
+    let ours = dir.path().join("ours_cli_os.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-os", "-idq"])
+        .arg(&ours)
+        .arg("ads.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "our CLI a -os failed:\n{out}");
+
+    if let Some(unrar) = unrar_bin() {
+        let win = dir.path().join("win_cli_os");
+        std::fs::create_dir_all(&win).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-os", "-y", "-idq"])
+            .arg(&ours)
+            .arg(&win));
+        assert!(ok, "UnRAR x -os failed on our CLI archive:\n{out}");
+        assert_eq!(
+            std::fs::read(format!("{}{}", win.join("ads.bin").display(), stream_name)).unwrap(),
+            stream_data,
+            "WinRAR must restore the stream our CLI stored"
+        );
+    }
+
+    if let Some(rar) = rar_bin() {
+        let theirs = dir.path().join("theirs_cli_os.rar");
+        let (ok, out) = run(Command::new(&rar)
+            .args(["a", "-os", "-idq"])
+            .arg(&theirs)
+            .arg("ads.bin")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR -os failed:\n{out}");
+        let out_dir = dir.path().join("ours_cli_out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+            .args(["x", "-os", "-idq", "--dest"])
+            .arg(&out_dir)
+            .arg(&theirs));
+        assert!(ok, "our CLI x -os failed:\n{out}");
+        assert_eq!(
+            std::fs::read(format!(
+                "{}{}",
+                out_dir.join("ads.bin").display(),
+                stream_name
+            ))
+            .unwrap(),
+            stream_data,
+            "our CLI must restore WinRAR's stream"
+        );
+    }
+}
+
+/// `-p` streams: our writer encrypts the "STM" payload with a plaintext
+/// CRC32 (matching WinRAR), WinRAR restores it, and WinRAR's encrypted
+/// streams decode through our reader.
+#[cfg(windows)]
+#[test]
+fn os_streams_password_interop_with_winrar() {
+    let dir = temp_dir();
+    let src = dir.path().join("ads.bin");
+    std::fs::write(&src, b"main stream data").unwrap();
+    let stream_name = ":secret";
+    let stream_data = b"encrypted alternate payload".to_vec();
+    std::fs::write(format!("{}{}", src.display(), stream_name), &stream_data).unwrap();
+
+    let ours = dir.path().join("ours_os_p.rar");
+    {
+        let mut rar = ArchiveWriter::create_with(
+            &ours,
+            WriterOptions::default().password("pw").save_streams(true),
+        )
+        .unwrap();
+        rar.add_path(&src, EntryWriteOptions::new()).unwrap();
+        rar.finish().unwrap();
+    }
+    if let Some(unrar) = unrar_bin() {
+        let win = dir.path().join("win_os_p");
+        std::fs::create_dir_all(&win).unwrap();
+        let (ok, out) = run(Command::new(&unrar)
+            .args(["x", "-os", "-ppw", "-y", "-idq"])
+            .arg(&ours)
+            .arg(&win));
+        assert!(ok, "UnRAR x -os -ppw failed on our archive:\n{out}");
+        assert_eq!(
+            std::fs::read(format!("{}{}", win.join("ads.bin").display(), stream_name)).unwrap(),
+            stream_data,
+            "WinRAR must restore our encrypted stream"
+        );
+    }
+
+    if let Some(rar) = rar_bin() {
+        let theirs = dir.path().join("theirs_os_p.rar");
+        let (ok, out) = run(Command::new(&rar)
+            .args(["a", "-os", "-ppw", "-idq"])
+            .arg(&theirs)
+            .arg("ads.bin")
+            .current_dir(dir.path()));
+        assert!(ok, "WinRAR a -os -ppw failed:\n{out}");
+        let out_dir = dir.path().join("ours_os_p_out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let mut ar = ArchiveReader::open_with(&theirs, OpenOptions::new().password("pw")).unwrap();
+        ar.extract_all_with_options(&out_dir, ExtractOptions::default())
+            .unwrap();
+        assert_eq!(
+            std::fs::read(format!(
+                "{}{}",
+                out_dir.join("ads.bin").display(),
+                stream_name
+            ))
+            .unwrap(),
+            stream_data,
+            "we must restore WinRAR's encrypted stream"
         );
     }
 }

@@ -167,9 +167,8 @@ pub struct MiscSwitches {
     #[arg(global = true, long = "exclude-attrs", value_name = "MASK")]
     #[allow(dead_code)]
     pub exclude_attrs: Option<String>,
-    /// Save NTFS streams (`-os`; not supported)
+    /// Save NTFS streams (`-os`; Windows-only)
     #[arg(global = true, long = "save-streams")]
-    #[allow(dead_code)]
     pub save_streams: bool,
     /// Charset for list files (`-sc<charset>l`; accepted)
     #[arg(global = true, long = "charset", value_name = "SET")]

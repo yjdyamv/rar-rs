@@ -15,6 +15,7 @@
 - **MemberDecoder** — `format/rar5/payload.rs`：统一成员读/解码门面（`ChunkReader` trait + `read_packed` + `decode_member`），STORE 直通与压缩解码共用。
 - **Spill file（溢出文件）** — 大文件（≥ `STREAM_COMPRESS_THRESHOLD`，64 MiB）压缩路径的临时落盘文件：压缩流先溢出，头写出后再流式进归档，保证内存有界。
 - **Streaming payload（流式负载）** — `write_streamed_payload`（`format/rar5/write/stream.rs`）：统一流式写路径（单卷/分卷 + 可选流式 AES-256-CBC），`write_stored_file` 是其 STORE 特例。
+- **NTFS stream（ADS，`-os`）** — 成员附属的 NTFS alternate data stream，存为 owner 之后随的 "STM" 服务块（`DEPENDS_PREV`，明文 CRC32；`-p`/`-hp` 时每流独立 ENCR 记录 + 加密载荷，CRC 不 MAC）。写侧 `write/stream.rs::write_member_streams`（Windows 枚举，batch 并行自动退回顺序）；读侧 `StreamRecord`（`archive/state.rs`）+ `extract/decode.rs::read_member_streams`（读取时校验口令/派生密钥、解密、CRC 校验；锁定档仍可列表）。
 - **CbcRangeEmitter** — `format/rar5/write/engine.rs` 中连续 CBC 密文按任意字节区间发出的机制（read-ahead 到块边界 + ≤15B carry），使加密分块边界任意、卷大小仍精确（与 WinRAR 字节级一致）。
 - **Header encryption（-hp）** — 归档级加密头（每卷开头明文），其后所有块为 `[IV][AES-256-CBC 加密头]`。
 - **Recovery record（恢复记录）** — 单卷内联 "RR" 服务块，奇偶校验保护归档前缀（GF(2^16) Cauchy 矩阵，见 `recovery/rar50/`：`plan`/`gf16`/`encode`/`repair`/`stream` 角色模块）。

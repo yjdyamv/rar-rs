@@ -350,6 +350,54 @@ pub(crate) fn build_service_block(
     hdr.extend(header_content);
     hdr
 }
+/// Serialize an "STM" NTFS-stream service block: the same envelope as
+/// [`build_service_block`], but carrying the plaintext CRC32 over the
+/// decoded stream bytes, the stream's compression info, and the full
+/// extra area (optional encryption record plus the SUBDATA stream name).
+#[cfg(windows)]
+pub(crate) fn build_stream_block(
+    packed_size: u64,
+    unpacked_size: u64,
+    stream_crc32: u32,
+    method: u8,
+    dict_log: u8,
+    extra: &[u8],
+) -> Vec<u8> {
+    use crate::format::rar5::{BLOCK_FLAG_DEPENDS_PREV, OS_WINDOWS};
+
+    let mut body = Vec::new();
+    body.extend(vint::encode(BLOCK_TYPE_SERVICE_HEADER));
+    body.extend(vint::encode(
+        BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_DEPENDS_PREV,
+    ));
+    body.extend(vint::encode(extra.len() as u64)); // extra area size
+    body.extend(vint::encode(packed_size)); // data size
+    body.extend(vint::encode(FILE_FLAG_CRC32)); // file flags
+    body.extend(vint::encode(unpacked_size));
+    body.extend(vint::encode(0u64)); // attributes
+    body.extend(stream_crc32.to_le_bytes());
+    body.extend(vint::encode(
+        (u64::from(dict_log) << COMP_INFO_DICT_SHIFT)
+            | (u64::from(method) << COMP_INFO_METHOD_SHIFT),
+    ));
+    body.extend(vint::encode(OS_WINDOWS));
+    body.extend(vint::encode(3u64)); // name length
+    body.extend(b"STM");
+    body.extend_from_slice(extra);
+
+    let size_bytes = vint::encode(body.len() as u64);
+    let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
+    header_content.extend(&size_bytes);
+    header_content.extend(&body);
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&header_content);
+    let header_crc = hasher.finalize();
+    let mut hdr = Vec::with_capacity(4 + header_content.len());
+    hdr.extend(header_crc.to_le_bytes());
+    hdr.extend(header_content);
+    hdr
+}
+
 /// Encode `value` as a fixed 5-byte RAR5 vint (LSB-first, continuation bit
 /// on every byte except the last). Valid for values < 2^35.
 pub(crate) fn vint_fixed5(value: u64) -> [u8; 5] {

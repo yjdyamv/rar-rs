@@ -663,8 +663,9 @@ pub(crate) fn parse_service_subdata(extra_data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Parse the compression parameters of a service block ("STM" stream
-/// records carry a compressed payload): `(unpacked_size, method, dict_log)`.
-pub(crate) fn parse_stream_params(body: &[u8]) -> Option<(u64, u8, u8)> {
+/// records carry a compressed payload): `(unpacked_size, method, dict_log,
+/// crc32)`.
+pub(crate) fn parse_stream_params(body: &[u8]) -> Option<(u64, u8, u8, Option<u32>)> {
     let mut offset = 0usize;
     let (_, n) = vint::decode_from_slice(body, offset).ok()?;
     offset += n;
@@ -687,8 +688,14 @@ pub(crate) fn parse_stream_params(body: &[u8]) -> Option<(u64, u8, u8)> {
     if file_flags & FILE_FLAG_TIME_UNIX != 0 {
         offset = offset.checked_add(4)?;
     }
+    let mut crc32_val = None;
     if file_flags & FILE_FLAG_CRC32 != 0 {
-        offset = offset.checked_add(4)?;
+        let end = offset.checked_add(4)?;
+        if end > body.len() {
+            return None;
+        }
+        crc32_val = Some(u32::from_le_bytes(body[offset..end].try_into().ok()?));
+        offset = end;
     }
     if offset > body.len() {
         return None;
@@ -697,7 +704,7 @@ pub(crate) fn parse_stream_params(body: &[u8]) -> Option<(u64, u8, u8)> {
     let method = ((comp_info >> 7) & 7) as u8;
     let dict_log = ((comp_info >> 10) & 0x0F) as u8;
     let _ = n;
-    Some((unpacked_size, method, dict_log))
+    Some((unpacked_size, method, dict_log, crc32_val))
 }
 
 /// Read a length-prefixed name from an extra record body.

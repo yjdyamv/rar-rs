@@ -51,7 +51,125 @@ impl Write for IntegritySink<'_> {
     }
 }
 
+/// Decrypt (when the stream block carries an ENCR record) and decode one
+/// "STM" alternate-data-stream payload, verifying the stored CRC32 over the
+/// decoded bytes.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn decode_stream_payload(
+    record: &crate::archive::StreamRecord,
+    packed: &[u8],
+    keys: Option<&crate::crypto::DerivedKeys>,
+) -> RarResult<Vec<u8>> {
+    let mut packed = match (record.params.as_ref(), keys) {
+        (Some(params), Some(keys)) => crate::crypto::decrypt_data(packed, &keys.key, &params.iv)?,
+        _ => packed.to_vec(),
+    };
+    let data = if record.method == crate::format::rar5::COMP_METHOD_STORE {
+        // Encrypted STORE payloads carry AES zero-fill padding; the
+        // unpacked size trims it back to the real stream bytes.
+        let len = usize::try_from(record.unpacked_size)
+            .unwrap_or(usize::MAX)
+            .min(packed.len());
+        packed.truncate(len);
+        packed
+    } else {
+        crate::codec::decode_standalone(
+            &packed,
+            record.unpacked_size,
+            record.dict_size_log,
+            None,
+            crate::version::ArchiveVersion::V50,
+        )
+        .map_err(|e| RarError::Format(format!("stream decode: {e}")))?
+    };
+    if let Some(expected) = record.crc32 {
+        let actual = crc32fast::hash(&data);
+        if actual != expected {
+            return Err(RarError::Crc {
+                expected,
+                actual,
+                context: format!("NTFS stream {}", record.name),
+            });
+        }
+    }
+    Ok(data)
+}
+
 impl RarArchive {
+    /// Read, decrypt and decode every "STM" stream record owned by member
+    /// `idx`, returning `(name, bytes)` pairs in archive order.
+    ///
+    /// Both the packed and the unpacked size are capped before they can
+    /// drive an allocation (a crafted "STM" header could otherwise request
+    /// a multi-TiB decode window), and the packed size is narrowed with
+    /// `try_from` so 32-bit targets report an error instead of truncating.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn read_member_streams(&mut self, idx: usize) -> RarResult<Vec<(String, Vec<u8>)>> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let owned: Vec<crate::archive::StreamRecord> = self
+            .read_ctx()
+            .streams
+            .iter()
+            .filter(|s| s.owner_index == idx)
+            .cloned()
+            .collect();
+        let mut out = Vec::with_capacity(owned.len());
+        for s in owned {
+            let limit = self.read_ctx().extract_options.metadata_limit();
+            if s.data_size > limit {
+                return Err(RarError::LimitExceeded {
+                    limit,
+                    context: format!(
+                        "NTFS stream {:?} declares {} packed bytes",
+                        s.name, s.data_size
+                    ),
+                });
+            }
+            let declared = usize::try_from(s.data_size).map_err(|_| RarError::LimitExceeded {
+                limit,
+                context: format!("NTFS stream {:?} packed size does not fit in usize", s.name),
+            })?;
+            if s.unpacked_size > limit {
+                return Err(RarError::LimitExceeded {
+                    limit,
+                    context: format!(
+                        "NTFS stream {:?} declares {} unpacked bytes",
+                        s.name, s.unpacked_size
+                    ),
+                });
+            }
+            let mut packed = vec![0u8; declared];
+            {
+                let stream = stream_mut(&mut self.stream)?;
+                stream.seek(SeekFrom::Start(s.data_offset))?;
+                stream.read_exact(&mut packed)?;
+            }
+            // Encrypted streams carry a per-stream ENCR record (own salt),
+            // so the password is checked and the keys are derived here
+            // rather than at open time.
+            let keys = match s.params.as_ref() {
+                Some(params) => {
+                    let password = self.password.as_deref().ok_or_else(|| {
+                        RarError::Encrypted(format!(
+                            "{}: encrypted NTFS stream, no password set",
+                            s.name
+                        ))
+                    })?;
+                    if !params.verify_password(password) {
+                        return Err(RarError::WrongPassword);
+                    }
+                    Some(params.derive_keys(password)?)
+                }
+                None => None,
+            };
+            out.push((
+                s.name.clone(),
+                decode_stream_payload(&s, &packed, keys.as_ref())?,
+            ));
+        }
+        Ok(out)
+    }
     /// Read packed data for an entry, potentially across multiple volumes.
     ///
     /// The returned payload is decrypted (when applicable) together with

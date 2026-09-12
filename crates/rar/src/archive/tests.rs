@@ -745,6 +745,39 @@ fn in_memory_sink_archive_is_well_formed() {
 }
 
 #[test]
+fn official_ntfs_stream_fixtures_decode() {
+    // Genuine WinRAR 7.23 `-os` output: one `data.txt` carrying a `:meta`
+    // stream, plain and `-ppw`. Decoding the "STM" record must return the
+    // exact bytes and verify the stored plaintext CRC32 (both fixtures
+    // carry one).
+    let base = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar50/");
+    let expected = vec![(
+        ":meta".to_string(),
+        b"stream-payload-abcdefghij\r\n".to_vec(),
+    )];
+
+    let mut plain = RarArchive::open(format!("{base}winrar5_ntfs_stream.rar")).unwrap();
+    assert_eq!(plain.read_member_streams(0).unwrap(), expected);
+
+    let mut enc =
+        RarArchive::open_with_password(format!("{base}winrar5_ntfs_stream_p.rar"), "pw").unwrap();
+    assert_eq!(enc.read_member_streams(0).unwrap(), expected);
+
+    // Locked archives still list; the password is demanded at stream read.
+    let mut locked = RarArchive::open(format!("{base}winrar5_ntfs_stream_p.rar")).unwrap();
+    assert!(matches!(
+        locked.read_member_streams(0),
+        Err(RarError::Encrypted(_))
+    ));
+    let mut wrong =
+        RarArchive::open_with_password(format!("{base}winrar5_ntfs_stream_p.rar"), "nope").unwrap();
+    assert!(matches!(
+        wrong.read_member_streams(0),
+        Err(RarError::WrongPassword)
+    ));
+}
+
+#[test]
 fn multivolume_create_store_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mv.rar");

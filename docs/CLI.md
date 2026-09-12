@@ -106,9 +106,13 @@ mode), `-ierr`/`-ilog`/`-iver`, `-cfg-`/`-sc<charset>`.
 
 Switches that are Windows-only or interactive in WinRAR (e.g. `-ac`, `-dh`,
 `-ieml`, `-ioff`, `-isnd`, `-ri`, `-mlp`, `-oc`, `-oni`, `-oi`) are
-**accepted as no-ops**. `-dr` (recycle bin) and `-dw` (wipe) are **rejected
-with an error** rather than silently ignored, since they would otherwise
-imply source deletion. `-log` and `-om` are not implemented.
+**accepted as no-ops**. `-os` (NTFS streams) is implemented on Windows:
+create stores the file's alternate data streams as `STM` records (each
+stream is encrypted with the archive password when `-p`/`-hp` is set) and
+extraction restores them; on other platforms it is a no-op. `-dr` (recycle
+bin) and `-dw` (wipe) are **rejected with an error** rather than silently
+ignored, since they would otherwise imply source deletion. `-log` and `-om`
+are not implemented.
 
 ---
 

@@ -22,7 +22,8 @@ use crate::format::rar5::vint;
 ///    present, all subsequent blocks (including file headers) are also
 ///    encrypted.
 use crate::format::rar5::{
-    ENCR_IV_SIZE, ENCR_KEY_SIZE, ENCR_SALT_SIZE, ENCR_VERSION_AES256, EXTRA_FILE_ENCRYPTION,
+    ENCR_FLAG_CHECKSUM, ENCR_FLAG_HASH_MAC, ENCR_IV_SIZE, ENCR_KEY_SIZE, ENCR_SALT_SIZE,
+    ENCR_VERSION_AES256, EXTRA_FILE_ENCRYPTION,
 };
 
 use aes::Aes256;
@@ -350,7 +351,7 @@ impl EncryptionParams {
         iv.copy_from_slice(&data[offset..offset + ENCR_IV_SIZE]);
         offset += ENCR_IV_SIZE;
 
-        let checksum = if flags & 0x01 != 0 && offset + 12 <= data.len() {
+        let checksum = if flags & ENCR_FLAG_CHECKSUM as u64 != 0 && offset + 12 <= data.len() {
             let mut ck = [0u8; 12];
             ck.copy_from_slice(&data[offset..offset + 12]);
             Some(ck)
@@ -374,7 +375,7 @@ impl EncryptionParams {
     /// True when checksums in this archive are MAC'd with the hash key
     /// (encryption record flag 0x0002).
     pub fn uses_hash_mac(&self) -> bool {
-        self.flags & 0x0002 != 0
+        self.flags & ENCR_FLAG_HASH_MAC != 0
     }
 
     /// Verify a password against the stored check value (if present).
@@ -456,7 +457,7 @@ impl EncryptionParams {
 
         EncryptionParams {
             version: ENCR_VERSION_AES256,
-            flags: 0x03,
+            flags: ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC,
             strength,
             salt,
             iv,

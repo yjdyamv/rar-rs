@@ -20,74 +20,8 @@ impl RarArchive {
     pub(super) fn extract_member_streams(&mut self, idx: usize, dest_path: &Path) -> RarResult<()> {
         #[cfg(windows)]
         {
-            use std::io::{Read, Seek, SeekFrom};
-
-            use crate::archive::StreamRecord;
-            use crate::format::shared::stream_mut;
-
-            let owned: Vec<StreamRecord> = self
-                .read_ctx()
-                .streams
-                .iter()
-                .filter(|s| s.owner_index == idx)
-                .cloned()
-                .collect();
-            for s in owned {
-                // Read the stream payload (possibly RAR5-compressed). The
-                // size comes from the "STM" service header, so it is capped
-                // before it can drive an allocation, and narrowed with
-                // `try_from` so a 32-bit target reports an error instead of
-                // silently truncating the buffer.
-                let limit = self.read_ctx().extract_options.metadata_limit();
-                if s.data_size > limit {
-                    return Err(RarError::LimitExceeded {
-                        limit,
-                        context: format!(
-                            "NTFS stream {:?} declares {} packed bytes",
-                            s.name, s.data_size
-                        ),
-                    });
-                }
-                let declared =
-                    usize::try_from(s.data_size).map_err(|_| RarError::LimitExceeded {
-                        limit,
-                        context: format!(
-                            "NTFS stream {:?} packed size does not fit in usize",
-                            s.name
-                        ),
-                    })?;
-                // The unpacked size drives the decode window allocation, so it
-                // needs the same cap as the packed size: otherwise a crafted
-                // "STM" record can request a multi-TiB window through
-                // `decode_standalone`.
-                if s.unpacked_size > limit {
-                    return Err(RarError::LimitExceeded {
-                        limit,
-                        context: format!(
-                            "NTFS stream {:?} declares {} unpacked bytes",
-                            s.name, s.unpacked_size
-                        ),
-                    });
-                }
-                let mut packed = vec![0u8; declared];
-                {
-                    let stream = stream_mut(&mut self.stream)?;
-                    stream.seek(SeekFrom::Start(s.data_offset))?;
-                    stream.read_exact(&mut packed)?;
-                }
-                let data = if s.method == crate::format::rar5::COMP_METHOD_STORE {
-                    packed
-                } else {
-                    crate::codec::decode_standalone(
-                        &packed,
-                        s.unpacked_size,
-                        s.dict_size_log,
-                        None,
-                        crate::version::ArchiveVersion::V50,
-                    )
-                    .map_err(|e| RarError::Format(format!("stream decode: {e}")))?
-                };
-                rar5_write::write_windows_stream(dest_path, &s.name, &data)?;
+            for (name, data) in self.read_member_streams(idx)? {
+                rar5_write::write_windows_stream(dest_path, &name, &data)?;
             }
         }
         #[cfg(not(windows))]

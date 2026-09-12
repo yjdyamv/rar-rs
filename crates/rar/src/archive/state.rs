@@ -258,6 +258,10 @@ pub(crate) struct StreamRecord {
     pub unpacked_size: u64,
     pub method: u8,
     pub dict_size_log: u8,
+    /// Stored CRC32 over the decoded stream payload.
+    pub crc32: Option<u32>,
+    /// Encryption parameters from the stream block's ENCR extra record.
+    pub params: Option<crypto::EncryptionParams>,
 }
 
 #[derive(Clone, Copy, PartialEq)]

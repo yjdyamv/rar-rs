@@ -215,7 +215,11 @@ impl RarArchive {
         self.check_cancel()?;
         #[cfg(feature = "parallel")]
         {
-            if !self.rar4 && !self.write_ctx().solid.mode && !entries.is_empty() {
+            if !self.rar4
+                && !self.write_ctx().solid.mode
+                && !self.write_ctx().meta.streams
+                && !entries.is_empty()
+            {
                 return self.add_batch_parallel(entries);
             }
             // RAR4: independent non-solid file members compress in parallel

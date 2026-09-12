@@ -95,6 +95,8 @@ pub const COMP_INFO_DICT_MASK: u64 = 0x3C00;
 
 // ── OS / Platform Identifiers ──────────────────────────────────────────────
 
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const OS_WINDOWS: u64 = 0x00;
 pub const OS_UNIX: u64 = 0x01;
 
 // ── End-of-Archive Flags ───────────────────────────────────────────────────
@@ -121,6 +123,11 @@ pub const ENCR_SALT_SIZE: usize = 16;
 pub const ENCR_IV_SIZE: usize = 16;
 pub const ENCR_KEY_SIZE: usize = 32;
 pub const ENCR_PBKDF2_ITER_LOG: u8 = 15;
+/// Encryption record flag: the 12-byte password check value follows.
+pub const ENCR_FLAG_CHECKSUM: u8 = 0x01;
+/// Encryption record flag: header checksums are MAC'd with the hash key
+/// (`-htb`); service blocks with plaintext CRCs (NTFS streams) clear it.
+pub const ENCR_FLAG_HASH_MAC: u8 = 0x02;
 
 // ── Resource Limits ───────────────────────────────────────────────────────
 

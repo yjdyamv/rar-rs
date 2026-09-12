@@ -220,9 +220,14 @@ impl RarArchive {
                         if let Some(stream_name) =
                             crate::format::rar5::headers::parse_service_subdata(&extra)
                             && !stream_name.is_empty()
-                            && let Some((unpacked_size, method, dict_size_log)) =
+                            && let Some((unpacked_size, method, dict_size_log, crc32)) =
                                 crate::format::rar5::headers::parse_stream_params(&raw.header_data)
                         {
+                            // `-p` streams carry their own ENCR record; the
+                            // password is only needed at read time, so the
+                            // list works on locked archives like it does for
+                            // encrypted members.
+                            let params = crate::crypto::parse_encryption_extra(&extra)?;
                             self.read_ctx_mut().streams.push(StreamRecord {
                                 owner_index,
                                 name: String::from_utf8_lossy(&stream_name).into_owned(),
@@ -231,6 +236,8 @@ impl RarArchive {
                                 unpacked_size,
                                 method,
                                 dict_size_log,
+                                crc32,
+                                params,
                             });
                         }
                     }

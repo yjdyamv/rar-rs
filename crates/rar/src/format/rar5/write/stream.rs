@@ -813,21 +813,46 @@ impl RarArchive {
                     extra.extend(name.as_bytes());
                     extra
                 };
-                let hdr = crate::format::rar5::headers::build_service_block(
-                    "STM",
-                    &subdata,
-                    data.len() as u64,
-                    crate::format::rar5::BLOCK_FLAG_DEPENDS_PREV,
+                // `-p` streams carry their own encryption record and an
+                // encrypted payload; the stored CRC32 stays the plaintext
+                // checksum (WinRAR does not MAC stream CRCs).
+                let data_len = data.len();
+                let stream_crc = crc32fast::hash(&data);
+                let (extra, packed) = match self.password.as_deref() {
+                    Some(password) => {
+                        let mut params = crypto::EncryptionParams::generate_for_password(
+                            password,
+                            crate::format::rar5::ENCR_PBKDF2_ITER_LOG,
+                        );
+                        // Stream CRCs stay plaintext, so the record must not
+                        // request hash-MAC'd checksums (flag 0x02).
+                        params.flags = crate::format::rar5::ENCR_FLAG_CHECKSUM;
+                        let mut extra = params.to_extra_bytes();
+                        extra.extend_from_slice(&subdata);
+                        (extra, params.encrypt(&data, password)?)
+                    }
+                    None => (subdata, data),
+                };
+                let hdr = crate::format::rar5::headers::build_stream_block(
+                    packed.len() as u64,
+                    data_len as u64,
+                    stream_crc,
+                    COMP_METHOD_STORE,
+                    0,
+                    &extra,
                 );
+                self.ensure_rar5_volume_space(
+                    self.on_disk_header_len(hdr.len() as u64) + packed.len() as u64,
+                )?;
                 self.write_block_header(&hdr)?;
                 let stream = stream_mut(&mut self.stream)?;
-                stream.write_all(&data)?;
+                stream.write_all(&packed)?;
                 self.write_ctx_mut().output.bytes_written = self
                     .write_ctx()
                     .output
                     .bytes_written
                     .saturating_add(self.on_disk_header_len(hdr.len() as u64))
-                    .saturating_add(data.len() as u64);
+                    .saturating_add(packed.len() as u64);
             }
         }
         #[cfg(not(windows))]

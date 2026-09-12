@@ -543,7 +543,7 @@ impl RarArchive {
     /// already includes the end-of-archive reserve. No-op for single-volume
     /// archives, and a volume too small for one header errors instead of
     /// rolling forever (matching the file-member splitter).
-    fn ensure_rar5_volume_space(&mut self, needed: u64) -> RarResult<()> {
+    pub(super) fn ensure_rar5_volume_space(&mut self, needed: u64) -> RarResult<()> {
         let Some(volume_size) = self.write_ctx().output.volume_size else {
             return Ok(());
         };
