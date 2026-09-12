@@ -4,13 +4,16 @@
 //! Ported from the encode half of the `rars` project (MIT OR Apache-2.0)
 //! `codec/rar29.rs` `Unpack29Encoder`.  Produces RAR3/4-format compressed
 //! block sequences (不含 FILE_HEAD，只含压缩数据流).  The write pipeline
-//! (`format/rar4/write.rs`) handles headers, encryption, and multi-volume splitting.
+//! (`format/rar4/write/`) handles headers, encryption, and multi-volume
+//! splitting.
 //!
 //! Phase 1: LZSS only (m1–m5).  Phase 2 adds PPMd member encoding (m4/m5):
 //! a whole member is one PPMd block whose model either starts fresh
 //! (order-8, 25 MiB suballocator) or continues a solid chain's, with LZ
 //! matches escaped into the model where the tokeniser prices them cheaper
-//! than literals.  VM-filter integration is still out of scope.
+//! than literals.  Phase 3 adds the six standard VM filters (E8/E8E9,
+//! Delta, Audio, RGB, Itanium) through
+//! [`Unpack29Encoder::encode_member_with_filter_ranges`].
 
 use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::huffman::EncodeTable;
@@ -1300,9 +1303,8 @@ fn encode_ppmd_hybrid(input: &[u8], encoder: &mut PpmdEncoder) -> RarResult<()> 
 /// Code one member as a single fresh-model PPMd block (order-8, 25 MiB
 /// suballocator), optionally escaping LZ matches into the model.
 /// Returns the wire bytes: `[0x80|0x20|order-1][dict_mb-1]` + range-coded
-/// payload. The model is not retained (solid-chain continuation of a PPMd
-/// model is a later phase; solid RAR4 members stay LZ-only, which matches
-/// what WinRAR 6.23 itself produces).
+/// payload. The model is not retained; solid-chain continuation lives in
+/// [`Unpack29Encoder::encode_ppmd_member_chain`].
 pub(crate) fn encode_ppmd_member_packed(input: &[u8], lz_escapes: bool) -> RarResult<Vec<u8>> {
     let mut out = vec![0x80 | 0x20 | (PPMD_ORDER as u8 - 1), PPMD_DICTIONARY_MB - 1];
     let mut encoder =
@@ -2061,8 +2063,8 @@ impl Unpack29Encoder {
     }
 
     /// Code one member as a PPMd block (m4/m5 text path). Always starts a
-    /// fresh model; the caller decides when PPMd is worth trying and keeps
-    /// this encoder out of solid runs (see `encode_ppmd_member_packed`).
+    /// fresh model; [`Self::encode_ppmd_member_chain`] is the solid-run
+    /// variant that continues the carried model.
     pub fn encode_ppmd_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
         encode_ppmd_member_packed(input, true)
     }

@@ -1,3 +1,6 @@
+//! Hash-chain match finding for the RAR5 encoder: short-window chains, the
+//! long-range sample table and the four-slot repeat-distance cache.
+
 use crate::codec::lzss_huff::DIST_CACHE_SIZE;
 
 /// Sampling step of the long-range hash table: one 4-byte sample per

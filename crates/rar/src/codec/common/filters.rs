@@ -1,7 +1,7 @@
-/// RAR5 output filters: Delta, E8, E8E9, ARM.
-///
-/// Post-processing filters applied to regions of decompressed output.
-/// Each filter has decode (inverse) and encode (forward) functions.
+//! RAR5 output filters: Delta, E8, E8E9, ARM.
+//!
+//! Post-processing filters applied to regions of decompressed output.
+//! Each filter has decode (inverse) and encode (forward) functions.
 use crate::codec::lzss_huff::{FILTER_ARM, FILTER_DELTA, FILTER_E8, FILTER_E8E9};
 
 /// Apply the inverse filter (for decompression).

@@ -1,3 +1,5 @@
+//! RAR 3.x/4.x member cipher (AES-128-CBC with a per-member salt).
+
 #![allow(clippy::chunks_exact_to_as_chunks)] // kept close to the reference implementation
 
 use aes::Aes128;

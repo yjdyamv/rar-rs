@@ -8,6 +8,9 @@
 //!
 //! Audio blocks are emitted verbatim like rars.
 
+// Reference-implementation parity surface: the rars-port entry points
+// (literals-only encoders, progress hooks, tuning knobs) are kept verbatim
+// even where this pipeline does not call them yet.
 #![allow(dead_code)]
 
 use crate::codec::common::bitstream::BitWriter;

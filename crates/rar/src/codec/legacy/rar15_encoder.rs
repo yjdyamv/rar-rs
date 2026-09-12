@@ -8,7 +8,10 @@
 //! decoder keeps them. The write pipeline (headers, encryption, multi-volume
 //! splitting) is the caller's job.
 
-#![allow(dead_code)] // not yet wired into the legacy write pipeline; rar20_encoder precedent
+// Reference-implementation parity surface: the rars-port entry points
+// (literals-only encoders, progress hooks, tuning knobs) are kept verbatim
+// even where this pipeline does not call them yet.
+#![allow(dead_code)]
 
 use crate::codec::common::bitstream::BitWriter;
 use crate::error::{RarError, RarResult};

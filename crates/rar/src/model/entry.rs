@@ -1,3 +1,5 @@
+//! Format-neutral entry model shared by the RAR4 and RAR5 families.
+
 // These private compatibility constants preserve the values previously supplied
 // by rar50::{COMP_METHOD_STORE, OS_UNIX, FILE_FLAG_TIME_UNIX,
 // FILE_FLAG_CRC32}. Keeping the values local makes the model a format-layer leaf.

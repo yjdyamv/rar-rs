@@ -7,8 +7,6 @@
 //! The member-addition orchestration (encoder dispatch, member encryption,
 //! volume splitting and the parallel batch) lives in [`pipeline`].
 
-#![allow(dead_code)]
-
 mod cbc;
 mod pipeline;
 
@@ -43,14 +41,6 @@ fn patch_crc16(buf: &mut [u8], start: usize) {
     buf[start..start + 2].copy_from_slice(&crc.to_le_bytes());
 }
 
-// ── Signature ───────────────────────────────────────────────────────────────
-
-/// Write the 7-byte RAR4 signature.
-pub(crate) fn write_signature(out: &mut impl std::io::Write) -> RarResult<()> {
-    out.write_all(RAR4_SIGNATURE)?;
-    Ok(())
-}
-
 // ── Main header ─────────────────────────────────────────────────────────────
 
 /// Build a 13-byte MAIN_HEAD block.
@@ -69,43 +59,6 @@ pub(crate) fn build_main_header(flags: u16) -> [u8; 13] {
     patch_crc16(&mut buf, 0);
     buf
 }
-
-/// Write the main header to the output stream.
-pub(crate) fn write_main_header(out: &mut impl std::io::Write, flags: u16) -> RarResult<()> {
-    out.write_all(&build_main_header(flags))?;
-    Ok(())
-}
-
-// ── Dictionary / directory window bits ─────────────────────────────────────
-
-/// Encode a dictionary size (in bytes) into the upper bits of the FILE_HEAD
-/// flags word (bits 5–7). Returns the flags-with-dict value.
-///
-/// Accepted sizes: 64 KiB – 4 MiB (powers of two).
-/// Returns `Err` for unsupported sizes.
-pub(crate) fn dictionary_flags(size: usize) -> RarResult<u16> {
-    let bits: u16 = match size {
-        0x1_0000 => 0,  // 64 KiB
-        0x2_0000 => 1,  // 128 KiB
-        0x4_0000 => 2,  // 256 KiB
-        0x8_0000 => 3,  // 512 KiB
-        0x10_0000 => 4, // 1 MiB
-        0x20_0000 => 5, // 2 MiB
-        0x40_0000 => 6, // 4 MiB
-        _ => {
-            return Err(RarError::Format(format!(
-                "unsupported RAR4 dictionary size: {size} bytes"
-            )));
-        }
-    };
-    Ok(bits << 5)
-}
-
-/// The flags value for a RAR4 directory member: bits 5–7 all set. UnRAR and
-/// WinRAR classify a member as a directory when the window bits equal this
-/// mask (`flags & 0xE0 == 0xE0`); host-specific file attributes are not
-/// consulted for RAR4 (see `rar15_40.rs` in the reference rars port).
-pub(crate) const DIRECTORY_WINDOW_BITS: u16 = 0x00E0;
 
 // ── File header ─────────────────────────────────────────────────────────────
 
@@ -228,16 +181,6 @@ pub(crate) fn build_file_comment_block(comment: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Write a FILE_HEAD block to the output stream.
-pub(crate) fn write_file_header(
-    out: &mut impl std::io::Write,
-    p: &FileHeaderParams<'_>,
-) -> RarResult<()> {
-    let buf = build_file_header(p)?;
-    out.write_all(&buf)?;
-    Ok(())
-}
-
 // ── End-of-archive ──────────────────────────────────────────────────────────
 
 /// Build a 7-byte ENDARC_HEAD block.
@@ -252,12 +195,6 @@ pub(crate) fn build_endarc(flags: u16) -> [u8; 7] {
     buf[5..7].copy_from_slice(&ENDARC_HEADER_SIZE.to_le_bytes());
     patch_crc16(&mut buf, 0);
     buf
-}
-
-/// Write the end-of-archive block.
-pub(crate) fn write_endarc(out: &mut impl std::io::Write, flags: u16) -> RarResult<()> {
-    out.write_all(&build_endarc(flags))?;
-    Ok(())
 }
 
 /// Encrypt a RAR4 block header for a `-hp` header-encrypted archive.
@@ -426,6 +363,34 @@ pub(crate) fn build_ext_time(mtime_ns: Option<u32>) -> Option<Vec<u8>> {
     ext.push((ticks >> 16) as u8);
     Some(ext)
 }
+
+/// Encode a dictionary size (in bytes) into the upper bits of the FILE_HEAD
+/// flags word (bits 5–7). Test-only: production code passes the 3-bit
+/// `window_bits` straight to [`build_file_header`], so this pins the
+/// encoding against the shifted flags-mask representation.
+#[cfg(test)]
+fn dictionary_flags(size: usize) -> RarResult<u16> {
+    let bits: u16 = match size {
+        0x1_0000 => 0,  // 64 KiB
+        0x2_0000 => 1,  // 128 KiB
+        0x4_0000 => 2,  // 256 KiB
+        0x8_0000 => 3,  // 512 KiB
+        0x10_0000 => 4, // 1 MiB
+        0x20_0000 => 5, // 2 MiB
+        0x40_0000 => 6, // 4 MiB
+        _ => {
+            return Err(RarError::Format(format!(
+                "unsupported RAR4 dictionary size: {size} bytes"
+            )));
+        }
+    };
+    Ok(bits << 5)
+}
+
+/// The flags value for a RAR4 directory member (bits 5–7 all set), used by
+/// the tests to check the `window_bits == 7` encoding.
+#[cfg(test)]
+const DIRECTORY_WINDOW_BITS: u16 = 0x00E0;
 
 #[cfg(test)]
 mod tests {

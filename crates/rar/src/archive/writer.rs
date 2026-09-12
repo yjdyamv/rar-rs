@@ -623,8 +623,9 @@ pub struct ArchiveWriter {
     archive: Option<RarArchive>,
 }
 
-// The typed writer role delegates to the legacy write facade (create, add*,
-// close). The deprecation targets external users; the delegation seam stays
+// The typed writer role delegates to the legacy `RarArchive` engine
+// (create, add*, close). The engine is doc-hidden compat surface (ADR 0006);
+// the delegation seam and this module are the supported API.
 impl ArchiveWriter {
     /// Begin creating an archive with default [`WriterOptions`].
     pub fn create(path: impl AsRef<Path>) -> RarResult<Self> {

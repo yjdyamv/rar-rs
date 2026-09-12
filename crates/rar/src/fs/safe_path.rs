@@ -54,25 +54,6 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
     Ok(out)
 }
 
-/// Resolve the target of a redirect (symlink / junction) member against the
-/// directory that holds the link.
-///
-/// Returns the path components the target names **relative to the extraction
-/// root**, so the caller can build the on-disk path without touching the
-/// filesystem — the target of a link frequently does not exist yet when the
-/// link itself is extracted, so any check that stats the path would reject
-/// legitimate archives.
-///
-/// The resolution is lexical (`..` pops a component, `.` and empty
-/// components are skipped) and rejects three shapes that can never resolve
-/// inside the extraction root:
-///
-/// - **absolute targets** (`/etc/passwd`, `\\?\C:\…`),
-/// - **Windows drive / ADS components** (`C:/…`, `name:stream`),
-/// - **targets that walk above the root** (`../..`, `a/../../../b`).
-///
-/// A target that merely moves sideways inside the root (`sub/../target.txt`)
-/// is accepted, matching the member-name policy in [`sanitize_archive_path`].
 /// Whether a path component means something different on this platform than
 /// it does on POSIX.
 ///
@@ -113,6 +94,25 @@ fn component_is_ambiguous(_component: &str) -> bool {
     false
 }
 
+/// Resolve the target of a redirect (symlink / junction) member against the
+/// directory that holds the link.
+///
+/// Returns the path components the target names **relative to the extraction
+/// root**, so the caller can build the on-disk path without touching the
+/// filesystem — the target of a link frequently does not exist yet when the
+/// link itself is extracted, so any check that stats the path would reject
+/// legitimate archives.
+///
+/// The resolution is lexical (`..` pops a component, `.` and empty
+/// components are skipped) and rejects three shapes that can never resolve
+/// inside the extraction root:
+///
+/// - **absolute targets** (`/etc/passwd`, `\\?\C:\…`),
+/// - **Windows drive / ADS components** (`C:/…`, `name:stream`),
+/// - **targets that walk above the root** (`../..`, `a/../../../b`).
+///
+/// A target that merely moves sideways inside the root (`sub/../target.txt`)
+/// is accepted, matching the member-name policy in [`sanitize_archive_path`].
 pub(crate) fn resolve_redirect_target(link_dir: &str, target: &str) -> RarResult<Vec<String>> {
     if target.is_empty() {
         return Err(RarError::Security("redirect target is empty".into()));

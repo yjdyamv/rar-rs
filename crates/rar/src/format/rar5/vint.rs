@@ -1,7 +1,7 @@
-/// RAR5 variable-length integer encoding/decoding.
-///
-/// Each byte contributes 7 data bits (bits 0-6). Bit 7 is a continuation
-/// flag: 1 = more bytes follow, 0 = last byte. Little-endian order.
+//! RAR5 variable-length integer encoding/decoding.
+//!
+//! Each byte contributes 7 data bits (bits 0-6). Bit 7 is a continuation
+//! flag: 1 = more bytes follow, 0 = last byte. Little-endian order.
 use std::io::{self, Read, Write};
 
 /// Encode a `u64` as a RAR5 vint, returning the bytes.

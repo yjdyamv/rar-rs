@@ -1,3 +1,6 @@
+//! Write-side progress reporting: the raw `WriteProgress` event trait and
+//! the aggregated `(committed, total)` tracker behind the public callback.
+
 /// A high-level archive-writing operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

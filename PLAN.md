@@ -101,6 +101,14 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
   `emit_pending_rar4_comment`）。回归测试：`rar5_directory_header_rolls_to_a_fresh_volume`、
   `tiny_volume_size_rejects_directory_and_redirect_members`、
   `rar4_writer_comment_precedes_a_directory_first_member`（三者均验证过撤掉修复即失败）。
+- **审查续修（2026-09，结构 + 文档 + 死代码）**：RAR4 三份重复的分卷切分循环（流式/缓冲/并行）收敛为
+  单一驱动 `emit_rar4_split` + `Rar4SplitParams`（`Cow` 源闭包；流式路径在闭包内报进度），
+  `pipeline.rs` 1616→1535 行且漂移源归一；修 `safe_path.rs` 错挂文档、`rar5/mod.rs` 孤儿
+  `stream_mut` 文档、`codec/mod.rs` 许可声明挂错（改 `//!`）；补 12 个模块的 `//!`；清理过期注释
+  （rar15/rar20/rar29/ppmd/writer.rs 的 "later phase"/"not yet wired"/deprecation 措辞）；删除
+  `format/rar4/write/mod.rs` 六个被 `build_*` 取代的写流 helper（`dictionary_flags` /
+  `DIRECTORY_WINDOW_BITS` 保留为 `#[cfg(test)]`）；rar15/rar20 编码器的 blanket `dead_code` allow
+  补上真实理由（rars 参考 API 保留，非"未接线"）；`architecture_boundaries` 去掉重复 forbidden 项。
 - **CLI 两个二进制（2026-09，主体去重）**：`selector.rs` / `password.rs` 已有；新增共享
   `ops.rs`（`#[path]` 双二进制共用）：`open_reader`、`extract_members`（整档/选成员）、
   `extract_to_stdout`（`-so`）、`print_members`（`p`）、列表三态（`list_entries` /

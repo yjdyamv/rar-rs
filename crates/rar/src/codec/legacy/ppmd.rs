@@ -1661,7 +1661,6 @@ impl PpmdEncoder {
     /// `0x80|order-1` continuing header). Each block still gets a fresh range
     /// coder, so a member's packed bytes start on a byte boundary of their
     /// own while the model keeps its context across the chain.
-    #[allow(dead_code)] // solid-chain PPMd model continuation (later phase)
     pub(crate) fn continuing(model: PpmdDecoder, esc_char: u8) -> Self {
         Self {
             model,

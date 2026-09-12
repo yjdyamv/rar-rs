@@ -1,3 +1,5 @@
+//! Packed-data chunk model: one member's data slice within one volume.
+
 /// Describes a contiguous slice of packed file data within one volume.
 ///
 /// Multi-volume archives split a file's packed data across multiple volumes.

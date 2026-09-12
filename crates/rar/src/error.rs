@@ -1,4 +1,4 @@
-/// Error types for RAR archive operations.
+//! Error types for RAR archive operations.
 use std::fmt;
 use std::io;
 

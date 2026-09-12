@@ -6,6 +6,7 @@
 //! the parent [`super`] module and the AES-128 range emitter in
 //! [`super::cbc`].
 
+use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -182,6 +183,105 @@ impl Rar4PayloadSource {
             }
         }
     }
+}
+
+/// Scalar member fields shared by the RAR4 multi-volume split drivers.
+struct Rar4SplitParams<'a> {
+    encoded_name: &'a [u8],
+    name_flags: u16,
+    file_crc: u32,
+    dos_time: u32,
+    method: u8,
+    unpacked_size: u64,
+    password: bool,
+    salt: Option<[u8; 8]>,
+    ext_time: Option<&'a [u8]>,
+    solid_continuation: bool,
+    is_dir: bool,
+    comment: Option<Vec<u8>>,
+}
+
+/// Split `packed_size` on-disk bytes across volumes: one FILE_HEAD plus one
+/// segment per volume, using the RAR4 split convention (a non-final head
+/// carries its own segment's CRC, the final head the whole-file CRC; the
+/// unpacked size is the full file size in every head). `segment(offset, len)`
+/// yields the segment's on-disk (already encrypted) bytes; the closure may
+/// report progress itself.
+fn emit_rar4_split<'a>(
+    this: &mut RarArchive,
+    params: &Rar4SplitParams<'_>,
+    volume_size: u64,
+    packed_size: u64,
+    mut segment: impl FnMut(&mut RarArchive, u64, u64) -> RarResult<Cow<'a, [u8]>>,
+) -> RarResult<Vec<crate::model::DataChunk>> {
+    let needed = 7 + rar4_segment_header_reserve(
+        params.encoded_name,
+        params.salt.is_some(),
+        params.ext_time,
+        this.header_encryption,
+    );
+    let mut chunks = Vec::new();
+    let mut sent = 0u64;
+    let mut vol_index = this.write_ctx().current_volume - 1;
+    let mut split_before = false;
+    while sent < packed_size {
+        // Roll to a volume with room for the header and the EOA.
+        let mut rolled = false;
+        loop {
+            let used = this.write_ctx().volume_bytes_written;
+            if volume_size.saturating_sub(used) > needed {
+                break;
+            }
+            if rolled {
+                return Err(RarError::InvalidOption(format!(
+                    "volume size {volume_size} is too small for a RAR4 member header"
+                )));
+            }
+            this.start_next_volume()?;
+            vol_index = this.write_ctx().current_volume - 1;
+            rolled = true;
+        }
+        let used = this.write_ctx().volume_bytes_written;
+        let available = volume_size - used - needed;
+        let chunk_size = (packed_size - sent).min(available);
+        let split_after = sent + chunk_size < packed_size;
+        let data = segment(this, sent, chunk_size)?;
+        let head_crc = if split_after {
+            crate::crc32::crc32(&data)
+        } else {
+            params.file_crc
+        };
+        let (data_offset, _) = emit_rar4_segment(
+            this,
+            params.encoded_name,
+            params.name_flags,
+            head_crc,
+            params.dos_time,
+            params.method,
+            chunk_size as u32,
+            params.unpacked_size as u32,
+            &data,
+            params.password,
+            params.salt,
+            params.ext_time,
+            params.solid_continuation,
+            params.is_dir,
+            params.comment.clone(),
+            split_before,
+            split_after,
+        )?;
+        chunks.push(crate::model::DataChunk {
+            volume_index: vol_index,
+            data_offset,
+            packed_size: chunk_size,
+            crc32_val: Some(head_crc),
+            is_final: !split_after,
+            extra_data: Vec::new(),
+        });
+        sent += chunk_size;
+        split_before = true;
+    }
+    Ok(chunks)
 }
 
 impl RarArchive {
@@ -469,74 +569,33 @@ impl RarArchive {
                 });
             }
             Some(volume_size) => {
-                let needed = 7 + rar4_segment_header_reserve(
-                    &encoded_name,
-                    salt.is_some(),
-                    ext_time.as_deref(),
-                    self.header_encryption,
-                );
-                let mut sent = 0u64;
-                let mut vol_index = self.write_ctx().current_volume - 1;
-                let mut split_before = false;
-                while sent < packed_size {
-                    let mut rolled = false;
-                    loop {
-                        let used = self.write_ctx().volume_bytes_written;
-                        if volume_size.saturating_sub(used) > needed {
-                            break;
-                        }
-                        if rolled {
-                            return Err(RarError::InvalidOption(format!(
-                                "volume size {volume_size} is too small for a RAR4 member header"
-                            )));
-                        }
-                        self.start_next_volume()?;
-                        vol_index = self.write_ctx().current_volume - 1;
-                        rolled = true;
-                    }
-                    let used = self.write_ctx().volume_bytes_written;
-                    let available = volume_size - used - needed;
-                    let chunk_size = (packed_size - sent).min(available);
-                    let split_after = sent + chunk_size < packed_size;
-                    // Segment CRCs cover the on-disk (encrypted) bytes, like
-                    // the buffered path.
-                    let segment = source.read_range(sent, sent + chunk_size)?;
-                    let head_crc = if split_after {
-                        crate::crc32::crc32(&segment)
-                    } else {
-                        file_crc
-                    };
-                    let (data_offset, _) = emit_rar4_segment(
-                        self,
-                        &encoded_name,
+                chunks = {
+                    let params = Rar4SplitParams {
+                        encoded_name: &encoded_name,
                         name_flags,
-                        head_crc,
+                        file_crc,
                         dos_time,
                         method,
-                        chunk_size as u32,
-                        unpacked_size as u32,
-                        &segment,
+                        unpacked_size: file_size,
                         password,
                         salt,
-                        ext_time.as_deref(),
+                        ext_time: ext_time.as_deref(),
                         solid_continuation,
-                        false,
-                        None,
-                        split_before,
-                        split_after,
-                    )?;
-                    chunks.push(crate::model::DataChunk {
-                        volume_index: vol_index,
-                        data_offset,
-                        packed_size: chunk_size,
-                        crc32_val: Some(head_crc),
-                        is_final: !split_after,
-                        extra_data: Vec::new(),
-                    });
-                    sent += chunk_size;
-                    split_before = true;
-                    self.report_progress(sent, file_size);
-                }
+                        is_dir: false,
+                        comment: None,
+                    };
+                    emit_rar4_split(
+                        self,
+                        &params,
+                        volume_size,
+                        packed_size,
+                        |this, offset, len| {
+                            let chunk = source.read_range(offset, offset + len)?;
+                            this.report_progress(offset + len, file_size);
+                            Ok(Cow::Owned(chunk))
+                        },
+                    )?
+                };
             }
         }
 
@@ -763,83 +822,27 @@ impl RarArchive {
             }
             Some(volume_size) => {
                 // ── Multi-volume: split the packed member across volumes ──
-                let mut chunks = Vec::<crate::model::DataChunk>::new();
-                let mut sent = 0u64;
-                let mut vol_index = self.write_ctx().current_volume - 1;
-                let mut split_before = false;
-                // Reserve the FILE_HEAD (fixed 32 bytes + name + salt +
-                // exttime, plus the `-hp` encryption block) before the data:
-                // it is written ahead of the segment, so budgeting only the
-                // 7-byte end block lets every volume exceed `-v` by a header.
-                let header_reserve = rar4_segment_header_reserve(
-                    &encoded_name,
-                    salt.is_some(),
-                    ext_time.as_deref(),
-                    self.header_encryption,
-                );
-                let needed = 7 + header_reserve;
-                while sent < packed_size {
-                    // Roll to a volume with room for the header and the EOA.
-                    let mut rolled = false;
-                    loop {
-                        let used = self.write_ctx().volume_bytes_written;
-                        if volume_size.saturating_sub(used) > needed {
-                            break;
-                        }
-                        if rolled {
-                            return Err(RarError::InvalidOption(format!(
-                                "volume size {volume_size} is too small for a RAR4 member header"
-                            )));
-                        }
-                        self.start_next_volume()?;
-                        vol_index = self.write_ctx().current_volume - 1;
-                        rolled = true;
-                    }
-                    let used = self.write_ctx().volume_bytes_written;
-                    let available = volume_size - used - needed;
-                    let chunk_size = (packed_size - sent).min(available);
-                    let split_after = sent + chunk_size < packed_size;
-                    let segment = &packed[sent as usize..(sent + chunk_size) as usize];
-                    // RAR4 split-member CRC convention (matches WinRAR):
-                    // every non-final head carries the CRC32 of its OWN
-                    // segment's data; only the final head carries the
-                    // whole-file CRC. Unpacked size is the full file size in
-                    // every head; packed size is per-segment.
-                    let head_crc = if split_after {
-                        crate::crc32::crc32(segment)
-                    } else {
-                        file_crc
-                    };
-                    let (data_offset, _) = emit_rar4_segment(
-                        self,
-                        &encoded_name,
+                let chunks = {
+                    let params = Rar4SplitParams {
+                        encoded_name: &encoded_name,
                         name_flags,
-                        head_crc,
+                        file_crc,
                         dos_time,
                         method,
-                        chunk_size as u32,
-                        unpacked_size as u32,
-                        segment,
-                        password_encrypted,
+                        unpacked_size,
+                        password: password_encrypted,
                         salt,
-                        ext_time.as_deref(),
+                        ext_time: ext_time.as_deref(),
                         solid_continuation,
                         is_dir,
-                        comment.clone(),
-                        split_before,
-                        split_after,
-                    )?;
-                    chunks.push(crate::model::DataChunk {
-                        volume_index: vol_index,
-                        data_offset,
-                        packed_size: chunk_size,
-                        crc32_val: Some(head_crc),
-                        is_final: !split_after,
-                        extra_data: Vec::new(),
-                    });
-                    sent += chunk_size;
-                    split_before = true;
-                }
+                        comment: comment.clone(),
+                    };
+                    emit_rar4_split(self, &params, volume_size, packed_size, |_, offset, len| {
+                        Ok(Cow::Borrowed(
+                            &packed[offset as usize..(offset + len) as usize],
+                        ))
+                    })?
+                };
                 self.entries.push(crate::archive::ArchiveEntry {
                     header: crate::model::FileHeader {
                         name,
@@ -1455,75 +1458,27 @@ impl RarArchive {
                 Ok(())
             }
             Some(volume_size) => {
-                let mut chunks = Vec::<crate::model::DataChunk>::new();
-                let mut sent = 0u64;
-                let mut vol_index = self.write_ctx().current_volume - 1;
-                let mut split_before = false;
-                // Reserve the FILE_HEAD before the payload exactly like the
-                // sequential path does; budgeting only the EOA let every
-                // volume exceed `-v` by one header.
-                let needed = 7 + rar4_segment_header_reserve(
-                    &encoded_name,
-                    salt.is_some(),
-                    ext_time.as_deref(),
-                    self.header_encryption,
-                );
-                while sent < packed_size {
-                    let mut rolled = false;
-                    loop {
-                        let used = self.write_ctx().volume_bytes_written;
-                        if volume_size.saturating_sub(used) > needed {
-                            break;
-                        }
-                        if rolled {
-                            return Err(RarError::InvalidOption(format!(
-                                "volume size {volume_size} is too small for a RAR4 member header"
-                            )));
-                        }
-                        self.start_next_volume()?;
-                        vol_index = self.write_ctx().current_volume - 1;
-                        rolled = true;
-                    }
-                    let used = self.write_ctx().volume_bytes_written;
-                    let available = volume_size - used - needed;
-                    let chunk_size = (packed_size - sent).min(available);
-                    let split_after = sent + chunk_size < packed_size;
-                    let segment = &packed[sent as usize..(sent + chunk_size) as usize];
-                    let head_crc = if split_after {
-                        crate::crc32::crc32(segment)
-                    } else {
-                        file_crc
-                    };
-                    let (data_offset, _) = emit_rar4_segment(
-                        self,
-                        &encoded_name,
+                let chunks = {
+                    let params = Rar4SplitParams {
+                        encoded_name: &encoded_name,
                         name_flags,
-                        head_crc,
+                        file_crc,
                         dos_time,
                         method,
-                        chunk_size as u32,
-                        unpacked_size as u32,
-                        segment,
-                        password_encrypted,
+                        unpacked_size,
+                        password: password_encrypted,
                         salt,
-                        ext_time.as_deref(),
-                        false,
-                        false,
-                        None,
-                        split_before,
-                        split_after,
-                    )?;
-                    chunks.push(crate::model::DataChunk {
-                        volume_index: vol_index,
-                        data_offset,
-                        packed_size: chunk_size,
-                        crc32_val: Some(head_crc),
-                        is_final: !split_after,
-                        extra_data: Vec::new(),
-                    });
-                    sent += chunk_size;
-                    split_before = true;
-                }
+                        ext_time: ext_time.as_deref(),
+                        solid_continuation: false,
+                        is_dir: false,
+                        comment: None,
+                    };
+                    emit_rar4_split(self, &params, volume_size, packed_size, |_, offset, len| {
+                        Ok(Cow::Borrowed(
+                            &packed[offset as usize..(offset + len) as usize],
+                        ))
+                    })?
+                };
                 self.entries.push(crate::archive::ArchiveEntry {
                     header: crate::model::FileHeader {
                         name,

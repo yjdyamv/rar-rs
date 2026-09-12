@@ -1,3 +1,5 @@
+//! RAR5 sliding window shared by the modern decoder and encoder.
+
 /// RAR5 sliding window (circular buffer) for LZSS decompression.
 pub struct SlidingWindow {
     buf: Vec<u8>,

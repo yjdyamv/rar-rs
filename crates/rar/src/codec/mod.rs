@@ -1,11 +1,12 @@
-/// RAR5 native codec — LZSS+Huffman compression/decompression.
-///
-/// Clean-room implementation for software conservation and educational
-/// purposes. Bitstream format derived from analysis of libarchive's
-/// archive_read_support_format_rar5.c by Grzegorz Antoniak (2018),
-/// an independent BSD-2-Clause licensed implementation.
-///
-/// License: BSD-2-Clause
+//! Codec implementations: the modern RAR5 LZSS+Huffman family and the
+//! legacy RAR 1.5–4.x LZSS/Huffman/PPMd family.
+//!
+//! The RAR5 codec is a clean-room implementation for software conservation
+//! and educational purposes. Bitstream format derived from analysis of
+//! libarchive's `archive_read_support_format_rar5.c` by Grzegorz Antoniak
+//! (2018), an independent BSD-2-Clause licensed implementation.
+//!
+//! License: BSD-2-Clause
 pub(crate) mod common;
 pub(crate) mod legacy;
 pub(crate) mod modern;

@@ -67,7 +67,6 @@ fn role_facades_stay_off_format_and_codec_internals() {
     let forbidden = [
         "crate::format",
         "crate::codec",
-        "crate::codec",
         "crate::crypto",
         "crate::recovery",
     ];
@@ -94,7 +93,6 @@ fn fs_and_model_policy_do_not_depend_upward() {
     let forbidden = [
         "crate::archive",
         "crate::format",
-        "crate::codec",
         "crate::codec",
         "crate::crypto",
         "crate::recovery",

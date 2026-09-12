@@ -1,3 +1,5 @@
+//! RAR 1.5 stream cipher (XOR keystream, no salt).
+
 use crate::crc32::{crc32_raw, table_entry as crc32_table_entry};
 use zeroize::ZeroizeOnDrop;
 
