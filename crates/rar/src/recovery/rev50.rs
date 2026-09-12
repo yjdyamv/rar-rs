@@ -15,6 +15,26 @@ use std::path::{Path, PathBuf};
 /// REV5 file signature, distinct from the RAR archive marker.
 pub const REV5_SIGNATURE: &[u8] = b"Rar!\x1aRev";
 
+/// Refuse RAR 1.5–4.x volume sets: their `.rev` files use the legacy RAR4
+/// recovery-volume container, not REV5, and that format is not implemented
+/// (clean-room reverse engineering; see `docs/issues/rar4-recovery-volumes.md`).
+///
+/// Without this gate `rv` used to write a REV5 file next to a RAR4 set, which
+/// official WinRAR rejects with a checksum error, and `rc` reported "no
+/// recovery volumes found" on official RAR4 `.rev` files.
+fn ensure_rar5_volume_set(first_volume: &Path) -> RarResult<()> {
+    let mut head = [0u8; 8];
+    let mut file = fs::File::open(first_volume)?;
+    let read = file.read(&mut head)?;
+    if read >= 7 && head[..7] == *crate::detect::RAR4_SIGNATURE {
+        return Err(RarError::Unsupported(
+            "RAR4 recovery volumes (.rev) are not implemented; -rv/-rc support RAR5 volume sets only"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Number of `.rev` files for `data_count` volumes at `rec_percent`
 /// (0-100): `max(1, ceil(pct * ND / 100))`, capped at `ND`.
 pub fn plan_recovery_volume_count(data_count: usize, rec_percent: u64) -> RarResult<usize> {
@@ -76,6 +96,8 @@ pub fn rebuild_missing_volumes_with(
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> RarResult<Vec<PathBuf>> {
     use crate::recovery::rar50::reconstruct_data_shards;
+
+    ensure_rar5_volume_set(first_volume)?;
 
     let check_cancel = |cancel: Option<&std::sync::atomic::AtomicBool>| -> RarResult<()> {
         if cancel.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
@@ -312,6 +334,7 @@ pub fn build_recovery_volumes_for_set(
     if nd == 0 {
         return Err(RarError::Format("no volumes for recovery volumes".into()));
     }
+    ensure_rar5_volume_set(&volume_paths[0])?;
     if nd > 65535 {
         return Err(RarError::Format(format!(
             "too many volumes ({nd}) for recovery volumes; maximum is 65535"

@@ -102,3 +102,50 @@ fn cli_rv_creates_recovery_volumes_and_rc_rebuilds() {
         !std::path::Path::new(&format!("{}.part{:02}.rev", base.display(), expected + 1)).exists()
     );
 }
+
+/// `rar rv` / `rar rc` must refuse RAR4 volume sets with a clear error
+/// instead of writing a REV5 `.rev` file official WinRAR cannot read
+/// (`docs/issues/rar4-recovery-volumes.md`).
+#[test]
+fn cli_rv_and_rc_refuse_rar4_volume_sets() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut big = vec![0u8; 400_000];
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for b in &mut big {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *b = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8;
+    }
+    let src = dir.path().join("rnd.bin");
+    std::fs::write(&src, &big).unwrap();
+    let base = dir.path().join("mv4.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-m0", "-v100k", "-idq"])
+        .arg(&base)
+        .arg(&src)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let rv = std::process::Command::new(RAR_CLI)
+        .args(["rv", "-idq"])
+        .arg(&base)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!rv.status.success(), "rv must refuse a RAR4 set");
+    let text = String::from_utf8_lossy(&rv.stderr).into_owned();
+    assert!(text.contains("RAR4"), "unexpected rv error: {text}");
+
+    let rc = std::process::Command::new(RAR_CLI)
+        .args(["rc", "-idq"])
+        .arg(&base)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!rc.status.success(), "rc must refuse a RAR4 set");
+    let text = String::from_utf8_lossy(&rc.stderr).into_owned();
+    assert!(text.contains("RAR4"), "unexpected rc error: {text}");
+}

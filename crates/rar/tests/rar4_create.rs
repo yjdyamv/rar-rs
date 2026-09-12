@@ -1548,3 +1548,43 @@ fn create_rar4_streams_large_members_beyond_the_threshold() {
     let entry = reader.unique_entry("large.txt").unwrap();
     assert_eq!(reader.read_entry(entry).unwrap(), data);
 }
+
+/// RAR4 volume sets must refuse `.rev` recovery volumes instead of writing a
+/// REV5 file that official WinRAR rejects (see
+/// `docs/issues/rar4-recovery-volumes.md`).
+#[test]
+fn rar4_volumes_refuse_recovery_volumes() {
+    let dir = make_temp_dir();
+    let mut content = vec![0u8; 400_000];
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for b in &mut content {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *b = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8;
+    }
+    let src = dir.path().join("rnd.bin");
+    std::fs::write(&src, &content).unwrap();
+    let arc = dir.path().join("mv4.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .volume_size(100_000),
+    )
+    .expect("create");
+    archive.add_path(&src, ewo(0)).expect("add");
+    archive.finish().expect("close");
+    let volumes = discover_volumes(&arc);
+    assert!(
+        volumes.len() >= 2,
+        "expected multiple volumes, got {volumes:?}"
+    );
+
+    let err = rar_rs::build_recovery_volumes_for_set(&volumes, 1).unwrap_err();
+    assert!(matches!(err, rar_rs::RarError::Unsupported(_)), "{err:?}");
+    assert!(err.to_string().contains("RAR4"), "{err}");
+
+    let err = rar_rs::rebuild_missing_volumes(&volumes[0]).unwrap_err();
+    assert!(matches!(err, rar_rs::RarError::Unsupported(_)), "{err:?}");
+}
