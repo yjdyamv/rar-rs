@@ -10,14 +10,15 @@
 
 #![allow(dead_code)]
 
+use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::huffman::build_code_lengths_from_freqs;
+use crate::codec::legacy::tables::{LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT};
 use crate::error::{RarError, RarResult};
 
 // ── Table geometry ─────────────────────────────────────────────────────────
 
 const MAIN_COUNT: usize = 298;
 const OFFSET_COUNT: usize = 48;
-const LENGTH_COUNT: usize = 28;
 const LEVEL_COUNT: usize = 19;
 const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LENGTH_COUNT;
 const AUDIO_COUNT: usize = 257;
@@ -25,13 +26,6 @@ const MAX_CHANNELS: usize = 4;
 const OLD_LEVEL_COUNT: usize = AUDIO_COUNT * MAX_CHANNELS;
 const MAX_HISTORY: usize = 1024 * 1024;
 
-const LENGTH_BASES: [usize; LENGTH_COUNT] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
-    160, 192, 224,
-];
-const LENGTH_BITS: [u8; LENGTH_COUNT] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5,
-];
 const OFFSET_BASES: [usize; OFFSET_COUNT] = [
     0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536,
     2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608,
@@ -482,7 +476,7 @@ fn encode_member_with_tables(
             }
         }
     }
-    Ok(bits.finish())
+    Ok(bits.into_bytes())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1552,7 +1546,7 @@ fn encode_audio_member(input: &[u8], channels: usize) -> RarResult<Vec<u8>> {
             audio_codes[channel][delta as usize].ok_or(enc_err("missing audio Huffman code"))?;
         bits.write_bits(code.code as u32, code.len);
     }
-    Ok(bits.finish())
+    Ok(bits.into_bytes())
 }
 
 fn encode_audio_table_level_symbols(levels: &[u8]) -> Vec<usize> {
@@ -1764,39 +1758,6 @@ fn huffman_assign_flat_complete_code(lengths: &mut [u8]) {
     let short_count = cap - n; // symbols at length k-1
     for (i, &symbol) in used.iter().enumerate() {
         lengths[symbol] = if i < short_count { k - 1 } else { k };
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  BitWriter (in-file, rars-identical)
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[derive(Default)]
-struct BitWriter {
-    bytes: Vec<u8>,
-    bit_pos: usize,
-}
-
-impl BitWriter {
-    fn write_bits(&mut self, value: u32, count: u8) {
-        for shift in (0..count).rev() {
-            self.write_bit(((value >> shift) & 1) != 0);
-        }
-    }
-
-    fn write_bit(&mut self, bit: bool) {
-        if self.bit_pos.is_multiple_of(8) {
-            self.bytes.push(0);
-        }
-        if bit {
-            let shift = 7 - (self.bit_pos % 8);
-            *self.bytes.last_mut().unwrap() |= 1 << shift;
-        }
-        self.bit_pos += 1;
-    }
-
-    fn finish(self) -> Vec<u8> {
-        self.bytes
     }
 }
 

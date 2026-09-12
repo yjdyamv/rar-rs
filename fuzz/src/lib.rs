@@ -182,7 +182,10 @@ pub fn parse(data: &[u8]) {
     // input almost never forms a valid block envelope, so the KDF is
     // effectively never hit with hostile strength here; the crypto
     // target covers bounded-strength KDF directly.
-    if let Ok(mut a) = rar_rs::RarArchive::open_with_password(&path, "fuzz") {
+    if let Ok(mut a) = rar_rs::ArchiveReader::open_with(
+        &path,
+        rar_rs::OpenOptions::new().password("fuzz"),
+    ) {
         let _ = a.extract_all_with_options(dir.path().join("y"), opts);
     }
 
@@ -450,9 +453,9 @@ pub fn rewrite(data: &[u8]) {
             rar.apply(rar_rs::EditPlan::new().set_comment(b"fuzz comment"))
                 .unwrap();
         }
-        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
+        let mut rar = rar_rs::ArchiveReader::open(&path).unwrap();
         assert_eq!(
-            rar.get_comment().unwrap().as_deref(),
+            rar.comment().unwrap().as_deref(),
             Some(b"fuzz comment".as_slice()),
             "comment round trip mismatch"
         );

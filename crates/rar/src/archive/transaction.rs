@@ -295,6 +295,7 @@ impl RarArchive {
             .sum();
         let mut processed = 0u64;
         for (idx, entry) in self.entries.clone().iter().enumerate() {
+            self.check_cancel()?;
             if self.progress.is_some() {
                 self.report_progress(processed, total_bytes);
             }
@@ -386,53 +387,74 @@ impl RarArchive {
         self.write_ctx_mut().volume_size = None;
         self.path = saved_path;
 
-        // Move the new volumes into place, drop stale ones, and regenerate
-        // `.rev` recovery volumes when the original set had any.
+        // Move the new volumes (and regenerated `.rev` recovery volumes)
+        // into place as one journaled commit. `commit_files` parks every
+        // replaced or retired file first, so a failure or a process kill
+        // mid-swap leaves either the complete new set or the untouched old
+        // one — never a mix.
+        let mut staged_paths: Vec<PathBuf> = Vec::new();
         let result = (|| -> RarResult<()> {
+            let mut install: Vec<(PathBuf, PathBuf)> = Vec::new();
             let mut final_volumes: Vec<PathBuf> = Vec::new();
             for n in 1..=orig_volumes.len() {
                 let tmp = volume_path(&parent, &tmp_base, n);
-                let final_path = volume_path(&parent, &base, n);
                 let exists = fs::metadata(&tmp).map(|m| m.len() > 0).unwrap_or(false);
                 if !exists {
                     let _ = fs::remove_file(&tmp);
                     continue;
                 }
-                replace_file(&tmp, &final_path)?;
+                let final_path = volume_path(&parent, &base, n);
+                staged_paths.push(tmp.clone());
+                install.push((tmp, final_path.clone()));
                 final_volumes.push(final_path);
             }
-            // Drop any stale volumes beyond the new set.
-            for n in final_volumes.len() + 1..=orig_volumes.len() {
-                let _ = fs::remove_file(volume_path(&parent, &base, n));
-            }
-            self.volume_paths = final_volumes;
 
+            // Regenerate the `.rev` set from the staged volumes so the
+            // recovery files commit together with the data volumes instead
+            // of after them (a failure used to leave the data set committed
+            // with stale or missing recovery files).
             let rev = parent.join(format!("{base}.part1.rev"));
             if rev.exists() {
                 let (rec_count, _data_count) = rev_params_from_file(&rev)?;
-                // Drop every stale `.rev` file, then regenerate the set.
-                let mut n = 1u32;
-                loop {
-                    let old_rev = parent.join(format!("{base}.part{n}.rev"));
-                    if old_rev.exists() {
-                        let _ = fs::remove_file(old_rev);
-                        n += 1;
-                    } else {
-                        break;
-                    }
+                let staged_volumes: Vec<PathBuf> =
+                    install.iter().map(|(staged, _)| staged.clone()).collect();
+                let rec_count = (rec_count as usize).min(staged_volumes.len());
+                let written = crate::recovery::rev50::build_recovery_volumes_for_set(
+                    &staged_volumes,
+                    rec_count,
+                )?;
+                for (k, staged_rev) in written.into_iter().enumerate() {
+                    staged_paths.push(staged_rev.clone());
+                    let final_rev = parent.join(format!("{base}.part{}.rev", k + 1));
+                    install.push((staged_rev, final_rev));
                 }
-                self.recovery_volumes_count = Some(rec_count.min(self.volume_paths.len() as u32));
-                self.recovery_volumes_percent = None;
-                self.write_recovery_volumes()?;
             }
+
+            let keep: Vec<PathBuf> = install.iter().map(|(_, f)| f.clone()).collect();
+            let retire = crate::fs::volume::stale_volume_paths(&parent, &base, false, &keep);
+            crate::fs::atomic::commit_files(&parent, &base, &install, &retire)?;
+            self.volume_paths = final_volumes;
             Ok(())
         })();
-        // The staged volumes were renamed/cleaned above (or on error below),
-        // so the drop guard must not touch them again.
+        // `commit_files` installed the staged files (or restored them to
+        // their staged names on rollback), so the drop guard must not touch
+        // them again.
         self.write_ctx_mut().pending = None;
         if result.is_err() {
-            for n in 1..=orig_volumes.len() {
-                let _ = fs::remove_file(volume_path(&parent, &tmp_base, n));
+            for path in &staged_paths {
+                let _ = fs::remove_file(path);
+            }
+            // A `.rev` generation failure may leave staged rev siblings that
+            // never made it into `staged_paths`; sweep them by their unique
+            // staged base.
+            if let Ok(entries) = fs::read_dir(&parent) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with(&tmp_base) && name.ends_with(".rev") {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
             }
         }
         result

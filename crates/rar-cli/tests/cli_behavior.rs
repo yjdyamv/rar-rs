@@ -147,7 +147,14 @@ fn cli_wildcard_args_and_ep1() {
 fn official_validates_cli_switch_archives() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
-        None => return,
+        None => {
+            assert!(
+                std::env::var_os("SA_REQUIRE_OFFICIAL").is_none(),
+                "SA_OFFICIAL_UNRAR is required (SA_REQUIRE_OFFICIAL is set)"
+            );
+            eprintln!("SKIP: SA_OFFICIAL_UNRAR not set");
+            return;
+        }
     };
     let dir = make_temp_dir();
     make_tree(dir.path());
@@ -875,6 +882,73 @@ fn cli_period_filters_tn_to_match_winrar() {
     assert!(!archive.exists(), "no-match must not create the archive");
 }
 
+/// Exit codes must distinguish the failure categories scripts care about:
+/// wrong password (11), CRC mismatch (3) and a missing archive (2).
+#[test]
+fn cli_exit_codes_distinguish_failure_categories() {
+    let dir = make_temp_dir();
+
+    // Wrong password on an encrypted member: exit 11.
+    let encrypted = dir.path().join("enc.rar");
+    let mut writer = rar_rs::ArchiveWriter::create_with(
+        &encrypted,
+        rar_rs::WriterOptions::new().password("hunter2"),
+    )
+    .unwrap();
+    writer
+        .add_bytes(
+            "secret.bin",
+            b"top secret payload",
+            EntryWriteOptions::new().compression_level(CompressionLevel::STORE),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["t", "-pwrong", "-idq"])
+        .arg(&encrypted)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(11), "wrong password must exit 11");
+
+    // A damaged STORE payload: exit 3 (CRC).
+    let damaged = dir.path().join("crc.rar");
+    let payload = b"known payload for the crc damage test".to_vec();
+    let mut writer = rar_rs::ArchiveWriter::create(&damaged).unwrap();
+    writer
+        .add_bytes(
+            "d.bin",
+            &payload,
+            EntryWriteOptions::new().compression_level(CompressionLevel::STORE),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+    let mut bytes = std::fs::read(&damaged).unwrap();
+    let pos = bytes
+        .windows(payload.len())
+        .position(|window| window == payload.as_slice())
+        .expect("payload bytes in archive");
+    bytes[pos] ^= 0xFF;
+    std::fs::write(&damaged, &bytes).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["t", "-idq"])
+        .arg(&damaged)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(3), "damaged payload must exit 3");
+
+    // Missing archive: generic fatal (2).
+    let missing = dir.path().join("missing.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["t", "-idq"])
+        .arg(&missing)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(2), "missing archive must exit 2");
+}
+
 #[test]
 fn cli_stdin_name_reads_stdin() {
     let dir = make_temp_dir();
@@ -1248,7 +1322,7 @@ fn long_range_compresses_distant_copies() {
     // And it must round-trip byte-identically through our extractor.
     let out_dir = dir.path().join("out");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let mut rar = rar_rs::RarArchive::open(&archive).unwrap();
+    let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
     rar.extract_all_with_options(
         &out_dir,
         rar_rs::ExtractOptions {

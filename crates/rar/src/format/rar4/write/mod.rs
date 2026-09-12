@@ -3,8 +3,14 @@
 //! This module writes the fixed-width RAR 3.x/4.x container format:
 //! 7-byte signature, 13-byte main header, 32+N-byte file headers with
 //! 16-bit CRC, and the 7-byte end-of-archive block.
+//!
+//! The member-addition orchestration (encoder dispatch, member encryption,
+//! volume splitting and the parallel batch) lives in [`pipeline`].
 
 #![allow(dead_code)]
+
+mod cbc;
+mod pipeline;
 
 use crate::crc32;
 use crate::error::{RarError, RarResult};

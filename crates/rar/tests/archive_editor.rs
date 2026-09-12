@@ -3,9 +3,10 @@
 //! after structural edits. Byte parity with the legacy name-based
 //! operations is checked on twin archive copies.
 
+use rar_rs::archive::RarArchive;
 use rar_rs::{
     ArchiveEditor, ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, EditPlan,
-    EntryWriteOptions, RarArchive, RarError, SolidMode, WriterOptions,
+    EntryWriteOptions, RarError, SolidMode, WriterOptions,
 };
 
 fn stored() -> EntryWriteOptions {

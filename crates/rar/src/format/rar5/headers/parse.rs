@@ -413,7 +413,7 @@ impl FileHeader {
         };
 
         let is_directory = file_flags & FILE_FLAG_DIRECTORY != 0;
-        let (hash_type, hash_value) = parse_hash_record(&extra_data);
+        let (hash_type, hash_value) = parse_hash_record(&extra_data)?;
         let (mtime_override, mtime_ns, ctime, atime, owner, group, version) =
             parse_extra_records(&extra_data);
 
@@ -716,8 +716,10 @@ fn read_extra_name(data: &[u8], mut p: usize, end: usize) -> Option<(String, usi
 /// Parse the extra-area hash record (`EXTRA_FILE_HASH`).
 ///
 /// Record format: `[rec_size vint][rec_type vint=0x02][hash_type vint]
-/// [hash bytes]`. Hash type `0` is BLAKE2sp (32 bytes).
-fn parse_hash_record(extra_data: &[u8]) -> (u8, Option<[u8; 32]>) {
+/// [hash bytes]`. Hash type `0` is BLAKE2sp (32 bytes). A record that
+/// declares BLAKE2sp but is malformed is a hard error: treating it as "no
+/// hash" would silently disable integrity verification for the member.
+fn parse_hash_record(extra_data: &[u8]) -> RarResult<(u8, Option<[u8; 32]>)> {
     let mut offset = 0usize;
     while offset < extra_data.len() {
         let (rec_size, n) = match vint::decode_from_slice(extra_data, offset) {
@@ -742,21 +744,29 @@ fn parse_hash_record(extra_data: &[u8]) -> (u8, Option<[u8; 32]>) {
             _ => break,
         };
         if rec_type == EXTRA_FILE_HASH {
-            if let Ok((hash_type, hn)) = vint::decode_from_slice(extra_data, body_start)
-                && let Some(data_start) = body_start.checked_add(hn)
-                && data_start <= rec_end
-                && hash_type == 0
-                && rec_end - data_start == 32
-            {
-                let mut value = [0u8; 32];
-                value.copy_from_slice(&extra_data[data_start..rec_end]);
-                return (hash_type as u8, Some(value));
+            let malformed =
+                |what: &str| RarError::Format(format!("malformed file hash extra record: {what}"));
+            let (hash_type, hn) = vint::decode_from_slice(extra_data, body_start)
+                .map_err(|_| malformed("hash type"))?;
+            let data_start = body_start
+                .checked_add(hn)
+                .filter(|start| *start <= rec_end)
+                .ok_or_else(|| malformed("hash body"))?;
+            if hash_type != 0 {
+                // Unknown algorithm: nothing this build can verify, but the
+                // declared type is still reported to the caller.
+                return Ok((hash_type as u8, None));
             }
-            return (0, None);
+            if rec_end - data_start != 32 {
+                return Err(malformed("BLAKE2sp hash is not 32 bytes"));
+            }
+            let mut value = [0u8; 32];
+            value.copy_from_slice(&extra_data[data_start..rec_end]);
+            return Ok((0, Some(value)));
         }
         offset = rec_end;
     }
-    (u8::MAX, None)
+    Ok((u8::MAX, None))
 }
 
 impl EndOfArchiveHeader {
@@ -1212,5 +1222,38 @@ mod tests {
 
         let error = expect_error(ArchiveHeader::from_raw(&raw_block(body)));
         assert!(error.to_string().contains("truncated archive extra area"));
+    }
+
+    /// Build an extra-area hash record: `[rec_size][rec_type][hash_type][hash]`.
+    fn hash_record(hash_type: u64, hash_bytes: &[u8]) -> Vec<u8> {
+        let mut body = vint::encode(hash_type);
+        body.extend_from_slice(hash_bytes);
+        let mut record = vint::encode(body.len() as u64 + 1);
+        record.extend(vint::encode(EXTRA_FILE_HASH));
+        record.extend(body);
+        record
+    }
+
+    #[test]
+    fn well_formed_blake2sp_hash_record_is_parsed() {
+        let expected = [0xABu8; 32];
+        let (hash_type, value) = parse_hash_record(&hash_record(0, &expected)).unwrap();
+        assert_eq!(hash_type, 0);
+        assert_eq!(value, Some(expected));
+    }
+
+    #[test]
+    fn unknown_hash_algorithm_is_reported_without_a_value() {
+        let (hash_type, value) = parse_hash_record(&hash_record(5, &[0u8; 16])).unwrap();
+        assert_eq!(hash_type, 5);
+        assert_eq!(value, None);
+    }
+
+    /// A record that declares BLAKE2sp but carries the wrong number of bytes
+    /// used to parse as "no hash", silently disabling verification.
+    #[test]
+    fn malformed_blake2sp_hash_record_is_rejected() {
+        let error = expect_error(parse_hash_record(&hash_record(0, &[0u8; 31])));
+        assert!(error.to_string().contains("not 32 bytes"), "{error}");
     }
 }

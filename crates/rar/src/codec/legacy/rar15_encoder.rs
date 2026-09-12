@@ -10,6 +10,7 @@
 
 #![allow(dead_code)] // not yet wired into the legacy write pipeline; rar20_encoder precedent
 
+use crate::codec::common::bitstream::BitWriter;
 use crate::error::{RarError, RarResult};
 
 /// Prebuilt long-LZ candidate index. Unlike the other encoders, rar13 builds
@@ -290,7 +291,7 @@ impl Unpack15Encoder {
                 self.emit_stmode_exit()?;
             }
         }
-        Ok(std::mem::take(&mut self.bits).finish())
+        Ok(std::mem::take(&mut self.bits).into_bytes())
     }
 
     pub fn encode_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
@@ -408,7 +409,7 @@ impl Unpack15Encoder {
         if progress.is_some_and(|report| !report(input.len())) {
             return Err(RarError::Cancelled);
         }
-        Ok(std::mem::take(&mut self.bits).finish())
+        Ok(std::mem::take(&mut self.bits).into_bytes())
     }
 
     fn clone_for_planning(&self) -> Self {
@@ -769,7 +770,7 @@ impl Unpack15Encoder {
             (self.short_len2(code), SHORT_XOR2[code])
         };
         self.bits
-            .write_bits((code_byte >> (8 - code_len)) as u32, code_len as usize);
+            .write_bits((code_byte >> (8 - code_len)) as u32, code_len);
         Ok(())
     }
 
@@ -1396,7 +1397,7 @@ fn emit_long_lz_length(bits: &mut BitWriter, avr_ln2: u32, length_code: u32) -> 
         return emit_decode_num(bits, length_code, 2, DEC_L1, POS_L1);
     }
     if length_code <= 7 {
-        bits.write_bits(1, length_code as usize + 1);
+        bits.write_bits(1, (length_code + 1) as u8);
         return Ok(());
     }
     if length_code < 0x100 {
@@ -1414,7 +1415,7 @@ fn emit_decode_num(
     pos_tab: &[u16],
 ) -> RarResult<()> {
     if let Some((code, len)) = encode_decode_num_prefix(target, start_pos, dec_tab, pos_tab) {
-        bits.write_bits(code, len);
+        bits.write_bits(code, len as u8);
         return Ok(());
     }
     Err(enc_err("RAR 1.3 DecodeNum value is not encodable"))
@@ -1529,37 +1530,4 @@ fn match_length_scalar(
         length += 1;
     }
     length
-}
-
-#[derive(Default)]
-struct BitWriter {
-    output: Vec<u8>,
-    bit_pos: usize,
-}
-
-impl BitWriter {
-    fn new() -> Self {
-        Self {
-            output: Vec::new(),
-            bit_pos: 0,
-        }
-    }
-
-    fn write_bits(&mut self, value: u32, count: usize) {
-        for i in (0..count).rev() {
-            let bit = ((value >> i) & 1) as u8;
-            if self.bit_pos.is_multiple_of(8) {
-                self.output.push(0);
-            }
-            if bit != 0 {
-                let idx = self.output.len() - 1;
-                self.output[idx] |= 1 << (7 - (self.bit_pos % 8));
-            }
-            self.bit_pos += 1;
-        }
-    }
-
-    fn finish(self) -> Vec<u8> {
-        self.output
-    }
 }

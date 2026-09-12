@@ -148,6 +148,13 @@ pub(crate) fn resolve_redirect_target(link_dir: &str, target: &str) -> RarResult
             return Err(RarError::Security(format!(
                 "redirect target {target:?} contains a ':' (drive/ADS) component"
             )));
+        } else if component_is_ambiguous(component) {
+            // Win32 normalizes these names (trailing dot/space stripping,
+            // device names) when the link is later opened, so the lexical
+            // containment check alone would not hold on disk.
+            return Err(RarError::Security(format!(
+                "redirect target {target:?} contains the platform-ambiguous component {component:?}"
+            )));
         } else {
             parts.push(component.to_string());
         }
@@ -255,5 +262,19 @@ mod tests {
         }
         assert!(resolve_redirect_target("dir", "").is_err());
         assert!(resolve_redirect_target("dir", "a\0b").is_err());
+    }
+
+    /// Link targets are normalized by Win32 on open exactly like member
+    /// names, so the ambiguous-name policy must cover them too.
+    #[test]
+    #[cfg(windows)]
+    fn redirect_targets_reject_ambiguous_components() {
+        for target in [".. ", "...", "CON", "NUL.txt", "report."] {
+            let err = resolve_redirect_target("dir", target).unwrap_err();
+            assert!(
+                matches!(err, crate::error::RarError::Security(_)),
+                "target {target:?} should be rejected, got {err}"
+            );
+        }
     }
 }

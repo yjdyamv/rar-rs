@@ -688,7 +688,16 @@ fn decode_inner(
     }
 
     // Extract output
-    let written = (window.total_written() - output_start).min(unpacked_size);
+    let produced = window.total_written() - output_start;
+    if produced != unpacked_size {
+        // The streaming path rejects this too (see `decode_inner_streaming`):
+        // a packed stream that ends early must not surface as a silently
+        // truncated member.
+        return Err(RarError::Format(format!(
+            "decompressed size mismatch: expected {unpacked_size}, got {produced}"
+        )));
+    }
+    let written = produced.min(unpacked_size);
     let mut output = window.get_output(output_start, written as usize);
 
     // Apply pending filters. RAR5 filter positions are stream-absolute
@@ -1400,6 +1409,18 @@ mod decode_tests {
         let back =
             decode_standalone(&packed, data.len() as u64, 3, None, ArchiveVersion::V50).unwrap();
         assert_eq!(back, data);
+    }
+
+    /// The buffered decoder must reject a stream that stops before producing
+    /// the declared unpacked size instead of returning a short buffer (the
+    /// streaming path already checked this; the buffered one did not).
+    #[test]
+    fn underproduced_stream_is_rejected() {
+        let data = b"underproduction regression data ".repeat(256);
+        let packed = crate::codec::encode_raw(&data, 3, 3, ArchiveVersion::V50);
+        let err = decode_standalone(&packed, data.len() as u64 + 1, 3, None, ArchiveVersion::V50)
+            .unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "got {err}");
     }
 
     /// Regression: streaming decode (used by `extract_all`) applied split

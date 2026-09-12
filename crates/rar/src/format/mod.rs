@@ -10,3 +10,4 @@
 
 pub mod rar4;
 pub mod rar5;
+pub(crate) mod shared;

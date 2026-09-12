@@ -2,6 +2,8 @@
 
 #[path = "../common.rs"]
 mod common;
+#[path = "../error.rs"]
+mod error;
 #[path = "../input.rs"]
 mod input;
 #[path = "../name_policy.rs"]
@@ -18,6 +20,7 @@ mod selector;
 mod time;
 
 use clap::{Args, Parser, Subcommand};
+use error::CliResult;
 use std::process;
 
 #[derive(Parser)]
@@ -735,7 +738,7 @@ fn main() {
     let args = common::merge_default_switches(defaults, cli_args);
     if let Err(e) = password::reject_bare_password(&args) {
         eprintln!("rar: {e}");
-        process::exit(1);
+        process::exit(error::EXIT_BAD_COMMAND);
     }
     // `rar -iver` prints the version and exits (no subcommand needed).
     if args.iter().any(|a| a == "--version-info") {
@@ -749,7 +752,7 @@ fn main() {
         && let Err(e) = std::env::set_current_dir(dir)
     {
         eprintln!("rar: cannot change to work directory {dir}: {e}");
-        process::exit(1);
+        process::exit(error::EXIT_BAD_COMMAND);
     }
     let _ = cli.yes; // no interactive prompts exist yet; accepted for parity
     let log_errors = cli.misc.log_errors.clone();
@@ -765,11 +768,11 @@ fn main() {
                     f.write_all(format!("rar: {e}\n").as_bytes())
                 });
         }
-        process::exit(1);
+        process::exit(e.exit_code());
     }
 }
 
-fn run(cli: Cli) -> Result<(), String> {
+fn run(cli: Cli) -> CliResult<()> {
     let misc = &cli.misc;
     if misc.erase_disk {
         return Err("-vd/--erase-disk is not supported; no disk was erased".into());
@@ -821,13 +824,13 @@ fn run(cli: Cli) -> Result<(), String> {
                     count_spec: if spec.is_empty() { "10%".into() } else { spec },
                 })
             } else {
-                Err(format!("unknown command: {name}"))
+                Err(format!("unknown command: {name}").into())
             }
         }
     }
 }
 
-fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), String> {
+fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     if let Some(threads) = args.threads {
         rar_rs::set_compression_threads(threads);
         rar_rs::set_extraction_threads(threads);
@@ -1380,12 +1383,13 @@ fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> Result<(), Stri
     // -t: test the archive right after creating it without materializing
     // member contents or extracting to a temporary directory.
     if args.test_after {
-        let mut ar = ops::open_reader(archive_path, password.as_deref())
-            .map_err(|e| format!("open: {e}"))?;
-        let report: rar_rs::VerificationReport =
-            ar.verify().map_err(|e| format!("test failed: {e}"))?;
+        let mut ar =
+            ops::open_reader(archive_path, password.as_deref()).map_err(|e| e.context("open"))?;
+        let report: rar_rs::VerificationReport = ar
+            .verify()
+            .map_err(|e| error::CliError::from(e).context("test failed"))?;
         if report.failed() != 0 {
-            return Err(format!("test failed: {} member(s) failed", report.failed()));
+            return Err(format!("test failed: {} member(s) failed", report.failed()).into());
         }
     }
     // -as: synchronize the archive contents — drop members that are not
@@ -1533,7 +1537,7 @@ fn editor_chained_rename_plan(
     Ok(plan)
 }
 
-fn cmd_delete(args: &DeleteArgs) -> Result<(), String> {
+fn cmd_delete(args: &DeleteArgs) -> CliResult<()> {
     let archive_path = &args.archive;
     let names: Vec<&str> = args.names.iter().map(|s| s.as_str()).collect();
     let mut editor = open_editor(archive_path, args.password.password.as_deref())?;
@@ -1594,7 +1598,7 @@ impl StagedArchive {
         Err("could not allocate a unique staged archive path".into())
     }
 
-    fn commit(mut self, original: &std::path::Path) -> Result<(), String> {
+    fn commit(mut self, original: &std::path::Path) -> CliResult<()> {
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -1616,18 +1620,12 @@ impl Drop for StagedArchive {
 }
 
 #[cfg(unix)]
-fn replace_archive_file(
-    staged: &std::path::Path,
-    original: &std::path::Path,
-) -> Result<(), String> {
+fn replace_archive_file(staged: &std::path::Path, original: &std::path::Path) -> CliResult<()> {
     std::fs::rename(staged, original).map_err(|error| format!("replace archive: {error}"))
 }
 
 #[cfg(windows)]
-fn replace_archive_file(
-    staged: &std::path::Path,
-    original: &std::path::Path,
-) -> Result<(), String> {
+fn replace_archive_file(staged: &std::path::Path, original: &std::path::Path) -> CliResult<()> {
     use std::os::windows::ffi::OsStrExt;
 
     let original: Vec<u16> = original.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -1643,27 +1641,21 @@ fn replace_archive_file(
         )
     };
     if replaced == 0 {
-        Err(format!(
-            "replace archive: {}",
-            std::io::Error::last_os_error()
-        ))
+        Err(format!("replace archive: {}", std::io::Error::last_os_error()).into())
     } else {
         Ok(())
     }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn replace_archive_file(
-    _staged: &std::path::Path,
-    _original: &std::path::Path,
-) -> Result<(), String> {
+fn replace_archive_file(_staged: &std::path::Path, _original: &std::path::Path) -> CliResult<()> {
     Err("transactional archive replacement is not supported on this platform".into())
 }
 
 fn update_archive_transactionally(
     archive: &std::path::Path,
     operation: impl FnOnce(&std::path::Path) -> Result<(), String>,
-) -> Result<(), String> {
+) -> CliResult<()> {
     let staged = StagedArchive::copy_from(archive)?;
     operation(&staged.path)?;
     staged.commit(archive)
@@ -1671,13 +1663,13 @@ fn update_archive_transactionally(
 
 /// Update an archive: add files not present, replace files whose source
 /// is newer (like `rar u`).
-fn cmd_update(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String> {
+fn cmd_update(args: &FilesArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     cmd_update_freshen(args, false, "Updated", misc)
 }
 
 /// Freshen the archive (like `rar f`): update members that already exist
 /// when the source is newer; never add new members.
-fn cmd_freshen(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String> {
+fn cmd_freshen(args: &FilesArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     cmd_update_freshen(args, true, "Freshened", misc)
 }
 
@@ -1690,11 +1682,11 @@ fn cmd_update_freshen(
     freshen: bool,
     verb: &str,
     misc: &common::MiscSwitches,
-) -> Result<(), String> {
+) -> CliResult<()> {
     let archive_path = std::path::Path::new(&args.archive);
     let password = &args.password.password;
     if !archive_path.exists() {
-        return Err(format!("archive not found: {}", archive_path.display()));
+        return Err(format!("archive not found: {}", archive_path.display()).into());
     }
     if rar_rs::discover_volumes(archive_path).len() > 1 {
         return Err("transactional update of multi-volume archives is not supported".into());
@@ -1929,7 +1921,7 @@ fn cmd_update_freshen(
 }
 
 /// Lock the archive (like `rar k`).
-fn cmd_lock(args: &ArchiveArgs) -> Result<(), String> {
+fn cmd_lock(args: &ArchiveArgs) -> CliResult<()> {
     let mut editor = open_editor(&args.archive, args.password.password.as_deref())
         .map_err(|e| format!("open: {e}"))?;
     editor.lock().map_err(|e| format!("lock: {e}"))?;
@@ -1938,7 +1930,7 @@ fn cmd_lock(args: &ArchiveArgs) -> Result<(), String> {
 }
 
 /// Add an inline recovery record (like `rar rr`).
-fn cmd_rr(args: &RecoveryArgs) -> Result<(), String> {
+fn cmd_rr(args: &RecoveryArgs) -> CliResult<()> {
     let mut editor = open_editor(&args.archive, args.password.password.as_deref())?;
     editor
         .apply(rar_rs::EditPlan::new().set_recovery(args.percent))
@@ -1957,32 +1949,30 @@ fn cmd_rr(args: &RecoveryArgs) -> Result<(), String> {
 /// volume count and the `.rev` files are named with the set's padding,
 /// matching WinRAR. Only the raw volume bytes are read, so encrypted
 /// sets need no password.
-fn cmd_recovery_volumes(args: &RecoveryVolumesArgs) -> Result<(), String> {
+fn cmd_recovery_volumes(args: &RecoveryVolumesArgs) -> CliResult<()> {
     let first = std::path::Path::new(&args.archive);
     let volumes = rar_rs::discover_volumes(first);
     let nd = volumes.len();
     if nd <= 1 {
-        return Err(format!(
-            "rv: {} is not part of a multi-volume set",
-            first.display()
-        ));
+        return Err(format!("rv: {} is not part of a multi-volume set", first.display()).into());
     }
     let spec = args.count_spec.trim();
     let rec_count = if let Some(pct) = spec.strip_suffix('%') {
         let pct: u64 = pct
             .parse()
-            .map_err(|_| format!("invalid recovery percent: {spec}"))?;
+            .map_err(|_| error::CliError::from(format!("invalid recovery percent: {spec}")))?;
         if pct > 1000 {
-            return Err(format!("invalid recovery percent: {spec}"));
+            return Err(format!("invalid recovery percent: {spec}").into());
         }
-        rar_rs::plan_recovery_volume_count(nd, pct).map_err(|e| format!("rv: {e}"))?
+        rar_rs::plan_recovery_volume_count(nd, pct)
+            .map_err(|e| error::CliError::from(e).context("rv"))?
     } else {
         spec.parse::<usize>()
-            .map_err(|_| format!("invalid recovery volume count: {spec}"))?
+            .map_err(|_| error::CliError::from(format!("invalid recovery volume count: {spec}")))?
     };
 
     let written = rar_rs::build_recovery_volumes_for_set(&volumes, rec_count)
-        .map_err(|e| format!("rv: {e}"))?;
+        .map_err(|e| error::CliError::from(e).context("rv"))?;
     for path in &written {
         info!("Creating {}", path.display());
     }
@@ -1991,7 +1981,7 @@ fn cmd_recovery_volumes(args: &RecoveryVolumesArgs) -> Result<(), String> {
 }
 
 /// Rename archived members (like `rar rn`): pairs of old/new names.
-fn cmd_rename(args: &RenameArgs) -> Result<(), String> {
+fn cmd_rename(args: &RenameArgs) -> CliResult<()> {
     if !args.pairs.len().is_multiple_of(2) {
         return Err("usage: rar rn <archive.rar> <old1> <new1> [<old2> <new2> ...]".into());
     }
@@ -2015,14 +2005,14 @@ fn cmd_rename(args: &RenameArgs) -> Result<(), String> {
 
 /// Move files into the archive (like `rar m`): add them through the typed
 /// writer, then erase the sources after a successful commit.
-fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String> {
+fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let archive_path = &args.archive;
     let files = &args.files;
     let password = &args.password.password;
     for file in files {
         let path = std::path::Path::new(file);
         if !path.exists() {
-            return Err(format!("path not found: {file}"));
+            return Err(format!("path not found: {file}").into());
         }
     }
     let (dict_size_log, dict_size_bytes) = match args.dict_size.as_deref() {
@@ -2101,7 +2091,7 @@ fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> Result<(), String>
 ///
 /// The search string is attached to the command: `rar i<str> archive.rar`,
 /// with optional modifiers `ic` (case sensitive) and `ih` (hex bytes).
-fn cmd_find(cmd: &str, args: &[String]) -> Result<(), String> {
+fn cmd_find(cmd: &str, args: &[String]) -> CliResult<()> {
     if args.is_empty() {
         return Err("usage: rar i<string> <archive.rar>".into());
     }
@@ -2181,14 +2171,14 @@ fn cmd_find(cmd: &str, args: &[String]) -> Result<(), String> {
 
 /// Verbose list (like `rar v`): adds the packed size, ratio and checksum
 /// columns.
-fn cmd_verbose_list(args: &ArchiveArgs) -> Result<(), String> {
+fn cmd_verbose_list(args: &ArchiveArgs) -> CliResult<()> {
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    output::print_verbose_list(&rar)
+    output::print_verbose_list(&rar).map_err(error::CliError::from)
 }
 
 /// Repair an archive with its inline recovery record (like `rar r`).
 /// Writes `fixed.<name>` when damage was found and repaired.
-fn cmd_repair(args: &ArchiveArgs) -> Result<(), String> {
+fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
     let archive_path = &args.archive;
     let name = std::path::Path::new(archive_path)
         .file_name()
@@ -2221,20 +2211,25 @@ fn cmd_repair(args: &ArchiveArgs) -> Result<(), String> {
     // clear error; validate the repaired bytes with our own reader. A `-hp`
     // archive must be opened with its password, or the open fails before we
     // even reach the members.
-    let verified = match &args.password.password {
-        Some(pw) if !pw.is_empty() => rar_rs::RarArchive::open_with_password(&fixed_path, pw),
-        _ => rar_rs::RarArchive::open(&fixed_path),
-    };
-    if let Err(e) = verified {
+    let mut options = rar_rs::OpenOptions::new();
+    if let Some(pw) = args
+        .password
+        .password
+        .as_deref()
+        .filter(|pw| !pw.is_empty())
+    {
+        options = options.password(pw);
+    }
+    if let Err(e) = rar_rs::ArchiveReader::open_with(&fixed_path, options) {
         let _ = std::fs::remove_file(&fixed_path);
-        return Err(format!("repair produced an unreadable archive: {e}"));
+        return Err(error::CliError::from(e).context("repair produced an unreadable archive"));
     }
     info!("Repaired {archive_path} -> {fixed_path}");
     Ok(())
 }
 
 /// Rebuild missing volumes from the `.rev` recovery volumes (like `rar rc`).
-fn cmd_rebuild_volumes(args: &ArchiveArgs) -> Result<(), String> {
+fn cmd_rebuild_volumes(args: &ArchiveArgs) -> CliResult<()> {
     let first = &args.archive;
     let rebuilt = rar_rs::rebuild_missing_volumes(std::path::Path::new(first))
         .map_err(|e| format!("rc: {e}"))?;
@@ -2250,7 +2245,7 @@ fn cmd_rebuild_volumes(args: &ArchiveArgs) -> Result<(), String> {
 
 /// Set the archive comment (like `rar c`), from stdin or `-z<file>`;
 /// empty input removes the comment.
-fn cmd_comment_set(args: &CommentArgs) -> Result<(), String> {
+fn cmd_comment_set(args: &CommentArgs) -> CliResult<()> {
     use std::io::Read;
     let mut comment = Vec::new();
     if let Some(file) = &args.comment_file {
@@ -2278,7 +2273,7 @@ fn cmd_comment_set(args: &CommentArgs) -> Result<(), String> {
 /// Set a member's file comment (like `rar cf`), from stdin or `-z<file>`;
 /// empty input removes the member's comment. RAR 1.5–4.x only (RAR5 has no
 /// per-member comment block).
-fn cmd_file_comment_set(args: &FileCommentArgs) -> Result<(), String> {
+fn cmd_file_comment_set(args: &FileCommentArgs) -> CliResult<()> {
     use std::io::Read;
     let mut comment = Vec::new();
     if let Some(file) = &args.comment_file {
@@ -2315,13 +2310,14 @@ fn cmd_file_comment_set(args: &FileCommentArgs) -> Result<(), String> {
 }
 
 /// Write the archive comment to stdout (like `rar cw`).
-fn cmd_comment_write(args: &ArchiveArgs) -> Result<(), String> {
-    let mut rar = match &args.password.password {
-        Some(pw) => rar_rs::RarArchive::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        None => rar_rs::RarArchive::open(&args.archive).map_err(|e| format!("open: {e}"))?,
-    };
-    if let Some(comment) = rar.get_comment().map_err(|e| format!("cw: {e}"))? {
+fn cmd_comment_write(args: &ArchiveArgs) -> CliResult<()> {
+    let mut options = rar_rs::OpenOptions::new();
+    if let Some(pw) = &args.password.password {
+        options = options.password(pw);
+    }
+    let mut rar = rar_rs::ArchiveReader::open_with(&args.archive, options)
+        .map_err(|e| format!("open: {e}"))?;
+    if let Some(comment) = rar.comment().map_err(|e| format!("cw: {e}"))? {
         use std::io::Write;
         std::io::stdout()
             .write_all(&comment)
@@ -2331,7 +2327,7 @@ fn cmd_comment_write(args: &ArchiveArgs) -> Result<(), String> {
 }
 
 /// Convert an archive to or from SFX (like `rar s` / `rar s-`).
-fn cmd_sfx_strip(args: &ArchiveArgs) -> Result<(), String> {
+fn cmd_sfx_strip(args: &ArchiveArgs) -> CliResult<()> {
     let archive_path = &args.archive;
     let input = std::fs::read(archive_path).map_err(|e| format!("read: {e}"))?;
     let sfx_offset = rar_rs::sfx_offset_of(&input)
@@ -2348,7 +2344,7 @@ fn cmd_sfx_strip(args: &ArchiveArgs) -> Result<(), String> {
 }
 
 /// Convert an archive to SFX (like `rar s`).
-fn cmd_sfx(args: &SfxArgs) -> Result<(), String> {
+fn cmd_sfx(args: &SfxArgs) -> CliResult<()> {
     let archive_path = &args.archive;
     let input = std::fs::read(archive_path).map_err(|e| format!("read: {e}"))?;
 
@@ -2440,7 +2436,7 @@ fn find_sfx_module() -> Option<String> {
 
 /// Change archive parameters (like `rar ch`): member name case conversion
 /// with `-cl` / `-cu`.
-fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
+fn cmd_change(args: &ChangeArgs) -> CliResult<()> {
     let kind = match (args.lowercase, args.uppercase) {
         (true, false) => crate::name_policy::CaseKind::Lower,
         (false, true) => crate::name_policy::CaseKind::Upper,
@@ -2486,13 +2482,13 @@ fn cmd_change(args: &ChangeArgs) -> Result<(), String> {
 }
 
 /// Print a member to stdout (like `rar p`).
-fn cmd_print(args: &PrintArgs) -> Result<(), String> {
+fn cmd_print(args: &PrintArgs) -> CliResult<()> {
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     ops::print_members(&mut rar, args.file.as_deref())
 }
 
 /// Extract with full paths (like `rar x`).
-fn cmd_extract(args: &ExtractArgs) -> Result<(), String> {
+fn cmd_extract(args: &ExtractArgs) -> CliResult<()> {
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
@@ -2523,7 +2519,7 @@ fn extract_dest(args: &ExtractArgs) -> Result<std::path::PathBuf, String> {
 }
 
 /// Extract without archived paths (like `rar e`).
-fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
+fn cmd_extract_flat(args: &ExtractArgs) -> CliResult<()> {
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
@@ -2544,10 +2540,12 @@ fn cmd_extract_flat(args: &ExtractArgs) -> Result<(), String> {
 }
 
 /// Test archive contents (like `rar t`).
-fn cmd_test(args: &ArchiveArgs) -> Result<(), String> {
+fn cmd_test(args: &ArchiveArgs) -> CliResult<()> {
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())
-        .map_err(|e| format!("open: {e}"))?;
-    let report: rar_rs::VerificationReport = rar.verify().map_err(|e| format!("test: {e}"))?;
+        .map_err(|e| e.context("open"))?;
+    let report: rar_rs::VerificationReport = rar
+        .verify()
+        .map_err(|e| error::CliError::from(e).context("test"))?;
     info!("{} OK, {} failed", report.passed(), report.failed());
     if report.failed() == 0 {
         Ok(())
@@ -2559,7 +2557,15 @@ fn cmd_test(args: &ArchiveArgs) -> Result<(), String> {
                 .unwrap_or_else(|_| "<unknown>".to_string());
             info!("{name}: {}", failure.error());
         }
-        Err("test failed".into())
+        // Surface the first failure's category so scripts see CRC failures
+        // (exit 3) or wrong passwords (exit 11) instead of a generic error.
+        let code = report
+            .failures()
+            .first()
+            .map_or(error::EXIT_FATAL, |failure| {
+                error::exit_code_for(failure.error().code())
+            });
+        Err(error::CliError::with_code("test failed", code))
     }
 }
 
@@ -2734,14 +2740,14 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn cmd_list(args: &ArchiveArgs) -> Result<(), String> {
+fn cmd_list(args: &ArchiveArgs) -> CliResult<()> {
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     ops::list_entries(&rar, true);
     Ok(())
 }
 
 /// Bare list (`lb` / `vb`): member names only.
-fn cmd_list_bare(args: &ArchiveArgs) -> Result<(), String> {
+fn cmd_list_bare(args: &ArchiveArgs) -> CliResult<()> {
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     ops::list_bare(&rar);
     Ok(())
@@ -2749,13 +2755,13 @@ fn cmd_list_bare(args: &ArchiveArgs) -> Result<(), String> {
 
 /// Technical list (`lt` / `vt`): mtime, attributes, sizes, ratio, CRC and
 /// method per member, in the spirit of the official `rar lt`.
-fn cmd_list_technical(args: &ArchiveArgs) -> Result<(), String> {
+fn cmd_list_technical(args: &ArchiveArgs) -> CliResult<()> {
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     ops::list_technical(&rar);
     Ok(())
 }
 
-fn cmd_info(args: &ArchiveArgs) -> Result<(), String> {
+fn cmd_info(args: &ArchiveArgs) -> CliResult<()> {
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
 
     let files: Vec<_> = rar.entries().filter(|e| !e.is_dir()).collect();
@@ -2894,7 +2900,14 @@ mod tests {
             Err("injected append failure".into())
         });
 
-        assert_eq!(result, Err("injected append failure".into()));
+        assert!(result.is_err(), "expected the injected failure");
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.message().contains("injected append failure")),
+            "unexpected error: {result:?}"
+        );
         assert_eq!(std::fs::read(&archive).unwrap(), b"original");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }

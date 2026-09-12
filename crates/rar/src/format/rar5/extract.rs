@@ -9,7 +9,6 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use super::stream_mut;
 use crate::archive::{
     ArchiveEntry, DecryptedPayload, MAX_DICT_SIZE_LOG, RarArchive, StreamRecord, discover_volumes,
 };
@@ -30,6 +29,7 @@ use crate::format::rar5::{
     BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
     BLOCK_TYPE_SERVICE_HEADER, MAX_METADATA_BYTES, RAR5_SIGNATURE,
 };
+use crate::format::shared::stream_mut;
 use crate::fs::atomic::{replace_file, temp_sibling_path};
 #[cfg(any(unix, windows))]
 use crate::fs::safe_path::resolve_redirect_target;
@@ -396,7 +396,11 @@ impl RarArchive {
         for (vol_idx, vol_path) in self.volume_paths.iter().enumerate() {
             let mut stream = File::open(vol_path)?;
 
-            // Verify signature
+            // Verify signature. The first volume may be an SFX stub, so the
+            // archive begins at `sfx_offset` there; later volumes start at 0.
+            if vol_idx == 0 && self.sfx_offset > 0 {
+                stream.seek(SeekFrom::Start(self.sfx_offset))?;
+            }
             let mut sig = [0u8; 8];
             stream.read_exact(&mut sig)?;
             if sig != *RAR5_SIGNATURE {
@@ -1027,6 +1031,19 @@ impl RarArchive {
                             s.name
                         ),
                     })?;
+                // The unpacked size drives the decode window allocation, so it
+                // needs the same cap as the packed size: otherwise a crafted
+                // "STM" record can request a multi-TiB window through
+                // `decode_standalone`.
+                if s.unpacked_size > limit {
+                    return Err(RarError::LimitExceeded {
+                        limit,
+                        context: format!(
+                            "NTFS stream {:?} declares {} unpacked bytes",
+                            s.name, s.unpacked_size
+                        ),
+                    });
+                }
                 let mut packed = vec![0u8; declared];
                 {
                     let stream = stream_mut(&mut self.stream)?;

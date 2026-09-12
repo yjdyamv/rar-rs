@@ -1,9 +1,10 @@
 use std::fs::OpenOptions as FsOpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
+use rar_rs::archive::RarArchive;
 use rar_rs::{
     ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, EntryWriteOptions, ErrorCode,
-    ExtractOptions, OpenOptions, RarArchive, RarError, ScanStrategy, SolidMode, WriterOptions,
+    ExtractOptions, OpenOptions, RarError, ScanStrategy, SolidMode, WriterOptions,
 };
 
 struct FailAfter {

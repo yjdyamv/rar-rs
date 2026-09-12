@@ -34,12 +34,13 @@ pub enum SolidReset {
 /// All fields default to the plain unencrypted single-volume create
 /// behavior; enable only the features you need.
 ///
-/// This is the plain-struct entry point kept for source compatibility;
-/// [`crate::WriterOptions`] is the typed builder and validates the full
-/// combination of format, dictionary, threads, recovery and encryption
-/// options before the archive is opened.
+/// Internal create-options struct consumed by `archive/create.rs`, the RAR4
+/// repack pipeline and the in-tree tests. The supported public builder is
+/// [`crate::WriterOptions`], which validates the full combination of format,
+/// dictionary, threads, recovery and encryption options before the archive is
+/// opened; this struct is not part of the public API (ADR 0006).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateOptions {
+pub(crate) struct CreateOptions {
     /// Target member compression version. [`ArchiveVersion::V50`]
     /// (default) selects the modern RAR5 container; combine with
     /// `force_v70` (and `dict_size_bytes`) to request v70. The legacy

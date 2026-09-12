@@ -16,6 +16,7 @@ use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::huffman::EncodeTable;
 use crate::codec::common::match_finder::MatchFinder;
 use crate::codec::legacy::ppmd::PpmdEncoder;
+use crate::codec::legacy::tables::{LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT};
 use crate::codec::lzss_huff::DIST_CACHE_SIZE;
 use crate::error::{RarError, RarResult};
 
@@ -24,7 +25,6 @@ use crate::error::{RarError, RarResult};
 const MAIN_COUNT: usize = 299;
 const OFFSET_COUNT: usize = 60;
 const LOW_OFFSET_COUNT: usize = 17;
-const LENGTH_COUNT: usize = 28;
 const LEVEL_COUNT: usize = 20;
 const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT + LENGTH_COUNT;
 
@@ -72,13 +72,6 @@ const PPMD_REJECT_SEARCH_COOLDOWN: usize = 8;
 
 // ── Shared lookup tables (identical to the decoder) ───────────────────────
 
-const LENGTH_BASES: [usize; LENGTH_COUNT] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
-    160, 192, 224,
-];
-const LENGTH_BITS: [u8; LENGTH_COUNT] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5,
-];
 const OFFSET_BASES: [usize; OFFSET_COUNT] = [
     0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536,
     2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608,
@@ -1041,10 +1034,24 @@ fn encode_member_blocks(
     Ok(out)
 }
 
+/// Fill `buf` from `reader` until full or EOF; returns the number of bytes
+/// read. Used by the streaming encoder, which never holds the whole input.
+fn read_block<R: std::io::Read>(reader: &mut R, buf: &mut [u8]) -> RarResult<usize> {
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(RarError::Io(error)),
+        }
+    }
+    Ok(filled)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Multi-block parallelism (feature `parallel`)
 // ═══════════════════════════════════════════════════════════════════════════
-
 /// Members at least this large route through the block-parallel encoder: the
 /// write pipeline already holds the whole member in memory, and at 64 KiB per
 /// block the parse now outweighs the pool/scope overhead. Below this the
@@ -1920,6 +1927,73 @@ impl Unpack29Encoder {
         Ok(packed)
     }
 
+    /// Encode one member from a reader with bounded memory: the input is
+    /// consumed in [`RAR29_LZ_BLOCK_SIZE`] blocks, each analyzed against the
+    /// rolling window carried in `self.history` and serialized straight to
+    /// `writer`. Returns the number of unpacked bytes read.
+    ///
+    /// Byte-identical to [`Self::encode_member`] for the LZ engine: the
+    /// in-memory path feeds `encode_member_blocks` the same blocks with the
+    /// same rolling history. The PPMd trial and the automatic VM filters need
+    /// whole-member buffers, so members taking this path use the LZ engine
+    /// only.
+    pub fn encode_member_streaming<R: std::io::Read, W: std::io::Write>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+        mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    ) -> RarResult<u64> {
+        let mut options = self.options;
+        options.block_size = None;
+        let mut current = vec![0u8; RAR29_LZ_BLOCK_SIZE];
+        let mut next = vec![0u8; RAR29_LZ_BLOCK_SIZE];
+        let mut have_current = read_block(reader, &mut current)?;
+        if have_current == 0 {
+            let packed = encode_member_inner(
+                &[],
+                &self.history,
+                &[],
+                options,
+                false,
+                &mut self.levels,
+                progress,
+            )?;
+            writer.write_all(&packed).map_err(RarError::Io)?;
+            self.last_was_ppmd = false;
+            return Ok(0);
+        }
+        let mut read_total = 0u64;
+        loop {
+            let have_next = read_block(reader, &mut next)?;
+            let base = read_total;
+            let mut block_progress = |position: usize| {
+                progress.as_deref_mut().is_none_or(|report| {
+                    let done = base.saturating_add(position as u64);
+                    report(usize::try_from(done).unwrap_or(usize::MAX))
+                })
+            };
+            let packed = encode_member_inner(
+                &current[..have_current],
+                &self.history,
+                &[],
+                options,
+                have_next > 0,
+                &mut self.levels,
+                Some(&mut block_progress),
+            )?;
+            writer.write_all(&packed).map_err(RarError::Io)?;
+            self.remember(&current[..have_current]);
+            read_total += have_current as u64;
+            if have_next == 0 {
+                break;
+            }
+            std::mem::swap(&mut current, &mut next);
+            have_current = have_next;
+        }
+        self.last_was_ppmd = false;
+        Ok(read_total)
+    }
+
     /// Code one member of a solid run as PPMd, continuing the carried model
     /// when the previous compressed member was PPMd, otherwise starting a
     /// fresh order-8 / 25 MiB model (0xA7 + dict byte header). The model is
@@ -2468,6 +2542,43 @@ mod tests {
                 input.len()
             );
         }
+    }
+
+    /// The bounded-memory streaming encoder must produce exactly the bytes
+    /// the in-memory path produces, including across a carried solid window.
+    #[test]
+    fn streaming_encode_matches_in_memory_across_members() {
+        let mut first = Vec::new();
+        for i in 0..120_000u32 {
+            first.extend_from_slice(
+                format!("first member line {i:07} with repeated words words words\n").as_bytes(),
+            );
+        }
+        let mut second = Vec::new();
+        for i in 0..90_000u32 {
+            second.extend_from_slice(
+                format!("second member line {i:07} different repeated tail tail tail\n").as_bytes(),
+            );
+        }
+
+        let mut memory = Unpack29Encoder::with_options(options_for_level(3));
+        let first_mem = memory.encode_member(&first).unwrap();
+        let second_mem = memory.encode_member(&second).unwrap();
+
+        let mut streaming = Unpack29Encoder::with_options(options_for_level(3));
+        let mut first_stream = Vec::new();
+        let read = streaming
+            .encode_member_streaming(&mut first.as_slice(), &mut first_stream, None)
+            .unwrap();
+        assert_eq!(read, first.len() as u64);
+        let mut second_stream = Vec::new();
+        let read = streaming
+            .encode_member_streaming(&mut second.as_slice(), &mut second_stream, None)
+            .unwrap();
+        assert_eq!(read, second.len() as u64);
+
+        assert_eq!(first_stream, first_mem, "first member drifted");
+        assert_eq!(second_stream, second_mem, "solid-window member drifted");
     }
 }
 

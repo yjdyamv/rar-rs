@@ -522,6 +522,14 @@ impl ArchiveReader {
         })
     }
 
+    /// Read the archive-level comment (the `CMT` service block), if any.
+    ///
+    /// Returns the raw comment bytes as stored in the archive; `None` when
+    /// the archive carries no comment.
+    pub fn comment(&mut self) -> RarResult<Option<Vec<u8>>> {
+        self.archive.get_comment()
+    }
+
     /// Extract all archive entries with safe default options.
     pub fn extract_all(&mut self, destination: impl AsRef<Path>) -> RarResult<()> {
         self.archive

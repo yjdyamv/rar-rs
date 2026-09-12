@@ -76,17 +76,23 @@ Rust 的 SemVer 规则是硬的 —— 只要一个 `pub` 项能从 crate 根到
 feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么自己实现块信封解析
 （会漂移），要么 11 个依赖它的测试目标另想办法。
 
-- **热点文件拆分**：`format/rar5/write/mod.rs` 4025 行、`codec/modern/lzss_huff/encoder.rs` 3940、
-  `archive/rar4_edit.rs` 2809、`codec/legacy/rar29_encoder.rs` 2634。分层（`archive` / `codec` / `format`）
-  已收敛，文件级拆分没做。
-- **双 options 面（2026-09，校验已收敛）**：`WriterOptions`（私有字段 builder）与
-  `CreateOptions`（公开字段）仍并存且都从 `lib.rs` 导出，但组合规则已抽到
-  `options::validate_combinations` 由两者共用——`CreateOptions` 不再静默丢弃/钳制（quick-open×分卷
-  或 -hp、内联 RR×分卷、rv 无分卷、recovery>100、`volume_size=0`、-hp 无口令现在同样报
-  `InvalidOption`），`new_with_options` 里的重复检查与 `min(100)`/quick-open 静默降级已删。
-  剩余：两者结构仍在；`CreateOptions` 目前没有任何公开入口接收它
-  （`RarArchive::create_with_options` 是 `pub(crate)`，napi 用 `WriterOptions`），属死的公开类型，
-  其去留是破坏性决策，待 ADR。
+- **热点文件拆分（2026-09 完成）**：`format/rar5/write/mod.rs` 已拆为 `write/{mod,add,emit,stream,batch,engine,layout}.rs`
+  （只含 RAR5，mod.rs 22 行门面），RAR4 编排回到 `format/rar4/write/{mod,pipeline,cbc}.rs`，格式中性写机制在
+  `format/shared/{write_ops,engine,stream}.rs`。剩余大文件：`codec/modern/lzss_huff/encoder.rs` 3940、
+  `archive/rar4_edit.rs` 2809、`codec/legacy/rar29_encoder.rs` 2634（后两者按 CONTEXT 是 rars 移植的逐文件隔离，拆分收益低）。
+- **双 options 面（2026-09 收敛，ADR 0006）**：`WriterOptions`（私有字段 builder）是唯一公开构造器；
+  `CreateOptions` 已降为 `pub(crate)` 并从 crate 根移除（此前是零公开入口的死类型）。组合规则仍由
+  `options::validate_combinations` 共用，`CreateOptions` 不静默丢弃/钳制（quick-open×分卷或 -hp、
+  内联 RR×分卷、rv 无分卷、recovery>100、`volume_size=0`、-hp 无口令同样报 `InvalidOption`）。
+- **双 API 收敛（2026-09，ADR 0006）**：`ArchiveReader`/`ArchiveWriter`/`ArchiveEditor` 是唯一受支持
+  公开面。`RarArchive` 从 crate 根移除并 `#[doc(hidden)]`，仅留 `rar_rs::archive::RarArchive` 作为
+  字节比对测试语料/内部委托的兼容路径（完整删除留待下一个破坏性版本）。CLI/N-API/examples/fuzz 已全部
+  迁到角色面；补齐 `ArchiveReader::comment()`（原只有 `RarArchive::get_comment`）使读侧无缺口。
+- **老编码器去重（2026-09）**：`rar20_encoder`/`rar15_encoder` 各自私有的 BitWriter 删除，统一
+  `codec::common::bitstream::BitWriter`（同为 MSB-first，`finish()`→`into_bytes()`，rar15 的 usize
+  位宽调用点改 u8）；新增 `codec/legacy/tables.rs` 共享 RAR20/29 完全相同的 LENGTH 槽表，OFFSET 表因
+  槽数不同（48 vs 60）各留副本。解码器与 match finder 按 rars 逐文件隔离设计不动。验证：全量测试 +
+  本机 WinRAR 互操作（35/6）字节不变。
 - **CLI 两个二进制（2026-09，主体去重）**：`selector.rs` / `password.rs` 已有；新增共享
   `ops.rs`（`#[path]` 双二进制共用）：`open_reader`、`extract_members`（整档/选成员）、
   `extract_to_stdout`（`-so`）、`print_members`（`p`）、列表三态（`list_entries` /
@@ -100,7 +106,7 @@ feature。代价是 `tests/support::scan_blocks` 不能再跨 seam —— 要么
 
 ### 老容器族读取（RAR 1.5–4.x，继续）
 - [x] solid RAR2.x/1.5 链（2026-09）：unp_ver<29 的链按归档级 MHD_SOLID+位置判定（该代编码器从不写 FHD_SOLID；rars crafted fixture 第二成员清除标志仍须共享窗口），`rar4_solid_archive` 标志接线；RAR3+ 维持 FHD_SOLID 语义。验证：solid_flag_cleared_rar15（46B→2700B 续窗）、rar250 SOLID.RAR（CRC 0x97668cf2/0x28833332 精确）b3d19a7
-- [x] EXTTIME mtime 亚秒（9845c34；RAR4 无 ctime/atime 秒基字段，亚秒无从附着——记录为格式事实）；FHD_COMMENT 读取已做（`format/rar4/mod.rs::parse_file_comment` 解析 COMM_HEAD 0x75 嵌套块，STORE 载荷按 UTF-8/UTF-16LE 解码），接到 `FileHeader::comment` 并经 `ArchiveEntry::comment()` 暴露，CLI `l`/`v` 显示成员注释（2026-09）；FHD_COMMENT 写侧已做（`format/rar4/write.rs::build_file_comment_block` 构造 COMM_HEAD 0x75 子块，`add_rar4_data`/`emit_segment` 追加并置 FHD_COMMENT、按 `file_header_crc_end` 重算头 CRC；编辑器新增 `EditOp::SetMemberComment`/`EditPlan::set_member_comment`，非 solid 走字节级 `rebuild_rar4_header`（rename + comment strip/set，其余字段原样保留），solid repack 由 `kept` 元组携带覆盖；RAR5 明确拒绝；CLI `cf` 设置/清除成员注释；2026-09）
+- [x] EXTTIME mtime 亚秒（9845c34；RAR4 无 ctime/atime 秒基字段，亚秒无从附着——记录为格式事实）；FHD_COMMENT 读取已做（`format/rar4/mod.rs::parse_file_comment` 解析 COMM_HEAD 0x75 嵌套块，STORE 载荷按 UTF-8/UTF-16LE 解码），接到 `FileHeader::comment` 并经 `ArchiveEntry::comment()` 暴露，CLI `l`/`v` 显示成员注释（2026-09）；FHD_COMMENT 写侧已做（`format/rar4/write/mod.rs::build_file_comment_block` 构造 COMM_HEAD 0x75 子块，`add_rar4_data`/`emit_segment` 追加并置 FHD_COMMENT、按 `file_header_crc_end` 重算头 CRC；编辑器新增 `EditOp::SetMemberComment`/`EditPlan::set_member_comment`，非 solid 走字节级 `rebuild_rar4_header`（rename + comment strip/set，其余字段原样保留），solid repack 由 `kept` 元组携带覆盖；RAR5 明确拒绝；CLI `cf` 设置/清除成员注释；2026-09）
 - [x] store-in-solid 窗口语义（2026-09 实测）：WinRAR 6.23 RAR4 solid 强制压缩不产 store 成员（随机也压）；我们的写侧 STORE 断链、读侧对 store 冻结窗口（WinRAR 自产无此类，互操作无碍）
 - [x] rar154 老命名 split 集（2026-09）：random.rar+.r00+.r01 三卷 2 MiB 成员，头 CRC 0xFFFF 哨兵容忍，CRC 0x1c9eb697 精确
 - [x] 大成员流式提取（2026-09，8588302）：提取到 writer 不再整驻留——STORE 明文成员按 1 MiB 分块直拷（零整缓冲）；压缩成员（RAR29/20/15）packed 小流整读后解码器每 1 MiB flush + 窗口裁剪（峰值=窗口+一块，与成员大小无关）；VM-filter 成员整解码后还原；solid 链保持共享窗口单遍；流式 CRC 校验。验证：CLI 解 250 MB store + 67 MB m5 文本字节一致、extract 96 MiB store+压缩成员测试。错误口令提示已映射 WrongPassword（9845c34）

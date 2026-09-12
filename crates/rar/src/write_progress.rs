@@ -128,7 +128,29 @@ impl ProgressTracker {
         self.per_member.insert(member, done);
         self.committed = self.committed.saturating_add(delta);
         if let Some(cb) = self.callback.as_mut() {
-            cb(self.committed.min(self.total), self.total);
+            let committed = self.committed.min(self.total);
+            let total = self.total;
+            // The callback is user code running while the enclosing mutex is
+            // held: a panic unwinding through the guard would poison the lock
+            // and turn every later `lock().expect(...)` in the write pipeline
+            // into a second panic. Catch it so a misbehaving callback cannot
+            // take down an otherwise healthy write operation.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                cb(committed, total);
+            }));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProgressTracker;
+
+    #[test]
+    fn panicking_callback_does_not_escape_or_stop_progress() {
+        let mut tracker = ProgressTracker::new(Some(Box::new(|_, _| panic!("user callback"))));
+        tracker.report(0, 10, 10);
+        tracker.report(0, 20, 20);
+        assert_eq!(tracker.committed, 20);
     }
 }

@@ -8,7 +8,8 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar_rs::{ArchiveReader, RarArchive, RarError};
+use rar_rs::archive::RarArchive;
+use rar_rs::{ArchiveReader, RarError};
 
 const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/");
 const RAR300: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar300/");

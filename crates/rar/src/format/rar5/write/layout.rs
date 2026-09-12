@@ -91,6 +91,7 @@ pub(crate) fn hash_file(
     path: &Path,
     size: u64,
     want_blake: bool,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> RarResult<(u32, Option<[u8; 32]>)> {
     let mut crc = crc32fast::Hasher::new();
     let mut blake = want_blake.then(crate::format::rar5::blake2sp::Hasher::new);
@@ -98,6 +99,9 @@ pub(crate) fn hash_file(
     let mut buf = vec![0u8; 1 << 20];
     let mut total = 0u64;
     loop {
+        if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err(RarError::Cancelled);
+        }
         let n = f.read(&mut buf)?;
         if n == 0 {
             break;

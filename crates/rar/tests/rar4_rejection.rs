@@ -5,7 +5,7 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar_rs::RarArchive;
+use rar_rs::archive::RarArchive;
 
 #[test]
 fn synthetic_rar4_with_bogus_header_is_refused_with_clear_error() {

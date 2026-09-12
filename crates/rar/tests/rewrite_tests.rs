@@ -697,6 +697,15 @@ fn delete_multivolume_rebuilds_recovery_volumes() {
     // The .rev set is regenerated over the new volumes.
     let volumes_after = rar_rs::discover_volumes(&path);
     assert!(rev.exists(), ".rev files must be regenerated");
+    // The journaled commit leaves no staging, journal or backup siblings.
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            name.contains("rar5commit") || name.contains("rar5bak") || name.contains("rar5tmp")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "commit leftovers: {leftovers:?}");
     let mut rar = ArchiveReader::open(&volumes_after[0]).unwrap();
     assert_eq!(
         rar.entries()
@@ -1053,14 +1062,14 @@ fn comment_set_get_roundtrip() {
         rar.finish().unwrap();
     }
     {
-        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
+        let mut rar = rar_rs::archive::RarArchive::open(&path).unwrap();
         assert_eq!(rar.get_comment().unwrap(), None);
         let mut ed = ArchiveEditor::open(&path).unwrap();
         ed.apply(rar_rs::EditPlan::new().set_comment(b"my comment\n"))
             .unwrap();
     }
     {
-        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
+        let mut rar = rar_rs::archive::RarArchive::open(&path).unwrap();
         assert_eq!(rar.get_comment().unwrap(), Some(b"my comment\n".to_vec()));
         // The member survives the comment rewrite.
         let mut rar2 = ArchiveReader::open(&path).unwrap();
@@ -1074,7 +1083,7 @@ fn comment_set_get_roundtrip() {
         ed.apply(rar_rs::EditPlan::new().set_comment(b"")).unwrap();
     }
     {
-        let mut rar = rar_rs::RarArchive::open(&path).unwrap();
+        let mut rar = rar_rs::archive::RarArchive::open(&path).unwrap();
         assert_eq!(rar.get_comment().unwrap(), None);
     }
 
@@ -1169,6 +1178,35 @@ fn sfx_archives_open_read_and_modify_with_stub_preserved() {
         rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(),
         payload
     );
+}
+
+/// A multi-volume set whose first volume carries an SFX stub: the multi-volume
+/// scanner must start at the archive signature instead of file offset 0.
+#[test]
+fn sfx_multivolume_archive_reads_members_across_volumes() {
+    let dir = make_temp_dir();
+    let base = dir.path().join("sfxmv.rar");
+    let payload = compressible(63, 120_000);
+    {
+        let mut rar = ArchiveWriter::create_with(
+            &base,
+            rar_rs::WriterOptions::default().volume_size(32 * 1024),
+        )
+        .unwrap();
+        let opts0 = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
+        rar.add_bytes("big.bin", &payload, opts0).unwrap();
+        rar.finish().unwrap();
+    }
+    let volumes = rar_rs::discover_volumes(&base);
+    assert!(volumes.len() > 1, "precondition: multi-volume set");
+    let first = volumes[0].clone();
+    let plain = std::fs::read(&first).unwrap();
+    std::fs::write(&first, with_stub(&plain, 4096)).unwrap();
+
+    let mut rar = ArchiveReader::open(&first).unwrap();
+    let id = rar.unique_entry("big.bin").unwrap();
+    assert_eq!(rar.read_entry(id).unwrap(), payload);
 }
 
 #[test]

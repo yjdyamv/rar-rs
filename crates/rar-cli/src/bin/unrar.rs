@@ -2,6 +2,8 @@
 
 #[path = "../common.rs"]
 mod common;
+#[path = "../error.rs"]
+mod error;
 #[path = "../input.rs"]
 mod input;
 #[path = "../ops.rs"]
@@ -16,6 +18,7 @@ mod selector;
 mod time;
 
 use clap::{Args, Parser, Subcommand};
+use error::CliResult;
 use std::process;
 
 #[derive(Parser)]
@@ -197,7 +200,7 @@ fn main() {
     let args = common::merge_default_switches(defaults, cli_args);
     if let Err(e) = password::reject_bare_password(&args) {
         eprintln!("unrar: {e}");
-        process::exit(1);
+        process::exit(error::EXIT_BAD_COMMAND);
     }
     // `unrar -iver` prints the version and exits (no subcommand needed).
     if args.iter().any(|a| a == "--version-info") {
@@ -212,11 +215,11 @@ fn main() {
     output::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
     if let Err(e) = run(cli) {
         eprintln!("unrar: {e}");
-        process::exit(1);
+        process::exit(e.exit_code());
     }
 }
 
-fn run(cli: Cli) -> Result<(), String> {
+fn run(cli: Cli) -> CliResult<()> {
     let log_errors = cli.misc.log_errors.clone();
     let result = run_inner(cli);
     if let Err(e) = &result
@@ -234,7 +237,7 @@ fn run(cli: Cli) -> Result<(), String> {
     result
 }
 
-fn run_inner(cli: Cli) -> Result<(), String> {
+fn run_inner(cli: Cli) -> CliResult<()> {
     if cli.misc.erase_disk {
         return Err("-vd/--erase-disk is not supported; no disk was erased".into());
     }
@@ -253,6 +256,7 @@ fn run_inner(cli: Cli) -> Result<(), String> {
         Command::ListTechnical(args) => cmd_list_technical(&args.archive, password),
         Command::VerboseList(args) => {
             output::print_verbose_list(&ops::open_reader(&args.archive, password)?)
+                .map_err(error::CliError::from)
         }
         Command::VerboseListBare(args) => cmd_list_bare(&args.archive, password),
         Command::VerboseListTechnical(args) => cmd_list_technical(&args.archive, password),
@@ -263,14 +267,14 @@ fn run_inner(cli: Cli) -> Result<(), String> {
             if name.ends_with(".rar") || name.ends_with(".cbr") {
                 cmd_list(&name, password)
             } else {
-                Err(format!("unknown command: {name}"))
+                Err(format!("unknown command: {name}").into())
             }
         }
     }
 }
 
 /// Bare list (`lb` / `vb`): member names only.
-fn cmd_list_bare(archive: &str, password: Option<&str>) -> Result<(), String> {
+fn cmd_list_bare(archive: &str, password: Option<&str>) -> CliResult<()> {
     let rar = ops::open_reader(archive, password)?;
     ops::list_bare(&rar);
     Ok(())
@@ -278,7 +282,7 @@ fn cmd_list_bare(archive: &str, password: Option<&str>) -> Result<(), String> {
 
 /// Technical list (`lt` / `vt`): mtime, sizes, ratio, CRC and method per
 /// member, in the spirit of UnRAR's `lt`.
-fn cmd_list_technical(archive: &str, password: Option<&str>) -> Result<(), String> {
+fn cmd_list_technical(archive: &str, password: Option<&str>) -> CliResult<()> {
     let rar = ops::open_reader(archive, password)?;
     ops::list_technical(&rar);
     Ok(())
@@ -289,7 +293,7 @@ fn cmd_extract(
     password: Option<&str>,
     ts: time::TsSettings,
     max_dict_size: Option<u64>,
-) -> Result<(), String> {
+) -> CliResult<()> {
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
@@ -333,7 +337,7 @@ fn cmd_extract_flat(
     password: Option<&str>,
     ts: time::TsSettings,
     max_dict_size: Option<u64>,
-) -> Result<(), String> {
+) -> CliResult<()> {
     let base = args
         .output_path
         .clone()
@@ -361,16 +365,18 @@ fn cmd_extract_flat(
     Ok(())
 }
 
-fn cmd_list(archive: &str, password: Option<&str>) -> Result<(), String> {
+fn cmd_list(archive: &str, password: Option<&str>) -> CliResult<()> {
     let rar = ops::open_reader(archive, password)?;
     ops::list_entries(&rar, false);
     Ok(())
 }
 
-fn cmd_test(archive: &str, password: Option<&str>) -> Result<(), String> {
+fn cmd_test(archive: &str, password: Option<&str>) -> CliResult<()> {
     let mut rar = ops::open_reader(archive, password)?;
 
-    let report: rar_rs::VerificationReport = rar.verify().map_err(|e| format!("test: {e}"))?;
+    let report: rar_rs::VerificationReport = rar
+        .verify()
+        .map_err(|e| error::CliError::from(e).context("test"))?;
     info!();
     if report.failed() == 0 {
         info!("All {} files OK", report.checked());
@@ -383,15 +389,26 @@ fn cmd_test(archive: &str, password: Option<&str>) -> Result<(), String> {
                 .unwrap_or_else(|_| "<unknown>".to_string());
             info!("{name}: {}", failure.error());
         }
-        Err(format!(
-            "{} file(s) failed, {} checked",
-            report.failed(),
-            report.checked()
+        // Surface the first failure's category so scripts see CRC failures
+        // (exit 3) or wrong passwords (exit 11) instead of a generic error.
+        let code = report
+            .failures()
+            .first()
+            .map_or(error::EXIT_FATAL, |failure| {
+                error::exit_code_for(failure.error().code())
+            });
+        Err(error::CliError::with_code(
+            format!(
+                "{} file(s) failed, {} checked",
+                report.failed(),
+                report.checked()
+            ),
+            code,
         ))
     }
 }
 
-fn cmd_print(args: &PrintArgs, password: Option<&str>) -> Result<(), String> {
+fn cmd_print(args: &PrintArgs, password: Option<&str>) -> CliResult<()> {
     let mut rar = ops::open_reader(&args.archive, password)?;
     ops::print_members(&mut rar, args.file.as_deref())
 }

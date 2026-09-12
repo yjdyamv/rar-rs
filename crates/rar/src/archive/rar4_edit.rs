@@ -1425,6 +1425,7 @@ pub(crate) fn repack_solid_archive(
             // member and has to be header-encrypted on a `-hp` archive).
             writer.set_rar4_writer_comment(final_comment.clone());
             for kept_member in &kept {
+                archive.check_cancel()?;
                 // Directory members are zero-byte placeholders: they contribute
                 // nothing to the solid window (the decoder skips them), so they
                 // are re-emitted with empty data rather than the decoded run.
@@ -1444,6 +1445,7 @@ pub(crate) fn repack_solid_archive(
             }
             // Deferred solid-append additions continue the same fresh chain.
             for entry in additions {
+                archive.check_cancel()?;
                 writer.add_rar4_data(
                     entry.name.clone(),
                     entry.data.clone(),

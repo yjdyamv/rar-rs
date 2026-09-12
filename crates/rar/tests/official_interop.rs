@@ -7,6 +7,19 @@ use support::*;
 
 use rar_rs::{CompressionLevel, EntryWriteOptions};
 
+/// The official-binary tests skip when `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR`
+/// are not configured. The skip prints a marker so a green run is not mistaken
+/// for interop coverage; `SA_REQUIRE_OFFICIAL=1` turns it into a hard failure
+/// so a CI job can demand the suite instead of silently skipping it.
+fn skip_official() {
+    assert!(
+        std::env::var_os("SA_REQUIRE_OFFICIAL").is_none(),
+        "official rar/unrar interop binaries are required (SA_REQUIRE_OFFICIAL is set): set \
+         SA_OFFICIAL_RAR / SA_OFFICIAL_UNRAR"
+    );
+    eprintln!("SKIP: SA_OFFICIAL_RAR / SA_OFFICIAL_UNRAR not set");
+}
+
 /// Official UNRAR (e.g. /home/yuan/下载/rar/unrar) validates archives
 /// produced by rar-rs with every new feature combination.
 /// The official UnRAR console tools still decode RAR 1.5/2.x members (their
@@ -17,7 +30,7 @@ use rar_rs::{CompressionLevel, EntryWriteOptions};
 fn official_unrar_validates_old_format_writers() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
-        None => return, // skipped unless the interop script sets it
+        None => return skip_official(), // skipped unless the interop script sets it
     };
     for version in [rar_rs::ArchiveVersion::V15, rar_rs::ArchiveVersion::V20] {
         let dir = make_temp_dir();
@@ -55,7 +68,7 @@ fn official_unrar_validates_old_format_writers() {
 fn official_unrar_validates_our_feature_archives() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
-        None => return, // skipped unless the interop script sets it
+        None => return skip_official(), // skipped unless the interop script sets it
     };
     let rar = std::env::var_os("SA_OFFICIAL_RAR");
     let dir = make_temp_dir();
@@ -266,7 +279,7 @@ fn official_unrar_validates_our_feature_archives() {
 fn our_unrar_reads_official_archives() {
     let rar = match std::env::var_os("SA_OFFICIAL_RAR") {
         Some(p) => p,
-        None => return, // skipped unless the interop script sets it
+        None => return skip_official(), // skipped unless the interop script sets it
     };
     let dir = make_temp_dir();
     let src = dir.path().join("src");
@@ -326,7 +339,7 @@ fn our_unrar_reads_official_archives() {
 fn official_unrar_validates_deleted_archives() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let rar_bin = std::env::var_os("SA_OFFICIAL_RAR");
     let dir = make_temp_dir();
@@ -468,7 +481,7 @@ fn official_unrar_validates_deleted_archives() {
 fn official_tools_validate_modified_archives() {
     let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let unrar = std::env::var_os("SA_OFFICIAL_UNRAR").unwrap_or(rar_bin.clone());
     let dir = make_temp_dir();
@@ -571,7 +584,7 @@ fn official_tools_validate_modified_archives() {
 fn official_rename_cross_validation() {
     let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let dir = make_temp_dir();
     let src = dir.path().join("src");
@@ -660,7 +673,7 @@ fn official_rename_cross_validation() {
 fn official_repair_and_rebuild_cross_validation() {
     let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let unrar = std::env::var_os("SA_OFFICIAL_UNRAR").unwrap_or(rar_bin.clone());
     let dir = make_temp_dir();
@@ -736,7 +749,7 @@ fn official_repair_and_rebuild_cross_validation() {
 fn official_sfx_cross_validation() {
     let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let unrar = std::env::var_os("SA_OFFICIAL_UNRAR").unwrap_or(rar_bin.clone());
     let dir = make_temp_dir();
@@ -841,7 +854,7 @@ fn official_sfx_cross_validation() {
 fn official_redirection_cross_validation() {
     let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let dir = make_temp_dir();
     let src = dir.path().join("src");
@@ -915,7 +928,7 @@ fn official_redirection_cross_validation() {
 fn official_time_and_owner_cross_validation() {
     let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let unrar = std::env::var_os("SA_OFFICIAL_UNRAR").unwrap_or(rar_bin.clone());
     let dir = make_temp_dir();
@@ -992,7 +1005,7 @@ fn official_time_and_owner_cross_validation() {
 fn official_unrar_validates_rar4_header_edits() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
-        None => return, // skipped unless the interop script sets it
+        None => return skip_official(), // skipped unless the interop script sets it
     };
     let dir = make_temp_dir();
     let path = dir.path().join("rar4-edit.rar");
@@ -1078,11 +1091,11 @@ fn official_unrar_validates_rar4_header_edits() {
 fn official_unrar_validates_rar4_renames() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let dir = make_temp_dir();
 
@@ -1189,7 +1202,7 @@ fn official_unrar_validates_rar4_renames() {
 fn official_unrar_validates_rar4_add_bytes() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let dir = make_temp_dir();
     let path = dir.path().join("bytes4.rar");
@@ -1237,7 +1250,7 @@ fn official_unrar_validates_rar4_add_bytes() {
 fn official_tools_validate_rar4_comments() {
     let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let dir = make_temp_dir();
     let path = dir.path().join("cmt4.rar");
@@ -1301,7 +1314,7 @@ fn official_tools_validate_rar4_comments() {
         .status()
         .unwrap();
     assert!(status.success(), "6.23 could not set the comment");
-    let mut archive = rar_rs::RarArchive::open(&theirs).unwrap();
+    let mut archive = rar_rs::archive::RarArchive::open(&theirs).unwrap();
     assert_eq!(
         archive.get_comment().unwrap(),
         Some(b"official comment \xe4\xb8\xad\xe6\x96\x87".to_vec())
@@ -1314,11 +1327,11 @@ fn official_tools_validate_rar4_comments() {
 fn official_unrar_validates_rar4_deletes() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let dir = make_temp_dir();
     let f1 = dir.path().join("keep.bin");
@@ -1417,7 +1430,7 @@ fn official_unrar_validates_rar4_deletes() {
 fn official_unrar_validates_rar4_appends() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let dir = make_temp_dir();
     let path = dir.path().join("app4.rar");
@@ -1485,7 +1498,7 @@ fn official_unrar_validates_rar4_appends() {
 fn official_unrar_validates_rar4_solid_repack() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let dir = make_temp_dir();
     let path = dir.path().join("solid-repack.rar");
@@ -1551,7 +1564,7 @@ fn official_unrar_validates_rar4_solid_repack() {
 fn official_unrar_validates_rar4_solid_append() {
     let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
         Some(p) => p,
-        None => return,
+        None => return skip_official(),
     };
     let dir = make_temp_dir();
     let path = dir.path().join("solid-app.rar");

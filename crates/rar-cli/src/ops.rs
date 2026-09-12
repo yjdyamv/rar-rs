@@ -8,19 +8,18 @@
 use std::io::Write;
 use std::path::Path;
 
+use crate::error::{CliError, CliResult};
 use rar_rs::{ArchiveReader, EntryRef, ExtractOptions};
 
 /// Open an archive for reading. A bad archive or wrong password becomes the
-/// user-facing error string the command runners return.
-pub fn open_reader(
-    path: impl AsRef<Path>,
-    password: Option<&str>,
-) -> Result<ArchiveReader, String> {
+/// user-facing error the command runners return, keeping the library's
+/// error category (wrong password, locked, format) for the exit code.
+pub fn open_reader(path: impl AsRef<Path>, password: Option<&str>) -> CliResult<ArchiveReader> {
     let mut options = rar_rs::OpenOptions::new();
     if let Some(password) = password {
         options = options.password(password);
     }
-    ArchiveReader::open_with(path, options).map_err(|error| format!("{error}"))
+    ArchiveReader::open_with(path, options).map_err(CliError::from)
 }
 
 /// UTC rendering of a unix timestamp (no chrono dependency).
@@ -137,10 +136,10 @@ pub fn extract_members(
     dest: &Path,
     names: &[String],
     options: ExtractOptions,
-) -> Result<usize, String> {
+) -> CliResult<usize> {
     if names.is_empty() {
         rar.extract_all_with_options(dest, options)
-            .map_err(|error| format!("{error}"))?;
+            .map_err(CliError::from)?;
         return Ok(rar.entries().len());
     }
 
@@ -151,19 +150,22 @@ pub fn extract_members(
         names,
     );
     if wanted.is_empty() {
-        return Err(format!(
-            "no archive members matched the requested name(s): {}",
-            names.join(", ")
+        return Err(CliError::with_code(
+            format!(
+                "no archive members matched the requested name(s): {}",
+                names.join(", ")
+            ),
+            crate::error::EXIT_NO_FILES,
         ));
     }
     for &id in &wanted {
         let member = rar
             .entry(id)
-            .map_err(|error| format!("resolve archive member: {error}"))?
+            .map_err(|error| CliError::from(error).context("resolve archive member"))?
             .name()
             .to_string();
         rar.extract_entry_with_options(id, dest, options)
-            .map_err(|error| format!("extract {member}: {error}"))?;
+            .map_err(|error| CliError::from(error).context(format!("extract {member}")))?;
     }
     Ok(wanted.len())
 }
@@ -175,7 +177,7 @@ pub fn extract_to_stdout(
     rar: &mut ArchiveReader,
     names: &[String],
     max_dict_size: Option<u64>,
-) -> Result<(), String> {
+) -> CliResult<()> {
     let wanted = crate::selector::select_entries(
         rar.entries()
             .filter(|entry| !entry.is_dir())
@@ -183,9 +185,12 @@ pub fn extract_to_stdout(
         names,
     );
     if wanted.is_empty() && !names.is_empty() {
-        return Err(format!(
-            "no archive members matched the requested name(s): {}",
-            names.join(", ")
+        return Err(CliError::with_code(
+            format!(
+                "no archive members matched the requested name(s): {}",
+                names.join(", ")
+            ),
+            crate::error::EXIT_NO_FILES,
         ));
     }
 
@@ -200,18 +205,18 @@ pub fn extract_to_stdout(
     for id in wanted {
         let name = rar
             .entry(id)
-            .map_err(|error| format!("resolve archive member: {error}"))?
+            .map_err(|error| CliError::from(error).context("resolve archive member"))?
             .name()
             .to_string();
         rar.copy_entry_to_with_options(id, &mut out, options)
-            .map_err(|error| format!("read {name}: {error}"))?;
+            .map_err(|error| CliError::from(error).context(format!("read {name}")))?;
     }
-    out.flush().map_err(|error| format!("stdout: {error}"))
+    out.flush().map_err(CliError::from)
 }
 
 /// Print one member, or every file member when `file` is `None`, to stdout
 /// (`p`).
-pub fn print_members(rar: &mut ArchiveReader, file: Option<&str>) -> Result<(), String> {
+pub fn print_members(rar: &mut ArchiveReader, file: Option<&str>) -> CliResult<()> {
     let wanted: Vec<_> = if let Some(file) = file {
         rar.entries_named(file)
             .filter(|entry| !entry.is_dir())
@@ -225,8 +230,9 @@ pub fn print_members(rar: &mut ArchiveReader, file: Option<&str>) -> Result<(), 
     };
     if wanted.is_empty() && file.is_some() {
         let file = file.unwrap_or_default();
-        return Err(format!(
-            "no archive members matched the requested name(s): {file}"
+        return Err(CliError::with_code(
+            format!("no archive members matched the requested name(s): {file}"),
+            crate::error::EXIT_NO_FILES,
         ));
     }
 
@@ -240,11 +246,11 @@ pub fn print_members(rar: &mut ArchiveReader, file: Option<&str>) -> Result<(), 
     for id in wanted {
         let name = rar
             .entry(id)
-            .map_err(|error| format!("resolve archive member: {error}"))?
+            .map_err(|error| CliError::from(error).context("resolve archive member"))?
             .name()
             .to_string();
         rar.copy_entry_to_with_options(id, &mut out, options)
-            .map_err(|error| format!("{name}: {error}"))?;
+            .map_err(|error| CliError::from(error).context(name))?;
     }
-    out.flush().map_err(|error| format!("stdout: {error}"))
+    out.flush().map_err(CliError::from)
 }

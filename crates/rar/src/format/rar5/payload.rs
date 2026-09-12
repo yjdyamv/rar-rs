@@ -175,5 +175,37 @@ pub(crate) fn decode_member(
             out,
         )?
     };
+    if written != hdr.unpacked_size {
+        // A short STORE payload (or a packed stream that stopped early) must
+        // not surface as a silently truncated member even when the stored CRC
+        // was recomputed over the truncated data.
+        return Err(RarError::Format(format!(
+            "member {}: decoded {written} bytes, header declares {}",
+            hdr.name, hdr.unpacked_size
+        )));
+    }
     Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_payload_shorter_than_declared_is_rejected() {
+        let hdr = FileHeader {
+            name: "short.bin".into(),
+            unpacked_size: 4,
+            comp_method: COMP_METHOD_STORE,
+            ..Default::default()
+        };
+        let payload = DecryptedPayload {
+            data: b"ab".to_vec(),
+            params: None,
+            keys: None,
+        };
+        let mut out = Vec::new();
+        let err = decode_member(&hdr, &payload, None, &mut out).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "got {err}");
+    }
 }

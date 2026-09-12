@@ -475,6 +475,14 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
     let mut pos = start + 32;
 
     let (pack_size, unp_size) = if block.flags & FHD_LARGE != 0 {
+        // The 64-bit high halves extend the fixed area; a crafted header can
+        // set FHD_LARGE while head_size stops at the fixed 32 bytes, so check
+        // the extent before slicing instead of relying on `name_end` below.
+        if pos + 8 > head_end {
+            return Err(RarError::Format(
+                "RAR4: FHD_LARGE header too short for 64-bit sizes".into(),
+            ));
+        }
         let high_pack = u32::from_le_bytes(h[pos..pos + 4].try_into().unwrap()) as u64;
         let high_unp = u32::from_le_bytes(h[pos + 4..pos + 8].try_into().unwrap()) as u64;
         pos += 8;
@@ -939,5 +947,31 @@ mod tests {
         let (c, len) = parse_file_comment(&b);
         assert_eq!(c.unwrap(), payload);
         assert_eq!(len, b.len());
+    }
+
+    /// A crafted FILE_HEAD can set FHD_LARGE while `head_size` stops at the
+    /// fixed 32 bytes; the parser must reject it instead of slicing past the
+    /// header for the 64-bit high halves.
+    #[test]
+    fn fhd_large_header_without_high_sizes_is_rejected() {
+        let flags = LONG_BLOCK | FHD_LARGE;
+        let mut header = vec![0u8; FILE_HEADER_FIXED];
+        header[2] = FILE_HEAD;
+        header[3..5].copy_from_slice(&flags.to_le_bytes());
+        header[5..7].copy_from_slice(&(FILE_HEADER_FIXED as u16).to_le_bytes());
+        let block = Rar4Block {
+            head_crc: 0,
+            head_type: FILE_HEAD,
+            flags,
+            offset: 0,
+            header_end: FILE_HEADER_FIXED as u64,
+            total_size: FILE_HEADER_FIXED as u64,
+            header,
+        };
+        let err = parse_file_header(&block).unwrap_err();
+        assert!(
+            matches!(err, RarError::Format(_)),
+            "expected a format error, got {err}"
+        );
     }
 }

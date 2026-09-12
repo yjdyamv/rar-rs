@@ -1,87 +1,13 @@
-//! Bounded-memory emission machinery: counting/progress/CRC writer
-//! adapters, the encrypted/plaintext payload emitter and the arbitrary-range
-//! CBC emitter used for exact multi-volume splits.
+//! RAR5 payload emission: the encrypted/plaintext stream selector and the
+//! arbitrary-range AES-256-CBC emitter used for byte-exact multi-volume
+//! splits. Counting/progress/CRC adapters are format-neutral and live in
+//! [`crate::format::shared::engine`].
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
 
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::fs::atomic::temp_suffix;
-use crate::write_progress::ProgressTracker;
-/// Wraps a writer and counts the bytes written through it.
-pub(crate) struct CountingWriter<'a> {
-    pub(crate) inner: &'a mut dyn Write,
-    written: u64,
-}
-
-impl<'a> CountingWriter<'a> {
-    pub(crate) fn new(inner: &'a mut dyn Write) -> Self {
-        Self { inner, written: 0 }
-    }
-
-    pub(crate) fn written(&self) -> u64 {
-        self.written
-    }
-}
-
-impl Write for CountingWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.written += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-}
-
-/// Wraps a writer and reports the member's written bytes through the shared
-/// progress tracker after every write. `written` may be seeded with a
-/// non-zero offset (multi-volume members resume their counter across volume
-/// boundaries).
-pub(crate) struct ProgressWriter<'a> {
-    pub(crate) inner: &'a mut dyn Write,
-    pub(crate) total: u64,
-    pub(crate) written: u64,
-    pub(crate) member: usize,
-    pub(crate) progress: Option<std::sync::Arc<std::sync::Mutex<ProgressTracker>>>,
-}
-
-impl Write for ProgressWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.written += n as u64;
-        if let Some(progress) = &self.progress {
-            let member = self.member;
-            progress
-                .lock()
-                .expect("progress lock")
-                .report(member, self.written, self.total);
-        }
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-}
-
-/// CRC32 sink for the streaming probe pass.
-pub(crate) struct CrcSink<'a>(pub(crate) &'a mut crc32fast::Hasher);
-
-impl Write for CrcSink<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.update(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
 
 /// A member's payload in transit: plaintext passthrough or on-the-fly
 /// AES-256-CBC encryption.
@@ -218,23 +144,4 @@ impl CbcRangeEmitter {
         }
         Ok(())
     }
-}
-
-/// Removes a temporary spill file on drop (covers every error path).
-pub(crate) struct SpillGuard(pub(crate) PathBuf);
-
-impl Drop for SpillGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
-/// Temporary spill file for the streaming compressed path, kept next to
-/// the archive being written.
-pub(crate) fn spill_path_for(archive_path: &Path) -> PathBuf {
-    let name = archive_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "archive".to_string());
-    archive_path.with_file_name(format!(".{name}.rar5spill-{}", temp_suffix()))
 }

@@ -275,8 +275,7 @@ fn bench_extract(name: &str, data: &[u8]) {
     let seq_out = dir.join("seq");
     let t0 = std::time::Instant::now();
     {
-        let mut ar = rar_rs::RarArchive::open(&archive_path).unwrap();
-        ar.set_progress_callback(Some(Box::new(|_, _| {})));
+        let mut ar = rar_rs::ArchiveReader::open(&archive_path).unwrap();
         ar.extract_all_with_options(&seq_out, rar_rs::ExtractOptions::default())
             .unwrap();
     }
@@ -285,7 +284,7 @@ fn bench_extract(name: &str, data: &[u8]) {
     let par_out = dir.join("par");
     let t1 = std::time::Instant::now();
     {
-        let mut ar = rar_rs::RarArchive::open(&archive_path).unwrap();
+        let mut ar = rar_rs::ArchiveReader::open(&archive_path).unwrap();
         ar.extract_all_with_options(&par_out, rar_rs::ExtractOptions::default())
             .unwrap();
     }

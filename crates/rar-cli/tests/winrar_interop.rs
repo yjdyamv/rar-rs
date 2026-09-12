@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Directory containing `Rar.exe` and `UnRAR.exe`, when WinRAR is
-/// installed. `None` skips the tests.
+/// installed. `None` skips the tests; the skip prints a visible marker and
+/// `SA_REQUIRE_WINRAR=1` turns a missing installation into a hard failure so
+/// a CI job can demand the suite instead of silently skipping it.
 fn winrar_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("SA_WINRAR_DIR") {
         return Some(PathBuf::from(dir));
@@ -40,6 +42,11 @@ fn winrar_dir() -> Option<PathBuf> {
             }
         }
     }
+    assert!(
+        std::env::var_os("SA_REQUIRE_WINRAR").is_none(),
+        "WinRAR is required (SA_REQUIRE_WINRAR is set): set SA_WINRAR_DIR"
+    );
+    eprintln!("SKIP: WinRAR not found (set SA_WINRAR_DIR)");
     None
 }
 

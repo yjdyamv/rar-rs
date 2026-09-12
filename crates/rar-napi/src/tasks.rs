@@ -728,14 +728,14 @@ impl Task for TestArchiveTask {
   type JsValue = Vec<u32>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut archive = match self.password.as_deref() {
-      Some(pw) if !pw.is_empty() => {
-        rar_rs::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
-      }
-      _ => rar_rs::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
-    };
-    let (checked, failed) = archive.test().map_err(to_napi_error)?;
-    Ok(vec![checked as u32, failed as u32])
+    let mut options = rar_rs::OpenOptions::new();
+    if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
+      options = options.password(pw);
+    }
+    let mut archive =
+      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+    let report = archive.verify().map_err(to_napi_error)?;
+    Ok(vec![report.checked() as u32, report.failed() as u32])
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -839,13 +839,14 @@ impl Task for ListEntriesDetailedTask {
   type JsValue = Vec<EntryInfo>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut options = rar_rs::OpenOptions::new();
+    let mut options = rar_rs::OpenOptions::new().scan_strategy(if self.quick {
+      rar_rs::ScanStrategy::PreferQuickOpen
+    } else {
+      rar_rs::ScanStrategy::Full
+    });
     if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
       options = options.password(pw);
     }
-    // `ArchiveReader` transparently prefers the quick-open record and falls
-    // back to a full scan, so the explicit `quick` selector is subsumed.
-    let _ = self.quick;
     let archive =
       rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
     Ok(entry_infos(&archive))
@@ -1076,12 +1077,12 @@ impl Task for ExtractArchiveTask {
   type JsValue = ();
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut archive = match self.opts.password.as_deref() {
-      Some(pw) if !pw.is_empty() => {
-        rar_rs::RarArchive::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
-      }
-      _ => rar_rs::RarArchive::open(&self.archive_path).map_err(to_napi_error)?,
-    };
+    let mut options = rar_rs::OpenOptions::new();
+    if let Some(pw) = self.opts.password.as_deref().filter(|pw| !pw.is_empty()) {
+      options = options.password(pw);
+    }
+    let mut archive =
+      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
     archive.set_cancel_flag(self.cancel.take());
     let dest = Path::new(&self.opts.dest_path);
     fs::create_dir_all(dest)

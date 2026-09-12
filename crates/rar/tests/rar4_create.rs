@@ -1407,3 +1407,144 @@ fn rar4_multivolume_volumes_do_not_exceed_the_requested_size() {
         );
     }
 }
+
+/// The parallel batch emission path must apply the same FILE_HEAD budget as
+/// the sequential one: every emitted RAR4 volume respects `-v`, and the split
+/// members still read back intact.
+#[test]
+#[cfg(feature = "parallel")]
+fn rar4_batch_multivolume_volumes_do_not_exceed_the_requested_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for i in 0..2u8 {
+        let p = dir.path().join(format!("m{i}.bin"));
+        let payload: Vec<u8> = (0..60_000u32)
+            .map(|index| ((index + i as u32) % 251) as u8)
+            .collect();
+        std::fs::write(&p, &payload).unwrap();
+        paths.push(p);
+    }
+    let base = dir.path().join("batch-mv.rar");
+    let volume_size = 16_000u64;
+    let mut archive = ArchiveWriter::create_with(
+        &base,
+        WriterOptions::new()
+            .compression(ArchiveVersion::V29)
+            .volume_size(volume_size),
+    )
+    .expect("create");
+    let entries: Vec<rar_rs::WriteEntry<'_>> = paths
+        .iter()
+        .map(|p| rar_rs::WriteEntry::File {
+            path: p,
+            name: None,
+            options: ewo(0),
+        })
+        .collect();
+    archive.add_batch(&entries).expect("add_batch");
+    archive.finish().expect("close");
+
+    let volumes = discover_volumes(&base);
+    assert!(volumes.len() > 1, "expected multiple volumes");
+    for path in &volumes {
+        let len = std::fs::metadata(path).unwrap().len();
+        assert!(
+            len <= volume_size,
+            "{} is {len} bytes, over the {volume_size}-byte volume size",
+            path.display()
+        );
+    }
+
+    let mut reader = ArchiveReader::open(&base).expect("reopen");
+    for (i, p) in paths.iter().enumerate() {
+        let data = reader
+            .read_entry(reader.unique_entry(&format!("m{i}.bin")).unwrap())
+            .expect("read member");
+        assert_eq!(data, std::fs::read(p).unwrap());
+    }
+}
+
+/// Members at or above the streaming threshold must roundtrip through the
+/// spill-based path: STORE split across volumes, an encrypted STORE fallback,
+/// and a compressed member whose packed spill wins.
+#[test]
+fn create_rar4_streams_large_members_beyond_the_threshold() {
+    let dir = make_temp_dir();
+    let size = 66 * 1024 * 1024usize;
+    let src = dir.path().join("large.bin");
+    // Pseudo-random: the member stays STORE, so the streaming copy path and
+    // the split emitter are what get exercised here.
+    let mut payload = vec![0u8; size];
+    let mut state = 0x9E37_9B97_7F4A_7C15u64;
+    for byte in payload.iter_mut() {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        *byte = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8;
+    }
+    std::fs::write(&src, &payload).unwrap();
+
+    // STORE, multi-volume: the streaming emitter splits every segment.
+    let store = dir.path().join("large-store.rar");
+    let volume_size = 8 * 1024 * 1024u64;
+    let mut archive = ArchiveWriter::create_with(
+        &store,
+        WriterOptions::new()
+            .compression(ArchiveVersion::V29)
+            .volume_size(volume_size),
+    )
+    .unwrap();
+    archive.add_path(&src, ewo(0)).unwrap();
+    archive.finish().unwrap();
+    let volumes = discover_volumes(&store);
+    assert!(volumes.len() > 1, "expected multiple volumes");
+    for path in &volumes {
+        assert!(
+            std::fs::metadata(path).unwrap().len() <= volume_size,
+            "{} exceeds the volume size",
+            path.display()
+        );
+    }
+    let mut reader = ArchiveReader::open(&store).unwrap();
+    let entry = reader.unique_entry("large.bin").unwrap();
+    assert_eq!(reader.read_entry(entry).unwrap(), payload);
+
+    // Encrypted STORE, single volume: the payload is encrypted on the fly by
+    // the range emitter.
+    let enc = dir.path().join("large-enc.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &enc,
+        WriterOptions::new()
+            .compression(ArchiveVersion::V29)
+            .password("hunter2"),
+    )
+    .unwrap();
+    archive.add_path(&src, ewo(0)).unwrap();
+    archive.finish().unwrap();
+    let mut reader =
+        ArchiveReader::open_with(&enc, OpenOptions::new().password("hunter2")).unwrap();
+    let entry = reader.unique_entry("large.bin").unwrap();
+    assert_eq!(reader.read_entry(entry).unwrap(), payload);
+
+    // Compressible content: the streaming LZ encode wins and its packed spill
+    // roundtrips.
+    let text = dir.path().join("large.txt");
+    let line = b"the quick brown fox jumps over the lazy dog 0123456789\n";
+    let mut data = Vec::with_capacity(size + line.len());
+    while data.len() < size {
+        data.extend_from_slice(line);
+    }
+    data.truncate(size);
+    std::fs::write(&text, &data).unwrap();
+    let packed = dir.path().join("large-packed.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &packed,
+        WriterOptions::new().compression(ArchiveVersion::V29),
+    )
+    .unwrap();
+    archive.add_path(&text, ewo(1)).unwrap();
+    archive.finish().unwrap();
+    let mut reader = ArchiveReader::open(&packed).unwrap();
+    let entry = reader.unique_entry("large.txt").unwrap();
+    assert_eq!(reader.read_entry(entry).unwrap(), data);
+}

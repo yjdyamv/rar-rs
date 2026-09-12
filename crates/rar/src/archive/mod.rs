@@ -1,8 +1,14 @@
-//! The [RarArchive] facade: shared archive state, entry-point constructors,
-//! configuration setters and drop-time cleanup.
+//! Typed role facades over the internal archive engine.
+//!
+//! [`ArchiveReader`] (listing/reading/verification), [`ArchiveWriter`]
+//! (create/append) and [`ArchiveEditor`] (delete/rename/comment/recovery)
+//! are the supported public API (ADR 0006); they share the `RarArchive`
+//! engine defined here together with the archive state, entry-point
+//! constructors and drop-time cleanup.
 //!
 //! This module is intentionally a thin seam. Read/decode lives in
-//! [`crate::format::rar5::extract`], the write pipeline in [`crate::format::rar5::write`],
+//! `crate::format::rar5::extract` and `crate::format::rar4`, the write
+//! pipeline in `crate::format::shared` + `crate::format::{rar5,rar4}::write`,
 //! create/append finalization in `crate::archive::create`, and surgical
 //! edit transactions (delete/rename/comment/recovery) in
 //! `crate::archive::transaction`.
@@ -275,7 +281,15 @@ impl Default for WriteState {
     }
 }
 
-/// RAR archive reader/writer for legacy RAR 1.5–4.x and RAR5/RAR7.
+/// Legacy RAR archive engine: the shared implementation behind
+/// [`ArchiveReader`], [`ArchiveWriter`] and [`ArchiveEditor`].
+///
+/// Not part of the supported public API (ADR 0006): new code uses the typed
+/// role facades. It stays reachable as `rar_rs::archive::RarArchive` because
+/// the in-tree byte-parity test corpus and the internal role delegation build
+/// on it; it is hidden from the rustdoc surface and will be removed in a
+/// future breaking release.
+#[doc(hidden)]
 pub struct RarArchive {
     pub(crate) path: PathBuf,
     pub(crate) mode: Mode,

@@ -38,14 +38,6 @@ pub use headers::{DataChunk, FileHeader};
 /// Takes the `Option` by field reference (not `&mut self`) so callers keep the
 /// field-level disjoint borrow of `archive.stream`: they can still borrow other
 /// fields of the same archive (e.g. `password`, `volume_paths`) on the same line.
-pub(crate) fn stream_mut(
-    stream: &mut Option<Box<dyn crate::archive::ArchiveStream>>,
-) -> crate::error::RarResult<&mut Box<dyn crate::archive::ArchiveStream>> {
-    stream.as_mut().ok_or_else(|| {
-        crate::error::RarError::InvalidState("archive has no underlying stream".into())
-    })
-}
-
 // ── Archive Signature ──────────────────────────────────────────────────────
 /// RAR5 magic number (8 bytes).
 pub const RAR5_SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";

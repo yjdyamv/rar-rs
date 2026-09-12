@@ -78,7 +78,7 @@ mod write_progress;
 pub use archive::{
     AppendOptions, ArchiveEditor, ArchiveEntry, ArchiveReader, ArchiveWriter, BatchEntry,
     CompressionLevel, DictionarySize, EditOp, EditPlan, EditReport, Entries, EntryId, EntryMatches,
-    EntryRef, EntryWriteOptions, OpenOptions, RarArchive, ScanStrategy, SolidMode, ThreadCount,
+    EntryRef, EntryWriteOptions, OpenOptions, ScanStrategy, SolidMode, ThreadCount,
     VerificationFailure, VerificationReport, WriteEntry, WriteReport, WriterOptions,
     discover_volumes,
 };
@@ -95,7 +95,7 @@ pub use crypto::{EncryptionParams, decrypt_data, derive_keys, encrypt_data};
 pub use detect::sfx_offset_of;
 pub use error::{ErrorCode, RarError, RarResult};
 pub use features::{Feature, FeatureSet};
-pub use options::{CreateOptions, ExtractOptions, SolidReset, parse_dict_bytes, parse_dict_size};
+pub use options::{ExtractOptions, SolidReset, parse_dict_bytes, parse_dict_size};
 pub use parallel::{set_compression_threads, set_extraction_threads};
 pub use recovery::rev50::{build_recovery_volumes_for_set, plan_recovery_volume_count};
 pub use recovery::{

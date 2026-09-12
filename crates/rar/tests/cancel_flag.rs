@@ -136,3 +136,48 @@ fn unset_flag_allows_completion() {
         payload()
     );
 }
+
+/// A multi-volume edit checks the cancel flag per member and leaves every
+/// original volume untouched when it aborts.
+#[test]
+fn multivolume_edit_aborts_when_flag_already_set() {
+    let dir = temp_dir();
+    let base = dir.path().join("mv-cancel.rar");
+    let member = payload();
+    {
+        let mut rar = rar_rs::ArchiveWriter::create_with(
+            &base,
+            rar_rs::WriterOptions::new().volume_size(1_000_000),
+        )
+        .expect("create");
+        let opts =
+            rar_rs::EntryWriteOptions::new().compression_level(rar_rs::CompressionLevel::STORE);
+        rar.add_bytes("a.bin", &member, opts).expect("add a");
+        rar.add_bytes("b.bin", &member, opts).expect("add b");
+        rar.finish().expect("close");
+    }
+    let volumes = rar_rs::discover_volumes(&base);
+    assert!(volumes.len() > 1, "precondition: multi-volume set");
+    let before: Vec<Vec<u8>> = volumes
+        .iter()
+        .map(|path| std::fs::read(path).expect("read volume"))
+        .collect();
+
+    let flag = Arc::new(AtomicBool::new(true));
+    let mut editor = rar_rs::ArchiveEditor::open(&volumes[0]).expect("open editor");
+    editor.set_cancel_flag(Some(flag));
+    let id = editor.unique_entry("a.bin").expect("entry");
+    let res = editor.delete_entries(&[id]);
+    assert!(
+        matches!(res, Err(RarError::Cancelled)),
+        "expected Cancelled, got {res:?}"
+    );
+    drop(editor);
+
+    // Every original volume byte is still in place.
+    let after = rar_rs::discover_volumes(&base);
+    assert_eq!(after.len(), volumes.len(), "volume set changed");
+    for (path, old) in after.iter().zip(before) {
+        assert_eq!(std::fs::read(path).expect("read volume"), old);
+    }
+}
