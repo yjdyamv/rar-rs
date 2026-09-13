@@ -2,7 +2,9 @@ use std::io::Write;
 
 use rar_rs::{CompressionLevel, EntryWriteOptions};
 
-use crate::support::{RAR_CLI, UNRAR_CLI, cli_names, make_temp_dir, set_mtime_ago};
+use crate::support::{
+    RAR_CLI, UNRAR_CLI, cli_names, make_temp_dir, pseudo_random_bytes, set_mtime_ago,
+};
 // ── WinRAR CLI parity batch 3: -sl/-sm/-ed, -tn/-to, -si, -tk, -p-/-c-, ──
 // ── -ierr, -ad ────────────────────────────────────────────────────────────
 
@@ -604,4 +606,167 @@ fn cli_hardlink_flag_stores_redirects() {
             .compressed_size()
     };
     assert!(packed4("h1.txt") > 0 && packed4("h2.txt") > 0);
+}
+
+// ── -oi identical files ─────────────────────────────────────────────────────
+
+/// `rar a -oi` stores the first identical file and a reference for the
+/// rest (zero packed bytes); extraction restores the exact bytes. The
+/// default 64 KiB threshold, `-oi1:<size>` overrides, `-oi-` and RAR4
+/// (which has no redirect records) are covered too.
+#[cfg(any(unix, windows))]
+#[test]
+fn cli_identical_flag_stores_references() {
+    let dir = make_temp_dir();
+    let data = pseudo_random_bytes(64 * 1024, 11);
+    std::fs::write(dir.path().join("i1.bin"), &data).unwrap();
+    std::fs::write(dir.path().join("i2.bin"), &data).unwrap();
+    let other = pseudo_random_bytes(64 * 1024, 12);
+    std::fs::write(dir.path().join("other.bin"), &other).unwrap();
+
+    let archive = dir.path().join("oi.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-oi", "-idq"])
+        .arg(&archive)
+        .args(["i1.bin", "i2.bin", "other.bin"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let reader = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let packed = |name: &str| {
+        reader
+            .entry(reader.unique_entry(name).unwrap())
+            .unwrap()
+            .compressed_size()
+    };
+    assert!(packed("i1.bin") > 0);
+    assert_eq!(
+        packed("i2.bin"),
+        0,
+        "the second identical file is a reference"
+    );
+    assert!(
+        packed("other.bin") > 0,
+        "same-size different bytes are not referenced"
+    );
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-idq", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read(out.join("i2.bin")).unwrap(), data);
+
+    // -oi- disables the dedup.
+    let off = dir.path().join("off.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-oi-", "-idq"])
+        .arg(&off)
+        .args(["i1.bin", "i2.bin"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let reader = rar_rs::ArchiveReader::open(&off).unwrap();
+    assert!(
+        reader
+            .entry(reader.unique_entry("i2.bin").unwrap())
+            .unwrap()
+            .compressed_size()
+            > 0
+    );
+
+    // RAR4 has no redirect records: -ma4 -oi stores both files in full.
+    let rar4 = dir.path().join("oi4.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-oi", "-idq"])
+        .arg(&rar4)
+        .args(["i1.bin", "i2.bin"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let reader = rar_rs::ArchiveReader::open(&rar4).unwrap();
+    assert!(
+        reader
+            .entry(reader.unique_entry("i2.bin").unwrap())
+            .unwrap()
+            .compressed_size()
+            > 0
+    );
+
+    // -oi1:<minsize> lowers the 64 KiB default threshold.
+    let small = pseudo_random_bytes(4096, 13);
+    std::fs::write(dir.path().join("s1.bin"), &small).unwrap();
+    std::fs::write(dir.path().join("s2.bin"), &small).unwrap();
+    let lowered = dir.path().join("lowered.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-oi1:1k", "-idq"])
+        .arg(&lowered)
+        .args(["s1.bin", "s2.bin"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let reader = rar_rs::ArchiveReader::open(&lowered).unwrap();
+    assert_eq!(
+        reader
+            .entry(reader.unique_entry("s2.bin").unwrap())
+            .unwrap()
+            .compressed_size(),
+        0
+    );
+}
+
+/// `-oi3` lists identical groups and creates no archive; `-oi4` lists the
+/// bare duplicate names.
+#[cfg(any(unix, windows))]
+#[test]
+fn cli_identical_listing_modes() {
+    let dir = make_temp_dir();
+    let data = pseudo_random_bytes(64 * 1024, 21);
+    std::fs::write(dir.path().join("g1.bin"), &data).unwrap();
+    std::fs::write(dir.path().join("g2.bin"), &data).unwrap();
+    std::fs::write(dir.path().join("g3.bin"), &data).unwrap();
+    std::fs::write(
+        dir.path().join("unique.bin"),
+        pseudo_random_bytes(64 * 1024, 22),
+    )
+    .unwrap();
+
+    let dummy = dir.path().join("dummy.rar");
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a", "-oi3"])
+        .arg(&dummy)
+        .args(["g1.bin", "g2.bin", "g3.bin", "unique.bin"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("g1.bin") && text.contains("g3.bin"), "{text}");
+    assert!(!text.contains("unique.bin"), "{text}");
+    assert!(text.contains("2 found."), "{text}");
+    assert!(!dummy.exists(), "-oi3 must not create an archive");
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a", "-oi4"])
+        .arg(&dummy)
+        .args(["g1.bin", "g2.bin", "g3.bin", "unique.bin"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("g2.bin") && text.contains("g3.bin"), "{text}");
+    assert!(
+        !text.contains("g1.bin"),
+        "-oi4 skips the first file: {text}"
+    );
+    assert!(!dummy.exists(), "-oi4 must not create an archive");
 }

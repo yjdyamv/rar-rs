@@ -582,6 +582,7 @@ name = "rar-cli"
 version = "0.1.2"
 dependencies = [
  "clap",
+ "crc32fast",
  "rar-rs",
  "sha2",
  "tempfile",

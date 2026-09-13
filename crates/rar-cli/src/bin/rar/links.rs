@@ -7,12 +7,215 @@
 //! their target path.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 
+use crate::info;
 use crate::name_policy::Collected;
 
 /// A redirect to append after the data members: `(name, type, target)`.
 pub(crate) type LinkRedirect = (String, u64, String);
+
+/// How `-oi` treats identical files.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdenticalMode {
+    /// `-oi` / `-oi1`: store the first file, redirect the rest.
+    Dedup,
+    /// `-oi2`: like `Dedup`, but announce the groups before archiving.
+    Announce,
+    /// `-oi3`: list each group (size + names); no archive is created.
+    List,
+    /// `-oi4`: list the bare duplicate names (the first file is skipped).
+    ListBare,
+}
+
+/// Parsed `-oi[0-4][:<minsize>]` switch.
+pub(crate) struct IdenticalSpec {
+    pub mode: IdenticalMode,
+    /// Files smaller than this are never compared (default 64 KiB).
+    pub min_size: u64,
+}
+
+/// Parse the normalized `--identical` value. `Ok(None)` means the switch
+/// was absent or explicitly turned off (`-oi0` / `-oi-`).
+pub(crate) fn parse_identical(spec: Option<&str>) -> Result<Option<IdenticalSpec>, String> {
+    let Some(spec) = spec else {
+        return Ok(None);
+    };
+    let (mode_part, min_part) = match spec.split_once(':') {
+        Some((mode, size)) => (mode, Some(size)),
+        None => (spec, None),
+    };
+    let mode = match mode_part {
+        "" | "1" => IdenticalMode::Dedup,
+        "2" => IdenticalMode::Announce,
+        "3" => IdenticalMode::List,
+        "4" => IdenticalMode::ListBare,
+        "0" | "-" => return Ok(None),
+        other => return Err(format!("Unknown option: oi{other}")),
+    };
+    let min_size = match min_part {
+        None | Some("") => 64 * 1024,
+        Some(size) => parse_min_size(size)?,
+    };
+    Ok(Some(IdenticalSpec { mode, min_size }))
+}
+
+/// `-oi` size units: lowercase is binary (`k` = 1024), uppercase decimal
+/// (`K` = 1000), matching Rar.txt.
+fn parse_min_size(spec: &str) -> Result<u64, String> {
+    let (digits, multiplier) = match spec.chars().last() {
+        Some(unit) if unit.is_ascii_alphabetic() => {
+            let multiplier = match unit {
+                'b' | 'B' => 1,
+                'k' => 1024,
+                'K' => 1000,
+                'm' => 1024 * 1024,
+                'M' => 1_000_000,
+                'g' => 1024 * 1024 * 1024,
+                'G' => 1_000_000_000,
+                't' => 1024u64.pow(4),
+                'T' => 1_000_000_000_000,
+                other => return Err(format!("Invalid -oi size unit: {other}")),
+            };
+            (&spec[..spec.len() - unit.len_utf8()], multiplier)
+        }
+        _ => (spec, 1),
+    };
+    let value: u64 = digits
+        .parse()
+        .map_err(|_| format!("Invalid -oi size: {spec}"))?;
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("-oi size too large: {spec}"))
+}
+
+/// Groups of indices (into `collected`) whose files have identical contents,
+/// in first-occurrence order; only groups with two or more members.
+fn identical_groups(collected: &[Collected], min_size: u64) -> Vec<Vec<usize>> {
+    let mut by_key: HashMap<(u64, u32), usize> = HashMap::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, c) in collected.iter().enumerate() {
+        if c.is_dir {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&c.path) else {
+            continue;
+        };
+        if meta.len() < min_size {
+            continue;
+        }
+        let Ok(crc) = crc32_file(&c.path) else {
+            continue;
+        };
+        match by_key.get(&(meta.len(), crc)) {
+            Some(&group) => {
+                // A CRC collision must not turn two different files into a
+                // reference: compare the bytes before accepting the match.
+                if files_equal(&collected[groups[group][0]].path, &c.path) {
+                    groups[group].push(i);
+                }
+            }
+            None => {
+                by_key.insert((meta.len(), crc), groups.len());
+                groups.push(vec![i]);
+            }
+        }
+    }
+    groups.retain(|group| group.len() > 1);
+    groups
+}
+
+fn crc32_file(path: &Path) -> std::io::Result<u32> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            return Ok(hasher.finalize());
+        }
+        hasher.update(&buf[..read]);
+    }
+}
+
+fn files_equal(a: &Path, b: &Path) -> bool {
+    let (Ok(mut left), Ok(mut right)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    let mut left_buf = [0u8; 64 * 1024];
+    let mut right_buf = [0u8; 64 * 1024];
+    loop {
+        match (left.read(&mut left_buf), right.read(&mut right_buf)) {
+            (Ok(0), Ok(0)) => return true,
+            (Ok(n), Ok(m)) if n == m && left_buf[..n] == right_buf[..m] => {}
+            _ => return false,
+        }
+    }
+}
+
+/// Turn every duplicate in an identical-file group into a type-5 "file
+/// copy" redirect to the first member; `-oi2` announces the groups first.
+pub(crate) fn apply_identical_redirects(
+    collected: Vec<Collected>,
+    spec: &IdenticalSpec,
+) -> (Vec<Collected>, Vec<LinkRedirect>) {
+    let groups = identical_groups(&collected, spec.min_size);
+    if groups.is_empty() {
+        return (collected, Vec::new());
+    }
+    if spec.mode == IdenticalMode::Announce {
+        print_groups(&collected, &groups, false);
+    }
+    let mut copy = vec![false; collected.len()];
+    let mut redirects = Vec::new();
+    for group in &groups {
+        let first = &collected[group[0]];
+        for &i in &group[1..] {
+            copy[i] = true;
+            redirects.push((collected[i].name.clone(), 5, first.name.clone()));
+        }
+    }
+    let kept = collected
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !copy[*i])
+        .map(|(_, c)| c)
+        .collect();
+    (kept, redirects)
+}
+
+/// Print the identical groups for the listing modes (`-oi3` / `-oi4`).
+pub(crate) fn print_identical_groups(collected: &[Collected], spec: &IdenticalSpec) {
+    let groups = identical_groups(collected, spec.min_size);
+    print_groups(collected, &groups, spec.mode == IdenticalMode::ListBare);
+}
+
+fn print_groups(collected: &[Collected], groups: &[Vec<usize>], bare: bool) {
+    if bare {
+        for group in groups {
+            for &i in &group[1..] {
+                info!("{}", collected[i].name);
+            }
+        }
+        return;
+    }
+    for (g, group) in groups.iter().enumerate() {
+        if g > 0 {
+            info!("");
+        }
+        for &i in group {
+            let size = std::fs::metadata(&collected[i].path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            info!("{size:>12}  {}", collected[i].name);
+        }
+    }
+    if !groups.is_empty() {
+        let duplicates: usize = groups.iter().map(|g| g.len() - 1).sum();
+        info!("{duplicates} found.");
+    }
+}
 
 /// Split `collected` into data members plus link redirects.
 ///

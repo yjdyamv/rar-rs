@@ -191,10 +191,10 @@ pub struct MiscSwitches {
     #[arg(global = true, long = "erase-disk")]
     #[allow(dead_code)]
     pub erase_disk: bool,
-    /// Stream options (`-oi[1|-]`; not supported)
-    #[arg(global = true, long = "stream-options", value_name = "OPTS")]
-    #[allow(dead_code)]
-    pub stream_options: Option<String>,
+    /// Save identical files as references (`-oi[0-4][:<minsize>]`; create
+    /// side; accepted as a no-op on extraction)
+    #[arg(global = true, long = "identical", value_name = "OPTS", num_args = 0..=1, default_missing_value = "")]
+    pub identical: Option<String>,
     /// Archive metadata save/restore (`-am[s,r]`; accepted)
     #[arg(global = true, long = "archive-meta", value_name = "SPEC")]
     #[allow(dead_code)]
@@ -474,7 +474,7 @@ pub fn normalize_switch(arg: &str) -> String {
         return format!("--priority={rest}");
     }
     if let Some(rest) = arg.strip_prefix("-oi") {
-        return format!("--stream-options={rest}");
+        return format!("--identical={rest}");
     }
     if let Some(rest) = arg.strip_prefix("-am") {
         return format!("--archive-meta={rest}");

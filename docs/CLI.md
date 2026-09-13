@@ -99,7 +99,10 @@ name to dest / archive metadata), `-ol`/`-oh` (store sym/hard links as links:
 symlinks become redirects, hard-link groups store the first path and
 redirect the rest — Windows and Unix, RAR5 only),
 `-op<path>`/`-or` (output path / auto-rename), `-os`/`-ow` (NTFS streams /
-owner), `-df`/`-kb`/`-si<name>` (delete sources / keep broken / stdin
+owner), `-oi[0-4][:<minsize>]` (identical files as references: `-oi`/`-oi1`
+store the first file and reference the rest, `-oi2` announces the groups,
+`-oi3`/`-oi4` list them and create no archive; default 64 KiB minimum,
+RAR5 only), `-df`/`-kb`/`-si<name>` (delete sources / keep broken / stdin
 member), `-ta`/`-tb`/`-tn`/`-to` (time filters), `-tl`/`-tk` (set archive
 time to newest / keep), `-ts[mca][±,1]` (three timestamps), `-tsp` (preserve
 source access time), `-ver[n]` (versioning), `-ag[fmt]` (auto-name),

@@ -17,6 +17,7 @@ path = "src/bin/unrar.rs"
 [dependencies]
 rar-rs = { workspace = true, features = ["parallel"] }
 clap = { workspace = true }
+crc32fast = { workspace = true }
 windows-sys = { workspace = true }
 
 [dev-dependencies]

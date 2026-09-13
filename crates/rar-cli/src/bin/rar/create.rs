@@ -199,18 +199,11 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     } else {
         None
     };
-    // The writer is opened lazily: for an existing archive the
-    // same-named members are replaced (deleted) first, so the append
-    // handle is only opened after that rewrite; a new archive is created
-    // immediately.
-    let created: Option<rar_rs::ArchiveWriter> = if existing {
-        None
-    } else {
-        Some(
-            rar_rs::ArchiveWriter::create_with(archive_path, opts.clone())
-                .map_err(|e| format!("create: {e}"))?,
-        )
-    };
+    // The writer is opened lazily, after the candidate list is final: for an
+    // existing archive the same-named members are replaced (deleted) first,
+    // so the append handle is only opened after that rewrite; a new archive
+    // is created just before the first add. This also keeps `-oi3`/`-oi4`
+    // (identical-file listings) from creating an archive at all.
 
     let mut include_masks = args.include_masks.clone();
     let mut exclude_masks = args.exclude_masks.clone();
@@ -333,22 +326,45 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // (first occurrence) is archived normally; the rest reference it.
     // RAR4 has no redirect records, and WinRAR's `-ma4 -oh` likewise stores
     // the files in full, so `-oh` is a no-op for the legacy pipeline.
-    let (collected, redirects) = crate::links::split_link_redirects(
+    let (mut collected, mut redirects) = crate::links::split_link_redirects(
         collected,
         args.store_links,
         args.store_hardlinks && !version.is_legacy(),
     );
-    // WinRAR aborts with "WARNING: No files" (exit code 10) and leaves the
-    // archive untouched when every candidate was filtered out; a newly
-    // created archive file is removed again.
-    if collected.is_empty() && args.stdin_name.is_none() && redirects.is_empty() {
-        drop(created);
-        if !existing {
-            let _ = std::fs::remove_file(archive_path);
+    // -oi: identical-file references. The listing modes (-oi3/-oi4) print
+    // the groups and create no archive at all; the dedup modes store the
+    // first file and redirect the rest (RAR4 has no redirect records, and
+    // WinRAR's `-ma4 -oi` likewise stores the files in full).
+    let identical = crate::links::parse_identical(misc.identical.as_deref())?;
+    if let Some(spec) = identical.as_ref() {
+        if matches!(
+            spec.mode,
+            crate::links::IdenticalMode::List | crate::links::IdenticalMode::ListBare
+        ) {
+            crate::links::print_identical_groups(&collected, spec);
+            return Ok(());
         }
+        if !version.is_legacy() {
+            let (kept, mut copies) = crate::links::apply_identical_redirects(collected, spec);
+            collected = kept;
+            redirects.append(&mut copies);
+        }
+    }
+    // WinRAR aborts with "WARNING: No files" (exit code 10) and leaves the
+    // archive untouched when every candidate was filtered out; since the
+    // writer opens lazily, nothing has been created at this point.
+    if collected.is_empty() && args.stdin_name.is_none() && redirects.is_empty() {
         info!("WARNING: No files");
         process::exit(10);
     }
+    let created: Option<rar_rs::ArchiveWriter> = if existing {
+        None
+    } else {
+        Some(
+            rar_rs::ArchiveWriter::create_with(archive_path, opts.clone())
+                .map_err(|e| format!("create: {e}"))?,
+        )
+    };
     // Directory entries always come after the files, like WinRAR.
     let (file_entries, dir_entries): (Vec<_>, Vec<_>) =
         collected.into_iter().partition(|c| !c.is_dir);

@@ -111,11 +111,28 @@ fn cmd_update_freshen(
 
     // -ol / -oh: symlinks and hard links become redirect members (RAR4 has
     // no redirect records, and WinRAR's `-ma4 -oh` stores full files).
-    let (to_add, redirects) = crate::links::split_link_redirects(
+    let (mut to_add, mut redirects) = crate::links::split_link_redirects(
         to_add,
         args.store_links,
         args.store_hardlinks && !version.is_legacy(),
     );
+    // -oi: identical-file references over the files being added. The listing
+    // modes print the groups and change nothing.
+    let identical = crate::links::parse_identical(misc.identical.as_deref())?;
+    if let Some(spec) = identical.as_ref() {
+        if matches!(
+            spec.mode,
+            crate::links::IdenticalMode::List | crate::links::IdenticalMode::ListBare
+        ) {
+            crate::links::print_identical_groups(&to_add, spec);
+            return Ok(());
+        }
+        if !version.is_legacy() {
+            let (kept, mut copies) = crate::links::apply_identical_redirects(to_add, spec);
+            to_add = kept;
+            redirects.append(&mut copies);
+        }
+    }
 
     if to_delete.is_empty() && to_add.is_empty() && redirects.is_empty() {
         info!("{}: no files to {verb}", archive_path.display());
