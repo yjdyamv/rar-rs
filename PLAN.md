@@ -309,7 +309,7 @@ fuzz 使用一个可枚举的小子集，于是删除 feature 与 `rar40`/`rar50
 
 ## 已知小差异（记录，互操作无碍）
 
-- **RAR4 成员注释（`cf`）不是互操作保证（2026-09-11 实测）**：WinRAR 6.23 命令行没有成员注释命令（`cf` 输出用法即退）；我们写出的 RAR4（unp_ver 29）成员注释，UnRAR/Rar 6.23 与 7.23 的 `t` 均报 `Total errors: 2`（exit 3，数据仍可解出）。真实的成员注释只有 RAR2 时代样本（`rar40/rar2/comment_nopsw.rar`，UnRAR `t` 通过）。据此：格式层按该样本修正了 COMM_HEAD（13 字节固定头：HEAD_SIZE + UNP_SIZE + UNP_VER + METHOD + COMM_CRC）与三条 CRC 规则（FILE_HEAD 到 name(+salt+exttime)，COMM_HEAD 到 11 字节子块头，COMM_CRC = crc32(payload)&0xffff），读取侧新增测试能正确解出 `file1comment`/`file2comment`；但 RAR4 写侧 `cf` 属自洽扩展，**多卷成员注释因此继续拒绝**。
+- **RAR4 成员注释（`cf`）不是互操作保证（2026-09-13 复核）**：WinRAR 6.23 命令行没有成员注释命令（`cf` 输出用法即退）；我们写出的 RAR4（unp_ver 29）成员注释，官方 `t` 报 `Total errors: 2`（exit 3，数据仍可解出）。复核发现：唯一可得的真实成员注释样本 `rar40/rar2/comment_nopsw.rar` 在 UnRAR 5.91/6.23/7.23 上也同样被判 `The archive comment is corrupt`（exit 3）——官方对 1.5/2.x 注释的校验本身不能作为基准；且官方工具无法生成 RAR4 成员注释（无 `cf`），因此不存在干净的对照目标。我们的嵌套 COMM_HEAD 布局按该样本实现（13 字节固定头：HEAD_SIZE + UNP_SIZE + UNP_VER + METHOD + COMM_CRC）、读写往返一致、数据可被官方解出（仅注释告警），保持为自洽扩展；多卷成员注释继续拒绝。
 
 - solid 且无 rarfiles.lst 时：WinRAR 按扩展名/名字启发式排序，我们按参数顺序
 - 目录条目名带尾斜杠
