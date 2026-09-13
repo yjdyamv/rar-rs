@@ -1,7 +1,7 @@
 //! RAR5 encryption: AES-256-CBC, the chained HMAC-SHA256 key-derivation
 //! function, and the hash-key MAC that protects encrypted members' checksums.
 //!
-//! Ported from the `rars` project (https://github.com/bitplane/rars), licensed
+//! Ported from the `rars` project (<https://github.com/bitplane/rars>), licensed
 //! MIT OR Apache-2.0, at upstream revision `c08a17b`. See NOTICE for
 //! attribution and the unresolved workspace-metadata/COPYING difference.
 

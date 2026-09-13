@@ -144,7 +144,11 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         .solid_mode(solid_mode)
         .quick_open(args.quick_open)
         .blake2(args.blake2)
-        .encrypt_headers(header_encrypt);
+        .encrypt_headers(header_encrypt)
+        .filters(match args.mc_params.as_deref() {
+            Some(spec) => crate::args::parse_mc_params(spec),
+            None => Default::default(),
+        });
     let opts = if let Some(pw) = &password {
         opts.password(pw.clone())
     } else {

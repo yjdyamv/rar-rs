@@ -18,7 +18,7 @@ pub struct ArchiveEntry {
     pub(crate) chunks: Vec<DataChunk>,
 }
 
-/// One entry to add through [`RarArchive::add_batch`].
+/// One entry to add through `RarArchive::add_batch`.
 ///
 /// Borrowed views only: byte payloads are copied by the library during
 /// preparation, and file entries are read (up to the batch member cap)
@@ -80,6 +80,8 @@ pub(crate) struct BatchPrepareCtx<'a> {
     pub(crate) dict_size_log: Option<u8>,
     pub(crate) dict_size_bytes: Option<u64>,
     pub(crate) force_v70: bool,
+    /// Compression filter policy (`-mc`) for this batch.
+    pub(crate) filters: crate::options::FilterOptions,
     pub(crate) save_ctime: bool,
     pub(crate) save_atime: bool,
     pub(crate) save_mtime: bool,

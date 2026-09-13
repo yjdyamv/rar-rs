@@ -15,6 +15,7 @@ mod add;
 mod batch;
 mod emit;
 pub(crate) mod engine;
+mod filter_policy;
 pub(crate) mod layout;
 mod stream;
 #[cfg(windows)]

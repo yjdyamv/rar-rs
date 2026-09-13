@@ -1,6 +1,6 @@
 //! BLAKE2sp hash (BLAKE2s parallel tree hash used by RAR 5.0 archives).
 //!
-//! Ported from the `rars` crate (https://github.com/bitplane/rars,
+//! Ported from the `rars` crate (<https://github.com/bitplane/rars>,
 //! `crates/rars/src/rar50/blake2sp.rs`), licensed MIT OR Apache-2.0.
 //! See NOTICE for attribution.
 

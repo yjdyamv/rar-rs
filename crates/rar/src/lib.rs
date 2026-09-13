@@ -72,7 +72,10 @@ pub use codec::lzss_huff::{EncoderState, encode_chunked_mt};
 pub use detect::sfx_offset_of;
 pub use error::{ErrorCode, RarError, RarResult};
 pub use features::{Feature, FeatureSet};
-pub use options::{ExtractOptions, MarkOfTheWeb, SolidReset, parse_dict_bytes, parse_dict_size};
+pub use options::{
+    ExtractOptions, FilterMode, FilterOptions, MarkOfTheWeb, SolidReset, parse_dict_bytes,
+    parse_dict_size,
+};
 pub use parallel::{set_compression_threads, set_extraction_threads};
 pub use recovery::rev50::{build_recovery_volumes_for_set, plan_recovery_volume_count};
 pub use recovery::{

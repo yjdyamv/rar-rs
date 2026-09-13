@@ -982,7 +982,8 @@ impl RarArchive {
             return Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE));
         }
         if !self.write_ctx().solid.mode {
-            return Ok(match best_rar29_member(data, level)? {
+            let filters = self.write_ctx().compression.filters;
+            return Ok(match best_rar29_member(data, level, filters)? {
                 Some(best) => best,
                 None => (data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE),
             });
@@ -1222,10 +1223,15 @@ fn build_legacy_solid_encoder(
 /// The solid-run path is separate: it reuses the persistent encoder and
 /// measures LZ against the chain-continuing PPMd trial
 /// (`Unpack29Encoder::encode_solid_member`).
-fn best_rar29_member(data: &[u8], level: u8) -> RarResult<Option<(Vec<u8>, u8)>> {
+fn best_rar29_member(
+    data: &[u8],
+    level: u8,
+    policy: crate::options::FilterOptions,
+) -> RarResult<Option<(Vec<u8>, u8)>> {
     use crate::codec::legacy::rar29_encoder::{
         Rar29FilterKind, Unpack29Encoder, options_for_level,
     };
+    use crate::options::FilterMode;
     if !(1..=5).contains(&level) {
         return Ok(None);
     }
@@ -1236,20 +1242,39 @@ fn best_rar29_member(data: &[u8], level: u8) -> RarResult<Option<(Vec<u8>, u8)>>
     let mut best: (Vec<u8>, u8) = (lz, method);
 
     if !data.is_empty() {
-        // Auto filters on binary members (any level): every candidate is
-        // measured with its own throwaway encoder (no chain state). The RAR5
-        // scanners gate the search — text never produces x86 clusters or
-        // structured deltas.
+        // Filters under the -mc policy: every candidate is measured with
+        // its own throwaway encoder (no chain state). Auto mode keeps the
+        // scanner-gated search — text never produces x86 clusters or
+        // structured deltas — while forced modes run on the whole member.
         let mut candidates: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> = Vec::new();
-        let e8e9 = crate::codec::common::filters::auto_x86_filter_ranges(data, true);
-        if !e8e9.is_empty() {
-            candidates.push((Rar29FilterKind::E8E9, e8e9));
+        if policy.x86 == FilterMode::Forced {
+            candidates.push((
+                Rar29FilterKind::E8E9,
+                std::iter::once(0..data.len()).collect(),
+            ));
+        } else if policy.x86 == FilterMode::Auto {
+            let e8e9 = crate::codec::common::filters::auto_x86_filter_ranges(data, true);
+            if !e8e9.is_empty() {
+                candidates.push((Rar29FilterKind::E8E9, e8e9));
+            }
+            let e8 = crate::codec::common::filters::auto_x86_filter_ranges(data, false);
+            if !e8.is_empty() {
+                candidates.push((Rar29FilterKind::E8, e8));
+            }
         }
-        let e8 = crate::codec::common::filters::auto_x86_filter_ranges(data, false);
-        if !e8.is_empty() {
-            candidates.push((Rar29FilterKind::E8, e8));
-        }
-        if let Some(channels) = crate::codec::common::filters::auto_delta_filter_channels(data) {
+        if policy.delta == FilterMode::Forced {
+            let channels = policy.delta_channels.unwrap_or_else(|| {
+                crate::codec::common::filters::auto_delta_filter_channels(data).unwrap_or(1)
+            });
+            candidates.push((
+                Rar29FilterKind::Delta {
+                    channels: channels as usize,
+                },
+                std::iter::once(0..data.len()).collect(),
+            ));
+        } else if policy.delta == FilterMode::Auto
+            && let Some(channels) = crate::codec::common::filters::auto_delta_filter_channels(data)
+        {
             candidates.push((
                 Rar29FilterKind::Delta {
                     channels: channels as usize,
@@ -1300,6 +1325,7 @@ pub(crate) fn prepare_rar4_file_member(
     name: &str,
     level: u8,
     unp_ver: u8,
+    filters: crate::options::FilterOptions,
 ) -> RarResult<Rar4PreparedMember> {
     let meta = fs::metadata(path)?;
     let file_size = meta.len();
@@ -1328,7 +1354,7 @@ pub(crate) fn prepare_rar4_file_member(
             (data, crate::format::rar4::RAR4_METHOD_STORE)
         }
     } else if (1..=5).contains(&level) {
-        match best_rar29_member(&data, level)? {
+        match best_rar29_member(&data, level, filters)? {
             Some(best) => best,
             None => (data, crate::format::rar4::RAR4_METHOD_STORE),
         }
@@ -1501,6 +1527,7 @@ impl RarArchive {
                 let threads = self.effective_threads();
                 let pool = crate::parallel::compression_pool_for(threads);
                 let unp_ver = self.write_ctx().solid.rar4_unp_ver;
+                let filters = self.write_ctx().compression.filters;
                 let prepared: Vec<RarResult<(usize, Rar4PreparedMember)>> = pool.install(|| {
                     wave.par_iter()
                         .map(|&(idx, entry)| {
@@ -1515,7 +1542,8 @@ impl RarArchive {
                                     .to_string_lossy()
                                     .into_owned(),
                             };
-                            prepare_rar4_file_member(path, &name, level, unp_ver).map(|p| (idx, p))
+                            prepare_rar4_file_member(path, &name, level, unp_ver, filters)
+                                .map(|p| (idx, p))
                         })
                         .collect()
                 });

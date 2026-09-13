@@ -30,6 +30,35 @@ pub enum SolidReset {
     PerExtension,
 }
 
+/// How a compression filter participates in encoding (WinRAR `-mc`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterMode {
+    /// Apply the filter only when it beats plain compression (the default).
+    #[default]
+    Auto,
+    /// Never apply this filter (`-mc<mode>-`).
+    Disabled,
+    /// Apply this filter to all data, whether or not it helps
+    /// (`-mc<mode>+`).
+    Forced,
+}
+
+/// Compression filter policy from WinRAR's `-mc` switch.
+///
+/// The long-range (`-mcl`) and exhaustive (`-mcx`) modes have no
+/// configuration here: long-range matching is always enabled for methods
+/// 2–5, and the exhaustive parser is not implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FilterOptions {
+    /// Delta (multimedia) filter mode (`-mcd`).
+    pub delta: FilterMode,
+    /// x86 E8/E8E9 filter mode (`-mce`).
+    pub x86: FilterMode,
+    /// Channel count for a forced delta filter (`-mcd<N>+`, 1–31); `None`
+    /// auto-selects among the supported channel counts.
+    pub delta_channels: Option<u8>,
+}
+
 /// Options controlling RAR archive creation.
 ///
 /// All fields default to the plain unencrypted single-volume create
@@ -110,6 +139,9 @@ pub(crate) struct CreateOptions {
     /// v70 code paths at small scale. Requires `dict_size_bytes`; no-op
     /// without it.
     pub force_v70: bool,
+    /// Compression filter policy (WinRAR's `-mc`): automatic, disabled or
+    /// forced delta / x86 filters.
+    pub filters: FilterOptions,
     /// Save the creation time (Windows) / ctime (Unix inode change time)
     /// in the FILE_TIME extra record, like WinRAR's `-tsc`.
     pub save_ctime: bool,
@@ -289,6 +321,7 @@ impl Default for CreateOptions {
             dict_size_log: None,
             dict_size_bytes: None,
             force_v70: false,
+            filters: FilterOptions::default(),
             save_ctime: false,
             save_atime: false,
             time_precision_seconds: false,
@@ -404,8 +437,8 @@ impl Default for ExtractOptions {
 /// Mark of the Web propagation for extraction (WinRAR's `-om`).
 ///
 /// Browsers tag downloaded files with a `Zone.Identifier` alternate data
-/// stream; when set on a [`crate::archive::RarArchive`] through
-/// [`crate::archive::RarArchive::set_mark_of_the_web`], the archive file's
+/// stream; when set on a [`crate::ArchiveReader`] through
+/// [`crate::ArchiveReader::set_mark_of_the_web`], the archive file's
 /// own stream is copied onto every extracted file. Windows only: the
 /// setting is ignored on other platforms, where the concept does not exist.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -419,8 +452,8 @@ pub struct MarkOfTheWeb {
 }
 
 /// Parse a WinRAR `-md<size>[k|m|g]` dictionary size into the
-/// `(dict_size_log, dict_size_bytes)` pair used by [`CreateOptions`].
-/// No unit means MiB.
+/// `(dict_size_log, dict_size_bytes)` pair used by the internal
+/// `CreateOptions`. No unit means MiB.
 ///
 /// Sizes in the RAR5 range (128 KiB ..= 4 GiB) must be a power of two and
 /// map to a dict log (WinRAR rejects e.g. `-md3m` with "Unknown option");

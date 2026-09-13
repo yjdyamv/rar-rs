@@ -45,6 +45,11 @@ struct Cli {
     #[arg(long = "dict-extract", value_name = "SIZE", global = true)]
     #[allow(dead_code)]
     dict_extract: Option<String>,
+    /// Advanced compression parameters (like `-mc<par>`; accepted for CLI
+    /// parity, unused on extraction)
+    #[arg(long = "mc", value_name = "PAR", global = true)]
+    #[allow(dead_code)]
+    mc_params: Option<String>,
     /// Assume Yes on all queries (like `-y`; accepted, no prompts exist)
     #[arg(long, global = true)]
     #[allow(dead_code)]

@@ -797,6 +797,7 @@ impl RarArchive {
                     dict_size_log: opts.dict_size_log,
                     dict_size_bytes: opts.dict_size_bytes,
                     force_v70: opts.force_v70,
+                    filters: opts.filters,
                 },
                 meta: MetadataSettings {
                     ctime: opts.save_ctime,

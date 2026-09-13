@@ -9,7 +9,7 @@ use crate::error::CliResult;
 use crate::filters::arg_to_name;
 use crate::info;
 use crate::time;
-/// Open an [`ArchiveEditor`] for the CLI, honoring the password switch.
+/// Open a [`rar_rs::ArchiveEditor`] for the CLI, honoring the password switch.
 pub(crate) fn open_editor(
     path: impl AsRef<std::path::Path>,
     password: Option<&str>,
@@ -205,6 +205,10 @@ pub(crate) fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> CliResu
             .save_mtime(ts.save_mtime)
             .save_owner(misc.owner)
             .save_streams(misc.save_streams)
+            .filters(match args.mc_params.as_deref() {
+                Some(spec) => crate::args::parse_mc_params(spec),
+                None => Default::default(),
+            })
             .time_precision_seconds(ts.precision_seconds);
         if let Some(pw) = password {
             writer_opts = writer_opts.password(pw.clone());

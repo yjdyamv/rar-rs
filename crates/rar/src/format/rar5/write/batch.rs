@@ -117,6 +117,7 @@ impl RarArchive {
             dict_size_log: self.write_ctx().compression.dict_size_log,
             dict_size_bytes: self.write_ctx().compression.dict_size_bytes,
             force_v70: self.write_ctx().compression.force_v70,
+            filters: self.write_ctx().compression.filters,
             save_ctime: self.write_ctx().meta.ctime,
             save_atime: self.write_ctx().meta.atime,
             save_mtime: self.write_ctx().meta.mtime,
@@ -257,112 +258,104 @@ impl RarArchive {
             // the member is compressed in bounded chunks with one shared
             // encoder state across chunks.
             let cancel_ref = ctx.cancel.as_deref();
-            match lzss_huff::encode_with_auto_delta_filter(
+            let variant = crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
+            match super::filter_policy::encode_with_filter_policy(
                 data,
                 method,
                 dsl,
-                crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                variant,
+                ctx.filters,
                 ctx.threads,
                 cancel_ref,
             )? {
                 Some(filtered) if filtered.len() < data.len() => filtered,
-                _ => match lzss_huff::encode_with_auto_x86_filter(
-                    data,
-                    method,
-                    dsl,
-                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                    ctx.threads,
-                    cancel_ref,
-                )? {
-                    Some(filtered) if filtered.len() < data.len() => filtered,
-                    _ => {
-                        // Mid-size members run the same windowed MT encode as
-                        // add_file and the streaming path (byte-identical to
-                        // add_file's MT branch — both slice the whole buffer
-                        // with one shared encoder state); smaller ones or
-                        // solid chains keep the sequential chunk loop with
-                        // per-64 KiB progress.
-                        const MT_MIN: usize = 3 * crate::codec::DEFAULT_CHUNK_SIZE;
-                        if ctx.threads > 1 && data.len() >= MT_MIN {
-                            let progress = progress.cloned();
-                            let mut cb = move |done: u64, _total: u64| {
-                                if let Some(progress) = &progress {
-                                    progress
-                                        .lock()
-                                        .expect("progress lock")
-                                        .report(member, done, total);
-                                }
-                            };
-                            crate::codec::lzss_huff::encode_chunked_mt_with_progress(
-                                data,
-                                method,
-                                dsl,
-                                crate::codec::DEFAULT_CHUNK_SIZE,
-                                &mut state,
-                                ctx.threads,
-                                true,
-                                crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                                None,
-                                Some(&mut cb),
-                                ctx.cancel.as_deref(),
-                            )?
-                        } else {
-                            let mut packed = Vec::new();
-                            // Fine-grained progress: the sequential path feeds the
-                            // encoder a per-64 KiB callback (`encode_chunked` reports
-                            // every 0x10000 input bytes); the batch path used to only
-                            // report after each whole 4 MiB chunk, so the bar stepped
-                            // 64× more coarsely. Route a per-64 KiB callback into the
-                            // chunk encoder and offset its chunk-relative reports by
-                            // the member bytes already processed, so the shared
-                            // tracker sees a smooth member-relative stream.
-                            let processed_cell = std::cell::Cell::new(0u64);
-                            let cell_ref = &processed_cell;
-                            let mut cb = move |done: u64, _chunk_total: u64| {
-                                if let Some(progress) = progress {
-                                    progress.lock().expect("progress lock").report(
-                                        member,
-                                        cell_ref.get() + done,
-                                        total,
-                                    );
-                                }
-                            };
-                            for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
-                                if ctx
-                                    .cancel
-                                    .as_ref()
-                                    .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
-                                {
-                                    return Err(RarError::Cancelled);
-                                }
-                                // Same finality rule as add_file's streaming loop:
-                                // the last chunk is final even when it fills the
-                                // whole 4 MiB slice (an exact-multiple member must
-                                // still mark its closing block).
-                                let is_final = processed_cell.get() + chunk.len() as u64 >= total;
-                                let compressed = lzss_huff::encode_chunked(
-                                    chunk,
-                                    lzss_huff::EncodeOptions {
-                                        chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
-                                        state: Some(&mut state),
-                                        is_final,
-                                        variant: crate::version::ArchiveVersion::from_v70(
-                                            dict_bytes.is_some(),
-                                        ),
-                                        progress: Some(&mut cb),
-                                        ..lzss_huff::EncodeOptions::new(method, dsl)
-                                    },
-                                )?;
-                                packed.extend(compressed);
-                                processed_cell.set(processed_cell.get() + chunk.len() as u64);
-                                if packed.len() >= data.len() {
-                                    break;
-                                }
+                _ => {
+                    // Mid-size members run the same windowed MT encode as
+                    // add_file and the streaming path (byte-identical to
+                    // add_file's MT branch — both slice the whole buffer
+                    // with one shared encoder state); smaller ones or
+                    // solid chains keep the sequential chunk loop with
+                    // per-64 KiB progress.
+                    const MT_MIN: usize = 3 * crate::codec::DEFAULT_CHUNK_SIZE;
+                    if ctx.threads > 1 && data.len() >= MT_MIN {
+                        let progress = progress.cloned();
+                        let mut cb = move |done: u64, _total: u64| {
+                            if let Some(progress) = &progress {
+                                progress
+                                    .lock()
+                                    .expect("progress lock")
+                                    .report(member, done, total);
                             }
-                            packed
+                        };
+                        crate::codec::lzss_huff::encode_chunked_mt_with_progress(
+                            data,
+                            method,
+                            dsl,
+                            crate::codec::DEFAULT_CHUNK_SIZE,
+                            &mut state,
+                            ctx.threads,
+                            true,
+                            crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                            None,
+                            Some(&mut cb),
+                            ctx.cancel.as_deref(),
+                        )?
+                    } else {
+                        let mut packed = Vec::new();
+                        // Fine-grained progress: the sequential path feeds the
+                        // encoder a per-64 KiB callback (`encode_chunked` reports
+                        // every 0x10000 input bytes); the batch path used to only
+                        // report after each whole 4 MiB chunk, so the bar stepped
+                        // 64× more coarsely. Route a per-64 KiB callback into the
+                        // chunk encoder and offset its chunk-relative reports by
+                        // the member bytes already processed, so the shared
+                        // tracker sees a smooth member-relative stream.
+                        let processed_cell = std::cell::Cell::new(0u64);
+                        let cell_ref = &processed_cell;
+                        let mut cb = move |done: u64, _chunk_total: u64| {
+                            if let Some(progress) = progress {
+                                progress.lock().expect("progress lock").report(
+                                    member,
+                                    cell_ref.get() + done,
+                                    total,
+                                );
+                            }
+                        };
+                        for chunk in data.chunks(crate::codec::DEFAULT_CHUNK_SIZE) {
+                            if ctx
+                                .cancel
+                                .as_ref()
+                                .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+                            {
+                                return Err(RarError::Cancelled);
+                            }
+                            // Same finality rule as add_file's streaming loop:
+                            // the last chunk is final even when it fills the
+                            // whole 4 MiB slice (an exact-multiple member must
+                            // still mark its closing block).
+                            let is_final = processed_cell.get() + chunk.len() as u64 >= total;
+                            let compressed = lzss_huff::encode_chunked(
+                                chunk,
+                                lzss_huff::EncodeOptions {
+                                    chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                                    state: Some(&mut state),
+                                    is_final,
+                                    variant: crate::version::ArchiveVersion::from_v70(
+                                        dict_bytes.is_some(),
+                                    ),
+                                    progress: Some(&mut cb),
+                                    ..lzss_huff::EncodeOptions::new(method, dsl)
+                                },
+                            )?;
+                            packed.extend(compressed);
+                            processed_cell.set(processed_cell.get() + chunk.len() as u64);
+                            if packed.len() >= data.len() {
+                                break;
+                            }
                         }
+                        packed
                     }
-                },
+                }
             }
         } else {
             // add_bytes path: no filter attempt, one shared window. Same MT

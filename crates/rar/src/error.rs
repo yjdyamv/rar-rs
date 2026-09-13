@@ -105,7 +105,7 @@ pub enum RarError {
     /// The archive is locked (read-only).
     ArchiveLocked,
     /// The operation was cancelled through the caller's cancellation flag
-    /// (see [`crate::RarArchive::set_cancel_flag`]).
+    /// (see [`crate::ArchiveWriter::set_cancel_flag`]).
     Cancelled,
     /// An encrypted archive was opened with the wrong password.
     WrongPassword,

@@ -270,6 +270,9 @@ pub(crate) struct FilesArgs {
     /// Save hard links as links instead of the file (like `-oh`)
     #[arg(long = "hardlinks")]
     pub(crate) store_hardlinks: bool,
+    /// Advanced compression parameters (like `-mc<par>`)
+    #[arg(long = "mc", value_name = "PAR")]
+    pub(crate) mc_params: Option<String>,
 }
 
 /// Archive path plus the members to delete.
@@ -660,6 +663,73 @@ pub(crate) fn resolve_dict_switch(
         return Ok((None, Some(bytes)));
     }
     Err(format!("Unknown option: md{spec}"))
+}
+
+/// Parse a normalized `-mc<par>` value into a filter policy.
+///
+/// Grammar: `[channels][mode][+|-]` with `D` (delta), `E` (x86), `L`
+/// (long range) and `X` (exhaustive). No sign keeps RAR's automatic
+/// choice; `-mc-` disables every mode. WinRAR's parser ignores anything
+/// it does not recognize here, so this does too (channels and the mode
+/// letter may appear in either order). `-mcl±`/`-mcx±` are accepted
+/// without effect: long-range matching is always on for m2–m5 and the
+/// exhaustive parser is not implemented.
+pub(crate) fn parse_mc_params(spec: &str) -> rar_rs::FilterOptions {
+    use rar_rs::FilterMode;
+
+    let mut filters = rar_rs::FilterOptions::default();
+    let mut rest = spec;
+    let forced = match rest.chars().last() {
+        Some('+') => {
+            rest = &rest[..rest.len() - 1];
+            Some(true)
+        }
+        Some('-') => {
+            rest = &rest[..rest.len() - 1];
+            Some(false)
+        }
+        _ => None,
+    };
+    let mode_state = match forced {
+        None => FilterMode::Auto,
+        Some(true) => FilterMode::Forced,
+        Some(false) => FilterMode::Disabled,
+    };
+    let mut channels: Option<u8> = None;
+    let mut digits = String::new();
+    let mut delta = false;
+    let mut x86 = false;
+    for ch in rest.chars() {
+        match ch {
+            '0'..='9' => digits.push(ch),
+            'd' | 'D' => delta = true,
+            'e' | 'E' => x86 = true,
+            // Long-range and exhaustive modes carry no configuration here.
+            'l' | 'L' | 'x' | 'X' => {}
+            _ => {}
+        }
+    }
+    if let Ok(value) = digits.parse::<u8>()
+        && (1..=31).contains(&value)
+    {
+        channels = Some(value);
+    }
+    let no_mode = !delta && !x86;
+    if no_mode {
+        if mode_state == FilterMode::Disabled {
+            filters.delta = FilterMode::Disabled;
+            filters.x86 = FilterMode::Disabled;
+        }
+        return filters;
+    }
+    if delta {
+        filters.delta = mode_state;
+        filters.delta_channels = channels;
+    }
+    if x86 {
+        filters.x86 = mode_state;
+    }
+    filters
 }
 
 /// Whether an archive member name matches one `-ms<list>` entry: a bare

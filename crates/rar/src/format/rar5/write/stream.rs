@@ -368,6 +368,7 @@ impl RarArchive {
         // STORE. x86 regions detected in the sample are extended to the
         // full file size (the E8/E8E9 encoder only touches actual opcodes
         // within the region, so non-opcode bytes pass through unchanged).
+        let filter_policy = self.write_ctx().compression.filters;
         let mut delta_channels: Option<u8> = None;
         let mut x86_filter_type: Option<u8> = None;
         let mut x86_regions: Vec<std::ops::Range<usize>> = Vec::new();
@@ -379,22 +380,32 @@ impl RarArchive {
                 sf.read(&mut sample)?
             };
             sample.truncate(got);
+            let variant = crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
             if got > 0 {
-                // Try delta filter first (cheap pre-gate on sample).
-                if crate::codec::common::filters::auto_delta_filter_channels(&sample).is_some() {
-                    delta_channels = lzss_huff::pick_delta_channel(
-                        &sample,
-                        method,
-                        dsl,
-                        crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                    )?;
+                // -mcd+ forces the delta filter; the switch's channel count
+                // wins, then the sample pick, then a single lane.
+                if filter_policy.delta == crate::options::FilterMode::Forced {
+                    delta_channels = Some(filter_policy.delta_channels.unwrap_or_else(|| {
+                        lzss_huff::pick_delta_channel(&sample, method, dsl, variant)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(1)
+                    }));
                 }
-                // Try x86 filter when delta did not win (same ordering as
-                // the in-memory path: real x86 code is not multi-channel-
-                // correlated, so the cheap delta scan returns None and we
-                // fall through; for correlated audio/raw the delta filter
-                // wins outright).
-                if delta_channels.is_none() && got > 5 {
+                // Try delta filter first (cheap pre-gate on sample).
+                if filter_policy.delta == crate::options::FilterMode::Auto
+                    && crate::codec::common::filters::auto_delta_filter_channels(&sample).is_some()
+                {
+                    delta_channels = lzss_huff::pick_delta_channel(&sample, method, dsl, variant)?;
+                }
+                // -mce+ forces the x86 filter over the whole member.
+                if filter_policy.x86 == crate::options::FilterMode::Forced {
+                    x86_filter_type = Some(lzss_huff::FILTER_E8E9);
+                    x86_regions = std::iter::once(0..file_size as usize).collect();
+                } else if filter_policy.x86 == crate::options::FilterMode::Auto
+                    && delta_channels.is_none()
+                    && got > 5
+                {
                     let mut regions_e9 =
                         crate::codec::common::filters::auto_x86_filter_ranges(&sample, true);
                     if !regions_e9.is_empty() {
@@ -417,8 +428,6 @@ impl RarArchive {
                                 // Decide E8 vs E8E9 by compressed size on
                                 // the sample (same as
                                 // encode_with_auto_x86_filter).
-                                let variant =
-                                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
                                 let sample_specs_e9: Vec<lzss_huff::FilterSpec> = regions_e9
                                     .iter()
                                     .map(|r| {

@@ -255,6 +255,10 @@ fn cmd_update_freshen(
                 .save_mtime(ts.save_mtime)
                 .save_owner(misc.owner)
                 .save_streams(misc.save_streams)
+                .filters(match args.mc_params.as_deref() {
+                    Some(spec) => crate::args::parse_mc_params(spec),
+                    None => Default::default(),
+                })
                 .time_precision_seconds(ts.precision_seconds);
             if let Some(value) = password {
                 writer_opts = writer_opts.password(value.clone());

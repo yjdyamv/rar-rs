@@ -143,9 +143,9 @@ impl RarArchive {
         owner_extra_cfg(self.write_ctx().meta.owner, meta)
     }
 
-    /// Try the automatic delta (multimedia) and then the x86 (E8/E8E9)
-    /// filter, returning the packed bytes of whichever the scan found worth
-    /// filtering — or `None` when plain LZSS should handle the member.
+    /// Try the compression filters under the `-mc` policy, returning the
+    /// packed bytes of the chosen filter — or `None` when plain LZSS should
+    /// handle the member.
     fn try_auto_filters(
         &mut self,
         data: &[u8],
@@ -155,16 +155,15 @@ impl RarArchive {
     ) -> RarResult<Option<Vec<u8>>> {
         let variant = crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
         let threads = self.effective_threads();
-        let cancel = self.cancel.as_deref();
-        Ok(
-            match lzss_huff::encode_with_auto_delta_filter(
-                data, method, dsl, variant, threads, cancel,
-            )? {
-                Some(f) => Some(f),
-                None => lzss_huff::encode_with_auto_x86_filter(
-                    data, method, dsl, variant, threads, cancel,
-                )?,
-            },
+        let cancel = self.cancel.clone();
+        super::filter_policy::encode_with_filter_policy(
+            data,
+            method,
+            dsl,
+            variant,
+            self.write_ctx().compression.filters,
+            threads,
+            cancel.as_deref(),
         )
     }
 

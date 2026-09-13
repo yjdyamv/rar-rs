@@ -175,6 +175,9 @@ pub(crate) struct CompressionSettings {
     /// Force RAR7 (v70) member headers even below the 4 GiB threshold
     /// (test seam; see `CreateOptions::force_v70`).
     pub force_v70: bool,
+    /// Compression filter policy (`-mc`): automatic, disabled or forced
+    /// delta / x86 filters.
+    pub filters: crate::options::FilterOptions,
 }
 
 /// Member metadata policy (`-ts*`, `-ow`, `-os`, `-htb`).

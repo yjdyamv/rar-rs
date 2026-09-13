@@ -1363,3 +1363,75 @@ fn rar4_writer_comment_precedes_a_directory_first_member() {
         "comment at {comment_at} must precede the directory header at {dir_at}"
     );
 }
+
+#[test]
+fn writer_filter_policy_controls_member_filters() {
+    use crate::options::{FilterMode, FilterOptions};
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("ramp.bin");
+    let mut ramp = vec![0u8; 64 * 1024];
+    for (i, byte) in ramp.iter_mut().enumerate() {
+        *byte = ((i / 64) % 256) as u8;
+    }
+    std::fs::write(&src, &ramp).unwrap();
+
+    let create = |name: &str, filters: FilterOptions| -> u64 {
+        let path = dir.path().join(name);
+        let mut archive = RarArchive::create_with_options(
+            &path,
+            crate::options::CreateOptions {
+                filters,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add(&src, 3).unwrap();
+        archive.close().unwrap();
+
+        let mut archive = RarArchive::open(&path).unwrap();
+        assert_eq!(
+            archive
+                .read_with_options("ramp.bin", Default::default())
+                .unwrap(),
+            ramp,
+            "{name} must round-trip"
+        );
+        archive.entries[0].compressed_size()
+    };
+
+    let auto = create("auto.rar", FilterOptions::default());
+    let disabled = create(
+        "off.rar",
+        FilterOptions {
+            delta: FilterMode::Disabled,
+            x86: FilterMode::Disabled,
+            ..Default::default()
+        },
+    );
+    let forced = create(
+        "forced.rar",
+        FilterOptions {
+            delta: FilterMode::Forced,
+            ..Default::default()
+        },
+    );
+    assert!(
+        disabled > auto,
+        "auto delta must beat disabled filters ({auto} vs {disabled})"
+    );
+    assert!(
+        forced <= auto,
+        "forced delta must be at least as good as auto on ramp data ({auto} vs {forced})"
+    );
+
+    // Out-of-range channel counts are rejected by the typed builder.
+    let bad = crate::archive::ArchiveWriter::create_with(
+        dir.path().join("bad.rar"),
+        crate::archive::WriterOptions::new().filters(FilterOptions {
+            delta_channels: Some(0),
+            ..Default::default()
+        }),
+    );
+    assert!(matches!(bad, Err(RarError::InvalidOption(_))));
+}

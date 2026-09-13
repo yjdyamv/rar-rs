@@ -996,3 +996,117 @@ fn cli_log_is_rejected_by_unrar_and_reports_unwritable_paths() {
         .unwrap();
     assert_eq!(status.code(), Some(9), "unwritable log paths use exit 9");
 }
+
+// ── -mc filter policy ───────────────────────────────────────────────────────
+
+/// `-mc-` disables the automatic delta/x86 filters, `-mcd+` forces delta
+/// (matching what auto picks on ramp data), and the switch parser stays as
+/// lenient as WinRAR's.
+#[cfg(any(unix, windows))]
+#[test]
+fn cli_mc_filter_policy_controls_filters() {
+    let dir = make_temp_dir();
+    let mut ramp = vec![0u8; 64 * 1024];
+    for (i, byte) in ramp.iter_mut().enumerate() {
+        *byte = ((i / 64) % 256) as u8;
+    }
+    std::fs::write(dir.path().join("ramp.bin"), &ramp).unwrap();
+
+    let create = |spec: Option<&str>, archive: &str| {
+        let mut command = std::process::Command::new(RAR_CLI);
+        command.arg("a");
+        if let Some(spec) = spec {
+            command.arg(spec);
+        }
+        let status = command
+            .args(["-m3", "-idq", archive, "ramp.bin"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{spec:?}");
+        let reader = rar_rs::ArchiveReader::open(dir.path().join(archive)).unwrap();
+        reader
+            .entry(reader.unique_entry("ramp.bin").unwrap())
+            .unwrap()
+            .compressed_size()
+    };
+
+    let auto = create(None, "auto.rar");
+    let disabled = create(Some("-mc-"), "disabled.rar");
+    let forced = create(Some("-mcd+"), "forced.rar");
+    assert!(
+        disabled > auto,
+        "auto delta must beat disabled filters ({auto} vs {disabled})"
+    );
+    assert!(
+        forced <= auto,
+        "forced delta must be at least as good as auto on ramp data ({auto} vs {forced})"
+    );
+
+    // lenient forms stay accepted, like WinRAR's parser
+    for spec in ["-mc5", "-mcz", "-mcl-", "-mcx", "-mcd6+", "-mc6d+", "-mce+"] {
+        let packed = create(Some(spec), "lenient.rar");
+        assert!(packed > 0, "{spec}");
+    }
+
+    // Forced x86 must still round-trip.
+    let archive = dir.path().join("x86.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-mce+", "-idq"])
+        .arg(&archive)
+        .arg("ramp.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-idq", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read(out.join("ramp.bin")).unwrap(), ramp);
+
+    // RAR4 honors the same policy: forced delta beats disabled filters.
+    let disabled4 = {
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", "-ma4", "-mc-", "-m3", "-idq", "r4off.rar", "ramp.bin"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let reader = rar_rs::ArchiveReader::open(dir.path().join("r4off.rar")).unwrap();
+        reader
+            .entry(reader.unique_entry("ramp.bin").unwrap())
+            .unwrap()
+            .compressed_size()
+    };
+    let forced4 = {
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", "-ma4", "-mcd+", "-m3", "-idq", "r4on.rar", "ramp.bin"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let reader = rar_rs::ArchiveReader::open(dir.path().join("r4on.rar")).unwrap();
+        reader
+            .entry(reader.unique_entry("ramp.bin").unwrap())
+            .unwrap()
+            .compressed_size()
+    };
+    assert!(
+        forced4 < disabled4,
+        "RAR4 forced delta must beat disabled filters ({disabled4} vs {forced4})"
+    );
+
+    // UnRAR accepts the switch as a no-op, like the official binary.
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-mc-", "-idq"])
+        .arg(dir.path().join("auto.rar"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+}

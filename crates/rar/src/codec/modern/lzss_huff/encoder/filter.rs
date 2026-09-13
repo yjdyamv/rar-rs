@@ -537,8 +537,8 @@ pub fn pick_delta_channel(
 
 /// Like [`encode_with_auto_x86_filter`] but for the delta (multimedia)
 /// filter. When the data looks correlated (the cheap
-/// [`crate::codec::common::filters::auto_delta_filter_channels`] gate passes), the best channel
-/// count is chosen by compressed size on a leading sample and the whole member
+/// `auto_delta_filter_channels` gate passes), the best channel count is
+/// chosen by compressed size on a leading sample and the whole member
 /// is forward-transformed and packed as a standalone (non-solid) filter
 /// member — but only when it strictly beats plain LZSS. Size-based channel
 /// selection is what WinRAR does and is robust to byte-wrapping at sample

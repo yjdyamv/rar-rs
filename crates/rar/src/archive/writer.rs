@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 
 use super::{BatchEntry, RarArchive};
 use crate::error::{RarError, RarResult};
-use crate::options::{CreateOptions, SolidReset};
+use crate::options::{CreateOptions, FilterOptions, SolidReset};
 use crate::version::ArchiveVersion;
 
 const MIN_DICTIONARY_BYTES: u64 = 128 * 1024;
@@ -198,6 +198,7 @@ pub struct WriterOptions {
     save_owner: bool,
     save_streams: bool,
     thread_count: Option<ThreadCount>,
+    filters: FilterOptions,
 }
 
 impl Default for WriterOptions {
@@ -221,6 +222,7 @@ impl Default for WriterOptions {
             save_owner: false,
             save_streams: false,
             thread_count: None,
+            filters: FilterOptions::default(),
         }
     }
 }
@@ -238,7 +240,8 @@ impl WriterOptions {
     /// configurable dictionary. Only writable versions are accepted — `v26`
     /// and `v36` are read-only and rejected at validation, never silently
     /// downgraded (see [`ArchiveVersion::is_writable`]).
-    /// The owning v50/v70 policy lives in [`crate::format::rar5::create`].
+    /// The owning v50/v70 policy lives in the private `format::rar5::create`
+    /// module.
     #[must_use]
     pub fn compression(mut self, version: ArchiveVersion) -> Self {
         self.compression = version;
@@ -367,6 +370,14 @@ impl WriterOptions {
         self
     }
 
+    /// Set the compression filter policy (WinRAR's `-mc`): automatic,
+    /// disabled or forced delta / x86 filters.
+    #[must_use]
+    pub fn filters(mut self, filters: FilterOptions) -> Self {
+        self.filters = filters;
+        self
+    }
+
     /// Set a per-archive compression thread count (requires the `parallel`
     /// feature; otherwise compression stays sequential).
     #[must_use]
@@ -376,6 +387,13 @@ impl WriterOptions {
     }
 
     fn validate(&self) -> RarResult<()> {
+        if let Some(channels) = self.filters.delta_channels
+            && !(1..=31).contains(&channels)
+        {
+            return Err(RarError::InvalidOption(format!(
+                "delta filter channels must be in 1..=31, got {channels}"
+            )));
+        }
         // The combination rules live in `options` so the plain
         // `CreateOptions` struct rejects exactly the same set: a validated
         // typed option must never be silently dropped or clamped.
@@ -430,6 +448,7 @@ impl WriterOptions {
             dict_size_log: dictionary_log,
             dict_size_bytes: dictionary_bytes,
             force_v70: self.compression == ArchiveVersion::V70,
+            filters: self.filters,
             save_ctime: self.save_ctime,
             save_atime: self.save_atime,
             time_precision_seconds: self.time_precision_seconds,
@@ -729,7 +748,7 @@ impl ArchiveWriter {
 
     /// Add a link/copy redirect member (Unix or Windows symlink, junction,
     /// hardlink, or file copy) whose payload is a reference to another
-    /// member. Mirrors the legacy [`RarArchive::add_redirect`]; callers add
+    /// member. Mirrors the legacy `RarArchive::add_redirect`; callers add
     /// redirects after their data members, preserving archive order.
     pub fn add_redirect(&mut self, name: &str, redir_type: u64, target: &str) -> RarResult<()> {
         self.apply(|archive| archive.add_redirect(name, redir_type, target))
