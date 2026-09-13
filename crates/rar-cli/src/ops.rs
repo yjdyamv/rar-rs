@@ -507,7 +507,7 @@ fn member_type_cell(entry: &EntryRef<'_>) -> &'static str {
     match entry.redirect().map(|(redir_type, _)| redir_type) {
         Some(1) => "Unix symbolic link",
         Some(2) => "Windows symbolic link",
-        Some(3) => "Windows junction",
+        Some(3) => "NTFS junction point",
         Some(4) => "Hard link",
         Some(5) => "File copy",
         _ if entry.is_dir() => "Directory",

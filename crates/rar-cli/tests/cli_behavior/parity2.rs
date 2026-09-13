@@ -755,3 +755,44 @@ fn cli_directory_symlinks_are_stored_as_redirects() {
         "the target must not be walked:\n{text}"
     );
 }
+
+/// A Windows junction is stored as a redirect type 3 and the technical
+/// listing uses the official `NTFS junction point` label, not a Windows
+/// symlink.
+#[cfg(windows)]
+#[test]
+fn cli_junctions_use_the_official_type_label() {
+    let dir = make_temp_dir();
+    std::fs::create_dir(dir.path().join("real")).unwrap();
+    std::fs::write(dir.path().join("real/inner.txt"), b"inner").unwrap();
+    let status = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(dir.path().join("link"))
+        .arg(dir.path().join("real"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "mklink /J failed");
+
+    let archive = dir.path().join("junc.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-ol", "-idq"])
+        .arg(&archive)
+        .arg("link")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let tech = std::process::Command::new(RAR_CLI)
+        .args(["lt"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&tech.stdout);
+    assert!(text.contains("Type: NTFS junction point"), "{text}");
+    assert!(text.contains("Target:"), "{text}");
+    assert!(
+        !text.contains("inner.txt"),
+        "the target must not be walked:\n{text}"
+    );
+}
