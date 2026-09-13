@@ -637,6 +637,7 @@ pub(crate) fn archive_version(
         Some("4") => Ok((rar_rs::ArchiveVersion::V29, None)),
         Some("2") => Ok((rar_rs::ArchiveVersion::V20, None)),
         Some("15") => Ok((rar_rs::ArchiveVersion::V15, None)),
+        Some("13") | Some("14") => Ok((rar_rs::ArchiveVersion::V14, None)),
         None | Some("5") => Ok((rar_rs::ArchiveVersion::V50, dict_size_bytes)),
         Some("7") => {
             let bytes = dict_size_bytes

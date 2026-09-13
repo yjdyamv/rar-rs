@@ -359,3 +359,130 @@ fn cli_ma4_rejects_rar5_only_switches() {
     let f_id = rar.unique_entry("f.txt").unwrap();
     assert_eq!(rar.read_entry(f_id).unwrap(), b"payload");
 }
+
+/// `-ma13`/`-ma14` create the DOS-era `RE~^` container (RAR 1.3/1.4):
+/// stored, compressed and solid members round-trip through our reader and
+/// `unrar`, and the archive comment is queued ahead of the first member.
+#[test]
+fn cli_ma14_creates_rar13_archives() {
+    let dir = make_temp_dir();
+    let a = dir.path().join("a.txt");
+    let payload = b"RAR 1.3/1.4 CLI member payload ".repeat(1500);
+    std::fs::write(&a, &payload).unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"small sibling\r\n").unwrap();
+    std::fs::write(dir.path().join("note.txt"), b"cli archive comment\r\n").unwrap();
+
+    for (flag, solid, comment, password) in [
+        ("-ma14", false, false, false),
+        ("-ma13", true, false, false),
+        ("-ma14", false, true, false),
+        ("-ma14", true, false, true),
+    ] {
+        let arc = dir.path().join(format!(
+            "{}{}{}{}.rar",
+            flag.trim_start_matches('-'),
+            if solid { "-s" } else { "" },
+            if comment { "-z" } else { "" },
+            if password { "-p" } else { "" }
+        ));
+        let mut command = std::process::Command::new(RAR_CLI);
+        command.args(["a", flag, "-m5", "-idq"]);
+        if solid {
+            command.arg("-s");
+        }
+        if comment {
+            command.arg(format!("-z{}", dir.path().join("note.txt").display()));
+        }
+        if password {
+            command.arg("-ppw");
+        }
+        command
+            .arg(&arc)
+            .arg("a.txt")
+            .arg("b.txt")
+            .current_dir(dir.path());
+        let status = command.status().unwrap();
+        assert!(status.success(), "rar a {flag} (solid={solid}) failed");
+
+        // RAR 1.3/1.4 carries the 4-byte `RE~^` signature (plus the 7-byte
+        // main header whose size follows).
+        let head = std::fs::read(&arc).unwrap();
+        assert_eq!(&head[..4], b"RE~^", "{flag}: DOS-era signature expected");
+        let main_head = u16::from_le_bytes([head[4], head[5]]) as usize;
+        if comment {
+            assert!(
+                main_head > 7,
+                "{flag}: the archive comment extends the main header"
+            );
+        } else {
+            assert_eq!(main_head, 7, "{flag}: main header size");
+        }
+
+        let mut rar = if password {
+            rar_rs::ArchiveReader::open_with(&arc, rar_rs::OpenOptions::new().password("pw"))
+                .unwrap()
+        } else {
+            rar_rs::ArchiveReader::open(&arc).unwrap()
+        };
+        for entry in rar.entries() {
+            assert_eq!(entry.version(), rar_rs::ArchiveVersion::V14, "{flag}");
+        }
+        let a_id = rar.unique_entry("a.txt").unwrap();
+        assert_eq!(rar.read_entry(a_id).unwrap(), payload, "{flag}: a.txt");
+        let b_id = rar.unique_entry("b.txt").unwrap();
+        assert_eq!(rar.read_entry(b_id).unwrap(), b"small sibling\r\n");
+        if comment {
+            assert_eq!(
+                rar.comment().unwrap().as_deref(),
+                Some(b"cli archive comment\r\n".as_slice()),
+                "{flag}: archive comment"
+            );
+        }
+        drop(rar);
+
+        let mut command = std::process::Command::new(UNRAR_CLI);
+        command.args(["t", "-idq"]);
+        if password {
+            command.arg("-ppw");
+        }
+        let res = command.arg(&arc).output().unwrap();
+        assert!(
+            res.status.success(),
+            "unrar t rejected our {flag} archive (solid={solid}, comment={comment}, pw={password}):\n{}",
+            String::from_utf8_lossy(&res.stderr)
+        );
+    }
+}
+
+/// RAR5-only creation switches are rejected for `-ma13`/`-ma14`, since the
+/// DOS-era container cannot express them (no `-hp`, recovery records,
+/// multi-volume sets, quick-open, BLAKE2sp or dictionaries).
+#[test]
+fn cli_ma14_rejects_rar5_only_switches() {
+    let dir = make_temp_dir();
+    let f = dir.path().join("f.txt");
+    std::fs::write(&f, b"payload").unwrap();
+
+    for (name, extra) in [
+        ("hp", vec!["-hpsecret"]),
+        ("volume", vec!["--volume-size=100k"]),
+        ("recovery", vec!["-rr10%"]),
+        ("quick-open", vec!["-qo"]),
+        ("blake2", vec!["-htb"]),
+    ] {
+        let arc = dir.path().join(format!("ma14-{name}.rar"));
+        let mut command = std::process::Command::new(RAR_CLI);
+        command.args(["a", "-ma14", "-idq"]);
+        command.args(&extra);
+        let status = command
+            .arg(&arc)
+            .arg("f.txt")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "-ma14 {extra:?} must be rejected for RAR 1.3/1.4"
+        );
+    }
+}

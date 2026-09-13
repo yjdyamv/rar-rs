@@ -576,6 +576,11 @@ impl RarArchive {
                 "redirect members are not supported for RAR4 archives".into(),
             ));
         }
+        if self.rar13 {
+            return Err(RarError::Unsupported(
+                "redirect members are not supported for RAR 1.3/1.4 archives".into(),
+            ));
+        }
         if self.mode != Mode::Write && self.mode != Mode::Append {
             return Err(RarError::Format(
                 "add_redirect requires an archive being written".into(),

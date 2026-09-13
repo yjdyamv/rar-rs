@@ -2,7 +2,8 @@
 //!
 //! Pure-Rust RAR archive library. Creates, reads, and extracts legacy RAR
 //! 1.3–4.x and modern RAR5/RAR7 archives with native compression — no
-//! external binaries required.
+//! external binaries required. Creation covers RAR 1.3/1.4 (`RE~^`,
+//! `ArchiveVersion::V14`, single volume), RAR 1.5/2.x/4.x and RAR5/RAR7.
 //!
 //! ## Quick Start
 //!

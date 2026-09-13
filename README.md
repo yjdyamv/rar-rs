@@ -2,8 +2,8 @@
 
 **Pure-Rust RAR archive library and command-line tools.** Create, read,
 extract, and modify RAR5/RAR7 archives, read legacy RAR 1.3–4.x archives,
-and create RAR 1.5 / 2.x / 4.x archives with native Rust codecs. No external
-RAR/UNRAR binary is required at runtime.
+and create RAR 1.3 / 1.4 / 1.5 / 2.x / 4.x archives with native Rust codecs.
+No external RAR/UNRAR binary is required at runtime.
 
 > Licensed under BSD-2-Clause for original project portions. This is an
 > independent implementation with separately identified upstream portions —
@@ -17,9 +17,10 @@ RAR/UNRAR binary is required at runtime.
 - **Pure Rust** implementation with no external RAR/UNRAR runtime binary.
 - **RAR5 (v50) and RAR7 (v70)** read/write support with WinRAR/UnRAR
   interoperability testing.
-- **Legacy support** for reading RAR 1.3–4.x archives and creating RAR 1.5 /
-  2.x / 4.x archives (`-ma15` / `-ma2` / `-ma4`), including legacy codecs,
-  encryption, solid chains, and volumes.
+- **Legacy support** for reading RAR 1.3–4.x archives and creating RAR 1.3 /
+  1.4 (`RE~^` container, `-ma13` / `-ma14`) RAR 1.5 / 2.x / 4.x archives
+  (`-ma15` / `-ma2` / `-ma4`), including legacy codecs, encryption, solid
+  chains, and volumes.
 - **Archive operations** — append, update, delete, rename, freshen, move, lock,
   repair, comments, SFX handling, and multi-volume processing.
 - **Recovery** — inline recovery records and `.rev` recovery volumes, with
@@ -94,7 +95,8 @@ including solid archives, quick-open, BLAKE2sp, safe extraction,
 ## Feature highlights
 
 - **Formats:** RAR5 (v50) and RAR7 (v70) create/read/write; RAR 1.3–4.x
-  read/extract; and RAR 1.5 / 2.x / 4.x creation (`-ma15` / `-ma2` / `-ma4`).
+  read/extract; and RAR 1.3 / 1.4 / 1.5 / 2.x / 4.x creation (`-ma13` /
+  `-ma14` / `-ma15` / `-ma2` / `-ma4`).
 - **Compression:** native LZSS+Huffman and PPMd codecs, levels 0–5,
   dictionary controls, filters, solid archives, and parallel compression.
 - **Integrity:** CRC32, BLAKE2sp (`-htb`), recovery records, recovery volumes,

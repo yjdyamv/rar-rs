@@ -20,6 +20,7 @@ import { createArchive } from '../index.js'
 
 const RAR5_SIG = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00])
 const RAR4_SIG = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00])
+const RAR13_SIG = Buffer.from([0x52, 0x45, 0x7e, 0x5e])
 
 // Regression fixture from rar-rs tests/fixtures/tail-match-362.bin: a 362-byte
 // JSON file whose final two bytes match an earlier position at a cached
@@ -467,6 +468,41 @@ test('creates and reads back legacy RAR 1.5/2.x members (format rar15/rar2)', as
       await extractArchive(out, { destPath: dest })
       assert.deepEqual(readFileSync(join(dest, 'run.bin')), run)
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('creates and reads back a RAR 1.3/1.4 archive (format rar13)', async () => {
+  const dir = tempDir()
+  try {
+    const out = join(dir, 'rar13.rar')
+    const run = Buffer.alloc(64_000, 0x61)
+    await createArchive({
+      outPath: out,
+      format: 'rar13',
+      level: 3,
+      entries: [
+        { kind: 'bytes', name: 'text.txt', data: Buffer.from('rar13 napi smoke ') },
+        { kind: 'bytes', name: 'run.bin', data: run },
+      ],
+    })
+
+    // The DOS-era container carries the 4-byte `RE~^` signature.
+    assert.deepEqual(await readFileHead(out, 4), RAR13_SIG)
+
+    const { listEntriesDetailed, extractArchive } = await import('../index.js')
+    const entries = await listEntriesDetailed(out)
+    assert.equal(entries.length, 2)
+    const text = entries.find((e) => e.name === 'text.txt')
+    assert.equal(text.version, 'v14')
+    const runMember = entries.find((e) => e.name === 'run.bin')
+    assert.equal(runMember.version, 'v14')
+    assert.ok(runMember.packedSize < runMember.size, 'run must compress')
+
+    const dest = join(dir, 'out-rar13')
+    await extractArchive(out, { destPath: dest })
+    assert.deepEqual(readFileSync(join(dest, 'run.bin')), run)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

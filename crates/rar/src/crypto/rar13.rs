@@ -38,8 +38,8 @@ impl Rar13Cipher {
         }
     }
 
-    /// Encrypt a whole buffer in place (test vector / parity with the port).
-    #[cfg(test)]
+    /// Encrypt a whole buffer in place (write path and test vector parity
+    /// with the port).
     pub fn encrypt_in_place(mut self, data: &mut [u8]) {
         for byte in data {
             *byte = self.encrypt_byte(*byte);
@@ -53,7 +53,6 @@ impl Rar13Cipher {
     }
 
     /// Encrypt one byte, advancing the stream.
-    #[cfg(test)]
     pub fn encrypt_byte(&mut self, byte: u8) -> u8 {
         self.advance();
         byte.wrapping_add(self.key[0])

@@ -32,6 +32,9 @@ impl RarArchive {
         // was killed in the middle of, before staging anything new.
         let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
         recover_interrupted_commit(&parent, &volume_base_of(&self.path))?;
+        if self.rar13 {
+            return self.open_write_rar13();
+        }
         if self.rar4 {
             return self.open_write_rar4();
         }
@@ -174,6 +177,9 @@ impl RarArchive {
     /// end-of-archive block. The stream is left open so a caller can take
     /// it back afterwards (in-memory sink seam).
     pub(super) fn finish_writing(&mut self) -> RarResult<()> {
+        if self.rar13 {
+            return self.finish_writing_rar13();
+        }
         if self.rar4 {
             return self.finish_writing_rar4();
         }
@@ -681,6 +687,38 @@ impl RarArchive {
     }
 
     // ── RAR4 write path ──────────────────────────────────────────────────
+
+    // ── RAR 1.3/1.4 write path ───────────────────────────────────────────
+
+    /// Stage a single-volume RAR 1.3/1.4 archive: the signature is written
+    /// immediately, the main header is deferred until the archive comment is
+    /// known (first member or close).
+    fn open_write_rar13(&mut self) -> RarResult<()> {
+        if self.write_ctx().output.volume_size.is_some() {
+            return Err(RarError::InvalidOption(
+                "multi-volume RAR 1.3/1.4 creation is not supported yet".into(),
+            ));
+        }
+        self.volume_paths = vec![self.path.clone()];
+        let tmp_path = temp_sibling_path(&self.path);
+        self.write_ctx_mut().output.pending = Some(PendingCommit::Single(tmp_path.clone()));
+        let f = read_write_create(&tmp_path)?;
+        self.stream = Some(Box::new(f));
+        // The main header (signature included) is deferred until the archive
+        // comment is known: first member or close.
+        let ctx = self.write_ctx_mut();
+        ctx.output.rar13_header_pending = true;
+        ctx.output.bytes_written = 0;
+        Ok(())
+    }
+
+    fn finish_writing_rar13(&mut self) -> RarResult<()> {
+        if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
+            self.emit_rar13_main_header()?;
+            self.mode = Mode::Read; // prevent double-write
+        }
+        Ok(())
+    }
 
     fn open_write_rar4(&mut self) -> RarResult<()> {
         if let Some(volume_size) = self.write_ctx().output.volume_size {

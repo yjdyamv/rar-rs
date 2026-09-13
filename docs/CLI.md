@@ -63,6 +63,7 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 | `-ma5` | RAR5 format (default; v50, with a > 4 GiB `-md` keeping WinRAR's auto v50/v70 semantics) |
 | `-ma7` | Force RAR7 (v70) members at any dictionary size — an extension beyond WinRAR 7.23, which only switches to v70 above a 4 GiB dictionary |
 | `-ma4` | Legacy RAR3/4 container (v29): full write-side since 2026-09 — STORE + LZSS m1–m5 + PPMd, VM filters, -hp, RR, solid chains; byte-verified against WinRAR 6.23 (the last RAR4 producer) and read by 7.23/UnRAR |
+| `-ma13` / `-ma14` | DOS-era RAR 1.3/1.4 container (`RE~^`, v14), single volume: STORE + Unpack15 m1–m5, solid chains, archive comments and `-p` member encryption; `-hp`/recovery/volumes/quick-open/owner/streams/BLAKE2sp/dictionaries are rejected. Extension beyond WinRAR 7.23 (which cannot write this container); UnRAR 7.23 reads the output |
 | `-ma2` | Legacy RAR 2.x container (v20) member writer |
 | `-ma15` | Legacy RAR 1.5 container (v15) member writer |
 | `-md<size>` | Dictionary size (incl. RAR7 >4 GiB when `-ma7`); follows `-md`, default 32 MiB, capped at 2× member size |

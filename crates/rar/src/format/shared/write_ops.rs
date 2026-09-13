@@ -72,15 +72,17 @@ impl RarArchive {
         }
     }
 
-    /// The container-neutral file dispatcher: RAR4 uses the legacy pipeline,
-    /// RAR5 the modern one.
+    /// The container-neutral file dispatcher: RAR 1.3/1.4 uses its own
+    /// DOS-era pipeline, RAR4 the legacy one, RAR5 the modern one.
     pub(crate) fn add_file(
         &mut self,
         path: &Path,
         arcname: Option<&str>,
         level: u8,
     ) -> RarResult<()> {
-        if self.rar4 {
+        if self.rar13 {
+            self.add_file_rar13(path, arcname, level)
+        } else if self.rar4 {
             self.add_file_rar4(path, arcname, level)
         } else {
             self.add_file_rar5(path, arcname, level)
@@ -95,6 +97,20 @@ impl RarArchive {
         compression_level: u8,
     ) -> RarResult<()> {
         self.check_cancel()?;
+        if self.rar13 {
+            let name = arcname.replace('\\', "/");
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            return self.add_rar13_data(
+                name,
+                data.to_vec(),
+                compression_level,
+                now.as_secs() as u32,
+                now.subsec_nanos(),
+                None,
+            );
+        }
         if self.rar4 {
             // RAR4 members are encoded through the same pipeline as
             // `add_file_rar4` (CRC, LZ/PPMd/filter/STORE candidates,
@@ -145,6 +161,9 @@ impl RarArchive {
             .unwrap_or_default()
             .subsec_nanos();
 
+        if self.rar13 {
+            return self.write_rar13_dir_entry(&name, mtime, mtime_ns);
+        }
         if self.rar4 {
             return self.write_rar4_dir_entry(&name, mtime, mtime_ns);
         }
@@ -174,7 +193,15 @@ impl RarArchive {
             .unwrap_or_default()
             .as_secs() as u32;
 
-        if self.rar4 {
+        if self.rar13 {
+            let mtime_ns = meta
+                .modified()
+                .unwrap_or(SystemTime::now())
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos();
+            self.write_rar13_dir_entry(&name, mtime, mtime_ns)?;
+        } else if self.rar4 {
             let mtime_ns = meta
                 .modified()
                 .unwrap_or(SystemTime::now())
@@ -216,6 +243,7 @@ impl RarArchive {
         #[cfg(feature = "parallel")]
         {
             if !self.rar4
+                && !self.rar13
                 && !self.write_ctx().solid.mode
                 && !self.write_ctx().meta.streams
                 && !entries.is_empty()

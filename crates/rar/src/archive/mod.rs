@@ -448,6 +448,11 @@ impl RarArchive {
     /// the rebuilt quick-open record, and truncate the trailing end /
     /// quick-open / recovery blocks.
     fn prepare_append(&mut self) -> RarResult<()> {
+        if self.rar13 {
+            return Err(RarError::Unsupported(
+                "appending to RAR 1.3/1.4 archives is not supported".into(),
+            ));
+        }
         // Recover a multi-volume commit another process was killed in the
         // middle of before touching this archive.
         let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -730,6 +735,11 @@ impl RarArchive {
                 "in-memory sinks are single-volume only".into(),
             ));
         }
+        if opts.compression.is_rar13() {
+            return Err(RarError::Unsupported(
+                "in-memory sinks are not supported for RAR 1.3/1.4 archives".into(),
+            ));
+        }
         if opts.recovery_volumes_percent.is_some() || opts.recovery_volume_count.is_some() {
             return Err(RarError::Unsupported(
                 "recovery volumes require files on disk".into(),
@@ -748,12 +758,29 @@ impl RarArchive {
     fn new_with_options(path: PathBuf, opts: crate::options::CreateOptions) -> RarResult<Self> {
         opts.validate()?;
         let is_rar4 = opts.compression.is_legacy();
+        let is_rar13 = opts.compression.is_rar13();
         if is_rar4 {
             // The RAR4 container's own policy: options it cannot express are
             // rejected by the format module that owns them, so this layer
             // carries no duplicated RAR4 rule set (and reports the same
             // `InvalidOption` error the typed `WriterOptions` surface does).
             crate::format::rar4::create::validate_rar4_only(Rar4WriteOptions::from(&opts))?;
+        }
+        if is_rar13 {
+            crate::format::rar13::create::validate_rar13_only(
+                crate::format::rar13::create::Rar13WriteOptions {
+                    quick_open: opts.quick_open,
+                    blake2: opts.blake2,
+                    recovery_percent: opts.recovery_percent,
+                    recovery_volumes_percent: opts.recovery_volumes_percent,
+                    recovery_volume_count: opts.recovery_volume_count,
+                    save_owner: opts.save_owner,
+                    save_streams: opts.save_streams,
+                    has_dictionary: opts.dict_size_log.is_some() || opts.dict_size_bytes.is_some(),
+                    encrypt_headers: opts.encrypt_headers,
+                    volume_size: opts.volume_size,
+                },
+            )?;
         }
         // Header encryption is supported for multi-volume archives: every
         // volume starts with the plaintext encryption header and all
@@ -770,7 +797,7 @@ impl RarArchive {
             entries: Vec::new(),
             sfx_offset: 0,
             rar4: is_rar4,
-            rar13: false,
+            rar13: is_rar13,
             rar13_extra: Vec::new(),
             rar4_solid_archive: false,
             stream: None,
@@ -829,6 +856,7 @@ impl RarArchive {
                     volume_size: opts.volume_size,
                     current_volume: 0,
                     bytes_written: 0,
+                    rar13_header_pending: false,
                 },
             }),
         };

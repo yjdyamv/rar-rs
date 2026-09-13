@@ -51,7 +51,7 @@ fn rar13_lists_every_single_volume_fixture() {
         for entry in reader.entries() {
             assert_eq!(
                 entry.version(),
-                rar_rs::ArchiveVersion::V15,
+                rar_rs::ArchiveVersion::V14,
                 "{file}: {}",
                 entry.name()
             );

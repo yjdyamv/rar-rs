@@ -1,10 +1,13 @@
-//! RAR 1.3/1.4 container read: signature `RE~^`, fixed little-endian
-//! headers without a header CRC, 16-bit rolling member checksums and the
-//! RAR13 additive stream cipher.
+//! RAR 1.3/1.4 container read and write: signature `RE~^`, fixed
+//! little-endian headers without a header CRC, 16-bit rolling member
+//! checksums and the RAR13 additive stream cipher.
 //!
-//! Only the read side is implemented; the member payload decodes through
-//! the same `Unpack15` codec as the RAR 1.5 family. Ported from the
-//! decode half of `rars`' `rar13.rs` (WTFPL; see NOTICE).
+//! The member payload uses the same `Unpack15` codec as the RAR 1.5
+//! family; the read/write sides are ported from `rars`' `rar13.rs`
+//! (WTFPL; see NOTICE).
+
+pub(crate) mod create;
+pub(crate) mod write;
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -14,6 +17,8 @@ use crate::detect::RAR13_SIGNATURE;
 use crate::error::{RarError, RarResult};
 use crate::model::{DataChunk, FileHeader};
 
+/// Main header flag: always set (the reference writer stamps `0x80`).
+pub(crate) const MHD_ALWAYS_SET: u8 = 0x80;
 /// Main header flag: the main-header extension holds an archive comment.
 pub(crate) const MHD_COMMENT: u8 = 0x02;
 /// Main header flag: solid archive (`Unpack15` window shared by members).
@@ -23,11 +28,19 @@ pub(crate) const MHD_PACK_COMMENT: u8 = 0x10;
 
 const LHD_SPLIT_BEFORE: u8 = 0x01;
 const LHD_SPLIT_AFTER: u8 = 0x02;
-const LHD_COMMENT: u8 = 0x08;
-const METHOD_STORE: u8 = 0;
+/// File header flag: the payload is RAR13-cipher encrypted.
+pub(crate) const LHD_PASSWORD: u8 = 0x04;
+/// File header flag: the header extension holds a member comment.
+pub(crate) const LHD_COMMENT: u8 = 0x08;
+/// File header flag: the member continues a solid chain (reference writers
+/// stamp it; readers chain by `MHD_SOLID` + position).
+pub(crate) const LHD_SOLID: u8 = 0x10;
+pub(crate) const METHOD_STORE: u8 = 0;
+pub(crate) const METHOD_BEST: u8 = 5;
+pub(crate) const DEFAULT_UNP_VER: u8 = 2;
 
-const MAIN_HEAD_SIZE: usize = 7;
-const FILE_HEAD_BASE_SIZE: usize = 21;
+pub(crate) const MAIN_HEAD_SIZE: usize = 7;
+pub(crate) const FILE_HEAD_BASE_SIZE: usize = 21;
 
 /// The 16-bit rolling checksum RAR 1.3/1.4 stamps on member data.
 pub(crate) fn file_checksum(data: &[u8]) -> u16 {
@@ -121,6 +134,7 @@ pub(crate) fn parse_volume(
             mtime: crate::format::rar4::dos_time_to_unix(file_time),
             crc32_val: Some(u32::from(file_crc)),
             comp_method: method.wrapping_sub(METHOD_STORE),
+            comp_solid: lhd_flags & LHD_SOLID != 0,
             flags: u64::from(lhd_flags),
             is_directory,
             data_offset: data_start,

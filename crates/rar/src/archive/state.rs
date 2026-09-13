@@ -248,6 +248,10 @@ pub(crate) struct OutputState {
     pub current_volume: usize,
     /// Bytes written in the current volume during creation.
     pub bytes_written: u64,
+    /// RAR 1.3/1.4 create: the signature is written at open and the main
+    /// header is deferred until the archive comment is known (first member
+    /// or close).
+    pub rar13_header_pending: bool,
 }
 
 /// An NTFS alternate data stream ("STM" service record) attached to an

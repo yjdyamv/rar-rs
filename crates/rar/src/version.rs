@@ -7,6 +7,7 @@
 //!
 //! | Version | Codec                        | Container          | Writable |
 //! |---------|------------------------------|--------------------|----------|
+//! | `v14`   | RAR13 (Unpack15)             | RAR 1.3/1.4 (`RE~^`)| yes     |
 //! | `v15`   | RAR15 (adaptive-Huffman LZ)  | RAR 1.5–4.x        | yes      |
 //! | `v20`   | RAR20 (LZSS + Huffman)       | RAR 1.5–4.x        | yes      |
 //! | `v26`   | RAR20 (LZSS + Huffman)       | RAR 1.5–4.x        | —        |
@@ -21,14 +22,17 @@
 //! 8-byte-signature RAR5 container. Readers report a version per member
 //! ([`crate::ArchiveEntry::version`]); writers select the version on the
 //! writer options ([`crate::WriterOptions::compression`] /
-//! `CreateOptions::compression`). `v15`, `v20`, `v29`, `v50` and `v70` are
-//! writable; `v26` (same RAR20 codec as `v20`, read-only) and `v36` (same
-//! RAR29 codec as `v29`, read-only) exist for interoperability, and the
-//! legacy writers only produce their upstream equivalents (`v20` for v26,
-//! `v29` for v36), matching how WinRAR's newer writable profiles map onto
-//! the oldest repack format. The `v15`/`v20` writers cover the same
-//! feature set as the `v29` pipeline (solid chains, `-p` member
-//! encryption and `-hp` header encryption; 2026-09).
+//! `CreateOptions::compression`). `v14`, `v15`, `v20`, `v29`, `v50` and
+//! `v70` are writable; `v26` (same RAR20 codec as `v20`, read-only) and
+//! `v36` (same RAR29 codec as `v29`, read-only) exist for interoperability,
+//! and the legacy writers only produce their upstream equivalents (`v20`
+//! for v26, `v29` for v36), matching how WinRAR's newer writable profiles
+//! map onto the oldest repack format. The `v14` writer emits the DOS-era
+//! `RE~^` container (single volume, stored or Unpack15-compressed members,
+//! solid chains, archive comments and `-p` member encryption; 2026-09).
+//! The `v15`/`v20` writers cover the same feature set as the `v29` pipeline
+//! (solid chains, `-p` member encryption and `-hp` header encryption;
+//! 2026-09).
 
 /// A member compression version in the archive version table.
 ///
@@ -40,6 +44,10 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ArchiveVersion {
+    /// RAR 1.3/1.4 member: the `RE~^` container with the Unpack15 codec
+    /// (member `unp_ver` 2). Its own container family, distinct from the
+    /// RAR 1.5–4.x `Rar!\x1a\x07\x00` signature.
+    V14,
     /// RAR 1.5 unpack version: the original adaptive-Huffman + plain LZ
     /// codec.
     V15,
@@ -70,7 +78,8 @@ impl Default for ArchiveVersion {
 
 impl ArchiveVersion {
     /// All member compression versions, in order.
-    pub const ALL: [ArchiveVersion; 7] = [
+    pub const ALL: [ArchiveVersion; 8] = [
+        ArchiveVersion::V14,
         ArchiveVersion::V15,
         ArchiveVersion::V20,
         ArchiveVersion::V26,
@@ -83,6 +92,7 @@ impl ArchiveVersion {
     /// Stable machine-readable two-digit name (`"v15"` … `"v70"`).
     pub const fn as_str(self) -> &'static str {
         match self {
+            ArchiveVersion::V14 => "v14",
             ArchiveVersion::V15 => "v15",
             ArchiveVersion::V20 => "v20",
             ArchiveVersion::V26 => "v26",
@@ -91,6 +101,11 @@ impl ArchiveVersion {
             ArchiveVersion::V50 => "v50",
             ArchiveVersion::V70 => "v70",
         }
+    }
+
+    /// Whether this version lives in the RAR 1.3/1.4 (`RE~^`) container.
+    pub const fn is_rar13(self) -> bool {
+        matches!(self, Self::V14)
     }
 
     /// Whether this version lives in the legacy RAR 1.5–4.x container
@@ -110,7 +125,7 @@ impl ArchiveVersion {
     pub const fn is_writable(self) -> bool {
         matches!(
             self,
-            Self::V15 | Self::V20 | Self::V29 | Self::V50 | Self::V70
+            Self::V14 | Self::V15 | Self::V20 | Self::V29 | Self::V50 | Self::V70
         )
     }
 
@@ -118,6 +133,7 @@ impl ArchiveVersion {
     /// `20`/`26`/`29`/`36`), or `None` for the RAR5 family versions.
     pub const fn to_unp_ver(self) -> Option<u8> {
         match self {
+            ArchiveVersion::V14 => Some(2),
             ArchiveVersion::V15 => Some(15),
             ArchiveVersion::V20 => Some(20),
             ArchiveVersion::V26 => Some(26),
@@ -138,6 +154,7 @@ impl ArchiveVersion {
     /// the version table, or `None` for an unknown value.
     pub const fn from_unp_ver(unp_ver: u8) -> Option<Self> {
         match unp_ver {
+            2 => Some(ArchiveVersion::V14),
             15 => Some(ArchiveVersion::V15),
             20 => Some(ArchiveVersion::V20),
             26 => Some(ArchiveVersion::V26),
@@ -172,7 +189,7 @@ mod tests {
 
     #[test]
     fn the_table_is_exhaustive_and_two_digit_named() {
-        assert_eq!(ArchiveVersion::ALL.len(), 7);
+        assert_eq!(ArchiveVersion::ALL.len(), 8);
         for version in ArchiveVersion::ALL {
             let name = version.as_str();
             assert_eq!(name.len(), 3, "{version} name should be like \"v15\"");
@@ -182,7 +199,19 @@ mod tests {
 
     #[test]
     fn legacy_and_container_derived_isolation() {
-        // v15-v36 live in the legacy RAR 1.5-4.x container; v50/v70 in RAR5.
+        // v14 lives in the RAR 1.3/1.4 (`RE~^`) container; v15-v36 in the
+        // legacy RAR 1.5-4.x container; v50/v70 in RAR5.
+        assert!(ArchiveVersion::V14.is_rar13());
+        assert!(!ArchiveVersion::V14.is_legacy());
+        for version in [
+            ArchiveVersion::V15,
+            ArchiveVersion::V20,
+            ArchiveVersion::V26,
+            ArchiveVersion::V29,
+            ArchiveVersion::V36,
+        ] {
+            assert!(!version.is_rar13(), "{version}");
+        }
         for version in [
             ArchiveVersion::V15,
             ArchiveVersion::V20,
@@ -200,6 +229,7 @@ mod tests {
     #[test]
     fn only_v26_and_v36_are_read_only() {
         for version in [
+            ArchiveVersion::V14,
             ArchiveVersion::V15,
             ArchiveVersion::V20,
             ArchiveVersion::V29,
@@ -216,6 +246,7 @@ mod tests {
     #[test]
     fn to_unp_ver_maps_the_legacy_versions_back() {
         for (version, unp_ver) in [
+            (ArchiveVersion::V14, 2),
             (ArchiveVersion::V15, 15),
             (ArchiveVersion::V20, 20),
             (ArchiveVersion::V26, 26),

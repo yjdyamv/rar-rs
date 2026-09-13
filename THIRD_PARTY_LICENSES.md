@@ -59,6 +59,7 @@ not as verified copying.
 | `crates/rar/src/codec/legacy/ppmd.rs` | `codec/ppmd.rs` | WTFPL |
 | `crates/rar/src/codec/legacy/rarvm.rs` | `codec/rarvm.rs` (generic filter bytecode interpreter) | WTFPL |
 | `crates/rar/src/format/rar13/mod.rs` | `rar13.rs` (decode half: container read) | WTFPL |
+| `crates/rar/src/format/rar13/write.rs` | `rar13.rs` (encode half: header layout, member write) | WTFPL |
 | `crates/rar/src/crypto/rar13.rs` | `crypto/rar13.rs` | WTFPL |
 | `crates/rar/src/codec/common/match_finder.rs` | `codec/match_finder.rs` (LZMA BT4) | MIT OR Apache-2.0 |
 | `crates/rar/src/codec/common/filters.rs` | `codec/filters.rs`, `x86_filter_scan.rs`, RAR4 audio gate | MIT OR Apache-2.0 |

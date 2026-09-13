@@ -77,13 +77,15 @@ pub(crate) struct CreateOptions {
     /// RAR 1.5–4.x container pipeline (`Rar!\x1a\x07\x00`, fixed-width
     /// headers, 16-bit CRC) is selected by [`ArchiveVersion::V29`]
     /// (per-member `unp_ver 29`), [`ArchiveVersion::V20`] (`unp_ver 20`)
-    /// or [`ArchiveVersion::V15`] (`unp_ver 15`).
+    /// or [`ArchiveVersion::V15`] (`unp_ver 15`), and the DOS-era
+    /// RAR 1.3/1.4 container (`RE~^`, 4-byte signature) by
+    /// [`ArchiveVersion::V14`] (single volume; members report `unp_ver 2`).
     ///
-    /// Only writable versions are accepted: `v15`, `v20`, `v29`, `v50` and
-    /// `v70` (see [`ArchiveVersion::is_writable`]). `v26` and `v36` are
-    /// read-only — their codecs are identical to `v20`/`v29` and writers
-    /// emit the upstream base version instead, so they are rejected rather
-    /// than silently downgraded.
+    /// Only writable versions are accepted: `v14`, `v15`, `v20`, `v29`,
+    /// `v50` and `v70` (see [`ArchiveVersion::is_writable`]). `v26` and
+    /// `v36` are read-only — their codecs are identical to `v20`/`v29` and
+    /// writers emit the upstream base version instead, so they are rejected
+    /// rather than silently downgraded.
     pub compression: ArchiveVersion,
     /// Create a solid archive: consecutive compressed members share one
     /// LZ window (better ratio, slower random access). Solid state can remain
@@ -194,7 +196,7 @@ impl CreateOptions {
 pub(crate) fn require_writable_version(version: ArchiveVersion) -> RarResult<()> {
     if !version.is_writable() {
         return Err(RarError::InvalidOption(format!(
-            "only versions v15, v20, v29, v50 and v70 are writable, got {version}"
+            "only versions v14, v15, v20, v29, v50 and v70 are writable, got {version}"
         )));
     }
     Ok(())

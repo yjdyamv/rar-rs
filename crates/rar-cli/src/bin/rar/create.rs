@@ -116,7 +116,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // The `-md` dictionary in bytes. The legacy v29 pipeline never
     // receives one: its writer picks the per-member window internally,
     // and the legacy CLI silently ignored `-md` there.
-    let dictionary = if version.is_legacy() {
+    let dictionary = if version.is_legacy() || version.is_rar13() {
         None
     } else {
         v70_dict_bytes
@@ -489,6 +489,17 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     } else {
         created.expect("new archive opened above")
     };
+    // RAR 1.3/1.4 have no editor path: the DOS main header must precede every
+    // member, so `-z` queues the comment before the first member; RAR5/RAR4
+    // attach it after creation through the editor below.
+    if version.is_rar13()
+        && let Some(comment_file) = &args.comment_file
+    {
+        let data = std::fs::read(comment_file).map_err(|e| format!("comment: {e}"))?;
+        writer
+            .set_archive_comment(Some(data))
+            .map_err(|e| format!("comment: {e}"))?;
+    }
     writer
         .add_batch(&write_entries)
         .map_err(|e| format!("add: {e}"))?;
@@ -619,8 +630,11 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             args.level
         );
     }
-    // -z<file>: attach an archive comment through the editor role.
-    if let Some(comment_file) = &args.comment_file {
+    // -z<file>: attach an archive comment through the editor role (the RAR
+    // 1.3/1.4 comment was already queued before the first member above).
+    if !version.is_rar13()
+        && let Some(comment_file) = &args.comment_file
+    {
         crate::comment::cmd_comment_set(&crate::args::CommentArgs {
             password: args.password.clone(),
             archive: archive_path.clone(),

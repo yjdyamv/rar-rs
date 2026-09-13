@@ -410,6 +410,22 @@ impl WriterOptions {
         if self.compression.is_legacy() {
             crate::format::rar4::create::validate_rar4_only(self.into())?;
         }
+        if self.compression.is_rar13() {
+            crate::format::rar13::create::validate_rar13_only(
+                crate::format::rar13::create::Rar13WriteOptions {
+                    quick_open: self.quick_open,
+                    blake2: self.blake2,
+                    recovery_percent: self.recovery_percent,
+                    recovery_volumes_percent: self.recovery_volumes_percent,
+                    recovery_volume_count: self.recovery_volume_count,
+                    save_owner: self.save_owner,
+                    save_streams: self.save_streams,
+                    has_dictionary: self.dictionary_size.is_some(),
+                    encrypt_headers: self.encrypt_headers,
+                    volume_size: self.volume_size,
+                },
+            )?;
+        }
         // A v50 archive accepts every dictionary size; sizes above 4 GiB
         // keep WinRAR's auto semantics (see [`Self::into_legacy`]) instead of
         // being downgraded or rejected.
@@ -752,6 +768,24 @@ impl ArchiveWriter {
     /// redirects after their data members, preserving archive order.
     pub fn add_redirect(&mut self, name: &str, redir_type: u64, target: &str) -> RarResult<()> {
         self.apply(|archive| archive.add_redirect(name, redir_type, target))
+    }
+
+    /// Queue the archive comment written ahead of every member. Supported by
+    /// the legacy RAR4 and RAR 1.3/1.4 create paths (their comment precedes
+    /// the first member header); RAR5 comments are attached after creation
+    /// through the editor role.
+    pub fn set_archive_comment(&mut self, comment: Option<Vec<u8>>) -> RarResult<()> {
+        self.apply(|archive| {
+            if !(archive.rar4 || archive.rar13) {
+                return Err(RarError::Unsupported(
+                    "archive comments must be queued before creation for RAR4/RAR 1.3/1.4; \
+                     use the editor for RAR5"
+                        .into(),
+                ));
+            }
+            archive.set_rar4_writer_comment(comment);
+            Ok(())
+        })
     }
 
     /// Add borrowed entries in order, preserving duplicate names.
