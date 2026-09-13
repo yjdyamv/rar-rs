@@ -1,7 +1,7 @@
 //! Shared helpers for the `rar` and `unrar` binaries.
 
 use clap::Args;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Long options that may legitimately repeat (kept out of the default
 /// switch deduplication).
@@ -26,10 +26,16 @@ fn long_key(arg: &str) -> Option<String> {
 /// Merge lower-priority default switches (configuration file, then
 /// `RARINISWITCHES`) with the command line: single-value options given
 /// on the command line suppress the same default option (WinRAR
-/// priority: command line > RARINISWITCHES > configuration file).
+/// priority: command line > RARINISWITCHES > configuration file), and
+/// repeated single-value defaults collapse to the last one (so a
+/// duplicated `-s` in a configuration source cannot fail every command).
 /// The defaults are inserted right after the subcommand token (clap
 /// subcommand-scoped options must not appear before the subcommand).
-pub fn merge_default_switches(defaults: Vec<String>, cli_args: Vec<String>) -> Vec<String> {
+pub fn merge_default_switches(
+    defaults: Vec<String>,
+    cli_args: Vec<String>,
+    value_options: &HashSet<String>,
+) -> Vec<String> {
     let cli_keys: HashSet<String> = cli_args
         .iter()
         .filter_map(|a| long_key(a))
@@ -42,12 +48,11 @@ pub fn merge_default_switches(defaults: Vec<String>, cli_args: Vec<String>) -> V
             _ => true,
         })
         .collect();
+    let defaults = dedupe_defaults(defaults, value_options);
     if defaults.is_empty() {
         return cli_args;
     }
-    let pos = cli_args
-        .iter()
-        .position(|a| !a.starts_with('-'))
+    let pos = command_index(&cli_args, value_options)
         .map(|p| p + 1)
         .unwrap_or(0);
     let mut merged = Vec::with_capacity(defaults.len() + cli_args.len());
@@ -55,6 +60,38 @@ pub fn merge_default_switches(defaults: Vec<String>, cli_args: Vec<String>) -> V
     merged.extend(defaults);
     merged.extend(cli_args[pos..].iter().cloned());
     merged
+}
+
+/// Collapse repeated single-value default switches, keeping the last
+/// occurrence: `RARINISWITCHES` (appended after the configuration file)
+/// wins over `rar.ini`, matching WinRAR's source priority. Repeatable
+/// switches and stray values keep their order.
+fn dedupe_defaults(defaults: Vec<String>, value_options: &HashSet<String>) -> Vec<String> {
+    let mut spans: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut drop = vec![false; defaults.len()];
+    let mut index = 0;
+    while index < defaults.len() {
+        let arg = &defaults[index];
+        let mut end = index + 1;
+        if let Some(key) = long_key(arg)
+            && !REPEATABLE_LONG.contains(&key.as_str())
+        {
+            if !arg.contains('=') && value_options.contains(&format!("--{key}")) {
+                end = (index + 2).min(defaults.len());
+            }
+            if let Some((start, stop)) = spans.insert(key, (index, end)) {
+                for slot in &mut drop[start..stop] {
+                    *slot = true;
+                }
+            }
+        }
+        index = end;
+    }
+    defaults
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, arg)| (!drop[index]).then_some(arg))
+        .collect()
 }
 
 /// Parse a WinRAR `-mdx<size>[k|m|g]` extraction dictionary cap: unlike
@@ -73,10 +110,121 @@ pub fn parse_mdx_size(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("dictionary size is too large: {s}"))
 }
 
-/// The subcommand name of a raw argument list (the first token that does
-/// not start with `-`), used to select `switches_<command>` entries.
-pub fn command_name(raw: &[String]) -> Option<String> {
-    raw.iter().skip(1).find(|a| !a.starts_with('-')).cloned()
+/// Long options that may consume a separate value token, collected from
+/// the whole command tree (root and every subcommand). Options that demand
+/// `=` (like `-hp`/`-ad`) never take the following token, so they are not
+/// listed.
+pub fn value_options(cmd: &clap::Command) -> HashSet<String> {
+    fn walk(cmd: &clap::Command, out: &mut HashSet<String>) {
+        for arg in cmd.get_arguments() {
+            if arg.get_action().takes_values()
+                && !arg.is_require_equals_set()
+                && let Some(long) = arg.get_long()
+            {
+                out.insert(format!("--{long}"));
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            walk(sub, out);
+        }
+    }
+    let mut out = HashSet::new();
+    walk(cmd, &mut out);
+    out
+}
+
+/// Every subcommand name and alias of `cmd`, used to decide whether a
+/// token can be a command when reordering switches that precede it.
+pub fn subcommand_names(cmd: &clap::Command) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for sub in cmd.get_subcommands() {
+        out.insert(sub.get_name().to_string());
+        out.extend(sub.get_all_aliases().map(str::to_string));
+    }
+    out
+}
+
+/// Index of the subcommand token: WinRAR's first argument that is neither
+/// a switch nor a switch value. Values of value-taking long options are
+/// skipped, so `--work-dir . a` still lands on `a` and not on `.`.
+pub fn command_index(args: &[String], value_options: &HashSet<String>) -> Option<usize> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            return None;
+        }
+        if let Some(name) = arg.strip_prefix("--") {
+            if !name.contains('=') && value_options.contains(&format!("--{name}")) {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+/// The subcommand name of a normalized argument list (without the program
+/// name), used to select `switches_<command>` entries.
+pub fn command_name(args: &[String], value_options: &HashSet<String>) -> Option<String> {
+    command_index(args, value_options).map(|index| args[index].clone())
+}
+
+/// Move switches given before the subcommand behind it, matching WinRAR's
+/// order-independent switch parsing (`rar -m5 -s a book.rar`). Root-level
+/// switches (already accepted before a subcommand) stay where they are so
+/// a switch repeated on both sides keeps its old, tolerated behavior;
+/// option values stay attached to their switch. Commands this binary does
+/// not define (external `i<string>`/`rv<N>` forms, a bare archive path)
+/// are left untouched: their remaining arguments are not parsed as
+/// switches.
+pub fn switches_after_command(args: Vec<String>, cmd: &clap::Command) -> Vec<String> {
+    let value_options = value_options(cmd);
+    let root: HashSet<String> = cmd
+        .get_arguments()
+        .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+        .collect();
+    let Some(index) = command_index(&args, &value_options) else {
+        return args;
+    };
+    if index == 0 || !subcommand_names(cmd).contains(args[index].as_str()) {
+        return args;
+    }
+    let mut root_prefix = Vec::new();
+    let mut moved = Vec::new();
+    let mut cursor = 0;
+    while cursor < index {
+        let arg = &args[cursor];
+        let key = long_key(arg);
+        let takes_value = key
+            .as_ref()
+            .is_some_and(|key| !arg.contains('=') && value_options.contains(&format!("--{key}")));
+        let end = if takes_value {
+            (cursor + 2).min(index)
+        } else {
+            cursor + 1
+        };
+        let belongs_to_root = key
+            .as_ref()
+            .is_some_and(|key| root.contains(&format!("--{key}")));
+        if belongs_to_root {
+            root_prefix.extend_from_slice(&args[cursor..end]);
+        } else {
+            moved.extend_from_slice(&args[cursor..end]);
+        }
+        cursor = end;
+    }
+    let mut reordered = root_prefix;
+    reordered.push(args[index].clone());
+    reordered.extend(moved);
+    reordered.extend(args[index + 1..].iter().cloned());
+    reordered
 }
 
 /// Read the configuration file (`rar.ini` next to the executable on
@@ -769,7 +917,11 @@ macro_rules! info {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_switch, parse_mdx_size};
+    use super::{
+        command_name, merge_default_switches, normalize_switch, parse_mdx_size,
+        switches_after_command, value_options,
+    };
+    use std::collections::HashSet;
 
     #[test]
     fn mcl_is_normalized_before_the_shorter_mc_prefix() {
@@ -797,5 +949,58 @@ mod tests {
         assert_eq!(normalize_switch("-si"), "--stdin-name=");
         assert_eq!(normalize_switch("-@"), "--list-files=");
         assert_eq!(normalize_switch("-@+"), "--list-files=+");
+    }
+
+    #[test]
+    fn command_scan_skips_option_values() {
+        let cmd = clap::Command::new("t")
+            .arg(
+                clap::Arg::new("work")
+                    .long("work-dir")
+                    .action(clap::ArgAction::Set),
+            )
+            .subcommand(
+                clap::Command::new("a").arg(
+                    clap::Arg::new("level")
+                        .long("level")
+                        .action(clap::ArgAction::Set),
+                ),
+            );
+        let options = value_options(&cmd);
+        let args: Vec<String> = ["--work-dir", ".", "--level", "5", "a", "arc.rar"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(command_name(&args, &options).as_deref(), Some("a"));
+        // Root switches stay before the command; subcommand switches move
+        // behind it with their split values attached.
+        assert_eq!(
+            switches_after_command(args, &cmd),
+            ["--work-dir", ".", "a", "--level", "5", "arc.rar"]
+        );
+    }
+
+    #[test]
+    fn default_switches_dedupe_keeps_the_last_value() {
+        let options = HashSet::new();
+        let merged = merge_default_switches(
+            vec!["--level=1".into(), "--level=5".into()],
+            vec!["a".into(), "arc.rar".into()],
+            &options,
+        );
+        assert_eq!(merged, ["a", "--level=5", "arc.rar"]);
+
+        let options: HashSet<String> = ["--password".to_string()].into_iter().collect();
+        let merged = merge_default_switches(
+            vec![
+                "--password".into(),
+                "old".into(),
+                "--password".into(),
+                "new".into(),
+            ],
+            vec!["a".into(), "arc.rar".into()],
+            &options,
+        );
+        assert_eq!(merged, ["a", "--password", "new", "arc.rar"]);
     }
 }

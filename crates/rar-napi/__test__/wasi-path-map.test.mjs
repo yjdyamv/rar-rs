@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import {
   toGuestPath,
   toHostPath,
@@ -28,11 +29,32 @@ test('win32 absolute paths map to guest /<DRIVE>:/ paths', () => {
   assert.equal(toGuestPath('C:', 'win32'), '/C:')
 })
 
-test('non-Windows and relative paths pass through unchanged', () => {
+test('non-Windows absolute paths pass through; relative paths resolve', () => {
   assert.equal(toGuestPath('/tmp/x', 'linux'), '/tmp/x')
   assert.equal(toGuestPath('C:\\x', 'linux'), 'C:\\x')
-  assert.equal(toGuestPath('tmp\\x', 'win32'), 'tmp\\x')
-  assert.equal(toGuestPath('C:relative', 'win32'), 'C:relative')
+  assert.equal(toGuestPath('out.rar', 'linux', '/work/proj'), '/work/proj/out.rar')
+  assert.equal(
+    toGuestPath('./sub/../x', 'linux', '/work/proj'),
+    '/work/proj/x',
+  )
+})
+
+test('win32 relative paths resolve against the cwd and then map', () => {
+  const cwd = 'C:\\work\\proj'
+  assert.equal(toGuestPath('out.rar', 'win32', cwd), '/C:/work/proj/out.rar')
+  assert.equal(
+    toGuestPath('.\\sub\\out.rar', 'win32', cwd),
+    '/C:/work/proj/sub/out.rar',
+  )
+  assert.equal(toGuestPath('..\\out.rar', 'win32', cwd), '/C:/work/out.rar')
+  assert.equal(
+    toGuestPath('C:relative', 'win32', cwd),
+    '/C:/work/proj/relative',
+  )
+  // Absolute drive paths do not depend on the cwd.
+  assert.equal(toGuestPath('D:\\tmp\\x', 'win32', cwd), '/D:/tmp/x')
+  // Rooted and guest-style paths keep their existing pass-through.
+  assert.equal(toGuestPath('/tmp/x', 'win32', cwd), '/tmp/x')
 })
 
 test('guest paths map back to host Windows paths', () => {
@@ -40,6 +62,36 @@ test('guest paths map back to host Windows paths', () => {
   assert.equal(toHostPath('/D:/tmp/x', 'win32'), 'D:\\tmp\\x')
   assert.equal(toHostPath('/C:', 'win32'), 'C:\\')
   assert.equal(toHostPath('/tmp/x', 'win32'), '/tmp/x')
+})
+
+test('resolved relative paths round-trip back to host paths', () => {
+  const cwd = 'C:\\work\\proj'
+  assert.equal(
+    toHostPath(toGuestPath('..\\out.rar', 'win32', cwd), 'win32'),
+    'C:\\work\\out.rar',
+  )
+  assert.equal(
+    toHostPath(toGuestPath('out.rar', 'win32', cwd), 'win32'),
+    'C:\\work\\proj\\out.rar',
+  )
+  assert.equal(
+    toHostPath(toGuestPath('out.rar', 'linux', '/work'), 'linux'),
+    '/work/out.rar',
+  )
+})
+
+test('relative paths default to the Node process cwd', () => {
+  const resolved = resolve(process.cwd(), 'out.rar')
+  if (process.platform === 'win32') {
+    // The guest spelling is drive-mapped, so check through the inverse.
+    assert.equal(toHostPath(toGuestPath('out.rar')), resolved)
+  } else {
+    assert.equal(toGuestPath('out.rar'), resolved)
+  }
+  assert.equal(
+    toGuestPath('out.rar', process.platform),
+    toGuestPath('out.rar', process.platform, process.cwd()),
+  )
 })
 
 test('preopens map / plus each existing drive on win32', () => {
@@ -67,6 +119,22 @@ test('createArchive options map paths but preserve other fields', () => {
   assert.equal(mapped.entries[1].name, 'b.bin')
   assert.equal(mapped.entries[1].path, undefined)
   assert.equal(options.outPath, 'C:\\o.rar', 'input options must not mutate')
+})
+
+test('create/append mappers inherit cwd resolution for relative paths', () => {
+  const mapped = mapCreateArchiveOptions(
+    {
+      outPath: 'out.rar',
+      entries: [{ kind: 'file', path: 'in.txt', name: 'in.txt' }],
+    },
+    process.platform,
+  )
+  assert.equal(mapped.outPath, toGuestPath('out.rar', process.platform))
+  assert.equal(mapped.entries[0].path, toGuestPath('in.txt', process.platform))
+  assert.equal(
+    mapAppendOptions({ archivePath: 'a.rar' }, process.platform).archivePath,
+    toGuestPath('a.rar', process.platform),
+  )
 })
 
 test('create result maps files back to host paths', () => {

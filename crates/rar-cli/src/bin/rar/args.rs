@@ -15,7 +15,7 @@ use crate::password;
 )]
 pub(crate) struct Cli {
     /// Assume yes on all queries (like `-y`)
-    #[arg(short = 'y', long, global = true)]
+    #[arg(short = 'y', long, global = true, overrides_with = "yes")]
     pub(crate) yes: bool,
     /// Quiet mode: suppress informational messages (like `-idq` / `-inul`)
     #[arg(long, global = true)]
@@ -202,6 +202,9 @@ pub(crate) struct PrintArgs {
     pub(crate) archive: String,
     #[arg(value_name = "FILE")]
     pub(crate) file: Option<String>,
+    /// Extraction dictionary cap (like `-mdx<size>`; no unit means GiB)
+    #[arg(long = "dict-extract", value_name = "SIZE")]
+    pub(crate) dict_extract: Option<String>,
 }
 
 /// Comment setting: stdin by default, or `-z<file>`.
@@ -277,6 +280,9 @@ pub(crate) struct ExtractArgs {
     /// Output path (like `-op<path>`); overrides the `--dest` base
     #[arg(long = "output-path", value_name = "PATH")]
     pub(crate) output_path: Option<String>,
+    /// Extraction dictionary cap (like `-mdx<size>`; no unit means GiB)
+    #[arg(long = "dict-extract", value_name = "SIZE")]
+    pub(crate) dict_extract: Option<String>,
 }
 
 /// Archive path plus one or more source files.
@@ -288,6 +294,20 @@ pub(crate) struct FilesArgs {
     pub(crate) archive: String,
     #[arg(value_name = "FILES", required = true)]
     pub(crate) files: Vec<String>,
+    /// Compression level 0-5
+    #[arg(
+        short = 'm',
+        long = "level",
+        value_name = "N",
+        default_value_t = 3,
+        value_parser = clap::value_parser!(u8).range(0..=5),
+        overrides_with = "level"
+    )]
+    pub(crate) level: u8,
+    /// Solid archive (`-s`; accepted for update/freshen parity, honored
+    /// when a move creates the archive)
+    #[arg(short = 's', long, overrides_with = "solid")]
+    pub(crate) solid: bool,
     /// Dictionary size for compression (like `-md<size>`)
     #[arg(long = "dict-size", value_name = "SIZE")]
     pub(crate) dict_size: Option<String>,
@@ -380,7 +400,8 @@ pub(crate) struct CreateArgs {
         long = "level",
         value_name = "N",
         default_value_t = 3,
-        value_parser = clap::value_parser!(u8).range(0..=5)
+        value_parser = clap::value_parser!(u8).range(0..=5),
+        overrides_with = "level"
     )]
     pub(crate) level: u8,
     #[command(flatten)]
@@ -389,7 +410,7 @@ pub(crate) struct CreateArgs {
     #[arg(short = 'v', long = "volume-size", value_name = "SIZE", value_parser = parse_size)]
     pub(crate) volume_size: Option<u64>,
     /// Solid archive
-    #[arg(short = 's', long)]
+    #[arg(short = 's', long, overrides_with = "solid")]
     pub(crate) solid: bool,
     /// Split the solid chain (WinRAR `-s` modifiers `-sd`/`-sv`/`-se`).
     /// BLAKE2sp hash records
@@ -783,6 +804,8 @@ pub(crate) fn as_files_args(args: &CreateArgs) -> FilesArgs {
         password: args.password.clone(),
         archive: args.archive.clone(),
         files: args.files.clone(),
+        level: args.level,
+        solid: args.solid,
         dict_size: args.dict_size.clone(),
         archive_format: args.archive_format.clone(),
         dict_extract: args.dict_extract.clone(),

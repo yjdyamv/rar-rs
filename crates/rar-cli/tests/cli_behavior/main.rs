@@ -6,10 +6,12 @@
 //! [`support`] holds the shared fixtures and the `rarfiles.lst` lock; the
 //! other modules group the tests by area.
 
+mod argv;
 mod basics;
 mod compression;
 mod config;
 mod edits;
+mod fixes;
 mod formats;
 mod input;
 mod legacy;

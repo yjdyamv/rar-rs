@@ -194,6 +194,17 @@ pub(crate) fn cmd_move(
             })
             .transpose()?
     };
+    // `-s` enables solid compression when the move has to create the
+    // archive; appending to an existing archive keeps its own mode.
+    let solid_mode = match (
+        misc.solid_reset.as_str(),
+        args.solid || misc.solid_reset != "continuous",
+    ) {
+        (_, false) => rar_rs::SolidMode::Disabled,
+        ("volume", _) => rar_rs::SolidMode::PerVolume,
+        ("extension", _) => rar_rs::SolidMode::PerExtension,
+        _ => rar_rs::SolidMode::Continuous,
+    };
     let mut writer = if std::path::Path::new(archive_path).exists() {
         let mut append_opts = rar_rs::AppendOptions::new();
         if let Some(pw) = password {
@@ -208,6 +219,7 @@ pub(crate) fn cmd_move(
         let ts = time::parse_ts_specs(&args.ts_specs)?;
         let mut writer_opts = rar_rs::WriterOptions::new()
             .compression(version)
+            .solid_mode(solid_mode)
             .save_ctime(ts.save_ctime)
             .save_atime(ts.save_atime)
             .save_mtime(ts.save_mtime)
@@ -228,7 +240,7 @@ pub(crate) fn cmd_move(
             .map_err(|e| format!("create: {e}"))?
     };
     let options = rar_rs::EntryWriteOptions::new().compression_level(
-        rar_rs::CompressionLevel::try_from(3).map_err(|e| format!("level: {e}"))?,
+        rar_rs::CompressionLevel::try_from(args.level).map_err(|e| format!("level: {e}"))?,
     );
     // Both `m` and `mf` archive the full tree (directory entries included);
     // they differ only in what is removed from disk afterwards.

@@ -104,11 +104,22 @@ fn replace_archive_file(_staged: &std::path::Path, _original: &std::path::Path) 
     Err("transactional archive replacement is not supported on this platform".into())
 }
 
+/// Run `operation` against a same-directory copy of `archive` and install
+/// the copy over the original only when the operation succeeds; the
+/// operation's value is handed back after the commit.
+pub(crate) fn update_archive_transactionally_with<T>(
+    archive: &std::path::Path,
+    operation: impl FnOnce(&std::path::Path) -> Result<T, String>,
+) -> CliResult<T> {
+    let staged = StagedArchive::copy_from(archive)?;
+    let value = operation(&staged.path)?;
+    staged.commit(archive)?;
+    Ok(value)
+}
+
 pub(crate) fn update_archive_transactionally(
     archive: &std::path::Path,
     operation: impl FnOnce(&std::path::Path) -> Result<(), String>,
 ) -> CliResult<()> {
-    let staged = StagedArchive::copy_from(archive)?;
-    operation(&staged.path)?;
-    staged.commit(archive)
+    update_archive_transactionally_with(archive, operation)
 }

@@ -476,14 +476,85 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             });
         }
     }
+    // The member write sequence is shared by the fresh-create and the
+    // transactional replace paths.
+    let write_members = |mut writer: rar_rs::ArchiveWriter| -> Result<rar_rs::WriteReport, String> {
+        // RAR 1.3/1.4 have no editor path: the DOS main header must
+        // precede every member, so `-z` queues the comment before the
+        // first member; RAR5/RAR4 attach it after creation through the
+        // editor below.
+        if version.is_rar13()
+            && let Some(comment_file) = &misc.comment_file
+        {
+            // A bare `-z` (empty value) reads the comment from stdin,
+            // like WinRAR.
+            let data = if comment_file.is_empty() {
+                use std::io::Read;
+                let mut data = Vec::new();
+                std::io::stdin()
+                    .read_to_end(&mut data)
+                    .map_err(|e| format!("stdin: {e}"))?;
+                data
+            } else {
+                std::fs::read(comment_file).map_err(|e| format!("comment: {e}"))?
+            };
+            writer
+                .set_archive_comment(Some(data))
+                .map_err(|e| format!("comment: {e}"))?;
+        }
+        writer
+            .add_batch(&write_entries)
+            .map_err(|e| format!("add: {e}"))?;
+        // Link redirects are recorded after their data members (the
+        // reference target name is what matters, not the order).
+        for redirect in &redirects {
+            writer
+                .add_redirect_with_time(
+                    &redirect.name,
+                    redirect.redir_type,
+                    &redirect.target,
+                    redirect.mtime,
+                    (redirect.mtime_ns != 0).then_some(redirect.mtime_ns),
+                )
+                .map_err(|e| format!("link {}: {e}", redirect.name))?;
+        }
+        // -si<name>: one member read from stdin. A bare `-si` names it
+        // `stdin`, like WinRAR.
+        if let Some(name) = &args.stdin_name {
+            use std::io::Read;
+            let mut data = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut data)
+                .map_err(|e| format!("stdin: {e}"))?;
+            let name = if name.is_empty() {
+                "stdin".to_string()
+            } else {
+                name.replace('\\', "/")
+            };
+            let stdin_options = rar_rs::EntryWriteOptions::new().compression_level(
+                rar_rs::CompressionLevel::try_from(args.level)
+                    .map_err(|e| format!("level: {e}"))?,
+            );
+            writer
+                .add_bytes(&name, &data, stdin_options)
+                .map_err(|e| format!("add stdin: {e}"))?;
+        }
+        writer.finish().map_err(|e| format!("close: {e}"))
+    };
     // WinRAR `rar a` semantics on an existing archive: members with the
     // same name as an incoming file are replaced — deleted first through
-    // the editor role, then re-added through the typed append below; every
-    // other member is preserved verbatim. The append handle is opened only
-    // after the rewrite.
-    let mut writer = if existing {
+    // the editor role, then re-added through the typed append; every other
+    // member is preserved verbatim. Delete and append share one staged copy
+    // of the archive and the original is replaced only when both succeed
+    // (the update path's transaction), so a failed append never loses the
+    // old member.
+    let write_report = if existing {
         use std::collections::HashSet;
-        if args.volume_size.is_some() {
+        // Appending to a volume set would rewrite only the opened volume;
+        // refuse it up front like the library's append and the update path.
+        if args.volume_size.is_some()
+            || rar_rs::discover_volumes(std::path::Path::new(archive_path)).len() > 1
+        {
             return Err("appending to multi-volume archives is not supported".into());
         }
         let incoming: HashSet<String> = collected
@@ -491,104 +562,65 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             .map(|c| c.name.clone())
             .chain(args.stdin_name.iter().cloned())
             .collect();
-        let mut editor = open_editor(archive_path, password.as_deref())?;
-        let to_drop: Vec<String> = editor
-            .entries()
-            .map(|entry| entry.name().to_string())
-            .filter(|n| incoming.contains(n))
-            .collect();
-        if !to_drop.is_empty() {
-            let refs: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
-            let plan = editor_delete_plan(&editor, &refs).map_err(|e| format!("replace: {e}"))?;
-            editor.apply(plan).map_err(|e| format!("replace: {e}"))?;
-        }
-        // Deleting every member erases the archive file (like `rar d`);
-        // when the replacement removed the only members, recreate it
-        // instead of appending to a file that no longer exists.
-        if std::path::Path::new(archive_path).exists() {
-            let mut append_opts = rar_rs::AppendOptions::new();
-            if let Some(pw) = &password {
-                append_opts = append_opts.password(pw.clone());
-            }
-            if let Some(size) = dictionary {
-                append_opts = append_opts.dictionary_size(size);
-            }
-            rar_rs::ArchiveWriter::append_with(archive_path, append_opts)
-                .map_err(|e| format!("open: {e}"))?
-        } else {
-            rar_rs::ArchiveWriter::create_with(archive_path, opts.clone())
-                .map_err(|e| format!("create: {e}"))?
-        }
+        crate::staging::update_archive_transactionally_with(
+            std::path::Path::new(archive_path),
+            |staged_path| {
+                let mut editor = open_editor(staged_path, password.as_deref())?;
+                let to_drop: Vec<String> = editor
+                    .entries()
+                    .map(|entry| entry.name().to_string())
+                    .filter(|n| incoming.contains(n))
+                    .collect();
+                if !to_drop.is_empty() {
+                    let refs: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
+                    let plan =
+                        editor_delete_plan(&editor, &refs).map_err(|e| format!("replace: {e}"))?;
+                    editor.apply(plan).map_err(|e| format!("replace: {e}"))?;
+                }
+                // Deleting every member erases the staged archive (like
+                // `rar d`); when the replacement removed the only members,
+                // recreate it instead of appending to a file that no longer
+                // exists.
+                let writer = if staged_path.exists() {
+                    let mut append_opts = rar_rs::AppendOptions::new();
+                    if let Some(pw) = &password {
+                        append_opts = append_opts.password(pw.clone());
+                    }
+                    if let Some(size) = dictionary {
+                        append_opts = append_opts.dictionary_size(size);
+                    }
+                    rar_rs::ArchiveWriter::append_with(staged_path, append_opts)
+                        .map_err(|e| format!("open: {e}"))?
+                } else {
+                    rar_rs::ArchiveWriter::create_with(staged_path, opts.clone())
+                        .map_err(|e| format!("create: {e}"))?
+                };
+                write_members(writer)
+            },
+        )?
     } else {
-        created.expect("new archive opened above")
+        write_members(created.expect("new archive opened above"))?
     };
-    // RAR 1.3/1.4 have no editor path: the DOS main header must precede every
-    // member, so `-z` queues the comment before the first member; RAR5/RAR4
-    // attach it after creation through the editor below.
-    if version.is_rar13()
-        && let Some(comment_file) = &misc.comment_file
-    {
-        // A bare `-z` (empty value) reads the comment from stdin, like
-        // WinRAR.
-        let data = if comment_file.is_empty() {
-            use std::io::Read;
-            let mut data = Vec::new();
-            std::io::stdin()
-                .read_to_end(&mut data)
-                .map_err(|e| format!("stdin: {e}"))?;
-            data
-        } else {
-            std::fs::read(comment_file).map_err(|e| format!("comment: {e}"))?
-        };
-        writer
-            .set_archive_comment(Some(data))
-            .map_err(|e| format!("comment: {e}"))?;
-    }
-    writer
-        .add_batch(&write_entries)
-        .map_err(|e| format!("add: {e}"))?;
-    // Link redirects are recorded after their data members (the reference
-    // target name is what matters, not the order).
-    for redirect in &redirects {
-        writer
-            .add_redirect_with_time(
-                &redirect.name,
-                redirect.redir_type,
-                &redirect.target,
-                redirect.mtime,
-                (redirect.mtime_ns != 0).then_some(redirect.mtime_ns),
-            )
-            .map_err(|e| format!("link {}: {e}", redirect.name))?;
-    }
-
-    // -si<name>: one member read from stdin. A bare `-si` names it
-    // `stdin`, like WinRAR.
-    if let Some(name) = &args.stdin_name {
-        use std::io::Read;
-        let mut data = Vec::new();
-        std::io::stdin()
-            .read_to_end(&mut data)
-            .map_err(|e| format!("stdin: {e}"))?;
-        let name = if name.is_empty() {
-            "stdin".to_string()
-        } else {
-            name.replace('\\', "/")
-        };
-        let stdin_options = rar_rs::EntryWriteOptions::new().compression_level(
-            rar_rs::CompressionLevel::try_from(args.level).map_err(|e| format!("level: {e}"))?,
-        );
-        writer
-            .add_bytes(&name, &data, stdin_options)
-            .map_err(|e| format!("add stdin: {e}"))?;
-    }
-
     let was_existing = existing;
-    let write_report = writer.finish().map_err(|e| format!("close: {e}"))?;
-    // -sfx[name]: prepend the SFX module to the (first) archive volume.
+    // -sfx[name]: prepend the SFX module to the (first) archive volume. The
+    // replace path wrote through a staged copy that was installed over the
+    // archive on commit, so the original path is the final one there.
     if let Some(module) = &args.sfx_module {
-        crate::sfx::prepend_module_in_place(write_report.primary_path(), Some(module.as_str()))?;
+        let target = if was_existing {
+            std::path::Path::new(archive_path)
+        } else {
+            write_report.primary_path()
+        };
+        crate::sfx::prepend_module_in_place(target, Some(module.as_str()))?;
     }
-    crate::log::write_logs(&logs, write_report.volume_paths(), &log_files)?;
+    // The replace path's report still names the staged copy the commit
+    // consumed; the original archive path is the only final volume there.
+    let report_volumes: Vec<std::path::PathBuf> = if was_existing {
+        vec![std::path::PathBuf::from(archive_path)]
+    } else {
+        write_report.volume_paths().to_vec()
+    };
+    crate::log::write_logs(&logs, &report_volumes, &log_files)?;
     // -tsp: restore the source files' access times that were recorded
     // before archiving (reading the files may have refreshed them).
     if misc.ts_preserve {
@@ -645,7 +677,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         let mut ar =
             ops::open_reader(archive_path, password.as_deref()).map_err(|e| e.context("open"))?;
         let report: rar_rs::VerificationReport = ar
-            .verify()
+            .verify_with_options(ops::verify_options())
             .map_err(|e| error::CliError::from(e).context("test failed"))?;
         if report.failed() != 0 {
             return Err(format!("test failed: {} member(s) failed", report.failed()).into());

@@ -45,9 +45,13 @@ pub fn expand(specs: &[String], list_files: Option<&str>) -> Result<Vec<String>,
     Ok(out)
 }
 
-/// Decode a list file: UTF-16 by BOM, otherwise UTF-8 with a byte-preserving
-/// Latin-1 fallback for legacy single-byte encodings.
-fn decode(bytes: &[u8]) -> String {
+/// Decode a list file: UTF-8 (with or without its BOM), UTF-16 by BOM,
+/// otherwise UTF-8 with a byte-preserving Latin-1 fallback for legacy
+/// single-byte encodings.
+pub(crate) fn decode(bytes: &[u8]) -> String {
+    // Notepad-style UTF-8 list files carry a BOM; without stripping it the
+    // first entry would start with U+FEFF.
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         let units: Vec<u16> = rest
             .as_chunks::<2>()
@@ -109,5 +113,7 @@ mod tests {
         assert_eq!(decode(&bytes), "a.txt\r\nb.txt");
         // Latin-1 fallback preserves non-UTF-8 bytes.
         assert_eq!(decode(&[0xE9, b'.', b't']), "é.t");
+        // A UTF-8 BOM must not leak into the first entry.
+        assert_eq!(decode(&[0xEF, 0xBB, 0xBF, b'a', b'.', b't']), "a.t");
     }
 }

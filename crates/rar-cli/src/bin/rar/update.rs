@@ -91,7 +91,7 @@ fn cmd_update_freshen(
         &crate::name_policy::NamePolicy::default(),
         &crate::listfile::expand(&args.files, misc.list_files.as_deref())
             .map_err(crate::error::CliError::from)?,
-        3,
+        args.level,
         &args.archive,
         args.store_links,
         misc.skip_links,

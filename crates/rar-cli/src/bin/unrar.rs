@@ -20,7 +20,7 @@ mod selector;
 #[allow(dead_code)] // shared with `rar`; unrar only needs the -ts parser
 mod time;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use error::CliResult;
 use std::process;
 
@@ -192,15 +192,12 @@ struct PrintArgs {
 }
 
 fn main() {
-    let raw: Vec<String> = std::env::args().collect();
-    // Configuration sources (priority: command line > RARINISWITCHES >
-    // rar.ini / .rarrc); `-cfg-` disables both.
-    let no_config = raw.iter().skip(1).any(|a| a == "-cfg-");
-    let command = common::command_name(&raw);
-    let defaults: Vec<String> = common::default_switches(command.as_deref(), no_config)
-        .iter()
-        .map(|a| common::normalize_switch(a))
+    let raw: Vec<String> = std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
+    // Configuration sources (priority: command line > RARINISWITCHES >
+    // rar.ini / .rarrc); normalized first so `-cfg-` and `--no-config` are
+    // the same check.
     let cli_args: Vec<String> = raw
         .iter()
         .skip(1)
@@ -215,7 +212,18 @@ fn main() {
             }
         })
         .collect();
-    let args = common::merge_default_switches(defaults, cli_args);
+    let surface = Cli::command();
+    let value_options = common::value_options(&surface);
+    let command = common::command_name(&cli_args, &value_options);
+    let no_config = cli_args.iter().any(|a| a == "--no-config");
+    let defaults: Vec<String> = common::default_switches(command.as_deref(), no_config)
+        .iter()
+        .map(|a| common::normalize_switch(a))
+        .collect();
+    // WinRAR accepts switches before the command; clap's subcommand-scoped
+    // options do not, so move that block behind the command token.
+    let cli_args = common::switches_after_command(cli_args, &surface);
+    let args = common::merge_default_switches(defaults, cli_args, &value_options);
     if let Err(e) = password::reject_bare_password(&args) {
         eprintln!("unrar: {e}");
         process::exit(error::EXIT_BAD_COMMAND);
@@ -301,7 +309,7 @@ fn run_inner(cli: Cli) -> CliResult<()> {
         Command::VerboseListBare(args) => cmd_list_bare(&args, password, &cli.misc),
         Command::VerboseListTechnical(args) => cmd_list_technical(&args, password, &cli.misc),
         Command::Test(args) => cmd_test(&args, password, &cli.misc),
-        Command::Print(args) => cmd_print(&args, password),
+        Command::Print(args) => cmd_print(&args, password, max_dict_size),
         Command::External(ext) => {
             let name = ext.first().cloned().unwrap_or_default();
             if name.ends_with(".rar") || name.ends_with(".cbr") {
@@ -502,7 +510,11 @@ fn cmd_test(
     }
 }
 
-fn cmd_print(args: &PrintArgs, password: Option<&str>) -> CliResult<()> {
+fn cmd_print(
+    args: &PrintArgs,
+    password: Option<&str>,
+    max_dict_size: Option<u64>,
+) -> CliResult<()> {
     let mut rar = ops::open_reader(&args.archive, password)?;
-    ops::print_members(&mut rar, args.file.as_deref())
+    ops::print_members(&mut rar, args.file.as_deref(), max_dict_size)
 }

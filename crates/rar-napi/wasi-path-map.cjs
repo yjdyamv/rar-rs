@@ -11,8 +11,14 @@
 //
 //   C:\Users\me\out.rar  ->  /C:/Users/me/out.rar
 //
-// On non-Windows hosts paths already start with '/', so they pass through
-// unchanged and the loader keeps the default '/' -> '/' preopen.
+// Relative host paths are resolved against the Node process cwd before
+// mapping: the guest's initial cwd is the preopen root, not the host cwd, so
+// a bare 'out.rar' would otherwise land next to the preopen root (e.g.
+// C:\out.rar) instead of next to the Node process.
+//
+// On non-Windows hosts absolute paths already start with '/', so they pass
+// through unchanged and the loader keeps the default '/' -> '/' preopen;
+// relative paths resolve against the process cwd the same way.
 
 const path = require('node:path')
 const fs = require('node:fs')
@@ -20,10 +26,23 @@ const fs = require('node:fs')
 const DRIVE_RE = /^([A-Za-z]):(?:([\\/].*))?$/
 const DRIVE_HOST_RE = /^\/([A-Za-z]):(?:\/(.*))?$/
 
-function toGuestPath(p, platform = process.platform) {
-  if (typeof p !== 'string' || platform !== 'win32') return p
-  const m = DRIVE_RE.exec(p)
-  if (!m) return p
+function toGuestPath(p, platform = process.platform, cwd = process.cwd()) {
+  if (typeof p !== 'string' || p === '') return p
+  if (platform !== 'win32') {
+    // Windows drive paths are not meaningful for a POSIX guest; keep the
+    // historical pass-through for them, resolve everything relative.
+    if (path.posix.isAbsolute(p) || DRIVE_RE.test(p)) return p
+    return path.posix.resolve(cwd, p)
+  }
+  // Drive-absolute, guest-style ('/...') and other rooted/UNC Windows paths
+  // are absolute and keep their existing mapping/pass-through; relative
+  // paths resolve against the process cwd first.
+  const host =
+    DRIVE_RE.test(p) || p.startsWith('/') || p.startsWith('\\')
+      ? p
+      : path.win32.resolve(cwd, p)
+  const m = DRIVE_RE.exec(host)
+  if (!m) return host
   const drive = m[1].toUpperCase()
   const rest = (m[2] || '').replace(/[\\/]+/g, '/').replace(/^\/+/, '')
   return rest ? `/${drive}:/${rest}` : `/${drive}:`

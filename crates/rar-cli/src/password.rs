@@ -11,7 +11,8 @@ pub struct PasswordArgs {
         long,
         global = true,
         value_name = "PASSWORD",
-        num_args = 1
+        num_args = 1,
+        overrides_with = "password"
     )]
     pub password: Option<String>,
 }

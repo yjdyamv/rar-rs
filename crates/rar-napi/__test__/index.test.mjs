@@ -392,12 +392,16 @@ test('accepts the new writer options and validates solidReset', async () => {
       },
     )
 
-    // recoveryVolumesPercent expands to .rev files at creation.
+    // recoveryVolumesPercent expands to .rev files at creation. Stored
+    // (level 0) data guarantees the 90 KB member exceeds the 32 KB volume
+    // size, so the set really splits and carries recovery volumes one
+    // volume-size apart from the compressed default.
     const vol = join(dir, 'vols.rar')
     const result = await createArchive({
       outPath: vol,
       volumeSize: 32 * 1024,
       recoveryVolumesPercent: 20,
+      level: 0,
       entries: [
         { kind: 'bytes', name: 'big.bin', data: Buffer.alloc(90_000, 0x41) },
       ],

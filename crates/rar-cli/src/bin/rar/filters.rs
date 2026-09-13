@@ -7,11 +7,12 @@ pub(crate) fn arg_to_name(arg: &str) -> String {
 }
 
 /// Read one mask per line from a filter list file (like `-x@listfile`);
-/// blank lines are skipped.
+/// blank lines are skipped. Uses the shared list-file decoder, so UTF-8
+/// BOMs, UTF-16 lists and legacy single-byte encodings behave like `@`
+/// list files.
 pub(crate) fn read_mask_file(path: &str) -> Result<Vec<String>, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("read mask list {path}: {e}"))?;
-    Ok(content
+    let bytes = std::fs::read(path).map_err(|e| format!("read mask list {path}: {e}"))?;
+    Ok(crate::listfile::decode(&bytes)
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())

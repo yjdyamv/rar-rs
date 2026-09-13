@@ -38,28 +38,36 @@ mod update;
 #[cfg(test)]
 mod tests;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::process;
 
 use args::{Cli, Command, RecoveryVolumesArgs};
 use error::CliResult;
 
 fn main() {
-    let raw: Vec<String> = std::env::args().collect();
-    // Configuration sources (priority: command line > RARINISWITCHES >
-    // rar.ini); `-cfg-` disables the file and the environment variable.
-    let no_config = raw.iter().skip(1).any(|a| a == "-cfg-");
-    let command = common::command_name(&raw);
-    let defaults: Vec<String> = common::default_switches(command.as_deref(), no_config)
-        .iter()
-        .map(|a| common::normalize_switch(a))
+    let raw: Vec<String> = std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
+    // Configuration sources (priority: command line > RARINISWITCHES >
+    // rar.ini); normalized first so `-cfg-` and `--no-config` are the same
+    // check.
     let cli_args: Vec<String> = raw
         .iter()
         .skip(1)
         .map(|a| common::normalize_switch(a))
         .collect();
-    let args = common::merge_default_switches(defaults, cli_args);
+    let surface = Cli::command();
+    let value_options = common::value_options(&surface);
+    let command = common::command_name(&cli_args, &value_options);
+    let no_config = cli_args.iter().any(|a| a == "--no-config");
+    let defaults: Vec<String> = common::default_switches(command.as_deref(), no_config)
+        .iter()
+        .map(|a| common::normalize_switch(a))
+        .collect();
+    // WinRAR accepts switches before the command; clap's subcommand-scoped
+    // options do not, so move that block behind the command token.
+    let cli_args = common::switches_after_command(cli_args, &surface);
+    let args = common::merge_default_switches(defaults, cli_args, &value_options);
     if let Err(e) = password::reject_bare_password(&args) {
         eprintln!("rar: {e}");
         process::exit(error::EXIT_BAD_COMMAND);

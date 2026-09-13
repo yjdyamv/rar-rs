@@ -6,12 +6,12 @@
 //! wording stay in the binaries.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use crate::error::{CliError, CliResult};
 use rar_rs::version::ArchiveVersion;
-use rar_rs::{ArchiveReader, EntryRef, ExtractOptions};
+use rar_rs::{ArchiveReader, EntryId, EntryRef, ExtractOptions};
 
 /// Quiet labels (`-idq` / `-inul`) suppress the listing tables entirely,
 /// like WinRAR's `l`/`v`/`lt`.
@@ -22,12 +22,40 @@ fn listing_quiet() -> bool {
 /// Open an archive for reading. A bad archive or wrong password becomes the
 /// user-facing error the command runners return, keeping the library's
 /// error category (wrong password, locked, format) for the exit code.
+///
+/// Like WinRAR, a missing name without an extension is retried with `.rar`
+/// (`rar l exa` reads `exa.rar`); a `.part1.rar` first volume is accepted
+/// the same way. A genuinely missing archive keeps the original error.
 pub fn open_reader(path: impl AsRef<Path>, password: Option<&str>) -> CliResult<ArchiveReader> {
-    let mut options = rar_rs::OpenOptions::new();
-    if let Some(password) = password {
-        options = options.password(password);
+    let path = path.as_ref();
+    let open = |candidate: &Path| {
+        let mut options = rar_rs::OpenOptions::new();
+        if let Some(password) = password {
+            options = options.password(password);
+        }
+        ArchiveReader::open_with(candidate, options)
+    };
+    let first = match open(path) {
+        Ok(rar) => return Ok(rar),
+        Err(error) => error,
+    };
+    if !path.exists() && path.extension().is_none() {
+        for candidate in inferred_archive_paths(path) {
+            if let Ok(rar) = open(&candidate) {
+                return Ok(rar);
+            }
+        }
     }
-    ArchiveReader::open_with(path, options).map_err(CliError::from)
+    Err(CliError::from(first))
+}
+
+/// The archive names WinRAR infers for an extension-less read request:
+/// `<path>.rar`, then the `<path>.part1.rar` first volume.
+fn inferred_archive_paths(path: &Path) -> Vec<PathBuf> {
+    let mut rar = path.to_path_buf();
+    rar.set_extension("rar");
+    let part1 = PathBuf::from(format!("{}.part1.rar", path.display()));
+    vec![rar, part1]
 }
 
 /// WinRAR's integer `Ratio` cell (`0%` for directories and empty members).
@@ -546,8 +574,11 @@ pub fn verify_members(
     rar: &mut ArchiveReader,
     names: &[String],
 ) -> CliResult<rar_rs::VerificationReport> {
+    let options = verify_options();
     if names.is_empty() {
-        return rar.verify().map_err(|e| CliError::from(e).context("test"));
+        return rar
+            .verify_with_options(options)
+            .map_err(|e| CliError::from(e).context("test"));
     }
     let ids = crate::selector::select_entries(
         rar.entries()
@@ -564,53 +595,117 @@ pub fn verify_members(
             crate::error::EXIT_NO_FILES,
         ));
     }
-    rar.verify_ids_with_options(&ids, rar_rs::ExtractOptions::default())
+    rar.verify_ids_with_options(&ids, options)
         .map_err(|e| CliError::from(e).context("test"))
+}
+
+/// Verification streams every member to a sink, so the in-memory size caps
+/// guarding the materializing read API do not apply (official `Rar.exe t`
+/// tests members of any size). The dictionary cap stays: it bounds decoder
+/// memory.
+pub(crate) fn verify_options() -> ExtractOptions {
+    ExtractOptions {
+        max_unpacked_bytes: None,
+        max_total_unpacked_bytes: None,
+        ..Default::default()
+    }
 }
 
 /// Extract the whole archive, or only the members whose stored path, mask or
 /// directory prefix matches one of `names` (see [`crate::selector`]), using
 /// the same options. Directory entries are selected too, so selecting a
-/// stored directory also materializes an empty one. Returns how many members
-/// were written. A name matching nothing is a hard error, so a mistyped
-/// selector is never silently swallowed or treated as a destination
-/// directory.
+/// stored directory also materializes an empty one. Returns how many *files*
+/// were written: directory entries and members left untouched by the
+/// skip-existing policy are not counted, and skipped files are reported
+/// (WinRAR's progress label for them is "Skipping"). A name matching nothing
+/// is a hard error, so a mistyped selector is never silently swallowed or
+/// treated as a destination directory.
 pub fn extract_members(
     rar: &mut ArchiveReader,
     dest: &Path,
     names: &[String],
     options: ExtractOptions,
 ) -> CliResult<usize> {
+    let wanted: Vec<EntryId> = if names.is_empty() {
+        rar.entries().map(|entry| entry.id()).collect()
+    } else {
+        let wanted = crate::selector::select_entries(
+            rar.entries()
+                .map(|entry| (entry.id(), entry.metadata().name())),
+            names,
+        );
+        if wanted.is_empty() {
+            return Err(CliError::with_code(
+                format!(
+                    "no archive members matched the requested name(s): {}",
+                    names.join(", ")
+                ),
+                crate::error::EXIT_NO_FILES,
+            ));
+        }
+        wanted
+    };
+
+    // Predict the written members and report the files `-o-` (or the
+    // non-interactive default) leaves untouched; the library returns no
+    // count, and the destination path is resolved here exactly like the
+    // library's `resolve_dest_path`.
+    let written = count_extracted(rar, dest, &wanted, &options);
+
     if names.is_empty() {
         rar.extract_all_with_options(dest, options)
             .map_err(CliError::from)?;
-        return Ok(rar.entries().len());
+    } else {
+        for &id in &wanted {
+            let member = rar
+                .entry(id)
+                .map_err(|error| CliError::from(error).context("resolve archive member"))?
+                .name()
+                .to_string();
+            rar.extract_entry_with_options(id, dest, options)
+                .map_err(|error| CliError::from(error).context(format!("extract {member}")))?;
+        }
     }
+    Ok(written)
+}
 
-    let wanted = crate::selector::select_entries(
-        rar.entries()
-            .map(|entry| (entry.id(), entry.metadata().name())),
-        names,
-    );
-    if wanted.is_empty() {
-        return Err(CliError::with_code(
-            format!(
-                "no archive members matched the requested name(s): {}",
-                names.join(", ")
-            ),
-            crate::error::EXIT_NO_FILES,
-        ));
+/// Number of members extraction will write, printing a `Skipping` line for
+/// every file the skip-existing policy leaves alone. Directory entries and
+/// `-ol-` links are not written files; the sequential simulation mirrors the
+/// library's `dest_path.exists()` check, so duplicate member names count
+/// once.
+fn count_extracted(
+    rar: &ArchiveReader,
+    dest: &Path,
+    ids: &[EntryId],
+    options: &ExtractOptions,
+) -> usize {
+    let mut written = 0usize;
+    let mut taken: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for &id in ids {
+        let Ok(entry) = rar.entry(id) else {
+            continue;
+        };
+        if entry.is_dir() || (options.skip_links && entry.redirect().is_some()) {
+            continue;
+        }
+        let name = entry.name().replace('\\', "/");
+        let path = if options.flat_paths {
+            let base = name.rsplit('/').next().unwrap_or(&name);
+            dest.join(base)
+        } else {
+            dest.join(&name)
+        };
+        if options.skip_existing {
+            if path.exists() || taken.contains(&path) {
+                crate::info!("Skipping {}", display_name(&path.to_string_lossy()));
+                continue;
+            }
+            taken.insert(path);
+        }
+        written += 1;
     }
-    for &id in &wanted {
-        let member = rar
-            .entry(id)
-            .map_err(|error| CliError::from(error).context("resolve archive member"))?
-            .name()
-            .to_string();
-        rar.extract_entry_with_options(id, dest, options)
-            .map_err(|error| CliError::from(error).context(format!("extract {member}")))?;
-    }
-    Ok(wanted.len())
+    written
 }
 
 /// Extract every file member to stdout, concatenated (`-so`), for piping.
@@ -660,7 +755,11 @@ pub fn extract_to_stdout(
 /// Print one member, or every file member when `file` is `None`, to stdout
 /// (`p`). The selector follows the shared member-selection rules (stored
 /// path, basename, mask or directory prefix).
-pub fn print_members(rar: &mut ArchiveReader, file: Option<&str>) -> CliResult<()> {
+pub fn print_members(
+    rar: &mut ArchiveReader,
+    file: Option<&str>,
+    max_dict_size: Option<u64>,
+) -> CliResult<()> {
     let wanted: Vec<_> = if let Some(file) = file {
         crate::selector::select_entries(
             rar.entries()
@@ -685,6 +784,7 @@ pub fn print_members(rar: &mut ArchiveReader, file: Option<&str>) -> CliResult<(
     let options = ExtractOptions {
         max_unpacked_bytes: None,
         max_total_unpacked_bytes: None,
+        max_dict_size: max_dict_size.or(Some(ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
     let stdout = std::io::stdout();
@@ -699,4 +799,25 @@ pub fn print_members(rar: &mut ArchiveReader, file: Option<&str>) -> CliResult<(
             .map_err(|error| CliError::from(error).context(name))?;
     }
     out.flush().map_err(CliError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_options;
+    use rar_rs::ExtractOptions;
+
+    /// `t` streams every member to a sink, so the materializing read caps
+    /// must be off (otherwise > 4 GiB members / > 32 GiB archives fail while
+    /// official `Rar.exe t` succeeds); the dictionary cap bounds decoder
+    /// memory and stays.
+    #[test]
+    fn verify_options_drop_the_read_size_caps() {
+        let options = verify_options();
+        assert_eq!(options.max_unpacked_bytes, None);
+        assert_eq!(options.max_total_unpacked_bytes, None);
+        assert_eq!(
+            options.max_dict_size,
+            Some(ExtractOptions::DEFAULT_MAX_DICT_SIZE)
+        );
+    }
 }

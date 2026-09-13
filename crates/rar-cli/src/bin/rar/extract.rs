@@ -8,8 +8,14 @@ use crate::ops;
 use crate::output;
 /// Print a member to stdout (like `rar p`).
 pub(crate) fn cmd_print(args: &PrintArgs) -> CliResult<()> {
+    let max_dict_size = dict_cap(args.dict_extract.as_deref())?;
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    ops::print_members(&mut rar, args.file.as_deref())
+    ops::print_members(&mut rar, args.file.as_deref(), max_dict_size)
+}
+
+/// `-mdx`: extraction dictionary cap; no unit means GiB (WinRAR).
+fn dict_cap(spec: Option<&str>) -> Result<Option<u64>, String> {
+    spec.map(common::parse_mdx_size).transpose()
 }
 
 /// Apply `-om` (Mark of the Web propagation) to the reader before
@@ -33,12 +39,13 @@ pub(crate) fn cmd_extract(
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
+    let max_dict_size = dict_cap(args.dict_extract.as_deref())?;
     let (names, dest) = resolve_target(args, misc)?;
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     // `-so`: write the extracted members to stdout (one stream) instead of
     // to disk — handy for piping. Directories carry no data.
     if args.stdout {
-        return ops::extract_to_stdout(&mut rar, &names, None);
+        return ops::extract_to_stdout(&mut rar, &names, max_dict_size);
     }
     apply_mark_web(&mut rar, misc)?;
     let options = rar_rs::ExtractOptions {
@@ -51,12 +58,23 @@ pub(crate) fn cmd_extract(
         keep_broken: args.keep_broken,
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
+        max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
     let count = ops::extract_members(&mut rar, &dest, &names, options)?;
     write_extract_logs(misc, &rar, args, &names)?;
-    info!("Extracted {count} file(s) to {}", dest.display());
+    info!("{}", extract_summary(count, &dest));
     Ok(())
+}
+
+/// Final extraction line; when every file was left alone (all existing and
+/// `-o-`, or an empty archive) WinRAR prints "No files to extract".
+fn extract_summary(count: usize, dest: &std::path::Path) -> String {
+    if count == 0 {
+        "No files to extract".to_string()
+    } else {
+        format!("Extracted {count} file(s) to {}", dest.display())
+    }
 }
 
 /// `-log` for extraction: archive name plus every extracted member (the
@@ -107,10 +125,11 @@ pub(crate) fn cmd_extract_flat(
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
+    let max_dict_size = dict_cap(args.dict_extract.as_deref())?;
     let (names, dest) = resolve_target(args, misc)?;
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     if args.stdout {
-        return ops::extract_to_stdout(&mut rar, &names, None);
+        return ops::extract_to_stdout(&mut rar, &names, max_dict_size);
     }
     apply_mark_web(&mut rar, misc)?;
     let options = rar_rs::ExtractOptions {
@@ -124,10 +143,11 @@ pub(crate) fn cmd_extract_flat(
         keep_broken: args.keep_broken,
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
+        max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
     let count = ops::extract_members(&mut rar, &dest, &names, options)?;
     write_extract_logs(misc, &rar, args, &names)?;
-    info!("Extracted {count} file(s) to {}", dest.display());
+    info!("{}", extract_summary(count, &dest));
     Ok(())
 }

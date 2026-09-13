@@ -343,6 +343,143 @@ fn cli_failed_update_preserves_the_original_archive() {
     );
 }
 
+/// `rar a` replacing a member of an existing archive keeps every other
+/// member: delete and append run in one staged transaction.
+#[test]
+fn cli_a_replace_preserves_other_members() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"old version").unwrap();
+    std::fs::write(dir.path().join("keep.txt"), b"keep").unwrap();
+    let archive = dir.path().join("replace.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .args(["a.txt", "keep.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    std::fs::write(dir.path().join("a.txt"), b"new version").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let a_id = rar.unique_entry("a.txt").unwrap();
+    assert_eq!(rar.read_entry(a_id).unwrap(), b"new version");
+    let keep_id = rar.unique_entry("keep.txt").unwrap();
+    assert_eq!(rar.read_entry(keep_id).unwrap(), b"keep");
+}
+
+/// A failed `rar a` replacement never loses the old member: the delete only
+/// lands together with the append. A RAR4 archive with a RAR7-only byte
+/// dictionary (`-md8g`) passes option validation but makes the append fail
+/// after the delete step, so the original archive must stay byte-identical.
+#[test]
+fn cli_failed_a_replace_preserves_the_original_archive() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"original").unwrap();
+    std::fs::write(dir.path().join("keep.txt"), b"keep").unwrap();
+    let archive = dir.path().join("replace-failure.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-idq"])
+        .arg(&archive)
+        .args(["a.txt", "keep.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let original = std::fs::read(&archive).unwrap();
+
+    std::fs::write(dir.path().join("a.txt"), b"replacement").unwrap();
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a", "-md8g", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the append must fail");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("RAR4"),
+        "unexpected error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+
+    let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let a_id = rar.unique_entry("a.txt").unwrap();
+    assert_eq!(rar.read_entry(a_id).unwrap(), b"original");
+    let keep_id = rar.unique_entry("keep.txt").unwrap();
+    assert_eq!(rar.read_entry(keep_id).unwrap(), b"keep");
+
+    // The transaction rolls back without leaving its staged copy behind.
+    assert_eq!(
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("rar-rs-update"))
+            .count(),
+        0
+    );
+}
+
+/// `rar a` refuses an existing multi-volume set up front and leaves every
+/// volume untouched (the transaction can only stage a single file).
+#[test]
+fn cli_a_rejects_multi_volume_archives_without_modifying_them() {
+    let dir = make_temp_dir();
+    std::fs::write(
+        dir.path().join("payload.bin"),
+        pseudo_random_bytes(16 * 1024, 77),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("added.txt"), b"added").unwrap();
+    let base = dir.path().join("multi-a");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-v1k", "-idq"])
+        .arg(&base)
+        .arg("payload.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut volumes: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rar"))
+        .collect();
+    volumes.sort();
+    assert!(volumes.len() > 1, "expected a multi-volume archive");
+    let original: Vec<Vec<u8>> = volumes
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&volumes[0])
+        .arg("added.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("multi-volume"));
+    for (path, expected) in volumes.iter().zip(original) {
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+    }
+}
+
 #[test]
 fn cli_update_rejects_multi_volume_archives_without_modifying_them() {
     let dir = make_temp_dir();
