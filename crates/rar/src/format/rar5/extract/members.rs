@@ -221,7 +221,9 @@ impl RarArchive {
                 continue;
             }
             if let Some(redir) = parse_redirect_record(&entry.header.extra_data) {
-                self.extract_redirection(dest, &dest_path, &redir)?;
+                if !self.read_ctx().extract_options.skip_links {
+                    self.extract_redirection(dest, &dest_path, &redir)?;
+                }
                 continue;
             }
             if let Some(parent) = dest_path.parent() {
@@ -369,8 +371,12 @@ impl RarArchive {
         }
 
         // RAR5 redirect records (symlinks, hardlinks, file copies): the
-        // entry carries no data, only the target reference.
+        // entry carries no data, only the target reference. `-ol-` skips
+        // them entirely.
         if let Some(redir) = parse_redirect_record(&entry.header.extra_data) {
+            if self.read_ctx().extract_options.skip_links {
+                return Ok(dest_path);
+            }
             return self.extract_redirection(dest_dir, &dest_path, &redir);
         }
 

@@ -3,7 +3,7 @@
 use clap::Args;
 
 /// Common `-p<password>` argument shared by every command.
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct PasswordArgs {
     /// Archive password (`-p-` explicitly disables password use)
     #[arg(

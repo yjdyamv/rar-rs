@@ -100,10 +100,21 @@ fn run(cli: Cli) -> CliResult<()> {
         return Err("-vd/--erase-disk is not supported; no disk was erased".into());
     }
     match cli.command {
-        Command::Create(args) => create::cmd_create(&args, misc),
+        Command::Create(args) => {
+            // `-f` / `-u` turn `a` into the freshen/update commands, like
+            // WinRAR's "a -f is equivalent to f".
+            if misc.freshen {
+                update::cmd_freshen(&crate::args::as_files_args(&args), misc)
+            } else if misc.update_files {
+                update::cmd_update(&crate::args::as_files_args(&args), misc)
+            } else {
+                create::cmd_create(&args, misc)
+            }
+        }
         Command::Update(args) => update::cmd_update(&args, misc),
         Command::Freshen(args) => update::cmd_freshen(&args, misc),
-        Command::Move(args) => edit::cmd_move(&args, misc),
+        Command::Move(args) => edit::cmd_move(&args, misc, false),
+        Command::MoveFiles(args) => edit::cmd_move(&args, misc, true),
         Command::Delete(args) => edit::cmd_delete(&args, misc),
         Command::Rename(args) => edit::cmd_rename(&args),
         Command::Change(args) => edit::cmd_change(&args),

@@ -269,8 +269,10 @@ fn run_inner(cli: Cli) -> CliResult<()> {
         .transpose()?
         .flatten();
     match cli.command {
-        Command::Extract(args) => cmd_extract(&args, password, ts, max_dict_size, motw),
-        Command::ExtractFlat(args) => cmd_extract_flat(&args, password, ts, max_dict_size, motw),
+        Command::Extract(args) => cmd_extract(&args, password, ts, max_dict_size, motw, &cli.misc),
+        Command::ExtractFlat(args) => {
+            cmd_extract_flat(&args, password, ts, max_dict_size, motw, &cli.misc)
+        }
         Command::List(args) => cmd_list(&args.archive, password),
         Command::ListBare(args) => cmd_list_bare(&args.archive, password),
         Command::ListTechnical(args) => cmd_list_technical(&args.archive, password),
@@ -314,6 +316,7 @@ fn cmd_extract(
     ts: time::TsSettings,
     max_dict_size: Option<u64>,
     motw: Option<rar_rs::MarkOfTheWeb>,
+    misc: &common::MiscSwitches,
 ) -> CliResult<()> {
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
@@ -347,6 +350,8 @@ fn cmd_extract(
         // WinRAR refuses dictionaries above 4 GiB unless -mdx raises
         // the cap; None here means "use the default cap".
         max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
+        skip_links: misc.skip_links,
+        allow_unsafe_links: misc.unsafe_links,
         ..Default::default()
     };
     let count = ops::extract_members(&mut rar, &dest, &args.names, options)?;
@@ -360,6 +365,7 @@ fn cmd_extract_flat(
     ts: time::TsSettings,
     max_dict_size: Option<u64>,
     motw: Option<rar_rs::MarkOfTheWeb>,
+    misc: &common::MiscSwitches,
 ) -> CliResult<()> {
     let base = args
         .output_path
@@ -382,6 +388,8 @@ fn cmd_extract_flat(
         set_creation_time: ts.save_ctime,
         set_access_time: ts.save_atime,
         max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
+        skip_links: misc.skip_links,
+        allow_unsafe_links: misc.unsafe_links,
         ..Default::default()
     };
     let count = ops::extract_members(&mut rar, &dest, &args.names, options)?;

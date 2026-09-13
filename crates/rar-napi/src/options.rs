@@ -220,6 +220,8 @@ impl ExtractArchiveOptions {
       keep_broken: self.keep_broken.unwrap_or(false),
       set_creation_time: self.set_creation_time.unwrap_or(false),
       set_access_time: self.set_access_time.unwrap_or(false),
+      skip_links: false,
+      allow_unsafe_links: false,
     })
   }
 }

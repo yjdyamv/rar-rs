@@ -114,10 +114,11 @@ pub(crate) fn cmd_delete(args: &DeleteArgs, misc: &common::MiscSwitches) -> CliR
     let logs = crate::log::specs_from(misc)?;
     let names: Vec<&str> = args.names.iter().map(|s| s.as_str()).collect();
     let mut editor = open_editor(archive_path, args.password.password.as_deref())?;
-    let plan = editor_delete_plan(&editor, &names).map_err(|e| format!("delete: {e}"))?;
+    let plan = editor_delete_plan(&editor, &names)
+        .map_err(|e| crate::error::CliError::from(e).context("delete"))?;
     let deleted = editor
         .apply(plan)
-        .map_err(|e| format!("delete: {e}"))?
+        .map_err(|e| crate::error::CliError::from(e).context("delete"))?
         .deleted();
     info!("Deleted {deleted} file(s) from {archive_path}");
     if !logs.is_empty() {
@@ -144,18 +145,24 @@ pub(crate) fn cmd_rename(args: &RenameArgs) -> CliResult<()> {
     // A `-hp` archive needs its password: the rename rewrites the encrypted
     // FILE_HEAD.
     let mut editor = open_editor(archive_path, args.password.password.as_deref())?;
-    let plan = editor_rename_plan(&editor, &pairs).map_err(|e| format!("rename: {e}"))?;
+    let plan = editor_rename_plan(&editor, &pairs)
+        .map_err(|e| crate::error::CliError::from(e).context("rename"))?;
     let renamed = editor
         .apply(plan)
-        .map_err(|e| format!("rename: {e}"))?
+        .map_err(|e| crate::error::CliError::from(e).context("rename"))?
         .renamed();
     info!("Renamed {renamed} file(s) in {archive_path}");
     Ok(())
 }
 
 /// Move files into the archive (like `rar m`): add them through the typed
-/// writer, then erase the sources after a successful commit.
-pub(crate) fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+/// writer, then erase the sources after a successful commit. `files_only`
+/// (`rar mf`) skips directory entries and removes only files.
+pub(crate) fn cmd_move(
+    args: &FilesArgs,
+    misc: &common::MiscSwitches,
+    files_only: bool,
+) -> CliResult<()> {
     let archive_path = &args.archive;
     let files = &args.files;
     let password = &args.password.password;
@@ -222,23 +229,48 @@ pub(crate) fn cmd_move(args: &FilesArgs, misc: &common::MiscSwitches) -> CliResu
     let options = rar_rs::EntryWriteOptions::new().compression_level(
         rar_rs::CompressionLevel::try_from(3).map_err(|e| format!("level: {e}"))?,
     );
+    // Both `m` and `mf` archive the full tree (directory entries included);
+    // they differ only in what is removed from disk afterwards.
+    let mut moved = 0usize;
     for file in files {
         let name = arg_to_name(file);
         writer
             .add_path_as(file, &name, options)
             .map_err(|e| format!("add {file}: {e}"))?;
+        moved += 1;
     }
     writer.finish().map_err(|e| format!("close: {e}"))?;
     for file in files {
         let path = std::path::Path::new(file);
         if path.is_dir() {
-            let _ = std::fs::remove_dir_all(path);
+            if files_only {
+                remove_files_leaving_dirs(path);
+            } else {
+                let _ = std::fs::remove_dir_all(path);
+            }
         } else {
             let _ = std::fs::remove_file(path);
         }
     }
-    info!("Moved {} file(s) to {archive_path}", files.len());
+    info!("Moved {moved} file(s) to {archive_path}");
     Ok(())
+}
+
+/// Remove every file under `dir` (recursively) but leave the directory tree
+/// itself in place — `rar mf` archives the tree like `m` but only moves the
+/// files.
+fn remove_files_leaving_dirs(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            remove_files_leaving_dirs(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// Change archive parameters (like `rar ch`): member name case conversion

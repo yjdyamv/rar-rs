@@ -115,6 +115,7 @@ fn cmd_update_freshen(
         to_add,
         args.store_links,
         args.store_hardlinks && !version.is_legacy(),
+        misc.skip_links,
     );
     // -oi: identical-file references over the files being added. The listing
     // modes print the groups and change nothing.
@@ -310,6 +311,12 @@ fn cmd_update_freshen(
         Ok(())
     })?;
     crate::log::write_logs(&logs, &[archive_path.to_path_buf()], &log_files)?;
+    if misc.lock {
+        crate::recovery::cmd_lock(&crate::args::ArchiveArgs {
+            password: args.password.clone(),
+            archive: archive_path.to_string_lossy().into_owned(),
+        })?;
+    }
 
     info!(
         "{verb} {} ({updated_count} file(s))",

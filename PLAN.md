@@ -148,7 +148,7 @@ fuzz 使用一个可枚举的小子集，于是删除 feature 与 `rar40`/`rar50
 - [x] **`-log[AFPU]*[=name]`（2026-09）**：`rar` 侧日志（默认 `rarinfo.log`；`A` 归档名（含分卷全部路径）/`F` 处理成员名（a/u/f/x/e/d/l/lb/lt/v/vb/vt）/`P` 追加/`U` UTF-16LE；多次 `-log` 各写各的；写失败退出码 9）。官方 UnRAR 拒绝 `-log`（`Unknown option`，退出 7），我们 unrar 同样拒绝（消息与退出码一致）。注：官方 `-logAF` 只留最后一类（内部截断怪癖），我们写 A+F 正常叠加。
 - [ ] `-mc<par>` 高级压缩参数 no-op。
 - [x] **`-mc<par>` 过滤器策略（2026-09）**：`-mc[channels][mode][+/-]` 解析为 `FilterOptions`（`WriterOptions::filters`，`FilterMode::{Auto,Disabled,Forced}`）——`-mc-` 全禁、`-mcd-`/`-mce-` 单项禁、`-mcd+`/`-mce+` 强制（`-mcd<N>+` 指定 delta 通道 1–31），`-mcl±`/`-mcx±` 无效果（长距恒开、exhaustive 未实现）；与官方同样宽容（无法识别的字符忽略，`-mcd6+`/`-mc6d+`/`-mc5` 均接受）。RAR5 三条编码路径（常驻/batch/流式）与 RAR4 非 solid 候选都接策略；通道越界由 `WriterOptions` 校验拒绝。测试：库级 roundtrip + packed 对比、CLI 策略/宽容形式/RAR4、70 MiB 流式回环。
-- [ ] CLI 形态缺口：`m[f]`、`lta`/`vta`、`rar x -kb/-or/-op`、`a -f/-u/-k`、`-qo+/-`、`-ola`、`a -z`、单横线 `-` 停止扫描。
+- [x] **CLI 形态（2026-09）**：`mf`（归档含目录项、只删文件留目录，与官方逐项对照）、`lta`/`vta` 别名、`rar x -kb/-or/-op<path>`、`a -f`/`a -u`（命令串等价于 `f`/`u`）、`a -k`、`a -z<file>`、`-qo+`/`-qo-`、`-ol-`（归档与提取都跳过链接）、`-ola`（提取链接禁用安全校验，`ExtractOptions::allow_unsafe_links`）；另修 `d`/`rn` 的错误码丢失（锁定档现在报退出码 4，与官方一致）。注：官方只支持 `--` 停止开关扫描（单 `-` 报错 7），我们 `--` 已可用。
 - [ ] Windows no-op 开关（`-ac`/`-ai`/`-e[+]<attr>`/`-dh`/`-oc`/`-oni`/`-ri`/`-vp`/`-vd`/`-ioff`/`-isnd`/`-ieml`/`-mlp`/`-am[s,r]`/`-sc` 部分）：按 WinRAR 语义补齐或明确记录。
 - [ ] 格式硬限（记录）：RAR 1.3/1.4 读取；RAR3/4 非标准 VM 过滤器；RAR5 filter type ≥4；RAR4 分卷 `d/a`（官方同样拒绝）；pre-RAR3 solid repack（清晰报错）；RAR4 成员注释与官方 `t` 不互操作（已知小差异）。
 - 注：官方 7.23 已移除 `-ma4`（RAR4 创建，报 `Unknown option`）；我们的 RAR4/v15/v20 创建是超出官方的扩展。

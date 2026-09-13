@@ -209,7 +209,9 @@ impl RarArchive {
     /// exist on disk yet.
     #[cfg(unix)]
     fn check_link_target(&self, dest_dir: &Path, dest_path: &Path, target: &str) -> RarResult<()> {
-        if self.read_ctx().extract_options.safe_paths {
+        if self.read_ctx().extract_options.safe_paths
+            && !self.read_ctx().extract_options.allow_unsafe_links
+        {
             resolve_redirect_target(&Self::link_dir_of(dest_dir, dest_path), target)?;
         }
         Ok(())
@@ -225,7 +227,9 @@ impl RarArchive {
         dest_path: &Path,
         target: &str,
     ) -> RarResult<Option<PathBuf>> {
-        if !self.read_ctx().extract_options.safe_paths {
+        if !self.read_ctx().extract_options.safe_paths
+            || self.read_ctx().extract_options.allow_unsafe_links
+        {
             return Ok(None);
         }
         let mut resolved = dest_dir.to_path_buf();

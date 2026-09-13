@@ -203,6 +203,22 @@ pub struct MiscSwitches {
     #[arg(global = true, long = "me", value_name = "PAR")]
     #[allow(dead_code)]
     pub me_params: Option<String>,
+    /// Skip symbolic links when archiving or extracting (`-ol-`)
+    #[arg(global = true, long = "skip-links")]
+    pub skip_links: bool,
+    /// Extract links with dangerous targets as-is (`-ola`; disables the
+    /// link safety checks)
+    #[arg(global = true, long = "unsafe-links")]
+    pub unsafe_links: bool,
+    /// Freshen files (`-f`; `a -f` is equivalent to the `f` command)
+    #[arg(global = true, long = "freshen")]
+    pub freshen: bool,
+    /// Update files (`-u`; `a -u` is equivalent to the `u` command)
+    #[arg(global = true, long = "update-files")]
+    pub update_files: bool,
+    /// Lock the archive (`-k`)
+    #[arg(global = true, long = "lock")]
+    pub lock: bool,
     /// Write archive/file names to a log file (`-log[AFPU]*[=name]`; rar
     /// only — UnRAR rejects the switch like the official one)
     #[arg(global = true, long = "log", value_name = "SPEC", action = clap::ArgAction::Append)]
@@ -367,8 +383,12 @@ pub fn normalize_switch(arg: &str) -> String {
     if arg == "-htb" {
         return "--blake2".into();
     }
-    if arg == "-qo" {
-        return "--quick-open".into();
+    if let Some(rest) = arg.strip_prefix("-qo") {
+        return match rest {
+            "+" => "--quick-open".into(),
+            "-" => "--no-quick-open".into(),
+            _ => "--quick-open".into(),
+        };
     }
     if let Some(rest) = arg.strip_prefix("-hp") {
         return if rest.is_empty() {
@@ -552,11 +572,26 @@ pub fn normalize_switch(arg: &str) -> String {
             format!("--auto-name={rest}")
         };
     }
+    if arg == "-ol-" {
+        return "--skip-links".into();
+    }
+    if arg == "-ola" {
+        return "--unsafe-links".into();
+    }
     if arg == "-ol" {
         return "--links".into();
     }
     if arg == "-oh" {
         return "--hardlinks".into();
+    }
+    if arg == "-f" {
+        return "--freshen".into();
+    }
+    if arg == "-u" {
+        return "--update-files".into();
+    }
+    if arg == "-k" {
+        return "--lock".into();
     }
     if let Some(rest) = arg.strip_prefix("-sl") {
         return format!("--size-less={rest}");

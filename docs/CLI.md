@@ -22,10 +22,11 @@ never a silent dump into a `<name>/` folder.
 
 | Command | Alias | Action |
 |---|---|---|
-| `a` | | Add files (creates the archive if missing) |
+| `a` | | Add files (creates the archive if missing); `a -f`/`a -u` behave like the `f`/`u` commands, `-k` locks the result and `-z<file>` sets the comment |
 | `u` | | Update: add missing files, replace newer ones |
 | `f` | | Freshen: update existing members only |
 | `m` | | Move: add files, then erase the sources |
+| `mf` | | Move files only: the tree is archived like `m`, but directories are left on disk |
 | `d` | | Delete members without rebuilding the archive |
 | `rn` | | Rename archived members |
 | `ch` | | Change parameters (`-cl`/`-cu` name case conversion) |
@@ -46,8 +47,8 @@ never a silent dump into a `<name>/` folder.
 | `v` | | Verbose list |
 | `l` | | List contents |
 | `lb` | | List bare (names only) |
-| `lt` | | List technical (sizes/CRC/mtime) |
-| `vb` / `vt` | | Verbose bare / verbose technical |
+| `lt` | | List technical (sizes/CRC/mtime); `lta` accepted as an alias |
+| `vb` / `vt` | | Verbose bare / verbose technical (`vta` alias accepted) |
 | `i` | | Show archive info (file/dir counts, total & packed size, ratio) |
 | `i<string>` | | Find a string inside members (`ic`/`ih` variants); **`i` alone is Info, not search** |
 
@@ -89,16 +90,18 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 | `-v<size>` | Multi-volume (e.g. `-v1m` ≈ 1 MB, `-v100k` ≈ 100 KB); sets of 10+ volumes use zero-padded `part01` names like WinRAR |
 | `-rr[N]` | Inline recovery record; N = count or `N%` percent, default 10% (the `-rv` switch below takes a **required** value, no default) |
 | `-rv<N\|N%>` | Recovery volumes; capped at 10× the volume count |
-| `-qo` | Enable quick-open records (there is no `-qo-` disable form; quick-open is opt-in) |
+| `-qo[-|+]` | Quick-open records: `-qo`/`-qo+` enable, `-qo-` disables (opt-in) |
 
 ### Paths, time & misc
 
 `-r`/`-r0`/`-r-` (recurse), `-ep`/`-ep1`/`-ep2`/`-ep3`/`-ep4<path>` (path
 strip), `-ap<path>` (archive path prefix), `-x`/`-x@` (exclude),
 `-n`/`-n@` (include), `-ed`/`-as`/`-ad`/`-am` (empty dirs / sync / append archive
-name to dest / archive metadata), `-ol`/`-oh` (store sym/hard links as links:
-symlinks become redirects, hard-link groups store the first path and
-redirect the rest — Windows and Unix, RAR5 only),
+name to dest / archive metadata), `-ol`/`-ol-`/`-ola`/`-oh` (store symlinks as
+redirects / skip links when archiving and extracting / extract links with
+dangerous targets as-is (disables the link safety checks); hard links:
+hard-link groups store the first path and redirect the rest — Windows and
+Unix, RAR5 only),
 `-op<path>`/`-or` (output path / auto-rename), `-os`/`-ow` (NTFS streams /
 owner), `-om[-|1][=ext;ext]` (propagate the archive's Mark of the Web to
 extracted files: zone value only, every field with `1`, optional extension

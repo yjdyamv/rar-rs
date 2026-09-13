@@ -49,6 +49,10 @@ pub(crate) enum Command {
     /// Move: add files, then erase the sources
     #[command(visible_alias = "m")]
     Move(FilesArgs),
+    /// Move files only: like `m`, but directories are neither archived nor
+    /// removed
+    #[command(name = "mf")]
+    MoveFiles(FilesArgs),
     /// Delete members without rebuilding the archive
     #[command(visible_alias = "d")]
     Delete(DeleteArgs),
@@ -110,14 +114,15 @@ pub(crate) enum Command {
     /// List bare (names only, like `lb`)
     #[command(visible_alias = "lb")]
     ListBare(ArchiveArgs),
-    /// List technical (like `lt`)
-    #[command(visible_alias = "lt")]
+    /// List technical (like `lt`; `lta` is accepted as an alias — service
+    /// records are not listed)
+    #[command(visible_aliases = ["lt", "lta"])]
     ListTechnical(ArchiveArgs),
     /// Verbosely list bare (like `vb`)
     #[command(visible_alias = "vb")]
     VerboseListBare(ArchiveArgs),
-    /// Verbosely list technical (like `vt`)
-    #[command(visible_alias = "vt")]
+    /// Verbosely list technical (like `vt`; `vta` is accepted as an alias)
+    #[command(visible_aliases = ["vt", "vta"])]
     VerboseListTechnical(ArchiveArgs),
     /// Show archive info
     #[command(visible_alias = "i")]
@@ -236,6 +241,17 @@ pub(crate) struct ExtractArgs {
     /// stdout (directories are skipped).
     #[arg(long = "stdout")]
     pub(crate) stdout: bool,
+    /// Keep partially extracted files when a member fails to decode
+    /// (like `-kb`; the default deletes them)
+    #[arg(long = "keep-broken")]
+    pub(crate) keep_broken: bool,
+    /// Rename the destination automatically when it already exists
+    /// (like `-or`): `name.ext` becomes `name(1).ext`, ...
+    #[arg(long = "auto-rename")]
+    pub(crate) auto_rename: bool,
+    /// Output path (like `-op<path>`); overrides the `--dest` base
+    #[arg(long = "output-path", value_name = "PATH")]
+    pub(crate) output_path: Option<String>,
 }
 
 /// Archive path plus one or more source files.
@@ -361,6 +377,9 @@ pub(crate) struct CreateArgs {
     /// Quick-open record
     #[arg(long = "quick-open")]
     pub(crate) quick_open: bool,
+    /// Disable quick-open (`-qo-`; the default, kept for switch parity)
+    #[arg(long = "no-quick-open", hide = true)]
+    pub(crate) no_quick_open: bool,
     /// Header encryption (optionally with a password as `-hp{pwd}` /
     /// `--header-encrypt={pwd}`; a bare `-hp` turns it on with the `-p`
     /// password). The value is attached (WinRAR style), so a following
@@ -520,10 +539,13 @@ pub(crate) struct CreateArgs {
     #[arg(long = "hash-crc")]
     #[allow(dead_code)]
     pub(crate) hash_crc: bool,
-    /// Advanced compression parameters (like `-mc<par>`; accepted)
+    /// Advanced compression parameters (like `-mc<par>`)
     #[arg(long = "mc", value_name = "PAR")]
-    #[allow(dead_code)]
     pub(crate) mc_params: Option<String>,
+    /// Read the archive comment from a file while creating/updating
+    /// (like `-z<file>`)
+    #[arg(long = "comment-file", value_name = "FILE")]
+    pub(crate) comment_file: Option<String>,
     /// Long-distance matching control (like `-mcl`; accepted). Long-range
     /// matching is always enabled for `-m2`…`-m5`, so this is a no-op that
     /// matches WinRAR 7.23's own behaviour.
@@ -730,6 +752,26 @@ pub(crate) fn parse_mc_params(spec: &str) -> rar_rs::FilterOptions {
         filters.x86 = mode_state;
     }
     filters
+}
+
+/// Adapt create switches for the `a -f` / `a -u` delegation to the
+/// update/freshen pipeline: only the fields those paths consume are
+/// carried over (creation-only switches like volumes or recovery are
+/// silently ignored, like WinRAR's command-string equivalence implies).
+pub(crate) fn as_files_args(args: &CreateArgs) -> FilesArgs {
+    FilesArgs {
+        password: args.password.clone(),
+        archive: args.archive.clone(),
+        files: args.files.clone(),
+        dict_size: args.dict_size.clone(),
+        archive_format: args.archive_format.clone(),
+        dict_extract: args.dict_extract.clone(),
+        ts_specs: args.ts_specs.clone(),
+        keep_time: args.keep_time,
+        store_links: args.store_links,
+        store_hardlinks: args.store_hardlinks,
+        mc_params: args.mc_params.clone(),
+    }
 }
 
 /// Whether an archive member name matches one `-ms<list>` entry: a bare

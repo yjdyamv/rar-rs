@@ -1435,3 +1435,58 @@ fn writer_filter_policy_controls_member_filters() {
     );
     assert!(matches!(bad, Err(RarError::InvalidOption(_))));
 }
+
+#[cfg(unix)]
+#[test]
+fn extract_options_skip_and_allow_unsafe_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("links.rar");
+    {
+        let mut archive = RarArchive::create_with_options(&path, Default::default()).unwrap();
+        archive.add_bytes("target.txt", b"data", 0).unwrap();
+        // A symlink whose target escapes the destination: unsafe by default.
+        archive.add_redirect("lnk", 1, "../outside").unwrap();
+        archive.close().unwrap();
+    }
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+
+    // The default safe-path policy rejects the escaping link.
+    let mut archive = RarArchive::open(&path).unwrap();
+    assert!(
+        archive
+            .extract_all_with_options(&out, Default::default())
+            .is_err()
+    );
+
+    // `-ol-` skips link members entirely.
+    let mut archive = RarArchive::open(&path).unwrap();
+    archive
+        .extract_all_with_options(
+            &out,
+            crate::options::ExtractOptions {
+                skip_links: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(!out.join("lnk").exists());
+    assert!(out.join("target.txt").exists());
+
+    // `-ola` extracts the link exactly as stored.
+    let mut archive = RarArchive::open(&path).unwrap();
+    archive
+        .extract_all_with_options(
+            &out,
+            crate::options::ExtractOptions {
+                allow_unsafe_links: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read_link(out.join("lnk")).unwrap(),
+        std::path::PathBuf::from("../outside")
+    );
+}

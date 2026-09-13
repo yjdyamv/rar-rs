@@ -221,16 +221,18 @@ fn print_groups(collected: &[Collected], groups: &[Vec<usize>], bare: bool) {
 ///
 /// `store_hardlinks` must already be gated on the target format: RAR4 has
 /// no redirect records (`add_redirect` rejects them) and WinRAR's own
-/// `-ma4 -oh` stores the files in full.
+/// `-ma4 -oh` stores the files in full. `skip_links` (`-ol-`) drops
+/// symbolic links entirely instead of storing or following them.
 pub(crate) fn split_link_redirects(
     collected: Vec<Collected>,
     store_links: bool,
     store_hardlinks: bool,
+    skip_links: bool,
 ) -> (Vec<Collected>, Vec<LinkRedirect>) {
     let mut redirects = Vec::new();
     let mut keep = Vec::with_capacity(collected.len());
 
-    if store_links {
+    if store_links || skip_links {
         for c in collected {
             if c.is_dir {
                 keep.push(c);
@@ -238,6 +240,9 @@ pub(crate) fn split_link_redirects(
             }
             match std::fs::symlink_metadata(&c.path) {
                 Ok(m) if m.file_type().is_symlink() => {
+                    if skip_links {
+                        continue;
+                    }
                     if let Ok(target) = std::fs::read_link(&c.path) {
                         redirects.push((c.name.clone(), 1, target.to_string_lossy().into_owned()));
                         continue;

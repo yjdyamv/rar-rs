@@ -1110,3 +1110,242 @@ fn cli_mc_filter_policy_controls_filters() {
         .unwrap();
     assert!(status.success());
 }
+
+// ── command shapes: mf, lta/vta, extract -op/-kb/-or, -qo+/- ────────────────
+
+/// `rar mf` archives the tree like `m` but leaves directories on disk and
+/// removes only the files.
+#[test]
+fn cli_mf_moves_files_and_keeps_directories() {
+    let dir = make_temp_dir();
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    std::fs::write(dir.path().join("sub").join("f2.txt"), b"two").unwrap();
+
+    let archive = dir.path().join("mf.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["mf", "-idq"])
+        .arg(&archive)
+        .args(["sub", "f1.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(dir.path().join("sub").is_dir(), "directories stay on disk");
+    assert!(!dir.path().join("sub").join("f2.txt").exists());
+    assert!(!dir.path().join("f1.txt").exists());
+    assert_eq!(cli_names(&archive), ["f1.txt", "sub", "sub/f2.txt"]);
+}
+
+/// `lta` / `vta` are accepted aliases of `lt` / `vt`.
+#[test]
+fn cli_lta_vta_aliases_accepted() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    let archive = dir.path().join("lt.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("f1.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    for command in ["lt", "lta", "vt", "vta", "lb", "vb"] {
+        let out = std::process::Command::new(RAR_CLI)
+            .args([command])
+            .arg(&archive)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{command}");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("f1.txt"), "{command}: {text}");
+    }
+}
+
+/// `rar x` honors `-op<path>` (output path), `-kb` (keep broken) and `-or`
+/// (auto-rename), like UnRAR.
+#[test]
+fn cli_extract_op_kb_or_switches() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    let archive = dir.path().join("x.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("f1.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // -op<path> overrides --dest.
+    let out = dir.path().join("by-op");
+    let status = std::process::Command::new(RAR_CLI)
+        .arg("x")
+        .arg(format!("-op{}", out.display()))
+        .args(["-idq", "--dest"])
+        .arg(dir.path().join("unused"))
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(out.join("f1.txt").exists());
+
+    // -or renames an existing destination, -kb is accepted.
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-or", "-kb", "-idq", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(out.join("f1(1).txt").exists(), "-or must create f1(1).txt");
+}
+
+/// `-qo+` / `-qo-` are accepted (quick-open on/off).
+#[test]
+fn cli_qo_plus_and_minus_accepted() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    for (switch, name) in [("-qo+", "qo.rar"), ("-qo-", "noqo.rar")] {
+        let archive = dir.path().join(name);
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", switch, "-idq"])
+            .arg(&archive)
+            .arg("f1.txt")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{switch}");
+        assert_eq!(cli_names(&archive), ["f1.txt"]);
+    }
+}
+
+// ── a -f / a -u / a -k / -z, -ol- ───────────────────────────────────────────
+
+/// `rar a -f` freshens (existing members only) and `rar a -u` updates (adds
+/// missing members too), like the `f` / `u` commands.
+#[test]
+fn cli_create_freshen_update_switches() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    let base = dir.path().join("base.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&base)
+        .arg("f1.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(dir.path().join("f1.txt"), b"one-newer").unwrap();
+    std::fs::write(dir.path().join("f2.txt"), b"two").unwrap();
+
+    // -f: only the existing f1 is replaced, f2 stays out.
+    let freshened = dir.path().join("freshen.rar");
+    std::fs::copy(&base, &freshened).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-f", "-idq"])
+        .arg(&freshened)
+        .args(["f1.txt", "f2.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&freshened), ["f1.txt"]);
+
+    // -u: f2 is added and f1 updated.
+    let updated = dir.path().join("update.rar");
+    std::fs::copy(&base, &updated).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-u", "-idq"])
+        .arg(&updated)
+        .args(["f1.txt", "f2.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&updated), ["f1.txt", "f2.txt"]);
+}
+
+/// `rar a -k` locks the new archive (delete then fails with exit 4) and
+/// `-z<file>` attaches an archive comment.
+#[test]
+fn cli_create_lock_and_comment_switches() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    std::fs::write(dir.path().join("comment.txt"), b"archive comment").unwrap();
+    let archive = dir.path().join("locked.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-k", "-zcomment.txt", "-idq"])
+        .arg(&archive)
+        .arg("f1.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["cw", "locked.rar"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.stdout, b"archive comment");
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["d", "-idq", "locked.rar", "f1.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(4), "locked archives use exit 4");
+}
+
+/// `-ol-` skips symbolic links when archiving and when extracting.
+#[cfg(unix)]
+#[test]
+fn cli_skip_links_switch() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("target.txt"), b"target").unwrap();
+    std::os::unix::fs::symlink("target.txt", dir.path().join("lnk.txt")).unwrap();
+
+    let with_links = dir.path().join("links.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ol", "-idq"])
+        .arg(&with_links)
+        .args(["target.txt", "lnk.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&with_links), ["lnk.txt", "target.txt"]);
+
+    let without = dir.path().join("nolinks.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ol-", "-idq"])
+        .arg(&without)
+        .args(["target.txt", "lnk.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(cli_names(&without), ["target.txt"]);
+
+    // Extracting the -ol archive with -ol- skips the link member.
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-ol-", "-idq", "--dest"])
+        .arg(&out)
+        .arg(&with_links)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        !out.join("lnk.txt").exists(),
+        "-ol- must skip link extraction"
+    );
+    assert!(out.join("target.txt").exists());
+}

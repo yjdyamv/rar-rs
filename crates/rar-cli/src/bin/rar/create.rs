@@ -142,7 +142,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     let opts = rar_rs::WriterOptions::new()
         .compression(version)
         .solid_mode(solid_mode)
-        .quick_open(args.quick_open)
+        .quick_open(args.quick_open && !args.no_quick_open)
         .blake2(args.blake2)
         .encrypt_headers(header_encrypt)
         .filters(match args.mc_params.as_deref() {
@@ -334,6 +334,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         collected,
         args.store_links,
         args.store_hardlinks && !version.is_legacy(),
+        misc.skip_links,
     );
     // -oi: identical-file references. The listing modes (-oi3/-oi4) print
     // the groups and create no archive at all; the dedup modes store the
@@ -617,6 +618,21 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             files.len(),
             args.level
         );
+    }
+    // -z<file>: attach an archive comment through the editor role.
+    if let Some(comment_file) = &args.comment_file {
+        crate::comment::cmd_comment_set(&crate::args::CommentArgs {
+            password: args.password.clone(),
+            archive: archive_path.clone(),
+            comment_file: Some(comment_file.clone()),
+        })?;
+    }
+    // -k: lock the archive after a successful create.
+    if misc.lock {
+        crate::recovery::cmd_lock(&crate::args::ArchiveArgs {
+            password: args.password.clone(),
+            archive: archive_path.clone(),
+        })?;
     }
     Ok(())
 }

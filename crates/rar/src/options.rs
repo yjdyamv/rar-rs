@@ -397,6 +397,14 @@ pub struct ExtractOptions {
     /// is being opened, before any caller options apply, so it always uses
     /// the default ceiling.
     pub max_metadata_bytes: Option<u64>,
+    /// Skip link/copy redirect members during extraction (`-ol-`: WinRAR
+    /// skips symbolic links when this switch is present).
+    pub skip_links: bool,
+    /// Extract links with dangerous targets as-is (`-ola`): the link safety
+    /// checks (`safe_paths` for link bodies) are disabled. Placing links
+    /// outside the destination is a security risk; only use this for
+    /// trusted archives.
+    pub allow_unsafe_links: bool,
 }
 
 impl ExtractOptions {
@@ -430,6 +438,8 @@ impl Default for ExtractOptions {
             set_access_time: false,
             max_dict_size: Some(Self::DEFAULT_MAX_DICT_SIZE),
             max_metadata_bytes: Some(Self::DEFAULT_MAX_METADATA_BYTES),
+            skip_links: false,
+            allow_unsafe_links: false,
         }
     }
 }

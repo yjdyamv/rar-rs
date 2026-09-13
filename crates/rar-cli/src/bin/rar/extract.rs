@@ -40,6 +40,10 @@ pub(crate) fn cmd_extract(args: &ExtractArgs, misc: &common::MiscSwitches) -> Cl
     let skip = args.overwrite.as_deref() == Some("never");
     let options = rar_rs::ExtractOptions {
         skip_existing: skip,
+        auto_rename: args.auto_rename,
+        keep_broken: args.keep_broken,
+        skip_links: misc.skip_links,
+        allow_unsafe_links: misc.unsafe_links,
         ..Default::default()
     };
     let count = ops::extract_members(&mut rar, &dest, &args.names, options)?;
@@ -70,13 +74,11 @@ fn write_extract_logs(
     Ok(())
 }
 
-/// Destination directory, honoring `-ad` (append the archive base name).
+/// Destination directory, honoring `-op<path>` (output path) and `-ad`
+/// (append the archive base name).
 pub(crate) fn extract_dest(args: &ExtractArgs) -> Result<std::path::PathBuf, String> {
-    Ok(output::extract_dest(
-        &args.dest,
-        &args.archive,
-        args.append_dir,
-    ))
+    let base = args.output_path.as_deref().unwrap_or(&args.dest);
+    Ok(output::extract_dest(base, &args.archive, args.append_dir))
 }
 
 /// Extract without archived paths (like `rar e`).
@@ -94,6 +96,10 @@ pub(crate) fn cmd_extract_flat(args: &ExtractArgs, misc: &common::MiscSwitches) 
     let options = rar_rs::ExtractOptions {
         flat_paths: true,
         skip_existing: skip,
+        auto_rename: args.auto_rename,
+        keep_broken: args.keep_broken,
+        skip_links: misc.skip_links,
+        allow_unsafe_links: misc.unsafe_links,
         ..Default::default()
     };
     let count = ops::extract_members(&mut rar, &dest, &args.names, options)?;
