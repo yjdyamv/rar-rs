@@ -203,6 +203,113 @@ fn open_quick_handles_encrypted_archives() {
     );
 }
 
+/// Reorder the two cached entries of a quick-open record without touching
+/// their bodies (each body keeps its own header CRC and relative offset, so
+/// the resulting record is structurally valid but lists members in the
+/// opposite order from the archive scan).
+fn swap_quick_open_entries(archive: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+
+    let mut cursor = std::io::Cursor::new(archive);
+    cursor.set_position(8);
+    loop {
+        let meta = rar_rs::wire::read_block(&mut cursor, None)
+            .expect("read block")
+            .expect("block");
+        if meta.block_type == 0x03 {
+            assert!(meta.raw.data_size > 0, "empty quick-open payload");
+            cursor.set_position(meta.data_offset);
+            let mut payload = vec![0u8; meta.raw.data_size as usize];
+            cursor.read_exact(&mut payload).expect("read qo payload");
+            let mut entries: Vec<Vec<u8>> = Vec::new();
+            let mut off = 0usize;
+            while off < payload.len() {
+                let start = off;
+                off += 4; // entry CRC32
+                let (body_size, n) =
+                    rar_rs::wire::vint::decode_from_slice(&payload, off).expect("body size vint");
+                off += n + body_size as usize;
+                assert!(off <= payload.len(), "truncated quick-open body");
+                entries.push(payload[start..off].to_vec());
+            }
+            assert_eq!(entries.len(), 2, "test archive must cache two entries");
+            entries.reverse();
+            let swapped: Vec<u8> = entries.concat();
+            assert_eq!(swapped.len(), payload.len());
+            let mut out = archive.to_vec();
+            out.splice(
+                meta.data_offset as usize..meta.data_offset as usize + payload.len(),
+                swapped,
+            );
+            return out;
+        }
+        cursor.set_position(meta.data_end);
+        if meta.block_type == 0x05 {
+            panic!("archive has no quick-open record");
+        }
+    }
+}
+
+/// A quick-open catalog may order members differently from the full scan
+/// that extraction runs to discover "STM" records. An ID obtained from the
+/// cached listing must then resolve to the same member (or come back as
+/// [`rar_rs::RarError::StaleEntryId`]); it must never extract a different
+/// member that happens to sit at the same index after the rescan.
+#[test]
+fn quick_open_rescan_never_extracts_a_different_member() {
+    let dir = temp_dir();
+    let path = dir.path().join("qo-swapped.rar");
+    let aa = b"aa member payload".repeat(100);
+    let bb = b"bb member payload".repeat(100);
+    {
+        let mut rar = rar_rs::ArchiveWriter::create_with(
+            &path,
+            rar_rs::WriterOptions::default().quick_open(true),
+        )
+        .expect("create");
+        let opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
+        rar.add_bytes("aa.txt", &aa, opts).expect("add aa");
+        rar.add_bytes("bb.txt", &bb, opts).expect("add bb");
+        rar.finish().expect("close");
+    }
+
+    let bytes = fs::read(&path).expect("read archive");
+    let swapped_path = dir.path().join("qo-swapped-patched.rar");
+    fs::write(&swapped_path, swap_quick_open_entries(&bytes)).expect("write patched archive");
+
+    let mut reader = ArchiveReader::open_with(
+        &swapped_path,
+        rar_rs::OpenOptions::new().scan_strategy(rar_rs::ScanStrategy::PreferQuickOpen),
+    )
+    .expect("open quick");
+    let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+    assert_eq!(
+        names,
+        vec!["bb.txt".to_string(), "aa.txt".to_string()],
+        "the cached listing must be reversed"
+    );
+
+    let bb_id = reader.unique_entry("bb.txt").expect("bb id");
+    let out = dir.path().join("out");
+    match reader.extract_entry(bb_id, &out) {
+        Ok(extracted) => {
+            assert_eq!(
+                extracted.file_name().and_then(|n| n.to_str()),
+                Some("bb.txt"),
+                "the ID must resolve to the member it names"
+            );
+            assert_eq!(fs::read(&extracted).expect("read extracted bb"), bb);
+            assert!(
+                !out.join("aa.txt").exists(),
+                "a bb request must not extract aa"
+            );
+        }
+        Err(rar_rs::RarError::StaleEntryId) => {}
+        Err(other) => panic!("unexpected extraction error: {other}"),
+    }
+}
+
 /// Directory (and redirect) headers are members too: the quick-open record
 /// must cache them or `open_quick` lists fewer members than the full scan.
 #[test]

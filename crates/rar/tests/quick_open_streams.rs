@@ -9,6 +9,88 @@ use rar_rs::{
     WriterOptions,
 };
 
+/// Index of the volume holding the first "STM" service block (block type
+/// 0x03 with `BLOCK_FLAG_DEPENDS_PREV` 0x20), if any.
+fn stream_record_volume(volumes: &[std::path::PathBuf]) -> Option<usize> {
+    use std::io::{Seek, SeekFrom};
+
+    for (index, volume) in volumes.iter().enumerate() {
+        let Ok(mut file) = std::fs::File::open(volume) else {
+            continue;
+        };
+        // Every volume carries its own 8-byte RAR5 signature.
+        file.seek(SeekFrom::Start(8)).ok()?;
+        while let Ok(Some(meta)) = rar_rs::wire::read_block(&mut file, None) {
+            if meta.block_type == 0x03 && meta.flags & 0x20 != 0 {
+                return Some(index);
+            }
+            // `read_block` stops at the data area; skip it explicitly.
+            file.seek(SeekFrom::Start(meta.data_end)).ok()?;
+        }
+    }
+    None
+}
+
+/// A multi-volume `-os` set can place the "STM" block in a later volume
+/// (the writer rolls to the next volume before emitting it). Extraction
+/// must read the record from the volume that holds it; the old reader
+/// always sought the primary volume and silently dropped the stream.
+#[test]
+fn multivolume_extraction_restores_ntfs_streams() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("mkdir");
+    let src = src_dir.join("owner.bin");
+    // A compressible head plus an incompressible tail keeps the packed
+    // member spanning several 64 KiB volumes (the random tail dominates the
+    // packed size while the head keeps compression a net win).
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut payload = vec![0u8; 128 * 1024];
+    payload.extend((0..300_000).map(|_| {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8
+    }));
+    std::fs::write(&src, &payload).expect("write member");
+    let stream = b"alternate stream payload for a multi-volume set".repeat(20);
+    std::fs::write(format!("{}{}", src.display(), ":ads"), &stream).expect("write stream");
+
+    let archive = dir.path().join("streams-mv.rar");
+    {
+        let mut rar = ArchiveWriter::create_with(
+            &archive,
+            WriterOptions::default()
+                .save_streams(true)
+                .volume_size(64 * 1024),
+        )
+        .expect("create");
+        rar.add_path_as(&src, "owner.bin", EntryWriteOptions::new())
+            .expect("add");
+        rar.finish().expect("close");
+    }
+
+    let volumes = rar_rs::discover_volumes(&archive);
+    assert!(volumes.len() >= 2, "expected a split set");
+    assert!(
+        matches!(stream_record_volume(&volumes), Some(volume) if volume > 0),
+        "the STM record must sit in a later volume for this regression test"
+    );
+
+    let out = dir.path().join("out");
+    let mut reader = ArchiveReader::open(&archive).expect("open");
+    reader
+        .extract_all_with_options(&out, ExtractOptions::default())
+        .expect("extract multi-volume");
+    assert_eq!(std::fs::read(out.join("owner.bin")).unwrap(), payload);
+    assert_eq!(
+        std::fs::read(format!("{}{}", out.join("owner.bin").display(), ":ads"))
+            .expect("restored stream"),
+        stream,
+        "the stream must be restored from its own volume"
+    );
+}
+
 #[test]
 fn quick_open_extraction_restores_ntfs_streams() {
     let dir = tempfile::tempdir().expect("tempdir");

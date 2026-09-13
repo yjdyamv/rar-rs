@@ -122,6 +122,29 @@ fn cli_absolute_time_filters_use_local_dates() {
     assert_eq!(cli_names(&next), ["t.txt"]);
 }
 
+/// `-ta19700101` must not fail when the local civil date precedes the Unix
+/// epoch (east-of-UTC zones): the filter saturates to 0 and a current file
+/// is included in every timezone.
+#[test]
+fn cli_epoch_time_filter_works_in_east_of_utc_zones() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"body").unwrap();
+
+    let archive = dir.path().join("epoch.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ta19700101", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "-ta19700101 must accept local dates before the Unix epoch"
+    );
+    assert_eq!(cli_names(&archive), ["f.txt"]);
+}
+
 /// Member selectors are masks and directory prefixes: a directory name
 /// selects its subtree, a `*.txt` mask selects by name, and names fold
 /// ASCII case on Windows.

@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rar_rs::ArchiveReader;
@@ -206,5 +207,90 @@ fn legacy_solid_repack_interop_with_winrar_623() {
             let (ok, out) = run(&mut test);
             assert!(ok, "UnRAR t after our -ma{ma} append failed:\n{out}");
         }
+    }
+}
+
+/// The cached official UnRAR of a `.cache/winrar/<version>` tool release,
+/// found relative to the CLI crate. `None` skips the official check.
+fn cached_unrar(version: &str) -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "UnRAR.exe" } else { "unrar" };
+    [
+        format!("../../.cache/winrar/{version}/{exe}"),
+        format!("../.cache/winrar/{version}/{exe}"),
+        format!(".cache/winrar/{version}/{exe}"),
+    ]
+    .iter()
+    .map(|rel| Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
+    .find(|bin| bin.exists())
+}
+
+/// `rar cf` must write the member comment in the official standalone
+/// `COMM_HEAD` layout: official UnRAR 6.23 and 7.23 both test and extract
+/// the result cleanly, and our reader reads the comment back.
+#[test]
+fn member_comment_is_accepted_by_official_unrar() {
+    let dir = temp_dir();
+    let payload = b"commented member payload\n".repeat(200);
+    std::fs::write(dir.path().join("c.txt"), &payload).unwrap();
+    let archive = dir.path().join("cf.rar");
+
+    let mut create = Command::new(env!("CARGO_BIN_EXE_rar"));
+    create
+        .args(["a", "-ma4", "-idq"])
+        .arg(&archive)
+        .arg("c.txt")
+        .current_dir(dir.path());
+    let (ok, out) = run(&mut create);
+    assert!(ok, "our create failed:\n{out}");
+
+    std::fs::write(dir.path().join("note.txt"), b"member comment body").unwrap();
+    let mut cf = Command::new(env!("CARGO_BIN_EXE_rar"));
+    cf.args(["cf", "-idq", "--comment-file"])
+        .arg(dir.path().join("note.txt"))
+        .arg(&archive)
+        .arg("c.txt");
+    let (ok, out) = run(&mut cf);
+    assert!(ok, "our cf failed:\n{out}");
+
+    // Our own read-back.
+    let mut reader = ArchiveReader::open(&archive).unwrap();
+    assert_eq!(
+        reader.entries().next().unwrap().comment(),
+        Some(&b"member comment body"[..])
+    );
+    assert_eq!(
+        reader
+            .read_entry(reader.unique_entry("c.txt").unwrap())
+            .unwrap(),
+        payload
+    );
+    drop(reader);
+
+    // Official UnRAR must both test and extract the archive; missing cached
+    // tools just skip the official half (our read-back above already ran).
+    for version in ["6-23", "7-23"] {
+        let Some(unrar) = cached_unrar(version) else {
+            eprintln!("skipped: official UnRAR {version} not found");
+            continue;
+        };
+        let mut test = Command::new(&unrar);
+        test.args(["t", "-idq"]).arg(&archive);
+        let (ok, out) = run(&mut test);
+        assert!(ok, "UnRAR {version} t failed:\n{out}");
+
+        let dest = dir.path().join(format!("out-{version}"));
+        std::fs::create_dir_all(&dest).unwrap();
+        let mut extract = Command::new(&unrar);
+        extract
+            .args(["x", "-idq", "-o+", "-y"])
+            .arg(&archive)
+            .arg(&dest);
+        let (ok, out) = run(&mut extract);
+        assert!(ok, "UnRAR {version} x failed:\n{out}");
+        assert_eq!(
+            std::fs::read(dest.join("c.txt")).unwrap(),
+            payload,
+            "UnRAR {version} extracted bytes"
+        );
     }
 }

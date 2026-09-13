@@ -398,7 +398,12 @@ impl Rar20Decoder {
 
         let level_lengths = Self::read_level_lengths(&mut self.bits)?;
         let level_decoder = Huffman::from_lengths(&level_lengths)?;
-        let mut new_levels = [0u8; OLD_LEVEL_COUNT];
+        // unrar updates `UnpOldTable20` in place and copies back only the
+        // first `TableSize` entries, so positions past the new table keep
+        // their stale values (they are the delta base when a later
+        // keep-tables block uses a larger table). Start from the previous
+        // table and write only the covered positions.
+        let mut new_levels = self.levels;
         let mut pos = 0usize;
         while pos < table_size {
             let symbol = level_decoder.decode(&mut self.bits)?;
@@ -413,15 +418,15 @@ impl Rar20Decoder {
                     }
                     let count = 3 + self.bits.read_bits(2)? as usize;
                     let value = new_levels[pos - 1];
-                    fill_levels(&mut new_levels, &mut pos, count, value)?;
+                    fill_levels(&mut new_levels[..table_size], &mut pos, count, value)?;
                 }
                 17 => {
                     let count = 3 + self.bits.read_bits(3)? as usize;
-                    fill_levels(&mut new_levels, &mut pos, count, 0)?;
+                    fill_levels(&mut new_levels[..table_size], &mut pos, count, 0)?;
                 }
                 18 => {
                     let count = 11 + self.bits.read_bits(7)? as usize;
-                    fill_levels(&mut new_levels, &mut pos, count, 0)?;
+                    fill_levels(&mut new_levels[..table_size], &mut pos, count, 0)?;
                 }
                 _ => return Err(E::Bad("invalid level symbol")),
             }
@@ -752,5 +757,92 @@ mod tests {
         assert_eq!(table.decode(&mut bits).unwrap(), 1);
         assert_eq!(table.decode(&mut bits).unwrap(), 2);
         assert_eq!(table.decode(&mut bits).unwrap(), 3);
+    }
+
+    /// Push `count` bits of `value` (MSB first) onto `bits`.
+    fn push_bits(bits: &mut Vec<bool>, value: u32, count: u32) {
+        for shift in (0..count).rev() {
+            bits.push((value >> shift) & 1 != 0);
+        }
+    }
+
+    fn pack_bits(bits: &[bool]) -> Vec<u8> {
+        let mut out = vec![0u8; bits.len().div_ceil(8)];
+        for (index, &bit) in bits.iter().enumerate() {
+            if bit {
+                out[index / 8] |= 1 << (7 - (index % 8));
+            }
+        }
+        out
+    }
+
+    /// One `read_tables` input: the block header (audio/keep flags and, for
+    /// audio, the channel bits), 19 level lengths all equal to 5 (a valid
+    /// 5-bit code per symbol) and one `delta` symbol per table position,
+    /// whose 5-bit code equals its value.
+    fn level_table_stream(
+        audio: bool,
+        keep: bool,
+        channels: usize,
+        table_size: usize,
+        delta: u8,
+    ) -> Vec<u8> {
+        let mut bits = Vec::new();
+        push_bits(&mut bits, u32::from(audio), 1);
+        push_bits(&mut bits, u32::from(keep), 1);
+        if audio {
+            push_bits(&mut bits, (channels as u32) - 1, 2);
+        }
+        for _ in 0..LEVEL_COUNT {
+            push_bits(&mut bits, 5, 4);
+        }
+        // Codes are plain 0..=18 at length 5, so `delta` encodes directly.
+        for _ in 0..table_size {
+            push_bits(&mut bits, u32::from(delta), 5);
+        }
+        pack_bits(&bits)
+    }
+
+    fn read_tables_from(decoder: &mut Rar20Decoder, stream: &[u8]) {
+        decoder.bits = BitReader::new();
+        decoder.bits.append(stream);
+        decoder.read_tables().expect("valid table");
+    }
+
+    /// A keep-tables transition to a *larger* table must keep the stale
+    /// entries past the previous table size as the delta base (unrar's
+    /// in-place `UnpOldTable20`). Sequence: LZ (374 entries, 9s), audio 1ch
+    /// (257, keep: 0..257 = 9, 257..374 stale), LZ keep (reads the stale
+    /// 257..374 base). The old zero-filled rebuild lost the stale 9s.
+    #[test]
+    fn keep_tables_larger_audio_to_lz_retains_stale_entries() {
+        let mut decoder = Rar20Decoder::new();
+        // All-9 lengths are a valid (incomplete) Huffman table for each count.
+        read_tables_from(
+            &mut decoder,
+            &level_table_stream(false, false, 1, TABLE_COUNT, 9),
+        );
+        assert_eq!(&decoder.levels[..TABLE_COUNT], &[9u8; TABLE_COUNT]);
+
+        read_tables_from(
+            &mut decoder,
+            &level_table_stream(true, true, 1, AUDIO_COUNT, 0),
+        );
+        assert_eq!(&decoder.levels[..AUDIO_COUNT], &[9u8; AUDIO_COUNT]);
+        assert_eq!(
+            &decoder.levels[AUDIO_COUNT..TABLE_COUNT],
+            &[9u8; TABLE_COUNT - AUDIO_COUNT],
+            "stale entries beyond the audio table survive the keep-tables rebuild"
+        );
+
+        read_tables_from(
+            &mut decoder,
+            &level_table_stream(false, true, 1, TABLE_COUNT, 0),
+        );
+        assert_eq!(
+            &decoder.levels[..TABLE_COUNT],
+            &[9u8; TABLE_COUNT],
+            "the larger LZ table uses the preserved stale delta base"
+        );
     }
 }

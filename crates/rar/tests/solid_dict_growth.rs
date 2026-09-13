@@ -1,16 +1,15 @@
 //! Regression tests for the solid-chain dictionary window.
 //!
-//! The shared decoder window is fixed by the chain head's dictionary, so a
-//! later member whose own size selects a larger dictionary must be clamped
-//! to the chain-start value. Before the clamp, the encoder emitted
-//! distances beyond the window and the member decoded to garbage (CRC
-//! mismatch in rar-rs, "Not enough memory" from UnRAR). Reading such an
-//! archive must now fail with [`RarError::Format`] instead of silently
-//! wrapping out-of-window distances.
+//! The writer clamps a later member whose own size selects a larger
+//! dictionary to the chain-start value, so self-produced archives always
+//! stay inside the shared window. The reader accepts continuation headers
+//! that declare a larger dictionary anyway (official archives do): it grows
+//! the shared window and carries the lookbehind tail forward instead of
+//! rejecting the member.
 
 use rar_rs::{
-    ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions, RarError, SolidMode,
-    WriterOptions, wire,
+    ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions, SolidMode, WriterOptions,
+    wire,
 };
 
 fn compressible(seed: u8, n: usize) -> Vec<u8> {
@@ -75,9 +74,40 @@ fn solid_chain_clamps_a_larger_member_dictionary() {
     assert_eq!(reader.read_entry(large_id).expect("read large"), large);
 }
 
-/// Rebuild `name`'s header with a dictionary log of `dict_log` and splice it
-/// back into a copy of the archive, simulating the pre-fix (growing-window)
-/// archives a broken writer produced.
+/// Offset of the comp-info vint inside a FILE_HEADER body (the same field
+/// walk `parse_stream_params` performs).
+fn comp_info_offset(body: &[u8]) -> usize {
+    let mut off = 0usize;
+    let next = |off: &mut usize| -> u64 {
+        let (value, n) = wire::vint::decode_from_slice(body, *off).expect("vint");
+        *off += n;
+        value
+    };
+    let _ = next(&mut off); // block type
+    let flags = next(&mut off);
+    if flags & 0x01 != 0 {
+        let _ = next(&mut off); // extra area size
+    }
+    if flags & 0x02 != 0 {
+        let _ = next(&mut off); // data area size
+    }
+    let file_flags = next(&mut off);
+    let _ = next(&mut off); // unpacked size
+    let _ = next(&mut off); // attributes
+    if file_flags & 0x0002 != 0 {
+        off += 4; // FILE_FLAG_TIME_UNIX
+    }
+    if file_flags & 0x0004 != 0 {
+        off += 4; // FILE_FLAG_CRC32
+    }
+    off
+}
+
+/// Set `name`'s dictionary log to `dict_log` **in place** in the stored
+/// header bytes and recompute the header CRC, mirroring how the review
+/// patched a WinRAR archive. In-place keeps the original serialization
+/// layout (official UnRAR still accepts the patched file), unlike a
+/// resynthesized header.
 fn patch_member_dict(archive: &[u8], name: &str, dict_log: u8) -> Vec<u8> {
     let mut cursor = std::io::Cursor::new(archive);
     cursor.set_position(8);
@@ -86,16 +116,27 @@ fn patch_member_dict(archive: &[u8], name: &str, dict_log: u8) -> Vec<u8> {
             .expect("read block")
             .expect("block");
         if meta.block_type == 0x02 {
-            let mut hdr = wire::FileHeader::from_raw(&meta.raw, meta.block_start)
+            let hdr = wire::FileHeader::from_raw(&meta.raw, meta.block_start)
                 .expect("parse member header");
             if hdr.name == name {
-                hdr.comp_dict_size = dict_log;
-                hdr.dict_size_bytes = None;
-                let mut out = archive.to_vec();
-                out.splice(
-                    meta.block_start as usize..meta.data_offset as usize,
-                    hdr.to_bytes(),
+                let body = &meta.raw.header_data;
+                let off = comp_info_offset(body);
+                let (comp_info, vint_len) =
+                    wire::vint::decode_from_slice(body, off).expect("comp info vint");
+                let patched = (comp_info & !(0x0F << 10)) | (u64::from(dict_log) << 10);
+                let encoded = wire::vint::encode(patched);
+                assert_eq!(
+                    encoded.len(),
+                    vint_len,
+                    "dictionary log must keep the vint width"
                 );
+                let body_start = meta.block_start as usize + 4 + meta.hsize_vint_len;
+                let content_start = meta.block_start as usize + 4;
+                let content_end = meta.data_offset as usize;
+                let mut out = archive.to_vec();
+                out[body_start + off..body_start + off + vint_len].copy_from_slice(&encoded);
+                let crc = crc32fast::hash(&out[content_start..content_end]);
+                out[meta.block_start as usize..content_start].copy_from_slice(&crc.to_le_bytes());
                 return out;
             }
         }
@@ -106,10 +147,14 @@ fn patch_member_dict(archive: &[u8], name: &str, dict_log: u8) -> Vec<u8> {
     }
 }
 
-/// A member header declaring a dictionary larger than the chain window must
-/// be rejected with `Format`, not decoded against the too-small window.
+/// A solid-chain continuation header declaring a dictionary larger than the
+/// chain head's (official archives do this; a reviewer reproduced it with a
+/// WinRAR solid archive) must decode: the reader grows the shared window and
+/// carries the lookbehind tail forward instead of rejecting the archive.
+/// The patched header keeps the packed stream the writer produced against
+/// the chain window, so every distance resolves inside the preserved tail.
 #[test]
-fn read_rejects_a_solid_member_with_a_larger_dictionary() {
+fn read_decodes_a_solid_member_with_a_larger_dictionary() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("solid-patched.rar");
 
@@ -124,12 +169,23 @@ fn read_rejects_a_solid_member_with_a_larger_dictionary() {
 
     let mut reader = ArchiveReader::open(&patched_path).expect("open patched archive");
     let id = reader.unique_entry("large.bin").expect("large entry");
-    let err = reader
-        .read_entry(id)
-        .expect_err("growing solid dictionary must be rejected");
-    assert!(
-        matches!(err, RarError::Format(_)),
-        "expected Format error, got {err}"
+    assert_eq!(
+        reader.entry(id).expect("large metadata").comp_dict_size(),
+        6,
+        "the patched continuation declaration must be visible"
+    );
+    assert_eq!(
+        reader
+            .read_entry(id)
+            .expect("growing dictionary must decode"),
+        large,
+        "the continuation must decode against the grown window"
+    );
+    let small_id = reader.unique_entry("small.bin").expect("small entry");
+    assert_eq!(
+        reader.read_entry(small_id).expect("chain head must decode"),
+        small,
+        "the chain head must still decode after the window grew"
     );
 }
 

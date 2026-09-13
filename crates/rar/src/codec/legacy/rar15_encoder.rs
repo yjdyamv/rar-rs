@@ -309,6 +309,15 @@ impl Unpack15Encoder {
         self.encode_member_inner(input, Some(progress))
     }
 
+    /// Snapshot the persistent solid-chain state for a trial encode: every
+    /// adaptive table field is copied, the output bit writer is fresh (the
+    /// member encode resets it anyway). The write pipeline commits the
+    /// snapshot only when the member is actually packed, so a STORE
+    /// fallback cannot advance the chain the position-derived reader skips.
+    pub(crate) fn clone_for_trial(&self) -> Self {
+        self.clone_for_planning()
+    }
+
     fn encode_member_inner(
         &mut self,
         input: &[u8],

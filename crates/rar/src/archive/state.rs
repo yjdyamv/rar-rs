@@ -47,6 +47,13 @@ pub(crate) struct ReadState {
     /// carries no "STM" service records; extraction replaces such a
     /// catalog with a full scan first (see `ensure_full_catalog`).
     pub quick_open_catalog: bool,
+    /// Identity token of the current entry catalog (`0` until the first
+    /// catalog is built). [`EntryId`](crate::EntryId) values embed this
+    /// token; every catalog rebuild mints a fresh one, so IDs obtained from
+    /// an earlier catalog are rejected as stale instead of silently
+    /// addressing a different member after a rescan (a quick-open catalog
+    /// can order entries differently from the full scan).
+    pub catalog_token: u64,
     /// Mark of the Web propagation for extraction (WinRAR `-om`).
     pub motw: Option<crate::options::MarkOfTheWeb>,
     /// RAR 1.3/1.4 main-header flags of the first opened volume (`RE~^`
@@ -64,6 +71,7 @@ impl Default for ReadState {
             extract_options: crate::options::ExtractOptions::default(),
             streams: Vec::new(),
             quick_open_catalog: false,
+            catalog_token: 0,
             motw: None,
             rar13_flags: 0,
         }
@@ -279,6 +287,9 @@ pub(crate) struct OutputState {
 #[derive(Clone)]
 pub(crate) struct StreamRecord {
     pub owner_index: usize,
+    /// Volume file holding the "STM" block (0 = the primary stream); a
+    /// multi-volume write can push the record into a later volume.
+    pub volume_index: usize,
     pub name: String,
     pub data_offset: u64,
     pub data_size: u64,
@@ -324,6 +335,15 @@ impl PendingCommit {
             } => {
                 for n in 1..=volume_count {
                     let _ = fs::remove_file(volume_path(parent, tmp_base, n));
+                }
+                if let Ok(entries) = fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        if name.starts_with(tmp_base.as_str()) && name.ends_with(".rev") {
+                            let _ = fs::remove_file(entry.path());
+                        }
+                    }
                 }
             }
         }

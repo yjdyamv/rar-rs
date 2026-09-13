@@ -169,6 +169,53 @@ fn hp_comment_sets_reads_and_removes() {
     assert_eq!(ar.get_comment().unwrap(), None);
 }
 
+/// `rar cf` on a header-encrypted archive: the standalone comment block is
+/// header-encrypted like every other block and reads back through the
+/// catalog; clearing removes it again.
+#[test]
+fn hp_member_comment_sets_reads_and_removes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hp-cf.rar");
+    let p = noise(9_000);
+    build_hp(&path, &[("a.bin", &p)], false);
+
+    let mut editor = crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+    let a = editor.unique_entry("a.bin").unwrap();
+    editor
+        .apply(
+            crate::archive::editor::EditPlan::new()
+                .set_member_comment(a, b"hp member comment".to_vec()),
+        )
+        .unwrap();
+    drop(editor);
+
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(
+        !bytes.windows(17).any(|w| w == b"hp member comment"),
+        "the comment payload is header-encrypted on disk"
+    );
+    {
+        let mut ar = RarArchive::open_with_password(&path, HP).unwrap();
+        assert_eq!(
+            ar.entries[0].comment().unwrap(),
+            b"hp member comment".as_slice()
+        );
+        assert_eq!(
+            ar.read_with_options("a.bin", Default::default()).unwrap(),
+            p
+        );
+    }
+
+    let mut editor = crate::archive::editor::ArchiveEditor::open_with_password(&path, HP).unwrap();
+    let a = editor.unique_entry("a.bin").unwrap();
+    editor
+        .apply(crate::archive::editor::EditPlan::new().set_member_comment(a, Vec::new()))
+        .unwrap();
+    drop(editor);
+    let ar = RarArchive::open_with_password(&path, HP).unwrap();
+    assert!(ar.entries[0].comment().is_none());
+}
+
 #[test]
 fn hp_recovery_record_rebuilds_and_repairs() {
     let dir = tempfile::tempdir().unwrap();

@@ -328,10 +328,12 @@ impl VerificationReport {
 /// Read-only archive role with duplicate-safe member identities.
 ///
 /// This type wraps the existing [`RarArchive`] implementation but deliberately
-/// exposes no creation, append, rewrite or locking operations.
+/// exposes no creation, append, rewrite or locking operations. IDs are minted
+/// and checked against the archive's live catalog identity, so a catalog
+/// rebuild (a quick-open rescan before extraction) makes every previously
+/// issued ID stale instead of letting it address a different member.
 pub struct ArchiveReader {
     archive: RarArchive,
-    catalog_token: u64,
 }
 
 impl std::fmt::Debug for ArchiveReader {
@@ -363,10 +365,7 @@ impl ArchiveReader {
                 RarArchive::open_quick_with_password(path, password)?
             }
         };
-        Ok(Self {
-            archive,
-            catalog_token: allocate_catalog_token()?,
-        })
+        Ok(Self { archive })
     }
 
     /// Configure Mark of the Web propagation for subsequent extractions
@@ -383,7 +382,7 @@ impl ArchiveReader {
     /// Iterate over all entries in archive order.
     pub fn entries(&self) -> Entries<'_> {
         Entries {
-            catalog_token: self.catalog_token,
+            catalog_token: self.archive.catalog_token(),
             entries: self.archive.entries.iter().enumerate(),
         }
     }
@@ -424,7 +423,7 @@ impl ArchiveReader {
         name: &'query str,
     ) -> EntryMatches<'reader, 'query> {
         EntryMatches {
-            catalog_token: self.catalog_token,
+            catalog_token: self.archive.catalog_token(),
             name,
             entries: self.archive.entries.iter().enumerate(),
         }
@@ -619,7 +618,9 @@ impl ArchiveReader {
     }
 
     fn resolve_id(&self, id: EntryId) -> RarResult<usize> {
-        if id.catalog_token != self.catalog_token || id.index >= self.archive.entries.len() {
+        if id.catalog_token != self.archive.catalog_token()
+            || id.index >= self.archive.entries.len()
+        {
             return Err(RarError::StaleEntryId);
         }
         Ok(id.index)

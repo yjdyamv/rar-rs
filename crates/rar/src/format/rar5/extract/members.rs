@@ -295,12 +295,32 @@ impl RarArchive {
                 "entry index is outside the current catalog".into(),
             ));
         }
+        // Capture the member's payload position before the catalog can be
+        // rebuilt. A quick-open catalog can order entries differently from
+        // the full scan, so the index alone is not stable across the rescan
+        // while the payload offset identifies the same member in both.
+        let data_offset = self.entries[idx].chunks.first().map(|c| c.data_offset);
+        let rebuilt = self.read_ctx().quick_open_catalog;
         let dest = dest_dir.as_ref();
         fs::create_dir_all(dest)?;
         self.read_ctx_mut().extract_options = opts;
         // A quick-open catalog carries no "STM" service records: replace it
         // with the scanned catalog before extraction restores streams.
         self.ensure_full_catalog()?;
+        let idx = if rebuilt {
+            data_offset
+                .and_then(|offset| {
+                    self.entries.iter().position(|entry| {
+                        entry
+                            .chunks
+                            .first()
+                            .is_some_and(|chunk| chunk.data_offset == offset)
+                    })
+                })
+                .ok_or(RarError::StaleEntryId)?
+        } else {
+            idx
+        };
         if idx >= self.entries.len() {
             return Err(RarError::InvalidState(
                 "entry index is outside the scanned catalog".into(),

@@ -150,11 +150,12 @@ pub(crate) fn build_file_header(p: &FileHeaderParams<'_>) -> RarResult<Vec<u8>> 
     Ok(buf)
 }
 
-/// Build a RAR 3.x/4.x per-file comment block (`FHD_COMMENT`): a nested
-/// `COMM_HEAD` (0x75) subblock appended after the extended-time area of a
-/// `FILE_HEAD`. The comment is stored uncompressed (method `0x30`); the payload
+/// Build a RAR4 per-file comment block (`COMM_HEAD` 0x75): the caller emits
+/// it either standalone after the member data (RAR 3.x/4.x layout) or nested
+/// after the extended-time area of a `FHD_COMMENT` `FILE_HEAD` (RAR 1.5–2.9
+/// layout). The comment is stored uncompressed (method `0x30`); the payload
 /// is the raw text bytes (UTF-8). Layout:
-/// `HEAD_CRC(2) HEAD_TYPE(1)=0x75 HEAD_FLAGS(2) HEAD_SIZE(2) VERSION(1)=0x50
+/// `HEAD_CRC(2) HEAD_TYPE(1)=0x75 HEAD_FLAGS(2) HEAD_SIZE(2) UNP_SIZE(2)
 ///  UNP_VER(1) METHOD(1)=0x30 COMM_CRC(2) payload`.
 pub(crate) fn build_file_comment_block(comment: &[u8]) -> Vec<u8> {
     // Layout verified against a genuine RAR2 archive comment

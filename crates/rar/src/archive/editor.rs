@@ -122,8 +122,8 @@ pub enum EditOp {
     SetComment(Vec<u8>),
     /// Set or clear the per-member (file) comment of the member identified by
     /// the ID (like `rar cf`). Empty bytes remove the member's existing
-    /// comment. RAR 3.x/4.x only: the comment is a `FHD_COMMENT` block
-    /// appended to the member header.
+    /// comment. RAR 3.x/4.x only: the comment is a standalone `COMM_HEAD`
+    /// block after the member data (RAR 1.5–2.9 nested it in the header).
     SetMemberComment(EntryId, Vec<u8>),
     /// Rebuild the inline recovery record protecting this percent of the
     /// archive (like `rar rr`; 0..=100). Only valid on single-volume

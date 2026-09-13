@@ -8,7 +8,7 @@ use std::io::{self, Write};
 
 use crate::archive::RarArchive;
 use crate::codec::DecoderState;
-use crate::error::{RarError, RarResult};
+use crate::error::RarResult;
 use crate::format::rar5::COMP_METHOD_STORE;
 use crate::format::shared::stream_mut;
 
@@ -95,19 +95,16 @@ impl RarArchive {
             if entry.is_dir() {
                 continue;
             }
-            // The shared window is frozen at the chain head's dictionary;
-            // decoding a member that declares a larger one would make
-            // `SlidingWindow::copy_match` silently wrap its out-of-window
-            // distances. Reject the archive instead (the writer guarantees
-            // the window never grows in a solid stream).
+            // A continuation may declare a dictionary larger than the chain
+            // head's (official archives do this); grow the shared window so
+            // its distances stay addressable, carrying the lookbehind tail
+            // and codec state forward instead of rejecting the archive.
+            // `-mdx` still bounds the declared size via `member_dict_window`.
             if entry.header.comp_method != COMP_METHOD_STORE {
                 let member_window = self.member_dict_window(i)?;
-                if member_window > chain_window {
-                    self.reset_solid_decoder(chain_start);
-                    return Err(RarError::Format(format!(
-                        "member {}: dictionary of {member_window} bytes exceeds the solid chain window of {chain_window} bytes",
-                        entry.header.name
-                    )));
+                let state = self.read_ctx_mut().solid_state.as_mut().unwrap();
+                if member_window > state.window_capacity() {
+                    state.grow_window(member_window);
                 }
             }
             let sink: &mut dyn Write = if i == target_idx {

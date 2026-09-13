@@ -207,25 +207,33 @@ const COMMIT_JOURNAL_VERSION: &str = "rar5commit v2";
 /// (fields taken verbatim) so an in-flight journal survives an upgrade.
 const COMMIT_JOURNAL_VERSION_V1: &str = "rar5commit v1";
 
-/// Escape one journal field: `\`, `\t` and `\n` get a backslash form so the
-/// tab-separated, one-record-per-line format stays unambiguous. Other
-/// control characters cannot be represented and reject the record.
-fn escape_journal_field(name: &str) -> Option<String> {
+/// Escape one journal field so the tab-separated, one-record-per-line format
+/// stays unambiguous: `\`, `\t` and `\n` get a backslash form, and every
+/// other control character is written as `\r` or `\xNN`. Control characters
+/// are legal on Unix, so they are escaped rather than rejected (rejecting
+/// them here failed a whole multi-volume commit after staging).
+fn escape_journal_field(name: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
             '\t' => out.push_str("\\t"),
             '\n' => out.push_str("\\n"),
-            c if c.is_control() => return None,
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => {
+                out.push_str("\\x");
+                out.push(HEX[((c as u32 >> 4) & 0xF) as usize] as char);
+                out.push(HEX[(c as u32 & 0xF) as usize] as char);
+            }
             c => out.push(c),
         }
     }
-    Some(out)
+    out
 }
 
 /// Inverse of [`escape_journal_field`]; `None` marks a malformed field (an
-/// unknown escape or a raw control character).
+/// unknown escape, a truncated `\xNN`, or a raw control character).
 fn unescape_journal_field(field: &str) -> Option<String> {
     let mut out = String::with_capacity(field.len());
     let mut chars = field.chars();
@@ -235,6 +243,12 @@ fn unescape_journal_field(field: &str) -> Option<String> {
                 '\\' => out.push('\\'),
                 't' => out.push('\t'),
                 'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                'x' => {
+                    let hi = chars.next()?.to_digit(16)?;
+                    let lo = chars.next()?.to_digit(16)?;
+                    out.push(char::from_u32(hi * 16 + lo)?);
+                }
                 _ => return None,
             },
             c if c.is_control() => return None,
@@ -248,12 +262,18 @@ fn unescape_journal_field(field: &str) -> Option<String> {
 /// directory. Reject separators, `.`/`..`, NUL and Windows drive-relative
 /// names (`C:evil`), all of which would make `parent.join(name)` leave
 /// `parent` — a planted journal must never become a file primitive outside
-/// the archive's own directory.
+/// the archive's own directory. A backslash is a legal filename character on
+/// Unix (v2 escapes it, so records stay unambiguous) and only Windows treats
+/// it as a separator.
 fn plain_journal_name(name: &str) -> bool {
     if name.is_empty() || name == "." || name == ".." || name.contains('\0') {
         return false;
     }
-    if name.contains('/') || name.contains('\\') {
+    if name.contains('/') {
+        return false;
+    }
+    #[cfg(windows)]
+    if name.contains('\\') {
         return false;
     }
     let mut components = Path::new(name).components();
@@ -275,17 +295,10 @@ fn write_commit_journal(
 ) -> RarResult<()> {
     let mut text = String::from(COMMIT_JOURNAL_VERSION);
     text.push('\n');
-    let mut push = |kind: &str, from: &Path, to: &Path| -> RarResult<()> {
+    let mut push = |kind: &str, from: &Path, to: &Path| {
         if let (Some(from), Some(to)) = (from.file_name(), to.file_name()) {
-            let (Some(from), Some(to)) = (
-                escape_journal_field(&from.to_string_lossy()),
-                escape_journal_field(&to.to_string_lossy()),
-            ) else {
-                return Err(RarError::Io(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "commit journal cannot record a file name with control characters",
-                )));
-            };
+            let from = escape_journal_field(&from.to_string_lossy());
+            let to = escape_journal_field(&to.to_string_lossy());
             text.push_str(kind);
             text.push('\t');
             text.push_str(&from);
@@ -293,13 +306,12 @@ fn write_commit_journal(
             text.push_str(&to);
             text.push('\n');
         }
-        Ok(())
     };
     for (backup, final_path) in backups {
-        push("backup", backup, final_path)?;
+        push("backup", backup, final_path);
     }
     for (staged, final_path) in install {
-        push("install", staged, final_path)?;
+        push("install", staged, final_path);
     }
     let path = journal_path(parent, base);
     let tmp = path.with_extension("journal.tmp");
@@ -315,9 +327,14 @@ fn write_commit_journal(
 /// never leaves a mixed volume set behind. With the done marker present the
 /// new set won and the parked originals are dropped; without it the commit had
 /// not finished, so newly installed files are removed, parked originals are
-/// restored, and leftover staged files are discarded. Malformed records
-/// (unknown escapes, wrong field counts, names that are not plain siblings)
-/// are skipped; a journal with an unknown version header is left untouched
+/// restored, and leftover staged files are discarded. A final is only removed
+/// when it either had no pre-existing original (no backup record) or that
+/// original was actually parked (the backup file exists): a kill between the
+/// parks leaves later finals untouched *and* unbacked, and deleting them would
+/// destroy the old set. Malformed records (unknown escapes, wrong field
+/// counts, names that are not plain siblings) and unknown record kinds are
+/// skipped and keep the journal in place, so nothing skipped is silently
+/// forgotten; a journal with an unknown version header is left untouched
 /// (recovery never guesses).
 pub(crate) fn recover_interrupted_commit(parent: &Path, base: &str) -> RarResult<()> {
     let journal = journal_path(parent, base);
@@ -334,13 +351,18 @@ pub(crate) fn recover_interrupted_commit(parent: &Path, base: &str) -> RarResult
     };
     let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut installs: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut malformed = false;
     for line in lines {
+        if line.is_empty() {
+            continue;
+        }
         let mut fields = line.split('\t');
         // Exactly three fields: a raw tab or newline in a name makes the
         // record malformed, and it is skipped rather than guessed at.
         let (Some(kind), Some(from), Some(to), None) =
             (fields.next(), fields.next(), fields.next(), fields.next())
         else {
+            malformed = true;
             continue;
         };
         let (from, to) = if escaped {
@@ -349,15 +371,17 @@ pub(crate) fn recover_interrupted_commit(parent: &Path, base: &str) -> RarResult
             (Some(from.to_owned()), Some(to.to_owned()))
         };
         let (Some(from), Some(to)) = (from, to) else {
+            malformed = true;
             continue;
         };
         if !plain_journal_name(&from) || !plain_journal_name(&to) {
+            malformed = true;
             continue;
         }
         match kind {
             "backup" => backups.push((parent.join(from), parent.join(to))),
             "install" => installs.push((parent.join(from), parent.join(to))),
-            _ => {}
+            _ => malformed = true,
         }
     }
     if commit_done_path(parent, base).exists() {
@@ -366,17 +390,27 @@ pub(crate) fn recover_interrupted_commit(parent: &Path, base: &str) -> RarResult
         }
     } else {
         for (_, final_path) in &installs {
-            let _ = fs::remove_file(final_path);
+            let has_backup_record = backups.iter().any(|(_, final_)| final_ == final_path);
+            let parked = backups
+                .iter()
+                .any(|(backup, final_)| final_ == final_path && backup.exists());
+            if !has_backup_record || parked {
+                let _ = fs::remove_file(final_path);
+            }
         }
         for (backup, final_path) in &backups {
-            let _ = restore_file(backup, final_path);
+            if backup.exists() {
+                let _ = restore_file(backup, final_path);
+            }
         }
         for (staged, _) in &installs {
             let _ = fs::remove_file(staged);
         }
     }
-    let _ = fs::remove_file(&journal);
-    let _ = fs::remove_file(commit_done_path(parent, base));
+    if !malformed {
+        let _ = fs::remove_file(&journal);
+        let _ = fs::remove_file(commit_done_path(parent, base));
+    }
     Ok(())
 }
 
@@ -429,7 +463,13 @@ pub(crate) fn commit_files(
             let _ = restore_file(final_path, staged);
         }
         for (backup, final_path) in backups.iter().rev() {
-            let _ = restore_file(backup, final_path);
+            // A missing backup means this final was never parked (the kill or
+            // failure happened before its phase-1 rename): leave the original
+            // untouched instead of treating the missing backup as "remove
+            // whatever is there".
+            if backup.exists() {
+                let _ = restore_file(backup, final_path);
+            }
         }
     };
 
@@ -616,6 +656,134 @@ mod tests {
         assert!(!super::journal_path(parent, "set").exists());
     }
 
+    /// A kill between the phase-1 parks leaves some finals parked (backup
+    /// file present) and later ones untouched (backup file missing even
+    /// though the journal planned one). Recovery must never delete the
+    /// untouched final: it is the only copy of the old data.
+    #[test]
+    fn recovery_leaves_an_unparked_final_alone_when_the_park_was_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        let name =
+            |path: &std::path::Path| path.file_name().unwrap().to_string_lossy().into_owned();
+        let first = parent.join("set.part1.rar");
+        let second = parent.join("set.part2.rar");
+        let first_backup = parent.join(".set.part1.rar.rar5bak-x");
+        // The second park never ran, so this planned backup does not exist.
+        let planned_second_backup = parent.join(".set.part2.rar.rar5bak-x");
+        let first_staged = parent.join(".set.part1.rar.rar5tmp-x");
+        let second_staged = parent.join(".set.part2.rar.rar5tmp-x");
+        std::fs::write(&first_backup, b"old-1").unwrap();
+        std::fs::write(&second, b"old-2").unwrap();
+        std::fs::write(&first_staged, b"new-1").unwrap();
+        std::fs::write(&second_staged, b"new-2").unwrap();
+        std::fs::write(
+            super::journal_path(parent, "set"),
+            format!(
+                "rar5commit v1\n\
+                 backup\t{}\t{}\n\
+                 backup\t{}\t{}\n\
+                 install\t{}\t{}\n\
+                 install\t{}\t{}\n",
+                name(&first_backup),
+                name(&first),
+                name(&planned_second_backup),
+                name(&second),
+                name(&first_staged),
+                name(&first),
+                name(&second_staged),
+                name(&second),
+            ),
+        )
+        .unwrap();
+
+        super::recover_interrupted_commit(parent, "set").unwrap();
+
+        // The parked original came back; the untouched final stayed put.
+        assert_eq!(std::fs::read(&first).unwrap(), b"old-1");
+        assert_eq!(std::fs::read(&second).unwrap(), b"old-2");
+        assert!(!first_backup.exists());
+        assert!(!first_staged.exists());
+        assert!(!second_staged.exists());
+        assert!(!super::journal_path(parent, "set").exists());
+    }
+
+    /// A kill after all parks but before any install: every final is
+    /// missing and every backup exists, so recovery restores the complete
+    /// old set and discards the staged files.
+    #[test]
+    fn recovery_restores_every_parked_final_when_no_install_ran() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        let name =
+            |path: &std::path::Path| path.file_name().unwrap().to_string_lossy().into_owned();
+        let first = parent.join("set.part1.rar");
+        let second = parent.join("set.part2.rar");
+        let first_backup = parent.join(".set.part1.rar.rar5bak-x");
+        let second_backup = parent.join(".set.part2.rar.rar5bak-x");
+        let first_staged = parent.join(".set.part1.rar.rar5tmp-x");
+        let second_staged = parent.join(".set.part2.rar.rar5tmp-x");
+        std::fs::write(&first_backup, b"old-1").unwrap();
+        std::fs::write(&second_backup, b"old-2").unwrap();
+        std::fs::write(&first_staged, b"new-1").unwrap();
+        std::fs::write(&second_staged, b"new-2").unwrap();
+        std::fs::write(
+            super::journal_path(parent, "set"),
+            format!(
+                "rar5commit v1\n\
+                 backup\t{}\t{}\n\
+                 backup\t{}\t{}\n\
+                 install\t{}\t{}\n\
+                 install\t{}\t{}\n",
+                name(&first_backup),
+                name(&first),
+                name(&second_backup),
+                name(&second),
+                name(&first_staged),
+                name(&first),
+                name(&second_staged),
+                name(&second),
+            ),
+        )
+        .unwrap();
+
+        super::recover_interrupted_commit(parent, "set").unwrap();
+
+        assert_eq!(std::fs::read(&first).unwrap(), b"old-1");
+        assert_eq!(std::fs::read(&second).unwrap(), b"old-2");
+        assert!(!first_backup.exists());
+        assert!(!second_backup.exists());
+        assert!(!first_staged.exists());
+        assert!(!second_staged.exists());
+        assert!(!super::journal_path(parent, "set").exists());
+    }
+
+    /// A file installed where nothing pre-existed (no backup record) is the
+    /// new set's own bytes and must still be removed on rollback.
+    #[test]
+    fn recovery_removes_an_installed_final_with_no_parked_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        let final_path = parent.join("set.part1.rar");
+        let staged = parent.join(".set.part1.rar.rar5tmp-x");
+        std::fs::write(&final_path, b"new").unwrap();
+        std::fs::write(
+            super::journal_path(parent, "set"),
+            format!(
+                "rar5commit v1\ninstall\t{}\t{}\n",
+                staged.file_name().unwrap().to_string_lossy(),
+                final_path.file_name().unwrap().to_string_lossy(),
+            ),
+        )
+        .unwrap();
+
+        super::recover_interrupted_commit(parent, "set").unwrap();
+
+        assert!(!final_path.exists(), "a fresh install must be rolled back");
+        assert!(!staged.exists());
+        assert!(!super::journal_path(parent, "set").exists());
+    }
+
     #[test]
     fn replace_installs_the_staged_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -630,41 +798,52 @@ mod tests {
     }
 
     #[test]
-    fn journal_field_escaping_round_trips_and_rejects_controls() {
+    fn journal_field_escaping_round_trips_controls() {
         for name in [
             "plain",
             "tab\there",
             "line\nbreak",
+            "carriage\rreturn",
             "back\\slash",
-            "all\t\n\\of them",
+            "controls\x01\x1f\x7f",
+            "all\t\n\\of them\r\x01",
         ] {
-            let escaped = super::escape_journal_field(name).unwrap();
-            assert!(!escaped.contains('\t') && !escaped.contains('\n'));
+            let escaped = super::escape_journal_field(name);
+            assert!(
+                !escaped.chars().any(char::is_control),
+                "escaped field still holds a control character: {escaped:?}"
+            );
             assert_eq!(
                 super::unescape_journal_field(&escaped).as_deref(),
                 Some(name)
             );
         }
-        assert!(super::escape_journal_field("nul\0").is_none());
-        assert!(super::escape_journal_field("cr\r").is_none());
         assert!(super::unescape_journal_field("unknown\\x").is_none());
+        assert!(super::unescape_journal_field("\\x0").is_none());
+        assert!(super::unescape_journal_field("\\xzz").is_none());
         assert!(super::unescape_journal_field("raw\ttab").is_none());
         assert!(super::unescape_journal_field("trailing\\").is_none());
     }
 
     #[test]
     fn journal_names_must_be_plain_siblings() {
-        for bad in ["", ".", "..", "../x", "..\\..\\x", "a/b", "a\\b", "nul\0"] {
+        for bad in ["", ".", "..", "../x", "a/b", "nul\0"] {
             assert!(!super::plain_journal_name(bad), "{bad:?} accepted");
         }
         assert!(super::plain_journal_name("set.part1.rar"));
         assert!(super::plain_journal_name(".set.part1.rar.rar5bak-abc"));
+        // A backslash is an ordinary character on Unix and a separator on
+        // Windows; `C:evil` is drive-relative only on Windows.
+        #[cfg(unix)]
+        assert!(super::plain_journal_name("a\\b"));
+        #[cfg(windows)]
+        assert!(!super::plain_journal_name("a\\b"));
         #[cfg(windows)]
         assert!(!super::plain_journal_name("C:evil"));
     }
 
     #[test]
-    fn recovery_ignores_escaping_and_malformed_records() {
+    fn recovery_ignores_bad_records_and_keeps_the_journal() {
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path().join("archive");
         std::fs::create_dir(&parent).unwrap();
@@ -676,9 +855,10 @@ mod tests {
         let backup = parent.join(".set.part1.rar.rar5bak-x");
         std::fs::write(&backup, b"old").unwrap();
 
-        // `..\..\victim` reaches the journal escaped as `..\\..\\victim`;
-        // the forward-slash variant stays raw. Both must be skipped, as do
-        // the over-long and unknown-kind records.
+        // The forward-slash traversal stays rejected on every platform; the
+        // escaped backslash traversal is only a traversal on Windows (on Unix
+        // it is an ordinary, harmless sibling name). The over-long and
+        // unknown-kind records are malformed everywhere.
         let escaped_traversal = "..\\\\..\\\\victim";
         std::fs::write(
             super::journal_path(&parent, "set"),
@@ -698,9 +878,12 @@ mod tests {
         super::recover_interrupted_commit(&parent, "set").unwrap();
 
         assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
+        // The valid backup record still rolled the parked original back.
         assert_eq!(std::fs::read(&final_path).unwrap(), b"old");
         assert!(!backup.exists());
-        assert!(!super::journal_path(&parent, "set").exists());
+        // Skipped records keep the journal for inspection instead of being
+        // silently forgotten and deleted.
+        assert!(super::journal_path(&parent, "set").exists());
     }
 
     #[test]
@@ -724,36 +907,60 @@ mod tests {
     }
 
     #[test]
-    fn write_commit_journal_rejects_control_characters() {
+    fn write_commit_journal_escapes_control_characters() {
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path();
-        let from = parent.join("bad\rname");
+        let from = parent.join("bad\rname\x01");
         let to = parent.join("final.rar");
 
-        let error = super::write_commit_journal(parent, "set", &[(from, to)], &[]).unwrap_err();
-        assert_eq!(error.code(), crate::error::ErrorCode::Io);
-        assert!(!super::journal_path(parent, "set").exists());
+        super::write_commit_journal(parent, "set", &[(from, to)], &[]).unwrap();
+        let text = std::fs::read_to_string(super::journal_path(parent, "set")).unwrap();
+        assert_eq!(
+            text.lines().count(),
+            2,
+            "records must stay on one line: {text:?}"
+        );
+        assert!(text.contains("bad\\rname\\x01"), "{text:?}");
     }
 
     #[cfg(unix)]
     #[test]
-    fn journal_round_trips_tab_and_newline_names_on_disk() {
+    fn journal_round_trips_control_and_backslash_names_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path();
-        let backup = parent.join(".set.part1.rar.rar5bak-\t\n");
+        let backup = parent.join(".set.part1.rar.rar5bak-\t\n\r\x01\\");
         let final_path = parent.join("set.part1.rar");
+        let staged = parent.join(".set.part1.rar.rar5tmp-x");
         std::fs::write(&backup, b"old").unwrap();
         std::fs::write(&final_path, b"new").unwrap();
 
-        super::write_commit_journal(parent, "set", &[(backup.clone(), final_path.clone())], &[])
-            .unwrap();
+        let install = vec![(staged, final_path.clone())];
+        super::write_commit_journal(
+            parent,
+            "set",
+            &[(backup.clone(), final_path.clone())],
+            &install,
+        )
+        .unwrap();
         let text = std::fs::read_to_string(super::journal_path(parent, "set")).unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2, "records must stay on one line: {text:?}");
-        assert_eq!(lines[1].split('\t').count(), 3);
+        assert_eq!(lines.len(), 3, "records must stay on one line: {text:?}");
+        assert!(
+            lines
+                .iter()
+                .skip(1)
+                .all(|line| line.split('\t').count() == 3),
+            "malformed record: {text:?}"
+        );
+        assert_eq!(
+            super::unescape_journal_field(lines[1].split('\t').nth(1).unwrap()).as_deref(),
+            Some(backup.file_name().unwrap().to_str().unwrap()),
+            "escaped field must round-trip: {text:?}"
+        );
 
         super::recover_interrupted_commit(parent, "set").unwrap();
         assert_eq!(std::fs::read(&final_path).unwrap(), b"old");
         assert!(!backup.exists());
+        assert!(!super::journal_path(parent, "set").exists());
     }
 }

@@ -156,10 +156,22 @@ impl RarArchive {
                 });
             }
             let mut packed = vec![0u8; declared];
-            {
+            if s.volume_index == 0 {
                 let stream = stream_mut(&mut self.stream)?;
                 stream.seek(SeekFrom::Start(s.data_offset))?;
                 stream.read_exact(&mut packed)?;
+            } else {
+                // A multi-volume write can push the "STM" block into a later
+                // volume than the one the primary stream holds.
+                let volume_path = self.volume_paths.get(s.volume_index).ok_or_else(|| {
+                    RarError::Format(format!(
+                        "NTFS stream {:?} references missing volume {}",
+                        s.name, s.volume_index
+                    ))
+                })?;
+                let mut volume = std::fs::File::open(volume_path)?;
+                volume.seek(SeekFrom::Start(s.data_offset))?;
+                volume.read_exact(&mut packed)?;
             }
             // Encrypted streams carry a per-stream ENCR record (own salt),
             // so the password is checked and the keys are derived here

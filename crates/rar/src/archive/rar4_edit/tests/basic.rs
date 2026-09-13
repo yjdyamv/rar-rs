@@ -8,7 +8,7 @@ use crate::format::rar4::RAR4_METHOD_STORE;
 use crate::format::rar4::write::{
     FileHeaderParams, build_endarc, build_file_header, encode_file_name,
 };
-use crate::format::rar4::{FHD_UNICODE, MHD_LOCK, MHD_RECOVERY};
+use crate::format::rar4::{COMM_HEAD, FHD_COMMENT, FHD_UNICODE, MHD_LOCK, MHD_RECOVERY};
 use crate::recovery::legacy_rr::{
     build_legacy_recovery_block, recovery_sector_count, scan_protect,
 };
@@ -340,4 +340,84 @@ fn comment_encode_decode_symmetry() {
         decode_comment_payload("中文测试".as_bytes(), false),
         "中文测试".as_bytes()
     );
+}
+
+/// `rar cf` writes the official RAR 3.x/4.x standalone member comment: no
+/// `FHD_COMMENT` nesting, a `COMM_HEAD` block after the member data whose
+/// HEAD_CRC covers only the 13-byte block header. Clearing drops the block.
+#[test]
+fn member_comment_uses_the_standalone_comm_head_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cf_layout.rar");
+    let payload = b"payload for the commented member".to_vec();
+    let comment: &[u8] = b"release notes";
+    {
+        let mut a = crate::archive::RarArchive::create_with_options(
+            &path,
+            crate::options::CreateOptions {
+                compression: crate::version::ArchiveVersion::V29,
+                solid: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        a.add_bytes("a.txt", &payload, 3).unwrap();
+        a.close().unwrap();
+    }
+    {
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        let a = editor.unique_entry("a.txt").unwrap();
+        editor
+            .apply(crate::archive::editor::EditPlan::new().set_member_comment(a, comment.to_vec()))
+            .unwrap();
+    }
+
+    let bytes = std::fs::read(&path).unwrap();
+    let layout = scan_layout(&bytes, 0, None).unwrap();
+    assert_eq!(layout.files.len(), 1);
+    let (file_offset, header) = &layout.files[0];
+    let flags = u16::from_le_bytes([header[3], header[4]]);
+    assert_eq!(flags & FHD_COMMENT, 0, "the comment is not nested");
+    let head_size = u16::from_le_bytes([header[5], header[6]]) as usize;
+    let packed = u32::from_le_bytes(header[7..11].try_into().unwrap()) as usize;
+    let comment_offset = file_offset + head_size + packed;
+    assert_eq!(bytes[comment_offset + 2], COMM_HEAD);
+    let block_size =
+        u16::from_le_bytes([bytes[comment_offset + 5], bytes[comment_offset + 6]]) as usize;
+    assert_eq!(block_size, 13 + comment.len());
+    let head_crc = u16::from_le_bytes([bytes[comment_offset], bytes[comment_offset + 1]]);
+    assert_eq!(
+        head_crc,
+        (crate::crc32::crc32(&bytes[comment_offset + 2..comment_offset + 13]) & 0xffff) as u16,
+        "HEAD_CRC covers only the 13-byte block header"
+    );
+    assert_eq!(
+        &bytes[comment_offset + 13..comment_offset + block_size],
+        comment
+    );
+
+    // The comment reads back through the public API.
+    let archive = RarArchive::open(&path).unwrap();
+    assert_eq!(archive.entries[0].comment().unwrap(), comment);
+
+    // Clearing drops the standalone block again.
+    {
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        let a = editor.unique_entry("a.txt").unwrap();
+        editor
+            .apply(crate::archive::editor::EditPlan::new().set_member_comment(a, Vec::new()))
+            .unwrap();
+    }
+    let bytes = std::fs::read(&path).unwrap();
+    let layout = scan_layout(&bytes, 0, None).unwrap();
+    let (file_offset, header) = &layout.files[0];
+    let head_size = u16::from_le_bytes([header[5], header[6]]) as usize;
+    let packed = u32::from_le_bytes(header[7..11].try_into().unwrap()) as usize;
+    assert_eq!(
+        layout.endarc_offset,
+        file_offset + head_size + packed,
+        "no comment block before the end-of-archive marker"
+    );
+    let archive = RarArchive::open(&path).unwrap();
+    assert!(archive.entries[0].comment().is_none());
 }

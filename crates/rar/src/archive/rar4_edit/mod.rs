@@ -10,8 +10,10 @@
 //! append on a set are refused exactly like the official "Cannot modify
 //! volume", archive comments are supported (the `CMT` block lands right after
 //! the first volume's main header); recovery-record and per-member-comment
-//! edits on a set are refused (a volume set uses `.rev` recovery volumes,
-//! and RAR4 member comments are not interoperable — see `PLAN.md`).
+//! edits on a set are refused (a volume set uses `.rev` recovery volumes).
+//! RAR 3.x/4.x member comments use the official standalone `COMM_HEAD` block
+//! after the member data (RAR 1.5–2.9 archives keep their nested layout, and
+//! the reader accepts both).
 //!
 //! Rename rebuilds each FILE_HEAD's encoded name field in place (keeping
 //! every other field byte-identical, including salt / nested comment /
@@ -36,7 +38,7 @@
 //!
 //! Role split:
 //! - [`layout`] — main-header access and the block/layout scan,
-//! - [`headers`] — FILE_HEAD rename and nested-comment rewriting,
+//! - [`headers`] — FILE_HEAD rename and legacy nested-comment stripping,
 //! - [`comment`] — the `CMT` archive-comment block,
 //! - [`engine`] — append prelude and the combined edit transaction,
 //! - [`repack`] — solid-archive decode/re-encode repack (stage C).

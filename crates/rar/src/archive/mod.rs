@@ -294,6 +294,20 @@ impl RarArchive {
         self.read.as_mut().expect("read context not available")
     }
 
+    /// Identity token of the current entry catalog (`0` until a catalog has
+    /// been built). [`EntryId`]s embed this token; see
+    /// [`ReadState::catalog_token`].
+    pub(crate) fn catalog_token(&self) -> u64 {
+        self.read_ctx().catalog_token
+    }
+
+    /// Mint a fresh catalog identity. Called after every catalog rebuild so
+    /// IDs minted from the previous catalog are rejected as stale.
+    pub(crate) fn reset_catalog_token(&mut self) -> RarResult<()> {
+        self.read_ctx_mut().catalog_token = reader::allocate_catalog_token()?;
+        Ok(())
+    }
+
     /// Immutable access to the write-side state. Panics if not opened for writing.
     pub(crate) fn write_ctx(&self) -> &WriteState {
         self.write.as_ref().expect("write context not available")

@@ -69,6 +69,19 @@ impl DecoderState {
             table_rc: None,
         }
     }
+
+    /// Capacity, in bytes, of the shared window.
+    pub fn window_capacity(&self) -> usize {
+        self.window.capacity()
+    }
+
+    /// Grow the shared window to `new_capacity` (a larger power of two),
+    /// carrying the lookbehind tail, distance cache, last-length state and
+    /// Huffman tables forward. A no-op when the window is already at least
+    /// that large.
+    pub fn grow_window(&mut self, new_capacity: usize) {
+        self.window.grow(new_capacity);
+    }
 }
 
 /// Options for decoding one member.

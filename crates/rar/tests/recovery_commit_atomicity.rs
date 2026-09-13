@@ -194,6 +194,47 @@ fn failed_recovery_build_leaves_the_previous_set_intact() {
     );
 }
 
+/// A journaled-commit failure (here: a directory occupies the journal temp
+/// path) happens after the `.rev` files were generated next to the staged
+/// data volumes; the cleanup must sweep those `.rev` siblings too instead
+/// of leaking them forever.
+#[test]
+fn failed_commit_sweeps_staged_recovery_volumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journalfail.rar");
+    let payload = patterned(200_000, 251);
+
+    let mut writer = ArchiveWriter::create_with(
+        &path,
+        WriterOptions::new()
+            .volume_size(32 * 1024)
+            .recovery_volume_count(2),
+    )
+    .unwrap();
+    writer.add_bytes("big.bin", &payload, stored()).unwrap();
+    std::fs::create_dir(dir.path().join(".journalfail.rar5commit.journal.tmp")).unwrap();
+
+    assert!(writer.finish().is_err(), "the commit must fail");
+
+    let mut revs = rev_names(dir.path());
+    revs.sort();
+    assert!(
+        revs.is_empty(),
+        "the failed commit leaked staged recovery files: {revs:?}"
+    );
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("rar5tmp") || name.contains("rar5bak"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the failed commit leaked staging files: {leftovers:?}"
+    );
+}
+
 /// A created set past nine volumes must install zero-padded `.rev` names
 /// (`part01.rev`), matching the padded data volumes.
 #[test]

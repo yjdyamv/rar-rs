@@ -1,9 +1,12 @@
-//! FILE_HEAD rewriting: member rename and the nested per-file comment.
+//! FILE_HEAD rewriting: member rename and per-file comment stripping.
 //!
 //! Both operations keep every other field byte-identical (high sizes, salt,
 //! extended time, flags) and recompute the header CRC16 over the reader's
-//! coverage; a header carrying a nested comment has that coverage stop
-//! before the comment area.
+//! coverage; a legacy header carrying a nested comment has that coverage
+//! stop before the comment area. RAR 3.x/4.x comments are standalone
+//! `COMM_HEAD` blocks after the member data, so a comment change only
+//! strips the old nested layout here — the caller emits the replacement
+//! block itself (see `engine.rs`).
 
 use super::header_crc16;
 use crate::error::{RarError, RarResult};
@@ -103,27 +106,13 @@ pub(super) fn file_header_name(header: &[u8]) -> RarResult<String> {
     ))
 }
 
-/// Append a RAR4 per-file comment (`COMM_HEAD`) subblock to an already-built
-/// `FILE_HEAD` and fix the outer head size + head CRC. Mirrors the logic in
-/// `add_rar4_data`'s `emit_segment`.
-fn append_rar4_comment_block(header: &mut Vec<u8>, comment: &[u8]) {
-    let block = crate::format::rar4::write::build_file_comment_block(comment);
-    let new_head = u16::from_le_bytes([header[5], header[6]]) as usize + block.len();
-    header[5..7].copy_from_slice(&(new_head as u16).to_le_bytes());
-    header.extend_from_slice(&block);
-    // A FILE_HEAD carrying a nested comment stops its CRC coverage before the
-    // trailing extended-time/comment area (mirrors `rename_file_header` and the
-    // reader's `header_crc_end`).
-    let crc_end = crate::format::rar4::file_header_crc_end(header);
-    let crc = header_crc16(&header[2..crc_end]);
-    header[0..2].copy_from_slice(&crc.to_le_bytes());
-}
-
-/// Rebuild a `FILE_HEAD` block, optionally renaming it and/or setting or
-/// removing its per-file comment. Used by the non-solid edit path when a
-/// member's name or comment changes: the compressed payload is copied as-is,
-/// so only the header is rewritten. `new_comment` is `None` to keep the
-/// existing comment, `Some(None)` to remove it, `Some(Some(bytes))` to set it.
+/// Rebuild a `FILE_HEAD` block, optionally renaming it and/or dropping a
+/// legacy nested comment. Used by the non-solid edit path when a member's
+/// name or comment changes: the compressed payload is copied as-is, so only
+/// the header is rewritten. `strip_comment` truncates a legacy nested
+/// `FHD_COMMENT` subblock and clears the flag; the replacement comment is a
+/// standalone `COMM_HEAD` block the caller emits after the member data
+/// (RAR 3.x/4.x layout).
 ///
 /// Everything except the name and the trailing comment area is preserved
 /// byte-identically (high sizes, salt, extended time, flags), matching the
@@ -131,16 +120,14 @@ fn append_rar4_comment_block(header: &mut Vec<u8>, comment: &[u8]) {
 pub(super) fn rebuild_rar4_header(
     header: &[u8],
     new_name: Option<&str>,
-    new_comment: Option<Option<&[u8]>>,
+    strip_comment: bool,
 ) -> RarResult<Vec<u8>> {
     let mut out = match new_name {
         Some(name) => rename_file_header(header, name)?,
         None => header.to_vec(),
     };
-    match new_comment {
-        None => {}
-        Some(None) => out = strip_rar4_comment(&out),
-        Some(Some(comment)) => out = set_rar4_comment(&out, comment)?,
+    if strip_comment {
+        out = strip_rar4_comment(&out);
     }
     Ok(out)
 }
@@ -169,18 +156,4 @@ fn strip_rar4_comment(header: &[u8]) -> Vec<u8> {
     let crc = header_crc16(&out[2..]);
     out[0..2].copy_from_slice(&crc.to_le_bytes());
     out
-}
-
-/// Set (or replace) a `FILE_HEAD`'s nested comment subblock.
-fn set_rar4_comment(header: &[u8], comment: &[u8]) -> RarResult<Vec<u8>> {
-    let mut out = strip_rar4_comment(header);
-    if out.len() < 7 {
-        return Err(RarError::Format(
-            "RAR4: file header block is malformed".into(),
-        ));
-    }
-    let flags = u16::from_le_bytes([out[3], out[4]]) | FHD_COMMENT;
-    out[3..5].copy_from_slice(&flags.to_le_bytes());
-    append_rar4_comment_block(&mut out, comment);
-    Ok(out)
 }

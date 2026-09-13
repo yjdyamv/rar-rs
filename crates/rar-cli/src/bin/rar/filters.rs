@@ -77,7 +77,7 @@ pub(crate) fn parse_rar_date(s: &str) -> Result<u32, String> {
     let local = crate::time::local_civil_to_system_time(y, m, d, hh, mm, ss);
     let secs = match local.duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
-        Err(_) => return Err(format!("date out of range: {s}")),
+        Err(_) => 0,
     };
     u32::try_from(secs).map_err(|_| format!("date out of range: {s}"))
 }

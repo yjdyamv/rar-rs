@@ -33,6 +33,33 @@ impl SlidingWindow {
         self.buf.len()
     }
 
+    /// Grow the ring to `new_size` (a larger power of two), carrying the
+    /// lookbehind tail forward: the last `min(old capacity, total_written)`
+    /// bytes stay addressable at their stream offsets, the write cursor and
+    /// `total_written` are preserved. Smaller or equal sizes are a no-op.
+    ///
+    /// A solid-chain continuation may declare a dictionary larger than the
+    /// chain head's; growing (rather than rejecting) matches the reference
+    /// reader, whose window is sized by the largest dictionary it has seen.
+    pub fn grow(&mut self, new_size: usize) {
+        if new_size <= self.buf.len() {
+            return;
+        }
+        debug_assert!(new_size.is_power_of_two());
+        let preserve = usize::try_from(self.total_written)
+            .unwrap_or(usize::MAX)
+            .min(self.buf.len());
+        let tail = self.get_output(self.total_written - preserve as u64, preserve);
+        let new_pos = (self.total_written % new_size as u64) as usize;
+        let mut buf = vec![0u8; new_size];
+        for (i, &b) in tail.iter().enumerate() {
+            buf[(new_pos + new_size - preserve + i) % new_size] = b;
+        }
+        self.buf = buf;
+        self.mask = new_size - 1;
+        self.pos = new_pos;
+    }
+
     /// Write a single literal byte.
     #[inline]
     pub fn put_byte(&mut self, b: u8) {

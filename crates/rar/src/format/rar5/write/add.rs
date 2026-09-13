@@ -294,6 +294,7 @@ impl RarArchive {
                 mtime,
                 dict_bytes,
             )?;
+            self.write_member_streams(path)?;
             self.report_progress(file_size, file_size);
             return Ok(());
         }

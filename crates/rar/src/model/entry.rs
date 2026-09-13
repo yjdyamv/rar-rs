@@ -71,10 +71,12 @@ pub struct FileHeader {
     /// use the 32-bit header CRC32.
     // Only read through the wire surface, which is `raw`-gated.
     pub legacy_head_crc: Option<u16>,
-    /// Per-member (file) comment (`FHD_COMMENT`) for RAR 3.x/4.x archives.
-    /// `None` when the member carries no comment. Decoded to raw text bytes
-    /// (UTF-8 kept as-is; an even-length non-UTF-8 payload is treated as
-    /// UTF-16LE), matching the archive-comment payload convention.
+    /// Per-member (file) comment for RAR 1.5–4.x archives: a `COMM_HEAD`
+    /// block after the member data (RAR 3.x/4.x) or nested in the header via
+    /// `FHD_COMMENT` (RAR 1.5–2.9). `None` when the member carries no
+    /// comment. Decoded to raw text bytes (UTF-8 kept as-is; an even-length
+    /// non-UTF-8 payload is treated as UTF-16LE), matching the
+    /// archive-comment payload convention.
     pub comment: Option<Vec<u8>>,
 }
 

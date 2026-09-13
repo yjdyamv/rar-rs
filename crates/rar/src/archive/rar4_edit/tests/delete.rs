@@ -161,6 +161,46 @@ fn delete_every_member_erases_the_archive() {
 }
 
 #[test]
+fn delete_drops_the_members_standalone_comment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("del_cmt.rar");
+    let (p1, p2, _) = payloads();
+    std::fs::write(
+        &path,
+        archive_bytes(&[file_block("a.bin", &p1), file_block("b.bin", &p2)], false),
+    )
+    .unwrap();
+
+    // Give a.bin a standalone member comment, then delete a.bin: the
+    // comment block must not survive and attach to b.bin.
+    let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+    let a = editor.unique_entry("a.bin").unwrap();
+    editor
+        .apply(
+            crate::archive::editor::EditPlan::new()
+                .set_member_comment(a, b"stale comment".to_vec()),
+        )
+        .unwrap();
+    let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+    let a = editor.unique_entry("a.bin").unwrap();
+    assert_eq!(editor.delete_entries(&[a]).unwrap(), 1);
+    drop(editor);
+
+    let mut archive = RarArchive::open(&path).unwrap();
+    assert_eq!(
+        archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["b.bin"]
+    );
+    assert!(archive.entries[0].comment().is_none());
+    assert_eq!(
+        archive
+            .read_with_options("b.bin", Default::default())
+            .unwrap(),
+        p2
+    );
+}
+
+#[test]
 fn delete_conflicts_and_solid_are_refused_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("del4.rar");

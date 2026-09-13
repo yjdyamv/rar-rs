@@ -12,7 +12,7 @@ use crate::archive::{ArchiveEntry, RarArchive, StreamRecord, discover_volumes};
 use crate::crypto;
 use crate::detect::SFX_SCAN_LIMIT;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader};
+use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader, RawBlock};
 use crate::format::rar5::vint;
 use crate::format::rar5::{
     BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, BLOCK_TYPE_ARCHIVE_HEADER,
@@ -55,6 +55,7 @@ impl RarArchive {
         } else {
             self.scan_blocks()?;
         }
+        self.reset_catalog_token()?;
         Ok(())
     }
 
@@ -71,15 +72,18 @@ impl RarArchive {
         if self.rar4 {
             // RAR4 has no quick-open record: always full-scan.
             self.scan_rar4_blocks()?;
+            self.reset_catalog_token()?;
             return Ok(());
         }
         if self.rar13 {
             // RAR 1.3/1.4 has no quick-open record either.
             self.scan_rar13_volumes()?;
+            self.reset_catalog_token()?;
             return Ok(());
         }
         if self.volume_paths.len() > 1 {
             self.scan_all_volumes()?;
+            self.reset_catalog_token()?;
             return Ok(());
         }
         if !self.try_quick_open_entries()? {
@@ -92,6 +96,7 @@ impl RarArchive {
             ))?;
             self.scan_blocks()?;
         }
+        self.reset_catalog_token()?;
         Ok(())
     }
 
@@ -166,11 +171,30 @@ impl RarArchive {
         if !self.read_ctx().quick_open_catalog {
             return Ok(());
         }
+        // Identity of each cached entry in catalog order: the payload offset
+        // is stable between the quick-open record and the full scan, so an
+        // identical sequence means the rescan preserves every index.
+        let cached: Vec<u64> = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.chunks.first().map(|chunk| chunk.data_offset))
+            .collect();
         let stream = stream_mut(&mut self.stream)?;
         stream.seek(SeekFrom::Start(
             self.sfx_offset + RAR5_SIGNATURE.len() as u64,
         ))?;
         self.scan_blocks()?;
+        let scanned: Vec<u64> = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.chunks.first().map(|chunk| chunk.data_offset))
+            .collect();
+        if cached != scanned {
+            // The scan reordered or replaced members: mint a fresh catalog
+            // identity so IDs from the quick-open catalog fail as stale
+            // instead of addressing different members at the same index.
+            self.reset_catalog_token()?;
+        }
         Ok(())
     }
 
@@ -251,31 +275,7 @@ impl RarArchive {
                     if name.as_deref() == Some("STM")
                         && let Some(owner_index) = last_file_index
                     {
-                        let extra =
-                            crate::format::rar5::headers::block_extra_area(&raw.header_data)?;
-                        if let Some(stream_name) =
-                            crate::format::rar5::headers::parse_service_subdata(&extra)
-                            && !stream_name.is_empty()
-                            && let Some((unpacked_size, method, dict_size_log, crc32)) =
-                                crate::format::rar5::headers::parse_stream_params(&raw.header_data)
-                        {
-                            // `-p` streams carry their own ENCR record; the
-                            // password is only needed at read time, so the
-                            // list works on locked archives like it does for
-                            // encrypted members.
-                            let params = crate::crypto::parse_encryption_extra(&extra)?;
-                            self.read_ctx_mut().streams.push(StreamRecord {
-                                owner_index,
-                                name: String::from_utf8_lossy(&stream_name).into_owned(),
-                                data_offset: raw.data_offset,
-                                data_size: raw.data_size,
-                                unpacked_size,
-                                method,
-                                dict_size_log,
-                                crc32,
-                                params,
-                            });
-                        }
+                        self.record_member_stream(&meta.raw, owner_index, 0)?;
                     }
                 }
                 BLOCK_TYPE_END_ARCHIVE => break,
@@ -293,6 +293,40 @@ impl RarArchive {
             }
         }
 
+        Ok(())
+    }
+
+    /// Record one "STM" service block as an NTFS alternate data stream owned
+    /// by `owner_index` and stored in `volume_index` (0 = the primary
+    /// stream). `-p` streams carry their own ENCR record; the password is
+    /// only needed at read time, so listing works on locked archives like it
+    /// does for encrypted members.
+    fn record_member_stream(
+        &mut self,
+        raw: &RawBlock,
+        owner_index: usize,
+        volume_index: usize,
+    ) -> RarResult<()> {
+        let extra = crate::format::rar5::headers::block_extra_area(&raw.header_data)?;
+        if let Some(stream_name) = crate::format::rar5::headers::parse_service_subdata(&extra)
+            && !stream_name.is_empty()
+            && let Some((unpacked_size, method, dict_size_log, crc32)) =
+                crate::format::rar5::headers::parse_stream_params(&raw.header_data)
+        {
+            let params = crate::crypto::parse_encryption_extra(&extra)?;
+            self.read_ctx_mut().streams.push(StreamRecord {
+                owner_index,
+                volume_index,
+                name: String::from_utf8_lossy(&stream_name).into_owned(),
+                data_offset: raw.data_offset,
+                data_size: raw.data_size,
+                unpacked_size,
+                method,
+                dict_size_log,
+                crc32,
+                params,
+            });
+        }
         Ok(())
     }
 
@@ -343,9 +377,17 @@ impl RarArchive {
     /// all of its blocks.
     fn scan_all_volumes(&mut self) -> RarResult<()> {
         self.entries.clear();
+        self.read_ctx_mut().streams.clear();
         let mut pending: Option<ArchiveEntry> = None;
+        // Owner of a "STM" record that may appear in any volume after its
+        // member's final chunk.
+        let mut last_file_index: Option<usize> = None;
+        // Cloned so the loop body can push stream records into `self`
+        // (the field-borrow checker cannot split `self.volume_paths` from
+        // the rest of `self` here).
+        let volume_paths = self.volume_paths.clone();
 
-        for (vol_idx, vol_path) in self.volume_paths.iter().enumerate() {
+        for (vol_idx, vol_path) in volume_paths.iter().enumerate() {
             let mut stream = File::open(vol_path)?;
 
             // Verify signature. The first volume may be an SFX stub, so the
@@ -369,19 +411,19 @@ impl RarArchive {
                 crate::format::rar5::headers::read_block(&mut stream, encr_key.as_ref())?
             {
                 self.check_cancel()?;
-                let raw = meta.raw;
+                let raw = &meta.raw;
 
                 let stream_pos = stream.stream_position()?;
 
                 match raw.block_type {
                     BLOCK_TYPE_ARCHIVE_HEADER => {
-                        let ah = ArchiveHeader::from_raw(&raw)?;
+                        let ah = ArchiveHeader::from_raw(raw)?;
                         if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
                             self.rar4_solid_archive = true;
                         }
                     }
                     BLOCK_TYPE_FILE_HEADER => {
-                        let fh = FileHeader::from_raw(&raw, stream_pos)?;
+                        let fh = FileHeader::from_raw(raw, stream_pos)?;
                         let continues_from = raw.flags & BLOCK_FLAG_DATA_CONTINUES != 0;
                         let continues_to = raw.flags & BLOCK_FLAG_DATA_CONTINUE_TO != 0;
 
@@ -420,6 +462,7 @@ impl RarArchive {
                                         entry.header.version = fh.version;
                                     }
                                     self.entries.push(pending.take().unwrap());
+                                    last_file_index = Some(self.entries.len() - 1);
                                 }
                             }
                         } else if continues_to {
@@ -432,15 +475,30 @@ impl RarArchive {
                                 header: fh,
                                 chunks: vec![chunk],
                             });
+                            last_file_index = Some(self.entries.len() - 1);
+                        }
+                    }
+                    BLOCK_TYPE_SERVICE_HEADER
+                        if raw.flags & crate::format::rar5::BLOCK_FLAG_DEPENDS_PREV != 0 =>
+                    {
+                        // NTFS stream record ("STM") owned by the preceding
+                        // member; the record can sit in a later volume than
+                        // the start of that member's data, so both the owner
+                        // index and the volume index are recorded.
+                        let name = self.service_block_name(&meta)?;
+                        if name.as_deref() == Some("STM")
+                            && let Some(owner_index) = last_file_index
+                        {
+                            self.record_member_stream(&meta.raw, owner_index, vol_idx)?;
                         }
                     }
                     BLOCK_TYPE_END_ARCHIVE => {
-                        let eoa = EndOfArchiveHeader::from_raw(&raw)?;
+                        let eoa = EndOfArchiveHeader::from_raw(raw)?;
                         let _ = eoa;
                         break; // continue to next volume
                     }
                     BLOCK_TYPE_ENCRYPT_HEADER => {
-                        encr_key = Some(crypto::derive_header_key(&raw, self.password.as_deref())?);
+                        encr_key = Some(crypto::derive_header_key(raw, self.password.as_deref())?);
                     }
                     _ => {}
                 }

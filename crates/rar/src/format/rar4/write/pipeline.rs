@@ -92,7 +92,12 @@ fn emit_rar4_segment(
     if solid_continuation {
         fhd |= FHD_SOLID;
     }
-    if comment.is_some() {
+    // RAR 3.x/4.x (unp_ver >= 29) stores a member comment as a standalone
+    // COMM_HEAD block after the member's data (the layout official UnRAR
+    // accepts); pre-RAR3 archives nest it inside the FILE_HEAD behind
+    // `FHD_COMMENT`, their historical layout.
+    let standalone_comment = comment.is_some() && this.write_ctx().solid.rar4_unp_ver >= 29;
+    if comment.is_some() && !standalone_comment {
         fhd |= FHD_COMMENT;
     }
     let params = FileHeaderParams {
@@ -113,7 +118,9 @@ fn emit_rar4_segment(
     let mut hdr = build_file_header(&params)?;
     // Append the per-file comment subblock (COMM_HEAD 0x75) after the
     // extended-time area and fix the outer head size + head CRC.
-    if let Some(comment) = &comment {
+    if let Some(comment) = &comment
+        && !standalone_comment
+    {
         let block = build_file_comment_block(comment);
         let new_head = u16::from_le_bytes([hdr[5], hdr[6]]) as usize + block.len();
         hdr[5..7].copy_from_slice(&(new_head as u16).to_le_bytes());
@@ -144,7 +151,29 @@ fn emit_rar4_segment(
     let data_offset = stream.stream_position()? + header_on_disk;
     stream.write_all(&header_bytes)?;
     stream.write_all(data)?;
-    this.write_ctx_mut().output.bytes_written += header_on_disk + data.len() as u64;
+    let mut written = header_on_disk + data.len() as u64;
+    // Standalone member comment (RAR 3.x/4.x): a COMM_HEAD block right
+    // after the member data. The split path passes the comment to every
+    // segment, so only the final one carries it. Under `-hp` the whole
+    // block is header-encrypted (`HEAD_SIZE` spans its payload, matching
+    // the reader's `align16(head_size)` ciphertext block).
+    if let Some(comment) = &comment
+        && standalone_comment
+        && !split_after
+    {
+        let block = build_file_comment_block(comment);
+        let block_bytes = if this.header_encryption {
+            let password = this.password.as_deref().ok_or_else(|| {
+                RarError::Encrypted("header encryption requires a password".into())
+            })?;
+            crate::format::rar4::write::encrypt_block_header(&block, password)?.0
+        } else {
+            block
+        };
+        stream.write_all(&block_bytes)?;
+        written += block_bytes.len() as u64;
+    }
+    this.write_ctx_mut().output.bytes_written += written;
     Ok((data_offset, data.len() as u64))
 }
 
@@ -290,21 +319,27 @@ impl RarArchive {
     /// ends the run (dropping the carried encoder state the trial may have
     /// advanced); a non-empty compressed member marks the run as started.
     ///
-    /// Pre-RAR3 writers (unp_ver < 29) never flag `FHD_SOLID`: the reader
-    /// derives solid continuation from the archive-level `MHD_SOLID` and
-    /// member position instead.
+    /// RAR 1.5 (unp_ver 15) never flags `FHD_SOLID`: the reader derives
+    /// solid continuation from the archive-level `MHD_SOLID` and member
+    /// position instead. RAR 2.x (unp_ver 20/26) flags each continuation
+    /// exactly like RAR3+ — official UnRAR feeds `Arc.FileHead.Solid` to
+    /// `Unpack20` for those versions and resets its tables when the flag is
+    /// clear.
     fn track_rar4_solid_member(&mut self, method: u8, unpacked_size: u64) -> bool {
+        let unp_ver = self.write_ctx().solid.rar4_unp_ver;
         let continuation = self.write_ctx().solid.mode
             && method != crate::format::rar4::RAR4_METHOD_STORE
             && self.write_ctx().solid.rar4_run_has_member
-            && self.write_ctx().solid.rar4_unp_ver == 29;
+            && unp_ver >= 20;
         if method == crate::format::rar4::RAR4_METHOD_STORE {
             // RAR3+ flags the break with FHD_SOLID, so a STORE member ends
-            // the run. Pre-RAR3 chains are position-derived and carry no
-            // flag: the reader keeps the window across STORE members, so the
-            // writer must keep the encoder alive for the next compressed
-            // member.
-            if self.write_ctx().solid.rar4_unp_ver == 29 {
+            // the run. RAR 1.5 chains are position-derived and carry no
+            // flag: the reader keeps the window across STORE members, so
+            // the writer must keep the encoder alive for the next
+            // compressed member. RAR 2.x also keeps the encoder alive
+            // (official UnRAR skips `Unpack20` for STORE members and keeps
+            // `TablesRead2`); only RAR3+'s flagged break resets it here.
+            if unp_ver == 29 {
                 self.write_ctx_mut().solid.rar4_encoder = None;
                 self.write_ctx_mut().solid.legacy_encoder = None;
                 self.write_ctx_mut().solid.rar4_run_has_member = false;
@@ -909,6 +944,12 @@ impl RarArchive {
     /// reused across the members of a run so its adaptive tables (and the
     /// RAR 2.x window) carry over — historical WinRAR produced solid
     /// RAR 1.5/2.x archives this way too.
+    ///
+    /// The reader skips STORE members (their bytes never reach the
+    /// decoder), so the persistent encoder must not advance for a member
+    /// that falls back to STORE. The trial encode runs on a clone; only a
+    /// member that actually packs (and is therefore decoded) commits the
+    /// advanced state.
     fn encode_rar4_member(&mut self, data: &[u8], level: u8) -> RarResult<(Vec<u8>, u8)> {
         let unp_ver = self.write_ctx().solid.rar4_unp_ver;
         if unp_ver == 29 {
@@ -919,15 +960,24 @@ impl RarArchive {
         }
         let method = crate::format::rar4::RAR4_METHOD_STORE + level;
         let packed = if self.write_ctx().solid.mode {
-            if self.write_ctx().solid.legacy_encoder.is_none() {
-                let encoder = build_legacy_solid_encoder(unp_ver, level)?;
-                self.write_ctx_mut().solid.legacy_encoder = Some(encoder);
-            }
             use crate::archive::LegacySolidEncoder;
-            match self.write_ctx_mut().solid.legacy_encoder.as_mut().unwrap() {
+            let mut trial = match self.write_ctx().solid.legacy_encoder.as_ref() {
+                Some(LegacySolidEncoder::Rar15(encoder)) => {
+                    LegacySolidEncoder::Rar15(Box::new(encoder.clone_for_trial()))
+                }
+                Some(LegacySolidEncoder::Rar20(encoder)) => {
+                    LegacySolidEncoder::Rar20(encoder.clone())
+                }
+                None => build_legacy_solid_encoder(unp_ver, level)?,
+            };
+            let packed = match &mut trial {
                 LegacySolidEncoder::Rar15(encoder) => encoder.encode_member(data)?,
                 LegacySolidEncoder::Rar20(encoder) => encoder.encode_member(data)?,
+            };
+            if packed.len() < data.len() {
+                self.write_ctx_mut().solid.legacy_encoder = Some(trial);
             }
+            packed
         } else {
             encode_legacy_codec_member(data, level, unp_ver)?
         };

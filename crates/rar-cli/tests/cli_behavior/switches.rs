@@ -475,6 +475,44 @@ fn cli_save_streams_roundtrips_ntfs_ads() {
     assert_eq!(std::fs::read(restored).unwrap(), b"alternate payload");
 }
 
+/// `-os -m0` (STORE) must store a file's NTFS streams too: the STORE
+/// branches used to write the member without its "STM" records, silently
+/// dropping them.
+#[cfg(windows)]
+#[test]
+fn cli_save_streams_roundtrips_ntfs_ads_store_mode() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("ads_store.bin");
+    std::fs::write(&src, b"main stream data").unwrap();
+    let stream = format!("{}{}", src.display(), ":meta");
+    std::fs::write(&stream, b"stored alternate payload").unwrap();
+
+    let archive = dir.path().join("ads_store.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-os", "-m0", "-idq"])
+        .arg(&archive)
+        .arg("ads_store.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-os", "-idq", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let restored = format!("{}{}", out.join("ads_store.bin").display(), ":meta");
+    assert_eq!(
+        std::fs::read(restored).unwrap(),
+        b"stored alternate payload"
+    );
+}
+
 /// `-p` streams are encrypted individually (`-os -ppw`); extraction with the
 /// password restores them, extraction without it fails instead of writing
 /// plaintext.

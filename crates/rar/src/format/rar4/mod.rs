@@ -32,8 +32,9 @@ pub(crate) const ENDARC_HEAD: u8 = 0x7b;
 /// comment `CMT` are both NEWSUB blocks).
 pub(crate) const NEWSUB_HEAD: u8 = 0x7a;
 
-/// COMM_HEAD: the per-file comment sub-block nested inside a `FILE_HEAD` when
-/// the `FHD_COMMENT` flag is set. Distinct from `FILE_HEAD` (0x74) and
+/// COMM_HEAD: a per-member comment block. RAR 3.x/4.x stores it as a
+/// standalone block after the member data; RAR 1.5–2.9 nested it inside the
+/// `FILE_HEAD` (flagged `FHD_COMMENT`). Distinct from `FILE_HEAD` (0x74) and
 /// `NEWSUB_HEAD` (0x7a).
 pub(crate) const COMM_HEAD: u8 = 0x75;
 
@@ -241,6 +242,23 @@ impl Rar4VolumeScan {
                     }
                 }
                 ENDARC_HEAD => break,
+                COMM_HEAD => {
+                    // Standalone per-member comment block (RAR 3.x/4.x
+                    // layout): it follows the member's data. Attach it to
+                    // the entry that was just completed, or to the pending
+                    // split member when a volume ends mid-member.
+                    if let (Some(comment), _) = parse_file_comment(&block.header, 0) {
+                        let entry = self.pending.as_mut().or_else(|| out.last_mut());
+                        if let Some(entry) = entry
+                            && entry.header.comment.is_none()
+                        {
+                            entry.header.comment = Some(comment);
+                        }
+                    }
+                    if block.total_size > block.header.len() as u64 {
+                        stream.seek(SeekFrom::Start(block.offset + block.total_size))?;
+                    }
+                }
                 _ => {
                     // Unknown block types (comment, protect, auth, subblock):
                     // skip over their data area when present.
@@ -447,6 +465,11 @@ fn header_crc_end(header: &[u8], head_type: u8, flags: u16) -> usize {
     match head_type {
         MAIN_HEAD if flags & 0x0002 != 0 => 13.min(header.len()),
         FILE_HEAD if flags & FHD_COMMENT != 0 => file_header_crc_end(header),
+        // A standalone COMM_HEAD's `HEAD_SIZE` spans the 13-byte block
+        // header plus its payload, but `HEAD_CRC` covers only the header
+        // (unrar's `SIZEOF_COMMHEAD`); the payload is protected by the
+        // block's own `COMM_CRC`.
+        COMM_HEAD => 13.min(header.len()),
         _ => header.len(),
     }
 }

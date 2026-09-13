@@ -479,18 +479,28 @@ pub fn decode_standalone(
     dict_size_bytes: Option<u64>,
     variant: ArchiveVersion,
 ) -> RarResult<Vec<u8>> {
-    let mut dict_size = checked_dict_size(dict_size_log, dict_size_bytes)?;
-    // The decoder reconstructs the whole file in the sliding window before
-    // extracting it (see `get_output`), so the window must be at least as
-    // large as the unpacked output. The encoder sizes its dictionary to the
-    // input (WinRAR-style, capped at 2x the file size), so grow the decode
-    // buffer here instead of reverting that cap.
+    let dict_size = checked_dict_size(dict_size_log, dict_size_bytes)?;
+    // The buffered core reconstructs the whole file in the sliding window
+    // before extracting it (see `get_output`), so it cannot materialize a
+    // member larger than the dictionary. Growing the window to the declared
+    // output size (the old behavior) sized an allocation directly from a
+    // header field, so a hostile multi-TiB `unpacked_size` aborted the
+    // process. Route oversized members through the streaming core instead:
+    // it allocates only the dictionary window and fails with a classified
+    // error when the packed data does not produce the declared output.
     let unpacked = usize::try_from(unpacked_size)
         .map_err(|_| RarError::Format("unpacked size overflows host address space".into()))?;
     if unpacked > dict_size {
-        dict_size = unpacked.checked_next_power_of_two().ok_or_else(|| {
-            RarError::Format("unpacked size too large for host address space".into())
-        })?;
+        let mut output = Vec::new();
+        decode_standalone_to_writer(
+            data,
+            unpacked_size,
+            dict_size_log,
+            dict_size_bytes,
+            variant,
+            &mut output,
+        )?;
+        return Ok(output);
     }
 
     let mut reader = BitReader::new(data);

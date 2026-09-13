@@ -27,7 +27,8 @@ use crate::archive::RarArchive;
 use crate::archive::transaction::EditSummary;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::{
-    FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY, MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD,
+    COMM_HEAD, FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY, MHD_SOLID, MHD_VOLUME,
+    NEWSUB_HEAD,
 };
 use crate::fs::atomic::{commit_files, read_write_create, replace_file, temp_sibling_path};
 use crate::fs::volume::{stale_volume_paths, volume_base_of};
@@ -495,31 +496,50 @@ pub(crate) fn edit_rar4(
             .map_err(RarError::Io)?;
         let mut pos = main_end as u64;
         let mut file_index = 0usize;
+        // Whether the block right after the current member (its standalone
+        // comment) belongs to a member whose comment is being replaced or
+        // was deleted: that block is dropped.
+        let mut drop_standalone_comment = false;
         while pos < region_end as u64 {
             let view = read_block_stream(&mut src, hp_bytes)?
                 .ok_or_else(|| RarError::Format("RAR4: truncated block stream".into()))?;
             if view.head_type == FILE_HEAD {
                 if deleted[file_index] {
-                    // Drop the member's header and payload verbatim.
+                    // Drop the member's header and payload verbatim (and
+                    // its standalone comment block, when one follows).
+                    drop_standalone_comment = true;
                 } else {
                     let new_name = rename_map.get(&file_index);
-                    let new_comment = member_comments
+                    let comment_change = member_comments
                         .iter()
                         .find(|(i, _)| *i == file_index)
                         .map(|(_, c)| c.as_deref());
-                    if new_name.is_some() || new_comment.is_some() {
-                        // The rebuilt header (rename and/or comment) is
-                        // re-encrypted with a fresh salt; the member's
-                        // payload is copied as-is.
+                    drop_standalone_comment = comment_change.is_some();
+                    if new_name.is_some() || comment_change.is_some() {
+                        // The rebuilt header (rename and/or legacy nested
+                        // comment stripped) is re-encrypted with a fresh
+                        // salt; the member's payload is copied as-is.
                         let rebuilt = rebuild_rar4_header(
                             &view.header,
                             new_name.map(|s| s.as_str()),
-                            new_comment,
+                            comment_change.is_some(),
                         )?;
                         let mut emitted = Vec::new();
                         emit_block(&mut emitted, &rebuilt, &[], hp)?;
                         out.write_all(&emitted).map_err(RarError::Io)?;
                         copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
+                        // RAR 3.x/4.x stores the replacement comment as a
+                        // standalone COMM_HEAD block after the member data.
+                        if let Some(Some(text)) = comment_change
+                            && !text.is_empty()
+                        {
+                            let block = crate::format::rar4::write::build_file_comment_block(text);
+                            // `HEAD_SIZE` spans the payload, so under `-hp`
+                            // the whole block is one encrypted header block.
+                            let mut emitted = Vec::new();
+                            emit_block(&mut emitted, &block, &[], hp)?;
+                            out.write_all(&emitted).map_err(RarError::Io)?;
+                        }
                     } else {
                         // Untouched: copy the on-disk bytes (ciphertext
                         // included).
@@ -528,6 +548,10 @@ pub(crate) fn edit_rar4(
                     }
                 }
                 file_index += 1;
+            } else if view.head_type == COMM_HEAD && drop_standalone_comment {
+                // The member's old standalone comment: dropped (the
+                // replacement, if any, was emitted after its data).
+                drop_standalone_comment = false;
             } else if replace_comment
                 && view.head_type == NEWSUB_HEAD
                 && view.header.len() >= 32

@@ -271,7 +271,8 @@ impl ArchiveEntry {
         file_header_has_mtime(&self.header)
     }
 
-    /// Per-member (file) comment for RAR 3.x/4.x archives (`FHD_COMMENT`),
+    /// Per-member (file) comment for RAR 3.x/4.x archives (a `COMM_HEAD`
+    /// block after the member data; nested in the header for RAR 1.5–2.9),
     /// if the member carries one. Returns raw text bytes (UTF-8 when the
     /// comment was ASCII, UTF-16LE decoded otherwise).
     pub fn comment(&self) -> Option<&[u8]> {

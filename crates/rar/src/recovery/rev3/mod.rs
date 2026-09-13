@@ -691,7 +691,7 @@ pub(crate) fn is_legacy_rev_set(path: &Path) -> RarResult<bool> {
     if read >= 8 && head == *crate::format::rar5::RAR5_SIGNATURE {
         return Ok(false);
     }
-    if read >= 7 && head[..7] == *crate::recovery::rev50::REV5_SIGNATURE {
+    if read >= 8 && head == *crate::recovery::rev50::REV5_SIGNATURE {
         return Ok(false);
     }
     let is_rev = path

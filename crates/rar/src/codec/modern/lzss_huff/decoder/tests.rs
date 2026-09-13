@@ -363,6 +363,16 @@ fn filtered_member_at_solid_offset_decodes_member_relative() {
     );
 }
 
+/// Regression: a bogus multi-terabyte declared unpacked size must fail with
+/// a classified error instead of aborting the process on the window
+/// allocation (`unpacked_size.checked_next_power_of_two()` used to size a
+/// `vec![0u8; ...]` directly from the header field).
+#[test]
+fn huge_declared_unpacked_size_is_a_clean_error() {
+    let err = decode_standalone(&[0u8; 16], 1 << 40, 0, None, ArchiveVersion::V50).unwrap_err();
+    assert!(matches!(err, RarError::Format(_)), "got {err}");
+}
+
 /// Regression: a solid-chain member larger than the shared chain window must
 /// decode through the streaming core; the buffered core used to panic inside
 /// `SlidingWindow::get_output` (requested output exceeds window size).
