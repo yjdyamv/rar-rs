@@ -387,7 +387,7 @@ impl RarArchive {
         let tmp_path = temp_sibling_path(&dest_path);
         let result = (|| -> RarResult<u64> {
             let mut file = File::create(&tmp_path)?;
-            let written = if self.rar4 {
+            let written = if self.rar4 || self.rar13 {
                 self.decode_rar4_to(idx, &mut file)?
             } else if self.is_solid_chain_member(idx) {
                 self.decode_solid_through_to(idx, &mut file)?

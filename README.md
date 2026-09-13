@@ -1,7 +1,7 @@
 # rar-rs
 
 **Pure-Rust RAR archive library and command-line tools.** Create, read,
-extract, and modify RAR5/RAR7 archives, read legacy RAR 1.5–4.x archives,
+extract, and modify RAR5/RAR7 archives, read legacy RAR 1.3–4.x archives,
 and create RAR 1.5 / 2.x / 4.x archives with native Rust codecs. No external
 RAR/UNRAR binary is required at runtime.
 
@@ -17,7 +17,7 @@ RAR/UNRAR binary is required at runtime.
 - **Pure Rust** implementation with no external RAR/UNRAR runtime binary.
 - **RAR5 (v50) and RAR7 (v70)** read/write support with WinRAR/UnRAR
   interoperability testing.
-- **Legacy support** for reading RAR 1.5–4.x archives and creating RAR 1.5 /
+- **Legacy support** for reading RAR 1.3–4.x archives and creating RAR 1.5 /
   2.x / 4.x archives (`-ma15` / `-ma2` / `-ma4`), including legacy codecs,
   encryption, solid chains, and volumes.
 - **Archive operations** — append, update, delete, rename, freshen, move, lock,
@@ -93,7 +93,7 @@ including solid archives, quick-open, BLAKE2sp, safe extraction,
 
 ## Feature highlights
 
-- **Formats:** RAR5 (v50) and RAR7 (v70) create/read/write; RAR 1.5–4.x
+- **Formats:** RAR5 (v50) and RAR7 (v70) create/read/write; RAR 1.3–4.x
   read/extract; and RAR 1.5 / 2.x / 4.x creation (`-ma15` / `-ma2` / `-ma4`).
 - **Compression:** native LZSS+Huffman and PPMd codecs, levels 0–5,
   dictionary controls, filters, solid archives, and parallel compression.

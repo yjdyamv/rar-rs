@@ -39,6 +39,9 @@ pub(crate) struct MemberDecodeOptions<'a> {
 struct CrcWriter<'a, W: ?Sized + std::io::Write> {
     inner: &'a mut W,
     hasher: crc32fast::Hasher,
+    /// RAR 1.3/1.4 rolling checksum, maintained alongside the CRC-32 so the
+    /// streaming path can verify that family without a second pass.
+    rar13_checksum: u16,
     count: u64,
     limit: u64,
 }
@@ -63,6 +66,12 @@ impl<W: ?Sized + std::io::Write> std::io::Write for CrcWriter<'_, W> {
         }
         let n = self.inner.write(buf)?;
         self.hasher.update(&buf[..n]);
+        for &byte in &buf[..n] {
+            self.rar13_checksum = self
+                .rar13_checksum
+                .wrapping_add(u16::from(byte))
+                .rotate_left(1);
+        }
         self.count = self.count.checked_add(n as u64).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "RAR4 output size overflow")
         })?;
@@ -89,10 +98,11 @@ pub(crate) fn decode_member_bytes_to(
     hdr: &FileHeader,
     options: MemberDecodeOptions<'_>,
     writer: &mut dyn std::io::Write,
-) -> RarResult<(u64, u32)> {
+) -> RarResult<(u64, u32, u16)> {
     let mut crc_writer = CrcWriter {
         inner: writer,
         hasher: crc32fast::Hasher::new(),
+        rar13_checksum: 0,
         count: 0,
         limit: hdr.unpacked_size,
     };
@@ -101,7 +111,11 @@ pub(crate) fn decode_member_bytes_to(
         decode_member_bytes_to_inner(stream, volume_paths, chunks, hdr, options, writer)?;
     }
     validate_output_size(hdr, crc_writer.count)?;
-    Ok((crc_writer.count, crc_writer.hasher.clone().finalize()))
+    Ok((
+        crc_writer.count,
+        crc_writer.hasher.clone().finalize(),
+        crc_writer.rar13_checksum,
+    ))
 }
 
 fn decode_member_bytes_to_inner(
@@ -177,18 +191,24 @@ fn decode_member_bytes_to_inner(
         hdr,
         packed_len,
         max_alloc_packed_bytes,
+        password,
     )?;
 
     if encrypted {
-        let password = password
-            .ok_or_else(|| {
-                RarError::Encrypted(format!(
-                    "{}: encrypted member, no password provided",
-                    hdr.name
-                ))
-            })?
-            .as_bytes();
-        decrypt_in_place(hdr, password, &mut packed)?;
+        // RAR 1.3/1.4 resets its cipher at every volume fragment and
+        // `read_packed_payload` already applied it; the other families
+        // decrypt the assembled payload as one stream.
+        if hdr.format_version != 3 {
+            let password = password
+                .ok_or_else(|| {
+                    RarError::Encrypted(format!(
+                        "{}: encrypted member, no password provided",
+                        hdr.name
+                    ))
+                })?
+                .as_bytes();
+            decrypt_in_place(hdr, password, &mut packed)?;
+        }
         if super::is_stored(hdr.comp_method) {
             if packed.len() < unp_size {
                 return Err(RarError::Format(format!(
@@ -315,6 +335,7 @@ fn read_packed_payload(
     hdr: &FileHeader,
     packed_len: usize,
     max_packed_bytes: u64,
+    password: Option<&str>,
 ) -> RarResult<Vec<u8>> {
     let mut packed = Vec::new();
     packed
@@ -357,6 +378,18 @@ fn read_packed_payload(
             file.read_exact(&mut packed[start..end])
                 .map_err(RarError::Io)?;
         }
+        // RAR 1.3/1.4 encrypts each volume fragment with a fresh cipher
+        // stream, so the decryption is applied per chunk.
+        if hdr.format_version == 3 && hdr.flags & super::FHD_PASSWORD as u64 != 0 {
+            let password = password.ok_or_else(|| {
+                RarError::Encrypted(format!(
+                    "{}: encrypted member, no password provided",
+                    hdr.name
+                ))
+            })?;
+            crate::crypto::Rar13Cipher::new(password.as_bytes())
+                .decrypt_in_place(&mut packed[start..end]);
+        }
     }
     Ok(packed)
 }
@@ -397,10 +430,12 @@ pub(crate) fn decode_member_bytes(
         hdr,
         packed_len,
         max_alloc_packed_bytes,
+        password,
     )?;
 
     let encrypted = hdr.flags & super::FHD_PASSWORD as u64 != 0;
-    if encrypted {
+    if encrypted && hdr.format_version != 3 {
+        // RAR 1.3/1.4 fragments were already decrypted per volume chunk.
         let password = password
             .ok_or_else(|| {
                 RarError::Encrypted(format!(

@@ -15,6 +15,9 @@ pub struct FileHeader {
     pub packed_size: u64,
     pub attributes: u64,
     pub mtime: u32,
+    /// Member checksum. CRC-32 for RAR4/RAR5 members, except RAR 1.3/1.4
+    /// members (`format_version == 3`) where it holds the 16-bit rolling
+    /// checksum in the low half.
     pub crc32_val: Option<u32>,
     /// Wire hash-record type (`0` = BLAKE2sp) when a hash extra record is
     /// present, otherwise `u8::MAX`.

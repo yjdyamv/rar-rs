@@ -12,6 +12,7 @@ mod filters;
 mod large;
 mod links;
 mod misc;
+mod rar13;
 mod rar4_create;
 mod rar4_edit;
 mod recovery;

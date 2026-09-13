@@ -174,6 +174,7 @@ impl ArchiveEntry {
     /// onto [`ArchiveVersion`]; RAR5 members map `comp_version` to v50/v70.
     pub fn version(&self) -> ArchiveVersion {
         match self.header.format_version {
+            3 => ArchiveVersion::V15,
             4 => ArchiveVersion::from_unp_ver(self.header.unp_ver).unwrap_or(ArchiveVersion::V29),
             _ => ArchiveVersion::from_v70(self.header.comp_version == 1),
         }

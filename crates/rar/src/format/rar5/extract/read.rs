@@ -35,7 +35,7 @@ impl RarArchive {
         }
         self.read_ctx_mut().extract_options = opts;
         self.validate_entry_limits(target_idx)?;
-        if self.rar4 {
+        if self.rar4 || self.rar13 {
             return self.decode_rar4_at(target_idx);
         }
         if self.is_solid_chain_member(target_idx) {
@@ -87,7 +87,7 @@ impl RarArchive {
             ));
         }
         self.read_ctx_mut().extract_options = opts;
-        if self.rar4 {
+        if self.rar4 || self.rar13 {
             return self.decode_rar4_to(target_idx, writer);
         }
         if self.is_solid_chain_member(target_idx) {

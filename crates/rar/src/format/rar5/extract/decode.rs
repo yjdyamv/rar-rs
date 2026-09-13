@@ -357,7 +357,7 @@ impl RarArchive {
         let entry = self.entries[idx].clone();
         let max_alloc_packed_bytes = self.max_packed_bytes();
         let max_stream_packed_bytes = self.max_stream_packed_bytes();
-        let (written, crc) = crate::format::rar4::decode_member_bytes_to(
+        let (written, crc, rar13_checksum) = crate::format::rar4::decode_member_bytes_to(
             stream_mut(&mut self.stream)?,
             &self.volume_paths,
             &entry.chunks,
@@ -370,15 +370,20 @@ impl RarArchive {
             },
             writer,
         )?;
-        // The streamed CRC is authoritative; compare with the header.
-        if let Some(expected) = hdr.crc32_val
-            && crc != expected
-        {
-            return Err(RarError::Crc {
-                expected,
-                actual: crc,
-                context: format!("{}: CRC32 mismatch", hdr.name),
-            });
+        // The streamed checksum is authoritative; compare with the header.
+        if let Some(expected) = hdr.crc32_val {
+            let actual = if hdr.format_version == 3 {
+                u32::from(rar13_checksum)
+            } else {
+                crc
+            };
+            if actual != expected {
+                return Err(RarError::Crc {
+                    expected,
+                    actual,
+                    context: format!("{}: checksum mismatch", hdr.name),
+                });
+            }
         }
         Ok(written)
     }
@@ -407,12 +412,16 @@ impl RarArchive {
     }
     fn rar4_verify_crc(&self, hdr: &FileHeader, data: &[u8]) -> RarResult<()> {
         if let Some(expected) = hdr.crc32_val {
-            let actual = crate::format::rar4::member_crc(data);
+            let actual = if hdr.format_version == 3 {
+                u32::from(crate::format::rar13::file_checksum(data))
+            } else {
+                crate::format::rar4::member_crc(data)
+            };
             if actual != expected {
                 return Err(RarError::Crc {
                     expected,
                     actual,
-                    context: format!("{}: CRC32 mismatch", hdr.name),
+                    context: format!("{}: checksum mismatch", hdr.name),
                 });
             }
         }

@@ -7,11 +7,13 @@
 // The wire-level primitives (`EncryptionParams`, `decrypt_data`,
 // `derive_keys`, `encrypt_data`) are re-exported through `crate::wire`.
 
+pub mod rar13;
 pub mod rar15;
 pub mod rar20;
 pub mod rar30;
 pub mod rar50;
 
+pub use rar13::Rar13Cipher;
 pub use rar15::Rar15Cipher;
 pub use rar20::Rar20Cipher;
 pub use rar30::Rar30Cipher;

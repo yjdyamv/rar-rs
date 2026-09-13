@@ -44,6 +44,9 @@ pub(crate) struct ReadState {
     pub streams: Vec<StreamRecord>,
     /// Mark of the Web propagation for extraction (WinRAR `-om`).
     pub motw: Option<crate::options::MarkOfTheWeb>,
+    /// RAR 1.3/1.4 main-header flags of the first opened volume (`RE~^`
+    /// family; comment/volume/solid bits).
+    pub rar13_flags: u8,
 }
 
 impl Default for ReadState {
@@ -56,6 +59,7 @@ impl Default for ReadState {
             extract_options: crate::options::ExtractOptions::default(),
             streams: Vec::new(),
             motw: None,
+            rar13_flags: 0,
         }
     }
 }

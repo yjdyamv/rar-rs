@@ -150,7 +150,8 @@ fuzz 使用一个可枚举的小子集，于是删除 feature 与 `rar40`/`rar50
 - [x] **CLI 形态（2026-09）**：`mf`（归档含目录项、只删文件留目录，与官方逐项对照）、`lta`/`vta` 别名、`rar x -kb/-or/-op<path>`、`a -f`/`a -u`（命令串等价于 `f`/`u`）、`a -k`、`a -z<file>`、`-qo+`/`-qo-`、`-ol-`（归档与提取都跳过链接）、`-ola`（提取链接禁用安全校验，`ExtractOptions::allow_unsafe_links`）；另修 `d`/`rn` 的错误码丢失（锁定档现在报退出码 4，与官方一致）。注：官方只支持 `--` 停止开关扫描（单 `-` 报错 7），我们 `--` 已可用。
 - [x] **RAR3/4 非标准 VM 过滤器（2026-09）**：移植 rars `codec/rarvm.rs` 解释器（`codec/legacy/rarvm.rs`，21 个单元测试全过），`rar29` 的 `VmProgramKind::{Standard, Generic}` 分派——标准五过滤器仍走原生实现，任意字节码走 VM（globals 跨调用持久化）；夹具 `rar40/rarvm/`（rars 语料）+ `tests/rar_vm_filters.rs` 六例（generic delta、PPMd esc-3 过滤、32-bit 编码整数、solid E8 偏移、真实 exe、64 通道 delta）全过。
 - [x] **pre-RAR3 solid repack（2026-09）**：`solid_repack_version` 按源成员 unp_ver 选生成（15→v15、20/26→v20、29/36→v29，混合代际拒绝），`repack_solid_archive` 用同一代编码器重建链——官方 6.23 的 `-ma1`/`-ma2 -s` 档经我们 `d`/`a` 编辑后 UnRAR 7.23 `t` 通过，成员字节精确（库测试 + winrar_interop 各一）。
-- [x] **格式硬限（记录）**：RAR 1.3/1.4 读取；RAR5 filter type ≥4（RAR5 只定义 0–3：delta/E8/E8E9/ARM，≥4 为非法数据）；RAR4 分卷 `d/a`（官方同样拒绝）；RAR4 成员注释与官方 `t` 不互操作（已知小差异）。
+- [x] **RAR 1.3/1.4 读取（2026-09）**：移植 rars `rar13.rs` 解码半——`RE~^` 4 字节签名 + SFX 扫描（强签名优先）、7 字节主头（无头 CRC）、21 字节固定文件头、16 位滚动校验（`file_checksum`）、`LHD_PASSWORD` 的 RAR13 加性流密码（`crypto/rar13.rs`，逐卷段重置）、旧命名 `.rar/.r00/.r01` 分卷跨卷拼装、`LHD_COMMENT` 成员注释与主头扩展的归档注释（含 packed 注释：注释密钥 + Unpack15）、目录与空文件、solid 链（MHD_SOLID 复用 pre-RAR3 链）；成员解码复用现有 `Rar15Decoder`。夹具 `tests/fixtures/rar13/`（rars 语料，git blob 复制避免 CRLF 污染）+ `tests/rar13_read.rs` 10 例；官方 UnRAR 7.23 对 SOLID/CMULTIV/README/FCOMM/SFX/加密档逐成员字节一致（winrar_interop 两例）。
+- [x] **格式硬限（记录）**：RAR5 filter type ≥4（RAR5 只定义 0–3：delta/E8/E8E9/ARM，≥4 为非法数据）；RAR4 分卷 `d/a`（官方同样拒绝）；RAR4 成员注释与官方 `t` 不互操作（已知小差异）。
 - [x] **Windows/no-op 开关全命令接受（2026-09）**：`-ac`/`-ai`/`-ao`/`-e[+]<attr>`/`-dh`/`-oc`/`-oni`/`-ri`/`-vp`/`-ioff`/`-isnd`/`-ieml`/`-mlp`/`-am[s,r]`/`-sc` 从 create-only 移到全局（`rar`/`unrar` 每个命令都接受，官方解析器模型），重复出现按最后一次生效（`overrides_with`，如 `-ams -amr`）；`-vd` 保持明确拒绝（会擦盘）。测试 `cli_noop_switches_accepted_everywhere`。
 - 注：官方 7.23 已移除 `-ma4`（RAR4 创建，报 `Unknown option`）；我们的 RAR4/v15/v20 创建是超出官方的扩展。
 
@@ -196,7 +197,7 @@ fuzz 使用一个可枚举的小子集，于是删除 feature 与 `rar40`/`rar50
 
 ## 已取消 / 不做
 
-- RAR 1.3/1.4（`RE~^` 族）：rars 支持但本实现不追（夹具稀少、DOS 时代）
+- ~~RAR 1.3/1.4（`RE~^` 族）：rars 支持但本实现不追（夹具稀少、DOS 时代）~~ 2026-09 已实现读取（见「独立审计 2026-09-13」）
 - unrar `s`（转 SFX）：官方 UnRAR 7.23 无此命令，非差距
 
 ## 加固记录（原 CHANGELOG，2026-09 迁入本文件）

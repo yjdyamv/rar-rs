@@ -44,3 +44,7 @@ NOTICE text eol=lf
 *.ico binary
 *.pdf binary
 *.zip binary
+
+# RAR 1.3/1.4 fixture corpus: byte-exact test inputs with the DOS-era
+# upper-case names (`BIG80K.RAR`, `MULTIVOL.R00`, ...).
+crates/rar/tests/fixtures/rar13/** -text

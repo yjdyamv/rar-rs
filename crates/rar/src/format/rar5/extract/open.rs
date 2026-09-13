@@ -10,7 +10,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::archive::{ArchiveEntry, RarArchive, StreamRecord, discover_volumes};
 use crate::crypto;
-use crate::detect::{SFX_SCAN_LIMIT, find_bytes};
+use crate::detect::SFX_SCAN_LIMIT;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader};
 use crate::format::rar5::vint;
@@ -30,6 +30,8 @@ impl RarArchive {
         self.verify_signature()?;
         if self.rar4 {
             self.scan_rar4_blocks()?;
+        } else if self.rar13 {
+            self.scan_rar13_volumes()?;
         } else if self.volume_paths.len() > 1 {
             self.scan_all_volumes()?;
         } else {
@@ -51,6 +53,11 @@ impl RarArchive {
         if self.rar4 {
             // RAR4 has no quick-open record: always full-scan.
             self.scan_rar4_blocks()?;
+            return Ok(());
+        }
+        if self.rar13 {
+            // RAR 1.3/1.4 has no quick-open record either.
+            self.scan_rar13_volumes()?;
             return Ok(());
         }
         if self.volume_paths.len() > 1 {
@@ -139,32 +146,17 @@ impl RarArchive {
         let mut buf = vec![0u8; scan];
         let n = stream.read(&mut buf)?;
         buf.truncate(n);
-        let rar5_pos = find_bytes(&buf, RAR5_SIGNATURE);
-        let rar4_pos = find_bytes(&buf, crate::detect::RAR4_SIGNATURE);
-        let (sfx_offset, is_rar4) = match (rar5_pos, rar4_pos) {
-            (Some(r5), Some(r4)) => {
-                if r4 < r5 {
-                    (r4 as u64, true)
-                } else {
-                    (r5 as u64, false)
-                }
-            }
-            (Some(r5), None) => (r5 as u64, false),
-            (None, Some(r4)) => (r4 as u64, true),
-            (None, None) => {
-                return Err(RarError::Format(
-                    "not a RAR archive (signature not found)".into(),
-                ));
-            }
+        let (family, sfx_offset) = crate::detect::find_archive_start(&buf, SFX_SCAN_LIMIT)
+            .ok_or_else(|| RarError::Format("not a RAR archive (signature not found)".into()))?;
+        self.sfx_offset = sfx_offset as u64;
+        self.rar4 = family == crate::detect::ArchiveFamily::Rar15To40;
+        self.rar13 = family == crate::detect::ArchiveFamily::Rar13;
+        let sig_len = match family {
+            crate::detect::ArchiveFamily::Rar50Plus => RAR5_SIGNATURE.len() as u64,
+            crate::detect::ArchiveFamily::Rar15To40 => crate::detect::RAR4_SIGNATURE.len() as u64,
+            crate::detect::ArchiveFamily::Rar13 => crate::detect::RAR13_SIGNATURE.len() as u64,
         };
-        self.sfx_offset = sfx_offset;
-        self.rar4 = is_rar4;
-        let sig_len = if is_rar4 {
-            crate::detect::RAR4_SIGNATURE.len() as u64
-        } else {
-            RAR5_SIGNATURE.len() as u64
-        };
-        stream.seek(SeekFrom::Start(sfx_offset + sig_len))?;
+        stream.seek(SeekFrom::Start(self.sfx_offset + sig_len))?;
         Ok(())
     }
 
