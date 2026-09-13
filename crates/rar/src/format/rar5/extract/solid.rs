@@ -8,7 +8,8 @@ use std::io::{self, Write};
 
 use crate::archive::RarArchive;
 use crate::codec::DecoderState;
-use crate::error::RarResult;
+use crate::error::{RarError, RarResult};
+use crate::format::rar5::COMP_METHOD_STORE;
 use crate::format::shared::stream_mut;
 
 impl RarArchive {
@@ -43,20 +44,18 @@ impl RarArchive {
         Ok(target_data)
     }
 
-    /// Find the start index of the solid chain containing `target_idx`
-    /// (the first non-directory file at or before it that is not solid,
-    /// followed by solid files).
+    /// Find the start index of the solid chain containing `target_idx`:
+    /// walk back across members flagged `comp_solid` (each continues its
+    /// predecessor) to the first member that is not solid. A member that is
+    /// not solid itself starts a new group even when its predecessor is
+    /// solid (`-se`/`-sv` resets), so the walk must not cross it.
     fn find_solid_chain_start(&self, target_idx: usize) -> usize {
         let mut chain_start = target_idx;
-        for i in (0..target_idx).rev() {
-            if self.entries[i].is_dir() {
-                continue;
-            }
-            if self.entries[i].header.comp_solid || self.is_solid_chain_member(i) {
-                chain_start = i;
-            } else {
+        while self.entries[chain_start].header.comp_solid {
+            let Some(previous) = (0..chain_start).rev().find(|&i| !self.entries[i].is_dir()) else {
                 break;
-            }
+            };
+            chain_start = previous;
         }
         chain_start
     }
@@ -82,9 +81,9 @@ impl RarArchive {
             self.reset_solid_decoder(chain_start);
         }
 
+        let chain_window = self.member_dict_window(chain_start)?;
         if self.read_ctx().solid_state.is_none() {
-            let dict_size = self.member_dict_window(chain_start)?;
-            self.read_ctx_mut().solid_state = Some(DecoderState::new(dict_size));
+            self.read_ctx_mut().solid_state = Some(DecoderState::new(chain_window));
         }
 
         let start_from = (self.read_ctx_mut().solid_decoded_through + 1) as usize;
@@ -95,6 +94,21 @@ impl RarArchive {
             let entry = self.entries[i].clone();
             if entry.is_dir() {
                 continue;
+            }
+            // The shared window is frozen at the chain head's dictionary;
+            // decoding a member that declares a larger one would make
+            // `SlidingWindow::copy_match` silently wrap its out-of-window
+            // distances. Reject the archive instead (the writer guarantees
+            // the window never grows in a solid stream).
+            if entry.header.comp_method != COMP_METHOD_STORE {
+                let member_window = self.member_dict_window(i)?;
+                if member_window > chain_window {
+                    self.reset_solid_decoder(chain_start);
+                    return Err(RarError::Format(format!(
+                        "member {}: dictionary of {member_window} bytes exceeds the solid chain window of {chain_window} bytes",
+                        entry.header.name
+                    )));
+                }
             }
             let sink: &mut dyn Write = if i == target_idx {
                 writer

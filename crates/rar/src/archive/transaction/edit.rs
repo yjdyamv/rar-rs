@@ -15,7 +15,7 @@ use crate::format::rar5::{
     ARCHIVE_FLAG_LOCKED, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_ENCRYPT_HEADER,
     BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_SERVICE_HEADER,
 };
-use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path};
+use crate::fs::atomic::{read_write_create, replace_file, sync_file, temp_sibling_path};
 
 impl RarArchive {
     pub(crate) fn edit_plan(
@@ -92,10 +92,10 @@ impl RarArchive {
 
         if deleted_count == self.entries.len() {
             // Matching `rar d`: deleting every member erases the archive
-            // (every volume for multi-volume archives). Renames are empty
-            // here — the disjointness check above leaves no target — and
-            // comment/recovery changes would be silently dropped, so they
-            // are refused too.
+            // (every volume and `.rev` recovery volume for multi-volume
+            // archives). Renames are empty here — the disjointness check
+            // above leaves no target — and comment/recovery changes would be
+            // silently dropped, so they are refused too.
             if force_rr.is_some() || comment.is_some() {
                 return Err(RarError::InvalidOption(
                     "cannot combine comment or recovery-record changes with deleting every member"
@@ -105,9 +105,7 @@ impl RarArchive {
             if self.main_header_is_locked()? {
                 return Err(RarError::ArchiveLocked);
             }
-            for vol in &self.volume_paths {
-                let _ = fs::remove_file(vol);
-            }
+            self.erase_archive_files()?;
             self.stream = None;
             self.entries.clear();
             self.read_ctx_mut().solid_state = None;
@@ -144,6 +142,38 @@ impl RarArchive {
             deleted: deleted_count,
             renamed: renamed_count,
         })
+    }
+
+    /// Remove every file of an archive whose members are all being deleted:
+    /// the discovered data volumes plus the `.rev` recovery volumes sharing
+    /// their base (multi-volume sets). Every removal is attempted so one
+    /// locked file cannot stop the rest, and the first failure is returned;
+    /// ignoring removal errors used to leave a locked volume behind while
+    /// the erase reported success.
+    fn erase_archive_files(&self) -> RarResult<()> {
+        let mut victims = self.volume_paths.clone();
+        if self.volume_paths.len() > 1 {
+            let base = crate::fs::volume::volume_base_of(&self.path);
+            let parent = self.path.parent().unwrap_or(Path::new("."));
+            victims.extend(crate::fs::volume::stale_volume_paths(
+                parent,
+                &base,
+                false,
+                &self.volume_paths,
+            ));
+        }
+        let mut failure: Option<RarError> = None;
+        for path in &victims {
+            if let Err(error) = fs::remove_file(path) {
+                failure.get_or_insert_with(|| {
+                    RarError::Io(std::io::Error::new(
+                        error.kind(),
+                        format!("{}: {error}", path.display()),
+                    ))
+                });
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     /// Build the rename map (index -> new name) for resolved rename pairs,
@@ -202,7 +232,16 @@ impl RarArchive {
             );
             self.stream = None;
             match result {
-                Ok(()) => replace_file(&tmp_path, &src_path)?,
+                Ok(()) => {
+                    // Flush the rewritten bytes before replacing the original:
+                    // the rename must not become durable ahead of its data.
+                    if let Err(e) =
+                        sync_file(&tmp_path).and_then(|()| replace_file(&tmp_path, &src_path))
+                    {
+                        let _ = fs::remove_file(&tmp_path);
+                        return Err(e);
+                    }
+                }
                 Err(e) => {
                     let _ = fs::remove_file(&tmp_path);
                     return Err(e);

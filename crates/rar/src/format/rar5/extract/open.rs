@@ -22,6 +22,24 @@ use crate::format::rar5::{
 use crate::format::shared::stream_mut;
 use crate::model::{DataChunk, FileHeader};
 
+/// Ceiling on how many entries a catalog may hold. The quick-open payload
+/// is capped at [`MAX_METADATA_BYTES`] but can still describe millions of
+/// small entries, and a full scan's entry count is bounded only by the
+/// physical archive size; neither may expand into multi-GiB allocation of
+/// `ArchiveEntry`/`FileHeader` objects. The bound is far above any real
+/// archive, so only hand-made inputs are rejected.
+const MAX_QUICK_OPEN_ENTRIES: usize = 1_000_000;
+
+/// Reject a catalog that would grow past `max`.
+fn check_entry_cap(count: usize, max: usize) -> RarResult<()> {
+    if count >= max {
+        return Err(RarError::Format(format!(
+            "archive catalog exceeds the {max}-entry ceiling"
+        )));
+    }
+    Ok(())
+}
+
 impl RarArchive {
     pub(crate) fn open_read(&mut self) -> RarResult<()> {
         self.volume_paths = discover_volumes(&self.path);
@@ -132,10 +150,28 @@ impl RarArchive {
         match parse_quick_open_payload(&payload, qo_abs) {
             Ok(entries) if !entries.is_empty() => {
                 self.entries = entries;
+                self.read_ctx_mut().quick_open_catalog = true;
                 Ok(true)
             }
             _ => Ok(false),
         }
+    }
+
+    /// Guarantee that `self.entries` came from a full block scan, so the
+    /// service records the quick-open payload does not cache ("STM" NTFS
+    /// streams) are discovered. No-op unless the catalog came from the
+    /// quick-open record. The scan reads headers only: payload areas are
+    /// skipped with seeks, never loaded.
+    pub(crate) fn ensure_full_catalog(&mut self) -> RarResult<()> {
+        if !self.read_ctx().quick_open_catalog {
+            return Ok(());
+        }
+        let stream = stream_mut(&mut self.stream)?;
+        stream.seek(SeekFrom::Start(
+            self.sfx_offset + RAR5_SIGNATURE.len() as u64,
+        ))?;
+        self.scan_blocks()?;
+        Ok(())
     }
 
     fn verify_signature(&mut self) -> RarResult<()> {
@@ -166,6 +202,7 @@ impl RarArchive {
     fn scan_blocks(&mut self) -> RarResult<()> {
         self.entries.clear();
         self.read_ctx_mut().streams.clear();
+        self.read_ctx_mut().quick_open_catalog = false;
 
         // None until the plaintext archive-level encryption header arrives
         // (header-encrypted archives: every block after it is `[IV][AES-256-
@@ -189,6 +226,7 @@ impl RarArchive {
                     }
                 }
                 BLOCK_TYPE_FILE_HEADER => {
+                    check_entry_cap(self.entries.len(), MAX_QUICK_OPEN_ENTRIES)?;
                     let fh = FileHeader::from_raw(raw, stream_pos)?;
                     let chunk = DataChunk {
                         volume_index: 0,
@@ -432,12 +470,24 @@ impl RarArchive {
 ///
 /// `qo_abs` is the absolute position of the QO record; each entry's
 /// `relative offset` points back to its original file header, from which
-/// the data-area offset follows. Returns an error for any structural or
-/// CRC violation (the caller falls back to a full scan).
+/// the data-area offset follows. Returns an error for any structural,
+/// CRC or entry-count violation (the caller falls back to a full scan).
 fn parse_quick_open_payload(payload: &[u8], qo_abs: u64) -> RarResult<Vec<ArchiveEntry>> {
+    parse_quick_open_payload_capped(payload, qo_abs, MAX_QUICK_OPEN_ENTRIES)
+}
+
+/// [`parse_quick_open_payload`] with an explicit entry ceiling. The payload
+/// is capped at [`MAX_METADATA_BYTES`], but its entries are tiny: without
+/// the ceiling a crafted record expands into millions of entry objects.
+fn parse_quick_open_payload_capped(
+    payload: &[u8],
+    qo_abs: u64,
+    max_entries: usize,
+) -> RarResult<Vec<ArchiveEntry>> {
     let mut entries = Vec::new();
     let mut off = 0usize;
     while off < payload.len() {
+        check_entry_cap(entries.len(), max_entries)?;
         if off + 4 > payload.len() {
             return Err(RarError::Format("quick-open: truncated entry CRC".into()));
         }
@@ -505,4 +555,44 @@ fn parse_quick_open_payload(payload: &[u8], qo_abs: u64) -> RarResult<Vec<Archiv
         off = body_end;
     }
     Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One quick-open entry: `[entry CRC32][body size][flags][relative
+    /// offset][header size][complete file header]`, matching the writer.
+    fn qo_entry(header: &[u8], rel: u64) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend(vint::encode(0));
+        body.extend(vint::encode(rel));
+        body.extend(vint::encode(header.len() as u64));
+        body.extend_from_slice(header);
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
+        entry.extend(vint::encode(body.len() as u64));
+        entry.extend(body);
+        entry
+    }
+
+    #[test]
+    fn quick_open_entry_cap_rejects_beyond_the_ceiling() {
+        let header = FileHeader {
+            name: "a.txt".into(),
+            ..Default::default()
+        }
+        .to_bytes();
+        let mut payload = qo_entry(&header, 10);
+        payload.extend(qo_entry(&header, 11));
+        assert!(parse_quick_open_payload_capped(&payload, 100, 2).is_ok());
+        let err = parse_quick_open_payload_capped(&payload, 100, 1).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
+    }
+
+    #[test]
+    fn catalog_entry_cap_matches_the_bound() {
+        assert!(check_entry_cap(MAX_QUICK_OPEN_ENTRIES - 1, MAX_QUICK_OPEN_ENTRIES).is_ok());
+        assert!(check_entry_cap(MAX_QUICK_OPEN_ENTRIES, MAX_QUICK_OPEN_ENTRIES).is_err());
+    }
 }

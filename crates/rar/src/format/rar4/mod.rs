@@ -901,6 +901,11 @@ pub(crate) fn decrypt_encrypted_header(
     header.truncate(head_size);
     let flags = u16::from_le_bytes([header[3], header[4]]);
     let add_size = if flags & LONG_BLOCK != 0 {
+        if header.len() < 11 {
+            return Err(RarError::Format(
+                "RAR4: encrypted header missing LONG_BLOCK size".into(),
+            ));
+        }
         u32::from_le_bytes(header[7..11].try_into().unwrap()) as usize
     } else {
         0
@@ -1008,6 +1013,25 @@ mod tests {
             header,
         };
         let err = parse_file_header(&block).unwrap_err();
+        assert!(
+            matches!(err, RarError::Format(_)),
+            "expected a format error, got {err}"
+        );
+    }
+
+    /// A wrong password (or a crafted block) can decrypt to `head_size = 7`
+    /// with LONG_BLOCK set: there is no room for the data-size field, so the
+    /// helper must reject the block instead of slicing `[7..11]`.
+    #[test]
+    fn encrypted_header_with_long_block_but_short_head_size_is_rejected() {
+        let mut header = vec![0u8; 7];
+        header[2] = FILE_HEAD;
+        header[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
+        header[5..7].copy_from_slice(&7u16.to_le_bytes());
+        let (encrypted, _) =
+            crate::format::rar4::write::encrypt_block_header(&header, "pw").unwrap();
+
+        let err = decrypt_encrypted_header(&encrypted, 0, b"pw").unwrap_err();
         assert!(
             matches!(err, RarError::Format(_)),
             "expected a format error, got {err}"

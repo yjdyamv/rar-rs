@@ -160,7 +160,10 @@ pub fn collect(
     skip_links: bool,
 ) -> Result<Vec<Collected>, String> {
     let mut pending: Vec<Collected> = Vec::new();
-    let mut added: HashSet<String> = HashSet::new();
+    // Deduplicate by *source path*, never by stored name: the official tool
+    // stores duplicate archive names (`-ep1 a/f.txt b/f.txt` keeps two
+    // `f.txt` members), so a name-keyed set would silently drop data.
+    let mut added: HashSet<PathBuf> = HashSet::new();
     for arg in args {
         add_with_policy(
             &mut pending,
@@ -204,7 +207,7 @@ fn add_with_policy(
     policy: &NamePolicy,
     store_links: bool,
     skip_links: bool,
-    added: &mut HashSet<String>,
+    added: &mut HashSet<PathBuf>,
 ) -> Result<(), String> {
     if has_wildcards(arg) {
         return add_wildcard_arg(pending, arg, level, policy, store_links, skip_links, added);
@@ -234,7 +237,7 @@ fn add_with_policy(
         } else {
             policy.stored_name(&rel)
         };
-        if policy.file_kept(&rel) && added.insert(name.clone()) {
+        if policy.file_kept(&rel) && added.insert(path.to_path_buf()) {
             pending.push(Collected {
                 path: path.to_path_buf(),
                 name,
@@ -300,7 +303,7 @@ fn add_wildcard_arg(
     policy: &NamePolicy,
     store_links: bool,
     skip_links: bool,
-    added: &mut HashSet<String>,
+    added: &mut HashSet<PathBuf>,
 ) -> Result<(), String> {
     let wc = pattern.find(['*', '?']).unwrap();
     let prefix = &pattern[..wc];
@@ -356,7 +359,7 @@ fn add_wildcard_arg(
                     added,
                 )?;
             }
-        } else if policy.file_kept(&rel) && added.insert(policy.stored_name(&rel)) {
+        } else if policy.file_kept(&rel) && added.insert(child.path()) {
             pending.push(Collected {
                 path: child.path(),
                 name: policy.stored_name(&rel),
@@ -377,7 +380,7 @@ fn walk_directory(
     policy: &NamePolicy,
     store_links: bool,
     skip_links: bool,
-    added: &mut HashSet<String>,
+    added: &mut HashSet<PathBuf>,
 ) -> Result<(), String> {
     let mut children: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| format!("read dir {}: {e}", dir.display()))?
@@ -411,7 +414,7 @@ fn walk_directory(
                     added,
                 )?;
             }
-        } else if policy.file_kept(&rel) && added.insert(policy.stored_name(&rel)) {
+        } else if policy.file_kept(&rel) && added.insert(child.path()) {
             pending.push(Collected {
                 path: child.path(),
                 name: policy.stored_name(&rel),
@@ -423,31 +426,9 @@ fn walk_directory(
     Ok(())
 }
 
-/// Wildcard mask match: `*` matches any sequence (including `/`), `?`
-/// matches a single character, everything else is literal; matching is
-/// case-sensitive (like `rar -x`/`-n` on Unix).
-pub fn mask_match(mask: &str, name: &str) -> bool {
-    let m: Vec<char> = mask.chars().collect();
-    let n: Vec<char> = name.chars().collect();
-    let mut prev = vec![false; n.len() + 1];
-    prev[0] = true;
-    for mc in &m {
-        let mut cur = vec![false; n.len() + 1];
-        for (i, nc) in n.iter().enumerate() {
-            let take = match mc {
-                '*' => prev[i] || cur[i],
-                '?' => prev[i],
-                c => *nc == *c && prev[i],
-            };
-            cur[i + 1] = take;
-        }
-        if *mc == '*' {
-            cur[0] = prev[0];
-        }
-        prev = cur;
-    }
-    prev[n.len()]
-}
+/// Wildcard mask match: the canonical implementation lives in
+/// [`crate::selector`] because both binaries include that module.
+pub use crate::selector::mask_match;
 
 #[cfg(test)]
 mod tests {
@@ -461,6 +442,39 @@ mod tests {
         assert!(mask_match("a?c", "abc"));
         assert!(!mask_match("a?c", "abdc"));
         assert!(mask_match("*", "anything/at/all"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mask_match_folds_case_on_windows() {
+        assert!(mask_match("*.TXT", "lower.txt"));
+        assert!(mask_match("LOWER.*", "lower.txt"));
+    }
+
+    #[test]
+    fn collect_dedups_by_source_not_by_stored_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a")).unwrap();
+        std::fs::create_dir_all(dir.path().join("b")).unwrap();
+        let first = dir.path().join("a/f.txt");
+        let second = dir.path().join("b/f.txt");
+        std::fs::write(&first, b"1").unwrap();
+        std::fs::write(&second, b"2").unwrap();
+        let policy = NamePolicy {
+            basename_only: true,
+            ..Default::default()
+        };
+        let args = vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ];
+        let collected = collect(&policy, &args, 3, false, false).unwrap();
+        assert_eq!(collected.len(), 2, "colliding stored names must both stay");
+        assert!(collected.iter().all(|c| c.name == "f.txt"));
+
+        let twice = vec![args[0].clone(), args[0].clone()];
+        let collected = collect(&policy, &twice, 3, false, false).unwrap();
+        assert_eq!(collected.len(), 1, "one source added twice stays single");
     }
 
     #[test]

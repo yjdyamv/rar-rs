@@ -143,6 +143,36 @@ impl RarArchive {
         owner_extra_cfg(self.write_ctx().meta.owner, meta)
     }
 
+    /// Clamp a member's dictionary to the current RAR5 solid chain's window.
+    ///
+    /// The reader builds one shared `DecoderState` from the chain head's
+    /// declared dictionary, so the window never grows across a solid run
+    /// (WinRAR's archiver guarantees the same). A later member whose own
+    /// size selects a larger dictionary would let the encoder emit
+    /// distances that window cannot resolve, so it inherits the chain-start
+    /// parameters instead. A chain head (or a non-solid member) records its
+    /// own selection as the window for the run.
+    fn solid_dict_params(&mut self, dsl: u8, dict_bytes: Option<u64>) -> (u8, Option<u64>) {
+        if !self.write_ctx().solid.mode {
+            return (dsl, dict_bytes);
+        }
+        if self.write_ctx().solid.encoder_state.is_none() {
+            self.write_ctx_mut().solid.chain_dict = Some((dsl, dict_bytes));
+            return (dsl, dict_bytes);
+        }
+        let Some((head_dsl, head_bytes)) = self.write_ctx().solid.chain_dict else {
+            // Chain state seeded by a path that did not record a head
+            // (surgical rewrite): leave the member's own selection.
+            return (dsl, dict_bytes);
+        };
+        let window = |log: u8, bytes: Option<u64>| bytes.unwrap_or((128u64 * 1024) << log);
+        if window(dsl, dict_bytes) > window(head_dsl, head_bytes) {
+            (head_dsl, head_bytes)
+        } else {
+            (dsl, dict_bytes)
+        }
+    }
+
     /// Try the compression filters under the `-mc` policy, returning the
     /// packed bytes of the chosen filter — or `None` when plain LZSS should
     /// handle the member.
@@ -273,6 +303,11 @@ impl RarArchive {
         // streamed into the archive (bounded memory for any file size);
         // smaller files are compressed in memory.
         if file_size >= STREAM_COMPRESS_THRESHOLD {
+            // The streaming path also applies the `-se` extension reset;
+            // run it before clamping so a fresh chain head keeps its own
+            // dictionary (the later call inside is then a no-op).
+            self.maybe_reset_solid_for_extension(&name);
+            let (dsl, dict_bytes) = self.solid_dict_params(dsl, dict_bytes);
             return self.add_file_streaming(
                 path,
                 &name,
@@ -314,6 +349,7 @@ impl RarArchive {
 
         // WinRAR `-se`: reset the solid statistics when the extension changes.
         self.maybe_reset_solid_for_extension(&name);
+        let (dsl, dict_bytes) = self.solid_dict_params(dsl, dict_bytes);
         let chain_solid =
             self.write_ctx().solid.mode && self.write_ctx().solid.encoder_state.is_some();
         self.write_ctx_mut()
@@ -772,6 +808,7 @@ impl RarArchive {
             );
             // WinRAR `-se`: reset the solid statistics when the extension changes.
             self.maybe_reset_solid_for_extension(&name);
+            let (dsl, dict_bytes) = self.solid_dict_params(dsl, dict_bytes);
             let chain_solid =
                 self.write_ctx().solid.mode && self.write_ctx().solid.encoder_state.is_some();
             if self.write_ctx().solid.mode {

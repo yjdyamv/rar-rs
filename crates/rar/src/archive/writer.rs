@@ -876,9 +876,10 @@ impl ArchiveWriter {
     /// stale `.rev` files of an overwritten set go with it. The commit is
     /// journaled, so a process killed between the renames is rolled back or
     /// completed the next time the archive is written. `.rev` recovery
-    /// volumes, when requested, are generated only after every data volume is
-    /// committed; if that step fails, `finish` returns the error but the data
-    /// volumes are already on disk.
+    /// volumes, when requested, are generated from the staged volumes and
+    /// installed by that same transaction, so a committed set always carries
+    /// its parity and a failed recovery build aborts the whole commit (the
+    /// previous set stays intact).
     pub fn finish(mut self) -> RarResult<WriteReport> {
         let mut archive = self.archive.take().ok_or_else(Self::poisoned_error)?;
         if let Err(error) = archive.close() {

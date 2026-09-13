@@ -91,6 +91,33 @@ pub(crate) fn read_windows_stream(path: &Path, stream_name: &str) -> Option<Vec<
 #[cfg(windows)]
 const MAX_MOTW_BYTES: usize = 1024 * 1024;
 
+/// Write `data` through `write_chunk` in pieces of at most `max_chunk`
+/// bytes. `WriteFile` takes a 32-bit byte count, so a larger NTFS stream
+/// must be submitted in several calls; a short write resumes at the offset
+/// it reached. Factored out so the chunking loop is testable without a real
+/// >4 GiB stream.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn write_chunked(
+    data: &[u8],
+    max_chunk: usize,
+    mut write_chunk: impl FnMut(&[u8]) -> std::io::Result<usize>,
+) -> RarResult<()> {
+    let max_chunk = max_chunk.max(1);
+    let mut written = 0usize;
+    while written < data.len() {
+        let take = (data.len() - written).min(max_chunk);
+        let n = write_chunk(&data[written..written + take]).map_err(RarError::Io)?;
+        if n == 0 {
+            return Err(RarError::Io(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "NTFS stream write made no progress",
+            )));
+        }
+        written += n;
+    }
+    Ok(())
+}
+
 /// Write an NTFS alternate data stream (`path` + `stream_name` like
 /// `:custom1`) on Windows.
 #[cfg(windows)]
@@ -128,21 +155,25 @@ pub(crate) fn write_windows_stream(path: &Path, stream_name: &str, data: &[u8]) 
     if handle == INVALID_HANDLE_VALUE {
         return Err(RarError::Io(std::io::Error::last_os_error()));
     }
-    let mut written = 0u32;
-    let ok = unsafe {
-        WriteFile(
-            handle,
-            data.as_ptr() as *const _,
-            data.len().min(u32::MAX as usize) as u32,
-            &mut written,
-            std::ptr::null_mut(),
-        )
-    };
+    let result = write_chunked(data, u32::MAX as usize, |chunk| {
+        let mut written = 0u32;
+        let ok = unsafe {
+            WriteFile(
+                handle,
+                chunk.as_ptr() as *const _,
+                chunk.len() as u32,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(written as usize)
+        }
+    });
     unsafe { CloseHandle(handle) };
-    if ok == 0 {
-        return Err(RarError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(())
+    result
 }
 
 /// Set a file's creation time (Windows only) via `SetFileTime`.
@@ -295,7 +326,8 @@ pub(crate) fn enumerate_windows_streams(path: &Path) -> RarResult<Vec<(String, u
 
 #[cfg(test)]
 mod tests {
-    use super::valid_stream_name;
+    use super::{valid_stream_name, write_chunked};
+    use crate::error::RarError;
 
     #[test]
     fn stream_names_reject_path_separators_and_embedded_colons() {
@@ -307,5 +339,46 @@ mod tests {
         assert!(!valid_stream_name(":a/b"));
         assert!(!valid_stream_name(":a:b"));
         assert!(!valid_stream_name(":a*b"));
+    }
+
+    #[test]
+    fn chunked_write_resumes_partial_writes_and_caps_chunk_size() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+        let mut got = Vec::new();
+        let mut largest_chunk = 0usize;
+        write_chunked(&data, 7, |chunk| {
+            largest_chunk = largest_chunk.max(chunk.len());
+            // Deliberately short writes force the resume-from-offset path.
+            let n = chunk.len().min(3);
+            got.extend_from_slice(&chunk[..n]);
+            Ok(n)
+        })
+        .unwrap();
+        assert_eq!(got, data);
+        assert!(
+            largest_chunk <= 7,
+            "chunks must respect the cap: {largest_chunk}"
+        );
+    }
+
+    #[test]
+    fn chunked_write_rejects_zero_progress_and_io_failures() {
+        let err = write_chunked(b"abc", 2, |_| Ok(0)).unwrap_err();
+        assert!(
+            matches!(&err, RarError::Io(e) if e.kind() == std::io::ErrorKind::WriteZero),
+            "got {err}"
+        );
+
+        let err = write_chunked(b"abc", 2, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&err, RarError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "got {err}"
+        );
     }
 }

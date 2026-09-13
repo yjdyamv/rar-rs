@@ -42,6 +42,11 @@ pub(crate) struct ReadState {
     /// members, in archive order.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub streams: Vec<StreamRecord>,
+    /// True while `entries` came from the quick-open record rather than a
+    /// full block scan. The QO payload caches file headers only, so it
+    /// carries no "STM" service records; extraction replaces such a
+    /// catalog with a full scan first (see `ensure_full_catalog`).
+    pub quick_open_catalog: bool,
     /// Mark of the Web propagation for extraction (WinRAR `-om`).
     pub motw: Option<crate::options::MarkOfTheWeb>,
     /// RAR 1.3/1.4 main-header flags of the first opened volume (`RE~^`
@@ -58,6 +63,7 @@ impl Default for ReadState {
             rar4_decoded_through: -1,
             extract_options: crate::options::ExtractOptions::default(),
             streams: Vec::new(),
+            quick_open_catalog: false,
             motw: None,
             rar13_flags: 0,
         }
@@ -108,6 +114,12 @@ pub(crate) struct SolidChain {
     pub last_ext: Option<String>,
     /// Persistent RAR5 encoder state for solid archives.
     pub encoder_state: Option<crate::codec::EncoderState>,
+    /// Dictionary parameters `(comp_dict_size, dict_size_bytes)` of the
+    /// current RAR5 solid chain's first member. The shared decoder window
+    /// is fixed there (the reader builds one `DecoderState` from the chain
+    /// head), so later members of the run are clamped to it; cleared by
+    /// [`crate::archive::RarArchive::reset_solid_chain`].
+    pub chain_dict: Option<(u8, Option<u64>)>,
     /// Persistent RAR4 LZSS encoder for solid archives; the sliding window
     /// and Huffman table state carry across the members of a solid run.
     pub rar4_encoder: Option<crate::codec::legacy::rar29_encoder::Unpack29Encoder>,
@@ -132,6 +144,7 @@ impl Default for SolidChain {
             reset: crate::options::SolidReset::Continuous,
             last_ext: None,
             encoder_state: None,
+            chain_dict: None,
             rar4_encoder: None,
             legacy_encoder: None,
             rar4_unp_ver: 29,

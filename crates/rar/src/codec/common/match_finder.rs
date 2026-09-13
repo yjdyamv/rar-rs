@@ -25,10 +25,11 @@ pub const LONG_RANGE_MAX: usize = 128 * 1024 * 1024;
 /// Open-addressing hash table mapping a 4-byte sample hash to its most
 /// recent position inside the long-range history (a relative offset).
 ///
-/// Keys are stored as `hash + 1` so 0 marks an empty slot; values are
-/// i32 because the history is bounded by [`LONG_RANGE_MAX`]. The table
-/// starts small and grows geometrically as history is pushed, so memory
-/// tracks the actual data size instead of the declared dictionary.
+/// Keys are stored through [`LongRangeTable::slot_key`] so 0 marks an
+/// empty slot; values are i32 because the history is bounded by
+/// [`LONG_RANGE_MAX`]. The table starts small and grows geometrically as
+/// history is pushed, so memory tracks the actual data size instead of the
+/// declared dictionary.
 struct LongRangeTable {
     keys: Vec<u32>,
     vals: Vec<i32>,
@@ -84,12 +85,14 @@ impl LongRangeTable {
         for (i, k) in self.keys.iter().enumerate() {
             if *k != 0 {
                 // Insert the second-newest first so the newest ends up in
-                // `vals` and the chain survives the rehash.
+                // `vals` and the chain survives the rehash. `slot_key` is
+                // not invertible, so only the already-transformed value is
+                // available here; `insert_slot` takes it as-is.
                 let v2 = self.vals2[i];
                 if v2 != 0 {
-                    grown.insert(*k - 1, v2);
+                    grown.insert_slot(*k, v2);
                 }
-                grown.insert(*k - 1, self.vals[i]);
+                grown.insert_slot(*k, self.vals[i]);
             }
         }
         *self = grown;
@@ -106,23 +109,44 @@ impl LongRangeTable {
         }
     }
 
+    /// Stored representation of a hash key: never 0 (the empty-slot
+    /// sentinel). Plain `key + 1` overflowed at `u32::MAX` — in release the
+    /// wrap to 0 made the slot look empty (the entry became silently
+    /// invisible to probes), in debug it panicked. No map from `u32` into
+    /// the nonzero `u32` values can be injective, so this merges exactly
+    /// one pair, `{0, u32::MAX}`; every other key keeps its own value. A
+    /// merged pair can only make a probe return the other key's offset,
+    /// which `find_from` re-verifies against the real bytes — it costs a
+    /// candidate, never returns a wrong match.
     #[inline]
-    fn probe(&self, key: u32) -> usize {
-        (key.wrapping_mul(0x9E3779B1) as usize) & self.mask
+    fn slot_key(key: u32) -> u32 {
+        key.wrapping_add(1).max(1)
+    }
+
+    #[inline]
+    fn probe(&self, slot: u32) -> usize {
+        (slot.wrapping_mul(0x9E3779B1) as usize) & self.mask
     }
 
     /// Insert or refresh `(key, offset)` — the newest position wins for
     /// repeated keys (LZ favors the most recent candidate); the previous
     /// newest drops to the second slot (see [`LongRangeTable::vals2`]).
     fn insert(&mut self, key: u32, offset: i32) {
-        let mut i = self.probe(key);
+        self.insert_slot(Self::slot_key(key), offset);
+    }
+
+    /// [`Self::insert`] for an already-transformed value; the rehash only
+    /// has the stored slot form left.
+    fn insert_slot(&mut self, slot: u32, offset: i32) {
+        debug_assert!(slot != 0, "0 is the empty-slot sentinel");
+        let mut i = self.probe(slot);
         let step = 1;
         loop {
-            if self.keys[i] == 0 || self.keys[i] == key + 1 {
-                if self.keys[i] == key + 1 {
+            if self.keys[i] == 0 || self.keys[i] == slot {
+                if self.keys[i] == slot {
                     self.vals2[i] = self.vals[i];
                 }
-                self.keys[i] = key + 1;
+                self.keys[i] = slot;
                 self.vals[i] = offset;
                 return;
             }
@@ -136,11 +160,12 @@ impl LongRangeTable {
     /// position itself (self-shadowing).
     #[inline]
     fn get_before(&self, key: u32, limit: i32) -> Option<i32> {
+        let key = Self::slot_key(key);
         let mut i = self.probe(key);
         loop {
             match self.keys[i] {
                 0 => return None,
-                k if k == key + 1 => {
+                k if k == key => {
                     let v = self.vals[i];
                     if v < limit {
                         return Some(v);
@@ -1162,6 +1187,50 @@ mod tests {
         // The oldest data slid out: the retained history starts at
         // 256 KiB - 64 KiB.
         assert_eq!(lr.hist_base(), 256 * 1024 - 64 * 1024);
+    }
+
+    /// The hash value `0xFFFF_FFFF` is a valid 4-byte sample hash. The old
+    /// `key + 1` encoding overflowed there: debug panicked, release wrapped
+    /// to the 0 empty-slot sentinel and the entry vanished. The transformed
+    /// key must insert, refresh, survive a rehash and be found through the
+    /// full `LongRange` path.
+    #[test]
+    fn long_range_hash_max_value_is_found() {
+        // `AF D0 74 F1` little-endian = 0xF174D0AF; times the hash constant
+        // wraps to 0xFFFF_FFFF.
+        let bytes = [0xAF, 0xD0, 0x74, 0xF1];
+        let key = long_hash4(&bytes, 0);
+        assert_eq!(key, u32::MAX);
+
+        let mut table = LongRangeTable::with_capacity(TABLE_MIN_CAP);
+        table.insert(key, 123);
+        assert_eq!(
+            table.get_before(key, 200),
+            Some(123),
+            "inserted entry must be found"
+        );
+
+        // Refresh: the previous newest must drop to the second slot.
+        table.insert(key, 456);
+        assert_eq!(table.get_before(key, 500), Some(456));
+        assert_eq!(table.get_before(key, 456), Some(123));
+
+        // Rehash (the grow path only has the transformed value left).
+        table.grow_to(TABLE_MIN_CAP, TABLE_MIN_CAP * 2);
+        assert_eq!(
+            table.get_before(key, 500),
+            Some(456),
+            "entry must survive the rehash"
+        );
+
+        // End to end: the pattern must be found through the sampled table.
+        let mut lr = LongRange::new(64 * 1024);
+        let mut chunk = [0u8; LONG_RANGE_STEP];
+        chunk[..4].copy_from_slice(&bytes);
+        lr.push(&chunk);
+        let found = lr.find(&chunk, 0, 1, LONG_RANGE_STEP);
+        let (dist, len) = found.expect("the pattern must be found");
+        assert_eq!((dist as usize, len), (LONG_RANGE_STEP, LONG_RANGE_STEP));
     }
 
     /// The software-pipelined first step ([`TreeMatchFinder::seed_for`]

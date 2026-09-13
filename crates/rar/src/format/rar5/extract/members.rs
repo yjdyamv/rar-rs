@@ -38,6 +38,15 @@ const PARALLEL_MIN_MEMBERS: usize = 4;
 #[cfg(feature = "parallel")]
 const PARALLEL_MIN_UNPACKED: u64 = 64 * 1024 * 1024;
 
+/// Destination resolution outcome for one member; the serial and parallel
+/// extraction paths share it so `-e`, `-o-` and `-or` behave identically.
+enum DestResolution {
+    /// Extract the member to this path.
+    Extract(PathBuf),
+    /// `-o-`: the destination already exists and must be left untouched.
+    Skip(PathBuf),
+}
+
 impl RarArchive {
     /// Extract all archive contents with explicit options.
     pub fn extract_all_with_options(
@@ -48,6 +57,9 @@ impl RarArchive {
         let dest = dest_dir.as_ref();
         fs::create_dir_all(dest)?;
         self.read_ctx_mut().extract_options = opts;
+        // A quick-open catalog carries no "STM" service records: replace it
+        // with the scanned catalog before extraction restores streams.
+        self.ensure_full_catalog()?;
 
         #[cfg(feature = "parallel")]
         {
@@ -215,7 +227,10 @@ impl RarArchive {
         for result in results {
             let member = result?;
             let entry = &self.entries[member.idx];
-            let dest_path = self.safe_dest_path(dest, &entry.header.name)?;
+            let dest_path = match self.resolve_dest_path(entry, dest)? {
+                DestResolution::Extract(path) => path,
+                DestResolution::Skip(_) => continue,
+            };
             if entry.is_dir() {
                 fs::create_dir_all(&dest_path)?;
                 continue;
@@ -283,6 +298,14 @@ impl RarArchive {
         let dest = dest_dir.as_ref();
         fs::create_dir_all(dest)?;
         self.read_ctx_mut().extract_options = opts;
+        // A quick-open catalog carries no "STM" service records: replace it
+        // with the scanned catalog before extraction restores streams.
+        self.ensure_full_catalog()?;
+        if idx >= self.entries.len() {
+            return Err(RarError::InvalidState(
+                "entry index is outside the scanned catalog".into(),
+            ));
+        }
         self.validate_entry_limits(idx)?;
         self.extract_entry(idx, &self.entries[idx].clone(), dest)
     }
@@ -313,25 +336,28 @@ impl RarArchive {
         Ok(())
     }
 
-    /// Extract one entry. File contents are decoded to a temporary file and
-    /// renamed over the destination only after integrity checks pass, so a
-    /// failure never leaves partial or corrupt output behind.
-    fn extract_entry(
-        &mut self,
-        idx: usize,
+    /// Resolve the destination path for one member, applying the shared
+    /// extraction policies: flat extraction (`-e`), `-o-` (skip existing)
+    /// and `-or` (auto rename).
+    ///
+    /// Flat extraction (`rar e` / `unrar e`) lands members in the
+    /// destination directory under their basename. The safe-path policy
+    /// always applies — the full member name is sanitized (which rejects
+    /// `..`/absolute/drive names) before its basename is used, so
+    /// traversal-shaped names cannot escape the destination. A directory
+    /// in flat mode resolves to the destination directory itself.
+    ///
+    /// `Skip` means the destination exists and `skip_existing` is set, so
+    /// the caller must leave it untouched. Both the serial (`extract_entry`)
+    /// and parallel (phase 3) paths call this, so they stay identical.
+    fn resolve_dest_path(
+        &self,
         entry: &ArchiveEntry,
         dest_dir: &Path,
-    ) -> RarResult<PathBuf> {
-        self.validate_entry_limits(idx)?;
-
-        // Flat extraction (`rar e` / `unrar e`): members land in the
-        // destination directory under their basename. The safe-path policy
-        // always applies here — the full member name is sanitized (which
-        // rejects `..`/absolute/drive names) before its basename is used,
-        // so traversal-shaped names cannot escape the destination.
+    ) -> RarResult<DestResolution> {
         let dest_path = if self.read_ctx().extract_options.flat_paths {
             if entry.is_dir() {
-                return Ok(dest_dir.to_path_buf());
+                return Ok(DestResolution::Extract(dest_dir.to_path_buf()));
             }
             let safe_name = sanitize_archive_path(&entry.header.name)?;
             let base = safe_name.rsplit('/').next().unwrap_or(&safe_name);
@@ -343,7 +369,7 @@ impl RarArchive {
         // `-o-` (skip existing): members whose destination already exists
         // are left untouched.
         if self.read_ctx().extract_options.skip_existing && dest_path.exists() {
-            return Ok(dest_path);
+            return Ok(DestResolution::Skip(dest_path));
         }
 
         // `-or` (auto rename): when the destination exists, insert `(N)`
@@ -364,6 +390,24 @@ impl RarArchive {
                 n += 1;
             }
         }
+        Ok(DestResolution::Extract(dest_path))
+    }
+
+    /// Extract one entry. File contents are decoded to a temporary file and
+    /// renamed over the destination only after integrity checks pass, so a
+    /// failure never leaves partial or corrupt output behind.
+    fn extract_entry(
+        &mut self,
+        idx: usize,
+        entry: &ArchiveEntry,
+        dest_dir: &Path,
+    ) -> RarResult<PathBuf> {
+        self.validate_entry_limits(idx)?;
+
+        let dest_path = match self.resolve_dest_path(entry, dest_dir)? {
+            DestResolution::Extract(path) => path,
+            DestResolution::Skip(path) => return Ok(path),
+        };
 
         if entry.is_dir() {
             fs::create_dir_all(&dest_path)?;

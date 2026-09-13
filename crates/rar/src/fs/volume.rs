@@ -4,26 +4,41 @@
 
 use std::path::{Path, PathBuf};
 
+/// Strip a trailing `.rar` or `.rev` extension (ASCII case-insensitive).
+/// ASCII lowering preserves byte offsets, so the returned slice is valid
+/// for the original name (a Unicode `to_lowercase` can expand characters).
+fn strip_archive_extension(name: &str) -> Option<&str> {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".rar") || lower.ends_with(".rev") {
+        Some(&name[..name.len() - 4])
+    } else {
+        None
+    }
+}
+
+/// Split a `{base}.part{N}` stem (extension already stripped) at its LAST
+/// `.part`: returns `(base, digit width)` when the trailing segment is all
+/// ASCII digits and the base is non-empty. The last occurrence matters for
+/// bases that themselves contain `.part` (`my.partition.part2.rar` →
+/// `("my.partition", 1)`). Matching is ASCII case-insensitive; the returned
+/// base slices the original `name`, preserving its casing.
+fn split_part_stem(name: &str) -> Option<(&str, usize)> {
+    let lower = name.to_ascii_lowercase();
+    let (base, tail) = lower.rsplit_once(".part")?;
+    if base.is_empty() || tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((&name[..base.len()], tail.len()))
+}
+
 /// Extract the volume base and the zero-padding width of the part number
 /// from a name like `archive.part3.rar` → `("archive", 1)` or
 /// `archive.part03.rar` → `("archive", 2)`. WinRAR pads the number to the
 /// digit count of the total volume count (part01..part15), so both forms
 /// must be discoverable.
 pub(crate) fn extract_volume_base(name: &str) -> Option<(String, usize)> {
-    // Case-insensitive match for `.partN.rar`; ASCII lowercasing preserves
-    // byte offsets (a Unicode `to_lowercase` can expand characters, which
-    // would make the index invalid for slicing `name`).
-    let lower = name.to_ascii_lowercase();
-    if let Some(idx) = lower.find(".part") {
-        let after = &lower[idx + 5..];
-        if let Some(rar_idx) = after.find(".rar") {
-            let num_str = &after[..rar_idx];
-            if num_str.chars().all(|c| c.is_ascii_digit()) && !num_str.is_empty() {
-                return Some((name[..idx].to_string(), num_str.len()));
-            }
-        }
-    }
-    None
+    let stem = strip_archive_extension(name)?;
+    split_part_stem(stem).map(|(base, width)| (base.to_string(), width))
 }
 
 /// Volume base of an archive path, stripping `.partN.rar` or `.rar`
@@ -118,11 +133,7 @@ fn part_volume_base(name: &str) -> Option<&str> {
     let stem = name
         .strip_suffix(".rar")
         .or_else(|| name.strip_suffix(".RAR"))?;
-    let (base, tail) = stem.rsplit_once(".part")?;
-    if base.is_empty() || tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    Some(base)
+    split_part_stem(stem).map(|(base, _)| base)
 }
 
 /// Base name of a `{base}.partN.rev` recovery-volume file, if the name parses
@@ -131,11 +142,7 @@ fn part_recovery_base(name: &str) -> Option<&str> {
     let stem = name
         .strip_suffix(".rev")
         .or_else(|| name.strip_suffix(".REV"))?;
-    let (base, tail) = stem.rsplit_once(".part")?;
-    if base.is_empty() || tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    Some(base)
+    split_part_stem(stem).map(|(base, _)| base)
 }
 
 /// Existing volume files of the set based at `base` that `keep` does not
@@ -200,6 +207,59 @@ pub(crate) fn stale_volume_paths(
 #[cfg(test)]
 mod tests {
     use super::stale_volume_paths;
+    use std::path::Path;
+
+    #[test]
+    fn part_base_splits_at_the_last_part_segment() {
+        assert_eq!(
+            super::extract_volume_base("my.partition.part2.rar"),
+            Some(("my.partition".to_string(), 1))
+        );
+        assert_eq!(
+            super::extract_volume_base("my.part2.rar"),
+            Some(("my".to_string(), 1))
+        );
+        // `part01`: part number 1, zero-padding width 2.
+        assert_eq!(
+            super::extract_volume_base("set.part01.rar"),
+            Some(("set".to_string(), 2))
+        );
+        // Not part-volume names: the `.part` inside `partition` is not the
+        // segment separator, and `.rar`/`.rNN` legacy naming is untouched.
+        assert_eq!(super::extract_volume_base("my.partition.rar"), None);
+        assert_eq!(super::extract_volume_base("archive.rar"), None);
+        assert_eq!(super::extract_volume_base("archive.r00"), None);
+        assert_eq!(
+            super::legacy_volume_base("archive.rar").as_deref(),
+            Some("archive")
+        );
+        assert_eq!(
+            super::legacy_volume_base("archive.r00").as_deref(),
+            Some("archive")
+        );
+    }
+
+    #[test]
+    fn volume_base_of_agrees_with_part_discovery() {
+        assert_eq!(
+            super::volume_base_of(Path::new("dir/my.partition.part2.rar")),
+            "my.partition"
+        );
+        assert_eq!(
+            super::volume_base_of(Path::new("dir/my.partition.rar")),
+            "my.partition"
+        );
+        assert_eq!(super::volume_base_of(Path::new("dir/my.part2.rar")), "my");
+        assert_eq!(
+            super::volume_base_of(Path::new("dir/archive.rar")),
+            "archive"
+        );
+        // The legacy `.rNN` fallback still strips only `.rar`.
+        assert_eq!(
+            super::volume_base_of(Path::new("dir/archive.r00")),
+            "archive.r00"
+        );
+    }
 
     #[test]
     fn stale_scan_ignores_staged_temporaries_and_kept_parts() {

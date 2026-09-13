@@ -121,16 +121,26 @@ pub(crate) fn repack_solid_archive(
     };
     // `-hp`: the fresh archive carries the same protection — the members are
     // re-encoded from their decrypted bytes, so both the data and the
-    // headers are re-encrypted with the archive password.
+    // headers are re-encrypted with the archive password. `-p` (without
+    // `-hp`) must survive the repack too: the members are re-encoded from
+    // decrypted bytes into an archive written with the same member password,
+    // and a repack without the password would strip the encryption.
     let hp = archive_is_header_encrypted(archive)? || archive.header_encryption;
-    let password = if hp {
+    let member_encrypted = archive
+        .entries
+        .iter()
+        .any(|entry| entry.header.flags & crate::format::rar4::FHD_PASSWORD as u64 != 0);
+    let password = if hp || member_encrypted {
         Some(
             header_password(archive)
                 .ok_or_else(|| {
-                    RarError::Encrypted(
+                    RarError::Encrypted(if hp {
                         "repacking a header-encrypted (-hp) RAR4 archive requires its password"
-                            .into(),
-                    )
+                            .into()
+                    } else {
+                        "repacking a member-encrypted (-p) RAR4 archive requires its password"
+                            .into()
+                    })
                 })?
                 .to_string(),
         )

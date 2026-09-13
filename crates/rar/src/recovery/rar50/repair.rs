@@ -505,6 +505,12 @@ pub(super) fn parse_inline_recovery_chunk(input: &[u8]) -> Result<InlineRecovery
 
     let protected_size = read_u64(input, 0x22)?;
     let group_count = read_u64(input, 0x2a)?;
+    // The encoder rounds `group_count` up to an even size (the RS solver
+    // works on 16-bit words); an odd record never comes from a writer and
+    // must not reach the word-pair loops below.
+    if !group_count.is_multiple_of(2) {
+        return Err(Error::OddShardSize);
+    }
     let shard_size = read_u64(input, 0x32)?;
     let data_shards = u16::from_le_bytes(input[0x3a..0x3c].try_into().unwrap()) as u64;
     let recovery_shards = u16::from_le_bytes(input[0x3c..0x3e].try_into().unwrap()) as u64;
@@ -601,4 +607,52 @@ fn recover_damaged_shards(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A structurally valid `{RB}` chunk (correct CRC64) declaring an odd
+    /// `group_count`, as a damaged/crafted archive may carry. The RS solver
+    /// reads 16-bit words, so the record is malformed; the guard must reject
+    /// it before the word-pair loops index past the parity shard.
+    fn odd_group_count_chunk(prefix_len: u64) -> Vec<u8> {
+        let data_shards = 1u16;
+        let recovery_shards = 1u16;
+        let group_count = 1u64;
+        let header_size = RAR5_RECOVERY_CHUNK_FIXED_HEADER_SIZE + u64::from(data_shards) * 8;
+        let shard_size = header_size + group_count;
+        let mut chunk = vec![0u8; shard_size as usize];
+        chunk[..4].copy_from_slice(b"{RB}");
+        chunk[0x0c..0x10].copy_from_slice(&(shard_size as u32).to_le_bytes());
+        chunk[0x10..0x14].copy_from_slice(&(header_size as u32).to_le_bytes());
+        chunk[0x14] = 1;
+        chunk[0x15] = 1;
+        chunk[0x22..0x2a].copy_from_slice(&prefix_len.to_le_bytes());
+        chunk[0x2a..0x32].copy_from_slice(&group_count.to_le_bytes());
+        chunk[0x32..0x3a].copy_from_slice(&shard_size.to_le_bytes());
+        chunk[0x3a..0x3c].copy_from_slice(&data_shards.to_le_bytes());
+        chunk[0x3c..0x3e].copy_from_slice(&recovery_shards.to_le_bytes());
+        // The recorded data-shard state deliberately mismatches, as in the
+        // report: the old code marked the shard damaged and then indexed
+        // `parity[1]`.
+        let crc = crc64_xz(&chunk[0x0c..]);
+        chunk[0x04..0x0c].copy_from_slice(&crc.to_le_bytes());
+        chunk
+    }
+
+    #[test]
+    fn odd_group_count_recovery_chunk_is_rejected() {
+        let chunk = odd_group_count_chunk(1);
+        assert_eq!(
+            parse_inline_recovery_chunk(&chunk).unwrap_err(),
+            Error::OddShardSize
+        );
+        assert_eq!(
+            repair_inline_recovery_prefix(&[0x5a], &chunk),
+            Err(Error::BadRecoveryChunk)
+        );
+        assert!(crate::recovery::repair_archive(&chunk).is_err());
+    }
 }

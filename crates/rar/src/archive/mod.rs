@@ -40,9 +40,9 @@ use crate::format::rar5::vint;
 use crate::format::rar5::{
     ARCHIVE_FLAG_LOCKED, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_ARCHIVE_HEADER,
     BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
-    BLOCK_TYPE_SERVICE_HEADER,
+    BLOCK_TYPE_SERVICE_HEADER, ENCR_IV_SIZE,
 };
-use crate::fs::atomic::{copy_prefix, read_write_create, temp_sibling_path};
+use crate::fs::atomic::{copy_prefix, read_write_create, replace_file, temp_sibling_path};
 use crate::write_progress::ProgressTracker;
 
 use state::{
@@ -107,6 +107,12 @@ pub(crate) const PARALLEL_COMPRESS_WAVE_BUDGET: u64 = 256 * 1024 * 1024;
 pub struct RarArchive {
     pub(crate) path: PathBuf,
     pub(crate) mode: Mode,
+    /// Set before the first trailing write of [`RarArchive::finish_writing`].
+    /// Once finalization has been attempted, a failed/partial result must
+    /// never be finalized again (a retry could append a second quick-open /
+    /// recovery record or patch the wrong offset): [`RarArchive::close`] and
+    /// [`Drop`] both refuse to re-enter it.
+    pub(crate) finalize_started: bool,
     pub(crate) entries: Vec<ArchiveEntry>,
     /// The archive stream: a file, or any caller-provided seekable
     /// read/write sink (in-memory `Cursor` in tests, stdin/stdout for
@@ -192,6 +198,7 @@ impl RarArchive {
         RarArchive {
             path,
             mode,
+            finalize_started: false,
             entries: Vec::new(),
             sfx_offset: 0,
             rar4: false,
@@ -317,6 +324,10 @@ impl RarArchive {
     pub(crate) fn abort(&mut self) {
         self.stream = None;
         self.mode = Mode::Read;
+        // This is an explicit abort of the operation, not a finalization
+        // attempt: a later close may finalize (and, after an abort's cleanup,
+        // find nothing to commit).
+        self.finalize_started = false;
         self.recovery_volumes_percent = None;
         self.recovery_volumes_count = None;
         self.recovery_percent = None;
@@ -349,7 +360,11 @@ impl RarArchive {
     /// record, so listing (`list` / `namelist`) is O(QO size) instead of
     /// O(archive size). Archives without a usable record (multi-volume,
     /// header-encrypted, or `-qo-`) transparently fall back to the full
-    /// scan, and reading/extraction work identically either way.
+    /// scan. Listing therefore always stays fast, while extraction first
+    /// performs a header-only rescan (payload areas are skipped, never
+    /// read) because the QO payload caches file headers only and would
+    /// otherwise silently drop "STM" NTFS alternate data streams; after
+    /// that, reading and extraction work identically to a full scan.
     pub fn open_quick(path: impl AsRef<Path>) -> RarResult<Self> {
         let mut archive = Self::new_for_mode(path.as_ref().to_path_buf(), Mode::Read, None);
         archive.open_read_quick()?;
@@ -612,6 +627,12 @@ impl RarArchive {
     /// Lock the archive (like `rar k`): sets the `LOCKED` flag in the main
     /// archive header, making the archive read-only. Locking is
     /// irreversible.
+    ///
+    /// The patched prefix is staged in a temporary sibling and installed over
+    /// the archive only when it is complete and flushed, so a crash or a
+    /// failed install leaves the original archive untouched instead of a
+    /// header with a stale CRC. The in-place stream is not touched: the read
+    /// side opens it lazily per operation.
     pub(crate) fn lock(&mut self) -> RarResult<()> {
         if self.mode != Mode::Read {
             return Err(RarError::Format(
@@ -654,7 +675,9 @@ impl RarArchive {
         };
 
         // Patch the archive-level flags in the plaintext header and
-        // recompute the CRC.
+        // recompute the CRC. The flags field lives in the header body at
+        // `offset`; the on-disk header is `[crc 4][size vint][body]` (or an
+        // IV + ciphertext when header-encrypted, rebuilt below).
         let data = &main_meta.raw.header_data;
         let mut offset = 0usize;
         let (_, n) = vint::decode_from_slice(data, offset)
@@ -677,30 +700,52 @@ impl RarArchive {
                 "cannot lock: the archive flags field grows when locked".into(),
             ));
         }
-        let mut hdr = main_meta.header_bytes.clone();
-        // Header bytes: [crc 4][size vint][body]; the flags field lives at
-        // 4 + hsize_vint_len + offset within the body.
-        let body_off = 4 + main_meta.hsize_vint_len + offset;
-        hdr[body_off..body_off + vint_len].copy_from_slice(&new_vint);
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&hdr[4..]);
-        let crc = hasher.finalize();
-        hdr[..4].copy_from_slice(&crc.to_le_bytes());
+        let mut body = main_meta.raw.header_data.clone();
+        body[offset..offset + vint_len].copy_from_slice(&new_vint);
+        let plain = plain_header_bytes(&body);
 
-        self.stream = Some(Box::new(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)?,
-        ));
+        // Stage the archive start up to the main header, the re-encoded main
+        // header, and the untouched tail into a temporary sibling; streaming
+        // keeps memory bounded for multi-GB archives and the original is
+        // untouched until the flushed stage replaces it. Header-encrypted
+        // archives get a fresh IV (the on-disk header is `[IV][ciphertext]`).
         let main_start = main_meta.block_start;
-        self.stream
-            .as_mut()
-            .unwrap()
-            .seek(SeekFrom::Start(main_start))?;
-        self.write_block_header(&hdr)?;
-        self.stream = None;
-        Ok(())
+        let main_end = main_meta.data_offset;
+        let header_encryption = self.header_encryption;
+        let password = self.password.clone();
+        let archive_encr = self.archive_encr.clone();
+        stage_file(
+            &path,
+            |out| {
+                let mut reader = File::open(&path)?;
+                copy_prefix(&mut reader, out, main_start)?;
+                if header_encryption {
+                    let password = password
+                        .as_deref()
+                        .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
+                    let key = archive_encr
+                        .as_ref()
+                        .ok_or_else(|| RarError::Format("no archive encryption params".into()))?
+                        .get_key(password)?;
+                    let mut iv = [0u8; ENCR_IV_SIZE];
+                    rand::fill(&mut iv);
+                    out.write_all(&iv)?;
+                    out.write_all(&crypto::encrypt_data(&plain, &key, &iv))?;
+                } else {
+                    out.write_all(&plain)?;
+                }
+                let file_len = reader.metadata().map_err(RarError::Io)?.len();
+                if file_len < main_end {
+                    return Err(RarError::Format(
+                        "archive tail lies past the end of the archive".into(),
+                    ));
+                }
+                reader.seek(SeekFrom::Start(main_end))?;
+                copy_prefix(&mut reader, out, file_len - main_end)?;
+                Ok(())
+            },
+            replace_file,
+        )
     }
 
     /// Create a new RAR archive with explicit options (overwrites an
@@ -798,6 +843,7 @@ impl RarArchive {
         let archive = RarArchive {
             path,
             mode: Mode::Write,
+            finalize_started: false,
             entries: Vec::new(),
             sfx_offset: 0,
             rar4: is_rar4,
@@ -823,6 +869,7 @@ impl RarArchive {
                     reset: opts.solid_reset,
                     last_ext: None,
                     encoder_state: None,
+                    chain_dict: None,
                     rar4_encoder: None,
                     legacy_encoder: None,
                     rar4_unp_ver: if is_rar4 {
@@ -911,6 +958,43 @@ impl RarArchive {
     }
 }
 
+/// Replace `dest` with the contents of a temporary sibling filled by
+/// `write_staged`: the bytes are flushed before the install, and a failed
+/// install (or a failed fill) removes the temporary file, leaving `dest`
+/// untouched. Used by the archive lock path, which must never leave a header
+/// with a stale CRC at the archive path.
+fn stage_file(
+    dest: &Path,
+    write_staged: impl FnOnce(&mut File) -> RarResult<()>,
+    install: impl FnOnce(&Path, &Path) -> RarResult<()>,
+) -> RarResult<()> {
+    let tmp_path = temp_sibling_path(dest);
+    let staged = (|| -> RarResult<()> {
+        let mut file = read_write_create(&tmp_path)?;
+        write_staged(&mut file)?;
+        file.sync_all().map_err(RarError::Io)
+    })();
+    let installed = staged.and_then(|()| install(&tmp_path, dest));
+    if installed.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    installed
+}
+
+/// Re-encode a plaintext RAR5 header body as the on-disk bytes
+/// `[CRC32][size vint][body]`, matching the read-side block parser.
+fn plain_header_bytes(body: &[u8]) -> Vec<u8> {
+    let size = vint::encode(body.len() as u64);
+    let mut content = Vec::with_capacity(size.len() + body.len());
+    content.extend(&size);
+    content.extend(body);
+    let crc = crc32fast::hash(&content);
+    let mut out = Vec::with_capacity(4 + content.len());
+    out.extend(crc.to_le_bytes());
+    out.extend(content);
+    out
+}
+
 /// Project the plain [`crate::options::CreateOptions`] struct onto the
 /// RAR4-only policy the legacy format module owns, so both write surfaces
 /// are checked by the same rule set.
@@ -930,7 +1014,12 @@ impl From<&crate::options::CreateOptions> for Rar4WriteOptions {
 
 impl Drop for RarArchive {
     fn drop(&mut self) {
-        let _ = self.close();
+        // Once finalization has been attempted, never re-enter it: a failed
+        // or partial finalize may have left the stream mid-write, and a
+        // retry would corrupt the archive. The caller already saw the error.
+        if !self.finalize_started {
+            let _ = self.close();
+        }
         // `close` may have failed (or never been reached); remove any
         // staged files that were not committed so a failed or interrupted
         // write leaves no garbage behind and never a partial archive at

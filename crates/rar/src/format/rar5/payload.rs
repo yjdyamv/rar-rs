@@ -60,6 +60,16 @@ impl ChunkReader for SingleFileReader<'_> {
     }
 }
 
+/// Convert a declared payload size to `usize`, rejecting lengths that do not
+/// fit the host address space: on 32-bit targets `as usize` would silently
+/// truncate them and defeat the surrounding size limits.
+fn size_to_usize(size: u64, name: &str, what: &str) -> RarResult<usize> {
+    usize::try_from(size).map_err(|_| RarError::LimitExceeded {
+        limit: size,
+        context: format!("{name}: {what} overflows host address space"),
+    })
+}
+
 /// Read a member's full packed payload from the reader with per-chunk CRC
 /// verification, decrypting when the header carries an encryption extra
 /// record (keys derived once, reused for integrity verification).
@@ -89,9 +99,10 @@ pub(crate) fn read_packed<R: ChunkReader + ?Sized>(
         }
     }
 
+    let packed_len = size_to_usize(total_packed, name, "packed size")?;
     let mut packed = Vec::new();
     packed
-        .try_reserve_exact(total_packed as usize)
+        .try_reserve_exact(packed_len)
         .map_err(|_| RarError::LimitExceeded {
             limit: max_packed,
             context: format!("{name}: cannot allocate packed data"),
@@ -133,7 +144,8 @@ pub(crate) fn read_packed<R: ChunkReader + ?Sized>(
         let keys = p.derive_keys(password)?;
         let mut data = crypto::decrypt_data(&packed, &keys.key, &p.iv)?;
         if hdr.comp_method == COMP_METHOD_STORE {
-            data.truncate(hdr.unpacked_size as usize);
+            let unp_size = size_to_usize(hdr.unpacked_size, name, "unpacked size")?;
+            data.truncate(unp_size);
         }
         packed = data;
         Some(keys)
@@ -207,5 +219,22 @@ mod tests {
         let mut out = Vec::new();
         let err = decode_member(&hdr, &payload, None, &mut out).unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "got {err}");
+    }
+
+    #[test]
+    fn declared_sizes_must_fit_the_host_address_space() {
+        assert_eq!(size_to_usize(4096, "m", "packed size").unwrap(), 4096);
+        let over_32_bit = u64::from(u32::MAX) + 1;
+        if cfg!(target_pointer_width = "64") {
+            // 64-bit hosts can represent the value; only 32-bit targets can
+            // execute the rejection arm below.
+            assert_eq!(
+                size_to_usize(over_32_bit, "m", "packed size").unwrap(),
+                usize::try_from(over_32_bit).unwrap()
+            );
+        } else {
+            let err = size_to_usize(over_32_bit, "m", "packed size").unwrap_err();
+            assert!(matches!(err, RarError::LimitExceeded { .. }), "got {err}");
+        }
     }
 }

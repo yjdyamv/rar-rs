@@ -26,19 +26,47 @@ pub fn decode_raw(data: &[u8], unpacked_size: u64, opts: DecodeOptions<'_>) -> R
     let mut reader = BitReader::new(data);
 
     match opts.state {
-        Some(st) => decode_inner(
-            &mut reader,
-            unpacked_size,
-            &mut st.window,
-            &mut st.dist_cache,
-            &mut st.last_length,
-            &mut st.prev_low_dist,
-            &mut st.table_nc,
-            &mut st.table_dc,
-            &mut st.table_ldc,
-            &mut st.table_rc,
-            opts.variant,
-        ),
+        Some(st) => {
+            let unpacked = usize::try_from(unpacked_size).map_err(|_| {
+                RarError::Format("unpacked size overflows host address space".into())
+            })?;
+            if unpacked <= st.window.capacity() {
+                decode_inner(
+                    &mut reader,
+                    unpacked_size,
+                    &mut st.window,
+                    &mut st.dist_cache,
+                    &mut st.last_length,
+                    &mut st.prev_low_dist,
+                    &mut st.table_nc,
+                    &mut st.table_dc,
+                    &mut st.table_ldc,
+                    &mut st.table_rc,
+                    opts.variant,
+                )
+            } else {
+                // The buffered core materializes the whole member from the
+                // ring, so it cannot handle a member larger than the chain
+                // window (a solid member routinely is). Route those through
+                // the streaming core instead of panicking in `get_output`.
+                let mut output = Vec::new();
+                decode_inner_streaming(
+                    &mut reader,
+                    unpacked_size,
+                    &mut st.window,
+                    &mut st.dist_cache,
+                    &mut st.last_length,
+                    &mut st.prev_low_dist,
+                    &mut st.table_nc,
+                    &mut st.table_dc,
+                    &mut st.table_ldc,
+                    &mut st.table_rc,
+                    opts.variant,
+                    &mut output,
+                )?;
+                Ok(output)
+            }
+        }
         None => decode_standalone(
             data,
             unpacked_size,

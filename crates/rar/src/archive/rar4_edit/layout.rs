@@ -1,10 +1,13 @@
 //! Main-header access and the block/layout scan.
 //!
-//! `Rar4Layout` is a parsed plaintext view of a single-volume archive: the
-//! main header, every FILE_HEAD in order and the end-of-archive offset.
-//! [`read_block_view`] transparently decrypts block headers on `-hp`
-//! archives so callers see plaintext headers either way; [`emit_block`] is
-//! its write-side counterpart (fresh salt per rebuilt header).
+//! `Rar4Layout` is a parsed plaintext view of an archive: the main header,
+//! every FILE_HEAD in order, the end-of-archive offset and any legacy
+//! recovery record. [`read_block_stream`] walks a `Read + Seek` source one
+//! block at a time (bounded buffers, member payloads never buffered),
+//! transparently decrypting block headers on `-hp` archives so callers see
+//! plaintext headers either way; [`emit_block`] is its write-side counterpart
+//! (fresh salt per rebuilt header), and [`copy_range`] streams verbatim
+//! ranges between files.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -14,8 +17,9 @@ use super::header_crc16;
 use crate::archive::RarArchive;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::{
-    ENDARC_HEAD, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD, MHD_VOLUME,
+    ENDARC_HEAD, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD, MHD_VOLUME, NEWSUB_HEAD,
 };
+use crate::fs::atomic::{copy_prefix, read_up_to};
 
 /// Patch the main-header flags: OR `set_bits` into the flags word at
 /// bytes 3..5 and recompute the CRC16. The main header is 13 bytes; when a
@@ -52,11 +56,70 @@ pub(super) fn header_password(archive: &RarArchive) -> Option<&str> {
     archive.password.as_deref().filter(|p| !p.is_empty())
 }
 
+/// The first volume of the archive's set (`volume_paths[0]`); the opened
+/// path when the catalog carries no volume list. Archive comments and the
+/// lock bit live on the first volume regardless of which part was opened.
+pub(super) fn first_volume(archive: &RarArchive) -> &Path {
+    archive
+        .volume_paths
+        .first()
+        .map(|path| path.as_path())
+        .unwrap_or(archive.path.as_path())
+}
+
+/// Signature offset of the set's first volume: the opened archive's own
+/// offset when it is the first volume, otherwise a bounded scan of the
+/// first volume (which may carry an SFX stub).
+pub(super) fn first_volume_signature_offset(archive: &RarArchive) -> RarResult<usize> {
+    let first = first_volume(archive);
+    if first == archive.path.as_path() {
+        return Ok(archive.sfx_offset as usize);
+    }
+    let mut file = File::open(first).map_err(RarError::Io)?;
+    locate_signature(&mut file)
+}
+
+/// Bounded scan for the RAR4 signature at the head of `stream` (a later
+/// volume carries it at offset 0; the first volume may follow an SFX stub).
+pub(super) fn locate_signature(stream: &mut File) -> RarResult<usize> {
+    let file_len = stream.metadata().map_err(RarError::Io)?.len();
+    let scan = usize::try_from(file_len.min(crate::detect::SFX_SCAN_LIMIT as u64))
+        .map_err(|_| RarError::Format("RAR4: volume size overflows host address space".into()))?;
+    let mut head = vec![0u8; scan];
+    stream.seek(SeekFrom::Start(0))?;
+    stream.read_exact(&mut head).map_err(RarError::Io)?;
+    crate::detect::find_bytes(&head, crate::detect::RAR4_SIGNATURE)
+        .ok_or_else(|| RarError::Format("RAR4: volume has no archive signature".into()))
+}
+
+/// Copy `len` bytes starting at `offset` from `reader` to `writer` with a
+/// bounded buffer (used to stream member payloads and the kept tail).
+pub(super) fn copy_range(
+    reader: &mut File,
+    writer: &mut File,
+    offset: u64,
+    len: u64,
+) -> RarResult<()> {
+    reader.seek(SeekFrom::Start(offset))?;
+    copy_prefix(reader, writer, len).map_err(RarError::Io)?;
+    Ok(())
+}
+
 /// Whether the archive on disk is `-hp` header-encrypted (the main header is
 /// always plaintext and carries MHD_PASSWORD).
 pub(super) fn archive_is_header_encrypted(archive: &RarArchive) -> RarResult<bool> {
     let (_offset, main_header) = read_main_from_file(&archive.path, archive.sfx_offset)?;
     Ok(main_flags(&main_header)? & MHD_PASSWORD != 0)
+}
+
+/// Whether the set's first volume carries the locked main-header flag: the
+/// lock lives there regardless of which part is open, so every edit checks
+/// it there.
+pub(super) fn archive_is_locked(archive: &RarArchive) -> RarResult<bool> {
+    let first = first_volume(archive);
+    let sfx_offset = first_volume_signature_offset(archive)? as u64;
+    let (_offset, main_header) = read_main_from_file(first, sfx_offset)?;
+    Ok(main_flags(&main_header)? & MHD_LOCK != 0)
 }
 
 /// Read the archive's main header block (which starts 7 bytes after the
@@ -110,8 +173,11 @@ pub(super) fn refuse_unsupported_containers(
 /// irreversible; an already-locked archive is a no-op.
 pub(crate) fn lock_archive(archive: &RarArchive) -> RarResult<()> {
     // Multi-volume sets lock the first volume's main header, which is what
-    // official `rar k` does (the later volumes' headers stay untouched).
-    let (main_offset, main_header) = read_main_from_file(&archive.path, archive.sfx_offset)?;
+    // official `rar k` does (the later volumes' headers stay untouched),
+    // regardless of which part was opened.
+    let first = first_volume(archive);
+    let sfx_offset = first_volume_signature_offset(archive)? as u64;
+    let (main_offset, main_header) = read_main_from_file(first, sfx_offset)?;
     let flags = main_flags(&main_header)?;
     if flags & MHD_LOCK != 0 {
         return Ok(()); // already locked; nothing to do
@@ -120,7 +186,7 @@ pub(crate) fn lock_archive(archive: &RarArchive) -> RarResult<()> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&archive.path)
+        .open(first)
         .map_err(RarError::Io)?;
     file.seek(SeekFrom::Start(main_offset))?;
     file.write_all(&patched).map_err(RarError::Io)?;
@@ -130,8 +196,21 @@ pub(crate) fn lock_archive(archive: &RarArchive) -> RarResult<()> {
 
 // ── Layout scan ────────────────────────────────────────────────────────────
 
-/// A parsed plaintext, single-volume RAR4 layout over an in-memory copy of
-/// the archive.
+/// A legacy recovery record ([`PROTECT_HEAD`](crate::format::rar4) 0x78 or
+/// the NEWSUB `RR` 0x7a) located by the streaming layout scan.
+pub(super) struct ProtectRecord {
+    /// File-absolute offset where the recovery block starts.
+    pub(super) block_offset: usize,
+    /// File-absolute end of the recovery block's data area.
+    pub(super) data_end: usize,
+    /// Number of 512-byte parity sectors.
+    pub(super) rec_sectors: u32,
+    /// `Protect!` (0x78) or `Protect+` (0x7a).
+    pub(super) mark: [u8; 8],
+}
+
+/// A parsed plaintext, single-volume RAR4 layout. The member headers are the
+/// only bytes retained; file data is streamed past.
 pub(super) struct Rar4Layout {
     /// Offset where the archive signature starts (SFX stub length); the
     /// recovery-record sector grid is anchored here.
@@ -152,82 +231,295 @@ pub(super) struct Rar4Layout {
     /// header bytes). Archive-entry index `i` maps to `files[i]` on a
     /// single-volume archive (each member is one FILE_HEAD block).
     pub(super) files: Vec<(usize, Vec<u8>)>,
+    /// The first recovery record found before the end-of-archive block.
+    pub(super) protect: Option<ProtectRecord>,
 }
 
-/// Read a block envelope at `pos`: `(head_size, flags, total_size)`.
-fn block_envelope(bytes: &[u8], pos: usize) -> RarResult<(usize, u16, usize)> {
-    if pos + 7 > bytes.len() {
-        return Err(RarError::Format("RAR4: truncated block".into()));
-    }
-    let flags = u16::from_le_bytes([bytes[pos + 3], bytes[pos + 4]]);
-    let head_size = u16::from_le_bytes([bytes[pos + 5], bytes[pos + 6]]) as usize;
-    if head_size < 7 {
-        return Err(RarError::Format("RAR4: block head_size too small".into()));
-    }
-    let add_size = if flags & LONG_BLOCK != 0 {
-        if pos + 11 > bytes.len() {
-            return Err(RarError::Format("RAR4: truncated block".into()));
-        }
-        u32::from_le_bytes(bytes[pos + 7..pos + 11].try_into().unwrap()) as usize
-    } else {
-        0
-    };
-    let total = head_size + add_size;
-    if pos + total > bytes.len() {
-        return Err(RarError::Format("RAR4: truncated block".into()));
-    }
-    Ok((head_size, flags, total))
-}
-
-/// One block of an in-memory RAR4 archive, with its header in plaintext
-/// (decrypted when the archive is `-hp` header-encrypted).
-pub(super) struct BlockView {
+/// One block read from a stream: the plaintext header (decrypted for `-hp`),
+/// the raw on-disk header bytes and the data area's extent. The stream is
+/// left positioned right after the header.
+pub(super) struct BlockStreamView {
     pub(super) head_type: u8,
     /// Plaintext header bytes (`head_size` long, 7-byte prefix included).
     pub(super) header: Vec<u8>,
-    /// Bytes the header occupies on disk: `head_size`, or
-    /// `8 + align16(head_size)` for a header-encrypted block.
-    pub(super) on_disk_header: usize,
+    /// On-disk header bytes: identical to `header` for plaintext archives,
+    /// `[salt][ciphertext]` for `-hp` ones (copied verbatim).
+    pub(super) raw_header: Vec<u8>,
+    /// Absolute offset of the block start.
+    pub(super) offset: u64,
+    /// Bytes the header occupies on disk.
+    pub(super) on_disk_header: u64,
     /// Bytes of data following the header (`add_size`).
-    pub(super) add_size: usize,
+    pub(super) add_size: u64,
     /// Total on-disk size of the block (`on_disk_header + add_size`).
-    pub(super) total: usize,
+    pub(super) total: u64,
 }
 
-impl BlockView {
-    /// The block's data area (never encrypted: member payloads, parity...).
-    pub(super) fn data<'a>(&self, bytes: &'a [u8], start: usize) -> &'a [u8] {
-        &bytes[start + self.on_disk_header..start + self.total]
+impl BlockStreamView {
+    /// Absolute offset of the block's data area.
+    pub(super) fn data_offset(&self) -> u64 {
+        self.offset + self.on_disk_header
+    }
+
+    /// Absolute offset just past the block.
+    pub(super) fn end(&self) -> u64 {
+        self.offset + self.total
     }
 }
 
-/// Read the block at `pos`, transparently decrypting its header when
-/// `password` is `Some` (the caller passes it only for `-hp` archives, and
-/// only for blocks after the plaintext main header).
-pub(super) fn read_block_view(
-    bytes: &[u8],
-    pos: usize,
-    password: Option<&[u8]>,
-) -> RarResult<BlockView> {
-    let (header, on_disk_header, add_size, total) = match password {
-        Some(password) => crate::format::rar4::decrypt_encrypted_header(bytes, pos, password)?,
-        None => {
-            let (head_size, _flags, total) = block_envelope(bytes, pos)?;
-            (
-                bytes[pos..pos + head_size].to_vec(),
-                head_size,
-                total - head_size,
-                total,
-            )
+/// `(add_size, total)` from a plaintext header and its on-disk header size.
+fn block_data_size(header: &[u8], on_disk_header: u64) -> RarResult<(u64, u64)> {
+    let flags = u16::from_le_bytes([header[3], header[4]]);
+    let add_size = if flags & LONG_BLOCK != 0 {
+        if header.len() < 11 {
+            return Err(RarError::Format(
+                "RAR4: header missing LONG_BLOCK size".into(),
+            ));
         }
+        u32::from_le_bytes(header[7..11].try_into().unwrap()) as u64
+    } else {
+        0
     };
-    Ok(BlockView {
+    Ok((add_size, on_disk_header + add_size))
+}
+
+/// Read one block header at the stream's position, transparently decrypting
+/// it when `password` is `Some` (the caller passes it only for `-hp`
+/// archives, and only for blocks after the plaintext main header). Returns
+/// `None` at a clean end of stream; the data area is left unread.
+pub(super) fn read_block_stream(
+    stream: &mut (impl Read + Seek),
+    password: Option<&[u8]>,
+) -> RarResult<Option<BlockStreamView>> {
+    let offset = stream.stream_position()?;
+    let Some(password) = password else {
+        let mut prefix = [0u8; 7];
+        let n = read_up_to(stream, &mut prefix)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        if n < 7 {
+            return Err(RarError::Format("RAR4: truncated block header".into()));
+        }
+        let head_size = u16::from_le_bytes([prefix[5], prefix[6]]) as usize;
+        if head_size < 7 {
+            return Err(RarError::Format("RAR4: block head_size too small".into()));
+        }
+        let mut header = Vec::with_capacity(head_size);
+        header.extend_from_slice(&prefix);
+        if head_size > 7 {
+            let mut rest = vec![0u8; head_size - 7];
+            stream.read_exact(&mut rest).map_err(RarError::Io)?;
+            header.extend_from_slice(&rest);
+        }
+        let (add_size, total) = block_data_size(&header, head_size as u64)?;
+        return Ok(Some(BlockStreamView {
+            head_type: header[2],
+            raw_header: header.clone(),
+            header,
+            offset,
+            on_disk_header: head_size as u64,
+            add_size,
+            total,
+        }));
+    };
+
+    // `-hp`: `[8-byte salt][AES-128-CBC ciphertext]`, where the ciphertext
+    // holds the whole header padded to a 16-byte multiple.
+    let mut first = [0u8; 24];
+    let n = read_up_to(stream, &mut first)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if n < 24 {
+        return Err(RarError::Format(
+            "RAR4: truncated encrypted block header".into(),
+        ));
+    }
+    let salt: [u8; 8] = first[..8].try_into().unwrap();
+    let mut cipher = crate::crypto::Rar30Cipher::new(password, Some(salt))
+        .map_err(|e| RarError::Format(format!("RAR4 header key setup: {e}")))?;
+    let mut block0: [u8; 16] = first[8..24].try_into().unwrap();
+    cipher
+        .decrypt_in_place(&mut block0)
+        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
+    let head_size = u16::from_le_bytes([block0[5], block0[6]]) as usize;
+    if head_size < 7 {
+        return Err(RarError::Format(format!(
+            "RAR4: encrypted header head_size {head_size} too small (wrong password?)"
+        )));
+    }
+    let align16 = (head_size + 15) & !15;
+    let mut rest = vec![0u8; align16 - 16];
+    stream.read_exact(&mut rest).map_err(|err| {
+        // A wrong password yields garbage `head_size` from the first
+        // decrypted block; following it reads past the end of the archive.
+        if err.kind() == std::io::ErrorKind::UnexpectedEof {
+            RarError::WrongPassword
+        } else {
+            RarError::Io(err)
+        }
+    })?;
+    let mut raw_header = first.to_vec();
+    raw_header.extend_from_slice(&rest);
+    cipher
+        .decrypt_in_place(&mut rest)
+        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
+    let mut header = block0.to_vec();
+    header.extend_from_slice(&rest);
+    header.truncate(head_size);
+    let on_disk_header = (8 + align16) as u64;
+    let (add_size, total) = block_data_size(&header, on_disk_header)?;
+    Ok(Some(BlockStreamView {
         head_type: header[2],
         header,
+        raw_header,
+        offset,
         on_disk_header,
         add_size,
         total,
+    }))
+}
+
+/// Parse a legacy recovery-record block header. Mirrors
+/// `recovery::legacy_rr::scan_protect_with_password`'s header checks without
+/// touching the record's data area.
+fn parse_protect_record(view: &BlockStreamView) -> RarResult<Option<ProtectRecord>> {
+    const PROTECT_HEAD: u8 = 0x78;
+    let header = &view.header;
+    let flags = u16::from_le_bytes([header[3], header[4]]);
+    // RAR 2.5-era PROTECT_HEAD (0x78): 26-byte fixed header with the
+    // `Protect!` mark in the last eight bytes.
+    if view.head_type == PROTECT_HEAD
+        && header.len() == 26
+        && flags & LONG_BLOCK != 0
+        && header.get(18..26) == Some(b"Protect!")
+    {
+        let rec_sectors = u16::from_le_bytes(header[12..14].try_into().unwrap());
+        let total_blocks = u32::from_le_bytes(header[14..18].try_into().unwrap());
+        if u64::from(total_blocks) * 2 + u64::from(rec_sectors) * 512 != view.add_size {
+            return Err(RarError::Format(
+                "RAR4: recovery data size does not match header".into(),
+            ));
+        }
+        return Ok(Some(ProtectRecord {
+            block_offset: view.offset as usize,
+            data_end: view.end() as usize,
+            rec_sectors: u32::from(rec_sectors),
+            mark: [0x50, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x21], // "Protect!"
+        }));
+    }
+    // RAR 3.x/4.x NEWSUB (0x7a) named `RR`: FILE_HEAD-shaped header whose
+    // 20-byte tail after the name is `Protect+` + rec_sectors + total_blocks.
+    if view.head_type == NEWSUB_HEAD
+        && flags & LONG_BLOCK != 0
+        && header.len() >= 32 + 2 + 20
+        && header.get(32..34) == Some(b"RR")
+    {
+        let name_size = u16::from_le_bytes(header[26..28].try_into().unwrap()) as usize;
+        let tail = 32 + name_size;
+        if header.get(tail..tail + 8) != Some(b"Protect+") {
+            return Ok(None);
+        }
+        let Some(rec_bytes) = header.get(tail + 8..tail + 12) else {
+            return Err(RarError::Format("RAR4: recovery header truncated".into()));
+        };
+        let Some(total_bytes) = header.get(tail + 12..tail + 16) else {
+            return Err(RarError::Format("RAR4: recovery header truncated".into()));
+        };
+        let rec_sectors = u32::from_le_bytes(rec_bytes.try_into().unwrap());
+        let total_blocks = u32::from_le_bytes(total_bytes.try_into().unwrap());
+        if u64::from(total_blocks) * 2 + u64::from(rec_sectors) * 512 != view.add_size {
+            return Err(RarError::Format(
+                "RAR4: recovery data size does not match header".into(),
+            ));
+        }
+        return Ok(Some(ProtectRecord {
+            block_offset: view.offset as usize,
+            data_end: view.end() as usize,
+            rec_sectors,
+            mark: [0x50, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x2b], // "Protect+"
+        }));
+    }
+    Ok(None)
+}
+
+/// Walk the block stream of a RAR4 archive from `stream` with bounded
+/// buffers, decrypting the headers of a `-hp` archive with `password`
+/// (ignored for plaintext ones). The archive must already be validated (the
+/// editor only reaches here after a successful open scan), so headers are
+/// not CRC-checked again; only the envelope bounds are.
+pub(super) fn scan_layout_stream(
+    stream: &mut (impl Read + Seek),
+    sfx_offset: usize,
+    password: Option<&str>,
+) -> RarResult<Rar4Layout> {
+    stream.seek(SeekFrom::Start(sfx_offset as u64))?;
+    let mut sig = [0u8; 7];
+    stream.read_exact(&mut sig).map_err(RarError::Io)?;
+    if &sig != crate::detect::RAR4_SIGNATURE {
+        return Err(RarError::Format(
+            "RAR4: signature mismatch while editing".into(),
+        ));
+    }
+    let mut main: Option<(usize, Vec<u8>, u16)> = None;
+    let mut endarc: Option<usize> = None;
+    let mut files = Vec::new();
+    let mut protect = None;
+    // Latched from the main header: `MHD_PASSWORD` means every later block
+    // header is encrypted.
+    let mut hp: Option<&[u8]> = None;
+    while let Some(view) = read_block_stream(stream, hp)? {
+        let start = view.offset as usize;
+        if view.head_type == MAIN_HEAD && main.is_none() {
+            let flags = main_flags(&view.header)?;
+            if flags & MHD_PASSWORD != 0 {
+                let password = password.ok_or_else(|| {
+                    RarError::Encrypted(
+                        "editing a header-encrypted (-hp) RAR4 archive requires its password"
+                            .into(),
+                    )
+                })?;
+                hp = Some(password.as_bytes());
+            }
+            main = Some((start, view.header.clone(), flags));
+        } else if view.head_type == ENDARC_HEAD {
+            endarc = Some(start);
+            break;
+        } else if view.head_type == FILE_HEAD {
+            files.push((start, view.header.clone()));
+        } else if protect.is_none() {
+            protect = parse_protect_record(&view)?;
+        }
+        stream.seek(SeekFrom::Start(view.end()))?;
+    }
+    let (main_offset, main_header, main_flags) =
+        main.ok_or_else(|| RarError::Format("RAR4: archive is missing its main header".into()))?;
+    let endarc_offset = endarc.ok_or_else(|| {
+        RarError::Format("RAR4: archive is missing the end-of-archive block".into())
+    })?;
+    Ok(Rar4Layout {
+        sfx_offset,
+        main_offset,
+        main_header,
+        main_flags,
+        header_encrypted: hp.is_some(),
+        endarc_offset,
+        files,
+        protect,
     })
+}
+
+/// [`scan_layout_stream`] over an in-memory archive copy (kept for the
+/// layout/`-hp` tests, which build archives in memory).
+#[cfg(test)]
+pub(super) fn scan_layout(
+    bytes: &[u8],
+    sfx_offset: usize,
+    password: Option<&str>,
+) -> RarResult<Rar4Layout> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    scan_layout_stream(&mut cursor, sfx_offset, password)
 }
 
 /// Emit a block as `header` + `data`, encrypting the header with a fresh
@@ -251,66 +543,4 @@ pub(super) fn emit_block(
     }
     out.extend_from_slice(data);
     Ok(())
-}
-
-/// Walk the block stream of an in-memory RAR4 archive, decrypting the
-/// headers of a `-hp` archive with `password` (ignored for plaintext ones).
-/// The archive must already be validated (the editor only reaches here after
-/// a successful open scan), so headers are not CRC-checked again; only the
-/// envelope bounds are.
-pub(super) fn scan_layout(
-    bytes: &[u8],
-    sfx_offset: usize,
-    password: Option<&str>,
-) -> RarResult<Rar4Layout> {
-    let sig = &bytes[sfx_offset..sfx_offset + 7];
-    if sig != crate::detect::RAR4_SIGNATURE {
-        return Err(RarError::Format(
-            "RAR4: signature mismatch while editing".into(),
-        ));
-    }
-    let mut pos = sfx_offset + 7;
-    let mut main: Option<(usize, Vec<u8>, u16)> = None;
-    let mut endarc: Option<usize> = None;
-    let mut files = Vec::new();
-    // Latched from the main header: `MHD_PASSWORD` means every later block
-    // header is encrypted.
-    let mut hp: Option<&[u8]> = None;
-    while pos + 7 <= bytes.len() {
-        let start = pos;
-        let view = read_block_view(bytes, pos, hp)?;
-        if view.head_type == MAIN_HEAD && main.is_none() {
-            let flags = main_flags(&view.header)?;
-            if flags & MHD_PASSWORD != 0 {
-                let password = password.ok_or_else(|| {
-                    RarError::Encrypted(
-                        "editing a header-encrypted (-hp) RAR4 archive requires its password"
-                            .into(),
-                    )
-                })?;
-                hp = Some(password.as_bytes());
-            }
-            main = Some((start, view.header.clone(), flags));
-        } else if view.head_type == ENDARC_HEAD {
-            endarc = Some(start);
-            break;
-        } else if view.head_type == FILE_HEAD {
-            files.push((start, view.header.clone()));
-        }
-        pos = start + view.total;
-    }
-    let (main_offset, main_header, main_flags) =
-        main.ok_or_else(|| RarError::Format("RAR4: archive is missing its main header".into()))?;
-    let endarc_offset = endarc.ok_or_else(|| {
-        RarError::Format("RAR4: archive is missing its end-of-archive block".into())
-    })?;
-    Ok(Rar4Layout {
-        sfx_offset,
-        main_offset,
-        main_header,
-        main_flags,
-        header_encrypted: hp.is_some(),
-        endarc_offset,
-        files,
-    })
 }

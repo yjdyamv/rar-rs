@@ -15,6 +15,11 @@ pub struct DecodeTable {
     decode_len: [u32; MAX_CODE_LENGTH + 2],
     decode_pos: [usize; MAX_CODE_LENGTH + 2],
     decode_num: Vec<u16>,
+    /// Codes assigned at each length. The slow path needs it to tell a real
+    /// code from an unassigned prefix: slots past `decode_pos[i] +
+    /// decode_count[i]` in `decode_num` are zero-initialized and would
+    /// otherwise alias symbol 0.
+    decode_count: [u32; MAX_CODE_LENGTH + 2],
     quick_len: Vec<u8>,
     quick_num: Vec<u16>,
 }
@@ -85,6 +90,7 @@ impl DecodeTable {
             decode_len,
             decode_pos,
             decode_num,
+            decode_count: len_count,
             quick_len,
             quick_num,
         }
@@ -120,12 +126,16 @@ pub fn decode_symbol(table: &DecodeTable, reader: &mut BitReader) -> Result<usiz
 
     for i in 1..=MAX_CODE_LENGTH {
         if bits < table.decode_len[i] {
-            reader.skip_bits(i as u32);
             let prev_boundary = if i > 1 { table.decode_len[i - 1] } else { 0 };
             let offset = ((bits - prev_boundary) >> (MAX_CODE_LENGTH - i)) as usize;
-            let idx = table.decode_pos[i] + offset;
-            if idx < table.num_symbols {
-                return Ok(table.decode_num[idx] as usize);
+            // Only prefixes that carry a real code of this length are
+            // valid; the zero-initialized slots past them must not alias
+            // symbol 0. Incomplete tables (Kraft sum < 1) are fine: their
+            // assigned codes still land below `decode_count[i]`.
+            if offset < table.decode_count[i] as usize {
+                debug_assert!(table.decode_pos[i] + offset < table.num_symbols);
+                reader.skip_bits(i as u32);
+                return Ok(table.decode_num[table.decode_pos[i] + offset] as usize);
             }
             break;
         }
@@ -659,5 +669,60 @@ mod tests {
             .sum();
         assert!(lengths.iter().all(|&l| l <= MAX_CODE_LENGTH as u8));
         assert_eq!(kraft, 1i64 << MAX_CODE_LENGTH);
+    }
+
+    /// A prefix with no assigned code must be an error, not symbol 0: the
+    /// zero-initialized `decode_num` slots past a length's real codes used
+    /// to alias symbol 0 (here the second 1-bit prefix of a single-code
+    /// table).
+    #[test]
+    fn unassigned_code_prefix_is_rejected() {
+        let table = DecodeTable::new(&[1, 0, 0, 0]);
+        // High bit set: prefix `1`, while the table only defines `0`.
+        let data = [0b1000_0000u8];
+        let mut reader = BitReader::new(&data);
+        let result = decode_symbol(&table, &mut reader);
+        assert!(result.is_err(), "unassigned prefix decoded as {result:?}");
+    }
+
+    /// A complete table (Kraft sum == 1) decodes every assigned symbol.
+    #[test]
+    fn complete_table_decodes_all_symbols() {
+        // Canonical codes: `0` -> 0, `10` -> 1, `11` -> 2.
+        let lengths = [1u8, 2, 2];
+        let decode = DecodeTable::new(&lengths);
+        let encode = EncodeTable::new(&lengths);
+        for sym in 0..lengths.len() {
+            let mut writer = BitWriter::new();
+            encode_symbol(&encode, &mut writer, sym);
+            let data = writer.into_bytes();
+            let mut reader = BitReader::new(&data);
+            assert_eq!(decode_symbol(&decode, &mut reader).unwrap(), sym);
+        }
+    }
+
+    /// Incomplete tables (Kraft sum < 1) are legal for RAR5 and their
+    /// assigned codes must keep decoding — including a code longer than
+    /// QUICK_BITS, which goes through the slow path the validity check
+    /// guards.
+    #[test]
+    fn incomplete_table_decodes_its_codes() {
+        // One 1-bit code and one 11-bit code (Kraft sum < 1).
+        let mut lengths = vec![0u8; 4];
+        lengths[0] = 1;
+        lengths[3] = 11;
+        let decode = DecodeTable::new(&lengths);
+        let encode = EncodeTable::new(&lengths);
+        for &sym in &[0usize, 3] {
+            let mut writer = BitWriter::new();
+            encode_symbol(&encode, &mut writer, sym);
+            let data = writer.into_bytes();
+            let mut reader = BitReader::new(&data);
+            assert_eq!(
+                decode_symbol(&decode, &mut reader).unwrap(),
+                sym,
+                "symbol {sym} must decode"
+            );
+        }
     }
 }

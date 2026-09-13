@@ -25,6 +25,14 @@ impl SlidingWindow {
         self.total_written
     }
 
+    /// Number of bytes the ring can hold. `get_output` can only return a
+    /// region no longer than this, so buffered decoders must check it before
+    /// materializing a member larger than the dictionary.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.buf.len()
+    }
+
     /// Write a single literal byte.
     #[inline]
     pub fn put_byte(&mut self, b: u8) {

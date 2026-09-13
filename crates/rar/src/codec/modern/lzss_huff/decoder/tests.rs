@@ -362,3 +362,28 @@ fn filtered_member_at_solid_offset_decodes_member_relative() {
         "filtered member must decode member-relative at a solid offset"
     );
 }
+
+/// Regression: a solid-chain member larger than the shared chain window must
+/// decode through the streaming core; the buffered core used to panic inside
+/// `SlidingWindow::get_output` (requested output exceeds window size).
+#[test]
+fn member_larger_than_shared_window_decodes() {
+    let member: Vec<u8> = (0..200_000u32)
+        .map(|i| (i.wrapping_mul(31)) as u8)
+        .collect();
+    let packed = crate::codec::encode_raw(&member, 3, 0, ArchiveVersion::V50);
+
+    let mut state = DecoderState::new(128 * 1024);
+    let decoded = decode_raw(
+        &packed,
+        member.len() as u64,
+        DecodeOptions {
+            dict_size_log: 0,
+            dict_size_bytes: None,
+            variant: ArchiveVersion::V50,
+            state: Some(&mut state),
+        },
+    )
+    .unwrap();
+    assert_eq!(decoded, member);
+}

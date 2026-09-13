@@ -2,8 +2,9 @@
 //! pipelines: the member-addition dispatchers, batch progress/sequential
 //! fallback and solid-chain state resets.
 
+use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::archive::{BatchEntry, RarArchive};
@@ -180,6 +181,27 @@ impl RarArchive {
         recursive: bool,
         level: u8,
     ) -> RarResult<()> {
+        let mut visited = HashSet::new();
+        self.add_directory_inner(path, arcname, recursive, level, &mut visited)
+    }
+
+    /// [`Self::add_directory`] carrying the canonical identities of the
+    /// directories already entered. A symlink or junction loop
+    /// (`root/loop -> root`) resolved by `is_dir()` would otherwise recurse
+    /// until the path-length limit and fail mid-add; the loop edge is
+    /// skipped instead. Ordinary (acyclic) trees are unaffected: no two
+    /// directory paths in them share an identity.
+    fn add_directory_inner(
+        &mut self,
+        path: &Path,
+        arcname: Option<&str>,
+        recursive: bool,
+        level: u8,
+        visited: &mut HashSet<PathBuf>,
+    ) -> RarResult<()> {
+        if !visited.insert(canonical_directory_id(path)) {
+            return Ok(());
+        }
         if !self.solid_chain_is_position_derived() {
             self.reset_solid_chain();
         }
@@ -230,7 +252,7 @@ impl RarArchive {
                     format!("{name}/{}", child.file_name().to_string_lossy())
                 };
                 if child_path.is_dir() {
-                    self.add_directory(&child_path, Some(&child_name), true, level)?;
+                    self.add_directory_inner(&child_path, Some(&child_name), true, level, visited)?;
                 } else {
                     self.add_file(&child_path, Some(&child_name), level)?;
                 }
@@ -331,6 +353,7 @@ impl RarArchive {
     /// (`v29` FHD_SOLID, RAR5): see [`Self::solid_chain_is_position_derived`].
     pub(crate) fn reset_solid_chain(&mut self) {
         self.write_ctx_mut().solid.encoder_state = None;
+        self.write_ctx_mut().solid.chain_dict = None;
         self.write_ctx_mut().solid.rar4_encoder = None;
         self.write_ctx_mut().solid.legacy_encoder = None;
         self.write_ctx_mut().solid.rar4_run_has_member = false;
@@ -354,6 +377,7 @@ impl RarArchive {
             Some(prev) if prev == ext => {}
             _ => {
                 self.write_ctx_mut().solid.encoder_state = None;
+                self.write_ctx_mut().solid.chain_dict = None;
                 self.write_ctx_mut().solid.rar4_encoder = None;
                 self.write_ctx_mut().solid.legacy_encoder = None;
                 self.write_ctx_mut().solid.rar4_run_has_member = false;
@@ -361,6 +385,14 @@ impl RarArchive {
             }
         }
     }
+}
+
+/// Canonical filesystem identity of a directory for recursive-add cycle
+/// detection. `canonicalize` resolves symlinks and junctions; when it fails
+/// (e.g. overlong paths) the path as given is used as a best effort, so
+/// traversal still terminates on identical lexical paths.
+fn canonical_directory_id(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[cfg(test)]

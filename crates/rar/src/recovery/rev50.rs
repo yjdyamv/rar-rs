@@ -87,6 +87,34 @@ pub fn build_recovery_volume_file(
     out
 }
 
+/// Verify the header CRC32 of a `.rev` file over the exact writer coverage:
+/// [`build_recovery_volume_file`] hashes `header_content`, i.e. the 4-byte
+/// header-size field plus the header body (file bytes `12..16 + hsize`),
+/// and stores the CRC right after the signature (bytes `8..12`).
+fn verify_rev5_header(data: &[u8], path: &Path) -> RarResult<()> {
+    if data.len() < 16 {
+        return Err(RarError::Format(format!(
+            "{}: truncated recovery volume header",
+            path.display()
+        )));
+    }
+    let stored = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    let hsize = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+    let Some(content) = 16usize.checked_add(hsize).and_then(|end| data.get(12..end)) else {
+        return Err(RarError::Format(format!(
+            "{}: truncated recovery volume header",
+            path.display()
+        )));
+    };
+    if crc32fast::hash(content) != stored {
+        return Err(RarError::Format(format!(
+            "{}: recovery volume header CRC mismatch",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// [`rebuild_missing_volumes`] with a cancellation flag and progress
 /// reporting. `progress` receives `(rebuilt_bytes, total_bytes)`, strictly
 /// non-decreasing up to `total` on success; `cancel` is polled per chunk.
@@ -144,6 +172,7 @@ pub fn rebuild_missing_volumes_with(
             rev1.display()
         )));
     }
+    verify_rev5_header(&rev_data, &rev1)?;
     let mut off = 8 + 4 + 4;
     if rev_data[off] != 1 {
         return Err(RarError::Format(
@@ -232,6 +261,7 @@ pub fn rebuild_missing_volumes_with(
                 rev_path.display()
             )));
         }
+        verify_rev5_header(&data, &rev_path)?;
         let hsize = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
         // A truncated `.rev` (interrupted copy, partial download) must be an
         // error, not a slice past the buffer.
@@ -425,4 +455,46 @@ pub fn build_recovery_volumes_for_set(
         written.push(rev_path);
     }
     Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_crc_is_verified_but_does_not_cover_payload() {
+        let payload = vec![0x5au8; 512];
+        let file = build_recovery_volume_file(0, 1, &[1024], &[0xdead_beef], &payload);
+        let path = Path::new("set.part1.rev");
+
+        // Positive control: the freshly built header verifies.
+        verify_rev5_header(&file, path).unwrap();
+
+        // A flipped header content byte (here the version field) is caught.
+        let mut corrupted = file.clone();
+        corrupted[16] ^= 0x40;
+        let err = verify_rev5_header(&corrupted, path).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "got {err}");
+
+        // A flipped stored CRC is caught too.
+        let mut corrupted = file.clone();
+        corrupted[8] ^= 0x01;
+        assert!(matches!(
+            verify_rev5_header(&corrupted, path).unwrap_err(),
+            RarError::Format(_)
+        ));
+
+        // The parity payload lies outside the verified header.
+        let mut payload_flip = file;
+        let last = payload_flip.len() - 1;
+        payload_flip[last] ^= 0xff;
+        verify_rev5_header(&payload_flip, path).unwrap();
+    }
+
+    #[test]
+    fn truncated_header_is_rejected() {
+        let file = build_recovery_volume_file(0, 1, &[1024], &[0xdead_beef], &[0u8; 64]);
+        let err = verify_rev5_header(&file[..20], Path::new("x.rev")).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "got {err}");
+    }
 }

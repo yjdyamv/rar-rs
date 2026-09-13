@@ -120,18 +120,24 @@ pub fn derive_keys(
         )));
     }
 
+    // WinRAR copies the password into a 127-wchar_t buffer before running the
+    // KDF (see `clamp_password`). Without the clamp the two sides derive
+    // different keys for longer passwords and cannot open each other's
+    // archives.
+    let password = crate::crypto::clamp_password(password.as_bytes());
+
     let mut first_input = Vec::with_capacity(salt.len() + 4);
     first_input.extend_from_slice(salt);
     first_input.extend_from_slice(&1u32.to_be_bytes());
 
-    let mut u = hmac_sha256(password.as_bytes(), &first_input);
+    let mut u = hmac_sha256(password, &first_input);
     let mut accumulator = u;
     let mut taps = [[0u8; ENCR_KEY_SIZE]; 3];
     let mut iterations = (1u32 << strength) - 1;
 
     for tap in &mut taps {
         for _ in 0..iterations {
-            u = hmac_sha256(password.as_bytes(), &u);
+            u = hmac_sha256(password, &u);
             for (acc, byte) in accumulator.iter_mut().zip(u) {
                 *acc ^= byte;
             }
@@ -714,6 +720,28 @@ mod tests {
         let mut no_check = params.clone();
         no_check.checksum = None;
         assert!(no_check.verify_password("anything"));
+    }
+
+    #[test]
+    fn kdf_truncates_passwords_at_127_chars() {
+        let salt = *b"salt1234salt1234";
+        let long = "p".repeat(crate::crypto::MAX_PASSWORD_CHARS + 3);
+        let prefix = "p".repeat(crate::crypto::MAX_PASSWORD_CHARS);
+        let keys_long = derive_keys(&long, &salt, 4).unwrap();
+        let keys_prefix = derive_keys(&prefix, &salt, 4).unwrap();
+        assert_eq!(keys_long.key, keys_prefix.key);
+        assert_eq!(keys_long.hash_key, keys_prefix.hash_key);
+        assert_eq!(keys_long.password_check, keys_prefix.password_check);
+    }
+
+    #[test]
+    fn generated_params_accept_the_clamped_password() {
+        let long = "p".repeat(crate::crypto::MAX_PASSWORD_CHARS + 3);
+        let prefix = "p".repeat(crate::crypto::MAX_PASSWORD_CHARS);
+        let params = EncryptionParams::generate_for_password(&long, 4);
+        assert!(params.verify_password(&long));
+        assert!(params.verify_password(&prefix));
+        assert!(!params.verify_password(&"p".repeat(crate::crypto::MAX_PASSWORD_CHARS - 1)));
     }
 
     #[test]

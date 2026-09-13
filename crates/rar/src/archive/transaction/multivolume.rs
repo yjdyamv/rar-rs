@@ -16,7 +16,7 @@ use crate::format::rar5::headers::FileHeader;
 use crate::format::rar5::{COMP_METHOD_STORE, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX};
 use crate::fs::atomic::{read_write_create, temp_suffix};
 
-use super::super::{PendingCommit, volume_base_of, volume_path};
+use super::super::{PendingCommit, volume_base_of, volume_path, volume_path_padded};
 
 /// Lazily opened readers for every volume of the original archive.
 struct VolumeReaders {
@@ -233,14 +233,22 @@ impl RarArchive {
                 continue;
             }
 
-            // Verbatim payload, re-split across the new volumes.
+            // Verbatim payload, re-split across the new volumes. Encrypted
+            // members come back decrypted; re-encrypt with the original
+            // parameters (same salt/IV/key) so the copied ENCR record and
+            // MAC'd header CRC stay valid and the stored bytes are exactly
+            // the ciphertext that was read.
             let payload = self.read_packed_volumes(&mut readers, idx)?;
             processed += payload.data.len() as u64;
             let hdr = &entry.header;
+            let stored_payload = match (payload.params.as_ref(), self.password.as_deref()) {
+                (Some(params), Some(password)) => params.encrypt(&payload.data, password)?,
+                _ => payload.data,
+            };
             self.write_file_entry(
                 &entry_name,
                 hdr.unpacked_size,
-                &payload.data,
+                &stored_payload,
                 hdr.crc32_val.unwrap_or(0),
                 hdr.comp_method,
                 hdr.comp_dict_size,
@@ -267,38 +275,84 @@ impl RarArchive {
         // one — never a mix.
         let mut staged_paths: Vec<PathBuf> = Vec::new();
         let result = (|| -> RarResult<()> {
-            let mut install: Vec<(PathBuf, PathBuf)> = Vec::new();
-            let mut final_volumes: Vec<PathBuf> = Vec::new();
-            for n in 1..=orig_volumes.len() {
-                let tmp = volume_path(&parent, &tmp_base, n);
-                let exists = fs::metadata(&tmp).map(|m| m.len() > 0).unwrap_or(false);
-                if !exists {
-                    let _ = fs::remove_file(&tmp);
+            // The staged set — not the original volume count — is
+            // authoritative: a rewrite whose members grew (longer names,
+            // additional volumes) can produce more volumes than the archive
+            // had, and every one of them must be installed.
+            let mut staged: Vec<(usize, PathBuf)> = Vec::new();
+            for entry in fs::read_dir(&parent)? {
+                let entry = entry?;
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let Some(rest) = name.strip_prefix(&tmp_base) else {
+                    continue;
+                };
+                let Some(rest) = rest.strip_prefix(".part") else {
+                    continue;
+                };
+                let Some(num) = rest.strip_suffix(".rar") else {
+                    continue;
+                };
+                let Ok(n) = num.parse::<usize>() else {
+                    continue;
+                };
+                let path = entry.path();
+                if !fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false) {
+                    let _ = fs::remove_file(&path);
                     continue;
                 }
-                let final_path = volume_path(&parent, &base, n);
-                staged_paths.push(tmp.clone());
-                install.push((tmp, final_path.clone()));
+                staged_paths.push(path.clone());
+                staged.push((n, path));
+            }
+            staged.sort_by_key(|(n, _)| *n);
+            if staged.len() > 65535 {
+                return Err(RarError::Format(format!(
+                    "volume set of {} parts exceeds the RAR5 limit of 65535",
+                    staged.len()
+                )));
+            }
+            // WinRAR zero-pads the part number to the digit count of the
+            // volume count (part01..part15); the installed set and the
+            // regenerated `.rev` files share that canonical naming.
+            let width = staged.len().to_string().len().max(1);
+            let mut install: Vec<(PathBuf, PathBuf)> = Vec::new();
+            let mut final_volumes: Vec<PathBuf> = Vec::new();
+            for (n, tmp) in &staged {
+                let final_path = volume_path_padded(&parent, &base, *n, width);
+                install.push((tmp.clone(), final_path.clone()));
                 final_volumes.push(final_path);
             }
 
             // Regenerate the `.rev` set from the staged volumes so the
             // recovery files commit together with the data volumes instead
             // of after them (a failure used to leave the data set committed
-            // with stale or missing recovery files).
-            let rev = parent.join(format!("{base}.part1.rev"));
-            if rev.exists() {
+            // with stale or missing recovery files). WinRAR names `.rev`
+            // files with the volume set's own padding (`part01.rev` for a
+            // padded set), so probe the whole family like
+            // `rev50::rebuild_missing_volumes` does.
+            let orig_width = crate::fs::volume::volume_part_width(&orig_volumes[0]).max(1);
+            let mut rev_probe: Option<PathBuf> = None;
+            for w in [orig_width, 1, 2, 3, 4] {
+                let probe = parent.join(format!("{base}.part{:0w$}.rev", 1, w = w));
+                if probe.exists() {
+                    rev_probe = Some(probe);
+                    break;
+                }
+            }
+            if let Some(rev) = rev_probe {
                 let (rec_count, _data_count) = rev_params_from_file(&rev)?;
-                let staged_volumes: Vec<PathBuf> =
+                let staged_data: Vec<PathBuf> =
                     install.iter().map(|(staged, _)| staged.clone()).collect();
-                let rec_count = (rec_count as usize).min(staged_volumes.len());
+                let rec_count = (rec_count as usize).min(staged_data.len());
                 let written = crate::recovery::rev50::build_recovery_volumes_for_set(
-                    &staged_volumes,
+                    &staged_data,
                     rec_count,
                 )?;
                 for (k, staged_rev) in written.into_iter().enumerate() {
                     staged_paths.push(staged_rev.clone());
-                    let final_rev = parent.join(format!("{base}.part{}.rev", k + 1));
+                    let final_rev =
+                        parent.join(format!("{base}.part{:0width$}.rev", k + 1, width = width));
                     install.push((staged_rev, final_rev));
                 }
             }
@@ -307,6 +361,13 @@ impl RarArchive {
             let retire = crate::fs::volume::stale_volume_paths(&parent, &base, false, &keep);
             crate::fs::atomic::commit_files(&parent, &base, &install, &retire)?;
             self.volume_paths = final_volumes;
+            // Canonical padding can differ from the original name (an
+            // unpadded set that grew past nine volumes); reopen from the
+            // installed first volume so the catalog reload rediscovers the
+            // new set from `self.path`.
+            if let Some(first) = self.volume_paths.first() {
+                self.path = first.clone();
+            }
             Ok(())
         })();
         // `commit_files` installed the staged files (or restored them to

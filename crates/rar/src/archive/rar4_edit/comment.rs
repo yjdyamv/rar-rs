@@ -3,16 +3,20 @@
 //! WinRAR 6.23 places the block right after the first volume's main header;
 //! the payload is either STORE bytes or a RAR29-LZSS stream (`method`
 //! 0x31-0x35) and carries UTF-16LE (no BOM) when it holds characters
-//! outside the single-byte range.
+//! outside the single-byte range. The comment is read from the set's first
+//! volume regardless of which part was opened.
 
-use std::fs;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 
 use crate::archive::RarArchive;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::{ENDARC_HEAD, LONG_BLOCK, MAIN_HEAD, MHD_PASSWORD, NEWSUB_HEAD};
 
 use super::header_crc16;
-use super::layout::{header_password, main_flags, read_block_view};
+use super::layout::{
+    first_volume, first_volume_signature_offset, header_password, main_flags, read_block_stream,
+};
 
 /// Encode comment text for storage, mirroring WinRAR 6.23's convention:
 /// the CMT block's `attr` bit 0 marks a UTF-16LE payload (no BOM); pure
@@ -88,25 +92,26 @@ pub(crate) fn build_comment_block(payload: &[u8], unicode: bool) -> Vec<u8> {
     block
 }
 
-/// Read the archive comment (`rar cw`): locate the NEWSUB `CMT` block and
-/// decode its payload. Returns `None` when the archive has no comment.
-/// On a `-hp` archive the block's header is decrypted with the archive
-/// password first (only the header is encrypted; the payload is not).
+/// Read the archive comment (`rar cw`): locate the NEWSUB `CMT` block in
+/// the set's first volume and decode its payload. Returns `None` when the
+/// archive has no comment. On a `-hp` archive the block's header is
+/// decrypted with the archive password first (only the header is encrypted;
+/// the payload is not).
 pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
-    let bytes = fs::read(&archive.path).map_err(RarError::Io)?;
-    let sfx_offset = archive.sfx_offset as usize;
-    let sig = &bytes[sfx_offset..sfx_offset + 7];
-    if sig != crate::detect::RAR4_SIGNATURE {
-        return Err(RarError::Format(
-            "RAR4: signature mismatch while reading the comment".into(),
-        ));
-    }
-    let mut pos = sfx_offset + 7;
+    // The comment sits in the first volume (WinRAR's placement), which is
+    // not necessarily the part that was opened.
+    let path = first_volume(archive);
+    let sfx_offset = first_volume_signature_offset(archive)?;
+    let mut file = File::open(path).map_err(RarError::Io)?;
+    let file_len = file.metadata().map_err(RarError::Io)?.len();
+    let mut pos = sfx_offset as u64 + 7;
     let mut saw_main = false;
     let mut hp: Option<&[u8]> = None;
-    while pos + 7 <= bytes.len() {
-        let start = pos;
-        let view = read_block_view(&bytes, pos, hp)?;
+    while pos < file_len {
+        file.seek(SeekFrom::Start(pos)).map_err(RarError::Io)?;
+        let Some(view) = read_block_stream(&mut file, hp)? else {
+            break;
+        };
         if view.head_type == MAIN_HEAD && !saw_main {
             saw_main = true;
             if main_flags(&view.header)? & MHD_PASSWORD != 0 {
@@ -124,19 +129,30 @@ pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
             let method = view.header[25];
             let unp = u32::from_le_bytes(view.header[11..15].try_into().unwrap());
             let unicode = u32::from_le_bytes(view.header[28..32].try_into().unwrap()) & 1 != 0;
-            let data_start = start + view.on_disk_header;
-            let data = &bytes[data_start..data_start + view.add_size];
             let payload = if method == crate::format::rar4::RAR4_METHOD_STORE {
-                data.to_vec()
+                let data_len = usize::try_from(view.add_size).map_err(|_| {
+                    RarError::Format("RAR4: comment size overflows host address space".into())
+                })?;
+                let mut data = vec![0u8; data_len];
+                file.seek(SeekFrom::Start(view.data_offset()))
+                    .map_err(RarError::Io)?;
+                file.read_exact(&mut data).map_err(RarError::Io)?;
+                data
             } else {
-                decode_comment_stream(&bytes, data_start, view.add_size, method, unp as usize)?
+                decode_comment_stream(
+                    &mut file,
+                    view.data_offset(),
+                    view.add_size,
+                    method,
+                    unp as usize,
+                )?
             };
             return Ok(Some(decode_comment_payload(&payload, unicode)));
         }
-        pos = start + view.total;
         if view.head_type == ENDARC_HEAD {
             break;
         }
+        pos = view.end();
     }
     Ok(None)
 }
@@ -148,11 +164,13 @@ pub(super) fn comment_block_name_is_cmt(header: &[u8]) -> bool {
 }
 
 /// Decode a compressed comment payload through the shared RAR29 member
-/// decoder (the payload is a plain single-chunk member stream).
+/// decoder (the payload is a plain single-chunk member stream). The packed
+/// bytes are read straight from `stream` (which is left where the decoder
+/// finished), so the surrounding archive is never buffered.
 fn decode_comment_stream(
-    bytes: &[u8],
-    data_start: usize,
-    packed_size: usize,
+    stream: &mut (impl Read + Seek),
+    data_start: u64,
+    packed_size: u64,
     method: u8,
     unpacked_size: usize,
 ) -> RarResult<Vec<u8>> {
@@ -163,28 +181,25 @@ fn decode_comment_stream(
             "RAR4: unsupported comment compression method".into(),
         ));
     }
-    let data_offset = data_start as u64;
-    let packed_size = packed_size as u64;
     let hdr = FileHeader {
         unpacked_size: unpacked_size as u64,
         packed_size,
         comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
-        data_offset,
+        data_offset: data_start,
         format_version: 4,
         unp_ver: 29,
         ..Default::default()
     };
     let chunk = DataChunk {
         volume_index: 0,
-        data_offset,
+        data_offset: data_start,
         packed_size,
         crc32_val: None,
         is_final: true,
         extra_data: Vec::new(),
     };
-    let stream = std::io::Cursor::new(bytes.to_vec());
     decode_member_bytes(
-        &mut stream.clone(),
+        stream,
         &[],
         &[chunk],
         &hdr,

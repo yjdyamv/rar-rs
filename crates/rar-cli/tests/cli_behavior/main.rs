@@ -17,6 +17,7 @@ mod operations;
 mod parity;
 mod parity2;
 mod recovery;
+mod regressions;
 mod support;
 mod switches;
 mod timestamps;

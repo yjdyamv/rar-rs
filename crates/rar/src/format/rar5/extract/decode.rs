@@ -139,6 +139,22 @@ impl RarArchive {
                     ),
                 });
             }
+            // A compressed stream allocates the same LZ window a member
+            // would, and its 4-bit dictionary field can declare up to 4 GiB.
+            // Enforce the extraction dictionary cap (`-mdx`) exactly like
+            // `member_dict_window` does for members.
+            let dict_bytes = (128u64 * 1024) << s.dict_size_log;
+            if let Some(cap) = self.read_ctx().extract_options.max_dict_size
+                && dict_bytes > cap
+            {
+                return Err(RarError::LimitExceeded {
+                    limit: cap,
+                    context: format!(
+                        "NTFS stream {:?} dictionary size {dict_bytes} bytes exceeds the extraction cap (use -mdx to raise it)",
+                        s.name
+                    ),
+                });
+            }
             let mut packed = vec![0u8; declared];
             {
                 let stream = stream_mut(&mut self.stream)?;
@@ -224,6 +240,28 @@ impl RarArchive {
             .unwrap_or(u64::MAX)
     }
 
+    /// Verify the stored checksums of a zero-size member without decoding
+    /// a payload: CRC32 of empty, BLAKE2sp of empty when a hash record
+    /// exists, and their hash-key MAC equivalents when the member is
+    /// encrypted. The parallel extraction path verifies empty members the
+    /// same way; returning early without this check would let a crafted
+    /// zero-size header bypass integrity verification.
+    fn verify_empty_member(&mut self, idx: usize) -> RarResult<()> {
+        let crc = crc32fast::hash(&[]);
+        let blake = self.entries[idx]
+            .header
+            .hash_value
+            .map(|_| crate::format::rar5::blake2sp::hash(&[]));
+        let payload = self.read_packed_data(idx)?;
+        self.verify_integrity(
+            idx,
+            crc,
+            blake,
+            payload.params.as_ref(),
+            payload.keys.as_ref(),
+        )
+    }
+
     /// Decode a single file into memory, optionally with a shared
     /// DecoderState (solid archives), verifying CRC32/BLAKE2sp.
     pub(super) fn decode_file_at(
@@ -237,6 +275,10 @@ impl RarArchive {
 
         // Empty files / directories
         if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
+            if self.entries[idx].is_dir() {
+                return Ok(Vec::new());
+            }
+            self.verify_empty_member(idx)?;
             return Ok(Vec::new());
         }
 
@@ -291,6 +333,10 @@ impl RarArchive {
         let hdr = &self.entries[idx].header;
         let _ = self.member_dict_window(idx)?; // enforces the -mdx cap
         if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
+            if self.entries[idx].is_dir() {
+                return Ok(0);
+            }
+            self.verify_empty_member(idx)?;
             return Ok(0);
         }
 
@@ -426,5 +472,108 @@ impl RarArchive {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader};
+    use crate::format::rar5::vint;
+    use crate::format::rar5::{
+        BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_DEPENDS_PREV, BLOCK_FLAG_EXTRA_DATA,
+        BLOCK_TYPE_SERVICE_HEADER, COMP_INFO_DICT_SHIFT, COMP_INFO_METHOD_SHIFT,
+        COMP_METHOD_NORMAL, COMP_METHOD_STORE, EXTRA_SERVICE_SUBDATA, FILE_FLAG_CRC32, OS_WINDOWS,
+        RAR5_SIGNATURE,
+    };
+
+    /// Build a minimal single-member RAR5 archive whose member owns one
+    /// "STM" service block. The stream's compression info carries `method`
+    /// and `dict_log` (the low four bits WinRAR reserves for the LZ
+    /// dictionary); `payload` becomes the block's data area.
+    fn archive_with_stream(method: u8, dict_log: u8, payload: &[u8], unpacked: u64) -> Vec<u8> {
+        let mut out = RAR5_SIGNATURE.to_vec();
+        out.extend_from_slice(
+            &ArchiveHeader {
+                flags: 0,
+                extra_data: Vec::new(),
+                volume_number: None,
+            }
+            .to_bytes(),
+        );
+        let member = FileHeader {
+            name: "owner.bin".into(),
+            ..Default::default()
+        };
+        out.extend_from_slice(&member.to_bytes());
+
+        let stream_name = b":ads";
+        let mut extra = Vec::new();
+        extra.extend(vint::encode((1 + stream_name.len()) as u64));
+        extra.extend(vint::encode(EXTRA_SERVICE_SUBDATA));
+        extra.extend_from_slice(stream_name);
+
+        let mut body = Vec::new();
+        body.extend(vint::encode(BLOCK_TYPE_SERVICE_HEADER));
+        body.extend(vint::encode(
+            BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_DEPENDS_PREV,
+        ));
+        body.extend(vint::encode(extra.len() as u64)); // extra area size
+        body.extend(vint::encode(payload.len() as u64)); // data size
+        body.extend(vint::encode(FILE_FLAG_CRC32));
+        body.extend(vint::encode(unpacked));
+        body.extend(vint::encode(0u64)); // attributes
+        body.extend(crc32fast::hash(payload).to_le_bytes());
+        body.extend(vint::encode(
+            (u64::from(dict_log) << COMP_INFO_DICT_SHIFT)
+                | (u64::from(method) << COMP_INFO_METHOD_SHIFT),
+        ));
+        body.extend(vint::encode(OS_WINDOWS));
+        body.extend(vint::encode(3u64)); // name length
+        body.extend(b"STM");
+        body.extend_from_slice(&extra);
+
+        let mut content = vint::encode(body.len() as u64);
+        content.extend(body);
+        out.extend_from_slice(&crc32fast::hash(&content).to_le_bytes());
+        out.extend(content);
+        out.extend_from_slice(payload);
+        out.extend_from_slice(&EndOfArchiveHeader { flags: 0 }.to_bytes());
+        out
+    }
+
+    fn open_archive(bytes: &[u8]) -> (tempfile::TempDir, RarArchive) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stream-cap.rar");
+        std::fs::write(&path, bytes).unwrap();
+        let archive = RarArchive::open(&path).unwrap();
+        (dir, archive)
+    }
+
+    /// A "STM" record with dictionary bits 0xF declares a 4 GiB window; a
+    /// lowered `max_dict_size` must reject it before any allocation.
+    #[test]
+    fn stream_dictionary_cap_is_enforced() {
+        let bytes = archive_with_stream(COMP_METHOD_NORMAL, 0x0F, &[0xFF; 4], 4);
+        let (_dir, mut archive) = open_archive(&bytes);
+        archive.read_ctx_mut().extract_options.max_dict_size = Some(128 * 1024);
+        let err = archive.read_member_streams(0).unwrap_err();
+        assert!(
+            matches!(err, RarError::LimitExceeded { .. }),
+            "unexpected: {err:?}"
+        );
+    }
+
+    /// Positive control: a STORE stream with dictionary bits 0xF (exactly
+    /// the default 4 GiB cap) passes the check and decodes.
+    #[test]
+    fn stream_dictionary_at_the_default_cap_decodes() {
+        let payload = b"stream bytes";
+        let bytes = archive_with_stream(COMP_METHOD_STORE, 0x0F, payload, payload.len() as u64);
+        let (_dir, mut archive) = open_archive(&bytes);
+        assert_eq!(
+            archive.read_member_streams(0).unwrap(),
+            vec![(":ads".to_string(), payload.to_vec())]
+        );
     }
 }

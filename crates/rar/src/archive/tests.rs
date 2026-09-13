@@ -1056,6 +1056,143 @@ fn temp_leftovers(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+fn staging_size(dir: &Path) -> u64 {
+    let staged = temp_leftovers(dir)
+        .into_iter()
+        .find(|name| name.contains("rar5tmp"))
+        .expect("a staged archive file");
+    std::fs::metadata(dir.join(staged)).unwrap().len()
+}
+
+/// A failed finalization marks the archive as already finalized, so a second
+/// `close()` (which `Drop` used to run unconditionally) cannot re-enter
+/// `finish_writing` and append a second quick-open record over the already
+/// patched header.
+#[test]
+fn failed_finalize_is_not_retried_by_a_second_close() {
+    let dir = tempfile::tempdir().unwrap();
+    // A directory at the target path: `finish_writing` succeeds, the commit
+    // rename fails. The staging file is left in place, so the second close
+    // has something to corrupt if it re-entered finalization.
+    let target = dir.path().join("t.rar");
+    std::fs::create_dir(&target).unwrap();
+    let mut archive = RarArchive::create_with_options(
+        &target,
+        crate::options::CreateOptions {
+            quick_open: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    archive.add_bytes("a.txt", b"data", 0).unwrap();
+
+    assert!(archive.close().is_err());
+    let after_failure = staging_size(dir.path());
+    // The retry must be a no-op: no QO record / end block appended after the
+    // first failed attempt.
+    assert!(archive.close().is_err());
+    assert_eq!(
+        staging_size(dir.path()),
+        after_failure,
+        "a second close re-entered finalization and wrote trailing records"
+    );
+    // The failed operation must not have touched the target (still the
+    // directory planted above) and `Drop` cleans the staging up.
+    drop(archive);
+    assert!(target.is_dir());
+    assert!(temp_leftovers(dir.path()).is_empty());
+}
+
+/// Locking must leave the archive readable: the patched main header is
+/// staged and installed atomically, so the archive never carries a stale
+/// header CRC.
+#[test]
+fn lock_installs_a_valid_main_header_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lock.rar");
+    {
+        let mut archive =
+            RarArchive::create_with_options(&path, crate::options::CreateOptions::default())
+                .unwrap();
+        archive.add_bytes("a.txt", b"payload", 0).unwrap();
+        archive.add_bytes("b.bin", &[7u8; 4096], 3).unwrap();
+        archive.close().unwrap();
+    }
+
+    let mut archive = RarArchive::open(&path).unwrap();
+    archive.lock().unwrap();
+    assert!(
+        archive.main_header_is_locked().unwrap(),
+        "the installed main header must carry the LOCKED flag"
+    );
+    // No staging leftovers, and the locked archive still reads back.
+    assert!(temp_leftovers(dir.path()).is_empty());
+    let mut reader = RarArchive::open(&path).unwrap();
+    assert!(
+        reader.main_header_is_locked().unwrap(),
+        "the on-disk main header must stay valid (CRC) and locked"
+    );
+    assert_eq!(
+        reader
+            .read_with_options("a.txt", Default::default())
+            .unwrap(),
+        b"payload"
+    );
+    assert_eq!(
+        reader
+            .read_with_options("b.bin", Default::default())
+            .unwrap(),
+        vec![7u8; 4096]
+    );
+
+    // Locking an already-locked archive is a no-op and leaves the bytes
+    // untouched.
+    let before = std::fs::read(&path).unwrap();
+    reader.lock().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// A failed lock install must leave the original archive byte-identical and
+/// remove the staged temporary: the patched bytes never touch the archive
+/// path unless the whole prefix (including its tail) was staged and flushed.
+#[test]
+fn failed_lock_install_preserves_the_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lock-fail.rar");
+    {
+        let mut archive =
+            RarArchive::create_with_options(&path, crate::options::CreateOptions::default())
+                .unwrap();
+        archive.add_bytes("a.txt", b"payload", 0).unwrap();
+        archive.close().unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+
+    let error = super::stage_file(
+        &path,
+        |file| {
+            use std::io::Write;
+            file.write_all(b"replacement bytes").map_err(RarError::Io)
+        },
+        |_, _| {
+            Err(RarError::Io(std::io::Error::other(
+                "injected install failure",
+            )))
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, RarError::Io(_)), "got {error:?}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "a failed install must leave the original archive untouched"
+    );
+    assert!(
+        temp_leftovers(dir.path()).is_empty(),
+        "a failed install left its staged temporary behind"
+    );
+}
+
 #[test]
 fn create_is_not_visible_until_close_and_leaves_no_temp() {
     let dir = tempfile::tempdir().unwrap();

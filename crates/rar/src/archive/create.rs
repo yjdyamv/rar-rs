@@ -160,16 +160,27 @@ impl RarArchive {
     /// Finalize the archive (writes end-of-archive block in write mode).
     pub(crate) fn close(&mut self) -> RarResult<()> {
         self.check_cancel()?;
+        // Finalization runs exactly once. A failure can leave the stream
+        // positioned mid-header and may already have written service
+        // records; re-running it (a second `close`, or `Drop`'s automatic
+        // retry) would append a second quick-open/recovery record or patch
+        // the wrong offset. The flag is set before the first trailing write,
+        // so neither path can re-enter it.
+        if self.finalize_started {
+            return Err(RarError::InvalidState(
+                "archive finalization was already attempted".into(),
+            ));
+        }
         self.finish_writing()?;
         self.stream = None;
         // Move the staged files over their final paths: only now does the
-        // archive become visible at the target path. On failure the staged
-        // files are left for [`Drop`] to clean up.
+        // archive become visible at the target path. Recovery volumes are
+        // generated from the staged set and committed in the same
+        // transaction, so a committed volume set always has its `.rev`
+        // siblings (a failure before the commit leaves the previous set
+        // untouched). On failure the staged files are left for [`Drop`] to
+        // clean up.
         self.commit_pending()?;
-        if self.recovery_volumes_percent.is_some() || self.recovery_volumes_count.is_some() {
-            self.check_cancel()?;
-            self.write_recovery_volumes()?;
-        }
         Ok(())
     }
 
@@ -177,6 +188,12 @@ impl RarArchive {
     /// end-of-archive block. The stream is left open so a caller can take
     /// it back afterwards (in-memory sink seam).
     pub(super) fn finish_writing(&mut self) -> RarResult<()> {
+        if self.finalize_started {
+            return Err(RarError::InvalidState(
+                "archive finalization was already attempted".into(),
+            ));
+        }
+        self.finalize_started = true;
         if self.rar13 {
             return self.finish_writing_rar13();
         }
@@ -219,32 +236,33 @@ impl RarArchive {
             .ok_or_else(|| RarError::Format("no archive stream to take".into()))
     }
 
-    /// Generate the `.rev` recovery-volume files for a completed
-    /// multi-volume archive set (WinRAR `-rv` equivalent).
-    pub(super) fn write_recovery_volumes(&mut self) -> RarResult<()> {
-        // Exact count wins; the percent variant is converted at close time.
-        let nd = self.volume_paths.len();
+    /// Generate the `.rev` recovery-volume files for a multi-volume archive
+    /// set (WinRAR `-rv` equivalent), reading the staged volume files that
+    /// are about to be committed. Returns the staged `.rev` paths so the
+    /// caller can install them in the same atomic commit as the data
+    /// volumes; if the generation fails, no data volume is committed.
+    ///
+    /// WinRAR silently skips recovery volumes when `-v` produced a single
+    /// volume (the data fit), and so do we.
+    fn stage_recovery_volumes(
+        &self,
+        parent: &Path,
+        tmp_base: &str,
+        nd: usize,
+    ) -> RarResult<Vec<PathBuf>> {
         if nd < 2 {
-            // WinRAR silently skips recovery volumes when `-v` produced a
-            // single volume (the data fit), and so do we.
-            self.recovery_volumes_percent = None;
-            self.recovery_volumes_count = None;
-            return Ok(());
+            return Ok(Vec::new());
         }
+        // Exact count wins; the percent variant is converted at close time.
         let rec_count = if let Some(count) = self.recovery_volumes_count {
             (count as usize).min(nd)
         } else if let Some(percent) = self.recovery_volumes_percent {
             crate::recovery::rev50::plan_recovery_volume_count(nd, percent as u64)?
         } else {
-            return Ok(());
+            return Ok(Vec::new());
         };
-
-        let written =
-            crate::recovery::rev50::build_recovery_volumes_for_set(&self.volume_paths, rec_count)?;
-        let _ = written;
-        self.recovery_volumes_percent = None;
-        self.recovery_volumes_count = None;
-        Ok(())
+        let staged: Vec<PathBuf> = (1..=nd).map(|n| volume_path(parent, tmp_base, n)).collect();
+        crate::recovery::rev50::build_recovery_volumes_for_set(&staged, rec_count)
     }
 
     /// Compute the RAR5 recovery record over the archive written so far
@@ -283,10 +301,10 @@ impl RarArchive {
             } => {
                 // WinRAR zero-pads the part number to the digit count of
                 // the total volume count (part01..part15 for 10+ volumes);
-                // the final names carry the same padding, and the staged
-                // `.rev` naming (write_recovery_volumes) follows it.
+                // the final names carry the same padding.
                 let nd = self.volume_paths.len();
                 let width = nd.to_string().len().max(1);
+                let mut data_paths = Vec::with_capacity(nd);
                 let mut install = Vec::with_capacity(nd);
                 for n in 1..=nd {
                     let tmp = volume_path(parent, tmp_base, n);
@@ -297,12 +315,40 @@ impl RarArchive {
                     } else {
                         volume_path_padded(parent, final_base, n, width)
                     };
+                    data_paths.push(final_path.clone());
                     install.push((tmp, final_path));
                 }
+                // Recovery volumes are generated from the staged data
+                // volumes and installed by the same journaled commit, so a
+                // committed set always carries matching `.rev` files and a
+                // failure before the commit leaves the previous set intact.
+                let revs = match self.stage_recovery_volumes(parent, tmp_base, nd) {
+                    Ok(revs) => revs,
+                    Err(error) => {
+                        // The builder writes the `.rev` files one by one;
+                        // drop the ones it managed to write before failing
+                        // so no partial parity set is left next to the
+                        // staged volumes.
+                        Self::remove_staged_recovery_files(parent, tmp_base);
+                        self.write_ctx_mut().output.pending = Some(pending);
+                        return Err(error);
+                    }
+                };
+                let rev_install = match recovery_install_paths(parent, final_base, &revs, width) {
+                    Ok(install) => install,
+                    Err(error) => {
+                        Self::remove_staged_recovery_files(parent, tmp_base);
+                        self.write_ctx_mut().output.pending = Some(pending);
+                        return Err(error);
+                    }
+                };
+                install.extend(rev_install);
                 // A shorter overwrite must not leave parts of the previous,
                 // longer set behind: retire every existing volume the new
                 // set does not replace. The commit below parks them with the
                 // replaced originals and restores them if it rolls back.
+                // The new `.rev` files are in `keep`, so a stale-set scan
+                // never retires the parity generated in this same commit.
                 let keep: Vec<PathBuf> = install.iter().map(|(_, f)| f.clone()).collect();
                 let retire = crate::fs::volume::stale_volume_paths(
                     parent,
@@ -312,7 +358,11 @@ impl RarArchive {
                 );
                 let result = commit_files(parent, final_base, &install, &retire);
                 if result.is_ok() {
-                    self.volume_paths = keep;
+                    self.volume_paths = data_paths;
+                    // The .rev generation is one-shot: never re-run it on a
+                    // later close (the data volumes are already installed).
+                    self.recovery_volumes_percent = None;
+                    self.recovery_volumes_count = None;
                 }
                 result
             }
@@ -324,6 +374,23 @@ impl RarArchive {
                 // staged files that were not committed.
                 self.write_ctx_mut().output.pending = Some(pending);
                 Err(e)
+            }
+        }
+    }
+
+    /// Remove the staged `.rev` files the recovery-volume builder may have
+    /// written before failing. Called with the staged volume base; the
+    /// builder names every file after it, so the sweep cannot match
+    /// anything else.
+    fn remove_staged_recovery_files(parent: &Path, tmp_base: &str) {
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(tmp_base) && name.ends_with(".rev") {
+                let _ = std::fs::remove_file(entry.path());
             }
         }
     }
@@ -1007,4 +1074,29 @@ impl RarArchive {
             self.stream.as_mut().unwrap().stream_position()?;
         Ok(())
     }
+}
+
+/// Map the staged `.rev` files returned by the recovery-volume builder (named
+/// after the staged volume base) to the canonical final names of the set.
+///
+/// The names are rebuilt from the generated files themselves: RAR5 uses the
+/// zero-padded `<base>.partNN.rev` scheme (matching the data volumes),
+/// while legacy (RAR 1.5–4.x) sets keep the rev3 name shape — including the
+/// counts it embeds — for the final base.
+fn recovery_install_paths(
+    parent: &Path,
+    final_base: &str,
+    revs: &[PathBuf],
+    part_width: usize,
+) -> RarResult<Vec<(PathBuf, PathBuf)>> {
+    if revs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let names =
+        crate::recovery::rev3::canonical_recovery_names(final_base, revs, Some(part_width))?;
+    Ok(revs
+        .iter()
+        .zip(names)
+        .map(|(staged, name)| (staged.clone(), parent.join(name)))
+        .collect())
 }

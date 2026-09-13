@@ -21,7 +21,9 @@ pub(crate) fn read_mask_file(path: &str) -> Result<Vec<String>, String> {
 
 /// Parse a WinRAR date (`-ta`/`-tb`) into unix seconds. Accepts
 /// `YYYY[MM[DD[HH[MM[SS]]]]]`; missing trailing parts default to their
-/// minimum (month/day 01, time 00:00:00).
+/// minimum (month/day 01, time 00:00:00). The date is a *local* civil date
+/// (like `-tk`), so it is resolved through the current UTC offset before it
+/// is compared against file mtimes.
 pub(crate) fn parse_rar_date(s: &str) -> Result<u32, String> {
     let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
     let (y, m, d, hh, mm, ss) = match digits.len() {
@@ -71,8 +73,11 @@ pub(crate) fn parse_rar_date(s: &str) -> Result<u32, String> {
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 59 {
         return Err(format!("invalid date: {s}"));
     }
-    let days = crate::time::days_from_civil(y, m, d);
-    let secs = days * 86400 + i64::from(hh) * 3600 + i64::from(mm) * 60 + i64::from(ss);
+    let local = crate::time::local_civil_to_system_time(y, m, d, hh, mm, ss);
+    let secs = match local.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+        Err(_) => return Err(format!("date out of range: {s}")),
+    };
     u32::try_from(secs).map_err(|_| format!("date out of range: {s}"))
 }
 

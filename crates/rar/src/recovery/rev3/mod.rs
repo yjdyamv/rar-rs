@@ -370,13 +370,25 @@ fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet>
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let bytes = fs::read(&path)?;
+        // Filter by name before reading: unrelated files (and unreadable
+        // entries such as directories) must neither be slurped into memory
+        // nor abort recovery.
+        let candidates = rev_name_candidates(name);
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.base.eq_ignore_ascii_case(base))
+        {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
         let trailer = parse_trailer(&bytes);
 
         // The name is ambiguous when the base ends in digits; keep the
         // candidate whose data volumes actually exist.
         let mut best: Option<(usize, RevName, Meta)> = None;
-        for candidate in rev_name_candidates(name) {
+        for candidate in candidates {
             if !candidate.base.eq_ignore_ascii_case(base) {
                 continue;
             }
@@ -652,6 +664,127 @@ fn use_trailer_format(volume_paths: &[PathBuf], sizes: &[u64]) -> RarResult<bool
     Ok(probe)
 }
 
+/// Identify the recovery layout and naming family for a data-volume set: the
+/// `.rev` name shape (trailer vs legacy, new vs old naming) follows the
+/// sizes' tails, so a final-name computation must use the same inputs as the
+/// builder.
+fn recovery_name_layout(
+    volume_paths: &[PathBuf],
+) -> RarResult<(PathBuf, Layout, Format, Vec<u64>)> {
+    let parent = volume_paths[0]
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    let (_, layout, _) = identify(&volume_paths[0])?;
+    let mut sizes = Vec::with_capacity(volume_paths.len());
+    for path in volume_paths {
+        sizes.push(fs::metadata(path)?.len());
+    }
+    let format = if use_trailer_format(volume_paths, &sizes)? {
+        Format::Trailer
+    } else {
+        Format::Legacy
+    };
+    Ok((parent, layout, format, sizes))
+}
+
+/// Old-naming trailer-format `.rev` path (`k` is the zero-based recovery
+/// index): `{base}{N}.rev`.
+fn old_trailer_name(base: &str, k: usize) -> String {
+    format!("{base}{}.rev", k + 1)
+}
+
+/// Old-naming legacy-format `.rev` path: the counts live in the name,
+/// `{base}{data}_{rec}_{index}.rev`.
+fn old_legacy_name(base: &str, k: usize, data_count: usize, rec_count: usize) -> String {
+    format!("{base}{data_count}_{rec_count}_{}.rev", k + 1)
+}
+
+/// The canonical `.rev` names for a set whose data volumes are named
+/// `final_base` (+ the legacy `.rar`/`.rNN` suffixes), keeping the name
+/// shape the builder chose for the staged recovery files.
+///
+/// The staged files are named after a temporary base but carry the same
+/// layout: a trailer-format `.rev` is recognised by its trailer bytes, a
+/// legacy-format one by the counts encoded in its name. Only the base name
+/// and, for a `.partN.rar` set, the part padding change at install time, so
+/// the names are derived from the staged files themselves rather than
+/// re-detecting the layout from the not-yet-installed final volumes.
+///
+/// `part_width` is the zero-padding the final `.partN.rar` data volumes use
+/// (RAR5); `None` keeps the padding of the generated name.
+pub(crate) fn canonical_recovery_names(
+    final_base: &str,
+    staged_revs: &[PathBuf],
+    part_width: Option<usize>,
+) -> RarResult<Vec<String>> {
+    let Some(first) = staged_revs.first() else {
+        return Ok(Vec::new());
+    };
+    let name = first
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| RarError::Format(format!("{}: not a recovery path", first.display())))?;
+    let candidates = rev_name_candidates(name);
+    let parsed = candidates
+        .first()
+        .ok_or_else(|| RarError::Format(format!("{name}: not a recovery-volume name")))?;
+    // RAR5 recovery volumes (`REV5` signature) use the `.partN.rev` scheme
+    // with the data set's padding; the legacy codec's `.rev` layout is only
+    // chosen for a real legacy set.
+    if is_rar5_recovery_volume(first) {
+        let width = part_width.unwrap_or(parsed.width).max(1);
+        return Ok((1..=staged_revs.len())
+            .map(|k| format!("{}.part{:0width$}.rev", final_base, k))
+            .collect());
+    }
+    // The legacy layout is recognised from the staged file itself: trailer
+    // bytes for the trailer layout, the name-encoded counts for the legacy
+    // layout.
+    let trailer = trailer_style(first);
+    let legacy_name = candidates.iter().find_map(|candidate| candidate.meta);
+    if !trailer && legacy_name.is_none() {
+        return Err(RarError::Format(format!(
+            "{name}: legacy recovery name without counts"
+        )));
+    }
+    Ok((0..staged_revs.len())
+        .map(|k| {
+            if trailer {
+                if parsed.new_naming {
+                    let width = part_width.unwrap_or(parsed.width).max(1);
+                    format!("{}.part{:0width$}.rev", final_base, k + 1)
+                } else {
+                    old_trailer_name(final_base, k)
+                }
+            } else {
+                let meta = legacy_name.expect("checked above");
+                old_legacy_name(final_base, k, meta.data_count, meta.rec_count)
+            }
+        })
+        .collect())
+}
+
+/// Whether `path` starts with the RAR5 recovery-volume signature.
+fn is_rar5_recovery_volume(path: &Path) -> bool {
+    let mut head = [0u8; 8];
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    matches!(file.read(&mut head), Ok(8)) && head == *crate::recovery::rev50::REV5_SIGNATURE
+}
+
+/// Whether the staged `.rev` file at `path` uses the trailer layout (its
+/// last bytes parse as a valid trailer).
+fn trailer_style(path: &Path) -> bool {
+    fs::read(path)
+        .ok()
+        .as_deref()
+        .and_then(parse_trailer)
+        .is_some()
+}
+
 /// Build `.rev` recovery volumes for an existing RAR 1.5–4.x volume set,
 /// matching WinRAR's `rv` output byte-for-byte.
 pub(crate) fn build_recovery_volumes_for_set(
@@ -671,27 +804,13 @@ pub(crate) fn build_recovery_volumes_for_set(
     }
     let rec_count = rec_count.max(1);
 
-    let parent = volume_paths[0]
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
-    let (_, layout, _) = identify(&volume_paths[0])?;
-
-    let mut sizes = Vec::with_capacity(nd);
-    for path in volume_paths {
-        sizes.push(fs::metadata(path)?.len());
-    }
+    let (parent, layout, format, sizes) = recovery_name_layout(volume_paths)?;
     let shard_len = *sizes.iter().max().unwrap_or(&0);
     if shard_len < (TRAILER_LEN + 1) as u64 {
         return Err(RarError::Format(
             "volumes are too small for recovery volumes".into(),
         ));
     }
-    let format = if use_trailer_format(volume_paths, &sizes)? {
-        Format::Trailer
-    } else {
-        Format::Legacy
-    };
     let protected = match format {
         Format::Trailer => shard_len - TRAILER_LEN as u64,
         Format::Legacy => shard_len,
@@ -1208,7 +1327,9 @@ fn map_coder(error: rs8::Rs8Error) -> RarError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Meta, NameKind, parse_trailer, rev_name_candidates, write_trailer};
+    use super::{
+        Meta, NameKind, collect_recovery_volumes, parse_trailer, rev_name_candidates, write_trailer,
+    };
 
     #[test]
     fn trailer_roundtrip_validates_counts_and_crc() {
@@ -1286,6 +1407,24 @@ mod tests {
             .collect();
         assert!(data_counts.contains(&4), "{data_counts:?}");
         assert!(data_counts.contains(&44), "{data_counts:?}");
+    }
+
+    /// Scanning a directory with a subdirectory and an unrelated file must
+    /// not abort recovery (the subdirectory used to be read and fail).
+    #[test]
+    fn collect_recovery_volumes_ignores_non_rev_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        // A legacy-format name carries its metadata, so no data volumes
+        // need to exist for collection to succeed.
+        std::fs::write(dir.path().join("set4_1_1.rev"), b"parity payload").unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        std::fs::write(dir.path().join("unrelated.bin"), vec![0u8; 4096]).unwrap();
+
+        let set = collect_recovery_volumes(dir.path(), "set").unwrap();
+        assert_eq!(set.meta.data_count, 4);
+        assert_eq!(set.meta.rec_count, 1);
+        assert_eq!(set.payloads.len(), 1);
+        assert_eq!(set.payloads[0].1, b"parity payload");
     }
 }
 

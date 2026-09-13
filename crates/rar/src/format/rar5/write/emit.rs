@@ -265,7 +265,11 @@ impl RarArchive {
                 block_flags |= BLOCK_FLAG_DATA_CONTINUES;
             }
 
-            // Estimate header size
+            // Estimate header sizes. The final chunk's extra area can be
+            // larger than a mid chunk's (BLAKE2sp hash / OWNER records, the
+            // full encryption record), so a chunk sized by the mid estimate
+            // alone can turn out to be the last one and overflow the volume
+            // by the extra-record delta. Budget against both.
             let (chunk_mtime, chunk_flags) =
                 self.rar5_time_fields(params.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
             let chunk_fh = FileHeader {
@@ -286,9 +290,36 @@ impl RarArchive {
                 ..Default::default()
             };
             let hdr_size = self.on_disk_header_len(chunk_fh.to_bytes().len() as u64);
+            // The final header carries the full extra area; its other fields
+            // are no longer than the estimate's (`packed_size` is at most
+            // `remaining_vol`, the continue-to flag is cleared), so this
+            // length bounds the header actually written for a final chunk.
+            let last_hdr_size = self.on_disk_header_len(
+                FileHeader {
+                    extra_data: chunk_extra(true, is_first),
+                    ..chunk_fh
+                }
+                .to_bytes()
+                .len() as u64,
+            );
 
             let bytes_for_data = remaining_vol.saturating_sub(hdr_size + eoa_size);
-            if bytes_for_data == 0 {
+            let bytes_for_last = remaining_vol.saturating_sub(last_hdr_size + eoa_size);
+            let remaining_member = total_packed - offset;
+
+            // Middle chunks keep the mid estimate's budget; a chunk that
+            // would swallow the member tail only does so when it also fits
+            // with the final header, otherwise it stops at `bytes_for_last`
+            // (rolling the volume when that budget is zero) and leaves the
+            // tail for the next volume.
+            let chunk_size = if remaining_member <= bytes_for_last {
+                remaining_member
+            } else if remaining_member <= bytes_for_data {
+                bytes_for_last
+            } else {
+                bytes_for_data
+            };
+            if chunk_size == 0 {
                 if rolled {
                     return Err(RarError::InvalidOption(format!(
                         "volume size {volume_size} is too small for a member header ({hdr_size} bytes) plus the end block"
@@ -301,7 +332,6 @@ impl RarArchive {
             }
             rolled = false;
 
-            let chunk_size = bytes_for_data.min(total_packed - offset);
             let is_last = offset + chunk_size >= total_packed;
 
             // Set final flags

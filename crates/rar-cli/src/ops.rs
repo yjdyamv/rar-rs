@@ -568,11 +568,13 @@ pub fn verify_members(
         .map_err(|e| CliError::from(e).context("test"))
 }
 
-/// Extract the whole archive, or only the members whose name matches one of
-/// `names` (full stored path or basename), using the same options. Returns
-/// how many members were written. A name matching nothing is a hard error,
-/// so a mistyped selector is never silently swallowed or treated as a
-/// destination directory.
+/// Extract the whole archive, or only the members whose stored path, mask or
+/// directory prefix matches one of `names` (see [`crate::selector`]), using
+/// the same options. Directory entries are selected too, so selecting a
+/// stored directory also materializes an empty one. Returns how many members
+/// were written. A name matching nothing is a hard error, so a mistyped
+/// selector is never silently swallowed or treated as a destination
+/// directory.
 pub fn extract_members(
     rar: &mut ArchiveReader,
     dest: &Path,
@@ -587,7 +589,6 @@ pub fn extract_members(
 
     let wanted = crate::selector::select_entries(
         rar.entries()
-            .filter(|entry| !entry.is_dir())
             .map(|entry| (entry.id(), entry.metadata().name())),
         names,
     );
@@ -657,13 +658,16 @@ pub fn extract_to_stdout(
 }
 
 /// Print one member, or every file member when `file` is `None`, to stdout
-/// (`p`).
+/// (`p`). The selector follows the shared member-selection rules (stored
+/// path, basename, mask or directory prefix).
 pub fn print_members(rar: &mut ArchiveReader, file: Option<&str>) -> CliResult<()> {
     let wanted: Vec<_> = if let Some(file) = file {
-        rar.entries_named(file)
-            .filter(|entry| !entry.is_dir())
-            .map(|entry| entry.id())
-            .collect()
+        crate::selector::select_entries(
+            rar.entries()
+                .filter(|entry| !entry.is_dir())
+                .map(|entry| (entry.id(), entry.metadata().name())),
+            std::slice::from_ref(&file.to_string()),
+        )
     } else {
         rar.entries()
             .filter(|entry| !entry.is_dir())

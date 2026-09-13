@@ -4,19 +4,22 @@
 //! archives are refused; solid archives defer to [`super::repack`]);
 //! [`edit_rar4`] stages one rewrite that composes deletes, renames, the
 //! archive comment, recovery-record rebuilds and per-member comments, then
-//! replaces the archive atomically. Multi-volume sets follow the per-volume
-//! rule (rename + comment only).
+//! replaces the archive atomically. Blocks are streamed through bounded
+//! buffers; only a rebuilt recovery record's protected prefix is retained
+//! (its parity covers the whole prefix by construction). Multi-volume sets
+//! follow the per-volume rule (rename + comment only).
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::comment::{build_comment_block, comment_block_name_is_cmt, encode_comment_text};
 use super::headers::{file_header_name, rebuild_rar4_header, rename_file_header};
 use super::layout::{
-    emit_block, header_password, main_flags, patch_main_header, read_block_view,
-    refuse_unsupported_containers, scan_layout,
+    archive_is_locked, copy_range, emit_block, first_volume, header_password, locate_signature,
+    main_flags, patch_main_header, read_block_stream, refuse_unsupported_containers,
+    scan_layout_stream,
 };
 use super::repack::repack_solid_archive;
 use super::{CMT_HEAD_SIZE, RECOVERY_HEAD_SIZE};
@@ -27,18 +30,18 @@ use crate::format::rar4::{
     FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY, MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD,
 };
 use crate::fs::atomic::{commit_files, read_write_create, replace_file, temp_sibling_path};
-use crate::fs::volume::volume_base_of;
-use crate::recovery::legacy_rr::{
-    build_legacy_recovery_block, recovery_sector_count, scan_protect_with_password,
-};
+use crate::fs::volume::{stale_volume_paths, volume_base_of};
+use crate::recovery::legacy_rr::{build_legacy_recovery_block, recovery_sector_count};
+
 /// Header-level edits across a multi-volume RAR4 set: rename and archive
 /// comment. Each volume is rewritten as its own block stream (official `rar`
 /// does not rebalance volumes, so a volume may grow past `-v`). Every
 /// FILE_HEAD carrying a renamed member's name is rebuilt — a split member
 /// repeats its name in each volume's chunk header — and a comment change
 /// inserts/removes the `CMT` block right after the first volume's main
-/// header (WinRAR's placement). The whole set is committed through the shared
-/// multi-file transaction, so a failure restores the previous volumes.
+/// header (WinRAR's placement), regardless of which part was opened. The
+/// whole set is committed through the shared multi-file transaction, so a
+/// failure restores the previous volumes.
 fn apply_multivolume_edits(
     archive: &mut RarArchive,
     rename_map: &HashMap<usize, String>,
@@ -54,72 +57,95 @@ fn apply_multivolume_edits(
         );
     }
     let password = header_password(archive);
-    let password_bytes = password.map(str::as_bytes);
+    let first_path = first_volume(archive).to_path_buf();
     let mut matched: HashSet<String> = HashSet::new();
     let mut install: Vec<(PathBuf, PathBuf)> = Vec::new();
     for volume in archive.volume_paths.clone() {
-        let bytes = fs::read(&volume).map_err(RarError::Io)?;
-        let sig = if volume == archive.path {
-            archive.sfx_offset as usize
-        } else {
-            crate::detect::find_bytes(&bytes, crate::detect::RAR4_SIGNATURE).ok_or_else(|| {
-                RarError::Format(format!(
-                    "RAR4: {} has no archive signature",
-                    volume.display()
-                ))
-            })?
-        };
-        let mut out = Vec::with_capacity(bytes.len() + 64);
-        out.extend_from_slice(&bytes[..sig + 7]);
-        let mut pos = sig + 7;
-        let mut hp: Option<&[u8]> = None;
-        while pos + 7 <= bytes.len() {
-            let start = pos;
-            let view = read_block_view(&bytes, pos, hp)?;
-            if view.head_type == MAIN_HEAD {
-                let flags = main_flags(&view.header)?;
-                if flags & MHD_PASSWORD != 0 {
-                    hp = password_bytes;
-                }
-                out.extend_from_slice(&bytes[start..start + view.total]);
-                // A comment change inserts its CMT block right after the
-                // first volume's main header (WinRAR's placement).
-                if volume == archive.path
-                    && let Some(text) = comment
-                    && !text.is_empty()
-                {
-                    let (payload, unicode) = encode_comment_text(text);
-                    let block = build_comment_block(&payload, unicode);
-                    emit_block(
-                        &mut out,
-                        &block[..CMT_HEAD_SIZE],
-                        &block[CMT_HEAD_SIZE..],
-                        password,
-                    )?;
-                }
-            } else if view.head_type == FILE_HEAD {
-                let name = file_header_name(&view.header)?;
-                let key = name.trim_end_matches('/');
-                if let Some(new_name) = by_name.get(key) {
-                    let new_header = rename_file_header(&view.header, new_name)?;
-                    emit_block(&mut out, &new_header, view.data(&bytes, start), password)?;
-                    matched.insert(key.to_string());
-                } else {
-                    out.extend_from_slice(&bytes[start..start + view.total]);
-                }
-            } else if replace_comment
-                && view.head_type == NEWSUB_HEAD
-                && view.header.len() >= 32
-                && comment_block_name_is_cmt(&view.header)
-            {
-                // Dropped: the replacement was emitted after the main header.
-            } else {
-                out.extend_from_slice(&bytes[start..start + view.total]);
-            }
-            pos = start + view.total;
-        }
+        let is_first = volume == first_path;
         let tmp = temp_sibling_path(&volume);
-        fs::write(&tmp, &out).map_err(RarError::Io)?;
+        let staged = (|| -> RarResult<()> {
+            let mut src = File::open(&volume).map_err(RarError::Io)?;
+            // The first volume may carry an SFX stub; every later volume
+            // starts at its own signature. `archive.sfx_offset` belongs to
+            // the opened file, so it is only trusted for the opened first
+            // volume.
+            let sig = if is_first && volume == archive.path {
+                archive.sfx_offset as usize
+            } else {
+                locate_signature(&mut src)?
+            };
+            let file_len = src.metadata().map_err(RarError::Io)?.len();
+            let mut out = read_write_create(&tmp).map_err(RarError::Io)?;
+            // Signature (and any SFX stub) through the end of the signature.
+            copy_range(&mut src, &mut out, 0, sig as u64 + 7)?;
+            src.seek(SeekFrom::Start(sig as u64 + 7))
+                .map_err(RarError::Io)?;
+            let mut pos = sig as u64 + 7;
+            let mut hp: Option<&[u8]> = None;
+            while pos < file_len {
+                let view = read_block_stream(&mut src, hp)?
+                    .ok_or_else(|| RarError::Format("RAR4: truncated block stream".into()))?;
+                if view.head_type == MAIN_HEAD {
+                    let flags = main_flags(&view.header)?;
+                    if flags & MHD_PASSWORD != 0 {
+                        hp = password.map(str::as_bytes);
+                    }
+                    out.write_all(&view.raw_header).map_err(RarError::Io)?;
+                    // A comment change inserts its CMT block right after the
+                    // first volume's main header (WinRAR's placement).
+                    if is_first
+                        && let Some(text) = comment
+                        && !text.is_empty()
+                    {
+                        let (payload, unicode) = encode_comment_text(text);
+                        let block = build_comment_block(&payload, unicode);
+                        let mut emitted = Vec::new();
+                        emit_block(
+                            &mut emitted,
+                            &block[..CMT_HEAD_SIZE],
+                            &block[CMT_HEAD_SIZE..],
+                            password,
+                        )?;
+                        out.write_all(&emitted).map_err(RarError::Io)?;
+                    }
+                } else if view.head_type == FILE_HEAD {
+                    let name = file_header_name(&view.header)?;
+                    let key = name.trim_end_matches('/');
+                    if let Some(new_name) = by_name.get(key) {
+                        let new_header = rename_file_header(&view.header, new_name)?;
+                        let mut emitted = Vec::new();
+                        emit_block(&mut emitted, &new_header, &[], password)?;
+                        out.write_all(&emitted).map_err(RarError::Io)?;
+                        copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
+                        matched.insert(key.to_string());
+                    } else {
+                        out.write_all(&view.raw_header).map_err(RarError::Io)?;
+                        copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
+                    }
+                } else if replace_comment
+                    && view.head_type == NEWSUB_HEAD
+                    && view.header.len() >= 32
+                    && comment_block_name_is_cmt(&view.header)
+                {
+                    // Dropped: the replacement was emitted after the main
+                    // header.
+                } else {
+                    out.write_all(&view.raw_header).map_err(RarError::Io)?;
+                    copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
+                }
+                pos = view.end();
+                src.seek(SeekFrom::Start(pos)).map_err(RarError::Io)?;
+            }
+            out.sync_all().map_err(RarError::Io)?;
+            Ok(())
+        })();
+        if let Err(error) = staged {
+            let _ = fs::remove_file(&tmp);
+            for (tmp, _) in &install {
+                let _ = fs::remove_file(tmp);
+            }
+            return Err(error);
+        }
         install.push((tmp, volume));
     }
     let parent = archive
@@ -180,26 +206,23 @@ pub(crate) struct SolidAppendEntry {
 /// `-hp` archives are appended to under the same header encryption (the
 /// password is required and reported by the prelude).
 pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
-    let bytes = fs::read(&archive.path).map_err(RarError::Io)?;
-    let layout = scan_layout(
-        &bytes,
-        archive.sfx_offset as usize,
-        header_password(archive),
-    )?;
+    let layout = {
+        let mut src = File::open(&archive.path).map_err(RarError::Io)?;
+        scan_layout_stream(
+            &mut src,
+            archive.sfx_offset as usize,
+            header_password(archive),
+        )?
+    };
     refuse_unsupported_containers(archive, layout.main_flags)?;
     if layout.main_flags & MHD_LOCK != 0 {
         return Err(RarError::ArchiveLocked);
     }
     let header_encrypted = layout.header_encrypted;
-    let hp = if header_encrypted {
-        header_password(archive).map(str::as_bytes)
-    } else {
-        None
-    };
     let solid = layout.main_flags & MHD_SOLID != 0;
     if solid {
         // RAR 2.5-era PROTECT_HEAD records cannot be repacked in place.
-        let rr_sectors = match scan_protect_with_password(&bytes, hp)?.protect {
+        let rr_sectors = match &layout.protect {
             Some(protect) if &protect.mark == b"Protect+" => Some(protect.rec_sectors),
             Some(_) => {
                 return Err(RarError::Unsupported(
@@ -219,7 +242,7 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
     // end-of-archive block; truncating at its start drops it (it cannot
     // protect members appended after it) and it is rebuilt at close. RAR
     // 2.5-era PROTECT_HEAD records cannot be rebuilt this way.
-    let (truncate_pos, rr_sectors) = match scan_protect_with_password(&bytes, hp)?.protect {
+    let (truncate_pos, rr_sectors) = match &layout.protect {
         Some(protect)
             if &protect.mark == b"Protect+" && protect.data_end <= layout.endarc_offset =>
         {
@@ -240,6 +263,33 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
     })
 }
 
+/// Erase an RAR4 archive: every data volume of the set plus any `.rev`
+/// recovery volumes for the same base. The journaled commit parks each file
+/// first, so a failure restores the whole set and the operation never leaves
+/// orphan volumes behind or reports success after a partial removal.
+fn erase_rar4_archive(archive: &mut RarArchive, deleted: usize) -> RarResult<EditSummary> {
+    let parent = archive
+        .path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    let base = volume_base_of(&archive.path);
+    let mut retire = archive.volume_paths.clone();
+    for stale in stale_volume_paths(&parent, &base, true, &retire) {
+        if !retire.contains(&stale) {
+            retire.push(stale);
+        }
+    }
+    retire.sort();
+    retire.dedup();
+    commit_files(&parent, &base, &[], &retire)?;
+    archive.entries.clear();
+    Ok(EditSummary {
+        deleted,
+        renamed: 0,
+    })
+}
+
 /// Apply one combined RAR4 edit transaction: delete members, rename
 /// members, set/remove the archive comment, and/or add or rebuild the
 /// recovery record, then atomically replace the archive and re-scan it.
@@ -249,9 +299,9 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
 /// Deleting members of a solid archive is refused (that needs the
 /// decode->re-encode repack of stage C); non-solid archives drop the whole
 /// FILE_HEAD + payload verbatim. Deleting every member erases the archive
-/// file, matching `rar d`. `comment` mirrors the RAR5 engine's semantics:
-/// `None` keeps the existing comment untouched, `Some(bytes)` installs it
-/// (empty bytes remove it).
+/// file (every volume of a set), matching `rar d`. `comment` mirrors the
+/// RAR5 engine's semantics: `None` keeps the existing comment untouched,
+/// `Some(bytes)` installs it (empty bytes remove it).
 pub(crate) fn edit_rar4(
     archive: &mut RarArchive,
     deletes: &[usize],
@@ -265,13 +315,19 @@ pub(crate) fn edit_rar4(
             "recovery percent must be in 0..=100".into(),
         ));
     }
-    let bytes = fs::read(&archive.path).map_err(RarError::Io)?;
-    let layout = scan_layout(
-        &bytes,
-        archive.sfx_offset as usize,
-        header_password(archive),
-    )?;
-    if layout.main_flags & MHD_LOCK != 0 {
+    let layout = {
+        let mut src = File::open(&archive.path).map_err(RarError::Io)?;
+        scan_layout_stream(
+            &mut src,
+            archive.sfx_offset as usize,
+            header_password(archive),
+        )?
+    };
+    // The lock bit lives on the set's first volume; a later part opened on
+    // its own still sees (and refuses) a locked archive.
+    if layout.main_flags & MHD_LOCK != 0
+        || (first_volume(archive) != archive.path.as_path() && archive_is_locked(archive)?)
+    {
         return Err(RarError::ArchiveLocked);
     }
     // `-hp`: the password that decrypts the layout also re-encrypts every
@@ -300,19 +356,15 @@ pub(crate) fn edit_rar4(
     // Deleting every member erases the archive file (matching `rar d`);
     // comment and recovery-record changes would be silently dropped, so
     // they are refused too, exactly like the RAR5 engine. This applies to
-    // solid archives as well (no repack needed when nothing survives).
+    // solid archives as well (no repack needed when nothing survives) and
+    // to multi-volume sets (every volume is removed).
     if deleted_count == archive.entries.len() {
         if force_rr.is_some() || comment.is_some() || !renames.is_empty() {
             return Err(RarError::InvalidOption(
                 "cannot combine comment, recovery-record or rename changes with deleting every member".into(),
             ));
         }
-        std::fs::remove_file(&archive.path).map_err(RarError::Io)?;
-        archive.entries.clear();
-        return Ok(EditSummary {
-            deleted: deleted_count,
-            renamed: 0,
-        });
+        return erase_rar4_archive(archive, deleted_count);
     }
 
     // Multi-volume sets: official `rar` supports the header-level edits on a
@@ -377,7 +429,7 @@ pub(crate) fn edit_rar4(
     // (written after ENDARC, or with a non-NEWSUB mark) cannot be kept
     // valid through a prefix rewrite; refuse rather than leave a stale
     // record behind.
-    let existing = match scan_protect_with_password(&bytes, hp_bytes)?.protect {
+    let existing = match &layout.protect {
         Some(protect)
             if &protect.mark == b"Protect+" && protect.data_end <= layout.endarc_offset =>
         {
@@ -407,108 +459,151 @@ pub(crate) fn edit_rar4(
         layout.main_header.clone()
     };
     let main_end = layout.main_offset + layout.main_header.len();
-    let mut out = Vec::with_capacity(bytes.len() + 4096);
-    out.extend_from_slice(&bytes[..layout.main_offset]);
-    out.extend_from_slice(&patched_main);
-    // A comment change lands its NEWSUB `CMT` block right after the main
-    // header (WinRAR's placement). `Some(empty)` removes the comment.
     let replace_comment = comment.is_some();
-    if let Some(text) = comment
-        && !text.is_empty()
-    {
-        let (payload, unicode) = encode_comment_text(text);
-        let block = build_comment_block(&payload, unicode);
-        // Only the 35-byte CMT header is header-encrypted; the payload
-        // follows as plaintext data (the same rule as FILE members).
-        emit_block(
-            &mut out,
-            &block[..CMT_HEAD_SIZE],
-            &block[CMT_HEAD_SIZE..],
-            hp,
-        )?;
-    }
 
-    let mut pos = main_end;
-    let mut file_index = 0usize;
-    while pos < region_end {
-        let start = pos;
-        let view = read_block_view(&bytes, pos, hp_bytes)?;
-        if view.head_type == FILE_HEAD {
-            let data = view.data(&bytes, start);
-            if deleted[file_index] {
-                // Drop the member's header and payload verbatim.
-            } else {
-                let new_name = rename_map.get(&file_index);
-                let new_comment = member_comments
-                    .iter()
-                    .find(|(i, _)| *i == file_index)
-                    .map(|(_, c)| c.as_deref());
-                if new_name.is_some() || new_comment.is_some() {
-                    // The rebuilt header (rename and/or comment) is re-encrypted
-                    // with a fresh salt; the member's payload is copied as-is.
-                    let rebuilt = rebuild_rar4_header(
-                        &view.header,
-                        new_name.map(|s| s.as_str()),
-                        new_comment,
-                    )?;
-                    emit_block(&mut out, &rebuilt, data, hp)?;
-                } else {
-                    // Untouched: copy the on-disk bytes (ciphertext included).
-                    out.extend_from_slice(&bytes[start..start + view.total]);
-                }
-            }
-            file_index += 1;
-        } else if replace_comment
-            && view.head_type == NEWSUB_HEAD
-            && view.header.len() >= 32
-            && comment_block_name_is_cmt(&view.header)
+    // The rewrite streams the original archive into a sibling staging file
+    // block by block: member payloads are copied through a bounded buffer,
+    // never materialized.
+    let src_path = archive.path.clone();
+    let tmp_path = temp_sibling_path(&src_path);
+    let rewrite = (|| -> RarResult<()> {
+        let mut src = File::open(&src_path).map_err(RarError::Io)?;
+        let mut out = read_write_create(&tmp_path).map_err(RarError::Io)?;
+        // The SFX stub (when any) is copied verbatim.
+        copy_range(&mut src, &mut out, 0, layout.main_offset as u64)?;
+        out.write_all(&patched_main).map_err(RarError::Io)?;
+        // A comment change lands its NEWSUB `CMT` block right after the main
+        // header (WinRAR's placement). `Some(empty)` removes the comment.
+        if let Some(text) = comment
+            && !text.is_empty()
         {
-            // A comment change replaces the existing CMT block (the new one
-            // was already emitted after the main header).
-        } else {
-            out.extend_from_slice(&bytes[start..start + view.total]);
+            let (payload, unicode) = encode_comment_text(text);
+            let block = build_comment_block(&payload, unicode);
+            // Only the 35-byte CMT header is header-encrypted; the payload
+            // follows as plaintext data (the same rule as FILE members).
+            let mut emitted = Vec::new();
+            emit_block(
+                &mut emitted,
+                &block[..CMT_HEAD_SIZE],
+                &block[CMT_HEAD_SIZE..],
+                hp,
+            )?;
+            out.write_all(&emitted).map_err(RarError::Io)?;
         }
-        pos = start + view.total;
-    }
-    if pos != region_end {
-        return Err(RarError::Format(
-            "RAR4: block walk ended before the expected region end".into(),
-        ));
-    }
 
-    // Append the recovery record when the plan wants one (a fresh record at
-    // `percent`, or a rebuild keeping the original parity-sector strength),
-    // then the tail (old record's data end onward, or ENDARC + trailing
-    // bytes).
-    if wants_record {
-        let prefix = &out[layout.sfx_offset..];
-        if prefix.is_empty() {
+        src.seek(SeekFrom::Start(main_end as u64))
+            .map_err(RarError::Io)?;
+        let mut pos = main_end as u64;
+        let mut file_index = 0usize;
+        while pos < region_end as u64 {
+            let view = read_block_stream(&mut src, hp_bytes)?
+                .ok_or_else(|| RarError::Format("RAR4: truncated block stream".into()))?;
+            if view.head_type == FILE_HEAD {
+                if deleted[file_index] {
+                    // Drop the member's header and payload verbatim.
+                } else {
+                    let new_name = rename_map.get(&file_index);
+                    let new_comment = member_comments
+                        .iter()
+                        .find(|(i, _)| *i == file_index)
+                        .map(|(_, c)| c.as_deref());
+                    if new_name.is_some() || new_comment.is_some() {
+                        // The rebuilt header (rename and/or comment) is
+                        // re-encrypted with a fresh salt; the member's
+                        // payload is copied as-is.
+                        let rebuilt = rebuild_rar4_header(
+                            &view.header,
+                            new_name.map(|s| s.as_str()),
+                            new_comment,
+                        )?;
+                        let mut emitted = Vec::new();
+                        emit_block(&mut emitted, &rebuilt, &[], hp)?;
+                        out.write_all(&emitted).map_err(RarError::Io)?;
+                        copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
+                    } else {
+                        // Untouched: copy the on-disk bytes (ciphertext
+                        // included).
+                        out.write_all(&view.raw_header).map_err(RarError::Io)?;
+                        copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
+                    }
+                }
+                file_index += 1;
+            } else if replace_comment
+                && view.head_type == NEWSUB_HEAD
+                && view.header.len() >= 32
+                && comment_block_name_is_cmt(&view.header)
+            {
+                // A comment change replaces the existing CMT block (the new
+                // one was already emitted after the main header).
+            } else {
+                out.write_all(&view.raw_header).map_err(RarError::Io)?;
+                copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
+            }
+            pos = view.end();
+            src.seek(SeekFrom::Start(pos)).map_err(RarError::Io)?;
+        }
+        if pos != region_end as u64 {
             return Err(RarError::Format(
-                "RAR4: nothing to protect with a recovery record".into(),
+                "RAR4: block walk ended before the expected region end".into(),
             ));
         }
-        let rec_sectors = match (force_rr, keep_sectors) {
-            (Some(percent), _) => recovery_sector_count(prefix.len(), percent),
-            (None, Some(rec)) => rec,
-            (None, None) => unreachable!("wants_record implies a source"),
-        };
-        let block = build_legacy_recovery_block(prefix, rec_sectors)?;
-        // `-hp`: only the 54-byte NEWSUB header is encrypted; the tag table
-        // and parity sectors stay plaintext so the record remains usable.
-        emit_block(
-            &mut out,
-            &block[..RECOVERY_HEAD_SIZE],
-            &block[RECOVERY_HEAD_SIZE..],
-            hp,
-        )?;
-    }
-    out.extend_from_slice(&bytes[tail_from..]);
 
-    let tmp_path = temp_sibling_path(&archive.path);
-    {
-        let mut file = read_write_create(&tmp_path).map_err(RarError::Io)?;
-        file.write_all(&out).map_err(RarError::Io)?;
-        file.sync_all().map_err(RarError::Io)?;
+        // Append the recovery record when the plan wants one (a fresh record
+        // at `percent`, or a rebuild keeping the original parity-sector
+        // strength). The parity covers the whole new prefix, so it is read
+        // back from the staged file instead of being held while writing.
+        if wants_record {
+            let out_len = out.stream_position().map_err(RarError::Io)? as usize;
+            let prefix_len = out_len.checked_sub(layout.sfx_offset).ok_or_else(|| {
+                RarError::Format("RAR4: rewritten prefix is shorter than the archive start".into())
+            })?;
+            if prefix_len == 0 {
+                return Err(RarError::Format(
+                    "RAR4: nothing to protect with a recovery record".into(),
+                ));
+            }
+            let mut prefix = vec![0u8; prefix_len];
+            {
+                let mut reader = File::open(&tmp_path).map_err(RarError::Io)?;
+                reader.seek(SeekFrom::Start(layout.sfx_offset as u64))?;
+                reader.read_exact(&mut prefix).map_err(RarError::Io)?;
+            }
+            let rec_sectors = match (force_rr, keep_sectors) {
+                (Some(percent), _) => recovery_sector_count(prefix.len(), percent),
+                (None, Some(rec)) => rec,
+                (None, None) => unreachable!("wants_record implies a source"),
+            };
+            let block = build_legacy_recovery_block(&prefix, rec_sectors)?;
+            // `-hp`: only the 54-byte NEWSUB header is encrypted; the tag
+            // table and parity sectors stay plaintext so the record remains
+            // usable.
+            let mut header_out = Vec::new();
+            emit_block(&mut header_out, &block[..RECOVERY_HEAD_SIZE], &[], hp)?;
+            out.write_all(&header_out).map_err(RarError::Io)?;
+            out.write_all(&block[RECOVERY_HEAD_SIZE..])
+                .map_err(RarError::Io)?;
+        }
+
+        // Keep the tail (old record's data end onward, or ENDARC + trailing
+        // bytes) verbatim.
+        let file_len = src.metadata().map_err(RarError::Io)?.len();
+        if tail_from as u64 > file_len {
+            return Err(RarError::Format(
+                "RAR4: recovery tail lies past the archive end".into(),
+            ));
+        }
+        copy_range(
+            &mut src,
+            &mut out,
+            tail_from as u64,
+            file_len - tail_from as u64,
+        )?;
+        out.sync_all().map_err(RarError::Io)?;
+        Ok(())
+    })();
+    if let Err(error) = rewrite {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
     }
     if let Err(error) = replace_file(&tmp_path, &archive.path) {
         let _ = fs::remove_file(&tmp_path);
