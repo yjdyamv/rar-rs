@@ -62,7 +62,7 @@ jobs:
         # read-side targets are cheap, the write-side ones do real file I/O.
         run: |
           set -euo pipefail
-          for t in parse crypto recovery; do
+          for t in parse crypto recovery rev legacy; do
             FUZZ_ITERATIONS=5000 cargo run --release --locked --manifest-path fuzz/Cargo.toml --bin "$t"
           done
           for t in write rewrite; do

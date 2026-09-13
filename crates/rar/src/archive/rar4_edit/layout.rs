@@ -267,22 +267,6 @@ impl BlockStreamView {
     }
 }
 
-/// `(add_size, total)` from a plaintext header and its on-disk header size.
-fn block_data_size(header: &[u8], on_disk_header: u64) -> RarResult<(u64, u64)> {
-    let flags = u16::from_le_bytes([header[3], header[4]]);
-    let add_size = if flags & LONG_BLOCK != 0 {
-        if header.len() < 11 {
-            return Err(RarError::Format(
-                "RAR4: header missing LONG_BLOCK size".into(),
-            ));
-        }
-        u32::from_le_bytes(header[7..11].try_into().unwrap()) as u64
-    } else {
-        0
-    };
-    Ok((add_size, on_disk_header + add_size))
-}
-
 /// Read one block header at the stream's position, transparently decrypting
 /// it when `password` is `Some` (the caller passes it only for `-hp`
 /// archives, and only for blocks after the plaintext main header). Returns
@@ -312,15 +296,17 @@ pub(super) fn read_block_stream(
             stream.read_exact(&mut rest).map_err(RarError::Io)?;
             header.extend_from_slice(&rest);
         }
-        let (add_size, total) = block_data_size(&header, head_size as u64)?;
+        // Headers were CRC-checked by the open scan; envelope bounds still
+        // go through the shared reader (see `read_envelope`).
+        let envelope = crate::format::rar4::read_envelope(offset, header, head_size as u64, false)?;
         return Ok(Some(BlockStreamView {
-            head_type: header[2],
-            raw_header: header.clone(),
-            header,
+            head_type: envelope.head_type,
+            raw_header: envelope.header.clone(),
+            header: envelope.header,
             offset,
             on_disk_header: head_size as u64,
-            add_size,
-            total,
+            add_size: envelope.add_size,
+            total: envelope.total_size,
         }));
     };
 
@@ -369,15 +355,15 @@ pub(super) fn read_block_stream(
     header.extend_from_slice(&rest);
     header.truncate(head_size);
     let on_disk_header = (8 + align16) as u64;
-    let (add_size, total) = block_data_size(&header, on_disk_header)?;
+    let envelope = crate::format::rar4::read_envelope(offset, header, on_disk_header, false)?;
     Ok(Some(BlockStreamView {
-        head_type: header[2],
-        header,
+        head_type: envelope.head_type,
+        header: envelope.header,
         raw_header,
         offset,
         on_disk_header,
-        add_size,
-        total,
+        add_size: envelope.add_size,
+        total: envelope.total_size,
     }))
 }
 

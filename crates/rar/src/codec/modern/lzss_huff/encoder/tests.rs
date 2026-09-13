@@ -1,14 +1,16 @@
 use super::*;
 
 use super::super::{
-    FILTER_DELTA, HUFF_DC, HUFF_LDC, HUFF_NC, HUFF_RC, MAX_CODE_LENGTH, SYM_FILTER,
+    FILTER_DELTA, FILTER_E8, FILTER_E8E9, HUFF_DC, HUFF_LDC, HUFF_NC, HUFF_RC, MAX_CODE_LENGTH,
+    SYM_FILTER,
 };
 use super::emit::{build_block_header, ensure_nonzero, write_filter_data, write_tables};
 use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::huffman::{
     DecodeTable, EncodeTable, build_code_lengths_from_freqs, encode_symbol,
 };
-use crate::codec::{DecodeOptions, decode_to_writer};
+use crate::codec::{DecodeOptions, decode_raw, decode_to_writer};
+use crate::error::RarError;
 use crate::version::ArchiveVersion;
 
 fn one_symbol_table(count: usize) -> Vec<u8> {
@@ -82,6 +84,190 @@ fn streaming_decode_applies_delta_filter() {
     .expect("decode");
     assert_eq!(written as usize, original.len());
     assert_eq!(out, original);
+}
+
+/// Build a one-block RAR5 stream with a single Delta filter record followed
+/// by `original`'s delta-encoded literals. `filter_len` is the record's
+/// declared region length, which may exceed `original.len()` to craft a
+/// malformed stream.
+fn delta_filtered_stream(original: &[u8], filter_len: u32) -> Vec<u8> {
+    let mut delta = vec![0u8; original.len()];
+    let mut prev = 0u8;
+    for (i, &b) in original.iter().enumerate() {
+        delta[i] = prev.wrapping_sub(b);
+        prev = b;
+    }
+
+    let mut nc_freq = vec![0u32; HUFF_NC];
+    for &b in &delta {
+        nc_freq[b as usize] += 1;
+    }
+    nc_freq[SYM_FILTER] += 1;
+    ensure_nonzero(&mut nc_freq);
+
+    let nc_lengths = build_code_lengths_from_freqs(&nc_freq, MAX_CODE_LENGTH);
+    let dc_lengths = build_code_lengths_from_freqs(&vec![1u32; HUFF_DC], MAX_CODE_LENGTH);
+    let ldc_lengths = build_code_lengths_from_freqs(&[1u32; HUFF_LDC], MAX_CODE_LENGTH);
+    let rc_lengths = build_code_lengths_from_freqs(&[1u32; HUFF_RC], MAX_CODE_LENGTH);
+    let enc_nc = EncodeTable::new(&nc_lengths);
+
+    let mut writer = BitWriter::new();
+    write_tables(
+        &mut writer,
+        &nc_lengths,
+        &dc_lengths,
+        &ldc_lengths,
+        &rc_lengths,
+    );
+    encode_symbol(&enc_nc, &mut writer, SYM_FILTER);
+    write_filter_data(&mut writer, 0);
+    write_filter_data(&mut writer, filter_len);
+    writer.write_bits(FILTER_DELTA as u32, 3);
+    writer.write_bits(0, 5); // channels - 1
+
+    for &b in &delta {
+        encode_symbol(&enc_nc, &mut writer, b as usize);
+    }
+
+    let total_bits = writer.bit_count();
+    let block_data = writer.into_bytes();
+    build_block_header(&block_data, total_bits, true, true)
+}
+
+/// A filter record whose declared region outlives the member is malformed:
+/// our encoder now rejects such specs up front, but another writer can
+/// still produce one. Both decoder cores must reject it. The buffered core
+/// used to clip the region to the output and return success while the
+/// streaming core rejected it — the buffered/streamed disagreement this
+/// test pins down.
+#[test]
+fn filter_region_outliving_member_errors_in_both_decoders() {
+    let original: Vec<u8> = (0..300u32).map(|i| (i * 7 % 251) as u8).collect();
+    let stream = delta_filtered_stream(&original, original.len() as u32 + 100);
+
+    let buffered = crate::codec::decode_standalone(
+        &stream,
+        original.len() as u64,
+        0,
+        None,
+        ArchiveVersion::V50,
+    );
+    let buffered_err = buffered.expect_err("buffered decoder must reject an outliving filter");
+    assert!(
+        matches!(buffered_err, RarError::Format(_)),
+        "{buffered_err}"
+    );
+
+    let mut out = Vec::new();
+    let streamed = decode_to_writer(
+        &stream,
+        original.len() as u64,
+        DecodeOptions {
+            dict_size_log: 0,
+            ..Default::default()
+        },
+        &mut out,
+    );
+    let streamed_err = streamed.expect_err("streaming decoder must reject an outliving filter");
+    assert!(
+        matches!(streamed_err, RarError::Format(_)),
+        "{streamed_err}"
+    );
+}
+
+/// Invalid `FilterSpec`s must be rejected by both writer entry points
+/// before any encoding. Previously the encoder accepted them and emitted a
+/// member whose streaming decoder then refused to read it.
+#[test]
+fn invalid_filter_specs_are_rejected_by_all_encoders() {
+    let data = vec![0x5Au8; 4096];
+    let len = data.len() as u32;
+    let cases: [(&str, FilterSpec); 6] = [
+        (
+            "out-of-range length",
+            FilterSpec::new(FILTER_DELTA, 1, 0, len + 100),
+        ),
+        (
+            "out-of-range start",
+            FilterSpec::new(FILTER_DELTA, 1, len, 1),
+        ),
+        (
+            "start past end",
+            FilterSpec::new(FILTER_DELTA, 1, len + 10, 1),
+        ),
+        ("zero length", FilterSpec::new(FILTER_E8, 0, 10, 0)),
+        ("unsupported type 4", FilterSpec::new(4, 0, 0, 16)),
+        ("unsupported type 7", FilterSpec::new(7, 0, 0, 16)),
+    ];
+    for (name, spec) in cases {
+        for err in [
+            encode_with_filters(&data, 3, 0, &[spec], ArchiveVersion::V50).unwrap_err(),
+            encode_with_filters_mt(&data, 3, 0, &[spec], ArchiveVersion::V50, 2, None).unwrap_err(),
+        ] {
+            assert!(
+                matches!(err, RarError::InvalidOption(_)),
+                "{name}: expected InvalidOption, got {err}"
+            );
+        }
+    }
+
+    // Overlapping regions are invalid: mixed transforms do not commute, so
+    // record-order inversion cannot recover the original bytes.
+    let overlap = [
+        FilterSpec::new(FILTER_DELTA, 1, 0, 200),
+        FilterSpec::new(FILTER_E8E9, 0, 100, 200),
+    ];
+    let err = encode_with_filters(&data, 3, 0, &overlap, ArchiveVersion::V50).unwrap_err();
+    assert!(matches!(err, RarError::InvalidOption(_)), "{err}");
+
+    // Adjacent (touching) regions are valid: the interval convention is
+    // `[start, start + length)`.
+    let adjacent = [
+        FilterSpec::new(FILTER_DELTA, 1, 0, 200),
+        FilterSpec::new(FILTER_E8E9, 0, 200, len - 200),
+    ];
+    assert!(encode_with_filters(&data, 3, 0, &adjacent, ArchiveVersion::V50).is_ok());
+}
+
+/// Valid filters still round-trip byte-identically through the buffered
+/// (`decode_raw`) and streaming (`decode_to_writer`) cores, including
+/// multiple disjoint regions in one member.
+#[test]
+fn filtered_member_roundtrips_through_buffered_and_streaming() {
+    let data: Vec<u8> = (0..50_000u32)
+        .map(|i| (((i / 64) % 251) as u8) ^ ((i % 7) as u8))
+        .collect();
+    let specs = [
+        FilterSpec::new(FILTER_DELTA, 1, 0, 4096),
+        FilterSpec::new(FILTER_E8E9, 0, 4096, data.len() as u32 - 4096),
+    ];
+    let packed = encode_with_filters(&data, 3, 0, &specs, ArchiveVersion::V50).unwrap();
+
+    let buffered = decode_raw(
+        &packed,
+        data.len() as u64,
+        DecodeOptions {
+            dict_size_log: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(buffered, data, "buffered decode");
+
+    let mut streamed = Vec::new();
+    let written = decode_to_writer(
+        &packed,
+        data.len() as u64,
+        DecodeOptions {
+            dict_size_log: 0,
+            ..Default::default()
+        },
+        &mut streamed,
+    )
+    .unwrap();
+    assert_eq!(written, data.len() as u64);
+    assert_eq!(streamed, buffered, "streaming must match buffered");
+    assert_eq!(streamed, data, "streaming decode");
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use super::super::comment::decode_comment_payload;
 use super::super::headers::rename_file_header;
-use super::super::layout::patch_main_header;
+use super::super::layout::{patch_main_header, scan_layout};
 use super::super::{encode_comment_text, header_crc16};
 
 use crate::archive::RarArchive;
@@ -56,6 +56,30 @@ fn patch_main_header_sets_bits_and_keeps_crc_valid() {
     let crc = header_crc16(&patched[2..]);
     assert_eq!(u16::from_le_bytes([patched[0], patched[1]]), crc);
     assert_eq!(&patched[5..], &main[5..]);
+}
+
+/// The layout scan routes block envelopes through the shared reader: a
+/// `head_size`-7 block with LONG_BLOCK (no room for its 4-byte ADD_SIZE)
+/// must be rejected cleanly instead of reading past the header.
+#[test]
+fn layout_scan_rejects_short_long_block() {
+    let mut bytes = crate::detect::RAR4_SIGNATURE.to_vec();
+    bytes.extend_from_slice(&crate::format::rar4::write::build_main_header(0));
+    let mut bad = vec![0u8; 7];
+    bad[2] = 0x74; // FILE_HEAD
+    bad[3..5].copy_from_slice(&0x8000u16.to_le_bytes()); // LONG_BLOCK
+    bad[5..7].copy_from_slice(&7u16.to_le_bytes());
+    bytes.extend_from_slice(&bad);
+    bytes.extend_from_slice(&build_endarc(0));
+
+    let err = match scan_layout(&bytes, 0, None) {
+        Err(err) => err,
+        Ok(_) => panic!("expected the malformed block to be rejected"),
+    };
+    assert!(
+        matches!(err, crate::error::RarError::Format(_)),
+        "expected a format error, got {err}"
+    );
 }
 
 #[test]

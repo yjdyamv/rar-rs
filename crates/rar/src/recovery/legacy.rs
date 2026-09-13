@@ -99,23 +99,23 @@ pub(crate) fn scan_protect_with_password(
                 crate::format::rar4::decrypt_encrypted_header(bytes, pos, password)?;
             (header, on_disk, add)
         } else {
-            let flags = u16::from_le_bytes([bytes[pos + 3], bytes[pos + 4]]);
             let head_size = u16::from_le_bytes([bytes[pos + 5], bytes[pos + 6]]) as usize;
             if head_size < 7 {
                 return Err(RarError::Format("RAR4: block head_size too small".into()));
             }
-            let add_size = if flags & 0x8000 != 0 {
-                if pos + 11 > bytes.len() {
-                    return Err(RarError::Format("RAR4: truncated block".into()));
-                }
-                u32::from_le_bytes(bytes[pos + 7..pos + 11].try_into().unwrap()) as usize
-            } else {
-                0
-            };
-            if pos + head_size + add_size > bytes.len() {
+            if pos + head_size > bytes.len() {
                 return Err(RarError::Format("RAR4: truncated block".into()));
             }
-            (bytes[pos..pos + head_size].to_vec(), head_size, add_size)
+            // A damaged header is exactly what this scanner exists to
+            // repair, so its CRC is not checked; only the shared envelope
+            // bounds apply.
+            let envelope = crate::format::rar4::read_envelope(
+                pos as u64,
+                bytes[pos..pos + head_size].to_vec(),
+                head_size as u64,
+                false,
+            )?;
+            (envelope.header, head_size, envelope.add_size as usize)
         };
         let head_type = header[2];
         let flags = u16::from_le_bytes([header[3], header[4]]);
@@ -488,6 +488,29 @@ mod tests {
         bytes.extend_from_slice(&header);
 
         assert!(scan_protect(&bytes).is_err());
+    }
+
+    /// A block whose `head_size` is 7 while `LONG_BLOCK` demands a 4-byte
+    /// ADD_SIZE must be rejected by the shared envelope reader instead of
+    /// reading the size field past the header.
+    #[test]
+    fn short_long_block_is_rejected_without_panicking() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(RAR4_SIGNATURE);
+        let mut header = vec![0u8; 7];
+        header[2] = 0x74; // FILE_HEAD
+        header[3..5].copy_from_slice(&0x8000u16.to_le_bytes()); // LONG_BLOCK
+        header[5..7].copy_from_slice(&7u16.to_le_bytes());
+        bytes.extend_from_slice(&header);
+
+        let err = match scan_protect(&bytes) {
+            Err(err) => err,
+            Ok(_) => panic!("expected the malformed block to be rejected"),
+        };
+        assert!(
+            matches!(err, RarError::Format(_)),
+            "expected a format error, got {err}"
+        );
     }
 
     #[test]

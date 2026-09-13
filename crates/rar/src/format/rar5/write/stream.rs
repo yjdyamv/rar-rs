@@ -27,6 +27,23 @@ use super::windows;
 #[cfg(windows)]
 use crate::format::rar5::vint;
 
+/// The streaming writer records its delta and x86 filters as pre-built
+/// `Symbol::Filter` leads, bypassing `encode_with_filters`' overlap
+/// validation. Both forced (`-mcd+ -mce+`) and forced-x86-over-auto-delta
+/// combinations transform overlapping regions, and the decoder applies
+/// records in stream order, so the pair silently corrupts the member.
+/// Reject it before any bytes are spilled or written, matching the
+/// buffered path's `InvalidOption`; single-filter paths are unaffected.
+fn ensure_compatible_stream_filters(delta_used: bool, x86_used: bool) -> RarResult<()> {
+    if delta_used && x86_used {
+        return Err(RarError::InvalidOption(
+            "cannot force the delta and x86 filters on the same member; choose one filter mode"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 impl RarArchive {
     /// Stream a STORE member directly from a reader (bounded memory).
     ///
@@ -490,6 +507,7 @@ impl RarArchive {
         }
         let delta_used = delta_channels.is_some();
         let x86_used = x86_filter_type.is_some();
+        ensure_compatible_stream_filters(delta_used, x86_used)?;
         if delta_used || x86_used {
             self.reset_solid_chain();
         }
@@ -871,5 +889,25 @@ impl RarArchive {
             let _ = path;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_compatible_stream_filters;
+    use crate::error::RarError;
+
+    #[test]
+    fn forced_delta_and_x86_together_are_rejected() {
+        assert!(ensure_compatible_stream_filters(false, false).is_ok());
+        assert!(ensure_compatible_stream_filters(true, false).is_ok());
+        assert!(ensure_compatible_stream_filters(false, true).is_ok());
+        match ensure_compatible_stream_filters(true, true).unwrap_err() {
+            RarError::InvalidOption(message) => assert_eq!(
+                message,
+                "cannot force the delta and x86 filters on the same member; choose one filter mode"
+            ),
+            other => panic!("expected InvalidOption, got {other}"),
+        }
     }
 }

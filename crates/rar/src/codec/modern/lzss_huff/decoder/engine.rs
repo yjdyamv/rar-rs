@@ -665,11 +665,32 @@ fn decode_inner(
     // position relative to the current file's output (WinRAR's
     // `WrittenFileSize`, reset per file), so the offset passed to the
     // inverse filter is member-relative: `block_start - output_start`.
+    //
+    // A region that is not fully inside this member's output is malformed.
+    // The streaming path rejects it as an unapplied filter at end of stream;
+    // this path used to clip the region (or skip it entirely when it started
+    // past the output), silently accepting a stream the streaming decoder
+    // refuses. Enforce the same completeness here.
     for filt in &pending_filters {
-        let start = (filt.block_start - output_start) as usize;
-        let end = (start + filt.block_length as usize).min(output.len());
-        if start >= output.len() {
-            continue;
+        let rel_start = filt.block_start.checked_sub(output_start).ok_or_else(|| {
+            RarError::Format(format!(
+                "RAR5 filter region starts at {} before member output at {}",
+                filt.block_start, output_start
+            ))
+        })?;
+        let rel_end = rel_start
+            .checked_add(filt.block_length)
+            .ok_or_else(|| RarError::Format("RAR5 filter region overflows".into()))?;
+        let start = usize::try_from(rel_start).map_err(|_| {
+            RarError::Format("RAR5 filter start overflows host address space".into())
+        })?;
+        let end = usize::try_from(rel_end)
+            .map_err(|_| RarError::Format("RAR5 filter end overflows host address space".into()))?;
+        if end > output.len() {
+            return Err(RarError::Format(format!(
+                "unapplied RAR5 filter at end of member: region {start}..{end} exceeds output size {}",
+                output.len()
+            )));
         }
         let region = &mut output[start..end];
         let filtered = apply_filter_decode(

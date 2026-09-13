@@ -60,7 +60,11 @@ pub fn repair_inline_recovery_prefix(
     // (WinRAR stores such blocks byte-identically in one run). The candidate
     // copy is validated against the shard's expected CRC64, so a wrong or
     // itself-damaged source can never corrupt the archive.
-    let file_blocks = parse_file_data_blocks(archive_prefix)?;
+    //
+    // The walk is a best-effort heuristic: a prefix that no longer parses
+    // (it may itself be damaged) yields no relocation candidates instead of
+    // aborting — parity alone can still rebuild every shard.
+    let file_blocks = parse_file_data_blocks(archive_prefix).unwrap_or_default();
     let mut remaining: Vec<usize> = Vec::with_capacity(damaged.len());
     for &index in &damaged {
         let range = &shard_ranges[index];
@@ -611,6 +615,7 @@ fn recover_damaged_shards(
 
 #[cfg(test)]
 mod tests {
+    use super::super::build_structural_inline_recovery_data;
     use super::*;
 
     /// A structurally valid `{RB}` chunk (correct CRC64) declaring an odd
@@ -654,5 +659,43 @@ mod tests {
             Err(Error::BadRecoveryChunk)
         );
         assert!(crate::recovery::repair_archive(&chunk).is_err());
+    }
+
+    /// The relocation block walk is only a heuristic: a prefix whose block
+    /// chain no longer parses must still repair from parity alone. One
+    /// flipped byte here turns a valid zero header-size vint into a
+    /// continuation chain that never terminates.
+    #[test]
+    fn relocation_parse_failure_falls_back_to_parity() {
+        let mut prefix: Vec<u8> = (0..32_000).map(|index| (index * 11) as u8).collect();
+        prefix[..7].copy_from_slice(b"Rar!\x1a\x07\x01");
+        // A valid 10-byte non-canonical vint encoding zero: the block walk
+        // stops at the zero header size.
+        prefix[12..21].fill(0x80);
+        prefix[21] = 0x00;
+        assert!(parse_file_data_blocks(&prefix).is_ok());
+
+        let recovery_data = build_structural_inline_recovery_data(&prefix, 20).unwrap();
+        assert_eq!(
+            repair_inline_recovery_prefix(&prefix, &recovery_data).unwrap(),
+            prefix
+        );
+
+        let mut damaged = prefix.clone();
+        damaged[21] = 0x80;
+        assert!(parse_file_data_blocks(&damaged).is_err());
+        assert_eq!(
+            repair_inline_recovery_prefix(&damaged, &recovery_data).unwrap(),
+            prefix
+        );
+
+        let mut archive = prefix.clone();
+        archive.extend_from_slice(&recovery_data);
+        let mut damaged_archive = archive.clone();
+        damaged_archive[21] = 0x80;
+        assert_eq!(
+            repair_inline_recovery_archive(&damaged_archive).unwrap(),
+            archive
+        );
     }
 }

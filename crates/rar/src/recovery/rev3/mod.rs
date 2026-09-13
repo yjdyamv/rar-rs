@@ -31,7 +31,7 @@
 pub(crate) mod rs8;
 
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -74,6 +74,7 @@ enum Format {
 }
 
 /// Parse the 7-byte trailer of a trailer-format `.rev` file.
+#[cfg(test)]
 fn parse_trailer(bytes: &[u8]) -> Option<Meta> {
     if bytes.len() < TRAILER_LEN {
         return None;
@@ -91,7 +92,47 @@ fn parse_trailer(bytes: &[u8]) -> Option<Meta> {
     meta.valid().then_some(meta)
 }
 
+/// Streaming [`parse_trailer`]: the CRC covers `bytes[..len - 4]`, so it is
+/// verified through a bounded read instead of materializing the file. I/O
+/// failures surface as `Err` so callers can decide whether to skip the file.
+fn parse_trailer_reader(file: &mut fs::File) -> io::Result<Option<Meta>> {
+    let len = file.metadata()?.len();
+    if len < TRAILER_LEN as u64 {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(len - TRAILER_LEN as u64))?;
+    let mut tail = [0u8; TRAILER_LEN];
+    file.read_exact(&mut tail)?;
+    let stored = u32::from_le_bytes(tail[3..7].try_into().unwrap());
+    file.seek(SeekFrom::Start(0))?;
+    let mut hasher = crc32fast::Hasher::new();
+    let mut remaining = len - 4;
+    let mut buf = vec![0u8; CHUNK];
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        file.read_exact(&mut buf[..want])?;
+        hasher.update(&buf[..want]);
+        remaining -= want as u64;
+    }
+    if hasher.finalize() != stored {
+        return Ok(None);
+    }
+    let meta = Meta {
+        data_count: usize::from(tail[0]) + 1,
+        rec_count: usize::from(tail[1]) + 1,
+        recovery_index: usize::from(tail[2]),
+    };
+    Ok(meta.valid().then_some(meta))
+}
+
+/// Parse the trailer of the `.rev` file at `path` through a bounded read.
+fn parse_trailer_file(path: &Path) -> io::Result<Option<Meta>> {
+    let mut file = fs::File::open(path)?;
+    parse_trailer_reader(&mut file)
+}
+
 /// Append the 7-byte trailer for `payload` to `out`.
+#[cfg(test)]
 fn write_trailer(meta: &Meta, payload: &[u8], out: &mut Vec<u8>) {
     let head = [
         (meta.data_count - 1) as u8,
@@ -338,14 +379,26 @@ fn slot_exists(parent: &Path, layout: &Layout, index: usize) -> bool {
     volume_path_rar4(parent, &layout.base, index + 1).exists()
 }
 
+/// One `.rev` file's parity source. The bytes stay on disk and are seeked
+/// stripe by stripe; for trailer-format files the seven trailer bytes read
+/// back as zeros (those offsets carry no parity, matching WinRAR).
+#[derive(Clone, Debug)]
+struct RevSource {
+    index: usize,
+    path: PathBuf,
+    /// File length (= payload length; the trailer is part of the file but
+    /// is not parity).
+    len: u64,
+}
+
 /// Everything `rc` needs about a recovery set: the naming layout, the
-/// volume counts, the on-disk layout and the recovery payloads (sorted by
-/// recovery index).
+/// volume counts, the on-disk layout and the recovery payload sources
+/// (sorted by recovery index).
 struct RecoverySet {
     layout: Layout,
     meta: Meta,
     format: Format,
-    payloads: Vec<(usize, Vec<u8>)>,
+    payloads: Vec<RevSource>,
 }
 
 /// Locate every `.rev` file belonging to `base` under `parent`, in any of
@@ -358,7 +411,7 @@ fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet>
     let mut layout: Option<Layout> = None;
     let mut meta: Option<Meta> = None;
     let mut format: Option<Format> = None;
-    let mut payloads: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut payloads: Vec<RevSource> = Vec::new();
 
     let dir = if parent.as_os_str().is_empty() {
         Path::new(".")
@@ -380,10 +433,22 @@ fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet>
         {
             continue;
         }
-        let Ok(bytes) = fs::read(&path) else {
+        // Only trailer-format candidates need the trailer CRC parsed; the
+        // trailer is streamed in bounded chunks, not materialized.
+        let needs_trailer = candidates.iter().any(|candidate| {
+            candidate.base.eq_ignore_ascii_case(base) && candidate.kind.format() == Format::Trailer
+        });
+        let trailer = if needs_trailer {
+            match fs::File::open(&path) {
+                Ok(mut file) => parse_trailer_reader(&mut file).ok().flatten(),
+                Err(_) => continue,
+            }
+        } else {
+            None
+        };
+        let Ok(len) = fs::metadata(&path).map(|metadata| metadata.len()) else {
             continue;
         };
-        let trailer = parse_trailer(&bytes);
 
         // The name is ambiguous when the base ends in digits; keep the
         // candidate whose data volumes actually exist.
@@ -439,15 +504,6 @@ fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet>
                 "recovery volumes mix both legacy layouts".into(),
             ));
         }
-        let payload = match parsed.kind.format() {
-            Format::Trailer => {
-                let mut payload = bytes;
-                let len = payload.len();
-                payload[len - TRAILER_LEN..].fill(0);
-                payload
-            }
-            Format::Legacy => bytes,
-        };
         meta = Some(file_meta);
         format = Some(parsed.kind.format());
         layout.get_or_insert(Layout {
@@ -458,7 +514,11 @@ fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet>
             new_naming: parsed.new_naming,
             width: parsed.width,
         });
-        payloads.push((file_meta.recovery_index, payload));
+        payloads.push(RevSource {
+            index: file_meta.recovery_index,
+            path,
+            len,
+        });
     }
 
     let Some(meta) = meta else {
@@ -477,10 +537,10 @@ fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet>
             "no recovery volumes found for the volume set".into(),
         ));
     };
-    payloads.sort_by_key(|(index, _)| *index);
+    payloads.sort_by_key(|source| source.index);
     let mut seen = vec![false; meta.rec_count];
-    for (index, _) in &payloads {
-        if *index >= meta.rec_count || std::mem::replace(&mut seen[*index], true) {
+    for source in &payloads {
+        if source.index >= meta.rec_count || std::mem::replace(&mut seen[source.index], true) {
             return Err(RarError::Format(
                 "duplicate or out-of-range recovery volume".into(),
             ));
@@ -505,8 +565,7 @@ fn identify(path: &Path) -> RarResult<(PathBuf, Layout, Option<Meta>)> {
     let candidates = rev_name_candidates(name);
     if !candidates.is_empty() {
         // Ambiguous names: prefer the split whose data volumes exist.
-        let bytes = fs::read(path).ok();
-        let trailer = bytes.as_deref().and_then(parse_trailer);
+        let trailer = parse_trailer_file(path).ok().flatten();
         let mut best: Option<(usize, RevName, Option<Meta>)> = None;
         for candidate in candidates {
             let probe = Layout {
@@ -776,20 +835,30 @@ fn is_rar5_recovery_volume(path: &Path) -> bool {
 }
 
 /// Whether the staged `.rev` file at `path` uses the trailer layout (its
-/// last bytes parse as a valid trailer).
+/// last bytes parse as a valid trailer). The trailer CRC is streamed over
+/// the file, so a multi-GB recovery volume is never materialized.
 fn trailer_style(path: &Path) -> bool {
-    fs::read(path)
-        .ok()
-        .as_deref()
-        .and_then(parse_trailer)
-        .is_some()
+    parse_trailer_file(path).ok().flatten().is_some()
 }
 
 /// Build `.rev` recovery volumes for an existing RAR 1.5–4.x volume set,
-/// matching WinRAR's `rv` output byte-for-byte.
+/// matching WinRAR's `rv` output byte-for-byte. Each file is built under a
+/// temporary sibling and installed only once the whole set is complete, so
+/// a failure leaves existing `.rev` files untouched; the final paths are
+/// returned.
 pub(crate) fn build_recovery_volumes_for_set(
     volume_paths: &[PathBuf],
     rec_count: usize,
+) -> RarResult<Vec<PathBuf>> {
+    build_recovery_volumes_for_set_chunked(volume_paths, rec_count, CHUNK)
+}
+
+/// [`build_recovery_volumes_for_set`] with an explicit stripe size (tests
+/// lower it to exercise multi-stripe runs on small volume sets).
+fn build_recovery_volumes_for_set_chunked(
+    volume_paths: &[PathBuf],
+    rec_count: usize,
+    chunk: usize,
 ) -> RarResult<Vec<PathBuf>> {
     let nd = volume_paths.len();
     if nd < 2 {
@@ -821,36 +890,21 @@ pub(crate) fn build_recovery_volumes_for_set(
     for path in volume_paths {
         readers.push(fs::File::open(path)?);
     }
-    let mut payloads: Vec<Vec<u8>> = vec![Vec::new(); rec_count];
 
-    let mut offset = 0u64;
-    while offset < protected {
-        let want = (protected - offset).min(CHUNK as u64) as usize;
-        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(nd);
-        for (index, reader) in readers.iter_mut().enumerate() {
-            let mut chunk = vec![0u8; want];
-            if offset < sizes[index] {
-                let to_read = (sizes[index] - offset).min(want as u64) as usize;
-                reader.seek(SeekFrom::Start(offset))?;
-                reader.read_exact(&mut chunk[..to_read])?;
-            }
-            chunks.push(chunk);
-        }
-        let mut column = vec![0u8; nd];
-        for position in 0..want {
-            for (index, chunk) in chunks.iter().enumerate() {
-                column[index] = chunk[position];
-            }
-            let encoded = coder.encode(&column);
-            for (index, byte) in encoded.into_iter().enumerate() {
-                payloads[index].push(byte);
-            }
-        }
-        offset += want as u64;
+    // Create the `.rev` files as temporary siblings and fill them stripe
+    // by stripe; the trailer (when the layout has one) is appended after
+    // the last stripe. The temps are installed over the final paths only
+    // after the whole parity set is built, so a failure leaves existing
+    // `.rev` files untouched.
+    struct RevOutput {
+        final_path: PathBuf,
+        tmp_path: PathBuf,
+        file: fs::File,
+        meta: Meta,
+        payload_crc: crc32fast::Hasher,
     }
-
-    let mut written = Vec::with_capacity(rec_count);
-    for (k, payload) in payloads.iter().enumerate() {
+    let mut outputs = Vec::with_capacity(rec_count);
+    for k in 0..rec_count {
         let meta = Meta {
             data_count: nd,
             rec_count,
@@ -860,13 +914,107 @@ pub(crate) fn build_recovery_volumes_for_set(
             Format::Trailer => layout.trailer_rev_path(&parent, k),
             Format::Legacy => layout.legacy_rev_path(&parent, k, &meta),
         };
-        let mut file = Vec::with_capacity(payload.len() + TRAILER_LEN);
-        file.extend_from_slice(payload);
-        if format == Format::Trailer {
-            write_trailer(&meta, payload, &mut file);
+        let tmp_path = crate::fs::atomic::temp_sibling_path(&path);
+        match fs::File::create(&tmp_path) {
+            Ok(file) => outputs.push(RevOutput {
+                final_path: path,
+                tmp_path,
+                file,
+                meta,
+                payload_crc: crc32fast::Hasher::new(),
+            }),
+            Err(error) => {
+                for output in &outputs {
+                    let _ = fs::remove_file(&output.tmp_path);
+                }
+                let _ = fs::remove_file(&tmp_path);
+                return Err(RarError::Io(error));
+            }
         }
-        fs::write(&path, &file)?;
-        written.push(path);
+    }
+
+    let result = (|| -> RarResult<()> {
+        let mut offset = 0u64;
+        while offset < protected {
+            let want = (protected - offset).min(chunk as u64) as usize;
+            let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(nd);
+            for (index, reader) in readers.iter_mut().enumerate() {
+                let mut chunk = vec![0u8; want];
+                if offset < sizes[index] {
+                    let to_read = (sizes[index] - offset).min(want as u64) as usize;
+                    reader.seek(SeekFrom::Start(offset))?;
+                    reader.read_exact(&mut chunk[..to_read])?;
+                }
+                chunks.push(chunk);
+            }
+            let mut parity: Vec<Vec<u8>> = vec![vec![0u8; want]; rec_count];
+            let mut column = vec![0u8; nd];
+            for position in 0..want {
+                for (index, chunk) in chunks.iter().enumerate() {
+                    column[index] = chunk[position];
+                }
+                let encoded = coder.encode(&column);
+                for (index, byte) in encoded.into_iter().enumerate() {
+                    parity[index][position] = byte;
+                }
+            }
+            for (output, bytes) in outputs.iter_mut().zip(&parity) {
+                output.payload_crc.update(bytes);
+                output.file.write_all(bytes)?;
+            }
+            offset += want as u64;
+        }
+
+        // Trailer layout: the seven trailer bytes carry the counts and a
+        // CRC over the payload plus the first three trailer bytes.
+        if format == Format::Trailer {
+            for output in outputs.iter_mut() {
+                let head = [
+                    (output.meta.data_count - 1) as u8,
+                    (output.meta.rec_count - 1) as u8,
+                    output.meta.recovery_index as u8,
+                ];
+                let mut hasher =
+                    std::mem::replace(&mut output.payload_crc, crc32fast::Hasher::new());
+                hasher.update(&head);
+                output.file.write_all(&head)?;
+                output.file.write_all(&hasher.finalize().to_le_bytes())?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        for output in &outputs {
+            let _ = fs::remove_file(&output.tmp_path);
+        }
+        return Err(error);
+    }
+
+    // The whole parity set is built: install every temporary over its
+    // final path. A failed install removes the remaining temps; a final
+    // path is only ever replaced by a fully built `.rev`.
+    let tmp_paths: Vec<PathBuf> = outputs
+        .iter()
+        .map(|output| output.tmp_path.clone())
+        .collect();
+    let mut written = Vec::with_capacity(outputs.len());
+    for (slot, output) in outputs.into_iter().enumerate() {
+        let RevOutput {
+            final_path,
+            tmp_path,
+            file,
+            ..
+        } = output;
+        drop(file);
+        match crate::fs::atomic::replace_file(&tmp_path, &final_path) {
+            Ok(()) => written.push(final_path),
+            Err(error) => {
+                for path in &tmp_paths[slot..] {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(error);
+            }
+        }
     }
     Ok(written)
 }
@@ -929,7 +1077,18 @@ fn resolve_data_slots(
 pub(crate) fn rebuild_missing_volumes(
     path: &Path,
     cancel: Option<&AtomicBool>,
+    progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> RarResult<Vec<PathBuf>> {
+    rebuild_missing_volumes_chunked(path, cancel, progress, CHUNK)
+}
+
+/// [`rebuild_missing_volumes`] with an explicit stripe size (tests lower it
+/// to exercise multi-stripe runs on small volume sets).
+fn rebuild_missing_volumes_chunked(
+    path: &Path,
+    cancel: Option<&AtomicBool>,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
+    chunk: usize,
 ) -> RarResult<Vec<PathBuf>> {
     let check_cancel = |cancel: Option<&AtomicBool>| -> RarResult<()> {
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
@@ -949,11 +1108,7 @@ pub(crate) fn rebuild_missing_volumes(
     if revs.is_empty() {
         return Err(RarError::Format("no recovery volumes found".into()));
     }
-    let shard_len = revs
-        .iter()
-        .map(|(_, payload)| payload.len() as u64)
-        .max()
-        .unwrap_or(0);
+    let shard_len = revs.iter().map(|source| source.len).max().unwrap_or(0);
     if shard_len == 0 {
         return Err(RarError::Format("empty recovery volume".into()));
     }
@@ -962,6 +1117,14 @@ pub(crate) fn rebuild_missing_volumes(
         Format::Legacy => shard_len,
     };
 
+    // Open every recovery volume once; the parity bytes are seeked per
+    // stripe. Trailer-format footers read back as zeros.
+    let zero_from = (format == Format::Trailer).then_some(protected);
+    let mut rev_readers: Vec<(usize, fs::File, u64)> = Vec::with_capacity(revs.len());
+    for source in &revs {
+        rev_readers.push((source.index, fs::File::open(&source.path)?, source.len));
+    }
+
     let (data_paths, missing) = resolve_data_slots(&parent, &set_layout, meta.data_count);
     let sizes: Vec<u64> = data_paths
         .iter()
@@ -969,7 +1132,7 @@ pub(crate) fn rebuild_missing_volumes(
         .collect();
 
     let missing_recovery: Vec<usize> = (0..meta.rec_count)
-        .filter(|index| !revs.iter().any(|(k, _)| k == index))
+        .filter(|index| !revs.iter().any(|source| source.index == *index))
         .collect();
     let mut erasures: Vec<usize> = missing.clone();
     erasures.extend(missing_recovery.iter().map(|k| meta.data_count + k));
@@ -993,12 +1156,14 @@ pub(crate) fn rebuild_missing_volumes(
         &data_paths,
         &sizes,
         &missing,
-        &revs,
+        &mut rev_readers,
         &meta,
         &coder,
         protected,
         &erasures,
         cancel,
+        chunk,
+        zero_from,
     )? {
         let mut added = false;
         for position in positions {
@@ -1053,15 +1218,16 @@ pub(crate) fn rebuild_missing_volumes(
             if let Some(report) = progress.as_deref_mut() {
                 report(offset, shard_len);
             }
-            let want = (shard_len - offset).min(CHUNK as u64) as usize;
+            let want = (shard_len - offset).min(chunk as u64) as usize;
             let columns = load_chunk(
                 &data_paths,
                 &sizes,
                 &missing,
-                &revs,
+                &mut rev_readers,
                 meta.rec_count,
                 offset,
                 want,
+                zero_from,
             )?;
             let mut codeword = vec![0u8; codeword_len];
             let mut rebuilt: Vec<Vec<u8>> = vec![Vec::with_capacity(want); rebuild_indices.len()];
@@ -1127,15 +1293,15 @@ pub(crate) fn rebuild_missing_volumes(
 }
 
 /// One chunk of every volume, loaded once per streaming step.
-struct ChunkColumns<'a> {
+struct ChunkColumns {
     /// `None` for a missing data volume; other chunks are zero-padded past
     /// their volume's length.
     data: Vec<Option<Vec<u8>>>,
-    /// One slice per recovery volume (`None` when absent).
-    revs: Vec<Option<&'a [u8]>>,
+    /// One zero-padded chunk per recovery volume (`None` when absent).
+    revs: Vec<Option<Vec<u8>>>,
 }
 
-impl ChunkColumns<'_> {
+impl ChunkColumns {
     fn codeword(&self, position: usize, meta: &Meta, codeword: &mut [u8]) {
         codeword.fill(0);
         for (index, chunk) in self.data.iter().enumerate() {
@@ -1145,22 +1311,46 @@ impl ChunkColumns<'_> {
         }
         for (k, chunk) in self.revs.iter().enumerate() {
             if let Some(chunk) = chunk {
-                codeword[meta.data_count + k] = chunk.get(position).copied().unwrap_or(0);
+                codeword[meta.data_count + k] = chunk[position];
             }
         }
     }
 }
 
+/// Fill `buf` with the parity bytes at `offset..offset + buf.len()` of a
+/// `.rev` file. Bytes past the file (or past `zero_from`, the trailer
+/// region of a trailer-format file) read as zero, matching the previous
+/// in-memory zero-padded payloads.
+fn read_rev_range(
+    file: &mut fs::File,
+    len: u64,
+    zero_from: Option<u64>,
+    offset: u64,
+    buf: &mut [u8],
+) -> RarResult<()> {
+    buf.fill(0);
+    let end = offset.saturating_add(buf.len() as u64);
+    let readable_end = end.min(len).min(zero_from.unwrap_or(u64::MAX));
+    if readable_end > offset {
+        let n = (readable_end - offset) as usize;
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut buf[..n])?;
+    }
+    Ok(())
+}
+
 /// Load one chunk of every volume for a streaming pass.
-fn load_chunk<'a>(
+#[allow(clippy::too_many_arguments)]
+fn load_chunk(
     slot_paths: &[PathBuf],
     sizes: &[u64],
     missing: &[usize],
-    revs: &'a [(usize, Vec<u8>)],
+    revs: &mut [(usize, fs::File, u64)],
     rec_count: usize,
     offset: u64,
     want: usize,
-) -> RarResult<ChunkColumns<'a>> {
+    zero_from: Option<u64>,
+) -> RarResult<ChunkColumns> {
     let mut data = Vec::with_capacity(slot_paths.len());
     for (index, path) in slot_paths.iter().enumerate() {
         if missing.contains(&index) {
@@ -1176,13 +1366,11 @@ fn load_chunk<'a>(
         }
         data.push(Some(chunk));
     }
-    let mut rev_chunks: Vec<Option<&[u8]>> = vec![None; rec_count];
-    for (k, payload) in revs {
-        let start = offset as usize;
-        if start < payload.len() {
-            let end = (start + want).min(payload.len());
-            rev_chunks[*k] = payload.get(start..end);
-        }
+    let mut rev_chunks: Vec<Option<Vec<u8>>> = vec![None; rec_count];
+    for (k, file, len) in revs.iter_mut() {
+        let mut chunk = vec![0u8; want];
+        read_rev_range(file, *len, zero_from, offset, &mut chunk)?;
+        rev_chunks[*k] = Some(chunk);
     }
     Ok(ChunkColumns {
         data,
@@ -1198,12 +1386,14 @@ fn locate_damage(
     slot_paths: &[PathBuf],
     sizes: &[u64],
     missing: &[usize],
-    revs: &[(usize, Vec<u8>)],
+    revs: &mut [(usize, fs::File, u64)],
     meta: &Meta,
     coder: &Rsc8,
     protected: u64,
     erasures: &[usize],
     cancel: Option<&AtomicBool>,
+    chunk: usize,
+    zero_from: Option<u64>,
 ) -> RarResult<Option<Vec<usize>>> {
     let mut codeword = vec![0u8; meta.data_count + meta.rec_count];
     let mut offset = 0u64;
@@ -1211,7 +1401,7 @@ fn locate_damage(
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return Err(RarError::Cancelled);
         }
-        let want = (protected - offset).min(CHUNK as u64) as usize;
+        let want = (protected - offset).min(chunk as u64) as usize;
         let columns = load_chunk(
             slot_paths,
             sizes,
@@ -1220,6 +1410,7 @@ fn locate_damage(
             meta.rec_count,
             offset,
             want,
+            zero_from,
         )?;
         for position in 0..want {
             columns.codeword(position, meta, &mut codeword);
@@ -1327,9 +1518,14 @@ fn map_coder(error: rs8::Rs8Error) -> RarError {
 
 #[cfg(test)]
 mod tests {
+    use super::rs8::Rsc8;
     use super::{
-        Meta, NameKind, collect_recovery_volumes, parse_trailer, rev_name_candidates, write_trailer,
+        Meta, NameKind, build_recovery_volumes_for_set_chunked, collect_recovery_volumes,
+        parse_trailer, parse_trailer_file, rebuild_missing_volumes_chunked, rev_name_candidates,
+        trailer_style, write_trailer,
     };
+    use super::{RarError, TRAILER_LEN};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn trailer_roundtrip_validates_counts_and_crc() {
@@ -1424,7 +1620,210 @@ mod tests {
         assert_eq!(set.meta.data_count, 4);
         assert_eq!(set.meta.rec_count, 1);
         assert_eq!(set.payloads.len(), 1);
-        assert_eq!(set.payloads[0].1, b"parity payload");
+        assert_eq!(set.payloads[0].len, 14);
+        assert_eq!(set.payloads[0].path, dir.path().join("set4_1_1.rev"));
+    }
+
+    /// `trailer_style` must accept a valid trailer, reject a CRC-corrupted
+    /// one, and reject a legacy-format file, all through the file-backed
+    /// streaming parser.
+    #[test]
+    fn trailer_style_detects_trailer_and_legacy_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = Meta {
+            data_count: 4,
+            rec_count: 2,
+            recovery_index: 0,
+        };
+        let payload = vec![0x5au8; 4096];
+        let mut trailer_file = payload.clone();
+        write_trailer(&meta, &payload, &mut trailer_file);
+        let trailer_path = dir.path().join("set.part1.rev");
+        std::fs::write(&trailer_path, &trailer_file).unwrap();
+
+        assert_eq!(
+            parse_trailer_file(&trailer_path).unwrap(),
+            parse_trailer(&trailer_file)
+        );
+        assert!(trailer_style(&trailer_path));
+
+        // A flipped payload byte fails the streamed CRC check.
+        let mut corrupt = trailer_file.clone();
+        corrupt[0] ^= 0xff;
+        let corrupt_path = dir.path().join("corrupt.part1.rev");
+        std::fs::write(&corrupt_path, &corrupt).unwrap();
+        assert!(!trailer_style(&corrupt_path));
+
+        // A legacy-format file carries no trailer.
+        let legacy_path = dir.path().join("set4_1_1.rev");
+        std::fs::write(&legacy_path, b"parity payload").unwrap();
+        assert!(!trailer_style(&legacy_path));
+    }
+
+    /// Deterministic non-archive byte patterns: the builder only reads the
+    /// volume files, so plain files exercise the `.rev` codec directly.
+    fn write_fake_volumes(dir: &Path, sizes: &[u64]) -> Vec<PathBuf> {
+        let mut volumes = Vec::with_capacity(sizes.len());
+        for (i, &size) in sizes.iter().enumerate() {
+            let path = dir.join(format!("set.part{}.rar", i + 1));
+            let mut bytes = vec![0u8; size as usize];
+            let mut state = 0x1234_5678u32.wrapping_add(i as u32 + 1);
+            for byte in &mut bytes {
+                state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                *byte = (state >> 16) as u8;
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            volumes.push(path);
+        }
+        volumes
+    }
+
+    /// Staging temp names the builder may have leaked into `dir`.
+    fn temp_leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("rar5tmp"))
+            .collect()
+    }
+
+    /// Reference parity for the legacy (full-parity) layout, computed with
+    /// full zero-padded volume shards in memory.
+    fn legacy_reference(volumes: &[PathBuf], rec_count: usize) -> Vec<Vec<u8>> {
+        let chunks: Vec<Vec<u8>> = volumes
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+        let shard_len = chunks.iter().map(Vec::len).max().unwrap();
+        let coder = Rsc8::new(rec_count).unwrap();
+        let mut payloads: Vec<Vec<u8>> = vec![Vec::with_capacity(shard_len); rec_count];
+        let mut column = vec![0u8; chunks.len()];
+        for offset in 0..shard_len {
+            for (index, chunk) in chunks.iter().enumerate() {
+                column[index] = chunk.get(offset).copied().unwrap_or(0);
+            }
+            for (payload, byte) in payloads.iter_mut().zip(coder.encode(&column)) {
+                payload.push(byte);
+            }
+        }
+        payloads
+    }
+
+    /// A 64-byte stripe over ~1 KiB volumes spans many stripes; the written
+    /// parity must equal the buffered reference, and a missing volume must
+    /// rebuild byte-identically through the streaming reader.
+    #[test]
+    fn streaming_build_and_rebuild_match_buffered_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let volumes = write_fake_volumes(dir.path(), &[1024, 1024, 700]);
+        let expected = legacy_reference(&volumes, 8);
+
+        let written = build_recovery_volumes_for_set_chunked(&volumes, 8, 64).unwrap();
+        assert_eq!(written.len(), 8);
+        for (k, path) in written.iter().enumerate() {
+            assert_eq!(
+                path.file_name().unwrap().to_string_lossy(),
+                format!("set.part{}_{}_{}.rev", volumes.len(), 8, k + 1),
+                "the builder must return the final paths"
+            );
+            let actual = std::fs::read(path).unwrap();
+            assert_eq!(actual.len(), expected[k].len(), "rev {k} length");
+            let diff = actual.iter().zip(&expected[k]).position(|(a, b)| a != b);
+            assert_eq!(diff, None, "rev {k} first difference");
+        }
+        assert!(
+            temp_leftovers(dir.path()).is_empty(),
+            "successful build left temps: {:?}",
+            temp_leftovers(dir.path())
+        );
+
+        // Only the last volume of a set may be short, so a full middle
+        // volume is the reconstructable victim.
+        let missing = std::fs::read(&volumes[1]).unwrap();
+        std::fs::remove_file(&volumes[1]).unwrap();
+        let rebuilt = rebuild_missing_volumes_chunked(&volumes[0], None, None, 64).unwrap();
+        assert_eq!(rebuilt, vec![volumes[1].clone()]);
+        assert_eq!(std::fs::read(&volumes[1]).unwrap(), missing);
+    }
+
+    /// A failed streaming build removes the temps it wrote and leaves a
+    /// pre-existing `.rev` untouched.
+    #[test]
+    fn streaming_build_failure_leaves_existing_revs_and_removes_temps() {
+        let dir = tempfile::tempdir().unwrap();
+        let volumes = write_fake_volumes(dir.path(), &[1024, 1024]);
+        // A pre-existing `.rev` for the second output: the failed build
+        // must leave it byte-identical.
+        let existing = dir.path().join("set.part2_2_2.rev");
+        let keep = b"pre-existing parity".to_vec();
+        std::fs::write(&existing, &keep).unwrap();
+        // Occupy the first final path with a directory so installing the
+        // first completed temp fails after the whole parity set is built.
+        std::fs::create_dir(dir.path().join("set.part2_2_1.rev")).unwrap();
+
+        let error = build_recovery_volumes_for_set_chunked(&volumes, 2, 64).unwrap_err();
+        assert!(matches!(error, RarError::Io(_)), "got {error}");
+        assert_eq!(
+            std::fs::read(&existing).unwrap(),
+            keep,
+            "the pre-existing .rev must survive the failed build"
+        );
+        assert!(
+            temp_leftovers(dir.path()).is_empty(),
+            "temps left behind: {:?}",
+            temp_leftovers(dir.path())
+        );
+    }
+
+    /// Trailer-format builds append a valid trailer after the streamed
+    /// payload, and the rebuild path ignores those seven non-parity bytes.
+    #[test]
+    fn streaming_trailer_build_writes_valid_trailer() {
+        let dir = tempfile::tempdir().unwrap();
+        let volumes = write_fake_volumes(dir.path(), &[1024, 900, 1100]);
+        // Zero tails select the trailer layout (WinRAR's ENDARC padding).
+        for path in &volumes {
+            let mut bytes = std::fs::read(path).unwrap();
+            bytes.extend_from_slice(&[0u8; TRAILER_LEN]);
+            std::fs::write(path, &bytes).unwrap();
+        }
+        let originals: Vec<Vec<u8>> = volumes
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+        let shard_len = originals.iter().map(Vec::len).max().unwrap();
+
+        let written = build_recovery_volumes_for_set_chunked(&volumes, 2, 64).unwrap();
+        assert_eq!(written.len(), 2);
+        for (k, path) in written.iter().enumerate() {
+            assert_eq!(
+                path.file_name().unwrap().to_string_lossy(),
+                format!("set.part{}.rev", k + 1),
+                "the builder must return the final paths"
+            );
+            let bytes = std::fs::read(path).unwrap();
+            assert_eq!(bytes.len(), shard_len);
+            let mut file = std::fs::File::open(path).unwrap();
+            assert_eq!(
+                super::parse_trailer_reader(&mut file).unwrap(),
+                Some(Meta {
+                    data_count: 3,
+                    rec_count: 2,
+                    recovery_index: k,
+                })
+            );
+        }
+        assert!(
+            temp_leftovers(dir.path()).is_empty(),
+            "successful build left temps: {:?}",
+            temp_leftovers(dir.path())
+        );
+
+        let missing = originals[2].clone();
+        std::fs::remove_file(&volumes[2]).unwrap();
+        let rebuilt = rebuild_missing_volumes_chunked(&volumes[0], None, None, 64).unwrap();
+        assert_eq!(rebuilt, vec![volumes[2].clone()]);
+        assert_eq!(std::fs::read(&volumes[2]).unwrap(), missing);
     }
 }
 

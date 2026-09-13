@@ -89,9 +89,13 @@ pub fn split_prefix_shard_ranges(
 
     let mut ranges = Vec::with_capacity(data_shards);
     for shard_index in 0..data_shards {
+        // A shard that starts past the protected prefix is entirely absent;
+        // clamping the start keeps every range non-reversed (`start <= end`)
+        // so callers can slice the prefix without an out-of-order panic.
         let start = shard_index
             .checked_mul(group_count)
-            .ok_or(Error::PlanOverflow)?;
+            .ok_or(Error::PlanOverflow)?
+            .min(prefix_len);
         let end = start.saturating_add(group_count).min(prefix_len);
         ranges.push(start..end);
     }

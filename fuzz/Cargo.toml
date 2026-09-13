@@ -45,6 +45,18 @@ test = false
 bench = false
 
 [[bin]]
+name = "rev"
+path = "fuzz_targets/rev.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "legacy"
+path = "fuzz_targets/legacy.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "write"
 path = "fuzz_targets/write.rs"
 test = false

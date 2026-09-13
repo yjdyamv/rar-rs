@@ -7,6 +7,9 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+#[path = "../../crates/rar/tests/support/structured.rs"]
+pub mod structured;
+
 /// Deterministic xorshift64* PRNG (no external deps).
 pub struct Rng(u64);
 
@@ -27,6 +30,12 @@ impl Rng {
     pub fn below(&mut self, n: usize) -> usize {
         (self.next_u64() % n.max(1) as u64) as usize
     }
+
+    pub fn fill(&mut self, buf: &mut [u8]) {
+        for byte in buf.iter_mut() {
+            *byte = self.next_u64() as u8;
+        }
+    }
 }
 
 /// Embedded seed corpus: real WinRAR output plus the tail-match
@@ -43,6 +52,40 @@ pub static CORPUS_TAIL_MATCH: &[u8] = include_bytes!(concat!(
 
 pub static CORPUS_PARSE: &[&[u8]] = &[CORPUS_WINRAR, CORPUS_TAIL_MATCH];
 pub static CORPUS_ALL: &[&[u8]] = &[CORPUS_WINRAR, CORPUS_TAIL_MATCH, b"Rar!\x1a\x07\x01\x00"];
+
+/// Genuine WinRAR RAR 7.23 archive with a `-rr5%` inline recovery record
+/// (`{RB}` chunks with WinRAR's own plan/geometry).
+pub static CORPUS_RR: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../crates/rar/tests/fixtures/rar50/winrar5_with_recovery_rr5.rar"
+));
+
+/// Small genuine legacy archives: RAR 1.4, RAR 2.0, a WinRAR 5.91 STORE
+/// RAR4 archive, a RAR 3.0 compressed archive and a RAR 2.5 `PROTECT_HEAD`
+/// recovery-record archive. The `legacy` target mutates their block
+/// envelopes with the 16-bit header CRC recomputed where it is verified.
+pub static CORPUS_LEGACY: &[&[u8]] = &[
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../crates/rar/tests/fixtures/rar13/MULTIFIL.RAR"
+    )),
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../crates/rar/tests/fixtures/rar40/rar2/rar20.rar"
+    )),
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../crates/rar/tests/fixtures/rar40/winrar591_store_m0.rar"
+    )),
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../crates/rar/tests/fixtures/rar40/rar300/compressed_text_rar300.rar"
+    )),
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../crates/rar/tests/fixtures/rar40/repair/rar250_protect_head_rr1.rar"
+    )),
+];
 
 /// Produce one mutated input from the corpus (dict-style: start from a
 /// seed, apply 1-8 byte-level edits, occasionally splice another seed).
@@ -527,7 +570,11 @@ pub fn crypto(data: &[u8]) {
 }
 
 /// Recovery surface: inline `{RB}` build/parse/repair, the GF(2^16)
-/// parity encode path, CRC64-XZ, and `.rev` serialization.
+/// parity encode path, CRC64-XZ, and `.rev` serialization. Beyond raw
+/// bytes, a structured strategy builds *valid* records with the wire API
+/// and mutates their plan/geometry with the checksums recomputed, so the
+/// shard arithmetic and relocation scan actually run (random bytes cannot
+/// pass the CRC64-XZ gate).
 pub fn recovery(data: &[u8]) {
     // Inline recovery record: parse + repair (allocations bounded by the
     // input length — chunk sizes must fit inside the input).
@@ -549,6 +596,29 @@ pub fn recovery(data: &[u8]) {
         }
     }
 
+    // Structured `{RB}` mutations: valid records over an archive-shaped
+    // prefix, then plan/geometry fields, shard states and parity flipped
+    // with the CRC64-XZ recomputed (plus truncations). This is what
+    // reaches `split_prefix_shards`, the relocation scan and the
+    // Reed-Solomon solve.
+    let mut rng = Rng::new(structured::seed_from_bytes(data));
+    let prefix_len = 64 + rng.below(CORPUS_WINRAR.len().saturating_sub(64).max(1));
+    let prefix = &CORPUS_WINRAR[..prefix_len.min(CORPUS_WINRAR.len())];
+    let pct = u64::from(data.first().copied().unwrap_or(2) % 20) + 1;
+    for (case, _) in structured::inline_rr_cases(prefix, pct, &mut rng, false) {
+        let _ = rar_rs::repair_archive(&case);
+    }
+
+    // A genuine WinRAR-produced RR archive: repair it, then mutate the real
+    // chunk fields/states with the CRC recomputed. Gated on a larger input
+    // so the per-iteration cost stays close to the raw loop's.
+    if data.len() >= 256 {
+        let _ = rar_rs::repair_archive(CORPUS_RR);
+        for (case, _) in structured::rr_archive_mutations(CORPUS_RR, &mut rng) {
+            let _ = rar_rs::repair_archive(&case);
+        }
+    }
+
     let _ = rar_rs::wire::crc64_xz(data);
     let _ = rar_rs::wire::crc64_rar_state(data);
 
@@ -559,5 +629,188 @@ pub fn recovery(data: &[u8]) {
         let crcs = [u32::from_le_bytes(data[0..4].try_into().unwrap())];
         let payload = &data[..data.len() / 2];
         let _ = rar_rs::wire::build_recovery_volume_file(0, 1, &sizes, &crcs, payload);
+    }
+}
+
+/// Recovery-volume / streaming-repair surface: `repair_archive_path` on a
+/// structured inline record, fabricated REV5 sets driven through
+/// `rebuild_missing_volumes` (header CRC recomputed after mutation), and
+/// rev3 `.rev` sets built with the public API and mutated at the trailer
+/// (CRC32 recomputed) before a volume is taken away. Reaches the shard
+/// math and the `.rev` naming/layout discovery.
+pub fn rev(data: &[u8]) {
+    let mut rng = Rng::new(structured::seed_from_bytes(data));
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // Streaming repair of one structured inline-RR case (a different code
+    // path from the in-memory repair in `recovery`).
+    let prefix_len = 64 + rng.below(CORPUS_WINRAR.len().saturating_sub(64).max(1));
+    let prefix = &CORPUS_WINRAR[..prefix_len.min(CORPUS_WINRAR.len())];
+    let pct = u64::from(data.first().copied().unwrap_or(2) % 20) + 1;
+    let cases = structured::inline_rr_cases(prefix, pct, &mut rng, false);
+    if !cases.is_empty() {
+        let pick = rng.below(cases.len());
+        let src = dir.path().join("inline.rar");
+        let dst = dir.path().join("inline.fixed.rar");
+        if std::fs::write(&src, &cases[pick].0).is_ok() {
+            let _ = rar_rs::repair_archive_path(&src, &dst);
+        }
+    }
+
+    rev5_fabricated(dir.path(), data, &mut rng);
+    rev3_fabricated(dir.path(), data, &mut rng);
+}
+
+/// Fabricate a small REV5 volume set, write its `.rev` (mutated with the
+/// header CRC recomputed), remove a middle volume and run `rar rc`.
+fn rev5_fabricated(dir: &std::path::Path, data: &[u8], rng: &mut Rng) {
+    let width = 1 + rng.below(3);
+    let data_count = 2 + rng.below(3); // 2..=4
+    let rec_count = 1 + rng.below(2); // 1..=2
+    // Zeroed volumes (zero parity) make a *successful* rebuild; random
+    // volumes run the same solve and fail the recorded-CRC check after it.
+    let zeroed = data.first().is_none_or(|byte| byte & 1 == 0);
+    let size = 2 * (1 + rng.below(96));
+    let base = "set";
+    let volume_path = |index: usize| dir.join(format!("{base}.part{:0width$}.rar", index + 1));
+
+    let mut sizes = Vec::with_capacity(data_count);
+    let mut crcs = Vec::with_capacity(data_count);
+    for index in 0..data_count {
+        let mut bytes = vec![0u8; size];
+        if !zeroed {
+            rng.fill(&mut bytes);
+        }
+        crcs.push(structured::crc32_ieee(&bytes));
+        sizes.push(bytes.len() as u64);
+        let _ = std::fs::write(volume_path(index), &bytes);
+    }
+    let mut payload = vec![0u8; size];
+    if !zeroed {
+        rng.fill(&mut payload);
+    }
+
+    for k in 0..rec_count {
+        let file = rar_rs::wire::build_recovery_volume_file(k, rec_count, &sizes, &crcs, &payload);
+        let path = dir.join(format!("{base}.part{:0width$}.rev", k + 1));
+        let bytes = if k == 0 {
+            let mut cases = structured::rev5_mutations(&file, rng);
+            cases.push((file, "rev5 as built"));
+            let pick = rng.below(cases.len());
+            cases.swap_remove(pick).0
+        } else {
+            file
+        };
+        let _ = std::fs::write(&path, &bytes);
+    }
+
+    let missing = 1 + rng.below(data_count - 1); // never the first volume
+    let _ = std::fs::remove_file(volume_path(missing));
+    let _ = rar_rs::rebuild_missing_volumes(&volume_path(0));
+}
+
+/// Fabricate a small legacy RAR4 volume set, build its rev3 `.rev` with the
+/// public API, mutate the trailer (CRC32 recomputed) when the layout has
+/// one, remove a middle volume and run `rar rc` (which walks
+/// `collect_recovery_volumes` and the name/layout scoring).
+fn rev3_fabricated(dir: &std::path::Path, data: &[u8], rng: &mut Rng) {
+    let control = data.first().copied().unwrap_or(0);
+    let new_naming = control & 2 != 0;
+    let trailer = control & 4 != 0;
+    let entry_from_rev = control & 8 != 0;
+    let data_count = 2 + rng.below(2); // 2..=3
+    let rec_count = 1 + rng.below(2); // 1..=2
+    let size = 32 + 2 * rng.below(64);
+    let base = "set";
+
+    let mut paths = Vec::with_capacity(data_count);
+    for index in 0..data_count {
+        let path = if new_naming {
+            dir.join(format!("{base}.part{}.rar", index + 1))
+        } else if index == 0 {
+            dir.join(format!("{base}.rar"))
+        } else {
+            dir.join(format!("{base}.r{:02}", index - 1))
+        };
+        let mut bytes = vec![0u8; size];
+        if index == 0 {
+            // Dispatch to the legacy codec: `collect_recovery_volumes`
+            // recognises the set from the first volume's signature.
+            bytes[..7].copy_from_slice(b"Rar!\x1a\x07\x00");
+        }
+        rng.fill(&mut bytes[7..size.saturating_sub(7)]);
+        if !trailer {
+            // Non-zero tail selects the legacy name-encoded layout.
+            bytes[size - 1] = 0x5a;
+        }
+        let _ = std::fs::write(&path, &bytes);
+        paths.push(path);
+    }
+
+    let Ok(revs) = rar_rs::build_recovery_volumes_for_set(&paths, rec_count) else {
+        return;
+    };
+    if trailer
+        && let Some(rev) = revs.first()
+        && let Ok(bytes) = std::fs::read(rev)
+    {
+        let mut cases = structured::rev3_trailer_mutations(&bytes, rng);
+        cases.push((bytes, "rev3 as built"));
+        let pick = rng.below(cases.len());
+        let _ = std::fs::write(rev, &cases[pick].0);
+    }
+
+    let missing = 1 + rng.below(data_count - 1);
+    let _ = std::fs::remove_file(&paths[missing]);
+    let entry = if entry_from_rev {
+        revs.first().cloned().unwrap_or_else(|| paths[0].clone())
+    } else {
+        paths[0].clone()
+    };
+    let _ = rar_rs::rebuild_missing_volumes(&entry);
+}
+
+/// Legacy block-envelope surface: mutate the headers of small genuine RAR4
+/// and RAR13 archives (recomputing the 16-bit RAR4 header CRC and the RAR13
+/// rolling member checksum where needed) and run the full read path —
+/// signature scan, block walk, header parse, member decode and the legacy
+/// recovery-record scan.
+pub fn legacy(data: &[u8]) {
+    let mut rng = Rng::new(structured::seed_from_bytes(data));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("in.rar");
+    let fixed = dir.path().join("fixed.rar");
+    let opts = rar_rs::ExtractOptions {
+        safe_paths: true,
+        max_unpacked_bytes: Some(8 * 1024 * 1024),
+        max_total_unpacked_bytes: Some(16 * 1024 * 1024),
+        ..Default::default()
+    };
+
+    let mut budget = 64usize;
+    for seed in CORPUS_LEGACY {
+        for (case, _) in structured::legacy_block_cases(seed, &mut rng) {
+            if budget == 0 {
+                return;
+            }
+            budget -= 1;
+            if std::fs::write(&path, &case).is_err() {
+                continue;
+            }
+            if let Ok(mut reader) = rar_rs::ArchiveReader::open(&path) {
+                let names: Vec<String> =
+                    reader.entries().map(|entry| entry.name().to_string()).collect();
+                for name in names.iter().take(4) {
+                    if let Some(id) = reader.entries_named(name).next().map(|entry| entry.id()) {
+                        let _ = reader.read_entry_with_options(id, opts);
+                    }
+                }
+            }
+            // The RAR 2.5 `PROTECT_HEAD` seed exercises the legacy
+            // recovery scan/repair on the mutated header stream.
+            if seed.starts_with(b"Rar!\x1a\x07\x00") {
+                let _ = rar_rs::repair_legacy_archive_path(&path, &fixed);
+            }
+        }
     }
 }

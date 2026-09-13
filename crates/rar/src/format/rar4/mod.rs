@@ -75,9 +75,9 @@ const FILE_HEADER_FIXED: usize = 32;
 
 /// A parsed RAR4 block envelope.
 #[derive(Debug, Clone)]
-struct Rar4Block {
+pub(crate) struct Rar4Block {
     head_crc: u16,
-    head_type: u8,
+    pub(crate) head_type: u8,
     flags: u16,
     /// Absolute offset where the block starts.
     offset: u64,
@@ -86,9 +86,11 @@ struct Rar4Block {
     /// `-hp` header-encrypted blocks).
     header_end: u64,
     /// Bytes on disk for this whole block (header + optional data area).
-    total_size: u64,
+    pub(crate) total_size: u64,
+    /// Data area length (`ADD_SIZE` when `LONG_BLOCK` is set, else `0`).
+    pub(crate) add_size: u64,
     /// Header bytes (for validation / name parsing).
-    header: Vec<u8>,
+    pub(crate) header: Vec<u8>,
 }
 
 /// File header flag: data continues from the previous volume (SPLIT_BEFORE)
@@ -295,7 +297,12 @@ fn read_block(
         read_exact(stream, &mut rest)?;
         header.extend_from_slice(&rest);
     }
-    finish_block(start, header, u64::from(head_size))
+    Ok(Some(read_envelope(
+        start,
+        header,
+        u64::from(head_size),
+        true,
+    )?))
 }
 
 /// Read an `-hp` encrypted block: `[8-byte salt][AES-128-CBC ciphertext]`,
@@ -355,14 +362,31 @@ fn read_encrypted_block(
     let mut header = block0.to_vec();
     header.extend_from_slice(&rest);
     header.truncate(head_size as usize);
-    finish_block(start, header, 8 + align16 as u64)
+    Ok(Some(read_envelope(
+        start,
+        header,
+        8 + align16 as u64,
+        true,
+    )?))
 }
 
-/// Validate a (possibly decrypted) header and compute the block envelope.
+/// Parse and validate a block envelope from a full plaintext header. This is
+/// the single RAR4 envelope reader: every caller (streaming scan, layout
+/// re-scan, recovery scan) routes through it so the `head_size`/`LONG_BLOCK`
+/// guards cannot diverge.
+///
 /// `on_disk_prefix` is the number of bytes the header occupies on disk
-/// (head_size for plaintext blocks, `8 + align16(head_size)` when the
-/// block was stored header-encrypted).
-fn finish_block(start: u64, header: Vec<u8>, on_disk_prefix: u64) -> RarResult<Option<Rar4Block>> {
+/// (`head_size` for plaintext blocks, `8 + align16(head_size)` when the
+/// block was stored header-encrypted). `verify_crc` checks the 16-bit
+/// `HEAD_CRC`: callers whose header is already validated by a previous pass
+/// (the edit layout scan) or may legitimately be damaged (the recovery
+/// scanner looking for the record to repair) pass `false`.
+pub(crate) fn read_envelope(
+    start: u64,
+    header: Vec<u8>,
+    on_disk_prefix: u64,
+    verify_crc: bool,
+) -> RarResult<Rar4Block> {
     if header.len() < 7 {
         return Err(RarError::Format("RAR4: truncated block header".into()));
     }
@@ -379,16 +403,18 @@ fn finish_block(start: u64, header: Vec<u8>, on_disk_prefix: u64) -> RarResult<O
     // Validate header CRC (16-bit) over bytes[2..head_size], except for
     // MARK (which has no meaningful CRC), AV/SIGN (documented bad), and
     // the 0xFFFF sentinel (RAR 1.5.4-era "no CRC" marker).
-    let should_check = !matches!(head_type, MARK_HEAD | 0x76 | 0x79) && head_crc != 0xFFFF;
-    let crc_end = header_crc_end(&header, head_type, flags);
-    if should_check {
-        let actual = (crc32::crc32(&header[2..crc_end]) & 0xffff) as u16;
-        if actual != head_crc {
-            return Err(RarError::Crc {
-                expected: head_crc as u32,
-                actual: actual as u32,
-                context: format!("RAR4 block type {head_type:#x} header"),
-            });
+    if verify_crc {
+        let should_check = !matches!(head_type, MARK_HEAD | 0x76 | 0x79) && head_crc != 0xFFFF;
+        let crc_end = header_crc_end(&header, head_type, flags);
+        if should_check {
+            let actual = (crc32::crc32(&header[2..crc_end]) & 0xffff) as u16;
+            if actual != head_crc {
+                return Err(RarError::Crc {
+                    expected: head_crc as u32,
+                    actual: actual as u32,
+                    context: format!("RAR4 block type {head_type:#x} header"),
+                });
+            }
         }
     }
 
@@ -398,21 +424,21 @@ fn finish_block(start: u64, header: Vec<u8>, on_disk_prefix: u64) -> RarResult<O
                 "RAR4: header missing LONG_BLOCK size".into(),
             ));
         }
-        u32::from_le_bytes(header[7..11].try_into().unwrap()) as u64
+        u64::from(u32::from_le_bytes(header[7..11].try_into().unwrap()))
     } else {
         0
     };
 
-    let total_size = on_disk_prefix + add_size;
-    Ok(Some(Rar4Block {
+    Ok(Rar4Block {
         head_crc,
         head_type,
         flags,
         offset: start,
         header_end: start + on_disk_prefix,
-        total_size,
+        total_size: on_disk_prefix + add_size,
+        add_size,
         header,
-    }))
+    })
 }
 
 /// Where the header CRC coverage ends: some block types with a nested
@@ -425,9 +451,82 @@ fn header_crc_end(header: &[u8], head_type: u8, flags: u16) -> usize {
     }
 }
 
+/// Deterministic byte length of a `FHD_EXTTIME` area (not counting the
+/// caller's fixed/name/salt prefix). The area opens with a 16-bit flags
+/// word whose four nibbles — mtime, ctime, atime, arctime from the top —
+/// each carry a PRESENT bit (`0x8`) and a 0..=3 sub-second byte count in
+/// the low bits. This mirrors unrar's `ReadExtTime`: mtime reuses the
+/// header's own DOS field, ctime and atime carry a 4-byte DOS time before
+/// their bytes, and arctime is never materialized (`tbl[3] == NULL`).
+/// Returns `None` when the flags word itself does not fit.
+fn ext_time_area_len(ext: &[u8]) -> Option<usize> {
+    let flags = ext
+        .get(..2)
+        .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
+        .map(u16::from_le_bytes)?;
+    let mut len = 2;
+    for (index, shift) in [12u32, 8, 4, 0].into_iter().enumerate() {
+        let nibble = ((flags >> shift) & 0xf) as usize;
+        if nibble & 0x8 == 0 {
+            continue;
+        }
+        len += match index {
+            // mtime reuses the fixed DOS field; arctime is never stored.
+            0 | 3 => nibble & 0x3,
+            // ctime/atime: 4-byte DOS time, then the sub-second bytes.
+            _ => 4 + (nibble & 0x3),
+        };
+    }
+    Some(len)
+}
+
+/// End offset of the `FHD_EXTTIME` area starting at `ext_start`, capped at
+/// `head_end`. Without a parseable flags word the area is empty.
+fn ext_time_area_end(header: &[u8], ext_start: usize, head_end: usize) -> usize {
+    match ext_time_area_len(&header[ext_start..head_end]) {
+        Some(len) => (ext_start + len).min(head_end),
+        None => ext_start,
+    }
+}
+
+/// Parse the nested `COMM_HEAD` (0x75) comment envelope at `start`
+/// (header-relative), returning `(block_start, payload_start, payload_end)`.
+/// `None` when the bytes there are not a comment envelope that fits inside
+/// `header`.
+fn comment_block_at(header: &[u8], start: usize) -> Option<(usize, usize, usize)> {
+    let tail = header.get(start..)?;
+    if tail.len() < 7 || tail[2] != COMM_HEAD {
+        return None;
+    }
+    let flags = u16::from_le_bytes([tail[3], tail[4]]);
+    let head_size = u16::from_le_bytes([tail[5], tail[6]]) as usize;
+    // CommentHeader body (unp_size, unp_ver, method, comm_crc) is 6 bytes
+    // after the 7-byte block prefix; a LONG_BLOCK inserts a 4-byte ADD_SIZE
+    // before it (verified against a genuine comment block: HEAD_SIZE 38 with
+    // a 10-byte payload).
+    let (data_start, data_end) = if flags & LONG_BLOCK != 0 {
+        if tail.len() < 11 {
+            return None;
+        }
+        let add = u32::from_le_bytes(tail[7..11].try_into().unwrap()) as usize;
+        (start + 17, start + 17 + add)
+    } else {
+        (start + 13, start + head_size)
+    };
+    (data_start <= data_end && data_end <= header.len()).then_some((start, data_start, data_end))
+}
+
+/// Where the header CRC coverage ends for a FILE_HEAD: the fixed/name/salt
+/// prefix plus the extended-time area, stopping at the nested comment
+/// subblock when one is present (the comment has its own CRC).
+///
+/// The extended-time length is derived from its flags word and the comment
+/// envelope is parsed at that exact offset — no byte scanning: ext-time
+/// tick bytes are arbitrary and can contain the `0x75` type byte, which a
+/// scanner would mistake for the comment start and shift the CRC coverage.
 pub(crate) fn file_header_crc_end(header: &[u8]) -> usize {
     // Named blocks end at name (+ salt + large high sizes), before the
-    // trailing comment block.
+    // trailing extended-time/comment area.
     let mut end = FILE_HEADER_FIXED;
     if header.len() < FILE_HEADER_FIXED {
         return header.len();
@@ -441,17 +540,22 @@ pub(crate) fn file_header_crc_end(header: &[u8]) -> usize {
     if flags & FHD_SALT != 0 {
         end += 8;
     }
-    // With a trailing comment the covered region runs up to where the comment
-    // subblock starts: everything before it, including the extended-time area
-    // (verified against a genuine FILE_HEAD+comment block: HEAD_CRC over
-    // `head_size - comment_size`).
-    if flags & FHD_COMMENT != 0
-        && end <= header.len()
-        && let Some((comment_start, _, _)) = find_comment_block_start(&header[end..])
-    {
-        return end + comment_start;
+    if end > header.len() {
+        return header.len();
     }
-    end.min(header.len())
+    let ext_end = if flags & FHD_EXTTIME != 0 {
+        ext_time_area_end(header, end, header.len())
+    } else {
+        end
+    };
+    // With a trailing comment the covered region runs up to where the
+    // comment subblock starts: immediately after the fixed/ext area. When
+    // no comment envelope is there, fall back to the whole fixed/ext area
+    // (tolerant: a missing comment must not reject the header).
+    if flags & FHD_COMMENT != 0 && comment_block_at(header, ext_end).is_some() {
+        return ext_end;
+    }
+    ext_end
 }
 
 /// Parse a RAR4 FILE_HEAD block body into the format-neutral `FileHeader`,
@@ -523,15 +627,23 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         None
     };
 
+    // The extended-time area's deterministic extent marks where the nested
+    // comment must start; no scanning (ext-time tick bytes can contain the
+    // COMM_HEAD type byte).
+    let ext_end = if block.flags & FHD_EXTTIME != 0 {
+        ext_time_area_end(h, pos, head_end)
+    } else {
+        pos
+    };
+
     // File comment: a nested COMM_HEAD (0x75) subblock set by the `FHD_COMMENT`
-    // flag. Its own 16-bit CRC covers the comment data and the outer file-header
-    // CRC stops before it (see `header_crc_end`). The comment sits after any
-    // extended-time area, so we locate it by scanning for the COMM_HEAD marker
-    // and decode its payload (UTF-8 kept; an even-length non-UTF-8 payload is
-    // read as UTF-16LE). `pos` is left unchanged: the extended-time region is
-    // read from `pos` below.
+    // flag, sitting immediately after the extended-time area. Its own 16-bit
+    // CRC covers the comment data and the outer file-header CRC stops before
+    // it (see `header_crc_end`). The payload is decoded as UTF-8; an
+    // even-length non-UTF-8 payload is read as UTF-16LE. `pos` is left
+    // unchanged: the extended-time region is read from `pos` below.
     let comment = if block.flags & FHD_COMMENT != 0 {
-        parse_file_comment(&h[pos..head_end]).0
+        parse_file_comment(h, ext_end).0
     } else {
         None
     };
@@ -783,33 +895,22 @@ fn extract_mtime_refinement(ext_time: &[u8]) -> (bool, Option<u32>) {
 }
 
 /// Locate the nested `COMM_HEAD` (0x75) file-comment subblock in a `FILE_HEAD`'s
-/// trailing area. `tail` must start at the first byte that can begin a comment
-/// block (i.e. the extended-time region). Returns
+/// trailing area, byte by byte. `tail` must start at the first byte that can
+/// begin a comment block (i.e. the extended-time region). Returns
 /// `(block_start, data_start, data_end)` as offsets relative to `tail`, or
 /// `None` when no comment block is present.
+///
+/// The reader no longer uses this: the comment sits immediately after the
+/// extended-time area, whose length is derived from its flags word (see
+/// [`file_header_crc_end`]). This scan remains for the edit path, where a
+/// header is rewritten in place and the comment may sit anywhere.
 pub(crate) fn find_comment_block_start(tail: &[u8]) -> Option<(usize, usize, usize)> {
     let mut i = 0;
     while i + 7 <= tail.len() {
-        if tail[i + 2] == COMM_HEAD {
-            let flags = u16::from_le_bytes([tail[i + 3], tail[i + 4]]);
-            let head_size = u16::from_le_bytes([tail[i + 5], tail[i + 6]]) as usize;
-            // CommentHeader body (unp_size, unp_ver, method, comm_crc) is 6
-            // bytes after the 7-byte block prefix; a LONG_BLOCK inserts a
-            // 4-byte ADD_SIZE before it (verified against a genuine comment
-            // block: HEAD_SIZE 38 with a 10-byte payload).
-            let (data_start, data_end) = if flags & LONG_BLOCK != 0 {
-                if i + 11 > tail.len() {
-                    i += 1;
-                    continue;
-                }
-                let add = u32::from_le_bytes(tail[i + 7..i + 11].try_into().unwrap()) as usize;
-                (i + 17, i + 17 + add)
-            } else {
-                (i + 13, i + head_size)
-            };
-            if data_start <= data_end && data_end <= tail.len() {
-                return Some((i, data_start, data_end));
-            }
+        if tail[i + 2] == COMM_HEAD
+            && let Some(found) = comment_block_at(tail, i)
+        {
+            return Some(found);
         }
         i += 1;
     }
@@ -817,15 +918,15 @@ pub(crate) fn find_comment_block_start(tail: &[u8]) -> Option<(usize, usize, usi
 }
 
 /// Locate and decode a RAR 3.x/4.x per-file comment (`FHD_COMMENT`). The
-/// comment is a COMM_HEAD (0x75) subblock that follows the extended-time area
-/// at the end of the file header. Returns the decoded text and the byte length
-/// the comment block occupies (`0` when absent).
-fn parse_file_comment(tail: &[u8]) -> (Option<Vec<u8>>, usize) {
-    match find_comment_block_start(tail) {
+/// comment envelope must begin at `start`, the byte just past the
+/// extended-time area. Returns the decoded text and the byte length the
+/// comment block occupies (`0` when absent).
+fn parse_file_comment(header: &[u8], start: usize) -> (Option<Vec<u8>>, usize) {
+    match comment_block_at(header, start) {
         Some((i, data_start, data_end)) => {
             // WinRAR stores file comments uncompressed (method 0x30); other
             // methods are rare and best-effort (raw bytes) here.
-            let raw = &tail[data_start..data_end];
+            let raw = &header[data_start..data_end];
             (Some(decode_comment_text(raw)), data_end - i)
         }
         None => (None, 0),
@@ -899,19 +1000,17 @@ pub(crate) fn decrypt_encrypted_header(
     let mut header = block0.to_vec();
     header.extend_from_slice(&rest);
     header.truncate(head_size);
-    let flags = u16::from_le_bytes([header[3], header[4]]);
-    let add_size = if flags & LONG_BLOCK != 0 {
-        if header.len() < 11 {
-            return Err(RarError::Format(
-                "RAR4: encrypted header missing LONG_BLOCK size".into(),
-            ));
-        }
-        u32::from_le_bytes(header[7..11].try_into().unwrap()) as usize
-    } else {
-        0
-    };
     let on_disk_header = 8 + align16;
-    Ok((header, on_disk_header, add_size, on_disk_header + add_size))
+    // CRC verification is off: a wrong password decrypts to garbage, and the
+    // caller (the recovery scanner) must tolerate headers it is about to
+    // repair. The envelope guards still apply.
+    let block = read_envelope(offset as u64, header, on_disk_header as u64, false)?;
+    Ok((
+        block.header,
+        on_disk_header,
+        block.add_size as usize,
+        block.total_size as usize,
+    ))
 }
 
 #[cfg(test)]
@@ -952,7 +1051,7 @@ mod tests {
     #[test]
     fn parses_ascii_file_comment() {
         let tail = comm_block(b"release notes");
-        let (c, len) = parse_file_comment(&tail);
+        let (c, len) = parse_file_comment(&tail, 0);
         assert_eq!(c.unwrap(), b"release notes");
         assert_eq!(len, tail.len());
     }
@@ -964,7 +1063,7 @@ mod tests {
             v
         });
         let tail = comm_block(&payload);
-        let (c, _) = parse_file_comment(&tail);
+        let (c, _) = parse_file_comment(&tail, 0);
         assert_eq!(c.unwrap(), "注".as_bytes());
     }
 
@@ -972,7 +1071,7 @@ mod tests {
     fn no_comment_returns_none() {
         // A FILE_HEAD (0x74) with no trailing COMM_HEAD subblock.
         let tail = [0u8, 1, FILE_HEAD, 0, 0, 0, 0];
-        assert!(parse_file_comment(&tail).0.is_none());
+        assert!(parse_file_comment(&tail, 0).0.is_none());
     }
 
     #[test]
@@ -988,9 +1087,88 @@ mod tests {
         b[7..11].copy_from_slice(&add_size.to_le_bytes());
         b.extend_from_slice(&[0, 0, 29, 0x30, 0, 0]); // unp_size, unp_ver, method, comm_crc
         b.extend_from_slice(payload);
-        let (c, len) = parse_file_comment(&b);
+        let (c, len) = parse_file_comment(&b, 0);
         assert_eq!(c.unwrap(), payload);
         assert_eq!(len, b.len());
+    }
+
+    #[test]
+    fn ext_time_length_follows_the_nibble_word() {
+        // mtime PRESENT + 3 tick bytes.
+        assert_eq!(ext_time_area_len(&[0x00, 0xF0, 0, 0, 0]), Some(5));
+        // mtime PRESENT + 0 tick bytes (ADD_SECOND only).
+        assert_eq!(ext_time_area_len(&[0x00, 0xC0]), Some(2));
+        // mtime + ctime (4-byte DOS time + 2 tick bytes).
+        assert_eq!(ext_time_area_len(&[0x00, 0xBA, 0, 0, 0, 0, 0, 0]), Some(11));
+        // No nibbles set: just the flags word.
+        assert_eq!(ext_time_area_len(&[0x00, 0x00]), Some(2));
+        // An absent flags word has no length.
+        assert_eq!(ext_time_area_len(&[0x00]), None);
+    }
+
+    /// An ext-time area whose tick bytes contain `0x75` at the offset the old
+    /// byte scanner keyed on must not shift the comment boundary: the extent
+    /// comes from the flags nibbles, so the header CRC (which covers the
+    /// ext-time area) still validates and the real comment is found after it.
+    #[test]
+    fn ext_time_0x75_byte_does_not_shift_the_comment_boundary() {
+        let name = b"t.bin";
+        let flags = LONG_BLOCK | FHD_EXTTIME | FHD_COMMENT;
+        let mut header = vec![0u8; FILE_HEADER_FIXED];
+        header[2] = FILE_HEAD;
+        header[3..5].copy_from_slice(&flags.to_le_bytes());
+        header[26..28].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        header.extend_from_slice(name);
+        // Ext-time flags word 0xB800: mtime PRESENT with 3 tick bytes and
+        // ctime PRESENT with none -> 2 + 3 + 4 = 9 bytes. The first mtime
+        // tick byte is 0x75 and the ctime DOS bytes [13, 0] look like a
+        // plausible non-LONG_BLOCK comment at offset 0 to the old scanner.
+        let ext = [0x00u8, 0xB8, 0x75, 0x00, 0x00, 0x0D, 0x00, 0x00, 0x00];
+        header.extend_from_slice(&ext);
+        let ext_end = header.len();
+        let comment = comm_block(b"real comment");
+        header.extend_from_slice(&comment);
+        let head_size = header.len() as u16;
+        header[5..7].copy_from_slice(&head_size.to_le_bytes());
+        // HEAD_CRC covers fixed + name + ext-time, stopping at the comment.
+        let crc = (crc32::crc32(&header[2..ext_end]) & 0xffff) as u16;
+        header[..2].copy_from_slice(&crc.to_le_bytes());
+
+        assert_eq!(
+            file_header_crc_end(&header),
+            ext_end,
+            "the ext-time nibbles locate the comment, not the 0x75 byte"
+        );
+        let block = read_envelope(0, header, u64::from(head_size), true)
+            .expect("valid envelope and header CRC");
+        let fh = parse_file_header(&block).expect("parse");
+        assert_eq!(fh.comment.as_deref(), Some(&b"real comment"[..]));
+    }
+
+    /// The shared envelope reader rejects a bad HEAD_CRC when asked to
+    /// verify, and a `head_size`-7 block with LONG_BLOCK (no room for the
+    /// 4-byte ADD_SIZE) either way instead of slicing past the buffer.
+    #[test]
+    fn read_envelope_rejects_bad_crc_and_short_long_block() {
+        // A well-formed 13-byte MAIN header with its CRC corrupted.
+        let mut main = crate::format::rar4::write::build_main_header(0).to_vec();
+        main[0] ^= 0xff;
+        let err = read_envelope(0, main, 13, true).unwrap_err();
+        assert!(matches!(err, RarError::Crc { .. }), "got {err}");
+
+        // head_size 7 + LONG_BLOCK: the ADD_SIZE field is out of bounds.
+        let mut short = vec![0u8; 7];
+        short[0..2].copy_from_slice(&0xFFFFu16.to_le_bytes()); // "no CRC" sentinel
+        short[2] = FILE_HEAD;
+        short[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
+        short[5..7].copy_from_slice(&7u16.to_le_bytes());
+        for verify in [true, false] {
+            let err = read_envelope(0, short.clone(), 7, verify).unwrap_err();
+            assert!(
+                matches!(err, RarError::Format(_)),
+                "verify={verify}: expected a format error, got {err}"
+            );
+        }
     }
 
     /// A crafted FILE_HEAD can set FHD_LARGE while `head_size` stops at the
@@ -1010,6 +1188,7 @@ mod tests {
             offset: 0,
             header_end: FILE_HEADER_FIXED as u64,
             total_size: FILE_HEADER_FIXED as u64,
+            add_size: 0,
             header,
         };
         let err = parse_file_header(&block).unwrap_err();

@@ -8,13 +8,13 @@
 
 use super::*;
 
-use super::super::{FILTER_DELTA, FILTER_E8, FILTER_E8E9};
+use super::super::{FILTER_ARM, FILTER_DELTA, FILTER_E8, FILTER_E8E9};
 use super::emit::{encode_block, encode_empty_block};
 use super::parse::{
     OPTIMAL_PARSE_PASSES, find_block_end, find_matches_optimal, find_matches_with_tail,
 };
 use crate::codec::common::filters::apply_filter_encode;
-use crate::error::RarResult;
+use crate::error::{RarError, RarResult};
 use crate::version::ArchiveVersion;
 
 /// Maximum length of one RAR5 filter block.
@@ -24,6 +24,69 @@ use crate::version::ArchiveVersion;
 /// most `0x3FFFF` bytes. Same value as the `rars` project's
 /// `MAX_FILTER_BLOCK_LENGTH` (MIT OR Apache-2.0).
 pub const MAX_FILTER_BLOCK_LENGTH: u32 = 0x3FFFF;
+
+/// Filter types the RAR5 writer intentionally produces: Delta, E8, E8E9 and
+/// ARM. Types 4-7 (ARMT/IA64/PPC/SPARC) are defined in the format notes but
+/// never produced by any implementation; the decoder refuses them explicitly
+/// (`apply_filter_decode`) while the encoder's forward transform would no-op
+/// them, so without this check a caller could write a filter record the
+/// reader rejects over raw, untransformed bytes.
+fn is_supported_filter_type(filter_type: u8) -> bool {
+    matches!(
+        filter_type,
+        FILTER_DELTA | FILTER_E8 | FILTER_E8E9 | FILTER_ARM
+    )
+}
+
+/// Single validation point for caller-supplied [`FilterSpec`]s, shared by the
+/// sequential ([`encode_with_filters`]) and parallel ([`encode_with_filters_mt`])
+/// writer entry points:
+///
+/// - the filter type must be one the writer produces,
+/// - regions must be non-empty and lie fully within `data`,
+/// - regions must not overlap. The decoder applies records in stream order,
+///   and mixed transforms (e.g. Delta then E8) do not commute, so overlapping
+///   records have no correct inverse; callers with overlapping ranges merge
+///   them first (see [`merge_ranges`]).
+///
+/// Rejecting up front keeps the writer from emitting a member its own
+/// streaming decoder refuses (a filter region that outlives the member).
+fn validate_filter_specs(data_len: usize, filters: &[FilterSpec]) -> RarResult<()> {
+    let data_len = data_len as u64;
+    let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(filters.len());
+    for f in filters {
+        if !is_supported_filter_type(f.filter_type) {
+            return Err(RarError::InvalidOption(format!(
+                "unsupported RAR5 filter type {}",
+                f.filter_type
+            )));
+        }
+        if f.block_length == 0 {
+            return Err(RarError::InvalidOption(format!(
+                "RAR5 filter region at {} has zero length",
+                f.block_start
+            )));
+        }
+        let start = u64::from(f.block_start);
+        let end = start + u64::from(f.block_length);
+        if end > data_len {
+            return Err(RarError::InvalidOption(format!(
+                "RAR5 filter region {start}..{end} exceeds member size {data_len}"
+            )));
+        }
+        ranges.push((start, end));
+    }
+    ranges.sort_unstable();
+    for pair in ranges.windows(2) {
+        if pair[1].0 < pair[0].1 {
+            return Err(RarError::InvalidOption(format!(
+                "overlapping RAR5 filter regions {}..{} and {}..{}",
+                pair[0].0, pair[0].1, pair[1].0, pair[1].1
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// Encode `data` as a single RAR5 member with output filters applied.
 ///
@@ -38,6 +101,10 @@ pub const MAX_FILTER_BLOCK_LENGTH: u32 = 0x3FFFF;
 /// offsets are member-relative too (WinRAR's `WrittenFileSize` is per-file);
 /// a member written through this path must be marked non-solid so the
 /// decoder's filter positions stay member-relative.
+///
+/// Specs are validated (see [`validate_filter_specs`]): unsupported filter
+/// types, empty or out-of-bounds regions and overlaps are rejected instead of
+/// producing a member the streaming decoder cannot decode.
 pub fn encode_with_filters(
     data: &[u8],
     method: u8,
@@ -45,6 +112,7 @@ pub fn encode_with_filters(
     filters: &[FilterSpec],
     variant: ArchiveVersion,
 ) -> RarResult<Vec<u8>> {
+    validate_filter_specs(data.len(), filters)?;
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
     }
@@ -216,6 +284,7 @@ pub fn encode_with_filters_mt(
     threads: usize,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> RarResult<Vec<u8>> {
+    validate_filter_specs(data.len(), filters)?;
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
     }
@@ -521,6 +590,10 @@ pub fn pick_delta_channel(
     dict_size_log: u8,
     variant: ArchiveVersion,
 ) -> RarResult<Option<u8>> {
+    // No data to transform; a zero-length spec is rejected by validation.
+    if data.is_empty() {
+        return Ok(None);
+    }
     let sample_len = data.len().min(1 << 16);
     let sample = &data[..sample_len];
     let plain = encode_with_filters(sample, method, dict_size_log, &[], variant)?;
