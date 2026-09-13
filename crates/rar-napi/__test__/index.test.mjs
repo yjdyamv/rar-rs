@@ -66,6 +66,17 @@ function tempDir() {
   return mkdtempSync(join(tmpdir(), 'sar-test-'))
 }
 
+// Explicit skip marker for the optional official-binary validation, so a
+// missing SA_OFFICIAL_UNRAR never reports as a silent pass.
+function skipOfficialValidation(t, reason) {
+  const message = `official unrar validation skipped: ${reason}`
+  if (typeof t.skip === 'function') {
+    t.skip(message)
+  } else {
+    t.diagnostic(`SKIP ${message}`)
+  }
+}
+
 function readFileHead(path, n = 8) {
   return new Promise((resolve, reject) => {
     const chunks = []
@@ -223,7 +234,7 @@ test('creates 10+ volumes in natural discovery order', async () => {
   }
 })
 
-test('creates archives via parallel batch with mixed entries', async () => {
+test('creates archives via parallel batch with mixed entries', async (t) => {
   const dir = tempDir()
   try {
     writeFileSync(join(dir, 'disk.bin'), Buffer.alloc(300_000, 5))
@@ -241,12 +252,23 @@ test('creates archives via parallel batch with mixed entries', async () => {
     assert.deepEqual(res.files, [out])
     const head = await readFileHead(out)
     assert.deepEqual(head, RAR5_SIG)
-    // Official UNRAR validates the batch-produced archive when available.
-    const unrar = process.env.SA_OFFICIAL_UNRAR || '/home/yuan/下载/rar/unrar'
+    // Official UNRAR validates the batch-produced archive when configured.
+    const unrar = process.env.SA_OFFICIAL_UNRAR
+    if (!unrar) {
+      skipOfficialValidation(t, 'SA_OFFICIAL_UNRAR is not set')
+      return
+    }
+    if (!existsSync(unrar)) {
+      skipOfficialValidation(t, `SA_OFFICIAL_UNRAR does not exist: ${unrar}`)
+      return
+    }
     try {
       execFileSync(unrar, ['t', out], { stdio: 'pipe' })
     } catch (err) {
-      if (err.code === 'ENOENT') return // unrar not installed: skip validation
+      if (err.code === 'ENOENT') {
+        skipOfficialValidation(t, `SA_OFFICIAL_UNRAR is not executable: ${unrar}`)
+        return
+      }
       throw err
     }
   } finally {
@@ -1001,6 +1023,70 @@ test('repairArchive streams a damaged archive back to byte-exact', async () => {
     const out2 = join(dir, 'out2.rar')
     assert.equal(await repairArchive(good, out2), false, 'intact archive must report no repair')
     assert.equal(existsSync(out2), false, 'no output written for an intact archive')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('rebuildMissingVolumes restores a deleted middle volume from .rev parity', async () => {
+  const dir = tempDir()
+  try {
+    const { rebuildMissingVolumes, listEntries, readMember } = await import('../index.js')
+    // Incompressible payloads (level 0) so the set splits at volume_size.
+    const payloadA = Buffer.alloc(120_000)
+    const payloadB = Buffer.alloc(60_000)
+    let x = 0x9e3779b9
+    for (let i = 0; i < payloadA.length; i++) {
+      x ^= x << 13; x ^= x >>> 17; x ^= x << 5
+      payloadA[i] = x & 0xff
+    }
+    for (let i = 0; i < payloadB.length; i++) {
+      x ^= x << 13; x ^= x >>> 17; x ^= x << 5
+      payloadB[i] = x & 0xff
+    }
+
+    const out = join(dir, 'rcv.rar')
+    const res = await createArchive({
+      outPath: out,
+      volumeSize: 60_000,
+      recoveryVolumeCount: 2,
+      level: 0,
+      entries: [
+        { kind: 'bytes', name: 'a.bin', data: payloadA },
+        { kind: 'bytes', name: 'b.bin', data: payloadB },
+      ],
+    })
+    assert.ok(res.files.length > 1, `precondition: multi-volume set, got ${res.files.join(', ')}`)
+    assert.ok(
+      readdirSync(dir).some((name) => name.endsWith('.rev')),
+      'precondition: .rev recovery volumes present',
+    )
+
+    // Delete a middle volume; the set no longer opens completely.
+    const victim = res.files[1]
+    rmSync(victim)
+    assert.equal(existsSync(victim), false, 'victim volume deleted')
+
+    const rebuilt = await rebuildMissingVolumes(res.files[0])
+    const normalize = (p) => p.replaceAll('\\', '/')
+    assert.equal(rebuilt.length, 1, `expected one rebuilt volume, got ${rebuilt.join(', ')}`)
+    assert.equal(
+      normalize(rebuilt[0]),
+      normalize(victim),
+      'rebuilt path must be the missing host volume',
+    )
+    for (const path of rebuilt) {
+      assert.equal(existsSync(path), true, `rebuilt path must exist on the host: ${path}`)
+    }
+
+    // Everything present again: nothing left to rebuild.
+    assert.deepEqual(await rebuildMissingVolumes(res.files[0]), [])
+
+    // The restored set opens and reads its members byte-exact.
+    const names = (await listEntries(res.files[0])).sort()
+    assert.deepEqual(names, ['a.bin', 'b.bin'])
+    assert.deepEqual(Buffer.from(await readMember(res.files[0], 'a.bin')), payloadA)
+    assert.deepEqual(Buffer.from(await readMember(res.files[0], 'b.bin')), payloadB)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

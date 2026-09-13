@@ -15,5 +15,10 @@ fuzz_target!(|data: &[u8]| rar_rs_fuzz::rewrite(data));
 fn main() {
     // Write-side targets do real file I/O per iteration (and Windows file
     // churn is slow), so they default lower than the read targets.
-    rar_rs_fuzz::standalone_with("rewrite", rar_rs_fuzz::CORPUS_ALL, rar_rs_fuzz::rewrite, 20_000);
+    rar_rs_fuzz::standalone_with(
+        "rewrite",
+        rar_rs_fuzz::CORPUS_ALL,
+        rar_rs_fuzz::rewrite,
+        20_000,
+    );
 }

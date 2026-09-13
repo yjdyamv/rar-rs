@@ -7,6 +7,33 @@ use support::*;
 
 use rar_rs::{ArchiveEditor, ArchiveReader, ArchiveWriter};
 
+/// Official-binary gate for the gated interop assertions below: skipping
+/// prints a visible marker (so a green run is not mistaken for interop
+/// coverage) unless `SA_REQUIRE_OFFICIAL=1` demands the tool.
+fn official_bin(name: &str) -> Option<std::path::PathBuf> {
+    match std::env::var_os(name) {
+        Some(path) => Some(path.into()),
+        None if std::env::var_os("SA_REQUIRE_OFFICIAL").is_some() => {
+            panic!(
+                "official rar/unrar interop binaries are required (SA_REQUIRE_OFFICIAL is set): \
+                 {name} is unset"
+            )
+        }
+        None => {
+            eprintln!("SKIPPED ({name} unset)");
+            None
+        }
+    }
+}
+
+/// Both official tools, for the blocks that drive `rar` and then `unrar`.
+fn official_tools() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    Some((
+        official_bin("SA_OFFICIAL_RAR")?,
+        official_bin("SA_OFFICIAL_UNRAR")?,
+    ))
+}
+
 #[test]
 fn delete_kept_members_preserve_exact_bytes() {
     let dir = make_temp_dir();
@@ -155,10 +182,7 @@ fn delete_rebuilds_recovery_record() {
     );
 
     // The rebuilt record must actually repair the archive (official rar).
-    if let (Some(unrar), Some(rar_bin)) = (
-        std::env::var_os("SA_OFFICIAL_UNRAR"),
-        std::env::var_os("SA_OFFICIAL_RAR"),
-    ) {
+    if let Some((rar_bin, unrar)) = official_tools() {
         {
             let mut bytes = std::fs::read(&path).unwrap();
             let data_off = first_file_data_offset(&bytes);
@@ -628,10 +652,7 @@ fn add_recovery_record_to_existing_archive() {
     );
 
     // The added record must repair the archive (official rar).
-    if let (Some(unrar), Some(rar_bin)) = (
-        std::env::var_os("SA_OFFICIAL_UNRAR"),
-        std::env::var_os("SA_OFFICIAL_RAR"),
-    ) {
+    if let Some((rar_bin, unrar)) = official_tools() {
         {
             let mut bytes = std::fs::read(&path).unwrap();
             let data_off = first_file_data_offset(&bytes);
@@ -719,10 +740,7 @@ fn delete_multivolume_rebuilds_recovery_volumes() {
     );
 
     // Official `rar rc` must reconstruct a deleted volume from them.
-    if let (Some(unrar), Some(rar_bin)) = (
-        std::env::var_os("SA_OFFICIAL_UNRAR"),
-        std::env::var_os("SA_OFFICIAL_RAR"),
-    ) {
+    if let Some((rar_bin, unrar)) = official_tools() {
         {
             let vols = rar_rs::discover_volumes(&path);
             let victim = vols[1].clone();
@@ -815,10 +833,7 @@ fn rename_preserves_payloads_and_rebuilds_records() {
     );
 
     // The rebuilt recovery record must still repair the archive.
-    if let (Some(unrar), Some(rar_bin)) = (
-        std::env::var_os("SA_OFFICIAL_UNRAR"),
-        std::env::var_os("SA_OFFICIAL_RAR"),
-    ) {
+    if let Some((rar_bin, unrar)) = official_tools() {
         {
             let mut bytes = std::fs::read(&path).unwrap();
             let data_off = first_file_data_offset(&bytes);
@@ -1088,7 +1103,7 @@ fn comment_set_get_roundtrip() {
     }
 
     // The comment must be readable by the official tool (env-gated).
-    if let Some(rar_bin) = std::env::var_os("SA_OFFICIAL_RAR") {
+    if let Some(rar_bin) = official_bin("SA_OFFICIAL_RAR") {
         {
             let mut ed = ArchiveEditor::open(&path).unwrap();
             ed.apply(rar_rs::EditPlan::new().set_comment(b"interop comment"))

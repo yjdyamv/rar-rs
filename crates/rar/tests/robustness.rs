@@ -1,10 +1,9 @@
-//! Robustness tests converted from the former cargo-fuzz harnesses.
+//! Robustness tests carried over from the former cargo-fuzz harnesses.
 //!
-//! The `fuzz/` tree (libFuzzer targets + corpus) was removed because
-//! long-running fuzzing overheated the machine. Each former fuzz target is
-//! now a deterministic, bounded `#[test]` over seeded pseudo-random inputs:
-//! errors are expected and swallowed, and the goal is only to catch panics,
-//! overflows, OOM aborts and unbounded loops.
+//! The live fuzz targets (standalone mutation loop + libFuzzer) now live in
+//! `fuzz/`; these tests are kept as a deterministic, bounded in-tree smoke
+//! over the same surfaces: errors are expected and swallowed, and the goal
+//! is only to catch panics, overflows, OOM aborts and unbounded loops.
 
 use rar_rs::wire;
 use rar_rs::wire::{EncryptionParams, decrypt_data};

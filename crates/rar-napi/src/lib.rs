@@ -13,6 +13,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 mod error;
+mod guard;
 mod options;
 mod tasks;
 

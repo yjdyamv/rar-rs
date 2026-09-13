@@ -9,6 +9,18 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Emit the shared skip marker — or fail when `SA_REQUIRE_WINRAR` demands
+/// the suite. Used both when no WinRAR directory exists at all and when the
+/// expected console tool is missing from the configured directory.
+fn skip_winrar() -> Option<PathBuf> {
+    assert!(
+        std::env::var_os("SA_REQUIRE_WINRAR").is_none(),
+        "WinRAR is required (SA_REQUIRE_WINRAR is set): set SA_WINRAR_DIR"
+    );
+    eprintln!("SKIPPED (WinRAR not found; set SA_WINRAR_DIR)");
+    None
+}
+
 /// Directory containing `Rar.exe` and `UnRAR.exe`, when WinRAR is
 /// installed. `None` skips the tests; the skip prints a visible marker and
 /// `SA_REQUIRE_WINRAR=1` turns a missing installation into a hard failure so
@@ -29,19 +41,23 @@ pub(crate) fn winrar_dir() -> Option<PathBuf> {
             }
         }
     }
-    assert!(
-        std::env::var_os("SA_REQUIRE_WINRAR").is_none(),
-        "WinRAR is required (SA_REQUIRE_WINRAR is set): set SA_WINRAR_DIR"
-    );
-    eprintln!("SKIP: WinRAR not found (set SA_WINRAR_DIR)");
-    None
+    skip_winrar()
+}
+
+/// Resolve one console tool in [`winrar_dir`]: a missing executable is a
+/// skip as well, so a stale `SA_WINRAR_DIR` cannot silently disable the
+/// suite while `SA_REQUIRE_WINRAR` demands it.
+fn winrar_tool(exe: &str) -> Option<PathBuf> {
+    let dir = winrar_dir()?;
+    let bin = dir.join(exe);
+    if bin.exists() {
+        return Some(bin);
+    }
+    skip_winrar()
 }
 
 pub(crate) fn rar_bin() -> Option<PathBuf> {
-    let dir = winrar_dir()?;
-    let exe = if cfg!(windows) { "Rar.exe" } else { "rar" };
-    let bin = dir.join(exe);
-    bin.exists().then_some(bin)
+    winrar_tool(if cfg!(windows) { "Rar.exe" } else { "rar" })
 }
 
 /// The WinRAR 6.23 console writer from the project's tool cache — the last
@@ -51,21 +67,22 @@ pub(crate) fn rar_bin() -> Option<PathBuf> {
 /// 6.23 explicitly. `None` skips those tests (e.g. on CI without the cache).
 pub(crate) fn rar4_623_bin() -> Option<PathBuf> {
     let exe = if cfg!(windows) { "Rar.exe" } else { "rar" };
-    [
+    let found = [
         "../../.cache/winrar/6-23",
         "../.cache/winrar/6-23",
         ".cache/winrar/6-23",
     ]
     .iter()
     .map(|dir| Path::new(env!("CARGO_MANIFEST_DIR")).join(dir).join(exe))
-    .find(|bin| bin.exists())
+    .find(|bin| bin.exists());
+    if found.is_none() {
+        eprintln!("SKIPPED (WinRAR 6.23 cache not found)");
+    }
+    found
 }
 
 pub(crate) fn unrar_bin() -> Option<PathBuf> {
-    let dir = winrar_dir()?;
-    let exe = if cfg!(windows) { "UnRAR.exe" } else { "unrar" };
-    let bin = dir.join(exe);
-    bin.exists().then_some(bin)
+    winrar_tool(if cfg!(windows) { "UnRAR.exe" } else { "unrar" })
 }
 
 pub(crate) fn temp_dir() -> tempfile::TempDir {

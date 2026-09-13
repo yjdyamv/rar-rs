@@ -7,8 +7,8 @@ Fuzz targets for the `rar-rs` library, covering the three attack surfaces:
 | `parse` | RAR5/RAR7 block envelope, vints, headers, extra records, solid chains, encryption-header scan, extraction (bounded) |
 | `crypto` | key derivation (bounded strength), encryption-parameter parsing, AES-256-CBC round trips |
 | `recovery` | inline `{RB}` chunk build/parse/repair, structured plan/geometry/shard mutations with the CRC64-XZ recomputed, GF(2^16) parity + reconstruct, CRC64-XZ, `.rev` serialization |
-| `rev` | streaming `repair_archive_path`, fabricated REV5 sets mutated at the header (CRC32 recomputed) and rev3 sets built with the public API and mutated at the trailer — both driven through `rebuild_missing_volumes` / `collect_recovery_volumes` |
-| `legacy` | RAR 1.4 / RAR 2.0 / RAR 3.0 / RAR4 block envelopes with mutated headers (16-bit header CRC / RAR13 rolling member checksum recomputed) through the full read path and the legacy recovery-record scan |
+| `rev` | streaming `repair_archive_path`, fabricated REV5 sets mutated at the header (CRC32 recomputed) and rev3 sets built with the public API and mutated at the trailer — both driven through `rebuild_missing_volumes` / `collect_recovery_volumes`; the input bytes steer the structured mutations directly |
+| `legacy` | RAR 1.4 / RAR 2.0 / RAR 3.0 / RAR4 block envelopes with mutated headers (16-bit header CRC / RAR13 rolling member checksum recomputed) through the full read path and the legacy recovery-record scan; the input bytes steer the structured mutations directly |
 | `write` | create from fuzzed options/members: single/multi-volume, solid, encrypted, header-encrypted, quick-open, BLAKE2sp, inline RR, `.rev`; round-trip byte checks + rv/rc rebuild |
 | `rewrite` | create then delete/rename/append/comment/lock mutations with byte-for-byte survivor verification |
 
@@ -27,21 +27,17 @@ arithmetic, Reed-Solomon solve and `.rev` naming/layout code are actually
 reached instead of being stopped at the checksum gate.
 
 > The standalone harness embeds its seeds (`include_bytes!`), so the
-> gitignored `fuzz/corpus/` directory is only used by libFuzzer. Seed it
-> from the same fixtures before a libFuzzer run (see below).
->
-> The structured mutator deliberately keeps one parser-valid geometry out
-> of the default loop: a reversed shard range
-> (`(data_shards-1) * group_count > prefix_len`) currently panics in
-> `repair_inline_recovery_prefix` (found by this target, 2026-09; the
-> library fix is out of scope for the fuzzing change).
-> `crates/rar/tests/structured_recovery_mutations.rs` carries the
-> deterministic repro as an `#[ignore]`d test.
+> gitignored `fuzz/corpus/` directory is only used by libFuzzer. Each
+> `fuzz/corpus/<target>/` directory is that target's libFuzzer seed corpus:
+> `cargo fuzz run <target>` loads every file there at startup and writes
+> coverage-increasing mutations back into it. Seed it from the same
+> fixtures before a libFuzzer run (see below); the embedded `include_bytes!`
+> seeds keep standalone runs independent of the directory.
 
 > The targets import the wire-level surface through `rar_rs::wire` (the
 > former `raw` feature was retired in ADR 0007); CI runs a bounded standalone
-> smoke (5k iterations for parse/crypto/recovery, 500 for write/rewrite) in
-> addition to the check.
+> smoke (5k iterations for parse/crypto/recovery/rev/legacy, 500 for
+> write/rewrite) in addition to the check.
 
 ## Standalone (stable Rust, no extra toolchain)
 
@@ -77,6 +73,8 @@ cd fuzz
 cargo +nightly fuzz run parse --features fuzzing
 cargo +nightly fuzz run crypto --features fuzzing
 cargo +nightly fuzz run recovery --features fuzzing
+cargo +nightly fuzz run rev --features fuzzing
+cargo +nightly fuzz run legacy --features fuzzing
 ```
 
 The `fuzzing` feature pulls in `libfuzzer-sys`; the same `fn(&[u8])`
@@ -99,11 +97,13 @@ cp crates/rar/tests/fixtures/rar13/MULTIFIL.RAR \
    crates/rar/tests/fixtures/rar40/repair/rar250_protect_head_rr1.rar fuzz/corpus/legacy/
 ```
 
-The corpus layout found on disk at the time of writing is
-`fuzz/corpus/{parse,crypto,recovery}` with `parse/winrar5.rar`,
-`parse/tail-match.bin`, `crypto/sig.bin` and `recovery/sig.bin`; the
-`rev`/`legacy` directories above are additions for this target pair (the
-standalone loop does not read them — it embeds the same bytes).
+What the files under `fuzz/corpus/` are: each is one libFuzzer seed input
+for its target directory (`cargo fuzz run <target>` reads
+`fuzz/corpus/<target>/`). The copies above are existing regression
+fixtures, used only as starting points for mutation; libFuzzer appends
+coverage-increasing inputs to the same directories and the directory is
+never committed. The standalone loop never reads it — its seeds come from
+the `include_bytes!` fixtures compiled into the harness.
 
 Nightly is required here — cargo-fuzz passes `-Z sanitizer` (ASAN/UBSAN)
 which stable cannot provide; the standalone loop only observes panics,

@@ -88,9 +88,10 @@ fn official_validates_cli_switch_archives() {
         None => {
             assert!(
                 std::env::var_os("SA_REQUIRE_OFFICIAL").is_none(),
-                "SA_OFFICIAL_UNRAR is required (SA_REQUIRE_OFFICIAL is set)"
+                "official unrar interop binary is required (SA_REQUIRE_OFFICIAL is set): set \
+                 SA_OFFICIAL_UNRAR"
             );
-            eprintln!("SKIP: SA_OFFICIAL_UNRAR not set");
+            eprintln!("SKIPPED (SA_OFFICIAL_UNRAR unset)");
             return;
         }
     };

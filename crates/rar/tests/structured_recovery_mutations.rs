@@ -69,8 +69,9 @@ fn legacy_seeds() -> [&'static [u8]; 5] {
 }
 
 /// Run `repair_archive` on every structured inline-RR mutation; a return
-/// value (success or classified error) passes, a panic fails. The known
-/// reversed-range defect is exercised by its own test below.
+/// value (success or classified error) passes, a panic fails. Hostile shard
+/// geometry (reversed ranges included) is part of the generated cases now
+/// that the defect is fixed; the deterministic repro remains below.
 #[test]
 fn structured_inline_rr_mutations_are_classified() {
     let mut checked = 0usize;
@@ -79,7 +80,7 @@ fn structured_inline_rr_mutations_are_classified() {
         let mut rng = Rng::new(0x5EED_1000 + round as u64);
         let len = (96 + round * 113).min(winrar5().len());
         let prefix = &winrar5()[..len];
-        let cases = structured::inline_rr_cases(prefix, 1 + round as u64 % 20, &mut rng, false);
+        let cases = structured::inline_rr_cases(prefix, 1 + round as u64 % 20, &mut rng);
         // Prove the structured seeds really reach the repair engine: the
         // intact record is idempotent and a single damaged prefix byte is
         // either restored byte-for-byte or rejected with a classified error.

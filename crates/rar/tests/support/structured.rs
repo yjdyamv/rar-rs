@@ -151,23 +151,11 @@ pub fn synthetic_rb_chunk(
 /// * the intact record and a genuinely damaged prefix (full repair cycle),
 /// * field/parity flips with the CRC64-XZ recomputed,
 /// * synthesized plans with exactly one damaged shard (RS solve path),
-/// * an odd `group_count` (the writer never emits it),
+/// * hostile shard geometry the writer never emits — an odd `group_count`
+///   and a reversed shard range (`(data_shards-1) * group_count >
+///   prefix_len`) — classified by the repair path, not filtered out,
 /// * truncations at structural boundaries.
-///
-/// `include_known_panics` additionally emits the reversed shard range
-/// (`(data_shards-1) * group_count > prefix_len` while the total capacity
-/// still covers the prefix). That geometry is parser-valid but currently
-/// panics in `repair_inline_recovery_prefix` (slice index with `start > end`,
-/// found by this fuzzer 2026-09); it is kept out of the default fuzz loop so
-/// the target keeps exploring other paths instead of dying at iteration 0,
-/// and driven by the regression test
-/// (`crates/rar/tests/structured_recovery_mutations.rs`).
-pub fn inline_rr_cases(
-    prefix: &[u8],
-    pct: u64,
-    rng: &mut Rng,
-    include_known_panics: bool,
-) -> Vec<Case> {
+pub fn inline_rr_cases(prefix: &[u8], pct: u64, rng: &mut Rng) -> Vec<Case> {
     let mut cases = Vec::new();
     let Ok(built) = rar_rs::wire::build_structural_inline_recovery_data(prefix, pct) else {
         return cases;
@@ -209,14 +197,13 @@ pub fn inline_rr_cases(
         cases.push((case, "field/parity flip with CRC"));
     }
 
-    // 4. Synthesized plans, one damaged shard each.
+    // 4. Synthesized plans, one damaged shard each. Hostile geometry
+    // (reversed shard ranges included) is in scope: `split_prefix_shard_ranges`
+    // clamps the start, so the repair path must classify these.
     for _ in 0..4 {
         let gc = 2 * (1 + rng.below(512)) as u64;
         let ds = (1 + rng.below(64)) as u16;
         if u64::from(ds) * gc < prefix.len() as u64 {
-            continue;
-        }
-        if !include_known_panics && geometry_is_reversed(prefix.len(), ds, gc) {
             continue;
         }
         let rs = (1 + rng.below(4)) as u16;
@@ -230,8 +217,9 @@ pub fn inline_rr_cases(
 
     // 5. Reversed shard range: the last shard starts past the prefix end
     // while `data_shards * group_count` still covers it. The writer never
-    // emits this; a damaged/crafted record can.
-    if include_known_panics {
+    // emits this; a damaged/crafted record can. Regression:
+    // `reversed_shard_range_geometry_must_not_panic`.
+    {
         let gc = 16u64 << rng.below(3);
         let ds = (prefix.len() as u64 / gc + 2) as u16;
         let chunk = synthetic_rb_chunk(prefix, ds, 1, gc, 0, Some(0), rng);
@@ -260,85 +248,7 @@ pub fn inline_rr_cases(
             cases.push((full[..start + cut].to_vec(), "structural truncation"));
         }
     }
-    if !include_known_panics {
-        // A mutation can reach the reversed geometry by shortening
-        // `protected_size` alone; filter those out while the defect is open.
-        cases.retain(|(case, _)| !reversed_shard_range(case));
-    }
     cases
-}
-
-/// `(data_shards - 1) * group_count > prefix_len`: the last shard's range
-/// starts past the prefix end (and `ds * gc >= prefix_len` still passes the
-/// capacity check), so `&prefix[range]` is a reversed range.
-fn geometry_is_reversed(prefix_len: usize, data_shards: u16, group_count: u64) -> bool {
-    u64::from(data_shards)
-        .saturating_sub(1)
-        .saturating_mul(group_count)
-        > prefix_len as u64
-        && u64::from(data_shards) * group_count >= prefix_len as u64
-}
-
-/// Would the in-memory repair path meet a reversed shard range for any
-/// `{RB}` chunk in `input`? Mirrors the parser cross-checks in
-/// `parse_inline_recovery_chunk` plus `split_prefix_shard_ranges`, and is
-/// used to keep the known panic (see [`inline_rr_cases`]) out of the default
-/// fuzz loop: a record can reach the reversed geometry by mutating
-/// `protected_size` alone, not just the shard counts.
-fn reversed_shard_range(input: &[u8]) -> bool {
-    let mut offset = 0usize;
-    while let Some(relative) = input[offset..].iter().position(|&byte| byte == b'{') {
-        let at = offset + relative;
-        if input.get(at..at + 4) != Some(b"{RB}") || input.len() < at + 0x40 {
-            offset = at + 1;
-            continue;
-        }
-        let total = u32le(input, at + 0x0c) as usize;
-        let header = u32le(input, at + 0x10) as usize;
-        if total < RB_FIXED_HEADER
-            || header < RB_FIXED_HEADER
-            || header > total
-            || at + total > input.len()
-        {
-            offset = at + 1;
-            continue;
-        }
-        if input[at + 0x14] != 1 || input[at + 0x15] != 1 {
-            offset = at + total;
-            continue;
-        }
-        let protected = u64::from_le_bytes(input[at + 0x22..at + 0x2a].try_into().unwrap());
-        let group_count = u64::from_le_bytes(input[at + 0x2a..at + 0x32].try_into().unwrap());
-        let shard_size = u64::from_le_bytes(input[at + 0x32..at + 0x3a].try_into().unwrap());
-        let data_shards = u16::from_le_bytes(input[at + 0x3a..at + 0x3c].try_into().unwrap());
-        let recovery_shards = u16::from_le_bytes(input[at + 0x3c..at + 0x3e].try_into().unwrap());
-        let shard_index = u16::from_le_bytes(input[at + 0x3e..at + 0x40].try_into().unwrap());
-        if group_count == 0
-            || !group_count.is_multiple_of(2)
-            || shard_size != total as u64
-            || shard_index >= recovery_shards
-            || header as u64 != RB_FIXED_HEADER as u64 + u64::from(data_shards) * 8
-            || (total - header) as u64 != group_count
-        {
-            offset = at + total;
-            continue;
-        }
-        let prefix_len = protected as usize;
-        if prefix_len <= input.len() {
-            let capacity = u64::from(data_shards) * group_count;
-            if capacity >= prefix_len as u64 {
-                for index in 0..u64::from(data_shards) {
-                    let start = index * group_count;
-                    let end = (start + group_count).min(prefix_len as u64);
-                    if start > end {
-                        return true;
-                    }
-                }
-            }
-        }
-        offset = at + total;
-    }
-    false
 }
 
 /// Mutate the `{RB}` chunks of a real archive in place, refreshing the
@@ -378,9 +288,6 @@ pub fn rr_archive_mutations(archive: &[u8], rng: &mut Rng) -> Vec<Case> {
         cases.push((archive[..cut].to_vec(), "real {RB} truncation"));
         offset = at + total;
     }
-    // Keep the known reversed-range panic (see `inline_rr_cases`) out of the
-    // default loop: a flip of `protected_size` alone can reach it.
-    cases.retain(|(case, _)| !reversed_shard_range(case));
     cases
 }
 

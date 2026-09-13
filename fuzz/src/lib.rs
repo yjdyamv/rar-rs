@@ -11,20 +11,60 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 pub mod structured;
 
 /// Deterministic xorshift64* PRNG (no external deps).
-pub struct Rng(u64);
+///
+/// [`Rng::from_input`] additionally consumes the fuzz input bytes as the
+/// primary randomness source, so libFuzzer mutations steer the structured
+/// mutators field by field instead of being flattened through a 64-bit seed
+/// hash; the xorshift stream takes over once the input runs out.
+pub struct Rng {
+    state: u64,
+    input: Vec<u8>,
+    cursor: usize,
+}
 
 impl Rng {
     pub fn new(seed: u64) -> Self {
-        Rng(seed | 1)
+        Rng {
+            state: seed | 1,
+            input: Vec::new(),
+            cursor: 0,
+        }
     }
 
-    pub fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
+    /// PRNG backed by the fuzz input: every `next_u64` draws up to eight
+    /// bytes from `data` first, so a mutated input byte changes the
+    /// structured decisions that follow it. Falls back to the xorshift
+    /// stream (seeded from the input hash) when `data` is short or
+    /// exhausted, keeping short/empty inputs deterministic.
+    pub fn from_input(data: &[u8]) -> Self {
+        Rng {
+            state: structured::seed_from_bytes(data) | 1,
+            input: data.to_vec(),
+            cursor: 0,
+        }
+    }
+
+    fn xorshift(&mut self) -> u64 {
+        let mut x = self.state;
         x ^= x >> 12;
         x ^= x << 25;
         x ^= x >> 27;
-        self.0 = x;
+        self.state = x;
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0u8; 8];
+        for byte in &mut bytes {
+            *byte = if self.cursor < self.input.len() {
+                let value = self.input[self.cursor];
+                self.cursor += 1;
+                value
+            } else {
+                self.xorshift() as u8
+            };
+        }
+        u64::from_le_bytes(bytes)
     }
 
     pub fn below(&mut self, n: usize) -> usize {
@@ -225,10 +265,9 @@ pub fn parse(data: &[u8]) {
     // input almost never forms a valid block envelope, so the KDF is
     // effectively never hit with hostile strength here; the crypto
     // target covers bounded-strength KDF directly.
-    if let Ok(mut a) = rar_rs::ArchiveReader::open_with(
-        &path,
-        rar_rs::OpenOptions::new().password("fuzz"),
-    ) {
+    if let Ok(mut a) =
+        rar_rs::ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("fuzz"))
+    {
         let _ = a.extract_all_with_options(dir.path().join("y"), opts);
     }
 
@@ -366,55 +405,90 @@ pub fn write_roundtrip(data: &[u8]) {
         return; // derived option combos may legitimately be rejected
     }
 
-    // Round trip: read every member back and compare byte-for-byte.
+    // Round trip: read every member back and compare byte-for-byte. A
+    // successful `create` must be readable; an open/locate/read failure
+    // here is a defect, not an unreachable option combination (only the
+    // option-derivation early return above may skip).
     let volumes = rar_rs::discover_volumes(&arc);
+    let mut failures: Vec<String> = Vec::new();
     let opened = if h[5].is_multiple_of(2) {
         rar_rs::ArchiveReader::open_with(&volumes[0], rar_rs::OpenOptions::new().password("fuzz"))
     } else {
         rar_rs::ArchiveReader::open(&volumes[0])
     };
-    if let Ok(mut ar) = opened {
-        for (name, payload) in &members {
-            if let Ok(id) = ar.unique_entry(name)
-                && let Ok(got) = ar.read_entry(id)
-            {
-                assert_eq!(
-                    &got[..],
-                    &payload[..],
-                    "write round trip mismatch for {name}"
-                );
+    match opened {
+        Ok(mut ar) => {
+            for (name, payload) in &members {
+                match ar.unique_entry(name) {
+                    Ok(id) => match ar.read_entry(id) {
+                        Ok(got) if got == *payload => {}
+                        Ok(_) => failures.push(format!("round trip mismatch for {name}")),
+                        Err(err) => failures.push(format!("read_entry({name}): {err}")),
+                    },
+                    Err(err) => failures.push(format!("unique_entry({name}): {err}")),
+                }
             }
         }
+        Err(err) => failures.push(format!("open after create: {err}")),
     }
 
     // rv/rc: multi-volume sets get .rev (either from create time or the
     // standalone rv path), a middle volume is deleted, rebuild must
     // reproduce it byte-for-byte. Bounded to modest sets — huge volume
     // counts would make the loop file-churn bound explode.
+    if multivolume && volumes.len() < 2 {
+        failures.push(format!(
+            "multi-volume create produced {} volume(s)",
+            volumes.len()
+        ));
+    }
     if multivolume && (2..=8).contains(&volumes.len()) {
         let rev_ok = if create_rev.is_some() {
             true // create-time .rev already on disk
         } else {
-            rar_rs::build_recovery_volumes_for_set(&volumes, 1 + (h[7] as usize % 2))
-                .is_ok()
+            match rar_rs::build_recovery_volumes_for_set(&volumes, 1 + (h[7] as usize % 2)) {
+                Ok(_) => true,
+                Err(err) => {
+                    failures.push(format!("build_recovery_volumes_for_set: {err}"));
+                    false
+                }
+            }
         };
         if rev_ok {
             let victim = volumes[volumes.len() / 2].clone();
-            let orig = std::fs::read(&victim).ok();
-            let _ = std::fs::remove_file(&victim);
-            if let (Some(orig), Ok(rebuilt)) = (&orig, rar_rs::rebuild_missing_volumes(&volumes[0]))
-                && rebuilt.contains(&victim)
-                && let Ok(bytes) = std::fs::read(&victim)
-            {
-                assert_eq!(
-                    &bytes[..],
-                    &orig[..],
-                    "rc rebuild mismatch for {}",
-                    victim.display()
-                );
+            match std::fs::read(&victim) {
+                Ok(orig) => {
+                    let _ = std::fs::remove_file(&victim);
+                    match rar_rs::rebuild_missing_volumes(&volumes[0]) {
+                        Ok(rebuilt) => {
+                            if !rebuilt.contains(&victim) {
+                                failures
+                                    .push(format!("rebuild did not report {}", victim.display()));
+                            }
+                            match std::fs::read(&victim) {
+                                Ok(bytes) if bytes == orig => {}
+                                Ok(_) => failures
+                                    .push(format!("rc rebuild mismatch for {}", victim.display())),
+                                Err(err) => failures.push(format!(
+                                    "rebuilt volume {} unreadable: {err}",
+                                    victim.display()
+                                )),
+                            }
+                        }
+                        Err(err) => failures.push(format!("rebuild_missing_volumes: {err}")),
+                    }
+                }
+                Err(err) => {
+                    failures.push(format!("read victim volume {}: {err}", victim.display()))
+                }
             }
         }
     }
+
+    assert!(
+        failures.is_empty(),
+        "write round-trip failures: {failures:#?}"
+    );
 }
 
 /// Rewrite surface: create a base archive, then apply surgical
@@ -479,8 +553,8 @@ pub fn rewrite(data: &[u8]) {
 
     // 3. Append d.bin.
     if data[2].is_multiple_of(3) {
-        let mut rar = rar_rs::ArchiveWriter::append_with(&path, rar_rs::AppendOptions::default())
-            .unwrap();
+        let mut rar =
+            rar_rs::ArchiveWriter::append_with(&path, rar_rs::AppendOptions::default()).unwrap();
         let opts = rar_rs::EntryWriteOptions::new()
             .compression_level(rar_rs::CompressionLevel::try_from(0).unwrap());
         rar.add_bytes("d.bin", d, opts).unwrap();
@@ -605,7 +679,7 @@ pub fn recovery(data: &[u8]) {
     let prefix_len = 64 + rng.below(CORPUS_WINRAR.len().saturating_sub(64).max(1));
     let prefix = &CORPUS_WINRAR[..prefix_len.min(CORPUS_WINRAR.len())];
     let pct = u64::from(data.first().copied().unwrap_or(2) % 20) + 1;
-    for (case, _) in structured::inline_rr_cases(prefix, pct, &mut rng, false) {
+    for (case, _) in structured::inline_rr_cases(prefix, pct, &mut rng) {
         let _ = rar_rs::repair_archive(&case);
     }
 
@@ -639,7 +713,7 @@ pub fn recovery(data: &[u8]) {
 /// (CRC32 recomputed) before a volume is taken away. Reaches the shard
 /// math and the `.rev` naming/layout discovery.
 pub fn rev(data: &[u8]) {
-    let mut rng = Rng::new(structured::seed_from_bytes(data));
+    let mut rng = Rng::from_input(data);
     let dir = tempfile::tempdir().expect("tempdir");
 
     // Streaming repair of one structured inline-RR case (a different code
@@ -647,7 +721,7 @@ pub fn rev(data: &[u8]) {
     let prefix_len = 64 + rng.below(CORPUS_WINRAR.len().saturating_sub(64).max(1));
     let prefix = &CORPUS_WINRAR[..prefix_len.min(CORPUS_WINRAR.len())];
     let pct = u64::from(data.first().copied().unwrap_or(2) % 20) + 1;
-    let cases = structured::inline_rr_cases(prefix, pct, &mut rng, false);
+    let cases = structured::inline_rr_cases(prefix, pct, &mut rng);
     if !cases.is_empty() {
         let pick = rng.below(cases.len());
         let src = dir.path().join("inline.rar");
@@ -776,7 +850,7 @@ fn rev3_fabricated(dir: &std::path::Path, data: &[u8], rng: &mut Rng) {
 /// signature scan, block walk, header parse, member decode and the legacy
 /// recovery-record scan.
 pub fn legacy(data: &[u8]) {
-    let mut rng = Rng::new(structured::seed_from_bytes(data));
+    let mut rng = Rng::from_input(data);
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("in.rar");
     let fixed = dir.path().join("fixed.rar");
@@ -787,19 +861,39 @@ pub fn legacy(data: &[u8]) {
         ..Default::default()
     };
 
-    let mut budget = 64usize;
-    for seed in CORPUS_LEGACY {
-        for (case, _) in structured::legacy_block_cases(seed, &mut rng) {
+    // Round-robin the per-input case budget across seeds: with a single
+    // shared budget the first two seeds' ~64 cases consumed everything, so
+    // the winrar591/rar300/rar250 seeds — including the `PROTECT_HEAD`
+    // recovery-repair exercise below — never ran. `executed` makes any
+    // future starvation loud instead of silent.
+    const CASES_PER_INPUT: usize = 64;
+    let per_seed: Vec<Vec<structured::Case>> = CORPUS_LEGACY
+        .iter()
+        .map(|seed| structured::legacy_block_cases(seed, &mut rng))
+        .collect();
+    let mut executed = vec![0usize; per_seed.len()];
+    let mut budget = CASES_PER_INPUT;
+    let mut round = 0usize;
+    'rounds: loop {
+        let mut progressed = false;
+        for (seed_index, cases) in per_seed.iter().enumerate() {
+            let Some((case, _)) = cases.get(round) else {
+                continue;
+            };
+            progressed = true;
             if budget == 0 {
-                return;
+                break 'rounds;
             }
             budget -= 1;
-            if std::fs::write(&path, &case).is_err() {
+            executed[seed_index] += 1;
+            if std::fs::write(&path, case).is_err() {
                 continue;
             }
             if let Ok(mut reader) = rar_rs::ArchiveReader::open(&path) {
-                let names: Vec<String> =
-                    reader.entries().map(|entry| entry.name().to_string()).collect();
+                let names: Vec<String> = reader
+                    .entries()
+                    .map(|entry| entry.name().to_string())
+                    .collect();
                 for name in names.iter().take(4) {
                     if let Some(id) = reader.entries_named(name).next().map(|entry| entry.id()) {
                         let _ = reader.read_entry_with_options(id, opts);
@@ -808,9 +902,22 @@ pub fn legacy(data: &[u8]) {
             }
             // The RAR 2.5 `PROTECT_HEAD` seed exercises the legacy
             // recovery scan/repair on the mutated header stream.
-            if seed.starts_with(b"Rar!\x1a\x07\x00") {
+            if CORPUS_LEGACY[seed_index].starts_with(b"Rar!\x1a\x07\x00") {
                 let _ = rar_rs::repair_legacy_archive_path(&path, &fixed);
             }
         }
+        if !progressed {
+            break;
+        }
+        round += 1;
     }
+    // Coverage report, off in normal runs (`FUZZ_LEGACY_COUNTS=1` opts in).
+    if std::env::var_os("FUZZ_LEGACY_COUNTS").is_some() {
+        static REPORT: std::sync::Once = std::sync::Once::new();
+        REPORT.call_once(|| eprintln!("legacy per-seed cases: {executed:?}"));
+    }
+    assert!(
+        executed.iter().all(|&count| count > 0),
+        "legacy seed starvation: per-seed case counts {executed:?}"
+    );
 }

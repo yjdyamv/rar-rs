@@ -17,6 +17,10 @@ env:
       - '**/*.gitignore'
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Weekly official-tool interop sweep (see the `interop` job). Scheduled
+    # workflows only run on the default branch.
+    - cron: '17 4 * * 1'
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -57,9 +61,33 @@ jobs:
         run: cargo check -p rar-rs --no-default-features --locked
       - name: Cargo check (fuzz workspace)
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
+      - name: Cargo fmt (fuzz workspace)
+        # `fuzz/` is not a workspace member, so `cargo fmt --all` never
+        # covers its targets.
+        run: cargo fmt --manifest-path fuzz/Cargo.toml --check
+      - name: Cargo check (fuzz workspace, libFuzzer feature)
+        # libfuzzer-sys compiles on stable (only `cargo fuzz` itself needs
+        # nightly, for `-Z sanitizer`), so the `fuzzing` codepaths are
+        # compiled on every run instead of only in the manual libFuzzer mode.
+        # `--cfg fuzzing` is the switch cargo-fuzz sets; without it the
+        # targets fall back to their standalone `main` and the
+        # `fuzz_target!` entry points are never type-checked.
+        env:
+          RUSTFLAGS: --cfg fuzzing
+        run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --features fuzzing --locked
       - name: Fuzz smoke (standalone mutation loop)
         # Bounded run so the targets are exercised, not just compiled: the
         # read-side targets are cheap, the write-side ones do real file I/O.
+        env:
+          # The smoke run exists to catch panics; a plain `--release` would
+          # compile the arithmetic/assert checks out, so force them back on
+          # for this step only.
+          CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: 'true'
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: 'true'
+          # A fixed seed would replay the same mutation sequence every run.
+          # `github.run_id` varies per run but stays deterministic, so a
+          # failure can be reproduced with the seed printed by the target.
+          FUZZ_SEED: ${{ github.run_id }}
         run: |
           set -euo pipefail
           for t in parse crypto recovery rev legacy; do
@@ -87,6 +115,13 @@ jobs:
         shell: bash
       - name: Cargo test (workspace)
         run: cargo test --workspace --all-features --locked
+      - name: Official interop skip visibility
+        # The workspace test above runs this target with its output captured,
+        # hiding the gating helpers' SKIPPED markers. Replay just the cheap
+        # official_interop target with --nocapture so a green lint run cannot
+        # be read as official-tool coverage (the scheduled `interop` job runs
+        # it for real with SA_REQUIRE_OFFICIAL=1).
+        run: cargo test --workspace --all-features --locked --test official_interop -- --nocapture
       - name: Cargo doc (workspace)
         # Build-only: several pre-existing public docs link to private
         # internals, so `-D warnings` is not on yet.
@@ -129,6 +164,95 @@ jobs:
         # The CLI's Windows-only paths (ReplaceFileW, registry SFX lookup)
         # are never exercised by the ubuntu lint job.
         run: cargo test -p rar-cli --locked
+      - name: Cargo test (rar-rs, Windows-only paths)
+        # quick_open_streams.rs, the Windows half of write_symlink_cycle.rs
+        # and rar5_erase_volume_errors.rs are #[cfg(windows)] and are
+        # compiled out of the ubuntu lint job.
+        run: cargo test -p rar-rs --locked
+      - name: WinRAR interop skip visibility
+        # Hosted runners have no WinRAR, so the suite self-skips. Run it with
+        # --nocapture so the log shows the SKIPPED markers instead of reading
+        # as if the interop ran; when WinRAR is present it runs for real.
+        run: cargo test -p rar-cli --locked --test winrar_interop -- --nocapture
+  interop:
+    name: Official rar/unrar interop (scheduled)
+    # Scheduled/manual only: the push/PR jobs must not depend on the rarlab
+    # network fetch, so the official-binary suites would always self-skip
+    # there. This job fetches the freeware console tools and runs them with
+    # SA_REQUIRE_OFFICIAL=1, turning "silently skipped" into a hard error.
+    # WinRAR itself is not freely installable on hosted runners, so the
+    # winrar_interop suite runs in the windows-cli job when present and
+    # prints visible SKIPPED markers otherwise.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # The rarlab download is best-effort: a fetch failure must not fail the
+    # repository (the test step is gated on the fetch outcome below). When
+    # the tools ARE present, an interop regression still fails this job and
+    # its annotation stays visible even though the scheduled run itself is
+    # non-blocking.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v6
+        continue-on-error: true # transient service outages must not fail builds
+        with:
+          path: |
+            ~/.cargo/git/db/
+            ~/.cargo/registry/
+            target/
+          key: ${{ runner.os }}-interop-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Fetch official RAR console tools
+        id: fetch
+        # Kept tolerant so a rarlab outage ends in a green job with an
+        # explicit skip notice, not a red scheduled run.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/rarlab"
+          mkdir -p "$root"
+          # Two releases are needed: 7.23's UnRAR validates every archive we
+          # emit, while the RAR writer must be 6.23 — the official_interop
+          # suite drives `rar a -ma4` against 6.23-created RAR4 archives and
+          # 7.23 removed RAR4 creation (it rejects `-ma4`). Both tarballs
+          # extract a `rar/` directory, so unpack and rename one at a time.
+          curl -fsSL --retry 3 -o "$root/unrar723.tar.gz" \
+            "https://www.rarlab.com/rar/rarlinux-x64-723.tar.gz"
+          curl -fsSL --retry 3 -o "$root/rar623.tar.gz" \
+            "https://www.rarlab.com/rar/rarlinux-x64-623.tar.gz"
+          tar -xzf "$root/unrar723.tar.gz" -C "$root"
+          mv "$root/rar" "$root/rar723"
+          tar -xzf "$root/rar623.tar.gz" -C "$root"
+          mv "$root/rar" "$root/rar623"
+          for tool in "$root/rar623/rar" "$root/rar723/unrar"; do
+            if [[ ! -x "$tool" ]]; then
+              echo "::error::$tool missing from the rarlab tarball"
+              exit 1
+            fi
+          done
+          {
+            echo "rar=$root/rar623/rar"
+            echo "unrar=$root/rar723/unrar"
+            echo "sfx=$root/rar623/default.sfx"
+          } >> "$GITHUB_OUTPUT"
+      - name: Official rar/unrar interop tests
+        if: steps.fetch.outcome == 'success'
+        env:
+          SA_OFFICIAL_RAR: ${{ steps.fetch.outputs.rar }}
+          SA_OFFICIAL_UNRAR: ${{ steps.fetch.outputs.unrar }}
+          SA_OFFICIAL_SFX: ${{ steps.fetch.outputs.sfx }}
+          # A missing tool must fail the test instead of skipping it.
+          SA_REQUIRE_OFFICIAL: '1'
+        # --nocapture keeps the gating helpers' SKIPPED markers (and any
+        # SA_REQUIRE_* assertion message) visible in the job log.
+        run: >-
+          cargo test -p rar-rs --locked --test official_interop --test rewrite_tests
+          -- --nocapture
+      - name: Official interop skip notice
+        if: steps.fetch.outcome != 'success'
+        run: echo "::warning title=Official interop skipped::rarlab console tools could not be downloaded; the official-binary suites did not run."
   build:
     name: build - ${{ matrix.settings.target }} - node@24
     runs-on: ${{ matrix.settings.host }}
@@ -374,6 +498,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - lint
+      - windows-cli
       - build
       - test-bindings
       - build-wasm

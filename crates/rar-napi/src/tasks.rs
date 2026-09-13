@@ -11,6 +11,7 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
+use crate::guard::run_guarded;
 use crate::options::{checked_js_integer, checked_optional_js_integer, parse_dict_size};
 use crate::{
   AppendArchiveOptions, CreateArchiveOptions, CreateResult, EntryInfo, EntryInput,
@@ -335,59 +336,62 @@ impl Task for CreateArchiveTask {
   type JsValue = CreateResult;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let planned = plan_entries(&self.opts.entries)?;
-    let total_bytes: u64 = planned.iter().try_fold(0u64, |acc, e| {
-      let s = entry_size(e)?;
-      let next = acc.saturating_add(s);
-      if next > MAX_TOTAL_BYTES {
+    run_guarded(|| {
+      let planned = plan_entries(&self.opts.entries)?;
+      let total_bytes: u64 = planned.iter().try_fold(0u64, |acc, e| {
+        let s = entry_size(e)?;
+        let next = acc.saturating_add(s);
+        if next > MAX_TOTAL_BYTES {
+          return Err(Error::new(
+            Status::InvalidArg,
+            "total input size exceeds 32 GiB limit",
+          ));
+        }
+        Ok(next)
+      })?;
+
+      if let Some(limit) = self.opts.max_total_bytes()?
+        && total_bytes > limit
+      {
         return Err(Error::new(
           Status::InvalidArg,
-          "total input size exceeds 32 GiB limit",
+          format!(
+            "total input size {:.1} MiB exceeds limit {:.1} MiB",
+            total_bytes as f64 / 1048576.0,
+            limit as f64 / 1048576.0
+          ),
         ));
       }
-      Ok(next)
-    })?;
+      let level = self.opts.level()?;
+      let redirected = planned_redirects(&planned);
+      let batch = write_entries(&planned, level)?;
+      let out = Path::new(&self.opts.out_path);
+      if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)
+          .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
+      }
 
-    if let Some(limit) = self.opts.max_total_bytes()?
-      && total_bytes > limit
-    {
-      return Err(Error::new(
-        Status::InvalidArg,
-        format!(
-          "total input size {:.1} MiB exceeds limit {:.1} MiB",
-          total_bytes as f64 / 1048576.0,
-          limit as f64 / 1048576.0
-        ),
-      ));
-    }
-    let level = self.opts.level()?;
-    let redirected = planned_redirects(&planned);
-    let batch = write_entries(&planned, level)?;
-    let out = Path::new(&self.opts.out_path);
-    if let Some(parent) = out.parent() {
-      fs::create_dir_all(parent)
-        .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
-    }
+      // The typed writer stages everything and commits only in `finish()`:
+      // a failed or cancelled add aborts the transaction and leaves nothing
+      // at the output path.
+      let writer_opts = self.opts.to_writer_options()?;
+      let mut writer =
+        rar_rs::ArchiveWriter::create_with(out, writer_opts).map_err(to_napi_error)?;
+      writer
+        .set_cancel_flag(self.cancel.take())
+        .map_err(to_napi_error)?;
 
-    // The typed writer stages everything and commits only in `finish()`:
-    // a failed or cancelled add aborts the transaction and leaves nothing
-    // at the output path.
-    let writer_opts = self.opts.to_writer_options()?;
-    let mut writer = rar_rs::ArchiveWriter::create_with(out, writer_opts).map_err(to_napi_error)?;
-    writer
-      .set_cancel_flag(self.cancel.take())
-      .map_err(to_napi_error)?;
+      let report = write_transaction(
+        writer,
+        &batch,
+        &redirected,
+        total_bytes,
+        self.progress.take(),
+      )?;
 
-    let report = write_transaction(
-      writer,
-      &batch,
-      &redirected,
-      total_bytes,
-      self.progress.take(),
-    )?;
-
-    Ok(CreateResult {
-      files: report_files(report),
+      Ok(CreateResult {
+        files: report_files(report),
+      })
     })
   }
 
@@ -435,25 +439,27 @@ impl Task for RepairArchiveTask {
   type JsValue = bool;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let progress = self.progress.take();
-    let mut report = |done: u64, total: u64| {
-      if let Some(tsfn) = progress.as_ref() {
-        let _ = tsfn.call(
-          Ok(ProgressData {
-            done: done.min(total) as f64,
-            total: total as f64,
-          }),
-          ThreadsafeFunctionCallMode::NonBlocking,
-        );
-      }
-    };
-    rar_rs::repair_archive_path_with(
-      Path::new(&self.input_path),
-      Path::new(&self.output_path),
-      self.cancel.as_deref(),
-      Some(&mut report),
-    )
-    .map_err(to_napi_error)
+    run_guarded(|| {
+      let progress = self.progress.take();
+      let mut report = |done: u64, total: u64| {
+        if let Some(tsfn) = progress.as_ref() {
+          let _ = tsfn.call(
+            Ok(ProgressData {
+              done: done.min(total) as f64,
+              total: total as f64,
+            }),
+            ThreadsafeFunctionCallMode::NonBlocking,
+          );
+        }
+      };
+      rar_rs::repair_archive_path_with(
+        Path::new(&self.input_path),
+        Path::new(&self.output_path),
+        self.cancel.as_deref(),
+        Some(&mut report),
+      )
+      .map_err(to_napi_error)
+    })
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -495,30 +501,32 @@ impl Task for RebuildVolumesTask {
   type JsValue = Vec<String>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let progress = self.progress.take();
-    let mut report = |done: u64, total: u64| {
-      if let Some(tsfn) = progress.as_ref() {
-        let _ = tsfn.call(
-          Ok(ProgressData {
-            done: done.min(total) as f64,
-            total: total as f64,
-          }),
-          ThreadsafeFunctionCallMode::NonBlocking,
-        );
-      }
-    };
-    let paths = rar_rs::rebuild_missing_volumes_with(
-      Path::new(&self.first_volume),
-      self.cancel.as_deref(),
-      Some(&mut report),
-    )
-    .map_err(to_napi_error)?;
-    Ok(
-      paths
-        .into_iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect(),
-    )
+    run_guarded(|| {
+      let progress = self.progress.take();
+      let mut report = |done: u64, total: u64| {
+        if let Some(tsfn) = progress.as_ref() {
+          let _ = tsfn.call(
+            Ok(ProgressData {
+              done: done.min(total) as f64,
+              total: total as f64,
+            }),
+            ThreadsafeFunctionCallMode::NonBlocking,
+          );
+        }
+      };
+      let paths = rar_rs::rebuild_missing_volumes_with(
+        Path::new(&self.first_volume),
+        self.cancel.as_deref(),
+        Some(&mut report),
+      )
+      .map_err(to_napi_error)?;
+      Ok(
+        paths
+          .into_iter()
+          .map(|p| p.to_string_lossy().into_owned())
+          .collect(),
+      )
+    })
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -538,63 +546,65 @@ impl Task for AppendArchiveTask {
   type JsValue = CreateResult;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let planned = plan_entries(&self.opts.entries)?;
-    let total_bytes: u64 = planned.iter().try_fold(0u64, |acc, e| {
-      let s = entry_size(e)?;
-      let next = acc.saturating_add(s);
-      if next > MAX_TOTAL_BYTES {
-        return Err(Error::new(
-          Status::InvalidArg,
-          "total input size exceeds 32 GiB limit",
-        ));
-      }
-      Ok(next)
-    })?;
-
-    let level = self.opts.level()?;
-    let redirected = planned_redirects(&planned);
-    let batch = write_entries(&planned, level)?;
-    let mut append_opts = rar_rs::AppendOptions::new();
-    if let Some(pw) = self.opts.password.as_deref().filter(|pw| !pw.is_empty()) {
-      append_opts = append_opts.password(pw.to_string());
-    }
-    if let Some(spec) = self.opts.dict_size.as_deref() {
-      let (dict_log, dict_bytes) = parse_dict_size(spec)?;
-      let bytes = dict_bytes
-        .or_else(|| dict_log.map(|log| (128u64 * 1024) << log))
-        .expect("dictionary parse returns a log or a byte count");
-      append_opts =
-        append_opts.dictionary_size(rar_rs::DictionarySize::try_from(bytes).map_err(|err| {
-          Error::new(
+    run_guarded(|| {
+      let planned = plan_entries(&self.opts.entries)?;
+      let total_bytes: u64 = planned.iter().try_fold(0u64, |acc, e| {
+        let s = entry_size(e)?;
+        let next = acc.saturating_add(s);
+        if next > MAX_TOTAL_BYTES {
+          return Err(Error::new(
             Status::InvalidArg,
-            format!("invalid dictionary size: {err}"),
-          )
-        })?);
-    }
-    if let Some(threads) = self.opts.thread_count {
-      let threads = checked_optional_js_integer(Some(threads), "threadCount", 0, 64)?
-        .expect("a present value stays present") as usize;
-      append_opts = append_opts.thread_count(
-        rar_rs::ThreadCount::try_from(threads)
-          .map_err(|err| Error::new(Status::InvalidArg, format!("{err}")))?,
-      );
-    }
-    let mut writer = rar_rs::ArchiveWriter::append_with(&self.opts.archive_path, append_opts)
-      .map_err(to_napi_error)?;
-    writer
-      .set_cancel_flag(self.cancel.take())
-      .map_err(to_napi_error)?;
+            "total input size exceeds 32 GiB limit",
+          ));
+        }
+        Ok(next)
+      })?;
 
-    let report = write_transaction(
-      writer,
-      &batch,
-      &redirected,
-      total_bytes,
-      self.progress.take(),
-    )?;
+      let level = self.opts.level()?;
+      let redirected = planned_redirects(&planned);
+      let batch = write_entries(&planned, level)?;
+      let mut append_opts = rar_rs::AppendOptions::new();
+      if let Some(pw) = self.opts.password.as_deref().filter(|pw| !pw.is_empty()) {
+        append_opts = append_opts.password(pw.to_string());
+      }
+      if let Some(spec) = self.opts.dict_size.as_deref() {
+        let (dict_log, dict_bytes) = parse_dict_size(spec)?;
+        let bytes = dict_bytes
+          .or_else(|| dict_log.map(|log| (128u64 * 1024) << log))
+          .expect("dictionary parse returns a log or a byte count");
+        append_opts =
+          append_opts.dictionary_size(rar_rs::DictionarySize::try_from(bytes).map_err(|err| {
+            Error::new(
+              Status::InvalidArg,
+              format!("invalid dictionary size: {err}"),
+            )
+          })?);
+      }
+      if let Some(threads) = self.opts.thread_count {
+        let threads = checked_optional_js_integer(Some(threads), "threadCount", 0, 64)?
+          .expect("a present value stays present") as usize;
+        append_opts = append_opts.thread_count(
+          rar_rs::ThreadCount::try_from(threads)
+            .map_err(|err| Error::new(Status::InvalidArg, format!("{err}")))?,
+        );
+      }
+      let mut writer = rar_rs::ArchiveWriter::append_with(&self.opts.archive_path, append_opts)
+        .map_err(to_napi_error)?;
+      writer
+        .set_cancel_flag(self.cancel.take())
+        .map_err(to_napi_error)?;
 
-    Ok(CreateResult {
-      files: report_files(report),
+      let report = write_transaction(
+        writer,
+        &batch,
+        &redirected,
+        total_bytes,
+        self.progress.take(),
+      )?;
+
+      Ok(CreateResult {
+        files: report_files(report),
+      })
     })
   }
 
@@ -669,44 +679,47 @@ impl Task for DeleteEntriesTask {
   type JsValue = u32;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut editor = match self.password.as_deref() {
-      Some(pw) if !pw.is_empty() => {
-        rar_rs::ArchiveEditor::open_with_password(&self.archive_path, pw).map_err(to_napi_error)?
+    run_guarded(|| {
+      let mut editor = match self.password.as_deref() {
+        Some(pw) if !pw.is_empty() => {
+          rar_rs::ArchiveEditor::open_with_password(&self.archive_path, pw)
+            .map_err(to_napi_error)?
+        }
+        _ => rar_rs::ArchiveEditor::open(&self.archive_path).map_err(to_napi_error)?,
+      };
+      editor.set_cancel_flag(self.cancel.take());
+      // Preserve the legacy name semantics: every name deletes the first
+      // matching member not already selected, so repeated names delete
+      // successive duplicates, and a missing name fails the whole plan
+      // before any rewrite starts.
+      let mut ids: Vec<rar_rs::EntryId> = Vec::with_capacity(self.names.len());
+      for name in &self.names {
+        let id = editor
+          .entries_named(name)
+          .map(|entry| entry.id())
+          .find(|id| !ids.contains(id))
+          .ok_or_else(|| to_napi_error(rar_rs::RarError::MemberNotFound { name: name.clone() }))?;
+        ids.push(id);
       }
-      _ => rar_rs::ArchiveEditor::open(&self.archive_path).map_err(to_napi_error)?,
-    };
-    editor.set_cancel_flag(self.cancel.take());
-    // Preserve the legacy name semantics: every name deletes the first
-    // matching member not already selected, so repeated names delete
-    // successive duplicates, and a missing name fails the whole plan
-    // before any rewrite starts.
-    let mut ids: Vec<rar_rs::EntryId> = Vec::with_capacity(self.names.len());
-    for name in &self.names {
-      let id = editor
-        .entries_named(name)
-        .map(|entry| entry.id())
-        .find(|id| !ids.contains(id))
-        .ok_or_else(|| to_napi_error(rar_rs::RarError::MemberNotFound { name: name.clone() }))?;
-      ids.push(id);
-    }
-    let progress = self.progress.take();
-    let count = editor
-      .delete_entries_with_progress(
-        &ids,
-        Some(Box::new(move |done: u64, total: u64| {
-          if let Some(tsfn) = progress.as_ref() {
-            let _ = tsfn.call(
-              Ok(ProgressData {
-                done: done.min(total) as f64,
-                total: total as f64,
-              }),
-              ThreadsafeFunctionCallMode::NonBlocking,
-            );
-          }
-        })),
-      )
-      .map_err(to_napi_error)?;
-    Ok(count as u32)
+      let progress = self.progress.take();
+      let count = editor
+        .delete_entries_with_progress(
+          &ids,
+          Some(Box::new(move |done: u64, total: u64| {
+            if let Some(tsfn) = progress.as_ref() {
+              let _ = tsfn.call(
+                Ok(ProgressData {
+                  done: done.min(total) as f64,
+                  total: total as f64,
+                }),
+                ThreadsafeFunctionCallMode::NonBlocking,
+              );
+            }
+          })),
+        )
+        .map_err(to_napi_error)?;
+      Ok(count as u32)
+    })
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -736,14 +749,16 @@ impl Task for TestArchiveTask {
   type JsValue = Vec<u32>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut options = rar_rs::OpenOptions::new();
-    if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
-      options = options.password(pw);
-    }
-    let mut archive =
-      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
-    let report = archive.verify().map_err(to_napi_error)?;
-    Ok(vec![report.checked() as u32, report.failed() as u32])
+    run_guarded(|| {
+      let mut options = rar_rs::OpenOptions::new();
+      if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
+        options = options.password(pw);
+      }
+      let mut archive =
+        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      let report = archive.verify().map_err(to_napi_error)?;
+      Ok(vec![report.checked() as u32, report.failed() as u32])
+    })
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -771,18 +786,20 @@ impl Task for ListEntriesTask {
   type JsValue = Vec<String>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut options = rar_rs::OpenOptions::new();
-    if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
-      options = options.password(pw);
-    }
-    let archive =
-      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
-    Ok(
-      archive
-        .entries()
-        .map(|entry| entry.name().to_string())
-        .collect(),
-    )
+    run_guarded(|| {
+      let mut options = rar_rs::OpenOptions::new();
+      if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
+        options = options.password(pw);
+      }
+      let archive =
+        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      Ok(
+        archive
+          .entries()
+          .map(|entry| entry.name().to_string())
+          .collect(),
+      )
+    })
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -847,17 +864,19 @@ impl Task for ListEntriesDetailedTask {
   type JsValue = Vec<EntryInfo>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut options = rar_rs::OpenOptions::new().scan_strategy(if self.quick {
-      rar_rs::ScanStrategy::PreferQuickOpen
-    } else {
-      rar_rs::ScanStrategy::Full
-    });
-    if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
-      options = options.password(pw);
-    }
-    let archive =
-      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
-    Ok(entry_infos(&archive))
+    run_guarded(|| {
+      let mut options = rar_rs::OpenOptions::new().scan_strategy(if self.quick {
+        rar_rs::ScanStrategy::PreferQuickOpen
+      } else {
+        rar_rs::ScanStrategy::Full
+      });
+      if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
+        options = options.password(pw);
+      }
+      let archive =
+        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      Ok(entry_infos(&archive))
+    })
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -935,30 +954,32 @@ impl Task for RenameEntriesTask {
   type JsValue = u32;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
-    editor.set_cancel_flag(self.cancel.take());
-    // Mirror the CLI `rar rn` name resolution: the first member matching
-    // each `from`, with repeated names skipping already-chosen matches.
-    let mut chosen: Vec<rar_rs::EntryId> = Vec::with_capacity(self.renames.len());
-    let mut ids: Vec<(rar_rs::EntryId, String)> = Vec::with_capacity(self.renames.len());
-    for pair in &self.renames {
-      let from_norm = pair.from.trim_end_matches('/');
-      let id = editor
-        .entries()
-        .find(|entry| {
-          entry.name().trim_end_matches('/') == from_norm && !chosen.contains(&entry.id())
-        })
-        .map(|entry| entry.id())
-        .ok_or_else(|| {
-          to_napi_error(rar_rs::RarError::MemberNotFound {
-            name: pair.from.clone(),
+    run_guarded(|| {
+      let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
+      editor.set_cancel_flag(self.cancel.take());
+      // Mirror the CLI `rar rn` name resolution: the first member matching
+      // each `from`, with repeated names skipping already-chosen matches.
+      let mut chosen: Vec<rar_rs::EntryId> = Vec::with_capacity(self.renames.len());
+      let mut ids: Vec<(rar_rs::EntryId, String)> = Vec::with_capacity(self.renames.len());
+      for pair in &self.renames {
+        let from_norm = pair.from.trim_end_matches('/');
+        let id = editor
+          .entries()
+          .find(|entry| {
+            entry.name().trim_end_matches('/') == from_norm && !chosen.contains(&entry.id())
           })
-        })?;
-      chosen.push(id);
-      ids.push((id, pair.to.clone()));
-    }
-    let renamed = editor.rename_entries(&ids).map_err(to_napi_error)? as u32;
-    Ok(renamed)
+          .map(|entry| entry.id())
+          .ok_or_else(|| {
+            to_napi_error(rar_rs::RarError::MemberNotFound {
+              name: pair.from.clone(),
+            })
+          })?;
+        chosen.push(id);
+        ids.push((id, pair.to.clone()));
+      }
+      let renamed = editor.rename_entries(&ids).map_err(to_napi_error)? as u32;
+      Ok(renamed)
+    })
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -992,11 +1013,13 @@ impl Task for SetCommentTask {
   type JsValue = ();
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
-    let plan =
-      rar_rs::EditPlan::new().set_comment(self.comment.clone().unwrap_or_default().into_bytes());
-    editor.apply(plan).map_err(to_napi_error)?;
-    Ok(())
+    run_guarded(|| {
+      let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
+      let plan =
+        rar_rs::EditPlan::new().set_comment(self.comment.clone().unwrap_or_default().into_bytes());
+      editor.apply(plan).map_err(to_napi_error)?;
+      Ok(())
+    })
   }
 
   fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
@@ -1034,12 +1057,14 @@ impl Task for SetMemberCommentTask {
   type JsValue = ();
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
-    let id = editor.unique_entry(&self.member).map_err(to_napi_error)?;
-    let plan = rar_rs::EditPlan::new()
-      .set_member_comment(id, self.comment.clone().unwrap_or_default().into_bytes());
-    editor.apply(plan).map_err(to_napi_error)?;
-    Ok(())
+    run_guarded(|| {
+      let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
+      let id = editor.unique_entry(&self.member).map_err(to_napi_error)?;
+      let plan = rar_rs::EditPlan::new()
+        .set_member_comment(id, self.comment.clone().unwrap_or_default().into_bytes());
+      editor.apply(plan).map_err(to_napi_error)?;
+      Ok(())
+    })
   }
 
   fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
@@ -1074,11 +1099,13 @@ impl Task for SetRecoveryTask {
   type JsValue = ();
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let percent = checked_js_integer(self.percent, "percent", 0, 100)? as u8;
-    let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
-    let plan = rar_rs::EditPlan::new().set_recovery(percent);
-    editor.apply(plan).map_err(to_napi_error)?;
-    Ok(())
+    run_guarded(|| {
+      let percent = checked_js_integer(self.percent, "percent", 0, 100)? as u8;
+      let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
+      let plan = rar_rs::EditPlan::new().set_recovery(percent);
+      editor.apply(plan).map_err(to_napi_error)?;
+      Ok(())
+    })
   }
 
   fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
@@ -1106,9 +1133,11 @@ impl Task for LockArchiveTask {
   type JsValue = ();
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
-    editor.lock().map_err(to_napi_error)?;
-    Ok(())
+    run_guarded(|| {
+      let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
+      editor.lock().map_err(to_napi_error)?;
+      Ok(())
+    })
   }
 
   fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
@@ -1128,20 +1157,22 @@ impl Task for ExtractArchiveTask {
   type JsValue = ();
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut options = rar_rs::OpenOptions::new();
-    if let Some(pw) = self.opts.password.as_deref().filter(|pw| !pw.is_empty()) {
-      options = options.password(pw);
-    }
-    let mut archive =
-      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
-    archive.set_cancel_flag(self.cancel.take());
-    let dest = Path::new(&self.opts.dest_path);
-    fs::create_dir_all(dest)
-      .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
-    archive
-      .extract_all_with_options(dest, self.opts.to_extract_options()?)
-      .map_err(to_napi_error)?;
-    Ok(())
+    run_guarded(|| {
+      let mut options = rar_rs::OpenOptions::new();
+      if let Some(pw) = self.opts.password.as_deref().filter(|pw| !pw.is_empty()) {
+        options = options.password(pw);
+      }
+      let mut archive =
+        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      archive.set_cancel_flag(self.cancel.take());
+      let dest = Path::new(&self.opts.dest_path);
+      fs::create_dir_all(dest)
+        .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
+      archive
+        .extract_all_with_options(dest, self.opts.to_extract_options()?)
+        .map_err(to_napi_error)?;
+      Ok(())
+    })
   }
 
   fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
@@ -1205,31 +1236,33 @@ impl Task for ExtractMemberTask {
   type JsValue = String;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut options = rar_rs::OpenOptions::new();
-    if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
-      options = options.password(pw);
-    }
-    let mut archive =
-      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
-    archive.set_cancel_flag(self.cancel.take());
-    let id = archive.unique_entry(&self.name).map_err(to_napi_error)?;
-    let dest = Path::new(&self.dest_dir);
-    if !dest.is_dir() {
-      fs::create_dir_all(dest)
-        .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
-    }
-    // Streaming extract: no per-member or total size caps (only the default
-    // 4 GiB dictionary cap, matching extract_archive).
-    let extract_opts = rar_rs::ExtractOptions {
-      max_unpacked_bytes: None,
-      max_total_unpacked_bytes: None,
-      max_dict_size: Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE),
-      ..Default::default()
-    };
-    let path = archive
-      .extract_entry_with_options(id, dest, extract_opts)
-      .map_err(to_napi_error)?;
-    Ok(path.to_string_lossy().into_owned())
+    run_guarded(|| {
+      let mut options = rar_rs::OpenOptions::new();
+      if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
+        options = options.password(pw);
+      }
+      let mut archive =
+        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      archive.set_cancel_flag(self.cancel.take());
+      let id = archive.unique_entry(&self.name).map_err(to_napi_error)?;
+      let dest = Path::new(&self.dest_dir);
+      if !dest.is_dir() {
+        fs::create_dir_all(dest)
+          .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
+      }
+      // Streaming extract: no per-member or total size caps (only the default
+      // 4 GiB dictionary cap, matching extract_archive).
+      let extract_opts = rar_rs::ExtractOptions {
+        max_unpacked_bytes: None,
+        max_total_unpacked_bytes: None,
+        max_dict_size: Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE),
+        ..Default::default()
+      };
+      let path = archive
+        .extract_entry_with_options(id, dest, extract_opts)
+        .map_err(to_napi_error)?;
+      Ok(path.to_string_lossy().into_owned())
+    })
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -1266,17 +1299,59 @@ impl Task for ReadMemberTask {
   type JsValue = Buffer;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    let mut options = rar_rs::OpenOptions::new();
-    if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
-      options = options.password(pw);
-    }
-    let mut archive =
-      rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
-    let id = archive.unique_entry(&self.name).map_err(to_napi_error)?;
-    archive.read_entry(id).map_err(to_napi_error)
+    run_guarded(|| {
+      let mut options = rar_rs::OpenOptions::new();
+      if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
+        options = options.password(pw);
+      }
+      let mut archive =
+        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      let id = archive.unique_entry(&self.name).map_err(to_napi_error)?;
+      archive.read_entry(id).map_err(to_napi_error)
+    })
   }
 
   fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
     Ok(output.into())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::TestArchiveTask;
+  use crate::guard::test_lock;
+  use napi::bindgen_prelude::Task;
+
+  #[test]
+  fn every_task_compute_body_runs_guarded() {
+    let source = include_str!("tasks.rs");
+    let computes = source
+      .matches("fn compute(&mut self) -> Result<Self::Output>")
+      .count();
+    let guarded = source.matches("run_guarded(|| {").count();
+    assert!(computes > 0);
+    assert_eq!(
+      computes, guarded,
+      "every Task::compute body must run through run_guarded"
+    );
+  }
+
+  #[test]
+  fn task_compute_maps_an_injected_panic_to_a_binding_error() {
+    let _lock = test_lock();
+    // SAFETY: the test-only lock serializes every test that runs a guarded
+    // entry point, and the variable is removed before the lock is released.
+    unsafe { std::env::set_var("RAR_RS_NAPI_TEST_PANIC", "seam panic") };
+    let mut task = TestArchiveTask {
+      archive_path: "does-not-exist.rar".into(),
+      password: None,
+    };
+    let result = task.compute();
+    unsafe { std::env::remove_var("RAR_RS_NAPI_TEST_PANIC") };
+
+    let error = result.expect_err("injected panic must become a binding error");
+    assert_eq!(error.status, napi::Status::GenericFailure);
+    assert!(error.reason.contains("internal panic"), "{}", error.reason);
+    assert!(error.reason.contains("seam panic"), "{}", error.reason);
   }
 }

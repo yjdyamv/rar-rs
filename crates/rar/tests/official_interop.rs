@@ -8,16 +8,16 @@ use support::*;
 use rar_rs::{CompressionLevel, EntryWriteOptions};
 
 /// The official-binary tests skip when `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR`
-/// are not configured. The skip prints a marker so a green run is not mistaken
-/// for interop coverage; `SA_REQUIRE_OFFICIAL=1` turns it into a hard failure
-/// so a CI job can demand the suite instead of silently skipping it.
+/// are not configured. The skip prints a visible marker so a green run is not
+/// mistaken for interop coverage; `SA_REQUIRE_OFFICIAL=1` turns it into a hard
+/// failure so a CI job can demand the suite instead of silently skipping it.
 fn skip_official() {
     assert!(
         std::env::var_os("SA_REQUIRE_OFFICIAL").is_none(),
         "official rar/unrar interop binaries are required (SA_REQUIRE_OFFICIAL is set): set \
          SA_OFFICIAL_RAR / SA_OFFICIAL_UNRAR"
     );
-    eprintln!("SKIP: SA_OFFICIAL_RAR / SA_OFFICIAL_UNRAR not set");
+    eprintln!("SKIPPED (SA_OFFICIAL_RAR / SA_OFFICIAL_UNRAR unset)");
 }
 
 /// Official UNRAR (e.g. /home/yuan/下载/rar/unrar) validates archives
