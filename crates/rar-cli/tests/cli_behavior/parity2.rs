@@ -665,3 +665,93 @@ fn cli_listing_marks_missing_timestamps() {
         "file.txt keeps its time:\n{text}"
     );
 }
+
+/// WinRAR accepts the reset modes both bare (`-se`) and as `-s=e`, and the
+/// switch is tolerated on read commands.
+#[test]
+fn cli_solid_reset_alias_forms() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("x1.txt"), b"solid ".repeat(400)).unwrap();
+    std::fs::write(dir.path().join("x2.bin"), b"binary ".repeat(400)).unwrap();
+
+    let a = dir.path().join("alias-a.rar");
+    let b = dir.path().join("alias-b.rar");
+    for (archive, flag) in [(&a, "-s=e"), (&b, "-se")] {
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", flag, "-m5", "-idq"])
+            .arg(archive)
+            .arg("x1.txt")
+            .arg("x2.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{flag} must be accepted");
+    }
+    assert_eq!(
+        std::fs::read(&a).unwrap(),
+        std::fs::read(&b).unwrap(),
+        "-s=e and -se must select the same reset mode"
+    );
+
+    let listing = std::process::Command::new(RAR_CLI)
+        .args(["l", "-se"])
+        .arg(&a)
+        .output()
+        .unwrap();
+    assert!(listing.status.success(), "read commands accept -se");
+
+    let rejected = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-s=v", "-m0", "-idq"])
+        .arg(dir.path().join("reject.rar"))
+        .arg("x1.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(
+        !rejected.success(),
+        "-ma4 -s=v must be rejected (unrepresentable reset)"
+    );
+}
+
+/// A directory symlink is stored as a redirect with `-ol` instead of being
+/// walked (the previous behavior duplicated the target's contents).
+#[cfg(windows)]
+#[test]
+fn cli_directory_symlinks_are_stored_as_redirects() {
+    use std::os::windows::fs::symlink_dir;
+    let dir = make_temp_dir();
+    std::fs::create_dir(dir.path().join("real")).unwrap();
+    std::fs::write(dir.path().join("real/inner.txt"), b"inner").unwrap();
+    symlink_dir(dir.path().join("real"), dir.path().join("link")).unwrap();
+
+    let archive = dir.path().join("links.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-ol", "-idq"])
+        .arg(&archive)
+        .arg("link")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let bare = std::process::Command::new(RAR_CLI)
+        .args(["lb"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&bare.stdout).trim(), "link");
+
+    let tech = std::process::Command::new(RAR_CLI)
+        .args(["lt"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&tech.stdout);
+    assert!(text.contains("Type: Windows symbolic link"), "{text}");
+    assert!(text.contains("Target:"), "{text}");
+    assert!(text.contains("real"), "{text}");
+    assert!(
+        !text.contains("inner.txt"),
+        "the target must not be walked:\n{text}"
+    );
+}

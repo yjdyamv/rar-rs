@@ -597,6 +597,7 @@ dependencies = [
  "aes",
  "crc32fast",
  "hmac",
+ "libc",
  "rand",
  "rayon",
  "sha1",

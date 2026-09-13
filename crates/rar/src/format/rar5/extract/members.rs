@@ -243,7 +243,7 @@ impl RarArchive {
                     return Err(e);
                 }
             }
-            if entry.header.mtime != 0 || entry.header.mtime_ns.is_some() {
+            if crate::archive::file_header_has_mtime(&entry.header) {
                 self.apply_member_times(&entry.header, &dest_path);
             }
             self.extract_member_streams(member.idx, &dest_path)?;
@@ -415,7 +415,7 @@ impl RarArchive {
 
         // Restore mtime (best-effort), including the nanosecond fraction
         // from the FILE_TIME extra record when present.
-        if entry.header.mtime != 0 || entry.header.mtime_ns.is_some() {
+        if crate::archive::file_header_has_mtime(&entry.header) {
             self.apply_member_times(&entry.header, &dest_path);
         }
         // Restore NTFS alternate data streams attached to this member

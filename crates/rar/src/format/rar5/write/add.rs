@@ -562,6 +562,16 @@ impl RarArchive {
         }
     }
 
+    /// Effective header time and file flags for a RAR5 member: `-tsm-`
+    /// (`save_mtime == false`) omits the time field entirely, like WinRAR.
+    pub(crate) fn rar5_time_fields(&self, mtime: u32, flags: u64) -> (u32, u64) {
+        if self.write_ctx().meta.mtime {
+            (mtime, flags)
+        } else {
+            (0, flags & !FILE_FLAG_TIME_UNIX)
+        }
+    }
+
     /// The entry carries no data; `redir_type` is 1 (Unix symlink),
     /// 2 (Windows symlink), 3 (Windows junction), 4 (hardlink) or
     /// 5 (file copy) and `target` is the referenced member name.
@@ -601,6 +611,12 @@ impl RarArchive {
             ));
         }
         self.reset_solid_chain();
+        // `-tsm-` omits the link's time like a regular member.
+        let (mtime, mtime_ns) = if self.write_ctx().meta.mtime {
+            (mtime, mtime_ns)
+        } else {
+            (0, None)
+        };
         let mut extra_data = if mtime != 0 {
             file_time_extra_record(Some((u64::from(mtime), mtime_ns.unwrap_or(0))), None, None)
         } else {
@@ -662,12 +678,14 @@ impl RarArchive {
             0o040755u64
         };
 
+        let (mtime, file_flags) =
+            self.rar5_time_fields(mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY);
         let fh = FileHeader {
             name: format!("{name}/"),
             attributes: attrs,
             mtime,
             host_os: OS_UNIX,
-            file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY,
+            file_flags,
             is_directory: true,
             ..Default::default()
         };

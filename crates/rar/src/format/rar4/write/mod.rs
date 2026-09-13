@@ -301,66 +301,118 @@ fn encode_flag_byte(modes: &[u8]) -> u8 {
 
 // ── DOS time encoding ───────────────────────────────────────────────────────
 
-/// Convert a Unix timestamp (seconds since epoch) to RAR4 DOS format time.
+/// Seconds east of UTC for the local time zone, at "now" (minute precision;
+/// targets without a local-time API report UTC).
+fn local_offset_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let utc = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    #[cfg(windows)]
+    {
+        let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
+        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
+        let civil = crate::format::rar4::days_from_civil(
+            i64::from(st.wYear),
+            u32::from(st.wMonth),
+            u32::from(st.wDay),
+        ) * 86_400
+            + i64::from(st.wHour) * 3_600
+            + i64::from(st.wMinute) * 60
+            + i64::from(st.wSecond);
+        civil - utc
+    }
+    #[cfg(unix)]
+    {
+        let secs = utc as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&secs, &mut tm) };
+        let civil = crate::format::rar4::days_from_civil(
+            i64::from(tm.tm_year) + 1900,
+            (tm.tm_mon + 1) as u32,
+            tm.tm_mday as u32,
+        ) * 86_400
+            + i64::from(tm.tm_hour) * 3_600
+            + i64::from(tm.tm_min) * 60
+            + i64::from(tm.tm_sec);
+        civil - utc
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = utc;
+        0
+    }
+}
+
+/// Convert a Unix instant to the "local civil" seconds the legacy catalog
+/// stores (the encoding [`crate::format::rar4::dos_time_to_unix`] produces).
+pub(crate) fn epoch_to_local_civil(secs: u32) -> u32 {
+    (i64::from(secs) + local_offset_secs()).clamp(0, u32::MAX as i64) as u32
+}
+
+/// Convert a legacy "local civil" time back to a Unix instant.
+pub(crate) fn local_civil_to_epoch(secs: u32) -> u32 {
+    (i64::from(secs) - local_offset_secs()).clamp(0, u32::MAX as i64) as u32
+}
+
+/// Convert a Unix timestamp (seconds since epoch) to the RAR4/RAR13 DOS
+/// time field. The field stores *local* wall-clock time (WinRAR's
+/// convention); pre-1980 years wrap like the official writers instead of
+/// underflowing.
 pub(crate) fn unix_to_dos_time(secs: u32) -> u32 {
-    // Compute date components from Unix timestamp.
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hour = time_of_day / 3600;
-    let minute = (time_of_day % 3600) / 60;
+    let local = epoch_to_local_civil(secs);
+    let days = local / 86_400;
+    let time_of_day = local % 86_400;
+    let hour = time_of_day / 3_600;
+    let minute = (time_of_day % 3_600) / 60;
     let second = time_of_day % 60;
 
-    // Convert days since 1970-01-01 to year/month/day.
-    // civil_from_days from Howard Hinnant (https://howardhinnant.github.io/date_algorithms.html).
-    // The algorithm takes days from epoch as input where 1970-01-01 = 0.
-    // Our `days` is secs/86400 which is the number of complete days since epoch.
-    // Hinnant's civil_from_days uses 0-based day count; our `days` already
-    // matches that convention (1970-01-01 = day 0).
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    // Howard Hinnant's civil_from_days: 1970-01-01 = day 0.
+    let z = i64::from(days) + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
     let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let year = y + i64::from(month <= 2);
 
-    let year = y + u32::from(m <= 2);
-    let month = m;
-    let day = d;
-
-    // Pack into DOS format: Y(7) M(4) D(5) H(5) M(6) S(5/2).
-    ((year - 1980) << 25)
-        | (month << 21)
-        | (day << 16)
-        | (hour << 11)
-        | (minute << 5)
-        | (second / 2)
+    // Pack into DOS format: Y(7) M(4) D(5) H(5) M(6) S(5/2). A pre-1980
+    // year wraps into the 7-bit field exactly like WinRAR's writers.
+    let year_bits = ((year - 1980) & 0x7F) as u32;
+    (year_bits << 25) | (month << 21) | (day << 16) | (hour << 11) | (minute << 5) | (second / 2)
 }
 
 // ── Extended time field ─────────────────────────────────────────────────────
 
 /// Build the FHD_EXTTIME field for a file header.
 ///
-/// The ext-time field carries sub-second precision for mtime. RAR4 stores
-/// the 100-ns tick count as three bytes, least significant first, with a
-/// 2-byte flags word whose bits 12-15 encode "present + byte count" (`0xB` =
-/// mtime present, 3 bytes). This matches what WinRAR writes and what
-/// `extract_mtime_refinement` decodes.
-pub(crate) fn build_ext_time(mtime_ns: Option<u32>) -> Option<Vec<u8>> {
-    let ns = mtime_ns?;
-    let ticks = ns / 100; // Convert nanoseconds to 100-ns ticks.
-    if ticks == 0 {
+/// The ext-time field carries sub-second precision and the DOS field's
+/// odd-second flag for mtime. RAR4 stores the 100-ns tick count as three
+/// bytes, least significant first, with a 2-byte flags word whose bits 12-15
+/// encode PRESENT (`0x8`), ADD_SECOND (`0x4`) and the byte count. This
+/// matches what WinRAR writes and what `extract_mtime_refinement` decodes.
+pub(crate) fn build_ext_time(mtime: u32, mtime_ns: Option<u32>) -> Option<Vec<u8>> {
+    // DOS seconds have 2-second resolution; an odd local second is
+    // recovered through ADD_SECOND.
+    let add_second = epoch_to_local_civil(mtime) % 2 == 1;
+    let ticks = mtime_ns.unwrap_or(0) / 100; // 100-ns ticks.
+    if ticks == 0 && !add_second {
         return None;
     }
 
-    let mut ext = Vec::with_capacity(5);
-    let flags: u16 = (0x8 | 3) << 12; // mtime present, 3 bytes of ticks.
+    let byte_count: u16 = if ticks == 0 { 0 } else { 3 };
+    let mut ext = Vec::with_capacity(2 + byte_count as usize);
+    let flags: u16 = (0x8 | if add_second { 0x4 } else { 0 } | byte_count) << 12;
     ext.extend_from_slice(&flags.to_le_bytes());
-    ext.push((ticks & 0xFF) as u8);
-    ext.push(((ticks >> 8) & 0xFF) as u8);
-    ext.push((ticks >> 16) as u8);
+    if ticks != 0 {
+        ext.push((ticks & 0xFF) as u8);
+        ext.push(((ticks >> 8) & 0xFF) as u8);
+        ext.push((ticks >> 16) as u8);
+    }
     Some(ext)
 }
 
@@ -487,22 +539,43 @@ mod tests {
 
     #[test]
     fn dos_time_roundtrip() {
-        // 2024-01-15 12:30:44 UTC (DOS time has 2-second resolution).
-        // days from epoch to 2024-01-15 = 19737; secs = 19737*86400 + 45044
+        // 2024-01-15 12:30:44 UTC; the DOS field stores the *local* wall
+        // clock with 2-second resolution.
         let secs = 19_737u32 * 86_400 + 45_044;
         let dos = unix_to_dos_time(secs);
+        let local = epoch_to_local_civil(secs);
+        let round = crate::format::rar4::dos_time_to_unix(dos);
+        assert_eq!(round, local - local % 2, "fields round-trip to local time");
         let year = ((dos >> 25) & 0x7f) + 1980;
-        let month = (dos >> 21) & 0x0f;
-        let day = (dos >> 16) & 0x1f;
-        let hour = (dos >> 11) & 0x1f;
-        let minute = (dos >> 5) & 0x3f;
-        let second = (dos & 0x1f) * 2;
-        assert_eq!(year, 2024);
-        assert_eq!(month, 1);
-        assert_eq!(day, 15);
-        assert_eq!(hour, 12);
-        assert_eq!(minute, 30);
-        assert_eq!(second, 44);
+        assert_eq!(year, 2024, "year stays on the same local day");
+    }
+
+    #[test]
+    fn dos_time_pre_1980_wraps_without_panicking() {
+        // 1970-01-01 is before the DOS epoch; WinRAR's writers wrap the
+        // 7-bit year field instead of failing.
+        let dos = unix_to_dos_time(0);
+        let year = ((dos >> 25) & 0x7f) + 1980;
+        assert!((1980..=2107).contains(&year), "wrapped year {year}");
+        let local = epoch_to_local_civil(0);
+        assert_eq!((dos >> 11) & 0x1f, (local / 3600) % 24, "hour preserved");
+    }
+
+    #[test]
+    fn ext_time_marks_odd_local_seconds() {
+        let odd_epoch = local_civil_to_epoch(1_700_000_001); // odd second
+        let ext = build_ext_time(odd_epoch, None).expect("odd second needs a record");
+        assert_eq!(ext, vec![0x00, 0xC0], "PRESENT|ADD_SECOND, 0 tick bytes");
+
+        let even_epoch = local_civil_to_epoch(1_700_000_002);
+        assert!(build_ext_time(even_epoch, None).is_none());
+
+        let ext = build_ext_time(even_epoch, Some(123_456_700)).expect("ticks need a record");
+        assert_eq!(
+            u16::from_le_bytes([ext[0], ext[1]]) >> 12,
+            0xB,
+            "PRESENT + 3 tick bytes"
+        );
     }
 
     #[test]

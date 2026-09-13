@@ -589,7 +589,7 @@ impl RarArchive {
         // run (and drops the encoder state the trial may have advanced).
         let solid_continuation = self.track_rar4_solid_member(method, file_size);
 
-        let ext_time = crate::format::rar4::write::build_ext_time(Some(mtime_ns));
+        let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
         let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
         let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(name);
         let unpacked_size = file_size;
@@ -790,7 +790,7 @@ impl RarArchive {
         // in lockstep.
         let solid_continuation = self.track_rar4_solid_member(method, unpacked_size);
 
-        let ext_time = crate::format::rar4::write::build_ext_time(Some(mtime_ns));
+        let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
 
         // Member-level encryption (WinRAR `-p`), dispatched on the cipher
         // generation (see `rar4_member_encrypt`). The header carries the
@@ -1036,7 +1036,7 @@ impl RarArchive {
         // kind it is; directories reached before any file flush it here.
         self.emit_pending_rar4_comment()?;
         let (encoded_name, name_flags) = encode_file_name(name);
-        let ext_time = build_ext_time(Some(mtime_ns));
+        let ext_time = build_ext_time(mtime_secs, Some(mtime_ns));
         let mut flags = name_flags;
         if ext_time.is_some() {
             flags |= crate::format::rar4::FHD_EXTTIME;
@@ -1395,7 +1395,7 @@ impl RarArchive {
             mut packed,
             method,
         } = prepared;
-        let ext_time = crate::format::rar4::write::build_ext_time(Some(mtime_ns));
+        let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
 
         let password_encrypted = self.password.as_deref().is_some_and(|pw| !pw.is_empty());
         let mut salt = None;

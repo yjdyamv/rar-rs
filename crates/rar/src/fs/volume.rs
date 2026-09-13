@@ -182,7 +182,7 @@ pub(crate) fn stale_volume_paths(
             // Legacy data volumes plus their `.rev` recovery volumes: an
             // overwrite that drops `-rv` must retire the old parity files.
             legacy_volume_base(name).as_deref() == Some(base)
-                || crate::recovery::rev3::rev_name_belongs_to(name, base)
+                || crate::recovery::rev3::rev_name_belongs_to_set(dir, base, name)
         } else {
             // The old set's `.rev` recovery volumes go with it: they are
             // regenerated after the new data volumes commit.
@@ -233,6 +233,37 @@ mod tests {
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["set.r00", "set.r01"]);
+    }
+
+    #[test]
+    fn rev_ownership_resolves_ambiguous_bases_and_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        for name in ["set4.rar", "set4.r00", "set4.r01", "set4.r02"] {
+            std::fs::write(parent.join(name), b"x").unwrap();
+        }
+        // `set44_2_1.rev` parses as `set` + data 44 or `set4` + data 4; the
+        // existing data volumes decide.
+        assert!(!crate::recovery::rev3::rev_name_belongs_to_set(
+            parent,
+            "set",
+            "set44_2_1.rev"
+        ));
+        assert!(crate::recovery::rev3::rev_name_belongs_to_set(
+            parent,
+            "set4",
+            "set44_2_1.rev"
+        ));
+        assert!(crate::recovery::rev3::rev_name_belongs_to_set(
+            parent,
+            "set4",
+            "SET44_2_1.REV"
+        ));
+        assert!(!crate::recovery::rev3::rev_name_belongs_to_set(
+            parent,
+            "set4",
+            "other4_2_1.rev"
+        ));
     }
 
     #[test]

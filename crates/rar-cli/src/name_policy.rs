@@ -152,14 +152,48 @@ fn has_wildcards(arg: &str) -> bool {
 
 /// Collect the members for the given arguments under `policy`, expanding
 /// wildcards and walking directories (like the official `rar a`).
-pub fn collect(policy: &NamePolicy, args: &[String], level: u8) -> Result<Vec<Collected>, String> {
+pub fn collect(
+    policy: &NamePolicy,
+    args: &[String],
+    level: u8,
+    store_links: bool,
+    skip_links: bool,
+) -> Result<Vec<Collected>, String> {
     let mut pending: Vec<Collected> = Vec::new();
     let mut added: HashSet<String> = HashSet::new();
     for arg in args {
-        add_with_policy(&mut pending, arg, level, policy, &mut added)
-            .map_err(|e| format!("add {arg}: {e}"))?;
+        add_with_policy(
+            &mut pending,
+            arg,
+            level,
+            policy,
+            store_links,
+            skip_links,
+            &mut added,
+        )
+        .map_err(|e| format!("add {arg}: {e}"))?;
     }
     Ok(pending)
+}
+
+/// Whether `path` is a symbolic link or a Windows reparse point (junction),
+/// i.e. a link the `-ol` / `-ol-` switches can store or skip instead of
+/// following.
+pub(crate) fn is_link_like(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 /// Add a file or directory tree honoring the name/filter policy.
@@ -168,16 +202,21 @@ fn add_with_policy(
     arg: &str,
     level: u8,
     policy: &NamePolicy,
+    store_links: bool,
+    skip_links: bool,
     added: &mut HashSet<String>,
 ) -> Result<(), String> {
     if has_wildcards(arg) {
-        return add_wildcard_arg(pending, arg, level, policy, added);
+        return add_wildcard_arg(pending, arg, level, policy, store_links, skip_links, added);
     }
     let path = Path::new(arg);
     if !path.exists() {
         return Err(format!("path not found: {arg}"));
     }
-    if path.is_file() {
+    // With `-ol` / `-ol-` a directory symlink is a leaf: the link collector
+    // stores it as a redirect or drops it, instead of walking the target.
+    let links_active = store_links || skip_links;
+    if path.is_file() || (links_active && is_link_like(path)) {
         // Relative path names, matching the official `rar a`; `-ep1`
         // strips the parent directories, `-ep2`/`-ep3` store full paths
         // (like the official tool).
@@ -239,7 +278,16 @@ fn add_with_policy(
     if plain.no_recurse {
         return Ok(());
     }
-    walk_directory(pending, path, &rel, level, &plain, added)
+    walk_directory(
+        pending,
+        path,
+        &rel,
+        level,
+        &plain,
+        store_links,
+        skip_links,
+        added,
+    )
 }
 
 /// Expand a wildcard argument (`sub/*.txt`, like the official `rar`, which
@@ -250,6 +298,8 @@ fn add_wildcard_arg(
     pattern: &str,
     level: u8,
     policy: &NamePolicy,
+    store_links: bool,
+    skip_links: bool,
     added: &mut HashSet<String>,
 ) -> Result<(), String> {
     let wc = pattern.find(['*', '?']).unwrap();
@@ -280,7 +330,8 @@ fn add_wildcard_arg(
         if !mask_match(pattern, &rel) {
             continue;
         }
-        if child.path().is_dir() {
+        let link_leaf = (store_links || skip_links) && is_link_like(&child.path());
+        if child.path().is_dir() && !link_leaf {
             if policy.dir_subtree_skipped(&rel) {
                 continue;
             }
@@ -294,7 +345,16 @@ fn add_wildcard_arg(
             }
             // -r0: wildcard expansion does not descend into directories.
             if !policy.no_recurse && !policy.wildcard_top_only {
-                walk_directory(pending, &child.path(), &rel, level, policy, added)?;
+                walk_directory(
+                    pending,
+                    &child.path(),
+                    &rel,
+                    level,
+                    policy,
+                    store_links,
+                    skip_links,
+                    added,
+                )?;
             }
         } else if policy.file_kept(&rel) && added.insert(policy.stored_name(&rel)) {
             pending.push(Collected {
@@ -308,12 +368,15 @@ fn add_wildcard_arg(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_directory(
     pending: &mut Vec<Collected>,
     dir: &Path,
     rel_dir: &str,
     level: u8,
     policy: &NamePolicy,
+    store_links: bool,
+    skip_links: bool,
     added: &mut HashSet<String>,
 ) -> Result<(), String> {
     let mut children: Vec<_> = std::fs::read_dir(dir)
@@ -323,7 +386,8 @@ fn walk_directory(
     children.sort_by_key(|e| e.file_name());
     for child in children {
         let rel = format!("{rel_dir}/{}", child.file_name().to_string_lossy());
-        if child.path().is_dir() {
+        let link_leaf = (store_links || skip_links) && is_link_like(&child.path());
+        if child.path().is_dir() && !link_leaf {
             if policy.dir_subtree_skipped(&rel) {
                 continue;
             }
@@ -336,7 +400,16 @@ fn walk_directory(
                 });
             }
             if !policy.no_recurse {
-                walk_directory(pending, &child.path(), &rel, level, policy, added)?;
+                walk_directory(
+                    pending,
+                    &child.path(),
+                    &rel,
+                    level,
+                    policy,
+                    store_links,
+                    skip_links,
+                    added,
+                )?;
             }
         } else if policy.file_kept(&rel) && added.insert(policy.stored_name(&rel)) {
             pending.push(Collected {
@@ -406,7 +479,7 @@ mod tests {
                 exclude_masks: vec!["*.tmp".into()],
                 ..Default::default()
             };
-            collect(&policy, &args, 3)
+            collect(&policy, &args, 3, false, false)
         };
         std::env::set_current_dir(cwd).unwrap();
         let collected = result.unwrap();
@@ -421,7 +494,7 @@ mod tests {
                 basename_only: true,
                 ..Default::default()
             };
-            collect(&policy, &args, 3)
+            collect(&policy, &args, 3, false, false)
         };
         std::env::set_current_dir(cwd).unwrap();
         let flat = flat.unwrap();

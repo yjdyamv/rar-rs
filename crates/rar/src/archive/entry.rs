@@ -226,20 +226,14 @@ impl ArchiveEntry {
             .map(|spec| (spec.redir_type, spec.target))
     }
 
-    /// Whether the member carries a modification time. RAR5 stores it
-    /// either in the header's `FILE_FLAG_TIME_UNIX` field or in a FILE_TIME
-    /// extra record (WinRAR shows `????-??-??` when neither is present); the
-    /// legacy formats always carry DOS time, where the all-zero value means
-    /// "unknown".
+    /// Whether the member carries a usable modification time. RAR5 stores
+    /// it in the header's `FILE_FLAG_TIME_UNIX` field or in a FILE_TIME
+    /// extra record; regular members without either default to the Unix
+    /// epoch (like WinRAR's own reader), while link redirects show
+    /// `????-??-??`. The legacy formats always carry DOS time, where the
+    /// all-zero value means "unknown".
     pub fn has_mtime(&self) -> bool {
-        match self.header.format_version {
-            3 | 4 => self.header.mtime != 0,
-            _ => {
-                self.header.file_flags & 0x0002 != 0
-                    || self.header.mtime_ns.is_some()
-                    || self.header.mtime != 0
-            }
-        }
+        file_header_has_mtime(&self.header)
     }
 
     /// Per-member (file) comment for RAR 3.x/4.x archives (`FHD_COMMENT`),
@@ -248,4 +242,49 @@ impl ArchiveEntry {
     pub fn comment(&self) -> Option<&[u8]> {
         self.header.comment.as_deref()
     }
+}
+
+/// Header-level view of [`ArchiveEntry::has_mtime`], for the decode paths
+/// that only hold a [`FileHeader`].
+pub(crate) fn file_header_has_mtime(header: &FileHeader) -> bool {
+    match header.format_version {
+        3 | 4 => header.mtime != 0,
+        _ => {
+            header.file_flags & crate::format::rar5::FILE_FLAG_TIME_UNIX != 0
+                || header.mtime_ns.is_some()
+                || header.mtime != 0
+                || has_file_time_extra(&header.extra_data)
+        }
+    }
+}
+
+/// Whether the RAR5 extra area carries a FILE_TIME (HTIME) record. A record
+/// with all-zero seconds still marks the time as explicitly stored (WinRAR
+/// shows 1970 for it), unlike a member with no time information at all
+/// (`-ts-`, which WinRAR renders as `????-??-??`).
+fn has_file_time_extra(extra: &[u8]) -> bool {
+    let mut offset = 0usize;
+    while offset < extra.len() {
+        let Ok((size, n)) = crate::format::rar5::vint::decode_from_slice(extra, offset) else {
+            return false;
+        };
+        offset += n;
+        let Ok(size) = usize::try_from(size) else {
+            return false;
+        };
+        let Some(end) = offset.checked_add(size) else {
+            return false;
+        };
+        if end > extra.len() {
+            return false;
+        }
+        let Ok((rec_type, _)) = crate::format::rar5::vint::decode_from_slice(extra, offset) else {
+            return false;
+        };
+        if rec_type == crate::format::rar5::EXTRA_FILE_TIME {
+            return true;
+        }
+        offset = end;
+    }
+    false
 }

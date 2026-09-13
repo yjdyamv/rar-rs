@@ -101,6 +101,8 @@ impl RarArchive {
         password: Option<&str>,
         progress: bool,
     ) -> RarResult<()> {
+        let (mtime, file_flags) =
+            self.rar5_time_fields(mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
         let fh_base = FileHeader {
             name: name.to_string(),
             unpacked_size,
@@ -115,7 +117,7 @@ impl RarArchive {
             comp_dict_size: dict_size_log,
             dict_size_bytes,
             host_os: OS_UNIX,
-            file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
+            file_flags,
             extra_data: extra_data.to_vec(),
             ..Default::default()
         };

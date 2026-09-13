@@ -392,17 +392,6 @@ pub(crate) struct CreateArgs {
     #[arg(short = 's', long)]
     pub(crate) solid: bool,
     /// Split the solid chain (WinRAR `-s` modifiers `-sd`/`-sv`/`-se`).
-    /// `continuous` (default, like `-sd`) keeps the statistics across the
-    /// whole archive; `volume` resets them at each volume boundary (like
-    /// `-sv`); `extension` resets when the member's file extension changes
-    /// (like `-se`). Implies `-s`.
-    #[arg(
-        long = "solid-reset",
-        value_name = "MODE",
-        default_value = "continuous",
-        value_parser = ["continuous", "volume", "extension"]
-    )]
-    pub(crate) solid_reset: String,
     /// BLAKE2sp hash records
     #[arg(long = "blake2")]
     pub(crate) blake2: bool,
@@ -816,9 +805,11 @@ pub(crate) fn collect_inputs(
     files: &[String],
     level: u8,
     archive_path: &str,
+    store_links: bool,
+    skip_links: bool,
 ) -> Result<Vec<crate::name_policy::Collected>, String> {
-    let mut collected =
-        crate::name_policy::collect(policy, files, level).map_err(|e| format!("collect: {e}"))?;
+    let mut collected = crate::name_policy::collect(policy, files, level, store_links, skip_links)
+        .map_err(|e| format!("collect: {e}"))?;
     if let Ok(abs_archive) = std::fs::canonicalize(archive_path) {
         collected.retain(
             |item| !matches!(std::fs::canonicalize(&item.path), Ok(path) if path == abs_archive),

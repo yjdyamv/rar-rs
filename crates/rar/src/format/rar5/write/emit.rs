@@ -55,6 +55,8 @@ impl RarArchive {
         solid: bool,
         hash_value: Option<[u8; 32]>,
     ) -> RarResult<()> {
+        let (mtime, file_flags) =
+            self.rar5_time_fields(mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
         let fh_base = FileHeader {
             name: name.to_string(),
             unpacked_size,
@@ -69,7 +71,7 @@ impl RarArchive {
             comp_dict_size: dict_size_log,
             dict_size_bytes,
             host_os: OS_UNIX,
-            file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
+            file_flags,
             extra_data: extra_data.to_vec(),
             ..Default::default()
         };
@@ -252,12 +254,14 @@ impl RarArchive {
             }
 
             // Estimate header size
+            let (chunk_mtime, chunk_flags) =
+                self.rar5_time_fields(params.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
             let chunk_fh = FileHeader {
                 name: params.name.to_string(),
                 unpacked_size: params.unpacked_size,
                 packed_size: remaining_vol.max(1),
                 attributes: params.attrs,
-                mtime: params.mtime,
+                mtime: chunk_mtime,
                 crc32_val: Some(0),
                 comp_method: params.method,
                 comp_solid: params.solid,
@@ -265,7 +269,7 @@ impl RarArchive {
                 dict_size_bytes: params.dict_size_bytes,
                 host_os: OS_UNIX,
                 flags: block_flags | BLOCK_FLAG_DATA_CONTINUE_TO,
-                file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
+                file_flags: chunk_flags,
                 extra_data: chunk_extra(false, is_first),
                 ..Default::default()
             };
@@ -297,12 +301,14 @@ impl RarArchive {
 
             let chunk_crc = phase(self, SplitPhase::Crc, offset, chunk_size, is_last)? as u32;
 
+            let (final_mtime, final_flags) =
+                self.rar5_time_fields(params.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
             let final_fh = FileHeader {
                 name: params.name.to_string(),
                 unpacked_size: params.unpacked_size,
                 packed_size: chunk_size,
                 attributes: params.attrs,
-                mtime: params.mtime,
+                mtime: final_mtime,
                 crc32_val: Some(chunk_crc),
                 comp_method: params.method,
                 comp_solid: params.solid,
@@ -310,7 +316,7 @@ impl RarArchive {
                 dict_size_bytes: params.dict_size_bytes,
                 host_os: OS_UNIX,
                 flags: block_flags,
-                file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
+                file_flags: final_flags,
                 extra_data: chunk_extra(is_last, is_first),
                 ..Default::default()
             };

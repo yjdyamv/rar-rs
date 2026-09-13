@@ -27,6 +27,11 @@ fn ensure_rar5_volume_set(first_volume: &Path) -> RarResult<()> {
             "legacy recovery volumes are handled by the RAR 1.5-4.x codec".into(),
         ));
     }
+    if read >= 4 && head[..4] == *crate::detect::RAR13_SIGNATURE {
+        return Err(RarError::Unsupported(
+            "recovery volumes are not supported for RAR 1.3/1.4 archives".into(),
+        ));
+    }
     Ok(())
 }
 

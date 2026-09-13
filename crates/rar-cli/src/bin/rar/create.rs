@@ -149,8 +149,8 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // has no explicit off switch, matching WinRAR: `-sd`/`-sv`/`-se` all
     // enable solid creation).
     let solid_mode = match (
-        args.solid_reset.as_str(),
-        args.solid || args.solid_params.is_some() || args.solid_reset != "continuous",
+        misc.solid_reset.as_str(),
+        args.solid || args.solid_params.is_some() || misc.solid_reset != "continuous",
     ) {
         (_, false) => rar_rs::SolidMode::Disabled,
         ("volume", _) => rar_rs::SolidMode::PerVolume,
@@ -259,7 +259,14 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         include_masks,
         exclude_masks,
     };
-    let mut collected = collect_inputs(&policy, files, args.level, archive_path)?;
+    let mut collected = collect_inputs(
+        &policy,
+        files,
+        args.level,
+        archive_path,
+        args.store_links,
+        misc.skip_links,
+    )?;
     // -ms<list>: files matching one of the listed types (extensions or
     // wildcard masks, semicolon-separated, repeatable) are stored without
     // compression (level 0), like WinRAR.

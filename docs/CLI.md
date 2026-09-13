@@ -91,6 +91,7 @@ files — it must exist and never changes where outputs are written).
 | `-mdx<size>` | Decompression dictionary cap (default 4 GiB) |
 | `-mt<threads>` | Compression/decompression thread count |
 | `-s` / `-ds` | Solid archive / disable solid sorting |
+| `-s=d` / `-s=v` / `-s=e` (aliases `-sd` / `-sv` / `-se`) | Split the solid statistics: continuously (default), at each volume (`-sv`) or when the member extension changes (`-se`); `-sv` is rejected for RAR4 and both resets are rejected for RAR 1.3–2.x, whose chains cannot carry a reset flag. The switch is accepted (and ignored) on read commands, like WinRAR |
 | `-ms<list>` | List of file types to store without compressing |
 | `-mcl` | Long-distance matching (WinRAR hidden switch) — automatic at `-m2`…`-m5`; the `-mcl` switch is accepted (no-op) because long-range matching is always on for those levels, matching WinRAR 7.23 |
 | `-mc[ch][mode][+/-]` | Advanced filter policy: `-mc-` disables every filter, `-mcd-`/`-mce-` disable delta/x86, `-mcd+`/`-mce+` force them on all data (`-mcd<N>+` picks the delta channel count, 1–31); `-mcl±`/`-mcx±` are accepted without effect (long-range always on, exhaustive search not implemented) |
@@ -124,9 +125,12 @@ archive's own directory (with / without a per-archive subdirectory) /
 archive metadata),
 `-ol`/`-ol-`/`-ola`/`-oh` (store symlinks as
 redirects / skip links when archiving and extracting / extract links with
-dangerous targets as-is (disables the link safety checks); hard links:
-hard-link groups store the first path and redirect the rest, and every
-redirect keeps the link's modification time — Windows and Unix, RAR5 only),
+dangerous targets as-is (disables the link safety checks); with `-ol` a
+directory symlink or junction is stored as a redirect instead of walking
+its target — Windows writes a Windows symlink (2) or junction (3) like
+WinRAR; hard links: hard-link groups store the first path and redirect the
+rest, and every redirect keeps the link's modification time — Windows and
+Unix, RAR5 only),
 `-op<path>`/`-or` (output path / auto-rename), `-os`/`-ow` (NTFS streams /
 owner), `-om[-|1][=ext;ext]` (propagate the archive's Mark of the Web to
 extracted files: zone value only, every field with `1`, optional extension
@@ -138,7 +142,8 @@ RAR5 only), `-df`/`-kb`/`-si<name>` (delete sources / keep broken / stdin
 member), `-sfx[name]` (create an SFX archive at create time),
 `-ta`/`-tb`/`-tn`/`-to` (time filters), `-tl`/`-tk[<date>]` (set archive
 time to newest / keep, or set it to the given local date), `-ts[mca][±,1]`
-(three timestamps), `-tsp` (preserve
+(three timestamps; `-ts-` omits the time field for RAR5 and is ignored for
+RAR 1.3–4.x, whose fixed headers always carry DOS local time), `-tsp` (preserve
 source access time), `-ver[n]` (versioning), `-ag[fmt]` (auto-name, local
 time),
 `-z<file>`/`-c-` (comment file / no comment; `-z` is accepted and ignored

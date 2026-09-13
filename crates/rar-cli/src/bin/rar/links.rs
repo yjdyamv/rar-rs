@@ -46,25 +46,40 @@ fn redirect(name: &str, redir_type: u64, target: String, path: &Path) -> LinkRed
     }
 }
 
-/// WinRAR's redirect type for a stored symbolic link: Windows writes a
-/// Windows symlink (2), or a junction (3) when the target is a directory;
-/// Unix writes a Unix symlink (1).
+/// WinRAR's redirect type for a stored link: Windows keeps symlinks (2) and
+/// junctions (3) apart, Unix writes a Unix symlink (1).
 fn symlink_redir_type(path: &Path) -> u64 {
     #[cfg(windows)]
-    let kind = if std::fs::metadata(path)
-        .map(|meta| meta.is_dir())
-        .unwrap_or(false)
-    {
-        3
-    } else {
-        2
-    };
+    let kind = if is_windows_junction(path) { 3 } else { 2 };
     #[cfg(not(windows))]
     let kind = {
         let _ = path;
         1
     };
     kind
+}
+
+/// Whether a Windows reparse point is an NTFS junction
+/// (`IO_REPARSE_TAG_MOUNT_POINT`) rather than a symlink. `std` reports both
+/// as symlinks, so read the reparse tag through `FindFirstFileW`.
+#[cfg(windows)]
+fn is_windows_junction(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, WIN32_FIND_DATAW};
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+    let handle = unsafe { FindFirstFileW(wide.as_ptr(), &mut data) };
+    if handle == INVALID_HANDLE_VALUE {
+        return false;
+    }
+    unsafe { FindClose(handle) };
+    data.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT
 }
 
 /// How `-oi` treats identical files.
@@ -294,23 +309,22 @@ pub(crate) fn split_link_redirects(
                 keep.push(c);
                 continue;
             }
-            match std::fs::symlink_metadata(&c.path) {
-                Ok(m) if m.file_type().is_symlink() => {
-                    if skip_links {
-                        continue;
-                    }
-                    if let Ok(target) = std::fs::read_link(&c.path) {
-                        redirects.push(redirect(
-                            &c.name,
-                            symlink_redir_type(&c.path),
-                            target.to_string_lossy().into_owned(),
-                            &c.path,
-                        ));
-                        continue;
-                    }
-                    keep.push(c);
+            if crate::name_policy::is_link_like(&c.path) {
+                if skip_links {
+                    continue;
                 }
-                _ => keep.push(c),
+                if let Ok(target) = std::fs::read_link(&c.path) {
+                    redirects.push(redirect(
+                        &c.name,
+                        symlink_redir_type(&c.path),
+                        target.to_string_lossy().into_owned(),
+                        &c.path,
+                    ));
+                    continue;
+                }
+                keep.push(c);
+            } else {
+                keep.push(c);
             }
         }
     } else {

@@ -93,6 +93,8 @@ fn cmd_update_freshen(
             .map_err(crate::error::CliError::from)?,
         3,
         &args.archive,
+        args.store_links,
+        misc.skip_links,
     )?;
     let archive = ops::open_reader(archive_path, password.as_deref())
         .map_err(|error| format!("open: {error}"))?;

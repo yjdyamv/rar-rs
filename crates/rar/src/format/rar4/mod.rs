@@ -538,7 +538,10 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         Vec::new()
     };
 
-    let mtime_ns = extract_mtime_refinement(&ext_time);
+    let (add_second, mtime_ns) = extract_mtime_refinement(&ext_time);
+    // The DOS field has 2-second resolution; an odd second is flagged in the
+    // ext-time word.
+    let mtime = dos_time_to_unix(file_time).wrapping_add(u32::from(add_second));
 
     let is_directory = match host_os {
         // MS-DOS / Windows: FILE_ATTRIBUTE_DIRECTORY in the low attribute word.
@@ -565,7 +568,7 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         unpacked_size: unp_size,
         packed_size: pack_size,
         attributes: attr as u64,
-        mtime: dos_time_to_unix(file_time),
+        mtime,
         crc32_val: Some(file_crc),
         hash_type: MODEL_HASH_NONE,
         hash_value: None,
@@ -711,7 +714,7 @@ pub(crate) fn dos_time_to_unix(dos: u32) -> u32 {
     secs.clamp(0, u32::MAX as i64) as u32
 }
 
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -742,24 +745,36 @@ pub(crate) fn is_stored(comp_method: u8) -> bool {
     comp_method == 0
 }
 
-/// Extract the mtime sub-second refinement from the RAR4 extended-time
-/// field.  The flags word holds four nibbles (mtime first at bits 15-12),
-/// each encoding PRESENT (0x8), ADD_SECOND (0x4), and a 0-3 byte count.
-/// Sub-second bytes arrive high-end first into a 24-bit accumulator.
-fn extract_mtime_refinement(ext_time: &[u8]) -> Option<u32> {
+/// Extract the mtime refinement from the RAR4 extended-time field: the
+/// `ADD_SECOND` flag (the DOS field has 2-second resolution) and the
+/// sub-second ticks. The flags word holds four nibbles (mtime first at bits
+/// 15-12), each encoding PRESENT (0x8), ADD_SECOND (0x4) and a 0-3 byte
+/// count. Sub-second bytes arrive high-end first into a 24-bit accumulator.
+fn extract_mtime_refinement(ext_time: &[u8]) -> (bool, Option<u32>) {
     const PRESENT: u8 = 0x8;
+    const ADD_SECOND: u8 = 0x4;
     const TICK_NANOSECONDS: u32 = 100;
 
-    let flags = u16::from_le_bytes(ext_time.get(..2)?.try_into().ok()?);
+    let Some(flags) = ext_time
+        .get(..2)
+        .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
+        .map(u16::from_le_bytes)
+    else {
+        return (false, None);
+    };
     let rmode = ((flags >> 12) & 0xf) as u8;
     if rmode & PRESENT == 0 {
-        return None;
+        return (false, None);
     }
+    let add_second = rmode & ADD_SECOND != 0;
+    let Some(bytes) = ext_time.get(2..2 + usize::from(rmode & 0x3)) else {
+        return (add_second, None);
+    };
     let mut ticks = 0u32;
-    for &byte in ext_time.get(2..2 + usize::from(rmode & 0x3))? {
+    for &byte in bytes {
         ticks = (u32::from(byte) << 16) | (ticks >> 8);
     }
-    Some(ticks * TICK_NANOSECONDS)
+    (add_second, Some(ticks * TICK_NANOSECONDS))
 }
 
 /// Locate the nested `COMM_HEAD` (0x75) file-comment subblock in a `FILE_HEAD`'s
@@ -905,6 +920,23 @@ mod tests {
         b[10] = 0x30; // method (store)
         b.extend_from_slice(payload);
         b
+    }
+
+    #[test]
+    fn extract_mtime_refinement_applies_add_second() {
+        // PRESENT|ADD_SECOND, one 100-ns tick.
+        let ext = [0x00u8, 0xF0, 0x01, 0x00, 0x00];
+        let (add_second, ns) = extract_mtime_refinement(&ext);
+        assert!(add_second);
+        assert_eq!(ns, Some(100));
+
+        // ADD_SECOND without ticks is still a present refinement.
+        let (add_second, ns) = extract_mtime_refinement(&[0x00, 0xC0]);
+        assert!(add_second);
+        assert_eq!(ns, Some(0));
+
+        // No PRESENT bit: nothing to apply.
+        assert_eq!(extract_mtime_refinement(&[0x00, 0x00]), (false, None));
     }
 
     #[test]

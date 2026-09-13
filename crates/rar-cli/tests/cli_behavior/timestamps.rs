@@ -123,7 +123,18 @@ fn cli_ts_saves_and_restores_file_times() {
             e.mtime_ns().is_none(),
             "-ts- must not write a time extra record"
         );
+        assert_eq!(e.mtime(), 0, "-ts- must omit the header time field");
+        assert!(!e.has_mtime(), "no stored time at all");
     }
+    let listing = std::process::Command::new(RAR_CLI)
+        .arg("l")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&listing.stdout).contains("????-??-?? ??:??"),
+        "a member without time renders ???? like WinRAR"
+    );
 
     // Invalid specs are rejected.
     let out = std::process::Command::new(RAR_CLI)

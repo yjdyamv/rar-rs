@@ -56,6 +56,7 @@ pub(crate) use crate::fs::volume::{
 };
 pub use discovery::discover_volumes;
 pub use editor::{ArchiveEditor, EditOp, EditPlan, EditReport};
+pub(crate) use entry::file_header_has_mtime;
 pub use entry::{ArchiveEntry, BatchEntry};
 #[cfg(feature = "parallel")]
 pub(crate) use entry::{BatchPrepareCtx, PreparedEntry};

@@ -377,7 +377,7 @@ fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet>
         // candidate whose data volumes actually exist.
         let mut best: Option<(usize, RevName, Meta)> = None;
         for candidate in rev_name_candidates(name) {
-            if candidate.base != base {
+            if !candidate.base.eq_ignore_ascii_case(base) {
                 continue;
             }
             let file_meta = match candidate.kind.format() {
@@ -439,7 +439,10 @@ fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet>
         meta = Some(file_meta);
         format = Some(parsed.kind.format());
         layout.get_or_insert(Layout {
-            base: parsed.base,
+            // Name rebuilt/repaired volumes after the data set's own base,
+            // not the recovery file's casing (they match
+            // case-insensitively).
+            base: base.to_string(),
             new_naming: parsed.new_naming,
             width: parsed.width,
         });
@@ -565,11 +568,46 @@ fn identify(path: &Path) -> RarResult<(PathBuf, Layout, Option<Meta>)> {
 /// Whether a path (a data volume or any `.rev`) belongs to a legacy RAR
 /// recovery set and should be dispatched to this module.
 /// Whether `name` parses as a RAR 1.5–4.x `.rev` file belonging to the
-/// volume set based at `base` (all four legacy name shapes).
-pub(crate) fn rev_name_belongs_to(name: &str, base: &str) -> bool {
-    rev_name_candidates(name)
-        .iter()
-        .any(|candidate| candidate.base == base)
+/// volume set based at `base`. Ambiguous legacy names (`set44_2_1.rev` can
+/// read as `set` + data 44 or `set4` + data 4) are resolved with the same
+/// data-volume scoring as [`collect_recovery_volumes`], so a stale scan
+/// never claims another set's parity files. Matching is ASCII
+/// case-insensitive, like the official tools on Windows.
+pub(crate) fn rev_name_belongs_to_set(parent: &Path, base: &str, name: &str) -> bool {
+    let mut trailer_owned = false;
+    let mut best: Option<(usize, String)> = None;
+    for candidate in rev_name_candidates(name) {
+        match candidate.kind.format() {
+            Format::Trailer => {
+                if candidate.base.eq_ignore_ascii_case(base) {
+                    trailer_owned = true;
+                }
+            }
+            Format::Legacy => {
+                let Some(meta) = candidate.meta else {
+                    continue;
+                };
+                let probe = Layout {
+                    base: candidate.base.clone(),
+                    new_naming: candidate.new_naming,
+                    width: candidate.width,
+                };
+                let score = (0..meta.data_count)
+                    .filter(|index| slot_exists(parent, &probe, *index))
+                    .count();
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_score, _)| score > *best_score)
+                {
+                    best = Some((score, candidate.base));
+                }
+            }
+        }
+    }
+    if trailer_owned {
+        return true;
+    }
+    best.is_some_and(|(_, candidate_base)| candidate_base.eq_ignore_ascii_case(base))
 }
 
 pub(crate) fn is_legacy_rev_set(path: &Path) -> RarResult<bool> {

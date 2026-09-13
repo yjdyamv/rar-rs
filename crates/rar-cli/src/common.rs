@@ -273,6 +273,19 @@ pub struct MiscSwitches {
     /// Lock the archive (`-k`)
     #[arg(global = true, long = "lock")]
     pub lock: bool,
+    /// How the solid chain splits (`-sd`/`-sv`/`-se`, also `-s=d`/`-s=v`/
+    /// `-s=e`): `continuous` (default) keeps the statistics across the whole
+    /// archive, `volume` resets them at each volume boundary and `extension`
+    /// resets them when the member's file extension changes. Implies solid;
+    /// accepted on every command, like WinRAR's parser.
+    #[arg(
+        global = true,
+        long = "solid-reset",
+        value_name = "MODE",
+        default_value = "continuous",
+        value_parser = ["continuous", "volume", "extension"]
+    )]
+    pub solid_reset: String,
     /// Read the comment from a file (`-z<file>`; a bare `-z` reads stdin).
     /// Used by the comment and create commands, accepted and ignored
     /// elsewhere
@@ -352,8 +365,15 @@ pub fn normalize_switch(arg: &str) -> String {
     if arg == "-ds" {
         return "--no-sort".into();
     }
+    // WinRAR accepts the reset modes both bare (`-se`) and with an equals
+    // sign (`-s=e`); other `-s=` values stay solid parameters.
     if let Some(rest) = arg.strip_prefix("-s=") {
-        return format!("--solid-params={rest}");
+        return match rest {
+            "d" => "--solid-reset=continuous".into(),
+            "v" => "--solid-reset=volume".into(),
+            "e" => "--solid-reset=extension".into(),
+            other => format!("--solid-params={other}"),
+        };
     }
     // WinRAR `-s` modifiers that split the solid compression chain.
     if arg == "-se" {

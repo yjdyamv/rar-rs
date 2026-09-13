@@ -183,11 +183,18 @@ pub(crate) fn repack_solid_archive(
                 .find(|(idx, _)| *idx == i)
                 .map(|(_, c)| c.clone())
                 .unwrap_or_else(|| entry.header.comment.clone());
+            // The catalog stores legacy DOS times as local-civil seconds;
+            // the writer re-packs from a Unix instant.
+            let mtime = if entry.header.format_version == 4 {
+                crate::format::rar4::write::local_civil_to_epoch(entry.header.mtime)
+            } else {
+                entry.header.mtime
+            };
             kept.push(KeptMember {
                 index: i,
                 name,
                 level: entry.header.comp_method,
-                mtime: entry.header.mtime,
+                mtime,
                 mtime_ns: entry.header.mtime_ns.unwrap_or(0),
                 comment,
             });

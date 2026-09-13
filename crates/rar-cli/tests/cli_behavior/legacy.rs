@@ -676,3 +676,48 @@ fn cli_repair_rejects_rar13_archives() {
         "a refused repair must not write output"
     );
 }
+
+/// `rv` / `rc` refuse RAR 1.3/1.4 volume sets instead of writing REV5 parity
+/// the DOS-era container cannot use.
+#[test]
+fn cli_rar13_recovery_volumes_are_refused() {
+    let dir = make_temp_dir();
+    let big: Vec<u8> = (0..30_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    std::fs::write(dir.path().join("big.bin"), &big).unwrap();
+    let arc = dir.path().join("r13set.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma14", "-m0", "-v8k", "-idq"])
+        .arg(&arc)
+        .arg("big.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "create the v14 volume set");
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["rv", "-idq"])
+        .arg(&arc)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "rv must refuse a v14 set");
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("RAR 1.3/1.4"), "{text}");
+    assert_eq!(
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "rev"))
+            .count(),
+        0,
+        "no .rev files may be written"
+    );
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["rc", "-idq"])
+        .arg(&arc)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "rc must refuse a v14 set");
+}

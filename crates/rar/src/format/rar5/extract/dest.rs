@@ -92,17 +92,27 @@ impl RarArchive {
     }
 
     /// Restore a member's stored timestamps on the extracted file: the
-    /// modification time always (when nonzero), plus access time when
-    /// requested via [`ExtractOptions`]. The creation time is set through
-    /// `SetFileTime` on Windows (std has no creation-time setter) and is a
-    /// `SetFileTime` on Windows (std has no creation-time setter) and is a
-    /// no-op on Unix, where the change time cannot be set (matching
-    /// WinRAR's behavior).
+    /// modification time always (when the header carries one), plus access
+    /// time when requested via [`ExtractOptions`]. The creation time is set
+    /// through `SetFileTime` on Windows (std has no creation-time setter)
+    /// and is a no-op on Unix, where the change time cannot be set
+    /// (matching WinRAR's behavior).
     pub(super) fn apply_member_times(&self, hdr: &crate::model::FileHeader, dest_path: &Path) {
         let mut times = std::fs::FileTimes::new();
         let mut any = false;
-        if hdr.mtime != 0 || hdr.mtime_ns.is_some() {
-            let mut mtime = UNIX_EPOCH + std::time::Duration::from_secs(hdr.mtime as u64);
+        // RAR 1.3–4.x store local wall-clock time; the catalog holds it as
+        // civil-as-UTC seconds, so convert back to an instant here. RAR5
+        // regular members default to the Unix epoch when no time record
+        // exists (like WinRAR); link redirects without one stay untouched.
+        let legacy = hdr.format_version == 3 || hdr.format_version == 4;
+        let time_known = crate::archive::file_header_has_mtime(hdr);
+        if time_known {
+            let secs = if legacy {
+                crate::format::rar4::write::local_civil_to_epoch(hdr.mtime)
+            } else {
+                hdr.mtime
+            };
+            let mut mtime = UNIX_EPOCH + std::time::Duration::from_secs(u64::from(secs));
             if let Some(ns) = hdr.mtime_ns {
                 mtime += std::time::Duration::from_nanos(ns as u64);
             }

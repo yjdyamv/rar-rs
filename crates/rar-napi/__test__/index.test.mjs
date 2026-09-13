@@ -278,7 +278,6 @@ test('rejects invalid JS numeric options with InvalidArg', async () => {
       ['level', 6],
       ['level', 1.5],
       ['level', Number.NaN],
-      ['threads', 0],
       ['threads', 65],
       ['threads', Number.POSITIVE_INFINITY],
       ['recoveryPercent', -1],
@@ -286,6 +285,8 @@ test('rejects invalid JS numeric options with InvalidArg', async () => {
       ['recoveryPercent', 1.5],
       ['recoveryVolumeCount', -1],
       ['recoveryVolumeCount', 2 ** 32],
+      ['recoveryVolumesPercent', -1],
+      ['recoveryVolumesPercent', 101],
       ['volumeSize', 0],
       ['volumeSize', -1],
       ['volumeSize', 1.5],
@@ -339,6 +340,72 @@ test('rejects invalid JS numeric options with InvalidArg', async () => {
         assert.equal(error.code, 'InvalidArg')
         return true
       },
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('accepts the new writer options and validates solidReset', async () => {
+  const dir = tempDir()
+  try {
+    const { listEntriesDetailed } = await import('../index.js')
+    const out = join(dir, 'opts.rar')
+    await createArchive({
+      outPath: out,
+      threads: 0,
+      saveMtime: false,
+      solidReset: 'extension',
+      entries: [
+        { kind: 'bytes', name: 'a.txt', data: Buffer.from('alpha '.repeat(500)) },
+        { kind: 'bytes', name: 'b.txt', data: Buffer.from('beta '.repeat(500)) },
+      ],
+    })
+    const entries = await listEntriesDetailed(out)
+    for (const entry of entries) {
+      assert.equal(entry.mtime, 0, 'saveMtime:false omits the stored time')
+    }
+
+    // An unknown reset mode is an argument error, and `-sv`-style resets are
+    // refused for the legacy formats by the writer validation.
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'bad-reset.rar'),
+        solidReset: 'bogus',
+        entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('x') }],
+      }),
+      (error) => {
+        assert.equal(error.code, 'InvalidArg')
+        return true
+      },
+    )
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'legacy-reset.rar'),
+        format: 'rar4',
+        solidReset: 'volume',
+        entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('x') }],
+      }),
+      (error) => {
+        assert.equal(error.code, 'InvalidArg')
+        return true
+      },
+    )
+
+    // recoveryVolumesPercent expands to .rev files at creation.
+    const vol = join(dir, 'vols.rar')
+    const result = await createArchive({
+      outPath: vol,
+      volumeSize: 32 * 1024,
+      recoveryVolumesPercent: 20,
+      entries: [
+        { kind: 'bytes', name: 'big.bin', data: Buffer.alloc(90_000, 0x41) },
+      ],
+    })
+    assert.ok(result.files.length >= 2, `expected data volumes, got ${result.files.join(', ')}`)
+    assert.ok(
+      readdirSync(dir).some((name) => name.endsWith('.rev')),
+      'recoveryVolumesPercent must create .rev files',
     )
   } finally {
     rmSync(dir, { recursive: true, force: true })
