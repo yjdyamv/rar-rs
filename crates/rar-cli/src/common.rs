@@ -164,14 +164,42 @@ pub struct MiscSwitches {
     #[allow(dead_code)]
     pub ignore_attr: bool,
     /// Exclude/include attribute mask (`-e[+]<attr>`; Windows-only)
-    #[arg(global = true, long = "exclude-attrs", value_name = "MASK")]
+    #[arg(
+        global = true,
+        long = "exclude-attrs",
+        value_name = "MASK",
+        overrides_with = "exclude_attrs"
+    )]
     #[allow(dead_code)]
     pub exclude_attrs: Option<String>,
     /// Save NTFS streams (`-os`; Windows-only)
     #[arg(global = true, long = "save-streams")]
     pub save_streams: bool,
+    /// Only add files with the Archive attribute set (`-ao`; Windows-only,
+    /// accepted)
+    #[arg(global = true, long = "archive-attr")]
+    #[allow(dead_code)]
+    pub archive_attr: bool,
+    /// Set the NTFS Compressed attribute on extracted files (`-oc`;
+    /// Windows-only, accepted)
+    #[arg(global = true, long = "ntfs-compressed")]
+    #[allow(dead_code)]
+    pub ntfs_compressed: bool,
+    /// Use large memory pages (`-mlp`; accepted)
+    #[arg(global = true, long = "large-pages")]
+    #[allow(dead_code)]
+    pub large_pages: bool,
+    /// Open shared files (`-dh`; accepted)
+    #[arg(global = true, long = "shared-files")]
+    #[allow(dead_code)]
+    pub shared_files: bool,
     /// Charset for list files (`-sc<charset>l`; accepted)
-    #[arg(global = true, long = "charset", value_name = "SET")]
+    #[arg(
+        global = true,
+        long = "charset",
+        value_name = "SET",
+        overrides_with = "charset"
+    )]
     #[allow(dead_code)]
     pub charset: Option<String>,
     /// Allow potentially incompatible names (`-oni`; Windows-only)
@@ -179,7 +207,12 @@ pub struct MiscSwitches {
     #[allow(dead_code)]
     pub allow_names: bool,
     /// Task priority and sleep (`-ri<P>[:<S>]`; Windows-only)
-    #[arg(global = true, long = "priority", value_name = "P[:S]")]
+    #[arg(
+        global = true,
+        long = "priority",
+        value_name = "P[:S]",
+        overrides_with = "priority"
+    )]
     #[allow(dead_code)]
     pub priority: Option<String>,
     /// Pause before each volume (`-vp`; no interactive prompts here)
@@ -193,14 +226,19 @@ pub struct MiscSwitches {
     pub erase_disk: bool,
     /// Save identical files as references (`-oi[0-4][:<minsize>]`; create
     /// side; accepted as a no-op on extraction)
-    #[arg(global = true, long = "identical", value_name = "OPTS", num_args = 0..=1, default_missing_value = "")]
+    #[arg(global = true, long = "identical", value_name = "OPTS", num_args = 0..=1, default_missing_value = "", overrides_with = "identical")]
     pub identical: Option<String>,
     /// Propagate Mark of the Web from the archive to extracted files
     /// (`-om[-|1][=ext;ext]`; Windows only)
-    #[arg(global = true, long = "mark-web", value_name = "OPTS", num_args = 0..=1, default_missing_value = "")]
+    #[arg(global = true, long = "mark-web", value_name = "OPTS", num_args = 0..=1, default_missing_value = "", overrides_with = "mark_web")]
     pub mark_web: Option<String>,
     /// Encryption parameters (`-me<par>`; accepted)
-    #[arg(global = true, long = "me", value_name = "PAR")]
+    #[arg(
+        global = true,
+        long = "me",
+        value_name = "PAR",
+        overrides_with = "me_params"
+    )]
     #[allow(dead_code)]
     pub me_params: Option<String>,
     /// Skip symbolic links when archiving or extracting (`-ol-`)
@@ -224,11 +262,16 @@ pub struct MiscSwitches {
     #[arg(global = true, long = "log", value_name = "SPEC", action = clap::ArgAction::Append)]
     pub log_specs: Vec<String>,
     /// Archive metadata save/restore (`-am[s,r]`; accepted)
-    #[arg(global = true, long = "archive-meta", value_name = "SPEC")]
+    #[arg(
+        global = true,
+        long = "archive-meta",
+        value_name = "SPEC",
+        overrides_with = "archive_meta"
+    )]
     #[allow(dead_code)]
     pub archive_meta: Option<String>,
     /// Log errors to a file (`-ilog[name]`; default `rar.log`)
-    #[arg(global = true, long = "log-errors", num_args = 0..=1, default_missing_value = "")]
+    #[arg(global = true, long = "log-errors", num_args = 0..=1, default_missing_value = "", overrides_with = "log_errors")]
     pub log_errors: Option<String>,
     /// File version control (`-ver[n]`; keep old versions on update)
     #[arg(global = true, long = "version-control", value_name = "N")]

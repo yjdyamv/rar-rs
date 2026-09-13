@@ -1349,3 +1349,38 @@ fn cli_skip_links_switch() {
     );
     assert!(out.join("target.txt").exists());
 }
+
+/// Windows/interactive no-op switches are accepted by every command of
+/// both binaries, like WinRAR's parser (`-vd` is the documented exception:
+/// it is rejected because it would erase removable media).
+#[test]
+fn cli_noop_switches_accepted_everywhere() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    let archive = dir.path().join("noop.rar");
+    let switches = [
+        "-ac", "-ai", "-ao", "-e+h", "-e-h", "-dh", "-oc", "-oni", "-ri1:1", "-vp", "-ioff",
+        "-isnd", "-ieml", "-mlp", "-ams", "-amr", "-scuc",
+    ];
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .args(switches)
+        .arg(&archive)
+        .arg("f1.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "create with the no-op switches");
+
+    for switch in switches {
+        for bin in [RAR_CLI, UNRAR_CLI] {
+            let status = std::process::Command::new(bin)
+                .args(["t", "-idq", switch])
+                .arg(&archive)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{bin} t {switch}");
+        }
+    }
+}

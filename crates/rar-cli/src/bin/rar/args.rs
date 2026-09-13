@@ -552,24 +552,6 @@ pub(crate) struct CreateArgs {
     #[arg(long = "long-match", value_name = "PAR")]
     #[allow(dead_code)]
     pub(crate) long_match: Option<String>,
-    /// Only add files with the Archive attribute set (like `-ao`;
-    /// Windows-only, accepted)
-    #[arg(long = "archive-attr")]
-    #[allow(dead_code)]
-    pub(crate) archive_attr: bool,
-    /// Set the NTFS Compressed attribute on extracted files (like `-oc`;
-    /// accepted)
-    #[arg(long = "ntfs-compressed")]
-    #[allow(dead_code)]
-    pub(crate) ntfs_compressed: bool,
-    /// Use large memory pages (like `-mlp`; accepted)
-    #[arg(long = "large-pages")]
-    #[allow(dead_code)]
-    pub(crate) large_pages: bool,
-    /// Open shared files (like `-dh`; accepted)
-    #[arg(long = "shared-files")]
-    #[allow(dead_code)]
-    pub(crate) shared_files: bool,
     /// Move deleted files to the Recycle Bin (like `-dr`; unsupported)
     #[arg(long = "recycle-bin")]
     pub(crate) recycle_bin: bool,

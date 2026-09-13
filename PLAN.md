@@ -146,11 +146,10 @@ fuzz 使用一个可枚举的小子集，于是删除 feature 与 `rar40`/`rar50
 - [x] **`-oi` 相同文件引用（2026-09）**：`rar a`/`u`/`f` 支持 `-oi[0-4][:<minsize>]`——默认 64 KiB 阈值（`b/B/k/K/m/M/g/G/t/T` 单位，小写二进制/大写十进制）、`-oi1` 存首文件+type-5 "File copy" redirect、`-oi2` 打印分组、`-oi3`/`-oi4` 只列分组且不创建归档、`-oi0`/`-oi-` 关闭；CRC32 相同后逐字节复核防碰撞；RAR4 与官方一致忽略 dedup。官方 UnRAR 双向互操作 + `cli_behavior` 两测试。
 - [x] **`-om` MOTW 传播 + `-mes`（2026-09）**：`-om[-|1][=ext;ext]`（默认只传播安全区 `ZoneId=`，`1` 全字段，扩展名过滤，Windows；库 `MarkOfTheWeb` + `ArchiveReader::set_mark_of_the_web`，`rar`/`unrar` 双侧接线）；与 WinRAR 输出逐字节一致（互操作测试）；`-me<par>`（含未文档化的 `-mes`）改为全局接受（原先仅 create 接受、extract/test 报错）。
 - [x] **`-log[AFPU]*[=name]`（2026-09）**：`rar` 侧日志（默认 `rarinfo.log`；`A` 归档名（含分卷全部路径）/`F` 处理成员名（a/u/f/x/e/d/l/lb/lt/v/vb/vt）/`P` 追加/`U` UTF-16LE；多次 `-log` 各写各的；写失败退出码 9）。官方 UnRAR 拒绝 `-log`（`Unknown option`，退出 7），我们 unrar 同样拒绝（消息与退出码一致）。注：官方 `-logAF` 只留最后一类（内部截断怪癖），我们写 A+F 正常叠加。
-- [ ] `-mc<par>` 高级压缩参数 no-op。
 - [x] **`-mc<par>` 过滤器策略（2026-09）**：`-mc[channels][mode][+/-]` 解析为 `FilterOptions`（`WriterOptions::filters`，`FilterMode::{Auto,Disabled,Forced}`）——`-mc-` 全禁、`-mcd-`/`-mce-` 单项禁、`-mcd+`/`-mce+` 强制（`-mcd<N>+` 指定 delta 通道 1–31），`-mcl±`/`-mcx±` 无效果（长距恒开、exhaustive 未实现）；与官方同样宽容（无法识别的字符忽略，`-mcd6+`/`-mc6d+`/`-mc5` 均接受）。RAR5 三条编码路径（常驻/batch/流式）与 RAR4 非 solid 候选都接策略；通道越界由 `WriterOptions` 校验拒绝。测试：库级 roundtrip + packed 对比、CLI 策略/宽容形式/RAR4、70 MiB 流式回环。
 - [x] **CLI 形态（2026-09）**：`mf`（归档含目录项、只删文件留目录，与官方逐项对照）、`lta`/`vta` 别名、`rar x -kb/-or/-op<path>`、`a -f`/`a -u`（命令串等价于 `f`/`u`）、`a -k`、`a -z<file>`、`-qo+`/`-qo-`、`-ol-`（归档与提取都跳过链接）、`-ola`（提取链接禁用安全校验，`ExtractOptions::allow_unsafe_links`）；另修 `d`/`rn` 的错误码丢失（锁定档现在报退出码 4，与官方一致）。注：官方只支持 `--` 停止开关扫描（单 `-` 报错 7），我们 `--` 已可用。
-- [ ] Windows no-op 开关（`-ac`/`-ai`/`-e[+]<attr>`/`-dh`/`-oc`/`-oni`/`-ri`/`-vp`/`-vd`/`-ioff`/`-isnd`/`-ieml`/`-mlp`/`-am[s,r]`/`-sc` 部分）：按 WinRAR 语义补齐或明确记录。
 - [ ] 格式硬限（记录）：RAR 1.3/1.4 读取；RAR3/4 非标准 VM 过滤器；RAR5 filter type ≥4；RAR4 分卷 `d/a`（官方同样拒绝）；pre-RAR3 solid repack（清晰报错）；RAR4 成员注释与官方 `t` 不互操作（已知小差异）。
+- [x] **Windows/no-op 开关全命令接受（2026-09）**：`-ac`/`-ai`/`-ao`/`-e[+]<attr>`/`-dh`/`-oc`/`-oni`/`-ri`/`-vp`/`-ioff`/`-isnd`/`-ieml`/`-mlp`/`-am[s,r]`/`-sc` 从 create-only 移到全局（`rar`/`unrar` 每个命令都接受，官方解析器模型），重复出现按最后一次生效（`overrides_with`，如 `-ams -amr`）；`-vd` 保持明确拒绝（会擦盘）。测试 `cli_noop_switches_accepted_everywhere`。
 - 注：官方 7.23 已移除 `-ma4`（RAR4 创建，报 `Unknown option`）；我们的 RAR4/v15/v20 创建是超出官方的扩展。
 
 ### 老容器族读取（RAR 1.5–4.x，继续）

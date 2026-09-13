@@ -116,9 +116,11 @@ source access time), `-ver[n]` (versioning), `-ag[fmt]` (auto-name),
 `-z<file>`/`-c-` (comment file / no comment), `-y`/`-o±` (yes / overwrite
 mode), `-ierr`/`-ilog`/`-iver`, `-cfg-`/`-sc<charset>`.
 
-Switches that are Windows-only or interactive in WinRAR (e.g. `-ac`, `-dh`,
-`-ieml`, `-ioff`, `-isnd`, `-ri`, `-mlp`, `-oc`, `-oni`, `-oi`) are
-**accepted as no-ops**. `-os` (NTFS streams) is implemented on Windows:
+Switches that are Windows-only or interactive in WinRAR (`-ac`, `-ai`,
+`-ao`, `-e[+]<attr>`, `-dh`, `-ieml`, `-ioff`, `-isnd`, `-ri`, `-mlp`,
+`-oc`, `-oni`, `-am[s,r]`, `-vp`, `-sc`) are **accepted as no-ops** on
+every command of both binaries, like WinRAR's own parser. `-os` (NTFS
+streams) is implemented on Windows:
 create stores the file's alternate data streams as `STM` records (each
 stream is encrypted with the archive password when `-p`/`-hp` is set) and
 extraction restores them; on other platforms it is a no-op. `-dr` (recycle
