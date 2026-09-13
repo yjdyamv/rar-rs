@@ -56,6 +56,26 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 `--work-dir <path>` (`-w<path>`; the directory WinRAR uses for temporary
 files — it must exist and never changes where outputs are written).
 
+### Input syntax (WinRAR parity)
+
+- **List files**: any file/member argument starting with `@` names a plain
+  text list (`rar a arc @files.lst`, `unrar x arc @members.lst`); `@` alone
+  reads the list from stdin. `//` starts a comment, blank lines are
+  ignored, and `-@` disables list processing (`-@+` re-enables). Lists are
+  decoded as UTF-8 with a Latin-1 fallback; UTF-16 lists are detected by
+  BOM. `-sc<charset>l` is accepted (its charset conversion is not applied).
+- **Implicit `*.*`**: `rar a archive` with no files (and no `-si`) archives
+  everything in the current directory, like WinRAR.
+- **Creation names**: `rar a foo f.txt` writes `foo.rar` — a missing
+  extension is filled in with `.rar`.
+- **Member filters**: `t`, `v`, `l`, `lb`, `lt`, `vb`, `vt` (and the UnRAR
+  equivalents) accept member names after the archive and process only the
+  matches; a filter matching nothing exits 10.
+- **Extraction destination**: the trailing argument is the destination when
+  it ends with a path separator (`rar x arc.rar dest\`); an explicit
+  `--dest` wins.
+- `rar d archive` without members is a successful no-op, like WinRAR.
+
 ### Compression & format
 
 | Switch | Meaning |

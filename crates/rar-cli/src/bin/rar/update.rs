@@ -89,7 +89,8 @@ fn cmd_update_freshen(
 
     let collected = collect_inputs(
         &crate::name_policy::NamePolicy::default(),
-        &args.files,
+        &crate::listfile::expand(&args.files, misc.list_files.as_deref())
+            .map_err(crate::error::CliError::from)?,
         3,
         &args.archive,
     )?;

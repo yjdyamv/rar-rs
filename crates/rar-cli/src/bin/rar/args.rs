@@ -104,26 +104,26 @@ pub(crate) enum Command {
     ExtractFlat(ExtractArgs),
     /// Test archive contents
     #[command(visible_alias = "t")]
-    Test(ArchiveArgs),
+    Test(ListArgs),
     /// Verbosely list archive contents
     #[command(visible_alias = "v")]
-    VerboseList(ArchiveArgs),
+    VerboseList(ListArgs),
     /// List archive contents
     #[command(visible_alias = "l")]
-    List(ArchiveArgs),
+    List(ListArgs),
     /// List bare (names only, like `lb`)
     #[command(visible_alias = "lb")]
-    ListBare(ArchiveArgs),
+    ListBare(ListArgs),
     /// List technical (like `lt`; `lta` is accepted as an alias — service
     /// records are not listed)
     #[command(visible_aliases = ["lt", "lta"])]
-    ListTechnical(ArchiveArgs),
+    ListTechnical(ListArgs),
     /// Verbosely list bare (like `vb`)
     #[command(visible_alias = "vb")]
-    VerboseListBare(ArchiveArgs),
+    VerboseListBare(ListArgs),
     /// Verbosely list technical (like `vt`; `vta` is accepted as an alias)
     #[command(visible_aliases = ["vt", "vta"])]
-    VerboseListTechnical(ArchiveArgs),
+    VerboseListTechnical(ListArgs),
     /// Show archive info
     #[command(visible_alias = "i")]
     Info(ArchiveArgs),
@@ -139,6 +139,18 @@ pub(crate) struct ArchiveArgs {
     pub(crate) password: password::PasswordArgs,
     #[arg(value_name = "ARCHIVE")]
     pub(crate) archive: String,
+}
+
+/// Archive path plus optional member filters (test / list commands).
+#[derive(Args)]
+pub(crate) struct ListArgs {
+    #[command(flatten)]
+    pub(crate) password: password::PasswordArgs,
+    #[arg(value_name = "ARCHIVE")]
+    pub(crate) archive: String,
+    /// Member names to list/test (empty = every member)
+    #[arg(value_name = "NAMES")]
+    pub(crate) names: Vec<String>,
 }
 
 /// `rar ch` parameters: member name case conversion (-cl / -cu).
@@ -214,13 +226,13 @@ pub(crate) struct ExtractArgs {
     pub(crate) password: password::PasswordArgs,
     #[arg(value_name = "ARCHIVE")]
     pub(crate) archive: String,
-    #[arg(long = "dest", default_value = ".", value_name = "DEST")]
-    pub(crate) dest: String,
+    #[arg(long = "dest", value_name = "DEST")]
+    pub(crate) dest: Option<String>,
     /// One or more member names to extract; when omitted, every file member
     /// is extracted (or, with `-so`, written to stdout). Member names match
-    /// the full stored path or its basename. They are never treated as a
-    /// destination directory — set the destination with `--dest` instead.
-    #[arg(value_name = "NAMES", trailing_var_arg = true)]
+    /// the full stored path or its basename. A trailing argument ending
+    /// with a path separator is treated as the destination directory.
+    #[arg(value_name = "NAMES")]
     pub(crate) names: Vec<String>,
     /// Compression threads (like `-mt<N>`; also used for extraction)
     #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
@@ -312,7 +324,7 @@ pub(crate) struct DeleteArgs {
     pub(crate) password: password::PasswordArgs,
     #[arg(value_name = "ARCHIVE")]
     pub(crate) archive: String,
-    #[arg(value_name = "NAMES", required = true)]
+    #[arg(value_name = "NAMES")]
     pub(crate) names: Vec<String>,
 }
 
@@ -595,7 +607,7 @@ pub(crate) struct CreateArgs {
     pub(crate) stdin_name: Option<String>,
     #[arg(value_name = "ARCHIVE")]
     pub(crate) archive: String,
-    #[arg(value_name = "FILES", required_unless_present = "stdin_name")]
+    #[arg(value_name = "FILES")]
     pub(crate) files: Vec<String>,
 }
 

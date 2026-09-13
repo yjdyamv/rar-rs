@@ -76,8 +76,19 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             archive_path
         };
     }
+    // WinRAR appends `.rar` when the archive name carries no extension.
+    if std::path::Path::new(&archive_path).extension().is_none() {
+        archive_path.push_str(".rar");
+    }
     let archive_path = &archive_path;
-    let files = &args.files;
+    let mut files = crate::listfile::expand(&args.files, misc.list_files.as_deref())
+        .map_err(error::CliError::from)?;
+    // WinRAR implies `*.*` when neither files nor listfiles are given
+    // (`-si` supplies its own member instead).
+    if args.files.is_empty() && args.stdin_name.is_none() {
+        files = vec!["*.*".to_string()];
+    }
+    let files = &files;
 
     let (dict_size_log, dict_size_bytes) = match args.dict_size.as_deref() {
         Some(s) => resolve_dict_switch(s, args.archive_format.as_deref())?,

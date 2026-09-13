@@ -112,7 +112,12 @@ pub(crate) fn editor_chained_rename_plan(
 pub(crate) fn cmd_delete(args: &DeleteArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let archive_path = &args.archive;
     let logs = crate::log::specs_from(misc)?;
-    let names: Vec<&str> = args.names.iter().map(|s| s.as_str()).collect();
+    let expanded = crate::listfile::expand(&args.names, misc.list_files.as_deref())?;
+    if expanded.is_empty() {
+        // WinRAR treats `d` without members as a successful no-op.
+        return Ok(());
+    }
+    let names: Vec<&str> = expanded.iter().map(|s| s.as_str()).collect();
     let mut editor = open_editor(archive_path, args.password.password.as_deref())?;
     let plan = editor_delete_plan(&editor, &names)
         .map_err(|e| crate::error::CliError::from(e).context("delete"))?;
@@ -122,11 +127,7 @@ pub(crate) fn cmd_delete(args: &DeleteArgs, misc: &common::MiscSwitches) -> CliR
         .deleted();
     info!("Deleted {deleted} file(s) from {archive_path}");
     if !logs.is_empty() {
-        crate::log::write_logs(
-            &logs,
-            &[std::path::PathBuf::from(archive_path)],
-            &args.names,
-        )?;
+        crate::log::write_logs(&logs, &[std::path::PathBuf::from(archive_path)], &expanded)?;
     }
     Ok(())
 }

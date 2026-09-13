@@ -11,6 +11,7 @@ mod compression;
 mod config;
 mod edits;
 mod formats;
+mod input;
 mod legacy;
 mod operations;
 mod parity;

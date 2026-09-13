@@ -1,12 +1,17 @@
 //! Listing, searching, testing and archive info.
 
-use crate::args::ArchiveArgs;
+use crate::args::{ArchiveArgs, ListArgs};
 use crate::common;
 use crate::error;
 use crate::error::CliResult;
 use crate::info;
 use crate::ops;
 use crate::output;
+
+/// Expand `@listfiles` in a list/test command's member filter.
+fn filter_names(args: &ListArgs, misc: &common::MiscSwitches) -> Result<Vec<String>, String> {
+    crate::listfile::expand(&args.names, misc.list_files.as_deref())
+}
 /// Find a string in member contents (like `rar i<string>`).
 ///
 /// The search string is attached to the command: `rar i<str> archive.rar`,
@@ -91,19 +96,41 @@ pub(crate) fn cmd_find(cmd: &str, args: &[String]) -> CliResult<()> {
 
 /// Verbose list (like `rar v`): adds the packed size, ratio and checksum
 /// columns.
-pub(crate) fn cmd_verbose_list(args: &ArchiveArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+pub(crate) fn cmd_verbose_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+    let names = filter_names(args, misc).map_err(error::CliError::from)?;
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    output::print_verbose_list(&rar).map_err(error::CliError::from)?;
-    write_list_logs(misc, &rar, &args.archive)
+    output::print_verbose_list(&rar, &names).map_err(error::CliError::from)?;
+    write_list_logs(misc, &rar, &args.archive, &names)
 }
 
-/// Test archive contents (like `rar t`).
-pub(crate) fn cmd_test(args: &ArchiveArgs) -> CliResult<()> {
+/// Test archive contents (like `rar t`), optionally filtered to the
+/// requested member names.
+pub(crate) fn cmd_test(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+    let names = filter_names(args, misc).map_err(error::CliError::from)?;
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())
         .map_err(|e| e.context("open"))?;
-    let report: rar_rs::VerificationReport = rar
-        .verify()
-        .map_err(|e| error::CliError::from(e).context("test"))?;
+    let ids = crate::selector::select_entries(
+        rar.entries()
+            .filter(|entry| !entry.is_dir())
+            .map(|entry| (entry.id(), entry.metadata().name())),
+        &names,
+    );
+    if ids.is_empty() && !names.is_empty() {
+        return Err(error::CliError::with_code(
+            format!(
+                "no archive members matched the requested name(s): {}",
+                names.join(", ")
+            ),
+            error::EXIT_NO_FILES,
+        ));
+    }
+    let report: rar_rs::VerificationReport = if names.is_empty() {
+        rar.verify()
+            .map_err(|e| error::CliError::from(e).context("test"))?
+    } else {
+        rar.verify_ids_with_options(&ids, rar_rs::ExtractOptions::default())
+            .map_err(|e| error::CliError::from(e).context("test"))?
+    };
     info!("{} OK, {} failed", report.passed(), report.failed());
     if report.failed() == 0 {
         Ok(())
@@ -127,25 +154,28 @@ pub(crate) fn cmd_test(args: &ArchiveArgs) -> CliResult<()> {
     }
 }
 
-pub(crate) fn cmd_list(args: &ArchiveArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+pub(crate) fn cmd_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+    let names = filter_names(args, misc).map_err(error::CliError::from)?;
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    ops::list_entries(&rar, true);
-    write_list_logs(misc, &rar, &args.archive)
+    ops::list_entries(&rar, true, &names);
+    write_list_logs(misc, &rar, &args.archive, &names)
 }
 
 /// Bare list (`lb` / `vb`): member names only.
-pub(crate) fn cmd_list_bare(args: &ArchiveArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+pub(crate) fn cmd_list_bare(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+    let names = filter_names(args, misc).map_err(error::CliError::from)?;
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    ops::list_bare(&rar);
-    write_list_logs(misc, &rar, &args.archive)
+    ops::list_bare(&rar, &names);
+    write_list_logs(misc, &rar, &args.archive, &names)
 }
 
 /// Technical list (`lt` / `vt`): mtime, attributes, sizes, ratio, CRC and
 /// method per member, in the spirit of the official `rar lt`.
-pub(crate) fn cmd_list_technical(args: &ArchiveArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+pub(crate) fn cmd_list_technical(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+    let names = filter_names(args, misc).map_err(error::CliError::from)?;
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    ops::list_technical(&rar);
-    write_list_logs(misc, &rar, &args.archive)
+    ops::list_technical(&rar, &names);
+    write_list_logs(misc, &rar, &args.archive, &names)
 }
 
 /// `-log` for the listing commands: every listed member name.
@@ -153,16 +183,18 @@ fn write_list_logs(
     misc: &common::MiscSwitches,
     rar: &rar_rs::ArchiveReader,
     archive: &str,
+    names: &[String],
 ) -> CliResult<()> {
     let logs = crate::log::specs_from(misc)?;
     if logs.is_empty() {
         return Ok(());
     }
-    let names: Vec<String> = rar
+    let listed: Vec<String> = rar
         .entries()
+        .filter(|entry| ops::matches_filter(entry.name(), names))
         .map(|entry| entry.name().to_string())
         .collect();
-    crate::log::write_logs(&logs, &[std::path::PathBuf::from(archive)], &names)?;
+    crate::log::write_logs(&logs, &[std::path::PathBuf::from(archive)], &listed)?;
     Ok(())
 }
 

@@ -99,7 +99,7 @@ pub fn format_comment_line(comment: Option<&[u8]>) -> Option<String> {
 }
 
 /// Print a verbose listing (like `rar v` / `unrar v`).
-pub fn print_verbose_list(rar: &rar_rs::ArchiveReader) -> Result<(), String> {
+pub fn print_verbose_list(rar: &rar_rs::ArchiveReader, names: &[String]) -> Result<(), String> {
     println!(
         "{:>10}  {:>10}  {:>6}  {:>10}  {:<8}  Name",
         "Size", "Packed", "Ratio", "Checksum", "Method"
@@ -107,7 +107,10 @@ pub fn print_verbose_list(rar: &rar_rs::ArchiveReader) -> Result<(), String> {
     println!("{}", "-".repeat(70));
     let mut total_size = 0u64;
     let mut total_packed = 0u64;
-    for entry in rar.entries() {
+    for entry in rar
+        .entries()
+        .filter(|entry| crate::ops::matches_filter(entry.name(), names))
+    {
         let ratio = if entry.is_dir() {
             "  dir".to_string()
         } else if entry.size() > 0 {

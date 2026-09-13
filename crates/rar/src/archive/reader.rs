@@ -520,11 +520,41 @@ impl ArchiveReader {
             }
             ids.push(entry.id());
         }
+        self.verify_ids_with_options(&ids, options)
+    }
+
+    /// Verify only the listed member IDs (used by filtered `t` runs).
+    pub fn verify_ids_with_options(
+        &mut self,
+        ids: &[EntryId],
+        options: ExtractOptions,
+    ) -> RarResult<VerificationReport> {
+        let mut total_unpacked = 0u64;
+        for &id in ids {
+            let entry = self.entry(id)?;
+            total_unpacked = total_unpacked.checked_add(entry.size()).ok_or_else(|| {
+                RarError::LimitExceeded {
+                    limit: options.max_total_unpacked_bytes.unwrap_or(u64::MAX),
+                    context: "total unpacked size overflow while verifying archive".into(),
+                }
+            })?;
+            if let Some(limit) = options.max_total_unpacked_bytes
+                && total_unpacked > limit
+            {
+                return Err(RarError::LimitExceeded {
+                    limit,
+                    context: format!(
+                        "total unpacked size {total_unpacked} exceeds limit while verifying {}",
+                        entry.name()
+                    ),
+                });
+            }
+        }
 
         let mut failures = Vec::new();
         let mut sink = std::io::sink();
 
-        for id in ids.iter().copied() {
+        for &id in ids {
             if let Err(error) = self.copy_entry_to_with_options(id, &mut sink, options) {
                 if matches!(error, RarError::Cancelled) {
                     return Err(error);

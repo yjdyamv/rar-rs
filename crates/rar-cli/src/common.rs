@@ -207,6 +207,17 @@ pub struct MiscSwitches {
     #[arg(global = true, long = "hash-crc")]
     #[allow(dead_code)]
     pub hash_crc: bool,
+    /// Disable / enable `@listfile` processing (`-@` / `-@+`)
+    #[arg(
+        global = true,
+        long = "list-files",
+        value_name = "+",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "",
+        overrides_with = "list_files"
+    )]
+    pub list_files: Option<String>,
     /// Allow potentially incompatible names (`-oni`; Windows-only)
     #[arg(global = true, long = "allow-names")]
     #[allow(dead_code)]
@@ -535,6 +546,12 @@ pub fn normalize_switch(arg: &str) -> String {
     if arg == "-idp" {
         return "--id=p".into();
     }
+    if arg == "-@" {
+        return "--list-files=".into();
+    }
+    if arg == "-@+" {
+        return "--list-files=+".into();
+    }
     if arg == "-ac" {
         return "--clear-attr".into();
     }
@@ -746,5 +763,13 @@ mod tests {
     fn mdx_size_parsing_checks_multiplication_overflow() {
         assert_eq!(parse_mdx_size("2k"), Ok(2 * 1024));
         assert!(parse_mdx_size("18446744073709551615g").is_err());
+    }
+
+    #[test]
+    fn attached_si_value_normalizes() {
+        assert_eq!(normalize_switch("-sidata.bin"), "--stdin-name=data.bin");
+        assert_eq!(normalize_switch("-si"), "--stdin-name=");
+        assert_eq!(normalize_switch("-@"), "--list-files=");
+        assert_eq!(normalize_switch("-@+"), "--list-files=+");
     }
 }

@@ -6,6 +6,8 @@ mod common;
 mod error;
 #[path = "../../input.rs"]
 mod input;
+#[path = "../../listfile.rs"]
+mod listfile;
 #[path = "../../name_policy.rs"]
 mod name_policy;
 #[path = "../../ops.rs"]
@@ -135,7 +137,7 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Print(args) => extract::cmd_print(&args),
         Command::Extract(args) => extract::cmd_extract(&args, misc),
         Command::ExtractFlat(args) => extract::cmd_extract_flat(&args, misc),
-        Command::Test(args) => list::cmd_test(&args),
+        Command::Test(args) => list::cmd_test(&args, misc),
         Command::VerboseList(args) => list::cmd_verbose_list(&args, misc),
         Command::List(args) => list::cmd_list(&args, misc),
         Command::ListBare(args) => list::cmd_list_bare(&args, misc),
