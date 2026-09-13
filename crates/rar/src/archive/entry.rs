@@ -180,9 +180,10 @@ impl ArchiveEntry {
         }
     }
 
-    /// Dictionary size as `log2(size/128KiB)`. Only meaningful for RAR5
-    /// members; RAR7 members carry the byte count via
-    /// [`dict_size_bytes`](Self::dict_size_bytes).
+    /// Dictionary setting: `log2(size/128KiB)` for RAR5 members (RAR7
+    /// members carry the byte count via
+    /// [`dict_size_bytes`](Self::dict_size_bytes)), or the RAR 1.5–4.x
+    /// window-bits field (`log2(window/64KiB)`, 7 = directory).
     pub fn comp_dict_size(&self) -> u8 {
         self.header.comp_dict_size
     }

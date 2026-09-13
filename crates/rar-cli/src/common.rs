@@ -273,6 +273,11 @@ pub struct MiscSwitches {
     /// Lock the archive (`-k`)
     #[arg(global = true, long = "lock")]
     pub lock: bool,
+    /// Read the comment from a file (`-z<file>`; used by the comment and
+    /// create commands, accepted and ignored elsewhere)
+    #[arg(global = true, long = "comment-file", value_name = "FILE")]
+    #[allow(dead_code)]
+    pub comment_file: Option<String>,
     /// Write archive/file names to a log file (`-log[AFPU]*[=name]`; rar
     /// only — UnRAR rejects the switch like the official one)
     #[arg(global = true, long = "log", value_name = "SPEC", action = clap::ArgAction::Append)]

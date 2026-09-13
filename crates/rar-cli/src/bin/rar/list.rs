@@ -6,7 +6,6 @@ use crate::error;
 use crate::error::CliResult;
 use crate::info;
 use crate::ops;
-use crate::output;
 
 /// Expand `@listfiles` in a list/test command's member filter.
 fn filter_names(args: &ListArgs, misc: &common::MiscSwitches) -> Result<Vec<String>, String> {
@@ -99,7 +98,7 @@ pub(crate) fn cmd_find(cmd: &str, args: &[String]) -> CliResult<()> {
 pub(crate) fn cmd_verbose_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let names = filter_names(args, misc).map_err(error::CliError::from)?;
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    output::print_verbose_list(&rar, &names).map_err(error::CliError::from)?;
+    ops::list_entries(&rar, &args.archive, &names, true);
     write_list_logs(misc, &rar, &args.archive, &names)
 }
 
@@ -109,28 +108,7 @@ pub(crate) fn cmd_test(args: &ListArgs, misc: &common::MiscSwitches) -> CliResul
     let names = filter_names(args, misc).map_err(error::CliError::from)?;
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())
         .map_err(|e| e.context("open"))?;
-    let ids = crate::selector::select_entries(
-        rar.entries()
-            .filter(|entry| !entry.is_dir())
-            .map(|entry| (entry.id(), entry.metadata().name())),
-        &names,
-    );
-    if ids.is_empty() && !names.is_empty() {
-        return Err(error::CliError::with_code(
-            format!(
-                "no archive members matched the requested name(s): {}",
-                names.join(", ")
-            ),
-            error::EXIT_NO_FILES,
-        ));
-    }
-    let report: rar_rs::VerificationReport = if names.is_empty() {
-        rar.verify()
-            .map_err(|e| error::CliError::from(e).context("test"))?
-    } else {
-        rar.verify_ids_with_options(&ids, rar_rs::ExtractOptions::default())
-            .map_err(|e| error::CliError::from(e).context("test"))?
-    };
+    let report = ops::verify_members(&mut rar, &names)?;
     info!("{} OK, {} failed", report.passed(), report.failed());
     if report.failed() == 0 {
         Ok(())
@@ -157,7 +135,7 @@ pub(crate) fn cmd_test(args: &ListArgs, misc: &common::MiscSwitches) -> CliResul
 pub(crate) fn cmd_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let names = filter_names(args, misc).map_err(error::CliError::from)?;
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    ops::list_entries(&rar, true, &names);
+    ops::list_entries(&rar, &args.archive, &names, false);
     write_list_logs(misc, &rar, &args.archive, &names)
 }
 
@@ -174,7 +152,7 @@ pub(crate) fn cmd_list_bare(args: &ListArgs, misc: &common::MiscSwitches) -> Cli
 pub(crate) fn cmd_list_technical(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let names = filter_names(args, misc).map_err(error::CliError::from)?;
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    ops::list_technical(&rar, &names);
+    ops::list_technical(&rar, &args.archive, &names);
     write_list_logs(misc, &rar, &args.archive, &names)
 }
 

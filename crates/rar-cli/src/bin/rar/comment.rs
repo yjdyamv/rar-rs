@@ -1,15 +1,16 @@
 //! Archive and per-member comments.
 
-use crate::args::{ArchiveArgs, CommentArgs, FileCommentArgs};
+use crate::args::{CommentArgs, CommentWriteArgs, FileCommentArgs};
+use crate::common;
 use crate::edit::open_editor;
 use crate::error::CliResult;
 use crate::info;
 /// Set the archive comment (like `rar c`), from stdin or `-z<file>`;
 /// empty input removes the comment.
-pub(crate) fn cmd_comment_set(args: &CommentArgs) -> CliResult<()> {
+pub(crate) fn cmd_comment_set(args: &CommentArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     use std::io::Read;
     let mut comment = Vec::new();
-    if let Some(file) = &args.comment_file {
+    if let Some(file) = &misc.comment_file {
         std::fs::File::open(file)
             .and_then(|mut f| f.read_to_end(&mut comment))
             .map_err(|e| format!("read comment file {file}: {e}"))?;
@@ -34,10 +35,13 @@ pub(crate) fn cmd_comment_set(args: &CommentArgs) -> CliResult<()> {
 /// Set a member's file comment (like `rar cf`), from stdin or `-z<file>`;
 /// empty input removes the member's comment. RAR 1.5–4.x only (RAR5 has no
 /// per-member comment block).
-pub(crate) fn cmd_file_comment_set(args: &FileCommentArgs) -> CliResult<()> {
+pub(crate) fn cmd_file_comment_set(
+    args: &FileCommentArgs,
+    misc: &common::MiscSwitches,
+) -> CliResult<()> {
     use std::io::Read;
     let mut comment = Vec::new();
-    if let Some(file) = &args.comment_file {
+    if let Some(file) = &misc.comment_file {
         std::fs::File::open(file)
             .and_then(|mut f| f.read_to_end(&mut comment))
             .map_err(|e| format!("read comment file {file}: {e}"))?;
@@ -70,15 +74,22 @@ pub(crate) fn cmd_file_comment_set(args: &FileCommentArgs) -> CliResult<()> {
     Ok(())
 }
 
-/// Write the archive comment to stdout (like `rar cw`).
-pub(crate) fn cmd_comment_write(args: &ArchiveArgs) -> CliResult<()> {
+/// Write the archive comment to stdout or a file (like `rar cw`).
+pub(crate) fn cmd_comment_write(args: &CommentWriteArgs) -> CliResult<()> {
     let mut options = rar_rs::OpenOptions::new();
     if let Some(pw) = &args.password.password {
         options = options.password(pw);
     }
     let mut rar = rar_rs::ArchiveReader::open_with(&args.archive, options)
         .map_err(|e| format!("open: {e}"))?;
-    if let Some(comment) = rar.comment().map_err(|e| format!("cw: {e}"))? {
+    let Some(comment) = rar.comment().map_err(|e| format!("cw: {e}"))? else {
+        info!("Comment is not present");
+        return Ok(());
+    };
+    if let Some(file) = &args.output {
+        std::fs::write(file, &comment).map_err(|e| format!("write comment file {file}: {e}"))?;
+        info!("Write comment to {file}");
+    } else {
         use std::io::Write;
         std::io::stdout()
             .write_all(&comment)

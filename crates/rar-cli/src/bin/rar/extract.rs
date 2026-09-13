@@ -33,7 +33,7 @@ pub(crate) fn cmd_extract(
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
-    let (names, dest) = extract_names_and_dest(args, misc)?;
+    let (names, dest) = resolve_target(args, misc)?;
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     // `-so`: write the extracted members to stdout (one stream) instead of
     // to disk — handy for piping. Directories carry no data.
@@ -82,24 +82,20 @@ fn write_extract_logs(
     Ok(())
 }
 
-/// Expand `@listfiles` and split off a trailing positional destination
-/// (WinRAR: the last argument is the destination when it ends with a path
-/// separator and `--dest` was not given).
-fn extract_names_and_dest(
+/// Expand `@listfiles` and resolve the extraction target through the shared
+/// `ops` helper.
+fn resolve_target(
     args: &ExtractArgs,
     misc: &common::MiscSwitches,
 ) -> Result<(Vec<String>, std::path::PathBuf), String> {
-    let mut names = crate::listfile::expand(&args.names, misc.list_files.as_deref())?;
-    let mut dest = args.dest.clone().unwrap_or_else(|| ".".to_string());
-    if args.dest.is_none()
-        && let Some(last) = names.last()
-        && (last.ends_with('/') || last.ends_with('\\'))
-    {
-        dest = names.pop().expect("checked above");
-    }
-    let base = args.output_path.as_deref().unwrap_or(&dest);
-    let mode = output::parse_append_dir(args.append_dir.as_deref())?;
-    Ok((names, output::extract_dest(base, &args.archive, mode)))
+    ops::extract_names_and_dest(
+        &args.names,
+        misc.list_files.as_deref(),
+        args.dest.as_deref(),
+        args.output_path.as_deref(),
+        args.append_dir.as_deref(),
+        &args.archive,
+    )
 }
 
 /// Extract without archived paths (like `rar e`).
@@ -111,7 +107,7 @@ pub(crate) fn cmd_extract_flat(
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
-    let (names, dest) = extract_names_and_dest(args, misc)?;
+    let (names, dest) = resolve_target(args, misc)?;
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     if args.stdout {
         return ops::extract_to_stdout(&mut rar, &names, None);

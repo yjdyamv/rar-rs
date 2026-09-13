@@ -38,16 +38,16 @@ never a silent dump into a `<name>/` folder.
 | `s` | | Convert the archive to self-extracting (SFX) |
 | `s-` | | Strip the SFX module from an SFX archive |
 | `c` | | Set the archive comment (stdin, or `-z<file>`) |
-| `cw` | | Write the archive comment to stdout |
+| `cw` | | Write the archive comment to stdout, or to a file with `cw archive file` |
 | `cf` | | Set/remove a per-member comment (RAR4 only; the library rejects it for RAR5, which has no member-comment block) |
 | `p` | | Print a member to stdout |
 | `x` | | Extract with full paths |
 | `e` | | Extract without paths (flat) |
 | `t` | | Test archive contents |
-| `v` | | Verbose list |
-| `l` | | List contents |
+| `v` | | Verbose list (WinRAR's `Attributes/Size/Packed/Ratio/Date/Time/Checksum/Name` table) |
+| `l` | | List contents (WinRAR's `Attributes/Size/Date/Time/Name` table) |
 | `lb` | | List bare (names only) |
-| `lt` | | List technical (sizes/CRC/mtime); `lta` accepted as an alias |
+| `lt` | | List technical (WinRAR's per-member block: type, sizes, ratio, nanosecond mtime, attributes, CRC32, host OS, compression); `lta` accepted as an alias |
 | `vb` / `vt` | | Verbose bare / verbose technical (`vta` alias accepted) |
 | `i` | | Show archive info (file/dir counts, total & packed size, ratio) |
 | `i<string>` | | Find a string inside members (`ic`/`ih` variants); **`i` alone is Info, not search** |
@@ -141,7 +141,8 @@ time to newest / keep, or set it to the given local date), `-ts[mca][±,1]`
 (three timestamps), `-tsp` (preserve
 source access time), `-ver[n]` (versioning), `-ag[fmt]` (auto-name, local
 time),
-`-z<file>`/`-c-` (comment file / no comment), `-y`/`-o±` (yes / overwrite
+`-z<file>`/`-c-` (comment file / no comment; `-z` is accepted and ignored
+outside the create and comment commands), `-y`/`-o±` (yes / overwrite
 mode), `-ierr`/`-ilog`/`-iver`, `-cfg-`/`-sc<charset>`. With no interactive
 prompt, extraction without `-y`/`-o+` skips existing files (WinRAR's
 non-interactive outcome); `-o+` overwrites, `-o-` skips and `-or`
@@ -155,8 +156,9 @@ streams) is implemented on Windows:
 create stores the file's alternate data streams as `STM` records (each
 stream is encrypted with the archive password when `-p`/`-hp` is set) and
 extraction restores them; on other platforms it is a no-op. `-dr` (recycle
-bin) and `-dw` (wipe) are **rejected with an error** rather than silently
-ignored, since they would otherwise imply source deletion. `-me<par>`
+bin), `-dw` (wipe) and `-vd` (erase disk) are **rejected with an error**
+rather than silently ignored, since they would otherwise imply destructive
+changes. `-me<par>`
 (including the undocumented `-mes`) is accepted as a no-op.
 `-log[AFPU]*[=name]` (rar only; UnRAR rejects it like the official binary)
 writes archive names (`A`), processed member names (`F`), appending with

@@ -27,6 +27,11 @@ pub struct FileHeader {
     pub comp_method: u8,
     pub comp_version: u8,
     pub comp_solid: bool,
+    /// Dictionary setting. RAR5: `log2(dictionary/128 KiB)`, with RAR7
+    /// members carrying the byte count in
+    /// [`dict_size_bytes`](Self::dict_size_bytes) instead. RAR 1.5–4.x:
+    /// the window-bits field, `log2(window/64 KiB)` (7 marks a directory
+    /// block).
     pub comp_dict_size: u8,
     pub host_os: u64,
     pub flags: u64,

@@ -111,7 +111,7 @@ fn cli_rar4_multivolume_archive_comment_roundtrips() {
     };
     let read_comment = || {
         let out = std::process::Command::new(RAR_CLI)
-            .args(["cw"])
+            .args(["cw", "-idq"])
             .arg(&first)
             .output()
             .unwrap();
@@ -122,6 +122,18 @@ fn cli_rar4_multivolume_archive_comment_roundtrips() {
     assert_eq!(read_comment(), "multi-volume comment");
     assert!(set_comment(b"replaced\n"));
     assert_eq!(read_comment(), "replaced");
+
+    // `cw <archive> <file>` writes the comment to the file.
+    let written = dir.path().join("comment-out.txt");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["cw", "-idq"])
+        .arg(&first)
+        .arg(&written)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read(&written).unwrap(), b"replaced\n");
+
     assert!(set_comment(b""));
     assert_eq!(read_comment(), "");
 

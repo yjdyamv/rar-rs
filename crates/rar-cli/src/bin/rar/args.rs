@@ -89,7 +89,7 @@ pub(crate) enum Command {
     CommentSet(CommentArgs),
     /// Write the archive comment to stdout
     #[command(visible_alias = "cw")]
-    CommentWrite(ArchiveArgs),
+    CommentWrite(CommentWriteArgs),
     /// Set a member's file comment (from stdin, or `-z<file>`)
     #[command(visible_alias = "cf")]
     CommentFileSet(FileCommentArgs),
@@ -139,6 +139,18 @@ pub(crate) struct ArchiveArgs {
     pub(crate) password: password::PasswordArgs,
     #[arg(value_name = "ARCHIVE")]
     pub(crate) archive: String,
+}
+
+/// Write the archive comment to stdout or a file (like `rar cw`).
+#[derive(Args)]
+pub(crate) struct CommentWriteArgs {
+    #[command(flatten)]
+    pub(crate) password: password::PasswordArgs,
+    #[arg(value_name = "ARCHIVE")]
+    pub(crate) archive: String,
+    /// Write the comment to this file instead of stdout
+    #[arg(value_name = "FILE")]
+    pub(crate) output: Option<String>,
 }
 
 /// Archive path plus optional member filters (test / list commands).
@@ -199,9 +211,6 @@ pub(crate) struct CommentArgs {
     pub(crate) password: password::PasswordArgs,
     #[arg(value_name = "ARCHIVE")]
     pub(crate) archive: String,
-    /// Read the comment from a file (like `-z<file>`)
-    #[arg(long = "comment-file")]
-    pub(crate) comment_file: Option<String>,
 }
 
 /// Per-member comment setting: stdin by default, or `-z<file>`.
@@ -214,9 +223,6 @@ pub(crate) struct FileCommentArgs {
     /// The archive member to annotate
     #[arg(value_name = "MEMBER")]
     pub(crate) member: String,
-    /// Read the comment from a file (like `-z<file>`)
-    #[arg(long = "comment-file")]
-    pub(crate) comment_file: Option<String>,
 }
 
 /// Archive path plus an optional destination directory.
@@ -586,10 +592,6 @@ pub(crate) struct CreateArgs {
     /// Advanced compression parameters (like `-mc<par>`)
     #[arg(long = "mc", value_name = "PAR")]
     pub(crate) mc_params: Option<String>,
-    /// Read the archive comment from a file while creating/updating
-    /// (like `-z<file>`)
-    #[arg(long = "comment-file", value_name = "FILE")]
-    pub(crate) comment_file: Option<String>,
     /// Long-distance matching control (like `-mcl`; accepted). Long-range
     /// matching is always enabled for `-m2`…`-m5`, so this is a no-op that
     /// matches WinRAR 7.23's own behaviour.

@@ -388,3 +388,82 @@ fn cli_extract_overwrite_defaults_to_skip() {
         );
     }
 }
+
+/// `l` / `v` / `lt` render WinRAR's table shape: the `Archive:`/`Details:`
+/// preamble, attribute column and per-member technical blocks.
+#[test]
+fn list_tables_follow_the_official_shape() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+    std::fs::write(src.join("c.txt"), b"nested").unwrap();
+
+    let archive = dir.path().join("shape.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .arg("src")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let listing = std::process::Command::new(RAR_CLI)
+        .arg("l")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&listing.stdout);
+    assert!(text.contains("Archive:"), "{text}");
+    assert!(text.contains("Details: RAR 5"), "{text}");
+    assert!(
+        text.contains(" Attributes       Size     Date    Time   Name"),
+        "{text}"
+    );
+    assert!(
+        text.contains("----------- ----------  ---------- -----  ----"),
+        "{text}"
+    );
+    assert!(text.contains("-rw-r--r--"), "{text}");
+    assert!(text.contains("drwxr-xr-x"), "{text}");
+
+    let verbose = std::process::Command::new(RAR_CLI)
+        .arg("v")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&verbose.stdout);
+    assert!(text.contains("Checksum"), "{text}");
+
+    let tech = std::process::Command::new(RAR_CLI)
+        .arg("lt")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&tech.stdout);
+    let nested = if cfg!(windows) {
+        "src\\c.txt"
+    } else {
+        "src/c.txt"
+    };
+    assert!(text.contains(&format!("        Name: {nested}")), "{text}");
+    assert!(text.contains("        Type: File"), "{text}");
+    assert!(text.contains(" Compression: RAR 5.0(v50) -m0"), "{text}");
+    assert!(text.contains("     Host OS: Unix"), "{text}");
+
+    // Unknown `-z...` values are accepted and ignored outside the comment
+    // commands, like WinRAR.
+    let ignored = std::process::Command::new(RAR_CLI)
+        .args(["l", "-zz"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(ignored.status.success());
+    assert!(
+        String::from_utf8_lossy(&ignored.stdout).contains("Archive:"),
+        "{}",
+        String::from_utf8_lossy(&ignored.stdout)
+    );
+}

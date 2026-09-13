@@ -573,7 +573,9 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         comp_method: method.wrapping_sub(RAR4_METHOD_STORE),
         comp_version: 0,
         comp_solid: block.flags & FHD_SOLID != 0,
-        comp_dict_size: 0,
+        // Window-bits field (bits 5–7 of the flags word): `log2(window/64 KiB)`,
+        // with 7 marking a directory block.
+        comp_dict_size: ((block.flags >> 5) & 7) as u8,
         host_os: host_os_u64,
         flags: block.flags as u64,
         file_flags: MODEL_FILE_FLAG_CRC32,

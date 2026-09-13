@@ -71,7 +71,7 @@ pub(crate) struct FileHeaderParams<'a> {
     pub packed_size: u32,
     /// Original uncompressed size.
     pub unpacked_size: u32,
-    /// Host OS (0 = DOS, 3 = Unix).
+    /// Host OS (0 = DOS, 2 = Windows, 3 = Unix).
     pub host_os: u8,
     /// CRC-32 of the uncompressed data.
     pub file_crc: u32,

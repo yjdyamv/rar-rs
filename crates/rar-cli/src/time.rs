@@ -187,6 +187,21 @@ pub fn format_local_time(secs: u32) -> String {
     )
 }
 
+/// Render a RAR 1.5–4.x timestamp as stored: those formats keep DOS local
+/// time with no zone, so no offset is applied.
+pub fn format_civil_time(secs: u32) -> String {
+    let secs = i64::from(secs);
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
 /// Set a file's modification time.
 pub fn set_file_mtime(path: &std::path::Path, time: SystemTime) -> std::io::Result<()> {
     let file = std::fs::File::options().write(true).open(path)?;

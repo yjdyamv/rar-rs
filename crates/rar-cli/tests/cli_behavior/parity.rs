@@ -288,10 +288,7 @@ fn unrar_list_variants_bare_and_technical() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&tech.stdout);
-    assert!(
-        text.contains("a.txt") && text.contains("Checksum"),
-        "{text}"
-    );
+    assert!(text.contains("a.txt") && text.contains("CRC32"), "{text}");
     // Technical rows carry a CRC column value.
     let row = text.lines().find(|l| l.ends_with("a.txt")).unwrap();
     assert!(!row.trim_start().starts_with("-"), "{row}");

@@ -119,8 +119,8 @@ members is refused with a clear error.
 Appending to multi-volume archives is not supported (the official `rar` refuses
 too). Inline recovery records have streaming limitations during repair; encrypted
 multi-volume sets cannot combine `-hp` with inline RR and must use `.rev` recovery
-volumes. RAR4 volume sets have no `.rev` support: `rv`/`rc` refuse them with a
-clear error (the legacy container is not implemented; see
+volumes. RAR4 volume sets support `.rev` recovery volumes in both layouts WinRAR
+recognizes, with `rv`/`rc` rebuilding missing or damaged volumes (see
 `docs/issues/rar4-recovery-volumes.md`). RAR5 solid chains do participate in multithreaded compression
 (chunk-level, with a small documented ratio divergence from sequential
 encoding); RAR4 solid chains stay sequential. Filter types

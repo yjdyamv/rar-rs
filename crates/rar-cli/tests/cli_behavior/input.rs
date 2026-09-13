@@ -108,13 +108,23 @@ fn cli_list_and_test_member_filters() {
     let bare = run(&["lb", "f.rar", "a.txt"], dir.path());
     assert_eq!(String::from_utf8_lossy(&bare.stdout).trim(), "a.txt");
 
-    let list = run(&["l", "-idq", "f.rar", "b.txt"], dir.path());
+    let list = run(&["l", "f.rar", "b.txt"], dir.path());
     let text = String::from_utf8_lossy(&list.stdout);
     assert!(text.contains("b.txt") && !text.contains("a.txt"), "{text}");
 
-    let tech = run(&["lt", "-idq", "f.rar", "a.txt"], dir.path());
+    let tech = run(&["lt", "f.rar", "a.txt"], dir.path());
     let text = String::from_utf8_lossy(&tech.stdout);
     assert!(text.contains("a.txt") && !text.contains("b.txt"), "{text}");
+
+    // `-idq` suppresses the listing tables, like WinRAR.
+    for command in ["l", "v", "lt", "lb"] {
+        let quiet = run(&[command, "-idq", "f.rar"], dir.path());
+        assert!(
+            quiet.stdout.is_empty(),
+            "{command} -idq: {}",
+            String::from_utf8_lossy(&quiet.stdout)
+        );
+    }
 
     assert!(
         run(&["t", "-idq", "f.rar", "a.txt"], dir.path())

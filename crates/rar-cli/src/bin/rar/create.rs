@@ -104,7 +104,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // operations up front instead of committing an archive without them.
     // The RAR4 editor supports `-hp` comments; RAR 1.3/1.4 rejects `-hp`.
     if header_encrypt && !version.is_legacy() && !version.is_rar13() {
-        if args.comment_file.is_some() {
+        if misc.comment_file.is_some() {
             return Err(
                 "-z/--comment-file is not supported for header-encrypted (RAR5 -hp) archives"
                     .into(),
@@ -510,7 +510,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // member, so `-z` queues the comment before the first member; RAR5/RAR4
     // attach it after creation through the editor below.
     if version.is_rar13()
-        && let Some(comment_file) = &args.comment_file
+        && let Some(comment_file) = &misc.comment_file
     {
         let data = std::fs::read(comment_file).map_err(|e| format!("comment: {e}"))?;
         writer
@@ -659,16 +659,16 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // 1.3/1.4 comment was already queued before the first member above).
     // The resolved password includes a `-hp<password>` value, unlike the raw
     // `args.password` (an `-hp`-encrypted archive needs it here).
-    if !version.is_rar13()
-        && let Some(comment_file) = &args.comment_file
-    {
-        crate::comment::cmd_comment_set(&crate::args::CommentArgs {
-            password: crate::password::PasswordArgs {
-                password: password.clone(),
+    if !version.is_rar13() && misc.comment_file.is_some() {
+        crate::comment::cmd_comment_set(
+            &crate::args::CommentArgs {
+                password: crate::password::PasswordArgs {
+                    password: password.clone(),
+                },
+                archive: archive_path.clone(),
             },
-            archive: archive_path.clone(),
-            comment_file: Some(comment_file.clone()),
-        })?;
+            misc,
+        )?;
     }
     // -k: lock the archive after a successful create.
     if misc.lock {

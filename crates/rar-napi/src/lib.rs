@@ -41,8 +41,7 @@ pub struct CreateArchiveOptions {
   pub level: Option<f64>,
   /// Optional AES-256 password (file-level encryption).
   pub password: Option<String>,
-  /// Also encrypt the archive structure (file names). Requires `password`;
-  /// incompatible with multi-volume.
+  /// Also encrypt the archive structure (file names). Requires `password`.
   pub encrypt_headers: Option<bool>,
   /// Add a WinRAR-compatible inline recovery record protecting this percent
   /// (0-100) of the archive. Incompatible with multi-volume.
@@ -85,10 +84,10 @@ pub struct CreateArchiveOptions {
   /// RAR7 (v70) when its effective dictionary exceeds 4 GiB. "rar7" forces
   /// v70 members at any dictionary (32 MiB by default). "rar4"/"rar2"/
   /// "rar15" write a legacy RAR 4.x / 2.x / 1.5 archive and "rar13" the
-  /// DOS-era RAR 1.3/1.4 (`RE~^`, single-volume) container; the dictionary
-  /// (`dict_size`) and other RAR5-only options (quick-open, BLAKE2sp,
-  /// owner/stream records, recovery volumes) are rejected there, and
-  /// "rar13" additionally rejects header encryption.
+  /// DOS-era RAR 1.3/1.4 (`RE~^`, single-volume) container; the RAR5-only
+  /// options (dictionary size, quick-open, BLAKE2sp, owner/stream records)
+  /// are rejected there, and "rar13" additionally rejects header encryption
+  /// and recovery volumes.
   pub format: Option<String>,
 }
 #[napi(object)]

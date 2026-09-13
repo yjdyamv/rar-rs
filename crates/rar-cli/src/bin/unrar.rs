@@ -294,8 +294,9 @@ fn run_inner(cli: Cli) -> CliResult<()> {
         Command::VerboseList(args) => {
             let names = listfile::expand(&args.names, cli.misc.list_files.as_deref())
                 .map_err(error::CliError::from)?;
-            output::print_verbose_list(&ops::open_reader(&args.archive, password)?, &names)
-                .map_err(error::CliError::from)
+            let rar = ops::open_reader(&args.archive, password)?;
+            ops::list_entries(&rar, &args.archive, &names, true);
+            Ok(())
         }
         Command::VerboseListBare(args) => cmd_list_bare(&args, password, &cli.misc),
         Command::VerboseListTechnical(args) => cmd_list_technical(&args, password, &cli.misc),
@@ -342,34 +343,24 @@ fn cmd_list_technical(
     let names =
         listfile::expand(&args.names, misc.list_files.as_deref()).map_err(error::CliError::from)?;
     let rar = ops::open_reader(&args.archive, password)?;
-    ops::list_technical(&rar, &names);
+    ops::list_technical(&rar, &args.archive, &names);
     Ok(())
 }
 
-/// Expand `@listfiles` and split off a trailing positional destination
-/// (WinRAR: the last argument is the destination when it ends with a path
-/// separator and `--dest` was not given).
-fn extract_names_and_dest(
+/// Expand `@listfiles` and resolve the extraction target through the shared
+/// `ops` helper.
+fn resolve_target(
     args: &ExtractArgs,
     misc: &common::MiscSwitches,
 ) -> Result<(Vec<String>, std::path::PathBuf), String> {
-    let mut names = listfile::expand(&args.names, misc.list_files.as_deref())?;
-    let mut dest = args.dest.clone().unwrap_or_else(|| ".".to_string());
-    if args.dest.is_none()
-        && let Some(last) = names.last()
-        && (last.ends_with('/') || last.ends_with('\\'))
-    {
-        dest = names.pop().expect("checked above");
-    }
-    let base = args.output_path.as_deref().unwrap_or(&dest);
-    Ok((
-        names,
-        output::extract_dest(
-            base,
-            &args.archive,
-            output::parse_append_dir(args.append_dir.as_deref())?,
-        ),
-    ))
+    ops::extract_names_and_dest(
+        &args.names,
+        misc.list_files.as_deref(),
+        args.dest.as_deref(),
+        args.output_path.as_deref(),
+        args.append_dir.as_deref(),
+        &args.archive,
+    )
 }
 
 fn cmd_extract(
@@ -384,7 +375,7 @@ fn cmd_extract(
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
-    let (names, dest) = extract_names_and_dest(args, misc)?;
+    let (names, dest) = resolve_target(args, misc)?;
     let mut rar = ops::open_reader(&args.archive, password)?;
     rar.set_mark_of_the_web(motw);
 
@@ -430,7 +421,7 @@ fn cmd_extract_flat(
     misc: &common::MiscSwitches,
     assume_yes: bool,
 ) -> CliResult<()> {
-    let (names, dest) = extract_names_and_dest(args, misc)?;
+    let (names, dest) = resolve_target(args, misc)?;
     let mut rar = ops::open_reader(&args.archive, password)?;
     rar.set_mark_of_the_web(motw);
     if args.stdout {
@@ -467,7 +458,7 @@ fn cmd_list(
     let names =
         listfile::expand(&args.names, misc.list_files.as_deref()).map_err(error::CliError::from)?;
     let rar = ops::open_reader(&args.archive, password)?;
-    ops::list_entries(&rar, false, &names);
+    ops::list_entries(&rar, &args.archive, &names, false);
     Ok(())
 }
 
@@ -479,29 +470,7 @@ fn cmd_test(
     let names =
         listfile::expand(&args.names, misc.list_files.as_deref()).map_err(error::CliError::from)?;
     let mut rar = ops::open_reader(&args.archive, password)?;
-
-    let report: rar_rs::VerificationReport = if names.is_empty() {
-        rar.verify()
-            .map_err(|e| error::CliError::from(e).context("test"))?
-    } else {
-        let ids = crate::selector::select_entries(
-            rar.entries()
-                .filter(|entry| !entry.is_dir())
-                .map(|entry| (entry.id(), entry.metadata().name())),
-            &names,
-        );
-        if ids.is_empty() {
-            return Err(error::CliError::with_code(
-                format!(
-                    "no archive members matched the requested name(s): {}",
-                    names.join(", ")
-                ),
-                error::EXIT_NO_FILES,
-            ));
-        }
-        rar.verify_ids_with_options(&ids, rar_rs::ExtractOptions::default())
-            .map_err(|e| error::CliError::from(e).context("test"))?
-    };
+    let report = ops::verify_members(&mut rar, &names)?;
     info!();
     if report.failed() == 0 {
         info!("All {} files OK", report.checked());
