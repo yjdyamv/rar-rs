@@ -27,4 +27,4 @@ rar-rs 将增加 RAR3/4（unp_ver=29）归档创建功能。核心决策：
 - `archive/create.rs` 按 `rar4` 标志分发到不同的写路径。
 - `CreateOptions` 新增 `format_version` 字段。
 - CLI `-ma4` 开关从拒绝改为接受。
-- ~~RAR4 不支持：QO、RR、BLAKE2sp、头加密（-hp 后续迭代）~~ **Amended 2026-09**：RR 与 `-hp` 后续均已实现（见 `PLAN.md`「RAR4 写侧 Tier 2 全闭」与 [ADR 0005](0005-rar4-edit-architecture.md)）；仍不支持的只有 QO、BLAKE2sp 与 `.rev` 恢复卷。
+- ~~RAR4 不支持：QO、RR、BLAKE2sp、头加密（-hp 后续迭代）~~ **Amended 2026-09**：RR 与 `-hp` 后续均已实现（见 `PLAN.md`「RAR4 写侧 Tier 2 全闭」与 [ADR 0005](0005-rar4-edit-architecture.md)）；`.rev` 恢复卷也已实现（`recovery/rev3/`，见 `docs/issues/rar4-recovery-volumes.md`）；仍不支持的只有 QO 与 BLAKE2sp。

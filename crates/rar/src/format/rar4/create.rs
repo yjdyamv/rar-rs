@@ -13,8 +13,6 @@ use crate::error::{RarError, RarResult};
 pub(crate) struct Rar4WriteOptions {
     pub quick_open: bool,
     pub blake2: bool,
-    pub recovery_volumes_percent: Option<u8>,
-    pub recovery_volume_count: Option<u32>,
     pub save_owner: bool,
     pub save_streams: bool,
     pub has_dictionary: bool,
@@ -31,11 +29,6 @@ pub(crate) fn validate_rar4_only(options: Rar4WriteOptions) -> RarResult<()> {
     if options.blake2 {
         return Err(RarError::InvalidOption(
             "BLAKE2sp hashes are not supported for RAR4 archives".into(),
-        ));
-    }
-    if options.recovery_volumes_percent.is_some() || options.recovery_volume_count.is_some() {
-        return Err(RarError::InvalidOption(
-            "recovery volumes are not supported for RAR4 archives".into(),
         ));
     }
     if options.save_owner || options.save_streams {

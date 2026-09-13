@@ -40,7 +40,7 @@
 |---|---|---|
 | [`testing.md`](testing.md) | 怎么跑测试、耗时花在哪、`[profile.test]` 为何开优化、nextest 的坑 | 跑测试 / 觉得套件慢 / 改测试 |
 | [`issues/compression-perf/map.md`](issues/compression-perf/map.md) | 压缩性能议题地图：结论、已关闭议题判决、Open frontier、与 WinRAR 7.23 的头对头 | 排压缩性能工作 |
-| [`issues/rar4-recovery-volumes.md`](issues/rar4-recovery-volumes.md) | RAR4 `.rev` 未实现（现为明确拒绝）的证据、容器对比与后续步骤 | 排 RAR4 恢复卷工作 |
+| [`issues/rar4-recovery-volumes.md`](issues/rar4-recovery-volumes.md) | RAR4 `.rev` 已实现（2026-09）：两种布局（trailer/legacy 全量奇偶）、命名、修复语义与双向互操作 | 改 RAR4 恢复卷或核对 `.rev` 格式 |
 | [`issues/compression-perf/issues/`](issues/compression-perf/issues/) | 仅存**未关闭**议题（04、09）；已关闭的结论见 map.md 表格 | 接手未关闭的性能议题 |
 | [`../fuzz/README.md`](../fuzz/README.md) | fuzz 五目标与双模式运行 | 跑 fuzz / 加模糊目标 |
 | [`../crates/rar/tests/fixtures/rar50/README.md`](../crates/rar/tests/fixtures/rar50/README.md) | 真实 WinRAR fixture 的来源与用途 | 理解互操作测试数据 |

@@ -181,7 +181,7 @@ rar a -ma4 -v1m archive.rar file1 file2
 - `archive_version()` 解析 `"4"` → `ArchiveVersion::V29`（旧 `archive_format_force_v70()`，
   2026-09 收敛为单一版本表）
 - `CreateOptions` 的 `compression` 字段类型为 `ArchiveVersion`（`"4"` → `V29`，字段原名 `format_version`，2026-09 与 `WriterOptions::compression` 统一）
-- RAR4 不兼容的选项（quick_open、blake2、`.rev` 恢复卷、owner/streams、RAR7 字典）在 `-ma4` 时报错；内联 RR（`-rr`）与头加密（`-hp`）**已支持**
+- RAR4 不兼容的选项（quick_open、blake2、owner/streams、RAR7 字典）在 `-ma4` 时报错；内联 RR（`-rr`）、头加密（`-hp`）与 `.rev` 恢复卷（`-rv`/`rv`/`rc`，2026-09）**已支持**
 
 ## 测试策略
 

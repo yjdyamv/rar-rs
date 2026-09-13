@@ -442,3 +442,191 @@ fn rar4_recovery_record_interops_with_winrar() {
         );
     }
 }
+
+// ── RAR 1.5–4.x `.rev` (legacy recovery volumes) ──────────────────────────
+
+/// Legacy RAR4 sets: our `rv` output is byte-identical to WinRAR's (the
+/// full-parity layout with the counts in the file name), and each side can
+/// rebuild a deleted volume from the other's `.rev` files.
+#[test]
+fn rar4_recovery_volumes_match_winrar_byte_for_byte() {
+    let Some(rar) = rar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    write_pattern_file(&src, 400_000, 21);
+
+    // Our RAR4 set (`-ma4`, old `.rar`/`.rNN` naming).
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m0", "-v100k", "-idq"])
+        .arg(dir.path().join("r4.rar"))
+        .arg("big.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "our -ma4 creation failed:\n{out}");
+    let first = dir.path().join("r4.rar");
+    let volumes = rar_rs::discover_volumes(&first);
+    assert!(volumes.len() >= 4, "expected several volumes");
+
+    let ours = dir.path().join("ours");
+    let theirs = dir.path().join("theirs");
+    std::fs::create_dir_all(&ours).unwrap();
+    std::fs::create_dir_all(&theirs).unwrap();
+    for volume in &volumes {
+        let name = volume.file_name().unwrap();
+        std::fs::copy(volume, ours.join(name)).unwrap();
+        std::fs::copy(volume, theirs.join(name)).unwrap();
+    }
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["rv", "-idq"])
+        .arg(ours.join(first.file_name().unwrap()))
+        .arg("2"));
+    assert!(ok, "our rar rv2 failed:\n{out}");
+    let (ok, out) = run(Command::new(&rar)
+        .args(["rv2", "-idq"])
+        .arg(theirs.join(first.file_name().unwrap())));
+    assert!(ok, "WinRAR rv2 failed:\n{out}");
+
+    let our_revs: Vec<_> = std::fs::read_dir(&ours)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".rev"))
+        .collect();
+    assert!(!our_revs.is_empty());
+    for name in &our_revs {
+        assert_eq!(
+            std::fs::read(ours.join(name)).unwrap(),
+            std::fs::read(theirs.join(name)).unwrap(),
+            "{name}: our legacy .rev must match WinRAR byte-for-byte"
+        );
+    }
+
+    // WinRAR rebuilds from OUR .rev.
+    let victim_ours = ours.join(volumes[1].file_name().unwrap());
+    let saved = std::fs::read(&victim_ours).unwrap();
+    std::fs::remove_file(&victim_ours).unwrap();
+    let (ok, out) = run(Command::new(&rar)
+        .args(["rc", "-idq"])
+        .arg(ours.join(first.file_name().unwrap())));
+    assert!(ok, "WinRAR rc failed on our .rev files:\n{out}");
+    assert_eq!(std::fs::read(&victim_ours).unwrap(), saved);
+
+    // We rebuild from WinRAR's .rev.
+    let victim_theirs = theirs.join(volumes[1].file_name().unwrap());
+    let saved = std::fs::read(&victim_theirs).unwrap();
+    std::fs::remove_file(&victim_theirs).unwrap();
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["rc", "-idq"])
+        .arg(theirs.join(first.file_name().unwrap())));
+    assert!(ok, "our rc failed on WinRAR's .rev files:\n{out}");
+    assert_eq!(std::fs::read(&victim_theirs).unwrap(), saved);
+}
+
+/// WinRAR 6.23 creates a RAR4 set; WinRAR 7.23 writes the trailer-format
+/// `.rev` files (its zero-tailed `ENDARC` selects that layout); our `rv`
+/// output must match them byte-for-byte and our `rc` must rebuild both a
+/// missing middle and the short last volume.
+#[test]
+fn rar4_trailer_layout_matches_and_rebuilds() {
+    let Some(rar623) = rar4_623_bin() else {
+        eprintln!("skipped: WinRAR 6.23 not cached");
+        return;
+    };
+    let Some(rar) = rar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    write_pattern_file(&src, 400_000, 23);
+
+    let (ok, out) = run(Command::new(&rar623)
+        .args(["a", "-ma4", "-m0", "-v100k", "-idq"])
+        .arg(dir.path().join("t.rar"))
+        .arg("big.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "WinRAR 6.23 creation failed:\n{out}");
+    let first = dir.path().join("t.part1.rar");
+    let volumes = rar_rs::discover_volumes(&first);
+    assert!(volumes.len() >= 4, "expected several volumes");
+
+    let ours = dir.path().join("ours");
+    let theirs = dir.path().join("theirs");
+    std::fs::create_dir_all(&ours).unwrap();
+    std::fs::create_dir_all(&theirs).unwrap();
+    for volume in &volumes {
+        let name = volume.file_name().unwrap();
+        std::fs::copy(volume, ours.join(name)).unwrap();
+        std::fs::copy(volume, theirs.join(name)).unwrap();
+    }
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["rv", "-idq"])
+        .arg(ours.join(first.file_name().unwrap()))
+        .arg("2"));
+    assert!(ok, "our rar rv2 failed:\n{out}");
+    let (ok, out) = run(Command::new(&rar)
+        .args(["rv2", "-idq"])
+        .arg(theirs.join(first.file_name().unwrap())));
+    assert!(ok, "WinRAR rv2 failed:\n{out}");
+    for index in 1..=2 {
+        let name = format!("t.part{index}.rev");
+        assert_eq!(
+            std::fs::read(ours.join(&name)).unwrap(),
+            std::fs::read(theirs.join(&name)).unwrap(),
+            "{name}: trailer .rev must match WinRAR byte-for-byte"
+        );
+    }
+
+    // Missing middle volume.
+    let victim = theirs.join(volumes[1].file_name().unwrap());
+    let saved = std::fs::read(&victim).unwrap();
+    std::fs::remove_file(&victim).unwrap();
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["rc", "-idq"])
+        .arg(theirs.join(first.file_name().unwrap())));
+    assert!(ok, "our rc failed on the trailer set:\n{out}");
+    assert_eq!(std::fs::read(&victim).unwrap(), saved);
+
+    // Missing short last volume (truncated at ENDARC).
+    let victim = theirs.join(volumes.last().unwrap().file_name().unwrap());
+    let saved = std::fs::read(&victim).unwrap();
+    std::fs::remove_file(&victim).unwrap();
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["rc", "-idq"])
+        .arg(theirs.join(first.file_name().unwrap())));
+    assert!(ok, "our rc failed on the last volume:\n{out}");
+    assert_eq!(std::fs::read(&victim).unwrap(), saved);
+}
+
+/// `a -ma4 -v -rv2` at create time: WinRAR's `rc` must rebuild a deleted
+/// volume from the `.rev` files our create pipeline emitted.
+#[test]
+fn rar4_create_rv_winrar_rc_rebuilds() {
+    let Some(rar) = rar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    write_pattern_file(&src, 400_000, 29);
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m0", "-v100k", "-rv2", "-idq"])
+        .arg(dir.path().join("cr.rar"))
+        .arg("big.bin")
+        .current_dir(dir.path()));
+    assert!(ok, "our -ma4 -rv2 creation failed:\n{out}");
+    let first = dir.path().join("cr.rar");
+    let volumes = rar_rs::discover_volumes(&first);
+    assert!(volumes.len() >= 4, "expected several volumes");
+    assert!(dir.path().join("cr4_2_1.rev").exists());
+    assert!(dir.path().join("cr4_2_2.rev").exists());
+
+    let victim = volumes[1].clone();
+    let saved = std::fs::read(&victim).unwrap();
+    std::fs::remove_file(&victim).unwrap();
+    let (ok, out) = run(Command::new(&rar).args(["rc", "-idq"]).arg(&first));
+    assert!(ok, "WinRAR rc failed on our create-time .rev files:\n{out}");
+    assert_eq!(std::fs::read(&victim).unwrap(), saved);
+}

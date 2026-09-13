@@ -52,7 +52,7 @@
 | `codec/modern/lzss_huff/` | **公开** | RAR5 LZSS+Huffman 编解码器。ADR 0003 决策 3 明确保留（`examples/` 依赖根上的 `encode` / `decode` / `EncoderState` / `encode_chunked*`） |
 | `codec/legacy/`、`codec/common/` | `pub(crate)` | 老代编解码器与 PPMd；bitstream / huffman / filters / incompressible / match_finder / window |
 | `crypto/` | 内部（AES/KDF 原语经 `wire` 导出） | `rar50`（AES-256-CBC + KDF + hash-key MAC）、`rar15` / `rar20` / `rar30` |
-| `recovery/` | 内部（受支持入口在 crate 根与 `wire` 重导出） | `rar50`（内联 RR）、`rev50`（.rev 恢复卷）、`legacy`（PROTECT_HEAD / NEWSUB 修复）。受支持的入口在 crate 根重导出（`repair_archive_path`、`rebuild_missing_volumes`、`build_recovery_volumes_for_set` 等） |
+| `recovery/` | 内部（受支持入口在 crate 根与 `wire` 重导出） | `rar50`（内联 RR）、`rev50`（RAR5 `.rev`）、`rev3`（RAR 1.5–4.x `.rev`，GF(2^8)）、`legacy`（PROTECT_HEAD / NEWSUB 修复）。受支持的入口在 crate 根重导出（`repair_archive_path`、`rebuild_missing_volumes`、`build_recovery_volumes_for_set` 等） |
 
 三棵树默认 `pub(crate)`（2026-09 删除 `raw` feature 后永久如此）：它们是 wire 级与底层
 原语，不属于受支持的 API；外部真正需要的子集（块信封 + varint + 模型结构 + 恢复构建 +

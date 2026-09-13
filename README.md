@@ -23,8 +23,8 @@ No external RAR/UNRAR binary is required at runtime.
   chains, and volumes.
 - **Archive operations** — append, update, delete, rename, freshen, move, lock,
   repair, comments, SFX handling, and multi-volume processing.
-- **Recovery** — inline recovery records and `.rev` recovery volumes, with
-  bounded-memory repair paths.
+- **Recovery** — inline recovery records and `.rev` recovery volumes
+  (RAR5 REV5 and legacy RAR 1.5–4.x), with bounded-memory repair paths.
 - **Safe extraction** — path sanitization, size limits, atomic staging, and
   cooperative cancellation.
 - **Compression and integrity** — LZSS+Huffman, PPMd, CRC32, BLAKE2sp,

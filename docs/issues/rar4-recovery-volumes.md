@@ -1,53 +1,52 @@
-# RAR4 recovery volumes (`.rev`) are not implemented
+# RAR4 recovery volumes (`.rev`) — implemented (2026-09)
 
-Status: open — `rv`/`rc` refuse RAR4 sets with a clear error (2026-09).
+Status: **resolved**. `rar rv` / `rar rc` (and `a … -rv[N]`) now read and
+write the legacy RAR 1.5–4.x recovery volumes; the format below was
+reverse-engineered from WinRAR 5.91/6.23/7.23 output and cross-validated
+byte-for-byte in both directions.
 
-## What WinRAR does
+## Format
 
-Official `rar rv` creates `.rev` files for RAR4 volume sets. Verified locally
-with Rar 5.91, 6.23 and 7.23:
+A legacy `.rev` file is raw Reed-Solomon parity over the volume set: for
+every byte offset, the bytes of all data volumes form one GF(2^8) RS
+codeword (8-bit field, primitive polynomial `0x11d`), and each recovery
+volume stores one parity symbol per offset. The codec lives in
+`crates/rar/src/recovery/rev3/rs8.rs` (ported from the reference `rars`
+implementation and verified against WinRAR's parity bytes).
 
-- for an old-naming set `s.rar` / `s.r00` / `s.r01`, WinRAR 7.23 writes
-  `s3_1_1.rev` (naming is not the `.partN.rev` scheme);
-- `rar rc s.rar` after deleting `s.r01` rebuilds the volume
-  byte-identically.
+Two on-disk layouts exist, and WinRAR picks by the archive's generation:
 
-The RAR4 `.rev` container is **not** the RAR5 REV5 format:
+| layout | tail of the file | parity range | names |
+| --- | --- | --- | --- |
+| **trailer** (RAR 4.20+, volumes end in zero bytes) | 7 bytes: `[data_count-1, recovery_count-1, recovery_index, CRC32-LE(payload + first three)]` | `0 .. len-7`; a rebuilt volume's last 7 bytes are zero | `.partN.rar` sets: `{base}.partNN.rev`; `.rar`/`.rNN` sets: `{base}N.rev` |
+| **legacy** (RAR 3.0-era volumes without zero tails) | full parity, no trailer | whole file | `{base}<data>_<rec>_<index+1>.rev` (new-naming sets keep the part infix: `{base}.part<data>_<rec>_<index>.rev`) |
 
-| file | leading bytes | size |
-| --- | --- | --- |
-| official RAR4 `.rev` | legacy container (`{t...`) | one padded volume |
-| our former output | `Rar!\x1aRev` (REV5) | REV5 header + parity |
+WinRAR's 20-byte `ENDARC` (flags `0x400e`/`0x400f`, data = prefix CRC32 +
+volume number + eight zero bytes) is what makes a volume end in zeros and
+selects the trailer layout; our own RAR4 writer emits a 7-byte `ENDARC`
+with a live tail, so `rv` writes the legacy full-parity layout for our
+sets — exactly what WinRAR 7.23 writes for them too.
 
-## What we do now
+## Repair (`rc`)
 
-`recovery/rev50.rs::ensure_rar5_volume_set` checks the first volume's
-signature; `build_recovery_volumes_for_set` and
-`rebuild_missing_volumes(_with)` return `RarError::Unsupported` for RAR4 sets
-before writing or scanning anything, and `rar rv` / `rar rc` surface that
-error.
+- Accepts any existing data volume or `.rev` file of the set.
+- Enumerates the volume slots from the metadata counts and rebuilds
+  missing volumes (up to `recovery_count`); a missing last volume is
+  truncated at its `ENDARC` block.
+- Locates *damaged* volumes with the RS syndromes (Berlekamp-Massey, up
+  to `floor(recovery_count / 2)` unknown damaged volumes), renames them to
+  `*.bad` and writes the rebuilt volume in place, mirroring WinRAR.
+- Trailer-format rebuilds zero the unprotected seven-byte tail, exactly
+  like WinRAR.
 
-Before this gate `rv` silently wrote a REV5 file next to a RAR4 set, which
-official WinRAR rejected with a checksum error, and `rc` could not read
-official RAR4 `.rev` files (reported "no recovery volumes found").
+## Validation
 
-RAR5 `.rev` creation/rebuild is unaffected and stays cross-validated against
-WinRAR in `crates/rar-cli/tests/winrar_interop/recovery.rs`.
-
-## Why not port unrar
-
-The legacy `.rev` codec lives in unrar's `recvol.cpp`. The unrar license is
-not compatible with this project's BSD-2-Clause, clean-room provenance
-policy (the same reason the RAR5 side is a rars/format-notes port), so an
-implementation has to be reverse-engineered from fixtures.
-
-## Next steps
-
-1. Collect fixtures: RAR4 sets created by us and by WinRAR, with their
-   official `.rev` files (5.91 / 6.23 / 7.23), covering missing first /
-   middle / last volumes, padded and unpadded volume names, and sets with
-   split members.
-2. Reverse the header (volume count, per-volume CRCs, parity layout) and
-   write reader tests first (`rc`), then implement the writer (`rv`).
-3. Cross-validate both directions against the locally installed WinRAR
-   (7.23 still reads and edits RAR4 sets, so `rc` parity is testable).
+- `tests/rar4_rev3.rs`: build/rebuild round trips (first/middle/last
+  volume missing, two recovery volumes, damaged volume, trailer layout)
+  plus the RAR 3.00 and 4.20 fixtures from the `rars` corpus.
+- `cli_behavior/recovery.rs`: CLI `rv`/`rc` round trip and `a -ma4 -v -rv`
+  create-time generation.
+- `winrar_interop/recovery.rs`: our `.rev` bytes are **identical** to
+  WinRAR 7.23's for the same volumes (legacy and trailer layouts); WinRAR
+  `rc` rebuilds from our files and our `rc` rebuilds from WinRAR's,
+  byte-for-byte.

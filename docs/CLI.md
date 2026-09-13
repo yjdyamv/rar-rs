@@ -90,7 +90,7 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 |---|---|
 | `-v<size>` | Multi-volume (e.g. `-v1m` ≈ 1 MB, `-v100k` ≈ 100 KB); sets of 10+ volumes use zero-padded `part01` names like WinRAR |
 | `-rr[N]` | Inline recovery record; N = count or `N%` percent, default 10% (the `-rv` switch below takes a **required** value, no default) |
-| `-rv<N\|N%>` | Recovery volumes; capped at 10× the volume count |
+| `-rv<N\|N%>` | Recovery volumes; capped at 10× the volume count. RAR4 sets (`-ma4`) use the legacy `.rev` layout: trailer format (`base.partNN.rev` / `baseN.rev`) when the volumes end in zero bytes (WinRAR-created sets), legacy full-parity format (`base<data>_<rec>_<idx>.rev`) otherwise; silently skipped when the archive ends up single-volume |
 | `-qo[-|+]` | Quick-open records: `-qo`/`-qo+` enable, `-qo-` disables (opt-in) |
 
 ### Paths, time & misc

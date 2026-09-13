@@ -481,8 +481,6 @@ impl From<&WriterOptions> for crate::format::rar4::create::Rar4WriteOptions {
         Self {
             quick_open: options.quick_open,
             blake2: options.blake2,
-            recovery_volumes_percent: options.recovery_volumes_percent,
-            recovery_volume_count: options.recovery_volume_count,
             save_owner: options.save_owner,
             save_streams: options.save_streams,
             has_dictionary: options.dictionary_size.is_some(),

@@ -103,11 +103,11 @@ fn cli_rv_creates_recovery_volumes_and_rc_rebuilds() {
     );
 }
 
-/// `rar rv` / `rar rc` must refuse RAR4 volume sets with a clear error
-/// instead of writing a REV5 `.rev` file official WinRAR cannot read
-/// (`docs/issues/rar4-recovery-volumes.md`).
+/// `rar rv` / `rar rc` round trip on a legacy RAR4 (`.rar`/`.rNN`) volume
+/// set: the recovery volume gets WinRAR's legacy full-parity layout with
+/// the counts in the file name, and a deleted volume is rebuilt exactly.
 #[test]
-fn cli_rv_and_rc_refuse_rar4_volume_sets() {
+fn cli_rv_and_rc_roundtrip_rar4_volume_sets() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut big = vec![0u8; 400_000];
     let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -129,23 +129,74 @@ fn cli_rv_and_rc_refuse_rar4_volume_sets() {
         .unwrap();
     assert!(status.success());
 
-    let rv = std::process::Command::new(RAR_CLI)
+    let status = std::process::Command::new(RAR_CLI)
         .args(["rv", "-idq"])
         .arg(&base)
         .current_dir(dir.path())
-        .output()
+        .status()
         .unwrap();
-    assert!(!rv.status.success(), "rv must refuse a RAR4 set");
-    let text = String::from_utf8_lossy(&rv.stderr).into_owned();
-    assert!(text.contains("RAR4"), "unexpected rv error: {text}");
+    assert!(status.success(), "rar rv must accept a RAR4 set");
+    let rev = dir.path().join("mv44_1_1.rev");
+    assert!(rev.exists(), "legacy RAR4 rev name expected: {rev:?}");
 
-    let rc = std::process::Command::new(RAR_CLI)
+    // Delete a middle volume and rebuild it byte-identically.
+    let victim = dir.path().join("mv4.r00");
+    let saved = std::fs::read(&victim).unwrap();
+    std::fs::remove_file(&victim).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
         .args(["rc", "-idq"])
         .arg(&base)
         .current_dir(dir.path())
-        .output()
+        .status()
         .unwrap();
-    assert!(!rc.status.success(), "rc must refuse a RAR4 set");
-    let text = String::from_utf8_lossy(&rc.stderr).into_owned();
-    assert!(text.contains("RAR4"), "unexpected rc error: {text}");
+    assert!(status.success(), "rar rc must rebuild a RAR4 set");
+    assert_eq!(std::fs::read(&victim).unwrap(), saved);
+
+    // The rebuilt set must pass our own test.
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-idq"])
+        .arg(&base)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// `a -ma4 -v -rv2` creates the legacy recovery volumes at close time and
+/// official-style `rc` finds them after a volume loss.
+#[test]
+fn cli_ma4_create_with_rv_creates_recovery_volumes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut big = vec![0u8; 400_000];
+    let mut x: u64 = 0xDEAD_BEEF_CAFE_F00D;
+    for b in &mut big {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *b = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8;
+    }
+    let src = dir.path().join("rnd.bin");
+    std::fs::write(&src, &big).unwrap();
+    let base = dir.path().join("rv4.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-m0", "-v100k", "-rv2", "-idq"])
+        .arg(&base)
+        .arg(&src)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(dir.path().join("rv44_2_1.rev").exists());
+    assert!(dir.path().join("rv44_2_2.rev").exists());
+
+    let victim = dir.path().join("rv4.r01");
+    let saved = std::fs::read(&victim).unwrap();
+    std::fs::remove_file(&victim).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["rc", "-idq"])
+        .arg(&base)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read(&victim).unwrap(), saved);
 }

@@ -1,4 +1,8 @@
-//! Recovery-record and recovery-volume support (RAR5 family / v50).
+//! Recovery-record and recovery-volume support.
+//!
+//! RAR5 uses the 16-bit inline `RR` records (`rar50`) and the REV5 `.rev`
+//! container (`rev50`); the legacy RAR 1.5–4.x family uses NEWSUB `RR`
+//! records (`legacy`) and the GF(2^8) parity `.rev` files (`rev3`).
 
 // Same rule as `format`: the module tree is only public with the `raw`
 // feature, and without it a few helpers have no in-tree caller.
@@ -21,6 +25,7 @@ pub(crate) mod legacy_rr {
     pub(crate) use super::legacy::scan_protect;
 }
 pub mod rar50;
+pub(crate) mod rev3;
 pub mod rev50;
 
 use crate::error::{RarError, RarResult};

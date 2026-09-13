@@ -15,21 +15,16 @@ use std::path::{Path, PathBuf};
 /// REV5 file signature, distinct from the RAR archive marker.
 pub const REV5_SIGNATURE: &[u8] = b"Rar!\x1aRev";
 
-/// Refuse RAR 1.5–4.x volume sets: their `.rev` files use the legacy RAR4
-/// recovery-volume container, not REV5, and that format is not implemented
-/// (clean-room reverse engineering; see `docs/issues/rar4-recovery-volumes.md`).
-///
-/// Without this gate `rv` used to write a REV5 file next to a RAR4 set, which
-/// official WinRAR rejects with a checksum error, and `rc` reported "no
-/// recovery volumes found" on official RAR4 `.rev` files.
+/// Refuse non-RAR5 volume sets: legacy RAR 1.5–4.x sets are dispatched to
+/// [`crate::recovery::rev3`] before this check runs, so anything still
+/// reaching it (e.g. a RAR 1.3/1.4 `RE~^` set) is unsupported here.
 fn ensure_rar5_volume_set(first_volume: &Path) -> RarResult<()> {
     let mut head = [0u8; 8];
     let mut file = fs::File::open(first_volume)?;
     let read = file.read(&mut head)?;
     if read >= 7 && head[..7] == *crate::detect::RAR4_SIGNATURE {
-        return Err(RarError::Unsupported(
-            "RAR4 recovery volumes (.rev) are not implemented; -rv/-rc support RAR5 volume sets only"
-                .into(),
+        return Err(RarError::Format(
+            "legacy recovery volumes are handled by the RAR 1.5-4.x codec".into(),
         ));
     }
     Ok(())
@@ -96,6 +91,11 @@ pub fn rebuild_missing_volumes_with(
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> RarResult<Vec<PathBuf>> {
     use crate::recovery::rar50::reconstruct_data_shards;
+
+    // Legacy RAR 1.5–4.x sets use their own recovery-volume codec.
+    if crate::recovery::rev3::is_legacy_rev_set(first_volume)? {
+        return crate::recovery::rev3::rebuild_missing_volumes(first_volume, cancel, progress);
+    }
 
     ensure_rar5_volume_set(first_volume)?;
 
@@ -333,6 +333,10 @@ pub fn build_recovery_volumes_for_set(
     let nd = volume_paths.len();
     if nd == 0 {
         return Err(RarError::Format("no volumes for recovery volumes".into()));
+    }
+    // Legacy RAR 1.5–4.x sets use their own recovery-volume codec.
+    if crate::recovery::rev3::is_legacy_rev_set(&volume_paths[0])? {
+        return crate::recovery::rev3::build_recovery_volumes_for_set(volume_paths, rec_count);
     }
     ensure_rar5_volume_set(&volume_paths[0])?;
     if nd > 65535 {

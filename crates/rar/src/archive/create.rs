@@ -224,6 +224,13 @@ impl RarArchive {
     pub(super) fn write_recovery_volumes(&mut self) -> RarResult<()> {
         // Exact count wins; the percent variant is converted at close time.
         let nd = self.volume_paths.len();
+        if nd < 2 {
+            // WinRAR silently skips recovery volumes when `-v` produced a
+            // single volume (the data fit), and so do we.
+            self.recovery_volumes_percent = None;
+            self.recovery_volumes_count = None;
+            return Ok(());
+        }
         let rec_count = if let Some(count) = self.recovery_volumes_count {
             (count as usize).min(nd)
         } else if let Some(percent) = self.recovery_volumes_percent {

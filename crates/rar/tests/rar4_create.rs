@@ -1549,11 +1549,10 @@ fn create_rar4_streams_large_members_beyond_the_threshold() {
     assert_eq!(reader.read_entry(entry).unwrap(), data);
 }
 
-/// RAR4 volume sets must refuse `.rev` recovery volumes instead of writing a
-/// REV5 file that official WinRAR rejects (see
-/// `docs/issues/rar4-recovery-volumes.md`).
+/// RAR4 volume sets build legacy `.rev` recovery volumes through the same
+/// library surface as RAR5 sets (dispatched by the volume signature).
 #[test]
-fn rar4_volumes_refuse_recovery_volumes() {
+fn rar4_volumes_build_legacy_recovery_volumes() {
     let dir = make_temp_dir();
     let mut content = vec![0u8; 400_000];
     let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -1581,10 +1580,17 @@ fn rar4_volumes_refuse_recovery_volumes() {
         "expected multiple volumes, got {volumes:?}"
     );
 
-    let err = rar_rs::build_recovery_volumes_for_set(&volumes, 1).unwrap_err();
-    assert!(matches!(err, rar_rs::RarError::Unsupported(_)), "{err:?}");
-    assert!(err.to_string().contains("RAR4"), "{err}");
+    // Our volumes keep a live `ENDARC` tail, so the legacy full-parity
+    // layout with the counts in the file name is used.
+    let revs = rar_rs::build_recovery_volumes_for_set(&volumes, 1).unwrap();
+    assert_eq!(revs.len(), 1);
+    let expected = dir.path().join(format!("mv4{}_1_1.rev", volumes.len()));
+    assert_eq!(revs[0], expected);
 
-    let err = rar_rs::rebuild_missing_volumes(&volumes[0]).unwrap_err();
-    assert!(matches!(err, rar_rs::RarError::Unsupported(_)), "{err:?}");
+    // Everything present: nothing to rebuild.
+    assert!(
+        rar_rs::rebuild_missing_volumes(&volumes[0])
+            .unwrap()
+            .is_empty()
+    );
 }
