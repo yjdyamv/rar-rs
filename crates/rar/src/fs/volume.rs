@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 /// digit count of the total volume count (part01..part15), so both forms
 /// must be discoverable.
 pub(crate) fn extract_volume_base(name: &str) -> Option<(String, usize)> {
-    // Case-insensitive match for .partN.rar
-    let lower = name.to_lowercase();
+    // Case-insensitive match for `.partN.rar`; ASCII lowercasing preserves
+    // byte offsets (a Unicode `to_lowercase` can expand characters, which
+    // would make the index invalid for slicing `name`).
+    let lower = name.to_ascii_lowercase();
     if let Some(idx) = lower.find(".part") {
         let after = &lower[idx + 5..];
         if let Some(rar_idx) = after.find(".rar") {
@@ -74,7 +76,8 @@ pub(crate) fn volume_path_rar4(parent: &Path, base: &str, part_num: usize) -> Pa
 /// Legacy volume base from `x.rar` / `x.r00` / `x.s37` (case-insensitive),
 /// the inverse of [`volume_path_rar4`].
 pub(crate) fn legacy_volume_base(name: &str) -> Option<String> {
-    let lower = name.to_lowercase();
+    // ASCII lowercasing keeps byte offsets valid for slicing `name`.
+    let lower = name.to_ascii_lowercase();
     if let Some(base) = lower.strip_suffix(".rar") {
         return Some(name[..base.len()].to_string());
     }
@@ -223,4 +226,16 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["set.r00", "set.r01"]);
     }
+}
+
+#[test]
+fn unicode_names_do_not_panic_on_case_folding() {
+    // `İ` lowercases to two chars, so a lowercase-derived byte index is
+    // not a valid index into the original name.
+    let name = "İİİİİ.rar";
+    assert_eq!(legacy_volume_base(name).as_deref(), Some("İİİİİ"));
+    assert_eq!(
+        extract_volume_base("İİİİİ.part07.rar"),
+        Some(("İİİİİ".to_string(), 2))
+    );
 }

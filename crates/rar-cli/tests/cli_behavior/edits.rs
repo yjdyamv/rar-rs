@@ -1,4 +1,4 @@
-use crate::support::{RAR_CLI, make_temp_dir};
+use crate::support::{RAR_CLI, UNRAR_CLI, make_temp_dir};
 /// RAR4 multi-volume sets support the header-level edits official `rar`
 /// supports: rename (and lock) rewrite each volume in place, while delete is
 /// refused exactly like WinRAR's "Cannot modify volume".
@@ -127,4 +127,78 @@ fn cli_rar4_multivolume_archive_comment_roundtrips() {
 
     let reader = rar_rs::ArchiveReader::open(&first).unwrap();
     assert_eq!(reader.entries().count(), 3);
+}
+
+/// Header-encrypted RAR5 archives refuse rename and archive-comment edits
+/// (the transaction cannot re-encrypt rewritten headers) and the archive is
+/// left byte-identical; delete and recovery-record edits keep working, as
+/// does the RAR4 `-hp` comment path.
+#[test]
+fn cli_header_encrypted_rar5_edits_are_refused() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"one").unwrap();
+    std::fs::write(dir.path().join("g.txt"), b"two").unwrap();
+    std::fs::write(dir.path().join("note.txt"), b"note").unwrap();
+    let archive = dir.path().join("hp.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-hpsecret", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .arg("g.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let before = std::fs::read(&archive).unwrap();
+
+    for args in [
+        vec!["c", "-psecret", "-znote.txt"],
+        vec!["rn", "-psecret", "-idq"],
+    ] {
+        let mut command = std::process::Command::new(RAR_CLI);
+        command.args(&args).arg(&archive);
+        if args[0] == "rn" {
+            command.arg("f.txt").arg("zz.txt");
+        }
+        let output = command.current_dir(dir.path()).output().unwrap();
+        assert!(
+            !output.status.success(),
+            "{args:?} must be refused on an -hp archive"
+        );
+        assert_eq!(
+            std::fs::read(&archive).unwrap(),
+            before,
+            "{args:?} must not touch the archive"
+        );
+    }
+
+    // Create-time `-z`/`-k` are rejected before anything is written.
+    for (name, extra) in [("nz", "-znote.txt"), ("nk", "-k")] {
+        let target = dir.path().join(format!("{name}.rar"));
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", "-hpsecret", "-idq", extra])
+            .arg(&target)
+            .arg("f.txt")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(!status.success(), "a -hp {extra} must be rejected");
+        assert!(!target.exists(), "{name}.rar must not be created");
+    }
+
+    // Delete still works on the encrypted archive.
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["d", "-psecret", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-psecret", "-idq"])
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
 }

@@ -624,3 +624,13 @@ fn parallel_parity_encode_matches_scalar_reference() {
     }
     assert_eq!(got, expected);
 }
+
+#[test]
+fn encoder_matrix_size_is_capped() {
+    // WinRAR's own writer stays at <= 200 data shards; the cap keeps a
+    // crafted `{RB}` header (declared data/recovery counts) from allocating
+    // a multi-GiB matrix. Legitimate plans still fit.
+    assert!(make_encoder_matrix(200, 200).is_ok());
+    assert!(make_encoder_matrix(32_768, 32_767).is_err());
+    assert!(make_encoder_matrix(4_096, 4_096).is_err());
+}

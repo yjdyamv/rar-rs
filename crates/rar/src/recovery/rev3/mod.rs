@@ -208,7 +208,9 @@ fn rev_name_candidates(name: &str) -> Vec<RevName> {
         let [index, rec_count, merged] = [groups[0], groups[1], groups[2]];
         let prefix = &stem[..cursor];
         for digits in 1..=merged.to_string().len() {
-            let divisor = 10usize.pow(digits as u32);
+            let Some(divisor) = 10usize.checked_pow(digits as u32) else {
+                break;
+            };
             let data_count = merged % divisor;
             let base_digits = merged / divisor;
             if data_count == 0 || rec_count == 0 || index == 0 || index > rec_count {
@@ -1240,4 +1242,16 @@ mod tests {
         assert!(data_counts.contains(&4), "{data_counts:?}");
         assert!(data_counts.contains(&44), "{data_counts:?}");
     }
+}
+
+#[test]
+fn long_trailing_groups_do_not_overflow() {
+    // A 20-digit group used to panic in `10usize.pow(20)` while
+    // enumerating the ambiguous splits of a `.rev` name.
+    let candidates = rev_name_candidates("mv4_10000000000000000000_1_1.rev");
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| !candidate.base.is_empty())
+    );
 }

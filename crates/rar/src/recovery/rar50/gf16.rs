@@ -155,8 +155,17 @@ impl Default for Gf16 {
     }
 }
 
+/// The largest encoder matrix (in cells) the recovery paths materialize.
+/// WinRAR's own writer caps data shards at 200, so legitimate plans stay
+/// far below this; the cap keeps a crafted `{RB}` chunk header from forcing
+/// a multi-GiB allocation.
+const MAX_ENCODER_MATRIX_CELLS: usize = 1 << 20;
+
 pub fn make_encoder_matrix(data_shards: usize, recovery_shards: usize) -> Result<Vec<Vec<u16>>> {
     if data_shards == 0 || recovery_shards == 0 || data_shards + recovery_shards > FIELD_SIZE {
+        return Err(Error::TooManyShards);
+    }
+    if data_shards.saturating_mul(recovery_shards) > MAX_ENCODER_MATRIX_CELLS {
         return Err(Error::TooManyShards);
     }
     let gf = shared_gf16();

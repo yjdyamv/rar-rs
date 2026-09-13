@@ -25,7 +25,11 @@ fn apply_mark_web(
 }
 
 /// Extract with full paths (like `rar x`).
-pub(crate) fn cmd_extract(args: &ExtractArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+pub(crate) fn cmd_extract(
+    args: &ExtractArgs,
+    misc: &common::MiscSwitches,
+    assume_yes: bool,
+) -> CliResult<()> {
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
@@ -37,9 +41,12 @@ pub(crate) fn cmd_extract(args: &ExtractArgs, misc: &common::MiscSwitches) -> Cl
         return ops::extract_to_stdout(&mut rar, &names, None);
     }
     apply_mark_web(&mut rar, misc)?;
-    let skip = args.overwrite.as_deref() == Some("never");
     let options = rar_rs::ExtractOptions {
-        skip_existing: skip,
+        skip_existing: output::skip_existing(
+            args.overwrite.as_deref(),
+            assume_yes,
+            args.auto_rename,
+        ),
         auto_rename: args.auto_rename,
         keep_broken: args.keep_broken,
         skip_links: misc.skip_links,
@@ -96,7 +103,11 @@ fn extract_names_and_dest(
 }
 
 /// Extract without archived paths (like `rar e`).
-pub(crate) fn cmd_extract_flat(args: &ExtractArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+pub(crate) fn cmd_extract_flat(
+    args: &ExtractArgs,
+    misc: &common::MiscSwitches,
+    assume_yes: bool,
+) -> CliResult<()> {
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
@@ -106,10 +117,13 @@ pub(crate) fn cmd_extract_flat(args: &ExtractArgs, misc: &common::MiscSwitches) 
         return ops::extract_to_stdout(&mut rar, &names, None);
     }
     apply_mark_web(&mut rar, misc)?;
-    let skip = args.overwrite.as_deref() == Some("never");
     let options = rar_rs::ExtractOptions {
         flat_paths: true,
-        skip_existing: skip,
+        skip_existing: output::skip_existing(
+            args.overwrite.as_deref(),
+            assume_yes,
+            args.auto_rename,
+        ),
         auto_rename: args.auto_rename,
         keep_broken: args.keep_broken,
         skip_links: misc.skip_links,

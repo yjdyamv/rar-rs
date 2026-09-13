@@ -344,3 +344,47 @@ fn cli_create_sfx_prepends_module() {
         .unwrap();
     assert!(status.success(), "unrar t on the created SFX");
 }
+
+/// Overwrite policy: with no `-y`/`-o±` (no interactive prompt) extraction
+/// skips existing files, `-y`/`-o+` overwrite and `-o-` skips, matching
+/// WinRAR's non-interactive outcomes.
+#[test]
+fn cli_extract_overwrite_defaults_to_skip() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"new").unwrap();
+    let archive = dir.path().join("ow.rar");
+    assert!(
+        std::process::Command::new(RAR_CLI)
+            .args(["a", "-idq"])
+            .arg(&archive)
+            .arg("f.txt")
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let out_file = out.join("f.txt");
+
+    for (label, extra, expected) in [
+        ("default", vec!["-idq"], "old"),
+        ("-y", vec!["-y", "-idq"], "new"),
+        ("-o+", vec!["-o+", "-idq"], "new"),
+        ("-o-", vec!["-o-", "-idq"], "old"),
+    ] {
+        std::fs::write(&out_file, b"old").unwrap();
+        let mut command = std::process::Command::new(UNRAR_CLI);
+        command.args(["x"]).args(&extra).arg(&archive);
+        command.arg("--dest").arg(&out);
+        assert!(
+            command.current_dir(dir.path()).status().unwrap().success(),
+            "{label}"
+        );
+        assert_eq!(
+            std::fs::read(&out_file).unwrap(),
+            expected.as_bytes(),
+            "{label}"
+        );
+    }
+}

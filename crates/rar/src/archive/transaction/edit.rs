@@ -47,6 +47,19 @@ impl RarArchive {
         {
             return Err(RarError::ArchiveLocked);
         }
+        // Renaming or setting the archive comment rewrites header blocks; a
+        // header-encrypted (RAR5 `-hp`) archive would need each rewritten or
+        // new block re-encrypted, which this transaction does not implement.
+        // Refuse before touching the file — the previous behaviour replaced
+        // the archive with a corrupt one. Deletes and recovery-record
+        // changes keep working (they only copy encrypted blocks verbatim or
+        // write service records through the encrypting writer).
+        if self.header_encryption && (!renames.is_empty() || comment.is_some()) {
+            return Err(RarError::Unsupported(
+                "renaming and archive comments are not supported for header-encrypted (RAR5 -hp) archives"
+                    .into(),
+            ));
+        }
 
         // Delete mask: duplicates are fine (a member can only be deleted
         // once); out-of-range indexes are callers' bugs, so surface them.

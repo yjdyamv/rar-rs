@@ -82,7 +82,6 @@ fn main() {
             process::exit(error::EXIT_BAD_COMMAND);
         }
     }
-    let _ = cli.yes; // no interactive prompts exist yet; accepted for parity
     let log_errors = cli.misc.log_errors.clone();
     if let Err(e) = run(cli) {
         eprintln!("rar: {e}");
@@ -135,8 +134,8 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::CommentWrite(args) => comment::cmd_comment_write(&args),
         Command::CommentFileSet(args) => comment::cmd_file_comment_set(&args),
         Command::Print(args) => extract::cmd_print(&args),
-        Command::Extract(args) => extract::cmd_extract(&args, misc),
-        Command::ExtractFlat(args) => extract::cmd_extract_flat(&args, misc),
+        Command::Extract(args) => extract::cmd_extract(&args, misc, cli.yes),
+        Command::ExtractFlat(args) => extract::cmd_extract_flat(&args, misc, cli.yes),
         Command::Test(args) => list::cmd_test(&args, misc),
         Command::VerboseList(args) => list::cmd_verbose_list(&args, misc),
         Command::List(args) => list::cmd_list(&args, misc),

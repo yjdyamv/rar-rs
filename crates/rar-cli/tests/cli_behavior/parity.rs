@@ -173,7 +173,7 @@ fn cli_stdout_and_selected_extraction_preserve_duplicate_members() {
 
         let output = dir.path().join(format!("selected-{index}"));
         let out = std::process::Command::new(binary)
-            .args(["x", "-idq"])
+            .args(["x", "-o+", "-idq"])
             .arg(&archive)
             .arg("--dest")
             .arg(&output)

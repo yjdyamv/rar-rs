@@ -53,9 +53,9 @@ struct Cli {
     #[arg(long = "mc", value_name = "PAR", global = true)]
     #[allow(dead_code)]
     mc_params: Option<String>,
-    /// Assume Yes on all queries (like `-y`; accepted, no prompts exist)
+    /// Assume Yes on all queries (like `-y`; there are no interactive
+    /// prompts, so this selects overwrite-on-extract)
     #[arg(long, global = true)]
-    #[allow(dead_code)]
     yes: bool,
     /// Save/restore file times (like `-ts[m,c,a][+,-,1]`; repeatable —
     /// on extraction, sets creation/access times in addition to mtime)
@@ -282,9 +282,11 @@ fn run_inner(cli: Cli) -> CliResult<()> {
         .transpose()?
         .flatten();
     match cli.command {
-        Command::Extract(args) => cmd_extract(&args, password, ts, max_dict_size, motw, &cli.misc),
+        Command::Extract(args) => {
+            cmd_extract(&args, password, ts, max_dict_size, motw, &cli.misc, cli.yes)
+        }
         Command::ExtractFlat(args) => {
-            cmd_extract_flat(&args, password, ts, max_dict_size, motw, &cli.misc)
+            cmd_extract_flat(&args, password, ts, max_dict_size, motw, &cli.misc, cli.yes)
         }
         Command::List(args) => cmd_list(&args, password, &cli.misc),
         Command::ListBare(args) => cmd_list_bare(&args, password, &cli.misc),
@@ -377,6 +379,7 @@ fn cmd_extract(
     max_dict_size: Option<u64>,
     motw: Option<rar_rs::MarkOfTheWeb>,
     misc: &common::MiscSwitches,
+    assume_yes: bool,
 ) -> CliResult<()> {
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
@@ -397,7 +400,11 @@ fn cmd_extract(
         max_unpacked_bytes: None,
         max_total_unpacked_bytes: None,
         flat_paths: args.flat,
-        skip_existing: args.overwrite.as_deref() == Some("never"),
+        skip_existing: output::skip_existing(
+            args.overwrite.as_deref(),
+            assume_yes,
+            args.auto_rename,
+        ),
         auto_rename: args.auto_rename,
         keep_broken: args.keep_broken,
         set_creation_time: ts.save_ctime,
@@ -421,6 +428,7 @@ fn cmd_extract_flat(
     max_dict_size: Option<u64>,
     motw: Option<rar_rs::MarkOfTheWeb>,
     misc: &common::MiscSwitches,
+    assume_yes: bool,
 ) -> CliResult<()> {
     let (names, dest) = extract_names_and_dest(args, misc)?;
     let mut rar = ops::open_reader(&args.archive, password)?;
@@ -432,7 +440,11 @@ fn cmd_extract_flat(
         flat_paths: true,
         max_unpacked_bytes: None,
         max_total_unpacked_bytes: None,
-        skip_existing: args.overwrite.as_deref() == Some("never"),
+        skip_existing: output::skip_existing(
+            args.overwrite.as_deref(),
+            assume_yes,
+            args.auto_rename,
+        ),
         auto_rename: args.auto_rename,
         keep_broken: args.keep_broken,
         set_creation_time: ts.save_ctime,

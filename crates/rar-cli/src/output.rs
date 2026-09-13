@@ -6,6 +6,23 @@ pub static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// Sends informational messages to stderr instead of stdout when `-ierr`
 /// is given.
 pub static ERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether extraction skips files that already exist.
+///
+/// WinRAR's default overwrite mode asks interactively; without a prompt we
+/// follow its non-interactive outcome and skip. `-y` (assume yes) and
+/// `-o+` overwrite, `-o-` skips, and `-or` auto-renames instead of
+/// skipping.
+pub fn skip_existing(overwrite: Option<&str>, assume_yes: bool, auto_rename: bool) -> bool {
+    if auto_rename {
+        return false;
+    }
+    match overwrite {
+        Some("always") => false,
+        Some("never") => true,
+        _ => !assume_yes,
+    }
+}
+
 /// `-ad[1,2]` destination mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppendDir {
@@ -38,7 +55,7 @@ fn archive_base(archive: &str) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    if let Some(idx) = base.to_lowercase().find(".part")
+    if let Some(idx) = base.to_ascii_lowercase().find(".part")
         && base[idx + 5..].chars().all(|c| c.is_ascii_digit())
     {
         base.truncate(idx);

@@ -101,7 +101,7 @@ files — it must exist and never changes where outputs are written).
 | Switch | Meaning |
 |---|---|
 | `-p<password>` / `-p-` | Set / clear password (file-level; AES-256 for RAR5, the legacy per-generation ciphers for RAR 1.5–4.x) |
-| `-hp<password>` | Encrypt headers too (`-hp`); multi-volume sets repeat the plaintext encryption header on every volume |
+| `-hp<password>` | Encrypt headers too (`-hp`); multi-volume sets repeat the plaintext encryption header on every volume. RAR5 header-encrypted archives refuse `rn`/`ch` and archive-comment edits (rewritten headers cannot be re-encrypted yet); delete and recovery-record edits work, as do RAR4 `-hp` comments |
 | `-htb` | BLAKE2sp hash records (verified on read) |
 | `-htc` | CRC32 hash records (the default; accepted on every command, like WinRAR) |
 
@@ -142,7 +142,10 @@ time to newest / keep, or set it to the given local date), `-ts[mca][±,1]`
 source access time), `-ver[n]` (versioning), `-ag[fmt]` (auto-name, local
 time),
 `-z<file>`/`-c-` (comment file / no comment), `-y`/`-o±` (yes / overwrite
-mode), `-ierr`/`-ilog`/`-iver`, `-cfg-`/`-sc<charset>`.
+mode), `-ierr`/`-ilog`/`-iver`, `-cfg-`/`-sc<charset>`. With no interactive
+prompt, extraction without `-y`/`-o+` skips existing files (WinRAR's
+non-interactive outcome); `-o+` overwrites, `-o-` skips and `-or`
+auto-renames.
 
 Switches that are Windows-only or interactive in WinRAR (`-ac`, `-ai`,
 `-ao`, `-e[+]<attr>`, `-dh`, `-ieml`, `-ioff`, `-isnd`, `-ri`, `-mlp`,

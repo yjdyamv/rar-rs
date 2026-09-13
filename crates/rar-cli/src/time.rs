@@ -172,6 +172,21 @@ pub fn format_auto_name(fmt: &str, y: i64, mo: u32, d: u32, h: u32, mi: u32, s: 
         .replace("SS", &format!("{s:02}"))
 }
 
+/// Format a Unix timestamp as a local civil timestamp
+/// (`YYYY-MM-DD HH:MM:SS`), the way WinRAR lists member times.
+pub fn format_local_time(secs: u32) -> String {
+    let local = i64::from(secs) + local_offset_secs();
+    let days = local.div_euclid(86_400);
+    let tod = local.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
 /// Set a file's modification time.
 pub fn set_file_mtime(path: &std::path::Path, time: SystemTime) -> std::io::Result<()> {
     let file = std::fs::File::options().write(true).open(path)?;
@@ -309,6 +324,24 @@ mod tests {
         assert_eq!(
             format_auto_name("x_YYYYMMDD-HHmmSS", 2026, 9, 13, 16, 18, 52),
             "x_20260913-161852"
+        );
+    }
+
+    #[test]
+    fn local_timestamp_uses_the_local_offset() {
+        let secs: u32 = 1_700_000_000;
+        let local = i64::from(secs) + local_offset_secs();
+        let days = local.div_euclid(86_400);
+        let tod = local.rem_euclid(86_400);
+        let (y, mo, d) = civil_from_days(days);
+        assert_eq!(
+            format_local_time(secs),
+            format!(
+                "{y:04}-{mo:02}-{d:02} {:02}:{:02}:{:02}",
+                tod / 3600,
+                (tod % 3600) / 60,
+                tod % 60
+            )
         );
     }
 }

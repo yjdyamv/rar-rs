@@ -99,6 +99,23 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         dict_size_log,
         dict_size_bytes,
     )?;
+    // The RAR5 editor cannot rewrite headers of a header-encrypted archive
+    // (`-hp`): renaming and comment changes would corrupt it, so refuse the
+    // operations up front instead of committing an archive without them.
+    // The RAR4 editor supports `-hp` comments; RAR 1.3/1.4 rejects `-hp`.
+    if header_encrypt && !version.is_legacy() && !version.is_rar13() {
+        if args.comment_file.is_some() {
+            return Err(
+                "-z/--comment-file is not supported for header-encrypted (RAR5 -hp) archives"
+                    .into(),
+            );
+        }
+        if misc.lock {
+            return Err(
+                "-k/--lock is not supported for header-encrypted (RAR5 -hp) archives".into(),
+            );
+        }
+    }
     // The version table is the single write knob: `-ma4` selects v29 (the
     // legacy RAR4 pipeline), `-ma7` v70 (every member v70, 32 MiB default
     // dictionary), and `-ma5`/default v50 — a > 4 GiB `-md` keeps the
@@ -640,11 +657,15 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     }
     // -z<file>: attach an archive comment through the editor role (the RAR
     // 1.3/1.4 comment was already queued before the first member above).
+    // The resolved password includes a `-hp<password>` value, unlike the raw
+    // `args.password` (an `-hp`-encrypted archive needs it here).
     if !version.is_rar13()
         && let Some(comment_file) = &args.comment_file
     {
         crate::comment::cmd_comment_set(&crate::args::CommentArgs {
-            password: args.password.clone(),
+            password: crate::password::PasswordArgs {
+                password: password.clone(),
+            },
             archive: archive_path.clone(),
             comment_file: Some(comment_file.clone()),
         })?;
@@ -652,7 +673,9 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // -k: lock the archive after a successful create.
     if misc.lock {
         crate::recovery::cmd_lock(&crate::args::ArchiveArgs {
-            password: args.password.clone(),
+            password: crate::password::PasswordArgs {
+                password: password.clone(),
+            },
             archive: archive_path.clone(),
         })?;
     }

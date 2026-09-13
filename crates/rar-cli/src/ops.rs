@@ -24,15 +24,7 @@ pub fn open_reader(path: impl AsRef<Path>, password: Option<&str>) -> CliResult<
 
 /// UTC rendering of a unix timestamp (no chrono dependency).
 fn format_unix_time(secs: u32) -> String {
-    let days = secs as i64 / 86400;
-    let secs_of_day = secs % 86400;
-    let (year, month, day) = crate::time::civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
-        secs_of_day / 3600,
-        (secs_of_day % 3600) / 60,
-        secs_of_day % 60
-    )
+    crate::time::format_local_time(secs)
 }
 
 /// The `Ratio` column shared by the standard and technical listings.
