@@ -46,6 +46,27 @@ fn redirect(name: &str, redir_type: u64, target: String, path: &Path) -> LinkRed
     }
 }
 
+/// WinRAR's redirect type for a stored symbolic link: Windows writes a
+/// Windows symlink (2), or a junction (3) when the target is a directory;
+/// Unix writes a Unix symlink (1).
+fn symlink_redir_type(path: &Path) -> u64 {
+    #[cfg(windows)]
+    let kind = if std::fs::metadata(path)
+        .map(|meta| meta.is_dir())
+        .unwrap_or(false)
+    {
+        3
+    } else {
+        2
+    };
+    #[cfg(not(windows))]
+    let kind = {
+        let _ = path;
+        1
+    };
+    kind
+}
+
 /// How `-oi` treats identical files.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdenticalMode {
@@ -281,7 +302,7 @@ pub(crate) fn split_link_redirects(
                     if let Ok(target) = std::fs::read_link(&c.path) {
                         redirects.push(redirect(
                             &c.name,
-                            1,
+                            symlink_redir_type(&c.path),
                             target.to_string_lossy().into_owned(),
                             &c.path,
                         ));

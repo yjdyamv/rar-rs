@@ -90,7 +90,7 @@ impl ArchiveVersion {
         ArchiveVersion::V70,
     ];
 
-    /// Stable machine-readable two-digit name (`"v15"` … `"v70"`).
+    /// Stable machine-readable two-digit name (`"v14"` … `"v70"`).
     pub const fn as_str(self) -> &'static str {
         match self {
             ArchiveVersion::V14 => "v14",

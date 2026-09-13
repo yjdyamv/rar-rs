@@ -182,7 +182,7 @@ impl Rar4VolumeScan {
                         volume_index,
                         data_offset: fh.data_offset,
                         packed_size: fh.packed_size,
-                        crc32_val: None,
+                        crc32_val: fh.crc32_val,
                         is_final: !split_after,
                         extra_data: Vec::new(),
                     };

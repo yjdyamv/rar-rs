@@ -2,6 +2,10 @@
 //!
 //! Wraps the pure-Rust `rar-rs` crate behind a napi-rs API for creating, reading,
 //! testing, listing, extracting, repairing, and modifying RAR archives.
+//!
+//! Deliberate omissions from the writer options: the per-archive compression
+//! filter policy (`-mc` / `WriterOptions::filters`) is not exposed; automatic
+//! filter selection stays in effect for every create/append call.
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -49,6 +53,10 @@ pub struct CreateArchiveOptions {
   /// Create this many `.rev` recovery volumes (WinRAR `-rv`); auto-capped
   /// at the actual data volume count. Requires `volume_size`.
   pub recovery_volume_count: Option<f64>,
+  /// Create recovery volumes as a percentage of the data-volume count
+  /// (WinRAR `-rv<N%>`); requires `volume_size` and cannot be combined with
+  /// `recovery_volume_count`.
+  pub recovery_volumes_percent: Option<f64>,
   /// Volume size in bytes; when set, produces multi-volume archives
   /// (`name.part1.rar`, ... for RAR5/RAR7; `name.rar`/`name.r00`, ... for
   /// the legacy and RAR 1.3/1.4 formats).
@@ -63,17 +71,23 @@ pub struct CreateArchiveOptions {
   pub dict_size: Option<String>,
   /// Create a solid archive (better ratio, slower random access).
   pub solid: Option<bool>,
+  /// How the solid chain splits (WinRAR `-sd`/`-sv`/`-se`): "continuous"
+  /// (default), "volume" (reset per volume) or "extension" (reset when the
+  /// member extension changes). Implies `solid`.
+  pub solid_reset: Option<String>,
   /// Add a quick-open record for fast member listing.
   pub quick_open: Option<bool>,
   /// Write BLAKE2sp hash records for every member (like WinRAR `-htb`).
   pub blake2: Option<bool>,
-  /// Compression threads (1..=64).
+  /// Compression threads (1..=64; 0 = automatic, the library default).
   pub threads: Option<f64>,
   /// Save the creation time (Windows) / ctime (Unix) in the FILE_TIME
   /// extra record (like WinRAR `-tsc`).
   pub save_ctime: Option<bool>,
   /// Save the last access time (like WinRAR `-tsa`).
   pub save_atime: Option<bool>,
+  /// Save the modification time (default `true`; `false` omits it).
+  pub save_mtime: Option<bool>,
   /// Store timestamps at 1-second precision (like WinRAR `-ts...1`).
   pub time_precision_seconds: Option<bool>,
   /// Save the owner and group (numeric ids) on Unix (like WinRAR `-ow`).
@@ -88,8 +102,8 @@ pub struct CreateArchiveOptions {
   /// DOS-era RAR 1.3/1.4 (`RE~^`) container (old-style `.rar`/`.r00`
   /// volume sets with `volume_size`); the RAR5-only options (dictionary
   /// size, quick-open, BLAKE2sp, owner/stream records) are rejected there,
-  /// and "rar13" additionally rejects header encryption and recovery
-  /// volumes.
+  /// and "rar13" additionally rejects header encryption, inline recovery
+  /// records and recovery volumes.
   pub format: Option<String>,
 }
 #[napi(object)]
@@ -115,6 +129,8 @@ pub struct AppendArchiveOptions {
   /// Dictionary size for the added members (like `-md`; see
   /// [`CreateArchiveOptions::dict_size`]).
   pub dict_size: Option<String>,
+  /// Compression threads for the appended members (1..=64; 0 = automatic).
+  pub thread_count: Option<f64>,
 }
 #[napi(object)]
 pub struct EntryInfo {
@@ -135,8 +151,8 @@ pub struct EntryInfo {
   pub ctime: Option<f64>,
   /// Last-access time as Unix seconds (undefined when not recorded).
   pub atime: Option<f64>,
-  /// Host OS of the producing archiver (0 = MS-DOS, 1 = OS/2, 2 = Win32,
-  /// 3 = Unix/32-bit, 6 = Unix/64-bit, 7 = macOS).
+  /// Host OS normalized across containers: 0 = Windows, 1 = Unix (RAR4's
+  /// raw DOS/OS2/Win32/Unix/… values are mapped onto these two).
   pub host_os: f64,
   /// Raw attribute word stored in the header (platform specific).
   pub attributes: f64,
@@ -144,7 +160,7 @@ pub struct EntryInfo {
   /// always report 0; their unpack version (15/20/26/29/36) is exposed as
   /// `version` instead.
   pub comp_version: u8,
-  /// Member version name ("v15" .. "v70").
+  /// Member version name ("v14" .. "v70").
   pub version: String,
   /// Compressed dictionary size in bytes (undefined when unknown).
   pub dict_size_bytes: Option<f64>,

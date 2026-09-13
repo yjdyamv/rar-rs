@@ -34,7 +34,7 @@
 | `archive/create.rs` / `entry.rs` / `discovery.rs` | 写生命周期、条目类型、分卷发现 |
 | `archive/rar4_edit/` | RAR4 编辑（rename / delete / comment / RR / lock / append / solid repack，含 `-hp`；`layout`/`headers`/`comment`/`engine`/`repack` 角色模块） |
 | `model/` | 格式中立模型（`entry.rs` / `chunk.rs`） |
-| `version.rs` | `ArchiveVersion` 单一版本表（v15–v70） |
+| `version.rs` | `ArchiveVersion` 单一版本表（v14–v70） |
 | `options.rs` / `error.rs` / `features.rs` / `write_progress.rs` | 选项、错误、能力报告、进度 |
 | `fs/` | 原子暂存、有界读取、卷命名、安全路径 |
 | `parallel.rs` | `parallel` 特性的 Rayon 池 |
@@ -47,8 +47,9 @@
 
 | 模块 | 可见性 | 内容 |
 |---|---|---|
-| `format/rar5/` | 内部（`wire` 导出受支持子集） | 常量与词汇（`mod.rs`）、`create.rs`（字典字段策略）、`headers/{parse,serialize,locator}`、`payload.rs`（MemberDecoder）、`vint.rs`、`blake2sp.rs`、`extract/`（读路径：`open`/`read`/`members`/`dest`/`solid`/`decode`/`verify`）、`write/{mod,engine,layout,windows}` |
+| `format/rar5/` | 内部（`wire` 导出受支持子集） | 常量与词汇（`mod.rs`）、`create.rs`（字典字段策略）、`headers/{parse,serialize,locator}`、`payload.rs`（MemberDecoder）、`vint.rs`、`blake2sp.rs`、`extract/`（读路径：`open`/`read`/`members`/`dest`/`solid`/`decode`/`verify`）、`write/{mod,add,emit,stream,batch,engine,filter_policy,layout,windows}` |
 | `format/rar4/` | 内部 | 老容器族：扫描 / 头解析、解码门面、写管线 |
+| `format/rar13/` | 内部 | DOS 时代 `RE~^` 容器：读取（旧命名分卷拼装）、创建（单卷 + `.rar/.rNN` 分卷、solid/注释/`-p`） |
 | `codec/modern/lzss_huff/` | **公开** | RAR5 LZSS+Huffman 编解码器。ADR 0003 决策 3 明确保留（`examples/` 依赖根上的 `encode` / `decode` / `EncoderState` / `encode_chunked*`） |
 | `codec/legacy/`、`codec/common/` | `pub(crate)` | 老代编解码器与 PPMd；bitstream / huffman / filters / incompressible / match_finder / window |
 | `crypto/` | 内部（AES/KDF 原语经 `wire` 导出） | `rar50`（AES-256-CBC + KDF + hash-key MAC）、`rar15` / `rar20` / `rar30` |

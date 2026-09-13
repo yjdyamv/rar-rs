@@ -388,6 +388,18 @@ impl ArchiveReader {
         }
     }
 
+    /// Whether the archive is solid: the main header carries the
+    /// archive-level solid flag (legacy `MHD_SOLID`) and/or a member
+    /// continues a solid chain (`FHD_SOLID`/`LHD_SOLID`).
+    pub fn is_solid(&self) -> bool {
+        self.archive.rar4_solid_archive
+            || self
+                .archive
+                .entries
+                .iter()
+                .any(|entry| entry.header.comp_solid)
+    }
+
     /// Resolve an entry ID to metadata.
     ///
     /// Returns [`RarError::StaleEntryId`] when the ID came from another

@@ -44,8 +44,8 @@ never a silent dump into a `<name>/` folder.
 | `x` | | Extract with full paths |
 | `e` | | Extract without paths (flat) |
 | `t` | | Test archive contents |
-| `v` | | Verbose list (WinRAR's `Attributes/Size/Packed/Ratio/Date/Time/Checksum/Name` table) |
-| `l` | | List contents (WinRAR's `Attributes/Size/Date/Time/Name` table) |
+| `v` | | Verbose list (WinRAR's `Attributes/Size/Packed/Ratio/Date/Time/Checksum/Name` table; on a volume set only the opened volume's members, with `-->`/`<->`/`<--` fragment ratios and per-fragment `Pack-CRC32`) |
+| `l` | | List contents (WinRAR's `Attributes/Size/Date/Time/Name` table; volume sets list only the opened volume's members) |
 | `lb` | | List bare (names only) |
 | `lt` | | List technical (WinRAR's per-member block: type, sizes, ratio, nanosecond mtime, attributes, CRC32, host OS, compression); `lta` accepted as an alias |
 | `vb` / `vt` | | Verbose bare / verbose technical (`vta` alias accepted) |
@@ -70,7 +70,7 @@ files — it must exist and never changes where outputs are written).
   extension is filled in with `.rar`.
 - **Member filters**: `t`, `v`, `l`, `lb`, `lt`, `vb`, `vt` (and the UnRAR
   equivalents) accept member names after the archive and process only the
-  matches; a filter matching nothing exits 10.
+  matches; a filter matching nothing is an error for `t` (exit 10) while the listing commands print an empty table and exit 0, like WinRAR.
 - **Extraction destination**: the trailing argument is the destination when
   it ends with a path separator (`rar x arc.rar dest\`); an explicit
   `--dest` wins.
@@ -101,7 +101,7 @@ files — it must exist and never changes where outputs are written).
 | Switch | Meaning |
 |---|---|
 | `-p<password>` / `-p-` | Set / clear password (file-level; AES-256 for RAR5, the legacy per-generation ciphers for RAR 1.5–4.x) |
-| `-hp<password>` | Encrypt headers too (`-hp`); multi-volume sets repeat the plaintext encryption header on every volume. RAR5 header-encrypted archives refuse `rn`/`ch` and archive-comment edits (rewritten headers cannot be re-encrypted yet); delete and recovery-record edits work, as do RAR4 `-hp` comments |
+| `-hp<password>` | Encrypt headers too (`-hp`); multi-volume sets repeat the plaintext encryption header on every volume. RAR5 header-encrypted archives refuse `rn`/`ch` and archive-comment edits (rewritten headers cannot be re-encrypted yet); single-volume delete and recovery-record edits work, as do RAR4 `-hp` comments; deleting from a header-encrypted multi-volume set is refused (the set is left untouched) |
 | `-htb` | BLAKE2sp hash records (verified on read) |
 | `-htc` | CRC32 hash records (the default; accepted on every command, like WinRAR) |
 
@@ -111,7 +111,7 @@ files — it must exist and never changes where outputs are written).
 |---|---|
 | `-v<size>` | Multi-volume (e.g. `-v1m` ≈ 1 MB, `-v100k` ≈ 100 KB); sets of 10+ volumes use zero-padded `part01` names like WinRAR |
 | `-rr[N]` | Inline recovery record; N = count or `N%` percent, default 10% (the `-rv` switch below takes a **required** value, no default) |
-| `-rv<N\|N%>` | Recovery volumes; capped at 10× the volume count. RAR4 sets (`-ma4`) use the legacy `.rev` layout: trailer format (`base.partNN.rev` / `baseN.rev`) when the volumes end in zero bytes (WinRAR-created sets), legacy full-parity format (`base<data>_<rec>_<idx>.rev`) otherwise; silently skipped when the archive ends up single-volume |
+| `-rv<N\|N%>` | Recovery volumes; at creation the count is capped at the data-volume count (the standalone `rv` command at 10×). RAR4 sets (`-ma4`) use the legacy `.rev` layout: trailer format (`base.partNN.rev` / `baseN.rev`) when the volumes end in zero bytes (WinRAR-created sets), legacy full-parity format (`base<data>_<rec>_<idx>.rev`) otherwise; silently skipped when the archive ends up single-volume |
 | `-qo[-|+]` | Quick-open records: `-qo`/`-qo+` enable, `-qo-` disables (opt-in) |
 
 ### Paths, time & misc

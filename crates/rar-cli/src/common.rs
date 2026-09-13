@@ -273,8 +273,9 @@ pub struct MiscSwitches {
     /// Lock the archive (`-k`)
     #[arg(global = true, long = "lock")]
     pub lock: bool,
-    /// Read the comment from a file (`-z<file>`; used by the comment and
-    /// create commands, accepted and ignored elsewhere)
+    /// Read the comment from a file (`-z<file>`; a bare `-z` reads stdin).
+    /// Used by the comment and create commands, accepted and ignored
+    /// elsewhere
     #[arg(global = true, long = "comment-file", value_name = "FILE")]
     #[allow(dead_code)]
     pub comment_file: Option<String>,

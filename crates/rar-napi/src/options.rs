@@ -64,6 +64,14 @@ impl CreateArchiveOptions {
     )?
     .filter(|&value| value != 0)
     .map(|value| value as u32);
+    let recovery_volumes_percent = checked_optional_js_integer(
+      self.recovery_volumes_percent,
+      "recoveryVolumesPercent",
+      0,
+      100,
+    )?
+    .filter(|&value| value != 0)
+    .map(|value| value as u8);
     let volume_size = checked_optional_js_integer(
       self.volume_size,
       "volumeSize",
@@ -71,7 +79,7 @@ impl CreateArchiveOptions {
       JS_MAX_SAFE_INTEGER as u64,
     )?;
     let threads =
-      checked_optional_js_integer(self.threads, "threads", 1, 64)?.map(|value| value as usize);
+      checked_optional_js_integer(self.threads, "threads", 0, 64)?.map(|value| value as usize);
     let password = self.password.as_deref().filter(|p| !p.is_empty());
     let format = self.format.as_deref().unwrap_or("rar5");
     let compression = match format {
@@ -120,18 +128,31 @@ impl CreateArchiveOptions {
       }
       None => None,
     };
+    let solid_mode = match self.solid_reset.as_deref() {
+      None | Some("") => None,
+      Some("continuous") => Some(rar_rs::SolidMode::Continuous),
+      Some("volume") => Some(rar_rs::SolidMode::PerVolume),
+      Some("extension") => Some(rar_rs::SolidMode::PerExtension),
+      Some(other) => {
+        return Err(Error::new(
+          Status::InvalidArg,
+          format!("unknown solidReset: `{other}` (expected continuous, volume, or extension)"),
+        ));
+      }
+    };
+    let solid_mode = solid_mode.unwrap_or(if self.solid.unwrap_or(false) {
+      rar_rs::SolidMode::Continuous
+    } else {
+      rar_rs::SolidMode::Disabled
+    });
     let opts = rar_rs::WriterOptions::new()
-      .solid_mode(if self.solid.unwrap_or(false) {
-        rar_rs::SolidMode::Continuous
-      } else {
-        rar_rs::SolidMode::Disabled
-      })
+      .solid_mode(solid_mode)
       .quick_open(self.quick_open.unwrap_or(false))
       .blake2(self.blake2.unwrap_or(false))
       .encrypt_headers(self.encrypt_headers.unwrap_or(false))
       .save_ctime(self.save_ctime.unwrap_or(false))
       .save_atime(self.save_atime.unwrap_or(false))
-      .save_mtime(true)
+      .save_mtime(self.save_mtime.unwrap_or(true))
       .time_precision_seconds(self.time_precision_seconds.unwrap_or(false))
       .save_owner(self.save_owner.unwrap_or(false))
       .save_streams(self.save_streams.unwrap_or(false));
@@ -147,6 +168,11 @@ impl CreateArchiveOptions {
     };
     let opts = if let Some(count) = recovery_volume_count {
       opts.recovery_volume_count(count)
+    } else {
+      opts
+    };
+    let opts = if let Some(percent) = recovery_volumes_percent {
+      opts.recovery_volumes_percent(percent)
     } else {
       opts
     };

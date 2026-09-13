@@ -12,7 +12,7 @@ rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver 15/20/29）归档，创建
 |------|------|
 | STORE（不压缩） | ✅ |
 | LZSS+Huffman m1-m5 | ✅ |
-| Solid 模式（-ms） | ✅ |
+| Solid 模式（-s） | ✅ |
 | 成员级加密（-p） | ✅ |
 | 多卷（-v） | ✅ |
 | 单卷创建 | ✅ |
@@ -34,10 +34,11 @@ rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver 15/20/29）归档，创建
 > （见 `codec/legacy/rar29_encoder.rs` 与 `PLAN.md` "RAR4 写侧 Tier 2 全闭"）。
 > 方法字节仍按 `-m` 级写（0x30+m），块内首个标志位指示 PPMd。
 
+Recovery volumes（`.rev`）两种布局均已支持，见 `docs/issues/rar4-recovery-volumes.md`。
+
 ### 不支持（RAR4 格式无此功能）
 
 - Quick-open（QO）
-- Recovery volumes（.rev）
 - BLAKE2sp 哈希
 - RAR5 vint 编码头
 
@@ -48,9 +49,9 @@ rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver 15/20/29）归档，创建
 `rar a -ma4` 压缩创建端到端可用：2.36 MB 文本语料上 `-m0` → Store
 （2,367,201 B）、`-m3` → Normal（23,048 B，1.0%）、`-m5` → Best
 （17,497 B，0.7%）、`-ma4 -s -m5` → Best。互操作覆盖见
-`crates/rar-cli/tests/winrar_interop.rs` 的 `we_create_rar4_*`（m3/m5、
+`crates/rar-cli/tests/winrar_interop/rar4_create.rs` 的 `we_create_rar4_*`（m3/m5、
 solid PPMd、Delta 过滤器、`-p`、`-hp`、`-rr` 双字节校验）与
-`cli_behavior.rs` 的 `cli_ma4_*`。
+`cli_behavior/legacy.rs` 的 `cli_ma4_*`。
 
 ## 架构设计
 
@@ -121,7 +122,7 @@ ArchiveWriter::close()
 ### 编码器接口
 
 ```rust
-// format/rar4/write.rs
+// format/rar4/write/pipeline.rs
 pub fn encode_member(
     data: &[u8],
     solid: bool,
@@ -168,7 +169,7 @@ rar a -ma2 archive.rar file1 file2
 rar a -ma15 archive.rar file1 file2
 
 # 创建 solid RAR3/4 归档
-rar a -ma4 -ms archive.rar file1 file2
+rar a -ma4 -s archive.rar file1 file2
 
 # 创建加密 RAR3/4 归档
 rar a -ma4 -p archive.rar file1 file2
@@ -177,7 +178,7 @@ rar a -ma4 -p archive.rar file1 file2
 rar a -ma4 -v1m archive.rar file1 file2
 ```
 
-在 `crates/rar-cli/src/bin/rar.rs` 中：
+在 `crates/rar-cli/src/bin/rar/{args,create}.rs` 中：
 - `archive_version()` 解析 `"4"` → `ArchiveVersion::V29`（旧 `archive_format_force_v70()`，
   2026-09 收敛为单一版本表）
 - `CreateOptions` 的 `compression` 字段类型为 `ArchiveVersion`（`"4"` → `V29`，字段原名 `format_version`，2026-09 与 `WriterOptions::compression` 统一）
@@ -204,7 +205,7 @@ rar a -ma4 -v1m archive.rar file1 file2
 
 ## 实现顺序
 
-1. **RAR4 头序列化**：`format/rar4/write.rs` 中的 `build_file_header()`、`write_file_header()`、`build_main_header()`
+1. **RAR4 头序列化**：`format/rar4/write/mod.rs` 中的 `build_file_header()`、`write_file_header()`、`build_main_header()`
 2. **STORE-only 创建**：最简单的路径，验证头格式正确
 3. **RAR29 编码器移植**：从 rars 移植 `Unpack29Encoder`，适配 rar-rs 错误类型
 4. **LZSS 压缩创建**：m1-m5 各级别

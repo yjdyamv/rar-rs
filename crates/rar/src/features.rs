@@ -13,7 +13,7 @@ pub enum Feature {
     /// Header encryption (`-hp`): the block stream after the per-volume
     /// plaintext header is encrypted.
     HeaderEncryption,
-    /// Quick-open record (`-rr` locator + "QO" service block).
+    /// Quick-open record (QO locator in the main header + "QO" service block).
     QuickOpen,
 }
 

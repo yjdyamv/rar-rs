@@ -179,7 +179,10 @@ pub(crate) fn stale_volume_paths(
             continue;
         };
         let matches = if rar4 {
+            // Legacy data volumes plus their `.rev` recovery volumes: an
+            // overwrite that drops `-rv` must retire the old parity files.
             legacy_volume_base(name).as_deref() == Some(base)
+                || crate::recovery::rev3::rev_name_belongs_to(name, base)
         } else {
             // The old set's `.rev` recovery volumes go with it: they are
             // regenerated after the new data volumes commit.
@@ -230,6 +233,38 @@ mod tests {
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["set.r00", "set.r01"]);
+    }
+
+    #[test]
+    fn stale_scan_retires_legacy_recovery_volumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        std::fs::write(parent.join("set.rar"), b"first").unwrap();
+        std::fs::write(parent.join("set.r00"), b"second").unwrap();
+        // The four legacy `.rev` name shapes for this base.
+        std::fs::write(parent.join("set.part2.rev"), b"rev").unwrap();
+        std::fs::write(parent.join("set2.rev"), b"rev").unwrap();
+        std::fs::write(parent.join("set3_2_1.rev"), b"rev").unwrap();
+        std::fs::write(parent.join("set.part3_2_1.rev"), b"rev").unwrap();
+        // A different base and a non-rev file must survive.
+        std::fs::write(parent.join("set-extra.rev"), b"other").unwrap();
+        std::fs::write(parent.join("set.txt"), b"other").unwrap();
+
+        let keep = vec![parent.join("set.rar"), parent.join("set.r00")];
+        let stale = stale_volume_paths(parent, "set", true, &keep);
+        let names: Vec<String> = stale
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "set.part2.rev",
+                "set.part3_2_1.rev",
+                "set2.rev",
+                "set3_2_1.rev"
+            ]
+        );
     }
 }
 

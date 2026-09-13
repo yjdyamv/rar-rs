@@ -546,6 +546,27 @@ fn cli_ma14_multivolume_sets_roundtrip() {
             }
         }
 
+        // WinRAR's per-volume listing: only the members with data in the
+        // opened volume, with a legacy `volume` suffix and fragment marker.
+        let listing = std::process::Command::new(RAR_CLI)
+            .arg("l")
+            .arg(&arc)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&listing.stdout);
+        assert!(text.contains("Details: RAR 1.4, volume"), "{flag}: {text}");
+        assert!(
+            text.contains("rnd.bin") && !text.contains("tail.txt"),
+            "{flag}: volume 1 lists only its members:\n{text}"
+        );
+        let verbose = std::process::Command::new(RAR_CLI)
+            .arg("v")
+            .arg(&arc)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&verbose.stdout);
+        assert!(text.contains("-->"), "{flag}: fragment marker:\n{text}");
+
         let mut rar = if password {
             rar_rs::ArchiveReader::open_with(&arc, rar_rs::OpenOptions::new().password("pw"))
                 .unwrap()
@@ -622,5 +643,36 @@ fn cli_legacy_rejects_unexpressible_solid_resets() {
         test.status.success(),
         "unrar t rejected the -se archive:\n{}",
         String::from_utf8_lossy(&test.stderr)
+    );
+}
+
+/// `rar r` refuses RAR 1.3/1.4 archives with a clear message instead of
+/// sending them through the RAR5 repair path.
+#[test]
+fn cli_repair_rejects_rar13_archives() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"payload").unwrap();
+    let arc = dir.path().join("repair13.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma14", "-m0", "-idq"])
+        .arg(&arc)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["r", "-idq"])
+        .arg(&arc)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "repair of a v14 archive must fail");
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("RAR 1.3/1.4"), "{text}");
+    assert!(
+        !dir.path().join("fixed.repair13.rar").exists(),
+        "a refused repair must not write output"
     );
 }

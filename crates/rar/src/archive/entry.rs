@@ -216,6 +216,32 @@ impl ArchiveEntry {
         &self.chunks
     }
 
+    /// Redirection record `(type, target)` for link/copy members (RAR5
+    /// `EXTRA_FILE_REDIRECT`); `None` for regular members.
+    ///
+    /// Types follow the RAR5 convention: 1 = Unix symlink, 2 = Windows
+    /// symlink, 3 = Windows junction, 4 = hardlink, 5 = file copy.
+    pub fn redirect(&self) -> Option<(u64, String)> {
+        crate::format::rar5::headers::parse_redirect_record(&self.header.extra_data)
+            .map(|spec| (spec.redir_type, spec.target))
+    }
+
+    /// Whether the member carries a modification time. RAR5 stores it
+    /// either in the header's `FILE_FLAG_TIME_UNIX` field or in a FILE_TIME
+    /// extra record (WinRAR shows `????-??-??` when neither is present); the
+    /// legacy formats always carry DOS time, where the all-zero value means
+    /// "unknown".
+    pub fn has_mtime(&self) -> bool {
+        match self.header.format_version {
+            3 | 4 => self.header.mtime != 0,
+            _ => {
+                self.header.file_flags & 0x0002 != 0
+                    || self.header.mtime_ns.is_some()
+                    || self.header.mtime != 0
+            }
+        }
+    }
+
     /// Per-member (file) comment for RAR 3.x/4.x archives (`FHD_COMMENT`),
     /// if the member carries one. Returns raw text bytes (UTF-8 when the
     /// comment was ASCII, UTF-16LE decoded otherwise).

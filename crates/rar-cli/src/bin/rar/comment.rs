@@ -10,7 +10,8 @@ use crate::info;
 pub(crate) fn cmd_comment_set(args: &CommentArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     use std::io::Read;
     let mut comment = Vec::new();
-    if let Some(file) = &misc.comment_file {
+    // A bare `-z` (empty value) reads stdin, like WinRAR.
+    if let Some(file) = misc.comment_file.as_deref().filter(|file| !file.is_empty()) {
         std::fs::File::open(file)
             .and_then(|mut f| f.read_to_end(&mut comment))
             .map_err(|e| format!("read comment file {file}: {e}"))?;
@@ -41,7 +42,8 @@ pub(crate) fn cmd_file_comment_set(
 ) -> CliResult<()> {
     use std::io::Read;
     let mut comment = Vec::new();
-    if let Some(file) = &misc.comment_file {
+    // A bare `-z` (empty value) reads stdin, like WinRAR.
+    if let Some(file) = misc.comment_file.as_deref().filter(|file| !file.is_empty()) {
         std::fs::File::open(file)
             .and_then(|mut f| f.read_to_end(&mut comment))
             .map_err(|e| format!("read comment file {file}: {e}"))?;

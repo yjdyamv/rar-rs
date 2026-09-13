@@ -143,7 +143,7 @@ pub(crate) fn cmd_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResul
 pub(crate) fn cmd_list_bare(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let names = filter_names(args, misc).map_err(error::CliError::from)?;
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    ops::list_bare(&rar, &names);
+    ops::list_bare(&rar, &args.archive, &names);
     write_list_logs(misc, &rar, &args.archive, &names)
 }
 
@@ -292,4 +292,23 @@ pub(crate) fn is_rar4_file(path: &std::path::Path) -> bool {
         (None, Some(_)) => true,
         _ => false,
     }
+}
+
+/// Whether `path` is a DOS-era RAR 1.3/1.4 archive: the weak `RE~^`
+/// signature is present and no RAR4/RAR5 signature precedes it anywhere in
+/// the scanned window (the reader's scanner rule).
+pub(crate) fn is_rar13_file(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; 8 * 1024 * 1024];
+    let Ok(n) = f.read(&mut buf) else {
+        return false;
+    };
+    buf.truncate(n);
+    let rar4 = b"Rar!\x1a\x07\x00";
+    let rar5 = b"Rar!\x1a\x07\x01\x00";
+    let first = |needle: &[u8]| buf.windows(needle.len()).position(|w| w == needle);
+    first(rar5).is_none() && first(rar4).is_none() && first(b"RE~^").is_some()
 }

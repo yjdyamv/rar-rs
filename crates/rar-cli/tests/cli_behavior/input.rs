@@ -212,3 +212,67 @@ fn cli_delete_without_members_is_a_noop() {
     assert!(out.status.success());
     assert_eq!(std::fs::read(dir.path().join("d.rar")).unwrap(), before);
 }
+
+/// A bare `-z` reads the archive comment from stdin and a bare `-si` names
+/// the stdin member `stdin`, like WinRAR.
+#[test]
+fn cli_bare_comment_file_and_stdin_name_switches() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"payload").unwrap();
+
+    let run_with_stdin = |args: &[&str], stdin: &[u8]| {
+        use std::io::Write;
+        let mut child = Command::new(RAR_CLI)
+            .args(args)
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin).unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    // RAR 1.3/1.4: the bare `-z` queues the comment before creation.
+    let out = run_with_stdin(
+        &["a", "-ma14", "-m0", "-z", "-idq", "z13.rar", "f.txt"],
+        b"from stdin\r\n",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cw = run(&["cw", "-idq", "z13.rar"], dir.path());
+    assert_eq!(String::from_utf8_lossy(&cw.stdout), "from stdin\r\n");
+
+    // RAR5: the bare `-z` attaches the comment through the editor command.
+    let out = run_with_stdin(
+        &["a", "-m0", "-z", "-idq", "z5.rar", "f.txt"],
+        b"rar5 stdin comment",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cw = run(&["cw", "-idq", "z5.rar"], dir.path());
+    assert_eq!(String::from_utf8_lossy(&cw.stdout), "rar5 stdin comment");
+
+    // A bare `-si` stores stdin as a member named `stdin`.
+    let out = run_with_stdin(
+        &["a", "-ma14", "-m0", "-si", "-idq", "si.rar"],
+        b"stdin payload",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let listing = run(&["lb", "si.rar"], dir.path());
+    assert_eq!(String::from_utf8_lossy(&listing.stdout).trim(), "stdin");
+    let mut rar = rar_rs::ArchiveReader::open(dir.path().join("si.rar")).unwrap();
+    let id = rar.unique_entry("stdin").unwrap();
+    assert_eq!(rar.read_entry(id).unwrap(), b"stdin payload");
+}

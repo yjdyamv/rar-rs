@@ -503,4 +503,165 @@ fn cli_hardlink_redirects_keep_the_file_mtime() {
         "the redirect must carry the link's mtime"
     );
     assert_ne!(entry.mtime(), 0, "mtime must not be the 1970 default");
+
+    // `lt` renders the link kind and its target, like WinRAR.
+    let tech = std::process::Command::new(RAR_CLI)
+        .arg("lt")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&tech.stdout);
+    assert!(text.contains("Type: Hard link"), "{text}");
+    assert!(text.contains("Target: h1.txt"), "{text}");
+}
+
+/// WinRAR's volume-set listing semantics: only the members with data in the
+/// opened volume, fragment packed/ratio/CRC columns and a numbered
+/// `Details:` suffix.
+#[test]
+fn cli_volume_set_listing_matches_winrar() {
+    let dir = make_temp_dir();
+    let mut state = 0x9e37_79b9u32;
+    let big: Vec<u8> = (0..30_000)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 24) as u8
+        })
+        .collect();
+    std::fs::write(dir.path().join("big.bin"), &big).unwrap();
+    std::fs::write(dir.path().join("tail.txt"), b"tail member\r\n").unwrap();
+
+    let archive = dir.path().join("mv.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "--volume-size=8k", "-idq"])
+        .arg(&archive)
+        .arg("big.bin")
+        .arg("tail.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let volumes = rar_rs::discover_volumes(&archive);
+    assert!(volumes.len() >= 2, "{} volumes", volumes.len());
+
+    let run = |command: &str, target: &std::path::Path| {
+        let out = std::process::Command::new(RAR_CLI)
+            .arg(command)
+            .arg(target)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let first = run("l", &archive);
+    assert!(first.contains("Details: RAR 5, volume 1"), "{first}");
+    assert!(first.contains("big.bin"), "{first}");
+    assert!(
+        !first.contains("tail.txt"),
+        "volume 1 must not list members that start later:\n{first}"
+    );
+
+    let verbose = run("v", &archive);
+    assert!(verbose.contains("-->"), "first fragment marker:\n{verbose}");
+
+    let last = volumes.last().unwrap();
+    let verbose = run("v", last);
+    assert!(verbose.contains("tail.txt"), "{verbose}");
+    assert!(verbose.contains("<--"), "last fragment marker:\n{verbose}");
+    let listing = run("l", last);
+    assert!(
+        listing.contains(&format!("Details: RAR 5, volume {}", volumes.len())),
+        "{listing}"
+    );
+}
+
+/// Solid archives carry the `, solid` suffix and mark chain continuations
+/// with WinRAR's `Flags: solid` line.
+#[test]
+fn cli_solid_listing_shows_the_archive_and_member_flags() {
+    let dir = make_temp_dir();
+    std::fs::write(
+        dir.path().join("a.txt"),
+        b"solid first member payload ".repeat(40),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("b.txt"),
+        b"solid second member payload ".repeat(40),
+    )
+    .unwrap();
+    let archive = dir.path().join("solid.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-s", "-m5", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .arg("b.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let listing = std::process::Command::new(RAR_CLI)
+        .arg("l")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&listing.stdout);
+    assert!(text.contains("Details: RAR 5, solid"), "{text}");
+
+    let tech = std::process::Command::new(RAR_CLI)
+        .arg("lt")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&tech.stdout);
+    assert!(text.contains("       Flags: solid "), "{text}");
+}
+
+/// Members without a stored timestamp render `????-??-?? ??:??` in the
+/// tables and omit the `Modified:` line in `lt`, like WinRAR.
+#[test]
+fn cli_listing_marks_missing_timestamps() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("nomtime.rar");
+    {
+        let mut writer =
+            rar_rs::ArchiveWriter::create_with(&archive, rar_rs::WriterOptions::new()).unwrap();
+        writer
+            .add_bytes("file.txt", b"payload", rar_rs::EntryWriteOptions::new())
+            .unwrap();
+        // A redirect created without a time (the pre-2026-09 CLI shape).
+        writer.add_redirect("link.txt", 1, "file.txt").unwrap();
+        writer.finish().unwrap();
+    }
+
+    let listing = std::process::Command::new(RAR_CLI)
+        .arg("l")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&listing.stdout);
+    assert!(text.contains("????-??-?? ??:??"), "{text}");
+
+    let tech = std::process::Command::new(RAR_CLI)
+        .arg("lt")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&tech.stdout);
+    let link_block = text
+        .split("\n\n")
+        .find(|block| block.contains("Name: link.txt"))
+        .unwrap_or_default();
+    assert!(
+        !link_block.contains("Modified:"),
+        "a member without time has no Modified line:\n{text}"
+    );
+    assert!(
+        text.contains("Modified:"),
+        "file.txt keeps its time:\n{text}"
+    );
 }

@@ -180,7 +180,10 @@ impl RarArchive {
 
             match raw.block_type {
                 BLOCK_TYPE_ARCHIVE_HEADER => {
-                    let _ah = ArchiveHeader::from_raw(raw)?;
+                    let ah = ArchiveHeader::from_raw(raw)?;
+                    if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
+                        self.rar4_solid_archive = true;
+                    }
                 }
                 BLOCK_TYPE_FILE_HEADER => {
                     let fh = FileHeader::from_raw(raw, stream_pos)?;
@@ -329,7 +332,10 @@ impl RarArchive {
 
                 match raw.block_type {
                     BLOCK_TYPE_ARCHIVE_HEADER => {
-                        let _ah = ArchiveHeader::from_raw(&raw)?;
+                        let ah = ArchiveHeader::from_raw(&raw)?;
+                        if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
+                            self.rar4_solid_archive = true;
+                        }
                     }
                     BLOCK_TYPE_FILE_HEADER => {
                         let fh = FileHeader::from_raw(&raw, stream_pos)?;

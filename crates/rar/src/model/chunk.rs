@@ -8,6 +8,10 @@ pub struct DataChunk {
     pub volume_index: usize,
     pub data_offset: u64,
     pub packed_size: u64,
+    /// The fragment's stored checksum: RAR5 non-final heads and RAR 1.5–4.x
+    /// split heads carry a per-fragment CRC, the final head the member's
+    /// whole-data checksum. `None` for RAR 1.3/1.4 (16-bit rolling
+    /// checksums are not shown per fragment).
     pub crc32_val: Option<u32>,
     pub is_final: bool,
     pub extra_data: Vec<u8>,

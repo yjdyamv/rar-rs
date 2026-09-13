@@ -112,7 +112,7 @@ The complete feature matrix lives in [PLAN.md](PLAN.md).
 
 ## Limitations
 
-Legacy RAR4 creation and extraction have feature-specific limitations. Editing existing RAR4 archives is implemented ([ADR 0005](docs/adr/0005-rar4-edit-architecture.md)): rename, lock, archive comments and recovery records work on solid and non-solid archives alike, and member delete/append/update repacks solid archives whole (decode -> re-encode, mirroring WinRAR 7.21+) and surgically rewrites non-solid ones. Multi-volume archives refuse edits. Header-encrypted (`-hp`) archives are editable
+Legacy RAR4 creation and extraction have feature-specific limitations. Editing existing RAR4 archives is implemented ([ADR 0005](docs/adr/0005-rar4-edit-architecture.md)): rename, lock, archive comments and recovery records work on solid and non-solid archives alike, and member delete/append/update repacks solid archives whole (decode -> re-encode, mirroring WinRAR 7.21+) and surgically rewrites non-solid ones. Multi-volume archives refuse delete/append/update (the official `rar` refuses those too); rename, `ch`, lock and archive comments work volume-by-volume. Header-encrypted (`-hp`) archives are editable
 given the password — rename, delete, comments, recovery records, lock, append and
 solid repack all work. Repacking a solid archive that contains pre-RAR3 codec
 members is refused with a clear error.

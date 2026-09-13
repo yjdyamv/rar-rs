@@ -521,7 +521,18 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     if version.is_rar13()
         && let Some(comment_file) = &misc.comment_file
     {
-        let data = std::fs::read(comment_file).map_err(|e| format!("comment: {e}"))?;
+        // A bare `-z` (empty value) reads the comment from stdin, like
+        // WinRAR.
+        let data = if comment_file.is_empty() {
+            use std::io::Read;
+            let mut data = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut data)
+                .map_err(|e| format!("stdin: {e}"))?;
+            data
+        } else {
+            std::fs::read(comment_file).map_err(|e| format!("comment: {e}"))?
+        };
         writer
             .set_archive_comment(Some(data))
             .map_err(|e| format!("comment: {e}"))?;
@@ -543,14 +554,19 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             .map_err(|e| format!("link {}: {e}", redirect.name))?;
     }
 
-    // -si<name>: one member read from stdin.
+    // -si<name>: one member read from stdin. A bare `-si` names it
+    // `stdin`, like WinRAR.
     if let Some(name) = &args.stdin_name {
         use std::io::Read;
         let mut data = Vec::new();
         std::io::stdin()
             .read_to_end(&mut data)
             .map_err(|e| format!("stdin: {e}"))?;
-        let name = name.replace('\\', "/");
+        let name = if name.is_empty() {
+            "stdin".to_string()
+        } else {
+            name.replace('\\', "/")
+        };
         let stdin_options = rar_rs::EntryWriteOptions::new().compression_level(
             rar_rs::CompressionLevel::try_from(args.level).map_err(|e| format!("level: {e}"))?,
         );

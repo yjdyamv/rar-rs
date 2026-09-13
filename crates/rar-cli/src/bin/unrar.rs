@@ -329,7 +329,7 @@ fn cmd_list_bare(
     let names =
         listfile::expand(&args.names, misc.list_files.as_deref()).map_err(error::CliError::from)?;
     let rar = ops::open_reader(&args.archive, password)?;
-    ops::list_bare(&rar, &names);
+    ops::list_bare(&rar, &args.archive, &names);
     Ok(())
 }
 

@@ -70,6 +70,11 @@ pub(crate) fn cmd_recovery_volumes(args: &RecoveryVolumesArgs) -> CliResult<()> 
 /// Writes `fixed.<name>` when damage was found and repaired.
 pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
     let archive_path = &args.archive;
+    // RAR 1.3/1.4 has no recovery records and its fixed-width headers are
+    // not RAR5 blocks; refuse before the RAR5 repair path misparses them.
+    if crate::list::is_rar13_file(std::path::Path::new(archive_path)) {
+        return Err("repair is not supported for RAR 1.3/1.4 archives".into());
+    }
     let name = std::path::Path::new(archive_path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

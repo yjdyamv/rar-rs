@@ -424,7 +424,8 @@ pub(crate) struct CreateArgs {
     )]
     pub(crate) header_encrypt: Option<String>,
     /// Dictionary size for compression (like `-md<size>[k|m|g]`; no unit
-    /// means MiB, valid values 128K..4G powers of two)
+    /// means MiB, valid values 128K..4G powers of two; with `-ma7` any byte
+    /// count through 126G, e.g. `6m`)
     #[arg(long = "dict-size", value_name = "SIZE")]
     pub(crate) dict_size: Option<String>,
     /// Archive format version (like `-ma5`; `-ma7` forces RAR7/v70 — an
@@ -559,8 +560,8 @@ pub(crate) struct CreateArgs {
     /// Do not add empty directories (like `-ed`)
     #[arg(long = "no-empty-dirs")]
     pub(crate) no_empty_dirs: bool,
-    /// Do not show the archive comment (like `-c-`; accepted, comments are
-    /// never displayed by this tool)
+    /// Accepted for compatibility (like `-c-`); table listings never show
+    /// archive comments — only `cw` prints them — so this has no effect
     #[arg(long = "no-comment", global = true)]
     pub(crate) no_comment: bool,
     /// Store files matching these types without compression (like
@@ -604,7 +605,8 @@ pub(crate) struct CreateArgs {
     /// Securely wipe files after archiving (like `-dw`; unsupported)
     #[arg(long = "wipe")]
     pub(crate) wipe: bool,
-    /// Read one member from stdin under this name (like `-si<name>`)
+    /// Read one member from stdin under this name (like `-si<name>`; a bare
+    /// `-si` names it `stdin`)
     #[arg(long = "stdin-name", value_name = "NAME")]
     pub(crate) stdin_name: Option<String>,
     #[arg(value_name = "ARCHIVE")]

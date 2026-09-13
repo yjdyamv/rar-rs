@@ -39,30 +39,118 @@ fn ratio_percent(size: u64, packed: u64) -> String {
     }
 }
 
+/// The volume a listing was opened from: WinRAR's table listings show only
+/// the members with data in that volume, with per-fragment columns for
+/// members split across volumes.
+#[derive(Clone, Copy)]
+struct VolumeView {
+    index: usize,
+    count: usize,
+}
+
+impl VolumeView {
+    fn of(archive: &str) -> Self {
+        let volumes = rar_rs::discover_volumes(std::path::Path::new(archive));
+        if volumes.len() <= 1 {
+            return Self { index: 0, count: 1 };
+        }
+        let opened = std::path::Path::new(archive).file_name();
+        let index = opened
+            .and_then(|name| {
+                let name = name.to_string_lossy();
+                volumes.iter().position(|volume| {
+                    volume.file_name().is_some_and(|candidate| {
+                        candidate.to_string_lossy().eq_ignore_ascii_case(&name)
+                    })
+                })
+            })
+            .unwrap_or(0);
+        Self {
+            index,
+            count: volumes.len(),
+        }
+    }
+
+    /// The chunk of `entry` that lives in the opened volume, with its
+    /// position in the member's chunk list and its stored checksum; `None`
+    /// when the member has no data in this volume (WinRAR omits it).
+    fn fragment(&self, entry: &EntryRef<'_>) -> Option<(usize, u64, Option<u32>)> {
+        let chunks = entry.chunks();
+        if self.count <= 1 {
+            let chunk = chunks.first()?;
+            return Some((0, chunk.packed_size, chunk.crc32_val));
+        }
+        let position = chunks
+            .iter()
+            .position(|chunk| chunk.volume_index == self.index)?;
+        let chunk = &chunks[position];
+        Some((position, chunk.packed_size, chunk.crc32_val))
+    }
+
+    fn includes(&self, entry: &EntryRef<'_>) -> bool {
+        self.count <= 1 || self.fragment(entry).is_some()
+    }
+
+    /// WinRAR's Ratio cell for a fragment: `-->`/`<->`/`<--` for members
+    /// split across volumes, the integer percentage otherwise.
+    fn ratio_cell(&self, entry: &EntryRef<'_>, position: usize, packed: u64) -> String {
+        let chunks = entry.chunks();
+        if self.count > 1 && chunks.len() > 1 {
+            return if position == 0 {
+                "-->".to_string()
+            } else if position + 1 == chunks.len() {
+                "<--".to_string()
+            } else {
+                "<->".to_string()
+            };
+        }
+        ratio_percent(entry.size(), packed)
+    }
+
+    /// Whether this fragment starts the member in the opened volume; the
+    /// totals rows count only those members, like WinRAR.
+    fn starts_here(&self, position: usize) -> bool {
+        position == 0
+    }
+}
+
 /// The `Archive:` / `Details:` preamble of the table listings.
-fn list_preamble(rar: &ArchiveReader, archive: &str) {
+fn list_preamble(rar: &ArchiveReader, archive: &str, view: &VolumeView) {
     println!("Archive: {archive}");
-    println!("Details: {}", archive_details(rar));
+    println!("Details: {}", archive_details(rar, view));
     println!();
 }
 
-/// WinRAR's `Details:` container label.
-fn archive_details(rar: &ArchiveReader) -> &'static str {
-    let Some(entry) = rar.entries().next() else {
-        return "RAR 5";
-    };
-    let version = entry.version();
-    if version.is_rar13() {
-        "RAR 1.4"
-    } else if version.is_legacy() {
-        "RAR 1.5"
-    } else if version == ArchiveVersion::V70
-        && entry.dict_size_bytes().is_some_and(|size| size > 4 << 30)
-    {
-        "RAR 7"
-    } else {
-        "RAR 5"
+/// WinRAR's `Details:` container label with its `, solid` / `, volume`
+/// annotations.
+fn archive_details(rar: &ArchiveReader, view: &VolumeView) -> String {
+    let first = rar.entries().next();
+    let version = first.map(|entry| entry.version());
+    let mut details = match version {
+        Some(rc) if rc.is_rar13() => "RAR 1.4",
+        Some(rc) if rc.is_legacy() => "RAR 1.5",
+        Some(ArchiveVersion::V70)
+            if first
+                .and_then(|entry| entry.dict_size_bytes())
+                .is_some_and(|size| size > 4 << 30) =>
+        {
+            "RAR 7"
+        }
+        _ => "RAR 5",
     }
+    .to_string();
+    if rar.is_solid() {
+        details.push_str(", solid");
+    }
+    if view.count > 1 {
+        let rar5 = matches!(version, Some(rc) if !rc.is_rar13() && !rc.is_legacy());
+        if rar5 {
+            details.push_str(&format!(", volume {}", view.index + 1));
+        } else {
+            details.push_str(", volume");
+        }
+    }
+    details
 }
 
 /// DOS/Windows attribute flags in WinRAR's `..A.SH.` column order.
@@ -203,8 +291,12 @@ fn compression_cell(entry: &EntryRef<'_>) -> String {
     cell
 }
 
-/// The date/time column pair (`YYYY-MM-DD`, `HH:MM`) WinRAR prints.
+/// The date/time column pair (`YYYY-MM-DD`, `HH:MM`) WinRAR prints;
+/// `????-??-??` / `??:??` when the member carries no time.
 fn list_stamp(entry: &EntryRef<'_>) -> (String, String) {
+    if !entry.has_mtime() {
+        return ("????-??-??".to_string(), "??:??".to_string());
+    }
     let stamp = member_stamp(entry);
     (stamp[..10].to_string(), stamp[11..16].to_string())
 }
@@ -238,56 +330,70 @@ pub(crate) fn matches_filter(member: &str, names: &[String]) -> bool {
             .any(|selector| crate::selector::name_matches(member, selector))
 }
 
-/// Bare list (`lb` / `vb`): member names only.
-pub fn list_bare(rar: &ArchiveReader, names: &[String]) {
+/// Bare list (`lb` / `vb`): member names only (of the opened volume).
+pub fn list_bare(rar: &ArchiveReader, archive: &str, names: &[String]) {
     if listing_quiet() {
         return;
     }
+    let view = VolumeView::of(archive);
     for entry in rar
         .entries()
-        .filter(|entry| matches_filter(entry.name(), names))
+        .filter(|entry| matches_filter(entry.name(), names) && view.includes(entry))
     {
         println!("{}", display_name(entry.name()));
     }
 }
 
 /// Standard list (`l`), or the verbose variant with the packed/ratio/CRC
-/// columns (`v`), in WinRAR's table shape.
+/// columns (`v`), in WinRAR's table shape. On a volume set only the members
+/// with data in the opened volume are listed, with per-fragment columns.
 pub fn list_entries(rar: &ArchiveReader, archive: &str, names: &[String], verbose: bool) {
     if listing_quiet() {
         return;
     }
-    list_preamble(rar, archive);
+    let view = VolumeView::of(archive);
+    list_preamble(rar, archive, &view);
 
     let mut total_size = 0u64;
     let mut total_packed = 0u64;
     let mut shown = 0usize;
-    let mut row = |entry: &EntryRef<'_>| {
-        let (date, time) = list_stamp(entry);
-        let attrs = attributes_cell(entry);
-        let name = display_name(entry.name());
-        if verbose {
-            let checksum = if entry.version().is_rar13() {
-                "????????".to_string()
+    let mut row =
+        |entry: &EntryRef<'_>, position: usize, packed: u64, fragment_crc: Option<u32>| {
+            let (date, time) = list_stamp(entry);
+            let attrs = attributes_cell(entry);
+            let name = display_name(entry.name());
+            if verbose {
+                let checksum = if entry.version().is_rar13() {
+                    if entry.is_dir() {
+                        String::new()
+                    } else {
+                        "????????".to_string()
+                    }
+                } else if position + 1 == entry.chunks().len() {
+                    entry
+                        .crc32()
+                        .map(|crc| format!("{crc:08X}"))
+                        .unwrap_or_default()
+                } else {
+                    fragment_crc
+                        .map(|crc| format!("{crc:08X}"))
+                        .unwrap_or_default()
+                };
+                println!(
+                    "{attrs:>11} {:>10} {:>10} {:>4}  {date} {time}  {checksum:>8}  {name}",
+                    entry.size(),
+                    packed,
+                    view.ratio_cell(entry, position, packed),
+                );
             } else {
-                entry
-                    .crc32()
-                    .map(|crc| format!("{crc:08X}"))
-                    .unwrap_or_default()
-            };
-            println!(
-                "{attrs:>11} {:>10} {:>10} {:>4}  {date} {time}  {checksum:>8}  {name}",
-                entry.size(),
-                entry.compressed_size(),
-                ratio_percent(entry.size(), entry.compressed_size()),
-            );
-        } else {
-            println!("{attrs:>11} {:>10}  {date} {time}  {name}", entry.size(),);
-        }
-        total_size += entry.size();
-        total_packed += entry.compressed_size();
-        shown += 1;
-    };
+                println!("{attrs:>11} {:>10}  {date} {time}  {name}", entry.size(),);
+            }
+            if view.starts_here(position) {
+                total_size += entry.size();
+                shown += 1;
+            }
+            total_packed += packed;
+        };
 
     if verbose {
         println!(" Attributes       Size     Packed Ratio    Date    Time   Checksum  Name");
@@ -298,9 +404,10 @@ pub fn list_entries(rar: &ArchiveReader, archive: &str, names: &[String], verbos
     }
     for entry in rar
         .entries()
-        .filter(|entry| matches_filter(entry.name(), names))
+        .filter(|entry| matches_filter(entry.name(), names) && view.includes(entry))
     {
-        row(&entry);
+        let (position, packed, fragment_crc) = view.fragment(&entry).expect("included above");
+        row(&entry, position, packed, fragment_crc);
     }
     let total_ratio = ratio_percent(total_size, total_packed);
     if verbose {
@@ -319,48 +426,81 @@ pub fn list_entries(rar: &ArchiveReader, archive: &str, names: &[String], verbos
     println!();
 }
 
-/// Technical list (`lt` / `vt`): WinRAR's per-member block shape.
+/// Technical list (`lt` / `vt`): WinRAR's per-member block shape (fragment
+/// values when listing one volume of a set).
 pub fn list_technical(rar: &ArchiveReader, archive: &str, names: &[String]) {
     if listing_quiet() {
         return;
     }
-    list_preamble(rar, archive);
+    let view = VolumeView::of(archive);
+    list_preamble(rar, archive, &view);
     for entry in rar
         .entries()
-        .filter(|entry| matches_filter(entry.name(), names))
+        .filter(|entry| matches_filter(entry.name(), names) && view.includes(entry))
     {
+        let (position, packed, fragment_crc) = view.fragment(&entry).expect("included above");
         println!("{:>12}: {}", "Name", display_name(entry.name()));
-        println!(
-            "{:>12}: {}",
-            "Type",
-            if entry.is_dir() { "Directory" } else { "File" }
-        );
+        println!("{:>12}: {}", "Type", member_type_cell(&entry));
+        if let Some((_, target)) = entry.redirect() {
+            println!("{:>12}: {target}", "Target");
+        }
         if !entry.is_dir() {
             println!("{:>12}: {}", "Size", entry.size());
-            println!("{:>12}: {}", "Packed size", entry.compressed_size());
+            println!("{:>12}: {}", "Packed size", packed);
             println!(
                 "{:>12}: {}",
                 "Ratio",
-                ratio_percent(entry.size(), entry.compressed_size())
+                view.ratio_cell(&entry, position, packed)
             );
         }
-        println!(
-            "{:>12}: {},{:09}",
-            "Modified",
-            member_stamp(&entry),
-            entry.mtime_ns().unwrap_or(0)
-        );
+        if entry.has_mtime() {
+            println!(
+                "{:>12}: {},{:09}",
+                "Modified",
+                member_stamp(&entry),
+                entry.mtime_ns().unwrap_or(0)
+            );
+        }
         println!("{:>12}: {}", "Attributes", attributes_cell(&entry));
-        if !entry.version().is_rar13()
-            && let Some(crc) = entry.crc32()
-        {
-            println!("{:>12}: {crc:08X}", "CRC32");
+        if !entry.version().is_rar13() {
+            let label = if position + 1 == entry.chunks().len() {
+                "CRC32"
+            } else {
+                "Pack-CRC32"
+            };
+            let crc = if position + 1 == entry.chunks().len() {
+                entry.crc32()
+            } else {
+                fragment_crc
+            };
+            if let Some(crc) = crc {
+                println!("{:>12}: {crc:08X}", label);
+            }
         }
         if let Some(host) = host_os_cell(&entry) {
             println!("{:>12}: {host}", "Host OS");
         }
         println!("{:>12}: {}", "Compression", compression_cell(&entry));
+        if entry.comp_solid() && !entry.version().is_rar13() {
+            // WinRAR marks chain continuations, with a trailing space after
+            // the value.
+            println!("{:>12}: solid ", "Flags");
+        }
         println!();
+    }
+}
+
+/// WinRAR's `Type:` cell: redirect members carry their link kind, other
+/// entries are files or directories.
+fn member_type_cell(entry: &EntryRef<'_>) -> &'static str {
+    match entry.redirect().map(|(redir_type, _)| redir_type) {
+        Some(1) => "Unix symbolic link",
+        Some(2) => "Windows symbolic link",
+        Some(3) => "Windows junction",
+        Some(4) => "Hard link",
+        Some(5) => "File copy",
+        _ if entry.is_dir() => "Directory",
+        _ => "File",
     }
 }
 

@@ -234,12 +234,14 @@ impl WriterOptions {
     }
 
     /// Select the member compression version. The container family follows
-    /// the version: `v50`/`v70` write the RAR5 container,
-    /// `v15`/`v20`/`v29` write the legacy RAR 1.5–4.x container with
-    /// per-member `unp_ver 15`/`20`/`29` (`-ma15` / `-ma2` / `-ma4`) and no
-    /// configurable dictionary. Only writable versions are accepted — `v26`
-    /// and `v36` are read-only and rejected at validation, never silently
-    /// downgraded (see [`ArchiveVersion::is_writable`]).
+    /// the version: `v50`/`v70` write the RAR5 container, `v14` the DOS-era
+    /// RAR 1.3/1.4 `RE~^` container (STORE/Unpack15, solid chains, comments,
+    /// `-p` and old-style `.rar`/`.rNN` volumes), and `v15`/`v20`/`v29`
+    /// write the legacy RAR 1.5–4.x container with per-member `unp_ver 15`/
+    /// `20`/`29` (`-ma15` / `-ma2` / `-ma4`); none of the legacy formats
+    /// take a configurable dictionary. Only writable versions are accepted —
+    /// `v26` and `v36` are read-only and rejected at validation, never
+    /// silently downgraded (see [`ArchiveVersion::is_writable`]).
     /// The owning v50/v70 policy lives in the private `format::rar5::create`
     /// module.
     #[must_use]
@@ -291,6 +293,10 @@ impl WriterOptions {
     }
 
     /// Add an inline recovery record using the given percentage.
+    ///
+    /// Validation rejects the combination with [`Self::volume_size`] and
+    /// formats without recovery records (`v14`, and the RAR5-only fields on
+    /// legacy writers) with `InvalidOption`.
     #[must_use]
     pub fn recovery_percent(mut self, percent: u8) -> Self {
         self.recovery_percent = Some(percent);
@@ -305,6 +311,10 @@ impl WriterOptions {
     }
 
     /// Create an exact number of recovery volumes.
+    ///
+    /// Requires [`Self::volume_size`] and cannot be combined with a
+    /// recovery-volume percentage; refused for RAR 1.3/1.4 with
+    /// `InvalidOption`.
     #[must_use]
     pub fn recovery_volume_count(mut self, count: u32) -> Self {
         self.recovery_volume_count = Some(count);
