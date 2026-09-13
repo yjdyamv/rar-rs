@@ -1,6 +1,7 @@
 //! `rar x` / `rar e` / `rar p` — extraction and printing.
 
 use crate::args::{ExtractArgs, PrintArgs};
+use crate::common;
 use crate::error::CliResult;
 use crate::info;
 use crate::ops;
@@ -11,8 +12,20 @@ pub(crate) fn cmd_print(args: &PrintArgs) -> CliResult<()> {
     ops::print_members(&mut rar, args.file.as_deref())
 }
 
+/// Apply `-om` (Mark of the Web propagation) to the reader before
+/// extraction; a no-op unless the switch is present.
+fn apply_mark_web(
+    rar: &mut rar_rs::ArchiveReader,
+    misc: &common::MiscSwitches,
+) -> Result<(), String> {
+    if let Some(spec) = misc.mark_web.as_deref() {
+        rar.set_mark_of_the_web(common::parse_mark_web(spec)?);
+    }
+    Ok(())
+}
+
 /// Extract with full paths (like `rar x`).
-pub(crate) fn cmd_extract(args: &ExtractArgs) -> CliResult<()> {
+pub(crate) fn cmd_extract(args: &ExtractArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
@@ -23,6 +36,7 @@ pub(crate) fn cmd_extract(args: &ExtractArgs) -> CliResult<()> {
     if args.stdout {
         return ops::extract_to_stdout(&mut rar, &args.names, None);
     }
+    apply_mark_web(&mut rar, misc)?;
     let skip = args.overwrite.as_deref() == Some("never");
     let options = rar_rs::ExtractOptions {
         skip_existing: skip,
@@ -43,7 +57,7 @@ pub(crate) fn extract_dest(args: &ExtractArgs) -> Result<std::path::PathBuf, Str
 }
 
 /// Extract without archived paths (like `rar e`).
-pub(crate) fn cmd_extract_flat(args: &ExtractArgs) -> CliResult<()> {
+pub(crate) fn cmd_extract_flat(args: &ExtractArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
     }
@@ -52,6 +66,7 @@ pub(crate) fn cmd_extract_flat(args: &ExtractArgs) -> CliResult<()> {
     if args.stdout {
         return ops::extract_to_stdout(&mut rar, &args.names, None);
     }
+    apply_mark_web(&mut rar, misc)?;
     let skip = args.overwrite.as_deref() == Some("never");
     let options = rar_rs::ExtractOptions {
         flat_paths: true,

@@ -14,6 +14,28 @@ use crate::format::rar5::write as rar5_write;
 use crate::fs::safe_path::resolve_redirect_target;
 use crate::fs::safe_path::sanitize_archive_path;
 
+/// Keep only the security zone from a Mark of the Web stream: the
+/// `[ZoneTransfer]` section header and its `ZoneId=` line (WinRAR's `-om`
+/// without the `1` modifier omits the potentially sensitive `ReferrerUrl`
+/// and `HostUrl` fields).
+#[cfg(windows)]
+fn filter_motw_zone(stream: &[u8]) -> Option<Vec<u8>> {
+    let text = String::from_utf8_lossy(stream);
+    let mut out = String::new();
+    let mut in_section = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("[ZoneTransfer]") {
+            out.push_str("[ZoneTransfer]\r\n");
+            in_section = true;
+        } else if in_section && trimmed.to_ascii_lowercase().starts_with("zoneid=") {
+            out.push_str(trimmed);
+            out.push_str("\r\n");
+        }
+    }
+    (!out.is_empty()).then(|| out.into_bytes())
+}
+
 impl RarArchive {
     /// Write the "STM" stream records attached to member `idx` onto the
     /// extracted file (`file:name`); Windows only.
@@ -29,6 +51,44 @@ impl RarArchive {
             let _ = (idx, dest_path);
         }
         Ok(())
+    }
+
+    /// Copy the archive file's Mark of the Web (its `Zone.Identifier`
+    /// stream) onto an extracted file (WinRAR's `-om`); Windows only.
+    pub(super) fn propagate_member_mark_of_the_web(&self, dest_path: &Path) {
+        #[cfg(windows)]
+        {
+            let Some(options) = self.read_ctx().motw.as_ref() else {
+                return;
+            };
+            if let Some(extensions) = &options.extensions {
+                let ext = dest_path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_ascii_lowercase());
+                let matches = ext.is_some_and(|ext| extensions.iter().any(|wanted| wanted == &ext));
+                if !matches {
+                    return;
+                }
+            }
+            let Some(stream) = rar5_write::read_windows_stream(&self.path, ":Zone.Identifier")
+            else {
+                return;
+            };
+            let data = if options.all_fields {
+                stream
+            } else {
+                match filter_motw_zone(&stream) {
+                    Some(data) => data,
+                    None => return,
+                }
+            };
+            let _ = rar5_write::write_windows_stream(dest_path, ":Zone.Identifier", &data);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = dest_path;
+        }
     }
 
     /// Restore a member's stored timestamps on the extracted file: the

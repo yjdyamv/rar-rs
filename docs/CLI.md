@@ -99,7 +99,10 @@ name to dest / archive metadata), `-ol`/`-oh` (store sym/hard links as links:
 symlinks become redirects, hard-link groups store the first path and
 redirect the rest — Windows and Unix, RAR5 only),
 `-op<path>`/`-or` (output path / auto-rename), `-os`/`-ow` (NTFS streams /
-owner), `-oi[0-4][:<minsize>]` (identical files as references: `-oi`/`-oi1`
+owner), `-om[-|1][=ext;ext]` (propagate the archive's Mark of the Web to
+extracted files: zone value only, every field with `1`, optional extension
+filter; Windows only),
+`-oi[0-4][:<minsize>]` (identical files as references: `-oi`/`-oi1`
 store the first file and reference the rest, `-oi2` announces the groups,
 `-oi3`/`-oi4` list them and create no archive; default 64 KiB minimum,
 RAR5 only), `-df`/`-kb`/`-si<name>` (delete sources / keep broken / stdin
@@ -116,8 +119,9 @@ create stores the file's alternate data streams as `STM` records (each
 stream is encrypted with the archive password when `-p`/`-hp` is set) and
 extraction restores them; on other platforms it is a no-op. `-dr` (recycle
 bin) and `-dw` (wipe) are **rejected with an error** rather than silently
-ignored, since they would otherwise imply source deletion. `-log` and `-om`
-are not implemented.
+ignored, since they would otherwise imply source deletion. `-me<par>`
+(including the undocumented `-mes`) is accepted as a no-op. `-log` is not
+implemented.
 
 ---
 

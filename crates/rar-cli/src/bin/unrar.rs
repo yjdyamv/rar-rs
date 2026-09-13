@@ -248,9 +248,16 @@ fn run_inner(cli: Cli) -> CliResult<()> {
         .as_deref()
         .map(common::parse_mdx_size)
         .transpose()?;
+    let motw = cli
+        .misc
+        .mark_web
+        .as_deref()
+        .map(common::parse_mark_web)
+        .transpose()?
+        .flatten();
     match cli.command {
-        Command::Extract(args) => cmd_extract(&args, password, ts, max_dict_size),
-        Command::ExtractFlat(args) => cmd_extract_flat(&args, password, ts, max_dict_size),
+        Command::Extract(args) => cmd_extract(&args, password, ts, max_dict_size, motw),
+        Command::ExtractFlat(args) => cmd_extract_flat(&args, password, ts, max_dict_size, motw),
         Command::List(args) => cmd_list(&args.archive, password),
         Command::ListBare(args) => cmd_list_bare(&args.archive, password),
         Command::ListTechnical(args) => cmd_list_technical(&args.archive, password),
@@ -293,6 +300,7 @@ fn cmd_extract(
     password: Option<&str>,
     ts: time::TsSettings,
     max_dict_size: Option<u64>,
+    motw: Option<rar_rs::MarkOfTheWeb>,
 ) -> CliResult<()> {
     if let Some(threads) = args.threads {
         rar_rs::set_extraction_threads(threads);
@@ -304,6 +312,7 @@ fn cmd_extract(
         .unwrap_or_else(|| ".".to_string());
     let dest = output::extract_dest(&base, &args.archive, args.append_dir);
     let mut rar = ops::open_reader(&args.archive, password)?;
+    rar.set_mark_of_the_web(motw);
 
     // `-so`: write the extracted members to stdout (one stream) instead of
     // to disk — handy for piping. Directories carry no data.
@@ -337,6 +346,7 @@ fn cmd_extract_flat(
     password: Option<&str>,
     ts: time::TsSettings,
     max_dict_size: Option<u64>,
+    motw: Option<rar_rs::MarkOfTheWeb>,
 ) -> CliResult<()> {
     let base = args
         .output_path
@@ -345,6 +355,7 @@ fn cmd_extract_flat(
         .unwrap_or_else(|| ".".to_string());
     let dest = output::extract_dest(&base, &args.archive, args.append_dir);
     let mut rar = ops::open_reader(&args.archive, password)?;
+    rar.set_mark_of_the_web(motw);
     if args.stdout {
         return ops::extract_to_stdout(&mut rar, &args.names, max_dict_size);
     }

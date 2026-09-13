@@ -770,3 +770,126 @@ fn cli_identical_listing_modes() {
     );
     assert!(!dummy.exists(), "-oi4 must not create an archive");
 }
+
+// ── -om Mark of the Web, -me switch surface ─────────────────────────────────
+
+/// `rar x -om` copies the archive's Zone.Identifier stream to extracted
+/// files (zone only by default, every field with `-om1`, filtered by
+/// `-om=<ext>`), and `unrar x` does the same.
+#[cfg(windows)]
+#[test]
+fn cli_mark_of_the_web_propagation() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"body").unwrap();
+    let archive = dir.path().join("motw.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let motw: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\nReferrerUrl=https://example.com/p\r\n";
+    let archive_stream = format!("{}{}", archive.display(), ":Zone.Identifier");
+    std::fs::write(&archive_stream, motw).unwrap();
+
+    let extract = |switch: Option<&str>, name: &str| {
+        let out = dir.path().join(name);
+        std::fs::create_dir_all(&out).unwrap();
+        let mut command = std::process::Command::new(RAR_CLI);
+        command.arg("x");
+        if let Some(switch) = switch {
+            command.arg(switch);
+        }
+        let status = command
+            .args(["-idq", "--dest"])
+            .arg(&out)
+            .arg(&archive)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::read(format!(
+            "{}{}",
+            out.join("f.txt").display(),
+            ":Zone.Identifier"
+        ))
+        .ok()
+    };
+
+    assert_eq!(
+        extract(Some("-om"), "zone").as_deref(),
+        Some(b"[ZoneTransfer]\r\nZoneId=3\r\n".as_slice()),
+        "-om propagates only the security zone"
+    );
+    assert_eq!(
+        extract(Some("-om1"), "full").as_deref(),
+        Some(motw),
+        "-om1 copies every field"
+    );
+    assert_eq!(extract(None, "off"), None, "no switch, no propagation");
+    assert_eq!(
+        extract(Some("-om=txt"), "txt").as_deref(),
+        Some(b"[ZoneTransfer]\r\nZoneId=3\r\n".as_slice()),
+        "-om=txt matches the extension"
+    );
+    assert_eq!(
+        extract(Some("-om=exe"), "exe"),
+        None,
+        "-om=exe must not match .txt"
+    );
+
+    let out = dir.path().join("unrar");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "-om", "-idq", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read(format!(
+            "{}{}",
+            out.join("f.txt").display(),
+            ":Zone.Identifier"
+        ))
+        .unwrap(),
+        b"[ZoneTransfer]\r\nZoneId=3\r\n"
+    );
+}
+
+/// `-me<par>` (including the undocumented `-mes`) is accepted by every
+/// command in both binaries, like WinRAR.
+#[cfg(any(unix, windows))]
+#[test]
+fn cli_me_switch_is_accepted_everywhere() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"me").unwrap();
+    let archive = dir.path().join("me.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-mes", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    for bin in [RAR_CLI, UNRAR_CLI] {
+        let status = std::process::Command::new(bin)
+            .args(["t", "-mes", "-idq"])
+            .arg(&archive)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{bin} t -mes must be accepted");
+    }
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-mes", "-idq", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}

@@ -144,7 +144,8 @@ fuzz 使用一个可枚举的小子集，于是删除 feature 与 `rar40`/`rar50
 - [x] **`-os` NTFS ADS 写侧完整化（2026-09）**：CLI `-os` 接线；流块补明文 CRC32、`-p` 时每流独立 ENCR（flags=1，不 MAC）+ 加密载荷；batch 并行在 `meta.streams` 时强制顺序。读侧 `StreamRecord` 增 `crc32`/`params`，密码改为读取时校验/派生（锁定档可正常列表）；`extract/decode.rs::read_member_streams` 统一读取/解密/CRC 校验（Linux 可测）。官方双向互操作（明文与 `-ppw`）+ 两个官方 `-os` 夹具单测。
 - [x] **`-oh` 硬链接写侧（2026-09）**：`rar a`/`u`/`f` 按文件身份（Unix `dev/ino`、Windows `GetFileInformationByHandle` 的卷序列+文件索引）把同组后续路径写成 type-4 "Hard link" redirect（`bin/rar/links.rs`）；`-ma4` 与官方一致地存完整文件（RAR4 无 redirect 记录）；官方 UnRAR 双向互操作 + `cli_behavior` 硬链接回环测试。
 - [x] **`-oi` 相同文件引用（2026-09）**：`rar a`/`u`/`f` 支持 `-oi[0-4][:<minsize>]`——默认 64 KiB 阈值（`b/B/k/K/m/M/g/G/t/T` 单位，小写二进制/大写十进制）、`-oi1` 存首文件+type-5 "File copy" redirect、`-oi2` 打印分组、`-oi3`/`-oi4` 只列分组且不创建归档、`-oi0`/`-oi-` 关闭；CRC32 相同后逐字节复核防碰撞；RAR4 与官方一致忽略 dedup。官方 UnRAR 双向互操作 + `cli_behavior` 两测试。
-- [ ] `-om` MOTW / `-log` / `-mes`：CLI 直接拒绝或未接线。
+- [x] **`-om` MOTW 传播 + `-mes`（2026-09）**：`-om[-|1][=ext;ext]`（默认只传播安全区 `ZoneId=`，`1` 全字段，扩展名过滤，Windows；库 `MarkOfTheWeb` + `ArchiveReader::set_mark_of_the_web`，`rar`/`unrar` 双侧接线）；与 WinRAR 输出逐字节一致（互操作测试）；`-me<par>`（含未文档化的 `-mes`）改为全局接受（原先仅 create 接受、extract/test 报错）。
+- [ ] `-log[AFPU]*[=name]`：命令日志（默认 `rarinfo.log`）未实现。
 - [ ] `-mc<par>` 高级压缩参数 no-op。
 - [ ] CLI 形态缺口：`m[f]`、`lta`/`vta`、`rar x -kb/-or/-op`、`a -f/-u/-k`、`-qo+/-`、`-ola`、`a -z`、单横线 `-` 停止扫描。
 - [ ] Windows no-op 开关（`-ac`/`-ai`/`-e[+]<attr>`/`-dh`/`-oc`/`-oni`/`-ri`/`-vp`/`-vd`/`-ioff`/`-isnd`/`-ieml`/`-mlp`/`-am[s,r]`/`-sc` 部分）：按 WinRAR 语义补齐或明确记录。

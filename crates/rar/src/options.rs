@@ -401,6 +401,23 @@ impl Default for ExtractOptions {
     }
 }
 
+/// Mark of the Web propagation for extraction (WinRAR's `-om`).
+///
+/// Browsers tag downloaded files with a `Zone.Identifier` alternate data
+/// stream; when set on a [`crate::archive::RarArchive`] through
+/// [`crate::archive::RarArchive::set_mark_of_the_web`], the archive file's
+/// own stream is copied onto every extracted file. Windows only: the
+/// setting is ignored on other platforms, where the concept does not exist.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MarkOfTheWeb {
+    /// Copy every field; when `false` only the security zone value
+    /// (`ZoneId=`) is propagated, matching `-om` without the `1` modifier.
+    pub all_fields: bool,
+    /// Restrict propagation to these file extensions (lowercase, no
+    /// leading dot); `None` propagates to every extracted file.
+    pub extensions: Option<Vec<String>>,
+}
+
 /// Parse a WinRAR `-md<size>[k|m|g]` dictionary size into the
 /// `(dict_size_log, dict_size_bytes)` pair used by [`CreateOptions`].
 /// No unit means MiB.

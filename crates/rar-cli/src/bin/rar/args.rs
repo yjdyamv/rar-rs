@@ -521,10 +521,6 @@ pub(crate) struct CreateArgs {
     #[arg(long = "mc", value_name = "PAR")]
     #[allow(dead_code)]
     pub(crate) mc_params: Option<String>,
-    /// Encryption parameters (like `-me<par>`; accepted)
-    #[arg(long = "me", value_name = "PAR")]
-    #[allow(dead_code)]
-    pub(crate) me_params: Option<String>,
     /// Long-distance matching control (like `-mcl`; accepted). Long-range
     /// matching is always enabled for `-m2`…`-m5`, so this is a no-op that
     /// matches WinRAR 7.23's own behaviour.

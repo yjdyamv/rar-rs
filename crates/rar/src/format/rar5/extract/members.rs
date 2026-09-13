@@ -245,6 +245,7 @@ impl RarArchive {
                 self.apply_member_times(&entry.header, &dest_path);
             }
             self.extract_member_streams(member.idx, &dest_path)?;
+            self.propagate_member_mark_of_the_web(&dest_path);
         }
         Ok(true)
     }
@@ -414,6 +415,7 @@ impl RarArchive {
         // Restore NTFS alternate data streams attached to this member
         // (no-op on non-Windows, like the reference extractor).
         self.extract_member_streams(idx, &dest_path)?;
+        self.propagate_member_mark_of_the_web(&dest_path);
 
         Ok(dest_path)
     }

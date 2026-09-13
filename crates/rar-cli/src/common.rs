@@ -195,6 +195,14 @@ pub struct MiscSwitches {
     /// side; accepted as a no-op on extraction)
     #[arg(global = true, long = "identical", value_name = "OPTS", num_args = 0..=1, default_missing_value = "")]
     pub identical: Option<String>,
+    /// Propagate Mark of the Web from the archive to extracted files
+    /// (`-om[-|1][=ext;ext]`; Windows only)
+    #[arg(global = true, long = "mark-web", value_name = "OPTS", num_args = 0..=1, default_missing_value = "")]
+    pub mark_web: Option<String>,
+    /// Encryption parameters (`-me<par>`; accepted)
+    #[arg(global = true, long = "me", value_name = "PAR")]
+    #[allow(dead_code)]
+    pub me_params: Option<String>,
     /// Archive metadata save/restore (`-am[s,r]`; accepted)
     #[arg(global = true, long = "archive-meta", value_name = "SPEC")]
     #[allow(dead_code)]
@@ -476,6 +484,9 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-oi") {
         return format!("--identical={rest}");
     }
+    if let Some(rest) = arg.strip_prefix("-om") {
+        return format!("--mark-web={rest}");
+    }
     if let Some(rest) = arg.strip_prefix("-am") {
         return format!("--archive-meta={rest}");
     }
@@ -566,6 +577,35 @@ pub fn normalize_switch(arg: &str) -> String {
         return format!("--comment-file={rest}");
     }
     arg.to_string()
+}
+
+/// Parse the normalized `--mark-web` value (`-om[-|1][=ext;ext]`).
+///
+/// Returns `Ok(None)` for the off form (`-om-`); the extension list, when
+/// present, is lowercased and stripped of leading dots.
+pub fn parse_mark_web(spec: &str) -> Result<Option<rar_rs::MarkOfTheWeb>, String> {
+    let (flags, list) = match spec.split_once('=') {
+        Some((flags, list)) => (flags, Some(list)),
+        None => (spec, None),
+    };
+    let all_fields = match flags {
+        "" => false,
+        "1" => true,
+        "-" => return Ok(None),
+        other => return Err(format!("Unknown option: om{other}")),
+    };
+    let extensions = list.and_then(|list| {
+        let extensions: Vec<String> = list
+            .split(';')
+            .map(|ext| ext.trim().trim_start_matches('.').to_ascii_lowercase())
+            .filter(|ext| !ext.is_empty())
+            .collect();
+        (!extensions.is_empty()).then_some(extensions)
+    });
+    Ok(Some(rar_rs::MarkOfTheWeb {
+        all_fields,
+        extensions,
+    }))
 }
 
 /// Print an informational message unless quiet mode is on (errors and

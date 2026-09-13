@@ -24,6 +24,73 @@ pub(crate) fn valid_stream_name(name: &str) -> bool {
         })
 }
 
+/// Read an NTFS alternate data stream (`path` + `stream_name` like
+/// `:Zone.Identifier`) on Windows; `None` when the stream is absent or
+/// unreadable (a missing Mark of the Web is normal, not an error).
+#[cfg(windows)]
+pub(crate) fn read_windows_stream(path: &Path, stream_name: &str) -> Option<Vec<u8>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileSizeEx,
+        OPEN_EXISTING, ReadFile,
+    };
+    if !valid_stream_name(stream_name) {
+        return None;
+    }
+    let mut full: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    for unit in stream_name.encode_utf16() {
+        full.insert(full.len() - 1, unit);
+    }
+    let handle = unsafe {
+        CreateFileW(
+            full.as_ptr(),
+            0x8000_0000, // GENERIC_READ
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let mut size = 0i64;
+    let mut data = Vec::new();
+    if unsafe { GetFileSizeEx(handle, &mut size) } != 0
+        && (1..=MAX_MOTW_BYTES as i64).contains(&size)
+    {
+        data.resize(size as usize, 0);
+        let mut read = 0u32;
+        let ok = unsafe {
+            ReadFile(
+                handle,
+                data.as_mut_ptr() as *mut _,
+                data.len() as u32,
+                &mut read,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            data.clear();
+        } else {
+            data.truncate(read as usize);
+        }
+    }
+    unsafe { CloseHandle(handle) };
+    (!data.is_empty()).then_some(data)
+}
+
+/// Upper bound for a Mark of the Web stream: real ones are a few hundred
+/// bytes, so this only guards against a pathological file.
+#[cfg(windows)]
+const MAX_MOTW_BYTES: usize = 1024 * 1024;
+
 /// Write an NTFS alternate data stream (`path` + `stream_name` like
 /// `:custom1`) on Windows.
 #[cfg(windows)]

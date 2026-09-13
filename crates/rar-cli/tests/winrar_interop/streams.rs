@@ -210,3 +210,53 @@ fn os_streams_password_interop_with_winrar() {
         );
     }
 }
+
+/// `-om` propagation matches WinRAR for the same archive Mark of the Web
+/// (security zone only by default; `-om1` copies every field).
+#[cfg(windows)]
+#[test]
+fn om_mark_of_the_web_matches_winrar() {
+    let dir = temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"body").unwrap();
+    let archive = dir.path().join("motw.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path()));
+    assert!(ok, "create failed:\n{out}");
+    let motw: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\nReferrerUrl=https://example.com/p\r\nHostUrl=https://example.com/f\r\n";
+    std::fs::write(format!("{}{}", archive.display(), ":Zone.Identifier"), motw).unwrap();
+
+    if let Some(unrar) = unrar_bin() {
+        for (switch, name) in [("-om", "win_zone"), ("-om1", "win_full")] {
+            let win = dir.path().join(name);
+            let ours = dir.path().join(format!("ours_{name}"));
+            std::fs::create_dir_all(&win).unwrap();
+            std::fs::create_dir_all(&ours).unwrap();
+            let (ok, out) = run(Command::new(&unrar)
+                .args(["x", switch, "-y", "-idq"])
+                .arg(&archive)
+                .arg(&win));
+            assert!(ok, "UnRAR x {switch} failed:\n{out}");
+            let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+                .args(["x", switch, "-idq", "--dest"])
+                .arg(&ours)
+                .arg(&archive));
+            assert!(ok, "our x {switch} failed:\n{out}");
+            let theirs = std::fs::read(format!(
+                "{}{}",
+                win.join("f.txt").display(),
+                ":Zone.Identifier"
+            ))
+            .unwrap();
+            let ours = std::fs::read(format!(
+                "{}{}",
+                ours.join("f.txt").display(),
+                ":Zone.Identifier"
+            ))
+            .unwrap();
+            assert_eq!(ours, theirs, "our {switch} filter must match WinRAR's");
+        }
+    }
+}

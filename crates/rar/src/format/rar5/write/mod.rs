@@ -20,4 +20,6 @@ mod stream;
 #[cfg(windows)]
 pub(crate) mod windows;
 #[cfg(windows)]
-pub(crate) use self::windows::{windows_set_creation_time, write_windows_stream};
+pub(crate) use self::windows::{
+    read_windows_stream, windows_set_creation_time, write_windows_stream,
+};

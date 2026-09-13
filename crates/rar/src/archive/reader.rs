@@ -369,6 +369,17 @@ impl ArchiveReader {
         })
     }
 
+    /// Configure Mark of the Web propagation for subsequent extractions
+    /// (WinRAR's `-om`); `None` disables it.
+    ///
+    /// The archive file's own `Zone.Identifier` stream is copied onto each
+    /// extracted file (filtered to the security zone unless
+    /// [`MarkOfTheWeb::all_fields`] is set). The setting is a no-op on
+    /// non-Windows platforms.
+    pub fn set_mark_of_the_web(&mut self, options: Option<crate::options::MarkOfTheWeb>) {
+        self.archive.read_ctx_mut().motw = options;
+    }
+
     /// Iterate over all entries in archive order.
     pub fn entries(&self) -> Entries<'_> {
         Entries {
