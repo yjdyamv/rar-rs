@@ -8,4 +8,5 @@ pub(crate) mod rar20;
 pub(crate) mod rar20_encoder;
 pub(crate) mod rar29;
 pub(crate) mod rar29_encoder;
+pub(crate) mod rarvm;
 pub(crate) mod tables;

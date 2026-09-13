@@ -17,10 +17,12 @@
 //! block boundary.
 //!
 //! Only the LZSS and PPMd paths are implemented today; members whose stream
-//! carries a VM-filter record (LZ symbol 257, or PPMd escape code 3) fail
-//! with a clear [`RarError::Unsupported`] — the filters milestone.
+//! carries a VM-filter record (LZ symbol 257, or PPMd escape code 3) run the
+//! standard filters natively and any other filter program through the
+//! [`rarvm`] bytecode interpreter.
 
 use super::ppmd::{self, PpmdByteReader, PpmdDecoder};
+use super::rarvm;
 use crate::error::{RarError, RarResult};
 
 // ── Table geometry ─────────────────────────────────────────────────────────
@@ -79,8 +81,6 @@ enum E {
     Truncated,
     /// Structurally invalid stream data.
     Bad(&'static str),
-    /// Valid RAR3/4 feature this codec does not implement yet.
-    Unsupported(&'static str),
 }
 
 impl From<ppmd::Error> for E {
@@ -92,11 +92,19 @@ impl From<ppmd::Error> for E {
     }
 }
 
+impl From<rarvm::Error> for E {
+    fn from(error: rarvm::Error) -> E {
+        match error {
+            rarvm::Error::InvalidData(message) => E::Bad(message),
+            rarvm::Error::NeedMoreInput => E::Truncated,
+        }
+    }
+}
+
 fn map_err(error: E) -> RarError {
     match error {
         E::Bad(message) => RarError::Format(format!("RAR 2.9 stream: {message}")),
         E::Truncated => RarError::Format("RAR 2.9 bitstream is truncated".into()),
-        E::Unsupported(message) => RarError::Unsupported(message.to_string()),
     }
 }
 
@@ -197,7 +205,6 @@ impl PpmdByteReader for BitReader {
             .map_err(|error| match error {
                 E::Truncated => ppmd::Error::NeedMoreInput,
                 E::Bad(message) => ppmd::Error::InvalidData(message),
-                E::Unsupported(message) => ppmd::Error::InvalidData(message),
             })
     }
 }
@@ -345,14 +352,26 @@ struct VmFilter {
     start: usize,
     size: usize,
     regs: [u32; 7],
+    /// Program globals carried by this filter record (`0x08` bit); empty
+    /// means "reuse the program's persistent globals".
+    global_data: Vec<u8>,
 }
 
-/// A recognized filter program (standard filters only).
+/// A recognized filter program: a standard fingerprint or arbitrary
+/// RARVM bytecode.
 #[derive(Debug, Clone)]
 struct VmProgram {
-    kind: StandardFilter,
+    kind: VmProgramKind,
     block_size: usize,
     exec_count: u32,
+    /// Globals persisted across invocations of a generic program.
+    globals: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+enum VmProgramKind {
+    Standard(StandardFilter),
+    Generic(rarvm::Program),
 }
 
 /// Persistent RAR3/4 LZSS+Huffman decoder. Keep one instance across solid
@@ -823,15 +842,15 @@ impl Rar29Decoder {
             for _ in 0..code_size {
                 code.push(vm.read_bits(8)? as u8);
             }
-            let Some(kind) = identify_standard_filter(&code) else {
-                return Err(E::Unsupported(
-                    "RAR 3.x/4.x member uses a non-standard VM program, which this decoder does not implement",
-                ));
+            let kind = match identify_standard_filter(&code) {
+                Some(standard) => VmProgramKind::Standard(standard),
+                None => VmProgramKind::Generic(rarvm::Program::parse(&code)?),
             };
             self.programs.push(VmProgram {
                 kind,
                 block_size,
                 exec_count: 0,
+                globals: Vec::new(),
             });
         } else if let Some(program) = self.programs.get_mut(program_index) {
             program.exec_count = program.exec_count.wrapping_add(1);
@@ -840,9 +859,8 @@ impl Rar29Decoder {
 
         let mut global_data = Vec::new();
         if first_byte & 0x08 != 0 {
-            // Global data only feeds generic (non-standard) VM programs,
-            // which this decoder does not run; still consume the bytes so
-            // the record parses and the stream position stays correct.
+            // Program globals for this invocation; generic programs use them
+            // as their initial global memory.
             let data_size = vm.read_encoded_u32()? as usize;
             global_data.reserve(data_size.min(MAX_VM_GLOBAL_DATA));
             for _ in 0..data_size {
@@ -852,7 +870,6 @@ impl Rar29Decoder {
                 }
             }
         }
-        let _ = global_data;
 
         if self.filters.len() >= MAX_VM_FILTERS {
             return Err(E::Bad("VM filter limit exceeded"));
@@ -862,6 +879,7 @@ impl Rar29Decoder {
             start: block_start,
             size: block_size,
             regs,
+            global_data,
         });
         Ok(())
     }
@@ -880,12 +898,18 @@ impl Rar29Decoder {
             })
             .collect();
         for filter_index in filters {
-            let (program_index, filter_start, filter_size, regs) = {
+            let (program_index, filter_start, filter_size, regs, global_data) = {
                 let filter = self
                     .filters
                     .get(filter_index)
                     .ok_or(E::Bad("VM filter is missing"))?;
-                (filter.program, filter.start, filter.size, filter.regs)
+                (
+                    filter.program,
+                    filter.start,
+                    filter.size,
+                    filter.regs,
+                    filter.global_data.clone(),
+                )
             };
             if filter_start < pos {
                 continue;
@@ -898,12 +922,31 @@ impl Rar29Decoder {
                 .checked_sub(member_start)
                 .ok_or(E::Bad("VM filter starts before file"))?
                 as u32;
-            let kind = self
+            let program = self
                 .programs
-                .get(program_index)
-                .ok_or(E::Bad("VM program is missing"))?
-                .kind;
-            apply_standard_filter(kind, &mut block, file_offset, &regs)?;
+                .get_mut(program_index)
+                .ok_or(E::Bad("VM program is missing"))?;
+            match &program.kind {
+                VmProgramKind::Standard(standard) => {
+                    apply_standard_filter(*standard, &mut block, file_offset, &regs)?;
+                }
+                VmProgramKind::Generic(generic) => {
+                    let globals = if global_data.is_empty() {
+                        program.globals.as_slice()
+                    } else {
+                        global_data.as_slice()
+                    };
+                    let result = generic.execute(rarvm::Invocation {
+                        input: &block,
+                        regs,
+                        global_data: globals,
+                        file_offset: file_offset as u64,
+                        exec_count: program.exec_count,
+                    })?;
+                    program.globals = result.globals;
+                    block = result.output;
+                }
+            }
             out.extend_from_slice(&block);
             pos = filter_start + filter_size;
         }
