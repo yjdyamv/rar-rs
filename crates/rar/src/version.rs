@@ -118,10 +118,10 @@ impl ArchiveVersion {
         )
     }
 
-    /// Whether the version is writable with the current writers: `v15`
-    /// (legacy RAR 1.5 adaptive-Huffman writer), `v20` (legacy RAR 2.x
-    /// writer), `v29` (legacy RAR4 pipeline), `v50` and `v70` (RAR5
-    /// pipeline). `v26`/`v36` remain read-only: their codecs are identical
+    /// Whether the version is writable with the current writers: `v14`
+    /// (DOS-era RAR 1.3/1.4 writer), `v15` (legacy RAR 1.5 adaptive-Huffman
+    /// writer), `v20` (legacy RAR 2.x writer), `v29` (legacy RAR4 pipeline),
+    /// `v50` and `v70` (RAR5 pipeline). `v26`/`v36` remain read-only: their codecs are identical
     /// to `v20`/`v29` and writers emit the upstream base version instead.
     pub const fn is_writable(self) -> bool {
         matches!(

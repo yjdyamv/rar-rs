@@ -176,3 +176,41 @@ fn cli_sd_dependent_volumes_interops_with_winrar() {
         }
     }
 }
+
+/// Our split chunks repeat the FILE_TIME record, so official UnRAR shows a
+/// member's nanoseconds from any volume of the set (not just the first).
+#[test]
+fn our_middle_volumes_expose_nanosecond_times_to_unrar() {
+    let Some(unrar) = unrar_bin() else {
+        eprintln!("skipped: UnRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    write_pattern_file(&src, 200_000, 7);
+    let arc = dir.path().join("t.rar");
+    {
+        let mut rar =
+            ArchiveWriter::create_with(&arc, WriterOptions::default().volume_size(64 * 1024))
+                .unwrap();
+        rar.add_path(
+            &src,
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0u8).unwrap()),
+        )
+        .unwrap();
+        rar.finish().unwrap();
+    }
+    let volumes = rar_rs::discover_volumes(&arc);
+    assert!(volumes.len() >= 3, "need a middle volume");
+    let (ok, out) = run(Command::new(&unrar).args(["lt"]).arg(&volumes[1]));
+    assert!(ok, "UnRAR lt failed:\n{out}");
+    let line = out
+        .lines()
+        .find(|line| line.contains("Modified:"))
+        .expect("a Modified line");
+    let fraction = line.rsplit(',').next().unwrap_or("").trim();
+    assert_ne!(
+        fraction, "000000000",
+        "middle volume must carry the FILE_TIME record: {line}"
+    );
+}

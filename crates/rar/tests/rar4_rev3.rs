@@ -201,3 +201,13 @@ fn rar300_fixtures_rebuild_from_both_layouts() {
         );
     }
 }
+
+/// Legacy sets created with WinRAR's new `.partN.rar` numbering carry
+/// MHD_NEWNUMBERING, which the listing uses for the `volume N` annotation.
+#[test]
+fn legacy_new_numbering_sets_are_reported() {
+    let path = Path::new(FIX).join("rev_newstyle.part2.rar");
+    let rar = rar_rs::ArchiveReader::open(&path).unwrap();
+    assert!(rar.is_new_numbering());
+    assert!(rar.entries().count() >= 1);
+}

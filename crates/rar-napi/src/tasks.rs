@@ -1004,6 +1004,49 @@ impl Task for SetCommentTask {
   }
 }
 
+/// Set or remove a member's file comment (RAR 1.5–4.x only; an empty
+/// comment removes it). Mirrors the CLI `cf`.
+#[napi(ts_return_type = "Promise<void>")]
+pub fn set_member_comment(
+  archive_path: String,
+  member: String,
+  comment: Option<String>,
+  password: Option<String>,
+) -> AsyncTask<SetMemberCommentTask> {
+  AsyncTask::new(SetMemberCommentTask {
+    archive_path,
+    member,
+    comment,
+    password,
+  })
+}
+
+pub struct SetMemberCommentTask {
+  archive_path: String,
+  member: String,
+  comment: Option<String>,
+  password: Option<String>,
+}
+
+#[napi]
+impl Task for SetMemberCommentTask {
+  type Output = ();
+  type JsValue = ();
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let mut editor = open_editor(&self.archive_path, self.password.as_deref())?;
+    let id = editor.unique_entry(&self.member).map_err(to_napi_error)?;
+    let plan = rar_rs::EditPlan::new()
+      .set_member_comment(id, self.comment.clone().unwrap_or_default().into_bytes());
+    editor.apply(plan).map_err(to_napi_error)?;
+    Ok(())
+  }
+
+  fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+    Ok(())
+  }
+}
+
 /// Rebuild the inline recovery record at `percent` (0..=100, like
 /// `rar rr`).
 #[napi(ts_return_type = "Promise<void>")]

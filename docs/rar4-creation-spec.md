@@ -61,7 +61,7 @@ solid PPMd、Delta 过滤器、`-p`、`-hp`、`-rr` 双字节校验）与
 format/rar4/
   mod.rs          ← 已有：常量、flag、block 结构、LegacyDecoder（扫描/解析）
   read.rs         ← 已有：成员解码门面
-  write.rs        ← 新建：RAR4 写管线
+  write/{mod,pipeline,cbc}.rs ← 写管线（头序列化 / 编排 / 加密区间）
   create.rs       ← 选项校验（`validate_rar4_only`）
 codec/
   legacy/rar29_encoder.rs ← 新建：RAR29 编码器（从 rars 移植）
@@ -84,7 +84,7 @@ ArchiveWriter::add_file()
   └─ rar5? → format::rar5::write 管线（write_streamed_payload）
 
 ArchiveWriter::close()
-  ├─ rar4? → write_rar4_endarc()    (optional, only for -hp)
+  ├─ rar4? → write_rar4_end_block() (always; the header is encrypted under -hp)
   └─ rar5? → write_end_block()      (QO + RR + end)
 ```
 
@@ -109,14 +109,16 @@ ArchiveWriter::close()
 5     2    head_size = 32 + name_len + salt_len + exttime_len
 7     4    packed_size (压缩后大小，含加密头)
 11    4    unpacked_size (原始大小)
-15    4    host_os = 0 (Windows)
-19    4    file_crc32
-23    1    unp_ver (29 default; 15/20 for -ma15/-ma2)
-24    1    method (0x30=STORE, 0x31-0x35=m1-m5)
-25    2    name_size
-27    N    filename (UTF-16LE if FHD_UNICODE)
-27+N  8    salt (if FHD_PASSWORD; v29 only — v15/v20 are saltless)
-35+N  ?    exttime (if FHD_EXTTIME)
+15    1    host_os (0 = DOS, 1 = OS/2, 2 = Windows（写侧默认）, 3 = Unix, 4 = Mac)
+16    4    file_crc32
+20    4    file_time (DOS 本地时间)
+24    1    unp_ver (29 default; 15/20 for -ma15/-ma2)
+25    1    method (0x30=STORE, 0x31-0x35=m1-m5)
+26    2    name_size
+28    4    file_attr (0x20 file / 0x10 directory)
+32    N    filename (UTF-16LE if FHD_UNICODE)
+32+N  8    salt (if FHD_PASSWORD; v29 only — v15/v20 are saltless)
+40+N  ?    exttime (if FHD_EXTTIME)
 ```
 
 ### 编码器接口
@@ -139,11 +141,8 @@ pub fn encode_member(
 
 ### 多卷切分
 
-RAR4 多卷切分点在成员边界：
-1. 写成员前检查：`head_size + data_size > volume_remaining?`
-2. 如果是：填零到卷尾，打开新卷
-3. 新卷开头写 MAIN_HEAD + 第一个成员带 `FHD_SPLIT_BEFORE`
-4. 最后一个成员带 `FHD_SPLIT_AFTER`（如果是最后一卷则不带）
+RAR4 多卷按 `-v` 精确填充：成员可跨卷，中碎片带 `FHD_SPLIT_BEFORE/AFTER`、各自携带片段 CRC，
+末碎片携带整成员 CRC 与完整 extra；每卷开头写 MAIN_HEAD。
 
 ### 加密
 

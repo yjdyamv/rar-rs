@@ -145,8 +145,9 @@ fn part_recovery_base(name: &str) -> Option<&str> {
 /// previous set: a shrinking overwrite must not leave stale parts behind,
 /// and an overwrite that no longer requests recovery volumes must not leave
 /// the old `.rev` files behind either. Only files that parse as volumes (or
-/// RAR5 `.rev` recovery volumes) of `base` are returned, so the new set's
-/// own staged temporaries never match.
+/// `.rev` recovery volumes — RAR5 and legacy, the latter resolved by data
+/// volumes) of `base` are returned, so the new set's own staged temporaries
+/// never match.
 pub(crate) fn stale_volume_paths(
     parent: &Path,
     base: &str,

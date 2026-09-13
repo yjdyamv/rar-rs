@@ -200,3 +200,20 @@ fn cli_ma4_create_with_rv_creates_recovery_volumes() {
     assert!(status.success());
     assert_eq!(std::fs::read(&victim).unwrap(), saved);
 }
+
+/// Legacy `.partN.rar` sets print `volume N` in the totals row, like WinRAR.
+#[test]
+fn cli_legacy_new_numbering_totals_show_the_volume() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rar/tests/fixtures/rar40/rev3/rev_newstyle.part2.rar");
+    for command in ["l", "v"] {
+        let out = std::process::Command::new(RAR_CLI)
+            .arg(command)
+            .arg(&fixture)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{command}: {text}");
+        assert!(text.contains("volume 2"), "{command}: {text}");
+    }
+}

@@ -227,8 +227,13 @@ impl RarArchive {
         } else {
             None
         };
+        // WinRAR repeats the FILE_TIME record on every chunk so each
+        // volume's own header is self-describing (middle volumes show the
+        // member's nanoseconds); the other records stay on the first and
+        // final chunks (the encryption record is per chunk by design).
+        let file_time = file_time_record(params.extra_data);
         let chunk_extra = |is_last: bool, is_first: bool| -> Vec<u8> {
-            if let Some(ref p) = encr_params {
+            let mut extra = if let Some(ref p) = encr_params {
                 if is_last {
                     params.extra_data.to_vec()
                 } else {
@@ -236,11 +241,18 @@ impl RarArchive {
                     np.flags &= !0x02;
                     np.to_extra_bytes()
                 }
-            } else if is_first {
+            } else if is_last || is_first {
                 params.extra_data.to_vec()
             } else {
                 Vec::new()
+            };
+            if !is_last
+                && !is_first
+                && let Some(time) = &file_time
+            {
+                extra.extend_from_slice(time);
             }
+            extra
         };
 
         while offset < total_packed {
@@ -333,11 +345,7 @@ impl RarArchive {
                 packed_size: chunk_size,
                 crc32_val: Some(chunk_crc),
                 is_final: is_last,
-                extra_data: if is_first {
-                    params.extra_data.to_vec()
-                } else {
-                    Vec::new()
-                },
+                extra_data: chunk_extra(is_last, is_first),
             });
 
             offset += chunk_size;
@@ -413,4 +421,25 @@ impl RarArchive {
             )),
         }
     }
+}
+
+/// The FILE_TIME (0x03) record from a RAR5 extra area, if present.
+fn file_time_record(extra: &[u8]) -> Option<Vec<u8>> {
+    let mut offset = 0usize;
+    while offset < extra.len() {
+        let (size, n) = crate::format::rar5::vint::decode_from_slice(extra, offset).ok()?;
+        let record_start = offset;
+        offset += n;
+        let size = usize::try_from(size).ok()?;
+        let end = offset.checked_add(size)?;
+        if end > extra.len() {
+            return None;
+        }
+        let (rec_type, _) = crate::format::rar5::vint::decode_from_slice(extra, offset).ok()?;
+        if rec_type == crate::format::rar5::EXTRA_FILE_TIME {
+            return Some(extra[record_start..end].to_vec());
+        }
+        offset = end;
+    }
+    None
 }

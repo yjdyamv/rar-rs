@@ -153,9 +153,44 @@ impl ArchiveEntry {
         self.header.atime
     }
 
-    /// Host OS identifier (0 = Windows, 1 = Unix).
+    /// Host OS identifier on the shared axis (0 = Windows, 1 = Unix).
+    /// RAR 1.5–4.x transmit the raw DOS/OS2/Win32/Unix/Mac code; it is
+    /// normalized here (the raw byte stays available through
+    /// [`Self::host_os_raw`] and [`Self::host_os_name`]).
     pub fn host_os(&self) -> u64 {
+        match self.header.format_version {
+            3 | 4 => match self.header.host_os {
+                0 | 2 => 0,
+                _ => 1,
+            },
+            _ => self.header.host_os,
+        }
+    }
+
+    /// The raw host code from the header (RAR4's DOS/OS2/Win32/Unix/Mac
+    /// table, RAR5's 0 = Windows / 1 = Unix).
+    pub fn host_os_raw(&self) -> u64 {
         self.header.host_os
+    }
+
+    /// Display name for the `Host OS:` column, matching WinRAR.
+    pub fn host_os_name(&self) -> &'static str {
+        match self.header.format_version {
+            4 => match self.header.host_os {
+                0 => "DOS",
+                1 => "OS/2",
+                2 => "Windows",
+                3 => "Unix",
+                _ => "Mac",
+            },
+            _ => {
+                if self.header.host_os == 1 {
+                    "Unix"
+                } else {
+                    "Windows"
+                }
+            }
+        }
     }
 
     /// File attributes (OS-specific).

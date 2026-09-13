@@ -744,3 +744,19 @@ fn rar4_rar154_old_numbered_split_set() {
     assert_eq!(data.len(), 2_097_152);
     assert_eq!(rar5_crc32(&data), 0x1c9e_b697, "random.bin payload CRC");
 }
+
+/// RAR 1.5 host codes stay distinguishable from Windows: DOS-era archives
+/// report `DOS`, our own writer reports `Windows`.
+#[test]
+fn rar4_host_os_names_distinguish_dos() {
+    let rar = ArchiveReader::open(format!("{RAR154}readme_154_normal.rar")).unwrap();
+    let entry = rar.entries().next().unwrap();
+    assert_eq!(entry.host_os_raw(), 0);
+    assert_eq!(entry.host_os_name(), "DOS");
+    assert_eq!(entry.host_os(), 0, "normalized axis stays Windows/Unix");
+
+    let rar = ArchiveReader::open(format!("{W591}c_m3.rar")).unwrap();
+    let entry = rar.entries().next().unwrap();
+    assert_eq!(entry.host_os_raw(), 2);
+    assert_eq!(entry.host_os_name(), "Windows");
+}

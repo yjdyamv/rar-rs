@@ -112,6 +112,12 @@ impl VolumeView {
     fn starts_here(&self, position: usize) -> bool {
         position == 0
     }
+
+    /// Whether the fragment is the member's last chunk (the one carrying
+    /// the whole-member checksum).
+    fn is_final_fragment(&self, entry: &EntryRef<'_>, position: usize) -> bool {
+        position + 1 == entry.chunks().len()
+    }
 }
 
 /// The `Archive:` / `Details:` preamble of the table listings.
@@ -210,24 +216,28 @@ fn unix_attributes(attrs: u64) -> String {
 }
 
 fn attributes_cell(entry: &EntryRef<'_>) -> String {
-    if entry.version().is_rar13() || entry.host_os() != 1 {
-        dos_attributes(entry.attributes() as u32)
+    let unix_host = if entry.version().is_rar13() {
+        false
+    } else if entry.version().is_legacy() {
+        // Raw RAR4 host table: 3 = Unix, 4 = Mac.
+        matches!(entry.host_os_raw(), 3 | 4)
     } else {
+        entry.host_os() == 1
+    };
+    if unix_host {
         unix_attributes(entry.attributes())
+    } else {
+        dos_attributes(entry.attributes() as u32)
     }
 }
 
-/// WinRAR omits `Host OS` for RAR 1.3/1.4 members and resolves the rest to
-/// the two host families the shared model keeps.
+/// WinRAR omits `Host OS` for RAR 1.3/1.4 members; legacy members show
+/// their raw host (DOS/OS-2/Windows/Unix/Mac).
 fn host_os_cell(entry: &EntryRef<'_>) -> Option<&'static str> {
     if entry.version().is_rar13() {
         return None;
     }
-    Some(if entry.host_os() == 1 {
-        "Unix"
-    } else {
-        "Windows"
-    })
+    Some(entry.host_os_name())
 }
 
 fn format_byte_count(bytes: u64) -> String {
@@ -369,7 +379,7 @@ pub fn list_entries(rar: &ArchiveReader, archive: &str, names: &[String], verbos
                     } else {
                         "????????".to_string()
                     }
-                } else if position + 1 == entry.chunks().len() {
+                } else if view.is_final_fragment(entry, position) {
                     entry
                         .crc32()
                         .map(|crc| format!("{crc:08X}"))
@@ -409,18 +419,22 @@ pub fn list_entries(rar: &ArchiveReader, archive: &str, names: &[String], verbos
         let (position, packed, fragment_crc) = view.fragment(&entry).expect("included above");
         row(&entry, position, packed, fragment_crc);
     }
+    // Legacy `.partN.rar` sets annotate the totals row like WinRAR.
+    let volume_cell =
+        (view.count > 1 && rar.is_new_numbering()).then(|| format!("volume {}", view.index + 1));
+    let volume_cell = volume_cell.as_deref().unwrap_or("");
     let total_ratio = ratio_percent(total_size, total_packed);
     if verbose {
         println!("----------- ---------- ---------- ----- ---------- -----  --------  ----");
         println!(
-            "{:>11} {:>10} {:>10} {:>4}  {:>10} {:>5}  {:>8}  {shown}",
-            "", total_size, total_packed, total_ratio, "", "", ""
+            "{:>11} {:>10} {:>10} {:>4}  {volume_cell:<10} {:>5}  {:>8}  {shown}",
+            "", total_size, total_packed, total_ratio, "", ""
         );
     } else {
         println!("----------- ----------  ---------- -----  ----");
         println!(
-            "{:>11} {:>10}  {:>10} {:>5}  {shown}",
-            "", total_size, "", ""
+            "{:>11} {:>10}  {volume_cell:<10} {:>5}  {shown}",
+            "", total_size, ""
         );
     }
     println!();
@@ -463,12 +477,9 @@ pub fn list_technical(rar: &ArchiveReader, archive: &str, names: &[String]) {
         }
         println!("{:>12}: {}", "Attributes", attributes_cell(&entry));
         if !entry.version().is_rar13() {
-            let label = if position + 1 == entry.chunks().len() {
-                "CRC32"
-            } else {
-                "Pack-CRC32"
-            };
-            let crc = if position + 1 == entry.chunks().len() {
+            let is_final = view.is_final_fragment(&entry, position);
+            let label = if is_final { "CRC32" } else { "Pack-CRC32" };
+            let crc = if is_final {
                 entry.crc32()
             } else {
                 fragment_crc

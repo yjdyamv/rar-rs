@@ -247,3 +247,38 @@ fn open_quick_lists_directories_like_the_full_scan() {
         "QO listing must match the full scan"
     );
 }
+
+/// The quick-open path also records the archive-level solid flag.
+#[test]
+fn open_quick_reports_solid_archives() {
+    let dir = temp_dir();
+    let path = dir.path().join("qo-solid.rar");
+    {
+        let data = b"solid ".repeat(2000);
+        let mut rar = rar_rs::ArchiveWriter::create_with(
+            &path,
+            rar_rs::WriterOptions::default()
+                .quick_open(true)
+                .solid_mode(rar_rs::SolidMode::Continuous),
+        )
+        .unwrap();
+        rar.add_bytes(
+            "a.txt",
+            &data,
+            rar_rs::EntryWriteOptions::new()
+                .compression_level(rar_rs::CompressionLevel::try_from(5).unwrap()),
+        )
+        .unwrap();
+        rar.finish().unwrap();
+    }
+
+    let quick = ArchiveReader::open_with(
+        &path,
+        rar_rs::OpenOptions::new().scan_strategy(rar_rs::ScanStrategy::PreferQuickOpen),
+    )
+    .unwrap();
+    assert!(
+        quick.is_solid(),
+        "quick-open must report the archive-level solid flag"
+    );
+}

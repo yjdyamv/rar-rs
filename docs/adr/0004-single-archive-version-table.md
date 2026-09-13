@@ -29,6 +29,7 @@ covering every member codec version this library reads and writes:
 
 | Version | Codec                          | Container    | Writable |
 |---------|--------------------------------|--------------|----------|
+| `v14`   | Unpack15 (DOS LZ + Huffman)    | RAR 1.3/1.4  | yes (2026-09) |
 | `v15`   | RAR15 (adaptive-Huffman LZ)    | RAR 1.5–4.x  | yes (2026-09) |
 | `v20`   | RAR20 (LZSS + Huffman)         | RAR 1.5–4.x  | yes (2026-09) |
 | `v26`   | RAR20 (LZSS + Huffman)         | RAR 1.5–4.x  | —        |
@@ -37,7 +38,7 @@ covering every member codec version this library reads and writes:
 | `v50`   | RAR5 v50 (64-entry distance)   | RAR5         | yes      |
 | `v70`   | RAR7 (80-entry DCX)            | RAR5         | yes      |
 
-- Variants are two-digit `V15`–`V70`; `as_str()`/`Display` yield `"v15"`…`"v70"`.
+- Variants are two-digit `V14`–`V70`; `as_str()`/`Display` yield `"v14"`…`"v70"`.
 - **No public container axis.** The container family is *derived* from the
   version (`v15`–`v36` → RAR 1.5–4.x envelope, `v50`/`v70` → RAR5 envelope);
   `ArchiveFormat` is removed from the public API. `ArchiveVersion::is_legacy()`
@@ -49,7 +50,9 @@ covering every member codec version this library reads and writes:
   **Amended 2026-09**: after porting the rars `Unpack15Encoder` /
   `Unpack20Encoder`, the writable subset grew to `{v15, v20, v29, v50, v70}`;
   `v26`/`v36` remain read-only and are written as their base versions. CLI
-  `-ma15`/`-ma2` map to `v15`/`v20`.
+  `-ma15`/`-ma2` map to `v15`/`v20`. **Amended again 2026-09**: the DOS-era
+  RAR 1.3/1.4 writer (`-ma13`/`-ma14`) added `v14`, giving
+  `{v14, v15, v20, v29, v50, v70}`.
 - `CreateOptions.compression` becomes `ArchiveVersion` (default `v50`); the field
   was renamed from `format_version` so the single version axis carries one name
   across both surfaces (`WriterOptions::compression`). The raw model keeps

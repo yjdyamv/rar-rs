@@ -68,8 +68,6 @@ pub(crate) const RAR4_METHOD_STORE: u8 = 0x30;
 // compatibility constants preserve the existing RAR4 mapping without coupling
 // the legacy format implementation to RAR5 wire definitions.
 const MODEL_HASH_NONE: u8 = 0;
-const MODEL_HOST_OS_WINDOWS: u64 = 0;
-const MODEL_HOST_OS_UNIX: u64 = 1;
 const MODEL_FILE_FLAG_CRC32: u64 = 0x0004;
 
 /// RAR4 header minimum size for the fixed fields before the variable tail.
@@ -125,6 +123,9 @@ pub(crate) const MHD_LOCK: u16 = 0x0004;
 /// NEWSUB `RR` block written before the end-of-archive block). WinRAR's
 /// repair looks for this bit before scanning for the record.
 pub(crate) const MHD_RECOVERY: u16 = 0x0040;
+/// Main header flag: the volume set uses the newer `.partN.rar` numbering
+/// (WinRAR's `-vn`); only affects the listing's volume annotations.
+pub(crate) const MHD_NEWNUMBERING: u16 = 0x0010;
 
 /// Cross-volume RAR4 block scan. A member split across volumes reappears as
 /// continuation file headers (FHD_SPLIT_BEFORE) in later volumes; the scan
@@ -137,6 +138,9 @@ pub(crate) struct Rar4VolumeScan {
     /// this archive-level flag plus position, NOT by the per-file FHD_SOLID
     /// bit (which those codecs never write); RAR3+ members use FHD_SOLID.
     pub archive_solid: bool,
+    /// The main header of the first volume carried MHD_NEWNUMBERING (a
+    /// `.partN.rar` legacy set).
+    pub new_numbering: bool,
 }
 
 impl Rar4VolumeScan {
@@ -172,6 +176,9 @@ impl Rar4VolumeScan {
                     }
                     if block.head_type == MAIN_HEAD && block.flags & MHD_SOLID != 0 {
                         self.archive_solid = true;
+                    }
+                    if block.head_type == MAIN_HEAD && block.flags & MHD_NEWNUMBERING != 0 {
+                        self.new_numbering = true;
                     }
                 }
                 FILE_HEAD => {
@@ -552,11 +559,9 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
     };
 
     // RAR4 host OS: 0 = MS-DOS, 1 = OS/2, 2 = Windows, 3 = Unix, 4 = Mac.
-    // Map to the shared OS constants (0 = Windows, 1 = Unix).
-    let host_os_u64 = match host_os {
-        0 | 2 => MODEL_HOST_OS_WINDOWS,
-        _ => MODEL_HOST_OS_UNIX,
-    };
+    // The model keeps the raw byte so display can distinguish DOS/OS/2 from
+    // Windows; `ArchiveEntry::host_os` normalizes it onto the shared axis.
+    let host_os_u64 = u64::from(host_os);
 
     // Data offset = where this block's data area starts on disk: past the
     // header's real on-disk size (head_size for plaintext blocks, or

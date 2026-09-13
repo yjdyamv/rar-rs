@@ -295,8 +295,9 @@ pub(crate) fn is_rar4_file(path: &std::path::Path) -> bool {
 }
 
 /// Whether `path` is a DOS-era RAR 1.3/1.4 archive: the weak `RE~^`
-/// signature is present and no RAR4/RAR5 signature precedes it anywhere in
-/// the scanned window (the reader's scanner rule).
+/// signature is present and no RAR4/RAR5 signature appears anywhere in the
+/// scanned window (a strong signature always wins, matching
+/// `detect::find_archive_start`).
 pub(crate) fn is_rar13_file(path: &std::path::Path) -> bool {
     use std::io::Read;
     let Ok(mut f) = std::fs::File::open(path) else {

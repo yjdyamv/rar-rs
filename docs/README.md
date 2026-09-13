@@ -28,7 +28,7 @@
 | [`adr/0001-rar4-creation-architecture.md`](adr/0001-rar4-creation-architecture.md) | RAR4 创建架构决策 |
 | [`adr/0002-format-neutral-model-and-api-v2.md`](adr/0002-format-neutral-model-and-api-v2.md) | 格式中立模型、依赖方向、API v2 兼容策略（版本轴拆分由 0003 决策 2 承接，再被 0004 取代） |
 | [`adr/0003-breaking-release-scope.md`](adr/0003-breaking-release-scope.md) | 公开面收敛范围：破坏性发布清单（`raw` 门控已被 ADR 0007 取代） |
-| [`adr/0004-single-archive-version-table.md`](adr/0004-single-archive-version-table.md) | 单一 `ArchiveVersion` 表（v15–v70），废弃容器轴与 `CompressionVersion` |
+| [`adr/0004-single-archive-version-table.md`](adr/0004-single-archive-version-table.md) | 单一 `ArchiveVersion` 表（v14–v70），废弃容器轴与 `CompressionVersion` |
 | [`adr/0005-rar4-edit-architecture.md`](adr/0005-rar4-edit-architecture.md) | RAR4 编辑架构（对齐官方、solid 整档 repack、分卷/-hp 边界） |
 | [`adr/0006-public-api-convergence.md`](adr/0006-public-api-convergence.md) | 公开面收敛到角色门面（ADR 0006）|
 | [`adr/0007-raw-feature-retired.md`](adr/0007-raw-feature-retired.md) | 删除 `raw` feature，常驻 `wire` 模块承接受支持子集 |

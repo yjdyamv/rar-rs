@@ -1535,3 +1535,46 @@ fn truncated_recovery_volume_errors_instead_of_panicking() {
 
     assert!(rar_rs::rebuild_missing_volumes(&base).is_err());
 }
+
+/// WinRAR repeats the FILE_TIME record on every chunk so each volume's own
+/// header is self-describing; middle chunks must not be bare.
+#[test]
+fn split_chunks_repeat_the_time_extra() {
+    let dir = make_temp_dir();
+    let base = dir.path().join("time-vol.rar");
+    let source = dir.path().join("big.bin");
+    let mut state = 0x1234_5678_9ABC_DEF0u64;
+    let payload: Vec<u8> = (0..200_000)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 33) as u8
+        })
+        .collect();
+    std::fs::write(&source, &payload).unwrap();
+    {
+        let mut rar = ArchiveWriter::create_with(
+            &base,
+            rar_rs::WriterOptions::default().volume_size(64 * 1024),
+        )
+        .unwrap();
+        rar.add_path(&source, opts(0)).unwrap();
+        rar.finish().unwrap();
+    }
+
+    let rar = ArchiveReader::open(&base).unwrap();
+    let entry = rar.entry(rar.unique_entry("big.bin").unwrap()).unwrap();
+    let chunks = entry.chunks();
+    assert!(
+        chunks.len() > 2,
+        "need a middle chunk, got {}",
+        chunks.len()
+    );
+    for chunk in chunks.iter().skip(1).take(chunks.len() - 2) {
+        assert!(
+            !chunk.extra_data.is_empty(),
+            "middle chunks repeat the FILE_TIME extra"
+        );
+    }
+}

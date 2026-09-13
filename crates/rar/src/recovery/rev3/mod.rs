@@ -565,8 +565,6 @@ fn identify(path: &Path) -> RarResult<(PathBuf, Layout, Option<Meta>)> {
     )))
 }
 
-/// Whether a path (a data volume or any `.rev`) belongs to a legacy RAR
-/// recovery set and should be dispatched to this module.
 /// Whether `name` parses as a RAR 1.5–4.x `.rev` file belonging to the
 /// volume set based at `base`. Ambiguous legacy names (`set44_2_1.rev` can
 /// read as `set` + data 44 or `set4` + data 4) are resolved with the same
@@ -610,6 +608,8 @@ pub(crate) fn rev_name_belongs_to_set(parent: &Path, base: &str, name: &str) -> 
     best.is_some_and(|(_, candidate_base)| candidate_base.eq_ignore_ascii_case(base))
 }
 
+/// Whether a path (a data volume or any `.rev`) belongs to a legacy RAR
+/// recovery set and should be dispatched to this module.
 pub(crate) fn is_legacy_rev_set(path: &Path) -> RarResult<bool> {
     let mut file = fs::File::open(path)?;
     let mut head = [0u8; 8];

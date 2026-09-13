@@ -122,10 +122,13 @@ pub struct RarArchive {
     /// RAR 1.3/1.4 main-header extension bytes (archive comment or the
     /// authenticity-verification payload).
     pub(crate) rar13_extra: Vec<u8>,
-    /// The legacy main header carried MHD_SOLID: pre-RAR3 codec members
-    /// (unp_ver < 29) chain by this archive-level flag + position, since
-    /// those codecs never write the per-file FHD_SOLID bit.
+    /// The archive is solid at the container level: legacy `MHD_SOLID`
+    /// (pre-RAR3 codecs chain by that flag + position, since they never
+    /// write the per-file FHD_SOLID bit), RAR13 `MHD_SOLID`, or RAR5's
+    /// `ARCHIVE_FLAG_SOLID`.
     pub(crate) rar4_solid_archive: bool,
+    /// The legacy volume set used MHD_NEWNUMBERING (`.partN.rar` naming).
+    pub(crate) rar4_new_numbering: bool,
     /// Password for encrypted archives.
     pub(crate) password: Option<String>,
     /// Encrypt archive headers (file names/structure hidden) — RAR5
@@ -195,6 +198,7 @@ impl RarArchive {
             rar13: false,
             rar13_extra: Vec::new(),
             rar4_solid_archive: false,
+            rar4_new_numbering: false,
             stream: None,
             password,
             header_encryption: false,
@@ -800,6 +804,7 @@ impl RarArchive {
             rar13: is_rar13,
             rar13_extra: Vec::new(),
             rar4_solid_archive: false,
+            rar4_new_numbering: false,
             stream: None,
             password: opts.password,
             header_encryption: opts.encrypt_headers,

@@ -5,7 +5,10 @@
 //!
 //! Deliberate omissions from the writer options: the per-archive compression
 //! filter policy (`-mc` / `WriterOptions::filters`) is not exposed; automatic
-//! filter selection stays in effect for every create/append call.
+//! filter selection stays in effect for every create/append call. Mark of the
+//! Web propagation (`-om`) and queueing the archive comment before creation
+//! (`-z` reads stdin in the CLI) are also not exposed — callers can set the
+//! comment with [`set_comment`] once the archive exists.
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -16,7 +19,7 @@ mod tasks;
 pub use tasks::{
   append_entries, create_archive, delete_entries, extract_archive, extract_member, list_entries,
   list_entries_detailed, list_entries_quick, lock_archive, read_member, rebuild_missing_volumes,
-  rename_entries, repair_archive, set_comment, set_recovery, test_archive,
+  rename_entries, repair_archive, set_comment, set_member_comment, set_recovery, test_archive,
 };
 
 #[napi(object)]
@@ -86,7 +89,10 @@ pub struct CreateArchiveOptions {
   pub save_ctime: Option<bool>,
   /// Save the last access time (like WinRAR `-tsa`).
   pub save_atime: Option<bool>,
-  /// Save the modification time (default `true`; `false` omits it).
+  /// Save the modification time (default `true`; `false` omits it for
+  /// RAR5/RAR7, which have no time field to omit once written). RAR 1.3–4.x
+  /// fixed headers always carry DOS local time, so the switch is ignored
+  /// there, like WinRAR.
   pub save_mtime: Option<bool>,
   /// Store timestamps at 1-second precision (like WinRAR `-ts...1`).
   pub time_precision_seconds: Option<bool>,
@@ -168,8 +174,9 @@ pub struct EntryInfo {
   /// has no member-comment block, so those members always report
   /// `undefined`).
   pub comment: Option<Buffer>,
-  /// Whether the member belongs to a solid chain (shares a window with
-  /// its predecessor).
+  /// The per-member solid flag (RAR5/RAR 1.3/4.x chain continuations).
+  /// RAR 1.5/2.x chains are archive-level (`ArchiveReader::is_solid`) and
+  /// may report `false` here, matching the on-disk bit.
   pub solid: bool,
 }
 #[napi(object)]
@@ -208,6 +215,10 @@ pub struct ExtractArchiveOptions {
   pub set_creation_time: Option<bool>,
   /// Restore the last-access time on extracted files.
   pub set_access_time: Option<bool>,
+  /// Skip symbolic links instead of materializing them (like `-ol-`).
+  pub skip_links: Option<bool>,
+  /// Extract links with dangerous targets as-is (like `-ola`).
+  pub allow_unsafe_links: Option<bool>,
 }
 
 #[cfg(test)]

@@ -93,6 +93,9 @@ impl RarArchive {
             return Ok(false);
         }
         let ah = ArchiveHeader::from_raw(&first.raw)?;
+        if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
+            self.rar4_solid_archive = true;
+        }
         let Some(qo_rel) = crate::format::rar5::headers::locator_quick_open_offset(&ah.extra_data)
         else {
             return Ok(false);
@@ -286,8 +289,10 @@ impl RarArchive {
             scan.scan_volume(&mut stream, vol_idx, self.password.as_deref(), &mut out)?;
         }
         let archive_solid = scan.archive_solid;
+        let new_numbering = scan.new_numbering;
         scan.finish()?;
         self.rar4_solid_archive = archive_solid;
+        self.rar4_new_numbering = new_numbering;
         self.entries = out;
         Ok(())
     }
