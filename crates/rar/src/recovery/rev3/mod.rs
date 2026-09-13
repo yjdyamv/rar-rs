@@ -39,7 +39,7 @@ use rs8::{MAX_CODEWORD, Rsc8};
 
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::{ENDARC_HEAD, LONG_BLOCK};
-use crate::fs::volume::{legacy_volume_base, volume_path_rar4};
+use crate::fs::volume::{legacy_volume_base, volume_part_width, volume_path_rar4};
 
 /// Metadata trailer length of the RAR 4.20+ `.rev` layout.
 const TRAILER_LEN: usize = 7;
@@ -351,14 +351,27 @@ impl Layout {
     }
 }
 
+/// Candidate part-number paddings for a `.partN.rar` probe: the layout's
+/// own width first (when known), then 1..=5 digits. WinRAR pads the part
+/// number to the digit count of the volume count; five digits cover the
+/// format's 65535-volume maximum, so a fixed 1..=4 scan must not hide
+/// `part00001.rar`.
+fn part_width_candidates(width: usize) -> Vec<usize> {
+    let mut widths = Vec::with_capacity(6);
+    if width > 0 {
+        widths.push(width);
+    }
+    for candidate in 1..=5 {
+        if !widths.contains(&candidate) {
+            widths.push(candidate);
+        }
+    }
+    widths
+}
+
 /// First existing `.partN.rar` probe for a slot (padded or unpadded).
 fn new_data_path(parent: &Path, base: &str, width: usize, index: usize) -> Option<PathBuf> {
-    let widths: Vec<usize> = if width > 0 {
-        vec![width, 1, 2, 3, 4]
-    } else {
-        vec![1, 2, 3, 4]
-    };
-    widths
+    part_width_candidates(width)
         .into_iter()
         .map(|width| {
             parent.join(format!(
@@ -406,18 +419,38 @@ struct RecoverySet {
 ///
 /// Trailer-format files have their trailer bytes zeroed (those seven
 /// offsets carry no parity, matching WinRAR); legacy files contribute
-/// their full bytes.
+/// their full bytes. The names are heuristic, so same-base files can
+/// describe different (stale) sets: they are grouped by the set they
+/// describe and only the best-scoring group is used, while files of other
+/// groups are skipped instead of aborting recovery.
 fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet> {
-    let mut layout: Option<Layout> = None;
-    let mut meta: Option<Meta> = None;
-    let mut format: Option<Format> = None;
-    let mut payloads: Vec<RevSource> = Vec::new();
+    /// One same-base `.rev` file resolved to its best name parse.
+    struct RevFile {
+        path: PathBuf,
+        len: u64,
+        new_naming: bool,
+        width: usize,
+        kind: NameKind,
+        meta: Meta,
+        /// Number of the described set's data volumes that exist on disk.
+        score: usize,
+    }
+    /// Same-base files that describe one recovery set.
+    struct RevGroup {
+        format: Format,
+        data_count: usize,
+        rec_count: usize,
+        new_naming: bool,
+        score: usize,
+        members: Vec<usize>,
+    }
 
     let dir = if parent.as_os_str().is_empty() {
         Path::new(".")
     } else {
         parent
     };
+    let mut files: Vec<RevFile> = Vec::new();
     for entry in fs::read_dir(dir)?.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -485,62 +518,90 @@ fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet>
                 best = Some((score, candidate, file_meta));
             }
         }
-        let Some((_, parsed, file_meta)) = best else {
+        let Some((score, parsed, meta)) = best else {
             continue;
         };
-
-        if let Some(existing) = &meta
-            && (existing.data_count != file_meta.data_count
-                || existing.rec_count != file_meta.rec_count)
-        {
-            return Err(RarError::Format(
-                "recovery volume metadata differs across files".into(),
-            ));
-        }
-        if let Some(existing) = format
-            && existing != parsed.kind.format()
-        {
-            return Err(RarError::Format(
-                "recovery volumes mix both legacy layouts".into(),
-            ));
-        }
-        meta = Some(file_meta);
-        format = Some(parsed.kind.format());
-        layout.get_or_insert(Layout {
-            // Name rebuilt/repaired volumes after the data set's own base,
-            // not the recovery file's casing (they match
-            // case-insensitively).
-            base: base.to_string(),
-            new_naming: parsed.new_naming,
-            width: parsed.width,
-        });
-        payloads.push(RevSource {
-            index: file_meta.recovery_index,
+        files.push(RevFile {
             path,
             len,
+            new_naming: parsed.new_naming,
+            width: parsed.width,
+            kind: parsed.kind,
+            meta,
+            score,
         });
     }
 
-    let Some(meta) = meta else {
+    // Group by the set each file describes; the best-scoring group wins
+    // (ties prefer the group with more files, then the first encountered).
+    let mut groups: Vec<RevGroup> = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        let format = file.kind.format();
+        if let Some(group) = groups.iter_mut().find(|group| {
+            group.format == format
+                && group.data_count == file.meta.data_count
+                && group.rec_count == file.meta.rec_count
+                && group.new_naming == file.new_naming
+        }) {
+            group.score += file.score;
+            group.members.push(index);
+        } else {
+            groups.push(RevGroup {
+                format,
+                data_count: file.meta.data_count,
+                rec_count: file.meta.rec_count,
+                new_naming: file.new_naming,
+                score: file.score,
+                members: vec![index],
+            });
+        }
+    }
+    let mut chosen: Option<RevGroup> = None;
+    for group in groups {
+        let better = chosen.as_ref().is_none_or(|best| {
+            (group.score, group.members.len()) > (best.score, best.members.len())
+        });
+        if better {
+            chosen = Some(group);
+        }
+    }
+    let Some(chosen) = chosen else {
         return Err(RarError::Format(format!(
             "{}: no recovery volumes found",
             parent.join(base).display()
         )));
     };
-    let Some(layout) = layout else {
-        return Err(RarError::Format(
-            "no recovery volumes found for the volume set".into(),
-        ));
+
+    // Name rebuilt/repaired volumes after the data set's own base, not the
+    // recovery file's casing (they match case-insensitively). The width
+    // comes from the best-scoring member when members disagree.
+    let mut layout = Layout {
+        base: base.to_string(),
+        new_naming: chosen.new_naming,
+        width: files[chosen.members[0]].width,
     };
-    let Some(format) = format else {
-        return Err(RarError::Format(
-            "no recovery volumes found for the volume set".into(),
-        ));
-    };
+    let mut layout_score = files[chosen.members[0]].score;
+    for &index in &chosen.members[1..] {
+        if files[index].score > layout_score {
+            layout_score = files[index].score;
+            layout.width = files[index].width;
+        }
+    }
+
+    let mut payloads = Vec::with_capacity(chosen.members.len());
+    for &index in &chosen.members {
+        let file = &files[index];
+        payloads.push(RevSource {
+            index: file.meta.recovery_index,
+            path: file.path.clone(),
+            len: file.len,
+        });
+    }
+
     payloads.sort_by_key(|source| source.index);
-    let mut seen = vec![false; meta.rec_count];
+    let mut seen = vec![false; chosen.rec_count];
     for source in &payloads {
-        if source.index >= meta.rec_count || std::mem::replace(&mut seen[source.index], true) {
+        if source.index >= chosen.rec_count || std::mem::replace(&mut seen[source.index], true) {
             return Err(RarError::Format(
                 "duplicate or out-of-range recovery volume".into(),
             ));
@@ -548,8 +609,12 @@ fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet>
     }
     Ok(RecoverySet {
         layout,
-        meta,
-        format,
+        meta: Meta {
+            data_count: chosen.data_count,
+            rec_count: chosen.rec_count,
+            recovery_index: 0,
+        },
+        format: chosen.format,
         payloads,
     })
 }
@@ -1027,17 +1092,22 @@ fn resolve_data_slots(
     layout: &Layout,
     data_count: usize,
 ) -> (Vec<PathBuf>, Vec<usize>) {
-    let fallback_new =
-        |index: usize| -> PathBuf { parent.join(format!("{}.part{}.rar", layout.base, index + 1)) };
     let old_path = |index: usize| volume_path_rar4(parent, &layout.base, index + 1);
 
     let mut slots: Vec<Option<PathBuf>> = Vec::with_capacity(data_count);
     let mut new_hits = 0usize;
     let mut old_hits = 0usize;
+    // A legacy `.rev` name carries no part padding, so recover it from the
+    // first existing data volume; reconstructed volumes must keep the
+    // set's own padding (`part02.rar`, not `part2.rar`).
+    let mut new_width = layout.width;
     for index in 0..data_count {
         let mut found = new_data_path(parent, &layout.base, layout.width, index);
-        if found.is_some() {
+        if let Some(path) = &found {
             new_hits += 1;
+            if new_width == 0 {
+                new_width = volume_part_width(path);
+            }
         } else {
             let legacy = old_path(index);
             if legacy.exists() {
@@ -1047,6 +1117,15 @@ fn resolve_data_slots(
         }
         slots.push(found);
     }
+    let fallback_new = |index: usize| -> PathBuf {
+        let width = new_width.max(1);
+        parent.join(format!(
+            "{}.part{:0width$}.rar",
+            layout.base,
+            index + 1,
+            width = width
+        ))
+    };
 
     let prefer_new = if new_hits != old_hits {
         new_hits > old_hits
@@ -1521,8 +1600,8 @@ mod tests {
     use super::rs8::Rsc8;
     use super::{
         Meta, NameKind, build_recovery_volumes_for_set_chunked, collect_recovery_volumes,
-        parse_trailer, parse_trailer_file, rebuild_missing_volumes_chunked, rev_name_candidates,
-        trailer_style, write_trailer,
+        parse_trailer, parse_trailer_file, part_width_candidates, rebuild_missing_volumes_chunked,
+        rev_name_candidates, trailer_style, write_trailer,
     };
     use super::{RarError, TRAILER_LEN};
     use std::path::{Path, PathBuf};
@@ -1624,6 +1703,37 @@ mod tests {
         assert_eq!(set.payloads[0].path, dir.path().join("set4_1_1.rev"));
     }
 
+    /// A same-base `.rev` describing a different (stale) set must be
+    /// ignored, not abort recovery: the best-scoring metadata group wins.
+    #[test]
+    fn collect_recovery_volumes_skips_stray_same_base_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        // Three data volumes exist; the real set protects all three, the
+        // stray same-base file protects only two.
+        for index in 1..=3 {
+            std::fs::write(
+                dir.path().join(format!("set.part{index}.rar")),
+                vec![0u8; 64],
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.path().join("set.part3_1_1.rev"), b"real parity").unwrap();
+        std::fs::write(dir.path().join("set.part2_1_1.rev"), b"stray parity").unwrap();
+
+        let set = collect_recovery_volumes(dir.path(), "set").unwrap();
+        assert_eq!(set.meta.data_count, 3);
+        assert_eq!(set.meta.rec_count, 1);
+        assert_eq!(set.payloads.len(), 1);
+        assert_eq!(set.payloads[0].path, dir.path().join("set.part3_1_1.rev"));
+    }
+
+    #[test]
+    fn part_width_candidates_cover_five_digit_sets() {
+        assert_eq!(part_width_candidates(5), vec![5, 1, 2, 3, 4]);
+        assert_eq!(part_width_candidates(2), vec![2, 1, 3, 4, 5]);
+        assert_eq!(part_width_candidates(0), vec![1, 2, 3, 4, 5]);
+    }
+
     /// `trailer_style` must accept a valid trailer, reject a CRC-corrupted
     /// one, and reject a legacy-format file, all through the file-backed
     /// streaming parser.
@@ -1663,9 +1773,18 @@ mod tests {
     /// Deterministic non-archive byte patterns: the builder only reads the
     /// volume files, so plain files exercise the `.rev` codec directly.
     fn write_fake_volumes(dir: &Path, sizes: &[u64]) -> Vec<PathBuf> {
+        write_fake_volumes_padded(dir, sizes, 1)
+    }
+
+    /// [`write_fake_volumes`] with an explicit part-number padding.
+    fn write_fake_volumes_padded(dir: &Path, sizes: &[u64], padding: usize) -> Vec<PathBuf> {
         let mut volumes = Vec::with_capacity(sizes.len());
         for (i, &size) in sizes.iter().enumerate() {
-            let path = dir.join(format!("set.part{}.rar", i + 1));
+            let path = dir.join(format!(
+                "set.part{:0padding$}.rar",
+                i + 1,
+                padding = padding
+            ));
             let mut bytes = vec![0u8; size as usize];
             let mut state = 0x1234_5678u32.wrapping_add(i as u32 + 1);
             for byte in &mut bytes {
@@ -1744,6 +1863,28 @@ mod tests {
         let rebuilt = rebuild_missing_volumes_chunked(&volumes[0], None, None, 64).unwrap();
         assert_eq!(rebuilt, vec![volumes[1].clone()]);
         assert_eq!(std::fs::read(&volumes[1]).unwrap(), missing);
+    }
+
+    /// A five-digit part width: a legacy `.rev` name carries no padding, so
+    /// the data-volume probe must cover five digits and a reconstructed
+    /// missing volume must keep the set's own padding.
+    #[test]
+    fn five_digit_legacy_set_rebuilds_with_padded_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let volumes = write_fake_volumes_padded(dir.path(), &[1024, 1024, 700], 5);
+        let original = std::fs::read(&volumes[1]).unwrap();
+        let revs = build_recovery_volumes_for_set_chunked(&volumes, 2, 64).unwrap();
+        // Plain files do not end in zeros: the builder picks the legacy
+        // full-parity layout, whose name carries no part padding.
+        assert_eq!(
+            revs[0].file_name().unwrap().to_string_lossy(),
+            "set.part3_2_1.rev"
+        );
+
+        std::fs::remove_file(&volumes[1]).unwrap();
+        let rebuilt = rebuild_missing_volumes_chunked(&volumes[0], None, None, 64).unwrap();
+        assert_eq!(rebuilt, vec![volumes[1].clone()]);
+        assert_eq!(std::fs::read(&volumes[1]).unwrap(), original);
     }
 
     /// A failed streaming build removes the temps it wrote and leaves a

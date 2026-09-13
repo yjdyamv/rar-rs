@@ -164,6 +164,20 @@ fn sync_parent_dir(_parent: &Path) -> RarResult<()> {
     Ok(())
 }
 
+/// Install `src` over `dest` durably: flush the staged bytes first, replace
+/// the destination, then flush the parent directory entry (Unix), so a power
+/// loss cannot persist the rename ahead of the bytes it names or lose the new
+/// name. Used by the single-volume commit and the archive lock path.
+pub(crate) fn install_durable(src: &Path, dest: &Path) -> RarResult<()> {
+    sync_file(src)?;
+    replace_file(src, dest)?;
+    let parent = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    sync_parent_dir(parent)
+}
+
 /// Hidden sibling used to park a destination file during [`commit_files`].
 fn backup_sibling_path(dest: &Path, suffix: &str) -> PathBuf {
     let file_name = dest
@@ -502,19 +516,35 @@ pub(crate) fn commit_files(
         return Err(error);
     }
 
-    // Phase 3: mark committed, then drop the parked originals.
-    let _ = fs::write(commit_done_path(parent, base), b"");
+    // Phase 3: mark committed, then drop the parked originals. The marker
+    // must be durable before any backup goes away: if a power loss persisted
+    // the backup removals while losing the marker, recovery would see "not
+    // done", delete the new installs, and have no originals left to restore.
+    let marker = commit_done_path(parent, base);
+    let marked = fs::write(&marker, b"")
+        .map_err(RarError::Io)
+        .and_then(|()| sync_file(&marker))
+        .and_then(|()| sync_parent_dir(parent));
+    // If the marker did not reach stable storage, keep the journal and the
+    // backups so recovery rolls the old set back (there is no durable "done"
+    // evidence), and report the failure.
+    marked?;
     for (backup, _) in &backups {
         let _ = fs::remove_file(backup);
     }
     let _ = fs::remove_file(journal_path(parent, base));
-    let _ = fs::remove_file(commit_done_path(parent, base));
+    let _ = fs::remove_file(&marker);
+    // Flush the removals as a batch: either the journal and marker removal
+    // both persist (recovery is a no-op) or neither does (the durable marker
+    // sends recovery down the "committed" path), never marker-gone while the
+    // journal still names the removed backups.
+    let _ = sync_parent_dir(parent);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{commit_files, read_write_create, replace_file};
+    use super::{commit_files, install_durable, read_write_create, replace_file};
 
     #[test]
     fn staging_create_never_truncates_an_existing_file() {
@@ -795,6 +825,25 @@ mod tests {
         replace_file(&src, &dest).unwrap();
         assert_eq!(std::fs::read(dest).unwrap(), b"replacement");
         assert!(!src.exists());
+    }
+
+    #[test]
+    fn install_durable_replaces_the_destination_and_consumes_the_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("stage.tmp");
+        let dest = dir.path().join("archive.rar");
+        std::fs::write(&src, b"durable").unwrap();
+        std::fs::write(&dest, b"original").unwrap();
+
+        install_durable(&src, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"durable");
+        assert!(!src.exists());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("rar5tmp") || name.contains("rar5bak"))
+            .collect();
+        assert!(leftovers.is_empty(), "install leftovers: {leftovers:?}");
     }
 
     #[test]

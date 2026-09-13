@@ -34,13 +34,15 @@ pub fn mask_match(mask: &str, name: &str) -> bool {
     prev[n.len()]
 }
 
-/// Match an archive member by its stored path, basename, `*`/`?` mask or
-/// directory name.
+/// Match an archive member by its stored path, `*`/`?` mask or directory
+/// name.
 ///
-/// A selector containing a path must match the complete stored path; a
-/// selector naming a directory (without wildcards) also selects the whole
-/// `dir/...` subtree, like the official extractor. Masks use the shared
-/// [`mask_match`] policy (ASCII case is folded on Windows).
+/// A non-mask selector must match the complete stored path or name the
+/// member's directory (selecting the whole `dir/...` subtree), like the
+/// official extractor: `rar x arc.rar file.txt` does not match a member
+/// stored as `dir/file.txt` (official tools report "No files to extract").
+/// Masks use the shared [`mask_match`] policy and additionally match the
+/// basename anywhere in the tree (ASCII case is folded on Windows).
 pub fn name_matches(member: &str, requested: &str) -> bool {
     let member = member.replace('\\', "/");
     let requested = requested.replace('\\', "/");
@@ -56,14 +58,7 @@ pub fn name_matches(member: &str, requested: &str) -> bool {
                     .next()
                     .is_some_and(|name| mask_match(requested, name)));
     }
-    if eq_name(&member, requested) || under_dir(&member, requested) {
-        return true;
-    }
-    !requested.contains('/')
-        && member
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| eq_name(name, requested))
+    eq_name(&member, requested) || under_dir(&member, requested)
 }
 
 /// Whether two name components are equal under the platform's case rules
@@ -124,8 +119,10 @@ mod tests {
     }
 
     #[test]
-    fn matches_basename() {
-        assert!(name_matches("dir/sub/file.txt", "file.txt"));
+    fn non_mask_selector_does_not_match_a_nested_basename() {
+        assert!(name_matches("file.txt", "file.txt"));
+        assert!(!name_matches("dir/sub/file.txt", "file.txt"));
+        assert!(!name_matches("dir/sub/file.txt", "sub/file.txt"));
     }
 
     #[test]
@@ -139,7 +136,8 @@ mod tests {
     fn normalizes_backslashes_before_matching() {
         assert!(name_matches("dir\\sub\\file.txt", "dir/sub/file.txt"));
         assert!(name_matches("dir/sub/file.txt", "dir\\sub\\file.txt"));
-        assert!(name_matches("dir\\sub\\file.txt", "file.txt"));
+        assert!(name_matches("dir\\sub\\file.txt", "dir\\sub\\file.txt"));
+        assert!(!name_matches("dir\\sub\\file.txt", "file.txt"));
     }
 
     #[test]
@@ -166,7 +164,8 @@ mod tests {
     #[test]
     fn windows_folds_selector_case() {
         assert!(name_matches("Dir/File.TXT", "dir"));
-        assert!(name_matches("Dir/File.TXT", "FILE.txt"));
+        assert!(name_matches("Dir/File.TXT", "dir/FILE.txt"));
+        assert!(!name_matches("Dir/File.TXT", "FILE.txt"));
         assert!(name_matches("Dir/File.TXT", "*.txt"));
     }
 

@@ -671,9 +671,11 @@ pub fn extract_members(
 
 /// Number of members extraction will write, printing a `Skipping` line for
 /// every file the skip-existing policy leaves alone. Directory entries and
-/// `-ol-` links are not written files; the sequential simulation mirrors the
-/// library's `dest_path.exists()` check, so duplicate member names count
-/// once.
+/// `-ol-` links are not written files. Each destination comes from the
+/// library's own resolver ([`ArchiveReader::resolve_destination`]), so
+/// sanitization, case folding and `-or` renaming match what extraction does;
+/// destinations written earlier in the run are folded in so a duplicate
+/// member name counts once under `-o-`.
 fn count_extracted(
     rar: &ArchiveReader,
     dest: &Path,
@@ -681,7 +683,7 @@ fn count_extracted(
     options: &ExtractOptions,
 ) -> usize {
     let mut written = 0usize;
-    let mut taken: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
     for &id in ids {
         let Ok(entry) = rar.entry(id) else {
             continue;
@@ -689,23 +691,36 @@ fn count_extracted(
         if entry.is_dir() || (options.skip_links && entry.redirect().is_some()) {
             continue;
         }
-        let name = entry.name().replace('\\', "/");
-        let path = if options.flat_paths {
-            let base = name.rsplit('/').next().unwrap_or(&name);
-            dest.join(base)
-        } else {
-            dest.join(&name)
+        let destination = match rar.resolve_destination(id, dest, options) {
+            Ok(destination) => destination,
+            // Unsafe member names make extraction itself fail; they write
+            // nothing, and the extraction error is the one to report.
+            Err(_) => continue,
         };
+        let path = destination.path();
         if options.skip_existing {
-            if path.exists() || taken.contains(&path) {
+            let key = destination_key(path);
+            if destination.is_skipped() || taken.contains(&key) {
                 crate::info!("Skipping {}", display_name(&path.to_string_lossy()));
                 continue;
             }
-            taken.insert(path);
+            taken.insert(key);
         }
         written += 1;
     }
     written
+}
+
+/// Destination key for the in-run "already written" set. Windows paths
+/// compare case-insensitively on disk, so `a.txt` and `A.txt` denote the
+/// same file and the second member is skipped by `-o-`.
+fn destination_key(path: &Path) -> String {
+    let key = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        key.to_ascii_lowercase()
+    } else {
+        key
+    }
 }
 
 /// Extract every file member to stdout, concatenated (`-so`), for piping.
@@ -754,7 +769,7 @@ pub fn extract_to_stdout(
 
 /// Print one member, or every file member when `file` is `None`, to stdout
 /// (`p`). The selector follows the shared member-selection rules (stored
-/// path, basename, mask or directory prefix).
+/// path, mask or directory prefix).
 pub fn print_members(
     rar: &mut ArchiveReader,
     file: Option<&str>,

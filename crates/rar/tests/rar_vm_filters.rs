@@ -31,6 +31,16 @@ fn read_member(path: &str, name: &str) -> Vec<u8> {
         .unwrap_or_else(|error| panic!("reading {name} from {path}: {error}"))
 }
 
+fn copy_member(path: &str, name: &str) -> Vec<u8> {
+    let mut archive = ArchiveReader::open(path).unwrap();
+    let id = archive.unique_entry(name).unwrap();
+    let mut out = Vec::new();
+    archive
+        .copy_entry_to(id, &mut out)
+        .unwrap_or_else(|error| panic!("streaming {name} from {path}: {error}"));
+    out
+}
+
 #[test]
 fn solid_e8_filters_use_member_relative_offsets() {
     let expected_lead = std::fs::read(fixture("solid_e8_filter_lead.txt")).unwrap();
@@ -114,4 +124,22 @@ fn vm_delta_filter_accepts_more_than_thirty_two_channels() {
     }
     let data = read_member(&fixture("delta_64_channels.rar"), "delta64.bin");
     assert_eq!(data, expected);
+}
+
+#[test]
+fn streaming_copy_matches_in_memory_for_filtered_members() {
+    // The bounded-flush streaming path must apply VM filters exactly like
+    // the whole-member path: E8 on a real executable, and a PPMd escape-3
+    // filter record.
+    for (file, name) in [
+        ("filter_bsdcat_exe.rar", "bsdcat.exe"),
+        ("ppmd_embedded_vm_filter.rar", "ppmd_branch_mix.bin"),
+    ] {
+        let path = fixture(file);
+        assert_eq!(
+            copy_member(&path, name),
+            read_member(&path, name),
+            "{file}/{name}"
+        );
+    }
 }

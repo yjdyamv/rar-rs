@@ -263,15 +263,25 @@ impl RarArchive {
     /// Compute the destination path for an entry name, applying the safe
     /// path policy (sanitization + canonical containment check).
     pub(super) fn safe_dest_path(&self, dest_dir: &Path, name: &str) -> RarResult<PathBuf> {
-        let sanitized = if self.read_ctx().extract_options.safe_paths {
+        self.safe_dest_path_with(dest_dir, name, self.read_ctx().extract_options.safe_paths)
+    }
+
+    /// [`Self::safe_dest_path`] with an explicit safe-path policy, for
+    /// callers that resolve with options not installed in the read context
+    /// (see `RarArchive::resolve_dest_path_with`).
+    pub(super) fn safe_dest_path_with(
+        &self,
+        dest_dir: &Path,
+        name: &str,
+        safe_paths: bool,
+    ) -> RarResult<PathBuf> {
+        let sanitized = if safe_paths {
             sanitize_archive_path(name)?
         } else {
             name.replace('\\', "/")
         };
         let dest_path = dest_dir.join(&sanitized);
-        if self.read_ctx().extract_options.safe_paths
-            && let Some(parent) = dest_path.parent()
-        {
+        if safe_paths && let Some(parent) = dest_path.parent() {
             // Containment is checked *before* the member's parent directory
             // is created: a rejected name then leaves nothing behind, and the
             // check cannot be satisfied by a directory we just created. The

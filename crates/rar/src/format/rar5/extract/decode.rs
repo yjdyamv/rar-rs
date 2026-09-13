@@ -175,7 +175,8 @@ impl RarArchive {
             }
             // Encrypted streams carry a per-stream ENCR record (own salt),
             // so the password is checked and the keys are derived here
-            // rather than at open time.
+            // rather than at open time. Service records accept the all-zero
+            // `PswCheck` RAR <= 5.21 wrote for "STM" items.
             let keys = match s.params.as_ref() {
                 Some(params) => {
                     let password = self.password.as_deref().ok_or_else(|| {
@@ -184,10 +185,11 @@ impl RarArchive {
                             s.name
                         ))
                     })?;
-                    if !params.verify_password(password) {
-                        return Err(RarError::WrongPassword);
-                    }
-                    Some(params.derive_keys(password)?)
+                    Some(
+                        params
+                            .derive_and_verify_service(password)?
+                            .ok_or(RarError::WrongPassword)?,
+                    )
                 }
                 None => None,
             };

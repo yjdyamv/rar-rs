@@ -464,6 +464,8 @@ impl Rar29Decoder {
         self.bits.append(packed);
         self.decode_until(target).map_err(map_err)?;
         self.finish_member().map_err(map_err)?;
+        self.validate_member_filters(start, target)
+            .map_err(map_err)?;
         let out = self.filtered_range(start, target, start).map_err(map_err)?;
         self.trim_history(target, target);
         Ok(out)
@@ -472,10 +474,10 @@ impl Rar29Decoder {
     /// Decode a member streaming its output to `writer` with bounded memory
     /// (~window + one flush chunk) instead of accumulating the whole member.
     ///
-    /// Members carrying VM-filter records are the exception: a filter range
-    /// can only be reversed once the member output is complete, so those
-    /// members are decoded whole and written at the end (the record bytes
-    /// queue in `filters` before any flush point is reached).
+    /// VM-filter records are handled without materializing the rest of the
+    /// member: a flush never passes the start of a filter whose range is not
+    /// fully decoded yet, so filtered members still stream out in chunks
+    /// (bounded by the flush size plus the largest pending filter block).
     pub(crate) fn decode_member_streaming_to(
         &mut self,
         packed: &[u8],
@@ -497,27 +499,38 @@ impl Rar29Decoder {
         self.bits.append(packed);
 
         let mut flushed = member_start;
+        let mut decode_target = member_start.saturating_add(FLUSH).min(target);
         while flushed < target {
-            let next = (flushed + FLUSH).min(target);
-            self.decode_until(next).map_err(map_err)?;
-            let pos = self.current_pos();
-            if !self.filters.is_empty() {
-                // A VM-filter record arrived: reverse the rest at member end.
-                break;
+            self.decode_until(decode_target).map_err(map_err)?;
+            // Stop at the next pending filter's start: its bytes can only be
+            // reversed once the whole filter range has been decoded.
+            let safe_end = self
+                .safe_flush_end(flushed, decode_target, target)
+                .map_err(map_err)?;
+            if safe_end <= flushed {
+                if decode_target == target {
+                    return Err(map_err(E::Bad("VM filter extends beyond output")));
+                }
+                decode_target = self.current_pos().saturating_add(FLUSH).min(target);
+                continue;
             }
-            let chunk = self.raw_range(flushed, pos).map_err(map_err)?;
-            writer.write_all(chunk).map_err(RarError::Io)?;
-            flushed = pos;
+            if self.filters.is_empty() {
+                let chunk = self.raw_range(flushed, safe_end).map_err(map_err)?;
+                writer.write_all(chunk).map_err(RarError::Io)?;
+            } else {
+                let out = self
+                    .filtered_range(flushed, safe_end, member_start)
+                    .map_err(map_err)?;
+                writer.write_all(&out).map_err(RarError::Io)?;
+            }
+            flushed = safe_end;
             // Drop decoded history beyond the sliding window.
-            self.trim_history(pos, pos);
+            self.trim_history(flushed, self.current_pos());
+            decode_target = self.current_pos().saturating_add(FLUSH).min(target);
         }
-        self.decode_until(target).map_err(map_err)?;
         self.finish_member().map_err(map_err)?;
-        let out = self
-            .filtered_range(flushed, target, member_start)
+        self.validate_member_filters(member_start, target)
             .map_err(map_err)?;
-        writer.write_all(&out).map_err(RarError::Io)?;
-        self.trim_history(target, target);
         Ok(())
     }
 
@@ -889,16 +902,18 @@ impl Rar29Decoder {
     fn filtered_range(&mut self, start: usize, end: usize, member_start: usize) -> Res<Vec<u8>> {
         let mut out = Vec::with_capacity(end - start);
         let mut pos = start;
-        let filters: Vec<_> = self
-            .filters
-            .iter()
-            .enumerate()
-            .filter_map(|(index, filter)| {
-                (filter.start >= start && filter.start + filter.size <= end).then_some(index)
-            })
-            .collect();
-        for filter_index in filters {
-            let (program_index, filter_start, filter_size, regs, global_data) = {
+        let mut filters = Vec::new();
+        for (index, filter) in self.filters.iter().enumerate() {
+            let filter_end = filter
+                .start
+                .checked_add(filter.size)
+                .ok_or(E::Bad("VM filter range overflows"))?;
+            if filter.start >= start && filter_end <= end {
+                filters.push((index, filter_end));
+            }
+        }
+        for (filter_index, filter_end) in filters {
+            let (program_index, filter_start, regs, global_data) = {
                 let filter = self
                     .filters
                     .get(filter_index)
@@ -906,7 +921,6 @@ impl Rar29Decoder {
                 (
                     filter.program,
                     filter.start,
-                    filter.size,
                     filter.regs,
                     filter.global_data.clone(),
                 )
@@ -915,9 +929,7 @@ impl Rar29Decoder {
                 continue;
             }
             out.extend_from_slice(self.raw_range(pos, filter_start)?);
-            let mut block = self
-                .raw_range(filter_start, filter_start + filter_size)?
-                .to_vec();
+            let mut block = self.raw_range(filter_start, filter_end)?.to_vec();
             let file_offset = filter_start
                 .checked_sub(member_start)
                 .ok_or(E::Bad("VM filter starts before file"))?
@@ -948,10 +960,56 @@ impl Rar29Decoder {
                 }
             }
             out.extend_from_slice(&block);
-            pos = filter_start + filter_size;
+            pos = filter_end;
         }
         out.extend_from_slice(self.raw_range(pos, end)?);
         Ok(out)
+    }
+
+    /// Last output position that can be safely flushed while decoding towards
+    /// `end`: a filter whose range is not fully decoded yet forces the flush
+    /// to stop at its start. Fails if a filter overruns the member output,
+    /// since those bytes could never be transformed.
+    fn safe_flush_end(&self, start: usize, end: usize, final_target: usize) -> Res<usize> {
+        let current = self.current_pos();
+        let mut safe_end = end;
+        for filter in &self.filters {
+            let filter_end = filter
+                .start
+                .checked_add(filter.size)
+                .ok_or(E::Bad("VM filter range overflows"))?;
+            if filter.start >= safe_end || filter_end <= start {
+                continue;
+            }
+            if filter_end > final_target {
+                return Err(E::Bad("VM filter extends beyond output"));
+            }
+            if filter_end > current {
+                safe_end = safe_end.min(filter.start);
+            }
+        }
+        Ok(safe_end)
+    }
+
+    /// Reject VM filter ranges that do not fit inside the member output:
+    /// leaving them untransformed would only surface as a CRC mismatch after
+    /// the bytes were already written. Filters anchored before `member_start`
+    /// belong to an earlier solid-chain member and are not this member's
+    /// concern.
+    fn validate_member_filters(&self, member_start: usize, member_end: usize) -> Res<()> {
+        for filter in &self.filters {
+            let filter_end = filter
+                .start
+                .checked_add(filter.size)
+                .ok_or(E::Bad("VM filter range overflows"))?;
+            if filter.start >= member_end {
+                return Err(E::Bad("VM filter starts beyond output"));
+            }
+            if filter.start >= member_start && filter_end > member_end {
+                return Err(E::Bad("VM filter extends beyond output"));
+            }
+        }
+        Ok(())
     }
 
     fn read_end_of_block(&mut self) -> Res<LzBlockEnd> {
@@ -1460,5 +1518,112 @@ mod tests {
         let mut count = [0u16; 16];
         count[1] = 3; // three 1-bit codes can never fit
         assert!(validate_huffman_counts(&count).is_err());
+    }
+
+    /// Collects streamed output and remembers the largest single write, so a
+    /// test can assert that filtered members do not fall back to one
+    /// whole-member flush.
+    #[derive(Default)]
+    struct CountingWriter {
+        bytes: Vec<u8>,
+        max_write: usize,
+    }
+
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.max_write = self.max_write.max(buffer.len());
+            self.bytes.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// x86-shaped filler: E8 call opcodes with small relative targets, the
+    /// shape the E8 filter rewrites and WinRAR would filter automatically.
+    fn x86_like_data(bytes: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(bytes);
+        while data.len() < bytes {
+            data.extend_from_slice(&[0u8; 48]);
+            for k in 0..6u32 {
+                data.push(0xE8);
+                data.extend_from_slice(&(k * 0x100 + 0x40).to_le_bytes());
+                data.extend_from_slice(&[0x90, 0x90]);
+            }
+        }
+        data.truncate(bytes);
+        data
+    }
+
+    #[test]
+    fn streaming_a_large_filtered_member_flushes_in_bounded_chunks() {
+        use crate::codec::legacy::rar29_encoder::{
+            Rar29FilterKind, Unpack29Encoder, options_for_level,
+        };
+        let input = x86_like_data(4 * 1024 * 1024);
+        let mut encoder = Unpack29Encoder::with_options(options_for_level(1));
+        let packed = encoder
+            .encode_member_with_filter(&input, Rar29FilterKind::E8, None)
+            .expect("encode E8-filtered member");
+        assert!(packed.len() < input.len(), "E8 filter should compress");
+
+        let mut writer = CountingWriter::default();
+        Rar29Decoder::new()
+            .decode_member_streaming_to(&packed, input.len() as u64, &mut writer)
+            .expect("streaming filtered decode");
+        assert_eq!(writer.bytes, input, "streamed bytes differ from input");
+        // E8 records cover 128 KiB blocks, so the whole 4 MiB member must
+        // never queue into a single write: each flush stays within one
+        // 1 MiB chunk plus one pending filter block.
+        assert!(
+            writer.max_write <= 2 * 1024 * 1024,
+            "filtered streaming was not bounded: {} bytes in one write",
+            writer.max_write
+        );
+    }
+
+    fn vm_filter(start: usize, size: usize) -> VmFilter {
+        VmFilter {
+            program: 0,
+            start,
+            size,
+            regs: [0; 7],
+            global_data: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn vm_filter_overrunning_the_member_is_rejected() {
+        let mut decoder = Rar29Decoder::new();
+        decoder.output.resize(64, 0);
+        decoder.filters.push(vm_filter(32, 64)); // ends at 96 > 64
+        assert!(decoder.validate_member_filters(0, 64).is_err());
+    }
+
+    #[test]
+    fn vm_filter_starting_beyond_the_member_is_rejected() {
+        let mut decoder = Rar29Decoder::new();
+        decoder.output.resize(64, 0);
+        decoder.filters.push(vm_filter(64, 4));
+        assert!(decoder.validate_member_filters(0, 64).is_err());
+    }
+
+    #[test]
+    fn vm_filter_range_overflow_is_rejected() {
+        let mut decoder = Rar29Decoder::new();
+        decoder.output.resize(64, 0);
+        decoder.filters.push(vm_filter(usize::MAX - 1, 8));
+        assert!(decoder.validate_member_filters(0, 64).is_err());
+        assert!(decoder.filtered_range(0, 64, 0).is_err());
+    }
+
+    #[test]
+    fn vm_filter_inside_the_member_is_accepted() {
+        let mut decoder = Rar29Decoder::new();
+        decoder.output.resize(64, 0);
+        decoder.filters.push(vm_filter(8, 32));
+        assert!(decoder.validate_member_filters(0, 64).is_ok());
     }
 }

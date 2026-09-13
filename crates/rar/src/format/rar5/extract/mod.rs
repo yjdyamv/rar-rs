@@ -21,6 +21,8 @@ mod read;
 mod solid;
 mod verify;
 
+pub use members::Destination;
+
 use crate::error::{RarError, RarResult};
 use crate::model::FileHeader;
 

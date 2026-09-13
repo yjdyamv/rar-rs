@@ -138,10 +138,9 @@ pub(crate) fn read_packed<R: ChunkReader + ?Sized>(
     let keys = if let Some(ref p) = params {
         let password = password
             .ok_or_else(|| RarError::Encrypted(format!("{name}: encrypted, no password set")))?;
-        if !p.verify_password(password) {
-            return Err(RarError::WrongPassword);
-        }
-        let keys = p.derive_keys(password)?;
+        let keys = p
+            .derive_and_verify(password)?
+            .ok_or(RarError::WrongPassword)?;
         let mut data = crypto::decrypt_data(&packed, &keys.key, &p.iv)?;
         if hdr.comp_method == COMP_METHOD_STORE {
             let unp_size = size_to_usize(hdr.unpacked_size, name, "unpacked size")?;
@@ -172,8 +171,22 @@ pub(crate) fn decode_member(
     out: &mut dyn std::io::Write,
 ) -> RarResult<u64> {
     let written = if hdr.comp_method == COMP_METHOD_STORE {
-        out.write_all(&payload.data).map_err(RarError::Io)?;
-        payload.data.len() as u64
+        // Never emit more than the declared unpacked size: a crafted STORE
+        // member whose packed area is larger than its unpacked size would
+        // otherwise stream the excess to the caller before the mismatch
+        // error below. A short payload still fails the size check.
+        let declared = size_to_usize(hdr.unpacked_size, &hdr.name, "unpacked size")?;
+        let take = payload.data.len().min(declared);
+        out.write_all(&payload.data[..take]).map_err(RarError::Io)?;
+        if payload.data.len() > declared {
+            return Err(RarError::Format(format!(
+                "member {}: stored payload has {} bytes, header declares {}",
+                hdr.name,
+                payload.data.len(),
+                hdr.unpacked_size
+            )));
+        }
+        take as u64
     } else {
         crate::codec::decode_to_writer(
             &payload.data,
@@ -202,6 +215,51 @@ pub(crate) fn decode_member(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_payload_longer_than_declared_does_not_emit_excess() {
+        let hdr = FileHeader {
+            name: "long.bin".into(),
+            unpacked_size: 4,
+            comp_method: COMP_METHOD_STORE,
+            ..Default::default()
+        };
+        let payload = DecryptedPayload {
+            data: b"abcdefgh".to_vec(),
+            params: None,
+            keys: None,
+        };
+        let mut out = Vec::new();
+        let err = decode_member(&hdr, &payload, None, &mut out).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "got {err}");
+        assert!(
+            out.len() <= 4,
+            "excess bytes reached the writer: {} bytes",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn store_payload_padded_to_declared_size_writes_declared_bytes() {
+        // The encrypted-read path trims AES zero-fill padding to the
+        // declared unpacked size; the STORE branch must copy it through
+        // unchanged (padding bytes included) and report the full size.
+        let hdr = FileHeader {
+            name: "padded.bin".into(),
+            unpacked_size: 4,
+            comp_method: COMP_METHOD_STORE,
+            ..Default::default()
+        };
+        let payload = DecryptedPayload {
+            data: b"ab\0\0".to_vec(),
+            params: None,
+            keys: None,
+        };
+        let mut out = Vec::new();
+        let written = decode_member(&hdr, &payload, None, &mut out).unwrap();
+        assert_eq!(written, 4);
+        assert_eq!(out, b"ab\0\0");
+    }
 
     #[test]
     fn store_payload_shorter_than_declared_is_rejected() {

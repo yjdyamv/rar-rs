@@ -101,6 +101,19 @@ impl DerivedKeys {
         constant_time_eq(&self.password_check, &stored[..8])
             && constant_time_eq(&checksum[..4], &stored[8..12])
     }
+
+    /// Verify the stored check value of a *service* record.
+    ///
+    /// RAR 5.21 and earlier wrote an all-zero `PswCheck` in service records
+    /// ("STM" items) even when the checksum flag was set; UnRAR treats that
+    /// value as "no check data" and accepts any password. Member records keep
+    /// the strict [`Self::check_password`] comparison.
+    pub fn check_password_service(&self, stored: &[u8; 12]) -> bool {
+        if stored[..8] == [0u8; 8] {
+            return true;
+        }
+        self.check_password(stored)
+    }
 }
 
 /// Derive key material from `password` using the RAR5 chained KDF.
@@ -328,6 +341,11 @@ impl EncryptionParams {
         let (version, n) = vint::decode_from_slice(data, offset)
             .map_err(|e| RarError::Format(format!("encr version: {e}")))?;
         offset += n;
+        if version > u64::from(ENCR_VERSION_AES256) {
+            return Err(RarError::Format(format!(
+                "unsupported encryption version {version}"
+            )));
+        }
         let (flags, n) = vint::decode_from_slice(data, offset)
             .map_err(|e| RarError::Format(format!("encr flags: {e}")))?;
         offset += n;
@@ -357,7 +375,15 @@ impl EncryptionParams {
         iv.copy_from_slice(&data[offset..offset + ENCR_IV_SIZE]);
         offset += ENCR_IV_SIZE;
 
-        let checksum = if flags & ENCR_FLAG_CHECKSUM as u64 != 0 && offset + 12 <= data.len() {
+        let checksum = if flags & u64::from(ENCR_FLAG_CHECKSUM) != 0 {
+            // A flagged check value must be complete: treating a truncated
+            // one as "no check" would make `verify_password` accept any
+            // password for the member.
+            if data.len().saturating_sub(offset) < 12 {
+                return Err(RarError::Format(
+                    "truncated encryption password check value".into(),
+                ));
+            }
             let mut ck = [0u8; 12];
             ck.copy_from_slice(&data[offset..offset + 12]);
             Some(ck)
@@ -400,6 +426,37 @@ impl EncryptionParams {
             Ok(keys) => keys.check_password(ck),
             Err(_) => false,
         }
+    }
+
+    /// Derive the key material once and verify the stored check value in the
+    /// same pass.
+    ///
+    /// Returns `Ok(None)` when the stored check value rejects the password and
+    /// `Ok(Some(keys))` otherwise (including when no check value is stored),
+    /// so the KDF never runs twice for an encrypted member. Errors are
+    /// reserved for malformed or unsupported parameters.
+    pub fn derive_and_verify(&self, password: &str) -> RarResult<Option<DerivedKeys>> {
+        self.derive_and_verify_with(password, false)
+    }
+
+    /// [`Self::derive_and_verify`] for service records ("STM" items), whose
+    /// all-zero `PswCheck` from RAR 5.21 and earlier means "not present".
+    pub fn derive_and_verify_service(&self, password: &str) -> RarResult<Option<DerivedKeys>> {
+        self.derive_and_verify_with(password, true)
+    }
+
+    fn derive_and_verify_with(
+        &self,
+        password: &str,
+        service: bool,
+    ) -> RarResult<Option<DerivedKeys>> {
+        let keys = self.derive_keys(password)?;
+        let verified = match &self.checksum {
+            Some(ck) if service => keys.check_password_service(ck),
+            Some(ck) => keys.check_password(ck),
+            None => true,
+        };
+        Ok(verified.then_some(keys))
     }
 
     /// Derive the full key material for `password` (single KDF pass).
@@ -555,6 +612,11 @@ pub fn parse_archive_encrypt_header(
     let (version, n) = vint::decode_from_slice(data, offset)
         .map_err(|e| RarError::Format(format!("encr version: {e}")))?;
     offset += n;
+    if version > u64::from(ENCR_VERSION_AES256) {
+        return Err(RarError::Format(format!(
+            "unsupported encryption version {version}"
+        )));
+    }
     let (flags, n) = vint::decode_from_slice(data, offset)
         .map_err(|e| RarError::Format(format!("encr flags: {e}")))?;
     offset += n;
@@ -577,7 +639,12 @@ pub fn parse_archive_encrypt_header(
     salt.copy_from_slice(&data[offset..offset + ENCR_SALT_SIZE]);
     offset += ENCR_SALT_SIZE;
 
-    let checksum = if flags & 0x01 != 0 && offset + 12 <= data.len() {
+    let checksum = if flags & u64::from(ENCR_FLAG_CHECKSUM) != 0 {
+        if data.len().saturating_sub(offset) < 12 {
+            return Err(RarError::Format(
+                "truncated encryption header password check value".into(),
+            ));
+        }
         let mut ck = [0u8; 12];
         ck.copy_from_slice(&data[offset..offset + 12]);
         Some(ck)
@@ -612,10 +679,10 @@ pub fn derive_header_key(
         RarError::Encrypted("archive has encrypted headers; provide a password".into())
     })?;
     let params = parse_archive_encrypt_header(raw)?;
-    if !params.verify_password(password) {
-        return Err(RarError::WrongPassword);
-    }
-    params.get_key(password)
+    let keys = params
+        .derive_and_verify(password)?
+        .ok_or(RarError::WrongPassword)?;
+    Ok(keys.key)
 }
 
 /// Parse the extra area of a file header to find encryption parameters.
@@ -742,6 +809,117 @@ mod tests {
         assert!(params.verify_password(&long));
         assert!(params.verify_password(&prefix));
         assert!(!params.verify_password(&"p".repeat(crate::crypto::MAX_PASSWORD_CHARS - 1)));
+    }
+
+    /// Extra-area encryption record body with strength 4 and fixed salt/IV.
+    fn encr_record(version: u64, flags: u64, checksum: Option<[u8; 12]>) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend(vint::encode(version));
+        data.extend(vint::encode(flags));
+        data.push(4);
+        data.extend_from_slice(&[0x11u8; ENCR_SALT_SIZE]);
+        data.extend_from_slice(&[0x22u8; ENCR_IV_SIZE]);
+        if let Some(ck) = checksum {
+            data.extend_from_slice(&ck);
+        }
+        data
+    }
+
+    /// Archive-level encryption header (`[type][flags][version][encr flags]
+    /// [strength][salt][checksum?]`) as a raw block.
+    fn archive_encrypt_header(version: u64, flags: u64) -> crate::format::rar5::headers::RawBlock {
+        let mut data = Vec::new();
+        data.extend(vint::encode(crate::format::rar5::BLOCK_TYPE_ENCRYPT_HEADER));
+        data.extend(vint::encode(0u64));
+        data.extend(vint::encode(version));
+        data.extend(vint::encode(flags));
+        data.push(4);
+        data.extend_from_slice(&[0x11u8; ENCR_SALT_SIZE]);
+        crate::format::rar5::headers::RawBlock {
+            header_crc: 0,
+            header_data: data,
+            data_size: 0,
+            data_offset: 0,
+            block_type: 0,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn unknown_encryption_version_is_rejected() {
+        let err = EncryptionParams::from_extra_bytes(&encr_record(
+            1,
+            u64::from(ENCR_FLAG_CHECKSUM),
+            None,
+        ))
+        .unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "got {err}");
+
+        let err = parse_archive_encrypt_header(&archive_encrypt_header(1, 0)).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "got {err}");
+    }
+
+    #[test]
+    fn truncated_password_check_value_is_rejected() {
+        // Flagged check value with only 11 trailing bytes: treating it as
+        // "no check" would let `verify_password` accept any password.
+        let mut data = encr_record(
+            u64::from(ENCR_VERSION_AES256),
+            u64::from(ENCR_FLAG_CHECKSUM),
+            None,
+        );
+        data.extend_from_slice(&[0u8; 11]);
+        let err = EncryptionParams::from_extra_bytes(&data).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "got {err}");
+
+        let mut raw = archive_encrypt_header(0, u64::from(ENCR_FLAG_CHECKSUM));
+        raw.header_data.extend_from_slice(&[0u8; 11]);
+        let err = parse_archive_encrypt_header(&raw).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "got {err}");
+    }
+
+    #[test]
+    fn service_record_all_zero_password_check_is_accepted() {
+        let params = EncryptionParams::from_extra_bytes(&encr_record(
+            0,
+            u64::from(ENCR_FLAG_CHECKSUM),
+            Some([0u8; 12]),
+        ))
+        .unwrap();
+
+        // Member records stay strict even when the stored check is zero.
+        assert!(!params.verify_password("hunter2"));
+        assert!(params.derive_and_verify("hunter2").unwrap().is_none());
+
+        // Service records mirror UnRAR: an all-zero PswCheck means the check
+        // is absent, so any password derives keys.
+        for password in ["hunter2", "anything"] {
+            let keys = params.derive_and_verify_service(password).unwrap().unwrap();
+            assert_eq!(keys.key, params.derive_keys(password).unwrap().key);
+        }
+    }
+
+    #[test]
+    fn derive_and_verify_matches_derive_keys() {
+        let params = EncryptionParams::generate_for_password("hunter2", 4);
+        let direct = params.derive_keys("hunter2").unwrap();
+        let keys = params
+            .derive_and_verify("hunter2")
+            .unwrap()
+            .expect("right password");
+        assert_eq!(keys.key, direct.key);
+        assert_eq!(keys.hash_key, direct.hash_key);
+        assert_eq!(keys.password_check, direct.password_check);
+
+        assert!(
+            params.derive_and_verify("hunter3").unwrap().is_none(),
+            "wrong password must be rejected"
+        );
+
+        // No stored check value: derivation still succeeds.
+        let mut no_check = params.clone();
+        no_check.checksum = None;
+        assert!(no_check.derive_and_verify("anything").unwrap().is_some());
     }
 
     #[test]

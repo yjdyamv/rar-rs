@@ -40,6 +40,17 @@ fn check_entry_cap(count: usize, max: usize) -> RarResult<()> {
     Ok(())
 }
 
+/// Convert a quick-open declared size to `usize`, rejecting lengths that do
+/// not fit the host address space: on 32-bit targets `as usize` would
+/// truncate `2^32 + N` to `N`, so the entry CRC would be verified over — and
+/// the embedded header parsed from — a range other than the declared one.
+fn qo_size_to_usize(size: u64, what: &str) -> RarResult<usize> {
+    usize::try_from(size).map_err(|_| RarError::LimitExceeded {
+        limit: size,
+        context: format!("quick-open: {what} overflows host address space"),
+    })
+}
+
 impl RarArchive {
     pub(crate) fn open_read(&mut self) -> RarResult<()> {
         self.volume_paths = discover_volumes(&self.path);
@@ -347,6 +358,7 @@ impl RarArchive {
             self.password.as_deref(),
             &mut out,
         )?;
+        check_entry_cap(out.len(), MAX_QUICK_OPEN_ENTRIES)?;
         for (vol_idx, vol_path) in self.volume_paths.iter().enumerate().skip(1) {
             self.check_cancel()?;
             let mut stream = std::fs::File::open(vol_path)?;
@@ -359,6 +371,7 @@ impl RarArchive {
                 )));
             }
             scan.scan_volume(&mut stream, vol_idx, self.password.as_deref(), &mut out)?;
+            check_entry_cap(out.len(), MAX_QUICK_OPEN_ENTRIES)?;
         }
         let archive_solid = scan.archive_solid;
         let new_numbering = scan.new_numbering;
@@ -376,6 +389,14 @@ impl RarArchive {
     /// header]`. The archive key is derived once per volume and reused for
     /// all of its blocks.
     fn scan_all_volumes(&mut self) -> RarResult<()> {
+        self.scan_all_volumes_capped(MAX_QUICK_OPEN_ENTRIES)
+    }
+
+    /// [`scan_all_volumes`] with an explicit entry ceiling. A crafted volume
+    /// set can keep adding FILE_HEAD blocks while the catalog grows without
+    /// bound (the headers on disk are tiny, the entry objects are not), so
+    /// the same ceiling [`scan_blocks`] applies is enforced here too.
+    fn scan_all_volumes_capped(&mut self, max_entries: usize) -> RarResult<()> {
         self.entries.clear();
         self.read_ctx_mut().streams.clear();
         let mut pending: Option<ArchiveEntry> = None;
@@ -423,6 +444,7 @@ impl RarArchive {
                         }
                     }
                     BLOCK_TYPE_FILE_HEADER => {
+                        check_entry_cap(self.entries.len(), max_entries)?;
                         let fh = FileHeader::from_raw(raw, stream_pos)?;
                         let continues_from = raw.flags & BLOCK_FLAG_DATA_CONTINUES != 0;
                         let continues_to = raw.flags & BLOCK_FLAG_DATA_CONTINUE_TO != 0;
@@ -554,8 +576,9 @@ fn parse_quick_open_payload_capped(
         let (body_size, n) = vint::decode_from_slice(payload, off)
             .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
         off += n;
+        let body_len = qo_size_to_usize(body_size, "entry body size")?;
         let body_end = off
-            .checked_add(body_size as usize)
+            .checked_add(body_len)
             .ok_or_else(|| RarError::Format("quick-open: body size overflow".into()))?;
         if body_end > payload.len() {
             return Err(RarError::Format("quick-open: truncated entry body".into()));
@@ -579,8 +602,9 @@ fn parse_quick_open_payload_capped(
         let (hdr_size, hn) = vint::decode_from_slice(payload, p)
             .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
         p += hn;
+        let hdr_len = qo_size_to_usize(hdr_size, "file header size")?;
         let hdr_end = p
-            .checked_add(hdr_size as usize)
+            .checked_add(hdr_len)
             .ok_or_else(|| RarError::Format("quick-open: header size overflow".into()))?;
         if hdr_end > body_end {
             return Err(RarError::Format("quick-open: truncated file header".into()));
@@ -594,7 +618,7 @@ fn parse_quick_open_payload_capped(
         let header_abs = qo_abs.checked_sub(rel).ok_or_else(|| {
             RarError::Format("quick-open: relative offset points past the archive start".into())
         })?;
-        let data_offset = header_abs + (hdr_end - p) as u64;
+        let data_offset = header_abs + hdr_len as u64;
         // `stream_pos` carries the data-area offset, matching scan_blocks.
         let fh = FileHeader::from_raw(&raw, data_offset)?;
         let chunk = DataChunk {
@@ -652,5 +676,93 @@ mod tests {
     fn catalog_entry_cap_matches_the_bound() {
         assert!(check_entry_cap(MAX_QUICK_OPEN_ENTRIES - 1, MAX_QUICK_OPEN_ENTRIES).is_ok());
         assert!(check_entry_cap(MAX_QUICK_OPEN_ENTRIES, MAX_QUICK_OPEN_ENTRIES).is_err());
+    }
+
+    #[test]
+    fn multivolume_scan_enforces_the_entry_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cap.rar");
+        // Incompressible-ish payload so the store-level member cannot fit a
+        // single 30 KB volume; mirrors the existing multi-volume tests.
+        let mut data = vec![0u8; 102400];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i.wrapping_mul(7) ^ (i >> 3)) as u8;
+        }
+        {
+            let mut ar = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    volume_size: Some(30_000),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            ar.add_bytes("a.bin", &data, 0).unwrap();
+            ar.add_bytes("b.bin", b"second member", 0).unwrap();
+            ar.close().unwrap();
+        }
+        let vols = discover_volumes(&path);
+        assert!(vols.len() > 1, "precondition: multiple volumes");
+
+        let mut ar = RarArchive::open(&vols[0]).unwrap();
+        assert_eq!(ar.entries.len(), 2, "precondition: two catalog entries");
+
+        let err = ar.scan_all_volumes_capped(1).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
+
+        ar.scan_all_volumes_capped(2).unwrap();
+        assert_eq!(ar.entries.len(), 2);
+    }
+
+    #[test]
+    fn quick_open_declared_sizes_must_fit_the_host_address_space() {
+        assert_eq!(qo_size_to_usize(4096, "entry body size").unwrap(), 4096);
+        let over_32_bit = u64::from(u32::MAX) + 1;
+        if cfg!(target_pointer_width = "64") {
+            // 64-bit hosts can represent the value; only 32-bit targets can
+            // execute the rejection arm below.
+            assert_eq!(
+                qo_size_to_usize(over_32_bit, "entry body size").unwrap(),
+                usize::try_from(over_32_bit).unwrap()
+            );
+        } else {
+            let err = qo_size_to_usize(over_32_bit, "entry body size").unwrap_err();
+            assert!(matches!(err, RarError::LimitExceeded { .. }), "got {err}");
+        }
+    }
+
+    #[test]
+    fn quick_open_rejects_oversized_declared_sizes() {
+        // Body size beyond u32: truncated to `N` by `as usize` on 32-bit
+        // targets, out of range on every target.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend(vint::encode(u64::from(u32::MAX) + 10));
+        let err = parse_quick_open_payload_capped(&payload, 1000, 4).unwrap_err();
+        assert!(
+            matches!(err, RarError::Format(_) | RarError::LimitExceeded { .. }),
+            "unexpected: {err:?}"
+        );
+
+        // Header size beyond u32 inside a CRC-valid body.
+        let header = FileHeader {
+            name: "a.txt".into(),
+            ..Default::default()
+        }
+        .to_bytes();
+        let mut body = Vec::new();
+        body.extend(vint::encode(0));
+        body.extend(vint::encode(10));
+        body.extend(vint::encode(u64::from(u32::MAX) + 10));
+        body.extend_from_slice(&header);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
+        payload.extend(vint::encode(body.len() as u64));
+        payload.extend_from_slice(&body);
+        let err = parse_quick_open_payload_capped(&payload, 1000, 4).unwrap_err();
+        assert!(
+            matches!(err, RarError::Format(_) | RarError::LimitExceeded { .. }),
+            "unexpected: {err:?}"
+        );
     }
 }

@@ -108,11 +108,25 @@ pub struct Collected {
 }
 
 /// Normalize a path argument into an archive name: relative paths stay as
-/// given, absolute paths drop the leading slash (like `rar`).
+/// given, absolute paths drop the leading slash and leading `.`/`./`
+/// components are removed (like `rar`: `.\sel\root.txt` stores
+/// `sel/root.txt`). Interior components are preserved verbatim.
 pub fn arg_to_name(arg: &str) -> String {
-    arg.trim_start_matches('/')
-        .trim_end_matches('/')
-        .replace('\\', "/")
+    let normalized = arg.replace('\\', "/");
+    let mut rest = normalized.as_str();
+    loop {
+        rest = rest.trim_start_matches('/');
+        match rest.strip_prefix("./") {
+            Some(tail) => rest = tail,
+            None => {
+                if rest == "." {
+                    rest = "";
+                }
+                break;
+            }
+        }
+    }
+    rest.trim_end_matches('/').to_string()
 }
 
 /// Full-path stored name for `-ep2` / `-ep3`: the absolute path with the
@@ -270,7 +284,9 @@ fn add_with_policy(
     if plain.dir_subtree_skipped(&rel) {
         return Ok(());
     }
-    if plain.dir_entry_kept(&rel) {
+    // A `.`/`./` argument names the current directory itself, which has no
+    // stored name: skip its directory entry, only its children are stored.
+    if !rel.is_empty() && plain.dir_entry_kept(&rel) && added.insert(path.to_path_buf()) {
         pending.push(Collected {
             path: path.to_path_buf(),
             name: plain.stored_name(&rel),
@@ -338,7 +354,7 @@ fn add_wildcard_arg(
             if policy.dir_subtree_skipped(&rel) {
                 continue;
             }
-            if policy.dir_entry_kept(&rel) {
+            if policy.dir_entry_kept(&rel) && added.insert(child.path()) {
                 pending.push(Collected {
                     path: child.path(),
                     name: policy.stored_name(&rel),
@@ -388,13 +404,18 @@ fn walk_directory(
         .collect();
     children.sort_by_key(|e| e.file_name());
     for child in children {
-        let rel = format!("{rel_dir}/{}", child.file_name().to_string_lossy());
+        let file_name = child.file_name().to_string_lossy().into_owned();
+        let rel = if rel_dir.is_empty() {
+            file_name
+        } else {
+            format!("{rel_dir}/{file_name}")
+        };
         let link_leaf = (store_links || skip_links) && is_link_like(&child.path());
         if child.path().is_dir() && !link_leaf {
             if policy.dir_subtree_skipped(&rel) {
                 continue;
             }
-            if policy.dir_entry_kept(&rel) {
+            if policy.dir_entry_kept(&rel) && added.insert(child.path()) {
                 pending.push(Collected {
                     path: child.path(),
                     name: policy.stored_name(&rel),
@@ -449,6 +470,19 @@ mod tests {
     fn mask_match_folds_case_on_windows() {
         assert!(mask_match("*.TXT", "lower.txt"));
         assert!(mask_match("LOWER.*", "lower.txt"));
+    }
+
+    #[test]
+    fn arg_to_name_strips_leading_dot_components() {
+        assert_eq!(arg_to_name(".\\sel\\root.txt"), "sel/root.txt");
+        assert_eq!(arg_to_name("./sel/root.txt"), "sel/root.txt");
+        assert_eq!(arg_to_name(".//sel//root.txt"), "sel//root.txt");
+        assert_eq!(arg_to_name("."), "");
+        assert_eq!(arg_to_name("./"), "");
+        assert_eq!(arg_to_name(".hidden/f.txt"), ".hidden/f.txt");
+        assert_eq!(arg_to_name("a/./b.txt"), "a/./b.txt");
+        assert_eq!(arg_to_name("/abs/x.txt"), "abs/x.txt");
+        assert_eq!(arg_to_name("sub/"), "sub");
     }
 
     #[test]

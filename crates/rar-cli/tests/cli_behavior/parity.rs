@@ -140,8 +140,9 @@ fn cli_print_preserves_duplicate_members_and_reports_no_match() {
     )
     .unwrap();
     rar.finish().unwrap();
-    // `p` uses the shared member-selection rules, so a basename selector
-    // picks up nested members too (like `x same.bin` does).
+    // `p` uses the shared member-selection rules: a bare name selects only
+    // the member with that exact stored path, a mask matches basenames too
+    // (like the official tools).
     for binary in [RAR_CLI, UNRAR_CLI] {
         let out = std::process::Command::new(binary)
             .arg("p")
@@ -151,8 +152,20 @@ fn cli_print_preserves_duplicate_members_and_reports_no_match() {
             .unwrap();
         assert!(out.status.success(), "{binary} exact print failed");
         assert_eq!(
+            out.stdout, b"exact",
+            "{binary} must select the exact stored path only"
+        );
+
+        let out = std::process::Command::new(binary)
+            .arg("p")
+            .arg(&exact_archive)
+            .arg("*same.bin")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{binary} mask print failed");
+        assert_eq!(
             out.stdout, b"exactbasename only",
-            "{binary} print must use the shared selector"
+            "{binary} print must match nested basenames through a mask"
         );
     }
 }

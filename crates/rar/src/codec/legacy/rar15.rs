@@ -809,7 +809,16 @@ impl Rar15Decoder {
                 limit: u64::MAX,
                 context: "RAR 1.5 member is too large for this platform".into(),
             })?;
-        let mut output = Vec::with_capacity(target);
+        // Reserve fallibly: `target` is the member's declared size, so a tiny
+        // hostile member claiming a multi-GiB output must surface an error
+        // instead of aborting the process on allocation failure.
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(target)
+            .map_err(|_| crate::error::RarError::LimitExceeded {
+                limit: target as u64,
+                context: "RAR 1.5 member output cannot be allocated".into(),
+            })?;
         self.decode_member_to(packed, target, solid, &mut output)
             .map_err(|error| match error {
                 Error::InvalidData(message) => {
@@ -820,5 +829,25 @@ impl Rar15Decoder {
                 }
             })?;
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreservable_output_is_rejected_instead_of_aborting() {
+        // A hostile member can declare any unpacked size; an output buffer
+        // that cannot be reserved must surface LimitExceeded (no allocation
+        // is attempted for a capacity overflow like usize::MAX).
+        let mut decoder = Rar15Decoder::new();
+        let error = decoder
+            .decode_member(&[], usize::MAX as u64, false)
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::error::RarError::LimitExceeded { .. }),
+            "expected LimitExceeded, got {error:?}"
+        );
     }
 }

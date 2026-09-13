@@ -58,8 +58,8 @@ mod write_progress;
 
 pub use archive::{
     AppendOptions, ArchiveEditor, ArchiveEntry, ArchiveReader, ArchiveWriter, BatchEntry,
-    CompressionLevel, DictionarySize, EditOp, EditPlan, EditReport, Entries, EntryId, EntryMatches,
-    EntryRef, EntryWriteOptions, OpenOptions, ScanStrategy, SolidMode, ThreadCount,
+    CompressionLevel, Destination, DictionarySize, EditOp, EditPlan, EditReport, Entries, EntryId,
+    EntryMatches, EntryRef, EntryWriteOptions, OpenOptions, ScanStrategy, SolidMode, ThreadCount,
     VerificationFailure, VerificationReport, WriteEntry, WriteReport, WriterOptions,
     discover_volumes,
 };

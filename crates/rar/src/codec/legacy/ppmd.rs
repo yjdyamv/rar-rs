@@ -339,19 +339,22 @@ impl Suballocator {
     fn glue_inner(&mut self) {
         use std::collections::HashMap;
         // Step 1: thread free blocks into the reference's list order.
-        // list[k] = (offset, nu). Reference prepends; we emulate with a
-        // front-growing build then it is naturally bucket-37-first.
+        // The reference walks free_list[0..38] head-first (most-recent first)
+        // and prepends each node to one glue list, so the result is bucket
+        // 37 down to bucket 0, oldest block first within a bucket. Walking
+        // the buckets backwards and pushing produces that exact sequence in
+        // one pass; front-inserting into the Vec was Theta(n^2) in the free
+        // block count (a hostile member can steer the model into repeated
+        // glue passes).
         let mut list: Vec<(u32, u32)> = Vec::new();
-        for bucket in 0..N_BUCKETS {
+        for bucket in (0..N_BUCKETS).rev() {
             let nu = Self::bucket_units(bucket) as u32;
-            // Reference walks the bucket list head-first (recent->oldest) and
-            // prepends each node. Iterating our Vec recent->oldest and
-            // prepending reproduces that; doing it per-bucket with the whole
-            // bucket prepended keeps later buckets in front.
-            for &off in self.free_lists[bucket].iter().rev() {
-                list.insert(0, (off, nu));
+            for &off in &self.free_lists[bucket] {
+                list.push((off, nu));
             }
-            self.free_lists[bucket].clear();
+        }
+        for free_list in &mut self.free_lists {
+            free_list.clear();
         }
         if list.is_empty() {
             return;
@@ -1995,5 +1998,108 @@ mod tests {
         payload.truncate(24 * 1024);
         let decoded = decode_fresh(&encode_all(&payload)).unwrap();
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn suballoc_alloc_until_exhaustion() {
+        // Pool needs the text reservation (1/8) plus units area. 16 units
+        // total gives 2-unit text region + 14 units of headroom for bumping.
+        let mut suballoc = Suballocator::default();
+        suballoc.reset(16 * ALLOC_UNIT_BYTES);
+        // 14 units between lo_bump and hi_bump → 7 × 2-unit blocks.
+        for _ in 0..7 {
+            assert!(suballoc.alloc(2, AllocSide::Lo, 0).is_some());
+        }
+        assert!(suballoc.alloc(2, AllocSide::Lo, 0).is_none()); // pool full
+    }
+
+    #[test]
+    fn glue_merges_adjacent_free_blocks() {
+        let mut suballoc = Suballocator::default();
+        suballoc.reset(16 * ALLOC_UNIT_BYTES);
+        // Four consecutive 1-unit blocks from the Lo side are adjacent.
+        let a = suballoc.alloc(1, AllocSide::Lo, 0).unwrap();
+        let b = suballoc.alloc(1, AllocSide::Lo, 0).unwrap();
+        let c = suballoc.alloc(1, AllocSide::Lo, 0).unwrap();
+        let d = suballoc.alloc(1, AllocSide::Lo, 0).unwrap();
+        assert_eq!(b, a + 1);
+        assert_eq!(c, a + 2);
+        assert_eq!(d, a + 3);
+        suballoc.free(a, 1);
+        suballoc.free(b, 1);
+        suballoc.free(c, 1);
+        suballoc.free(d, 1);
+        assert_eq!(suballoc.free_lists[0].len(), 4);
+        assert!(suballoc.free_lists[3].is_empty());
+        suballoc.glue();
+        // The 4-adjacent run becomes one 4-unit block in bucket 3.
+        assert!(suballoc.free_lists[0].is_empty());
+        assert_eq!(suballoc.free_lists[3].len(), 1);
+        assert_eq!(suballoc.alloc(4, AllocSide::Lo, 0), Some(a));
+    }
+
+    #[test]
+    fn glue_keeps_non_adjacent_blocks_separate() {
+        let mut suballoc = Suballocator::default();
+        suballoc.reset(16 * ALLOC_UNIT_BYTES);
+        // Two 1-unit blocks separated by a still-live 2-unit allocation.
+        let a = suballoc.alloc(1, AllocSide::Lo, 0).unwrap();
+        let _live = suballoc.alloc(2, AllocSide::Lo, 0).unwrap();
+        let b = suballoc.alloc(1, AllocSide::Lo, 0).unwrap();
+        suballoc.free(a, 1);
+        suballoc.free(b, 1);
+        suballoc.glue();
+        // Still two separate 1-unit free entries; no merged 2-unit block.
+        assert_eq!(suballoc.free_lists[0].len(), 2);
+    }
+
+    #[test]
+    fn glue_splits_oversized_run_into_buckets() {
+        let mut suballoc = Suballocator::default();
+        suballoc.reset(256 * ALLOC_UNIT_BYTES);
+        // Three adjacent 64-unit allocs → a run of 192 units after freeing.
+        let bucket_64 = Suballocator::bucket_for(64).unwrap();
+        assert_eq!(Suballocator::bucket_units(bucket_64), 64);
+        let a = suballoc.alloc(64, AllocSide::Lo, 0).unwrap();
+        let b = suballoc.alloc(64, AllocSide::Lo, 0).unwrap();
+        let c = suballoc.alloc(64, AllocSide::Lo, 0).unwrap();
+        assert_eq!(b, a + 64);
+        assert_eq!(c, a + 128);
+        suballoc.free(a, 64);
+        suballoc.free(b, 64);
+        suballoc.free(c, 64);
+        suballoc.glue();
+        // One 128-unit block plus one 64-unit block, in address order.
+        let bucket_128 = Suballocator::bucket_for(128).unwrap();
+        assert_eq!(suballoc.free_lists[bucket_128].len(), 1);
+        assert_eq!(suballoc.free_lists[bucket_64].len(), 1);
+        assert_eq!(suballoc.free_lists[bucket_128][0], a);
+        assert_eq!(suballoc.free_lists[bucket_64][0], a + 128);
+    }
+
+    // The glue fill pass must re-bucket runs in the reference order: higher
+    // buckets first, and within a bucket oldest free block first. The decoder
+    // pops these lists LIFO, so a different order changes which offset the
+    // next allocation gets and desynchronises real PPMd streams.
+    #[test]
+    fn glue_preserves_reference_visit_order() {
+        let mut suballoc = Suballocator::default();
+        suballoc.reset(16 * ALLOC_UNIT_BYTES);
+        // Pairs of non-adjacent free blocks in buckets 0 (1 unit) and 1
+        // (2 units), separated by live allocations.
+        let x = suballoc.alloc(1, AllocSide::Lo, 0).unwrap();
+        let _live1 = suballoc.alloc(2, AllocSide::Lo, 0).unwrap();
+        let y = suballoc.alloc(1, AllocSide::Lo, 0).unwrap();
+        let _gap = suballoc.alloc(2, AllocSide::Lo, 0).unwrap();
+        let p = suballoc.alloc(2, AllocSide::Lo, 0).unwrap();
+        let _live2 = suballoc.alloc(2, AllocSide::Lo, 0).unwrap();
+        let q = suballoc.alloc(2, AllocSide::Lo, 0).unwrap();
+        suballoc.free(x, 1);
+        suballoc.free(y, 1);
+        suballoc.free(p, 2);
+        suballoc.free(q, 2);
+        suballoc.glue();
+        assert_eq!(suballoc.free_lists[0], vec![x, y]);
+        assert_eq!(suballoc.free_lists[1], vec![p, q]);
     }
 }

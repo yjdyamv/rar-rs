@@ -526,7 +526,7 @@ fn cli_update_rejects_multi_volume_archives_without_modifying_them() {
 }
 
 #[test]
-fn cli_member_selection_uses_exact_paths_or_basenames() {
+fn cli_member_selection_uses_exact_paths_or_masks() {
     let dir = make_temp_dir();
     let archive = dir.path().join("selectors.rar");
     {
@@ -563,13 +563,36 @@ fn cli_member_selection_uses_exact_paths_or_basenames() {
         assert!(!out.status.success(), "{binary} must not match a as data");
         assert!(out.stdout.is_empty());
 
+        // A bare name does not match a nested member: the official tools
+        // only match the full stored path, a directory prefix or a mask.
         let out = std::process::Command::new(binary)
             .args(["x", "-so"])
             .arg(&archive)
             .arg("base.txt")
             .output()
             .unwrap();
-        assert!(out.status.success(), "{binary} basename selection failed");
+        assert!(
+            !out.status.success(),
+            "{binary} must not match dir/base.txt by basename"
+        );
+        assert!(out.stdout.is_empty());
+
+        let out = std::process::Command::new(binary)
+            .args(["x", "-so"])
+            .arg(&archive)
+            .arg("*base.txt")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{binary} mask selection failed");
+        assert_eq!(out.stdout, b"BASE");
+
+        let out = std::process::Command::new(binary)
+            .args(["x", "-so"])
+            .arg(&archive)
+            .arg("dir/base.txt")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{binary} full-path selection failed");
         assert_eq!(out.stdout, b"BASE");
 
         let out = std::process::Command::new(binary)

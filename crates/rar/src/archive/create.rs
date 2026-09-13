@@ -20,8 +20,8 @@ use crate::format::rar5::{
     RAR5_SIGNATURE,
 };
 use crate::fs::atomic::{
-    commit_files, read_write_create, recover_interrupted_commit, replace_file, temp_sibling_path,
-    temp_suffix,
+    commit_files, install_durable, read_write_create, recover_interrupted_commit,
+    temp_sibling_path, temp_suffix,
 };
 
 impl RarArchive {
@@ -293,7 +293,7 @@ impl RarArchive {
             return Ok(());
         };
         let result = match &pending {
-            PendingCommit::Single(tmp) => replace_file(tmp, &self.path),
+            PendingCommit::Single(tmp) => install_durable(tmp, &self.path),
             PendingCommit::Volumes {
                 parent,
                 tmp_base,

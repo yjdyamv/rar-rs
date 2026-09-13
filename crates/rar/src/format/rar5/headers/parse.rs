@@ -422,7 +422,9 @@ impl FileHeader {
             unpacked_size,
             packed_size: data_size,
             attributes,
-            mtime: mtime_override.map(|s| s as u32).unwrap_or(mtime),
+            mtime: mtime_override
+                .map(|s| u32::try_from(s).unwrap_or(u32::MAX))
+                .unwrap_or(mtime),
             crc32_val,
             hash_type,
             hash_value,
@@ -761,8 +763,11 @@ fn parse_hash_record(extra_data: &[u8]) -> RarResult<(u8, Option<[u8; 32]>)> {
                 .ok_or_else(|| malformed("hash body"))?;
             if hash_type != 0 {
                 // Unknown algorithm: nothing this build can verify, but the
-                // declared type is still reported to the caller.
-                return Ok((hash_type as u8, None));
+                // declared type is still reported to the caller. Saturate
+                // rather than truncate — `hash_type as u8` would alias a vint
+                // like 0x100 onto BLAKE2sp (type 0) and silently disable
+                // verification.
+                return Ok((u8::try_from(hash_type).unwrap_or(u8::MAX), None));
             }
             if rec_end - data_start != 32 {
                 return Err(malformed("BLAKE2sp hash is not 32 bytes"));
@@ -1262,5 +1267,53 @@ mod tests {
     fn malformed_blake2sp_hash_record_is_rejected() {
         let error = expect_error(parse_hash_record(&hash_record(0, &[0u8; 31])));
         assert!(error.to_string().contains("not 32 bytes"), "{error}");
+    }
+
+    /// An unknown hash type wider than a byte used to truncate (`0x100 as u8`
+    /// -> 0) and alias BLAKE2sp, silently disabling verification.
+    #[test]
+    fn out_of_range_hash_type_saturates_instead_of_aliasing_blake2sp() {
+        let (hash_type, value) = parse_hash_record(&hash_record(0x100, &[0u8; 16])).unwrap();
+        assert_eq!(hash_type, u8::MAX);
+        assert_eq!(value, None);
+    }
+
+    /// Extra-area FILE_TIME record with explicit flags and 8-byte FILETIME
+    /// values (UNIX flag clear).
+    fn file_time_record(flags: u64, filetimes: &[u64]) -> Vec<u8> {
+        let mut body = vint::encode(flags);
+        for ft in filetimes {
+            body.extend_from_slice(&ft.to_le_bytes());
+        }
+        let mut record = vint::encode(body.len() as u64 + 1);
+        record.extend(vint::encode(EXTRA_FILE_TIME));
+        record.extend(body);
+        record
+    }
+
+    /// A minimal file-header body carrying `extra` as its extra area.
+    fn file_header_with_extra(extra: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend(vint::encode(BLOCK_TYPE_FILE_HEADER));
+        body.extend(vint::encode(BLOCK_FLAG_EXTRA_DATA));
+        body.extend(vint::encode(extra.len() as u64));
+        // file_flags, unpacked_size, attributes, comp_info, host_os
+        for value in [0u64, 8, 0, 0, 0] {
+            body.extend(vint::encode(value));
+        }
+        body.extend(vint::encode(4u64)); // name length
+        body.extend_from_slice(b"test");
+        body.extend_from_slice(extra);
+        body
+    }
+
+    /// A FILETIME past 2106 converts to a Unix second count wider than
+    /// `u32`; storing it with `as u32` wrapped it to a bogus time instead of
+    /// saturating.
+    #[test]
+    fn far_future_filetime_seconds_saturate_instead_of_wrapping() {
+        let extra = file_time_record(0x0002, &[u64::MAX]);
+        let header = FileHeader::from_raw(&raw_block(file_header_with_extra(&extra)), 0).unwrap();
+        assert_eq!(header.mtime, u32::MAX);
     }
 }

@@ -19,6 +19,15 @@ pub const REV5_SIGNATURE: &[u8] = b"Rar!\x1aRev";
 /// header CRC, header-size field, version, counts, rev number, payload CRC.
 const REV5_FIXED_HEADER_LEN: u64 = 8 + 4 + 4 + 1 + 2 + 2 + 2 + 4;
 
+/// Fixed header-body fields (version, data count, recovery count, rev
+/// number, payload CRC) preceding the 12-byte-per-volume table.
+const REV5_BODY_FIXED_LEN: u64 = 11;
+
+/// Bytes a header body may carry beyond the fixed fields and the
+/// per-volume table. Keeps the allocation bound tolerant of unmodeled
+/// fixed fields while still rejecting a hostile `hsize`.
+const REV5_HEADER_SLACK: u64 = 64;
+
 /// Stripe size of the streaming `.rev` builder and rebuilder: one stripe of
 /// the shard space is read, coded and written before the next is touched, so
 /// memory stays O(stripe x volumes) instead of O(volumes x volume size).
@@ -189,9 +198,33 @@ fn read_rev5_header(file: &mut fs::File, path: &Path, len: u64) -> RarResult<Rev
     if header_end > len {
         return Err(truncated_header(path));
     }
+    if hsize < REV5_BODY_FIXED_LEN {
+        return Err(truncated_header(path));
+    }
+    // `hsize` is attacker-controlled and only bounded by the file length: a
+    // hostile file could claim gigabytes and drive `vec![0u8; hsize]`
+    // before any consistency check. The body cannot exceed its own
+    // per-volume table (12 bytes per data volume, u16 count) plus the fixed
+    // fields, so read the count first and bound the allocation.
+    let mut prefix = [0u8; REV5_BODY_FIXED_LEN as usize];
+    file.seek(SeekFrom::Start(16))?;
+    let got = read_up_to(file, &mut prefix)?;
+    if got < prefix.len() {
+        return Err(truncated_header(path));
+    }
+    let table_count = usize::from(u16::from_le_bytes(prefix[1..3].try_into().unwrap()));
+    let max_hsize =
+        REV5_BODY_FIXED_LEN + (table_count as u64).saturating_mul(12) + REV5_HEADER_SLACK;
+    if hsize > max_hsize {
+        return Err(RarError::Format(format!(
+            "{}: recovery volume header size {hsize} exceeds its volume table",
+            path.display()
+        )));
+    }
     let mut data = Vec::with_capacity(header_end as usize);
     data.extend_from_slice(&fixed);
     let mut body = vec![0u8; hsize as usize];
+    file.seek(SeekFrom::Start(16))?;
     file.read_exact(&mut body)?;
     data.extend_from_slice(&body);
     verify_rev5_header(&data, path)?;
@@ -298,19 +331,19 @@ fn rebuild_missing_volumes_chunked(
 
     // Parse the first `.rev` file for the set parameters. WinRAR (and
     // `build_recovery_volumes_for_set`) pad the part number to the digit
-    // count of the volume count (part01.rev .. part15.rev), so probe the
-    // padding width from 1 to 4 digits.
-    let mut rev1: Option<PathBuf> = None;
-    let mut width = 1usize;
-    for w in 1..=4 {
-        let probe = parent.join(format!("{base}.part{:0w$}.rev", 1, w = w));
-        if probe.exists() {
-            rev1 = Some(probe);
-            width = w;
-            break;
-        }
-    }
-    let Some(rev1) = rev1 else {
+    // count of the volume count (part01.rev .. part15.rev), so derive the
+    // width from the entry path itself: a set of >= 10000 volumes uses
+    // 5-digit part numbers, which a fixed 1..=4 probe would miss. The
+    // 1..=4 probe stays as a fallback for renamed or oddly-padded entries
+    // and cannot mask the derived width, which is tried first.
+    let derived_width = crate::archive::volume_part_width(first_volume).max(1);
+    let mut widths = vec![derived_width];
+    widths.extend((1..=4).filter(|&w| w != derived_width));
+    let found = widths.into_iter().find_map(|width| {
+        let probe = parent.join(format!("{base}.part{:0width$}.rev", 1, width = width));
+        probe.exists().then_some((probe, width))
+    });
+    let Some((rev1, width)) = found else {
         return Err(RarError::Format(format!(
             "{}: no recovery volumes found",
             first_volume.display()
@@ -805,9 +838,18 @@ mod tests {
     /// Deterministic non-RAR5 byte patterns: the builders only inspect
     /// volume contents, so plain files exercise the `.rev` codec directly.
     fn write_fake_volumes(dir: &Path, sizes: &[u64]) -> Vec<PathBuf> {
+        write_fake_volumes_padded(dir, sizes, 1)
+    }
+
+    /// [`write_fake_volumes`] with an explicit part-number padding.
+    fn write_fake_volumes_padded(dir: &Path, sizes: &[u64], padding: usize) -> Vec<PathBuf> {
         let mut volumes = Vec::with_capacity(sizes.len());
         for (i, &size) in sizes.iter().enumerate() {
-            let path = dir.join(format!("set.part{}.rar", i + 1));
+            let path = dir.join(format!(
+                "set.part{:0padding$}.rar",
+                i + 1,
+                padding = padding
+            ));
             let mut bytes = vec![0u8; size as usize];
             let mut state = 0x1234_5678u32.wrapping_add(i as u32 + 1);
             for byte in &mut bytes {
@@ -909,6 +951,79 @@ mod tests {
             temp_leftovers(dir.path()).is_empty(),
             "temps left behind: {:?}",
             temp_leftovers(dir.path())
+        );
+    }
+
+    /// The width used for `.rev` probing and rebuilt data-volume lookups
+    /// comes from the entry path, so `.part00001.rev` resolves to width 5.
+    #[test]
+    fn width_helper_reads_padded_part_numbers() {
+        assert_eq!(
+            crate::archive::volume_part_width(Path::new("set.part00001.rar")),
+            5
+        );
+        assert_eq!(
+            crate::archive::volume_part_width(Path::new("set.part00001.rev")),
+            5
+        );
+        assert_eq!(
+            crate::archive::volume_part_width(Path::new("set.part01.rar")),
+            2
+        );
+    }
+
+    /// A set of >= 10000 volumes names its parts with five digits: `rc`
+    /// must find `.part00001.rev` (a fixed 1..=4 probe misses it) and use
+    /// width 5 for the rebuilt data volume too.
+    #[test]
+    fn five_digit_part_width_rebuilds_from_padded_rev_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let volumes = write_fake_volumes_padded(dir.path(), &[1200, 900, 1100], 5);
+        assert_eq!(
+            volumes[0].file_name().unwrap().to_string_lossy(),
+            "set.part00001.rar"
+        );
+        let original = fs::read(&volumes[1]).unwrap();
+        let revs = build_recovery_volumes_for_set_chunked(&volumes, 2, 64).unwrap();
+        assert_eq!(
+            revs[0].file_name().unwrap().to_string_lossy(),
+            "set.part00001.rev"
+        );
+
+        fs::remove_file(&volumes[1]).unwrap();
+        let rebuilt = rebuild_missing_volumes_chunked(&volumes[0], None, None, 64).unwrap();
+        assert_eq!(rebuilt, vec![volumes[1].clone()]);
+        assert_eq!(fs::read(&volumes[1]).unwrap(), original);
+    }
+
+    /// A hostile `hsize` beyond the header's own volume table must be
+    /// rejected before the body is allocated or read.
+    #[test]
+    fn oversized_header_size_is_rejected_before_the_body_read() {
+        let mut bytes = Vec::new();
+        bytes.extend(REV5_SIGNATURE);
+        bytes.extend(0u32.to_le_bytes()); // stored header CRC: not reached
+        let oversized: u32 = 16 * 1024 * 1024;
+        bytes.extend(oversized.to_le_bytes());
+        bytes.push(1); // version
+        bytes.extend(1u16.to_le_bytes()); // one data volume in the table
+        bytes.extend(0u16.to_le_bytes());
+        bytes.extend(0u16.to_le_bytes());
+        bytes.extend(0u32.to_le_bytes());
+        assert_eq!(bytes.len(), 27);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("set.part1.rev");
+        fs::write(&path, &bytes).unwrap();
+        let mut file = fs::File::open(&path).unwrap();
+        // The caller-supplied length would let the old code allocate and
+        // read the 16 MiB body; the table bound must fire first.
+        let err = read_rev5_header(&mut file, &path, 16 + u64::from(oversized))
+            .err()
+            .expect("oversized header size accepted");
+        assert!(
+            matches!(&err, RarError::Format(message) if message.contains("exceeds its volume table")),
+            "got {err}"
         );
     }
 

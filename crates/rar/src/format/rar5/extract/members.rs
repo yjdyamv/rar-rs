@@ -40,11 +40,37 @@ const PARALLEL_MIN_UNPACKED: u64 = 64 * 1024 * 1024;
 
 /// Destination resolution outcome for one member; the serial and parallel
 /// extraction paths share it so `-e`, `-o-` and `-or` behave identically.
-enum DestResolution {
+///
+/// Callers that need to know where a member *would* land without extracting
+/// it (for example a CLI reporting how many files an extraction writes) get
+/// one through [`crate::ArchiveReader::resolve_destination`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Destination {
     /// Extract the member to this path.
     Extract(PathBuf),
     /// `-o-`: the destination already exists and must be left untouched.
     Skip(PathBuf),
+}
+
+impl Destination {
+    /// The resolved destination path, whether it is written or skipped.
+    pub fn path(&self) -> &Path {
+        match self {
+            Destination::Extract(path) | Destination::Skip(path) => path,
+        }
+    }
+
+    /// Whether the skip-existing policy leaves the member untouched.
+    pub fn is_skipped(&self) -> bool {
+        matches!(self, Destination::Skip(_))
+    }
+
+    /// Consume the outcome and return the resolved path.
+    pub fn into_path(self) -> PathBuf {
+        match self {
+            Destination::Extract(path) | Destination::Skip(path) => path,
+        }
+    }
 }
 
 impl RarArchive {
@@ -228,8 +254,8 @@ impl RarArchive {
             let member = result?;
             let entry = &self.entries[member.idx];
             let dest_path = match self.resolve_dest_path(entry, dest)? {
-                DestResolution::Extract(path) => path,
-                DestResolution::Skip(_) => continue,
+                Destination::Extract(path) => path,
+                Destination::Skip(_) => continue,
             };
             if entry.is_dir() {
                 fs::create_dir_all(&dest_path)?;
@@ -370,32 +396,40 @@ impl RarArchive {
     /// `Skip` means the destination exists and `skip_existing` is set, so
     /// the caller must leave it untouched. Both the serial (`extract_entry`)
     /// and parallel (phase 3) paths call this, so they stay identical.
-    fn resolve_dest_path(
+    fn resolve_dest_path(&self, entry: &ArchiveEntry, dest_dir: &Path) -> RarResult<Destination> {
+        self.resolve_dest_path_with(entry, dest_dir, &self.read_ctx().extract_options)
+    }
+
+    /// [`Self::resolve_dest_path`] with explicit options, for callers that
+    /// resolve members outside the extraction loop (the CLI's written-file
+    /// count, via [`crate::ArchiveReader::resolve_destination`]).
+    pub(crate) fn resolve_dest_path_with(
         &self,
         entry: &ArchiveEntry,
         dest_dir: &Path,
-    ) -> RarResult<DestResolution> {
-        let dest_path = if self.read_ctx().extract_options.flat_paths {
+        options: &crate::options::ExtractOptions,
+    ) -> RarResult<Destination> {
+        let dest_path = if options.flat_paths {
             if entry.is_dir() {
-                return Ok(DestResolution::Extract(dest_dir.to_path_buf()));
+                return Ok(Destination::Extract(dest_dir.to_path_buf()));
             }
             let safe_name = sanitize_archive_path(&entry.header.name)?;
             let base = safe_name.rsplit('/').next().unwrap_or(&safe_name);
             dest_dir.join(base)
         } else {
-            self.safe_dest_path(dest_dir, &entry.header.name)?
+            self.safe_dest_path_with(dest_dir, &entry.header.name, options.safe_paths)?
         };
 
         // `-o-` (skip existing): members whose destination already exists
         // are left untouched.
-        if self.read_ctx().extract_options.skip_existing && dest_path.exists() {
-            return Ok(DestResolution::Skip(dest_path));
+        if options.skip_existing && dest_path.exists() {
+            return Ok(Destination::Skip(dest_path));
         }
 
         // `-or` (auto rename): when the destination exists, insert `(N)`
         // before the extension (like WinRAR: a.txt -> a(1).txt).
         let mut dest_path = dest_path;
-        if self.read_ctx().extract_options.auto_rename && !entry.is_dir() {
+        if options.auto_rename && !entry.is_dir() {
             let mut n = 1;
             while dest_path.exists() {
                 let file_name = dest_path
@@ -410,7 +444,7 @@ impl RarArchive {
                 n += 1;
             }
         }
-        Ok(DestResolution::Extract(dest_path))
+        Ok(Destination::Extract(dest_path))
     }
 
     /// Extract one entry. File contents are decoded to a temporary file and
@@ -425,8 +459,8 @@ impl RarArchive {
         self.validate_entry_limits(idx)?;
 
         let dest_path = match self.resolve_dest_path(entry, dest_dir)? {
-            DestResolution::Extract(path) => path,
-            DestResolution::Skip(path) => return Ok(path),
+            Destination::Extract(path) => path,
+            Destination::Skip(path) => return Ok(path),
         };
 
         if entry.is_dir() {

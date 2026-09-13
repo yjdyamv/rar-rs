@@ -11,6 +11,7 @@ mod compression;
 mod filters;
 mod large;
 mod links;
+mod member_selection;
 mod misc;
 mod rar13;
 mod rar4_create;

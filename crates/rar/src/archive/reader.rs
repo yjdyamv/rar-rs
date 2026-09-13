@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::{ArchiveEntry, RarArchive};
+use super::{ArchiveEntry, Destination, RarArchive};
 use crate::error::{RarError, RarResult};
 use crate::options::ExtractOptions;
 
@@ -499,6 +499,29 @@ impl ArchiveReader {
         let index = self.resolve_id(id)?;
         self.archive
             .extract_at_index_with_options(index, destination, options)
+    }
+
+    /// Resolve where `id` would be extracted under `options`, without
+    /// writing anything: the same sanitization, containment, flat-path,
+    /// `-o-` (skip existing) and `-or` (auto rename) policies the extraction
+    /// paths apply.
+    ///
+    /// Returns [`Destination::Skip`] when the skip-existing policy will
+    /// leave the member untouched, and [`Destination::Extract`] otherwise.
+    /// Resolution errors reported here are the ones extraction would raise
+    /// for the member (for example [`RarError::Security`] for unsafe names).
+    pub fn resolve_destination(
+        &self,
+        id: EntryId,
+        destination: impl AsRef<Path>,
+        options: &ExtractOptions,
+    ) -> RarResult<Destination> {
+        let index = self.resolve_id(id)?;
+        self.archive.resolve_dest_path_with(
+            &self.archive.entries[index],
+            destination.as_ref(),
+            options,
+        )
     }
 
     /// Verify every non-directory member with safe default limits.

@@ -239,8 +239,9 @@ pub(crate) struct ExtractArgs {
     pub(crate) dest: Option<String>,
     /// One or more member names to extract; when omitted, every file member
     /// is extracted (or, with `-so`, written to stdout). Member names match
-    /// the full stored path or its basename. A trailing argument ending
-    /// with a path separator is treated as the destination directory.
+    /// the full stored path, a `*`/`?` mask (masks also match basenames) or
+    /// a directory prefix. A trailing argument ending with a path separator
+    /// is treated as the destination directory.
     #[arg(value_name = "NAMES")]
     pub(crate) names: Vec<String>,
     /// Compression threads (like `-mt<N>`; also used for extraction)

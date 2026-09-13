@@ -21,6 +21,7 @@ use crate::format::shared::engine::{
 };
 use crate::format::shared::stream_mut;
 use crate::model::{DataChunk, FileHeader};
+use crate::options::FilterMode;
 
 #[cfg(windows)]
 use super::windows;
@@ -29,11 +30,12 @@ use crate::format::rar5::vint;
 
 /// The streaming writer records its delta and x86 filters as pre-built
 /// `Symbol::Filter` leads, bypassing `encode_with_filters`' overlap
-/// validation. Both forced (`-mcd+ -mce+`) and forced-x86-over-auto-delta
-/// combinations transform overlapping regions, and the decoder applies
-/// records in stream order, so the pair silently corrupts the member.
-/// Reject it before any bytes are spilled or written, matching the
-/// buffered path's `InvalidOption`; single-filter paths are unaffected.
+/// validation. Forced delta + forced x86 (`-mcd+ -mce+`) transform
+/// overlapping regions, and the decoder applies records in stream order, so
+/// the pair silently corrupts the member. Reject it before any bytes are
+/// spilled or written, matching the buffered path's `InvalidOption`.
+/// Auto-delta under a forced x86 is not an overlap: that probe is skipped
+/// (`auto_delta_probe_enabled`), mirroring the buffered policy.
 fn ensure_compatible_stream_filters(delta_used: bool, x86_used: bool) -> RarResult<()> {
     if delta_used && x86_used {
         return Err(RarError::InvalidOption(
@@ -42,6 +44,16 @@ fn ensure_compatible_stream_filters(delta_used: bool, x86_used: bool) -> RarResu
         ));
     }
     Ok(())
+}
+
+/// Whether the streaming writer runs its auto-delta probe. A forced x86
+/// filter claims the whole member and mirrors the buffered `-mc` policy
+/// (`filter_policy.rs`): the auto-delta selection is skipped instead of
+/// aborting the add. A forced delta is selected in its own branch and never
+/// consults this, so forced delta + forced x86 still hits the compatibility
+/// check above.
+fn auto_delta_probe_enabled(delta: FilterMode, x86: FilterMode) -> bool {
+    delta == FilterMode::Auto && x86 != FilterMode::Forced
 }
 
 impl RarArchive {
@@ -411,8 +423,10 @@ impl RarArchive {
                             .unwrap_or(1)
                     }));
                 }
-                // Try delta filter first (cheap pre-gate on sample).
-                if filter_policy.delta == crate::options::FilterMode::Auto
+                // Try delta filter first (cheap pre-gate on sample); a
+                // forced x86 owns the whole member, so the auto probe is
+                // skipped rather than producing the overlapping-pair error.
+                if auto_delta_probe_enabled(filter_policy.delta, filter_policy.x86)
                     && crate::codec::common::filters::auto_delta_filter_channels(&sample).is_some()
                 {
                     delta_channels = lzss_huff::pick_delta_channel(&sample, method, dsl, variant)?;
@@ -895,8 +909,9 @@ impl RarArchive {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_compatible_stream_filters;
+    use super::{auto_delta_probe_enabled, ensure_compatible_stream_filters};
     use crate::error::RarError;
+    use crate::options::FilterMode;
 
     #[test]
     fn forced_delta_and_x86_together_are_rejected() {
@@ -910,5 +925,32 @@ mod tests {
             ),
             other => panic!("expected InvalidOption, got {other}"),
         }
+    }
+
+    /// Forced x86 + an auto-detectable delta must not abort a large-member
+    /// add: the probe is skipped (matching the buffered `-mc` policy), so
+    /// the compatibility check never sees the pair.
+    #[test]
+    fn forced_x86_skips_the_auto_delta_probe() {
+        assert!(auto_delta_probe_enabled(FilterMode::Auto, FilterMode::Auto));
+        assert!(auto_delta_probe_enabled(
+            FilterMode::Auto,
+            FilterMode::Disabled
+        ));
+        assert!(!auto_delta_probe_enabled(
+            FilterMode::Auto,
+            FilterMode::Forced
+        ));
+        assert!(!auto_delta_probe_enabled(
+            FilterMode::Disabled,
+            FilterMode::Auto
+        ));
+        // Forced delta never runs through the probe: it still pairs with a
+        // forced x86 into the rejection below.
+        assert!(!auto_delta_probe_enabled(
+            FilterMode::Forced,
+            FilterMode::Disabled
+        ));
+        assert!(ensure_compatible_stream_filters(false, true).is_ok());
     }
 }
