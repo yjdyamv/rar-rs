@@ -225,10 +225,17 @@ pub(crate) struct ExtractArgs {
     /// Compression threads (like `-mt<N>`; also used for extraction)
     #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
     pub(crate) threads: Option<usize>,
-    /// Append the archive base name as a destination subdirectory
-    /// (like `-ad`)
-    #[arg(long = "append-dir")]
-    pub(crate) append_dir: bool,
+    /// Alternate destination: `-ad` appends the archive base name to the
+    /// destination, `-ad1` uses the archive's directory with the base name,
+    /// `-ad2` the archive's directory itself
+    #[arg(
+        long = "append-dir",
+        value_name = "1|2",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ""
+    )]
+    pub(crate) append_dir: Option<String>,
     /// Overwrite mode (like `-o+` / `-o-`)
     #[arg(
         long = "overwrite",
@@ -276,10 +283,17 @@ pub(crate) struct FilesArgs {
     /// Save/restore file times (like `-ts[m,c,a][+,-,1]`; repeatable)
     #[arg(long = "ts", value_name = "SPEC", action = clap::ArgAction::Append)]
     pub(crate) ts_specs: Vec<String>,
-    /// Keep the archive's original modification time when updating
-    /// (like `-tk`)
-    #[arg(long = "keep-time")]
-    pub(crate) keep_time: bool,
+    /// Keep the archive's original modification time, or set it to the
+    /// given date (like `-tk[<date>]`, YYYYMMDDHHMMSS with optional
+    /// separators)
+    #[arg(
+        long = "keep-time",
+        value_name = "DATE",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ""
+    )]
+    pub(crate) keep_time: Option<String>,
     /// Save symbolic links as links instead of the file (like `-ol`)
     #[arg(long = "links")]
     pub(crate) store_links: bool,
@@ -480,15 +494,37 @@ pub(crate) struct CreateArgs {
     /// Set the archive time to the newest member (like `-tl`)
     #[arg(long = "set-latest-time")]
     pub(crate) latest_time: bool,
-    /// Keep the archive's original modification time when updating an
-    /// existing archive (like `-tk`)
-    #[arg(long = "keep-time")]
-    pub(crate) keep_time: bool,
+    /// Keep the archive's original modification time, or set it to the
+    /// given date (like `-tk[<date>]`, YYYYMMDDHHMMSS with optional
+    /// separators)
+    #[arg(
+        long = "keep-time",
+        value_name = "DATE",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ""
+    )]
+    pub(crate) keep_time: Option<String>,
     /// Generate the archive name from the current date (like `-ag[format]`;
     /// `*` in the name is replaced, `YYYY`/`MM`/`DD`/`HH`/`MM`/`SS` in the
     /// format are substituted)
-    #[arg(long = "auto-name", num_args = 0..=1, default_missing_value = "")]
+    #[arg(
+        long = "auto-name",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ""
+    )]
     pub(crate) auto_name: Option<String>,
+    /// Create a self-extracting archive, optionally with a specific SFX
+    /// module (like `-sfx[name]`)
+    #[arg(
+        long = "sfx-module",
+        value_name = "MODULE",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ""
+    )]
+    pub(crate) sfx_module: Option<String>,
     /// Save symbolic links as links instead of the file (like `-ol`)
     #[arg(long = "links")]
     pub(crate) store_links: bool,
@@ -535,10 +571,6 @@ pub(crate) struct CreateArgs {
     #[arg(long = "solid-params", value_name = "PAR")]
     #[allow(dead_code)]
     pub(crate) solid_params: Option<String>,
-    /// CRC32 file checksums (like `-htc`; the default)
-    #[arg(long = "hash-crc")]
-    #[allow(dead_code)]
-    pub(crate) hash_crc: bool,
     /// Advanced compression parameters (like `-mc<par>`)
     #[arg(long = "mc", value_name = "PAR")]
     pub(crate) mc_params: Option<String>,
@@ -750,7 +782,7 @@ pub(crate) fn as_files_args(args: &CreateArgs) -> FilesArgs {
         archive_format: args.archive_format.clone(),
         dict_extract: args.dict_extract.clone(),
         ts_specs: args.ts_specs.clone(),
-        keep_time: args.keep_time,
+        keep_time: args.keep_time.clone(),
         store_links: args.store_links,
         store_hardlinks: args.store_hardlinks,
         mc_params: args.mc_params.clone(),

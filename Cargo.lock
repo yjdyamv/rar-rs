@@ -583,6 +583,7 @@ version = "0.1.2"
 dependencies = [
  "clap",
  "crc32fast",
+ "libc",
  "rar-rs",
  "sha2",
  "tempfile",

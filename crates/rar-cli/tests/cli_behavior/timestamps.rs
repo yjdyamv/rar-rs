@@ -135,3 +135,96 @@ fn cli_ts_saves_and_restores_file_times() {
         .unwrap();
     assert!(!out.status.success(), "invalid -ts spec must be rejected");
 }
+
+/// `-tk[<date>]`: a bare `-tk` keeps the archive time on update; an
+/// attached date sets it (same local wall clock, so offsets cancel out).
+#[test]
+fn cli_tk_keeps_or_sets_archive_time() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+
+    let dated_a = dir.path().join("a.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq", "-tk2020-01-01"])
+        .arg(&dated_a)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let dated_b = dir.path().join("b.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq", "-tk2021-01-01"])
+        .arg(&dated_b)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let a = std::fs::metadata(&dated_a).unwrap().modified().unwrap();
+    let b = std::fs::metadata(&dated_b).unwrap().modified().unwrap();
+    assert_eq!(
+        b.duration_since(a).unwrap().as_secs(),
+        366 * 86_400,
+        "-tk<date> must set the requested local date"
+    );
+
+    // Equivalent compact and separated forms agree.
+    let dated_c = dir.path().join("c.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq", "-tk20200102030405"])
+        .arg(&dated_c)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let c = std::fs::metadata(&dated_c).unwrap().modified().unwrap();
+    assert_eq!(
+        c.duration_since(a).unwrap().as_secs(),
+        86_400 + 3 * 3600 + 4 * 60 + 5
+    );
+
+    // Bare `-tk` keeps the time across an update.
+    let kept = std::fs::metadata(&dated_a).unwrap().modified().unwrap();
+    std::fs::write(dir.path().join("g.txt"), b"g").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["u", "-idq", "-tk"])
+        .arg(&dated_a)
+        .arg("g.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::metadata(&dated_a).unwrap().modified().unwrap(),
+        kept
+    );
+}
+
+/// `-ag` appends a `YYYYMMDDHHMMSS` stamp to the archive name.
+#[test]
+fn cli_ag_generates_a_stamped_name() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"a").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ag", "-idq", "backup.rar", "f.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let stamped: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("backup") && name.ends_with(".rar"))
+        .collect();
+    assert_eq!(stamped.len(), 1, "{stamped:?}");
+    let name = &stamped[0];
+    let stamp = name
+        .strip_prefix("backup")
+        .and_then(|rest| rest.strip_suffix(".rar"))
+        .unwrap_or_else(|| panic!("unexpected -ag name: {name}"));
+    assert_eq!(stamp.len(), 14, "{name}");
+    assert!(stamp.chars().all(|c| c.is_ascii_digit()), "{name}");
+}

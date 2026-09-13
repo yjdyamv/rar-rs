@@ -15,6 +15,7 @@ mod password;
 #[path = "../selector.rs"]
 mod selector;
 #[path = "../time.rs"]
+#[allow(dead_code)] // shared with `rar`; unrar only needs the -ts parser
 mod time;
 
 use clap::{Args, Parser, Subcommand};
@@ -133,10 +134,17 @@ struct ExtractArgs {
     /// Extraction threads (like `rar -mt<N>`)
     #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
     threads: Option<usize>,
-    /// Append the archive base name as a destination subdirectory
-    /// (like `-ad`)
-    #[arg(long = "append-dir")]
-    append_dir: bool,
+    /// Alternate destination: `-ad` appends the archive base name to the
+    /// destination, `-ad1` uses the archive's directory with the base name,
+    /// `-ad2` the archive's directory itself
+    #[arg(
+        long = "append-dir",
+        value_name = "1|2",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ""
+    )]
+    append_dir: Option<String>,
     /// Overwrite mode (like `-o+` / `-o-`)
     #[arg(
         long = "overwrite",
@@ -326,7 +334,11 @@ fn cmd_extract(
         .clone()
         .or_else(|| args.dest.clone())
         .unwrap_or_else(|| ".".to_string());
-    let dest = output::extract_dest(&base, &args.archive, args.append_dir);
+    let dest = output::extract_dest(
+        &base,
+        &args.archive,
+        output::parse_append_dir(args.append_dir.as_deref())?,
+    );
     let mut rar = ops::open_reader(&args.archive, password)?;
     rar.set_mark_of_the_web(motw);
 
@@ -372,7 +384,11 @@ fn cmd_extract_flat(
         .clone()
         .or_else(|| args.dest.clone())
         .unwrap_or_else(|| ".".to_string());
-    let dest = output::extract_dest(&base, &args.archive, args.append_dir);
+    let dest = output::extract_dest(
+        &base,
+        &args.archive,
+        output::parse_append_dir(args.append_dir.as_deref())?,
+    );
     let mut rar = ops::open_reader(&args.archive, password)?;
     rar.set_mark_of_the_web(motw);
     if args.stdout {

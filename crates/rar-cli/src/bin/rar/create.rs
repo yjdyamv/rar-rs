@@ -63,28 +63,9 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // YYYYMMDDHHMMSS, like WinRAR): `*` in the name is replaced, otherwise
     // the stamp is inserted before the extension.
     if let Some(fmt) = &args.auto_name {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let days = (now / 86400) as i64;
-        let (y, mo, d) = time::civil_from_days(days);
-        let tod = now % 86400;
-        let stamp = if fmt.is_empty() {
-            format!(
-                "{y:04}{mo:02}{d:02}{:02}{:02}{:02}",
-                tod / 3600,
-                (tod % 3600) / 60,
-                tod % 60
-            )
-        } else {
-            fmt.replace("YYYY", &format!("{y:04}"))
-                .replace("MM", &format!("{mo:02}"))
-                .replace("DD", &format!("{d:02}"))
-                .replace("HH", &format!("{:02}", tod / 3600))
-                .replace("mm", &format!("{:02}", (tod % 3600) / 60))
-                .replace("SS", &format!("{:02}", tod % 60))
-        };
+        // WinRAR stamps the archive name with the current *local* time.
+        let (y, mo, d, hour, minute, second) = time::local_civil_now();
+        let stamp = time::format_auto_name(fmt, y, mo, d, hour, minute, second);
         archive_path = if archive_path.contains('*') {
             archive_path.replace('*', &stamp)
         } else if let Some(dot) = archive_path.rfind('.') {
@@ -195,8 +176,16 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         .time_precision_seconds(ts.precision_seconds);
 
     let existing = std::path::Path::new(archive_path).exists();
-    // -tk: keep the archive's original modification time on update.
-    let orig_mtime = if args.keep_time && existing {
+    // -tk: keep the archive's original modification time on update, or set
+    // the archive time to the given local date.
+    let keep_original_time = args.keep_time.as_deref() == Some("");
+    let tk_date = match args.keep_time.as_deref() {
+        Some(spec) if !spec.is_empty() => {
+            Some(time::parse_tk_date(spec).map_err(|e| format!("-tk: {e}"))?)
+        }
+        _ => None,
+    };
+    let orig_mtime = if keep_original_time && existing {
         std::fs::metadata(archive_path)
             .and_then(|m| m.modified())
             .ok()
@@ -529,6 +518,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
 
     let was_existing = existing;
     let write_report = writer.finish().map_err(|e| format!("close: {e}"))?;
+    // -sfx[name]: prepend the SFX module to the (first) archive volume.
+    if let Some(module) = &args.sfx_module {
+        crate::sfx::prepend_module_in_place(write_report.primary_path(), Some(module.as_str()))?;
+    }
     crate::log::write_logs(&logs, write_report.volume_paths(), &log_files)?;
     // -tsp: restore the source files' access times that were recorded
     // before archiving (reading the files may have refreshed them).
@@ -566,6 +559,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                 .open(archive_path)
                 .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(t)));
         }
+    }
+    // -tk<date>: assign the requested archive modification time.
+    if let Some(t) = tk_date {
+        let _ = time::set_file_mtime(std::path::Path::new(archive_path), t);
     }
     // -df: delete the source files after archiving (the archive keeps
     // them; directories are left in place, like WinRAR).

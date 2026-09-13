@@ -202,6 +202,11 @@ pub struct MiscSwitches {
     )]
     #[allow(dead_code)]
     pub charset: Option<String>,
+    /// Use CRC32 hash records (`-htc`; the default, accepted on every
+    /// command like WinRAR)
+    #[arg(global = true, long = "hash-crc")]
+    #[allow(dead_code)]
+    pub hash_crc: bool,
     /// Allow potentially incompatible names (`-oni`; Windows-only)
     #[arg(global = true, long = "allow-names")]
     #[allow(dead_code)]
@@ -599,6 +604,10 @@ pub fn normalize_switch(arg: &str) -> String {
     if arg == "-tk" {
         return "--keep-time".into();
     }
+    if let Some(rest) = arg.strip_prefix("-tk") {
+        // `-tk<date>` sets the archive time.
+        return format!("--keep-time={rest}");
+    }
     if arg == "-tl" {
         return "--set-latest-time".into();
     }
@@ -654,6 +663,12 @@ pub fn normalize_switch(arg: &str) -> String {
     }
     if arg == "-ad" {
         return "--append-dir".into();
+    }
+    if arg == "-ad1" {
+        return "--append-dir=1".into();
+    }
+    if arg == "-ad2" {
+        return "--append-dir=2".into();
     }
     if let Some(rest) = arg.strip_prefix("-si") {
         return format!("--stdin-name={rest}");

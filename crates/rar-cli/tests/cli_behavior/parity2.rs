@@ -1,4 +1,4 @@
-use crate::support::{RAR_CLI, make_temp_dir};
+use crate::support::{RAR_CLI, UNRAR_CLI, make_temp_dir};
 // ── WinRAR CLI parity batch 2: -x@/-n@, -ta/-tb, -ag, -ep2/-ep3, -r0 ──────
 
 #[test]
@@ -200,4 +200,147 @@ fn cli_links_ol_stores_symlink_redirects() {
         .unwrap();
     let link = std::fs::read_link(out.join("lnk/lnk.txt")).unwrap();
     assert_eq!(link, std::path::Path::new("target.txt"));
+}
+
+// ── Audit batch 2026-09-13 (2): -w, -htc, -ad1/2, -sfx at create ─────────
+
+/// `-w<p>` only names the directory RAR uses for temporary files (WinRAR
+/// semantics); it must never change where the archive is written. A
+/// missing directory is rejected before anything is created.
+#[test]
+fn cli_work_dir_does_not_relocate_outputs() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"w").unwrap();
+    std::fs::create_dir(dir.path().join("work")).unwrap();
+    let archive = dir.path().join("w.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq", "-wwork"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        archive.exists(),
+        "archive must stay in the working directory"
+    );
+    assert!(!dir.path().join("work").join("w.rar").exists());
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq", "-wmissing-dir"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(
+        !status.success(),
+        "a missing work directory must be rejected"
+    );
+}
+
+/// `-htc` (the default CRC32 hash) is accepted on every command, like
+/// WinRAR's parser.
+#[test]
+fn cli_htc_is_accepted_on_read_commands() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"h").unwrap();
+    let archive = dir.path().join("h.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    for command in ["t", "l", "x"] {
+        let mut probe = std::process::Command::new(RAR_CLI);
+        probe.args([command, "-htc", "-idq"]).arg(&archive);
+        if command == "x" {
+            probe.arg("--dest").arg(dir.path().join("out"));
+        }
+        let status = probe.current_dir(dir.path()).status().unwrap();
+        assert!(status.success(), "{command} -htc must be accepted");
+    }
+}
+
+/// `-ad1` puts each archive into its own directory next to the archive;
+/// `-ad2` extracts straight into the archive's directory. Both ignore the
+/// destination parameter.
+#[test]
+fn cli_ad1_ad2_pick_the_archive_directory() {
+    let dir = make_temp_dir();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub").join("g.txt"), b"g").unwrap();
+    let archive = dir.path().join("sub").join("a.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("sub/g.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    for (mode, expected) in [
+        (
+            "-ad",
+            dir.path().join("out").join("a").join("sub").join("g.txt"),
+        ),
+        (
+            "-ad1",
+            dir.path().join("sub").join("a").join("sub").join("g.txt"),
+        ),
+        ("-ad2", dir.path().join("sub").join("sub").join("g.txt")),
+    ] {
+        let out = dir.path().join("out");
+        let _ = std::fs::remove_dir_all(&out);
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["x", mode, "-idq", "--dest"])
+            .arg(&out)
+            .arg(&archive)
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{mode} extraction");
+        assert!(expected.exists(), "{mode}: expected {}", expected.display());
+        let _ = std::fs::remove_file(&expected);
+    }
+}
+
+/// `a -sfx` prepends the default SFX module at create time (skipped when
+/// no module is installed).
+#[test]
+fn cli_create_sfx_prepends_module() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"s").unwrap();
+    let exe = dir.path().join("out.exe");
+    let output = std::process::Command::new(RAR_CLI)
+        .args(["a", "-sfx", "-idq"])
+        .arg(&exe)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        if text.contains("default.sfx not found") {
+            eprintln!("skipped: no SFX module installed");
+            return;
+        }
+        panic!("a -sfx failed: {text}");
+    }
+    let head = std::fs::read(&exe).unwrap();
+    assert_eq!(&head[..2], b"MZ", "SFX output must carry the module");
+
+    // Our own extractor reads the SFX archive.
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-idq"])
+        .arg(&exe)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar t on the created SFX");
 }

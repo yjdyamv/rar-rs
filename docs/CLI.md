@@ -53,7 +53,8 @@ never a silent dump into a `<name>/` folder.
 | `i<string>` | | Find a string inside members (`ic`/`ih` variants); **`i` alone is Info, not search** |
 
 Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
-`--work-dir <path>` (`-w<path>`).
+`--work-dir <path>` (`-w<path>`; the directory WinRAR uses for temporary
+files — it must exist and never changes where outputs are written).
 
 ### Compression & format
 
@@ -82,7 +83,7 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 | `-p<password>` / `-p-` | Set / clear password (file-level; AES-256 for RAR5, the legacy per-generation ciphers for RAR 1.5–4.x) |
 | `-hp<password>` | Encrypt headers too (`-hp`); multi-volume sets repeat the plaintext encryption header on every volume |
 | `-htb` | BLAKE2sp hash records (verified on read) |
-| `-htc` | CRC32 hash (default; accepted) |
+| `-htc` | CRC32 hash records (the default; accepted on every command, like WinRAR) |
 
 ### Volumes & recovery
 
@@ -97,8 +98,11 @@ Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 
 `-r`/`-r0`/`-r-` (recurse), `-ep`/`-ep1`/`-ep2`/`-ep3`/`-ep4<path>` (path
 strip), `-ap<path>` (archive path prefix), `-x`/`-x@` (exclude),
-`-n`/`-n@` (include), `-ed`/`-as`/`-ad`/`-am` (empty dirs / sync / append archive
-name to dest / archive metadata), `-ol`/`-ol-`/`-ola`/`-oh` (store symlinks as
+`-n`/`-n@` (include), `-ed`/`-as`/`-ad`/`-ad1`/`-ad2`/`-am` (empty dirs /
+sync / append the archive name to the destination / extract into each
+archive's own directory (with / without a per-archive subdirectory) /
+archive metadata),
+`-ol`/`-ol-`/`-ola`/`-oh` (store symlinks as
 redirects / skip links when archiving and extracting / extract links with
 dangerous targets as-is (disables the link safety checks); hard links:
 hard-link groups store the first path and redirect the rest — Windows and
@@ -111,9 +115,12 @@ filter; Windows only),
 store the first file and reference the rest, `-oi2` announces the groups,
 `-oi3`/`-oi4` list them and create no archive; default 64 KiB minimum,
 RAR5 only), `-df`/`-kb`/`-si<name>` (delete sources / keep broken / stdin
-member), `-ta`/`-tb`/`-tn`/`-to` (time filters), `-tl`/`-tk` (set archive
-time to newest / keep), `-ts[mca][±,1]` (three timestamps), `-tsp` (preserve
-source access time), `-ver[n]` (versioning), `-ag[fmt]` (auto-name),
+member), `-sfx[name]` (create an SFX archive at create time),
+`-ta`/`-tb`/`-tn`/`-to` (time filters), `-tl`/`-tk[<date>]` (set archive
+time to newest / keep, or set it to the given local date), `-ts[mca][±,1]`
+(three timestamps), `-tsp` (preserve
+source access time), `-ver[n]` (versioning), `-ag[fmt]` (auto-name, local
+time),
 `-z<file>`/`-c-` (comment file / no comment), `-y`/`-o±` (yes / overwrite
 mode), `-ierr`/`-ilog`/`-iver`, `-cfg-`/`-sc<charset>`.
 

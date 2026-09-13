@@ -45,6 +45,31 @@ pub(crate) fn cmd_sfx(args: &SfxArgs) -> CliResult<()> {
     Ok(())
 }
 
+/// Prepend the SFX module to an existing archive *in place* (create-time
+/// `-sfx[name]`). Idempotent for archives that already carry a module.
+pub(crate) fn prepend_module_in_place(
+    archive: &std::path::Path,
+    module: Option<&str>,
+) -> CliResult<()> {
+    let input = std::fs::read(archive).map_err(|e| format!("read: {e}"))?;
+    let module_path = match module {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => find_sfx_module()
+            .ok_or_else(|| "default.sfx not found (use -sfx<module>)".to_string())?,
+    };
+    let module_bytes = std::fs::read(&module_path).map_err(|e| format!("read module: {e}"))?;
+    let payload = &input[rar_rs::sfx_offset_of(&input).unwrap_or(0)..];
+    let mut out = Vec::with_capacity(module_bytes.len() + payload.len());
+    out.extend_from_slice(&module_bytes);
+    out.extend_from_slice(payload);
+    let mut tmp = archive.as_os_str().to_owned();
+    tmp.push(".sfxtmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, &out).map_err(|e| format!("write: {e}"))?;
+    std::fs::rename(&tmp, archive).map_err(|e| format!("replace: {e}"))?;
+    Ok(())
+}
+
 /// Locate a `default.sfx` module: `$HOME`, `/usr/lib`, `/usr/local/lib`,
 /// or the installed WinRAR directory (Windows: `%ProgramFiles%\WinRAR`,
 /// `%ProgramFiles(x86)%\WinRAR`, or the registry-installed path).

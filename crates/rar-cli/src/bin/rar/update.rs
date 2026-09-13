@@ -70,7 +70,14 @@ fn cmd_update_freshen(
             .transpose()?
     };
     let ts = time::parse_ts_specs(&args.ts_specs)?;
-    let original_mtime = if args.keep_time {
+    // -tk: keep the original archive time (bare) or set the given date.
+    let tk_date = match args.keep_time.as_deref() {
+        Some(spec) if !spec.is_empty() => {
+            Some(time::parse_tk_date(spec).map_err(|error| format!("-tk: {error}"))?)
+        }
+        _ => None,
+    };
+    let original_mtime = if args.keep_time.as_deref() == Some("") {
         Some(
             std::fs::metadata(archive_path)
                 .and_then(|metadata| metadata.modified())
@@ -301,7 +308,7 @@ fn cmd_update_freshen(
             .finish()
             .map_err(|error| format!("close staged archive: {error}"))?;
 
-        if let Some(modified) = original_mtime {
+        if let Some(modified) = tk_date.or(original_mtime) {
             std::fs::File::options()
                 .write(true)
                 .open(staged_path)

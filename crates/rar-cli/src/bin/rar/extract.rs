@@ -78,7 +78,8 @@ fn write_extract_logs(
 /// (append the archive base name).
 pub(crate) fn extract_dest(args: &ExtractArgs) -> Result<std::path::PathBuf, String> {
     let base = args.output_path.as_deref().unwrap_or(&args.dest);
-    Ok(output::extract_dest(base, &args.archive, args.append_dir))
+    let mode = output::parse_append_dir(args.append_dir.as_deref())?;
+    Ok(output::extract_dest(base, &args.archive, mode))
 }
 
 /// Extract without archived paths (like `rar e`).

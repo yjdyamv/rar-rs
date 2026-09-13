@@ -70,11 +70,15 @@ fn main() {
     let cli = Cli::parse_from(std::iter::once("rar".to_string()).chain(args));
     output::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
     output::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
-    if let Some(dir) = &cli.work_dir
-        && let Err(e) = std::env::set_current_dir(dir)
-    {
-        eprintln!("rar: cannot change to work directory {dir}: {e}");
-        process::exit(error::EXIT_BAD_COMMAND);
+    if let Some(dir) = &cli.work_dir {
+        // WinRAR's `-w<p>` only selects the directory used for temporary
+        // files (and requires it to exist); it never changes the working
+        // directory, so neither do we. Our staging files stay next to
+        // their target so an interrupted commit never crosses volumes.
+        if !std::path::Path::new(dir).is_dir() {
+            eprintln!("rar: cannot set work directory {dir}: no such directory");
+            process::exit(error::EXIT_BAD_COMMAND);
+        }
     }
     let _ = cli.yes; // no interactive prompts exist yet; accepted for parity
     let log_errors = cli.misc.log_errors.clone();
