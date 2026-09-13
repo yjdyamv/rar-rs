@@ -467,3 +467,40 @@ fn list_tables_follow_the_official_shape() {
         String::from_utf8_lossy(&ignored.stdout)
     );
 }
+
+/// Redirect members (`-oh` hardlinks) keep the link's modification time,
+/// like official `rar`; the previous writer stored `mtime = 0` (1970).
+#[test]
+fn cli_hardlink_redirects_keep_the_file_mtime() {
+    let dir = make_temp_dir();
+    let first = dir.path().join("h1.txt");
+    std::fs::write(&first, b"hard link payload").unwrap();
+    std::fs::hard_link(&first, dir.path().join("h2.txt")).unwrap();
+
+    let archive = dir.path().join("links.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "--hardlinks", "-idq"])
+        .arg(&archive)
+        .arg("h1.txt")
+        .arg("h2.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "create the hardlink archive");
+
+    let expected = std::fs::metadata(&first)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let id = rar.unique_entry("h2.txt").unwrap();
+    let entry = rar.entry(id).unwrap();
+    assert_eq!(
+        entry.mtime(),
+        expected.as_secs() as u32,
+        "the redirect must carry the link's mtime"
+    );
+    assert_ne!(entry.mtime(), 0, "mtime must not be the 1970 default");
+}

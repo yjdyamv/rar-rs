@@ -571,6 +571,20 @@ impl RarArchive {
         redir_type: u64,
         target: &str,
     ) -> RarResult<()> {
+        self.add_redirect_with_time(name, redir_type, target, 0, None)
+    }
+
+    /// Like [`Self::add_redirect`], carrying the link's modification time
+    /// (WinRAR stores it like a regular member's, including the FILE_TIME
+    /// extra record).
+    pub(crate) fn add_redirect_with_time(
+        &mut self,
+        name: &str,
+        redir_type: u64,
+        target: &str,
+        mtime: u32,
+        mtime_ns: Option<u32>,
+    ) -> RarResult<()> {
         if self.rar4 {
             return Err(RarError::Unsupported(
                 "redirect members are not supported for RAR4 archives".into(),
@@ -587,13 +601,26 @@ impl RarArchive {
             ));
         }
         self.reset_solid_chain();
+        let mut extra_data = if mtime != 0 {
+            file_time_extra_record(Some((u64::from(mtime), mtime_ns.unwrap_or(0))), None, None)
+        } else {
+            Vec::new()
+        };
+        extra_data.extend_from_slice(&redirect_extra_bytes(redir_type, target));
+        let file_flags = if mtime != 0 {
+            FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32
+        } else {
+            FILE_FLAG_CRC32
+        };
         let fh = FileHeader {
             name: name.replace('\\', "/"),
             unpacked_size: 0,
             packed_size: 0,
             crc32_val: Some(0),
-            file_flags: FILE_FLAG_CRC32,
-            extra_data: redirect_extra_bytes(redir_type, target),
+            mtime,
+            host_os: OS_UNIX,
+            file_flags,
+            extra_data,
             ..Default::default()
         };
         let hdr_bytes = fh.to_bytes();

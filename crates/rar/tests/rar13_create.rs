@@ -363,6 +363,56 @@ fn rar13_multivolume_rejects_volumes_below_the_header_size() {
     assert!(!path.exists());
 }
 
+/// A first volume that would hold only the main header is rejected: official
+/// tools start at `.rar` and would report "No files to extract".
+#[test]
+fn rar13_multivolume_rejects_a_memberless_first_volume() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mv.rar");
+    let mut writer = ArchiveWriter::create_with(&path, writer_options().volume_size(130)).unwrap();
+    writer
+        .set_archive_comment(Some(pseudo_random(100)))
+        .unwrap();
+    let error = writer
+        .add_bytes("member.bin", b"payload", level(0))
+        .expect_err("the first member must fit in volume 1");
+    assert!(matches!(error, RarError::InvalidOption(_)), "{error:?}");
+    assert!(!path.exists(), "a failed create must leave no archive");
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+        "staged volumes must be cleaned up"
+    );
+}
+
+/// Pre-RAR3 solid chains are position-derived: STORE members and directory
+/// entries must not drop the shared encoder (the reader keeps its window
+/// across them), so the members after them still decode.
+#[test]
+fn rar13_solid_survives_store_and_directory_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chain.rar");
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let first = repetitive(b"alpha block; ", 300);
+    let stored = pseudo_random(4_000);
+    let last = repetitive(b"alpha block; ", 40);
+
+    let mut writer =
+        ArchiveWriter::create_with(&path, writer_options().solid_mode(SolidMode::Continuous))
+            .unwrap();
+    writer.add_bytes("a.txt", &first, level(5)).unwrap();
+    writer.add_bytes("b.bin", &stored, level(0)).unwrap();
+    writer.add_directory(&sub, "sub").unwrap();
+    writer.add_bytes("c.txt", &last, level(5)).unwrap();
+    writer.finish().unwrap();
+
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    for (name, expected) in [("a.txt", &first), ("b.bin", &stored), ("c.txt", &last)] {
+        let id = reader.unique_entry(name).unwrap();
+        assert_eq!(&reader.read_entry(id).unwrap(), expected, "{name}");
+    }
+}
+
 #[test]
 fn rar13_append_is_rejected() {
     let dir = tempfile::tempdir().unwrap();

@@ -171,6 +171,14 @@ impl RarArchive {
             "comment/recovery edits must be single-volume"
         );
         if self.volume_paths.len() > 1 {
+            // Probe the main header before the multi-volume rewrite. The
+            // probe derives header encryption (and the locked flag) from the
+            // file; a delete-only plan would otherwise skip it, and
+            // `rewrite_multivolume` would re-split the encrypted blocks
+            // without re-encrypting them — silently corrupting the set.
+            if self.main_header_is_locked()? {
+                return Err(RarError::ArchiveLocked);
+            }
             self.rewrite_multivolume(&deleted, chain, rename_map)?;
         } else {
             let src_path = self.path.clone();

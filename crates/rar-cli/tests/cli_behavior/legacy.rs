@@ -465,6 +465,7 @@ fn cli_ma14_rejects_rar5_only_switches() {
 
     for (name, extra) in [
         ("hp", vec!["-hpsecret"]),
+        ("sfx", vec!["-sfx"]),
         ("recovery", vec!["-rr10%"]),
         ("quick-open", vec!["-qo"]),
         ("blake2", vec!["-htb"]),
@@ -569,4 +570,57 @@ fn cli_ma14_multivolume_sets_roundtrip() {
             String::from_utf8_lossy(&res.stderr)
         );
     }
+}
+
+/// Solid-chain resets the container cannot flag are rejected instead of
+/// silently desynchronizing the decoder: pre-RAR3 chains are position-
+/// derived, and RAR4 implements `-se` only for `v29`.
+#[test]
+fn cli_legacy_rejects_unexpressible_solid_resets() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"payload A").unwrap();
+    std::fs::write(dir.path().join("b.bin"), b"payload B").unwrap();
+
+    for (name, flag, reset) in [
+        ("v14-se", "-ma14", "-se"),
+        ("v15-se", "-ma15", "-se"),
+        ("v20-sv", "-ma2", "-sv"),
+        ("v29-sv", "-ma4", "-sv"),
+    ] {
+        let arc = dir.path().join(format!("{name}.rar"));
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", flag, "-s", reset, "-m5", "-idq"])
+            .arg(&arc)
+            .arg("a.txt")
+            .arg("b.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "{flag} -s {reset} must be rejected (unrepresentable chain reset)"
+        );
+    }
+
+    // The RAR4 `v29` writer does implement `-se`, and the archive verifies.
+    let arc = dir.path().join("v29-se.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-s", "-se", "-m5", "-idq"])
+        .arg(&arc)
+        .arg("a.txt")
+        .arg("b.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "-ma4 -s -se must work");
+    let test = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-idq"])
+        .arg(&arc)
+        .output()
+        .unwrap();
+    assert!(
+        test.status.success(),
+        "unrar t rejected the -se archive:\n{}",
+        String::from_utf8_lossy(&test.stderr)
+    );
 }

@@ -249,6 +249,13 @@ impl ArchiveEditor {
         if self.archive.rar4 {
             return self.apply_rar4(&plan);
         }
+        if self.archive.rar13 {
+            // RAR 1.3/1.4 has no editor: the fixed-width headers are not
+            // RAR5 blocks, so every rewrite path would misparse them.
+            return Err(RarError::Unsupported(
+                "editing RAR 1.3/1.4 archives is not supported".into(),
+            ));
+        }
         // Resolve every operation against the current catalog before any
         // rewrite starts; a stale ID fails the whole plan up front.
         let mut deletes = Vec::with_capacity(plan.ops.len());
@@ -453,6 +460,11 @@ impl ArchiveEditor {
         if self.archive.rar4 {
             // RAR4 lock: patch the fixed-width main header (ADR 0005 stage A).
             return super::rar4_edit::lock_archive(&self.archive);
+        }
+        if self.archive.rar13 {
+            return Err(RarError::Unsupported(
+                "locking RAR 1.3/1.4 archives is not supported".into(),
+            ));
         }
         self.archive.lock()
     }

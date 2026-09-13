@@ -24,6 +24,12 @@ pub(crate) fn cmd_sfx_strip(args: &ArchiveArgs) -> CliResult<()> {
 pub(crate) fn cmd_sfx(args: &SfxArgs) -> CliResult<()> {
     let archive_path = &args.archive;
     let input = std::fs::read(archive_path).map_err(|e| format!("read: {e}"))?;
+    if input.starts_with(rar_rs::detect::RAR13_SIGNATURE) {
+        return Err(
+            "SFX is not supported for RAR 1.3/1.4 archives (official tools only accept the DOS-era stub)"
+                .into(),
+        );
+    }
 
     // Creation: prepend the SFX module.
     let module_path = match &args.module {

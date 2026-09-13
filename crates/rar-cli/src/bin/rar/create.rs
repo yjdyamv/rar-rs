@@ -99,6 +99,15 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         dict_size_log,
         dict_size_bytes,
     )?;
+    // A modern SFX module in front of a DOS-era archive makes it unreadable
+    // to WinRAR/UnRAR: the official tools locate RAR 1.3/1.4 only through
+    // the legacy DOS stub, never by scanning for the `RE~^` signature.
+    if args.sfx_module.is_some() && version.is_rar13() {
+        return Err(
+            "-sfx is not supported for RAR 1.3/1.4 archives (official tools only accept the DOS-era stub)"
+                .into(),
+        );
+    }
     // The RAR5 editor cannot rewrite headers of a header-encrypted archive
     // (`-hp`): renaming and comment changes would corrupt it, so refuse the
     // operations up front instead of committing an archive without them.
@@ -388,7 +397,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         collected
             .iter()
             .map(|c| c.name.clone())
-            .chain(redirects.iter().map(|(name, _, _)| name.clone()))
+            .chain(redirects.iter().map(|redirect| redirect.name.clone()))
             .chain(args.stdin_name.iter().cloned())
             .collect()
     };
@@ -522,10 +531,16 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         .map_err(|e| format!("add: {e}"))?;
     // Link redirects are recorded after their data members (the reference
     // target name is what matters, not the order).
-    for (name, redir_type, target) in &redirects {
+    for redirect in &redirects {
         writer
-            .add_redirect(name, *redir_type, target)
-            .map_err(|e| format!("link {name}: {e}"))?;
+            .add_redirect_with_time(
+                &redirect.name,
+                redirect.redir_type,
+                &redirect.target,
+                redirect.mtime,
+                (redirect.mtime_ns != 0).then_some(redirect.mtime_ns),
+            )
+            .map_err(|e| format!("link {}: {e}", redirect.name))?;
     }
 
     // -si<name>: one member read from stdin.

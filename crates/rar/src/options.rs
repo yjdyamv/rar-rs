@@ -175,6 +175,7 @@ pub(crate) struct CreateOptions {
 impl CreateOptions {
     pub(crate) fn validate(&self) -> RarResult<()> {
         require_writable_version(self.compression)?;
+        validate_solid_reset(self.compression, self.solid_reset)?;
         validate_dictionary(self.dict_size_log, self.dict_size_bytes)?;
         validate_threads(self.threads)?;
         validate_combinations(CombinationRules {
@@ -198,6 +199,30 @@ pub(crate) fn require_writable_version(version: ArchiveVersion) -> RarResult<()>
         return Err(RarError::InvalidOption(format!(
             "only versions v14, v15, v20, v29, v50 and v70 are writable, got {version}"
         )));
+    }
+    Ok(())
+}
+
+/// Solid-chain resets the legacy writers cannot express: pre-RAR3 chains
+/// are position-derived (`MHD_SOLID`) with no per-member reset flag, and the
+/// RAR4 writer implements `-se` only for `v29` (no `-sv`).
+pub(crate) fn validate_solid_reset(
+    compression: ArchiveVersion,
+    solid_reset: SolidReset,
+) -> RarResult<()> {
+    if solid_reset == SolidReset::Continuous {
+        return Ok(());
+    }
+    if compression.is_rar13() || matches!(compression, ArchiveVersion::V15 | ArchiveVersion::V20) {
+        return Err(RarError::InvalidOption(
+            "solid-chain resets (-se/-sv) are not supported for RAR 1.3/1.4/1.5/2.x archives"
+                .into(),
+        ));
+    }
+    if compression.is_legacy() && solid_reset == SolidReset::PerVolume {
+        return Err(RarError::InvalidOption(
+            "per-volume solid resets (-sv) are not supported for RAR4 archives".into(),
+        ));
     }
     Ok(())
 }

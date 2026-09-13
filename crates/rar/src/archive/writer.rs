@@ -407,6 +407,12 @@ impl WriterOptions {
             volume_size: self.volume_size,
         })?;
         crate::options::require_writable_version(self.compression)?;
+        let solid_reset = match self.solid_mode {
+            SolidMode::PerVolume => SolidReset::PerVolume,
+            SolidMode::PerExtension => SolidReset::PerExtension,
+            SolidMode::Disabled | SolidMode::Continuous => SolidReset::Continuous,
+        };
+        crate::options::validate_solid_reset(self.compression, solid_reset)?;
         if self.compression.is_legacy() {
             crate::format::rar4::create::validate_rar4_only(self.into())?;
         }
@@ -765,6 +771,22 @@ impl ArchiveWriter {
     /// redirects after their data members, preserving archive order.
     pub fn add_redirect(&mut self, name: &str, redir_type: u64, target: &str) -> RarResult<()> {
         self.apply(|archive| archive.add_redirect(name, redir_type, target))
+    }
+
+    /// Add a redirect member carrying the link's modification time (WinRAR
+    /// stores it like a regular member's; `mtime_ns` adds the high-precision
+    /// FILE_TIME extra record when non-zero).
+    pub fn add_redirect_with_time(
+        &mut self,
+        name: &str,
+        redir_type: u64,
+        target: &str,
+        mtime: u32,
+        mtime_ns: Option<u32>,
+    ) -> RarResult<()> {
+        self.apply(|archive| {
+            archive.add_redirect_with_time(name, redir_type, target, mtime, mtime_ns)
+        })
     }
 
     /// Queue the archive comment written ahead of every member. Supported by

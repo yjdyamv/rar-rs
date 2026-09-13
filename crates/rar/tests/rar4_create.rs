@@ -1594,3 +1594,43 @@ fn rar4_volumes_build_legacy_recovery_volumes() {
             .is_empty()
     );
 }
+
+/// Pre-RAR3 solid chains are position-derived: a STORE member or a
+/// directory in the middle must not reset the writer's encoder, or the
+/// members after them decode against the wrong window.
+#[test]
+fn rar4_solid_survives_store_and_directory_members() {
+    for version in [ArchiveVersion::V15, ArchiveVersion::V20] {
+        let dir = make_temp_dir();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let first = b"legacy chain block; ".repeat(400);
+        let stored: Vec<u8> = (0..4_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        let last = b"legacy chain block; ".repeat(40);
+        let arc = dir.path().join(format!("{version}-chain.rar"));
+        let mut archive = ArchiveWriter::create_with(
+            &arc,
+            WriterOptions::new()
+                .compression(version)
+                .solid_mode(SolidMode::Continuous),
+        )
+        .unwrap();
+        archive.add_bytes("a.txt", &first, ewo(5)).unwrap();
+        archive.add_bytes("b.bin", &stored, ewo(0)).unwrap();
+        archive.add_directory(&sub, "sub").unwrap();
+        archive.add_bytes("c.txt", &last, ewo(5)).unwrap();
+        archive.finish().unwrap();
+
+        let mut reader = ArchiveReader::open(&arc).unwrap();
+        for (name, expected) in [("a.txt", &first), ("b.bin", &stored), ("c.txt", &last)] {
+            let id = reader.unique_entry(name).unwrap();
+            assert_eq!(
+                &reader.read_entry(id).unwrap(),
+                expected,
+                "{version}: {name}"
+            );
+        }
+    }
+}

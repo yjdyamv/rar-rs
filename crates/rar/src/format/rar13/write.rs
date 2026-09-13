@@ -401,6 +401,11 @@ impl RarArchive {
                         "volume size {volume_size} is too small for a RAR 1.3/1.4 member header"
                     )));
                 }
+                if self.rar13_first_volume_is_empty(0) {
+                    return Err(RarError::InvalidOption(format!(
+                        "volume size {volume_size} leaves no room for the first member after the archive main header"
+                    )));
+                }
                 self.start_next_volume_rar13()?;
                 rolled = true;
             }
@@ -438,6 +443,11 @@ impl RarArchive {
                 if rolled {
                     return Err(RarError::InvalidOption(format!(
                         "volume size {volume_size} is too small for a RAR 1.3/1.4 member header"
+                    )));
+                }
+                if self.rar13_first_volume_is_empty(chunks.len()) {
+                    return Err(RarError::InvalidOption(format!(
+                        "volume size {volume_size} leaves no room for the first member after the archive main header"
                     )));
                 }
                 self.start_next_volume_rar13()?;
@@ -490,6 +500,19 @@ impl RarArchive {
             split_before = true;
         }
         self.push_rar13_entry(member, chunks)
+    }
+
+    /// Whether volume 1 currently holds nothing but its main header. The
+    /// split driver refuses to roll in that state: a member-less first
+    /// volume makes official tools (which start at `.rar`) report "No files
+    /// to extract".
+    fn rar13_first_volume_is_empty(&self, pending_chunks: usize) -> bool {
+        self.write_ctx().output.current_volume == 1
+            && pending_chunks == 0
+            && self
+                .entries
+                .iter()
+                .all(|entry| entry.chunks.iter().all(|chunk| chunk.volume_index != 0))
     }
 
     /// Append `header + payload` to the current volume and report the data

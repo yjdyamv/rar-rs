@@ -299,9 +299,16 @@ impl RarArchive {
             && self.write_ctx().solid.rar4_run_has_member
             && self.write_ctx().solid.rar4_unp_ver == 29;
         if method == crate::format::rar4::RAR4_METHOD_STORE {
-            self.write_ctx_mut().solid.rar4_encoder = None;
-            self.write_ctx_mut().solid.legacy_encoder = None;
-            self.write_ctx_mut().solid.rar4_run_has_member = false;
+            // RAR3+ flags the break with FHD_SOLID, so a STORE member ends
+            // the run. Pre-RAR3 chains are position-derived and carry no
+            // flag: the reader keeps the window across STORE members, so the
+            // writer must keep the encoder alive for the next compressed
+            // member.
+            if self.write_ctx().solid.rar4_unp_ver == 29 {
+                self.write_ctx_mut().solid.rar4_encoder = None;
+                self.write_ctx_mut().solid.legacy_encoder = None;
+                self.write_ctx_mut().solid.rar4_run_has_member = false;
+            }
         } else if unpacked_size != 0 {
             self.write_ctx_mut().solid.rar4_run_has_member = true;
         }

@@ -156,7 +156,7 @@ fn cmd_update_freshen(
         to_add
             .iter()
             .map(|c| c.name.clone())
-            .chain(redirects.iter().map(|(name, _, _)| name.clone()))
+            .chain(redirects.iter().map(|redirect| redirect.name.clone()))
             .collect()
     };
 
@@ -300,10 +300,16 @@ fn cmd_update_freshen(
         staged
             .add_batch(&write_entries)
             .map_err(|error| format!("append staged members: {error}"))?;
-        for (name, redir_type, target) in &redirects {
+        for redirect in &redirects {
             staged
-                .add_redirect(name, *redir_type, target)
-                .map_err(|error| format!("link {name}: {error}"))?;
+                .add_redirect_with_time(
+                    &redirect.name,
+                    redirect.redir_type,
+                    &redirect.target,
+                    redirect.mtime,
+                    (redirect.mtime_ns != 0).then_some(redirect.mtime_ns),
+                )
+                .map_err(|error| format!("link {}: {error}", redirect.name))?;
         }
         staged
             .finish()

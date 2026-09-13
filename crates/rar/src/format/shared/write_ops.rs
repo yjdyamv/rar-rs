@@ -144,7 +144,9 @@ impl RarArchive {
     ) -> RarResult<()> {
         self.check_cancel()?;
         let path = path.as_ref();
-        self.reset_solid_chain();
+        if !self.solid_chain_is_position_derived() {
+            self.reset_solid_chain();
+        }
         let name = arcname.replace('\\', "/").trim_end_matches('/').to_string();
 
         let meta = fs::metadata(path)?;
@@ -178,7 +180,9 @@ impl RarArchive {
         recursive: bool,
         level: u8,
     ) -> RarResult<()> {
-        self.reset_solid_chain();
+        if !self.solid_chain_is_position_derived() {
+            self.reset_solid_chain();
+        }
         let name = match arcname {
             Some(s) => s.to_string(),
             None => archive_name_from_path(path)?,
@@ -311,9 +315,20 @@ impl RarArchive {
         }
     }
 
+    /// Pre-RAR3 (and RAR 1.3/1.4) solid chains are derived from the
+    /// archive-level `MHD_SOLID` flag and member position: the reader keeps
+    /// one window across STORE members and directories, so the writer must
+    /// not drop the carried encoder for them (doing so desynchronises every
+    /// later member of the run).
+    pub(crate) fn solid_chain_is_position_derived(&self) -> bool {
+        self.rar13 || (self.rar4 && self.write_ctx().solid.rar4_unp_ver < 29)
+    }
+
     /// Drop the solid-chain encoder state (call after any member that does
     /// not participate in the LZ window: directories, STORE files, empty
-    /// files, or when compression fell back to STORE).
+    /// files, or when compression fell back to STORE). Position-derived
+    /// chains call this only when the container can flag the break
+    /// (`v29` FHD_SOLID, RAR5): see [`Self::solid_chain_is_position_derived`].
     pub(crate) fn reset_solid_chain(&mut self) {
         self.write_ctx_mut().solid.encoder_state = None;
         self.write_ctx_mut().solid.rar4_encoder = None;

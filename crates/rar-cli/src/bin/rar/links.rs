@@ -13,8 +13,38 @@ use std::path::Path;
 use crate::info;
 use crate::name_policy::Collected;
 
-/// A redirect to append after the data members: `(name, type, target)`.
-pub(crate) type LinkRedirect = (String, u64, String);
+/// A redirect to append after the data members.
+pub(crate) struct LinkRedirect {
+    pub name: String,
+    pub redir_type: u64,
+    pub target: String,
+    /// The link's own modification time (seconds since the Unix epoch).
+    pub mtime: u32,
+    /// Sub-second part of the modification time (0 when unavailable).
+    pub mtime_ns: u32,
+}
+
+/// The link's own mtime: for symlinks that is the link, not its target.
+fn link_mtime(path: &Path) -> (u32, u32) {
+    std::fs::symlink_metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| (duration.as_secs() as u32, duration.subsec_nanos()))
+        .unwrap_or((0, 0))
+}
+
+/// Build one redirect record with the link's timestamp attached.
+fn redirect(name: &str, redir_type: u64, target: String, path: &Path) -> LinkRedirect {
+    let (mtime, mtime_ns) = link_mtime(path);
+    LinkRedirect {
+        name: name.to_string(),
+        redir_type,
+        target,
+        mtime,
+        mtime_ns,
+    }
+}
 
 /// How `-oi` treats identical files.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -173,7 +203,12 @@ pub(crate) fn apply_identical_redirects(
         let first = &collected[group[0]];
         for &i in &group[1..] {
             copy[i] = true;
-            redirects.push((collected[i].name.clone(), 5, first.name.clone()));
+            redirects.push(redirect(
+                &collected[i].name,
+                5,
+                first.name.clone(),
+                &collected[i].path,
+            ));
         }
     }
     let kept = collected
@@ -244,7 +279,12 @@ pub(crate) fn split_link_redirects(
                         continue;
                     }
                     if let Ok(target) = std::fs::read_link(&c.path) {
-                        redirects.push((c.name.clone(), 1, target.to_string_lossy().into_owned()));
+                        redirects.push(redirect(
+                            &c.name,
+                            1,
+                            target.to_string_lossy().into_owned(),
+                            &c.path,
+                        ));
                         continue;
                     }
                     keep.push(c);
@@ -266,7 +306,7 @@ pub(crate) fn split_link_redirects(
             }
             if let Some(id) = file_identity(&c.path) {
                 if let Some(first) = seen.get(&id) {
-                    redirects.push((c.name.clone(), 4, first.clone()));
+                    redirects.push(redirect(&c.name, 4, first.clone(), &c.path));
                     continue;
                 }
                 seen.insert(id, c.name.clone());

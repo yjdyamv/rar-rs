@@ -214,3 +214,57 @@ fn cli_header_encrypted_rar5_edits_are_refused() {
         .unwrap();
     assert!(status.success());
 }
+
+/// Deleting from a header-encrypted multi-volume RAR5 set must be refused
+/// before anything is written (the volume rewrite cannot re-encrypt the
+/// re-split blocks; the previous behavior exited 0 with a corrupt set).
+#[test]
+fn cli_header_encrypted_multivolume_delete_is_refused() {
+    let dir = make_temp_dir();
+    let big: Vec<u8> = (0..60_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    std::fs::write(dir.path().join("big.bin"), &big).unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"member").unwrap();
+
+    let archive = dir.path().join("hp-mv.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-v20k", "-hppw", "-idq"])
+        .arg(&archive)
+        .arg("big.bin")
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "create the encrypted volume set");
+
+    let first = dir.path().join("hp-mv.part1.rar");
+    let before = std::fs::read(&first).unwrap();
+    let delete = std::process::Command::new(RAR_CLI)
+        .args(["d", "-ppw", "-idq"])
+        .arg(&first)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        !delete.status.success(),
+        "deleting from a header-encrypted volume set must be refused"
+    );
+    assert_eq!(
+        std::fs::read(&first).unwrap(),
+        before,
+        "the refused delete must leave the first volume untouched"
+    );
+
+    let test = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-ppw", "-idq"])
+        .arg(&first)
+        .output()
+        .unwrap();
+    assert!(
+        test.status.success(),
+        "the set must still verify:\n{}",
+        String::from_utf8_lossy(&test.stderr)
+    );
+}
