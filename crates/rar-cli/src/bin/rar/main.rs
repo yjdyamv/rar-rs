@@ -27,6 +27,7 @@ mod extract;
 mod filters;
 mod links;
 mod list;
+mod log;
 mod recovery;
 mod sfx;
 mod staging;
@@ -103,7 +104,7 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Update(args) => update::cmd_update(&args, misc),
         Command::Freshen(args) => update::cmd_freshen(&args, misc),
         Command::Move(args) => edit::cmd_move(&args, misc),
-        Command::Delete(args) => edit::cmd_delete(&args),
+        Command::Delete(args) => edit::cmd_delete(&args, misc),
         Command::Rename(args) => edit::cmd_rename(&args),
         Command::Change(args) => edit::cmd_change(&args),
         Command::Lock(args) => recovery::cmd_lock(&args),
@@ -120,12 +121,12 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Extract(args) => extract::cmd_extract(&args, misc),
         Command::ExtractFlat(args) => extract::cmd_extract_flat(&args, misc),
         Command::Test(args) => list::cmd_test(&args),
-        Command::VerboseList(args) => list::cmd_verbose_list(&args),
-        Command::List(args) => list::cmd_list(&args),
-        Command::ListBare(args) => list::cmd_list_bare(&args),
-        Command::ListTechnical(args) => list::cmd_list_technical(&args),
-        Command::VerboseListBare(args) => list::cmd_list_bare(&args),
-        Command::VerboseListTechnical(args) => list::cmd_list_technical(&args),
+        Command::VerboseList(args) => list::cmd_verbose_list(&args, misc),
+        Command::List(args) => list::cmd_list(&args, misc),
+        Command::ListBare(args) => list::cmd_list_bare(&args, misc),
+        Command::ListTechnical(args) => list::cmd_list_technical(&args, misc),
+        Command::VerboseListBare(args) => list::cmd_list_bare(&args, misc),
+        Command::VerboseListTechnical(args) => list::cmd_list_technical(&args, misc),
         Command::Info(args) => list::cmd_info(&args),
         Command::External(ext) => {
             let name = ext.first().cloned().unwrap_or_default();

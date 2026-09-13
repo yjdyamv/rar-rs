@@ -893,3 +893,106 @@ fn cli_me_switch_is_accepted_everywhere() {
         .unwrap();
     assert!(status.success());
 }
+
+// ── -log name logs ──────────────────────────────────────────────────────────
+
+/// `-log` writes archive and/or member names (default `rarinfo.log`), `P`
+/// appends, `U` writes UTF-16LE, and it works for create, list, extract
+/// and delete.
+#[cfg(any(unix, windows))]
+#[test]
+fn cli_log_writes_archive_and_file_names() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    std::fs::write(dir.path().join("f2.txt"), b"two").unwrap();
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new(RAR_CLI)
+            .args(args)
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{args:?}");
+    };
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap();
+
+    run(&["a", "-log=arc.txt", "-idq", "log.rar", "f1.txt", "f2.txt"]);
+    assert_eq!(read("arc.txt"), "log.rar\r\n");
+
+    run(&[
+        "a",
+        "-logf=files.txt",
+        "-idq",
+        "log2.rar",
+        "f1.txt",
+        "f2.txt",
+    ]);
+    assert_eq!(read("files.txt"), "f1.txt\r\nf2.txt\r\n");
+
+    run(&["a", "-logAF=both.txt", "-idq", "log3.rar", "f1.txt"]);
+    assert_eq!(read("both.txt"), "log3.rar\r\nf1.txt\r\n");
+
+    run(&["a", "-log", "-idq", "log4.rar", "f1.txt"]);
+    assert_eq!(read("rarinfo.log"), "log4.rar\r\n");
+
+    // P appends instead of truncating.
+    run(&["a", "-logP=arc.txt", "-idq", "log5.rar", "f2.txt"]);
+    assert_eq!(read("arc.txt"), "log.rar\r\nlog5.rar\r\n");
+
+    // U writes UTF-16LE (no BOM), like WinRAR.
+    run(&["a", "-logU=utf16.txt", "-idq", "log6.rar", "f1.txt"]);
+    let bytes = std::fs::read(dir.path().join("utf16.txt")).unwrap();
+    let expected: Vec<u8> = "log6.rar\r\n"
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect();
+    assert_eq!(bytes, expected);
+
+    run(&["l", "-logf=listed.txt", "-idq", "log.rar"]);
+    assert_eq!(read("listed.txt"), "f1.txt\r\nf2.txt\r\n");
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    run(&[
+        "x",
+        "-logf=xf.txt",
+        "-idq",
+        "--dest",
+        out.to_str().unwrap(),
+        "log.rar",
+    ]);
+    assert_eq!(read("xf.txt"), "f1.txt\r\nf2.txt\r\n");
+
+    run(&["d", "-logf=df.txt", "-idq", "log2.rar", "f2.txt"]);
+    assert_eq!(read("df.txt"), "f2.txt\r\n");
+}
+
+/// UnRAR rejects `-log` like the official binary (exit 7), and an
+/// unwritable log path fails with the create error code (9).
+#[cfg(any(unix, windows))]
+#[test]
+fn cli_log_is_rejected_by_unrar_and_reports_unwritable_paths() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq", "log.rar", "f1.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-log=ux.txt", "-idq", "log.rar"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "unrar must reject -log");
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("Unknown option: log=ux.txt"), "{text}");
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-log=no-such-dir/x.txt", "-idq", "log2.rar", "f1.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(9), "unwritable log paths use exit 9");
+}

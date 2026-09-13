@@ -241,6 +241,14 @@ fn run_inner(cli: Cli) -> CliResult<()> {
     if cli.misc.erase_disk {
         return Err("-vd/--erase-disk is not supported; no disk was erased".into());
     }
+    // UnRAR rejects `-log` (it is a console RAR switch), like the official
+    // binary: "Unknown option: log..." with exit code 7.
+    if let Some(spec) = cli.misc.log_specs.first() {
+        return Err(error::CliError::with_code(
+            format!("Unknown option: log{spec}"),
+            error::EXIT_BAD_COMMAND,
+        ));
+    }
     let password = cli.password.password.as_deref();
     let ts = time::parse_ts_specs(&cli.ts_specs)?;
     let max_dict_size = cli

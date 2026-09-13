@@ -43,7 +43,30 @@ pub(crate) fn cmd_extract(args: &ExtractArgs, misc: &common::MiscSwitches) -> Cl
         ..Default::default()
     };
     let count = ops::extract_members(&mut rar, &dest, &args.names, options)?;
+    write_extract_logs(misc, &rar, args)?;
     info!("Extracted {count} file(s) to {}", dest.display());
+    Ok(())
+}
+
+/// `-log` for extraction: archive name plus every extracted member (the
+/// requested names, or all members when the selection is empty).
+fn write_extract_logs(
+    misc: &common::MiscSwitches,
+    rar: &rar_rs::ArchiveReader,
+    args: &ExtractArgs,
+) -> CliResult<()> {
+    let logs = crate::log::specs_from(misc)?;
+    if logs.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<String> = if args.names.is_empty() {
+        rar.entries()
+            .map(|entry| entry.name().to_string())
+            .collect()
+    } else {
+        args.names.clone()
+    };
+    crate::log::write_logs(&logs, &[std::path::PathBuf::from(&args.archive)], &names)?;
     Ok(())
 }
 
@@ -74,6 +97,7 @@ pub(crate) fn cmd_extract_flat(args: &ExtractArgs, misc: &common::MiscSwitches) 
         ..Default::default()
     };
     let count = ops::extract_members(&mut rar, &dest, &args.names, options)?;
+    write_extract_logs(misc, &rar, args)?;
     info!("Extracted {count} file(s) to {}", dest.display());
     Ok(())
 }

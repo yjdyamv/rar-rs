@@ -109,8 +109,9 @@ pub(crate) fn editor_chained_rename_plan(
 }
 
 /// Delete members from an archive without rebuilding it (mirrors `rar d`).
-pub(crate) fn cmd_delete(args: &DeleteArgs) -> CliResult<()> {
+pub(crate) fn cmd_delete(args: &DeleteArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let archive_path = &args.archive;
+    let logs = crate::log::specs_from(misc)?;
     let names: Vec<&str> = args.names.iter().map(|s| s.as_str()).collect();
     let mut editor = open_editor(archive_path, args.password.password.as_deref())?;
     let plan = editor_delete_plan(&editor, &names).map_err(|e| format!("delete: {e}"))?;
@@ -119,6 +120,13 @@ pub(crate) fn cmd_delete(args: &DeleteArgs) -> CliResult<()> {
         .map_err(|e| format!("delete: {e}"))?
         .deleted();
     info!("Deleted {deleted} file(s) from {archive_path}");
+    if !logs.is_empty() {
+        crate::log::write_logs(
+            &logs,
+            &[std::path::PathBuf::from(archive_path)],
+            &args.names,
+        )?;
+    }
     Ok(())
 }
 

@@ -1,6 +1,7 @@
 //! Listing, searching, testing and archive info.
 
 use crate::args::ArchiveArgs;
+use crate::common;
 use crate::error;
 use crate::error::CliResult;
 use crate::info;
@@ -90,9 +91,10 @@ pub(crate) fn cmd_find(cmd: &str, args: &[String]) -> CliResult<()> {
 
 /// Verbose list (like `rar v`): adds the packed size, ratio and checksum
 /// columns.
-pub(crate) fn cmd_verbose_list(args: &ArchiveArgs) -> CliResult<()> {
+pub(crate) fn cmd_verbose_list(args: &ArchiveArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    output::print_verbose_list(&rar).map_err(error::CliError::from)
+    output::print_verbose_list(&rar).map_err(error::CliError::from)?;
+    write_list_logs(misc, &rar, &args.archive)
 }
 
 /// Test archive contents (like `rar t`).
@@ -125,24 +127,42 @@ pub(crate) fn cmd_test(args: &ArchiveArgs) -> CliResult<()> {
     }
 }
 
-pub(crate) fn cmd_list(args: &ArchiveArgs) -> CliResult<()> {
+pub(crate) fn cmd_list(args: &ArchiveArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     ops::list_entries(&rar, true);
-    Ok(())
+    write_list_logs(misc, &rar, &args.archive)
 }
 
 /// Bare list (`lb` / `vb`): member names only.
-pub(crate) fn cmd_list_bare(args: &ArchiveArgs) -> CliResult<()> {
+pub(crate) fn cmd_list_bare(args: &ArchiveArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     ops::list_bare(&rar);
-    Ok(())
+    write_list_logs(misc, &rar, &args.archive)
 }
 
 /// Technical list (`lt` / `vt`): mtime, attributes, sizes, ratio, CRC and
 /// method per member, in the spirit of the official `rar lt`.
-pub(crate) fn cmd_list_technical(args: &ArchiveArgs) -> CliResult<()> {
+pub(crate) fn cmd_list_technical(args: &ArchiveArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     ops::list_technical(&rar);
+    write_list_logs(misc, &rar, &args.archive)
+}
+
+/// `-log` for the listing commands: every listed member name.
+fn write_list_logs(
+    misc: &common::MiscSwitches,
+    rar: &rar_rs::ArchiveReader,
+    archive: &str,
+) -> CliResult<()> {
+    let logs = crate::log::specs_from(misc)?;
+    if logs.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<String> = rar
+        .entries()
+        .map(|entry| entry.name().to_string())
+        .collect();
+    crate::log::write_logs(&logs, &[std::path::PathBuf::from(archive)], &names)?;
     Ok(())
 }
 

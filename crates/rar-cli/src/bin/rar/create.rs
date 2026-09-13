@@ -357,6 +357,19 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         info!("WARNING: No files");
         process::exit(10);
     }
+    // -log: capture the member names before the candidate list is reordered
+    // for writing.
+    let logs = crate::log::specs_from(misc)?;
+    let log_files: Vec<String> = if logs.is_empty() {
+        Vec::new()
+    } else {
+        collected
+            .iter()
+            .map(|c| c.name.clone())
+            .chain(redirects.iter().map(|(name, _, _)| name.clone()))
+            .chain(args.stdin_name.iter().cloned())
+            .collect()
+    };
     let created: Option<rar_rs::ArchiveWriter> = if existing {
         None
     } else {
@@ -500,6 +513,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
 
     let was_existing = existing;
     let write_report = writer.finish().map_err(|e| format!("close: {e}"))?;
+    crate::log::write_logs(&logs, write_report.volume_paths(), &log_files)?;
     // -tsp: restore the source files' access times that were recorded
     // before archiving (reading the files may have refreshed them).
     if misc.ts_preserve {

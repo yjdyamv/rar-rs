@@ -203,6 +203,10 @@ pub struct MiscSwitches {
     #[arg(global = true, long = "me", value_name = "PAR")]
     #[allow(dead_code)]
     pub me_params: Option<String>,
+    /// Write archive/file names to a log file (`-log[AFPU]*[=name]`; rar
+    /// only — UnRAR rejects the switch like the official one)
+    #[arg(global = true, long = "log", value_name = "SPEC", action = clap::ArgAction::Append)]
+    pub log_specs: Vec<String>,
     /// Archive metadata save/restore (`-am[s,r]`; accepted)
     #[arg(global = true, long = "archive-meta", value_name = "SPEC")]
     #[allow(dead_code)]
@@ -486,6 +490,9 @@ pub fn normalize_switch(arg: &str) -> String {
     }
     if let Some(rest) = arg.strip_prefix("-om") {
         return format!("--mark-web={rest}");
+    }
+    if let Some(rest) = arg.strip_prefix("-log") {
+        return format!("--log={rest}");
     }
     if let Some(rest) = arg.strip_prefix("-am") {
         return format!("--archive-meta={rest}");

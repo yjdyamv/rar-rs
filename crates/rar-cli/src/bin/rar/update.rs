@@ -138,6 +138,18 @@ fn cmd_update_freshen(
         info!("{}: no files to {verb}", archive_path.display());
         return Ok(());
     }
+    // -log: capture the names before the transactional closure consumes the
+    // candidate lists.
+    let logs = crate::log::specs_from(misc)?;
+    let log_files: Vec<String> = if logs.is_empty() {
+        Vec::new()
+    } else {
+        to_add
+            .iter()
+            .map(|c| c.name.clone())
+            .chain(redirects.iter().map(|(name, _, _)| name.clone()))
+            .collect()
+    };
 
     let updated_count = to_add.len();
     update_archive_transactionally(archive_path, |staged_path| {
@@ -293,6 +305,7 @@ fn cmd_update_freshen(
         }
         Ok(())
     })?;
+    crate::log::write_logs(&logs, &[archive_path.to_path_buf()], &log_files)?;
 
     info!(
         "{verb} {} ({updated_count} file(s))",

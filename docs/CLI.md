@@ -120,8 +120,10 @@ stream is encrypted with the archive password when `-p`/`-hp` is set) and
 extraction restores them; on other platforms it is a no-op. `-dr` (recycle
 bin) and `-dw` (wipe) are **rejected with an error** rather than silently
 ignored, since they would otherwise imply source deletion. `-me<par>`
-(including the undocumented `-mes`) is accepted as a no-op. `-log` is not
-implemented.
+(including the undocumented `-mes`) is accepted as a no-op.
+`-log[AFPU]*[=name]` (rar only; UnRAR rejects it like the official binary)
+writes archive names (`A`), processed member names (`F`), appending with
+`P` and UTF-16LE output with `U` to a log file (default `rarinfo.log`).
 
 ---
 
