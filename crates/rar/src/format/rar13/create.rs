@@ -4,8 +4,8 @@
 
 use crate::error::{RarError, RarResult};
 
-/// The subset of typed writer options the RAR 1.3/1.4 container (single
-/// volume in this writer) cannot express.
+/// The subset of typed writer options the RAR 1.3/1.4 container cannot
+/// express.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Rar13WriteOptions {
     pub quick_open: bool,
@@ -17,7 +17,6 @@ pub(crate) struct Rar13WriteOptions {
     pub save_streams: bool,
     pub has_dictionary: bool,
     pub encrypt_headers: bool,
-    pub volume_size: Option<u64>,
 }
 
 /// Reject typed options the RAR 1.3/1.4 container cannot express.
@@ -55,11 +54,6 @@ pub(crate) fn validate_rar13_only(options: Rar13WriteOptions) -> RarResult<()> {
     if options.encrypt_headers {
         return Err(RarError::InvalidOption(
             "header encryption is not supported for RAR 1.3/1.4 archives".into(),
-        ));
-    }
-    if options.volume_size.is_some() {
-        return Err(RarError::InvalidOption(
-            "multi-volume RAR 1.3/1.4 creation is not supported yet".into(),
         ));
     }
     Ok(())
@@ -122,10 +116,6 @@ mod tests {
             },
             Rar13WriteOptions {
                 encrypt_headers: true,
-                ..Default::default()
-            },
-            Rar13WriteOptions {
-                volume_size: Some(1024),
                 ..Default::default()
             },
         ] {

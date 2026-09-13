@@ -19,6 +19,9 @@ use crate::model::{DataChunk, FileHeader};
 
 /// Main header flag: always set (the reference writer stamps `0x80`).
 pub(crate) const MHD_ALWAYS_SET: u8 = 0x80;
+/// Main header flag: the archive is part of a multi-volume set (every
+/// volume's main header carries it).
+pub(crate) const MHD_VOLUME: u8 = 0x01;
 /// Main header flag: the main-header extension holds an archive comment.
 pub(crate) const MHD_COMMENT: u8 = 0x02;
 /// Main header flag: solid archive (`Unpack15` window shared by members).
@@ -26,8 +29,11 @@ pub(crate) const MHD_SOLID: u8 = 0x08;
 /// Main header flag: the archive comment is compressed.
 pub(crate) const MHD_PACK_COMMENT: u8 = 0x10;
 
-const LHD_SPLIT_BEFORE: u8 = 0x01;
-const LHD_SPLIT_AFTER: u8 = 0x02;
+/// File header flag: the fragment continues a member from the previous
+/// volume.
+pub(crate) const LHD_SPLIT_BEFORE: u8 = 0x01;
+/// File header flag: the member continues in the next volume.
+pub(crate) const LHD_SPLIT_AFTER: u8 = 0x02;
 /// File header flag: the payload is RAR13-cipher encrypted.
 pub(crate) const LHD_PASSWORD: u8 = 0x04;
 /// File header flag: the header extension holds a member comment.

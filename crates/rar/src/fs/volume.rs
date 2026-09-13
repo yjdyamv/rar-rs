@@ -60,6 +60,11 @@ pub(crate) fn volume_path(parent: &Path, base: &str, part_num: usize) -> PathBuf
     parent.join(format!("{base}.part{part_num}.rar"))
 }
 
+/// Legacy volume naming ceiling: `{base}.rar` plus `r00`..`z99` — 901
+/// volumes. Larger sets cannot be named (or discovered) in the legacy
+/// `.rNN` scheme.
+pub(crate) const LEGACY_VOLUME_MAX: usize = 901;
+
 /// Legacy RAR 1.5–3.x volume name: the first volume is `{base}.rar`, then
 /// `{base}.r00`, `{base}.r01`, … `.r99`, then `{base}.s00`, … — one extension
 /// letter per hundred volumes, matching WinRAR's RAR4 multi-volume naming.

@@ -24,6 +24,19 @@ fn repetitive(seed: &[u8], repeats: usize) -> Vec<u8> {
     out
 }
 
+/// Incompressible bytes so volume splitting is exercised deterministically.
+fn pseudo_random(len: usize) -> Vec<u8> {
+    let mut state = 0x1234_5678u32;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
 #[test]
 fn rar13_create_roundtrips_stored_and_compressed_members() {
     let dir = tempfile::tempdir().unwrap();
@@ -194,7 +207,6 @@ fn rar13_create_rejects_options_the_container_cannot_express() {
             "dictionary",
             writer_options().dictionary_size(rar_rs::DictionarySize::DEFAULT),
         ),
-        ("multi-volume", writer_options().volume_size(1 << 20)),
     ];
     for (name, options) in cases {
         let path = dir.path().join(format!("{name}.rar"));
@@ -204,6 +216,151 @@ fn rar13_create_rejects_options_the_container_cannot_express() {
             "{name}: {error:?}"
         );
     }
+}
+
+/// Volume sets fill every volume to the exact `volume_size` (only the last
+/// one is shorter) and split members carry one fragment header per volume.
+#[test]
+fn rar13_multivolume_store_fills_volumes_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mv.rar");
+    let mut seed = Vec::new();
+    for i in 0..40_000u32 {
+        seed.push((i.wrapping_mul(2654435761) >> 24) as u8);
+    }
+    let tail = repetitive(b"tail member; ", 100);
+
+    let mut writer =
+        ArchiveWriter::create_with(&path, writer_options().volume_size(20_000)).unwrap();
+    writer.add_bytes("big.bin", &seed, level(0)).unwrap();
+    writer.add_bytes("tail.txt", &tail, level(5)).unwrap();
+    let report = writer.finish().unwrap();
+
+    let volumes = report.volume_paths();
+    assert!(volumes.len() >= 3, "{} volumes", volumes.len());
+    assert_eq!(volumes[0].file_name().unwrap(), "mv.rar");
+    assert_eq!(volumes[1].file_name().unwrap(), "mv.r00");
+    for (index, volume) in volumes.iter().enumerate() {
+        let len = std::fs::metadata(volume).unwrap().len();
+        if index + 1 == volumes.len() {
+            assert!(len <= 20_000, "last volume {len} > 20000");
+        } else {
+            assert_eq!(len, 20_000, "volume {index} is not exact");
+        }
+    }
+
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let id = reader.unique_entry("big.bin").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), seed);
+    let id = reader.unique_entry("tail.txt").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), tail);
+}
+
+/// Compressed solid chains keep their window across volume boundaries, and
+/// the RAR13 cipher is one stream over each member's packed data.
+#[test]
+fn rar13_multivolume_solid_and_encrypted_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mv.rar");
+    let first = pseudo_random(24_000);
+    let second = pseudo_random(9_000);
+    let third = pseudo_random(7_000);
+
+    let mut writer = ArchiveWriter::create_with(
+        &path,
+        writer_options()
+            .solid_mode(SolidMode::Continuous)
+            .password("pw")
+            .volume_size(6_000),
+    )
+    .unwrap();
+    writer.add_bytes("a.txt", &first, level(5)).unwrap();
+    writer.add_bytes("b.txt", &second, level(5)).unwrap();
+    writer.add_bytes("c.txt", &third, level(5)).unwrap();
+    let report = writer.finish().unwrap();
+    assert!(report.volume_paths().len() >= 2);
+
+    let mut reader = ArchiveReader::open_with(&path, OpenOptions::new().password("pw")).unwrap();
+    assert_eq!(reader.entries().count(), 3);
+    for (name, expected) in [("a.txt", &first), ("b.txt", &second), ("c.txt", &third)] {
+        let id = reader.unique_entry(name).unwrap();
+        assert_eq!(&reader.read_entry(id).unwrap(), expected, "{name}");
+    }
+
+    let error = ArchiveReader::open(&path)
+        .and_then(|mut plain| {
+            let id = plain.unique_entry("a.txt").unwrap();
+            plain.read_entry(id)
+        })
+        .unwrap_err();
+    assert!(matches!(error, RarError::Encrypted(_)), "{error:?}");
+}
+
+/// The archive comment lives in the first volume's main header; directories
+/// and empty members move to the next volume when their header no longer
+/// fits.
+#[test]
+fn rar13_multivolume_comment_directories_and_empty_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mv.rar");
+    let comment = b"multi-volume comment".to_vec();
+    let data = pseudo_random(18_000);
+
+    let mut writer =
+        ArchiveWriter::create_with(&path, writer_options().volume_size(4_000)).unwrap();
+    writer.set_archive_comment(Some(comment.clone())).unwrap();
+    writer.add_bytes("first.txt", &data, level(5)).unwrap();
+    writer.add_bytes("empty.bin", &[], level(5)).unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    writer.add_directory(&sub, "sub").unwrap();
+    let report = writer.finish().unwrap();
+    assert!(report.volume_paths().len() >= 2);
+
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    assert_eq!(reader.comment().unwrap(), Some(comment));
+    let names: Vec<String> = reader
+        .entries()
+        .map(|entry| entry.name().to_string())
+        .collect();
+    assert_eq!(names, ["first.txt", "empty.bin", "sub/"]);
+    let id = reader.unique_entry("first.txt").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), data);
+    let id = reader.unique_entry("empty.bin").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), Vec::<u8>::new());
+}
+
+/// The legacy `.rNN` naming tops out at 901 volumes; larger sets are
+/// rejected cleanly and leave no staged files behind.
+#[test]
+fn rar13_multivolume_rejects_sets_beyond_the_naming_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("huge.rar");
+    let data = repetitive(b"many tiny volumes; ", 6_000);
+
+    let mut writer = ArchiveWriter::create_with(&path, writer_options().volume_size(64)).unwrap();
+    let error = writer
+        .add_bytes("big.bin", &data, level(0))
+        .expect_err("volume naming must be bounded");
+    assert!(matches!(error, RarError::InvalidOption(_)), "{error:?}");
+    assert!(!path.exists(), "a failed create must leave no archive");
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+        "staged volumes must be cleaned up"
+    );
+}
+
+/// A volume smaller than one member header is rejected with a clear error.
+#[test]
+fn rar13_multivolume_rejects_volumes_below_the_header_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiny.rar");
+    let mut writer = ArchiveWriter::create_with(&path, writer_options().volume_size(30)).unwrap();
+    let error = writer
+        .add_bytes("member.bin", b"payload", level(0))
+        .expect_err("volume size must fit a header");
+    assert!(matches!(error, RarError::InvalidOption(_)), "{error:?}");
+    assert!(!path.exists());
 }
 
 #[test]

@@ -456,7 +456,7 @@ fn cli_ma14_creates_rar13_archives() {
 
 /// RAR5-only creation switches are rejected for `-ma13`/`-ma14`, since the
 /// DOS-era container cannot express them (no `-hp`, recovery records,
-/// multi-volume sets, quick-open, BLAKE2sp or dictionaries).
+/// quick-open, BLAKE2sp or dictionaries).
 #[test]
 fn cli_ma14_rejects_rar5_only_switches() {
     let dir = make_temp_dir();
@@ -465,7 +465,6 @@ fn cli_ma14_rejects_rar5_only_switches() {
 
     for (name, extra) in [
         ("hp", vec!["-hpsecret"]),
-        ("volume", vec!["--volume-size=100k"]),
         ("recovery", vec!["-rr10%"]),
         ("quick-open", vec!["-qo"]),
         ("blake2", vec!["-htb"]),
@@ -483,6 +482,91 @@ fn cli_ma14_rejects_rar5_only_switches() {
         assert!(
             !status.success(),
             "-ma14 {extra:?} must be rejected for RAR 1.3/1.4"
+        );
+    }
+}
+
+/// `-ma13 -v` creates an old-style `.rar`/`.r00` volume set: every volume
+/// but the last is exactly the requested size, members spanning volumes
+/// reassemble (solid and encrypted alike), and our `unrar` verifies the
+/// whole set.
+#[test]
+fn cli_ma14_multivolume_sets_roundtrip() {
+    let dir = make_temp_dir();
+    let expected: Vec<u8> = (0..120_000u32)
+        .map(|i| {
+            let x = i.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (x >> 16) as u8
+        })
+        .collect();
+    std::fs::write(dir.path().join("rnd.bin"), &expected).unwrap();
+    std::fs::write(dir.path().join("tail.txt"), b"tail member\r\n").unwrap();
+
+    for (flag, password) in [("-ma13", false), ("-ma14", true)] {
+        let arc = dir.path().join(format!(
+            "mv13{}{}.rar",
+            flag.trim_start_matches('-'),
+            if password { "-pw" } else { "" }
+        ));
+        let mut command = std::process::Command::new(RAR_CLI);
+        command.args(["a", flag, "-m0", "--volume-size=24k", "-idq"]);
+        if password {
+            command.arg("-ppw");
+        }
+        let status = command
+            .arg(&arc)
+            .arg("rnd.bin")
+            .arg("tail.txt")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "rar a {flag} --volume-size=24k failed");
+
+        assert!(arc.exists(), "{flag}: first volume missing");
+        assert!(
+            dir.path()
+                .join(format!(
+                    "{}.r00",
+                    arc.file_stem().unwrap().to_string_lossy()
+                ))
+                .exists(),
+            "{flag}: expected a second volume"
+        );
+
+        // Every volume but the last is exactly 24 KiB.
+        let volumes = rar_rs::discover_volumes(&arc);
+        assert!(volumes.len() >= 2, "{flag}: {} volumes", volumes.len());
+        for (index, volume) in volumes.iter().enumerate() {
+            let len = std::fs::metadata(volume).unwrap().len();
+            if index + 1 == volumes.len() {
+                assert!(len <= 24 * 1024, "{flag}: last volume {len} too large");
+            } else {
+                assert_eq!(len, 24 * 1024, "{flag}: volume {index} not exact");
+            }
+        }
+
+        let mut rar = if password {
+            rar_rs::ArchiveReader::open_with(&arc, rar_rs::OpenOptions::new().password("pw"))
+                .unwrap()
+        } else {
+            rar_rs::ArchiveReader::open(&arc).unwrap()
+        };
+        let id = rar.unique_entry("rnd.bin").unwrap();
+        assert_eq!(rar.read_entry(id).unwrap(), expected, "{flag}: rnd.bin");
+        let id = rar.unique_entry("tail.txt").unwrap();
+        assert_eq!(rar.read_entry(id).unwrap(), b"tail member\r\n");
+        drop(rar);
+
+        let mut command = std::process::Command::new(UNRAR_CLI);
+        command.args(["t", "-idq"]);
+        if password {
+            command.arg("-ppw");
+        }
+        let res = command.arg(&arc).output().unwrap();
+        assert!(
+            res.status.success(),
+            "unrar t rejected the {flag} volume set:\n{}",
+            String::from_utf8_lossy(&res.stderr)
         );
     }
 }

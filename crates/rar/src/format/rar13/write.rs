@@ -1,4 +1,4 @@
-//! RAR 1.3/1.4 container write (single volume).
+//! RAR 1.3/1.4 container write.
 //!
 //! Header layout and member emission follow `rars`' `rar13.rs` write half
 //! (WTFPL; see NOTICE).
@@ -9,6 +9,14 @@
 //! when compression does not shrink them. A solid chain keeps one encoder
 //! across members; the reference writer never stores inside a solid chain,
 //! and neither does this writer.
+//!
+//! Multi-volume sets split members at exact volume boundaries: every
+//! volume starts with the signature and a main header (`MHD_VOLUME`), and
+//! a member spanning volumes repeats its file header per fragment with
+//! `LHD_SPLIT_BEFORE`/`LHD_SPLIT_AFTER`. Intermediate fragments carry the
+//! cumulative packed checksum (matching the historical STORE convention),
+//! the final fragment the whole-member checksum; encrypted members restart
+//! the RAR13 cipher at every fragment, like the reference decoder expects.
 
 use std::fs;
 use std::io::Write;
@@ -16,8 +24,9 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    DEFAULT_UNP_VER, LHD_COMMENT, LHD_PASSWORD, LHD_SOLID, MAIN_HEAD_SIZE, METHOD_BEST,
-    METHOD_STORE, MHD_ALWAYS_SET, MHD_COMMENT, MHD_PACK_COMMENT, MHD_SOLID,
+    DEFAULT_UNP_VER, LHD_COMMENT, LHD_PASSWORD, LHD_SOLID, LHD_SPLIT_AFTER, LHD_SPLIT_BEFORE,
+    MAIN_HEAD_SIZE, METHOD_BEST, METHOD_STORE, MHD_ALWAYS_SET, MHD_COMMENT, MHD_PACK_COMMENT,
+    MHD_SOLID, MHD_VOLUME,
 };
 use crate::archive::{ArchiveEntry, LegacySolidEncoder, RarArchive};
 use crate::codec::legacy::rar15_encoder::{EncodeOptions, Unpack15Encoder};
@@ -109,10 +118,19 @@ pub(crate) fn build_archive_comment(comment: Option<&[u8]>) -> RarResult<Vec<u8>
     Ok(out)
 }
 
-/// Build the 7-byte main header plus its comment extension.
-pub(crate) fn build_main_header(solid: bool, archive_comment: Option<&[u8]>) -> RarResult<Vec<u8>> {
+/// Build the 7-byte main header plus its comment extension. `volume` marks
+/// every main header of a multi-volume set (only the first volume carries
+/// the comment extension).
+pub(crate) fn build_main_header(
+    solid: bool,
+    archive_comment: Option<&[u8]>,
+    volume: bool,
+) -> RarResult<Vec<u8>> {
     let comment_extra = build_archive_comment(archive_comment)?;
     let mut flags = MHD_ALWAYS_SET;
+    if volume {
+        flags |= MHD_VOLUME;
+    }
     if archive_comment.is_some() {
         flags |= MHD_COMMENT | MHD_PACK_COMMENT;
     }
@@ -204,7 +222,8 @@ impl RarArchive {
             return Ok(());
         }
         let comment = self.write_ctx_mut().rar4.writer_comment.take();
-        let header = build_main_header(self.write_ctx().solid.mode, comment.as_deref())?;
+        let volume = self.write_ctx().output.volume_size.is_some();
+        let header = build_main_header(self.write_ctx().solid.mode, comment.as_deref(), volume)?;
         {
             let stream = stream_mut(&mut self.stream)?;
             stream.seek(std::io::SeekFrom::Start(0))?;
@@ -247,12 +266,11 @@ impl RarArchive {
                 method: METHOD_STORE,
                 extra: Vec::new(),
             };
-            let header = build_file_header(&member)?;
-            return self.write_rar13_header_and_payload(&header, &[], &member);
+            return self.write_rar13_member(&member, &[]);
         }
 
         let file_crc = super::file_checksum(&data);
-        let (mut payload, method) = if level == 0 || data.is_empty() {
+        let (payload, method) = if level == 0 || data.is_empty() {
             (data, METHOD_STORE)
         } else if self.write_ctx().solid.mode {
             // One shared encoder per chain; a solid run never stores (the
@@ -290,11 +308,10 @@ impl RarArchive {
         if comment.is_some() {
             flags |= LHD_COMMENT;
         }
-        let extra = build_file_comment(comment.as_deref())?;
-        if let Some(password) = self.password.as_deref() {
-            crate::crypto::Rar13Cipher::new(password.as_bytes()).encrypt_in_place(&mut payload);
+        if self.password.is_some() {
             flags |= LHD_PASSWORD;
         }
+        let extra = build_file_comment(comment.as_deref())?;
         let member = MemberHeader {
             name: &name,
             packed_size: payload.len() as u64,
@@ -306,18 +323,179 @@ impl RarArchive {
             method,
             extra,
         };
-        let header = build_file_header(&member)?;
-        self.write_rar13_header_and_payload(&header, &payload, &member)?;
+        self.write_rar13_member(&member, &payload)?;
         self.report_progress(unpacked, unpacked);
         Ok(())
     }
 
-    fn write_rar13_header_and_payload(
+    /// Emit one member: a single fragment when the archive is single-volume,
+    /// otherwise the volume split driver. Encrypted payloads are encrypted
+    /// whole before the split (the RAR13 cipher is one stream over the
+    /// member's packed data; volume fragments continue it).
+    fn write_rar13_member(&mut self, member: &MemberHeader<'_>, payload: &[u8]) -> RarResult<()> {
+        let mut data = payload.to_vec();
+        if member.flags & LHD_PASSWORD != 0 {
+            let password = self.password.as_deref().ok_or_else(|| {
+                RarError::Encrypted("encrypted member, no password provided".into())
+            })?;
+            crate::crypto::Rar13Cipher::new(password.as_bytes()).encrypt_in_place(&mut data);
+        }
+        match self.write_ctx().output.volume_size {
+            Some(volume_size) => self.write_rar13_split_member(member, &data, volume_size),
+            None => {
+                let header = build_file_header(member)?;
+                let (volume_index, data_offset) = self.write_rar13_bytes(&header, &data)?;
+                self.push_rar13_entry(
+                    member,
+                    vec![DataChunk {
+                        volume_index,
+                        data_offset,
+                        packed_size: data.len() as u64,
+                        crc32_val: None,
+                        is_final: true,
+                        extra_data: Vec::new(),
+                    }],
+                )
+            }
+        }
+    }
+
+    /// Split a member across a volume set. The first fragment repeats the
+    /// caller's header fields (comment extension included); continuation
+    /// fragments carry `LHD_SPLIT_BEFORE` and no comment. `packed` holds the
+    /// member's final on-disk bytes; intermediate fragments store the
+    /// cumulative packed checksum, the final fragment the whole-member
+    /// checksum.
+    fn write_rar13_split_member(
         &mut self,
-        header: &[u8],
-        payload: &[u8],
         member: &MemberHeader<'_>,
+        packed: &[u8],
+        volume_size: u64,
     ) -> RarResult<()> {
+        let continuation = MemberHeader {
+            name: member.name,
+            packed_size: 0,
+            unpacked_size: member.unpacked_size,
+            file_crc: member.file_crc,
+            file_time: member.file_time,
+            file_attr: member.file_attr,
+            flags: (member.flags | LHD_SPLIT_BEFORE) & !LHD_COMMENT,
+            method: member.method,
+            extra: Vec::new(),
+        };
+        let continuation_len = build_file_header(&continuation)?.len() as u64;
+        let first_len = build_file_header(member)?.len() as u64;
+        let total = packed.len() as u64;
+
+        if total == 0 {
+            // Header-only member (directories, empty files): it moves to the
+            // next volume when the header no longer fits.
+            let mut rolled = false;
+            loop {
+                let used = self.write_ctx().output.bytes_written;
+                if volume_size.saturating_sub(used) >= first_len {
+                    break;
+                }
+                if rolled {
+                    return Err(RarError::InvalidOption(format!(
+                        "volume size {volume_size} is too small for a RAR 1.3/1.4 member header"
+                    )));
+                }
+                self.start_next_volume_rar13()?;
+                rolled = true;
+            }
+            let header = build_file_header(member)?;
+            let (volume_index, data_offset) = self.write_rar13_bytes(&header, &[])?;
+            return self.push_rar13_entry(
+                member,
+                vec![DataChunk {
+                    volume_index,
+                    data_offset,
+                    packed_size: 0,
+                    crc32_val: None,
+                    is_final: true,
+                    extra_data: Vec::new(),
+                }],
+            );
+        }
+
+        let mut chunks = Vec::new();
+        let mut sent = 0u64;
+        let mut running: u16 = 0;
+        let mut split_before = false;
+        while sent < total {
+            let header_len = if split_before {
+                continuation_len
+            } else {
+                first_len
+            };
+            let mut rolled = false;
+            loop {
+                let used = self.write_ctx().output.bytes_written;
+                if volume_size.saturating_sub(used) > header_len {
+                    break;
+                }
+                if rolled {
+                    return Err(RarError::InvalidOption(format!(
+                        "volume size {volume_size} is too small for a RAR 1.3/1.4 member header"
+                    )));
+                }
+                self.start_next_volume_rar13()?;
+                rolled = true;
+            }
+            let used = self.write_ctx().output.bytes_written;
+            let available = volume_size - used - header_len;
+            let chunk_len = (total - sent).min(available);
+            let split_after = sent + chunk_len < total;
+            let chunk = &packed[sent as usize..(sent + chunk_len) as usize];
+            for &byte in chunk {
+                running = running.wrapping_add(u16::from(byte)).rotate_left(1);
+            }
+            let split_flags = match (split_before, split_after) {
+                (true, true) => LHD_SPLIT_BEFORE | LHD_SPLIT_AFTER,
+                (true, false) => LHD_SPLIT_BEFORE,
+                (false, true) => LHD_SPLIT_AFTER,
+                (false, false) => 0,
+            };
+            let fragment = MemberHeader {
+                name: member.name,
+                packed_size: chunk_len,
+                unpacked_size: member.unpacked_size,
+                file_crc: if split_after {
+                    running
+                } else {
+                    member.file_crc
+                },
+                file_time: member.file_time,
+                file_attr: member.file_attr,
+                flags: (member.flags & !LHD_COMMENT) | split_flags,
+                method: member.method,
+                extra: if split_before {
+                    Vec::new()
+                } else {
+                    member.extra.clone()
+                },
+            };
+            let header = build_file_header(&fragment)?;
+            let (volume_index, data_offset) = self.write_rar13_bytes(&header, chunk)?;
+            chunks.push(DataChunk {
+                volume_index,
+                data_offset,
+                packed_size: chunk_len,
+                crc32_val: None,
+                is_final: !split_after,
+                extra_data: Vec::new(),
+            });
+            sent += chunk_len;
+            split_before = true;
+        }
+        self.push_rar13_entry(member, chunks)
+    }
+
+    /// Append `header + payload` to the current volume and report the data
+    /// position within the set (0-based volume index and offset).
+    fn write_rar13_bytes(&mut self, header: &[u8], payload: &[u8]) -> RarResult<(usize, u64)> {
+        let volume_index = self.write_ctx().output.current_volume.saturating_sub(1);
         let data_offset = {
             let stream = stream_mut(&mut self.stream)?;
             stream.write_all(header)?;
@@ -325,11 +503,28 @@ impl RarArchive {
             stream.write_all(payload)?;
             offset
         };
+        let ctx = self.write_ctx_mut();
+        ctx.output.bytes_written = ctx
+            .output
+            .bytes_written
+            .saturating_add(header.len() as u64)
+            .saturating_add(payload.len() as u64);
+        Ok((volume_index, data_offset))
+    }
+
+    /// Catalog one emitted member (all of its volume fragments).
+    fn push_rar13_entry(
+        &mut self,
+        member: &MemberHeader<'_>,
+        chunks: Vec<DataChunk>,
+    ) -> RarResult<()> {
+        let data_offset = chunks.first().map_or(0, |chunk| chunk.data_offset);
+        let packed_size = chunks.iter().map(|chunk| chunk.packed_size).sum();
         self.entries.push(ArchiveEntry {
             header: crate::model::FileHeader {
                 name: member.name.to_string(),
                 unpacked_size: member.unpacked_size,
-                packed_size: payload.len() as u64,
+                packed_size,
                 crc32_val: Some(u32::from(member.file_crc)),
                 comp_method: member.method,
                 is_directory: member.name.ends_with('/'),
@@ -338,25 +533,12 @@ impl RarArchive {
                 unp_ver: 15,
                 ..Default::default()
             },
-            chunks: vec![DataChunk {
-                volume_index: 0,
-                data_offset,
-                packed_size: payload.len() as u64,
-                crc32_val: None,
-                is_final: true,
-                extra_data: Vec::new(),
-            }],
+            chunks,
         });
-        let ctx = self.write_ctx_mut();
-        ctx.output.bytes_written = ctx
-            .output
-            .bytes_written
-            .saturating_add(header.len() as u64)
-            .saturating_add(payload.len() as u64);
         Ok(())
     }
 
-    /// RAR 1.3/1.4 filesystem-file member writer (single volume).
+    /// RAR 1.3/1.4 filesystem-file member writer.
     pub(crate) fn add_file_rar13(
         &mut self,
         path: &Path,

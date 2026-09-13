@@ -778,7 +778,6 @@ impl RarArchive {
                     save_streams: opts.save_streams,
                     has_dictionary: opts.dict_size_log.is_some() || opts.dict_size_bytes.is_some(),
                     encrypt_headers: opts.encrypt_headers,
-                    volume_size: opts.volume_size,
                 },
             )?;
         }

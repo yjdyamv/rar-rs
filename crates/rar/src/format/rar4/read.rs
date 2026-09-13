@@ -191,22 +191,23 @@ fn decode_member_bytes_to_inner(
         hdr,
         packed_len,
         max_alloc_packed_bytes,
-        password,
     )?;
 
     if encrypted {
-        // RAR 1.3/1.4 resets its cipher at every volume fragment and
-        // `read_packed_payload` already applied it; the other families
-        // decrypt the assembled payload as one stream.
-        if hdr.format_version != 3 {
-            let password = password
-                .ok_or_else(|| {
-                    RarError::Encrypted(format!(
-                        "{}: encrypted member, no password provided",
-                        hdr.name
-                    ))
-                })?
-                .as_bytes();
+        let password = password
+            .ok_or_else(|| {
+                RarError::Encrypted(format!(
+                    "{}: encrypted member, no password provided",
+                    hdr.name
+                ))
+            })?
+            .as_bytes();
+        // RAR 1.3/1.4 encrypts the member's whole packed stream with one
+        // RAR13 cipher stream (volume fragments continue it); the other
+        // families use their own cipher over the assembled payload.
+        if hdr.format_version == 3 {
+            crate::crypto::Rar13Cipher::new(password).decrypt_in_place(&mut packed);
+        } else {
             decrypt_in_place(hdr, password, &mut packed)?;
         }
         if super::is_stored(hdr.comp_method) {
@@ -335,7 +336,6 @@ fn read_packed_payload(
     hdr: &FileHeader,
     packed_len: usize,
     max_packed_bytes: u64,
-    password: Option<&str>,
 ) -> RarResult<Vec<u8>> {
     let mut packed = Vec::new();
     packed
@@ -378,18 +378,6 @@ fn read_packed_payload(
             file.read_exact(&mut packed[start..end])
                 .map_err(RarError::Io)?;
         }
-        // RAR 1.3/1.4 encrypts each volume fragment with a fresh cipher
-        // stream, so the decryption is applied per chunk.
-        if hdr.format_version == 3 && hdr.flags & super::FHD_PASSWORD as u64 != 0 {
-            let password = password.ok_or_else(|| {
-                RarError::Encrypted(format!(
-                    "{}: encrypted member, no password provided",
-                    hdr.name
-                ))
-            })?;
-            crate::crypto::Rar13Cipher::new(password.as_bytes())
-                .decrypt_in_place(&mut packed[start..end]);
-        }
     }
     Ok(packed)
 }
@@ -430,12 +418,10 @@ pub(crate) fn decode_member_bytes(
         hdr,
         packed_len,
         max_alloc_packed_bytes,
-        password,
     )?;
 
     let encrypted = hdr.flags & super::FHD_PASSWORD as u64 != 0;
-    if encrypted && hdr.format_version != 3 {
-        // RAR 1.3/1.4 fragments were already decrypted per volume chunk.
+    if encrypted {
         let password = password
             .ok_or_else(|| {
                 RarError::Encrypted(format!(
@@ -444,7 +430,12 @@ pub(crate) fn decode_member_bytes(
                 ))
             })?
             .as_bytes();
-        decrypt_in_place(hdr, password, &mut packed)?;
+        if hdr.format_version == 3 {
+            // One RAR13 cipher stream over the whole packed member.
+            crate::crypto::Rar13Cipher::new(password).decrypt_in_place(&mut packed);
+        } else {
+            decrypt_in_place(hdr, password, &mut packed)?;
+        }
     }
 
     let unp_size = usize::try_from(hdr.unpacked_size).map_err(|_| RarError::LimitExceeded {

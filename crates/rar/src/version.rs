@@ -28,8 +28,9 @@
 //! and the legacy writers only produce their upstream equivalents (`v20`
 //! for v26, `v29` for v36), matching how WinRAR's newer writable profiles
 //! map onto the oldest repack format. The `v14` writer emits the DOS-era
-//! `RE~^` container (single volume, stored or Unpack15-compressed members,
-//! solid chains, archive comments and `-p` member encryption; 2026-09).
+//! `RE~^` container (stored or Unpack15-compressed members,
+//! solid chains, archive comments, `-p` member encryption and old-style
+//! `.rar`/`.rNN` volume sets; 2026-09).
 //! The `v15`/`v20` writers cover the same feature set as the `v29` pipeline
 //! (solid chains, `-p` member encryption and `-hp` header encryption;
 //! 2026-09).

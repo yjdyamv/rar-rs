@@ -79,7 +79,7 @@ pub(crate) struct CreateOptions {
     /// (per-member `unp_ver 29`), [`ArchiveVersion::V20`] (`unp_ver 20`)
     /// or [`ArchiveVersion::V15`] (`unp_ver 15`), and the DOS-era
     /// RAR 1.3/1.4 container (`RE~^`, 4-byte signature) by
-    /// [`ArchiveVersion::V14`] (single volume; members report `unp_ver 2`).
+    /// [`ArchiveVersion::V14`] (members report `unp_ver 2`).
     ///
     /// Only writable versions are accepted: `v14`, `v15`, `v20`, `v29`,
     /// `v50` and `v70` (see [`ArchiveVersion::is_writable`]). `v26` and

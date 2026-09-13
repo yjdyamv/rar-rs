@@ -50,7 +50,8 @@ pub struct CreateArchiveOptions {
   /// at the actual data volume count. Requires `volume_size`.
   pub recovery_volume_count: Option<f64>,
   /// Volume size in bytes; when set, produces multi-volume archives
-  /// (`name.part1.rar`, ...).
+  /// (`name.part1.rar`, ... for RAR5/RAR7; `name.rar`/`name.r00`, ... for
+  /// the legacy and RAR 1.3/1.4 formats).
   pub volume_size: Option<f64>,
   /// Reject the operation when the summed input size exceeds this.
   pub max_total_bytes: Option<f64>,
@@ -84,10 +85,11 @@ pub struct CreateArchiveOptions {
   /// RAR7 (v70) when its effective dictionary exceeds 4 GiB. "rar7" forces
   /// v70 members at any dictionary (32 MiB by default). "rar4"/"rar2"/
   /// "rar15" write a legacy RAR 4.x / 2.x / 1.5 archive and "rar13" the
-  /// DOS-era RAR 1.3/1.4 (`RE~^`, single-volume) container; the RAR5-only
-  /// options (dictionary size, quick-open, BLAKE2sp, owner/stream records)
-  /// are rejected there, and "rar13" additionally rejects header encryption
-  /// and recovery volumes.
+  /// DOS-era RAR 1.3/1.4 (`RE~^`) container (old-style `.rar`/`.r00`
+  /// volume sets with `volume_size`); the RAR5-only options (dictionary
+  /// size, quick-open, BLAKE2sp, owner/stream records) are rejected there,
+  /// and "rar13" additionally rejects header encryption and recovery
+  /// volumes.
   pub format: Option<String>,
 }
 #[napi(object)]

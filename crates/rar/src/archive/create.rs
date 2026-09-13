@@ -290,9 +290,9 @@ impl RarArchive {
                 let mut install = Vec::with_capacity(nd);
                 for n in 1..=nd {
                     let tmp = volume_path(parent, tmp_base, n);
-                    // RAR4 volume sets use the legacy `.rar`/`.rNN` naming;
-                    // RAR5 uses the zero-padded `.partN.rar` naming.
-                    let final_path = if self.rar4 {
+                    // RAR4/RAR13 volume sets use the legacy `.rar`/`.rNN`
+                    // naming; RAR5 uses the zero-padded `.partN.rar` naming.
+                    let final_path = if self.rar4 || self.rar13 {
                         volume_path_rar4(parent, final_base, n)
                     } else {
                         volume_path_padded(parent, final_base, n, width)
@@ -304,8 +304,12 @@ impl RarArchive {
                 // set does not replace. The commit below parks them with the
                 // replaced originals and restores them if it rolls back.
                 let keep: Vec<PathBuf> = install.iter().map(|(_, f)| f.clone()).collect();
-                let retire =
-                    crate::fs::volume::stale_volume_paths(parent, final_base, self.rar4, &keep);
+                let retire = crate::fs::volume::stale_volume_paths(
+                    parent,
+                    final_base,
+                    self.rar4 || self.rar13,
+                    &keep,
+                );
                 let result = commit_files(parent, final_base, &install, &retire);
                 if result.is_ok() {
                     self.volume_paths = keep;
@@ -697,15 +701,35 @@ impl RarArchive {
 
     // ── RAR 1.3/1.4 write path ───────────────────────────────────────────
 
-    /// Stage a single-volume RAR 1.3/1.4 archive: the signature is written
-    /// immediately, the main header is deferred until the archive comment is
-    /// known (first member or close).
+    /// Stage a RAR 1.3/1.4 archive: the signature is written immediately,
+    /// the main header is deferred until the archive comment is known (first
+    /// member or close). Multi-volume sets stage under a temporary base and
+    /// are installed as the legacy `.rar`/`.rNN` names on close.
     fn open_write_rar13(&mut self) -> RarResult<()> {
-        if self.write_ctx().output.volume_size.is_some() {
-            return Err(RarError::InvalidOption(
-                "multi-volume RAR 1.3/1.4 creation is not supported yet".into(),
-            ));
+        if let Some(volume_size) = self.write_ctx().output.volume_size {
+            if volume_size == 0 {
+                return Err(RarError::Format(
+                    "volume size must be greater than zero".into(),
+                ));
+            }
+            let base = volume_base_of(&self.path);
+            let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let tmp_base = format!(".{base}.rar13tmp-{}", temp_suffix());
+            self.volume_paths = vec![volume_path_rar4(&parent, &base, 1)];
+            self.write_ctx_mut().output.current_volume = 1;
+            self.write_ctx_mut().output.pending = Some(PendingCommit::Volumes {
+                parent: parent.clone(),
+                tmp_base: tmp_base.clone(),
+                final_base: base,
+            });
+            let f = read_write_create(&volume_path(&parent, &tmp_base, 1))?;
+            self.stream = Some(Box::new(f));
+            let ctx = self.write_ctx_mut();
+            ctx.output.rar13_header_pending = true;
+            ctx.output.bytes_written = 0;
+            return Ok(());
         }
+
         self.volume_paths = vec![self.path.clone()];
         let tmp_path = temp_sibling_path(&self.path);
         self.write_ctx_mut().output.pending = Some(PendingCommit::Single(tmp_path.clone()));
@@ -716,6 +740,47 @@ impl RarArchive {
         let ctx = self.write_ctx_mut();
         ctx.output.rar13_header_pending = true;
         ctx.output.bytes_written = 0;
+        Ok(())
+    }
+
+    /// Roll a RAR 1.3/1.4 volume set: every volume starts with the signature
+    /// and a plaintext main header carrying `MHD_VOLUME` (only the first
+    /// volume holds the archive comment extension).
+    pub(crate) fn start_next_volume_rar13(&mut self) -> RarResult<()> {
+        if self.write_ctx().output.current_volume >= crate::fs::volume::LEGACY_VOLUME_MAX {
+            return Err(RarError::InvalidOption(format!(
+                "volume set exceeds the {}-volume legacy `.rNN` naming limit",
+                crate::fs::volume::LEGACY_VOLUME_MAX
+            )));
+        }
+        self.stream = None;
+        self.write_ctx_mut().output.current_volume += 1;
+        let (parent, tmp_base, final_base) = match &self.write_ctx().output.pending {
+            Some(PendingCommit::Volumes {
+                parent,
+                tmp_base,
+                final_base,
+            }) => (parent.clone(), tmp_base.clone(), final_base.clone()),
+            _ => {
+                return Err(RarError::Format(
+                    "internal error: volume created without a staged volume set".into(),
+                ));
+            }
+        };
+        let tmp_vol = volume_path(&parent, &tmp_base, self.write_ctx().output.current_volume);
+        let final_vol =
+            volume_path_rar4(&parent, &final_base, self.write_ctx().output.current_volume);
+        self.volume_paths.push(final_vol);
+        let f = read_write_create(&tmp_vol)?;
+        self.stream = Some(Box::new(f));
+        let header = crate::format::rar13::write::build_main_header(
+            self.write_ctx().solid.mode,
+            None,
+            true,
+        )?;
+        let stream = self.stream.as_mut().unwrap();
+        stream.write_all(&header)?;
+        self.write_ctx_mut().output.bytes_written = header.len() as u64;
         Ok(())
     }
 
@@ -909,6 +974,12 @@ impl RarArchive {
     }
 
     fn start_next_volume_rar4(&mut self) -> RarResult<()> {
+        if self.write_ctx().output.current_volume >= crate::fs::volume::LEGACY_VOLUME_MAX {
+            return Err(RarError::InvalidOption(format!(
+                "volume set exceeds the {}-volume legacy `.rNN` naming limit",
+                crate::fs::volume::LEGACY_VOLUME_MAX
+            )));
+        }
         self.write_rar4_end_block()?;
         self.stream = None;
         self.write_ctx_mut().output.current_volume += 1;

@@ -183,3 +183,97 @@ fn rar13_created_archives_roundtrip_through_unrar() {
         }
     }
 }
+
+/// Write interop: `-ma14` volume sets (stored, compressed solid and
+/// encrypted) are accepted by official UnRAR 7.23, which reassembles the
+/// split members byte-identically to ours.
+#[test]
+fn rar13_created_volume_sets_roundtrip_through_unrar() {
+    let Some(unrar) = unrar_bin() else {
+        eprintln!("skipped: UnRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let text = "the quick brown fox jumps over the lazy dog. ".repeat(4096);
+    let mut state = 0x1234_5678u32;
+    let binary: Vec<u8> = (0..70_000)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 24) as u8
+        })
+        .collect();
+    std::fs::write(src.join("big.txt"), &text).unwrap();
+    std::fs::write(src.join("data.bin"), &binary).unwrap();
+    std::fs::write(src.join("small.txt"), b"tiny member\r\n").unwrap();
+    let members = ["big.txt", "data.bin", "small.txt"];
+
+    let cases: [(&str, Vec<&str>, Option<&str>); 3] = [
+        (
+            "rar13-set-store.rar",
+            vec!["-m0", "--volume-size=24k"],
+            None,
+        ),
+        (
+            "rar13-set-solid.rar",
+            vec!["-m5", "-s", "--volume-size=24k"],
+            None,
+        ),
+        (
+            "rar13-set-pw.rar",
+            vec!["-m5", "-s", "-ppw", "--volume-size=24k"],
+            Some("pw"),
+        ),
+    ];
+
+    for (name, extra, password) in cases {
+        let archive = src.join(name);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rar"));
+        command.args(["a", "-ma14", "-idq"]).args(&extra);
+        command.arg(&archive);
+        for member in members {
+            command.arg(member);
+        }
+        command.current_dir(&src);
+        let (ok, out) = run(&mut command);
+        assert!(ok, "our -ma14 volume-set create of {name} failed:\n{out}");
+
+        // The set really is multi-volume.
+        let volumes = rar_rs::discover_volumes(&archive);
+        assert!(volumes.len() >= 2, "{name}: {} volumes", volumes.len());
+
+        let our_out = dir.path().join(name).join("ours");
+        let their_out = dir.path().join(name).join("theirs");
+        std::fs::create_dir_all(&our_out).unwrap();
+        std::fs::create_dir_all(&their_out).unwrap();
+
+        let mut our_command = Command::new(env!("CARGO_BIN_EXE_rar"));
+        our_command
+            .args(["x", "-y", "-idq", "--dest"])
+            .arg(&our_out);
+        if let Some(pw) = password {
+            our_command.arg(format!("-p{pw}"));
+        }
+        let (ok, out) = run(our_command.arg(&archive));
+        assert!(ok, "our extraction of {name} failed:\n{out}");
+
+        let mut their_command = Command::new(&unrar);
+        their_command.args(["x", "-y", "-idq"]);
+        if let Some(pw) = password {
+            their_command.arg(format!("-p{pw}"));
+        }
+        let (ok, out) = run(their_command.arg(&archive).arg(&their_out));
+        assert!(ok, "UnRAR extraction of {name} failed:\n{out}");
+
+        for member in members {
+            assert_eq!(
+                std::fs::read(our_out.join(member)).unwrap(),
+                std::fs::read(their_out.join(member)).unwrap(),
+                "{name}: {member} bytes differ"
+            );
+        }
+    }
+}

@@ -422,7 +422,6 @@ impl WriterOptions {
                     save_streams: self.save_streams,
                     has_dictionary: self.dictionary_size.is_some(),
                     encrypt_headers: self.encrypt_headers,
-                    volume_size: self.volume_size,
                 },
             )?;
         }
