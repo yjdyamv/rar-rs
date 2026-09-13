@@ -38,14 +38,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rs8::{MAX_CODEWORD, Rsc8};
 
 use crate::error::{RarError, RarResult};
+use crate::format::rar4::{ENDARC_HEAD, LONG_BLOCK};
 use crate::fs::volume::{legacy_volume_base, volume_path_rar4};
 
 /// Metadata trailer length of the RAR 4.20+ `.rev` layout.
 const TRAILER_LEN: usize = 7;
 /// Streaming chunk for parity building and reconstruction.
 const CHUNK: usize = 1024 * 1024;
-const ENDARC_HEAD: u8 = 0x7b;
-const LONG_BLOCK: u16 = 0x8000;
 
 /// Recovery-set metadata: how many data volumes the set has, how many
 /// recovery volumes protect it, and which recovery volume a file is.

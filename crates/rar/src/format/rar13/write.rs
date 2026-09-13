@@ -150,10 +150,10 @@ pub(crate) fn build_file_comment(comment: Option<&[u8]>) -> RarResult<Vec<u8>> {
     Ok(out)
 }
 
-/// Build a 21-byte-base file header plus its name and header extension.
-#[allow(clippy::too_many_arguments)]
-fn build_file_header(
-    name: &str,
+/// Everything a RAR 1.3/1.4 file header carries; bundled so the header
+/// builder and the catalog writer do not repeat the same field clump.
+struct MemberHeader<'a> {
+    name: &'a str,
     packed_size: u64,
     unpacked_size: u64,
     file_crc: u16,
@@ -161,34 +161,37 @@ fn build_file_header(
     file_attr: u8,
     flags: u8,
     method: u8,
-    extra: &[u8],
-) -> RarResult<Vec<u8>> {
-    let name_bytes = name.as_bytes();
+    extra: Vec<u8>,
+}
+
+/// Build a 21-byte-base file header plus its name and header extension.
+fn build_file_header(header: &MemberHeader<'_>) -> RarResult<Vec<u8>> {
+    let name_bytes = header.name.as_bytes();
     if name_bytes.len() > u8::MAX as usize {
         return Err(RarError::InvalidOption(format!(
             "RAR 1.3/1.4 member names are limited to 255 bytes (got {})",
             name_bytes.len()
         )));
     }
-    let head_size = super::FILE_HEAD_BASE_SIZE + name_bytes.len() + extra.len();
+    let head_size = super::FILE_HEAD_BASE_SIZE + name_bytes.len() + header.extra.len();
     if head_size > u16::MAX as usize {
         return Err(RarError::InvalidOption(
             "RAR 1.3/1.4 file header is longer than 65535 bytes".into(),
         ));
     }
     let mut out = Vec::with_capacity(head_size);
-    out.extend_from_slice(&(packed_size as u32).to_le_bytes());
-    out.extend_from_slice(&(unpacked_size as u32).to_le_bytes());
-    out.extend_from_slice(&file_crc.to_le_bytes());
+    out.extend_from_slice(&(header.packed_size as u32).to_le_bytes());
+    out.extend_from_slice(&(header.unpacked_size as u32).to_le_bytes());
+    out.extend_from_slice(&header.file_crc.to_le_bytes());
     out.extend_from_slice(&(head_size as u16).to_le_bytes());
-    out.extend_from_slice(&file_time.to_le_bytes());
-    out.push(file_attr);
-    out.push(flags);
+    out.extend_from_slice(&header.file_time.to_le_bytes());
+    out.push(header.file_attr);
+    out.push(header.flags);
     out.push(DEFAULT_UNP_VER);
     out.push(name_bytes.len() as u8);
-    out.push(method);
+    out.push(header.method);
     out.extend_from_slice(name_bytes);
-    out.extend_from_slice(extra);
+    out.extend_from_slice(&header.extra);
     Ok(out)
 }
 
@@ -233,8 +236,19 @@ impl RarArchive {
         let is_directory = name.ends_with('/');
         let file_time = crate::format::rar4::write::unix_to_dos_time(mtime);
         if is_directory {
-            let header = build_file_header(&name, 0, 0, 0, file_time, 0x10, 0, METHOD_STORE, &[])?;
-            return self.write_rar13_header_and_payload(&header, &[], &name, 0, 0, METHOD_STORE);
+            let member = MemberHeader {
+                name: &name,
+                packed_size: 0,
+                unpacked_size: 0,
+                file_crc: 0,
+                file_time,
+                file_attr: 0x10,
+                flags: 0,
+                method: METHOD_STORE,
+                extra: Vec::new(),
+            };
+            let header = build_file_header(&member)?;
+            return self.write_rar13_header_and_payload(&header, &[], &member);
         }
 
         let file_crc = super::file_checksum(&data);
@@ -281,18 +295,19 @@ impl RarArchive {
             crate::crypto::Rar13Cipher::new(password.as_bytes()).encrypt_in_place(&mut payload);
             flags |= LHD_PASSWORD;
         }
-        let header = build_file_header(
-            &name,
-            payload.len() as u64,
-            unpacked,
+        let member = MemberHeader {
+            name: &name,
+            packed_size: payload.len() as u64,
+            unpacked_size: unpacked,
             file_crc,
             file_time,
-            0x20,
+            file_attr: 0x20,
             flags,
             method,
-            &extra,
-        )?;
-        self.write_rar13_header_and_payload(&header, &payload, &name, unpacked, file_crc, method)?;
+            extra,
+        };
+        let header = build_file_header(&member)?;
+        self.write_rar13_header_and_payload(&header, &payload, &member)?;
         self.report_progress(unpacked, unpacked);
         Ok(())
     }
@@ -301,10 +316,7 @@ impl RarArchive {
         &mut self,
         header: &[u8],
         payload: &[u8],
-        name: &str,
-        unpacked_size: u64,
-        file_crc: u16,
-        method: u8,
+        member: &MemberHeader<'_>,
     ) -> RarResult<()> {
         let data_offset = {
             let stream = stream_mut(&mut self.stream)?;
@@ -315,12 +327,12 @@ impl RarArchive {
         };
         self.entries.push(ArchiveEntry {
             header: crate::model::FileHeader {
-                name: name.to_string(),
-                unpacked_size,
+                name: member.name.to_string(),
+                unpacked_size: member.unpacked_size,
                 packed_size: payload.len() as u64,
-                crc32_val: Some(u32::from(file_crc)),
-                comp_method: method,
-                is_directory: name.ends_with('/'),
+                crc32_val: Some(u32::from(member.file_crc)),
+                comp_method: member.method,
+                is_directory: member.name.ends_with('/'),
                 data_offset,
                 format_version: 3,
                 unp_ver: 15,

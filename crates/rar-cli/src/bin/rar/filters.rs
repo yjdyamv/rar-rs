@@ -71,7 +71,7 @@ pub(crate) fn parse_rar_date(s: &str) -> Result<u32, String> {
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 59 {
         return Err(format!("invalid date: {s}"));
     }
-    let days = days_from_civil(y, m, d);
+    let days = crate::time::days_from_civil(y, m, d);
     let secs = days * 86400 + i64::from(hh) * 3600 + i64::from(mm) * 60 + i64::from(ss);
     u32::try_from(secs).map_err(|_| format!("date out of range: {s}"))
 }
@@ -158,9 +158,4 @@ pub(crate) fn file_time(meta: &std::fs::Metadata, kind: TimeKind) -> u128 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos())
         .unwrap_or(0)
-}
-
-/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    crate::time::days_from_civil(y, m, d)
 }

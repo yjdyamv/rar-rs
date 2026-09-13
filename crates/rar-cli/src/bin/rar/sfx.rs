@@ -63,10 +63,13 @@ pub(crate) fn prepend_module_in_place(
     out.extend_from_slice(&module_bytes);
     out.extend_from_slice(payload);
     let mut tmp = archive.as_os_str().to_owned();
-    tmp.push(".sfxtmp");
+    tmp.push(format!(".sfxtmp-{}", std::process::id()));
     let tmp = std::path::PathBuf::from(tmp);
-    std::fs::write(&tmp, &out).map_err(|e| format!("write: {e}"))?;
-    std::fs::rename(&tmp, archive).map_err(|e| format!("replace: {e}"))?;
+    let staged = std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, archive));
+    if staged.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    staged.map_err(|e| format!("write: {e}"))?;
     Ok(())
 }
 
