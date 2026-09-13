@@ -1126,13 +1126,11 @@ fn rar4_solid_delete_repacks_and_keeps_data() {
     assert_eq!(reader.read_entry(c).unwrap(), p3);
 }
 
-/// Pre-RAR3 (v15/v20) codec members cannot be repacked for a solid archive
-/// edit (ADR 0005 stage C boundary): with our writers now able to *create*
-/// those archives, the clear `Unsupported` refusal for solid delete and
-/// solid append must fire before any write (the archive file is untouched,
-/// so the append probe below sees the same pristine archive).
+/// Pre-RAR3 (v15/v20) codec members repack for solid edits: the fresh
+/// archive keeps the source member generation (RAR 1.5 / RAR 2.x) and the
+/// surviving members round-trip byte-for-byte after delete and append.
 #[test]
-fn rar4_solid_legacy_members_refuse_delete_and_append() {
+fn rar4_solid_legacy_members_repack_on_delete_and_append() {
     for version in [ArchiveVersion::V15, ArchiveVersion::V20] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy-solid.rar");
@@ -1151,25 +1149,33 @@ fn rar4_solid_legacy_members_refuse_delete_and_append() {
             archive.finish().unwrap();
         }
 
-        // Solid deletion needs a whole-archive repack, which the fresh
-        // RAR4 writer cannot reproduce for legacy codec members.
+        // Solid deletion repacks the chain with the same member generation.
         let mut editor = ArchiveEditor::open(&path).unwrap();
         let b = editor.unique_entry("b.txt").unwrap();
-        let err = editor.delete_entries(&[b]).unwrap_err();
-        assert!(
-            matches!(&err, rar_rs::RarError::Unsupported(msg) if msg.contains("pre-RAR3")),
-            "{version:?}: expected Unsupported solid-delete refusal, got {err:?}"
-        );
+        editor.delete_entries(&[b]).unwrap();
         drop(editor);
 
-        // The refused delete wrote nothing; appending to the same solid
-        // archive defers to the repack and refuses at close.
+        let mut reader = ArchiveReader::open(&path).unwrap();
+        let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+        assert_eq!(names, ["a.txt"], "{version:?}");
+        assert_eq!(reader.entries().next().unwrap().version(), version);
+        let id = reader.unique_entry("a.txt").unwrap();
+        assert_eq!(reader.read_entry(id).unwrap(), p1, "{version:?}");
+        drop(reader);
+
+        // Appending to the same solid archive defers to a close-time repack,
+        // which keeps the generation and the existing payload.
         let mut append = ArchiveWriter::append(&path).unwrap();
         append.add_bytes("c.txt", &p2, level(3)).unwrap();
-        let err = append.finish().unwrap_err();
-        assert!(
-            matches!(&err, rar_rs::RarError::Unsupported(msg) if msg.contains("pre-RAR3")),
-            "{version:?}: expected Unsupported solid-append refusal, got {err:?}"
-        );
+        append.finish().unwrap();
+
+        let mut reader = ArchiveReader::open(&path).unwrap();
+        let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+        assert_eq!(names, ["a.txt", "c.txt"], "{version:?}");
+        assert_eq!(reader.entries().next().unwrap().version(), version);
+        let id = reader.unique_entry("a.txt").unwrap();
+        assert_eq!(reader.read_entry(id).unwrap(), p1, "{version:?}");
+        let id = reader.unique_entry("c.txt").unwrap();
+        assert_eq!(reader.read_entry(id).unwrap(), p2, "{version:?}");
     }
 }

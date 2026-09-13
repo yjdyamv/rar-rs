@@ -129,3 +129,82 @@ fn we_edit_the_comment_of_a_winrar_rar4_volume_set() {
         assert!(ok, "UnRAR t after the comment edit failed:\n{out}");
     }
 }
+
+/// Pre-RAR3 solid archives (official 6.23 `-ma1`/`-ma2 -s`) survive our
+/// solid repack edits: delete and append keep the member generation and
+/// UnRAR 7.23 validates the result.
+#[test]
+fn legacy_solid_repack_interop_with_winrar_623() {
+    let Some(rar623) = rar4_623_bin() else {
+        eprintln!("skipped: WinRAR 6.23 not found");
+        return;
+    };
+    let dir = temp_dir();
+    let p1: Vec<u8> = b"legacy solid chain payload a ".repeat(500);
+    let p2: Vec<u8> = b"legacy solid chain payload b ".repeat(400);
+    std::fs::write(dir.path().join("a.txt"), &p1).unwrap();
+    std::fs::write(dir.path().join("b.txt"), &p2).unwrap();
+
+    for ma in ["1", "2"] {
+        let archive = dir.path().join(format!("solid{ma}.rar"));
+        let mut create = Command::new(&rar623);
+        create
+            .args(["a", &format!("-ma{ma}"), "-s", "-idq"])
+            .arg(&archive)
+            .args(["a.txt", "b.txt"])
+            .current_dir(dir.path());
+        let (ok, out) = run(&mut create);
+        assert!(
+            ok,
+            "6.23 -ma{ma} could not create the solid archive:\n{out}"
+        );
+
+        // Solid delete repacks the whole chain.
+        let mut delete = Command::new(env!("CARGO_BIN_EXE_rar"));
+        delete
+            .args(["d", "-idq"])
+            .arg(&archive)
+            .arg("b.txt")
+            .current_dir(dir.path());
+        let (ok, out) = run(&mut delete);
+        assert!(ok, "our solid delete failed on -ma{ma}:\n{out}");
+
+        let mut reader = ArchiveReader::open(&archive).unwrap();
+        let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+        assert_eq!(names, ["a.txt"], "-ma{ma}");
+        let id = reader.unique_entry("a.txt").unwrap();
+        assert_eq!(reader.read_entry(id).unwrap(), p1, "-ma{ma}");
+        drop(reader);
+
+        if let Some(unrar) = unrar_bin() {
+            let mut test = Command::new(&unrar);
+            test.args(["t", "-idq"]).arg(&archive);
+            let (ok, out) = run(&mut test);
+            assert!(ok, "UnRAR t after our -ma{ma} delete failed:\n{out}");
+        }
+
+        // Append continues the same generation through the deferred repack.
+        let mut append = Command::new(env!("CARGO_BIN_EXE_rar"));
+        append
+            .args(["a", "-idq"])
+            .arg(&archive)
+            .arg("b.txt")
+            .current_dir(dir.path());
+        let (ok, out) = run(&mut append);
+        assert!(ok, "our append failed on -ma{ma}:\n{out}");
+
+        let mut reader = ArchiveReader::open(&archive).unwrap();
+        let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+        assert_eq!(names, ["a.txt", "b.txt"], "-ma{ma}");
+        let id = reader.unique_entry("b.txt").unwrap();
+        assert_eq!(reader.read_entry(id).unwrap(), p2, "-ma{ma}");
+        drop(reader);
+
+        if let Some(unrar) = unrar_bin() {
+            let mut test = Command::new(&unrar);
+            test.args(["t", "-idq"]).arg(&archive);
+            let (ok, out) = run(&mut test);
+            assert!(ok, "UnRAR t after our -ma{ma} append failed:\n{out}");
+        }
+    }
+}

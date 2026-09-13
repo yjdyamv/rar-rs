@@ -19,6 +19,39 @@ use crate::archive::transaction::EditSummary;
 use crate::error::{RarError, RarResult};
 use crate::fs::atomic::{replace_file, temp_sibling_path};
 use crate::recovery::legacy_rr::scan_protect_with_password;
+
+/// Member generation the repacked archive is written with, derived from the
+/// source members: RAR 1.5 (`unp_ver 15`), RAR 2.x (`20`, with `26` using
+/// the same codec) or RAR 3.x/4.x (`29`, with `36`). A solid chain shares
+/// one codec, so a mixed archive is refused rather than silently re-coded.
+fn solid_repack_version(archive: &RarArchive) -> RarResult<crate::version::ArchiveVersion> {
+    use crate::version::ArchiveVersion;
+
+    let mut target: Option<ArchiveVersion> = None;
+    for entry in archive.entries.iter().filter(|entry| !entry.is_dir()) {
+        let version = match entry.header.unp_ver {
+            15 => ArchiveVersion::V15,
+            20 | 26 => ArchiveVersion::V20,
+            29 | 36 => ArchiveVersion::V29,
+            other => {
+                return Err(RarError::Unsupported(format!(
+                    "repacking solid archives with unp_ver {other} members is not supported"
+                )));
+            }
+        };
+        match target {
+            None => target = Some(version),
+            Some(existing) if existing == version => {}
+            Some(_) => {
+                return Err(RarError::Unsupported(
+                    "repacking solid archives with mixed member generations is not supported"
+                        .into(),
+                ));
+            }
+        }
+    }
+    Ok(target.unwrap_or(ArchiveVersion::V29))
+}
 /// Whole-archive repack of a solid RAR4 archive (ADR 0005 stage C): every
 /// member is decoded in chain order through the shared window and
 /// re-encoded into a fresh solid archive — same order, minus the deleted
@@ -73,13 +106,11 @@ pub(crate) fn repack_solid_archive(
         }
     }
     let deleted_count = deleted.iter().filter(|d| **d).count();
-    // Shapes the fresh writer cannot reproduce yet get a clear refusal
-    // instead of a silently degraded archive.
-    if archive.entries.iter().any(|e| e.header.unp_ver < 29) {
-        return Err(RarError::Unsupported(
-            "repacking solid archives with legacy (pre-RAR3) codec members is not supported".into(),
-        ));
-    }
+    // The fresh archive is written with the source's member generation so
+    // the matching legacy encoder reproduces the chain (RAR 1.5 adaptive
+    // Huffman, RAR 2.x LZSS+Huffman, RAR 3.x+). A solid chain cannot mix
+    // codecs, so a mixed archive keeps the clear refusal.
+    let target_version = solid_repack_version(archive)?;
 
     // The final comment text: the plan's value (empty removes), or the
     // archive's original comment preserved by the repack.
@@ -172,7 +203,7 @@ pub(crate) fn repack_solid_archive(
             let mut writer = crate::archive::RarArchive::create_with_options(
                 &tmp_path,
                 crate::options::CreateOptions {
-                    compression: crate::version::ArchiveVersion::V29,
+                    compression: target_version,
                     solid: true,
                     password: password.clone(),
                     encrypt_headers: hp,
