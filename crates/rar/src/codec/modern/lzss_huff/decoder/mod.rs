@@ -1,8 +1,11 @@
 //! RAR5/RAR7 (v70) LZSS+Huffman decoder.
 //!
 //! Role split:
-//! - [`engine`] — public entry points and the streaming state machine,
-//! - [`analysis`] — symbol-stream analysis/tracing tooling,
+//! - [`symbols`] — the symbol-stream state machine (block framing,
+//!   checksums, Huffman tables, cache/repeat resolution),
+//! - [`engine`] — public entry points and the single window/output loop,
+//! - [`analysis`] — symbol-stream analysis/tracing tooling over
+//!   [`symbols`],
 //! - [`tables`] — Huffman-table reading and length/distance/filter
 //!   primitives.
 //!
@@ -16,6 +19,7 @@
 
 mod analysis;
 mod engine;
+mod symbols;
 mod tables;
 #[cfg(test)]
 mod tests;
@@ -26,8 +30,8 @@ pub use engine::{
     decode_to_writer,
 };
 
-use super::DIST_CACHE_SIZE;
-use crate::codec::common::huffman::DecodeTable;
+use symbols::SymbolState;
+
 use crate::codec::common::window::SlidingWindow;
 use crate::version::ArchiveVersion;
 
@@ -42,31 +46,19 @@ struct PendingFilter {
 
 /// Persistent decoder state for solid archive support.
 ///
-/// In a solid archive, the sliding window, distance cache, and Huffman
-/// tables carry over between files. The fields are codec-private; the
-/// archive layer only creates and holds the state.
+/// In a solid archive, the sliding window and the symbol-stream state
+/// (distance cache, Huffman tables) carry over between files. The fields are
+/// codec-private; the archive layer only creates and holds the state.
 pub struct DecoderState {
     window: SlidingWindow,
-    dist_cache: [u64; DIST_CACHE_SIZE],
-    last_length: u32,
-    prev_low_dist: u32,
-    table_nc: Option<DecodeTable>,
-    table_dc: Option<DecodeTable>,
-    table_ldc: Option<DecodeTable>,
-    table_rc: Option<DecodeTable>,
+    symbols: SymbolState,
 }
 
 impl DecoderState {
     pub fn new(dict_size: usize) -> Self {
         DecoderState {
             window: SlidingWindow::new(dict_size),
-            dist_cache: [0; DIST_CACHE_SIZE],
-            last_length: 0,
-            prev_low_dist: 0,
-            table_nc: None,
-            table_dc: None,
-            table_ldc: None,
-            table_rc: None,
+            symbols: SymbolState::default(),
         }
     }
 

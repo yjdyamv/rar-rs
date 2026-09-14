@@ -30,8 +30,8 @@ impl SlidingWindow {
     }
 
     /// Number of bytes the ring can hold. `get_output` can only return a
-    /// region no longer than this, so buffered decoders must check it before
-    /// materializing a member larger than the dictionary.
+    /// region no longer than this, so a caller materializing more than the
+    /// ring holds must bound the request.
     #[inline]
     pub fn capacity(&self) -> usize {
         self.buf.len()

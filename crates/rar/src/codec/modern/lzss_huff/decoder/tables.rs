@@ -7,7 +7,8 @@
 use super::*;
 
 use super::super::{
-    FILTER_DELTA, HUFF_BC, HUFF_DC, HUFF_DCX, HUFF_LDC, HUFF_NC, HUFF_RC, NIBBLE_ESCAPE,
+    DIST_CACHE_SIZE, FILTER_DELTA, HUFF_BC, HUFF_DC, HUFF_DCX, HUFF_LDC, HUFF_NC, HUFF_RC,
+    NIBBLE_ESCAPE,
 };
 use crate::codec::common::bitstream::BitReader;
 use crate::codec::common::huffman::{DecodeTable, decode_symbol};
