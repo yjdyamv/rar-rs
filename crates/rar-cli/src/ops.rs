@@ -559,7 +559,10 @@ pub fn extract_names_and_dest(
     let mut dest = dest.unwrap_or(".").to_string();
     if !dest_given
         && let Some(last) = names.last()
-        && (last.ends_with('/') || last.ends_with('\\'))
+        && last
+            .chars()
+            .next_back()
+            .is_some_and(std::path::is_separator)
     {
         dest = names.pop().expect("checked above");
     }
@@ -713,13 +716,19 @@ fn count_extracted(
 
 /// Destination key for the in-run "already written" set. Windows paths
 /// compare case-insensitively on disk, so `a.txt` and `A.txt` denote the
-/// same file and the second member is skipped by `-o-`.
+/// same file and the second member is skipped by `-o-`. Separator folding
+/// is Windows-only: on Unix `\` is a valid file-name character and must
+/// not be conflated with `/`.
 fn destination_key(path: &Path) -> String {
-    let key = path.to_string_lossy().replace('\\', "/");
-    if cfg!(windows) {
-        key.to_ascii_lowercase()
-    } else {
-        key
+    #[cfg(windows)]
+    {
+        path.to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
     }
 }
 
@@ -818,7 +827,7 @@ pub fn print_members(
 
 #[cfg(test)]
 mod tests {
-    use super::verify_options;
+    use super::{destination_key, extract_names_and_dest, verify_options};
     use rar_rs::ExtractOptions;
 
     /// `t` streams every member to a sink, so the materializing read caps
@@ -834,5 +843,55 @@ mod tests {
             options.max_dict_size,
             Some(ExtractOptions::DEFAULT_MAX_DICT_SIZE)
         );
+    }
+
+    /// A positional extraction destination is recognized through
+    /// `std::path::is_separator`: `/` everywhere, `\` only on Windows. On
+    /// Unix `dest\` is a valid member selector and must not create a
+    /// literal `dest\` directory.
+    #[test]
+    fn positional_destination_follows_the_host_separator() {
+        let (names, dest) =
+            extract_names_and_dest(&["dest/".into()], None, None, None, None, "p.rar").unwrap();
+        assert!(names.is_empty());
+        assert_eq!(dest, std::path::Path::new("dest"));
+
+        let (names, dest) =
+            extract_names_and_dest(&["dest\\".into()], None, None, None, None, "p.rar").unwrap();
+        if cfg!(windows) {
+            assert!(names.is_empty());
+            assert_eq!(dest, std::path::Path::new("dest"));
+        } else {
+            assert_eq!(names, ["dest\\"]);
+            assert_eq!(dest, std::path::Path::new("."));
+        }
+    }
+
+    /// The in-run destination key folds separators and case on Windows
+    /// only; on Unix `a\b` and `a/b` are distinct files.
+    #[test]
+    fn destination_key_is_platform_aware() {
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                destination_key(std::path::Path::new("a\\b")),
+                destination_key(std::path::Path::new("a/b"))
+            );
+            assert_eq!(
+                destination_key(std::path::Path::new("A.TXT")),
+                destination_key(std::path::Path::new("a.txt"))
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert_ne!(
+                destination_key(std::path::Path::new("a\\b")),
+                destination_key(std::path::Path::new("a/b"))
+            );
+            assert_ne!(
+                destination_key(std::path::Path::new("A.TXT")),
+                destination_key(std::path::Path::new("a.txt"))
+            );
+        }
     }
 }

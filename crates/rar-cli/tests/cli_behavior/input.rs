@@ -163,7 +163,9 @@ fn cli_create_appends_the_rar_extension() {
 }
 
 /// A trailing argument ending with a path separator is the extraction
-/// destination (WinRAR syntax), for `rar` and `unrar`.
+/// destination (WinRAR syntax), for `rar` and `unrar`. `\` only counts on
+/// Windows: on Unix it is a valid member-name character, so `dest\` is a
+/// selector that matches nothing.
 #[test]
 fn cli_positional_extraction_destination() {
     let dir = make_temp_dir();
@@ -174,8 +176,9 @@ fn cli_positional_extraction_destination() {
             .success()
     );
 
+    let sep = if cfg!(windows) { "\\" } else { "/" };
     assert!(
-        run(&["x", "-idq", "p.rar", "dest\\"], dir.path())
+        run(&["x", "-idq", "p.rar", &format!("dest{sep}")], dir.path())
             .status
             .success()
     );
@@ -187,6 +190,16 @@ fn cli_positional_extraction_destination() {
             .success()
     );
     assert!(dir.path().join("dest2").join("a.txt").exists());
+
+    #[cfg(unix)]
+    {
+        // `dest\` is not a destination separator on Unix: it is a member
+        // selector and matches nothing instead of creating a literal
+        // `dest\` directory.
+        let out = run(&["x", "-idq", "p.rar", "dest\\"], dir.path());
+        assert!(!out.status.success());
+        assert!(!dir.path().join("dest\\").exists());
+    }
 
     // `--dest` still wins over a trailing name.
     assert!(
