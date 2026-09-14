@@ -129,7 +129,10 @@ jobs:
           done
         shell: bash
       - name: Cargo test (workspace)
-        run: cargo test --workspace --all-features --locked
+        # `--no-fail-fast`: a platform-specific failure in an early target
+        # must not hide failures in later targets, so one red run reports the
+        # whole list instead of revealing them one per push.
+        run: cargo test --workspace --all-features --locked --no-fail-fast
       - name: Official interop skip visibility
         # The workspace test above runs this target with its output captured,
         # hiding the gating helpers' SKIPPED markers. Replay just the cheap
