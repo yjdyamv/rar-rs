@@ -17,6 +17,7 @@ use crate::archive::ArchiveEntry;
 use crate::crc32;
 use crate::error::{RarError, RarResult};
 use crate::format::decode_system_ansi;
+use crate::format::shared::legacy_time::days_from_civil;
 use crate::model::{DataChunk, FileHeader};
 pub(crate) use read::{
     MemberDecodeOptions, decode_member_bytes, decode_member_bytes_to, member_crc,
@@ -862,16 +863,6 @@ pub(crate) fn dos_time_to_unix(dos: u32) -> u32 {
     let secs = days_since_epoch * 86400
         + (i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second));
     secs.clamp(0, u32::MAX as i64) as u32
-}
-
-pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = ((m + 9) % 12) as i64;
-    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
 }
 
 fn read_some(stream: &mut impl Read, buf: &mut [u8]) -> RarResult<usize> {

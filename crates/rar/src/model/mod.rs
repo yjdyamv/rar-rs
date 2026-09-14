@@ -9,6 +9,7 @@ mod entry;
 
 pub use chunk::DataChunk;
 pub use entry::FileHeader;
+pub(crate) use entry::HostAttributes;
 
 #[cfg(test)]
 mod tests {

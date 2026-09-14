@@ -15,6 +15,7 @@ use crate::error::{RarError, RarResult};
 use crate::format::rar4::{
     COMM_HEAD, ENDARC_HEAD, FHD_UNICODE, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, RAR4_METHOD_STORE,
 };
+use crate::format::shared::legacy_time::epoch_to_local_civil;
 
 /// RAR 1.5–4.x signature (7 bytes, not a real block header).
 pub(crate) const RAR4_SIGNATURE: &[u8; 7] = b"Rar!\x1a\x07\x00";
@@ -302,61 +303,6 @@ fn encode_flag_byte(modes: &[u8]) -> u8 {
 
 // ── DOS time encoding ───────────────────────────────────────────────────────
 
-/// Seconds east of UTC for the local time zone, at "now" (minute precision;
-/// targets without a local-time API report UTC).
-fn local_offset_secs() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let utc = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    #[cfg(windows)]
-    {
-        let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
-        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
-        let civil = crate::format::rar4::days_from_civil(
-            i64::from(st.wYear),
-            u32::from(st.wMonth),
-            u32::from(st.wDay),
-        ) * 86_400
-            + i64::from(st.wHour) * 3_600
-            + i64::from(st.wMinute) * 60
-            + i64::from(st.wSecond);
-        civil - utc
-    }
-    #[cfg(unix)]
-    {
-        let secs = utc as libc::time_t;
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        unsafe { libc::localtime_r(&secs, &mut tm) };
-        let civil = crate::format::rar4::days_from_civil(
-            i64::from(tm.tm_year) + 1900,
-            (tm.tm_mon + 1) as u32,
-            tm.tm_mday as u32,
-        ) * 86_400
-            + i64::from(tm.tm_hour) * 3_600
-            + i64::from(tm.tm_min) * 60
-            + i64::from(tm.tm_sec);
-        civil - utc
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        let _ = utc;
-        0
-    }
-}
-
-/// Convert a Unix instant to the "local civil" seconds the legacy catalog
-/// stores (the encoding [`crate::format::rar4::dos_time_to_unix`] produces).
-pub(crate) fn epoch_to_local_civil(secs: u32) -> u32 {
-    (i64::from(secs) + local_offset_secs()).clamp(0, u32::MAX as i64) as u32
-}
-
-/// Convert a legacy "local civil" time back to a Unix instant.
-pub(crate) fn local_civil_to_epoch(secs: u32) -> u32 {
-    (i64::from(secs) - local_offset_secs()).clamp(0, u32::MAX as i64) as u32
-}
-
 /// Convert a Unix timestamp (seconds since epoch) to the RAR4/RAR13 DOS
 /// time field. The field stores *local* wall-clock time (WinRAR's
 /// convention); pre-1980 years wrap like the official writers instead of
@@ -449,6 +395,7 @@ const DIRECTORY_WINDOW_BITS: u16 = 0x00E0;
 mod tests {
     use super::*;
     use crate::format::rar4::RAR4_METHOD_STORE;
+    use crate::format::shared::legacy_time::local_civil_to_epoch;
 
     #[test]
     fn signature_is_correct_length() {

@@ -196,7 +196,7 @@ pub(crate) fn repack_solid_archive(
             // The catalog stores legacy DOS times as local-civil seconds;
             // the writer re-packs from a Unix instant.
             let mtime = if entry.header.format_version == 4 {
-                crate::format::rar4::write::local_civil_to_epoch(entry.header.mtime)
+                crate::format::shared::legacy_time::local_civil_to_epoch(entry.header.mtime)
             } else {
                 entry.header.mtime
             };

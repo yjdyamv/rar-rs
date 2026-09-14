@@ -7,6 +7,7 @@
 
 pub(crate) mod engine;
 pub(crate) mod extract;
+pub(crate) mod legacy_time;
 pub(crate) mod stream;
 pub(crate) mod write_ops;
 

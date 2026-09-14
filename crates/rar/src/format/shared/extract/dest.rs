@@ -14,25 +14,6 @@ use crate::format::rar5::write as rar5_write;
 use crate::fs::safe_path::resolve_redirect_target;
 use crate::fs::safe_path::sanitize_archive_path;
 
-/// Unix permission bits stored in a member's attribute field, when the
-/// member was created on Unix. RAR 1.5–4.x keep the mode in the high half
-/// of the attribute word (the `FILE_ATTRIBUTE_UNIX_EXTENSION` layout),
-/// RAR5 stores the mode directly. RAR 1.3/1.4 and Windows-host members
-/// carry only DOS attribute bits, so there is no mode to restore.
-#[cfg(unix)]
-fn stored_unix_mode(hdr: &crate::model::FileHeader) -> Option<u32> {
-    match hdr.format_version {
-        // RAR 1.3/1.4 carry DOS attributes only.
-        3 => None,
-        // RAR 1.5–4.x: hosts 3 (Unix) and 5 (BeOS) store a mode.
-        4 if matches!(hdr.host_os, 3 | 5) => Some(((hdr.attributes >> 16) & 0o7777) as u32),
-        4 => None,
-        // RAR5+: host 1 is Unix and the attribute vint is the mode.
-        _ if hdr.host_os == 1 => Some((hdr.attributes & 0o7777) as u32),
-        _ => None,
-    }
-}
-
 /// Restore a stored Unix mode, masking off the file-type bits `chmod`
 /// cannot use. Best-effort like the timestamp restoration: a filesystem
 /// that cannot represent the mode must not fail the extraction.
@@ -40,20 +21,6 @@ fn stored_unix_mode(hdr: &crate::model::FileHeader) -> Option<u32> {
 fn apply_unix_mode(dest_path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     let _ = fs::set_permissions(dest_path, fs::Permissions::from_mode(mode));
-}
-
-/// Whether a member's attribute field holds DOS attribute bits rather
-/// than a Unix mode.
-#[cfg(windows)]
-fn windows_host(hdr: &crate::model::FileHeader) -> bool {
-    match hdr.format_version {
-        // RAR 1.3/1.4 always store DOS attributes.
-        3 => true,
-        // RAR 1.5–4.x: hosts 3 (Unix) and 5 (BeOS) carry a mode.
-        4 => !matches!(hdr.host_os, 3 | 5),
-        // RAR5+: host 0 is Windows.
-        _ => hdr.host_os == 0,
-    }
 }
 
 /// Apply the attributes WinRAR restores on Windows: the stored DOS bits
@@ -72,12 +39,15 @@ fn apply_windows_attributes(hdr: &crate::model::FileHeader, dest_path: &Path) {
         | FILE_ATTRIBUTE_HIDDEN
         | FILE_ATTRIBUTE_SYSTEM
         | FILE_ATTRIBUTE_ARCHIVE) as u64;
-    let mut attrs = if windows_host(hdr) {
-        (hdr.attributes & STORED_DOS_ATTRIBUTES) as u32
-    } else if hdr.is_directory {
-        FILE_ATTRIBUTE_DIRECTORY
-    } else {
-        FILE_ATTRIBUTE_ARCHIVE
+    let mut attrs = match hdr.host_attributes() {
+        crate::model::HostAttributes::Dos => (hdr.attributes & STORED_DOS_ATTRIBUTES) as u32,
+        crate::model::HostAttributes::UnixMode(_) => {
+            if hdr.is_directory {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                FILE_ATTRIBUTE_ARCHIVE
+            }
+        }
     };
     if hdr.is_directory {
         attrs |= FILE_ATTRIBUTE_DIRECTORY;
@@ -185,11 +155,10 @@ impl RarArchive {
         // civil-as-UTC seconds, so convert back to an instant here. RAR5
         // regular members default to the Unix epoch when no time record
         // exists (like WinRAR); link redirects without one stay untouched.
-        let legacy = hdr.format_version == 3 || hdr.format_version == 4;
         let time_known = crate::archive::file_header_has_mtime(hdr);
         if time_known {
-            let secs = if legacy {
-                crate::format::rar4::write::local_civil_to_epoch(hdr.mtime)
+            let secs = if hdr.uses_local_civil_time() {
+                crate::format::shared::legacy_time::local_civil_to_epoch(hdr.mtime)
             } else {
                 hdr.mtime
             };
@@ -234,7 +203,7 @@ impl RarArchive {
     /// otherwise complete extraction.
     pub(super) fn apply_member_attributes(&self, hdr: &crate::model::FileHeader, dest_path: &Path) {
         #[cfg(unix)]
-        if let Some(mode) = stored_unix_mode(hdr) {
+        if let crate::model::HostAttributes::UnixMode(mode) = hdr.host_attributes() {
             apply_unix_mode(dest_path, mode);
         }
         #[cfg(windows)]

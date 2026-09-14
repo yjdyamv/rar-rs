@@ -34,6 +34,13 @@ pub(crate) fn check_entry_cap(count: usize, max: usize) -> RarResult<()> {
 }
 
 impl RarArchive {
+    /// Whether the parallel extraction path may decode this archive. The
+    /// parallel phase decodes with the RAR5 codec and uses the RAR5 solid
+    /// rule, so legacy families always stream sequentially.
+    pub(crate) fn supports_parallel_extract(&self) -> bool {
+        !self.is_legacy()
+    }
+
     /// Decode member `idx` to memory, honoring the family's solid chains.
     pub(crate) fn decode_entry_at(&mut self, idx: usize) -> RarResult<Vec<u8>> {
         if self.is_legacy() {
@@ -59,5 +66,38 @@ impl RarArchive {
             return self.decode_solid_through_to(idx, writer);
         }
         self.decode_file_to(idx, writer, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallel_extraction_is_rar5_only() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let legacy = dir.path().join("v29.rar");
+        let mut archive = RarArchive::create_with_options(
+            &legacy,
+            crate::options::CreateOptions {
+                compression: crate::version::ArchiveVersion::V29,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("a.txt", b"legacy data", 0).unwrap();
+        archive.close().unwrap();
+        let legacy = RarArchive::open(&legacy).unwrap();
+        assert!(!legacy.supports_parallel_extract());
+
+        let modern = dir.path().join("v50.rar");
+        let mut archive =
+            RarArchive::create_with_options(&modern, crate::options::CreateOptions::default())
+                .unwrap();
+        archive.add_bytes("a.txt", b"modern data", 0).unwrap();
+        archive.close().unwrap();
+        let modern = RarArchive::open(&modern).unwrap();
+        assert!(modern.supports_parallel_extract());
     }
 }

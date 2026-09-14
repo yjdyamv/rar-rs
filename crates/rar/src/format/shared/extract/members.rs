@@ -139,6 +139,9 @@ impl RarArchive {
     ) -> RarResult<bool> {
         use rayon::prelude::*;
 
+        if !self.supports_parallel_extract() {
+            return Ok(false);
+        }
         if self.progress.is_some() || self.entries.len() < PARALLEL_MIN_MEMBERS {
             return Ok(false);
         }

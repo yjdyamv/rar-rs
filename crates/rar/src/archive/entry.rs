@@ -138,8 +138,8 @@ impl ArchiveEntry {
     /// RAR 1.3–4.x the header stores DOS local wall-clock time, and the
     /// catalog preserves it as civil seconds (the stored date/time fields
     /// interpreted as UTC), so consume it as an instant only after
-    /// applying `format::rar4::write::local_civil_to_epoch` — extraction
-    /// does exactly that (see `apply_member_times`).
+    /// applying `format::shared::legacy_time::local_civil_to_epoch` —
+    /// extraction does exactly that (see `apply_member_times`).
     pub fn mtime(&self) -> u32 {
         self.header.mtime
     }

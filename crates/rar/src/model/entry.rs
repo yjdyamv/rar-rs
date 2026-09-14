@@ -80,6 +80,40 @@ pub struct FileHeader {
     pub comment: Option<Vec<u8>>,
 }
 
+/// Which attribute encoding a member's attribute field holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostAttributes {
+    /// Unix permission bits (RAR5 Unix-host members; RAR 1.5–4.x hosts 3
+    /// and 5, whose mode sits in the high half of the attribute word).
+    UnixMode(u32),
+    /// DOS attribute bits (Windows-host members; RAR 1.3/1.4 always).
+    Dos,
+}
+
+impl FileHeader {
+    /// Whether the stored time is legacy local wall-clock time
+    /// (RAR 1.3–4.x) rather than a Unix instant.
+    pub(crate) fn uses_local_civil_time(&self) -> bool {
+        self.format_version == 3 || self.format_version == 4
+    }
+
+    /// How to interpret the attribute field.
+    pub(crate) fn host_attributes(&self) -> HostAttributes {
+        match self.format_version {
+            // RAR 1.3/1.4 carry DOS attributes only.
+            3 => HostAttributes::Dos,
+            // RAR 1.5–4.x: hosts 3 (Unix) and 5 (BeOS) store a mode.
+            4 if matches!(self.host_os, 3 | 5) => {
+                HostAttributes::UnixMode(((self.attributes >> 16) & 0o7777) as u32)
+            }
+            4 => HostAttributes::Dos,
+            // RAR5+: host 1 is Unix and the attribute vint is the mode.
+            _ if self.host_os == 1 => HostAttributes::UnixMode((self.attributes & 0o7777) as u32),
+            _ => HostAttributes::Dos,
+        }
+    }
+}
+
 impl Default for FileHeader {
     fn default() -> Self {
         FileHeader {
