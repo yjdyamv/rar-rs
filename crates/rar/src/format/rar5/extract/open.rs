@@ -458,15 +458,15 @@ fn parse_quick_open_payload(payload: &[u8], qo_abs: u64) -> RarResult<Vec<Archiv
 /// [`parse_quick_open_payload`] with an explicit entry ceiling. The payload
 /// is capped at [`MAX_METADATA_BYTES`], but its entries are tiny: without
 /// the ceiling a crafted record expands into millions of entry objects.
+/// The ceiling is enforced inside the codec, before each entry is decoded.
 fn parse_quick_open_payload_capped(
     payload: &[u8],
     qo_abs: u64,
     max_entries: usize,
 ) -> RarResult<Vec<ArchiveEntry>> {
-    let catalog = quick_open::decode_payload(payload)?;
-    let mut entries = Vec::with_capacity(catalog.len().min(max_entries));
+    let catalog = quick_open::decode_payload(payload, max_entries)?;
+    let mut entries = Vec::with_capacity(catalog.len());
     for (rel, header_bytes) in catalog {
-        check_entry_cap(entries.len(), max_entries)?;
         let raw = crate::format::rar5::headers::parse_block_bytes(&header_bytes)?;
         if raw.block_type != BLOCK_TYPE_FILE_HEADER {
             return Err(RarError::Format("quick-open: unexpected block type".into()));

@@ -80,12 +80,11 @@ pub(crate) fn build_main_header(
     let (locator, qo_pos, rr_pos) = build_locator_body(quick_open, recovery);
     let mut all_extra = extra.to_vec();
     let locator_body_start = if quick_open || recovery {
-        // Locator record layout: [record size vint][type vint][body].
-        let record_body = vint::encoded_size(LOCATOR_TYPE) + locator.len();
-        let start = all_extra.len()
-            + vint::encoded_size(record_body as u64)
-            + vint::encoded_size(LOCATOR_TYPE);
-        all_extra.extend(frame_locator_record(&locator));
+        let record = frame_locator_record(&locator);
+        // The record is [record size vint][type vint][body]; the body is
+        // its tail, so it starts this far into the record.
+        let start = all_extra.len() + record.len() - locator.len();
+        all_extra.extend(record);
         Some(start)
     } else {
         None

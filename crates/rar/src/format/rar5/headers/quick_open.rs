@@ -14,6 +14,7 @@
 
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::vint;
+use crate::format::shared::extract::check_entry_cap;
 
 /// Convert a declared quick-open size to `usize`, rejecting lengths that do
 /// not fit the host address space: on 32-bit targets `as usize` would
@@ -45,11 +46,14 @@ pub(crate) fn encode_entry(rel: u64, header: &[u8]) -> Vec<u8> {
 /// Decode a quick-open payload into `(relative offset, header block bytes)`
 /// pairs. Every entry CRC is verified and every declared size must fit the
 /// host address space; structural violations are errors (the caller falls
-/// back to a full scan).
-pub(crate) fn decode_payload(payload: &[u8]) -> RarResult<Vec<(u64, Vec<u8>)>> {
+/// back to a full scan). `max_entries` bounds the decode: the payload limit
+/// alone still admits millions of tiny entries, so the ceiling is enforced
+/// before each entry is materialized.
+pub(crate) fn decode_payload(payload: &[u8], max_entries: usize) -> RarResult<Vec<(u64, Vec<u8>)>> {
     let mut entries = Vec::new();
     let mut off = 0usize;
     while off < payload.len() {
+        check_entry_cap(entries.len(), max_entries)?;
         if off + 4 > payload.len() {
             return Err(RarError::Format("quick-open: truncated entry CRC".into()));
         }
@@ -119,15 +123,26 @@ mod tests {
         let mut payload = encode_entry(0, &a);
         payload.extend(encode_entry(4096, &b));
 
-        let decoded = decode_payload(&payload).unwrap();
+        let decoded = decode_payload(&payload, usize::MAX).unwrap();
         assert_eq!(decoded, vec![(0, a), (4096, b)]);
+    }
+
+    #[test]
+    fn entry_cap_bounds_the_decode() {
+        let a = header("a.txt");
+        let mut payload = encode_entry(0, &a);
+        payload.extend(encode_entry(1, &a));
+
+        assert_eq!(decode_payload(&payload, 2).unwrap().len(), 2);
+        let err = decode_payload(&payload, 1).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
     }
 
     #[test]
     fn corrupt_entry_crc_is_rejected() {
         let mut payload = encode_entry(7, &header("a.txt"));
         payload[0] ^= 0xFF;
-        let err = decode_payload(&payload).unwrap_err();
+        let err = decode_payload(&payload, usize::MAX).unwrap_err();
         assert!(matches!(err, RarError::Crc { .. }), "unexpected: {err:?}");
     }
 
