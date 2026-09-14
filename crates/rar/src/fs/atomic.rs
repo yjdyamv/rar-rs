@@ -220,15 +220,17 @@ impl StagedFile {
         ))
     }
 
-    /// Path of the staged sibling (for callers that rename it themselves;
-    /// prefer [`Self::commit`]).
+    /// Path of the staged sibling, for writers that receive the path instead
+    /// of the handle; prefer [`Self::commit`] to install it.
     pub(crate) fn path(&self) -> &Path {
         &self.staged
     }
 
-    /// Install the staged bytes over the destination durably. On failure the
-    /// staged file is kept (still armed) so the caller can retry or let drop
-    /// clean it.
+    /// Install the staged bytes over the destination durably. A failure
+    /// before the rename (for example the staged sync) keeps the staged file
+    /// armed so drop can clean it; a failure after the rename has already
+    /// consumed it. [`StagedSet`] restores its staged files on a failed
+    /// commit.
     pub(crate) fn commit(&mut self) -> RarResult<()> {
         let result = install_durable(&self.staged, &self.dest);
         if result.is_ok() {
@@ -1366,6 +1368,28 @@ mod tests {
             .filter(|name| name.contains("rar5tmp"))
             .collect();
         assert!(leftovers.is_empty(), "staged leftovers: {leftovers:?}");
+    }
+
+    /// A failed install (here: the destination is a directory) keeps the
+    /// staged file until drop, so a caller can retry or clean it.
+    #[test]
+    fn staged_file_keeps_the_stage_when_commit_fails() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("t.rar");
+        std::fs::create_dir(&dest).unwrap();
+
+        let (mut staged, mut file) = super::StagedFile::create(&dest).unwrap();
+        file.write_all(b"new").unwrap();
+        drop(file);
+        let staged_path = staged.path().to_path_buf();
+
+        assert!(staged.commit().is_err());
+        assert!(staged_path.exists(), "the failed stage is kept until drop");
+        drop(staged);
+        assert!(!staged_path.exists());
+        assert!(dest.is_dir(), "the destination must stay untouched");
     }
 
     #[test]

@@ -17,7 +17,7 @@ use super::layout::{archive_is_header_encrypted, header_password};
 use crate::archive::RarArchive;
 use crate::archive::transaction::EditSummary;
 use crate::error::{RarError, RarResult};
-use crate::fs::atomic::temp_sibling_path;
+use crate::fs::atomic::{install_durable, temp_sibling_path};
 use crate::recovery::legacy_rr::scan_protect_with_password;
 
 /// Member generation the repacked archive is written with, derived from the
@@ -287,7 +287,7 @@ pub(crate) fn repack_solid_archive(
 
     match repack {
         Ok(mut summary) => {
-            crate::fs::atomic::install_durable(&tmp_path, &archive.path)?;
+            install_durable(&tmp_path, &archive.path)?;
             summary.deleted = deleted_count;
             summary.renamed = renamed;
             archive.open_read()?;

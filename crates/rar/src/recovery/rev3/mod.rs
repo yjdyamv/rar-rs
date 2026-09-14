@@ -1380,10 +1380,23 @@ fn commit_rebuilt_volumes(
     last_index: usize,
     shard_len: u64,
 ) -> RarResult<Vec<PathBuf>> {
-    let mut set = crate::fs::atomic::StagedSet::new(
+    let mut set = match crate::fs::atomic::StagedSet::new(
         &crate::fs::atomic::parent_dir(&data_paths[0]),
         &crate::archive::volume_base_of(&data_paths[0]),
-    )?;
+    ) {
+        Ok(set) => set,
+        Err(error) => {
+            for (_, tmp, _) in &outputs {
+                let _ = fs::remove_file(tmp);
+            }
+            return Err(error);
+        }
+    };
+    // Adopt every staged rebuild before finalizing any of them: a failure at
+    // any volume then removes them all on drop.
+    for (index, tmp, _) in &outputs {
+        set.track(tmp.clone(), &data_paths[*index]);
+    }
     let mut parked: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut rebuilt = Vec::with_capacity(outputs.len());
     let staged = (|| -> RarResult<()> {
@@ -1408,7 +1421,6 @@ fn commit_rebuilt_volumes(
                 fs::rename(&final_path, &bad).map_err(RarError::Io)?;
                 parked.push((bad, final_path.clone()));
             }
-            set.track(tmp, &final_path);
             rebuilt.push(final_path);
         }
         Ok(())
