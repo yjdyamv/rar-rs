@@ -55,6 +55,21 @@ jobs:
           targets: wasm32-wasip1-threads
       - name: Cargo fmt (workspace)
         run: cargo fmt --all --check
+      - name: Host-path separator guard
+        # Host paths (disk, destination directory, volumes, -w/-op/--dest)
+        # must test separators through `std::path::is_separator`, which is
+        # platform-correct: `/` everywhere, `\` only on Windows. A literal
+        # `ends_with('\\')` is a Windows-only assumption that made
+        # `rar x p.rar dest\` create a literal `dest\` directory on Linux.
+        # Archive-member names may still normalize `\` -> `/` (RAR stores
+        # backslashes), so only the method-on-char-literal shape is guarded.
+        run: |
+          set -euo pipefail
+          printf "ends_with('%s')\nstarts_with('%s')\n" '\\' '\\' > /tmp/host-sep-patterns
+          if grep -rnFf /tmp/host-sep-patterns --include='*.rs' crates/rar-cli/src crates/rar/src; then
+            echo "::error::host paths must use std::path::is_separator, not a literal backslash check"
+            exit 1
+          fi
       - name: Cargo check (workspace defaults)
         run: cargo check --workspace --all-targets --locked
       - name: Cargo check (rar-rs, no default features)

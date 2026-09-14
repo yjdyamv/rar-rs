@@ -37,6 +37,7 @@
 - **Rar20Decoder（`codec/legacy/rar20.rs`）** — RAR 2.x（unp_ver 20/26）LZSS+Huffman 解码器（rars 解码半移植）：自含 MSB 位读器/规范 Huffman（与 rar29 同构，按 rars 惯例逐文件复制）；块头 16 位 peek——bit15=**音频块**（每通道 Huffman 表 + 自适应 delta 预测，`AudioState`），bit14=keep-tables，其余为 LZ 块（主 298 符号：256 重末匹配/257–260 旧偏移/261–268 短距/269 块尾/270–297 全长匹配）；level 长度 19×4bit 直读（无 RAR3 的 0xF 逃逸）。成员尾 `read_last_tables` 消费块尾标记以续链。solid RAR2.x 链读侧已支持：常驻 `Rar20Decoder` 跨成员保窗/保表（`collection/solid` 链，见 Legacy solid chain）。写侧为 rars 移植的 `rar20_encoder.rs`（`Unpack20Encoder` + 自含 `Rar20MatchFinder` + 音频块编码，见 ArchiveVersion）。
 - **PpmdDecoder（`codec/legacy/ppmd.rs`）** — PPMd 变体 H 解码器（rars 解码半移植，编码器不移植）：Suballocator（12 B 单元、双端 bump + 空闲桶 + glue）+ 上下文模型（contexts Vec 模拟 C 指针布局）；`decode_init` 由块头 init byte（reset/阶/字典 MB/esc 标记）重启模型，`decode_symbol` 出符号。错误走自带 `Error`（InvalidData/NeedMoreInput），rar29 侧 From 映射。
 - **Legacy solid chain（老固态链）** — `format/rar5/extract/solid.rs` 对 RAR4 用常驻 `rar4_decoder`（`ReadState`）+ `rar4_decoded_through` 索引镜像 RAR5 链解码；链内 STORE 成员断链（窗口重开）。solid 排序由 WinRAR 决定，链起点=归档首文件。
+- **路径约定（host path vs archive name）** — **主机路径**（磁盘文件、目标目录、卷文件、`-w`/`-op`/`--dest`、位置式目标目录）一律走 `std::path`（`Path`/`PathBuf`），分隔符判定用 `std::path::is_separator`（`/` 全平台、`\` 仅 Windows）；禁止手写 `'\\'` 判定，CI 有 grep 防护。**归档成员名是格式空间**：RAR 以 `\` 作分隔符（WinRAR 存储形式），内部统一规范化为 `/`（`name_policy::arg_to_name`/写侧、`safe_path`/`safe_dest_path`/`selector`/展示都做 `\`→`/`），这是格式语义、与主机平台无关；因此 Unix 文件名里带 `\` 无法在归档内与目录分隔区分（与官方一致，不做特例）。
 
 ## 分层结构（镜像参考架构 rars）
 
