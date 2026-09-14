@@ -728,7 +728,7 @@ impl RarArchive {
         }
         let mut body = main_meta.raw.header_data.clone();
         body[offset..offset + vint_len].copy_from_slice(&new_vint);
-        let plain = plain_header_bytes(&body);
+        let plain = crate::format::rar5::headers::frame_block(&body);
 
         // Stage the archive start up to the main header, the re-encoded main
         // header, and the untouched tail into a temporary sibling; streaming
@@ -1008,20 +1008,6 @@ fn stage_file(
         let _ = std::fs::remove_file(&tmp_path);
     }
     installed
-}
-
-/// Re-encode a plaintext RAR5 header body as the on-disk bytes
-/// `[CRC32][size vint][body]`, matching the read-side block parser.
-fn plain_header_bytes(body: &[u8]) -> Vec<u8> {
-    let size = vint::encode(body.len() as u64);
-    let mut content = Vec::with_capacity(size.len() + body.len());
-    content.extend(&size);
-    content.extend(body);
-    let crc = crc32fast::hash(&content);
-    let mut out = Vec::with_capacity(4 + content.len());
-    out.extend(crc.to_le_bytes());
-    out.extend(content);
-    out
 }
 
 /// Project the plain [`crate::options::CreateOptions`] struct onto the

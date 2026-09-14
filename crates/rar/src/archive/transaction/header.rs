@@ -65,21 +65,12 @@ impl RarArchive {
         body.extend(vint::encode(arch_flags));
         body.extend(&extra);
 
-        let size_bytes = vint::encode(body.len() as u64);
-        let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
-        header_content.extend(&size_bytes);
-        header_content.extend(&body);
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&header_content);
-        let crc = hasher.finalize();
-        let mut hdr = Vec::with_capacity(4 + header_content.len());
-        hdr.extend(crc.to_le_bytes());
-        hdr.extend(header_content);
+        let hdr = crate::format::rar5::headers::frame_block(&body);
 
         // Plaintext-relative offset of the locator offset fields inside the
         // locator body (see write_archive_header_with_locators).
         let field_base = 4usize
-            + size_bytes.len()
+            + vint::encoded_size(body.len() as u64)
             + vint::encoded_size(BLOCK_TYPE_ARCHIVE_HEADER)
             + vint::encoded_size(block_flags)
             + vint::encoded_size(extra.len() as u64)

@@ -13,6 +13,23 @@ use crate::format::rar5::{
     FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX,
 };
 
+/// Frame a plaintext RAR5 block body as the on-disk envelope
+/// `[CRC32 LE][header size vint][body]`, with the CRC taken over the stored
+/// size vint bytes plus the body. The single writer of the RAR5 block
+/// envelope: every header builder below frames through it, and the
+/// surgical-rewrite paths call it for rebuilt headers.
+pub(crate) fn frame_block(body: &[u8]) -> Vec<u8> {
+    let size_bytes = vint::encode(body.len() as u64);
+    let mut content = Vec::with_capacity(size_bytes.len() + body.len());
+    content.extend(&size_bytes);
+    content.extend(body);
+    let crc = crc32fast::hash(&content);
+    let mut out = Vec::with_capacity(4 + content.len());
+    out.extend(crc.to_le_bytes());
+    out.extend(content);
+    out
+}
+
 impl ArchiveHeader {
     /// Serialize to RAR5 binary format (including CRC).
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -44,19 +61,7 @@ impl ArchiveHeader {
 
         body.extend(&self.extra_data);
 
-        let size_bytes = vint::encode(body.len() as u64);
-        let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
-        header_content.extend(&size_bytes);
-        header_content.extend(&body);
-
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&header_content);
-        let crc = hasher.finalize();
-
-        let mut result = Vec::with_capacity(4 + header_content.len());
-        result.extend(crc.to_le_bytes());
-        result.extend(header_content);
-        result
+        frame_block(&body)
     }
 }
 
@@ -135,19 +140,7 @@ impl FileHeader {
 
         body.extend(&self.extra_data);
 
-        let size_bytes = vint::encode(body.len() as u64);
-        let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
-        header_content.extend(&size_bytes);
-        header_content.extend(&body);
-
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&header_content);
-        let crc = hasher.finalize();
-
-        let mut result = Vec::with_capacity(4 + header_content.len());
-        result.extend(crc.to_le_bytes());
-        result.extend(header_content);
-        result
+        frame_block(&body)
     }
 }
 
@@ -179,19 +172,7 @@ impl EndOfArchiveHeader {
         body.extend(vint::encode(BLOCK_FLAG_SKIP_IF_UNKNOWN));
         body.extend(vint::encode(self.flags));
 
-        let size_bytes = vint::encode(body.len() as u64);
-        let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
-        header_content.extend(&size_bytes);
-        header_content.extend(&body);
-
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&header_content);
-        let crc = hasher.finalize();
-
-        let mut result = Vec::with_capacity(4 + header_content.len());
-        result.extend(crc.to_le_bytes());
-        result.extend(header_content);
-        result
+        frame_block(&body)
     }
 }
 
@@ -297,17 +278,7 @@ pub(crate) fn build_comment_block(comment: &[u8]) -> Vec<u8> {
     body.extend(vint::encode(3u64)); // name length
     body.extend(b"CMT");
 
-    let size_bytes = vint::encode(body.len() as u64);
-    let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
-    header_content.extend(&size_bytes);
-    header_content.extend(&body);
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&header_content);
-    let crc = hasher.finalize();
-
-    let mut block = Vec::with_capacity(4 + header_content.len() + comment.len());
-    block.extend(crc.to_le_bytes());
-    block.extend(header_content);
+    let mut block = frame_block(&body);
     block.extend_from_slice(comment);
     block
 }
@@ -338,17 +309,7 @@ pub(crate) fn build_service_block(
     body.extend(name.as_bytes());
     body.extend(subdata);
 
-    let size_bytes = vint::encode(body.len() as u64);
-    let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
-    header_content.extend(&size_bytes);
-    header_content.extend(&body);
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&header_content);
-    let crc = hasher.finalize();
-    let mut hdr = Vec::with_capacity(4 + header_content.len());
-    hdr.extend(crc.to_le_bytes());
-    hdr.extend(header_content);
-    hdr
+    frame_block(&body)
 }
 /// Serialize an "STM" NTFS-stream service block: the same envelope as
 /// [`build_service_block`], but carrying the plaintext CRC32 over the
@@ -385,17 +346,7 @@ pub(crate) fn build_stream_block(
     body.extend(b"STM");
     body.extend_from_slice(extra);
 
-    let size_bytes = vint::encode(body.len() as u64);
-    let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
-    header_content.extend(&size_bytes);
-    header_content.extend(&body);
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&header_content);
-    let header_crc = hasher.finalize();
-    let mut hdr = Vec::with_capacity(4 + header_content.len());
-    hdr.extend(header_crc.to_le_bytes());
-    hdr.extend(header_content);
-    hdr
+    frame_block(&body)
 }
 
 /// Encode `value` as a fixed 5-byte RAR5 vint (LSB-first, continuation bit
@@ -433,5 +384,24 @@ mod tests {
             parsed.dict_size_bytes,
             Some(crate::options::MAX_RAR7_DICTIONARY_BYTES)
         );
+    }
+
+    #[test]
+    fn frame_block_emits_the_read_side_envelope() {
+        let body = [1u8, 2, 3, 4, 5];
+        let framed = frame_block(&body);
+
+        let raw = crate::format::rar5::headers::parse_block_bytes(&framed).unwrap();
+        assert_eq!(raw.header_data, body, "the body must round-trip verbatim");
+        assert_eq!(raw.data_offset, framed.len() as u64);
+
+        // The CRC covers the stored size vint plus the body, and nothing
+        // else (no trailing data area in this call).
+        let content = &framed[4..];
+        assert_eq!(
+            u32::from_le_bytes(framed[..4].try_into().unwrap()),
+            crc32fast::hash(content)
+        );
+        assert_eq!(content[0] as usize, body.len());
     }
 }

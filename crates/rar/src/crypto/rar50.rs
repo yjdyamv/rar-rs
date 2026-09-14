@@ -589,19 +589,7 @@ impl EncryptionParams {
             body.extend_from_slice(ck);
         }
 
-        let size_bytes = vint::encode(body.len() as u64);
-        let mut header_content = Vec::with_capacity(size_bytes.len() + body.len());
-        header_content.extend(&size_bytes);
-        header_content.extend(&body);
-
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&header_content);
-        let crc = hasher.finalize();
-
-        let mut out = Vec::with_capacity(4 + header_content.len());
-        out.extend(crc.to_le_bytes());
-        out.extend(header_content);
-        out
+        crate::format::rar5::headers::frame_block(&body)
     }
 }
 
