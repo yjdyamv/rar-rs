@@ -9,7 +9,11 @@ pub struct SlidingWindow {
 }
 
 impl SlidingWindow {
-    /// Create a new window of the given size (must be a power of 2).
+    /// Create a new window of the given size.
+    ///
+    /// `size` must be a non-zero power of two. That invariant is asserted in
+    /// debug builds only: every caller derives the size from a dictionary
+    /// size, which the RAR5/RAR7 format restricts to powers of two.
     pub fn new(size: usize) -> Self {
         debug_assert!(size.is_power_of_two());
         SlidingWindow {
@@ -37,6 +41,9 @@ impl SlidingWindow {
     /// lookbehind tail forward: the last `min(old capacity, total_written)`
     /// bytes stay addressable at their stream offsets, the write cursor and
     /// `total_written` are preserved. Smaller or equal sizes are a no-op.
+    ///
+    /// `new_size` must be a power of two (asserted in debug builds; callers
+    /// are internal and derive it from a dictionary size).
     ///
     /// A solid-chain continuation may declare a dictionary larger than the
     /// chain head's; growing (rather than rejecting) matches the reference
@@ -130,5 +137,96 @@ mod tests {
         w.put_byte(b'a');
         w.copy_match(1, 5); // repeat 'a' 5 times
         assert_eq!(&w.get_output(0, 6), b"aaaaaa");
+    }
+
+    /// Fill past capacity (so the write cursor wraps and the ring is full of
+    /// wrapped data), then grow and check the whole obtainable tail against a
+    /// plain `Vec` model of the same stream.
+    #[test]
+    fn grow_preserves_the_wrapped_tail_and_cursor() {
+        let mut window = SlidingWindow::new(64);
+        let mut model: Vec<u8> = Vec::new();
+        let mut state = 0x1234_5678u32;
+        for _ in 0..300 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let byte = (state >> 24) as u8;
+            window.put_byte(byte);
+            model.push(byte);
+        }
+        // A `copy_match` advancing the ring too, so both write paths touch
+        // the wrapped region.
+        window.copy_match(5, 40);
+        let src = model.len() - 5;
+        for i in 0..40 {
+            let byte = model[src + i];
+            model.push(byte);
+        }
+
+        let total = model.len() as u64;
+        assert_eq!(window.total_written(), total);
+        let old_capacity = window.capacity();
+        for len in 1..=old_capacity {
+            assert_eq!(
+                window.get_output(total - len as u64, len),
+                model[model.len() - len..],
+                "pre-grow tail of {len} bytes"
+            );
+        }
+
+        window.grow(256);
+        assert_eq!(window.capacity(), 256);
+        assert_eq!(window.total_written(), total, "total_written must survive");
+        // Every byte the old ring could serve is still at the same stream
+        // offset.
+        for len in 1..=old_capacity {
+            assert_eq!(
+                window.get_output(total - len as u64, len),
+                model[model.len() - len..],
+                "post-grow tail of {len} bytes"
+            );
+        }
+
+        // The new headroom becomes addressable as new data is written: after
+        // more than `new_size` bytes the 250-byte tail crosses the ring's
+        // wrap and must still match the model.
+        for _ in 0..300 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let byte = (state >> 24) as u8;
+            window.put_byte(byte);
+            model.push(byte);
+        }
+        let total = model.len() as u64;
+        assert_eq!(window.total_written(), total);
+        assert_eq!(
+            window.get_output(total - 250, 250),
+            model[model.len() - 250..]
+        );
+
+        // The cursor continues where the stream left off: new writes land at
+        // `total` and read back through `get_output`.
+        for byte in [0xAA, 0x55, 0x00, 0xFF] {
+            window.put_byte(byte);
+            model.push(byte);
+        }
+        assert_eq!(window.total_written(), model.len() as u64);
+        assert_eq!(window.get_output(total, 4), [0xAA, 0x55, 0x00, 0xFF]);
+        assert_eq!(window.get_output(total - 50, 54), model[model.len() - 54..]);
+    }
+
+    /// Growing to the same or a smaller size is a no-op: capacity and the
+    /// cursor stay put.
+    #[test]
+    fn grow_to_smaller_size_is_a_no_op() {
+        let mut window = SlidingWindow::new(64);
+        for byte in 0..100u8 {
+            window.put_byte(byte);
+        }
+        let total = window.total_written();
+        window.grow(64);
+        window.grow(32);
+        assert_eq!(window.capacity(), 64);
+        assert_eq!(window.total_written(), total);
+        window.put_byte(0xEE);
+        assert_eq!(window.get_output(total, 1), [0xEE]);
     }
 }

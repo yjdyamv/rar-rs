@@ -5,9 +5,11 @@ use crate::error::{RarError, RarResult};
 
 /// Sanitize an archive member name for safe extraction.
 ///
-/// Rejects empty names, absolute paths, `..` traversal components, NUL
-/// bytes and Windows drive/ADS components (`:`). Backslashes are treated
-/// as separators and redundant `.`/empty components are dropped.
+/// Rejects empty names, absolute paths, `..` traversal components and NUL
+/// bytes, plus the host hazards checked by [`component_is_ambiguous`]
+/// (Windows drive/ADS `:` components, device names, trailing dots/spaces).
+/// Backslashes are treated as separators and redundant `.`/empty
+/// components are dropped.
 pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
     if name.is_empty() {
         return Err(RarError::Security("empty entry name".into()));
@@ -31,11 +33,6 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
                 "entry name {name:?} contains a '..' traversal component"
             )));
         }
-        if comp.contains(':') {
-            return Err(RarError::Security(format!(
-                "entry name {name:?} contains a ':' (drive/ADS) component"
-            )));
-        }
         if component_is_ambiguous(comp) {
             return Err(RarError::Security(format!(
                 "entry name {name:?} contains the platform-ambiguous component {comp:?}"
@@ -57,8 +54,11 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
 /// Whether a path component means something different on this platform than
 /// it does on POSIX.
 ///
-/// Windows normalizes paths in two ways the generic checks above cannot see:
+/// Windows normalizes paths in three ways the generic checks above cannot
+/// see:
 ///
+/// - a `:` names a drive (`C:`) or an alternate data stream (`name:stream`),
+///   so the component does not resolve to the literal name written;
 /// - trailing dots and spaces are stripped, so `".. "` opens as `".."` and a
 ///   name like `"report."` opens under a different name than it was written
 ///   with;
@@ -66,11 +66,15 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
 ///   `LPT1`–`LPT9`) refer to devices regardless of any extension, so
 ///   `"CON.txt"` writes to the console rather than to a file.
 ///
-/// Both are host hazards rather than archive-format hazards, so the check is
-/// compiled for Windows only — POSIX accepts these names and nothing about
-/// them is ambiguous there.
+/// All three are host hazards rather than archive-format hazards, so the
+/// check is compiled for Windows only — POSIX accepts these names (`:` in
+/// particular is an ordinary filename character and official unrar extracts
+/// `foo:bar` on Linux) and nothing about them is ambiguous there.
 #[cfg(windows)]
 fn component_is_ambiguous(component: &str) -> bool {
+    if component.contains(':') {
+        return true;
+    }
     if component.ends_with('.') || component.ends_with(' ') {
         return true;
     }
@@ -108,7 +112,8 @@ fn component_is_ambiguous(_component: &str) -> bool {
 /// inside the extraction root:
 ///
 /// - **absolute targets** (`/etc/passwd`, `\\?\C:\…`),
-/// - **Windows drive / ADS components** (`C:/…`, `name:stream`),
+/// - **Windows drive / ADS components** (`C:/…`, `name:stream`) and the
+///   other host-ambiguous names checked by [`component_is_ambiguous`],
 /// - **targets that walk above the root** (`../..`, `a/../../../b`).
 ///
 /// A target that merely moves sideways inside the root (`sub/../target.txt`)
@@ -144,14 +149,11 @@ pub(crate) fn resolve_redirect_target(link_dir: &str, target: &str) -> RarResult
                     "redirect target {target:?} escapes the destination directory"
                 )));
             }
-        } else if component.contains(':') {
-            return Err(RarError::Security(format!(
-                "redirect target {target:?} contains a ':' (drive/ADS) component"
-            )));
         } else if component_is_ambiguous(component) {
-            // Win32 normalizes these names (trailing dot/space stripping,
-            // device names) when the link is later opened, so the lexical
-            // containment check alone would not hold on disk.
+            // Win32 normalizes these names (drive/ADS colons, trailing
+            // dot/space stripping, device names) when the link is later
+            // opened, so the lexical containment check alone would not hold
+            // on disk.
             return Err(RarError::Security(format!(
                 "redirect target {target:?} contains the platform-ambiguous component {component:?}"
             )));
@@ -173,7 +175,6 @@ mod tests {
         assert!(sanitize_archive_path("a\0b").is_err());
         assert!(sanitize_archive_path("/etc/passwd").is_err());
         assert!(sanitize_archive_path("a/../b").is_err());
-        assert!(sanitize_archive_path("C:/x").is_err());
         // Redundant components are dropped, not rejected.
         assert_eq!(sanitize_archive_path("a/./b//c").unwrap(), "a/b/c");
     }
@@ -185,11 +186,25 @@ mod tests {
     #[cfg(windows)]
     fn windows_ambiguous_components_are_rejected() {
         for component in [
+            // Colons name drives / alternate data streams on Windows.
+            "C:",
+            "C:/x",
+            "name:stream",
+            "foo:bar",
             // Trailing dots and spaces are stripped by Win32, so `".. "`
             // opens as `".."`.
-            ".. ", "...", "report.", "name ",
+            ".. ",
+            "...",
+            "report.",
+            "name ",
             // Legacy device names, with and without an extension.
-            "CON", "con", "NUL.txt", "aux", "COM1", "com9", "LPT1.log",
+            "CON",
+            "con",
+            "NUL.txt",
+            "aux",
+            "COM1",
+            "com9",
+            "LPT1.log",
         ] {
             assert!(
                 component_is_ambiguous(component),
@@ -210,14 +225,23 @@ mod tests {
         }
     }
 
-    /// POSIX has neither device names nor trailing-dot normalization, so the
-    /// same names stay legal there — the check is platform-scoped on purpose.
+    /// POSIX has neither device names, trailing-dot normalization nor ADS
+    /// semantics, so the same names stay legal there — the check is
+    /// platform-scoped on purpose. `foo:bar` in particular is an ordinary
+    /// filename on Linux, matching official unrar.
     #[test]
     #[cfg(not(windows))]
     fn posix_accepts_names_windows_would_reject() {
         assert!(!component_is_ambiguous("CON"));
         assert!(!component_is_ambiguous("report."));
+        assert!(!component_is_ambiguous("foo:bar"));
         assert_eq!(sanitize_archive_path("report.").unwrap(), "report.");
+        assert_eq!(sanitize_archive_path("foo:bar").unwrap(), "foo:bar");
+        assert_eq!(sanitize_archive_path("C:/x").unwrap(), "C:/x");
+        assert_eq!(
+            resolve_redirect_target("dir", "foo:bar").unwrap(),
+            ["dir", "foo:bar"]
+        );
     }
 
     #[test]
@@ -247,12 +271,12 @@ mod tests {
             "../../../outside.txt",
             // Windows spellings go through the same normalizer.
             "..\\..\\outside.txt",
-            // Absolute paths and drive prefixes can never resolve inside.
+            // Absolute paths can never resolve inside. (`C:/Windows/win.ini`
+            // is absolute on Windows; on POSIX it is a relative name and is
+            // covered by the ambiguity test there.)
             "/etc/passwd",
             "//server/share",
-            "C:/Windows/win.ini",
             "\\\\?\\C:\\Windows",
-            "name:stream",
         ] {
             let err = resolve_redirect_target("dir", target).unwrap_err();
             assert!(
@@ -269,7 +293,15 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn redirect_targets_reject_ambiguous_components() {
-        for target in [".. ", "...", "CON", "NUL.txt", "report."] {
+        for target in [
+            ".. ",
+            "...",
+            "CON",
+            "NUL.txt",
+            "report.",
+            "name:stream",
+            "C:/Windows/win.ini",
+        ] {
             let err = resolve_redirect_target("dir", target).unwrap_err();
             assert!(
                 matches!(err, crate::error::RarError::Security(_)),

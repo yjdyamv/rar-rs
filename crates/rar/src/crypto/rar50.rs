@@ -38,6 +38,21 @@ type HmacSha256 = Hmac<Sha256>;
 /// are rejected at parse time to prevent CPU denial-of-service.
 pub const MAX_KDF_COUNT_LOG: u8 = 24;
 
+/// The defined bits of the encryption-record `flags` field. Unknown bits are
+/// rejected at parse time: a vint can carry more than 8 bits, and truncating
+/// it to `u8` (e.g. `0x102` -> `0x02`) would silently flip `uses_hash_mac`.
+const ENCR_FLAGS_KNOWN: u64 = (ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC) as u64;
+
+/// Reject an encryption-record `flags` value with undefined bits set.
+fn check_encr_flags(flags: u64) -> RarResult<()> {
+    if flags & !ENCR_FLAGS_KNOWN != 0 {
+        return Err(RarError::Format(format!(
+            "unsupported encryption flags {flags:#x} (known bits {ENCR_FLAGS_KNOWN:#x})"
+        )));
+    }
+    Ok(())
+}
+
 /// Constant-time byte-slice comparison.
 pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -349,6 +364,7 @@ impl EncryptionParams {
         let (flags, n) = vint::decode_from_slice(data, offset)
             .map_err(|e| RarError::Format(format!("encr flags: {e}")))?;
         offset += n;
+        check_encr_flags(flags)?;
 
         if offset >= data.len() {
             return Err(RarError::Format("truncated encryption record".into()));
@@ -620,6 +636,7 @@ pub fn parse_archive_encrypt_header(
     let (flags, n) = vint::decode_from_slice(data, offset)
         .map_err(|e| RarError::Format(format!("encr flags: {e}")))?;
     offset += n;
+    check_encr_flags(flags)?;
 
     if offset >= data.len() {
         return Err(RarError::Format("truncated encryption header".into()));
@@ -857,6 +874,51 @@ mod tests {
 
         let err = parse_archive_encrypt_header(&archive_encrypt_header(1, 0)).unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "got {err}");
+    }
+
+    /// Undefined flag bits must be rejected instead of truncated; `flags`
+    /// is a vint, so `0x102` must not become `0x02` (which would silently
+    /// flip `uses_hash_mac`).
+    #[test]
+    fn unknown_encryption_flags_are_rejected() {
+        for flags in [
+            u64::from(ENCR_FLAG_CHECKSUM) | 0x04, // unknown bit next to a known one
+            0x100,                                // only bits above the u8 range
+            u64::from(ENCR_FLAG_HASH_MAC) | 0x100, // truncates to 0x02
+        ] {
+            let err = EncryptionParams::from_extra_bytes(&encr_record(0, flags, None)).unwrap_err();
+            assert!(
+                matches!(err, RarError::Format(_)),
+                "flags {flags:#x}: {err}"
+            );
+
+            let err = parse_archive_encrypt_header(&archive_encrypt_header(0, flags)).unwrap_err();
+            assert!(
+                matches!(err, RarError::Format(_)),
+                "flags {flags:#x}: {err}"
+            );
+        }
+
+        // The defined combinations still parse (the check bit needs its
+        // 12-byte value present).
+        for flags in [0u64, u64::from(ENCR_FLAG_HASH_MAC)] {
+            assert!(
+                EncryptionParams::from_extra_bytes(&encr_record(0, flags, None)).is_ok(),
+                "flags {flags:#x}"
+            );
+            assert!(
+                parse_archive_encrypt_header(&archive_encrypt_header(0, flags)).is_ok(),
+                "flags {flags:#x}"
+            );
+        }
+        let with_check = u64::from(ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC);
+        assert!(
+            EncryptionParams::from_extra_bytes(&encr_record(0, with_check, Some([0u8; 12])))
+                .is_ok()
+        );
+        let mut raw = archive_encrypt_header(0, with_check);
+        raw.header_data.extend_from_slice(&[0u8; 12]);
+        assert!(parse_archive_encrypt_header(&raw).is_ok());
     }
 
     #[test]

@@ -56,6 +56,27 @@ fn auto_delta_probe_enabled(delta: FilterMode, x86: FilterMode) -> bool {
     delta == FilterMode::Auto && x86 != FilterMode::Forced
 }
 
+/// Collapse the merged sample-detected x86 regions into the single
+/// member-relative span the streaming writer filters: from the first
+/// detected region to the end of the member.
+///
+/// Extending *every* detected region to `file_size` made the emitted
+/// records overlap. The buffered writer's `validate_filter_specs` rejects
+/// exactly that shape, the streaming decoder applies records in order (so
+/// the overlap was transformed twice), and official WinRAR writes disjoint
+/// records (observed: adjacent 64 KiB records). Keeping one span from the
+/// first detection preserves the intent — once the leading sample looks
+/// like x86 code, filter from there through EOF — while leaving the records
+/// disjoint; [`crate::codec::lzss_huff::x86_stream_window`] splits the span
+/// at `MAX_FILTER_BLOCK_LENGTH` per window, like WinRAR's records.
+fn x86_region_span(regions: &mut Vec<std::ops::Range<usize>>, file_size: usize) {
+    let Some(start) = regions.iter().map(|region| region.start).min() else {
+        return;
+    };
+    regions.clear();
+    regions.push(start..file_size);
+}
+
 impl RarArchive {
     /// Stream a STORE member directly from a reader (bounded memory).
     ///
@@ -396,9 +417,11 @@ impl RarArchive {
         // (a whole-member comparison is impossible without a second
         // read+encode pass); member-relative region records keep positions
         // correct and the `packed_size` guard below still protects against
-        // STORE. x86 regions detected in the sample are extended to the
-        // full file size (the E8/E8E9 encoder only touches actual opcodes
-        // within the region, so non-opcode bytes pass through unchanged).
+        // STORE. Once x86 code is detected in the sample, the filtered span
+        // runs from the first detected region through end-of-member (see
+        // [`x86_region_span`]): the E8/E8E9 encoder only touches actual
+        // opcodes, so non-opcode bytes within the span pass through
+        // unchanged.
         let filter_policy = self.write_ctx().compression.filters;
         let mut delta_channels: Option<u8> = None;
         let mut x86_filter_type: Option<u8> = None;
@@ -508,13 +531,10 @@ impl RarArchive {
                                 }
                             }
                         }
-                        // Extend sample regions to the full file size:
-                        // the E8/E8E9 encoder only touches actual opcodes,
-                        // so non-opcode bytes within the extended region
-                        // pass through unchanged.
-                        for r in &mut x86_regions {
-                            r.end = r.end.max(file_size as usize);
-                        }
+                        // Extend the merged sample regions into one span
+                        // through end-of-member (disjoint records; see
+                        // `x86_region_span`).
+                        x86_region_span(&mut x86_regions, file_size as usize);
                     }
                 }
             }
@@ -909,7 +929,7 @@ impl RarArchive {
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_delta_probe_enabled, ensure_compatible_stream_filters};
+    use super::{auto_delta_probe_enabled, ensure_compatible_stream_filters, x86_region_span};
     use crate::error::RarError;
     use crate::options::FilterMode;
 
@@ -952,5 +972,29 @@ mod tests {
             FilterMode::Disabled
         ));
         assert!(ensure_compatible_stream_filters(false, true).is_ok());
+    }
+
+    /// The streaming x86 records must be disjoint: collapse the merged
+    /// sample regions into the span from the first detection to EOF instead
+    /// of extending each region (which produced overlapping records).
+    #[test]
+    fn x86_stream_region_span_is_disjoint() {
+        let mut regions = vec![16..100, 200..300, 640..1024];
+        x86_region_span(&mut regions, 4096);
+        assert_eq!(regions, vec![16..4096]);
+
+        // Unordered input still starts at the earliest detection.
+        let mut regions = vec![512..600, 32..64];
+        x86_region_span(&mut regions, 4096);
+        assert_eq!(regions, vec![32..4096]);
+
+        let mut single: Vec<std::ops::Range<usize>> = Vec::new();
+        single.push(0..64);
+        x86_region_span(&mut single, 4096);
+        assert_eq!(single, vec![0..4096]);
+
+        let mut empty: Vec<std::ops::Range<usize>> = Vec::new();
+        x86_region_span(&mut empty, 4096);
+        assert!(empty.is_empty());
     }
 }

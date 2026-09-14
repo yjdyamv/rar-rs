@@ -1022,12 +1022,20 @@ fn sanitize_archive_path_rejects_unsafe_names() {
         "a/../../b",
         "/etc/passwd",
         "//server/share",
-        "C:/windows",
-        "c:\\windows",
         "file.txt\0",
         ".",
         "./",
     ] {
+        assert!(
+            sanitize_archive_path(bad).is_err(),
+            "{bad:?} should be rejected"
+        );
+    }
+    // Drive/ADS names mean something different only on Windows; POSIX
+    // treats `:` as an ordinary filename character (official unrar extracts
+    // `foo:bar` on Linux), so the rejection is platform-scoped.
+    #[cfg(windows)]
+    for bad in ["C:/windows", "c:\\windows"] {
         assert!(
             sanitize_archive_path(bad).is_err(),
             "{bad:?} should be rejected"

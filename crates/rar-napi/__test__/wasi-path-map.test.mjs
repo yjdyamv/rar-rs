@@ -29,6 +29,68 @@ test('win32 absolute paths map to guest /<DRIVE>:/ paths', () => {
   assert.equal(toGuestPath('C:', 'win32'), '/C:')
 })
 
+test('win32 verbatim and device drive paths map like the plain drive path', () => {
+  assert.equal(
+    toGuestPath('\\\\?\\C:\\Users\\me\\out.rar', 'win32'),
+    '/C:/Users/me/out.rar',
+  )
+  assert.equal(toGuestPath('\\\\?\\D:\\tmp\\x', 'win32'), '/D:/tmp/x')
+  assert.equal(toGuestPath('\\\\?\\d:\\lower\\x', 'win32'), '/D:/lower/x')
+  assert.equal(toGuestPath('\\\\?\\C:', 'win32'), '/C:')
+  assert.equal(toGuestPath('\\\\?\\C:\\', 'win32'), '/C:')
+  assert.equal(
+    toGuestPath('\\\\.\\C:\\Users\\me\\out.rar', 'win32'),
+    '/C:/Users/me/out.rar',
+  )
+  assert.equal(toGuestPath('\\\\.\\D:\\tmp\\x', 'win32'), '/D:/tmp/x')
+  assert.equal(toGuestPath('\\\\.\\C:', 'win32'), '/C:')
+  // Normalizing the prefix away means the inverse yields the plain drive
+  // path rather than a verbatim/device spelling.
+  assert.equal(
+    toHostPath(toGuestPath('\\\\?\\C:\\x', 'win32'), 'win32'),
+    'C:\\x',
+  )
+  assert.equal(
+    toHostPath(toGuestPath('\\\\.\\D:\\x', 'win32'), 'win32'),
+    'D:\\x',
+  )
+})
+
+test('win32 UNC and non-drive verbatim/device paths throw explicitly', () => {
+  const assertUnsupported = (p, patterns) => {
+    assert.throws(
+      () => toGuestPath(p, 'win32'),
+      (err) => {
+        assert.ok(err instanceof Error)
+        for (const pattern of patterns) assert.match(err.message, pattern)
+        return true
+      },
+    )
+  }
+  assertUnsupported('\\\\server\\share\\x', [/unsupported/i, /UNC/])
+  assertUnsupported('\\\\?\\UNC\\server\\share\\x', [/unsupported/i, /UNC/])
+  assertUnsupported('\\\\?\\unc\\server\\share\\x', [/unsupported/i, /UNC/])
+  assertUnsupported(
+    '\\\\?\\Volume{01234567-0000-0000-0000-000000000000}\\x',
+    [/unsupported/i, /verbatim/i],
+  )
+  assertUnsupported('\\\\.\\pipe\\rar', [/unsupported/i, /device/i])
+})
+
+test('verbatim/device handling leaves relative and drive-relative paths unchanged', () => {
+  const cwd = 'C:\\work\\proj'
+  assert.equal(toGuestPath('out.rar', 'win32', cwd), '/C:/work/proj/out.rar')
+  assert.equal(
+    toGuestPath('.\\sub\\out.rar', 'win32', cwd),
+    '/C:/work/proj/sub/out.rar',
+  )
+  assert.equal(
+    toGuestPath('C:relative', 'win32', cwd),
+    '/C:/work/proj/relative',
+  )
+  assert.equal(toGuestPath('/tmp/x', 'win32', cwd), '/tmp/x')
+})
+
 test('non-Windows absolute paths pass through; relative paths resolve', () => {
   assert.equal(toGuestPath('/tmp/x', 'linux'), '/tmp/x')
   assert.equal(toGuestPath('C:\\x', 'linux'), 'C:\\x')

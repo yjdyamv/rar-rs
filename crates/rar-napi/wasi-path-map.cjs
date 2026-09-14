@@ -19,12 +19,38 @@
 // On non-Windows hosts absolute paths already start with '/', so they pass
 // through unchanged and the loader keeps the default '/' -> '/' preopen;
 // relative paths resolve against the process cwd the same way.
+//
+// Windows verbatim/device/UNC shapes are normalized explicitly (dunce-style):
+//   \\?\C:\x  and  \\.\C:\x   ->  /C:/x   (verbatim/device drive alias)
+//   \\server\share\x, \\?\UNC\server\share\x, and any other non-drive
+//   verbatim/device shape have no guest preopen to resolve against, so they
+//   throw a descriptive Error instead of surfacing a confusing guest ENOENT.
 
 const path = require('node:path')
 const fs = require('node:fs')
 
 const DRIVE_RE = /^([A-Za-z]):(?:([\\/].*))?$/
 const DRIVE_HOST_RE = /^\/([A-Za-z]):(?:\/(.*))?$/
+const VERBATIM_PREFIX = '\\\\?\\'
+const DEVICE_PREFIX = '\\\\.\\'
+
+function uncUnsupportedError(p) {
+  return new Error(
+    `Unsupported Windows path for WASI mapping: UNC paths are not ` +
+      `supported because the WASI guest only exposes '/' and the ` +
+      `'/A:'..'/Z:' drive preopens (got ${JSON.stringify(p)}). Copy the ` +
+      `file to a local drive or use a drive-absolute path like 'C:\\...'.`,
+  )
+}
+
+function unsupportedShapeError(p, shape) {
+  return new Error(
+    `Unsupported Windows path for WASI mapping: ${shape} has no guest ` +
+      `preopen to resolve against (got ${JSON.stringify(p)}). The WASI ` +
+      `guest only exposes '/' and the '/A:'..'/Z:' drive preopens; use a ` +
+      `drive-absolute path like 'C:\\...' or a relative path.`,
+  )
+}
 
 function toGuestPath(p, platform = process.platform, cwd = process.cwd()) {
   if (typeof p !== 'string' || p === '') return p
@@ -34,13 +60,31 @@ function toGuestPath(p, platform = process.platform, cwd = process.cwd()) {
     if (path.posix.isAbsolute(p) || DRIVE_RE.test(p)) return p
     return path.posix.resolve(cwd, p)
   }
-  // Drive-absolute, guest-style ('/...') and other rooted/UNC Windows paths
+  // Drive-absolute, guest-style ('/...') and rooted ('\...') Windows paths
   // are absolute and keep their existing mapping/pass-through; relative
-  // paths resolve against the process cwd first.
-  const host =
-    DRIVE_RE.test(p) || p.startsWith('/') || p.startsWith('\\')
-      ? p
-      : path.win32.resolve(cwd, p)
+  // paths resolve against the process cwd first. Verbatim/device/UNC shapes
+  // are normalized or rejected before that (see the header comment).
+  let host = p
+  if (host.startsWith(VERBATIM_PREFIX)) {
+    host = host.slice(VERBATIM_PREFIX.length)
+    if (/^UNC(?:[\\/]|$)/i.test(host)) throw uncUnsupportedError(p)
+    if (!DRIVE_RE.test(host)) {
+      throw unsupportedShapeError(p, 'verbatim path without a drive letter')
+    }
+  } else if (host.startsWith(DEVICE_PREFIX)) {
+    host = host.slice(DEVICE_PREFIX.length)
+    if (!DRIVE_RE.test(host)) {
+      throw unsupportedShapeError(p, 'device path')
+    }
+  } else if (host.startsWith('\\\\')) {
+    throw uncUnsupportedError(p)
+  } else if (
+    !DRIVE_RE.test(host) &&
+    !host.startsWith('/') &&
+    !host.startsWith('\\')
+  ) {
+    host = path.win32.resolve(cwd, host)
+  }
   const m = DRIVE_RE.exec(host)
   if (!m) return host
   const drive = m[1].toUpperCase()
