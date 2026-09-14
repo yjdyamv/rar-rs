@@ -451,17 +451,9 @@ impl RarArchive {
             let rel = qo_pos.checked_sub(*offset).ok_or_else(|| {
                 RarError::Format("quick-open cached header is after the QO record".into())
             })?;
-            let mut body = Vec::new();
-            body.extend(vint::encode(0u64)); // entry flags: file header
-            body.extend(vint::encode(rel));
-            body.extend(vint::encode(header.len() as u64));
-            body.extend_from_slice(header);
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(&body);
-            let crc = hasher.finalize();
-            payload.extend(crc.to_le_bytes());
-            payload.extend(vint::encode(body.len() as u64));
-            payload.extend(body);
+            payload.extend(crate::format::rar5::headers::quick_open::encode_entry(
+                rel, header,
+            ));
         }
 
         // Service header: type 3, name "QO", with an empty service-data

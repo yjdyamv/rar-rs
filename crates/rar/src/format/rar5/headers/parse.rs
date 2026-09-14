@@ -15,7 +15,9 @@ use crate::format::rar5::{
     FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX,
 };
 #[cfg(test)]
-use crate::format::rar5::{BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_FILE_HEADER};
+use crate::format::rar5::{
+    BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER,
+};
 
 pub fn read_block<R: Read + Seek>(
     reader: &mut R,
@@ -662,6 +664,76 @@ pub(crate) fn parse_service_subdata(extra_data: &[u8]) -> Option<Vec<u8>> {
         offset = rec_end;
     }
     None
+}
+
+/// Recovery percentage carried by an "RR" service block's header body: the
+/// service-data record (type 0x07) payload, a single byte.
+pub(crate) fn parse_service_recovery_percent(body: &[u8]) -> Option<u8> {
+    let extra = block_extra_area(body).ok()?;
+    parse_service_subdata(&extra)?.first().copied()
+}
+
+/// Name of a service block (type 3) from its header body, or `None` when
+/// the body ends before the name. The fields before the name follow the
+/// service-block shape: file flags, unpacked size, attributes, the
+/// optional Unix-time and CRC32 payloads, compression info and host OS.
+pub(crate) fn parse_service_block_name(body: &[u8]) -> RarResult<Option<String>> {
+    let mut offset = 0usize;
+    let (_, n) = vint::decode_from_slice(body, offset)
+        .map_err(|e| RarError::Format(format!("service block type: {e}")))?;
+    offset += n;
+    let (flags, n) = vint::decode_from_slice(body, offset)
+        .map_err(|e| RarError::Format(format!("service block flags: {e}")))?;
+    offset += n;
+    if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
+        let (_, n) = vint::decode_from_slice(body, offset)
+            .map_err(|e| RarError::Format(format!("service block extra size: {e}")))?;
+        offset += n;
+    }
+    if flags & BLOCK_FLAG_DATA_AREA != 0 {
+        let (_, n) = vint::decode_from_slice(body, offset)
+            .map_err(|e| RarError::Format(format!("service block data size: {e}")))?;
+        offset += n;
+    }
+    let (file_flags, n) = vint::decode_from_slice(body, offset)
+        .map_err(|e| RarError::Format(format!("service block file flags: {e}")))?;
+    offset += n;
+    // unpacked size, attributes
+    for _ in 0..2 {
+        let (_, n) = vint::decode_from_slice(body, offset)
+            .map_err(|e| RarError::Format(format!("service block field: {e}")))?;
+        offset += n;
+    }
+    for flag in [FILE_FLAG_TIME_UNIX, FILE_FLAG_CRC32] {
+        if file_flags & flag == 0 {
+            continue;
+        }
+        match offset.checked_add(4).filter(|end| *end <= body.len()) {
+            Some(end) => offset = end,
+            None => return Ok(None),
+        }
+    }
+    // compression info, host OS
+    for _ in 0..2 {
+        let (_, n) = vint::decode_from_slice(body, offset)
+            .map_err(|e| RarError::Format(format!("service block field: {e}")))?;
+        offset += n;
+    }
+    let (name_len, n) = vint::decode_from_slice(body, offset)
+        .map_err(|e| RarError::Format(format!("service block name: {e}")))?;
+    offset += n;
+    let Ok(name_len) = usize::try_from(name_len) else {
+        return Ok(None);
+    };
+    let Some(end) = offset
+        .checked_add(name_len)
+        .filter(|end| *end <= body.len())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        String::from_utf8_lossy(&body[offset..end]).into_owned(),
+    ))
 }
 
 /// Parse the compression parameters of a service block ("STM" stream
@@ -1315,5 +1387,58 @@ mod tests {
         let extra = file_time_record(0x0002, &[u64::MAX]);
         let header = FileHeader::from_raw(&raw_block(file_header_with_extra(&extra)), 0).unwrap();
         assert_eq!(header.mtime, u32::MAX);
+    }
+
+    #[test]
+    fn service_block_name_reads_the_written_name() {
+        let hdr = crate::format::rar5::headers::build_service_block("QO", &[1, 0x07], 0, 0);
+        let raw = parse_block_bytes(&hdr).unwrap();
+        assert_eq!(
+            parse_service_block_name(&raw.header_data)
+                .unwrap()
+                .as_deref(),
+            Some("QO")
+        );
+    }
+
+    #[test]
+    fn service_recovery_percent_reads_the_subdata_byte() {
+        let mut subdata = Vec::new();
+        subdata.extend(vint::encode(2u64)); // record size: type + payload
+        subdata.extend(vint::encode(0x07u64)); // service data record type
+        subdata.push(15);
+        let hdr = crate::format::rar5::headers::build_service_block("RR", &subdata, 0, 0);
+        let raw = parse_block_bytes(&hdr).unwrap();
+
+        assert_eq!(parse_service_recovery_percent(&raw.header_data), Some(15));
+        // A non-RR service block carries no percent payload.
+        let qo = crate::format::rar5::headers::build_service_block("QO", &[1, 0x07], 0, 0);
+        let qo_raw = parse_block_bytes(&qo).unwrap();
+        assert_eq!(parse_service_recovery_percent(&qo_raw.header_data), None);
+    }
+
+    /// A name (or a fixed time/CRC32 payload) that runs past the body used
+    /// to be clamped — or panic on arithmetic overflow — instead of being
+    /// reported as unparseable.
+    #[test]
+    fn truncated_service_names_are_none_instead_of_panicking() {
+        let mut body = Vec::new();
+        body.extend(vint::encode(BLOCK_TYPE_SERVICE_HEADER));
+        body.extend(vint::encode(0u64)); // block flags: no extra/data area
+        for value in [0u64, 0, 0, 0, 0] {
+            body.extend(vint::encode(value));
+        }
+        body.extend(vint::encode(10u64)); // name length
+        body.extend_from_slice(b"ab");
+        assert_eq!(parse_service_block_name(&body).unwrap(), None);
+
+        let mut body = Vec::new();
+        body.extend(vint::encode(BLOCK_TYPE_SERVICE_HEADER));
+        body.extend(vint::encode(0u64));
+        body.extend(vint::encode(FILE_FLAG_TIME_UNIX));
+        body.extend(vint::encode(0u64)); // unpacked size
+        body.extend(vint::encode(0u64)); // attributes
+        // The 4-byte Unix time field is missing.
+        assert_eq!(parse_service_block_name(&body).unwrap(), None);
     }
 }

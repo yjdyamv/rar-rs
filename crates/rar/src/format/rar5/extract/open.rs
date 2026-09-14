@@ -6,8 +6,9 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::archive::{ArchiveEntry, RarArchive, StreamRecord};
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader, RawBlock};
-use crate::format::rar5::vint;
+use crate::format::rar5::headers::{
+    ArchiveHeader, EndOfArchiveHeader, RawBlock, parse_service_block_name, quick_open,
+};
 use crate::format::rar5::{
     BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, BLOCK_TYPE_ARCHIVE_HEADER,
     BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
@@ -32,17 +33,6 @@ fn check_chunk_cap(count: usize, max: usize, member: &str) -> RarResult<()> {
         )));
     }
     Ok(())
-}
-
-/// Convert a quick-open declared size to `usize`, rejecting lengths that do
-/// not fit the host address space: on 32-bit targets `as usize` would
-/// truncate `2^32 + N` to `N`, so the entry CRC would be verified over — and
-/// the embedded header parsed from — a range other than the declared one.
-fn qo_size_to_usize(size: u64, what: &str) -> RarResult<usize> {
-    usize::try_from(size).map_err(|_| RarError::LimitExceeded {
-        limit: size,
-        context: format!("quick-open: {what} overflows host address space"),
-    })
 }
 
 impl RarArchive {
@@ -216,7 +206,7 @@ impl RarArchive {
                 {
                     // NTFS stream record ("STM"): the SUBDATA extra holds
                     // the stream name (":name"), the data area the content.
-                    let name = self.service_block_name(&meta)?;
+                    let name = parse_service_block_name(&meta.raw.header_data)?;
                     if name.as_deref() == Some("STM")
                         && let Some(owner_index) = last_file_index
                     {
@@ -413,7 +403,7 @@ impl RarArchive {
                         // member; the record can sit in a later volume than
                         // the start of that member's data, so both the owner
                         // index and the volume index are recorded.
-                        let name = self.service_block_name(&meta)?;
+                        let name = parse_service_block_name(&meta.raw.header_data)?;
                         if name.as_deref() == Some("STM")
                             && let Some(owner_index) = last_file_index
                         {
@@ -451,14 +441,11 @@ impl RarArchive {
 
 /// Parse a quick-open record payload into archive entries.
 ///
-/// Payload layout (mirrors the writer):
-/// ```text
-/// repeat:
-///   [entry CRC32] 4 bytes LE, over [body]
-///   [body size] vint
-///   [body] = [flags vint] [relative offset vint] [header size vint]
-///            [complete file-header block bytes]
-/// ```
+/// The payload layout lives in [`crate::format::rar5::headers::quick_open`],
+/// which verifies the entry CRCs and returns `(relative offset, header
+/// bytes)` pairs. Here the cached headers are parsed into [`ArchiveEntry`]s:
+/// the `qo_abs` → data-area offset arithmetic, the entry/chunk ceilings and
+/// the header-block checks stay on this side.
 ///
 /// `qo_abs` is the absolute position of the QO record; each entry's
 /// `relative offset` points back to its original file header, from which
@@ -476,52 +463,11 @@ fn parse_quick_open_payload_capped(
     qo_abs: u64,
     max_entries: usize,
 ) -> RarResult<Vec<ArchiveEntry>> {
-    let mut entries = Vec::new();
-    let mut off = 0usize;
-    while off < payload.len() {
+    let catalog = quick_open::decode_payload(payload)?;
+    let mut entries = Vec::with_capacity(catalog.len().min(max_entries));
+    for (rel, header_bytes) in catalog {
         check_entry_cap(entries.len(), max_entries)?;
-        if off + 4 > payload.len() {
-            return Err(RarError::Format("quick-open: truncated entry CRC".into()));
-        }
-        let stored_crc = u32::from_le_bytes(payload[off..off + 4].try_into().unwrap());
-        off += 4;
-        let (body_size, n) = vint::decode_from_slice(payload, off)
-            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
-        off += n;
-        let body_len = qo_size_to_usize(body_size, "entry body size")?;
-        let body_end = off
-            .checked_add(body_len)
-            .ok_or_else(|| RarError::Format("quick-open: body size overflow".into()))?;
-        if body_end > payload.len() {
-            return Err(RarError::Format("quick-open: truncated entry body".into()));
-        }
-        let actual = crc32fast::hash(&payload[off..body_end]);
-        if actual != stored_crc {
-            return Err(RarError::Crc {
-                expected: stored_crc,
-                actual,
-                context: "quick-open entry".into(),
-            });
-        }
-        let mut p = off;
-        // flags vint (writer always emits 0 = file header)
-        let (flags, fn_) = vint::decode_from_slice(payload, p)
-            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
-        p += fn_;
-        let (rel, rn) = vint::decode_from_slice(payload, p)
-            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
-        p += rn;
-        let (hdr_size, hn) = vint::decode_from_slice(payload, p)
-            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
-        p += hn;
-        let hdr_len = qo_size_to_usize(hdr_size, "file header size")?;
-        let hdr_end = p
-            .checked_add(hdr_len)
-            .ok_or_else(|| RarError::Format("quick-open: header size overflow".into()))?;
-        if hdr_end > body_end {
-            return Err(RarError::Format("quick-open: truncated file header".into()));
-        }
-        let raw = crate::format::rar5::headers::parse_block_bytes(&payload[p..hdr_end])?;
+        let raw = crate::format::rar5::headers::parse_block_bytes(&header_bytes)?;
         if raw.block_type != BLOCK_TYPE_FILE_HEADER {
             return Err(RarError::Format("quick-open: unexpected block type".into()));
         }
@@ -530,7 +476,7 @@ fn parse_quick_open_payload_capped(
         let header_abs = qo_abs.checked_sub(rel).ok_or_else(|| {
             RarError::Format("quick-open: relative offset points past the archive start".into())
         })?;
-        let data_offset = header_abs + hdr_len as u64;
+        let data_offset = header_abs + header_bytes.len() as u64;
         // `stream_pos` carries the data-area offset, matching scan_blocks.
         let fh = FileHeader::from_raw(&raw, data_offset)?;
         let chunk = DataChunk {
@@ -541,12 +487,10 @@ fn parse_quick_open_payload_capped(
             is_final: true,
             extra_data: fh.extra_data.clone(),
         };
-        let _ = flags;
         entries.push(ArchiveEntry {
             header: fh,
             chunks: vec![chunk],
         });
-        off = body_end;
     }
     Ok(entries)
 }
@@ -555,20 +499,11 @@ fn parse_quick_open_payload_capped(
 mod tests {
     use super::*;
     use crate::archive::discover_volumes;
+    use crate::format::rar5::vint;
 
-    /// One quick-open entry: `[entry CRC32][body size][flags][relative
-    /// offset][header size][complete file header]`, matching the writer.
+    /// One quick-open entry, through the shared codec.
     fn qo_entry(header: &[u8], rel: u64) -> Vec<u8> {
-        let mut body = Vec::new();
-        body.extend(vint::encode(0));
-        body.extend(vint::encode(rel));
-        body.extend(vint::encode(header.len() as u64));
-        body.extend_from_slice(header);
-        let mut entry = Vec::new();
-        entry.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
-        entry.extend(vint::encode(body.len() as u64));
-        entry.extend(body);
-        entry
+        quick_open::encode_entry(rel, header)
     }
 
     #[test]
@@ -685,23 +620,6 @@ mod tests {
     fn chunk_cap_matches_the_bound() {
         assert!(check_chunk_cap(MAX_MEMBER_CHUNKS - 1, MAX_MEMBER_CHUNKS, "m").is_ok());
         assert!(check_chunk_cap(MAX_MEMBER_CHUNKS, MAX_MEMBER_CHUNKS, "m").is_err());
-    }
-
-    #[test]
-    fn quick_open_declared_sizes_must_fit_the_host_address_space() {
-        assert_eq!(qo_size_to_usize(4096, "entry body size").unwrap(), 4096);
-        let over_32_bit = u64::from(u32::MAX) + 1;
-        if cfg!(target_pointer_width = "64") {
-            // 64-bit hosts can represent the value; only 32-bit targets can
-            // execute the rejection arm below.
-            assert_eq!(
-                qo_size_to_usize(over_32_bit, "entry body size").unwrap(),
-                usize::try_from(over_32_bit).unwrap()
-            );
-        } else {
-            let err = qo_size_to_usize(over_32_bit, "entry body size").unwrap_err();
-            assert!(matches!(err, RarError::LimitExceeded { .. }), "got {err}");
-        }
     }
 
     #[test]

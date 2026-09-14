@@ -35,7 +35,10 @@ use crate::crypto;
 use crate::crypto::parse_archive_encrypt_header;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::create::Rar4WriteOptions;
-use crate::format::rar5::headers::{ArchiveHeader, main_header_locator_fields, split_main_extra};
+use crate::format::rar5::headers::{
+    ArchiveHeader, main_header_locator_fields, parse_service_block_name,
+    parse_service_recovery_percent, split_main_extra,
+};
 use crate::format::rar5::vint;
 use crate::format::rar5::{
     ARCHIVE_FLAG_LOCKED, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_ARCHIVE_HEADER,
@@ -613,9 +616,9 @@ impl RarArchive {
                     last_file_end = meta.data_end;
                 }
                 BLOCK_TYPE_SERVICE_HEADER => {
-                    let name = self.service_block_name(&meta)?;
+                    let name = parse_service_block_name(&meta.raw.header_data)?;
                     if name.as_deref() == Some("RR") {
-                        rr_percent = self.rr_percent_from_block(&meta);
+                        rr_percent = parse_service_recovery_percent(&meta.raw.header_data);
                     }
                     if (name.as_deref() == Some("QO") || name.as_deref() == Some("RR"))
                         && meta.block_start >= last_file_end

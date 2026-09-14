@@ -9,7 +9,9 @@ use std::io::{Read, Seek, SeekFrom};
 use super::super::RarArchive;
 use crate::crypto::parse_archive_encrypt_header;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::{ArchiveHeader, split_main_extra};
+use crate::format::rar5::headers::{
+    ArchiveHeader, parse_service_block_name, parse_service_recovery_percent, split_main_extra,
+};
 use crate::format::rar5::{
     BLOCK_FLAG_DEPENDS_PREV, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_ENCRYPT_HEADER,
     BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER, COMP_METHOD_STORE,
@@ -146,9 +148,9 @@ impl RarArchive {
                     }
                 }
                 BLOCK_TYPE_SERVICE_HEADER => {
-                    let name = self.service_block_name(&meta)?;
+                    let name = parse_service_block_name(&meta.raw.header_data)?;
                     if name.as_deref() == Some("RR") && rr_percent.is_none() {
-                        rr_percent = self.rr_percent_from_block(&meta);
+                        rr_percent = parse_service_recovery_percent(&meta.raw.header_data);
                     }
                     let drops = name.as_deref() == Some("QO")
                         || name.as_deref() == Some("RR")

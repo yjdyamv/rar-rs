@@ -10,7 +10,7 @@ use std::io::{Read, Seek, SeekFrom};
 use super::super::{Mode, RarArchive};
 use crate::crypto::parse_archive_encrypt_header;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::ArchiveHeader;
+use crate::format::rar5::headers::{ArchiveHeader, parse_service_block_name};
 use crate::format::rar5::{
     ARCHIVE_FLAG_LOCKED, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_ENCRYPT_HEADER,
     BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_SERVICE_HEADER,
@@ -262,7 +262,8 @@ impl RarArchive {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_SERVICE_HEADER
-                    if self.service_block_name(&meta)?.as_deref() == Some("CMT") =>
+                    if parse_service_block_name(&meta.raw.header_data)?.as_deref()
+                        == Some("CMT") =>
                 {
                     // The comment size comes from the service header, so it
                     // is capped before it can drive an allocation (a hand-made

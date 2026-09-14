@@ -5,11 +5,7 @@ use std::io::{Seek, SeekFrom};
 use super::super::RarArchive;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{ArchiveHeader, BlockMeta, split_main_extra};
-use crate::format::rar5::vint;
-use crate::format::rar5::{
-    ARCHIVE_FLAG_LOCKED, ARCHIVE_FLAG_RECOVERY, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA,
-    FILE_FLAG_CRC32, FILE_FLAG_TIME_UNIX, RAR5_SIGNATURE,
-};
+use crate::format::rar5::{ARCHIVE_FLAG_LOCKED, ARCHIVE_FLAG_RECOVERY, RAR5_SIGNATURE};
 
 impl RarArchive {
     /// Rebuild the main archive header for the rewritten archive: original
@@ -80,101 +76,5 @@ impl RarArchive {
         self.write_block_header(&hdr)?;
         self.stream.as_mut().unwrap().seek(SeekFrom::End(0))?;
         Ok(())
-    }
-
-    /// Recovery percentage carried by a dropped "RR" service block
-    /// (service data record type 0x07, single byte).
-    pub(crate) fn rr_percent_from_block(&self, meta: &BlockMeta) -> Option<u8> {
-        let data = &meta.raw.header_data;
-        let mut offset = 0usize;
-        let (_, n) = vint::decode_from_slice(data, offset).ok()?;
-        offset += n;
-        let (flags, n) = vint::decode_from_slice(data, offset).ok()?;
-        offset += n;
-        let mut extra_size = 0usize;
-        if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
-            let (v, n) = vint::decode_from_slice(data, offset).ok()?;
-            extra_size = v as usize;
-            offset += n;
-        }
-        if flags & BLOCK_FLAG_DATA_AREA != 0 {
-            let (_, n) = vint::decode_from_slice(data, offset).ok()?;
-            offset += n;
-        }
-        // file flags, unpacked size, attributes, compression info, host OS
-        for _ in 0..5 {
-            let (_, n) = vint::decode_from_slice(data, offset).ok()?;
-            offset += n;
-        }
-        let (name_len, n) = vint::decode_from_slice(data, offset).ok()?;
-        offset += n + name_len as usize;
-        if offset + extra_size > data.len() {
-            return None;
-        }
-        let extra = &data[offset..offset + extra_size];
-        let mut e = 0usize;
-        let (rec_size, n) = vint::decode_from_slice(extra, e).ok()?;
-        e += n;
-        let rec_start = e;
-        let (rec_type, n) = vint::decode_from_slice(extra, e).ok()?;
-        let _ = n;
-        if rec_type != 0x07 || rec_size == 0 {
-            return None;
-        }
-        let data_end = rec_start + rec_size as usize;
-        if data_end > extra.len() {
-            return None;
-        }
-        Some(extra[data_end - 1])
-    }
-
-    /// Name of a service block (type 3), if parseable.
-    pub(crate) fn service_block_name(&self, meta: &BlockMeta) -> RarResult<Option<String>> {
-        let data = &meta.raw.header_data;
-        let mut offset = 0usize;
-        let (_, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("service block type: {e}")))?;
-        offset += n;
-        let (flags, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("service block flags: {e}")))?;
-        offset += n;
-        if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
-            let (_, n) = vint::decode_from_slice(data, offset)
-                .map_err(|e| RarError::Format(format!("service block extra size: {e}")))?;
-            offset += n;
-        }
-        if flags & BLOCK_FLAG_DATA_AREA != 0 {
-            let (_, n) = vint::decode_from_slice(data, offset)
-                .map_err(|e| RarError::Format(format!("service block data size: {e}")))?;
-            offset += n;
-        }
-        // file flags, unpacked size, attributes, then fixed time/CRC32
-        // fields, then compression info and host OS.
-        let (file_flags, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("service block file flags: {e}")))?;
-        offset += n;
-        for _ in 0..2 {
-            let (_, n) = vint::decode_from_slice(data, offset)
-                .map_err(|e| RarError::Format(format!("service block field: {e}")))?;
-            offset += n;
-        }
-        if file_flags & FILE_FLAG_TIME_UNIX != 0 {
-            offset += 4;
-        }
-        if file_flags & FILE_FLAG_CRC32 != 0 {
-            offset += 4;
-        }
-        for _ in 0..2 {
-            let (_, n) = vint::decode_from_slice(data, offset)
-                .map_err(|e| RarError::Format(format!("service block field: {e}")))?;
-            offset += n;
-        }
-        let (name_len, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("service block name: {e}")))?;
-        offset += n;
-        let end = (offset + name_len as usize).min(data.len());
-        Ok(Some(
-            String::from_utf8_lossy(&data[offset..end]).into_owned(),
-        ))
     }
 }

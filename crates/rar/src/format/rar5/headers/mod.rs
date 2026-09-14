@@ -15,13 +15,15 @@ pub(crate) mod locator;
 /// [`serialize`]. RAR5 wire structs and the block envelope stay here, while
 /// shared model types are re-exported for compatibility.
 pub(crate) mod parse;
+pub(crate) mod quick_open;
 pub(crate) mod serialize;
 
 pub use crate::model::{DataChunk, FileHeader};
 pub use parse::read_block;
 pub(crate) use parse::{
     block_extra_area, locator_quick_open_offset, main_header_locator_fields, parse_block_bytes,
-    parse_redirect_record, parse_service_subdata, parse_stream_params, split_main_extra,
+    parse_redirect_record, parse_service_block_name, parse_service_recovery_percent,
+    parse_service_subdata, parse_stream_params, split_main_extra,
 };
 #[cfg(unix)]
 pub(crate) use serialize::build_owner_extra_record;
