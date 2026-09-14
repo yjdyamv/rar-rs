@@ -1,6 +1,6 @@
 use super::super::comment::decode_comment_payload;
 use super::super::headers::rename_file_header;
-use super::super::layout::{patch_main_header, scan_layout};
+use super::super::layout::{MHD_COMMENT, patch_main_header, scan_layout};
 use super::super::{encode_comment_text, header_crc16};
 
 use crate::archive::RarArchive;
@@ -56,6 +56,133 @@ fn patch_main_header_sets_bits_and_keeps_crc_valid() {
     let crc = header_crc16(&patched[2..]);
     assert_eq!(u16::from_le_bytes([patched[0], patched[1]]), crc);
     assert_eq!(&patched[5..], &main[5..]);
+}
+
+/// A RAR 1.5–2.9 main header whose archive comment is embedded after the
+/// fixed 13 bytes must survive a flag patch whole: truncating it used to
+/// shift every following block by the comment length. The CRC keeps
+/// covering only `[2..13]`, exactly the reader's coverage for
+/// `MHD_COMMENT`.
+#[test]
+fn patch_main_header_preserves_an_embedded_comment() {
+    let fixture = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/rar40/rar2/comment_nopsw.rar"
+    ))
+    .unwrap();
+    let main = &fixture[7..7 + 51];
+    assert_eq!(main.len(), 51);
+    assert_ne!(u16::from_le_bytes([main[3], main[4]]) & MHD_COMMENT, 0);
+
+    let patched = patch_main_header(main, MHD_RECOVERY).unwrap();
+    assert_eq!(patched.len(), main.len(), "the embedded comment must stay");
+    assert_eq!(&patched[13..], &main[13..], "comment bytes byte-identical");
+    let flags = u16::from_le_bytes([patched[3], patched[4]]);
+    assert_ne!(flags & MHD_RECOVERY, 0);
+    assert_eq!(
+        u16::from_le_bytes([patched[0], patched[1]]),
+        header_crc16(&patched[2..13]),
+        "CRC coverage stays at the fixed 13 bytes"
+    );
+}
+
+/// The fixture-based RR edit (and a follow-up delete) on an archive whose
+/// comment lives in the main header must keep the full 51-byte header with
+/// its nested comment, stay parseable, and leave the members extractable.
+/// Before the fix `patch_main_header` truncated the header to 13 bytes and
+/// every later block parsed 38 bytes late.
+#[test]
+fn recovery_and_delete_keep_an_embedded_main_comment() {
+    let fixture_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/rar40/rar2/comment_nopsw.rar"
+    );
+    let fixture = std::fs::read(fixture_path).unwrap();
+    // The fixture predates the optional end-of-archive marker; the editor
+    // requires one.
+    let mut bytes = fixture.clone();
+    bytes.extend_from_slice(&build_endarc(0));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rar2_cmt.rar");
+    std::fs::write(&path, &bytes).unwrap();
+
+    // Expected member bytes straight from the untouched fixture.
+    let (expected_1, expected_2) = {
+        let mut untouched = RarArchive::open(fixture_path).unwrap();
+        (
+            untouched
+                .read_with_options("FILE1.TXT", Default::default())
+                .unwrap(),
+            untouched
+                .read_with_options("FILE2.TXT", Default::default())
+                .unwrap(),
+        )
+    };
+
+    // `rar rr` on the comment-bearing archive: rebuild the record.
+    {
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        editor
+            .apply(crate::archive::editor::EditPlan::new().set_recovery(5))
+            .unwrap();
+    }
+    let edited = std::fs::read(&path).unwrap();
+    let layout = scan_layout(&edited, 0, None).unwrap();
+    assert_eq!(layout.main_header.len(), 51, "full main header kept");
+    assert_ne!(layout.main_flags & MHD_RECOVERY, 0, "record flag set");
+    assert_eq!(
+        &layout.main_header[13..],
+        &fixture[20..58],
+        "embedded comment unchanged"
+    );
+    assert_eq!(
+        u16::from_le_bytes([layout.main_header[0], layout.main_header[1]]),
+        header_crc16(&layout.main_header[2..13])
+    );
+    let mut archive = RarArchive::open(&path).unwrap();
+    assert_eq!(
+        archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["FILE1.TXT", "FILE2.TXT"]
+    );
+    assert_eq!(
+        archive
+            .read_with_options("FILE1.TXT", Default::default())
+            .unwrap(),
+        expected_1
+    );
+    assert_eq!(
+        archive
+            .read_with_options("FILE2.TXT", Default::default())
+            .unwrap(),
+        expected_2
+    );
+
+    // A follow-up delete (which rebuilds the existing record) must keep the
+    // embedded comment too.
+    {
+        let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+        let file2 = editor.unique_entry("FILE2.TXT").unwrap();
+        assert_eq!(editor.delete_entries(&[file2]).unwrap(), 1);
+    }
+    let after_delete = std::fs::read(&path).unwrap();
+    let layout = scan_layout(&after_delete, 0, None).unwrap();
+    assert_eq!(layout.main_header.len(), 51);
+    assert_eq!(&layout.main_header[13..], &fixture[20..58]);
+    assert_eq!(
+        u16::from_le_bytes([layout.main_header[0], layout.main_header[1]]),
+        header_crc16(&layout.main_header[2..13])
+    );
+    let mut archive = RarArchive::open(&path).unwrap();
+    assert_eq!(
+        archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["FILE1.TXT"]
+    );
+    assert_eq!(
+        archive
+            .read_with_options("FILE1.TXT", Default::default())
+            .unwrap(),
+        expected_1
+    );
 }
 
 /// The layout scan routes block envelopes through the shared reader: a

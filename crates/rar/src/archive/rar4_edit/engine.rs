@@ -83,12 +83,18 @@ fn apply_multivolume_edits(
                 .map_err(RarError::Io)?;
             let mut pos = sig as u64 + 7;
             let mut hp: Option<&[u8]> = None;
+            // The same latch in the `&str` form `emit_block` re-encrypts
+            // with. Both stay `None` on a plain set even when a password
+            // was supplied for the edit: only `MHD_PASSWORD` turns headers
+            // into ciphertext.
+            let mut hp_password: Option<&str> = None;
             while pos < file_len {
                 let view = read_block_stream(&mut src, hp)?
                     .ok_or_else(|| RarError::Format("RAR4: truncated block stream".into()))?;
                 if view.head_type == MAIN_HEAD {
                     let flags = main_flags(&view.header)?;
                     if flags & MHD_PASSWORD != 0 {
+                        hp_password = password;
                         hp = password.map(str::as_bytes);
                     }
                     out.write_all(&view.raw_header).map_err(RarError::Io)?;
@@ -105,7 +111,7 @@ fn apply_multivolume_edits(
                             &mut emitted,
                             &block[..CMT_HEAD_SIZE],
                             &block[CMT_HEAD_SIZE..],
-                            password,
+                            hp_password,
                         )?;
                         out.write_all(&emitted).map_err(RarError::Io)?;
                     }
@@ -115,7 +121,7 @@ fn apply_multivolume_edits(
                     if let Some(new_name) = by_name.get(key) {
                         let new_header = rename_file_header(&view.header, new_name)?;
                         let mut emitted = Vec::new();
-                        emit_block(&mut emitted, &new_header, &[], password)?;
+                        emit_block(&mut emitted, &new_header, &[], hp_password)?;
                         out.write_all(&emitted).map_err(RarError::Io)?;
                         copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
                         matched.insert(key.to_string());
@@ -626,6 +632,18 @@ pub(crate) fn edit_rar4(
         Ok(())
     })();
     if let Err(error) = rewrite {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+    // Validate the staged rewrite before installing it: reopening it runs
+    // the same CRC-checked block scan the reader uses, so a structurally
+    // broken output (misaligned blocks, a stale header CRC) can never
+    // replace the original. A failed check leaves the original untouched.
+    let staged = match hp {
+        Some(password) => RarArchive::open_with_password(&tmp_path, password).map(drop),
+        None => RarArchive::open(&tmp_path).map(drop),
+    };
+    if let Err(error) = staged {
         let _ = fs::remove_file(&tmp_path);
         return Err(error);
     }

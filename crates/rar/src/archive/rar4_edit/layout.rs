@@ -21,11 +21,18 @@ use crate::format::rar4::{
 };
 use crate::fs::atomic::{copy_prefix, read_up_to};
 
+/// Main header flag: the archive comment is embedded after the fixed
+/// 13-byte main header (RAR 1.5–2.9 layout). The reader's header-CRC
+/// coverage stops at 13 bytes when it is set.
+pub(super) const MHD_COMMENT: u16 = 0x0002;
+
 /// Patch the main-header flags: OR `set_bits` into the flags word at
-/// bytes 3..5 and recompute the CRC16. The main header is 13 bytes; when a
-/// nested comment is present the reader's CRC coverage stops at 13 bytes,
-/// which is exactly where the flags live, so recomputing over `[2..13]` is
-/// correct with or without a comment.
+/// bytes 3..5 and recompute the CRC16 over the reader's coverage. The
+/// fixed main header is 13 bytes, but RAR 1.5–2.9 embeds an archive
+/// comment (`MHD_COMMENT`) right after it: the full header bytes are kept
+/// (the following blocks must stay aligned), while the CRC still covers
+/// only `[2..13]` — the reader stops there when the comment flag is set
+/// (see `format::rar4::header_crc_end`).
 pub(super) fn patch_main_header(main: &[u8], set_bits: u16) -> RarResult<Vec<u8>> {
     if main.len() < 13 || main[2] != MAIN_HEAD {
         return Err(RarError::Format(
@@ -33,9 +40,15 @@ pub(super) fn patch_main_header(main: &[u8], set_bits: u16) -> RarResult<Vec<u8>
         ));
     }
     let flags = u16::from_le_bytes([main[3], main[4]]);
-    let mut patched = main[..13].to_vec();
-    patched[3..5].copy_from_slice(&(flags | set_bits).to_le_bytes());
-    let crc = header_crc16(&patched[2..]);
+    let mut patched = main.to_vec();
+    let new_flags = flags | set_bits;
+    patched[3..5].copy_from_slice(&new_flags.to_le_bytes());
+    let crc_end = if new_flags & MHD_COMMENT != 0 {
+        13
+    } else {
+        patched.len()
+    };
+    let crc = header_crc16(&patched[2..crc_end]);
     patched[..2].copy_from_slice(&crc.to_le_bytes());
     Ok(patched)
 }
