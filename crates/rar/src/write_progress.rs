@@ -23,7 +23,7 @@ pub(crate) enum WriteProgressEvent {
         pass: usize,
     },
     /// Absolute progress within the current operation or pass.
-    // Only emitted by the wire-level write path, which is `raw`-gated.
+    // Only emitted by the RAR5 inline-recovery builder.
     Advanced {
         operation: WriteOperation,
         completed_bytes: u64,

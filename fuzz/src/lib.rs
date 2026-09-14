@@ -6,6 +6,7 @@
 //! so the targets run on stable Rust without libFuzzer.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[path = "../../crates/rar/tests/support/structured.rs"]
 pub mod structured;
@@ -188,15 +189,21 @@ pub fn mutate(rng: &mut Rng, seeds: &[&[u8]]) -> Vec<u8> {
 /// doubles as a smoke fuzzer.
 ///
 /// Overrides: `FUZZ_ITERATIONS` (default 200_000), `FUZZ_SEED`
-/// (default 0x5EED_0001).
-pub fn standalone(name: &str, seeds: &[&[u8]], runner: fn(&[u8])) {
-    standalone_with(name, seeds, runner, 200_000);
+/// (default 0x5EED_0001). Returns the number of iterations run.
+pub fn standalone(name: &str, seeds: &[&[u8]], runner: fn(&[u8])) -> usize {
+    standalone_with(name, seeds, runner, 200_000)
 }
 
 /// Like [`standalone`], with a target-specific default iteration count
 /// (write-side targets do real file I/O per iteration and default lower;
-/// `FUZZ_ITERATIONS` always overrides).
-pub fn standalone_with(name: &str, seeds: &[&[u8]], runner: fn(&[u8]), default_iterations: usize) {
+/// `FUZZ_ITERATIONS` always overrides). Returns the number of iterations
+/// run so callers can assert target-specific coverage floors.
+pub fn standalone_with(
+    name: &str,
+    seeds: &[&[u8]],
+    runner: fn(&[u8]),
+    default_iterations: usize,
+) -> usize {
     let iterations: usize = std::env::var("FUZZ_ITERATIONS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -230,6 +237,7 @@ pub fn standalone_with(name: &str, seeds: &[&[u8]], runner: fn(&[u8]), default_i
         }
     }
     eprintln!("{name}: {iterations} iterations (seed {seed:#x}), no panics");
+    iterations
 }
 
 // ── Target runners ─────────────────────────────────────────────────────────
@@ -295,6 +303,44 @@ fn fill_tile(seed: &[u8], need: usize) -> Vec<u8> {
     out
 }
 
+/// Standalone coverage counters for [`write_roundtrip`]. The corpus control
+/// bytes can freeze one option combination across iterations, so a run could
+/// pass while the multi-volume and rv/rc paths never executed; the `write`
+/// binary prints these after the loop via [`report_write_coverage`] and
+/// asserts floors.
+static WRITE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static WRITE_CREATED: AtomicUsize = AtomicUsize::new(0);
+static WRITE_MULTIVOLUME: AtomicUsize = AtomicUsize::new(0);
+static WRITE_RECOVERY: AtomicUsize = AtomicUsize::new(0);
+
+/// Print the write target's standalone coverage counters and assert the run
+/// actually reached the create, multi-volume and rv/rc paths. Called once by
+/// the `write` binary after the mutation loop; `iterations` is the number of
+/// runner invocations the loop performed.
+pub fn report_write_coverage(iterations: usize) {
+    let runs = WRITE_RUNS.swap(0, Ordering::Relaxed);
+    let created = WRITE_CREATED.swap(0, Ordering::Relaxed);
+    let multivolume = WRITE_MULTIVOLUME.swap(0, Ordering::Relaxed);
+    let recovery = WRITE_RECOVERY.swap(0, Ordering::Relaxed);
+    eprintln!(
+        "write coverage: {created}/{runs} valid inputs created archives, {multivolume} multi-volume, \
+         {recovery} rv/rc rebuilds ({iterations} iterations)"
+    );
+    assert!(
+        created > 0,
+        "write target created no archives in {iterations} iterations"
+    );
+    assert!(
+        multivolume >= iterations / 10,
+        "write multi-volume coverage starved: {multivolume} multi-volume creations over \
+         {iterations} iterations"
+    );
+    assert!(
+        recovery >= multivolume / 2,
+        "write rv/rc coverage starved: {recovery} rebuilds over {multivolume} multi-volume creations"
+    );
+}
+
 /// Write surface: create archives from fuzzed options and member bytes —
 /// single and multi-volume, solid, encrypted, header-encrypted,
 /// quick-open, BLAKE2sp, inline recovery record, create-time `.rev` —
@@ -305,18 +351,18 @@ pub fn write_roundtrip(data: &[u8]) {
     if data.len() < 17 {
         return;
     }
+    WRITE_RUNS.fetch_add(1, Ordering::Relaxed);
     let h = &data[8..]; // control bytes double as payload seeds
     let n_members = 1 + (h[0] % 3) as usize; // 1..=3
     // Multi-volume sets are exactly two volumes per member (member =
     // 2x volume) so chunk splits, per-chunk records and CBC chains get
     // exercised with minimal per-iteration file churn (Windows per-file
     // overhead dominates the loop cost).
-    let member_bytes: usize = match h[1] % 3 {
-        0 => 2048, // single volume
-        1 => 4096, // two 2 KiB volumes
-        _ => 8192, // two 4 KiB volumes
+    let (member_bytes, volume_size): (usize, Option<u64>) = match h[1] % 3 {
+        0 => (2048, None),       // single volume
+        1 => (4096, Some(2048)), // two 2 KiB volumes
+        _ => (8192, Some(4096)), // two 4 KiB volumes
     };
-    let volume_size = (member_bytes >= 4096).then_some((member_bytes / 2) as u64);
     let multivolume = volume_size.is_some();
     let create_rev = if multivolume && h[6].is_multiple_of(3) {
         Some(1 + (h[6] as u32 % 3)) // create-time .rev (rv during create)
@@ -336,6 +382,9 @@ pub fn write_roundtrip(data: &[u8]) {
     } else {
         (None, false)
     };
+    // Header encryption needs a password; h[5] % 4 == 2 is even, so the
+    // password branch below always runs with it.
+    let encrypt_headers = h[5] % 4 == 2;
     let mut opts = rar_rs::WriterOptions::default()
         .solid_mode(if h[3].is_multiple_of(2) {
             rar_rs::SolidMode::Continuous
@@ -343,13 +392,15 @@ pub fn write_roundtrip(data: &[u8]) {
             rar_rs::SolidMode::Disabled
         })
         .blake2(h[4].is_multiple_of(2))
-        .quick_open(h[4] % 4 < 3);
+        // Quick-open is rejected with data volumes and with header
+        // encryption, so derive it only when neither is selected. Without
+        // this gate most multi-volume inputs died in validation and the
+        // rv/rc rebuild path below never ran.
+        .quick_open(h[4] % 4 < 3 && !multivolume && !encrypt_headers);
     if h[5].is_multiple_of(2) {
-        // h[5] % 4 == 2 is even, so header encryption always carries a
-        // password here; -hp works for single- and multi-volume alike.
         opts = opts.password("fuzz");
     }
-    if h[5] % 4 == 2 {
+    if encrypt_headers {
         opts = opts.encrypt_headers(true);
     }
     if !multivolume && h[6].is_multiple_of(4) {
@@ -382,33 +433,37 @@ pub fn write_roundtrip(data: &[u8]) {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let arc = dir.path().join("w.rar");
-    let created = (|| -> rar_rs::RarResult<()> {
-        let mut rar = rar_rs::ArchiveWriter::create_with(&arc, opts.clone())?;
-        for (i, (name, payload)) in members.iter().enumerate() {
-            // Multi-volume members are STORED (level 0): the compressible
-            // tile pattern would otherwise collapse below one volume and
-            // the split paths would never run. Single-volume members
-            // exercise the compression levels.
-            let level = if multivolume {
-                0
-            } else {
-                ((h[0] as usize + i) % 6) as u8
-            };
-            let entry_opts = rar_rs::EntryWriteOptions::new()
-                .compression_level(rar_rs::CompressionLevel::try_from(level).unwrap());
-            rar.add_bytes(name, payload, entry_opts)?;
-        }
-        rar.finish()?;
-        Ok(())
-    })();
-    if created.is_err() {
-        return; // derived option combos may legitimately be rejected
+    let mut rar = match rar_rs::ArchiveWriter::create_with(&arc, opts) {
+        Ok(rar) => rar,
+        Err(rar_rs::RarError::InvalidOption(_)) => return, // derived combo rejected
+        Err(err) => panic!("create_with failed with a non-InvalidOption error: {err}"),
+    };
+    for (i, (name, payload)) in members.iter().enumerate() {
+        // Multi-volume members are STORED (level 0): the compressible
+        // tile pattern would otherwise collapse below one volume and
+        // the split paths would never run. Single-volume members
+        // exercise the compression levels.
+        let level = if multivolume {
+            0
+        } else {
+            ((h[0] as usize + i) % 6) as u8
+        };
+        let entry_opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(level).unwrap());
+        rar.add_bytes(name, payload, entry_opts)
+            .unwrap_or_else(|err| panic!("add_bytes({name}) failed: {err}"));
+    }
+    rar.finish()
+        .unwrap_or_else(|err| panic!("finish failed: {err}"));
+    WRITE_CREATED.fetch_add(1, Ordering::Relaxed);
+    if multivolume {
+        WRITE_MULTIVOLUME.fetch_add(1, Ordering::Relaxed);
     }
 
     // Round trip: read every member back and compare byte-for-byte. A
-    // successful `create` must be readable; an open/locate/read failure
-    // here is a defect, not an unreachable option combination (only the
-    // option-derivation early return above may skip).
+    // successful create must be readable; an open/locate/read failure
+    // here is a defect, not an unreachable option combination (only an
+    // `InvalidOption` from `create_with` may skip the rest).
     let volumes = rar_rs::discover_volumes(&arc);
     let mut failures: Vec<String> = Vec::new();
     let opened = if h[5].is_multiple_of(2) {
@@ -455,6 +510,7 @@ pub fn write_roundtrip(data: &[u8]) {
             }
         };
         if rev_ok {
+            WRITE_RECOVERY.fetch_add(1, Ordering::Relaxed);
             let victim = volumes[volumes.len() / 2].clone();
             match std::fs::read(&victim) {
                 Ok(orig) => {

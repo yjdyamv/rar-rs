@@ -16,10 +16,14 @@ fuzz_target!(|data: &[u8]| rar_rs_fuzz::write_roundtrip(data));
 fn main() {
     // Write-side targets do real file I/O per iteration (and Windows file
     // churn is slow), so they default lower than the read targets.
-    rar_rs_fuzz::standalone_with(
+    let iterations = rar_rs_fuzz::standalone_with(
         "write",
         rar_rs_fuzz::CORPUS_ALL,
         rar_rs_fuzz::write_roundtrip,
         20_000,
     );
+    // Fail loudly if the derived options starved the multi-volume / rv/rc
+    // paths (the reason this target exists) instead of reporting coverage
+    // that never ran.
+    rar_rs_fuzz::report_write_coverage(iterations);
 }

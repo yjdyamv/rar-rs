@@ -102,7 +102,7 @@ fn validate_filter_specs(data_len: usize, filters: &[FilterSpec]) -> RarResult<(
 /// a member written through this path must be marked non-solid so the
 /// decoder's filter positions stay member-relative.
 ///
-/// Specs are validated (see [`validate_filter_specs`]): unsupported filter
+/// Specs are validated (see `validate_filter_specs`): unsupported filter
 /// types, empty or out-of-bounds regions and overlaps are rejected instead of
 /// producing a member the streaming decoder cannot decode.
 pub fn encode_with_filters(

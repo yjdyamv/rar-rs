@@ -12,16 +12,23 @@ use rar_rs::{CompressionLevel, EntryWriteOptions};
 /// mistaken for interop coverage; `SA_REQUIRE_OFFICIAL=1` turns it into a hard
 /// failure so a CI job can demand the suite instead of silently skipping it.
 fn skip_official() {
+    skip_official_with("SA_OFFICIAL_RAR / SA_OFFICIAL_UNRAR unset");
+}
+
+/// [`skip_official`] with a specific reason, for skips the env-var check
+/// cannot describe (e.g. a missing optional SFX module): the marker names
+/// the missing piece and `SA_REQUIRE_OFFICIAL` still demands the test.
+fn skip_official_with(reason: &str) {
     assert!(
         std::env::var_os("SA_REQUIRE_OFFICIAL").is_none(),
         "official rar/unrar interop binaries are required (SA_REQUIRE_OFFICIAL is set): set \
          SA_OFFICIAL_RAR / SA_OFFICIAL_UNRAR"
     );
-    eprintln!("SKIPPED (SA_OFFICIAL_RAR / SA_OFFICIAL_UNRAR unset)");
+    eprintln!("SKIPPED ({reason})");
 }
 
-/// Official UNRAR (e.g. /home/yuan/下载/rar/unrar) validates archives
-/// produced by rar-rs with every new feature combination.
+/// Official UNRAR (e.g. the rarlab Linux tarball's `unrar`) validates
+/// archives produced by rar-rs with every new feature combination.
 /// The official UnRAR console tools still decode RAR 1.5/2.x members (their
 /// decoder table keeps unpack versions 15..36), so an env-gated `unrar t`
 /// validates the legacy writers end-to-end. Gated on SA_OFFICIAL_UNRAR like
@@ -771,10 +778,8 @@ fn official_sfx_cross_validation() {
         .unwrap();
     assert!(status.success());
     // Official `rar s` needs an SFX module. Resolve it portably: an env
-    // override (SA_OFFICIAL_SFX), default.sfx next to the official rar
-    // binary (the Linux rar tarball ships one), or the legacy developer
-    // path; without a module the official-conversion part is skipped (the
-    // reader-side SFX checks below still run on our synthetic stub).
+    // override (SA_OFFICIAL_SFX) or `default.sfx` next to the official rar
+    // binary (the Linux rar tarball ships one).
     let sfx_module = std::env::var_os("SA_OFFICIAL_SFX")
         .map(std::path::PathBuf::from)
         .filter(|p| p.exists())
@@ -783,13 +788,14 @@ fn official_sfx_cross_validation() {
                 .parent()
                 .map(|dir| dir.join("default.sfx"))
                 .filter(|p| p.exists())
-        })
-        .or_else(|| {
-            let legacy = std::path::Path::new("/home/yuan/下载/rar/default.sfx");
-            legacy.exists().then(|| legacy.to_path_buf())
         });
     let Some(sfx_module) = sfx_module else {
-        return; // no official SFX module available; conversion part skipped
+        // No official SFX module available: skip with a visible marker (and
+        // fail under SA_REQUIRE_OFFICIAL) instead of silently passing.
+        return skip_official_with(
+            "official SFX module not found: set SA_OFFICIAL_SFX or place default.sfx next to the \
+             official rar binary",
+        );
     };
     let status = std::process::Command::new(&rar_bin)
         .arg("s")

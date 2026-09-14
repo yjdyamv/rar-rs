@@ -1,8 +1,7 @@
 [workspace]
 members = ["crates/rar", "crates/rar-cli", "crates/rar-napi"]
 # Resolver 3 (edition 2024 generation): dev-dependency features no longer
-# leak into normal builds. This is what lets `crates/rar` dev-depend on
-# itself with the `raw` feature for the test graph only.
+# leak into normal builds.
 resolver = "3"
 
 [workspace.package]

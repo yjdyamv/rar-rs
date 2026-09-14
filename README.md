@@ -112,12 +112,12 @@ The complete feature matrix lives in [PLAN.md](PLAN.md).
 
 ## Limitations
 
-Legacy RAR4 creation and extraction have feature-specific limitations. Editing existing RAR4 archives is implemented ([ADR 0005](docs/adr/0005-rar4-edit-architecture.md)): rename, lock, archive comments and recovery records work on solid and non-solid archives alike, and member delete/append/update repacks solid archives whole (decode -> re-encode, mirroring WinRAR 7.21+) and surgically rewrites non-solid ones. Multi-volume archives refuse delete/append/update (the official `rar` refuses those too); rename, `ch`, lock and archive comments work volume-by-volume. Header-encrypted (`-hp`) archives are editable
+Legacy RAR4 creation and extraction have feature-specific limitations. Editing existing RAR4 archives is implemented ([ADR 0005](docs/adr/0005-rar4-edit-architecture.md)): rename, lock, archive comments and recovery records work on solid and non-solid archives alike, and member delete/append/update repacks solid archives whole (decode -> re-encode, mirroring WinRAR 7.21+) and surgically rewrites non-solid ones. Multi-volume behavior is per-format: RAR5 member delete/rename re-splits the set at its volume size and regenerates `.rev` recovery volumes (deleting from header-encrypted sets is refused; archive comments, recovery-record changes and lock stay single-volume), while RAR4 sets refuse delete/append/update (the official `rar` refuses those too) but rename, `ch`, lock and archive comments work volume-by-volume. Appending to multi-volume archives is not supported in either format (the official `rar` refuses too). Header-encrypted (`-hp`) archives are editable
 given the password — rename, delete, comments, recovery records, lock, append and
-solid repack all work. Repacking a solid archive that contains pre-RAR3 codec
-members is refused with a clear error.
-Appending to multi-volume archives is not supported (the official `rar` refuses
-too). Inline recovery records have streaming limitations during repair; encrypted
+solid repack all work. Repacking a solid archive that mixes member generations
+(for example pre-RAR3 members next to RAR3/4 ones) is refused with a clear
+error; homogeneous solid archives at any supported generation (RAR 1.5 / 2.x /
+3.x / 4.x) repack. Inline recovery records have streaming limitations during repair; encrypted
 multi-volume sets cannot combine `-hp` with inline RR and must use `.rev` recovery
 volumes. RAR4 volume sets support `.rev` recovery volumes in both layouts WinRAR
 recognizes, with `rv`/`rc` rebuilding missing or damaged volumes (see

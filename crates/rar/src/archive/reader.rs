@@ -2,8 +2,9 @@
 //! facade.
 //!
 //! [`ArchiveReader`] exposes only listing, reading, verification-adjacent and
-//! extraction operations. Archive creation and mutation remain available on
-//! [`RarArchive`] for compatibility, but cannot be reached through this role.
+//! extraction operations, so creation and mutation cannot be reached through
+//! this role; use [`ArchiveWriter`](crate::ArchiveWriter) for creation/append
+//! and [`ArchiveEditor`](crate::ArchiveEditor) for edits.
 
 use std::fmt;
 use std::io::Write;

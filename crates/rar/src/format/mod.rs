@@ -3,10 +3,9 @@
 //! container, including RAR7 v70 members). Internal home of the historical
 //! `crate::format::rar4` / `crate::rar50` module trees.
 
-// The trees are only publicly reachable with the `raw` feature (see
-// `lib.rs`). Without it they are crate-internal and a fair number of wire
-// constants and helpers have no in-tree caller — they exist for downstream
-// raw access, so silence dead-code for that configuration only.
+// The trees are `pub(crate)` (ADR 0007 retired the downstream `raw`
+// feature); wire-level helpers needed outside the crate are re-exported
+// through `wire`, and the remaining constants/helpers stay crate-internal.
 
 pub mod rar13;
 pub mod rar4;

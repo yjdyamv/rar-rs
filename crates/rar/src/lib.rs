@@ -63,9 +63,10 @@ pub use archive::{
     VerificationFailure, VerificationReport, WriteEntry, WriteReport, WriterOptions,
     discover_volumes,
 };
-// Multi-threaded encoding internals used by the mtbench example and the
-// napi binding's streaming path; hidden from the public docs but stable
-// enough to build against (feature `parallel` only).
+// Root re-exports of the public codec surface; the full item set lives at
+// `codec::lzss_huff`. The `parallel`-gated MT internals (`EncoderState`,
+// `encode_chunked_mt`) are hidden from the public docs but kept stable for
+// the benchmark examples (`mtbench`, `mtwin`, `ratiocheck`, …).
 pub use codec::lzss_huff::{EncodeOptions, decode, decode_standalone, encode, encode_chunked};
 #[doc(hidden)]
 #[cfg(feature = "parallel")]

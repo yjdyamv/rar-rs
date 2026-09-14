@@ -200,12 +200,11 @@ jobs:
     # prints visible SKIPPED markers otherwise.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # The rarlab download is best-effort: a fetch failure must not fail the
-    # repository (the test step is gated on the fetch outcome below). When
-    # the tools ARE present, an interop regression still fails this job and
-    # its annotation stays visible even though the scheduled run itself is
-    # non-blocking.
-    continue-on-error: true
+    # The rarlab download is best-effort: a fetch failure is tolerated by
+    # the fetch step's own `continue-on-error` and the test step is gated on
+    # the fetch outcome (a skip warning, not a failure). Once the tools are
+    # present, however, an interop regression fails this job: no job-level
+    # `continue-on-error` masks the test step.
     steps:
       - uses: actions/checkout@v7
       - name: Install rust toolchain
@@ -261,10 +260,12 @@ jobs:
           # A missing tool must fail the test instead of skipping it.
           SA_REQUIRE_OFFICIAL: '1'
         # --nocapture keeps the gating helpers' SKIPPED markers (and any
-        # SA_REQUIRE_* assertion message) visible in the job log.
+        # SA_REQUIRE_* assertion message) visible in the job log. The legacy
+        # solid/store fallback target is gated on SA_OFFICIAL_UNRAR and
+        # covered here together with the RAR5/RAR4 interop suites.
         run: >-
           cargo test -p rar-rs --locked --test official_interop --test rewrite_tests
-          -- --nocapture
+          --test rar4_solid_store_fallback -- --nocapture
       - name: Official interop skip notice
         if: steps.fetch.outcome != 'success'
         run: echo "::warning title=Official interop skipped::rarlab console tools could not be downloaded; the official-binary suites did not run."

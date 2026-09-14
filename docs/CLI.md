@@ -13,8 +13,10 @@ as no-ops where WinRAR does the same. This page is the usage reference.
 rar <command> [switches] archive[.rar] [files...]
 
 For extract commands (`x`/`e`), every `files...` argument is a **member
-selector** (full stored path or basename); the destination directory is set
-with `--dest <path>` (default `.`). A name matching nothing is a hard error,
+selector**: a non-mask name must match the full stored path or name a
+directory (selecting its subtree), while `*`/`?` masks also match the
+basename anywhere in the tree. The destination directory is set with
+`--dest <path>` (default `.`). A name matching nothing is a hard error,
 never a silent dump into a `<name>/` folder.
 ```
 
@@ -94,7 +96,7 @@ files — it must exist and never changes where outputs are written).
 | `-s=d` / `-s=v` / `-s=e` (aliases `-sd` / `-sv` / `-se`) | Split the solid statistics: continuously (default), at each volume (`-sv`) or when the member extension changes (`-se`); `-sv` is rejected for RAR4 and both resets are rejected for RAR 1.3–2.x, whose chains cannot carry a reset flag. The switch is accepted (and ignored) on read commands, like WinRAR |
 | `-ms<list>` | List of file types to store without compressing |
 | `-mcl` | Long-distance matching (WinRAR hidden switch) — automatic at `-m2`…`-m5`; the `-mcl` switch is accepted (no-op) because long-range matching is always on for those levels, matching WinRAR 7.23 |
-| `-mc[ch][mode][+/-]` | Advanced filter policy: `-mc-` disables every filter, `-mcd-`/`-mce-` disable delta/x86, `-mcd+`/`-mce+` force them on all data (`-mcd<N>+` picks the delta channel count, 1–31); `-mcl±`/`-mcx±` are accepted without effect (long-range always on, exhaustive search not implemented) |
+| `-mc[ch][mode][+/-]` | Advanced filter policy: `-mc-` disables every filter, `-mcd-`/`-mce-` disable delta/x86, `-mcd+`/`-mce+` force them on all data (`-mcd<N>+` picks the delta channel count, 1–31); forcing both at once (`-mcd+ -mce+` / `-mcde+`) is rejected with `InvalidOption`, since the two transforms would cover the same member (the streaming writer reports "cannot force the delta and x86 filters on the same member; choose one filter mode"); `-mcl±`/`-mcx±` are accepted without effect (long-range always on, exhaustive search not implemented) |
 | filters | Automatic output filters: x86 `E8`/`E8E9` for code **and delta (multimedia) for correlated multi-channel data** (audio PCM, raw bitmaps, database pages) are applied per-member before LZSS and written as non-solid filter members; both decode byte-for-byte under WinRAR/UnRAR |
 
 ### Encryption & integrity
@@ -178,9 +180,10 @@ unrar <command> [-p<password>] [--dest <path>] archive[.rar] [names...]
 ```
 
 The destination directory is set with `--dest <path>` (default `.`); every
-`names...` argument is a **member selector** (full stored path or basename). A
-name matching nothing is a hard error, never a silent dump into a `<name>/`
-folder.
+`names...` argument is a **member selector**: a non-mask name must match the
+full stored path or name a directory (selecting its subtree), while `*`/`?`
+masks also match the basename anywhere in the tree. A name matching nothing
+is a hard error, never a silent dump into a `<name>/` folder.
 
 | Command | Action |
 |---|---|

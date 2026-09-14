@@ -18,7 +18,9 @@ pub struct ArchiveEntry {
     pub(crate) chunks: Vec<DataChunk>,
 }
 
-/// One entry to add through `RarArchive::add_batch`.
+/// One entry to add through the batch paths: the facade's
+/// [`ArchiveWriter::add_batch`](crate::ArchiveWriter::add_batch) accepts
+/// [`WriteEntry`](crate::WriteEntry) values and converts them into this type.
 ///
 /// Borrowed views only: byte payloads are copied by the library during
 /// preparation, and file entries are read (up to the batch member cap)
@@ -130,7 +132,14 @@ impl ArchiveEntry {
         self.header.comp_method
     }
 
-    /// Modification time as a Unix timestamp (seconds since epoch).
+    /// Modification time in seconds.
+    ///
+    /// RAR5 members carry a Unix timestamp (seconds since epoch). For
+    /// RAR 1.3–4.x the header stores DOS local wall-clock time, and the
+    /// catalog preserves it as civil seconds (the stored date/time fields
+    /// interpreted as UTC), so consume it as an instant only after
+    /// applying `format::rar4::write::local_civil_to_epoch` — extraction
+    /// does exactly that (see `apply_member_times`).
     pub fn mtime(&self) -> u32 {
         self.header.mtime
     }

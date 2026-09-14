@@ -69,7 +69,7 @@ pub struct FileHeader {
     pub salt: Option<[u8; 8]>,
     /// RAR 1.5–4.x raw header CRC (16-bit); `None` for RAR5 members, which
     /// use the 32-bit header CRC32.
-    // Only read through the wire surface, which is `raw`-gated.
+    // Only read through the `wire` surface.
     pub legacy_head_crc: Option<u16>,
     /// Per-member (file) comment for RAR 1.5–4.x archives: a `COMM_HEAD`
     /// block after the member data (RAR 3.x/4.x) or nested in the header via

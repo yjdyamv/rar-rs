@@ -123,14 +123,15 @@ fn build(
 }
 
 /// `SA_OFFICIAL_UNRAR`, else the project's WinRAR cache (7.23 prefers the
-/// last release that reads pre-RAR5; 6.23 as fallback). `None` skips the
-/// official check.
+/// last release that reads pre-RAR5; 6.23 as fallback). When no binary is
+/// found the test skips with a visible marker; `SA_REQUIRE_OFFICIAL=1` turns
+/// that skip into a hard failure, matching `official_interop.rs`.
 fn official_unrar() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("SA_OFFICIAL_UNRAR") {
         return Some(PathBuf::from(path));
     }
     let exe = if cfg!(windows) { "UnRAR.exe" } else { "unrar" };
-    [
+    let cached = [
         "../../.cache/winrar/7-23",
         "../.cache/winrar/7-23",
         ".cache/winrar/7-23",
@@ -140,7 +141,15 @@ fn official_unrar() -> Option<PathBuf> {
     ]
     .iter()
     .map(|dir| Path::new(env!("CARGO_MANIFEST_DIR")).join(dir).join(exe))
-    .find(|bin| bin.exists())
+    .find(|bin| bin.exists());
+    if cached.is_none() {
+        assert!(
+            std::env::var_os("SA_REQUIRE_OFFICIAL").is_none(),
+            "official unrar is required (SA_REQUIRE_OFFICIAL is set): set SA_OFFICIAL_UNRAR"
+        );
+        eprintln!("SKIPPED (SA_OFFICIAL_UNRAR unset and no cached unrar found)");
+    }
+    cached
 }
 
 #[test]
@@ -195,8 +204,7 @@ fn old_format_solid_store_fallback_roundtrip() {
 #[test]
 fn official_unrar_validates_old_format_solid_store_fallback() {
     let Some(unrar) = official_unrar() else {
-        eprintln!("SKIP: official UnRAR not found (set SA_OFFICIAL_UNRAR)");
-        return;
+        return; // skipped with a visible marker unless SA_REQUIRE_OFFICIAL is set
     };
     let mut failures: Vec<String> = Vec::new();
     for version in [ArchiveVersion::V15, ArchiveVersion::V20] {

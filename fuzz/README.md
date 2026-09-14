@@ -1,6 +1,7 @@
 # rar-rs-fuzz
 
-Fuzz targets for the `rar-rs` library, covering the three attack surfaces:
+Fuzz targets for the `rar-rs` library, covering the read and write
+attack surfaces with seven targets:
 
 | target | surface |
 |---|---|
@@ -62,7 +63,12 @@ The write-side targets (`write`, `rewrite`) create and rewrite archives
 on disk every iteration, so they default to 20k iterations (Windows file
 churn makes them slow there; Linux is ~10x faster) — raise the count
 with `FUZZ_ITERATIONS` for longer runs. `rev` and `legacy` also touch
-disk per iteration and default to 20k for the same reason.
+disk per iteration and default to 20k for the same reason. `write`
+derives only mutually compatible option combinations (quick-open is
+suppressed when a volume size or header encryption is selected) and
+prints coverage counters after the loop — created archives, multi-volume
+creations and rv/rc rebuilds — failing the run when those paths were
+starved instead of passing with them dead.
 
 ## libFuzzer (nightly + clang, e.g. Linux CI)
 
@@ -75,6 +81,8 @@ cargo +nightly fuzz run crypto --features fuzzing
 cargo +nightly fuzz run recovery --features fuzzing
 cargo +nightly fuzz run rev --features fuzzing
 cargo +nightly fuzz run legacy --features fuzzing
+cargo +nightly fuzz run write --features fuzzing
+cargo +nightly fuzz run rewrite --features fuzzing
 ```
 
 The `fuzzing` feature pulls in `libfuzzer-sys`; the same `fn(&[u8])`
@@ -103,7 +111,9 @@ for its target directory (`cargo fuzz run <target>` reads
 fixtures, used only as starting points for mutation; libFuzzer appends
 coverage-increasing inputs to the same directories and the directory is
 never committed. The standalone loop never reads it — its seeds come from
-the `include_bytes!` fixtures compiled into the harness.
+the `include_bytes!` fixtures compiled into the harness. `write` and
+`rewrite` have no fixture seeds (their archives are derived from the fuzz
+input itself), so their corpus directories start empty.
 
 Nightly is required here — cargo-fuzz passes `-Z sanitizer` (ASAN/UBSAN)
 which stable cannot provide; the standalone loop only observes panics,

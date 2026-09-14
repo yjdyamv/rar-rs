@@ -50,7 +50,7 @@
 | `format/rar5/` | 内部（`wire` 导出受支持子集） | 常量与词汇（`mod.rs`）、`create.rs`（字典字段策略）、`headers/{parse,serialize,locator}`、`payload.rs`（MemberDecoder）、`vint.rs`、`blake2sp.rs`、`extract/`（读路径：`open`/`read`/`members`/`dest`/`solid`/`decode`/`verify`）、`write/{mod,add,emit,stream,batch,engine,filter_policy,layout,windows}` |
 | `format/rar4/` | 内部 | 老容器族：扫描 / 头解析、解码门面、写管线 |
 | `format/rar13/` | 内部 | DOS 时代 `RE~^` 容器：读取（旧命名分卷拼装）、创建（单卷 + `.rar/.rNN` 分卷、solid/注释/`-p`） |
-| `codec/modern/lzss_huff/` | **公开** | RAR5 LZSS+Huffman 编解码器。ADR 0003 决策 3 明确保留（`examples/` 依赖根上的 `encode` / `decode` / `EncoderState` / `encode_chunked*`） |
+| `codec/modern/lzss_huff/` | **公开**（`codec::lzss_huff` + crate 根重导出子集） | RAR5 LZSS+Huffman 编解码器。`codec/mod.rs` 重导出整个 `lzss_huff` 模块（公有项含 `encode*` / `decode*` / `analyze_stream` / `trace_stream` / `FilterSpec` / `EncodeOptions` / `DecoderState` 与 Huffman 常量），crate 根再重导出 `encode` / `decode` / `decode_standalone` / `encode_chunked`（`parallel` 下另有 `#[doc(hidden)]` 的 `EncoderState` / `encode_chunked_mt`）；`examples/` 两者都用。ADR 0003 决策 3 明确保留 |
 | `codec/legacy/`、`codec/common/` | `pub(crate)` | 老代编解码器与 PPMd；bitstream / huffman / filters / incompressible / match_finder / window |
 | `crypto/` | 内部（AES/KDF 原语经 `wire` 导出） | `rar50`（AES-256-CBC + KDF + hash-key MAC）、`rar15` / `rar20` / `rar30` |
 | `recovery/` | 内部（受支持入口在 crate 根与 `wire` 重导出） | `rar50`（内联 RR）、`rev50`（RAR5 `.rev`）、`rev3`（RAR 1.5–4.x `.rev`，GF(2^8)）、`legacy`（PROTECT_HEAD / NEWSUB 修复）。受支持的入口在 crate 根重导出（`repair_archive_path`、`rebuild_missing_volumes`、`build_recovery_volumes_for_set` 等） |
