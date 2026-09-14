@@ -8,7 +8,7 @@ use crate::format::rar5::headers::{ArchiveHeader, BlockMeta, split_main_extra};
 use crate::format::rar5::vint;
 use crate::format::rar5::{
     ARCHIVE_FLAG_LOCKED, ARCHIVE_FLAG_RECOVERY, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA,
-    BLOCK_TYPE_ARCHIVE_HEADER, FILE_FLAG_CRC32, FILE_FLAG_TIME_UNIX, RAR5_SIGNATURE,
+    FILE_FLAG_CRC32, FILE_FLAG_TIME_UNIX, RAR5_SIGNATURE,
 };
 
 impl RarArchive {
@@ -27,7 +27,7 @@ impl RarArchive {
         if ah.flags & ARCHIVE_FLAG_LOCKED != 0 {
             return Err(RarError::ArchiveLocked);
         }
-        let (had_qo, _had_rr, mut extra) = split_main_extra(&ah.extra_data)?;
+        let (had_qo, _had_rr, extra) = split_main_extra(&ah.extra_data)?;
         self.write_ctx_mut().locator.quick_open = had_qo && !self.header_encryption;
         // The recovery record is rebuilt when the original archive had one
         // (or when the caller forces it, e.g. the `rr` command).
@@ -40,45 +40,10 @@ impl RarArchive {
 
         let quick_open = self.write_ctx().locator.quick_open;
         let recovery = self.recovery_percent.is_some();
-        let (locator, qo_field_pos, rr_field_pos) =
-            crate::format::rar5::headers::locator::build_locator_body(quick_open, recovery);
-        // When neither QO nor RR is active, locator_flags == 0 and
-        // the body is exactly 1 byte (the flags vint).  Omit the record
-        // in that case, preserving the original conditional emit.
-        if locator.len() > 1 {
-            extra.extend(crate::format::rar5::headers::locator::frame_locator_record(
-                &locator,
-            ));
-        }
-
-        let mut block_flags = 0u64;
-        if !extra.is_empty() {
-            block_flags |= BLOCK_FLAG_EXTRA_DATA;
-        }
-
-        let mut body = Vec::new();
-        body.extend(vint::encode(BLOCK_TYPE_ARCHIVE_HEADER));
-        body.extend(vint::encode(block_flags));
-        if block_flags & BLOCK_FLAG_EXTRA_DATA != 0 {
-            body.extend(vint::encode(extra.len() as u64));
-        }
-        body.extend(vint::encode(arch_flags));
-        body.extend(&extra);
-
-        let hdr = crate::format::rar5::headers::frame_block(&body);
-
-        // Plaintext-relative offset of the locator offset fields inside the
-        // locator body (see write_archive_header_with_locators).
-        let field_base = 4usize
-            + vint::encoded_size(body.len() as u64)
-            + vint::encoded_size(BLOCK_TYPE_ARCHIVE_HEADER)
-            + vint::encoded_size(block_flags)
-            + vint::encoded_size(extra.len() as u64)
-            + vint::encoded_size(arch_flags)
-            + vint::encoded_size(locator.len() as u64)
-            + vint::encoded_size(crate::format::rar5::headers::locator::LOCATOR_TYPE);
-        let qo_field_pos = qo_field_pos.map(|p| field_base + p);
-        let rr_field_pos = rr_field_pos.map(|p| field_base + p);
+        let (hdr, qo_field_pos, rr_field_pos) =
+            crate::format::rar5::headers::locator::build_main_header(
+                arch_flags, &extra, quick_open, recovery, None,
+            );
 
         let main_start = self.stream.as_mut().unwrap().stream_position()?;
         self.write_block_header(&hdr)?;

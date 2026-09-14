@@ -12,12 +12,11 @@ use super::{
 };
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader};
+use crate::format::rar5::headers::EndOfArchiveHeader;
 use crate::format::rar5::vint;
 use crate::format::rar5::{
-    ARCHIVE_FLAG_RECOVERY, ARCHIVE_FLAG_SOLID, ARCHIVE_FLAG_VOLUME, BLOCK_FLAG_EXTRA_DATA,
-    BLOCK_TYPE_ARCHIVE_HEADER, ENCR_IV_SIZE, ENCR_PBKDF2_ITER_LOG, END_FLAG_NEXT_VOLUME,
-    RAR5_SIGNATURE,
+    ARCHIVE_FLAG_RECOVERY, ARCHIVE_FLAG_SOLID, ARCHIVE_FLAG_VOLUME, ENCR_IV_SIZE,
+    ENCR_PBKDF2_ITER_LOG, END_FLAG_NEXT_VOLUME, RAR5_SIGNATURE,
 };
 use crate::fs::atomic::{
     commit_files, install_durable, parent_dir, read_write_create, recover_interrupted_commit,
@@ -604,17 +603,19 @@ impl RarArchive {
         if self.recovery_percent.is_some() || self.write_ctx().locator.quick_open {
             return self.write_archive_header_with_locators();
         }
-        let hdr = ArchiveHeader {
-            flags: if self.write_ctx().solid.mode {
-                ARCHIVE_FLAG_SOLID
-            } else {
-                0
-            },
-            extra_data: Vec::new(),
-            volume_number: None,
+        let flags = if self.write_ctx().solid.mode {
+            ARCHIVE_FLAG_SOLID
+        } else {
+            0
         };
-        let hdr_bytes = hdr.to_bytes();
-        self.write_block_header(&hdr_bytes)
+        let (hdr, _, _) = crate::format::rar5::headers::locator::build_main_header(
+            flags,
+            &[],
+            false,
+            false,
+            None,
+        );
+        self.write_block_header(&hdr)
     }
 
     /// Write the main archive header with a locator record for the
@@ -625,82 +626,41 @@ impl RarArchive {
     /// header length never changes; the real offsets are patched in at
     /// close time.
     pub(super) fn write_archive_header_with_locators(&mut self) -> RarResult<()> {
-        // Locator record body: [flags vint][qo offset vint][rr offset vint]
-        // (only the offsets whose flags are set). The byte rules live once
-        // in headers::locator.
         let quick_open = self.write_ctx().locator.quick_open;
         let recovery = self.recovery_percent.is_some();
-        let (locator, qo_field_pos, rr_field_pos) =
-            crate::format::rar5::headers::locator::build_locator_body(quick_open, recovery);
-
-        let mut extra = Vec::new();
-        extra.extend(crate::format::rar5::headers::locator::frame_locator_record(
-            &locator,
-        ));
-
         let mut arch_flags = 0u64;
-        if self.recovery_percent.is_some() {
+        if recovery {
             arch_flags |= ARCHIVE_FLAG_RECOVERY;
         }
         if self.write_ctx().solid.mode {
             arch_flags |= ARCHIVE_FLAG_SOLID;
         }
-
-        let body = [
-            vint::encode(BLOCK_TYPE_ARCHIVE_HEADER),
-            vint::encode(BLOCK_FLAG_EXTRA_DATA),
-            vint::encode(extra.len() as u64),
-            vint::encode(arch_flags),
-        ]
-        .concat();
-        let mut content = body;
-        content.extend(&extra);
-
-        let size_bytes = vint::encode(content.len() as u64);
-        let mut header_content = Vec::with_capacity(size_bytes.len() + content.len());
-        header_content.extend(&size_bytes);
-        header_content.extend(&content);
-
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&header_content);
-        let crc = hasher.finalize();
-
-        let mut out = Vec::with_capacity(4 + header_content.len());
-        out.extend(crc.to_le_bytes());
-        out.extend(header_content);
+        let (hdr, qo_field, rr_field) = crate::format::rar5::headers::locator::build_main_header(
+            arch_flags,
+            &[],
+            quick_open,
+            recovery,
+            None,
+        );
 
         let main_header_start = self.stream.as_mut().unwrap().stream_position()?;
-        self.write_block_header(&out)?;
-        self.write_ctx_mut().locator.main_header_start = Some(main_header_start);
-        // Plaintext-relative index of the locator body (flags vint then
-        // the preallocated offset fields): crc(4) + hsize vint + block
-        // type + block flags + extra size + archive flags + record size +
-        // locator type.
-        let field_base = 4u64
-            + size_bytes.len() as u64
-            + vint::encoded_size(BLOCK_TYPE_ARCHIVE_HEADER) as u64
-            + vint::encoded_size(BLOCK_FLAG_EXTRA_DATA) as u64
-            + vint::encoded_size(extra.len() as u64) as u64
-            + vint::encoded_size(arch_flags) as u64
-            + vint::encoded_size(locator.len() as u64) as u64
-            + vint::encoded_size(crate::format::rar5::headers::locator::LOCATOR_TYPE) as u64;
-        if let Some(p) = qo_field_pos {
-            self.write_ctx_mut().locator.qo_offset_field_pos = Some(field_base + p as u64);
-        }
-        if let Some(p) = rr_field_pos {
-            self.write_ctx_mut().locator.rr_offset_field_pos = Some(field_base + p as u64);
-        }
+        self.write_block_header(&hdr)?;
+        let ctx = self.write_ctx_mut();
+        ctx.locator.main_header_start = Some(main_header_start);
+        ctx.locator.qo_offset_field_pos = qo_field.map(|p| p as u64);
+        ctx.locator.rr_offset_field_pos = rr_field.map(|p| p as u64);
         Ok(())
     }
 
     pub(super) fn write_archive_header_vol(&mut self, volume_number: Option<u64>) -> RarResult<()> {
-        let hdr = ArchiveHeader {
-            flags: ARCHIVE_FLAG_VOLUME,
-            extra_data: Vec::new(),
+        let (hdr, _, _) = crate::format::rar5::headers::locator::build_main_header(
+            ARCHIVE_FLAG_VOLUME,
+            &[],
+            false,
+            false,
             volume_number,
-        };
-        let hdr_bytes = hdr.to_bytes();
-        self.write_block_header(&hdr_bytes)
+        );
+        self.write_block_header(&hdr)
     }
 
     pub(super) fn write_end_block(&mut self) -> RarResult<()> {
