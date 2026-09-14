@@ -48,7 +48,10 @@ fn rar50_does_not_import_the_legacy_families() {
         .into_iter()
         .filter(|path| {
             let text = std::fs::read_to_string(path).expect("read RAR5 source");
-            text.contains("format::rar4") || text.contains("format::rar13")
+            text.contains("format::rar4")
+                || text.contains("format::rar13")
+                || text.contains("format::{rar4")
+                || text.contains("format::{rar13")
         })
         .collect();
 

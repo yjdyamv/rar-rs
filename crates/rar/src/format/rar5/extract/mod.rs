@@ -15,6 +15,7 @@ mod open;
 mod solid;
 mod verify;
 
+#[cfg(feature = "parallel")]
 pub(crate) use verify::verify_integrity_for;
 
 use crate::error::{RarError, RarResult};

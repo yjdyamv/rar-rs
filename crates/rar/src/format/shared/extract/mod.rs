@@ -37,6 +37,7 @@ impl RarArchive {
     /// Whether the parallel extraction path may decode this archive. The
     /// parallel phase decodes with the RAR5 codec and uses the RAR5 solid
     /// rule, so legacy families always stream sequentially.
+    #[cfg(feature = "parallel")]
     pub(crate) fn supports_parallel_extract(&self) -> bool {
         !self.is_legacy()
     }
@@ -69,7 +70,7 @@ impl RarArchive {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "parallel"))]
 mod tests {
     use super::*;
 

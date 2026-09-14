@@ -279,20 +279,12 @@ impl RarArchive {
             writer,
         )?;
         // The streamed checksum is authoritative; compare with the header.
-        if let Some(expected) = hdr.crc32_val {
-            let actual = if hdr.format_version == 3 {
-                u32::from(rar13_checksum)
-            } else {
-                crc
-            };
-            if actual != expected {
-                return Err(RarError::Crc {
-                    expected,
-                    actual,
-                    context: format!("{}: checksum mismatch", hdr.name),
-                });
-            }
-        }
+        let actual = if hdr.uses_rar13_checksum() {
+            u32::from(rar13_checksum)
+        } else {
+            crc
+        };
+        verify_member_crc(&hdr, actual)?;
         Ok(written)
     }
 
@@ -320,20 +312,25 @@ impl RarArchive {
     }
 
     fn rar4_verify_crc(&self, hdr: &FileHeader, data: &[u8]) -> RarResult<()> {
-        if let Some(expected) = hdr.crc32_val {
-            let actual = if hdr.format_version == 3 {
-                u32::from(crate::format::rar13::file_checksum(data))
-            } else {
-                super::member_crc(data)
-            };
-            if actual != expected {
-                return Err(RarError::Crc {
-                    expected,
-                    actual,
-                    context: format!("{}: checksum mismatch", hdr.name),
-                });
-            }
-        }
-        Ok(())
+        let actual = if hdr.uses_rar13_checksum() {
+            u32::from(crate::format::rar13::file_checksum(data))
+        } else {
+            super::member_crc(data)
+        };
+        verify_member_crc(hdr, actual)
     }
+}
+
+/// Compare a member's stored checksum with the computed one.
+fn verify_member_crc(hdr: &FileHeader, actual: u32) -> RarResult<()> {
+    if let Some(expected) = hdr.crc32_val
+        && actual != expected
+    {
+        return Err(RarError::Crc {
+            expected,
+            actual,
+            context: format!("{}: checksum mismatch", hdr.name),
+        });
+    }
+    Ok(())
 }

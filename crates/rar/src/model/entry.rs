@@ -88,6 +88,9 @@ pub(crate) enum HostAttributes {
     UnixMode(u32),
     /// DOS attribute bits (Windows-host members; RAR 1.3/1.4 always).
     Dos,
+    /// Another host's encoding: no Unix mode to restore, and no stored DOS
+    /// bits either (extraction applies the archive/directory bits only).
+    Other,
 }
 
 impl FileHeader {
@@ -95,6 +98,12 @@ impl FileHeader {
     /// (RAR 1.3–4.x) rather than a Unix instant.
     pub(crate) fn uses_local_civil_time(&self) -> bool {
         self.format_version == 3 || self.format_version == 4
+    }
+
+    /// Whether [`crc32_val`](Self::crc32_val) holds the RAR 1.3/1.4 16-bit
+    /// rolling checksum rather than a CRC32.
+    pub(crate) fn uses_rar13_checksum(&self) -> bool {
+        self.format_version == 3
     }
 
     /// How to interpret the attribute field.
@@ -107,9 +116,11 @@ impl FileHeader {
                 HostAttributes::UnixMode(((self.attributes >> 16) & 0o7777) as u32)
             }
             4 => HostAttributes::Dos,
-            // RAR5+: host 1 is Unix and the attribute vint is the mode.
+            // RAR5+: host 1 is Unix and the attribute vint is the mode;
+            // host 0 is Windows, any other host carries neither.
             _ if self.host_os == 1 => HostAttributes::UnixMode((self.attributes & 0o7777) as u32),
-            _ => HostAttributes::Dos,
+            _ if self.host_os == 0 => HostAttributes::Dos,
+            _ => HostAttributes::Other,
         }
     }
 }

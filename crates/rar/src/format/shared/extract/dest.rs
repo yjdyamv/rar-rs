@@ -41,7 +41,7 @@ fn apply_windows_attributes(hdr: &crate::model::FileHeader, dest_path: &Path) {
         | FILE_ATTRIBUTE_ARCHIVE) as u64;
     let mut attrs = match hdr.host_attributes() {
         crate::model::HostAttributes::Dos => (hdr.attributes & STORED_DOS_ATTRIBUTES) as u32,
-        crate::model::HostAttributes::UnixMode(_) => {
+        crate::model::HostAttributes::UnixMode(_) | crate::model::HostAttributes::Other => {
             if hdr.is_directory {
                 FILE_ATTRIBUTE_DIRECTORY
             } else {
