@@ -88,13 +88,21 @@ impl fmt::Debug for OpenOptions {
 
 /// Opaque identity of one member in an [`ArchiveReader`]'s entry catalog.
 ///
-/// IDs distinguish duplicate member names. They are scoped to the reader that
-/// created them: using an ID with another reader returns
-/// [`RarError::StaleEntryId`], even when both readers opened the same file.
+/// IDs distinguish duplicate member names and carry the member's packed-
+/// payload position, so a catalog rebuild that only reorders entries (the
+/// quick-open rescan before extraction) still resolves an ID to the member
+/// it names. They are scoped to the reader that created them: using an ID
+/// with another reader returns [`RarError::StaleEntryId`], even when both
+/// readers opened the same file. An ID whose member is no longer present in
+/// the catalog fails the same way instead of addressing whatever member now
+/// sits at its old index.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EntryId {
     catalog_token: u64,
     index: usize,
+    /// Packed-payload offset of the member's first chunk when the ID was
+    /// minted (`None` only for degenerate entries without data chunks).
+    data_offset: Option<u64>,
 }
 
 impl fmt::Debug for EntryId {
@@ -104,6 +112,16 @@ impl fmt::Debug for EntryId {
 }
 
 impl EntryId {
+    /// Mint an ID for `entry` at `index` in the catalog identified by
+    /// `catalog_token`.
+    pub(crate) fn mint(catalog_token: u64, index: usize, entry: &ArchiveEntry) -> Self {
+        EntryId {
+            catalog_token,
+            index,
+            data_offset: entry.chunks.first().map(|chunk| chunk.data_offset),
+        }
+    }
+
     /// Whether this ID was minted for the catalog with `token`.
     pub(crate) const fn scoped_to(self, token: u64) -> bool {
         self.catalog_token == token
@@ -175,10 +193,7 @@ impl<'a> Iterator for Entries<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.entries.next().map(|(index, entry)| EntryRef {
-            id: EntryId {
-                catalog_token: self.catalog_token,
-                index,
-            },
+            id: EntryId::mint(self.catalog_token, index, entry),
             entry,
         })
     }
@@ -191,10 +206,7 @@ impl<'a> Iterator for Entries<'a> {
 impl DoubleEndedIterator for Entries<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.entries.next_back().map(|(index, entry)| EntryRef {
-            id: EntryId {
-                catalog_token: self.catalog_token,
-                index,
-            },
+            id: EntryId::mint(self.catalog_token, index, entry),
             entry,
         })
     }
@@ -233,10 +245,7 @@ impl<'reader> Iterator for EntryMatches<'reader, '_> {
     fn next(&mut self) -> Option<Self::Item> {
         self.entries.find_map(|(index, entry)| {
             (entry.name() == self.name).then_some(EntryRef {
-                id: EntryId {
-                    catalog_token: self.catalog_token,
-                    index,
-                },
+                id: EntryId::mint(self.catalog_token, index, entry),
                 entry,
             })
         })
@@ -252,10 +261,7 @@ impl DoubleEndedIterator for EntryMatches<'_, '_> {
         self.entries
             .rfind(|(_, entry)| entry.name() == self.name)
             .map(|(index, entry)| EntryRef {
-                id: EntryId {
-                    catalog_token: self.catalog_token,
-                    index,
-                },
+                id: EntryId::mint(self.catalog_token, index, entry),
                 entry,
             })
     }
@@ -329,10 +335,12 @@ impl VerificationReport {
 /// Read-only archive role with duplicate-safe member identities.
 ///
 /// This type wraps the existing [`RarArchive`] implementation but deliberately
-/// exposes no creation, append, rewrite or locking operations. IDs are minted
-/// and checked against the archive's live catalog identity, so a catalog
-/// rebuild (a quick-open rescan before extraction) makes every previously
-/// issued ID stale instead of letting it address a different member.
+/// exposes no creation, append, rewrite or locking operations. IDs embed both
+/// the catalog generation and the member's packed-payload position, so a
+/// catalog rebuild that only reorders entries (a quick-open rescan before
+/// extraction) still resolves every issued ID to the member it names; only
+/// IDs from another catalog — or for members the rebuilt catalog no longer
+/// contains — fail as [`RarError::StaleEntryId`].
 pub struct ArchiveReader {
     archive: RarArchive,
 }
@@ -642,11 +650,25 @@ impl ArchiveReader {
     }
 
     fn resolve_id(&self, id: EntryId) -> RarResult<usize> {
-        if id.catalog_token != self.archive.catalog_token()
-            || id.index >= self.archive.entries.len()
-        {
+        if id.catalog_token != self.archive.catalog_token() {
             return Err(RarError::StaleEntryId);
         }
-        Ok(id.index)
+        let entries = &self.archive.entries;
+        let matches_member = |entry: &ArchiveEntry| {
+            entry.chunks.first().map(|chunk| chunk.data_offset) == id.data_offset
+        };
+        // The fast path holds while the catalog kept its order; after a
+        // quick-open rescan reordered it, locate the member by its payload
+        // position so the ID can never select whatever entry now happens to
+        // sit at the minted index.
+        if let Some(entry) = entries.get(id.index)
+            && matches_member(entry)
+        {
+            return Ok(id.index);
+        }
+        entries
+            .iter()
+            .position(matches_member)
+            .ok_or(RarError::StaleEntryId)
     }
 }

@@ -203,11 +203,10 @@ fn open_quick_handles_encrypted_archives() {
     );
 }
 
-/// Reorder the two cached entries of a quick-open record without touching
-/// their bodies (each body keeps its own header CRC and relative offset, so
-/// the resulting record is structurally valid but lists members in the
-/// opposite order from the archive scan).
-fn swap_quick_open_entries(archive: &[u8]) -> Vec<u8> {
+/// The quick-open payload of `archive`: the absolute file offset of the
+/// data area, its declared length, and the cached entry byte-runs in stored
+/// order. Each entry run is `[entry CRC32][body size vint][body]`.
+fn quick_open_payload_entries(archive: &[u8]) -> (u64, usize, Vec<Vec<u8>>) {
     use std::io::Read;
 
     let mut cursor = std::io::Cursor::new(archive);
@@ -232,22 +231,227 @@ fn swap_quick_open_entries(archive: &[u8]) -> Vec<u8> {
                 assert!(off <= payload.len(), "truncated quick-open body");
                 entries.push(payload[start..off].to_vec());
             }
-            assert_eq!(entries.len(), 2, "test archive must cache two entries");
-            entries.reverse();
-            let swapped: Vec<u8> = entries.concat();
-            assert_eq!(swapped.len(), payload.len());
-            let mut out = archive.to_vec();
-            out.splice(
-                meta.data_offset as usize..meta.data_offset as usize + payload.len(),
-                swapped,
-            );
-            return out;
+            return (meta.data_offset, payload.len(), entries);
         }
         cursor.set_position(meta.data_end);
         if meta.block_type == 0x05 {
             panic!("archive has no quick-open record");
         }
     }
+}
+
+/// Replace the quick-open payload with `entries`, which must encode to the
+/// same length as the original so the block header stays untouched.
+fn splice_quick_open_payload(archive: &[u8], payload_offset: u64, entries: &[Vec<u8>]) -> Vec<u8> {
+    let (_, payload_len, _) = quick_open_payload_entries(archive);
+    let patched: Vec<u8> = entries.concat();
+    assert_eq!(
+        patched.len(),
+        payload_len,
+        "patched quick-open payload must keep its length"
+    );
+    let mut out = archive.to_vec();
+    out.splice(
+        payload_offset as usize..payload_offset as usize + payload_len,
+        patched,
+    );
+    out
+}
+
+/// Reorder the two cached entries of a quick-open record without touching
+/// their bodies (each body keeps its own header CRC and relative offset, so
+/// the resulting record is structurally valid but lists members in the
+/// opposite order from the archive scan).
+fn swap_quick_open_entries(archive: &[u8]) -> Vec<u8> {
+    let (payload_offset, _, mut entries) = quick_open_payload_entries(archive);
+    assert_eq!(entries.len(), 2, "test archive must cache two entries");
+    entries.reverse();
+    splice_quick_open_payload(archive, payload_offset, &entries)
+}
+
+/// Move one cached entry's relative offset by one byte (keeping the varint
+/// width and payload length): the cached catalog names a member whose
+/// payload position no block scan produces, while the entry body stays
+/// structurally valid and CRC-checked.
+fn move_quick_open_entry_offset(archive: &[u8], entry_index: usize) -> Vec<u8> {
+    let (payload_offset, _, mut entries) = quick_open_payload_entries(archive);
+    let run = &mut entries[entry_index];
+    // Layout: [entry CRC32][body size vint][flags vint][rel vint][...]
+    let (body_size, size_len) =
+        rar_rs::wire::vint::decode_from_slice(run, 4).expect("body size vint");
+    let body_start = 4 + size_len;
+    let body_end = body_start + body_size as usize;
+    let (_, flags_len) =
+        rar_rs::wire::vint::decode_from_slice(run, body_start).expect("flags vint");
+    let rel_pos = body_start + flags_len;
+    let (rel, rel_len) =
+        rar_rs::wire::vint::decode_from_slice(run, rel_pos).expect("relative offset vint");
+    let new_rel = (1..=127u64)
+        .flat_map(|delta| [rel.checked_add(delta), rel.checked_sub(delta)])
+        .flatten()
+        .find(|candidate| rar_rs::wire::vint::encode(*candidate).len() == rel_len)
+        .expect("neighbor offset with the same varint width");
+    run[rel_pos..rel_pos + rel_len].copy_from_slice(&rar_rs::wire::vint::encode(new_rel));
+    let crc = crc32fast::hash(&run[body_start..body_end]);
+    run[0..4].copy_from_slice(&crc.to_le_bytes());
+    splice_quick_open_payload(archive, payload_offset, &entries)
+}
+
+/// Build the swapped-payload archive the ID-loop tests run against:
+/// listing `["bb.txt", "aa.txt"]`, scan order `["aa.txt", "bb.txt"]`.
+fn create_swapped_quick_open_archive(dir: &tempfile::TempDir) -> (std::path::PathBuf, Vec<u8>) {
+    let path = dir.path().join("qo-swapped.rar");
+    let aa = b"aa member payload".repeat(100);
+    let bb = b"bb member payload".repeat(100);
+    {
+        let mut rar = rar_rs::ArchiveWriter::create_with(
+            &path,
+            rar_rs::WriterOptions::default().quick_open(true),
+        )
+        .expect("create");
+        let opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
+        rar.add_bytes("aa.txt", &aa, opts).expect("add aa");
+        rar.add_bytes("bb.txt", &bb, opts).expect("add bb");
+        rar.finish().expect("close");
+    }
+
+    let patched = swap_quick_open_entries(&fs::read(&path).expect("read archive"));
+    let swapped_path = dir.path().join("qo-swapped-patched.rar");
+    fs::write(&swapped_path, &patched).expect("write patched archive");
+    (swapped_path, patched)
+}
+
+/// The natural ID loop — list every member, then extract each listed ID —
+/// must survive the catalog reorder a quick-open rescan performs: each
+/// extraction must land on the member the ID names, not on whatever entry
+/// now sits at the minted index.
+#[test]
+fn quick_open_id_loop_extracts_every_listed_member() {
+    let dir = temp_dir();
+    let (path, patched) = create_swapped_quick_open_archive(&dir);
+    let aa = b"aa member payload".repeat(100);
+    let bb = b"bb member payload".repeat(100);
+    let mut reader = ArchiveReader::open_with(
+        &path,
+        rar_rs::OpenOptions::new().scan_strategy(rar_rs::ScanStrategy::PreferQuickOpen),
+    )
+    .expect("open quick");
+
+    let listed: Vec<(String, rar_rs::EntryId)> = reader
+        .entries()
+        .map(|entry| (entry.name().to_string(), entry.id()))
+        .collect();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["bb.txt", "aa.txt"],
+        "the cached listing must be reversed"
+    );
+
+    let out = dir.path().join("out");
+    for (name, id) in &listed {
+        let extracted = reader
+            .extract_entry_with_options(*id, &out, rar_rs::ExtractOptions::default())
+            .unwrap_or_else(|err| panic!("extract {name} through its listed ID: {err}"));
+        assert_eq!(
+            extracted.file_name().and_then(|n| n.to_str()),
+            Some(name.as_str()),
+            "ID for {name} must resolve to the member it names"
+        );
+        let expected = if name == "aa.txt" { &aa } else { &bb };
+        assert_eq!(
+            &fs::read(&extracted).expect("read extracted file"),
+            expected,
+            "ID for {name} must extract {name}'s payload"
+        );
+    }
+
+    // Every ID also still resolves after the rescan, and the read/copy
+    // paths share the same resolution.
+    for (name, id) in &listed {
+        assert_eq!(
+            reader.entry(*id).expect("metadata after rescan").name(),
+            name
+        );
+        let expected = if name == "aa.txt" { &aa } else { &bb };
+        assert_eq!(
+            &reader.read_entry(*id).expect("read after rescan"),
+            expected,
+            "read_entry for {name} must survive the rescan"
+        );
+        let mut copied = Vec::new();
+        reader
+            .copy_entry_to(*id, &mut copied)
+            .unwrap_or_else(|err| panic!("copy {name} after rescan: {err}"));
+        assert_eq!(&copied, expected, "copy_entry_to for {name} must match");
+    }
+
+    assert_eq!(
+        fs::read(&path).expect("archive untouched"),
+        patched,
+        "extraction must not modify the archive"
+    );
+}
+
+/// A quick-open catalog entry the block scan cannot reproduce (its cached
+/// payload offset does not exist in the archive) is genuinely stale: the
+/// valid ID still extracts, the phantom ID errors instead of selecting a
+/// neighboring member.
+#[test]
+fn quick_open_id_for_member_missing_from_the_scan_is_stale() {
+    let dir = temp_dir();
+    let (path, _) = create_swapped_quick_open_archive(&dir);
+    let aa = b"aa member payload".repeat(100);
+
+    // The cached listing is ["bb.txt", "aa.txt"]; break bb's offset so the
+    // scan has no member at the position it names.
+    let bytes = fs::read(&path).expect("read patched archive");
+    let stale_path = dir.path().join("qo-stale.rar");
+    fs::write(&stale_path, move_quick_open_entry_offset(&bytes, 0)).expect("write stale archive");
+
+    let mut reader = ArchiveReader::open_with(
+        &stale_path,
+        rar_rs::OpenOptions::new().scan_strategy(rar_rs::ScanStrategy::PreferQuickOpen),
+    )
+    .expect("open quick");
+    let listed: Vec<(String, rar_rs::EntryId)> = reader
+        .entries()
+        .map(|entry| (entry.name().to_string(), entry.id()))
+        .collect();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["bb.txt", "aa.txt"],
+        "precondition: the cached listing still names both members"
+    );
+
+    // The valid entry extracts first and triggers the rescan.
+    let out = dir.path().join("out");
+    let (aa_name, aa_id) = &listed[1];
+    let extracted = reader
+        .extract_entry_with_options(*aa_id, &out, rar_rs::ExtractOptions::default())
+        .expect("valid ID must extract across the rescan");
+    assert_eq!(
+        extracted.file_name().and_then(|n| n.to_str()),
+        Some(aa_name.as_str())
+    );
+    assert_eq!(fs::read(&extracted).expect("read aa"), aa);
+
+    // The phantom ID names a payload position the scan never produced.
+    let (_, stale_id) = &listed[0];
+    assert!(matches!(
+        reader.extract_entry(*stale_id, &out),
+        Err(rar_rs::RarError::StaleEntryId)
+    ));
+    assert!(
+        !out.join("bb.txt").exists(),
+        "a stale ID must not extract a neighboring member"
+    );
 }
 
 /// A quick-open catalog may order members differently from the full scan

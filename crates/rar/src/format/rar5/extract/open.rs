@@ -195,34 +195,22 @@ impl RarArchive {
     /// streams) are discovered. No-op unless the catalog came from the
     /// quick-open record. The scan reads headers only: payload areas are
     /// skipped with seeks, never loaded.
+    ///
+    /// The scan can reorder members relative to the cached catalog, and the
+    /// catalog token is deliberately *not* rotated here: [`crate::EntryId`]s
+    /// carry the member's packed-payload offset and are re-resolved by
+    /// identity (see `ArchiveReader::resolve_id`), so IDs issued from the
+    /// cached listing survive the reorder while an ID whose member the scan
+    /// no longer contains still fails as stale.
     pub(crate) fn ensure_full_catalog(&mut self) -> RarResult<()> {
         if !self.read_ctx().quick_open_catalog {
             return Ok(());
         }
-        // Identity of each cached entry in catalog order: the payload offset
-        // is stable between the quick-open record and the full scan, so an
-        // identical sequence means the rescan preserves every index.
-        let cached: Vec<u64> = self
-            .entries
-            .iter()
-            .filter_map(|entry| entry.chunks.first().map(|chunk| chunk.data_offset))
-            .collect();
         let stream = stream_mut(&mut self.stream)?;
         stream.seek(SeekFrom::Start(
             self.sfx_offset + RAR5_SIGNATURE.len() as u64,
         ))?;
         self.scan_blocks()?;
-        let scanned: Vec<u64> = self
-            .entries
-            .iter()
-            .filter_map(|entry| entry.chunks.first().map(|chunk| chunk.data_offset))
-            .collect();
-        if cached != scanned {
-            // The scan reordered or replaced members: mint a fresh catalog
-            // identity so IDs from the quick-open catalog fail as stale
-            // instead of addressing different members at the same index.
-            self.reset_catalog_token()?;
-        }
         Ok(())
     }
 

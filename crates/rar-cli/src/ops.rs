@@ -51,10 +51,25 @@ pub fn open_reader(path: impl AsRef<Path>, password: Option<&str>) -> CliResult<
 
 /// The archive names WinRAR infers for an extension-less read request:
 /// `<path>.rar`, then the `<path>.part1.rar` first volume.
+///
+/// Both names are built with raw `OsString`s, so a non-UTF-8 host path
+/// (legal on Unix) is probed exactly as spelled; a `display()` /
+/// `to_string_lossy` hop would rewrite it to U+FFFD and never resolve.
 fn inferred_archive_paths(path: &Path) -> Vec<PathBuf> {
     let mut rar = path.to_path_buf();
     rar.set_extension("rar");
-    let part1 = PathBuf::from(format!("{}.part1.rar", path.display()));
+    let part1 = match path.file_name() {
+        Some(name) => {
+            let mut name = name.to_os_string();
+            name.push(".part1.rar");
+            path.with_file_name(name)
+        }
+        None => {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(".part1.rar");
+            PathBuf::from(name)
+        }
+    };
     vec![rar, part1]
 }
 
@@ -714,22 +729,24 @@ fn count_extracted(
     written
 }
 
-/// Destination key for the in-run "already written" set. Windows paths
-/// compare case-insensitively on disk, so `a.txt` and `A.txt` denote the
-/// same file and the second member is skipped by `-o-`. Separator folding
-/// is Windows-only: on Unix `\` is a valid file-name character and must
-/// not be conflated with `/`.
+/// Destination key for the in-run "already written" set. Windows and, by
+/// default, macOS filesystems compare case-insensitively, so `a.txt` and
+/// `A.txt` denote the same file and the second member is skipped by `-o-`.
+/// Separator folding is Windows-only: on Unix `\` is a valid file-name
+/// character and must not be conflated with `/`.
+///
+/// Caveat: a macOS volume can be formatted case-sensitively (or mounted
+/// from a case-sensitive share); the key then folds names the filesystem
+/// keeps distinct, so a same-name/different-case pair counts once.
 fn destination_key(path: &Path) -> String {
-    #[cfg(windows)]
-    {
-        path.to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase()
+    let mut key = path.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        key = key.replace('\\', "/");
     }
-    #[cfg(not(windows))]
-    {
-        path.to_string_lossy().into_owned()
+    if cfg!(any(windows, target_os = "macos")) {
+        key.make_ascii_lowercase();
     }
+    key
 }
 
 /// Extract every file member to stdout, concatenated (`-so`), for piping.
@@ -827,7 +844,7 @@ pub fn print_members(
 
 #[cfg(test)]
 mod tests {
-    use super::{destination_key, extract_names_and_dest, verify_options};
+    use super::{destination_key, extract_names_and_dest, inferred_archive_paths, verify_options};
     use rar_rs::ExtractOptions;
 
     /// `t` streams every member to a sink, so the materializing read caps
@@ -867,8 +884,10 @@ mod tests {
         }
     }
 
-    /// The in-run destination key folds separators and case on Windows
-    /// only; on Unix `a\b` and `a/b` are distinct files.
+    /// The in-run destination key folds separators on Windows only; on Unix
+    /// `a\b` and `a/b` are distinct files. Case is folded on Windows and
+    /// macOS (default APFS/HFS+ are case-insensitive), so `-o-` counting
+    /// matches what extraction does there.
     #[test]
     fn destination_key_is_platform_aware() {
         #[cfg(windows)]
@@ -877,10 +896,6 @@ mod tests {
                 destination_key(std::path::Path::new("a\\b")),
                 destination_key(std::path::Path::new("a/b"))
             );
-            assert_eq!(
-                destination_key(std::path::Path::new("A.TXT")),
-                destination_key(std::path::Path::new("a.txt"))
-            );
         }
         #[cfg(not(windows))]
         {
@@ -888,10 +903,49 @@ mod tests {
                 destination_key(std::path::Path::new("a\\b")),
                 destination_key(std::path::Path::new("a/b"))
             );
+        }
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            assert_eq!(
+                destination_key(std::path::Path::new("A.TXT")),
+                destination_key(std::path::Path::new("a.txt"))
+            );
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
             assert_ne!(
                 destination_key(std::path::Path::new("A.TXT")),
                 destination_key(std::path::Path::new("a.txt"))
             );
+        }
+    }
+
+    /// Inference appends the `.rar` / `.part1.rar` names through raw
+    /// `OsString`s: `<path>.rar` replaces an existing extension while
+    /// `<path>.part1.rar` keeps the spelling, and a non-UTF-8 Unix path is
+    /// not rewritten to U+FFFD.
+    #[test]
+    fn inferred_archive_paths_keep_the_raw_path_bytes() {
+        use std::path::{Path, PathBuf};
+
+        assert_eq!(
+            inferred_archive_paths(Path::new("foo")),
+            vec![PathBuf::from("foo.rar"), PathBuf::from("foo.part1.rar")]
+        );
+        assert_eq!(
+            inferred_archive_paths(Path::new("dir/bar.tar")),
+            vec![
+                PathBuf::from("dir/bar.rar"),
+                PathBuf::from("dir/bar.tar.part1.rar"),
+            ]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let candidates =
+                inferred_archive_paths(Path::new(std::ffi::OsStr::from_bytes(b"caf\xE9")));
+            assert_eq!(candidates[0].as_os_str().as_bytes(), b"caf\xE9.rar");
+            assert_eq!(candidates[1].as_os_str().as_bytes(), b"caf\xE9.part1.rar");
         }
     }
 }

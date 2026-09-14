@@ -1,7 +1,7 @@
 //! Small I/O helpers shared across the crate: bounded reads, atomic
 //! temp-sibling staging and file replacement.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -240,6 +240,7 @@ const COMMIT_JOURNAL_VERSION_V1: &str = "rar5commit v1";
 /// other control character is written as `\r` or `\xNN`. Control characters
 /// are legal on Unix, so they are escaped rather than rejected (rejecting
 /// them here failed a whole multi-volume commit after staging).
+#[cfg(not(unix))]
 fn escape_journal_field(name: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(name.len());
@@ -262,6 +263,7 @@ fn escape_journal_field(name: &str) -> String {
 
 /// Inverse of [`escape_journal_field`]; `None` marks a malformed field (an
 /// unknown escape, a truncated `\xNN`, or a raw control character).
+#[cfg(not(unix))]
 fn unescape_journal_field(field: &str) -> Option<String> {
     let mut out = String::with_capacity(field.len());
     let mut chars = field.chars();
@@ -286,29 +288,150 @@ fn unescape_journal_field(field: &str) -> Option<String> {
     Some(out)
 }
 
+/// Escape one file name into a journal field. On Unix the raw `OsStr` bytes
+/// are escaped (`\xNN` for every byte >= 0x80 or control byte), so a name
+/// that is not valid UTF-8 round-trips exactly; elsewhere the lossy spelling
+/// is escaped as before.
+#[cfg(unix)]
+fn escape_journal_name(name: &OsStr) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    escape_journal_bytes(name.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn escape_journal_name(name: &OsStr) -> String {
+    escape_journal_field(&name.to_string_lossy())
+}
+
+/// Inverse of [`escape_journal_name`], rebuilding the raw name.
+#[cfg(unix)]
+fn unescape_journal_name(field: &str) -> Option<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+    unescape_journal_bytes(field.as_bytes()).map(OsString::from_vec)
+}
+
+#[cfg(not(unix))]
+fn unescape_journal_name(field: &str) -> Option<OsString> {
+    unescape_journal_field(field).map(OsString::from)
+}
+
+/// Byte-level field escaping: `\`, `\t`, `\n` and `\r` keep their backslash
+/// forms, printable ASCII stays literal, and every other byte (a control
+/// byte or one above 0x7F) becomes `\xNN`. The escape is one byte per input
+/// byte, so a non-UTF-8 name is not rewritten to U+FFFD like
+/// `to_string_lossy` would.
+#[cfg(unix)]
+fn escape_journal_bytes(name: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(name.len());
+    for &byte in name {
+        match byte {
+            b'\\' => out.push_str("\\\\"),
+            b'\t' => out.push_str("\\t"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b if b.is_ascii_graphic() || b == b' ' => out.push(b as char),
+            b => {
+                out.push_str("\\x");
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0xF) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+/// Inverse of [`escape_journal_bytes`]: one output byte per literal byte and
+/// per `\xNN`. `None` marks a malformed field (an unknown escape, a
+/// truncated `\xNN`, or a raw control byte).
+#[cfg(unix)]
+fn unescape_journal_bytes(field: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(field.len());
+    let mut index = 0;
+    while index < field.len() {
+        let byte = field[index];
+        index += 1;
+        match byte {
+            b'\\' => {
+                let escape = *field.get(index)?;
+                index += 1;
+                match escape {
+                    b'\\' => out.push(b'\\'),
+                    b't' => out.push(b'\t'),
+                    b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b'x' => {
+                        let hi = hex_digit(*field.get(index)?)?;
+                        let lo = hex_digit(*field.get(index + 1)?)?;
+                        index += 2;
+                        out.push(hi * 16 + lo);
+                    }
+                    _ => return None,
+                }
+            }
+            b if b.is_ascii_control() => return None,
+            b => out.push(b),
+        }
+    }
+    Some(out)
+}
+
+#[cfg(unix)]
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// A journal record may only name a plain sibling of the journal's
 /// directory. Reject separators, `.`/`..`, NUL and Windows drive-relative
 /// names (`C:evil`), all of which would make `parent.join(name)` leave
 /// `parent` — a planted journal must never become a file primitive outside
 /// the archive's own directory. A backslash is a legal filename character on
 /// Unix (v2 escapes it, so records stay unambiguous) and only Windows treats
-/// it as a separator.
-fn plain_journal_name(name: &str) -> bool {
-    if name.is_empty() || name == "." || name == ".." || name.contains('\0') {
-        return false;
+/// it as a separator. On Unix the check runs on the raw bytes, so a
+/// non-UTF-8 name is validated without a lossy round trip.
+fn plain_journal_name(name: &OsStr) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = name.as_bytes();
+        let plain_bytes = !bytes.is_empty()
+            && bytes != b"."
+            && bytes != b".."
+            && !bytes.contains(&0)
+            && !bytes.contains(&b'/');
+        let mut components = Path::new(name).components();
+        plain_bytes
+            && matches!(
+                (components.next(), components.next()),
+                (Some(Component::Normal(part)), None) if part == name
+            )
     }
-    if name.contains('/') {
-        return false;
+    #[cfg(not(unix))]
+    {
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        if name.is_empty() || name == "." || name == ".." || name.contains('\0') {
+            return false;
+        }
+        if name.contains('/') {
+            return false;
+        }
+        #[cfg(windows)]
+        if name.contains('\\') {
+            return false;
+        }
+        let mut components = Path::new(name).components();
+        matches!(
+            (components.next(), components.next()),
+            (Some(Component::Normal(part)), None) if part == OsStr::new(name)
+        )
     }
-    #[cfg(windows)]
-    if name.contains('\\') {
-        return false;
-    }
-    let mut components = Path::new(name).components();
-    matches!(
-        (components.next(), components.next()),
-        (Some(Component::Normal(part)), None) if part == OsStr::new(name)
-    )
 }
 
 /// Serialize the commit plan: one `backup`/`install` record per file, names
@@ -325,8 +448,8 @@ fn write_commit_journal(
     text.push('\n');
     let mut push = |kind: &str, from: &Path, to: &Path| {
         if let (Some(from), Some(to)) = (from.file_name(), to.file_name()) {
-            let from = escape_journal_field(&from.to_string_lossy());
-            let to = escape_journal_field(&to.to_string_lossy());
+            let from = escape_journal_name(from);
+            let to = escape_journal_name(to);
             text.push_str(kind);
             text.push('\t');
             text.push_str(&from);
@@ -393,10 +516,10 @@ pub(crate) fn recover_interrupted_commit(parent: &Path, base: &str) -> RarResult
             malformed = true;
             continue;
         };
-        let (from, to) = if escaped {
-            (unescape_journal_field(from), unescape_journal_field(to))
+        let (from, to): (Option<OsString>, Option<OsString>) = if escaped {
+            (unescape_journal_name(from), unescape_journal_name(to))
         } else {
-            (Some(from.to_owned()), Some(to.to_owned()))
+            (Some(OsString::from(from)), Some(OsString::from(to)))
         };
         let (Some(from), Some(to)) = (from, to) else {
             malformed = true;
@@ -883,6 +1006,7 @@ mod tests {
         assert!(leftovers.is_empty(), "install leftovers: {leftovers:?}");
     }
 
+    #[cfg(not(unix))]
     #[test]
     fn journal_field_escaping_round_trips_controls() {
         for name in [
@@ -914,18 +1038,25 @@ mod tests {
     #[test]
     fn journal_names_must_be_plain_siblings() {
         for bad in ["", ".", "..", "../x", "a/b", "nul\0"] {
-            assert!(!super::plain_journal_name(bad), "{bad:?} accepted");
+            assert!(
+                !super::plain_journal_name(std::ffi::OsStr::new(bad)),
+                "{bad:?} accepted"
+            );
         }
-        assert!(super::plain_journal_name("set.part1.rar"));
-        assert!(super::plain_journal_name(".set.part1.rar.rar5bak-abc"));
+        assert!(super::plain_journal_name(std::ffi::OsStr::new(
+            "set.part1.rar"
+        )));
+        assert!(super::plain_journal_name(std::ffi::OsStr::new(
+            ".set.part1.rar.rar5bak-abc"
+        )));
         // A backslash is an ordinary character on Unix and a separator on
         // Windows; `C:evil` is drive-relative only on Windows.
         #[cfg(unix)]
-        assert!(super::plain_journal_name("a\\b"));
+        assert!(super::plain_journal_name(std::ffi::OsStr::new("a\\b")));
         #[cfg(windows)]
-        assert!(!super::plain_journal_name("a\\b"));
+        assert!(!super::plain_journal_name(std::ffi::OsStr::new("a\\b")));
         #[cfg(windows)]
-        assert!(!super::plain_journal_name("C:evil"));
+        assert!(!super::plain_journal_name(std::ffi::OsStr::new("C:evil")));
     }
 
     #[test]
@@ -1039,14 +1170,62 @@ mod tests {
             "malformed record: {text:?}"
         );
         assert_eq!(
-            super::unescape_journal_field(lines[1].split('\t').nth(1).unwrap()).as_deref(),
-            Some(backup.file_name().unwrap().to_str().unwrap()),
+            super::unescape_journal_name(lines[1].split('\t').nth(1).unwrap()).as_deref(),
+            Some(backup.file_name().unwrap()),
             "escaped field must round-trip: {text:?}"
         );
 
         super::recover_interrupted_commit(parent, "set").unwrap();
         assert_eq!(std::fs::read(&final_path).unwrap(), b"old");
         assert!(!backup.exists());
+        assert!(!super::journal_path(parent, "set").exists());
+    }
+
+    /// A name with invalid UTF-8 bytes is escaped byte-for-byte on Unix, so
+    /// recovery restores the original file instead of renaming to the
+    /// U+FFFD spelling (which could delete or overwrite a different file).
+    #[cfg(unix)]
+    #[test]
+    fn journal_round_trips_non_utf8_names_on_disk() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        let final_path = parent.join(OsString::from_vec(b"caf\xE9.part1.rar".to_vec()));
+        let backup = parent.join(OsString::from_vec(b".caf\xE9.part1.rar.rar5bak-x".to_vec()));
+        let staged = parent.join(OsString::from_vec(b".caf\xE9.part1.rar.rar5tmp-x".to_vec()));
+        // A different file at the lossy (U+FFFD) spelling: the old
+        // journal encoded this name, so recovery must not touch it.
+        let decoy = parent.join("caf\u{FFFD}.part1.rar");
+        std::fs::write(&backup, b"old").unwrap();
+        std::fs::write(&final_path, b"new").unwrap();
+        std::fs::write(&decoy, b"decoy").unwrap();
+
+        let install = vec![(staged.clone(), final_path.clone())];
+        super::write_commit_journal(
+            parent,
+            "set",
+            &[(backup.clone(), final_path.clone())],
+            &install,
+        )
+        .unwrap();
+        // The journal stays valid UTF-8 and carries the raw byte escaped,
+        // never the U+FFFD replacement character.
+        let text = std::fs::read_to_string(super::journal_path(parent, "set")).unwrap();
+        assert!(!text.contains('\u{FFFD}'), "{text:?}");
+        assert!(text.contains("caf\\xe9.part1.rar"), "{text:?}");
+
+        super::recover_interrupted_commit(parent, "set").unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(&decoy).unwrap(),
+            b"decoy",
+            "the U+FFFD spelling names a different file and must survive"
+        );
+        assert!(!backup.exists(), "the parked original must be consumed");
+        assert!(!staged.exists());
         assert!(!super::journal_path(parent, "set").exists());
     }
 }

@@ -49,10 +49,11 @@ pub(crate) struct ReadState {
     pub quick_open_catalog: bool,
     /// Identity token of the current entry catalog (`0` until the first
     /// catalog is built). [`EntryId`](crate::EntryId) values embed this
-    /// token; every catalog rebuild mints a fresh one, so IDs obtained from
-    /// an earlier catalog are rejected as stale instead of silently
-    /// addressing a different member after a rescan (a quick-open catalog
-    /// can order entries differently from the full scan).
+    /// token plus the member's payload offset; each `open` mints a fresh
+    /// token, so IDs from another reader (or an archive whose member set
+    /// changed) are rejected as stale. A quick-open catalog and the full
+    /// scan of the same member set keep the token: the payload offset
+    /// resolves the entry across the rescan reorder.
     pub catalog_token: u64,
     /// Mark of the Web propagation for extraction (WinRAR `-om`).
     pub motw: Option<crate::options::MarkOfTheWeb>,
