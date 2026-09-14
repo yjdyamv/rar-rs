@@ -81,9 +81,9 @@ impl RarArchive {
         arcname: Option<&str>,
         level: u8,
     ) -> RarResult<()> {
-        if self.rar13 {
+        if self.is_rar13() {
             self.add_file_rar13(path, arcname, level)
-        } else if self.rar4 {
+        } else if self.is_rar4() {
             self.add_file_rar4(path, arcname, level)
         } else {
             self.add_file_rar5(path, arcname, level)
@@ -98,7 +98,7 @@ impl RarArchive {
         compression_level: u8,
     ) -> RarResult<()> {
         self.check_cancel()?;
-        if self.rar13 {
+        if self.is_rar13() {
             let name = arcname.replace('\\', "/");
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -112,7 +112,7 @@ impl RarArchive {
                 None,
             );
         }
-        if self.rar4 {
+        if self.is_rar4() {
             // RAR4 members are encoded through the same pipeline as
             // `add_file_rar4` (CRC, LZ/PPMd/filter/STORE candidates,
             // per-member encryption, volume splitting) with the current
@@ -164,10 +164,10 @@ impl RarArchive {
             .unwrap_or_default()
             .subsec_nanos();
 
-        if self.rar13 {
+        if self.is_rar13() {
             return self.write_rar13_dir_entry(&name, mtime, mtime_ns);
         }
-        if self.rar4 {
+        if self.is_rar4() {
             return self.write_rar4_dir_entry(&name, mtime, mtime_ns);
         }
         self.write_rar5_dir_entry(&name, &meta, mtime)
@@ -229,7 +229,7 @@ impl RarArchive {
             .unwrap_or_default()
             .as_secs() as u32;
 
-        if self.rar13 {
+        if self.is_rar13() {
             let mtime_ns = meta
                 .modified()
                 .unwrap_or(SystemTime::now())
@@ -237,7 +237,7 @@ impl RarArchive {
                 .unwrap_or_default()
                 .subsec_nanos();
             self.write_rar13_dir_entry(&name, mtime, mtime_ns)?;
-        } else if self.rar4 {
+        } else if self.is_rar4() {
             let mtime_ns = meta
                 .modified()
                 .unwrap_or(SystemTime::now())
@@ -285,8 +285,7 @@ impl RarArchive {
         self.check_cancel()?;
         #[cfg(feature = "parallel")]
         {
-            if !self.rar4
-                && !self.rar13
+            if !self.is_legacy()
                 && !self.write_ctx().solid.mode
                 && !self.write_ctx().meta.streams
                 && !entries.is_empty()
@@ -297,7 +296,7 @@ impl RarArchive {
             // waves too (solid runs stay sequential - shared window; a
             // deferred solid append buffers its additions for the close-time
             // repack and must never stream-write).
-            if self.rar4
+            if self.is_rar4()
                 && !self.write_ctx().solid.mode
                 && !self.write_ctx().rar4.solid_append
                 && !entries.is_empty()
@@ -360,7 +359,7 @@ impl RarArchive {
     /// not drop the carried encoder for them (doing so desynchronises every
     /// later member of the run).
     pub(crate) fn solid_chain_is_position_derived(&self) -> bool {
-        self.rar13 || (self.rar4 && self.write_ctx().solid.rar4_unp_ver < 29)
+        self.is_rar13() || (self.is_rar4() && self.write_ctx().solid.rar4_unp_ver < 29)
     }
 
     /// Drop the solid-chain encoder state (call after any member that does

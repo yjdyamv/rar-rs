@@ -95,7 +95,7 @@ impl RarArchive {
         }
         let ah = ArchiveHeader::from_raw(&first.raw)?;
         if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
-            self.rar4_solid_archive = true;
+            self.archive_solid = true;
         }
         let Some(qo_rel) = crate::format::rar5::headers::locator_quick_open_offset(&ah.extra_data)
         else {
@@ -191,7 +191,7 @@ impl RarArchive {
                 BLOCK_TYPE_ARCHIVE_HEADER => {
                     let ah = ArchiveHeader::from_raw(raw)?;
                     if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
-                        self.rar4_solid_archive = true;
+                        self.archive_solid = true;
                     }
                 }
                 BLOCK_TYPE_FILE_HEADER => {
@@ -341,7 +341,7 @@ impl RarArchive {
                     BLOCK_TYPE_ARCHIVE_HEADER => {
                         let ah = ArchiveHeader::from_raw(raw)?;
                         if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
-                            self.rar4_solid_archive = true;
+                            self.archive_solid = true;
                         }
                     }
                     BLOCK_TYPE_FILE_HEADER => {

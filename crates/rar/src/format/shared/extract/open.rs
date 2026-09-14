@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::archive::{RarArchive, discover_volumes};
-use crate::detect::SFX_SCAN_LIMIT;
+use crate::detect::{ArchiveFamily, SFX_SCAN_LIMIT};
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::RAR5_SIGNATURE;
 use crate::format::shared::stream_mut;
@@ -13,12 +13,10 @@ impl RarArchive {
     /// Open the archive and scan its catalog (every volume).
     pub(crate) fn open_read(&mut self) -> RarResult<()> {
         self.open_common()?;
-        if self.rar4 {
-            self.open_read_rar4()?;
-        } else if self.rar13 {
-            self.open_read_rar13()?;
-        } else {
-            self.open_read_rar5()?;
+        match self.family {
+            ArchiveFamily::Rar13 => self.open_read_rar13()?,
+            ArchiveFamily::Rar15To40 => self.open_read_rar4()?,
+            ArchiveFamily::Rar50Plus => self.open_read_rar5()?,
         }
         self.reset_catalog_token()?;
         Ok(())
@@ -28,12 +26,10 @@ impl RarArchive {
     /// catalog; families without one fall back to their full scan.
     pub(crate) fn open_read_quick(&mut self) -> RarResult<()> {
         self.open_common()?;
-        if self.rar4 {
-            self.open_read_rar4()?;
-        } else if self.rar13 {
-            self.open_read_rar13()?;
-        } else {
-            self.open_read_quick_rar5()?;
+        match self.family {
+            ArchiveFamily::Rar13 => self.open_read_rar13()?,
+            ArchiveFamily::Rar15To40 => self.open_read_rar4()?,
+            ArchiveFamily::Rar50Plus => self.open_read_quick_rar5()?,
         }
         self.reset_catalog_token()?;
         Ok(())
@@ -62,12 +58,11 @@ impl RarArchive {
         let (family, sfx_offset) = crate::detect::find_archive_start(&buf, SFX_SCAN_LIMIT)
             .ok_or_else(|| RarError::Format("not a RAR archive (signature not found)".into()))?;
         self.sfx_offset = sfx_offset as u64;
-        self.rar4 = family == crate::detect::ArchiveFamily::Rar15To40;
-        self.rar13 = family == crate::detect::ArchiveFamily::Rar13;
+        self.family = family;
         let sig_len = match family {
-            crate::detect::ArchiveFamily::Rar50Plus => RAR5_SIGNATURE.len() as u64,
-            crate::detect::ArchiveFamily::Rar15To40 => crate::detect::RAR4_SIGNATURE.len() as u64,
-            crate::detect::ArchiveFamily::Rar13 => crate::detect::RAR13_SIGNATURE.len() as u64,
+            ArchiveFamily::Rar50Plus => RAR5_SIGNATURE.len() as u64,
+            ArchiveFamily::Rar15To40 => crate::detect::RAR4_SIGNATURE.len() as u64,
+            ArchiveFamily::Rar13 => crate::detect::RAR13_SIGNATURE.len() as u64,
         };
         stream.seek(SeekFrom::Start(self.sfx_offset + sig_len))?;
         Ok(())

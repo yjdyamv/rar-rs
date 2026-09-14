@@ -32,10 +32,10 @@ impl RarArchive {
         // was killed in the middle of, before staging anything new.
         let parent = parent_dir(&self.path);
         recover_interrupted_commit(&parent, &volume_base_of(&self.path))?;
-        if self.rar13 {
+        if self.is_rar13() {
             return self.open_write_rar13();
         }
-        if self.rar4 {
+        if self.is_rar4() {
             return self.open_write_rar4();
         }
         if let Some(volume_size) = self.write_ctx().output.volume_size {
@@ -194,10 +194,10 @@ impl RarArchive {
             ));
         }
         self.finalize_started = true;
-        if self.rar13 {
+        if self.is_rar13() {
             return self.finish_writing_rar13();
         }
-        if self.rar4 {
+        if self.is_rar4() {
             return self.finish_writing_rar4();
         }
         if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
@@ -310,7 +310,7 @@ impl RarArchive {
                     let tmp = volume_path(parent, tmp_base, n);
                     // RAR4/RAR13 volume sets use the legacy `.rar`/`.rNN`
                     // naming; RAR5 uses the zero-padded `.partN.rar` naming.
-                    let final_path = if self.rar4 || self.rar13 {
+                    let final_path = if self.is_legacy() {
                         volume_path_rar4(parent, final_base, n)
                     } else {
                         volume_path_padded(parent, final_base, n, width)
@@ -353,7 +353,7 @@ impl RarArchive {
                 let retire = crate::fs::volume::stale_volume_paths(
                     parent,
                     final_base,
-                    self.rar4 || self.rar13,
+                    self.is_legacy(),
                     &keep,
                 );
                 let result = commit_files(parent, final_base, &install, &retire);
@@ -715,7 +715,7 @@ impl RarArchive {
     }
 
     pub(crate) fn start_next_volume(&mut self) -> RarResult<()> {
-        if self.rar4 {
+        if self.is_rar4() {
             return self.start_next_volume_rar4();
         }
         // WinRAR `-sv`: always reset the solid statistics at the start of a

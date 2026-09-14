@@ -50,8 +50,8 @@ impl RarArchive {
         let archive_solid = scan.archive_solid;
         let new_numbering = scan.new_numbering;
         scan.finish()?;
-        self.rar4_solid_archive = archive_solid;
-        self.rar4_new_numbering = new_numbering;
+        self.archive_solid = archive_solid;
+        self.read_ctx_mut().legacy.new_numbering = new_numbering;
         self.entries = out;
         Ok(())
     }
@@ -64,7 +64,7 @@ impl RarArchive {
     fn is_rar4_solid_member(&self, idx: usize) -> bool {
         let hdr = &self.entries[idx].header;
         if hdr.unp_ver < 29 {
-            return self.rar4_solid_archive && !self.entries[idx].is_dir();
+            return self.archive_solid && !self.entries[idx].is_dir();
         }
         if hdr.comp_solid {
             return true;
@@ -111,8 +111,8 @@ impl RarArchive {
     /// Reset the legacy solid decoder to immediately before the current run.
     fn reset_rar4_solid_decoder(&mut self, chain_start: usize) {
         let ctx = self.read_ctx_mut();
-        ctx.rar4_decoder = None;
-        ctx.rar4_decoded_through = chain_start as isize - 1;
+        ctx.legacy.decoder = None;
+        ctx.legacy.decoded_through = chain_start as isize - 1;
     }
 
     /// Decode the legacy solid chain up through `target_idx` with one shared
@@ -125,25 +125,25 @@ impl RarArchive {
 
         let start_from = {
             let ctx = self.read_ctx_mut();
-            if ctx.rar4_decoder.is_some()
-                && ctx.rar4_decoded_through >= chain_start as isize
-                && ctx.rar4_decoded_through < target_idx as isize
+            if ctx.legacy.decoder.is_some()
+                && ctx.legacy.decoded_through >= chain_start as isize
+                && ctx.legacy.decoded_through < target_idx as isize
             {
                 // Continue from where we left off.
             } else {
                 // Backwards request or a fresh chain: restart from this run's
                 // head, not from unrelated members in an earlier solid run.
-                ctx.rar4_decoder = None;
-                ctx.rar4_decoded_through = chain_start as isize - 1;
+                ctx.legacy.decoder = None;
+                ctx.legacy.decoded_through = chain_start as isize - 1;
             }
-            if ctx.rar4_decoder.is_none() {
+            if ctx.legacy.decoder.is_none() {
                 // Bootstrap with a Rar29 decoder; it will be replaced on the
                 // first compressed member that reveals the actual unp_ver.
-                ctx.rar4_decoder = Some(LegacyDecoder::Rar29(
+                ctx.legacy.decoder = Some(LegacyDecoder::Rar29(
                     crate::codec::legacy::rar29::Rar29Decoder::new(),
                 ));
             }
-            (ctx.rar4_decoded_through + 1) as usize
+            (ctx.legacy.decoded_through + 1) as usize
         };
 
         let mut target = Vec::new();
@@ -163,7 +163,7 @@ impl RarArchive {
             if is_compressed {
                 // Ensure the decoder matches this member's codec version.
                 let needs_rebuild = {
-                    let dec = self.read_ctx_mut().rar4_decoder.as_ref();
+                    let dec = self.read_ctx_mut().legacy.decoder.as_ref();
                     match (hdr.unp_ver, dec) {
                         (v, Some(LegacyDecoder::Rar29(_))) if v >= 29 => false,
                         (20 | 26, Some(LegacyDecoder::Rar20(_))) => false,
@@ -179,11 +179,11 @@ impl RarArchive {
                     } else {
                         LegacyDecoder::Rar15(Box::default())
                     };
-                    self.read_ctx_mut().rar4_decoder = Some(new_decoder);
+                    self.read_ctx_mut().legacy.decoder = Some(new_decoder);
                 }
             }
 
-            let mut decoder = self.read_ctx_mut().rar4_decoder.take();
+            let mut decoder = self.read_ctx_mut().legacy.decoder.take();
             let max_packed_bytes = self.max_packed_bytes();
             let data = match super::decode_member_bytes(
                 stream_mut(&mut self.stream)?,
@@ -203,8 +203,8 @@ impl RarArchive {
                     return Err(err);
                 }
             };
-            self.read_ctx_mut().rar4_decoder = decoder;
-            self.read_ctx_mut().rar4_decoded_through = i as isize;
+            self.read_ctx_mut().legacy.decoder = decoder;
+            self.read_ctx_mut().legacy.decoded_through = i as isize;
             if i == target_idx {
                 target = data;
             }

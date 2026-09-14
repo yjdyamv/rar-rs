@@ -22,6 +22,34 @@ pub(crate) struct DecryptedPayload {
     pub(crate) keys: Option<crypto::DerivedKeys>,
 }
 
+/// Legacy-family read state (RAR 1.5–4.x and RAR 1.3/1.4).
+pub(crate) struct LegacyReadState {
+    /// Persistent legacy decoder for solid chains (RAR 1.5/2.x/3.x).
+    pub decoder: Option<crate::format::rar4::LegacyDecoder>,
+    /// Index of the last legacy-solid member decoded (-1 = none).
+    pub decoded_through: isize,
+    /// The legacy volume set used MHD_NEWNUMBERING (`.partN.rar` naming).
+    pub new_numbering: bool,
+    /// RAR 1.3/1.4 main-header flags of the first opened volume (`RE~^`
+    /// family; comment/volume/solid bits).
+    pub rar13_flags: u8,
+    /// RAR 1.3/1.4 main-header extension bytes (archive comment or the
+    /// authenticity-verification payload).
+    pub rar13_extra: Vec<u8>,
+}
+
+impl Default for LegacyReadState {
+    fn default() -> Self {
+        Self {
+            decoder: None,
+            decoded_through: -1,
+            new_numbering: false,
+            rar13_flags: 0,
+            rar13_extra: Vec::new(),
+        }
+    }
+}
+
 /// Read-side state for extraction and listing.
 ///
 /// Groups fields exclusively used by read/extract paths (extract.rs).
@@ -32,10 +60,8 @@ pub(crate) struct ReadState {
     pub solid_state: Option<DecoderState>,
     /// Index of the last file decoded in the solid chain (-1 = none).
     pub solid_decoded_through: isize,
-    /// Persistent legacy decoder for solid chains (RAR 1.5/2.x/3.x).
-    pub rar4_decoder: Option<crate::format::rar4::LegacyDecoder>,
-    /// Index of the last legacy-solid member decoded (-1 = none).
-    pub rar4_decoded_through: isize,
+    /// Legacy-family decode state (solid decoder, numbering, RAR13 header).
+    pub legacy: LegacyReadState,
     /// Options for the current read/extract operation (set per call).
     pub extract_options: crate::options::ExtractOptions,
     /// NTFS alternate data streams ("STM" service records) attached to
@@ -57,9 +83,6 @@ pub(crate) struct ReadState {
     pub catalog_token: u64,
     /// Mark of the Web propagation for extraction (WinRAR `-om`).
     pub motw: Option<crate::options::MarkOfTheWeb>,
-    /// RAR 1.3/1.4 main-header flags of the first opened volume (`RE~^`
-    /// family; comment/volume/solid bits).
-    pub rar13_flags: u8,
 }
 
 impl Default for ReadState {
@@ -67,14 +90,12 @@ impl Default for ReadState {
         Self {
             solid_state: None,
             solid_decoded_through: -1,
-            rar4_decoder: None,
-            rar4_decoded_through: -1,
+            legacy: LegacyReadState::default(),
             extract_options: crate::options::ExtractOptions::default(),
             streams: Vec::new(),
             quick_open_catalog: false,
             catalog_token: 0,
             motw: None,
-            rar13_flags: 0,
         }
     }
 }

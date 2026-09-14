@@ -10,7 +10,8 @@ use crate::error::{RarError, RarResult};
 impl RarArchive {
     /// Archive comment from the first volume's main-header extension.
     pub(crate) fn rar13_archive_comment(&self) -> RarResult<Option<Vec<u8>>> {
-        archive_comment(self.read_ctx().rar13_flags, &self.rar13_extra)
+        let legacy = &self.read_ctx().legacy;
+        archive_comment(legacy.rar13_flags, &legacy.rar13_extra)
     }
 
     /// Scan every volume of a RAR 1.3/1.4 set into the entry catalog,
@@ -28,9 +29,10 @@ impl RarArchive {
             let offset = if vol_idx == 0 { self.sfx_offset } else { 0 };
             let volume = parse_volume(&mut stream, offset, file_len)?;
             if vol_idx == 0 {
-                self.rar4_solid_archive = volume.flags & MHD_SOLID != 0;
-                self.read_ctx_mut().rar13_flags = volume.flags;
-                self.rar13_extra = volume.extra.clone();
+                self.archive_solid = volume.flags & MHD_SOLID != 0;
+                let legacy = &mut self.read_ctx_mut().legacy;
+                legacy.rar13_flags = volume.flags;
+                legacy.rar13_extra = volume.extra.clone();
             }
 
             for mut entry in volume.entries {

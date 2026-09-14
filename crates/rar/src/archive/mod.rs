@@ -122,20 +122,14 @@ pub struct RarArchive {
     /// Byte offset where the RAR5 signature begins (0 for plain archives,
     /// >0 for SFX archives whose stub precedes the archive).
     pub(crate) sfx_offset: u64,
-    /// Whether the archive uses the legacy RAR 1.5–4.x container (vs RAR5).
-    pub(crate) rar4: bool,
-    /// Whether the archive uses the RAR 1.3/1.4 container (`RE~^`).
-    pub(crate) rar13: bool,
-    /// RAR 1.3/1.4 main-header extension bytes (archive comment or the
-    /// authenticity-verification payload).
-    pub(crate) rar13_extra: Vec<u8>,
+    /// The container family the archive belongs to (read) or is being
+    /// written as (write).
+    pub(crate) family: crate::detect::ArchiveFamily,
     /// The archive is solid at the container level: legacy `MHD_SOLID`
     /// (pre-RAR3 codecs chain by that flag + position, since they never
     /// write the per-file FHD_SOLID bit), RAR13 `MHD_SOLID`, or RAR5's
     /// `ARCHIVE_FLAG_SOLID`.
-    pub(crate) rar4_solid_archive: bool,
-    /// The legacy volume set used MHD_NEWNUMBERING (`.partN.rar` naming).
-    pub(crate) rar4_new_numbering: bool,
+    pub(crate) archive_solid: bool,
     /// Password for encrypted archives.
     pub(crate) password: Option<String>,
     /// Encrypt archive headers (file names/structure hidden) — RAR5
@@ -202,11 +196,8 @@ impl RarArchive {
             finalize_started: false,
             entries: Vec::new(),
             sfx_offset: 0,
-            rar4: false,
-            rar13: false,
-            rar13_extra: Vec::new(),
-            rar4_solid_archive: false,
-            rar4_new_numbering: false,
+            family: crate::detect::ArchiveFamily::Rar50Plus,
+            archive_solid: false,
             stream: None,
             password,
             header_encryption: false,
@@ -221,6 +212,21 @@ impl RarArchive {
             read,
             write,
         }
+    }
+
+    /// Whether the container is the legacy RAR 1.5–4.x family.
+    pub(crate) fn is_rar4(&self) -> bool {
+        self.family == crate::detect::ArchiveFamily::Rar15To40
+    }
+
+    /// Whether the container is the RAR 1.3/1.4 family.
+    pub(crate) fn is_rar13(&self) -> bool {
+        self.family == crate::detect::ArchiveFamily::Rar13
+    }
+
+    /// Whether the container is any legacy family (RAR 1.3–4.x).
+    pub(crate) fn is_legacy(&self) -> bool {
+        self.is_rar4() || self.is_rar13()
     }
 
     /// Install a cancellation flag. The flag is an `Arc<AtomicBool>` the
@@ -448,7 +454,7 @@ impl RarArchive {
             ));
         }
         crate::options::validate_dictionary(dict_size_log, dict_size_bytes)?;
-        if self.rar4 && dict_size_bytes.is_some() {
+        if self.is_rar4() && dict_size_bytes.is_some() {
             return Err(RarError::InvalidOption(
                 "RAR4 does not support byte-sized RAR7 dictionaries".into(),
             ));
@@ -483,7 +489,7 @@ impl RarArchive {
     /// the rebuilt quick-open record, and truncate the trailing end /
     /// quick-open / recovery blocks.
     fn prepare_append(&mut self) -> RarResult<()> {
-        if self.rar13 {
+        if self.is_rar13() {
             return Err(RarError::Unsupported(
                 "appending to RAR 1.3/1.4 archives is not supported".into(),
             ));
@@ -499,7 +505,7 @@ impl RarArchive {
         // rebuild the quick-open record and patch the RAR5 main-header
         // locator. The RAR4 path (ADR 0005 stage B) has its own prelude
         // below instead of misparsing fixed-width headers.
-        if self.rar4 {
+        if self.is_rar4() {
             // RAR4 append (ADR 0005 stage B): gate on the main-header
             // flags, drop the trailing NEWSUB record / end-of-archive block
             // (rebuilding the record at close when the archive had one),
@@ -866,11 +872,14 @@ impl RarArchive {
             finalize_started: false,
             entries: Vec::new(),
             sfx_offset: 0,
-            rar4: is_rar4,
-            rar13: is_rar13,
-            rar13_extra: Vec::new(),
-            rar4_solid_archive: false,
-            rar4_new_numbering: false,
+            family: if is_rar13 {
+                crate::detect::ArchiveFamily::Rar13
+            } else if is_rar4 {
+                crate::detect::ArchiveFamily::Rar15To40
+            } else {
+                crate::detect::ArchiveFamily::Rar50Plus
+            },
+            archive_solid: false,
             stream: None,
             password: opts.password,
             header_encryption: opts.encrypt_headers,

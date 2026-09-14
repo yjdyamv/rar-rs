@@ -399,14 +399,14 @@ impl ArchiveReader {
     /// Whether a legacy volume set used the newer `.partN.rar` numbering
     /// (`MHD_NEWNUMBERING`); display-only.
     pub fn is_new_numbering(&self) -> bool {
-        self.archive.rar4_new_numbering
+        self.archive.read_ctx().legacy.new_numbering
     }
 
     /// Whether the archive is solid: the main header carries the
     /// archive-level solid flag (legacy `MHD_SOLID`) and/or a member
     /// continues a solid chain (`FHD_SOLID`/`LHD_SOLID`).
     pub fn is_solid(&self) -> bool {
-        self.archive.rar4_solid_archive
+        self.archive.archive_solid
             || self
                 .archive
                 .entries

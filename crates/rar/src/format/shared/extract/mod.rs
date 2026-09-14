@@ -36,7 +36,7 @@ pub(crate) fn check_entry_cap(count: usize, max: usize) -> RarResult<()> {
 impl RarArchive {
     /// Decode member `idx` to memory, honoring the family's solid chains.
     pub(crate) fn decode_entry_at(&mut self, idx: usize) -> RarResult<Vec<u8>> {
-        if self.rar4 || self.rar13 {
+        if self.is_legacy() {
             return self.decode_rar4_at(idx);
         }
         if self.is_solid_chain_member(idx) {
@@ -52,7 +52,7 @@ impl RarArchive {
         idx: usize,
         writer: &mut dyn std::io::Write,
     ) -> RarResult<u64> {
-        if self.rar4 || self.rar13 {
+        if self.is_legacy() {
             return self.decode_rar4_to(idx, writer);
         }
         if self.is_solid_chain_member(idx) {

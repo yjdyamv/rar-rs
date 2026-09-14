@@ -632,12 +632,12 @@ impl RarArchive {
         mtime: u32,
         mtime_ns: Option<u32>,
     ) -> RarResult<()> {
-        if self.rar4 {
+        if self.is_rar4() {
             return Err(RarError::Unsupported(
                 "redirect members are not supported for RAR4 archives".into(),
             ));
         }
-        if self.rar13 {
+        if self.is_rar13() {
             return Err(RarError::Unsupported(
                 "redirect members are not supported for RAR 1.3/1.4 archives".into(),
             ));

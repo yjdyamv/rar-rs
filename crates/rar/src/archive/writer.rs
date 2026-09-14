@@ -805,7 +805,7 @@ impl ArchiveWriter {
     /// through the editor role.
     pub fn set_archive_comment(&mut self, comment: Option<Vec<u8>>) -> RarResult<()> {
         self.apply(|archive| {
-            if !(archive.rar4 || archive.rar13) {
+            if !archive.is_legacy() {
                 return Err(RarError::Unsupported(
                     "archive comments must be queued before creation for RAR4/RAR 1.3/1.4; \
                      use the editor for RAR5"

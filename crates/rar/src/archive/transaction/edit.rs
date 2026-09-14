@@ -262,10 +262,10 @@ impl RarArchive {
     /// Header-encrypted archives store the comment encrypted; reading it
     /// requires the password and is not supported yet.
     pub fn get_comment(&mut self) -> RarResult<Option<Vec<u8>>> {
-        if self.rar13 {
+        if self.is_rar13() {
             return self.rar13_archive_comment();
         }
-        if self.rar4 {
+        if self.is_rar4() {
             return super::super::rar4_edit::read_comment(self);
         }
         let mut reader = File::open(&self.path)?;
