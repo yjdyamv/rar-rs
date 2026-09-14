@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 
 use std::io::{Read, Seek, SeekFrom};
 
-use super::super::{DecryptedPayload, RarArchive};
-use crate::codec::{DecoderState, lzss_huff as compression};
+use super::super::RarArchive;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::FileHeader;
 use crate::format::rar5::{COMP_METHOD_STORE, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX};
@@ -31,7 +30,9 @@ impl VolumeReaders {
             paths: paths.to_vec(),
         }
     }
+}
 
+impl crate::format::rar5::payload::ChunkReader for VolumeReaders {
     fn read_chunk(&mut self, vol: usize, offset: u64, len: u64) -> RarResult<Vec<u8>> {
         let file = self
             .files
@@ -51,12 +52,6 @@ impl VolumeReaders {
         let mut buf = Vec::new();
         f.take(len as u64).read_to_end(&mut buf)?;
         Ok(buf)
-    }
-}
-
-impl crate::format::rar5::payload::ChunkReader for VolumeReaders {
-    fn read_chunk(&mut self, vol: usize, offset: u64, len: u64) -> RarResult<Vec<u8>> {
-        VolumeReaders::read_chunk(self, vol, offset, len)
     }
 }
 
@@ -156,7 +151,7 @@ impl RarArchive {
             self.stream.as_mut().unwrap().stream_position()?;
 
         let mut readers = VolumeReaders::new(&orig_volumes);
-        let (mut dec, mut enc, mut enc_active) = (None, None, false);
+        let mut chain_state: Option<super::solid::SolidChainState> = None;
         let mut in_chain = false;
         let mut chain_end = usize::MAX;
         let total_bytes: u64 = self
@@ -176,16 +171,9 @@ impl RarArchive {
                 && let Some((s, e)) = chain
                 && s == idx
             {
-                let dict_log = self.entries[idx].header.comp_dict_size;
-                let dict_size =
-                    (128usize * 1024)
-                        .checked_shl(dict_log as u32)
-                        .ok_or_else(|| {
-                            RarError::Format("dictionary size overflows host address space".into())
-                        })?;
-                dec = Some(DecoderState::new(dict_size));
-                enc = Some(crate::codec::EncoderState::default());
-                enc_active = false;
+                chain_state = Some(super::solid::SolidChainState::start(
+                    self.entries[idx].header.comp_dict_size,
+                )?);
                 in_chain = true;
                 chain_end = e;
             }
@@ -197,8 +185,10 @@ impl RarArchive {
             if deleted[idx] {
                 if is_chain && !entry.is_dir() && entry.header.comp_method != COMP_METHOD_STORE {
                     // Advance the chain window.
-                    let _ =
-                        self.decode_chain_member_volumes(&mut readers, idx, dec.as_mut().unwrap())?;
+                    let _ = chain_state
+                        .as_mut()
+                        .unwrap()
+                        .decode_member(self, &mut readers, idx)?;
                 }
                 continue;
             }
@@ -221,13 +211,11 @@ impl RarArchive {
                 continue;
             }
             if is_chain && entry.header.comp_method != COMP_METHOD_STORE {
-                self.recompress_chain_member_volumes_named(
+                chain_state.as_mut().unwrap().recompress_member(
+                    self,
                     &mut readers,
                     idx,
                     &entry_name,
-                    dec.as_mut().unwrap(),
-                    enc.as_mut().unwrap(),
-                    &mut enc_active,
                 )?;
                 processed += entry.header.unpacked_size;
                 continue;
@@ -238,7 +226,7 @@ impl RarArchive {
             // parameters (same salt/IV/key) so the copied ENCR record and
             // MAC'd header CRC stay valid and the stored bytes are exactly
             // the ciphertext that was read.
-            let payload = self.read_packed_volumes(&mut readers, idx)?;
+            let payload = self.read_member_packed(&mut readers, idx)?;
             processed += payload.data.len() as u64;
             let hdr = &entry.header;
             let stored_payload = match (payload.params.as_ref(), self.password.as_deref()) {
@@ -392,128 +380,5 @@ impl RarArchive {
             }
         }
         result
-    }
-
-    /// Read the full packed (and decrypted, when applicable) payload of a
-    /// multi-volume member across its chunks on the original volumes.
-    fn read_packed_volumes(
-        &mut self,
-        readers: &mut VolumeReaders,
-        idx: usize,
-    ) -> RarResult<DecryptedPayload> {
-        let entry = &self.entries[idx];
-        let hdr = &entry.header;
-        crate::format::rar5::payload::read_packed(
-            readers,
-            hdr,
-            &entry.chunks,
-            &hdr.name,
-            self.password.as_deref(),
-            self.max_packed_bytes(),
-            || Ok(()),
-        )
-    }
-
-    /// Decode a multi-volume chain member with a shared decoder state,
-    /// verifying its integrity.
-    fn decode_chain_member_volumes(
-        &mut self,
-        readers: &mut VolumeReaders,
-        idx: usize,
-        state: &mut DecoderState,
-    ) -> RarResult<Vec<u8>> {
-        let hdr = &self.entries[idx].header;
-        if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
-            return Ok(Vec::new());
-        }
-        let payload = self.read_packed_volumes(readers, idx)?;
-        let mut raw_data = Vec::new();
-        crate::format::rar5::payload::decode_member(
-            &self.entries[idx].header,
-            &payload,
-            Some(state),
-            &mut raw_data,
-        )?;
-        let crc = crc32fast::hash(&raw_data);
-        let blake = self.entries[idx]
-            .header
-            .hash_value
-            .map(|_| crate::format::rar5::blake2sp::hash(&raw_data));
-        self.verify_integrity(
-            idx,
-            crc,
-            blake,
-            payload.params.as_ref(),
-            payload.keys.as_ref(),
-        )?;
-        Ok(raw_data)
-    }
-
-    /// Decode and recompress one member of the affected solid chain in a
-    /// multi-volume archive. `name` overrides the entry name (rename).
-    fn recompress_chain_member_volumes_named(
-        &mut self,
-        readers: &mut VolumeReaders,
-        idx: usize,
-        name: &str,
-        dec: &mut DecoderState,
-        enc: &mut crate::codec::EncoderState,
-        enc_active: &mut bool,
-    ) -> RarResult<()> {
-        let entry = self.entries[idx].clone();
-        let hdr = &entry.header;
-        let data = self.decode_chain_member_volumes(readers, idx, dec)?;
-
-        let plain_crc = crc32fast::hash(&data);
-        let plain_blake = hdr
-            .hash_value
-            .map(|_| crate::format::rar5::blake2sp::hash(&data));
-        let variant = crate::version::ArchiveVersion::from_v70(hdr.dict_size_bytes.is_some());
-        let packed = compression::encode_chunked(
-            &data,
-            compression::EncodeOptions {
-                chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
-                state: Some(enc),
-                is_final: true,
-                variant,
-                ..compression::EncodeOptions::new(hdr.comp_method, hdr.comp_dict_size)
-            },
-        )?;
-
-        let (method, dsl, dict_bytes, payload) = if packed.len() >= data.len() {
-            enc.reset();
-            *enc_active = false;
-            (COMP_METHOD_STORE, 0u8, None, data.clone())
-        } else {
-            *enc_active = true;
-            (
-                hdr.comp_method,
-                hdr.comp_dict_size,
-                hdr.dict_size_bytes,
-                packed,
-            )
-        };
-        let (header_crc, extra_data, stored_hash, encr_params) =
-            RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
-        let payload = RarArchive::encrypt_payload_with(
-            self.password.as_deref(),
-            encr_params.as_ref(),
-            &payload,
-        )?;
-        self.write_file_entry(
-            name,
-            data.len() as u64,
-            &payload,
-            header_crc,
-            method,
-            dsl,
-            dict_bytes,
-            &extra_data,
-            hdr.attributes,
-            hdr.mtime,
-            *enc_active,
-            stored_hash,
-        )?;
-        Ok(())
     }
 }

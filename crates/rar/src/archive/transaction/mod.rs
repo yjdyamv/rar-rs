@@ -8,6 +8,7 @@
 //! - [`edit`] — edit entry points (plan, comment, lock check),
 //! - [`plan`] — the rewrite plan walker,
 //! - [`execute`] — plan execution and the copy pipeline,
+//! - [`solid`] — the shared solid-chain decode/recompress pipeline,
 //! - [`header`] — main-header rebuilding and locator/record helpers.
 
 mod edit;
@@ -15,6 +16,7 @@ mod execute;
 mod header;
 mod multivolume;
 mod plan;
+mod solid;
 #[cfg(test)]
 mod tests;
 

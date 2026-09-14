@@ -7,11 +7,12 @@ use std::path::Path;
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
-use super::super::{DecryptedPayload, RarArchive};
-use crate::codec::{DecoderState, lzss_huff as compression};
-use crate::error::{RarError, RarResult};
+use super::super::RarArchive;
+#[cfg(feature = "parallel")]
+use crate::error::RarError;
+use crate::error::RarResult;
+use crate::format::rar5::RAR5_SIGNATURE;
 use crate::format::rar5::headers::build_comment_block;
-use crate::format::rar5::{COMP_METHOD_STORE, RAR5_SIGNATURE};
 
 /// Read-ahead copy job: `len` bytes from `src` in the original archive.
 #[cfg(feature = "parallel")]
@@ -155,9 +156,7 @@ impl RarArchive {
             }
         }
         let mut reader = File::open(src_path)?;
-        let mut dec = None;
-        let mut enc = None;
-        let mut enc_active = false;
+        let mut chain: Option<super::solid::SolidChainState> = None;
         // Rewrite progress: `(processed_input_bytes, total_bytes)` where
         // total is the rewrite work (kept payload bytes + recompressed
         // input) and `processed` counts input bytes consumed, so the
@@ -217,28 +216,22 @@ impl RarArchive {
                     }
                 }
                 RewriteOp::Recompress { idx, is_deleted } => {
-                    if dec.is_none() {
-                        let dict_log = self.entries[*idx].header.comp_dict_size;
-                        let dict_size =
-                            (128usize * 1024)
-                                .checked_shl(dict_log as u32)
-                                .ok_or_else(|| {
-                                    RarError::Format(
-                                        "dictionary size overflows host address space".into(),
-                                    )
-                                })?;
-                        dec = Some(DecoderState::new(dict_size));
-                        enc = Some(crate::codec::EncoderState::default());
-                        enc_active = false;
+                    if chain.is_none() {
+                        chain = Some(super::solid::SolidChainState::start(
+                            self.entries[*idx].header.comp_dict_size,
+                        )?);
                     }
-                    self.recompress_chain_member(
-                        &mut reader,
-                        *idx,
-                        *is_deleted,
-                        dec.as_mut().unwrap(),
-                        enc.as_mut().unwrap(),
-                        &mut enc_active,
-                    )?;
+                    let state = chain.as_mut().unwrap();
+                    let mut source = crate::format::rar5::payload::SingleFileReader {
+                        reader: &mut reader,
+                    };
+                    if *is_deleted {
+                        // Advance the shared window without emitting.
+                        let _ = state.decode_member(self, &mut source, *idx)?;
+                    } else {
+                        let name = self.entries[*idx].header.name.clone();
+                        state.recompress_member(self, &mut source, *idx, &name)?;
+                    }
                     processed += self.entries[*idx].header.unpacked_size;
                 }
             }
@@ -281,135 +274,5 @@ impl RarArchive {
         }
         self.write_end_block()?;
         Ok(())
-    }
-
-    /// Decode and recompress one member of the affected solid chain.
-    ///
-    /// Kept members are decoded with the shared decoder window and
-    /// recompressed with a shared encoder window; deleted members are only
-    /// decoded (to advance the window) and their blocks are not written.
-    fn recompress_chain_member(
-        &mut self,
-        reader: &mut File,
-        idx: usize,
-        is_deleted: bool,
-        dec: &mut DecoderState,
-        enc: &mut crate::codec::EncoderState,
-        enc_active: &mut bool,
-    ) -> RarResult<()> {
-        if is_deleted {
-            let _ = self.decode_chain_member(reader, idx, dec)?;
-            return Ok(());
-        }
-        let entry = self.entries[idx].clone();
-        let hdr = &entry.header;
-        let data = self.decode_chain_member(reader, idx, dec)?;
-
-        let plain_crc = crc32fast::hash(&data);
-        let plain_blake = hdr
-            .hash_value
-            .map(|_| crate::format::rar5::blake2sp::hash(&data));
-        let variant = crate::version::ArchiveVersion::from_v70(hdr.dict_size_bytes.is_some());
-        let packed = compression::encode_chunked(
-            &data,
-            compression::EncodeOptions {
-                chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
-                state: Some(enc),
-                is_final: true,
-                variant,
-                ..compression::EncodeOptions::new(hdr.comp_method, hdr.comp_dict_size)
-            },
-        )?;
-
-        let (method, dsl, dict_bytes, payload) = if packed.len() >= data.len() {
-            // Compression is a net loss: STORE resets the chain, matching
-            // the sequential add_file path.
-            enc.reset();
-            *enc_active = false;
-            (COMP_METHOD_STORE, 0u8, None, data.clone())
-        } else {
-            *enc_active = true;
-            (
-                hdr.comp_method,
-                hdr.comp_dict_size,
-                hdr.dict_size_bytes,
-                packed,
-            )
-        };
-        let (header_crc, extra_data, stored_hash, encr_params) =
-            RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
-        let payload = RarArchive::encrypt_payload_with(
-            self.password.as_deref(),
-            encr_params.as_ref(),
-            &payload,
-        )?;
-        self.write_file_entry(
-            &hdr.name,
-            data.len() as u64,
-            &payload,
-            header_crc,
-            method,
-            dsl,
-            dict_bytes,
-            &extra_data,
-            hdr.attributes,
-            hdr.mtime,
-            *enc_active,
-            stored_hash,
-        )?;
-        Ok(())
-    }
-
-    /// Decode member `idx` with a shared decoder state, verifying its
-    /// integrity. Reads directly from `reader` (the original archive) since
-    /// `self.stream` is the replacement file during deletion.
-    fn decode_chain_member(
-        &mut self,
-        reader: &mut File,
-        idx: usize,
-        state: &mut DecoderState,
-    ) -> RarResult<Vec<u8>> {
-        let hdr = &self.entries[idx].header;
-        if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
-            return Ok(Vec::new());
-        }
-        let payload = self.read_packed_single(reader, idx)?;
-        let mut raw_data = Vec::new();
-        crate::format::rar5::payload::decode_member(
-            &self.entries[idx].header,
-            &payload,
-            Some(state),
-            &mut raw_data,
-        )?;
-        let crc = crc32fast::hash(&raw_data);
-        let blake = self.entries[idx]
-            .header
-            .hash_value
-            .map(|_| crate::format::rar5::blake2sp::hash(&raw_data));
-        self.verify_integrity(
-            idx,
-            crc,
-            blake,
-            payload.params.as_ref(),
-            payload.keys.as_ref(),
-        )?;
-        Ok(raw_data)
-    }
-
-    /// Read the packed (and decrypted, when applicable) payload of a
-    /// single-volume member directly from `reader`.
-    fn read_packed_single(&mut self, reader: &mut File, idx: usize) -> RarResult<DecryptedPayload> {
-        let entry = &self.entries[idx];
-        let hdr = &entry.header;
-        let mut rr = crate::format::rar5::payload::SingleFileReader { reader };
-        crate::format::rar5::payload::read_packed(
-            &mut rr,
-            hdr,
-            &entry.chunks,
-            &hdr.name,
-            self.password.as_deref(),
-            self.max_packed_bytes(),
-            || Ok(()),
-        )
     }
 }

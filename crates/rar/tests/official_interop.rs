@@ -431,6 +431,63 @@ fn official_unrar_validates_deleted_archives() {
         assert_eq!(rar.read_entry(c_id).unwrap(), c);
     }
 
+    // Multi-volume solid delete: the surviving chain is recompressed across
+    // the volume set; the official tool must read the rewritten set.
+    {
+        let path = dir.path().join("del-mv-solid.rar");
+        let payloads: Vec<Vec<u8>> = [0xA1u64, 0xB2, 0xC3]
+            .iter()
+            .map(|seed| {
+                let mut state = *seed | 1;
+                let mut block = vec![0u8; 4096];
+                for byte in block.iter_mut() {
+                    state ^= state >> 12;
+                    state ^= state << 25;
+                    state ^= state >> 27;
+                    *byte = (state.wrapping_mul(0x2545F4914F6CDD1D) >> 32) as u8;
+                }
+                block.iter().copied().cycle().take(256 * 1024).collect()
+            })
+            .collect();
+        {
+            let mut rar = rar_rs::ArchiveWriter::create_with(
+                &path,
+                rar_rs::WriterOptions::default()
+                    .solid_mode(rar_rs::SolidMode::Continuous)
+                    .volume_size(8 * 1024),
+            )
+            .unwrap();
+            let level =
+                EntryWriteOptions::new().compression_level(CompressionLevel::try_from(1).unwrap());
+            for (index, payload) in payloads.iter().enumerate() {
+                rar.add_bytes(&format!("m{index}.bin"), payload, level)
+                    .unwrap();
+            }
+            rar.finish().unwrap();
+        }
+        let before = rar_rs::discover_volumes(&path);
+        assert!(before.len() >= 2, "precondition: multi-volume set");
+
+        let mut editor = rar_rs::ArchiveEditor::open(&before[0]).unwrap();
+        let middle = editor.unique_entry("m1.bin").unwrap();
+        editor.delete_entries(&[middle]).unwrap();
+        drop(editor);
+
+        let volumes = rar_rs::discover_volumes(&path);
+        let status = std::process::Command::new(&unrar)
+            .arg("t")
+            .arg(&volumes[0])
+            .status()
+            .expect("run official unrar");
+        assert!(status.success(), "official unrar rejected del-mv-solid");
+
+        let mut rar = rar_rs::ArchiveReader::open(&volumes[0]).unwrap();
+        let first = rar.unique_entry("m0.bin").unwrap();
+        assert_eq!(rar.read_entry(first).unwrap(), payloads[0]);
+        let last = rar.unique_entry("m2.bin").unwrap();
+        assert_eq!(rar.read_entry(last).unwrap(), payloads[2]);
+    }
+
     // Reverse direction: the official `rar d` modifies a rar-rs archive,
     // and rar-rs reads the result.
     if let Some(rar_bin) = &rar_bin {

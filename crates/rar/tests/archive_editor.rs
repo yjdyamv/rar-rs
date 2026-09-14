@@ -300,6 +300,69 @@ fn solid_chain_delete_roundtrips_and_refreshes_catalog() {
     assert_eq!(editor.entries().count(), 2);
 }
 
+/// Multi-volume solid chain delete: the recompress path must run across the
+/// volume set (it used to be an untested copy of the single-volume
+/// pipeline).
+#[test]
+fn solid_multivolume_delete_recompresses_the_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("solid-set.rar");
+    // Each member repeats a distinct 4 KiB block: compressible, yet far
+    // larger than the volume size, so the set spans several volumes.
+    let payloads: Vec<Vec<u8>> = [0xA1u64, 0xB2, 0xC3]
+        .iter()
+        .map(|seed| {
+            let mut state = *seed | 1;
+            let mut block = vec![0u8; 4096];
+            for byte in block.iter_mut() {
+                state ^= state >> 12;
+                state ^= state << 25;
+                state ^= state >> 27;
+                *byte = (state.wrapping_mul(0x2545F4914F6CDD1D) >> 32) as u8;
+            }
+            block.iter().copied().cycle().take(256 * 1024).collect()
+        })
+        .collect();
+    {
+        let mut archive = ArchiveWriter::create_with(
+            &path,
+            WriterOptions::new()
+                .solid_mode(SolidMode::Continuous)
+                .volume_size(8 * 1024),
+        )
+        .unwrap();
+        for (index, payload) in payloads.iter().enumerate() {
+            archive
+                .add_bytes(&format!("m{index}.bin"), payload, level(1))
+                .unwrap();
+        }
+        archive.finish().unwrap();
+    }
+    let before = rar_rs::discover_volumes(&path);
+    assert!(
+        before.len() >= 2,
+        "precondition: multi-volume set {before:?}"
+    );
+
+    let mut editor = ArchiveEditor::open(&before[0]).unwrap();
+    let middle = editor.unique_entry("m1.bin").unwrap();
+    editor.delete_entries(&[middle]).unwrap();
+    drop(editor);
+
+    let volumes = rar_rs::discover_volumes(&path);
+    let mut reader = ArchiveReader::open(&volumes[0]).unwrap();
+    assert_eq!(reader.entries().count(), 2);
+    assert!(reader.unique_entry("m1.bin").is_err());
+    let first = reader.unique_entry("m0.bin").unwrap();
+    let last = reader.unique_entry("m2.bin").unwrap();
+    assert_eq!(reader.read_entry(first).unwrap(), payloads[0]);
+    assert_eq!(reader.read_entry(last).unwrap(), payloads[2]);
+    assert!(
+        reader.verify().unwrap().is_ok(),
+        "rewritten set must verify"
+    );
+}
+
 #[test]
 fn edition_never_mixes_ids_between_archives() {
     let dir = tempfile::tempdir().unwrap();
