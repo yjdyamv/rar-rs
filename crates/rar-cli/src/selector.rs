@@ -1,10 +1,24 @@
 //! Shared archive-member selection for the `rar` and `unrar` binaries.
 
+/// Normalize path separators in a user-supplied wildcard mask: WinRAR
+/// accepts both `\` and `/` in masks, while stored names always use `/`.
+/// On Unix `\` is a literal filename character, so the mask is returned
+/// unchanged there.
+pub fn normalize_mask_separators(mask: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) && mask.contains('\\') {
+        std::borrow::Cow::Owned(mask.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(mask)
+    }
+}
+
 /// Wildcard mask match: `*` matches any sequence (including `/`), `?`
 /// matches a single character, everything else is literal. WinRAR folds
 /// ASCII case in masks, so matching is case-insensitive on Windows; on
 /// Unix the stored names are case-sensitive and matching stays exact.
 pub fn mask_match(mask: &str, name: &str) -> bool {
+    let mask = normalize_mask_separators(mask);
+    let mask = mask.as_ref();
     fn char_eq(mask: char, name: char) -> bool {
         if cfg!(windows) {
             mask.eq_ignore_ascii_case(&name)
@@ -110,7 +124,7 @@ pub fn select_entries<'a, T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{name_matches, select_entries};
+    use super::{mask_match, name_matches, select_entries};
 
     #[test]
     fn does_not_match_member_as_selector_suffix() {
@@ -158,6 +172,20 @@ mod tests {
         assert!(!name_matches("other/sub/f3.txt", "sub/*.txt"));
         assert!(!name_matches("a.bin", "*.txt"));
         assert!(name_matches("big.txt", "big?txt"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_mask_accepts_backslash_separators() {
+        assert!(mask_match("sub\\*.txt", "sub/f3.txt"));
+        assert!(!mask_match("sub\\*.txt", "other/f3.txt"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_mask_keeps_backslashes_literal() {
+        assert!(mask_match("sub\\*.txt", "sub\\f3.txt"));
+        assert!(!mask_match("sub\\*.txt", "sub/f3.txt"));
     }
 
     #[cfg(windows)]

@@ -20,7 +20,7 @@ use crate::format::rar5::{
     RAR5_SIGNATURE,
 };
 use crate::fs::atomic::{
-    commit_files, install_durable, read_write_create, recover_interrupted_commit,
+    commit_files, install_durable, parent_dir, read_write_create, recover_interrupted_commit,
     temp_sibling_path, temp_suffix,
 };
 
@@ -30,7 +30,7 @@ impl RarArchive {
     pub(super) fn open_write(&mut self) -> RarResult<()> {
         // Finish or roll back a multi-volume commit that a previous process
         // was killed in the middle of, before staging anything new.
-        let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let parent = parent_dir(&self.path);
         recover_interrupted_commit(&parent, &volume_base_of(&self.path))?;
         if self.rar13 {
             return self.open_write_rar13();
@@ -45,7 +45,7 @@ impl RarArchive {
                 ));
             }
             let base = volume_base_of(&self.path);
-            let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let parent = parent_dir(&self.path);
             // Stage the volumes under a temporary volume base; they are
             // moved over the final `{base}.partN.rar` names on close.
             let tmp_base = format!(".{base}.rar5tmp-{}", temp_suffix());
@@ -780,7 +780,7 @@ impl RarArchive {
                 ));
             }
             let base = volume_base_of(&self.path);
-            let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let parent = parent_dir(&self.path);
             let tmp_base = format!(".{base}.rar13tmp-{}", temp_suffix());
             self.volume_paths = vec![volume_path_rar4(&parent, &base, 1)];
             self.write_ctx_mut().output.current_volume = 1;
@@ -867,7 +867,7 @@ impl RarArchive {
                 ));
             }
             let base = volume_base_of(&self.path);
-            let parent = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let parent = parent_dir(&self.path);
             let tmp_base = format!(".{base}.rar4tmp-{}", temp_suffix());
             self.volume_paths = vec![volume_path_rar4(&parent, &base, 1)];
             self.write_ctx_mut().output.current_volume = 1;

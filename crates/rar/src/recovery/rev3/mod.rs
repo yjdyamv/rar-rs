@@ -46,6 +46,17 @@ const TRAILER_LEN: usize = 7;
 /// Streaming chunk for parity building and reconstruction.
 const CHUNK: usize = 1024 * 1024;
 
+/// Directory argument for the install transaction: a bare relative archive
+/// name has an empty (not absent) parent, which the transaction cannot
+/// journal or fsync into on some hosts.
+fn install_parent(parent: &Path) -> &Path {
+    if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    }
+}
+
 /// Recovery-set metadata: how many data volumes the set has, how many
 /// recovery volumes protect it, and which recovery volume a file is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1055,31 +1066,43 @@ fn build_recovery_volumes_for_set_chunked(
         return Err(error);
     }
 
-    // The whole parity set is built: install every temporary over its
-    // final path. A failed install removes the remaining temps; a final
-    // path is only ever replaced by a fully built `.rev`.
-    let tmp_paths: Vec<PathBuf> = outputs
+    // The whole parity set is built: close the staged files and install
+    // them as one transaction. `commit_files` parks every pre-existing
+    // final, installs the set and rolls the old files back if any install
+    // fails, so a failure cannot leave a half-replaced parity set.
+    let mut install: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(outputs.len());
+    let mut written: Vec<PathBuf> = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        drop(output.file);
+        install.push((output.tmp_path, output.final_path.clone()));
+        written.push(output.final_path);
+    }
+    // A directory (or other non-file) at a final path is a conflict:
+    // `commit_files` would park and replace it, then strand the parked
+    // entry because only files are dropped on success.
+    if let Some(conflict) = install
         .iter()
-        .map(|output| output.tmp_path.clone())
-        .collect();
-    let mut written = Vec::with_capacity(outputs.len());
-    for (slot, output) in outputs.into_iter().enumerate() {
-        let RevOutput {
-            final_path,
-            tmp_path,
-            file,
-            ..
-        } = output;
-        drop(file);
-        match crate::fs::atomic::replace_file(&tmp_path, &final_path) {
-            Ok(()) => written.push(final_path),
-            Err(error) => {
-                for path in &tmp_paths[slot..] {
-                    let _ = fs::remove_file(path);
-                }
-                return Err(error);
-            }
+        .map(|(_, final_path)| final_path)
+        .find(|final_path| final_path.exists() && !final_path.is_file())
+    {
+        for (tmp, _) in &install {
+            let _ = fs::remove_file(tmp);
         }
+        return Err(RarError::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "{}: refusing to replace a non-file entry with a recovery volume",
+                conflict.display()
+            ),
+        )));
+    }
+    if let Err(error) =
+        crate::fs::atomic::commit_files(install_parent(&parent), &layout.base, &install, &[])
+    {
+        for (tmp, _) in &install {
+            let _ = fs::remove_file(tmp);
+        }
+        return Err(error);
     }
     Ok(written)
 }
@@ -1344,31 +1367,64 @@ fn rebuild_missing_volumes_chunked(
         return Err(error);
     }
 
+    // Finalize the staged rebuilds one by one: sync and ENDARC-truncate the
+    // temp, then install it over its final path. Any error removes the
+    // remaining temps; a damaged original is only parked as `*.bad` while
+    // its install is attempted and comes back if the install fails.
+    let tmp_paths: Vec<PathBuf> = outputs.iter().map(|(_, tmp, _)| tmp.clone()).collect();
     let mut rebuilt = Vec::with_capacity(outputs.len());
-    for (index, tmp, file) in outputs {
-        file.sync_all().map_err(RarError::Io)?;
-        drop(file);
-        // Truncate at the `ENDARC` block when everything after it is zero
-        // padding (only the last volume of a set can be short).
-        if index == meta.data_count - 1 {
-            let mut probe = fs::File::open(&tmp)?;
-            if let Some(end) = endarc_end(&mut probe)?
-                && end > 0
-                && end < shard_len
-            {
-                let file = fs::File::options().write(true).open(&tmp)?;
-                file.set_len(end).map_err(RarError::Io)?;
+    for (slot, (index, tmp, file)) in outputs.into_iter().enumerate() {
+        let final_path = data_paths[index].clone();
+        let is_damaged = damaged.contains(&index);
+        // The closure owns the write handle (it must close before install);
+        // the final path is cloned for the rebuilt-path list.
+        let install_path = final_path.clone();
+        let step = (move || -> RarResult<()> {
+            file.sync_all().map_err(RarError::Io)?;
+            drop(file);
+            // Truncate at the `ENDARC` block when everything after it is
+            // zero padding (only the last volume of a set can be short).
+            if index == meta.data_count - 1 {
+                let mut probe = fs::File::open(&tmp)?;
+                if let Some(end) = endarc_end(&mut probe)?
+                    && end > 0
+                    && end < shard_len
+                {
+                    let file = fs::File::options().write(true).open(&tmp)?;
+                    file.set_len(end).map_err(RarError::Io)?;
+                }
+            }
+            install_rebuilt_volume(&tmp, &install_path, is_damaged)
+        })();
+        match step {
+            Ok(()) => rebuilt.push(final_path),
+            Err(error) => {
+                for path in &tmp_paths[slot..] {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(error);
             }
         }
-        let final_path = data_paths[index].clone();
-        if damaged.contains(&index) && final_path.exists() {
-            let bad = unique_bad_path(&final_path);
-            fs::rename(&final_path, &bad)?;
-        }
-        crate::fs::atomic::replace_file(&tmp, &final_path)?;
-        rebuilt.push(final_path);
     }
     Ok(rebuilt)
+}
+
+/// Install one rebuilt volume over its final path, parking a damaged
+/// original as `*.bad` first. If the install fails after the park, the
+/// parked original is moved back, so the final path never disappears and
+/// the damaged bytes survive as the final path's original name.
+fn install_rebuilt_volume(tmp: &Path, final_path: &Path, damaged: bool) -> RarResult<()> {
+    if damaged && final_path.exists() {
+        let bad = unique_bad_path(final_path);
+        fs::rename(final_path, &bad).map_err(RarError::Io)?;
+        if let Err(error) = crate::fs::atomic::replace_file(tmp, final_path) {
+            let _ = fs::rename(&bad, final_path);
+            return Err(error);
+        }
+    } else {
+        crate::fs::atomic::replace_file(tmp, final_path)?;
+    }
+    Ok(())
 }
 
 /// One chunk of every volume, loaded once per streaming step.
@@ -1600,8 +1656,8 @@ mod tests {
     use super::rs8::Rsc8;
     use super::{
         Meta, NameKind, build_recovery_volumes_for_set_chunked, collect_recovery_volumes,
-        parse_trailer, parse_trailer_file, part_width_candidates, rebuild_missing_volumes_chunked,
-        rev_name_candidates, trailer_style, write_trailer,
+        install_rebuilt_volume, parse_trailer, parse_trailer_file, part_width_candidates,
+        rebuild_missing_volumes_chunked, rev_name_candidates, trailer_style, write_trailer,
     };
     use super::{RarError, TRAILER_LEN};
     use std::path::{Path, PathBuf};
@@ -1806,6 +1862,15 @@ mod tests {
             .collect()
     }
 
+    /// Commit-transaction names (`rar5bak`/`rar5commit`) left in `dir`.
+    fn commit_leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("rar5bak") || name.contains("rar5commit"))
+            .collect()
+    }
+
     /// Reference parity for the legacy (full-parity) layout, computed with
     /// full zero-padded volume shards in memory.
     fn legacy_reference(volumes: &[PathBuf], rec_count: usize) -> Vec<Vec<u8>> {
@@ -1914,6 +1979,128 @@ mod tests {
             "temps left behind: {:?}",
             temp_leftovers(dir.path())
         );
+    }
+
+    /// The partial-install regression: with the conflict on a *later* final
+    /// path, the old loop had already replaced the first pre-existing `.rev`
+    /// when the install failed. The transactional install must leave it
+    /// byte-identical and remove every temp.
+    #[test]
+    fn streaming_build_partial_install_rolls_back_existing_revs() {
+        let dir = tempfile::tempdir().unwrap();
+        let volumes = write_fake_volumes(dir.path(), &[1024, 1024]);
+        let existing = dir.path().join("set.part2_2_1.rev");
+        let keep = b"pre-existing parity one".to_vec();
+        std::fs::write(&existing, &keep).unwrap();
+        // Occupy the second final path so the install cannot complete after
+        // the first `.rev` would have been replaced.
+        std::fs::create_dir(dir.path().join("set.part2_2_2.rev")).unwrap();
+
+        let error = build_recovery_volumes_for_set_chunked(&volumes, 2, 64).unwrap_err();
+        assert!(matches!(error, RarError::Io(_)), "got {error}");
+        assert_eq!(
+            std::fs::read(&existing).unwrap(),
+            keep,
+            "the first .rev must be rolled back"
+        );
+        assert!(
+            dir.path().join("set.part2_2_2.rev").is_dir(),
+            "the conflicting directory must stay untouched"
+        );
+        assert!(
+            temp_leftovers(dir.path()).is_empty(),
+            "temps left behind: {:?}",
+            temp_leftovers(dir.path())
+        );
+        assert!(
+            commit_leftovers(dir.path()).is_empty(),
+            "commit leftovers: {:?}",
+            commit_leftovers(dir.path())
+        );
+    }
+
+    /// A failure inside the install transaction (the journal temp path is
+    /// occupied) leaves every pre-existing `.rev` untouched and sweeps all
+    /// staged temps.
+    #[test]
+    fn streaming_build_commit_failure_keeps_existing_revs_and_removes_temps() {
+        let dir = tempfile::tempdir().unwrap();
+        let volumes = write_fake_volumes(dir.path(), &[1024, 1024]);
+        let first = dir.path().join("set.part2_2_1.rev");
+        let second = dir.path().join("set.part2_2_2.rev");
+        let keep_first = b"pre-existing parity one".to_vec();
+        let keep_second = b"pre-existing parity two".to_vec();
+        std::fs::write(&first, &keep_first).unwrap();
+        std::fs::write(&second, &keep_second).unwrap();
+        // `commit_files` writes its journal through this exact sibling name.
+        std::fs::create_dir(dir.path().join(".set.rar5commit.journal.tmp")).unwrap();
+
+        let error = build_recovery_volumes_for_set_chunked(&volumes, 2, 64).unwrap_err();
+        assert!(matches!(error, RarError::Io(_)), "got {error}");
+        assert_eq!(std::fs::read(&first).unwrap(), keep_first);
+        assert_eq!(std::fs::read(&second).unwrap(), keep_second);
+        // Drop the planted conflict so only transaction leftovers remain.
+        std::fs::remove_dir(dir.path().join(".set.rar5commit.journal.tmp")).unwrap();
+        assert!(
+            temp_leftovers(dir.path()).is_empty(),
+            "temps left behind: {:?}",
+            temp_leftovers(dir.path())
+        );
+        assert!(
+            commit_leftovers(dir.path()).is_empty(),
+            "commit leftovers: {:?}",
+            commit_leftovers(dir.path())
+        );
+    }
+
+    /// A failure after the damaged original was parked as `*.bad` (the
+    /// rebuilt temp cannot be installed) must restore the original bytes
+    /// and leave no `.bad` copy behind.
+    #[test]
+    fn failed_install_after_bad_rename_restores_the_damaged_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("set.part2.rar");
+        let damaged = b"damaged volume bytes".to_vec();
+        std::fs::write(&final_path, &damaged).unwrap();
+        // The staged rebuild does not exist, so the install fails after
+        // `final_path` was renamed to `set.part2.rar.bad`.
+        let missing_tmp = dir.path().join(".set.part2.rar.rar5tmp-x");
+
+        let error = install_rebuilt_volume(&missing_tmp, &final_path, true).unwrap_err();
+        assert!(matches!(error, RarError::Io(_)), "got {error}");
+        assert_eq!(
+            std::fs::read(&final_path).unwrap(),
+            damaged,
+            "the damaged original must be restored"
+        );
+        assert!(
+            !dir.path().join("set.part2.rar.bad").exists(),
+            "the parked copy must be moved back, not left behind"
+        );
+        assert!(
+            temp_leftovers(dir.path()).is_empty(),
+            "temps left behind: {:?}",
+            temp_leftovers(dir.path())
+        );
+    }
+
+    /// On success the damaged original stays parked as `*.bad` and the
+    /// rebuilt temp lands at the final path.
+    #[test]
+    fn install_rebuilt_volume_keeps_the_damaged_original_as_bad() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("set.part2.rar");
+        std::fs::write(&final_path, b"damaged").unwrap();
+        let tmp = dir.path().join(".set.part2.rar.rar5tmp-x");
+        std::fs::write(&tmp, b"rebuilt").unwrap();
+
+        install_rebuilt_volume(&tmp, &final_path, true).unwrap();
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"rebuilt");
+        assert_eq!(
+            std::fs::read(dir.path().join("set.part2.rar.bad")).unwrap(),
+            b"damaged"
+        );
+        assert!(!tmp.exists(), "the staged temp must be consumed");
     }
 
     /// Trailer-format builds append a valid trailer after the streamed

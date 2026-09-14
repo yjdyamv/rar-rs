@@ -55,6 +55,17 @@ fn ensure_rar5_volume_set(first_volume: &Path) -> RarResult<()> {
     Ok(())
 }
 
+/// Directory argument for the install transaction: a bare relative archive
+/// name has an empty (not absent) parent, which the transaction cannot
+/// journal or fsync into on some hosts.
+fn install_parent(parent: &Path) -> &Path {
+    if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    }
+}
+
 /// Number of `.rev` files for `data_count` volumes at `rec_percent`
 /// (0-100): `max(1, ceil(pct * ND / 100))`, capped at `ND`.
 pub fn plan_recovery_volume_count(data_count: usize, rec_percent: u64) -> RarResult<usize> {
@@ -535,10 +546,11 @@ fn rebuild_missing_volumes_chunked(
         return Err(error);
     }
 
-    // Validate each rebuilt volume against its recorded size and CRC32,
-    // then install it over the missing volume.
+    // Validate each rebuilt volume against its recorded size and CRC32
+    // before anything is installed: a corrupt reconstruction must never
+    // replace a volume.
     let tmp_paths: Vec<PathBuf> = outputs.iter().map(|output| output.tmp.clone()).collect();
-    let mut rebuilt_paths = Vec::with_capacity(outputs.len());
+    let mut install: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(outputs.len());
     for (slot, output) in outputs.into_iter().enumerate() {
         let RebuiltOutput {
             index,
@@ -549,7 +561,10 @@ fn rebuild_missing_volumes_chunked(
         } = output;
         let size = volume_sizes[index];
         let expected_crc = volume_crcs[index];
-        let step = (move || -> RarResult<PathBuf> {
+        // The closure owns the write handle (it must close before install);
+        // the temp path is cloned for its CRC re-read.
+        let tmp_for_check = tmp.clone();
+        let step = (move || -> RarResult<()> {
             check_cancel(cancel)?;
             if written < padded_max {
                 return Err(RarError::Format(format!(
@@ -560,7 +575,7 @@ fn rebuild_missing_volumes_chunked(
             file.set_len(size)?;
             file.sync_all()?;
             drop(file);
-            let actual_crc = crc32_file(&tmp, size)?;
+            let actual_crc = crc32_file(&tmp_for_check, size)?;
             if actual_crc != expected_crc {
                 return Err(RarError::Crc {
                     expected: expected_crc,
@@ -568,18 +583,31 @@ fn rebuild_missing_volumes_chunked(
                     context: format!("reconstructed volume {}", index + 1),
                 });
             }
-            crate::fs::atomic::replace_file(&tmp, &final_path)?;
-            Ok(final_path)
+            Ok(())
         })();
-        match step {
-            Ok(path) => rebuilt_paths.push(path),
-            Err(error) => {
-                for path in &tmp_paths[slot..] {
-                    let _ = fs::remove_file(path);
-                }
-                return Err(error);
+        if let Err(error) = step {
+            for path in &tmp_paths[slot..] {
+                let _ = fs::remove_file(path);
             }
+            return Err(error);
         }
+        install.push((tmp, final_path));
+    }
+
+    // Install the validated set as one transaction: either every rebuilt
+    // volume lands or none does, so a failure cannot leave a half-rebuilt
+    // set behind.
+    let rebuilt_paths: Vec<PathBuf> = install
+        .iter()
+        .map(|(_, final_path)| final_path.clone())
+        .collect();
+    if let Err(error) =
+        crate::fs::atomic::commit_files(install_parent(&parent), &base, &install, &[])
+    {
+        for (tmp, _) in &install {
+            let _ = fs::remove_file(tmp);
+        }
+        return Err(error);
     }
     Ok(rebuilt_paths)
 }
@@ -765,31 +793,43 @@ fn build_recovery_volumes_for_set_chunked(
         return Err(error);
     }
 
-    // The whole parity set is built: install every temporary over its
-    // final path. A failed install removes the remaining temps; a final
-    // path is only ever replaced by a fully built `.rev`.
-    let tmp_paths: Vec<PathBuf> = outputs
+    // The whole parity set is built: close the staged files and install
+    // them as one transaction. `commit_files` parks every pre-existing
+    // final, installs the set and rolls the old files back if any install
+    // fails, so a failure cannot leave a half-replaced parity set.
+    let mut install: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(outputs.len());
+    let mut written: Vec<PathBuf> = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        drop(output.file);
+        install.push((output.tmp_path, output.final_path.clone()));
+        written.push(output.final_path);
+    }
+    // A directory (or other non-file) at a final path is a conflict:
+    // `commit_files` would park and replace it, then strand the parked
+    // entry because only files are dropped on success.
+    if let Some(conflict) = install
         .iter()
-        .map(|output| output.tmp_path.clone())
-        .collect();
-    let mut written = Vec::with_capacity(outputs.len());
-    for (slot, output) in outputs.into_iter().enumerate() {
-        let RevOutput {
-            final_path,
-            tmp_path,
-            file,
-            ..
-        } = output;
-        drop(file);
-        match crate::fs::atomic::replace_file(&tmp_path, &final_path) {
-            Ok(()) => written.push(final_path),
-            Err(error) => {
-                for path in &tmp_paths[slot..] {
-                    let _ = fs::remove_file(path);
-                }
-                return Err(error);
-            }
+        .map(|(_, final_path)| final_path)
+        .find(|final_path| final_path.exists() && !final_path.is_file())
+    {
+        for (tmp, _) in &install {
+            let _ = fs::remove_file(tmp);
         }
+        return Err(RarError::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "{}: refusing to replace a non-file entry with a recovery volume",
+                conflict.display()
+            ),
+        )));
+    }
+    if let Err(error) =
+        crate::fs::atomic::commit_files(install_parent(parent), &base, &install, &[])
+    {
+        for (tmp, _) in &install {
+            let _ = fs::remove_file(tmp);
+        }
+        return Err(error);
     }
     Ok(written)
 }
@@ -868,6 +908,15 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|name| name.contains("rar5tmp"))
+            .collect()
+    }
+
+    /// Commit-transaction names (`rar5bak`/`rar5commit`) left in `dir`.
+    fn commit_leftovers(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("rar5bak") || name.contains("rar5commit"))
             .collect()
     }
 
@@ -951,6 +1000,78 @@ mod tests {
             temp_leftovers(dir.path()).is_empty(),
             "temps left behind: {:?}",
             temp_leftovers(dir.path())
+        );
+    }
+
+    /// The partial-install regression: with the conflict on a *later* final
+    /// path, the old loop had already replaced the first pre-existing `.rev`
+    /// when the install failed. The transactional install must leave it
+    /// byte-identical and remove every temp.
+    #[test]
+    fn streaming_build_partial_install_rolls_back_existing_revs() {
+        let dir = tempfile::tempdir().unwrap();
+        let volumes = write_fake_volumes(dir.path(), &[512, 400]);
+        let existing = dir.path().join("set.part1.rev");
+        let keep = b"pre-existing parity one".to_vec();
+        fs::write(&existing, &keep).unwrap();
+        // Occupy the second final path so the install cannot complete after
+        // the first `.rev` would have been replaced.
+        fs::create_dir(dir.path().join("set.part2.rev")).unwrap();
+
+        let error = build_recovery_volumes_for_set_chunked(&volumes, 2, 64).unwrap_err();
+        assert!(matches!(error, RarError::Io(_)), "got {error}");
+        assert_eq!(
+            fs::read(&existing).unwrap(),
+            keep,
+            "the first .rev must be rolled back"
+        );
+        assert!(
+            dir.path().join("set.part2.rev").is_dir(),
+            "the conflicting directory must stay untouched"
+        );
+        assert!(
+            temp_leftovers(dir.path()).is_empty(),
+            "temps left behind: {:?}",
+            temp_leftovers(dir.path())
+        );
+        assert!(
+            commit_leftovers(dir.path()).is_empty(),
+            "commit leftovers: {:?}",
+            commit_leftovers(dir.path())
+        );
+    }
+
+    /// A failure inside the install transaction (the journal temp path is
+    /// occupied) leaves every pre-existing `.rev` untouched and sweeps all
+    /// staged temps.
+    #[test]
+    fn streaming_build_commit_failure_keeps_existing_revs_and_removes_temps() {
+        let dir = tempfile::tempdir().unwrap();
+        let volumes = write_fake_volumes(dir.path(), &[512, 400]);
+        let first = dir.path().join("set.part1.rev");
+        let second = dir.path().join("set.part2.rev");
+        let keep_first = b"pre-existing parity one".to_vec();
+        let keep_second = b"pre-existing parity two".to_vec();
+        fs::write(&first, &keep_first).unwrap();
+        fs::write(&second, &keep_second).unwrap();
+        // `commit_files` writes its journal through this exact sibling name.
+        fs::create_dir(dir.path().join(".set.rar5commit.journal.tmp")).unwrap();
+
+        let error = build_recovery_volumes_for_set_chunked(&volumes, 2, 64).unwrap_err();
+        assert!(matches!(error, RarError::Io(_)), "got {error}");
+        assert_eq!(fs::read(&first).unwrap(), keep_first);
+        assert_eq!(fs::read(&second).unwrap(), keep_second);
+        // Drop the planted conflict so only transaction leftovers remain.
+        fs::remove_dir(dir.path().join(".set.rar5commit.journal.tmp")).unwrap();
+        assert!(
+            temp_leftovers(dir.path()).is_empty(),
+            "temps left behind: {:?}",
+            temp_leftovers(dir.path())
+        );
+        assert!(
+            commit_leftovers(dir.path()).is_empty(),
+            "commit leftovers: {:?}",
+            commit_leftovers(dir.path())
         );
     }
 

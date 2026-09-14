@@ -181,27 +181,37 @@ impl RarArchive {
         recursive: bool,
         level: u8,
     ) -> RarResult<()> {
-        let mut visited = HashSet::new();
-        self.add_directory_inner(path, arcname, recursive, level, &mut visited)
+        let mut ancestors = HashSet::new();
+        self.add_directory_inner(path, arcname, recursive, level, &mut ancestors)
     }
 
     /// [`Self::add_directory`] carrying the canonical identities of the
-    /// directories already entered. A symlink or junction loop
+    /// directory chain currently being walked. A symlink or junction loop
     /// (`root/loop -> root`) resolved by `is_dir()` would otherwise recurse
     /// until the path-length limit and fail mid-add; the loop edge is
-    /// skipped instead. Ordinary (acyclic) trees are unaffected: no two
-    /// directory paths in them share an identity.
+    /// skipped instead. Only the ancestor chain is recorded: `canonicalize`
+    /// maps a junction/symlink to its target, so an identity is on the set
+    /// exactly while one of its aliases is being walked and two sibling
+    /// links to the same directory are both traversed. Keeping every
+    /// identity in one whole-tree set instead dropped the second alias (and
+    /// its whole subtree) as if it were a cycle.
+    ///
+    /// An identity is removed when its subtree finishes; an error aborts the
+    /// whole add (every caller propagates), so no stale entry can survive
+    /// into a sibling.
     fn add_directory_inner(
         &mut self,
         path: &Path,
         arcname: Option<&str>,
         recursive: bool,
         level: u8,
-        visited: &mut HashSet<PathBuf>,
+        ancestors: &mut HashSet<PathBuf>,
     ) -> RarResult<()> {
-        if !visited.insert(canonical_directory_id(path)) {
+        let identity = canonical_directory_id(path);
+        if ancestors.contains(&identity) {
             return Ok(());
         }
+        ancestors.insert(identity.clone());
         if !self.solid_chain_is_position_derived() {
             self.reset_solid_chain();
         }
@@ -252,13 +262,20 @@ impl RarArchive {
                     format!("{name}/{}", child.file_name().to_string_lossy())
                 };
                 if child_path.is_dir() {
-                    self.add_directory_inner(&child_path, Some(&child_name), true, level, visited)?;
+                    self.add_directory_inner(
+                        &child_path,
+                        Some(&child_name),
+                        true,
+                        level,
+                        ancestors,
+                    )?;
                 } else {
                     self.add_file(&child_path, Some(&child_name), level)?;
                 }
             }
         }
 
+        ancestors.remove(&identity);
         Ok(())
     }
 

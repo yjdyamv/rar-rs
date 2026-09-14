@@ -321,6 +321,8 @@ fn add_wildcard_arg(
     skip_links: bool,
     added: &mut HashSet<PathBuf>,
 ) -> Result<(), String> {
+    let pattern = crate::selector::normalize_mask_separators(pattern);
+    let pattern = pattern.as_ref();
     let wc = pattern.find(['*', '?']).unwrap();
     let prefix = &pattern[..wc];
     let base_dir = match prefix.rfind('/') {

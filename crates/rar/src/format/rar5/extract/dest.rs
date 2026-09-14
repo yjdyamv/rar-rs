@@ -14,6 +14,87 @@ use crate::format::rar5::write as rar5_write;
 use crate::fs::safe_path::resolve_redirect_target;
 use crate::fs::safe_path::sanitize_archive_path;
 
+/// Unix permission bits stored in a member's attribute field, when the
+/// member was created on Unix. RAR 1.5–4.x keep the mode in the high half
+/// of the attribute word (the `FILE_ATTRIBUTE_UNIX_EXTENSION` layout),
+/// RAR5 stores the mode directly. RAR 1.3/1.4 and Windows-host members
+/// carry only DOS attribute bits, so there is no mode to restore.
+#[cfg(unix)]
+fn stored_unix_mode(hdr: &crate::model::FileHeader) -> Option<u32> {
+    match hdr.format_version {
+        // RAR 1.3/1.4 carry DOS attributes only.
+        3 => None,
+        // RAR 1.5–4.x: hosts 3 (Unix) and 5 (BeOS) store a mode.
+        4 if matches!(hdr.host_os, 3 | 5) => Some(((hdr.attributes >> 16) & 0o7777) as u32),
+        4 => None,
+        // RAR5+: host 1 is Unix and the attribute vint is the mode.
+        _ if hdr.host_os == 1 => Some((hdr.attributes & 0o7777) as u32),
+        _ => None,
+    }
+}
+
+/// Restore a stored Unix mode, masking off the file-type bits `chmod`
+/// cannot use. Best-effort like the timestamp restoration: a filesystem
+/// that cannot represent the mode must not fail the extraction.
+#[cfg(unix)]
+fn apply_unix_mode(dest_path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(dest_path, fs::Permissions::from_mode(mode));
+}
+
+/// Whether a member's attribute field holds DOS attribute bits rather
+/// than a Unix mode.
+#[cfg(windows)]
+fn windows_host(hdr: &crate::model::FileHeader) -> bool {
+    match hdr.format_version {
+        // RAR 1.3/1.4 always store DOS attributes.
+        3 => true,
+        // RAR 1.5–4.x: hosts 3 (Unix) and 5 (BeOS) carry a mode.
+        4 => !matches!(hdr.host_os, 3 | 5),
+        // RAR5+: host 0 is Windows.
+        _ => hdr.host_os == 0,
+    }
+}
+
+/// Apply the attributes WinRAR restores on Windows: the stored DOS bits
+/// for Windows-host members, the archive bit for other hosts (whose
+/// attribute field holds a Unix mode), plus the directory bit. Failures
+/// are deliberately ignored, like the timestamp restoration.
+#[cfg(windows)]
+fn apply_windows_attributes(hdr: &crate::model::FileHeader, dest_path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN,
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM, SetFileAttributesW,
+    };
+
+    const STORED_DOS_ATTRIBUTES: u64 = (FILE_ATTRIBUTE_READONLY
+        | FILE_ATTRIBUTE_HIDDEN
+        | FILE_ATTRIBUTE_SYSTEM
+        | FILE_ATTRIBUTE_ARCHIVE) as u64;
+    let mut attrs = if windows_host(hdr) {
+        (hdr.attributes & STORED_DOS_ATTRIBUTES) as u32
+    } else if hdr.is_directory {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_ARCHIVE
+    };
+    if hdr.is_directory {
+        attrs |= FILE_ATTRIBUTE_DIRECTORY;
+    }
+    if attrs == 0 {
+        // `SetFileAttributesW` rejects a zero mask; `FILE_ATTRIBUTE_NORMAL`
+        // is the documented way to say "no special attributes".
+        attrs = FILE_ATTRIBUTE_NORMAL;
+    }
+    let wide: Vec<u16> = dest_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let _ = unsafe { SetFileAttributesW(wide.as_ptr(), attrs) };
+}
+
 /// Keep only the security zone from a Mark of the Web stream: the
 /// `[ZoneTransfer]` section header and its `ZoneId=` line (WinRAR's `-om`
 /// without the `1` modifier omits the potentially sensitive `ReferrerUrl`
@@ -139,6 +220,28 @@ impl RarArchive {
             && let Some((secs, ns)) = hdr.ctime
         {
             let _ = rar5_write::windows_set_creation_time(dest_path, secs, ns);
+        }
+    }
+
+    /// Restore a member's stored attributes on the extracted path: the
+    /// Unix permission bits (`chmod`) for Unix-host members, the DOS
+    /// attributes (`SetFileAttributesW`) for Windows-host members.
+    ///
+    /// Applied after the member's data (and its NTFS streams) are in place,
+    /// so a read-only attribute cannot block the writes that follow. The
+    /// application is best-effort like [`Self::apply_member_times`]: a
+    /// filesystem that cannot represent the attributes must not fail an
+    /// otherwise complete extraction.
+    pub(super) fn apply_member_attributes(&self, hdr: &crate::model::FileHeader, dest_path: &Path) {
+        #[cfg(unix)]
+        if let Some(mode) = stored_unix_mode(hdr) {
+            apply_unix_mode(dest_path, mode);
+        }
+        #[cfg(windows)]
+        apply_windows_attributes(hdr, dest_path);
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (hdr, dest_path);
         }
     }
 

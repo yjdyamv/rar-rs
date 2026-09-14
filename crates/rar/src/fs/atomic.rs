@@ -151,12 +151,30 @@ pub(crate) fn sync_file(path: &Path) -> RarResult<()> {
         .map_err(RarError::Io)
 }
 
+/// The directory holding `path`, with the empty parent that
+/// `Path::parent` reports for a bare relative name (`Path::new("bare.rar")
+/// .parent()` is `Some("")`, not `None`) normalized to `.`.
+///
+/// Staging, journaling and the Unix parent-directory fsync all need a real
+/// directory: `File::open("")` fails with ENOENT, which used to roll a
+/// bare-name multi-volume create back after every volume was staged (the
+/// archive vanished and the command errored). Windows/WASI no-op the
+/// directory fsync, so only Unix hosts observed it.
+pub(crate) fn parent_dir(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
+
 /// Flush a directory's entries after renames so the new names survive a
 /// power loss. Windows has no portable directory handle to fsync with (and
 /// its replace APIs order metadata), so this is a no-op off Unix.
 #[cfg(unix)]
 fn sync_parent_dir(parent: &Path) -> RarResult<()> {
-    File::open(parent)?.sync_all().map_err(RarError::Io)
+    File::open(parent_dir(parent))?
+        .sync_all()
+        .map_err(RarError::Io)
 }
 
 #[cfg(not(unix))]
@@ -171,11 +189,7 @@ fn sync_parent_dir(_parent: &Path) -> RarResult<()> {
 pub(crate) fn install_durable(src: &Path, dest: &Path) -> RarResult<()> {
     sync_file(src)?;
     replace_file(src, dest)?;
-    let parent = dest
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    sync_parent_dir(parent)
+    sync_parent_dir(&parent_dir(dest))
 }
 
 /// Hidden sibling used to park a destination file during [`commit_files`].
@@ -455,6 +469,14 @@ pub(crate) fn commit_files(
     if install.is_empty() && retire.is_empty() {
         return Ok(());
     }
+    // A bare relative archive name has an empty (not absent) parent; treat
+    // it as the current directory so the journal and the parent fsync land
+    // in a real directory.
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     let suffix = temp_suffix();
     // Plan the backups up front so the journal can name them before any file
     // moves.
@@ -545,6 +567,21 @@ pub(crate) fn commit_files(
 #[cfg(test)]
 mod tests {
     use super::{commit_files, install_durable, read_write_create, replace_file};
+    use std::path::Path;
+
+    /// `Path::new("bare.rar").parent()` is `Some("")`: a bare relative
+    /// archive name must still yield a real directory to journal and fsync
+    /// in, or the Unix multi-volume commit rolls back after staging.
+    #[test]
+    fn parent_dir_normalizes_an_empty_parent_to_the_current_directory() {
+        assert_eq!(super::parent_dir(Path::new("bare.rar")), Path::new("."));
+        assert_eq!(super::parent_dir(Path::new("./bare.rar")), Path::new("."));
+        assert_eq!(super::parent_dir(Path::new("dir")), Path::new("."));
+        assert_eq!(
+            super::parent_dir(Path::new("sub/bare.rar")),
+            Path::new("sub")
+        );
+    }
 
     #[test]
     fn staging_create_never_truncates_an_existing_file() {

@@ -215,7 +215,29 @@ impl RarArchive {
                     let data = if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
                         Vec::new()
                     } else if hdr.comp_method == COMP_METHOD_STORE {
-                        payload.data
+                        // Mirror the serial `payload::decode_member` bound: a
+                        // crafted STORE member whose packed area exceeds the
+                        // declared unpacked size must fail before its excess
+                        // bytes can be written.
+                        let declared = usize::try_from(hdr.unpacked_size).map_err(|_| {
+                            RarError::LimitExceeded {
+                                limit: hdr.unpacked_size,
+                                context: format!(
+                                    "{}: unpacked size overflows host address space",
+                                    hdr.name
+                                ),
+                            }
+                        })?;
+                        let mut data = payload.data;
+                        if data.len() > declared {
+                            let actual = data.len();
+                            data.truncate(declared);
+                            return Err(RarError::Format(format!(
+                                "member {}: stored payload has {} bytes, header declares {}",
+                                hdr.name, actual, hdr.unpacked_size
+                            )));
+                        }
+                        data
                     } else {
                         crate::codec::decode_raw(
                             &payload.data,
@@ -259,6 +281,12 @@ impl RarArchive {
             };
             if entry.is_dir() {
                 fs::create_dir_all(&dest_path)?;
+                // Flat extraction resolves directories to the destination
+                // root itself; the archived mode must not be applied to the
+                // caller's directory.
+                if dest_path.as_path() != dest {
+                    self.apply_member_attributes(&entry.header, &dest_path);
+                }
                 continue;
             }
             if let Some(redir) = parse_redirect_record(&entry.header.extra_data) {
@@ -289,6 +317,7 @@ impl RarArchive {
             }
             self.extract_member_streams(member.idx, &dest_path)?;
             self.propagate_member_mark_of_the_web(&dest_path);
+            self.apply_member_attributes(&self.entries[member.idx].header, &dest_path);
         }
         Ok(true)
     }
@@ -465,6 +494,12 @@ impl RarArchive {
 
         if entry.is_dir() {
             fs::create_dir_all(&dest_path)?;
+            // Flat extraction resolves directories to the destination root
+            // itself; the archived mode must not be applied to the caller's
+            // directory.
+            if dest_path.as_path() != dest_dir {
+                self.apply_member_attributes(&entry.header, &dest_path);
+            }
             return Ok(dest_path);
         }
 
@@ -520,6 +555,7 @@ impl RarArchive {
         // (no-op on non-Windows, like the reference extractor).
         self.extract_member_streams(idx, &dest_path)?;
         self.propagate_member_mark_of_the_web(&dest_path);
+        self.apply_member_attributes(&entry.header, &dest_path);
 
         Ok(dest_path)
     }

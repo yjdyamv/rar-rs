@@ -24,3 +24,4 @@ mod support;
 mod switches;
 mod timestamps;
 mod update;
+mod wildcard_separators;

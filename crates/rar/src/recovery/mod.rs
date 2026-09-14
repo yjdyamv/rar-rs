@@ -4,8 +4,8 @@
 //! container (`rev50`); the legacy RAR 1.5–4.x family uses NEWSUB `RR`
 //! records (`legacy`) and the GF(2^8) parity `.rev` files (`rev3`).
 
-// Same rule as `format`: the module tree is only public with the `raw`
-// feature, and without it a few helpers have no in-tree caller.
+// Same rule as `format`: the tree is `pub(crate)` (ADR 0007 retired the
+// `raw` feature); a few wire-level helpers have no in-tree caller.
 
 mod legacy;
 pub use legacy::{repair_legacy_archive_path, repair_legacy_archive_path_with_password};

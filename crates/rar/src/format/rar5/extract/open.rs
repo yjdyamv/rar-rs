@@ -30,11 +30,28 @@ use crate::model::{DataChunk, FileHeader};
 /// archive, so only hand-made inputs are rejected.
 const MAX_QUICK_OPEN_ENTRIES: usize = 1_000_000;
 
+/// Ceiling on how many data chunks one continuing member may accumulate
+/// across volumes. A real set contributes at most one chunk per volume, so
+/// the bound sits far above any archival use; without it a crafted set of
+/// tiny continuation headers grows one member's chunk vector (and the
+/// cloned extra records it holds) without bound.
+const MAX_MEMBER_CHUNKS: usize = 1_000_000;
+
 /// Reject a catalog that would grow past `max`.
 fn check_entry_cap(count: usize, max: usize) -> RarResult<()> {
     if count >= max {
         return Err(RarError::Format(format!(
             "archive catalog exceeds the {max}-entry ceiling"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a continuing member that would grow past `max` chunks.
+fn check_chunk_cap(count: usize, max: usize, member: &str) -> RarResult<()> {
+    if count >= max {
+        return Err(RarError::Format(format!(
+            "member {member} exceeds the {max}-chunk ceiling"
         )));
     }
     Ok(())
@@ -396,14 +413,16 @@ impl RarArchive {
     /// header]`. The archive key is derived once per volume and reused for
     /// all of its blocks.
     fn scan_all_volumes(&mut self) -> RarResult<()> {
-        self.scan_all_volumes_capped(MAX_QUICK_OPEN_ENTRIES)
+        self.scan_all_volumes_capped(MAX_QUICK_OPEN_ENTRIES, MAX_MEMBER_CHUNKS)
     }
 
-    /// [`scan_all_volumes`] with an explicit entry ceiling. A crafted volume
-    /// set can keep adding FILE_HEAD blocks while the catalog grows without
-    /// bound (the headers on disk are tiny, the entry objects are not), so
-    /// the same ceiling [`scan_blocks`] applies is enforced here too.
-    fn scan_all_volumes_capped(&mut self, max_entries: usize) -> RarResult<()> {
+    /// [`scan_all_volumes`] with explicit entry/chunk ceilings. A crafted
+    /// volume set can keep adding FILE_HEAD blocks while the catalog grows
+    /// without bound (the headers on disk are tiny, the entry objects are
+    /// not), so the same ceiling [`scan_blocks`] applies is enforced here
+    /// too; a single continuing member is likewise bounded so its chunk
+    /// vector cannot grow without limit.
+    fn scan_all_volumes_capped(&mut self, max_entries: usize, max_chunks: usize) -> RarResult<()> {
         self.entries.clear();
         self.read_ctx_mut().streams.clear();
         let mut pending: Option<ArchiveEntry> = None;
@@ -470,6 +489,11 @@ impl RarArchive {
 
                         if continues_from {
                             if let Some(ref mut entry) = pending {
+                                check_chunk_cap(
+                                    entry.chunks.len(),
+                                    max_chunks,
+                                    &entry.header.name,
+                                )?;
                                 entry.chunks.push(chunk);
                                 if !continues_to {
                                     // Final chunk: total packed size and the
@@ -723,11 +747,72 @@ mod tests {
         let mut ar = RarArchive::open(&vols[0]).unwrap();
         assert_eq!(ar.entries.len(), 2, "precondition: two catalog entries");
 
-        let err = ar.scan_all_volumes_capped(1).unwrap_err();
+        let err = ar
+            .scan_all_volumes_capped(1, MAX_MEMBER_CHUNKS)
+            .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
 
-        ar.scan_all_volumes_capped(2).unwrap();
+        ar.scan_all_volumes_capped(2, MAX_MEMBER_CHUNKS).unwrap();
         assert_eq!(ar.entries.len(), 2);
+    }
+
+    /// A one-volume archive holding `blocks` FILE_HEAD blocks of a single
+    /// continuing member (the first opens the member, the last closes it),
+    /// each without a data area.
+    fn crafted_continuation_archive(blocks: usize) -> Vec<u8> {
+        use crate::format::rar5::{BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES};
+
+        let mut out = RAR5_SIGNATURE.to_vec();
+        out.extend_from_slice(
+            &ArchiveHeader {
+                flags: 0,
+                extra_data: Vec::new(),
+                volume_number: None,
+            }
+            .to_bytes(),
+        );
+        for i in 0..blocks {
+            let mut fh = FileHeader {
+                name: "member.bin".into(),
+                ..Default::default()
+            };
+            fh.flags = match i {
+                0 => BLOCK_FLAG_DATA_CONTINUE_TO,
+                i if i + 1 == blocks => BLOCK_FLAG_DATA_CONTINUES,
+                _ => BLOCK_FLAG_DATA_CONTINUES | BLOCK_FLAG_DATA_CONTINUE_TO,
+            };
+            out.extend_from_slice(&fh.to_bytes());
+        }
+        out.extend_from_slice(&EndOfArchiveHeader { flags: 0 }.to_bytes());
+        out
+    }
+
+    #[test]
+    fn multivolume_scan_enforces_the_chunk_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chunks.rar");
+        std::fs::write(&path, crafted_continuation_archive(4)).unwrap();
+
+        let mut ar = RarArchive::open(&path).unwrap();
+        let err = ar
+            .scan_all_volumes_capped(MAX_QUICK_OPEN_ENTRIES, 3)
+            .unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
+
+        ar.scan_all_volumes_capped(MAX_QUICK_OPEN_ENTRIES, 4)
+            .unwrap();
+        assert_eq!(
+            ar.entries.len(),
+            1,
+            "the continuation blocks are one member"
+        );
+        assert_eq!(ar.entries[0].chunks.len(), 4);
+    }
+
+    #[test]
+    fn chunk_cap_matches_the_bound() {
+        assert!(check_chunk_cap(MAX_MEMBER_CHUNKS - 1, MAX_MEMBER_CHUNKS, "m").is_ok());
+        assert!(check_chunk_cap(MAX_MEMBER_CHUNKS, MAX_MEMBER_CHUNKS, "m").is_err());
     }
 
     #[test]
