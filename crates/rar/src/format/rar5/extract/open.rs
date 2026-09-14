@@ -244,6 +244,10 @@ impl RarArchive {
         // CBC header]`).
         let mut encr_key: Option<[u8; 32]> = None;
         let mut last_file_index: Option<usize> = None;
+        // Declared data areas are bounded against the real file: a hostile
+        // vint size can exceed the filesystem's maximum offset, where the
+        // skip seek fails on Linux instead of hitting EOF.
+        let file_len = crate::format::shared::stream_len(stream_mut(&mut self.stream)?)?;
 
         while let Some(meta) = crate::format::rar5::headers::read_block(
             stream_mut(&mut self.stream)?,
@@ -296,11 +300,14 @@ impl RarArchive {
                 _ => {}
             }
 
-            if raw.data_size > 0 {
-                self.stream
-                    .as_mut()
-                    .unwrap()
-                    .seek(SeekFrom::Start(meta.data_end))?;
+            if raw.data_size > 0
+                && !crate::format::shared::seek_past_data_area(
+                    stream_mut(&mut self.stream)?,
+                    meta.data_end,
+                    file_len,
+                )?
+            {
+                break;
             }
         }
 
@@ -410,6 +417,9 @@ impl RarArchive {
 
         for (vol_idx, vol_path) in volume_paths.iter().enumerate() {
             let mut stream = File::open(vol_path)?;
+            // Bound declared data areas against this volume's real size (see
+            // `seek_past_data_area`: an out-of-range skip seek fails on Linux).
+            let vol_len = stream.metadata().map_err(RarError::Io)?.len();
 
             // Verify signature. The first volume may be an SFX stub, so the
             // archive begins at `sfx_offset` there; later volumes start at 0.
@@ -525,8 +535,14 @@ impl RarArchive {
                     _ => {}
                 }
 
-                if raw.data_size > 0 {
-                    stream.seek(SeekFrom::Start(raw.data_offset + raw.data_size))?;
+                if raw.data_size > 0
+                    && !crate::format::shared::seek_past_data_area(
+                        &mut stream,
+                        meta.data_end,
+                        vol_len,
+                    )?
+                {
+                    break;
                 }
             }
         }

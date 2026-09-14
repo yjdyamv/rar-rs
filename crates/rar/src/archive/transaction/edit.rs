@@ -270,6 +270,7 @@ impl RarArchive {
         }
         let mut reader = File::open(&self.path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
+        let file_len = reader.metadata().map_err(RarError::Io)?.len();
         while let Some(meta) = crate::format::rar5::headers::read_block(
             &mut reader,
             self.archive_block_key()?.as_ref(),
@@ -307,8 +308,11 @@ impl RarArchive {
                 }
                 _ => {}
             }
-            // Advance past the data area.
-            reader.seek(SeekFrom::Start(meta.data_end))?;
+            // Advance past the data area; stop at a declared area that runs
+            // past the file (Linux refuses the out-of-range seek).
+            if !crate::format::shared::seek_past_data_area(&mut reader, meta.data_end, file_len)? {
+                break;
+            }
         }
         Ok(None)
     }

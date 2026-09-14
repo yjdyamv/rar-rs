@@ -545,6 +545,7 @@ impl RarArchive {
         let path = self.path.clone();
         let mut reader = File::open(&path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
+        let file_len = reader.metadata().map_err(RarError::Io)?.len();
 
         let first = crate::format::rar5::headers::read_block(
             &mut reader,
@@ -619,8 +620,12 @@ impl RarArchive {
                 }
                 _ => {}
             }
-            // Advance past the data area (headers are read separately).
-            reader.seek(SeekFrom::Start(meta.data_end))?;
+            // Advance past the data area (headers are read separately); stop
+            // at a declared area that runs past the file instead of seeking
+            // beyond the filesystem's maximum offset.
+            if !crate::format::shared::seek_past_data_area(&mut reader, meta.data_end, file_len)? {
+                break;
+            }
         }
         let truncate_pos = truncate_pos.unwrap_or(last_file_end);
 

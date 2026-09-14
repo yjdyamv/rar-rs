@@ -33,6 +33,7 @@ impl RarArchive {
         let mut sig = [0u8; 8];
         reader.seek(SeekFrom::Start(self.sfx_offset))?;
         reader.read_exact(&mut sig)?;
+        let file_len = reader.metadata().map_err(RarError::Io)?.len();
 
         // Leading blocks: optional archive encryption header (plaintext),
         // then the main archive header (rebuilt so the locator stays
@@ -169,8 +170,12 @@ impl RarArchive {
                     len: meta.raw.data_size,
                 }),
             }
-            // Advance past the data area (headers are read separately).
-            reader.seek(SeekFrom::Start(meta.data_end))?;
+            // Advance past the data area (headers are read separately); stop
+            // at a declared area that runs past the file instead of seeking
+            // beyond the filesystem's maximum offset.
+            if !crate::format::shared::seek_past_data_area(reader, meta.data_end, file_len)? {
+                break;
+            }
         }
 
         Ok(RewritePlan {
