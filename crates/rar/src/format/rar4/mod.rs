@@ -15,6 +15,7 @@ pub(crate) mod write;
 use crate::archive::ArchiveEntry;
 use crate::crc32;
 use crate::error::{RarError, RarResult};
+use crate::format::decode_system_ansi;
 use crate::model::{DataChunk, FileHeader};
 pub(crate) use read::{
     MemberDecodeOptions, decode_member_bytes, decode_member_bytes_to, member_crc,
@@ -750,7 +751,15 @@ pub(crate) fn decode_file_name(raw: &[u8], flags: u16) -> String {
             .rposition(|b| *b != 0)
             .map(|i| i + 1)
             .unwrap_or(0);
-        return String::from_utf8_lossy(&raw[..end]).into_owned();
+        let bytes = &raw[..end];
+        // Valid UTF-8 keeps the historical byte-identical pass-through;
+        // otherwise Windows decodes with the system ANSI code page (e.g.
+        // CP936) before falling back to the lossy replacement text.
+        return match std::str::from_utf8(bytes) {
+            Ok(text) => text.to_string(),
+            Err(_) => decode_system_ansi(bytes)
+                .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned()),
+        };
     }
 
     let Some(zero_pos) = raw.iter().position(|b| *b == 0) else {
@@ -1052,6 +1061,14 @@ mod tests {
         b[10] = 0x30; // method (store)
         b.extend_from_slice(payload);
         b
+    }
+
+    /// Valid UTF-8 names stay byte-identical through the decoder (the ANSI
+    /// or lossy fallbacks must not engage).
+    #[test]
+    fn decode_file_name_passes_valid_utf8_through() {
+        let name = "目录/中文文件.txt";
+        assert_eq!(decode_file_name(name.as_bytes(), 0), name);
     }
 
     #[test]

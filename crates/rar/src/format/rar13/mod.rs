@@ -64,6 +64,17 @@ pub(crate) struct Volume {
     pub entries: Vec<ArchiveEntry>,
 }
 
+/// Decode a DOS-era member name: valid UTF-8 passes through, otherwise the
+/// Windows system ANSI code page (e.g. CP936) is tried before the lossy
+/// fallback — the same policy as RAR4's `decode_file_name`.
+fn decode_name(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => crate::format::decode_system_ansi(bytes)
+            .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned()),
+    }
+}
+
 /// Parse one RAR 1.3/1.4 volume starting at `offset` (an SFX stub may
 /// precede the first volume's signature).
 pub(crate) fn parse_volume(
@@ -133,7 +144,7 @@ pub(crate) fn parse_volume(
             None
         };
         let header = FileHeader {
-            name: String::from_utf8_lossy(name_bytes).into_owned(),
+            name: decode_name(name_bytes),
             unpacked_size: u64::from(unp_size),
             packed_size: u64::from(pack_size),
             attributes: u64::from(file_attr),
@@ -298,5 +309,18 @@ impl RarArchive {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_name;
+
+    /// Valid UTF-8 names stay byte-identical through the decoder (the ANSI
+    /// or lossy fallbacks must not engage).
+    #[test]
+    fn member_name_decoding_preserves_valid_utf8() {
+        let name = "目录/中文文件.txt";
+        assert_eq!(decode_name(name.as_bytes()), name);
     }
 }

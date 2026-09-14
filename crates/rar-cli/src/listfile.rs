@@ -3,8 +3,9 @@
 //! A parameter starting with `@` names a plain text file whose lines are
 //! file/member names; `@` alone reads the list from stdin. `//` starts a
 //! comment, and `-@` disables list processing (`-@+` re-enables it), like
-//! WinRAR. `-sc<charset>l` is accepted but decoding is UTF-8 with a
-//! Latin-1 fallback; UTF-16 lists are detected by their byte order mark.
+//! WinRAR. `-sc<charset>l` is accepted but decoding is UTF-8 with a Windows
+//! ANSI (`CP_ACP`, e.g. CP936) then Latin-1 fallback; UTF-16 lists are
+//! detected by their byte order mark.
 
 use std::io::Read;
 
@@ -45,9 +46,47 @@ pub fn expand(specs: &[String], list_files: Option<&str>) -> Result<Vec<String>,
     Ok(out)
 }
 
+/// Decode with the Windows system ANSI code page (`CP_ACP`: CP936 on
+/// Chinese Windows), so a Notepad "ANSI" `@listfile` decodes natively.
+///
+/// Mirror of `rar-rs`'s `format::decode_system_ansi` (crate-internal there,
+/// hence this local copy). Returns `None` off Windows, on conversion failure
+/// or when the conversion would yield U+FFFD replacement characters.
+#[cfg(windows)]
+fn decode_system_ansi(bytes: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Globalization::{CP_ACP, MultiByteToWideChar};
+
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    let len = i32::try_from(bytes.len()).ok()?;
+    // Size the UTF-16 buffer first, then convert into it.
+    let wide_len =
+        unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
+    if wide_len <= 0 {
+        return None;
+    }
+    let mut wide = vec![0u16; wide_len as usize];
+    let written =
+        unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), wide_len) };
+    if written <= 0 {
+        return None;
+    }
+    wide.truncate(written as usize);
+    let decoded = String::from_utf16(&wide).ok()?;
+    (!decoded.contains(char::REPLACEMENT_CHARACTER)).then_some(decoded)
+}
+
+/// Non-Windows stub: the legacy Windows code pages have no native
+/// equivalent, so the byte-preserving Latin-1 fallback applies.
+#[cfg(not(windows))]
+fn decode_system_ansi(_bytes: &[u8]) -> Option<String> {
+    None
+}
+
 /// Decode a list file: UTF-8 (with or without its BOM), UTF-16 by BOM,
-/// otherwise UTF-8 with a byte-preserving Latin-1 fallback for legacy
-/// single-byte encodings.
+/// otherwise the Windows system ANSI code page, with a byte-preserving
+/// Latin-1 fallback for legacy single-byte encodings.
 pub(crate) fn decode(bytes: &[u8]) -> String {
     // Notepad-style UTF-8 list files carry a BOM; without stripping it the
     // first entry would start with U+FEFF.
@@ -72,7 +111,8 @@ pub(crate) fn decode(bytes: &[u8]) -> String {
     }
     match std::str::from_utf8(bytes) {
         Ok(text) => text.to_string(),
-        Err(_) => bytes.iter().map(|&byte| byte as char).collect(),
+        Err(_) => decode_system_ansi(bytes)
+            .unwrap_or_else(|| bytes.iter().map(|&byte| byte as char).collect()),
     }
 }
 
@@ -111,9 +151,35 @@ mod tests {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
         assert_eq!(decode(&bytes), "a.txt\r\nb.txt");
-        // Latin-1 fallback preserves non-UTF-8 bytes.
+        // Legacy single-byte encodings fall back to the ANSI code page on
+        // Windows and to byte-preserving Latin-1 elsewhere. `CP_ACP` is
+        // locale-dependent (CP936 on Chinese Windows), so assert the
+        // no-replacement-character contract rather than the decoded text.
+        #[cfg(windows)]
+        assert!(
+            !decode(&[0xE9, b'.', b't']).contains(char::REPLACEMENT_CHARACTER),
+            "ANSI fallback leaked U+FFFD"
+        );
+        #[cfg(not(windows))]
         assert_eq!(decode(&[0xE9, b'.', b't']), "é.t");
         // A UTF-8 BOM must not leak into the first entry.
         assert_eq!(decode(&[0xEF, 0xBB, 0xBF, b'a', b'.', b't']), "a.t");
+    }
+
+    /// The CLI's local mirror of the library's `format::decode_system_ansi`:
+    /// a successful decode must never leak U+FFFD, while the decoded text
+    /// itself depends on the machine's `CP_ACP` (so it is not asserted).
+    #[cfg(windows)]
+    #[test]
+    fn ansi_decode_declines_replacement_characters() {
+        assert_eq!(super::decode_system_ansi(b""), Some(String::new()));
+        for bytes in [&[0xE9][..], &[0xE9, b'.', b't'][..], &[0xD6, 0xD0][..]] {
+            if let Some(text) = super::decode_system_ansi(bytes) {
+                assert!(
+                    !text.contains(char::REPLACEMENT_CHARACTER),
+                    "ANSI decode of {bytes:02X?} leaked U+FFFD: {text:?}"
+                );
+            }
+        }
     }
 }
