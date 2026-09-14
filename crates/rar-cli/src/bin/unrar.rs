@@ -1,5 +1,8 @@
 //! unrar — extract and inspect RAR4, RAR5, and RAR7 archives.
 
+#[macro_use]
+#[path = "../conout.rs"]
+mod conout;
 #[path = "../common.rs"]
 mod common;
 #[path = "../error.rs"]

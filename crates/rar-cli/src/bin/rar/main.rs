@@ -1,5 +1,8 @@
 //! rar — create, modify, and inspect RAR4, RAR5, and RAR7 archives.
 
+#[macro_use]
+#[path = "../../conout.rs"]
+mod conout;
 #[path = "../../common.rs"]
 mod common;
 #[path = "../../error.rs"]
@@ -173,5 +176,19 @@ fn run(cli: Cli) -> CliResult<()> {
                 Err(format!("unknown command: {name}").into())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod conout_shadowing {
+    use crate::conout::test_capture::{self, serial};
+
+    #[test]
+    fn println_outside_conout_routes_through_it() {
+        let _serial = serial();
+        test_capture::start();
+        println!("é");
+        let captured = test_capture::take().expect("capture was on");
+        assert_eq!(String::from_utf8(captured).unwrap(), "é\n");
     }
 }
