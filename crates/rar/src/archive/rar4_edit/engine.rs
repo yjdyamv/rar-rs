@@ -30,7 +30,7 @@ use crate::format::rar4::{
     COMM_HEAD, FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY, MHD_SOLID, MHD_VOLUME,
     NEWSUB_HEAD,
 };
-use crate::fs::atomic::{commit_files, read_write_create, replace_file, temp_sibling_path};
+use crate::fs::atomic::{commit_files, read_write_create, temp_sibling_path};
 use crate::fs::volume::{stale_volume_paths, volume_base_of};
 use crate::recovery::legacy_rr::{build_legacy_recovery_block, recovery_sector_count};
 
@@ -647,7 +647,7 @@ pub(crate) fn edit_rar4(
         let _ = fs::remove_file(&tmp_path);
         return Err(error);
     }
-    if let Err(error) = replace_file(&tmp_path, &archive.path) {
+    if let Err(error) = crate::fs::atomic::install_durable(&tmp_path, &archive.path) {
         let _ = fs::remove_file(&tmp_path);
         return Err(error);
     }

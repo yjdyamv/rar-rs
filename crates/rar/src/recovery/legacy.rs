@@ -351,9 +351,11 @@ pub fn repair_legacy_archive_path_with_password(
         return Ok(false);
     };
     // Keep the write atomic: stage next to the destination, then rename.
-    let tmp = crate::fs::atomic::temp_sibling_path(dst);
-    std::fs::write(&tmp, &repaired).map_err(RarError::Io)?;
-    std::fs::rename(&tmp, dst).map_err(RarError::Io)?;
+    use std::io::Write;
+    let (mut staged, mut file) = crate::fs::atomic::StagedFile::create(dst)?;
+    file.write_all(&repaired).map_err(RarError::Io)?;
+    drop(file);
+    staged.commit()?;
     Ok(true)
 }
 

@@ -71,21 +71,16 @@ pub fn repair_archive_path_with(
     let mut input = std::fs::File::open(src).map_err(RarError::Io)?;
     // Stage into a temp sibling and rename on success, so a failed
     // repair never leaves a partial file at `dst`.
-    let tmp = crate::fs::atomic::temp_sibling_path(dst);
-    let mut output = crate::fs::atomic::read_write_create(&tmp).map_err(RarError::Io)?;
+    let (mut staged, mut output) = crate::fs::atomic::StagedFile::create(dst)?;
     let repaired =
         rar50::repair_inline_recovery_archive_path(&mut input, &mut output, cancel, progress)
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                RarError::from(e)
-            })?;
+            .map_err(RarError::from)?;
     if !repaired {
         // Intact archive: `dst` stays untouched (like `rar r`'s "All OK").
-        let _ = std::fs::remove_file(&tmp);
         return Ok(false);
     }
-    output.sync_all().map_err(RarError::Io)?;
-    crate::fs::atomic::replace_file(&tmp, dst)?;
+    drop(output);
+    staged.commit()?;
     Ok(true)
 }
 

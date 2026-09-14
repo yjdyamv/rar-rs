@@ -2,7 +2,7 @@
 
 use super::*;
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::path::Path;
 
 use std::io::{Read, Seek, SeekFrom};
@@ -15,7 +15,6 @@ use crate::format::rar5::{
     ARCHIVE_FLAG_LOCKED, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_ENCRYPT_HEADER,
     BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_SERVICE_HEADER,
 };
-use crate::fs::atomic::{read_write_create, replace_file, sync_file, temp_sibling_path};
 
 impl RarArchive {
     pub(crate) fn edit_plan(
@@ -146,34 +145,31 @@ impl RarArchive {
 
     /// Remove every file of an archive whose members are all being deleted:
     /// the discovered data volumes plus the `.rev` recovery volumes sharing
-    /// their base (multi-volume sets). Every removal is attempted so one
-    /// locked file cannot stop the rest, and the first failure is returned;
-    /// ignoring removal errors used to leave a locked volume behind while
-    /// the erase reported success.
+    /// their base (multi-volume sets). The whole set is retired as one
+    /// journaled commit, so a failure (a locked volume) rolls every removal
+    /// back and the archive is never left half-erased.
     fn erase_archive_files(&self) -> RarResult<()> {
+        let base = crate::fs::volume::volume_base_of(&self.path);
+        let parent = crate::fs::atomic::parent_dir(&self.path);
         let mut victims = self.volume_paths.clone();
         if self.volume_paths.len() > 1 {
-            let base = crate::fs::volume::volume_base_of(&self.path);
-            let parent = self.path.parent().unwrap_or(Path::new("."));
             victims.extend(crate::fs::volume::stale_volume_paths(
-                parent,
+                &parent,
                 &base,
                 false,
                 &self.volume_paths,
             ));
         }
-        let mut failure: Option<RarError> = None;
-        for path in &victims {
-            if let Err(error) = fs::remove_file(path) {
-                failure.get_or_insert_with(|| {
-                    RarError::Io(std::io::Error::new(
-                        error.kind(),
-                        format!("{}: {error}", path.display()),
-                    ))
-                });
-            }
+        // A directory (or other non-file) at a victim path is a conflict:
+        // `commit_files` would park and retire it, then strand the parked
+        // entry because only files are dropped on success.
+        if let Some(conflict) = victims.iter().find(|path| path.exists() && !path.is_file()) {
+            return Err(RarError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{}: refusing to erase a non-file entry", conflict.display()),
+            )));
         }
-        failure.map_or(Ok(()), Err)
+        crate::fs::atomic::commit_files(&parent, &base, &[], &victims)
     }
 
     /// Build the rename map (index -> new name) for resolved rename pairs,
@@ -212,9 +208,10 @@ impl RarArchive {
             self.rewrite_multivolume(&deleted, chain, rename_map)?;
         } else {
             let src_path = self.path.clone();
-            let tmp_path = temp_sibling_path(&src_path);
+            let (mut staged, file) = crate::fs::atomic::StagedFile::create(&src_path)?;
+            let tmp_path = staged.path().to_path_buf();
             let mut reader = File::open(&src_path)?;
-            self.stream = Some(Box::new(read_write_create(&tmp_path)?));
+            self.stream = Some(Box::new(file));
             self.write_ctx_mut().locator.quick_open_entries.clear();
             // Rewriting rediscovers header encryption from the file itself.
             self.header_encryption = false;
@@ -230,23 +227,10 @@ impl RarArchive {
                 &src_path,
                 &tmp_path,
             );
+            // Close the write handle before installing the staged file.
             self.stream = None;
-            match result {
-                Ok(()) => {
-                    // Flush the rewritten bytes before replacing the original:
-                    // the rename must not become durable ahead of its data.
-                    if let Err(e) =
-                        sync_file(&tmp_path).and_then(|()| replace_file(&tmp_path, &src_path))
-                    {
-                        let _ = fs::remove_file(&tmp_path);
-                        return Err(e);
-                    }
-                }
-                Err(e) => {
-                    let _ = fs::remove_file(&tmp_path);
-                    return Err(e);
-                }
-            }
+            result?;
+            staged.commit()?;
         }
 
         self.mode = Mode::Read;

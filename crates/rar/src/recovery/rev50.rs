@@ -55,17 +55,6 @@ fn ensure_rar5_volume_set(first_volume: &Path) -> RarResult<()> {
     Ok(())
 }
 
-/// Directory argument for the install transaction: a bare relative archive
-/// name has an empty (not absent) parent, which the transaction cannot
-/// journal or fsync into on some hosts.
-fn install_parent(parent: &Path) -> &Path {
-    if parent.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        parent
-    }
-}
-
 /// Number of `.rev` files for `data_count` volumes at `rec_percent`
 /// (0-100): `max(1, ceil(pct * ND / 100))`, capped at `ND`.
 pub fn plan_recovery_volume_count(data_count: usize, rec_percent: u64) -> RarResult<usize> {
@@ -601,9 +590,7 @@ fn rebuild_missing_volumes_chunked(
         .iter()
         .map(|(_, final_path)| final_path.clone())
         .collect();
-    if let Err(error) =
-        crate::fs::atomic::commit_files(install_parent(&parent), &base, &install, &[])
-    {
+    if let Err(error) = crate::fs::atomic::commit_files(&parent, &base, &install, &[]) {
         for (tmp, _) in &install {
             let _ = fs::remove_file(tmp);
         }
@@ -823,9 +810,7 @@ fn build_recovery_volumes_for_set_chunked(
             ),
         )));
     }
-    if let Err(error) =
-        crate::fs::atomic::commit_files(install_parent(parent), &base, &install, &[])
-    {
+    if let Err(error) = crate::fs::atomic::commit_files(parent, &base, &install, &[]) {
         for (tmp, _) in &install {
             let _ = fs::remove_file(tmp);
         }

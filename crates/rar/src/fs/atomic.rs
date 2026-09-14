@@ -192,6 +192,120 @@ pub(crate) fn install_durable(src: &Path, dest: &Path) -> RarResult<()> {
     sync_parent_dir(&parent_dir(dest))
 }
 
+/// One staged file: a fresh sibling created atomically, installed over its
+/// destination by [`Self::commit`], and removed on drop while uncommitted.
+///
+/// The value owns the "original untouched until success" rule for a single
+/// file: staging happens next to the destination, the bytes are synced and
+/// renamed by [`install_durable`], and every early return discards the
+/// staged copy through `Drop`.
+pub(crate) struct StagedFile {
+    staged: PathBuf,
+    dest: PathBuf,
+    armed: bool,
+}
+
+impl StagedFile {
+    /// Create a fresh staged sibling for `dest` and return its write handle.
+    pub(crate) fn create(dest: &Path) -> RarResult<(Self, File)> {
+        let staged = temp_sibling_path(dest);
+        let file = read_write_create(&staged)?;
+        Ok((
+            Self {
+                staged,
+                dest: dest.to_path_buf(),
+                armed: true,
+            },
+            file,
+        ))
+    }
+
+    /// Path of the staged sibling (for callers that rename it themselves;
+    /// prefer [`Self::commit`]).
+    pub(crate) fn path(&self) -> &Path {
+        &self.staged
+    }
+
+    /// Install the staged bytes over the destination durably. On failure the
+    /// staged file is kept (still armed) so the caller can retry or let drop
+    /// clean it.
+    pub(crate) fn commit(&mut self) -> RarResult<()> {
+        let result = install_durable(&self.staged, &self.dest);
+        if result.is_ok() {
+            self.armed = false;
+        }
+        result
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.staged);
+        }
+    }
+}
+
+/// A set of staged files installed as one journaled commit.
+///
+/// Opening the set recovers an interrupted commit of the same parent/base so
+/// no caller can forget it; [`Self::track`] adopts files a lower-level
+/// builder staged; [`Self::commit`] runs the whole set through
+/// [`commit_files`]. A dropped, uncommitted set removes its staged files.
+pub(crate) struct StagedSet {
+    parent: PathBuf,
+    base: String,
+    install: Vec<(PathBuf, PathBuf)>,
+    committed: bool,
+}
+
+impl StagedSet {
+    /// Open a set for `parent`/`base`, recovering an interrupted commit of
+    /// the same base first (idempotent).
+    pub(crate) fn new(parent: &Path, base: &str) -> RarResult<Self> {
+        let parent = if parent.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            parent.to_path_buf()
+        };
+        recover_interrupted_commit(&parent, base)?;
+        Ok(Self {
+            parent,
+            base: base.to_string(),
+            install: Vec::new(),
+            committed: false,
+        })
+    }
+
+    /// Adopt a file that is already staged on disk (created by a lower-level
+    /// builder) as one entry of the set. The path's lifetime is transferred:
+    /// an uncommitted set removes it on drop.
+    pub(crate) fn track(&mut self, staged: PathBuf, final_path: &Path) {
+        self.install.push((staged, final_path.to_path_buf()));
+    }
+
+    /// Install every tracked file as one journaled commit. On failure the
+    /// set is rolled back and its staged files are kept (still uncommitted)
+    /// until drop.
+    pub(crate) fn commit(&mut self) -> RarResult<()> {
+        let result = commit_files(&self.parent, &self.base, &self.install, &[]);
+        if result.is_ok() {
+            self.committed = true;
+        }
+        result
+    }
+}
+
+impl Drop for StagedSet {
+    fn drop(&mut self) {
+        if !self.committed {
+            for (staged, _) in &self.install {
+                let _ = fs::remove_file(staged);
+            }
+        }
+    }
+}
+
 /// Hidden sibling used to park a destination file during [`commit_files`].
 fn backup_sibling_path(dest: &Path, suffix: &str) -> PathBuf {
     let file_name = dest
@@ -1227,5 +1341,130 @@ mod tests {
         assert!(!backup.exists(), "the parked original must be consumed");
         assert!(!staged.exists());
         assert!(!super::journal_path(parent, "set").exists());
+    }
+
+    /// An uncommitted [`super::StagedFile`] removes its staged sibling on
+    /// drop and leaves the destination untouched.
+    #[test]
+    fn staged_file_drops_its_temp_when_uncommitted() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("archive.rar");
+        std::fs::write(&dest, b"original").unwrap();
+
+        {
+            let (staged, mut file) = super::StagedFile::create(&dest).unwrap();
+            file.write_all(b"new").unwrap();
+            assert!(staged.path().exists());
+        }
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"original");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("rar5tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "staged leftovers: {leftovers:?}");
+    }
+
+    #[test]
+    fn staged_file_commits_over_the_destination() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("archive.rar");
+        std::fs::write(&dest, b"original").unwrap();
+
+        let (mut staged, mut file) = super::StagedFile::create(&dest).unwrap();
+        let staged_path = staged.path().to_path_buf();
+        file.write_all(b"durable").unwrap();
+        drop(file);
+        staged.commit().unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"durable");
+        assert!(!staged_path.exists());
+    }
+
+    /// Write a staged sibling for `final_path` the way a lower-level builder
+    /// would, and hand it to a set with [`super::StagedSet::track`].
+    fn staged_sibling(final_path: &Path, bytes: &[u8]) -> std::path::PathBuf {
+        let staged = super::temp_sibling_path(final_path);
+        std::fs::write(&staged, bytes).unwrap();
+        staged
+    }
+
+    #[test]
+    fn staged_set_drops_staged_files_when_uncommitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("set.part1.rar");
+        let second = dir.path().join("set.part2.rar");
+        std::fs::write(&first, b"old-1").unwrap();
+        std::fs::write(&second, b"old-2").unwrap();
+
+        let (first_staged, second_staged) = {
+            let mut set = super::StagedSet::new(dir.path(), "set").unwrap();
+            let first_staged = staged_sibling(&first, b"new-1");
+            set.track(first_staged.clone(), &first);
+            let second_staged = staged_sibling(&second, b"new-2");
+            set.track(second_staged.clone(), &second);
+            (first_staged, second_staged)
+        };
+
+        assert_eq!(std::fs::read(&first).unwrap(), b"old-1");
+        assert_eq!(std::fs::read(&second).unwrap(), b"old-2");
+        assert!(!first_staged.exists() && !second_staged.exists());
+    }
+
+    #[test]
+    fn staged_set_commits_tracked_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep = dir.path().join("set.part1.rar");
+        std::fs::write(&keep, b"old-1").unwrap();
+
+        let mut set = super::StagedSet::new(dir.path(), "set").unwrap();
+        let staged = staged_sibling(&keep, b"new-1");
+        set.track(staged, &keep);
+        set.commit().unwrap();
+
+        assert_eq!(std::fs::read(&keep).unwrap(), b"new-1");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("rar5"))
+            .collect();
+        assert!(leftovers.is_empty(), "commit leftovers: {leftovers:?}");
+    }
+
+    /// A failed set commit rolls the finals back and the set's drop removes
+    /// every staged file: no partial set, no leftovers.
+    #[test]
+    fn staged_set_failed_commit_cleans_the_staged_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("set.part1.rar");
+        let second = dir.path().join("set.part2.rar");
+        std::fs::write(&first, b"old-1").unwrap();
+        std::fs::write(&second, b"old-2").unwrap();
+
+        let mut set = super::StagedSet::new(dir.path(), "set").unwrap();
+        let first_staged = staged_sibling(&first, b"new-1");
+        set.track(first_staged, &first);
+        let second_staged = staged_sibling(&second, b"new-2");
+        set.track(second_staged.clone(), &second);
+        // Remove the second staged file so the install fails after the first
+        // one already landed.
+        std::fs::remove_file(&second_staged).unwrap();
+
+        assert!(set.commit().is_err());
+        // The failed set keeps its staged files until drop cleans them.
+        drop(set);
+        assert_eq!(std::fs::read(&first).unwrap(), b"old-1");
+        assert_eq!(std::fs::read(&second).unwrap(), b"old-2");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("rar5"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
     }
 }
