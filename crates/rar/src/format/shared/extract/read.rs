@@ -35,13 +35,7 @@ impl RarArchive {
         }
         self.read_ctx_mut().extract_options = opts;
         self.validate_entry_limits(target_idx)?;
-        if self.rar4 || self.rar13 {
-            return self.decode_rar4_at(target_idx);
-        }
-        if self.is_solid_chain_member(target_idx) {
-            return self.decode_solid_through(target_idx);
-        }
-        self.decode_file_at(target_idx, None)
+        self.decode_entry_at(target_idx)
     }
 
     /// Stream one member's uncompressed content into `writer` (bounded
@@ -87,13 +81,7 @@ impl RarArchive {
             ));
         }
         self.read_ctx_mut().extract_options = opts;
-        if self.rar4 || self.rar13 {
-            return self.decode_rar4_to(target_idx, writer);
-        }
-        if self.is_solid_chain_member(target_idx) {
-            return self.decode_solid_through_to(target_idx, writer);
-        }
-        self.decode_file_to(target_idx, writer, None)
+        self.decode_entry_to(target_idx, writer)
     }
 
     /// Test the integrity of every member (like `rar t`): each member is

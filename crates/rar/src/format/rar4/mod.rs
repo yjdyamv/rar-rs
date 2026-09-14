@@ -10,6 +10,7 @@
 //! STORE members pass through directly; compressed members dispatch to the
 //! implemented Unpack15, Unpack20, Unpack29, and PPMd-compatible paths.
 
+mod extract;
 mod read;
 pub(crate) mod write;
 use crate::archive::ArchiveEntry;

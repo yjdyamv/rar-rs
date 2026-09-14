@@ -33,6 +33,31 @@ fn rar40_does_not_import_models_from_rar50_headers() {
     );
 }
 
+/// The RAR5 read/write paths are self-contained: family dispatching lives in
+/// `format::shared::extract`, so no RAR5 source may reach into the legacy
+/// families (the reverse direction is pinned by
+/// `rar40_does_not_import_models_from_rar50_headers`).
+#[test]
+fn rar50_does_not_import_the_legacy_families() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source_dir = manifest_dir.join("src").join("format").join("rar5");
+    let mut sources = Vec::new();
+    rust_sources_below(&source_dir, &mut sources);
+
+    let offenders: Vec<_> = sources
+        .into_iter()
+        .filter(|path| {
+            let text = std::fs::read_to_string(path).expect("read RAR5 source");
+            text.contains("format::rar4") || text.contains("format::rar13")
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "RAR5 must not depend on the legacy families: {offenders:?}"
+    );
+}
+
 /// Every `use` line under `dir` that contains one of `forbidden`.
 fn use_lines_with(dir: &Path, forbidden: &[&str]) -> Vec<(String, String)> {
     let mut sources = Vec::new();

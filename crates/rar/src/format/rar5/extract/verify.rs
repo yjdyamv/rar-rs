@@ -36,7 +36,7 @@ impl RarArchive {
 
 /// Verify CRC32 and BLAKE2sp integrity against a file header. Encrypted
 /// members use the hash-key MAC when the encryption record requests it.
-pub(super) fn verify_integrity_for(
+pub(crate) fn verify_integrity_for(
     hdr: &FileHeader,
     crc: u32,
     blake: Option<[u8; 32]>,

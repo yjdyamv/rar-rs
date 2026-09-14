@@ -1,27 +1,21 @@
-//! RAR5 extraction: opening, block scanning, listing and member decoding.
-//!
-//! Mirrors the reference layout's `rar50/extract.rs`: every read-side
-//! operation on [RarArchive] lives here while the shared state definition
-//! stays in the facade (`crate::archive`).
+//! RAR5 read path: block scanning, quick-open resolution and member
+//! decoding.
 //!
 //! Role split:
-//! - [`open`] — open/quick-open, signature verification and block scanning,
-//! - [`read`] — reads and `test`,
-//! - [`members`] — whole-archive and single-member extraction,
-//! - [`dest`] — destinations: streams, timestamps, redirects, safe paths,
-//! - [`solid`] — solid-chain decode drivers (RAR5 and RAR4),
+//! - [`open`] — RAR5 full/quick scan and quick-open parsing,
+//! - [`solid`] — RAR5 solid-chain decode driver,
 //! - [`decode`] — packed-data assembly and member decoding,
 //! - [`verify`] — integrity verification of decoded members.
+//!
+//! The family-neutral read orchestration (opening across families,
+//! extraction, destinations) lives in [`crate::format::shared::extract`].
 
 mod decode;
-mod dest;
-mod members;
 mod open;
-mod read;
 mod solid;
 mod verify;
 
-pub use members::Destination;
+pub(crate) use verify::verify_integrity_for;
 
 use crate::error::{RarError, RarResult};
 use crate::model::FileHeader;
@@ -32,7 +26,7 @@ use crate::model::FileHeader;
 /// RAR5 uses `128 KiB << comp_dict_size`; RAR7 carries the byte count
 /// directly, and a hostile header can push that to a multi-TiB value, so
 /// every decode entry point must go through this before allocating.
-pub(super) fn capped_dict_bytes(hdr: &FileHeader, max_dict_size: Option<u64>) -> RarResult<u64> {
+pub(crate) fn capped_dict_bytes(hdr: &FileHeader, max_dict_size: Option<u64>) -> RarResult<u64> {
     let bytes = match hdr.dict_size_bytes {
         Some(bytes) => bytes,
         None => (128u64 * 1024) << hdr.comp_dict_size,

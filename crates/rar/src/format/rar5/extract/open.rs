@@ -1,16 +1,10 @@
-//! Opening, signature verification and the block scan.
-//!
-//! `open_read` drives the full scan (RAR5 blocks, RAR4 fallback, extra
-//! volumes); `open_read_quick` first tries the quick-open locator and falls
-//! back to the full scan. `parse_quick_open_payload` decodes the cached
-//! header copies the locator points at.
+//! RAR5 block scanning, quick-open resolution and catalog building.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::archive::{ArchiveEntry, RarArchive, StreamRecord, discover_volumes};
+use crate::archive::{ArchiveEntry, RarArchive, StreamRecord};
 use crate::crypto;
-use crate::detect::SFX_SCAN_LIMIT;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader, RawBlock};
 use crate::format::rar5::vint;
@@ -19,16 +13,9 @@ use crate::format::rar5::{
     BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
     BLOCK_TYPE_SERVICE_HEADER, MAX_METADATA_BYTES, RAR5_SIGNATURE,
 };
+use crate::format::shared::extract::{MAX_CATALOG_ENTRIES, check_entry_cap};
 use crate::format::shared::stream_mut;
 use crate::model::{DataChunk, FileHeader};
-
-/// Ceiling on how many entries a catalog may hold. The quick-open payload
-/// is capped at [`MAX_METADATA_BYTES`] but can still describe millions of
-/// small entries, and a full scan's entry count is bounded only by the
-/// physical archive size; neither may expand into multi-GiB allocation of
-/// `ArchiveEntry`/`FileHeader` objects. The bound is far above any real
-/// archive, so only hand-made inputs are rejected.
-const MAX_QUICK_OPEN_ENTRIES: usize = 1_000_000;
 
 /// Ceiling on how many data chunks one continuing member may accumulate
 /// across volumes. A real set contributes at most one chunk per volume, so
@@ -36,16 +23,6 @@ const MAX_QUICK_OPEN_ENTRIES: usize = 1_000_000;
 /// tiny continuation headers grows one member's chunk vector (and the
 /// cloned extra records it holds) without bound.
 const MAX_MEMBER_CHUNKS: usize = 1_000_000;
-
-/// Reject a catalog that would grow past `max`.
-fn check_entry_cap(count: usize, max: usize) -> RarResult<()> {
-    if count >= max {
-        return Err(RarError::Format(format!(
-            "archive catalog exceeds the {max}-entry ceiling"
-        )));
-    }
-    Ok(())
-}
 
 /// Reject a continuing member that would grow past `max` chunks.
 fn check_chunk_cap(count: usize, max: usize, member: &str) -> RarResult<()> {
@@ -69,50 +46,24 @@ fn qo_size_to_usize(size: u64, what: &str) -> RarResult<usize> {
 }
 
 impl RarArchive {
-    pub(crate) fn open_read(&mut self) -> RarResult<()> {
-        self.volume_paths = discover_volumes(&self.path);
-        let f = File::open(&self.volume_paths[0])?;
-        self.stream = Some(Box::new(f));
-        self.verify_signature()?;
-        if self.rar4 {
-            self.scan_rar4_blocks()?;
-        } else if self.rar13 {
-            self.scan_rar13_volumes()?;
-        } else if self.volume_paths.len() > 1 {
-            self.scan_all_volumes()?;
+    /// Full RAR5 scan: multi-volume sets rescan every volume, single-volume
+    /// archives scan their block sequence.
+    pub(crate) fn open_read_rar5(&mut self) -> RarResult<()> {
+        if self.volume_paths.len() > 1 {
+            self.scan_all_volumes()
         } else {
-            self.scan_blocks()?;
+            self.scan_blocks()
         }
-        self.reset_catalog_token()?;
-        Ok(())
     }
 
-    /// Open without a full block scan: read only the main archive header,
-    /// resolve the quick-open record through the locator, and parse the
-    /// cached file headers. Falls back to a full scan when the archive
-    /// has no usable quick-open record (multi-volume, header-encrypted,
-    /// no QO written, or a corrupt record).
-    pub(crate) fn open_read_quick(&mut self) -> RarResult<()> {
-        self.volume_paths = discover_volumes(&self.path);
-        let f = File::open(&self.volume_paths[0])?;
-        self.stream = Some(Box::new(f));
-        self.verify_signature()?;
-        if self.rar4 {
-            // RAR4 has no quick-open record: always full-scan.
-            self.scan_rar4_blocks()?;
-            self.reset_catalog_token()?;
-            return Ok(());
-        }
-        if self.rar13 {
-            // RAR 1.3/1.4 has no quick-open record either.
-            self.scan_rar13_volumes()?;
-            self.reset_catalog_token()?;
-            return Ok(());
-        }
+    /// RAR5 quick-open: read only the main archive header, resolve the
+    /// quick-open record through the locator, and parse the cached file
+    /// headers. Falls back to a full scan when the archive has no usable
+    /// quick-open record (multi-volume, header-encrypted, no QO written,
+    /// or a corrupt record).
+    pub(crate) fn open_read_quick_rar5(&mut self) -> RarResult<()> {
         if self.volume_paths.len() > 1 {
-            self.scan_all_volumes()?;
-            self.reset_catalog_token()?;
-            return Ok(());
+            return self.scan_all_volumes();
         }
         if !self.try_quick_open_entries()? {
             // `try_quick_open_entries` may have consumed the leading
@@ -124,7 +75,6 @@ impl RarArchive {
             ))?;
             self.scan_blocks()?;
         }
-        self.reset_catalog_token()?;
         Ok(())
     }
 
@@ -214,31 +164,6 @@ impl RarArchive {
         Ok(())
     }
 
-    fn verify_signature(&mut self) -> RarResult<()> {
-        // The signature must appear at the start for plain archives and
-        // after the embedded stub for SFX archives (scan up to 8 MiB,
-        // like the reference readers).
-        let stream = stream_mut(&mut self.stream)?;
-        let file_size = stream.seek(SeekFrom::End(0))?;
-        stream.seek(SeekFrom::Start(0))?;
-        let scan = file_size.min(SFX_SCAN_LIMIT as u64) as usize;
-        let mut buf = vec![0u8; scan];
-        let n = stream.read(&mut buf)?;
-        buf.truncate(n);
-        let (family, sfx_offset) = crate::detect::find_archive_start(&buf, SFX_SCAN_LIMIT)
-            .ok_or_else(|| RarError::Format("not a RAR archive (signature not found)".into()))?;
-        self.sfx_offset = sfx_offset as u64;
-        self.rar4 = family == crate::detect::ArchiveFamily::Rar15To40;
-        self.rar13 = family == crate::detect::ArchiveFamily::Rar13;
-        let sig_len = match family {
-            crate::detect::ArchiveFamily::Rar50Plus => RAR5_SIGNATURE.len() as u64,
-            crate::detect::ArchiveFamily::Rar15To40 => crate::detect::RAR4_SIGNATURE.len() as u64,
-            crate::detect::ArchiveFamily::Rar13 => crate::detect::RAR13_SIGNATURE.len() as u64,
-        };
-        stream.seek(SeekFrom::Start(self.sfx_offset + sig_len))?;
-        Ok(())
-    }
-
     fn scan_blocks(&mut self) -> RarResult<()> {
         self.entries.clear();
         self.read_ctx_mut().streams.clear();
@@ -270,7 +195,7 @@ impl RarArchive {
                     }
                 }
                 BLOCK_TYPE_FILE_HEADER => {
-                    check_entry_cap(self.entries.len(), MAX_QUICK_OPEN_ENTRIES)?;
+                    check_entry_cap(self.entries.len(), MAX_CATALOG_ENTRIES)?;
                     let fh = FileHeader::from_raw(raw, stream_pos)?;
                     let chunk = DataChunk {
                         volume_index: 0,
@@ -353,47 +278,6 @@ impl RarArchive {
         Ok(())
     }
 
-    /// Scan a single-volume RAR 1.5–4.x archive (legacy fixed-width block
-    /// headers). Multi-volume RAR4 sets use different naming and are not
-    /// supported yet; opening one is reported clearly.
-    fn scan_rar4_blocks(&mut self) -> RarResult<()> {
-        self.entries.clear();
-        let mut scan = crate::format::rar4::Rar4VolumeScan::default();
-        let mut out = Vec::new();
-
-        // Volume 0 is the already-open primary stream, positioned right
-        // after the signature (SFX-aware). Later volumes open fresh and each
-        // starts with its own 7-byte signature.
-        scan.scan_volume(
-            stream_mut(&mut self.stream)?,
-            0,
-            self.password.as_deref(),
-            &mut out,
-        )?;
-        check_entry_cap(out.len(), MAX_QUICK_OPEN_ENTRIES)?;
-        for (vol_idx, vol_path) in self.volume_paths.iter().enumerate().skip(1) {
-            self.check_cancel()?;
-            let mut stream = std::fs::File::open(vol_path)?;
-            let mut sig = [0u8; 7];
-            stream.read_exact(&mut sig)?;
-            if &sig != crate::detect::RAR4_SIGNATURE {
-                return Err(RarError::Format(format!(
-                    "volume {} has a bad RAR4 signature",
-                    vol_path.display()
-                )));
-            }
-            scan.scan_volume(&mut stream, vol_idx, self.password.as_deref(), &mut out)?;
-            check_entry_cap(out.len(), MAX_QUICK_OPEN_ENTRIES)?;
-        }
-        let archive_solid = scan.archive_solid;
-        let new_numbering = scan.new_numbering;
-        scan.finish()?;
-        self.rar4_solid_archive = archive_solid;
-        self.rar4_new_numbering = new_numbering;
-        self.entries = out;
-        Ok(())
-    }
-
     ///
     /// Header-encrypted volume sets repeat the plaintext archive-level
     /// encryption header at the start of EVERY volume (WinRAR convention);
@@ -401,7 +285,7 @@ impl RarArchive {
     /// header]`. The archive key is derived once per volume and reused for
     /// all of its blocks.
     fn scan_all_volumes(&mut self) -> RarResult<()> {
-        self.scan_all_volumes_capped(MAX_QUICK_OPEN_ENTRIES, MAX_MEMBER_CHUNKS)
+        self.scan_all_volumes_capped(MAX_CATALOG_ENTRIES, MAX_MEMBER_CHUNKS)
     }
 
     /// [`scan_all_volumes`] with explicit entry/chunk ceilings. A crafted
@@ -581,7 +465,7 @@ impl RarArchive {
 /// the data-area offset follows. Returns an error for any structural,
 /// CRC or entry-count violation (the caller falls back to a full scan).
 fn parse_quick_open_payload(payload: &[u8], qo_abs: u64) -> RarResult<Vec<ArchiveEntry>> {
-    parse_quick_open_payload_capped(payload, qo_abs, MAX_QUICK_OPEN_ENTRIES)
+    parse_quick_open_payload_capped(payload, qo_abs, MAX_CATALOG_ENTRIES)
 }
 
 /// [`parse_quick_open_payload`] with an explicit entry ceiling. The payload
@@ -670,6 +554,7 @@ fn parse_quick_open_payload_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::discover_volumes;
 
     /// One quick-open entry: `[entry CRC32][body size][flags][relative
     /// offset][header size][complete file header]`, matching the writer.
@@ -702,8 +587,8 @@ mod tests {
 
     #[test]
     fn catalog_entry_cap_matches_the_bound() {
-        assert!(check_entry_cap(MAX_QUICK_OPEN_ENTRIES - 1, MAX_QUICK_OPEN_ENTRIES).is_ok());
-        assert!(check_entry_cap(MAX_QUICK_OPEN_ENTRIES, MAX_QUICK_OPEN_ENTRIES).is_err());
+        assert!(check_entry_cap(MAX_CATALOG_ENTRIES - 1, MAX_CATALOG_ENTRIES).is_ok());
+        assert!(check_entry_cap(MAX_CATALOG_ENTRIES, MAX_CATALOG_ENTRIES).is_err());
     }
 
     #[test]
@@ -783,12 +668,11 @@ mod tests {
 
         let mut ar = RarArchive::open(&path).unwrap();
         let err = ar
-            .scan_all_volumes_capped(MAX_QUICK_OPEN_ENTRIES, 3)
+            .scan_all_volumes_capped(MAX_CATALOG_ENTRIES, 3)
             .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
 
-        ar.scan_all_volumes_capped(MAX_QUICK_OPEN_ENTRIES, 4)
-            .unwrap();
+        ar.scan_all_volumes_capped(MAX_CATALOG_ENTRIES, 4).unwrap();
         assert_eq!(
             ar.entries.len(),
             1,

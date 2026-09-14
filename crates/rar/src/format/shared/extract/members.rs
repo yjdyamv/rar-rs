@@ -5,9 +5,7 @@
 //! `extract_entry` is the shared per-member body.
 
 #[cfg(feature = "parallel")]
-use super::capped_dict_bytes;
-#[cfg(feature = "parallel")]
-use super::verify::verify_integrity_for;
+use crate::format::rar5::extract::{capped_dict_bytes, verify_integrity_for};
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -386,7 +384,7 @@ impl RarArchive {
     }
 
     /// Validate per-entry header limits against the current extract options.
-    pub(super) fn validate_entry_limits(&self, idx: usize) -> RarResult<()> {
+    pub(crate) fn validate_entry_limits(&self, idx: usize) -> RarResult<()> {
         let hdr = &self.entries[idx].header;
         if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
             return Err(RarError::LimitExceeded {
@@ -520,13 +518,7 @@ impl RarArchive {
         let tmp_path = temp_sibling_path(&dest_path);
         let result = (|| -> RarResult<u64> {
             let mut file = File::create(&tmp_path)?;
-            let written = if self.rar4 || self.rar13 {
-                self.decode_rar4_to(idx, &mut file)?
-            } else if self.is_solid_chain_member(idx) {
-                self.decode_solid_through_to(idx, &mut file)?
-            } else {
-                self.decode_file_to(idx, &mut file, None)?
-            };
+            let written = self.decode_entry_to(idx, &mut file)?;
             file.flush()?;
             Ok(written)
         })();

@@ -1,9 +1,9 @@
 //! Packed-data assembly and member decoding.
 //!
 //! `read_packed_data` gathers (and decrypts) the member payload across
-//! volumes; `decode_file_at`/`decode_file_to` drive the RAR5 decoder and
-//! `decode_rar4_*` the legacy codecs. `IntegritySink` is the streaming
-//! output wrapper that computes CRC32/BLAKE2sp on the fly.
+//! volumes; `decode_file_at`/`decode_file_to` drive the RAR5 decoder.
+//! `IntegritySink` is the streaming output wrapper that computes
+//! CRC32/BLAKE2sp on the fly.
 
 use super::*;
 
@@ -13,7 +13,6 @@ use crate::archive::{DecryptedPayload, RarArchive};
 use crate::codec::DecoderState;
 use crate::error::{RarError, RarResult};
 use crate::format::shared::stream_mut;
-use crate::model::FileHeader;
 /// Write sink that computes CRC32 and optional BLAKE2sp over streamed
 /// output.
 struct IntegritySink<'a> {
@@ -204,7 +203,7 @@ impl RarArchive {
     ///
     /// The returned payload is decrypted (when applicable) together with
     /// the derived keys needed for integrity verification.
-    pub(super) fn read_packed_data(&mut self, idx: usize) -> RarResult<DecryptedPayload> {
+    pub(crate) fn read_packed_data(&mut self, idx: usize) -> RarResult<DecryptedPayload> {
         let entry = &self.entries[idx];
         let hdr = &entry.header;
         let max_packed = self.max_packed_bytes();
@@ -244,16 +243,6 @@ impl RarArchive {
             .unwrap_or(8 * 1024 * 1024 * 1024)
     }
 
-    /// Maximum packed bytes accepted by a truly streaming STORE path. With no
-    /// unpacked limit there is no allocation-driven packed-size ceiling.
-    fn max_stream_packed_bytes(&self) -> u64 {
-        self.read_ctx()
-            .extract_options
-            .max_unpacked_bytes
-            .map(|u| u.saturating_add(1 << 20))
-            .unwrap_or(u64::MAX)
-    }
-
     /// Verify the stored checksums of a zero-size member without decoding
     /// a payload: CRC32 of empty, BLAKE2sp of empty when a hash record
     /// exists, and their hash-key MAC equivalents when the member is
@@ -278,7 +267,7 @@ impl RarArchive {
 
     /// Decode a single file into memory, optionally with a shared
     /// DecoderState (solid archives), verifying CRC32/BLAKE2sp.
-    pub(super) fn decode_file_at(
+    pub(crate) fn decode_file_at(
         &mut self,
         idx: usize,
         state: Option<&mut DecoderState>,
@@ -337,7 +326,7 @@ impl RarArchive {
             .ok_or_else(|| RarError::Format("dictionary size overflows host address space".into()))
     }
 
-    pub(super) fn decode_file_to(
+    pub(crate) fn decode_file_to(
         &mut self,
         idx: usize,
         writer: &mut dyn Write,
@@ -373,119 +362,6 @@ impl RarArchive {
             payload.keys.as_ref(),
         )?;
         Ok(written)
-    }
-    /// Decode a single RAR4 member in memory, verifying its CRC32. Solid
-    /// chain members decode through their chain prefix (shared window).
-    pub(crate) fn decode_rar4_at(&mut self, idx: usize) -> RarResult<Vec<u8>> {
-        self.validate_entry_limits(idx)?;
-        let hdr = self.entries[idx].header.clone();
-        if self.is_rar4_solid_member(idx) {
-            let chain_start = self.rar4_find_chain_start(idx);
-            let result = self
-                .rar4_decode_solid_through(idx)
-                .and_then(|out| self.rar4_verify_crc(&hdr, &out).map(|()| out));
-            if result.is_err() {
-                self.reset_rar4_solid_decoder(chain_start);
-            }
-            return result;
-        }
-        let out = self.rar4_decode_member(idx)?;
-        self.rar4_verify_crc(&hdr, &out)?;
-        Ok(out)
-    }
-
-    /// Decode a single RAR4 member, streaming output to `writer`, verifying
-    /// its CRC32 over the written bytes. Non-chain members stream through
-    /// the bounded-memory path (STORE chunks copied straight out; compressed
-    /// members decode incrementally); solid-chain members keep the shared
-    /// window semantics and decode in one pass.
-    pub(super) fn decode_rar4_to(&mut self, idx: usize, writer: &mut dyn Write) -> RarResult<u64> {
-        self.validate_entry_limits(idx)?;
-        let hdr = self.entries[idx].header.clone();
-        if self.is_rar4_solid_member(idx) {
-            let chain_start = self.rar4_find_chain_start(idx);
-            let result = self.rar4_decode_solid_through(idx).and_then(|out| {
-                self.rar4_verify_crc(&hdr, &out)?;
-                writer.write_all(&out).map_err(RarError::Io)?;
-                Ok(out.len() as u64)
-            });
-            if result.is_err() {
-                self.reset_rar4_solid_decoder(chain_start);
-            }
-            return result;
-        }
-        let entry = self.entries[idx].clone();
-        let max_alloc_packed_bytes = self.max_packed_bytes();
-        let max_stream_packed_bytes = self.max_stream_packed_bytes();
-        let (written, crc, rar13_checksum) = crate::format::rar4::decode_member_bytes_to(
-            stream_mut(&mut self.stream)?,
-            &self.volume_paths,
-            &entry.chunks,
-            &entry.header,
-            crate::format::rar4::MemberDecodeOptions {
-                password: self.password.as_deref(),
-                decoder: None,
-                max_alloc_packed_bytes,
-                max_stream_packed_bytes,
-            },
-            writer,
-        )?;
-        // The streamed checksum is authoritative; compare with the header.
-        if let Some(expected) = hdr.crc32_val {
-            let actual = if hdr.format_version == 3 {
-                u32::from(rar13_checksum)
-            } else {
-                crc
-            };
-            if actual != expected {
-                return Err(RarError::Crc {
-                    expected,
-                    actual,
-                    context: format!("{}: checksum mismatch", hdr.name),
-                });
-            }
-        }
-        Ok(written)
-    }
-
-    /// Decode RAR4 member `idx`, routing solid-chain members through the
-    /// persistent legacy decoder so their look-behind window covers the
-    /// chain prefix.
-    fn rar4_decode_member(&mut self, idx: usize) -> RarResult<Vec<u8>> {
-        if self.is_rar4_solid_member(idx) {
-            return self.rar4_decode_solid_through(idx);
-        }
-        let entry = self.entries[idx].clone();
-        let max_packed_bytes = self.max_packed_bytes();
-        crate::format::rar4::decode_member_bytes(
-            stream_mut(&mut self.stream)?,
-            &self.volume_paths,
-            &entry.chunks,
-            &entry.header,
-            crate::format::rar4::MemberDecodeOptions {
-                password: self.password.as_deref(),
-                decoder: None,
-                max_alloc_packed_bytes: max_packed_bytes,
-                max_stream_packed_bytes: max_packed_bytes,
-            },
-        )
-    }
-    fn rar4_verify_crc(&self, hdr: &FileHeader, data: &[u8]) -> RarResult<()> {
-        if let Some(expected) = hdr.crc32_val {
-            let actual = if hdr.format_version == 3 {
-                u32::from(crate::format::rar13::file_checksum(data))
-            } else {
-                crate::format::rar4::member_crc(data)
-            };
-            if actual != expected {
-                return Err(RarError::Crc {
-                    expected,
-                    actual,
-                    context: format!("{}: checksum mismatch", hdr.name),
-                });
-            }
-        }
-        Ok(())
     }
 }
 
