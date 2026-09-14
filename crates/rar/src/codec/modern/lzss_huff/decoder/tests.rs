@@ -1,9 +1,9 @@
 use super::*;
 
 use super::super::{
-    FILTER_ARM, FILTER_DELTA, FILTER_E8, FILTER_E8E9, FilterSpec, MAX_FILTER_BLOCK_LENGTH,
-    encode_with_auto_delta_filter, encode_with_auto_x86_filter, encode_with_filters,
-    pick_delta_channel,
+    BLOCK_CHECKSUM_SEED, FILTER_ARM, FILTER_DELTA, FILTER_E8, FILTER_E8E9, FilterSpec,
+    MAX_FILTER_BLOCK_LENGTH, encode_with_auto_delta_filter, encode_with_auto_x86_filter,
+    encode_with_filters, pick_delta_channel,
 };
 use super::engine::checked_dict_size;
 use crate::error::RarError;
@@ -52,9 +52,8 @@ fn three_byte_block_size_field_decodes() {
     assert_eq!(back, data);
 }
 
-/// The buffered decoder must reject a stream that stops before producing
-/// the declared unpacked size instead of returning a short buffer (the
-/// streaming path already checked this; the buffered one did not).
+/// A stream that stops before producing the declared unpacked size must be
+/// rejected instead of returning a short buffer.
 #[test]
 fn underproduced_stream_is_rejected() {
     let data = b"underproduction regression data ".repeat(256);
@@ -64,14 +63,13 @@ fn underproduced_stream_is_rejected() {
     assert!(matches!(err, RarError::Format(_)), "got {err}");
 }
 
-/// Regression: streaming decode (used by `extract_all`) applied split
-/// filter records at the wrong staging offset once part of the staging
-/// buffer had already been written out. Members whose filter region
-/// exceeds MAX_FILTER_BLOCK_LENGTH are split into multiple records, so
-/// the streaming path must produce byte-identical output to the
-/// buffered path for every filter type.
+/// Regression: decode applied split filter records at the wrong staging
+/// offset once part of the staging buffer had already been written out.
+/// Members whose filter region exceeds MAX_FILTER_BLOCK_LENGTH are split
+/// into multiple records, so the engine must reproduce the original bytes
+/// across staging-boundary drains for every filter type.
 #[test]
-fn streaming_decode_matches_buffered_for_split_filter_records() {
+fn split_filter_records_decode_across_staging_boundaries() {
     fn pattern(filter_type: u8, size: usize) -> Vec<u8> {
         match filter_type {
             FILTER_E8 | FILTER_E8E9 => {
@@ -116,8 +114,6 @@ fn streaming_decode_matches_buffered_for_split_filter_records() {
             let data = pattern(filter_type, size);
             let spec = FilterSpec::new(filter_type, channels, 0, size as u32);
             let packed = encode_with_filters(&data, 3, 0, &[spec], ArchiveVersion::V50).unwrap();
-            let buffered =
-                decode_standalone(&packed, size as u64, 0, None, ArchiveVersion::V50).unwrap();
             let mut streamed = Vec::new();
             let written = decode_standalone_to_writer(
                 &packed,
@@ -130,12 +126,8 @@ fn streaming_decode_matches_buffered_for_split_filter_records() {
             .unwrap();
             assert_eq!(written, size as u64);
             assert_eq!(
-                streamed, buffered,
-                "streaming != buffered for filter {filter_type:#x}, channels {channels}, size {size}"
-            );
-            assert_eq!(
                 streamed, data,
-                "streaming != original for filter {filter_type:#x}, channels {channels}, size {size}"
+                "decoded != original for filter {filter_type:#x}, channels {channels}, size {size}"
             );
         }
     }
@@ -373,9 +365,9 @@ fn huge_declared_unpacked_size_is_a_clean_error() {
     assert!(matches!(err, RarError::Format(_)), "got {err}");
 }
 
-/// Regression: a solid-chain member larger than the shared chain window must
-/// decode through the streaming core; the buffered core used to panic inside
-/// `SlidingWindow::get_output` (requested output exceeds window size).
+/// Regression: a solid-chain member larger than the shared chain window
+/// used to panic inside `SlidingWindow::get_output` (requested output
+/// exceeds window size); the shared window and symbol state must carry it.
 #[test]
 fn member_larger_than_shared_window_decodes() {
     let member: Vec<u8> = (0..200_000u32)
@@ -396,4 +388,62 @@ fn member_larger_than_shared_window_decodes() {
     )
     .unwrap();
     assert_eq!(decoded, member);
+}
+
+/// A corrupted block-header checksum must be rejected before any symbol of
+/// that block is decoded.
+#[test]
+fn corrupt_block_checksum_is_rejected() {
+    let data = b"block checksum regression data ".repeat(128);
+    let mut packed = crate::codec::encode_raw(&data, 3, 0, ArchiveVersion::V50);
+    // Byte 0 is the block flags, byte 1 the header checksum.
+    packed[1] ^= 0xFF;
+    let err =
+        decode_standalone(&packed, data.len() as u64, 0, None, ArchiveVersion::V50).unwrap_err();
+    assert!(matches!(err, RarError::Format(_)), "got {err}");
+}
+
+/// A block whose declared bit length is zero is malformed and must be
+/// rejected by the reader rather than looping.
+#[test]
+fn zero_length_block_is_rejected() {
+    let stream = [0x00u8, BLOCK_CHECKSUM_SEED, 0x00, 0x00];
+    let err = decode_standalone(&stream, 1, 0, None, ArchiveVersion::V50).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("zero-length block"), "{msg}");
+}
+
+/// The analysis consumer must account for every produced byte and every
+/// block of a multi-block member.
+#[test]
+fn analysis_covers_every_symbol_across_blocks() {
+    let data = b"the quick brown fox jumps over the lazy dog. ".repeat(120_000);
+    let packed = crate::codec::encode_raw(&data, 3, 3, ArchiveVersion::V50);
+    let analysis = analyze_stream(&packed, data.len() as u64, 3, ArchiveVersion::V50).unwrap();
+    assert_eq!(analysis.unpacked, data.len() as u64);
+    assert!(
+        analysis.blocks.len() > 1,
+        "expected an emitted block split, got {}",
+        analysis.blocks.len()
+    );
+    let summed: u64 = analysis.blocks.iter().map(|b| b.out_bytes).sum();
+    assert_eq!(summed, data.len() as u64);
+    let bucketed: u64 = analysis.len_hist.iter().sum();
+    let matches: u64 = analysis
+        .blocks
+        .iter()
+        .map(|b| b.matches + b.cache_matches)
+        .sum();
+    assert_eq!(bucketed, matches, "every match is length-bucketed once");
+}
+
+/// The tracing consumer inherits the reader's strictness: a corrupt block
+/// checksum is rejected instead of tracing through it.
+#[test]
+fn trace_stream_rejects_a_corrupt_block_checksum() {
+    let data = b"trace strictness regression data ".repeat(64);
+    let mut packed = crate::codec::encode_raw(&data, 3, 0, ArchiveVersion::V50);
+    packed[1] ^= 0xFF;
+    let err = trace_stream(&packed, data.len() as u64, ArchiveVersion::V50, 0, 16).unwrap_err();
+    assert!(matches!(err, RarError::Format(_)), "got {err}");
 }

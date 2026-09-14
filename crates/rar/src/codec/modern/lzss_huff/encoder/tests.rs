@@ -9,7 +9,7 @@ use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::huffman::{
     DecodeTable, EncodeTable, build_code_lengths_from_freqs, encode_symbol,
 };
-use crate::codec::{DecodeOptions, decode_raw, decode_to_writer};
+use crate::codec::{DecodeOptions, decode_to_writer};
 use crate::error::RarError;
 use crate::version::ArchiveVersion;
 
@@ -136,30 +136,15 @@ fn delta_filtered_stream(original: &[u8], filter_len: u32) -> Vec<u8> {
 
 /// A filter record whose declared region outlives the member is malformed:
 /// our encoder now rejects such specs up front, but another writer can
-/// still produce one. Both decoder cores must reject it. The buffered core
-/// used to clip the region to the output and return success while the
-/// streaming core rejected it — the buffered/streamed disagreement this
-/// test pins down.
+/// still produce one. The decoder must reject it instead of clipping the
+/// region and returning a wrong member.
 #[test]
-fn filter_region_outliving_member_errors_in_both_decoders() {
+fn filter_region_outliving_member_is_rejected() {
     let original: Vec<u8> = (0..300u32).map(|i| (i * 7 % 251) as u8).collect();
     let stream = delta_filtered_stream(&original, original.len() as u32 + 100);
 
-    let buffered = crate::codec::decode_standalone(
-        &stream,
-        original.len() as u64,
-        0,
-        None,
-        ArchiveVersion::V50,
-    );
-    let buffered_err = buffered.expect_err("buffered decoder must reject an outliving filter");
-    assert!(
-        matches!(buffered_err, RarError::Format(_)),
-        "{buffered_err}"
-    );
-
     let mut out = Vec::new();
-    let streamed = decode_to_writer(
+    let err = decode_to_writer(
         &stream,
         original.len() as u64,
         DecodeOptions {
@@ -167,12 +152,9 @@ fn filter_region_outliving_member_errors_in_both_decoders() {
             ..Default::default()
         },
         &mut out,
-    );
-    let streamed_err = streamed.expect_err("streaming decoder must reject an outliving filter");
-    assert!(
-        matches!(streamed_err, RarError::Format(_)),
-        "{streamed_err}"
-    );
+    )
+    .expect_err("decoder must reject an outliving filter");
+    assert!(matches!(err, RarError::Format(_)), "{err}");
 }
 
 /// Invalid `FilterSpec`s must be rejected by both writer entry points
@@ -229,11 +211,10 @@ fn invalid_filter_specs_are_rejected_by_all_encoders() {
     assert!(encode_with_filters(&data, 3, 0, &adjacent, ArchiveVersion::V50).is_ok());
 }
 
-/// Valid filters still round-trip byte-identically through the buffered
-/// (`decode_raw`) and streaming (`decode_to_writer`) cores, including
-/// multiple disjoint regions in one member.
+/// Valid filters round-trip byte-identically, including multiple disjoint
+/// regions in one member.
 #[test]
-fn filtered_member_roundtrips_through_buffered_and_streaming() {
+fn filtered_member_roundtrips_with_multiple_regions() {
     let data: Vec<u8> = (0..50_000u32)
         .map(|i| (((i / 64) % 251) as u8) ^ ((i % 7) as u8))
         .collect();
@@ -242,17 +223,6 @@ fn filtered_member_roundtrips_through_buffered_and_streaming() {
         FilterSpec::new(FILTER_E8E9, 0, 4096, data.len() as u32 - 4096),
     ];
     let packed = encode_with_filters(&data, 3, 0, &specs, ArchiveVersion::V50).unwrap();
-
-    let buffered = decode_raw(
-        &packed,
-        data.len() as u64,
-        DecodeOptions {
-            dict_size_log: 0,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(buffered, data, "buffered decode");
 
     let mut streamed = Vec::new();
     let written = decode_to_writer(
@@ -266,8 +236,7 @@ fn filtered_member_roundtrips_through_buffered_and_streaming() {
     )
     .unwrap();
     assert_eq!(written, data.len() as u64);
-    assert_eq!(streamed, buffered, "streaming must match buffered");
-    assert_eq!(streamed, data, "streaming decode");
+    assert_eq!(streamed, data, "streamed decode");
 }
 
 #[test]
