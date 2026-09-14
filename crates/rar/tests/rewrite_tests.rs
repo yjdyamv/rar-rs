@@ -1323,7 +1323,10 @@ fn contained_symlink_targets_extract() {
             .unwrap();
         rar.add_redirect("dir/nested/up", 1, "../target.txt")
             .unwrap();
-        rar.add_redirect("dir/sideways", 1, "sub/../target.txt")
+        // POSIX resolves `..` through the preceding component, so `nested`
+        // must exist for the link to be readable; Windows folds the path
+        // lexically. The other link already creates `dir/nested`.
+        rar.add_redirect("dir/sideways", 1, "nested/../target.txt")
             .unwrap();
         rar.finish().unwrap();
     }
