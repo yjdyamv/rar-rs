@@ -122,14 +122,30 @@ impl EntryId {
         }
     }
 
-    /// Whether this ID was minted for the catalog with `token`.
-    pub(crate) const fn scoped_to(self, token: u64) -> bool {
-        self.catalog_token == token
-    }
-
-    /// Position of the member in the catalog that minted this ID.
-    pub(crate) const fn catalog_index(self) -> usize {
-        self.index
+    /// Resolve this ID against a catalog: the token must match, and the
+    /// member is located by its minted index when the catalog kept that
+    /// order, otherwise by its packed-payload offset — a quick-open rescan
+    /// can reorder the same member set under one token, and the offset keeps
+    /// the ID pointing at the member it names.
+    ///
+    /// This is the one identity convention every facade (reader, editor)
+    /// applies, so stale/valid semantics cannot differ between them.
+    pub(crate) fn resolve(self, entries: &[ArchiveEntry], catalog_token: u64) -> RarResult<usize> {
+        if self.catalog_token != catalog_token {
+            return Err(RarError::StaleEntryId);
+        }
+        let matches_member = |entry: &ArchiveEntry| {
+            entry.chunks.first().map(|chunk| chunk.data_offset) == self.data_offset
+        };
+        if let Some(entry) = entries.get(self.index)
+            && matches_member(entry)
+        {
+            return Ok(self.index);
+        }
+        entries
+            .iter()
+            .position(matches_member)
+            .ok_or(RarError::StaleEntryId)
     }
 }
 
@@ -390,10 +406,7 @@ impl ArchiveReader {
 
     /// Iterate over all entries in archive order.
     pub fn entries(&self) -> Entries<'_> {
-        Entries {
-            catalog_token: self.archive.catalog_token(),
-            entries: self.archive.entries.iter().enumerate(),
-        }
+        Entries::new(self.archive.catalog_token(), &self.archive.entries)
     }
 
     /// Whether a legacy volume set used the newer `.partN.rar` numbering
@@ -431,11 +444,7 @@ impl ArchiveReader {
         &'reader self,
         name: &'query str,
     ) -> EntryMatches<'reader, 'query> {
-        EntryMatches {
-            catalog_token: self.archive.catalog_token(),
-            name,
-            entries: self.archive.entries.iter().enumerate(),
-        }
+        EntryMatches::new(self.archive.catalog_token(), name, &self.archive.entries)
     }
 
     /// Resolve exactly one entry with the stored `name`.
@@ -689,25 +698,6 @@ impl ArchiveReader {
     }
 
     fn resolve_id(&self, id: EntryId) -> RarResult<usize> {
-        if id.catalog_token != self.archive.catalog_token() {
-            return Err(RarError::StaleEntryId);
-        }
-        let entries = &self.archive.entries;
-        let matches_member = |entry: &ArchiveEntry| {
-            entry.chunks.first().map(|chunk| chunk.data_offset) == id.data_offset
-        };
-        // The fast path holds while the catalog kept its order; after a
-        // quick-open rescan reordered it, locate the member by its payload
-        // position so the ID can never select whatever entry now happens to
-        // sit at the minted index.
-        if let Some(entry) = entries.get(id.index)
-            && matches_member(entry)
-        {
-            return Ok(id.index);
-        }
-        entries
-            .iter()
-            .position(matches_member)
-            .ok_or(RarError::StaleEntryId)
+        id.resolve(&self.archive.entries, self.archive.catalog_token())
     }
 }

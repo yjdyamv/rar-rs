@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use super::RarArchive;
-use super::reader::{Entries, EntryId, EntryMatches, EntryRef, allocate_catalog_token};
+use super::reader::{Entries, EntryId, EntryMatches, EntryRef};
 use crate::error::{RarError, RarResult};
 
 /// Mutable archive role with duplicate-safe entry identities.
@@ -33,7 +33,6 @@ use crate::error::{RarError, RarResult};
 /// [`RarError::StaleEntryId`] afterwards.
 pub struct ArchiveEditor {
     archive: RarArchive,
-    catalog_token: u64,
 }
 
 impl std::fmt::Debug for ArchiveEditor {
@@ -59,15 +58,12 @@ impl ArchiveEditor {
         } else {
             RarArchive::open_with_password(path, password)?
         };
-        Ok(Self {
-            archive,
-            catalog_token: allocate_catalog_token()?,
-        })
+        Ok(Self { archive })
     }
 
     /// Iterate over all members in archive order.
     pub fn entries(&self) -> Entries<'_> {
-        Entries::new(self.catalog_token, &self.archive.entries)
+        Entries::new(self.archive.catalog_token(), &self.archive.entries)
     }
 
     /// Resolve an entry ID to metadata.
@@ -84,7 +80,7 @@ impl ArchiveEditor {
         &'editor self,
         name: &'query str,
     ) -> EntryMatches<'editor, 'query> {
-        EntryMatches::new(self.catalog_token, name, &self.archive.entries)
+        EntryMatches::new(self.archive.catalog_token(), name, &self.archive.entries)
     }
 
     /// Resolve exactly one member with the stored `name`.
@@ -294,7 +290,7 @@ impl ArchiveEditor {
         let summary = self
             .archive
             .edit_plan(&deletes, &renames, force_rr, comment.as_deref())?;
-        self.catalog_token = allocate_catalog_token()?;
+        self.archive.reset_catalog_token()?;
         Ok(EditReport {
             deleted: summary.deleted,
             renamed: summary.renamed,
@@ -369,7 +365,7 @@ impl ArchiveEditor {
             force_rr,
             &member_comments,
         )?;
-        self.catalog_token = allocate_catalog_token()?;
+        self.archive.reset_catalog_token()?;
         Ok(EditReport {
             deleted: summary.deleted,
             renamed: summary.renamed,
@@ -470,9 +466,6 @@ impl ArchiveEditor {
     }
 
     fn resolve_id(&self, id: EntryId) -> RarResult<usize> {
-        if !id.scoped_to(self.catalog_token) || id.catalog_index() >= self.archive.entries.len() {
-            return Err(RarError::StaleEntryId);
-        }
-        Ok(id.catalog_index())
+        id.resolve(&self.archive.entries, self.archive.catalog_token())
     }
 }
