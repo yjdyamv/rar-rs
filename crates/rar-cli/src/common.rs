@@ -870,6 +870,15 @@ pub fn normalize_switch(arg: &str) -> String {
     arg.to_string()
 }
 
+/// Parse the normalized `--mark-web` value (`-om[-|1][=ext;ext]`), or `None`
+/// when the switch is absent.
+pub fn mark_web(spec: Option<&str>) -> Result<Option<rar_rs::MarkOfTheWeb>, String> {
+    match spec {
+        Some(spec) => parse_mark_web(spec),
+        None => Ok(None),
+    }
+}
+
 /// Parse the normalized `--mark-web` value (`-om[-|1][=ext;ext]`).
 ///
 /// Returns `Ok(None)` for the off form (`-om-`); the extension list, when

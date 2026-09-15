@@ -17,14 +17,6 @@ fn dict_cap(spec: Option<&str>) -> Result<Option<u64>, String> {
     spec.map(common::parse_mdx_size).transpose()
 }
 
-/// `-om` (Mark of the Web propagation) parsed from the shared switches.
-fn mark_web(misc: &common::MiscSwitches) -> Result<Option<rar_rs::MarkOfTheWeb>, String> {
-    match misc.mark_web.as_deref() {
-        Some(spec) => common::parse_mark_web(spec),
-        None => Ok(None),
-    }
-}
-
 /// Extract with full paths (like `rar x`).
 pub(crate) fn cmd_extract(
     args: &ExtractArgs,
@@ -39,7 +31,7 @@ pub(crate) fn cmd_extract(
         stdout: args.stdout,
         threads: args.threads,
         max_dict_size,
-        mark_web: mark_web(misc)?,
+        mark_web: common::mark_web(misc.mark_web.as_deref())?,
         overwrite: args.overwrite.clone(),
         assume_yes,
         auto_rename: args.auto_rename,
@@ -120,7 +112,7 @@ pub(crate) fn cmd_extract_flat(
         stdout: args.stdout,
         threads: args.threads,
         max_dict_size,
-        mark_web: mark_web(misc)?,
+        mark_web: common::mark_web(misc.mark_web.as_deref())?,
         overwrite: args.overwrite.clone(),
         assume_yes,
         auto_rename: args.auto_rename,

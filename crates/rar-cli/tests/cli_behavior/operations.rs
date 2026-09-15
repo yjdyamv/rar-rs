@@ -271,3 +271,39 @@ fn cli_sfx_roundtrip_with_module() {
     let f_id = rar.unique_entry("f.txt").unwrap();
     assert_eq!(rar.read_entry(f_id).unwrap(), b"sfx payload");
 }
+
+/// `unrar x -ep` (and the `--flat` spelling) extracts basenames without the
+/// stored tree, like the `e` command; the non-flat `x` keeps the tree.
+#[test]
+fn cli_unrar_x_flat_flag_extracts_basenames() {
+    let dir = make_temp_dir();
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/a.txt"), b"payload").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq", "flat.rar", "sub/a.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let nested = dir.path().join("nested");
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "-idq", "flat.rar", "--dest"])
+        .arg(&nested)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(nested.join("sub/a.txt").exists());
+
+    let flat = dir.path().join("flat");
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "-ep", "-idq", "flat.rar", "--dest"])
+        .arg(&flat)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read(flat.join("a.txt")).unwrap(), b"payload");
+    assert!(!flat.join("sub").exists(), "-ep must drop the stored tree");
+}

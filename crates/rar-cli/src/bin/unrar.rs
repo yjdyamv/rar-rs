@@ -286,13 +286,7 @@ fn run_inner(cli: Cli) -> CliResult<()> {
         .as_deref()
         .map(common::parse_mdx_size)
         .transpose()?;
-    let motw = cli
-        .misc
-        .mark_web
-        .as_deref()
-        .map(common::parse_mark_web)
-        .transpose()?
-        .flatten();
+    let motw = common::mark_web(cli.misc.mark_web.as_deref())?;
     match cli.command {
         Command::Extract(args) => {
             cmd_extract(&args, password, ts, max_dict_size, motw, &cli.misc, cli.yes)
@@ -388,6 +382,7 @@ fn cmd_extract(
     let request = ops::ExtractRequest {
         names,
         dest,
+        flat: args.flat,
         stdout: args.stdout,
         threads: args.threads,
         max_dict_size,
@@ -400,7 +395,6 @@ fn cmd_extract(
         set_access_time: ts.save_atime,
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
-        ..ops::ExtractRequest::default()
     };
     let mut rar = ops::open_reader(&args.archive, password)?;
     if let Some(report) = ops::extract(&mut rar, &request)? {

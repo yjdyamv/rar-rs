@@ -630,11 +630,10 @@ pub(crate) fn verify_options() -> ExtractOptions {
     }
 }
 
-/// One disk-extraction request: the four `x`/`e` arms of both binaries build
-/// this value and hand it to [`extract`], so the flag-to-options assembly —
-/// including the streaming rule that disk extraction imposes no in-memory
-/// size caps — has one owner.
-#[derive(Debug, Default)]
+/// One extraction request: the four `x`/`e` arms of both binaries build this
+/// value and hand it to [`extract`], so the flag-to-options assembly for
+/// disk extraction has one owner.
+#[derive(Default)]
 pub struct ExtractRequest {
     /// Members to extract (empty = every entry).
     pub names: Vec<String>,
@@ -652,13 +651,19 @@ pub struct ExtractRequest {
     pub mark_web: Option<rar_rs::MarkOfTheWeb>,
     /// Overwrite policy (like `-o+` / `-o-`).
     pub overwrite: Option<String>,
-    /// Non-interactive confirmation (the `-o+` default when piped).
+    /// `-y`: overwrite instead of skip when no explicit `-o` was given.
     pub assume_yes: bool,
+    /// Rename an existing destination instead of overwriting (like `-or`).
     pub auto_rename: bool,
+    /// Keep partially extracted files on decode failure (like `-kb`).
     pub keep_broken: bool,
+    /// Skip link/copy redirect members (like `-ol-`).
     pub skip_links: bool,
+    /// Extract links with dangerous targets as-is (like `-ola`).
     pub allow_unsafe_links: bool,
+    /// Restore the creation time from FILE_TIME records (like `-tsc`).
     pub set_creation_time: bool,
+    /// Restore the last-access time from FILE_TIME records (like `-tsa`).
     pub set_access_time: bool,
 }
 
@@ -720,7 +725,7 @@ pub fn extract(
 /// created links, not directories or `-ol-` links. A name matching nothing is
 /// a hard error, so a mistyped selector is never silently swallowed or
 /// treated as a destination directory.
-pub fn extract_members(
+fn extract_members(
     rar: &mut ArchiveReader,
     dest: &Path,
     names: &[String],
@@ -758,7 +763,7 @@ pub fn extract_members(
 /// Extract every file member to stdout, concatenated (`-so`), for piping.
 /// Informational messages are suppressed by the caller so the stream stays
 /// clean.
-pub fn extract_to_stdout(
+fn extract_to_stdout(
     rar: &mut ArchiveReader,
     names: &[String],
     max_dict_size: Option<u64>,
