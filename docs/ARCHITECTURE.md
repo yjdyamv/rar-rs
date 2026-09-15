@@ -34,7 +34,7 @@
 | `archive/create.rs` / `entry.rs` / `discovery.rs` | 写生命周期、条目类型、分卷发现 |
 | `archive/rar4_edit/` | RAR4 编辑（rename / delete / comment / RR / lock / append / solid repack，含 `-hp`；`layout`/`headers`/`comment`/`engine`/`repack` 角色模块） |
 | `model/` | 格式中立模型（`entry.rs` / `chunk.rs`） |
-| `version.rs` | `ArchiveVersion` 单一版本表（v14–v70） |
+| `version.rs` | `ArchiveVersion` 单一版本表（v14–v70）；`LegacyCodec`（`pub(crate)`）折叠 legacy 别名并做读/写/repack/密码分派 |
 | `options.rs` / `error.rs` / `features.rs` / `write_progress.rs` | 选项、错误、能力报告、进度 |
 | `fs/` | 原子暂存、有界读取、卷命名、安全路径 |
 | `parallel.rs` | `parallel` 特性的 Rayon 池 |

@@ -21,6 +21,7 @@ use crate::format::shared::engine::{CountingWriter, CrcReader, SpillGuard, spill
 use crate::format::shared::stream_mut;
 use crate::format::shared::write_ops::archive_name_from_path;
 use crate::model::FileHeader;
+use crate::version::LegacyCodec;
 
 /// Bytes a RAR4 segment reserves ahead of its payload in a volume: the fixed
 /// FILE_HEAD, the encoded name, the optional salt and extended-time area,
@@ -92,11 +93,13 @@ fn emit_rar4_segment(
     if solid_continuation {
         fhd |= FHD_SOLID;
     }
-    // RAR 3.x/4.x (unp_ver >= 29) stores a member comment as a standalone
-    // COMM_HEAD block after the member's data (the layout official UnRAR
-    // accepts); pre-RAR3 archives nest it inside the FILE_HEAD behind
-    // `FHD_COMMENT`, their historical layout.
-    let standalone_comment = comment.is_some() && this.write_ctx().solid.rar4_unp_ver >= 29;
+    // RAR 3.x/4.x stores a member comment as a standalone COMM_HEAD block
+    // after the member's data (the layout official UnRAR accepts); pre-RAR3
+    // archives nest it inside the FILE_HEAD behind `FHD_COMMENT`, their
+    // historical layout.
+    let standalone_comment = comment.is_some()
+        && LegacyCodec::from_unp_ver(this.write_ctx().solid.rar4_unp_ver)
+            == Some(LegacyCodec::Rar29);
     if comment.is_some() && !standalone_comment {
         fhd |= FHD_COMMENT;
     }
@@ -326,11 +329,11 @@ impl RarArchive {
     /// `Unpack20` for those versions and resets its tables when the flag is
     /// clear.
     fn track_rar4_solid_member(&mut self, method: u8, unpacked_size: u64) -> bool {
-        let unp_ver = self.write_ctx().solid.rar4_unp_ver;
+        let codec = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver);
         let continuation = self.write_ctx().solid.mode
             && method != crate::format::rar4::RAR4_METHOD_STORE
             && self.write_ctx().solid.rar4_run_has_member
-            && unp_ver >= 20;
+            && matches!(codec, Some(LegacyCodec::Rar20 | LegacyCodec::Rar29));
         if method == crate::format::rar4::RAR4_METHOD_STORE {
             // RAR3+ flags the break with FHD_SOLID, so a STORE member ends
             // the run. RAR 1.5 chains are position-derived and carry no
@@ -339,7 +342,7 @@ impl RarArchive {
             // compressed member. RAR 2.x also keeps the encoder alive
             // (official UnRAR skips `Unpack20` for STORE members and keeps
             // `TablesRead2`); only RAR3+'s flagged break resets it here.
-            if unp_ver == 29 {
+            if codec == Some(LegacyCodec::Rar29) {
                 self.write_ctx_mut().solid.rar4_encoder = None;
                 self.write_ctx_mut().solid.legacy_encoder = None;
                 self.write_ctx_mut().solid.rar4_run_has_member = false;
@@ -442,7 +445,8 @@ impl RarArchive {
         // solid append keep the buffered path — their encoders need the whole
         // input.
         if file_size >= STREAM_COMPRESS_THRESHOLD
-            && self.write_ctx().solid.rar4_unp_ver == 29
+            && LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver)
+                == Some(LegacyCodec::Rar29)
             && !self.write_ctx().rar4.solid_append
         {
             return self.add_rar4_file_streaming(path, &name, file_size, mtime, mtime_ns, level);
@@ -951,8 +955,13 @@ impl RarArchive {
     /// member that actually packs (and is therefore decoded) commits the
     /// advanced state.
     fn encode_rar4_member(&mut self, data: &[u8], level: u8) -> RarResult<(Vec<u8>, u8)> {
-        let unp_ver = self.write_ctx().solid.rar4_unp_ver;
-        if unp_ver == 29 {
+        let Some(codec) = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver) else {
+            return Err(RarError::Unsupported(format!(
+                "RAR4 write dispatch: unp_ver {} has no encoder",
+                self.write_ctx().solid.rar4_unp_ver
+            )));
+        };
+        if codec == LegacyCodec::Rar29 {
             return self.encode_rar29_member(data, level);
         }
         if !(1..=5).contains(&level) {
@@ -968,7 +977,7 @@ impl RarArchive {
                 Some(LegacySolidEncoder::Rar20(encoder)) => {
                     LegacySolidEncoder::Rar20(encoder.clone())
                 }
-                None => build_legacy_solid_encoder(unp_ver, level)?,
+                None => build_legacy_solid_encoder(codec, level)?,
             };
             let packed = match &mut trial {
                 LegacySolidEncoder::Rar15(encoder) => encoder.encode_member(data)?,
@@ -979,7 +988,7 @@ impl RarArchive {
             }
             packed
         } else {
-            encode_legacy_codec_member(data, level, unp_ver)?
+            encode_legacy_codec_member(data, level, codec)?
         };
         if packed.len() < data.len() {
             Ok((packed, method))
@@ -999,12 +1008,12 @@ impl RarArchive {
         let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) else {
             return Ok(None);
         };
-        match self.write_ctx().solid.rar4_unp_ver {
-            15 => {
+        match LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver) {
+            Some(LegacyCodec::Rar15) => {
                 crate::crypto::Rar15Cipher::new(pw.as_bytes()).crypt_in_place(packed);
                 Ok(None)
             }
-            20 => {
+            Some(LegacyCodec::Rar20) => {
                 let pad = (16 - packed.len() % 16) % 16;
                 packed.resize(packed.len() + pad, 0);
                 crate::crypto::Rar20Cipher::new(pw.as_bytes())
@@ -1012,7 +1021,7 @@ impl RarArchive {
                     .map_err(|e| RarError::Format(format!("RAR4 member (RAR20) encrypt: {e}")))?;
                 Ok(None)
             }
-            29 => {
+            Some(LegacyCodec::Rar29) => {
                 let mut salt = [0u8; 8];
                 rand::fill(&mut salt);
                 let mut cipher = crate::crypto::Rar30Cipher::new(pw.as_bytes(), Some(salt))
@@ -1024,8 +1033,9 @@ impl RarArchive {
                     .map_err(|e| RarError::Format(format!("RAR4 member encrypt: {e:?}")))?;
                 Ok(Some(salt))
             }
-            other => Err(RarError::Unsupported(format!(
-                "RAR4 write encryption: unp_ver {other} has no cipher"
+            None => Err(RarError::Unsupported(format!(
+                "RAR4 write encryption: unp_ver {} has no cipher",
+                self.write_ctx().solid.rar4_unp_ver
             ))),
         }
     }
@@ -1221,28 +1231,28 @@ fn legacy_rar15_options(level: u8) -> crate::codec::legacy::rar15_encoder::Encod
     }
 }
 
-/// Encode a RAR4 member with the legacy codecs (unp_ver 15/20) using a
-/// fresh instance (non-solid semantics). Shared by the sequential member
-/// writer (`encode_rar4_member`) and the parallel batch preparation
+/// Encode a RAR4 member with the RAR 1.5/2.x codec `codec` using a fresh
+/// instance (non-solid semantics). Shared by the sequential member writer
+/// (`encode_rar4_member`) and the parallel batch preparation
 /// (`prepare_rar4_file_member`). STORE fallback stays with the callers'
 /// size comparison.
-fn encode_legacy_codec_member(data: &[u8], level: u8, unp_ver: u8) -> RarResult<Vec<u8>> {
-    match unp_ver {
-        20 => Ok(
+fn encode_legacy_codec_member(data: &[u8], level: u8, codec: LegacyCodec) -> RarResult<Vec<u8>> {
+    match codec {
+        LegacyCodec::Rar20 => Ok(
             crate::codec::legacy::rar20_encoder::unpack20_encode_auto_with_options(
                 data,
                 legacy_rar20_options(level),
             )?,
         ),
-        15 => Ok(
+        LegacyCodec::Rar15 => Ok(
             crate::codec::legacy::rar15_encoder::Unpack15Encoder::with_options(
                 legacy_rar15_options(level),
             )
             .encode_member(data)?,
         ),
-        other => Err(RarError::Unsupported(format!(
-            "RAR4 write dispatch: unp_ver {other} has no encoder"
-        ))),
+        LegacyCodec::Rar29 => Err(RarError::InvalidState(
+            "the RAR29 member encoder is dispatched by encode_rar4_member".into(),
+        )),
     }
 }
 
@@ -1251,24 +1261,24 @@ fn encode_legacy_codec_member(data: &[u8], level: u8, unp_ver: u8) -> RarResult<
 /// reuse). The run's level defaults to the first member's ladder options,
 /// matching the RAR29 solid encoder's get-or-create semantics.
 fn build_legacy_solid_encoder(
-    unp_ver: u8,
+    codec: LegacyCodec,
     level: u8,
 ) -> RarResult<crate::archive::LegacySolidEncoder> {
     use crate::archive::LegacySolidEncoder;
-    match unp_ver {
-        20 => Ok(LegacySolidEncoder::Rar20(
+    match codec {
+        LegacyCodec::Rar20 => Ok(LegacySolidEncoder::Rar20(
             crate::codec::legacy::rar20_encoder::Unpack20Encoder::with_options(
                 legacy_rar20_options(level),
             ),
         )),
-        15 => Ok(LegacySolidEncoder::Rar15(Box::new(
+        LegacyCodec::Rar15 => Ok(LegacySolidEncoder::Rar15(Box::new(
             crate::codec::legacy::rar15_encoder::Unpack15Encoder::with_options(
                 legacy_rar15_options(level),
             ),
         ))),
-        other => Err(RarError::Unsupported(format!(
-            "RAR4 write dispatch: unp_ver {other} has no encoder"
-        ))),
+        LegacyCodec::Rar29 => Err(RarError::InvalidState(
+            "the RAR29 solid encoder lives in the write context, not here".into(),
+        )),
     }
 }
 
@@ -1381,7 +1391,7 @@ pub(crate) fn prepare_rar4_file_member(
     path: &Path,
     name: &str,
     level: u8,
-    unp_ver: u8,
+    codec: LegacyCodec,
     filters: crate::options::FilterOptions,
 ) -> RarResult<Rar4PreparedMember> {
     let meta = fs::metadata(path)?;
@@ -1403,8 +1413,8 @@ pub(crate) fn prepare_rar4_file_member(
     std::io::Read::read_to_end(&mut reader, &mut data)?;
     let file_crc = crate::crc32::crc32(&data);
 
-    let (packed, method) = if (1..=5).contains(&level) && unp_ver != 29 {
-        let packed = encode_legacy_codec_member(&data, level, unp_ver)?;
+    let (packed, method) = if (1..=5).contains(&level) && codec != LegacyCodec::Rar29 {
+        let packed = encode_legacy_codec_member(&data, level, codec)?;
         if packed.len() < data.len() {
             (packed, crate::format::rar4::RAR4_METHOD_STORE + level)
         } else {
@@ -1584,6 +1594,11 @@ impl RarArchive {
                 let threads = self.effective_threads();
                 let pool = crate::parallel::compression_pool_for(threads);
                 let unp_ver = self.write_ctx().solid.rar4_unp_ver;
+                let codec = LegacyCodec::from_unp_ver(unp_ver).ok_or_else(|| {
+                    RarError::Unsupported(format!(
+                        "RAR4 write dispatch: unp_ver {unp_ver} has no encoder"
+                    ))
+                })?;
                 let filters = self.write_ctx().compression.filters;
                 let prepared: Vec<RarResult<(usize, Rar4PreparedMember)>> = pool.install(|| {
                     wave.par_iter()
@@ -1599,7 +1614,7 @@ impl RarArchive {
                                     .to_string_lossy()
                                     .into_owned(),
                             };
-                            prepare_rar4_file_member(path, &name, level, unp_ver, filters)
+                            prepare_rar4_file_member(path, &name, level, codec, filters)
                                 .map(|p| (idx, p))
                         })
                         .collect()

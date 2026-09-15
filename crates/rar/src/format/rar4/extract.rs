@@ -15,6 +15,16 @@ use crate::error::{RarError, RarResult};
 use crate::format::shared::extract::{MAX_CATALOG_ENTRIES, check_entry_cap};
 use crate::format::shared::stream_mut;
 use crate::model::FileHeader;
+use crate::version::LegacyCodec;
+
+/// Whether the member belongs to the RAR29 (RAR 3.x/4.x) codec generation,
+/// whose solid runs are flagged per member with FHD_SOLID.
+fn is_rar29_codec(hdr: &FileHeader) -> bool {
+    matches!(
+        LegacyCodec::from_unp_ver(hdr.unp_ver),
+        Some(LegacyCodec::Rar29)
+    )
+}
 
 impl RarArchive {
     /// Scan a RAR 1.5–4.x volume set (legacy fixed-width block headers) into
@@ -56,14 +66,14 @@ impl RarArchive {
         Ok(())
     }
 
-    /// Whether `idx` sits in a legacy solid run. RAR3+ members (unp_ver >=
-    /// 29) chain on the per-file FHD_SOLID bit (a head member is solid by
+    /// Whether `idx` sits in a legacy solid run. RAR3+ members (the RAR29
+    /// codec) chain on the per-file FHD_SOLID bit (a head member is solid by
     /// being directly followed by a flagged member). Pre-RAR3 codecs never
     /// write that bit: when the main header carried MHD_SOLID, every
     /// compressed member of such a codec is part of one shared-window run.
     fn is_rar4_solid_member(&self, idx: usize) -> bool {
         let hdr = &self.entries[idx].header;
-        if hdr.unp_ver < 29 {
+        if !is_rar29_codec(hdr) {
             return self.archive_solid && !self.entries[idx].is_dir();
         }
         if hdr.comp_solid {
@@ -79,7 +89,7 @@ impl RarArchive {
         // Pre-RAR3 codecs under MHD_SOLID do not write FHD_SOLID. STORE
         // members leave the shared window untouched, so the run reaches back
         // across them to the first compressed member.
-        if self.entries[target_idx].header.unp_ver < 29 {
+        if !is_rar29_codec(&self.entries[target_idx].header) {
             let mut chain_start = target_idx;
             for i in (0..target_idx).rev() {
                 if !self.entries[i].is_dir()
@@ -100,7 +110,7 @@ impl RarArchive {
             let Some(previous) = (0..chain_start).rev().find(|&i| !self.entries[i].is_dir()) else {
                 break;
             };
-            if self.entries[previous].header.unp_ver < 29 {
+            if !is_rar29_codec(&self.entries[previous].header) {
                 break;
             }
             chain_start = previous;
@@ -138,10 +148,8 @@ impl RarArchive {
             }
             if ctx.legacy.decoder.is_none() {
                 // Bootstrap with a Rar29 decoder; it will be replaced on the
-                // first compressed member that reveals the actual unp_ver.
-                ctx.legacy.decoder = Some(LegacyDecoder::Rar29(
-                    crate::codec::legacy::rar29::Rar29Decoder::new(),
-                ));
+                // first compressed member that reveals the actual codec.
+                ctx.legacy.decoder = Some(LegacyDecoder::new_for(LegacyCodec::Rar29));
             }
             (ctx.legacy.decoded_through + 1) as usize
         };
@@ -156,30 +164,18 @@ impl RarArchive {
             let hdr = entry.header;
             let chunks = entry.chunks;
 
-            // Determine decoder type from the member's unp_ver. A STORE
+            // Determine the decoder type from the member's codec. A STORE
             // member keeps the existing decoder unchanged (for RAR2.x the
             // window is not advanced; for RAR1.5 likewise).
             let is_compressed = !super::is_stored(hdr.comp_method);
-            if is_compressed {
+            if is_compressed && let Some(codec) = LegacyCodec::from_unp_ver(hdr.unp_ver) {
                 // Ensure the decoder matches this member's codec version.
                 let needs_rebuild = {
                     let dec = self.read_ctx_mut().legacy.decoder.as_ref();
-                    match (hdr.unp_ver, dec) {
-                        (v, Some(LegacyDecoder::Rar29(_))) if v >= 29 => false,
-                        (20 | 26, Some(LegacyDecoder::Rar20(_))) => false,
-                        (15, Some(LegacyDecoder::Rar15(_))) => false,
-                        _ => true,
-                    }
+                    !dec.is_some_and(|dec| dec.codec() == codec)
                 };
                 if needs_rebuild {
-                    let new_decoder = if hdr.unp_ver >= 29 {
-                        LegacyDecoder::Rar29(crate::codec::legacy::rar29::Rar29Decoder::new())
-                    } else if hdr.unp_ver == 20 || hdr.unp_ver == 26 {
-                        LegacyDecoder::Rar20(Box::default())
-                    } else {
-                        LegacyDecoder::Rar15(Box::default())
-                    };
-                    self.read_ctx_mut().legacy.decoder = Some(new_decoder);
+                    self.read_ctx_mut().legacy.decoder = Some(LegacyDecoder::new_for(codec));
                 }
             }
 

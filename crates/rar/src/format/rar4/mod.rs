@@ -66,6 +66,31 @@ pub(crate) enum LegacyDecoder {
     Rar15(Box<crate::codec::legacy::rar15::Rar15Decoder>),
 }
 
+impl LegacyDecoder {
+    /// The codec this carrier holds: the variant *is* the codec identity.
+    pub(crate) fn codec(&self) -> crate::version::LegacyCodec {
+        use crate::version::LegacyCodec;
+        match self {
+            LegacyDecoder::Rar29(_) => LegacyCodec::Rar29,
+            LegacyDecoder::Rar20(_) => LegacyCodec::Rar20,
+            LegacyDecoder::Rar15(_) => LegacyCodec::Rar15,
+        }
+    }
+
+    /// A fresh decoder for `codec`, used when a solid chain changes codec
+    /// generation (the chain keeps its own instance otherwise).
+    pub(crate) fn new_for(codec: crate::version::LegacyCodec) -> Self {
+        use crate::version::LegacyCodec;
+        match codec {
+            LegacyCodec::Rar29 => {
+                LegacyDecoder::Rar29(crate::codec::legacy::rar29::Rar29Decoder::new())
+            }
+            LegacyCodec::Rar20 => LegacyDecoder::Rar20(Box::default()),
+            LegacyCodec::Rar15 => LegacyDecoder::Rar15(Box::default()),
+        }
+    }
+}
+
 /// RAR4 compression method value for the STORE (uncompressed) method.
 pub(crate) const RAR4_METHOD_STORE: u8 = 0x30;
 

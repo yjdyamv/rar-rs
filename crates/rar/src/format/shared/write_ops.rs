@@ -359,7 +359,10 @@ impl RarArchive {
     /// not drop the carried encoder for them (doing so desynchronises every
     /// later member of the run).
     pub(crate) fn solid_chain_is_position_derived(&self) -> bool {
-        self.is_rar13() || (self.is_rar4() && self.write_ctx().solid.rar4_unp_ver < 29)
+        self.is_rar13()
+            || (self.is_rar4()
+                && crate::version::LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver)
+                    != Some(crate::version::LegacyCodec::Rar29))
     }
 
     /// Drop the solid-chain encoder state (call after any member that does

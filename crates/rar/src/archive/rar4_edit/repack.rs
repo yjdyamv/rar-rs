@@ -21,27 +21,23 @@ use crate::fs::atomic::{install_durable, temp_sibling_path};
 use crate::recovery::legacy_rr::scan_protect_with_password;
 
 /// Member generation the repacked archive is written with, derived from the
-/// source members: RAR 1.5 (`unp_ver 15`), RAR 2.x (`20`, with `26` using
-/// the same codec) or RAR 3.x/4.x (`29`, with `36`). A solid chain shares
-/// one codec, so a mixed archive is refused rather than silently re-coded.
+/// source members: RAR 1.5, RAR 2.x (the `26` alias folds onto the same
+/// codec) or RAR 3.x/4.x (likewise `36`). A solid chain shares one codec, so
+/// a mixed archive is refused rather than silently re-coded.
 fn solid_repack_version(archive: &RarArchive) -> RarResult<crate::version::ArchiveVersion> {
-    use crate::version::ArchiveVersion;
+    use crate::version::LegacyCodec;
 
-    let mut target: Option<ArchiveVersion> = None;
+    let mut target: Option<LegacyCodec> = None;
     for entry in archive.entries.iter().filter(|entry| !entry.is_dir()) {
-        let version = match entry.header.unp_ver {
-            15 => ArchiveVersion::V15,
-            20 | 26 => ArchiveVersion::V20,
-            29 | 36 => ArchiveVersion::V29,
-            other => {
-                return Err(RarError::Unsupported(format!(
-                    "repacking solid archives with unp_ver {other} members is not supported"
-                )));
-            }
-        };
+        let codec = LegacyCodec::from_unp_ver(entry.header.unp_ver).ok_or_else(|| {
+            RarError::Unsupported(format!(
+                "repacking solid archives with unp_ver {} members is not supported",
+                entry.header.unp_ver
+            ))
+        })?;
         match target {
-            None => target = Some(version),
-            Some(existing) if existing == version => {}
+            None => target = Some(codec),
+            Some(existing) if existing == codec => {}
             Some(_) => {
                 return Err(RarError::Unsupported(
                     "repacking solid archives with mixed member generations is not supported"
@@ -50,7 +46,7 @@ fn solid_repack_version(archive: &RarArchive) -> RarResult<crate::version::Archi
             }
         }
     }
-    Ok(target.unwrap_or(ArchiveVersion::V29))
+    Ok(target.unwrap_or(LegacyCodec::Rar29).writable_version())
 }
 /// Whole-archive repack of a solid RAR4 archive (ADR 0005 stage C): every
 /// member is decoded in chain order through the shared window and

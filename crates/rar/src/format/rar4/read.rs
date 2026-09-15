@@ -1,10 +1,12 @@
 //! RAR 1.5–4.x member read + decode.
 //!
 //! Reads a member's packed payload (single volume), decrypts it with the
-//! cipher selected by `unp_ver` (15 → RAR15 stream, 20/26 → RAR20 block, and
-//! 29+ → RAR30 AES-CBC block), then decodes it. STORE members pass through
-//! raw; compressed members decode through the appropriate codec. Solid chains
-//! share one decoder instance passed in by the caller via [`super::LegacyDecoder`].
+//! cipher the member's codec selects (RAR15 stream, RAR20 block, or the
+//! RAR30 AES-CBC block), then decodes it. STORE members pass through raw;
+//! compressed members decode through the codec selected by
+//! [`crate::version::LegacyCodec`] (one alias fold for `unp_ver` 15/20/26/
+//! 29/36). Solid chains share one decoder instance passed in by the caller
+//! via [`super::LegacyDecoder`].
 
 use crate::codec::legacy::rar15::Rar15Decoder;
 use crate::codec::legacy::rar20::Rar20Decoder;
@@ -13,6 +15,7 @@ use crate::crc32;
 use crate::crypto::{Rar15Cipher, Rar20Cipher, Rar30Cipher};
 use crate::error::{RarError, RarResult};
 use crate::model::{DataChunk, FileHeader};
+use crate::version::LegacyCodec;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
@@ -223,71 +226,43 @@ fn decode_member_bytes_to_inner(
         }
     }
 
-    if hdr.unp_ver >= 29 {
-        return match decoder {
+    let Some(codec) = LegacyCodec::from_unp_ver(hdr.unp_ver) else {
+        return Err(unsupported_unp_ver(hdr.unp_ver));
+    };
+    match codec {
+        LegacyCodec::Rar29 => match decoder {
             Some(LegacyDecoder::Rar29(dec)) => dec
                 .decode_member_streaming_to(&packed, hdr.unpacked_size, writer)
                 .map_err(|e| map_codec_error(hdr, e)),
-            Some(_) => Err(RarError::Format(
-                "RAR4: unp_ver >= 29 but wrong decoder type in solid chain".into(),
-            )),
+            Some(other) => Err(wrong_decoder(codec, other.codec())),
             None => crate::codec::legacy::rar29::Rar29Decoder::new()
                 .decode_member_streaming_to(&packed, hdr.unpacked_size, writer)
                 .map_err(|e| map_codec_error(hdr, e)),
-        };
-    }
-    if hdr.unp_ver == 20 || hdr.unp_ver == 26 {
-        return match decoder {
+        },
+        LegacyCodec::Rar20 => match decoder {
             Some(LegacyDecoder::Rar20(dec)) => dec
                 .decode_member_streaming_to(&packed, hdr.unpacked_size, writer)
                 .map_err(|e| map_codec_error(hdr, e)),
-            Some(_) => Err(RarError::Format(
-                "RAR4: unp_ver 20/26 but wrong decoder type in solid chain".into(),
-            )),
+            Some(other) => Err(wrong_decoder(codec, other.codec())),
             None => crate::codec::legacy::rar20::Rar20Decoder::new()
                 .decode_member_streaming_to(&packed, hdr.unpacked_size, writer)
                 .map_err(|e| map_codec_error(hdr, e)),
-        };
+        },
+        LegacyCodec::Rar15 => {
+            let solid = decoder.is_some();
+            let dec: &mut Rar15Decoder = match decoder {
+                Some(LegacyDecoder::Rar15(dec)) => dec,
+                Some(other) => return Err(wrong_decoder(codec, other.codec())),
+                None => {
+                    return Rar15Decoder::new()
+                        .decode_member_to(&packed, unp_size, false, writer)
+                        .map_err(|error| map_rar15_error(hdr, error));
+                }
+            };
+            dec.decode_member_to(&packed, unp_size, solid, writer)
+                .map_err(|error| map_rar15_error(hdr, error))
+        }
     }
-    if hdr.unp_ver == 15 {
-        let solid = decoder.is_some();
-        let dec: &mut crate::codec::legacy::rar15::Rar15Decoder = match decoder {
-            Some(LegacyDecoder::Rar15(dec)) => dec,
-            Some(_) => {
-                return Err(RarError::Format(
-                    "RAR4: unp_ver 15 but wrong decoder type in solid chain".into(),
-                ));
-            }
-            None => {
-                return crate::codec::legacy::rar15::Rar15Decoder::new()
-                    .decode_member_to(&packed, unp_size, false, writer)
-                    .map_err(|error| {
-                        let message = match error {
-                            crate::codec::legacy::rar15::Error::NeedMoreInput => {
-                                "RAR 1.5 stream is truncated"
-                            }
-                            crate::codec::legacy::rar15::Error::InvalidData(message) => message,
-                        };
-                        map_codec_error(hdr, RarError::Format(format!("RAR 1.5 stream: {message}")))
-                    });
-            }
-        };
-        return dec
-            .decode_member_to(&packed, unp_size, solid, writer)
-            .map_err(|error| {
-                let message = match error {
-                    crate::codec::legacy::rar15::Error::NeedMoreInput => {
-                        "RAR 1.5 stream is truncated"
-                    }
-                    crate::codec::legacy::rar15::Error::InvalidData(message) => message,
-                };
-                map_codec_error(hdr, RarError::Format(format!("RAR 1.5 stream: {message}")))
-            });
-    }
-    Err(RarError::Unsupported(format!(
-        "RAR 1.3/1.4-era compressed members (unpack version {}) are not yet supported",
-        hdr.unp_ver
-    )))
 }
 
 fn checked_packed_size(
@@ -462,49 +437,74 @@ pub(crate) fn decode_member_bytes(
         return Ok(packed);
     }
 
-    if hdr.unp_ver >= 29 {
-        let out = match decoder {
-            Some(LegacyDecoder::Rar29(dec)) => dec.decode_member(&packed, hdr.unpacked_size),
-            Some(_) => Err(RarError::Format(
-                "RAR4: unp_ver >= 29 but wrong decoder type in solid chain".into(),
-            )),
-            None => Rar29Decoder::new().decode_member(&packed, hdr.unpacked_size),
+    let Some(codec) = LegacyCodec::from_unp_ver(hdr.unp_ver) else {
+        return Err(unsupported_unp_ver(hdr.unp_ver));
+    };
+    match codec {
+        LegacyCodec::Rar29 => {
+            let out = match decoder {
+                Some(LegacyDecoder::Rar29(dec)) => dec.decode_member(&packed, hdr.unpacked_size),
+                Some(other) => return Err(wrong_decoder(codec, other.codec())),
+                None => Rar29Decoder::new().decode_member(&packed, hdr.unpacked_size),
+            }
+            .map_err(|e| map_codec_error(hdr, e))?;
+            validate_output_size(hdr, out.len() as u64)?;
+            Ok(out)
         }
-        .map_err(|e| map_codec_error(hdr, e))?;
-        validate_output_size(hdr, out.len() as u64)?;
-        return Ok(out);
-    }
-
-    if hdr.unp_ver == 20 || hdr.unp_ver == 26 {
-        let out = match decoder {
-            Some(LegacyDecoder::Rar20(dec)) => dec.decode_member(&packed, hdr.unpacked_size),
-            Some(_) => Err(RarError::Format(
-                "RAR4: unp_ver 20/26 but wrong decoder type in solid chain".into(),
-            )),
-            None => Rar20Decoder::new().decode_member(&packed, hdr.unpacked_size),
+        LegacyCodec::Rar20 => {
+            let out = match decoder {
+                Some(LegacyDecoder::Rar20(dec)) => dec.decode_member(&packed, hdr.unpacked_size),
+                Some(other) => return Err(wrong_decoder(codec, other.codec())),
+                None => Rar20Decoder::new().decode_member(&packed, hdr.unpacked_size),
+            }
+            .map_err(|e| map_codec_error(hdr, e))?;
+            validate_output_size(hdr, out.len() as u64)?;
+            Ok(out)
         }
-        .map_err(|e| map_codec_error(hdr, e))?;
-        validate_output_size(hdr, out.len() as u64)?;
-        return Ok(out);
-    }
-
-    if hdr.unp_ver == 15 {
-        let out = match decoder {
-            Some(LegacyDecoder::Rar15(dec)) => dec.decode_member(&packed, hdr.unpacked_size, true),
-            Some(_) => Err(RarError::Format(
-                "RAR4: unp_ver 15 but wrong decoder type in solid chain".into(),
-            )),
-            None => Rar15Decoder::new().decode_member(&packed, hdr.unpacked_size, false),
+        LegacyCodec::Rar15 => {
+            let out = match decoder {
+                Some(LegacyDecoder::Rar15(dec)) => {
+                    dec.decode_member(&packed, hdr.unpacked_size, true)
+                }
+                Some(other) => return Err(wrong_decoder(codec, other.codec())),
+                None => Rar15Decoder::new().decode_member(&packed, hdr.unpacked_size, false),
+            }
+            .map_err(|error| map_codec_error(hdr, error))?;
+            validate_output_size(hdr, out.len() as u64)?;
+            Ok(out)
         }
-        .map_err(|e| map_codec_error(hdr, e))?;
-        validate_output_size(hdr, out.len() as u64)?;
-        return Ok(out);
     }
+}
 
-    Err(RarError::Unsupported(format!(
-        "RAR 1.3/1.4-era compressed members (unpack version {}) are not yet supported",
-        hdr.unp_ver
-    )))
+/// A member whose `unp_ver` names no legacy codec (the RAR13-era and RAR5
+/// families are handled elsewhere).
+fn unsupported_unp_ver(unp_ver: u8) -> RarError {
+    RarError::Unsupported(format!(
+        "RAR 1.3/1.4-era compressed members (unpack version {unp_ver}) are not yet supported"
+    ))
+}
+
+/// A solid-chain carrier whose codec differs from the member's: callers
+/// rebuild the decoder on a codec change, so this is a corrupted chain.
+fn wrong_decoder(expected: LegacyCodec, actual: LegacyCodec) -> RarError {
+    RarError::Format(format!(
+        "RAR4: {} member in a solid chain carrying the {} decoder",
+        expected.name(),
+        actual.name()
+    ))
+}
+
+/// Map a RAR 1.5 codec error to the caller-facing error.
+fn map_rar15_error(hdr: &FileHeader, error: crate::codec::legacy::rar15::Error) -> RarError {
+    let error = match error {
+        crate::codec::legacy::rar15::Error::NeedMoreInput => {
+            RarError::Format("RAR 1.5 stream is truncated".into())
+        }
+        crate::codec::legacy::rar15::Error::InvalidData(message) => {
+            RarError::Format(format!("RAR 1.5 stream: {message}"))
+        }
+    };
+    map_codec_error(hdr, error)
 }
 
 /// Map codec-level errors to user-facing errors: encrypted members with a
@@ -524,29 +524,30 @@ fn map_codec_error(hdr: &FileHeader, error: RarError) -> RarError {
     }
 }
 
-/// Decrypt `data` in place according to the member's cipher.
+/// Decrypt `data` in place according to the member's codec cipher.
 pub(crate) fn decrypt_in_place(
     hdr: &FileHeader,
     password: &[u8],
     data: &mut [u8],
 ) -> RarResult<()> {
-    match hdr.unp_ver {
-        15 => {
+    match LegacyCodec::from_unp_ver(hdr.unp_ver) {
+        Some(LegacyCodec::Rar15) => {
             Rar15Cipher::new(password).crypt_in_place(data);
             Ok(())
         }
-        20 | 26 => Rar20Cipher::new(password)
+        Some(LegacyCodec::Rar20) => Rar20Cipher::new(password)
             .decrypt_in_place(data)
             .map_err(|e| RarError::Format(format!("RAR4 RAR20 decrypt: {e}"))),
-        v if v >= 29 => {
+        Some(LegacyCodec::Rar29) => {
             let mut cipher = Rar30Cipher::new(password, hdr.salt)
                 .map_err(|e| RarError::Format(format!("RAR4 RAR30 key setup: {e}")))?;
             cipher
                 .decrypt_in_place(data)
                 .map_err(|e| RarError::Format(format!("RAR4 RAR30 decrypt: {e}")))
         }
-        other => Err(RarError::Unsupported(format!(
-            "RAR4 encryption unpack version {other} not supported"
+        None => Err(RarError::Unsupported(format!(
+            "RAR4 encryption unpack version {} not supported",
+            hdr.unp_ver
         ))),
     }
 }

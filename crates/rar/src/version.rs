@@ -184,9 +184,58 @@ impl std::fmt::Display for ArchiveVersion {
     }
 }
 
+/// The member codec a legacy `unp_ver` value selects, with the read-only
+/// alias values folded in: RAR 2.x declares `20`/`26` for one codec and RAR
+/// 3.x/4.x `29`/`36` for another. Every legacy dispatch point (decode,
+/// solid-chain rules, encode, member cipher, repack generation) keys on this
+/// value instead of re-matching raw `unp_ver` bytes, so alias folding lives
+/// here once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum LegacyCodec {
+    /// RAR 1.5 (`unp_ver 15`): adaptive-Huffman + plain LZ.
+    Rar15,
+    /// RAR 2.x (`unp_ver 20`/`26`): LZSS + Huffman with audio blocks.
+    Rar20,
+    /// RAR 3.x/4.x (`unp_ver 29`/`36`): LZSS + Huffman + PPMd.
+    Rar29,
+}
+
+impl LegacyCodec {
+    /// Fold a member `unp_ver` field onto its codec: `15` → RAR15,
+    /// `20`/`26` → RAR20, `29`/`36` → RAR29. Unknown values (and the RAR13
+    /// and RAR5 families) are `None`.
+    pub(crate) const fn from_unp_ver(unp_ver: u8) -> Option<Self> {
+        match unp_ver {
+            15 => Some(Self::Rar15),
+            20 | 26 => Some(Self::Rar20),
+            29 | 36 => Some(Self::Rar29),
+            _ => None,
+        }
+    }
+
+    /// The version table entry this codec is written as (`v15`/`v20`/`v29`):
+    /// writers only produce the base versions, never the aliases.
+    pub(crate) const fn writable_version(self) -> ArchiveVersion {
+        match self {
+            Self::Rar15 => ArchiveVersion::V15,
+            Self::Rar20 => ArchiveVersion::V20,
+            Self::Rar29 => ArchiveVersion::V29,
+        }
+    }
+
+    /// Human-readable codec family name for error messages.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Rar15 => "RAR 1.5",
+            Self::Rar20 => "RAR 2.x",
+            Self::Rar29 => "RAR 3.x/4.x",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ArchiveVersion;
+    use super::{ArchiveVersion, LegacyCodec};
 
     #[test]
     fn the_table_is_exhaustive_and_two_digit_named() {
@@ -295,5 +344,35 @@ mod tests {
     #[test]
     fn default_is_v50() {
         assert_eq!(ArchiveVersion::default(), ArchiveVersion::V50);
+    }
+
+    /// Alias folding lives on `LegacyCodec`: the read-only pairs map onto
+    /// one codec, and writers emit the base version.
+    #[test]
+    fn legacy_codec_folds_the_alias_versions() {
+        for (unp_ver, codec) in [
+            (15, LegacyCodec::Rar15),
+            (20, LegacyCodec::Rar20),
+            (26, LegacyCodec::Rar20),
+            (29, LegacyCodec::Rar29),
+            (36, LegacyCodec::Rar29),
+        ] {
+            assert_eq!(LegacyCodec::from_unp_ver(unp_ver), Some(codec), "{unp_ver}");
+        }
+        assert_eq!(
+            LegacyCodec::from_unp_ver(2),
+            None,
+            "the RAR13 codec is separate"
+        );
+        assert_eq!(
+            LegacyCodec::from_unp_ver(30),
+            None,
+            "unknown versions stay unknown"
+        );
+        assert_eq!(LegacyCodec::from_unp_ver(50), None);
+
+        assert_eq!(LegacyCodec::Rar15.writable_version(), ArchiveVersion::V15);
+        assert_eq!(LegacyCodec::Rar20.writable_version(), ArchiveVersion::V20);
+        assert_eq!(LegacyCodec::Rar29.writable_version(), ArchiveVersion::V29);
     }
 }
