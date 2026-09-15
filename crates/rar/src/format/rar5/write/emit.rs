@@ -407,12 +407,12 @@ impl RarArchive {
         password: Option<&str>,
         plain_crc: u32,
         plain_blake: Option<[u8; 32]>,
-    ) -> RarResult<(
+    ) -> (
         u32,
         Vec<u8>,
         Option<[u8; 32]>,
         Option<crypto::MemberEncryption>,
-    )> {
+    ) {
         if let Some(password) = password {
             let session = crypto::MemberEncryption::generate(password, ENCR_PBKDF2_ITER_LOG);
             let header_crc = session.mac_crc32(plain_crc);
@@ -421,13 +421,13 @@ impl RarArchive {
             if let Some(h) = stored_hash {
                 extra.extend(crate::format::rar5::headers::hash_extra_record(h));
             }
-            Ok((header_crc, extra, stored_hash, Some(session)))
+            (header_crc, extra, stored_hash, Some(session))
         } else {
             let mut extra = Vec::new();
             if let Some(h) = plain_blake {
                 extra.extend(crate::format::rar5::headers::hash_extra_record(h));
             }
-            Ok((plain_crc, extra, plain_blake, None))
+            (plain_crc, extra, plain_blake, None)
         }
     }
 

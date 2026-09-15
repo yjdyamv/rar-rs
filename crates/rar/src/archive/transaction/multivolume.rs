@@ -225,12 +225,15 @@ impl RarArchive {
             // members come back decrypted; re-encrypt with the original
             // parameters (same salt/IV/key) so the copied ENCR record and
             // MAC'd header CRC stay valid and the stored bytes are exactly
-            // the ciphertext that was read.
+            // the ciphertext that was read. The read side already derived
+            // the keys, so no KDF runs here.
             let payload = self.read_member_packed(&mut readers, idx)?;
             processed += payload.data.len() as u64;
             let hdr = &entry.header;
-            let stored_payload = match (payload.params.as_ref(), self.password.as_deref()) {
-                (Some(params), Some(password)) => params.encrypt(&payload.data, password)?,
+            let stored_payload = match (payload.params.as_ref(), payload.keys.as_ref()) {
+                (Some(params), Some(keys)) => {
+                    crate::crypto::encrypt_data(&payload.data, &keys.key, &params.iv)
+                }
                 _ => payload.data,
             };
             self.write_file_entry(

@@ -1064,6 +1064,14 @@ mod tests {
             session.encrypt(&plaintext),
             parsed.encrypt(&plaintext, password).unwrap()
         );
+
+        // The streaming writer seeds its CBC chains from `key_iv`; a wrong
+        // key or IV there would corrupt every streamed encrypted member
+        // without failing the checks above.
+        let direct = parsed.derive_keys(password).unwrap();
+        let (key, iv) = session.key_iv();
+        assert_eq!(*key, direct.key);
+        assert_eq!(*iv, parsed.iv);
     }
 
     /// Service-record sessions ("STM") carry the password check only: stored
@@ -1075,6 +1083,10 @@ mod tests {
             .unwrap()
             .expect("one ENCR record");
         assert!(!parsed.uses_hash_mac());
+        assert!(
+            parsed.checksum.is_some(),
+            "the password check must stay enabled"
+        );
     }
 
     #[test]

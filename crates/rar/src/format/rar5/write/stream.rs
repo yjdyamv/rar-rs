@@ -756,11 +756,7 @@ impl RarArchive {
             // Compression is a net loss: fall back to streaming STORE.
             self.reset_solid_chain();
             let (header_crc, mut extra_data, stored_hash, encr) =
-                RarArchive::payload_extra_and_crc(
-                    self.password.as_deref(),
-                    plain_crc,
-                    plain_blake,
-                )?;
+                RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake);
             if let Some(ref t) = time_extra {
                 extra_data.extend_from_slice(t);
             }
@@ -785,7 +781,7 @@ impl RarArchive {
         }
 
         let (header_crc, mut extra_data, stored_hash, encr) =
-            RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
+            RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake);
         if let Some(ref t) = time_extra {
             extra_data.extend_from_slice(t);
         }

@@ -121,7 +121,7 @@ impl SolidChainState {
             )
         };
         let (header_crc, extra_data, stored_hash, encr) =
-            RarArchive::payload_extra_and_crc(archive.password.as_deref(), plain_crc, plain_blake)?;
+            RarArchive::payload_extra_and_crc(archive.password.as_deref(), plain_crc, plain_blake);
         let payload = RarArchive::encrypt_payload_with(encr.as_ref(), &payload);
         archive.write_file_entry(
             name,

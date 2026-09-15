@@ -534,7 +534,7 @@ impl RarArchive {
         payload: Vec<u8>,
     ) -> RarResult<PreparedEntry> {
         let (header_crc, mut extra_data, stored_hash, encr) =
-            RarArchive::payload_extra_and_crc(ctx.password, plain_crc, plain_blake)?;
+            RarArchive::payload_extra_and_crc(ctx.password, plain_crc, plain_blake);
         if let Some(t) = time_extra {
             extra_data.extend_from_slice(&t);
         }
