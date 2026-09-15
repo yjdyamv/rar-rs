@@ -17,6 +17,7 @@ pub use rar13::Rar13Cipher;
 pub use rar15::Rar15Cipher;
 pub use rar20::Rar20Cipher;
 pub use rar30::Rar30Cipher;
+pub(crate) use rar50::MemberEncryption;
 pub(crate) use rar50::constant_time_eq;
 pub use rar50::{
     Aes256CbcStream, DerivedKeys, EncryptionParams, decrypt_data, derive_header_key, derive_keys,

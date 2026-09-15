@@ -398,10 +398,10 @@ impl RarArchive {
     }
 
     /// Build the header CRC, extra-area records (encryption + BLAKE2sp)
-    /// and stored hash value for a member, plus the encryption parameters
-    /// to reuse for the actual payload encryption (one KDF/salt per
-    /// member). For encrypted members the checksums are MAC'd with the
-    /// hash key, matching WinRAR.
+    /// and stored hash value for a member, plus the per-member encryption
+    /// session reused for the payload (one KDF/salt per member). For
+    /// encrypted members the checksums are MAC'd with the hash key,
+    /// matching WinRAR.
     #[allow(clippy::type_complexity)]
     pub(crate) fn payload_extra_and_crc(
         password: Option<&str>,
@@ -411,21 +411,17 @@ impl RarArchive {
         u32,
         Vec<u8>,
         Option<[u8; 32]>,
-        Option<crypto::EncryptionParams>,
+        Option<crypto::MemberEncryption>,
     )> {
         if let Some(password) = password {
-            let params =
-                crypto::EncryptionParams::generate_for_password(password, ENCR_PBKDF2_ITER_LOG);
-            let header_crc = params.mac_crc32(plain_crc, password)?;
-            let stored_hash = match plain_blake {
-                Some(h) => Some(params.mac_hash32(h, password)?),
-                None => None,
-            };
-            let mut extra = params.to_extra_bytes();
+            let session = crypto::MemberEncryption::generate(password, ENCR_PBKDF2_ITER_LOG);
+            let header_crc = session.mac_crc32(plain_crc);
+            let stored_hash = plain_blake.map(|h| session.mac_hash32(h));
+            let mut extra = session.extra_bytes();
             if let Some(h) = stored_hash {
                 extra.extend(crate::format::rar5::headers::hash_extra_record(h));
             }
-            Ok((header_crc, extra, stored_hash, Some(params)))
+            Ok((header_crc, extra, stored_hash, Some(session)))
         } else {
             let mut extra = Vec::new();
             if let Some(h) = plain_blake {
@@ -435,20 +431,15 @@ impl RarArchive {
         }
     }
 
-    /// Encrypt a member payload with the parameters returned by
-    /// [`Self::payload_extra_and_crc`] (must match the member's stored
-    /// salt).
+    /// Encrypt a member payload with the session returned by
+    /// [`Self::payload_extra_and_crc`].
     pub(crate) fn encrypt_payload_with(
-        password: Option<&str>,
-        params: Option<&crypto::EncryptionParams>,
+        session: Option<&crypto::MemberEncryption>,
         plaintext: &[u8],
-    ) -> RarResult<Vec<u8>> {
-        match (password, params) {
-            (Some(password), Some(params)) => params.encrypt(plaintext, password),
-            (None, None) => Ok(plaintext.to_vec()),
-            _ => Err(RarError::Format(
-                "internal error: encryption parameters mismatch".into(),
-            )),
+    ) -> Vec<u8> {
+        match session {
+            Some(session) => session.encrypt(plaintext),
+            None => plaintext.to_vec(),
         }
     }
 }

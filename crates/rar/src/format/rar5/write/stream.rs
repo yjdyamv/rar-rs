@@ -112,7 +112,6 @@ impl RarArchive {
             reader,
             unpacked_size,
             None,
-            None,
             true,
         )
     }
@@ -147,8 +146,7 @@ impl RarArchive {
         solid: bool,
         reader: &mut File,
         plain_len: u64,
-        encr: Option<&crypto::EncryptionParams>,
-        password: Option<&str>,
+        encr: Option<&crypto::MemberEncryption>,
         progress: bool,
     ) -> RarResult<()> {
         let (mtime, file_flags) =
@@ -172,19 +170,14 @@ impl RarArchive {
             ..Default::default()
         };
 
-        // Derive the AES key once per member. Two independent encryptors
-        // are seeded with it: the probe pass (chunk CRC over the on-disk
-        // ciphertext) and the write pass must produce identical bytes, so
-        // they run separate chains from the same key and IV.
-        let key_iv = match (encr, password) {
-            (Some(params), Some(password)) => Some((params.get_key(password)?, params.iv)),
-            (None, None) => None,
-            _ => {
-                return Err(RarError::Format(
-                    "internal error: encryption parameters mismatch".into(),
-                ));
-            }
-        };
+        // Two independent encryptors are seeded from the session's key/IV:
+        // the probe pass (chunk CRC over the on-disk ciphertext) and the
+        // write pass must produce identical bytes, so they run separate
+        // chains from the same key and IV.
+        let key_iv = encr.map(|session| {
+            let (key, iv) = session.key_iv();
+            (*key, *iv)
+        });
         let mut write_src = payload_stream(&key_iv);
         let mut probe_src = payload_stream(&key_iv);
 
@@ -324,7 +317,7 @@ impl RarArchive {
     }
 
     /// Stream a STORE member directly from disk (bounded memory),
-    /// encrypting on the fly when a password is set.
+    /// encrypting on the fly when a session is set.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn write_store_member(
         &mut self,
@@ -334,15 +327,14 @@ impl RarArchive {
         header_crc: u32,
         extra_data: &[u8],
         stored_hash: Option<[u8; 32]>,
-        encr_params: Option<&crypto::EncryptionParams>,
+        encr: Option<&crypto::MemberEncryption>,
         attrs: u64,
         mtime: u32,
         dict_size_bytes: Option<u64>,
     ) -> RarResult<()> {
         let mut reader = File::open(path)?;
-        let password = self.password.clone();
-        match (password.as_deref(), encr_params) {
-            (Some(password), Some(params)) => self.write_streamed_payload(
+        match encr {
+            Some(session) => self.write_streamed_payload(
                 name,
                 file_size,
                 crypto::zero_padded_len(file_size),
@@ -357,11 +349,10 @@ impl RarArchive {
                 false,
                 &mut reader,
                 file_size,
-                Some(params),
-                Some(password),
+                Some(session),
                 false,
             ),
-            (None, None) => self.write_stored_file(
+            None => self.write_stored_file(
                 name,
                 file_size,
                 header_crc,
@@ -371,9 +362,6 @@ impl RarArchive {
                 extra_data,
                 stored_hash,
             ),
-            _ => Err(RarError::Format(
-                "internal error: encryption parameters mismatch".into(),
-            )),
         }
     }
 
@@ -767,7 +755,7 @@ impl RarArchive {
         if packed_size >= file_size {
             // Compression is a net loss: fall back to streaming STORE.
             self.reset_solid_chain();
-            let (header_crc, mut extra_data, stored_hash, encr_params) =
+            let (header_crc, mut extra_data, stored_hash, encr) =
                 RarArchive::payload_extra_and_crc(
                     self.password.as_deref(),
                     plain_crc,
@@ -786,7 +774,7 @@ impl RarArchive {
                 header_crc,
                 &extra_data,
                 stored_hash,
-                encr_params.as_ref(),
+                encr.as_ref(),
                 attrs,
                 mtime,
                 dict_bytes,
@@ -796,7 +784,7 @@ impl RarArchive {
             return Ok(());
         }
 
-        let (header_crc, mut extra_data, stored_hash, encr_params) =
+        let (header_crc, mut extra_data, stored_hash, encr) =
             RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
         if let Some(ref t) = time_extra {
             extra_data.extend_from_slice(t);
@@ -805,11 +793,10 @@ impl RarArchive {
             extra_data.extend_from_slice(t);
         }
         let mut spill = File::open(&spill_path)?;
-        let password = self.password.clone();
         // Encrypted members store the zero-padded ciphertext length in
         // the header and on disk (the streaming encryptor pads the final
         // partial block); plain members store the packed length as-is.
-        let (packed_size, plain_len) = match encr_params {
+        let (packed_size, plain_len) = match encr {
             Some(_) => (crypto::zero_padded_len(packed_size), packed_size),
             None => (packed_size, packed_size),
         };
@@ -828,8 +815,7 @@ impl RarArchive {
             chain_solid,
             &mut spill,
             plain_len,
-            encr_params.as_ref(),
-            password.as_deref(),
+            encr.as_ref(),
             false,
         )?;
         self.write_member_streams(path)?;
@@ -884,16 +870,16 @@ impl RarArchive {
                 let stream_crc = crc32fast::hash(&data);
                 let (extra, packed) = match self.password.as_deref() {
                     Some(password) => {
-                        let mut params = crypto::EncryptionParams::generate_for_password(
-                            password,
-                            crate::format::rar5::ENCR_PBKDF2_ITER_LOG,
-                        );
                         // Stream CRCs stay plaintext, so the record must not
                         // request hash-MAC'd checksums (flag 0x02).
-                        params.flags = crate::format::rar5::ENCR_FLAG_CHECKSUM;
-                        let mut extra = params.to_extra_bytes();
+                        let session = crypto::MemberEncryption::generate_with_flags(
+                            password,
+                            crate::format::rar5::ENCR_PBKDF2_ITER_LOG,
+                            crate::format::rar5::ENCR_FLAG_CHECKSUM,
+                        );
+                        let mut extra = session.extra_bytes();
                         extra.extend_from_slice(&subdata);
-                        (extra, params.encrypt(&data, password)?)
+                        (extra, session.encrypt(&data))
                     }
                     None => (subdata, data),
                 };

@@ -541,7 +541,7 @@ impl RarArchive {
         if let Some(t) = owner_extra {
             extra_data.extend_from_slice(&t);
         }
-        let payload = RarArchive::encrypt_payload_with(ctx.password, encr.as_ref(), &payload)?;
+        let payload = RarArchive::encrypt_payload_with(encr.as_ref(), &payload);
         Ok(PreparedEntry {
             name: name.to_string(),
             unpacked_size: data_len as u64,

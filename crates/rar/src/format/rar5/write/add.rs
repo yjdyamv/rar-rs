@@ -270,7 +270,7 @@ impl RarArchive {
                 self.write_ctx().meta.blake2,
                 self.cancel.as_deref(),
             )?;
-            let (header_crc, mut extra_data, stored_hash, encr_params) =
+            let (header_crc, mut extra_data, stored_hash, encr) =
                 RarArchive::payload_extra_and_crc(
                     self.password.as_deref(),
                     plain_crc,
@@ -289,7 +289,7 @@ impl RarArchive {
                 header_crc,
                 &extra_data,
                 stored_hash,
-                encr_params.as_ref(),
+                encr.as_ref(),
                 attrs,
                 mtime,
                 dict_bytes,
@@ -389,7 +389,7 @@ impl RarArchive {
             && (filtered.len() as u64) < file_size
         {
             self.reset_solid_chain();
-            let (header_crc, mut extra_data, stored_hash, encr_params) =
+            let (header_crc, mut extra_data, stored_hash, encr) =
                 RarArchive::payload_extra_and_crc(
                     self.password.as_deref(),
                     plain_crc,
@@ -401,11 +401,7 @@ impl RarArchive {
             if let Some(ref t) = owner_extra {
                 extra_data.extend_from_slice(t);
             }
-            let packed_data = RarArchive::encrypt_payload_with(
-                self.password.as_deref(),
-                encr_params.as_ref(),
-                &filtered,
-            )?;
+            let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), &filtered);
             self.write_file_entry(
                 &name,
                 file_size,
@@ -507,7 +503,7 @@ impl RarArchive {
         if packed.len() as u64 >= file_size {
             // Compression is a net loss: fall back to streaming STORE.
             self.reset_solid_chain();
-            let (header_crc, mut extra_data, stored_hash, encr_params) =
+            let (header_crc, mut extra_data, stored_hash, encr) =
                 RarArchive::payload_extra_and_crc(
                     self.password.as_deref(),
                     plain_crc,
@@ -526,7 +522,7 @@ impl RarArchive {
                 header_crc,
                 &extra_data,
                 stored_hash,
-                encr_params.as_ref(),
+                encr.as_ref(),
                 attrs,
                 mtime,
                 dict_bytes,
@@ -536,7 +532,7 @@ impl RarArchive {
             return Ok(());
         }
 
-        let (header_crc, mut extra_data, stored_hash, encr_params) =
+        let (header_crc, mut extra_data, stored_hash, encr) =
             RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake)?;
         if let Some(ref t) = time_extra {
             extra_data.extend_from_slice(t);
@@ -544,11 +540,7 @@ impl RarArchive {
         if let Some(ref t) = owner_extra {
             extra_data.extend_from_slice(t);
         }
-        let packed_data = RarArchive::encrypt_payload_with(
-            self.password.as_deref(),
-            encr_params.as_ref(),
-            &packed,
-        )?;
+        let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), &packed);
         self.write_file_entry(
             &name,
             file_size,
@@ -774,17 +766,12 @@ impl RarArchive {
         self.report_progress(0, data.len() as u64);
         if method == COMP_METHOD_STORE || sample_is_incompressible(data, method) {
             self.reset_solid_chain();
-            let (header_crc, extra_data, stored_hash, encr_params) =
-                RarArchive::payload_extra_and_crc(
-                    self.password.as_deref(),
-                    plain_crc,
-                    plain_blake,
-                )?;
-            let packed_data = RarArchive::encrypt_payload_with(
+            let (header_crc, extra_data, stored_hash, encr) = RarArchive::payload_extra_and_crc(
                 self.password.as_deref(),
-                encr_params.as_ref(),
-                data,
+                plain_crc,
+                plain_blake,
             )?;
+            let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), data);
             self.write_file_entry(
                 &name,
                 data.len() as u64,
@@ -844,17 +831,13 @@ impl RarArchive {
             )?;
             if packed.len() >= data.len() {
                 self.reset_solid_chain();
-                let (header_crc, extra_data, stored_hash, encr_params) =
+                let (header_crc, extra_data, stored_hash, encr) =
                     RarArchive::payload_extra_and_crc(
                         self.password.as_deref(),
                         plain_crc,
                         plain_blake,
                     )?;
-                let packed_data = RarArchive::encrypt_payload_with(
-                    self.password.as_deref(),
-                    encr_params.as_ref(),
-                    data,
-                )?;
+                let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), data);
                 self.write_file_entry(
                     &name,
                     data.len() as u64,
@@ -870,17 +853,13 @@ impl RarArchive {
                     stored_hash,
                 )?;
             } else {
-                let (header_crc, extra_data, stored_hash, encr_params) =
+                let (header_crc, extra_data, stored_hash, encr) =
                     RarArchive::payload_extra_and_crc(
                         self.password.as_deref(),
                         plain_crc,
                         plain_blake,
                     )?;
-                let packed_data = RarArchive::encrypt_payload_with(
-                    self.password.as_deref(),
-                    encr_params.as_ref(),
-                    &packed,
-                )?;
+                let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), &packed);
                 self.write_file_entry(
                     &name,
                     data.len() as u64,

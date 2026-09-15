@@ -521,28 +521,7 @@ impl EncryptionParams {
     /// the hash-key bit (0x0002) so checksums of encrypted files are
     /// MAC'd, matching WinRAR behavior.
     pub fn generate_for_password(password: &str, strength: u8) -> Self {
-        let mut salt = [0u8; ENCR_SALT_SIZE];
-        let mut iv = [0u8; ENCR_IV_SIZE];
-        rand::fill(&mut salt);
-        rand::fill(&mut iv);
-
-        let keys = derive_keys(password, &salt, strength).expect("valid strength");
-        let psw_check = keys.password_check;
-
-        let digest = sha2::Sha256::digest(psw_check);
-        let mut checksum = [0u8; 12];
-        checksum[..8].copy_from_slice(&psw_check);
-        checksum[8..12].copy_from_slice(&digest[..4]);
-
-        EncryptionParams {
-            version: ENCR_VERSION_AES256,
-            flags: ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC,
-            strength,
-            salt,
-            iv,
-            checksum: Some(checksum),
-            iterations: 1u32 << strength,
-        }
+        generate_params_and_keys(password, strength, ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC).0
     }
 
     /// Serialize to the RAR5 extra-area encryption record binary format.
@@ -590,6 +569,92 @@ impl EncryptionParams {
         }
 
         crate::format::rar5::headers::frame_block(&body)
+    }
+}
+
+/// Generate fresh random parameters and derive the key material in the same
+/// pass, so a caller that keeps the keys never runs the KDF twice.
+fn generate_params_and_keys(
+    password: &str,
+    strength: u8,
+    flags: u8,
+) -> (EncryptionParams, DerivedKeys) {
+    let mut salt = [0u8; ENCR_SALT_SIZE];
+    let mut iv = [0u8; ENCR_IV_SIZE];
+    rand::fill(&mut salt);
+    rand::fill(&mut iv);
+
+    let keys = derive_keys(password, &salt, strength).expect("valid strength");
+    let psw_check = keys.password_check;
+
+    let digest = sha2::Sha256::digest(psw_check);
+    let mut checksum = [0u8; 12];
+    checksum[..8].copy_from_slice(&psw_check);
+    checksum[8..12].copy_from_slice(&digest[..4]);
+
+    (
+        EncryptionParams {
+            version: ENCR_VERSION_AES256,
+            flags,
+            strength,
+            salt,
+            iv,
+            checksum: Some(checksum),
+            iterations: 1u32 << strength,
+        },
+        keys,
+    )
+}
+
+/// Per-member encryption session: the ENCR record parameters plus the key
+/// material derived once for this member's random salt.
+///
+/// The header CRC/hash MACs and the payload cipher all reuse the derived
+/// keys, so an encrypted member pays one KDF pass instead of one per
+/// operation (generate, MAC CRC, MAC hash, encrypt).
+pub(crate) struct MemberEncryption {
+    params: EncryptionParams,
+    keys: DerivedKeys,
+}
+
+impl MemberEncryption {
+    /// Fresh random parameters for `password`, with the hash-key flags a
+    /// member record carries.
+    pub(crate) fn generate(password: &str, strength: u8) -> Self {
+        Self::generate_with_flags(password, strength, ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC)
+    }
+
+    /// [`Self::generate`] with explicit ENCR flags: service records ("STM")
+    /// carry the password check only and leave stored CRCs in plaintext.
+    pub(crate) fn generate_with_flags(password: &str, strength: u8, flags: u8) -> Self {
+        let (params, keys) = generate_params_and_keys(password, strength, flags);
+        Self { params, keys }
+    }
+
+    /// The member's ENCR extra record bytes.
+    pub(crate) fn extra_bytes(&self) -> Vec<u8> {
+        self.params.to_extra_bytes()
+    }
+
+    /// MAC a CRC32 value for the stored header CRC.
+    pub(crate) fn mac_crc32(&self, crc: u32) -> u32 {
+        self.keys.mac_crc32(crc)
+    }
+
+    /// MAC a 32-byte hash for the stored hash record.
+    pub(crate) fn mac_hash32(&self, hash: [u8; 32]) -> [u8; 32] {
+        self.keys.mac_hash32(hash)
+    }
+
+    /// AES key and IV for the payload cipher; the streaming writer seeds its
+    /// CBC chains from these.
+    pub(crate) fn key_iv(&self) -> (&[u8; ENCR_KEY_SIZE], &[u8; ENCR_IV_SIZE]) {
+        (&self.keys.key, &self.params.iv)
+    }
+
+    /// Encrypt a member payload with this session's key and IV.
+    pub(crate) fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
+        encrypt_data(plaintext, &self.keys.key, &self.params.iv)
     }
 }
 
@@ -970,6 +1035,46 @@ mod tests {
         let mut no_check = params.clone();
         no_check.checksum = None;
         assert!(no_check.derive_and_verify("anything").unwrap().is_some());
+    }
+
+    /// The write-side session must produce the same ENCR record, MACs and
+    /// ciphertext as the per-call password API over the same parameters: it
+    /// only skips the repeated derivations, not any step.
+    #[test]
+    fn member_encryption_matches_the_password_api() {
+        let password = "hunter2";
+        let session = MemberEncryption::generate(password, 4);
+        let parsed = parse_encryption_extra(&session.extra_bytes())
+            .unwrap()
+            .expect("one ENCR record");
+        assert!(parsed.uses_hash_mac());
+
+        let crc = 0xDEAD_BEEF;
+        assert_eq!(
+            session.mac_crc32(crc),
+            parsed.mac_crc32(crc, password).unwrap()
+        );
+        let hash = [0x5Au8; 32];
+        assert_eq!(
+            session.mac_hash32(hash),
+            parsed.mac_hash32(hash, password).unwrap()
+        );
+        let plaintext = b"member payload ".repeat(9);
+        assert_eq!(
+            session.encrypt(&plaintext),
+            parsed.encrypt(&plaintext, password).unwrap()
+        );
+    }
+
+    /// Service-record sessions ("STM") carry the password check only: stored
+    /// CRCs stay in plaintext.
+    #[test]
+    fn member_encryption_without_hash_mac_keeps_plaintext_crcs() {
+        let session = MemberEncryption::generate_with_flags("hunter2", 4, ENCR_FLAG_CHECKSUM);
+        let parsed = parse_encryption_extra(&session.extra_bytes())
+            .unwrap()
+            .expect("one ENCR record");
+        assert!(!parsed.uses_hash_mac());
     }
 
     #[test]
