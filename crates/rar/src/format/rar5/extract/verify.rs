@@ -26,6 +26,12 @@ impl RarArchive {
             Some(encr) => encr,
             None => return Ok(None),
         };
+        // The key is cached after the first derivation (a scan of a
+        // header-encrypted archive keeps its own per-volume key and does not
+        // populate the cache).
+        if let Some(keys) = self.archive_keys.as_ref() {
+            return Ok(Some(keys.key));
+        }
         let password = match self.password.as_ref() {
             Some(password) => password,
             None => return Ok(None),

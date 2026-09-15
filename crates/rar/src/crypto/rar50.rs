@@ -521,7 +521,14 @@ impl EncryptionParams {
     /// the hash-key bit (0x0002) so checksums of encrypted files are
     /// MAC'd, matching WinRAR behavior.
     pub fn generate_for_password(password: &str, strength: u8) -> Self {
-        generate_params_and_keys(password, strength, ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC).0
+        Self::generate_with_keys(password, strength).0
+    }
+
+    /// [`Self::generate_for_password`] returning the derived key material
+    /// too, so a caller that keeps it (the header-encryption key cache) does
+    /// not run the KDF again per block.
+    pub(crate) fn generate_with_keys(password: &str, strength: u8) -> (Self, DerivedKeys) {
+        generate_params_and_keys(password, strength, ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC)
     }
 
     /// Serialize to the RAR5 extra-area encryption record binary format.

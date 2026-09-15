@@ -138,6 +138,9 @@ pub struct RarArchive {
     pub(crate) header_encryption: bool,
     /// Archive-level encryption parameters when header encryption is on.
     pub(crate) archive_encr: Option<crypto::EncryptionParams>,
+    /// The header-encryption AES key, derived once and reused for every
+    /// block header of the archive (and each of its volumes).
+    pub(crate) archive_keys: Option<crypto::DerivedKeys>,
     /// Recovery record: recovery percent (0-100) when the archive is created
     /// with an inline RAR5 recovery record ("RR" service header).
     pub(crate) recovery_percent: Option<u8>,
@@ -203,6 +206,7 @@ impl RarArchive {
             password,
             header_encryption: false,
             archive_encr: None,
+            archive_keys: None,
             recovery_percent: None,
             recovery_volumes_percent: None,
             recovery_volumes_count: None,
@@ -284,6 +288,35 @@ impl RarArchive {
             return Err(RarError::Cancelled);
         }
         Ok(())
+    }
+
+    /// Forget the archive-level encryption state, so a re-read starts from
+    /// the plaintext leading encryption header.
+    pub(crate) fn clear_archive_encryption(&mut self) {
+        self.header_encryption = false;
+        self.archive_encr = None;
+        self.archive_keys = None;
+    }
+
+    /// The header-encryption AES key: the cached derivation when present,
+    /// otherwise derived from the archive parameters and password and cached
+    /// for the following block headers.
+    pub(crate) fn archive_header_key(&mut self) -> RarResult<[u8; 32]> {
+        if let Some(keys) = self.archive_keys.as_ref() {
+            return Ok(keys.key);
+        }
+        let encr = self
+            .archive_encr
+            .as_ref()
+            .ok_or_else(|| RarError::Format("no archive encryption params".into()))?;
+        let password = self
+            .password
+            .as_deref()
+            .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
+        let keys = encr.derive_keys(password)?;
+        let key = keys.key;
+        self.archive_keys = Some(keys);
+        Ok(key)
     }
 
     // ── Read/Write context accessors ─────────────────────────────────────
@@ -679,29 +712,25 @@ impl RarArchive {
         // header, and the untouched tail into a temporary sibling; streaming
         // keeps memory bounded for multi-GB archives and the original is
         // untouched until the flushed stage replaces it. Header-encrypted
-        // archives get a fresh IV (the on-disk header is `[IV][ciphertext]`).
+        // archives get a fresh IV (the on-disk header is `[IV][ciphertext]`);
+        // the key is derived once and cached.
         let main_start = main_meta.block_start;
         let main_end = main_meta.data_offset;
-        let header_encryption = self.header_encryption;
-        let password = self.password.clone();
-        let archive_encr = self.archive_encr.clone();
+        let header_key = if self.header_encryption {
+            Some(self.archive_header_key()?)
+        } else {
+            None
+        };
         stage_file(
             &path,
             |out| {
                 let mut reader = File::open(&path)?;
                 copy_prefix(&mut reader, out, main_start)?;
-                if header_encryption {
-                    let password = password
-                        .as_deref()
-                        .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
-                    let key = archive_encr
-                        .as_ref()
-                        .ok_or_else(|| RarError::Format("no archive encryption params".into()))?
-                        .get_key(password)?;
+                if let Some(key) = header_key.as_ref() {
                     let mut iv = [0u8; ENCR_IV_SIZE];
                     rand::fill(&mut iv);
                     out.write_all(&iv)?;
-                    out.write_all(&crypto::encrypt_data(&plain, &key, &iv))?;
+                    out.write_all(&crypto::encrypt_data(&plain, key, &iv))?;
                 } else {
                     out.write_all(&plain)?;
                 }
@@ -829,6 +858,7 @@ impl RarArchive {
             password: opts.password,
             header_encryption: opts.encrypt_headers,
             archive_encr: None,
+            archive_keys: None,
             recovery_percent: opts.recovery_percent,
             recovery_volumes_percent: opts.recovery_volumes_percent,
             recovery_volumes_count: opts.recovery_volume_count,

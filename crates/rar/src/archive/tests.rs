@@ -1638,3 +1638,43 @@ fn extract_options_skip_and_allow_unsafe_links() {
         std::path::PathBuf::from("../outside")
     );
 }
+
+/// The header-encryption key is derived once and cached: later block headers
+/// (and the locator patch) reuse it instead of re-running the KDF, and the
+/// cached key must equal a fresh derivation.
+#[test]
+fn header_encryption_key_is_derived_once_and_cached() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hp-key.rar");
+    {
+        let mut ar = RarArchive::create_with_options(
+            &path,
+            crate::options::CreateOptions {
+                encrypt_headers: true,
+                password: Some("pw".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ar.add_bytes("a.bin", b"a", 0).unwrap();
+        ar.close().unwrap();
+    }
+
+    let mut ar = RarArchive::open_with_password(&path, "pw").unwrap();
+    let mut reader = File::open(&path).unwrap();
+    ar.read_main_header(&mut reader).unwrap();
+
+    let expected = ar
+        .archive_encr
+        .as_ref()
+        .unwrap()
+        .derive_keys("pw")
+        .unwrap()
+        .key;
+    assert_eq!(ar.archive_header_key().unwrap(), expected);
+    assert!(
+        ar.archive_keys.is_some(),
+        "the first request must cache the keys"
+    );
+    assert_eq!(ar.archive_header_key().unwrap(), expected);
+}

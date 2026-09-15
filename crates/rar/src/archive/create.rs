@@ -93,9 +93,10 @@ impl RarArchive {
             let password = self.password.as_ref().ok_or_else(|| {
                 RarError::Encrypted("header encryption requires a password".into())
             })?;
-            let encr =
-                crypto::EncryptionParams::generate_for_password(password, ENCR_PBKDF2_ITER_LOG);
+            let (encr, keys) =
+                crypto::EncryptionParams::generate_with_keys(password, ENCR_PBKDF2_ITER_LOG);
             self.archive_encr = Some(encr);
+            self.archive_keys = Some(keys);
         }
         let block = self
             .archive_encr
@@ -117,10 +118,11 @@ impl RarArchive {
         let password = self.password.as_ref().ok_or_else(|| {
             RarError::Encrypted("archive has encrypted headers; provide a password".into())
         })?;
-        if !params.verify_password(password) {
-            return Err(RarError::WrongPassword);
-        }
+        let keys = params
+            .derive_and_verify(password)?
+            .ok_or(RarError::WrongPassword)?;
         self.archive_encr = Some(params);
+        self.archive_keys = Some(keys);
         self.header_encryption = true;
         Ok(())
     }
@@ -138,20 +140,16 @@ impl RarArchive {
     /// Write a block header, wrapping it in `[16-byte IV][AES-256-CBC
     /// encrypted header]` when header encryption is enabled.
     pub(crate) fn write_block_header(&mut self, header_bytes: &[u8]) -> RarResult<()> {
-        let stream = self.stream.as_mut().unwrap();
-        if let Some(ref encr) = self.archive_encr {
-            let password = self
-                .password
-                .as_ref()
-                .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
-            let key = encr.get_key(password)?;
+        if self.archive_encr.is_some() {
+            let key = self.archive_header_key()?;
             let mut iv = [0u8; ENCR_IV_SIZE];
             rand::fill(&mut iv);
             let ciphertext = crypto::encrypt_data(header_bytes, &key, &iv);
+            let stream = self.stream.as_mut().unwrap();
             stream.write_all(&iv)?;
             stream.write_all(&ciphertext)?;
         } else {
-            stream.write_all(header_bytes)?;
+            self.stream.as_mut().unwrap().write_all(header_bytes)?;
         }
         Ok(())
     }
@@ -494,17 +492,15 @@ impl RarArchive {
             .ok_or_else(|| RarError::Format("main header position unknown".into()))?;
 
         // Rebuild the main header: read it back from the stream (plaintext
-        // or decrypted), so the patch also works for in-memory sinks.
-        let plain = if self.header_encryption {
-            let encr = self
-                .archive_encr
-                .as_ref()
-                .ok_or_else(|| RarError::Format("no archive encryption params".into()))?;
-            let password = self
-                .password
-                .as_ref()
-                .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
-            let key = encr.get_key(password)?;
+        // or decrypted), so the patch also works for in-memory sinks. The
+        // header key is derived once (cached) and reused for the read-back
+        // and the rewrite.
+        let header_key = if self.header_encryption {
+            Some(self.archive_header_key()?)
+        } else {
+            None
+        };
+        let plain = if let Some(key) = header_key.as_ref() {
             let stream = self.stream.as_mut().unwrap();
             let mut iv = [0u8; 16];
             stream.seek(SeekFrom::Start(start))?;
@@ -512,7 +508,7 @@ impl RarArchive {
             // Decrypt the first block to learn the header size.
             let mut first = [0u8; 16];
             stream.read_exact(&mut first)?;
-            let first_pt = crypto::decrypt_data(&first, &key, &iv)?;
+            let first_pt = crypto::decrypt_data(&first, key, &iv)?;
             let (hsize, vint_len) = vint::decode_from_slice(&first_pt, 4)
                 .map_err(|e| RarError::Format(format!("main header vint: {e}")))?;
             let total_raw = 4 + vint_len + hsize as usize;
@@ -522,7 +518,7 @@ impl RarArchive {
             if enc_size > 16 {
                 stream.read_exact(&mut full_ct[16..])?;
             }
-            let full_pt = crypto::decrypt_data(&full_ct, &key, &iv)?;
+            let full_pt = crypto::decrypt_data(&full_ct, key, &iv)?;
             full_pt[..total_raw].to_vec()
         } else {
             let stream = self.stream.as_mut().unwrap();
@@ -557,19 +553,10 @@ impl RarArchive {
         )?;
 
         let stream = self.stream.as_mut().unwrap();
-        if self.header_encryption {
-            let encr = self
-                .archive_encr
-                .as_ref()
-                .ok_or_else(|| RarError::Format("no archive encryption params".into()))?;
-            let password = self
-                .password
-                .as_ref()
-                .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
-            let key = encr.get_key(password)?;
+        if let Some(key) = header_key.as_ref() {
             let mut iv = [0u8; 16];
             rand::fill(&mut iv);
-            let ciphertext = crypto::encrypt_data(&new_header, &key, &iv);
+            let ciphertext = crypto::encrypt_data(&new_header, key, &iv);
             stream.seek(SeekFrom::Start(start))?;
             stream.write_all(&iv)?;
             stream.write_all(&ciphertext)?;

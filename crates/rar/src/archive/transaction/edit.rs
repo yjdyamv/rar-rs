@@ -210,8 +210,7 @@ impl RarArchive {
             self.stream = Some(Box::new(file));
             self.write_ctx_mut().locator.quick_open_entries.clear();
             // Rewriting rediscovers header encryption from the file itself.
-            self.header_encryption = false;
-            self.archive_encr = None;
+            self.clear_archive_encryption();
 
             let result = self.rewrite_blocks(
                 &mut reader,
@@ -296,8 +295,7 @@ impl RarArchive {
     /// erase-everything path is covered too.
     pub(crate) fn main_header_is_locked(&mut self) -> RarResult<bool> {
         let mut reader = File::open(&self.path)?;
-        self.header_encryption = false;
-        self.archive_encr = None;
+        self.clear_archive_encryption();
         let main = self.read_main_header(&mut reader)?;
         Ok(main.parsed.flags & ARCHIVE_FLAG_LOCKED != 0)
     }

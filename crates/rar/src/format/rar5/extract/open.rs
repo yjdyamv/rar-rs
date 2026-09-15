@@ -765,8 +765,7 @@ mod tests {
         // Re-reading an already-keyed archive resets the encryption state
         // first (like the locked check): the leading ENCR block is plaintext
         // and must parse as such.
-        ar.header_encryption = false;
-        ar.archive_encr = None;
+        ar.clear_archive_encryption();
         let mut reader = std::io::Cursor::new(bytes);
         let err = match ar.read_main_header(&mut reader) {
             Err(error) => error,
