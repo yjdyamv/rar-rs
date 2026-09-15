@@ -16,7 +16,8 @@ use super::emit::{encode_block, encode_empty_block};
 #[cfg(feature = "parallel")]
 use super::parse::find_matches_in_range;
 use super::parse::{
-    OPTIMAL_PARSE_PASSES, find_block_end_adaptive, find_matches_optimal, find_matches_with_tail,
+    EMITTED_BLOCK_SIZE, OPTIMAL_PARSE_PASSES, find_block_end_adaptive, find_matches_optimal,
+    find_matches_with_tail,
 };
 
 #[cfg(feature = "parallel")]
@@ -25,16 +26,6 @@ use crate::codec::common::match_finder;
 use crate::error::RarError;
 use crate::error::RarResult;
 use crate::version::ArchiveVersion;
-
-/// Cap for grouping parsed symbols into *emitted* blocks. The RAR5 size
-/// field allows blocks up to 4 GiB, so this is purely an encoder choice:
-/// on distribution-stable data (repetitive text) merging many parse blocks
-/// into one emitted block amortises the per-block Huffman table definitions
-/// (WinRAR writes one block per whole member there); on heterogeneous data
-/// the tables stay per-parse-block because the drift check keeps the parse
-/// blocks small. Only the emitted grouping is larger — the parse itself is
-/// unchanged, so token choices are byte-identical to the 128 KiB cap.
-const EMITTED_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
 /// Default input chunk size for the encoder. Processing input in bounded
 /// slices keeps the symbol table (and match finder) memory proportional to

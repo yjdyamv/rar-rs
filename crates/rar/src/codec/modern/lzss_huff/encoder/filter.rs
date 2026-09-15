@@ -11,7 +11,8 @@ use super::*;
 use super::super::{FILTER_ARM, FILTER_DELTA, FILTER_E8, FILTER_E8E9};
 use super::emit::{encode_block, encode_empty_block};
 use super::parse::{
-    OPTIMAL_PARSE_PASSES, find_block_end, find_matches_optimal, find_matches_with_tail,
+    EMITTED_BLOCK_SIZE, OPTIMAL_PARSE_PASSES, find_block_end_adaptive, find_matches_optimal,
+    find_matches_with_tail,
 };
 use crate::codec::common::filters::apply_filter_encode;
 use crate::error::{RarError, RarResult};
@@ -211,7 +212,7 @@ pub fn encode_with_filters(
 
         let mut block_start = 0usize;
         while block_start < symbols.len() {
-            let (block_end, _) = find_block_end(&symbols, block_start, MAX_BLOCK_SIZE);
+            let (block_end, _) = find_block_end_adaptive(&symbols, block_start, EMITTED_BLOCK_SIZE);
             let is_last = is_final && block_end >= symbols.len();
             let block_data = encode_block(&symbols[block_start..block_end], is_last, variant);
             output.extend(block_data);

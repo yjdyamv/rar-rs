@@ -1520,44 +1520,23 @@ fn parse_one_block(
     symbols
 }
 
-pub(super) fn find_block_end(
-    symbols: &[Symbol],
-    start: usize,
-    max_uncompressed: usize,
-) -> (usize, usize) {
-    let mut count = 0usize;
-    let mut last_len = 0u32;
-    for (offset, symbol) in symbols[start..].iter().enumerate() {
-        let i = start + offset;
-        match symbol {
-            Symbol::Literal(_) => {
-                count += 1;
-                last_len = 0;
-            }
-            Symbol::Match { distance, length } => {
-                last_len = apply_length_bonus(*length, *distance);
-                count += last_len as usize;
-            }
-            Symbol::CacheRef { length, .. } => {
-                last_len = *length;
-                count += *length as usize;
-            }
-            Symbol::Repeat => {
-                count += last_len as usize;
-            }
-            Symbol::Filter { .. } => {}
-        }
-        if count >= max_uncompressed {
-            return (i + 1, count);
-        }
-    }
-    (symbols.len(), count)
-}
+/// Cap for grouping parsed symbols into *emitted* blocks. The RAR5 size
+/// field allows blocks up to 4 GiB, so this is purely an encoder choice:
+/// on distribution-stable data (repetitive text) merging many parse blocks
+/// into one emitted block amortises the per-block Huffman table definitions
+/// (WinRAR writes one block per whole member there); on heterogeneous data
+/// the tables stay per-parse-block because the drift check keeps the parse
+/// blocks small. Only the emitted grouping is larger — the parse itself is
+/// unchanged, so token choices are byte-identical to the 128 KiB cap.
+///
+/// This is the one emitted-block policy every encode pipeline uses (plain
+/// and filtered, sequential and multi-threaded); [`find_block_end_adaptive`]
+/// is its splitter.
+pub(super) const EMITTED_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
-/// Adaptive variant of [`find_block_end`]: group symbols into emitted blocks
-/// of up to `cap` uncompressed bytes, but close the block early when the
-/// symbol stream's *local* literal distribution drifts between adjacent
-/// ~64 KiB sub-spans.
+/// Group symbols into emitted blocks of up to `cap` uncompressed bytes, but
+/// close the block early when the symbol stream's *local* literal
+/// distribution drifts between adjacent ~64 KiB sub-spans.
 ///
 /// The parse-side splitter compares each sub-block against the cumulative
 /// counts of the open block, which cannot see section boundaries once the
