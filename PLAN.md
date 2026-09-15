@@ -99,7 +99,18 @@ fuzz 使用一个可枚举的小子集，于是删除 feature 与 `rar40`/`rar50
   `codec::common::bitstream::BitWriter`（同为 MSB-first，`finish()`→`into_bytes()`，rar15 的 usize
   位宽调用点改 u8）；新增 `codec/legacy/tables.rs` 共享 RAR20/29 完全相同的 LENGTH 槽表，OFFSET 表因
   槽数不同（48 vs 60）各留副本。解码器与 match finder 按 rars 逐文件隔离设计不动。验证：全量测试 +
-  本机 WinRAR 互操作（35/6）字节不变。
+  本机 WinRAR 互操作（35/6）字节不变。该文件 2026-09 晚些已深化为 `codec/legacy/encode_core.rs`
+  （槽窗口查找、`match_length_adjustment`、`push_old_offset`、`LevelToken` + `LevelAlphabet` trait
+  与通用 level 表 token 生成；两个编码器与解码器共用，见下条）。
+- **架构收敛（2026-09，两轮八项）**：跨层重复收敛为单一 owner——`format/rar4/envelope.rs`
+  （RAR4 块信封/`-hp` 头解密唯一读取器）、`codec/legacy/lz.rs`（RAR20/RAR29 共享位读器/Huffman/
+  滑窗）、`ExtractionReport`（写入方回报 written/skipped，删 CLI 预测式 `count_extracted`/
+  `destination_key`）、`LegacyCodec`（legacy 别名折叠与读/写/密码/repack 分派）、`ops::ExtractRequest`
+  （四 `x`/`e` 臂的唯一请求值；磁盘抽取清空内存尺寸上限，修掉 `rar x` 与 `unrar x` 的分叉）、
+  `EntryId::resolve` + 单一 catalog token（读/编辑同一身份约定）、`codec/legacy/encode_core.rs`
+  （槽/level 核心，差分探针对拍 30 组配置逐字节一致 + 逐 level golden 字节测试）、公开
+  `rar_rs::StagedCopy`（CLI `rar u`/`f`/`a` 的替换事务；`bin/rar/staging.rs` 删除）。全部经双轴
+  code review 并出修复提交。
 - **审查修复（2026-09，三项正确性 + 一项契约）**：① RAR4 目录头滚动循环补 `rolled` 守卫
   （`format/rar4/write/pipeline.rs`，`-v` 过小不再死循环，报 `InvalidOption`）；② RAR5 目录/重定向
   头新增 `ensure_rar5_volume_space`（预留 EOA、必要时滚卷、装不下报错），并补上重定向头缺失的

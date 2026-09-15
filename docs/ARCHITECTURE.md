@@ -66,10 +66,24 @@ delete / rename 字节级复制保留的块、只重发射变更的块，丢弃�
 
 ## 3 · 设计笔记
 
-**有界内存。** 大成员从磁盘流式处理：STORE 直接流式，压缩走 4 MiB 分块 + 共享 LZ 窗口，
-提取时流式写出而不物化整个文件。压缩发射块合并到 ≤ 4 MiB（每块独立 Huffman 表，符号流
-局部分布漂移时提前闭合），解析侧分块预算上限 128 KiB（`MAX_BLOCK_SIZE`）。最坏内存约等于
-packed 大小加一个发射块，而不是正比于整个文件的符号表。
+**有界内存。** 成员从不整块进内存：STORE（含加密 STORE）按 1 MiB 块直拷进归档；压缩成员走
+**spill 文件**——逐窗压缩并把压缩字节先写进归档旁的临时文件（`SpillGuard`，`*.spill-*`），同时
+算明文 CRC/BLAKE2；等 packed 大小与校验和齐了才写成员头，再把 spill 流式拷进归档
+（`rar5/write/stream.rs::add_file_streaming`；RAR4 v29 同理，见
+`format/rar4/write/pipeline.rs::add_rar4_file_streaming`）。磁盘上因此有一份 packed 大小的中间
+文件，内存只驻留**编码器状态 + I/O 缓冲**：近程 tail ≤ `min(dict, NEAR_WINDOW_MAX = 8 MiB)`；
+短程 match finder 的 head/prev（或 BT4 son，页按插入惰性提交）与近程窗口同阶；长程采样历史
+（`-mcl` 风格）≤ `min(dict, LONG_RANGE_MAX = 128 MiB)` 字节 + 每 16 B 一个样本、≤50% 负载的
+采样表（随数据量增长；默认 32 MiB 字典下 hist ≤ 32 MiB）；并行时（`parallel` + `-mt>1`）成员
+按 `clamp(8 MiB × 线程数, 24 MiB, 64 MiB)` 的工作窗切片、每片再带 ≤ 8 MiB tail 上下文，顺序
+路径每个 4 MiB 读块立即 flush（工作缓冲 ≈ 4 MiB 读 + 1 MiB BufReader）；拷贝阶段 1 MiB 缓冲。
+实测（release，1 GiB 高度可压成员，默认 32 MiB 字典）：m1 顺序峰值 ≈ 130 MB、m3/m5 顺序 ≈ 365 MB
+（BT4 son 数组 + 长程采样历史为主），`-mt8` m3 ≈ 840 MB——内存与成员大小无关，但随线程数增长
+（每片 tail + 工作窗）。压缩发射块合并到 ≤ 4 MiB
+（每块独立 Huffman 表，符号流局部分布漂移时提前闭合），解析侧分块预算上限 128 KiB
+（`MAX_BLOCK_SIZE`，只为价格局部化）。内存 API（`encode()`/`encode_chunked`，ADR 0003 决策 3
+保留的公开面）仍物化输入与输出（packed 大小 + 一个发射块）；提取侧对称：解码直接写目标并裁剪
+窗口（legacy `MAX_HISTORY` 1/4 MiB，RAR5 = 字典），不物化成员。
 
 **安全提取（默认开启）。** 名字清洗（拒绝 `..`、绝对路径、盘符 / UNC、NUL，Windows 上还
 拒绝尾点 / 尾空格与保留设备名）→ 校验解析后的路径落在目标目录内（先校验后建目录）→ 单文件
