@@ -5,7 +5,6 @@ use crate::common;
 use crate::error::CliResult;
 use crate::info;
 use crate::ops;
-use crate::output;
 /// Print a member to stdout (like `rar p`).
 pub(crate) fn cmd_print(args: &PrintArgs) -> CliResult<()> {
     let max_dict_size = dict_cap(args.dict_extract.as_deref())?;
@@ -18,16 +17,12 @@ fn dict_cap(spec: Option<&str>) -> Result<Option<u64>, String> {
     spec.map(common::parse_mdx_size).transpose()
 }
 
-/// Apply `-om` (Mark of the Web propagation) to the reader before
-/// extraction; a no-op unless the switch is present.
-fn apply_mark_web(
-    rar: &mut rar_rs::ArchiveReader,
-    misc: &common::MiscSwitches,
-) -> Result<(), String> {
-    if let Some(spec) = misc.mark_web.as_deref() {
-        rar.set_mark_of_the_web(common::parse_mark_web(spec)?);
+/// `-om` (Mark of the Web propagation) parsed from the shared switches.
+fn mark_web(misc: &common::MiscSwitches) -> Result<Option<rar_rs::MarkOfTheWeb>, String> {
+    match misc.mark_web.as_deref() {
+        Some(spec) => common::parse_mark_web(spec),
+        None => Ok(None),
     }
-    Ok(())
 }
 
 /// Extract with full paths (like `rar x`).
@@ -36,34 +31,28 @@ pub(crate) fn cmd_extract(
     misc: &common::MiscSwitches,
     assume_yes: bool,
 ) -> CliResult<()> {
-    if let Some(threads) = args.threads {
-        rar_rs::set_extraction_threads(threads);
-    }
     let max_dict_size = dict_cap(args.dict_extract.as_deref())?;
     let (names, dest) = resolve_target(args, misc)?;
-    let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    // `-so`: write the extracted members to stdout (one stream) instead of
-    // to disk — handy for piping. Directories carry no data.
-    if args.stdout {
-        return ops::extract_to_stdout(&mut rar, &names, max_dict_size);
-    }
-    apply_mark_web(&mut rar, misc)?;
-    let options = rar_rs::ExtractOptions {
-        skip_existing: output::skip_existing(
-            args.overwrite.as_deref(),
-            assume_yes,
-            args.auto_rename,
-        ),
+    let request = ops::ExtractRequest {
+        names,
+        dest,
+        stdout: args.stdout,
+        threads: args.threads,
+        max_dict_size,
+        mark_web: mark_web(misc)?,
+        overwrite: args.overwrite.clone(),
+        assume_yes,
         auto_rename: args.auto_rename,
         keep_broken: args.keep_broken,
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
-        max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
-        ..Default::default()
+        ..ops::ExtractRequest::default()
     };
-    let report = ops::extract_members(&mut rar, &dest, &names, options)?;
-    write_extract_logs(misc, &rar, args, &names)?;
-    info!("{}", extract_summary(report.written_count(), &dest));
+    let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
+    if let Some(report) = ops::extract(&mut rar, &request)? {
+        write_extract_logs(misc, &rar, args, &request.names)?;
+        info!("{}", extract_summary(report.written_count(), &request.dest));
+    }
     Ok(())
 }
 
@@ -122,32 +111,28 @@ pub(crate) fn cmd_extract_flat(
     misc: &common::MiscSwitches,
     assume_yes: bool,
 ) -> CliResult<()> {
-    if let Some(threads) = args.threads {
-        rar_rs::set_extraction_threads(threads);
-    }
     let max_dict_size = dict_cap(args.dict_extract.as_deref())?;
     let (names, dest) = resolve_target(args, misc)?;
-    let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    if args.stdout {
-        return ops::extract_to_stdout(&mut rar, &names, max_dict_size);
-    }
-    apply_mark_web(&mut rar, misc)?;
-    let options = rar_rs::ExtractOptions {
-        flat_paths: true,
-        skip_existing: output::skip_existing(
-            args.overwrite.as_deref(),
-            assume_yes,
-            args.auto_rename,
-        ),
+    let request = ops::ExtractRequest {
+        names,
+        dest,
+        flat: true,
+        stdout: args.stdout,
+        threads: args.threads,
+        max_dict_size,
+        mark_web: mark_web(misc)?,
+        overwrite: args.overwrite.clone(),
+        assume_yes,
         auto_rename: args.auto_rename,
         keep_broken: args.keep_broken,
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
-        max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
-        ..Default::default()
+        ..ops::ExtractRequest::default()
     };
-    let report = ops::extract_members(&mut rar, &dest, &names, options)?;
-    write_extract_logs(misc, &rar, args, &names)?;
-    info!("{}", extract_summary(report.written_count(), &dest));
+    let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
+    if let Some(report) = ops::extract(&mut rar, &request)? {
+        write_extract_logs(misc, &rar, args, &request.names)?;
+        info!("{}", extract_summary(report.written_count(), &request.dest));
+    }
     Ok(())
 }

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use crate::error::{CliError, CliResult};
+use crate::output;
 use rar_rs::version::ArchiveVersion;
 use rar_rs::{ArchiveReader, EntryId, EntryRef, ExtractOptions, ExtractionReport};
 
@@ -629,6 +630,87 @@ pub(crate) fn verify_options() -> ExtractOptions {
     }
 }
 
+/// One disk-extraction request: the four `x`/`e` arms of both binaries build
+/// this value and hand it to [`extract`], so the flag-to-options assembly —
+/// including the streaming rule that disk extraction imposes no in-memory
+/// size caps — has one owner.
+#[derive(Debug, Default)]
+pub struct ExtractRequest {
+    /// Members to extract (empty = every entry).
+    pub names: Vec<String>,
+    /// Destination directory (unused by the stdout mode).
+    pub dest: PathBuf,
+    /// Flat extraction (basename only, like `e`).
+    pub flat: bool,
+    /// Write the selected members to stdout (like `-so`) instead of files.
+    pub stdout: bool,
+    /// Extraction worker count (like `-mt<N>`).
+    pub threads: Option<usize>,
+    /// Raised dictionary cap (like `-mdx<N>`).
+    pub max_dict_size: Option<u64>,
+    /// Mark of the Web propagation (like `-om`).
+    pub mark_web: Option<rar_rs::MarkOfTheWeb>,
+    /// Overwrite policy (like `-o+` / `-o-`).
+    pub overwrite: Option<String>,
+    /// Non-interactive confirmation (the `-o+` default when piped).
+    pub assume_yes: bool,
+    pub auto_rename: bool,
+    pub keep_broken: bool,
+    pub skip_links: bool,
+    pub allow_unsafe_links: bool,
+    pub set_creation_time: bool,
+    pub set_access_time: bool,
+}
+
+impl ExtractRequest {
+    /// The library options for this request. Disk extraction is fully
+    /// streaming, so the in-memory size caps do not apply (matching UnRAR
+    /// and WinRAR, which extract members of any size); the dictionary cap
+    /// stays, because it bounds decoder memory and WinRAR itself refuses
+    /// dictionaries over 4 GiB unless `-mdx` raises it.
+    fn options(&self) -> ExtractOptions {
+        ExtractOptions {
+            flat_paths: self.flat,
+            max_unpacked_bytes: None,
+            max_total_unpacked_bytes: None,
+            max_dict_size: self
+                .max_dict_size
+                .or(Some(ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
+            skip_existing: output::skip_existing(
+                self.overwrite.as_deref(),
+                self.assume_yes,
+                self.auto_rename,
+            ),
+            auto_rename: self.auto_rename,
+            keep_broken: self.keep_broken,
+            set_creation_time: self.set_creation_time,
+            set_access_time: self.set_access_time,
+            skip_links: self.skip_links,
+            allow_unsafe_links: self.allow_unsafe_links,
+            ..Default::default()
+        }
+    }
+}
+
+/// Run one extraction request: install the thread budget and Mark of the
+/// Web, then either stream the selected members to stdout or extract them to
+/// disk. The report is `None` for the stdout mode (nothing lands on disk).
+pub fn extract(
+    rar: &mut ArchiveReader,
+    request: &ExtractRequest,
+) -> CliResult<Option<ExtractionReport>> {
+    if let Some(threads) = request.threads {
+        rar_rs::set_extraction_threads(threads);
+    }
+    rar.set_mark_of_the_web(request.mark_web.clone());
+    if request.stdout {
+        extract_to_stdout(rar, &request.names, request.max_dict_size)?;
+        return Ok(None);
+    }
+    let report = extract_members(rar, &request.dest, &request.names, request.options())?;
+    Ok(Some(report))
+}
+
 /// Extract the whole archive, or only the members whose stored path, mask or
 /// directory prefix matches one of `names` (see [`crate::selector`]), using
 /// the same options. Directory entries are selected too, so selecting a
@@ -768,7 +850,7 @@ pub fn print_members(
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_names_and_dest, inferred_archive_paths, verify_options};
+    use super::{ExtractRequest, extract_names_and_dest, inferred_archive_paths, verify_options};
     use rar_rs::ExtractOptions;
 
     /// `t` streams every member to a sink, so the materializing read caps
@@ -784,6 +866,28 @@ mod tests {
             options.max_dict_size,
             Some(ExtractOptions::DEFAULT_MAX_DICT_SIZE)
         );
+    }
+
+    /// Disk extraction streams, so the request clears the in-memory size caps
+    /// (the old `rar x`/`rar e` arms kept the 4 GiB/32 GiB read defaults,
+    /// refusing members `unrar x` extracted) and keeps the dictionary cap;
+    /// an explicit `-mdx` cap wins over the default.
+    #[test]
+    fn extraction_request_clears_the_read_size_caps() {
+        let options = ExtractRequest::default().options();
+        assert_eq!(options.max_unpacked_bytes, None);
+        assert_eq!(options.max_total_unpacked_bytes, None);
+        assert_eq!(
+            options.max_dict_size,
+            Some(ExtractOptions::DEFAULT_MAX_DICT_SIZE)
+        );
+
+        let raised = 8 * 1024 * 1024 * 1024;
+        let request = ExtractRequest {
+            max_dict_size: Some(raised),
+            ..ExtractRequest::default()
+        };
+        assert_eq!(request.options().max_dict_size, Some(raised));
     }
 
     /// A positional extraction destination is recognized through

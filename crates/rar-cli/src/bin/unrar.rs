@@ -384,47 +384,32 @@ fn cmd_extract(
     misc: &common::MiscSwitches,
     assume_yes: bool,
 ) -> CliResult<()> {
-    if let Some(threads) = args.threads {
-        rar_rs::set_extraction_threads(threads);
-    }
     let (names, dest) = resolve_target(args, misc)?;
-    let mut rar = ops::open_reader(&args.archive, password)?;
-    rar.set_mark_of_the_web(motw);
-
-    // `-so`: write the extracted members to stdout (one stream) instead of
-    // to disk — handy for piping. Directories carry no data.
-    if args.stdout {
-        return ops::extract_to_stdout(&mut rar, &names, max_dict_size);
-    }
-
-    let options = rar_rs::ExtractOptions {
-        // Extraction is fully streaming: no per-member or total
-        // size caps (WinRAR's UnRAR extracts any size).
-        max_unpacked_bytes: None,
-        max_total_unpacked_bytes: None,
-        flat_paths: args.flat,
-        skip_existing: output::skip_existing(
-            args.overwrite.as_deref(),
-            assume_yes,
-            args.auto_rename,
-        ),
+    let request = ops::ExtractRequest {
+        names,
+        dest,
+        stdout: args.stdout,
+        threads: args.threads,
+        max_dict_size,
+        mark_web: motw,
+        overwrite: args.overwrite.clone(),
+        assume_yes,
         auto_rename: args.auto_rename,
         keep_broken: args.keep_broken,
         set_creation_time: ts.save_ctime,
         set_access_time: ts.save_atime,
-        // WinRAR refuses dictionaries above 4 GiB unless -mdx raises
-        // the cap; None here means "use the default cap".
-        max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
-        ..Default::default()
+        ..ops::ExtractRequest::default()
     };
-    let report = ops::extract_members(&mut rar, &dest, &names, options)?;
-    info!(
-        "Extracted {} entries to {}",
-        report.written_count(),
-        dest.display()
-    );
+    let mut rar = ops::open_reader(&args.archive, password)?;
+    if let Some(report) = ops::extract(&mut rar, &request)? {
+        info!(
+            "Extracted {} entries to {}",
+            report.written_count(),
+            request.dest.display()
+        );
+    }
     Ok(())
 }
 
@@ -438,35 +423,31 @@ fn cmd_extract_flat(
     assume_yes: bool,
 ) -> CliResult<()> {
     let (names, dest) = resolve_target(args, misc)?;
-    let mut rar = ops::open_reader(&args.archive, password)?;
-    rar.set_mark_of_the_web(motw);
-    if args.stdout {
-        return ops::extract_to_stdout(&mut rar, &names, max_dict_size);
-    }
-    let options = rar_rs::ExtractOptions {
-        flat_paths: true,
-        max_unpacked_bytes: None,
-        max_total_unpacked_bytes: None,
-        skip_existing: output::skip_existing(
-            args.overwrite.as_deref(),
-            assume_yes,
-            args.auto_rename,
-        ),
+    let request = ops::ExtractRequest {
+        names,
+        dest,
+        flat: true,
+        stdout: args.stdout,
+        threads: args.threads,
+        max_dict_size,
+        mark_web: motw,
+        overwrite: args.overwrite.clone(),
+        assume_yes,
         auto_rename: args.auto_rename,
         keep_broken: args.keep_broken,
         set_creation_time: ts.save_ctime,
         set_access_time: ts.save_atime,
-        max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
-        ..Default::default()
     };
-    let report = ops::extract_members(&mut rar, &dest, &names, options)?;
-    info!(
-        "Extracted {} entries to {}",
-        report.written_count(),
-        dest.display()
-    );
+    let mut rar = ops::open_reader(&args.archive, password)?;
+    if let Some(report) = ops::extract(&mut rar, &request)? {
+        info!(
+            "Extracted {} entries to {}",
+            report.written_count(),
+            request.dest.display()
+        );
+    }
     Ok(())
 }
 
