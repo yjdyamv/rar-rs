@@ -6,7 +6,9 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::archive::{ArchiveEntry, RarArchive, StreamRecord};
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::{ArchiveHeader, RawBlock, parse_service_block_name, quick_open};
+use crate::format::rar5::headers::{
+    ArchiveHeader, BlockMeta, RawBlock, parse_service_block_name, quick_open,
+};
 use crate::format::rar5::{
     BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, BLOCK_TYPE_ARCHIVE_HEADER,
     BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
@@ -231,7 +233,65 @@ impl CatalogBuilder {
     }
 }
 
+/// The archive's leading blocks: the parsed main archive header plus the
+/// verbatim bytes of a leading plaintext encryption header (header-encrypted
+/// archives), which rewrites re-emit.
+pub(crate) struct MainHeader {
+    pub(crate) meta: BlockMeta,
+    pub(crate) parsed: ArchiveHeader,
+    pub(crate) encrypt_header: Option<Vec<u8>>,
+}
+
 impl RarArchive {
+    /// Read the archive start: the optional plaintext encryption header
+    /// (verifying the password and keeping its key for the following blocks),
+    /// then the main archive header. `reader` may be positioned anywhere;
+    /// this seeks to the archive start (after any SFX stub) and leaves it
+    /// right after the main header. Every caller that opens a fresh reader at
+    /// the archive uses this one opener, so the encryption branch and the
+    /// missing-header error exist once.
+    pub(crate) fn read_main_header<R: Read + Seek>(
+        &mut self,
+        reader: &mut R,
+    ) -> RarResult<MainHeader> {
+        reader.seek(SeekFrom::Start(
+            self.sfx_offset + RAR5_SIGNATURE.len() as u64,
+        ))?;
+        let missing = || RarError::Format("archive is missing the main header".into());
+        let first =
+            crate::format::rar5::headers::read_block(reader, self.archive_block_key()?.as_ref())?
+                .ok_or_else(missing)?;
+        match first.block_type {
+            BLOCK_TYPE_ENCRYPT_HEADER => {
+                let params = crypto::parse_archive_encrypt_header(&first.raw)?;
+                self.handle_archive_encrypt_header(params)?;
+                let meta = crate::format::rar5::headers::read_block(
+                    reader,
+                    self.archive_block_key()?.as_ref(),
+                )?
+                .ok_or_else(missing)?;
+                if meta.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
+                    return Err(missing());
+                }
+                let parsed = ArchiveHeader::from_raw(&meta.raw)?;
+                Ok(MainHeader {
+                    meta,
+                    parsed,
+                    encrypt_header: Some(first.header_bytes),
+                })
+            }
+            BLOCK_TYPE_ARCHIVE_HEADER => {
+                let parsed = ArchiveHeader::from_raw(&first.raw)?;
+                Ok(MainHeader {
+                    meta: first,
+                    parsed,
+                    encrypt_header: None,
+                })
+            }
+            _ => Err(missing()),
+        }
+    }
+
     /// Full RAR5 scan: one catalog walk serves single-volume archives and
     /// volume sets.
     pub(crate) fn open_read_rar5(&mut self) -> RarResult<()> {
@@ -603,6 +663,76 @@ mod tests {
         let ar = RarArchive::open(&path).unwrap();
         assert_eq!(ar.entries.len(), 1, "continuation blocks are one member");
         assert_eq!(ar.entries[0].chunks.len(), 4);
+    }
+
+    /// The one opener reads both plain and header-encrypted archives and
+    /// reports the verbatim encryption header for rewrites.
+    #[test]
+    fn read_main_header_parses_plain_and_header_encrypted_archives() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let plain = dir.path().join("plain.rar");
+        {
+            let mut ar =
+                RarArchive::create_with_options(&plain, crate::options::CreateOptions::default())
+                    .unwrap();
+            ar.add_bytes("a.bin", b"a", 0).unwrap();
+            ar.close().unwrap();
+        }
+        let mut ar = RarArchive::open(&plain).unwrap();
+        let mut reader = File::open(&plain).unwrap();
+        let main = ar.read_main_header(&mut reader).unwrap();
+        assert_eq!(main.meta.block_type, BLOCK_TYPE_ARCHIVE_HEADER);
+        assert!(main.encrypt_header.is_none());
+        assert!(!ar.header_encryption);
+
+        let encrypted = dir.path().join("encrypted.rar");
+        {
+            let mut ar = RarArchive::create_with_options(
+                &encrypted,
+                crate::options::CreateOptions {
+                    encrypt_headers: true,
+                    password: Some("secret".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            ar.add_bytes("a.bin", b"a", 0).unwrap();
+            ar.close().unwrap();
+        }
+        let mut ar = RarArchive::open_with_password(&encrypted, "secret").unwrap();
+        let mut reader = File::open(&encrypted).unwrap();
+        let main = ar.read_main_header(&mut reader).unwrap();
+        assert_eq!(main.meta.block_type, BLOCK_TYPE_ARCHIVE_HEADER);
+        assert!(main.encrypt_header.is_some());
+        assert!(ar.header_encryption);
+    }
+
+    /// A stream whose first block is not the archive header is rejected by
+    /// the opener (every caller shares this error path).
+    #[test]
+    fn read_main_header_requires_the_archive_header_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-main.rar");
+        let mut bytes = RAR5_SIGNATURE.to_vec();
+        bytes.extend_from_slice(
+            &FileHeader {
+                name: "a.bin".into(),
+                ..Default::default()
+            }
+            .to_bytes(),
+        );
+        bytes.extend_from_slice(&EndOfArchiveHeader { flags: 0 }.to_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut ar = RarArchive::open(&path).unwrap();
+        let mut reader = File::open(&path).unwrap();
+        let err = match ar.read_main_header(&mut reader) {
+            Err(error) => error,
+            Ok(_) => panic!("a stream without a main header must be rejected"),
+        };
+        assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
+        assert!(err.to_string().contains("missing the main header"));
     }
 
     /// A failed rebuild must leave the quick-open flag alone: clearing it up

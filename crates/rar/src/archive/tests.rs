@@ -724,7 +724,10 @@ fn in_memory_sink_archive_is_well_formed() {
             break;
         }
     }
-    assert_eq!(types.first(), Some(&BLOCK_TYPE_ARCHIVE_HEADER));
+    assert_eq!(
+        types.first(),
+        Some(&crate::format::rar5::BLOCK_TYPE_ARCHIVE_HEADER)
+    );
     assert!(types.contains(&BLOCK_TYPE_FILE_HEADER), "{types:?}");
     assert!(types.contains(&BLOCK_TYPE_SERVICE_HEADER), "{types:?}");
     assert_eq!(types.last(), Some(&BLOCK_TYPE_END_ARCHIVE), "{types:?}");

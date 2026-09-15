@@ -8,11 +8,11 @@ use crate::format::rar5::headers::{
 };
 use crate::format::rar5::vint;
 use crate::format::rar5::{
-    ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA, COMP_INFO_DICT_MASK,
-    COMP_INFO_DICT_SHIFT, COMP_INFO_METHOD_MASK, COMP_INFO_METHOD_SHIFT, COMP_INFO_SOLID_BIT,
-    COMP_INFO_VERSION_MASK, EXTRA_FILE_HASH, EXTRA_FILE_OWNER, EXTRA_FILE_REDIRECT,
-    EXTRA_FILE_TIME, EXTRA_FILE_VERSION, EXTRA_SERVICE_SUBDATA, FILE_FLAG_CRC32,
-    FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX,
+    ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_END_ARCHIVE,
+    COMP_INFO_DICT_MASK, COMP_INFO_DICT_SHIFT, COMP_INFO_METHOD_MASK, COMP_INFO_METHOD_SHIFT,
+    COMP_INFO_SOLID_BIT, COMP_INFO_VERSION_MASK, EXTRA_FILE_HASH, EXTRA_FILE_OWNER,
+    EXTRA_FILE_REDIRECT, EXTRA_FILE_TIME, EXTRA_FILE_VERSION, EXTRA_SERVICE_SUBDATA,
+    FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX,
 };
 #[cfg(test)]
 use crate::format::rar5::{
@@ -70,6 +70,48 @@ pub fn read_block<R: Read + Seek>(
         hsize_vint_len: header.vint_bytes.len(),
         raw,
     }))
+}
+
+/// Walks a RAR5 block sequence within one file, advancing past each block's
+/// data area and stopping at the end block or a declared area that runs past
+/// the file. The key is fixed for the walk: single-file walks read one
+/// header-encrypted stream, never a mix.
+pub(crate) struct BlockCursor {
+    file_len: u64,
+    key: Option<[u8; 32]>,
+    done: bool,
+}
+
+impl BlockCursor {
+    pub(crate) fn new(file_len: u64, key: Option<[u8; 32]>) -> Self {
+        Self {
+            file_len,
+            key,
+            done: false,
+        }
+    }
+
+    /// Next block, or `None` after the end block (returned once), a data area
+    /// that runs past `file_len`, or EOF.
+    pub(crate) fn next<R: Read + Seek>(&mut self, reader: &mut R) -> RarResult<Option<BlockMeta>> {
+        if self.done {
+            return Ok(None);
+        }
+        let Some(meta) = read_block(reader, self.key.as_ref())? else {
+            self.done = true;
+            return Ok(None);
+        };
+        if meta.block_type == BLOCK_TYPE_END_ARCHIVE {
+            self.done = true;
+            return Ok(Some(meta));
+        }
+        if meta.raw.data_size > 0
+            && !crate::format::shared::seek_past_data_area(reader, meta.data_end, self.file_len)?
+        {
+            self.done = true;
+        }
+        Ok(Some(meta))
+    }
 }
 
 fn read_plain_header<R: Read>(reader: &mut R) -> RarResult<Option<RawHeader>> {

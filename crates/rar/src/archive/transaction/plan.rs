@@ -4,17 +4,14 @@ use super::*;
 
 use std::fs::File;
 
-use std::io::{Read, Seek, SeekFrom};
-
 use super::super::RarArchive;
-use crate::crypto::parse_archive_encrypt_header;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{
-    ArchiveHeader, parse_service_block_name, parse_service_recovery_percent, split_main_extra,
+    parse_service_block_name, parse_service_recovery_percent, split_main_extra,
 };
 use crate::format::rar5::{
-    BLOCK_FLAG_DEPENDS_PREV, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_ENCRYPT_HEADER,
-    BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER, COMP_METHOD_STORE,
+    BLOCK_FLAG_DEPENDS_PREV, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
+    BLOCK_TYPE_SERVICE_HEADER, COMP_METHOD_STORE,
 };
 
 impl RarArchive {
@@ -31,47 +28,19 @@ impl RarArchive {
         rename_map: Option<&std::collections::HashMap<usize, String>>,
         comment: Option<&[u8]>,
     ) -> RarResult<RewritePlan> {
-        // Signature (after any embedded SFX stub).
-        let mut sig = [0u8; 8];
-        reader.seek(SeekFrom::Start(self.sfx_offset))?;
-        reader.read_exact(&mut sig)?;
         let file_len = reader.metadata().map_err(RarError::Io)?.len();
 
         // Leading blocks: optional archive encryption header (plaintext),
         // then the main archive header (rebuilt so the locator stays
-        // consistent with the rewritten archive).
-        let mut encrypt_header = None;
-        let first =
-            crate::format::rar5::headers::read_block(reader, self.archive_block_key()?.as_ref())?
-                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
-        let main_meta = match first.block_type {
-            BLOCK_TYPE_ENCRYPT_HEADER => {
-                let params = parse_archive_encrypt_header(&first.raw)?;
-                self.handle_archive_encrypt_header(params)?;
-                encrypt_header = Some(first.header_bytes);
-                let main = crate::format::rar5::headers::read_block(
-                    reader,
-                    self.archive_block_key()?.as_ref(),
-                )?
-                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
-                if main.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
-                    return Err(RarError::Format(
-                        "archive is missing the main header".into(),
-                    ));
-                }
-                main
-            }
-            BLOCK_TYPE_ARCHIVE_HEADER => first,
-            _ => {
-                return Err(RarError::Format(
-                    "archive is missing the main header".into(),
-                ));
-            }
-        };
+        // consistent with the rewritten archive). The opener re-emits the
+        // encryption header verbatim for the rewrite.
+        let main = self.read_main_header(reader)?;
+        let encrypt_header = main.encrypt_header;
+        let main_meta = main.meta;
+        let ah = main.parsed;
 
         // Decide quick-open capture and recovery rebuild from the main
         // header (write_main_header re-derives them from the same data).
-        let ah = ArchiveHeader::from_raw(&main_meta.raw)?;
         let (had_qo, _had_rr, _) = split_main_extra(&ah.extra_data)?;
         let capture_qo = had_qo && !self.header_encryption;
 
@@ -85,9 +54,9 @@ impl RarArchive {
         // was deleted.
         let mut prev_file_deleted = false;
 
-        while let Some(meta) =
-            crate::format::rar5::headers::read_block(reader, self.archive_block_key()?.as_ref())?
-        {
+        let mut blocks =
+            crate::format::rar5::headers::BlockCursor::new(file_len, self.archive_block_key()?);
+        while let Some(meta) = blocks.next(reader)? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_FILE_HEADER => {
@@ -171,12 +140,6 @@ impl RarArchive {
                     src_data: meta.data_offset,
                     len: meta.raw.data_size,
                 }),
-            }
-            // Advance past the data area (headers are read separately); stop
-            // at a declared area that runs past the file instead of seeking
-            // beyond the filesystem's maximum offset.
-            if !crate::format::shared::seek_past_data_area(reader, meta.data_end, file_len)? {
-                break;
             }
         }
 

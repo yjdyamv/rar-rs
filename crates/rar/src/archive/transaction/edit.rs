@@ -8,13 +8,9 @@ use std::path::Path;
 use std::io::{Read, Seek, SeekFrom};
 
 use super::super::{Mode, RarArchive};
-use crate::crypto::parse_archive_encrypt_header;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::{ArchiveHeader, parse_service_block_name};
-use crate::format::rar5::{
-    ARCHIVE_FLAG_LOCKED, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_ENCRYPT_HEADER,
-    BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_SERVICE_HEADER,
-};
+use crate::format::rar5::headers::parse_service_block_name;
+use crate::format::rar5::{ARCHIVE_FLAG_LOCKED, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_SERVICE_HEADER};
 
 impl RarArchive {
     pub(crate) fn edit_plan(
@@ -255,10 +251,9 @@ impl RarArchive {
         let mut reader = File::open(&self.path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         let file_len = reader.metadata().map_err(RarError::Io)?.len();
-        while let Some(meta) = crate::format::rar5::headers::read_block(
-            &mut reader,
-            self.archive_block_key()?.as_ref(),
-        )? {
+        let mut blocks =
+            crate::format::rar5::headers::BlockCursor::new(file_len, self.archive_block_key()?);
+        while let Some(meta) = blocks.next(&mut reader)? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_SERVICE_HEADER
@@ -293,11 +288,6 @@ impl RarArchive {
                 }
                 _ => {}
             }
-            // Advance past the data area; stop at a declared area that runs
-            // past the file (Linux refuses the out-of-range seek).
-            if !crate::format::shared::seek_past_data_area(&mut reader, meta.data_end, file_len)? {
-                break;
-            }
         }
         Ok(None)
     }
@@ -307,33 +297,10 @@ impl RarArchive {
     /// erase-everything path is covered too.
     pub(crate) fn main_header_is_locked(&mut self) -> RarResult<bool> {
         let mut reader = File::open(&self.path)?;
-        reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         self.header_encryption = false;
         self.archive_encr = None;
-        let first = crate::format::rar5::headers::read_block(
-            &mut reader,
-            self.archive_block_key()?.as_ref(),
-        )?
-        .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
-        let main = match first.block_type {
-            BLOCK_TYPE_ENCRYPT_HEADER => {
-                let params = parse_archive_encrypt_header(&first.raw)?;
-                self.handle_archive_encrypt_header(params)?;
-                crate::format::rar5::headers::read_block(
-                    &mut reader,
-                    self.archive_block_key()?.as_ref(),
-                )?
-                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
-            }
-            BLOCK_TYPE_ARCHIVE_HEADER => first,
-            _ => {
-                return Err(RarError::Format(
-                    "archive is missing the main header".into(),
-                ));
-            }
-        };
-        let ah = ArchiveHeader::from_raw(&main.raw)?;
-        Ok(ah.flags & ARCHIVE_FLAG_LOCKED != 0)
+        let main = self.read_main_header(&mut reader)?;
+        Ok(main.parsed.flags & ARCHIVE_FLAG_LOCKED != 0)
     }
 
     /// Index range `[s, e]` of the solid chain affected by deleting member

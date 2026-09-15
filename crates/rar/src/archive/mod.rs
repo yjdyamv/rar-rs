@@ -32,17 +32,15 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::crypto;
-use crate::crypto::parse_archive_encrypt_header;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::create::Rar4WriteOptions;
 use crate::format::rar5::headers::{
-    ArchiveHeader, main_header_locator_fields, parse_service_block_name,
-    parse_service_recovery_percent, split_main_extra,
+    main_header_locator_fields, parse_service_block_name, parse_service_recovery_percent,
+    split_main_extra,
 };
 use crate::format::rar5::vint;
 use crate::format::rar5::{
-    ARCHIVE_FLAG_LOCKED, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_ARCHIVE_HEADER,
-    BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
+    ARCHIVE_FLAG_LOCKED, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
     BLOCK_TYPE_SERVICE_HEADER, ENCR_IV_SIZE,
 };
 use crate::fs::atomic::{copy_prefix, install_durable, read_write_create, temp_sibling_path};
@@ -549,38 +547,16 @@ impl RarArchive {
         }
         let path = self.path.clone();
         let mut reader = File::open(&path)?;
-        reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         let file_len = reader.metadata().map_err(RarError::Io)?.len();
 
-        let first = crate::format::rar5::headers::read_block(
-            &mut reader,
-            self.archive_block_key()?.as_ref(),
-        )?
-        .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
-        let main_meta = match first.block_type {
-            BLOCK_TYPE_ENCRYPT_HEADER => {
-                let params = parse_archive_encrypt_header(&first.raw)?;
-                self.handle_archive_encrypt_header(params)?;
-                crate::format::rar5::headers::read_block(
-                    &mut reader,
-                    self.archive_block_key()?.as_ref(),
-                )?
-                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
-            }
-            BLOCK_TYPE_ARCHIVE_HEADER => first,
-            _ => {
-                return Err(RarError::Format(
-                    "archive is missing the main header".into(),
-                ));
-            }
-        };
-        let ah = ArchiveHeader::from_raw(&main_meta.raw)?;
+        let main = self.read_main_header(&mut reader)?;
+        let ah = main.parsed;
         if ah.flags & ARCHIVE_FLAG_LOCKED != 0 {
             return Err(RarError::ArchiveLocked);
         }
         let (had_qo, had_rr, _) = split_main_extra(&ah.extra_data)?;
-        let (qo_field_pos, rr_field_pos) = main_header_locator_fields(&main_meta)?;
-        self.write_ctx_mut().locator.main_header_start = Some(main_meta.block_start);
+        let (qo_field_pos, rr_field_pos) = main_header_locator_fields(&main.meta)?;
+        self.write_ctx_mut().locator.main_header_start = Some(main.meta.block_start);
         self.write_ctx_mut().locator.qo_offset_field_pos = qo_field_pos.map(|p| p as u64);
         self.write_ctx_mut().locator.rr_offset_field_pos = rr_field_pos.map(|p| p as u64);
         self.write_ctx_mut().locator.quick_open = had_qo && !self.header_encryption;
@@ -591,10 +567,9 @@ impl RarArchive {
         let mut truncate_pos = None;
         let mut last_file_end = 0u64;
         let mut rr_percent = None;
-        while let Some(meta) = crate::format::rar5::headers::read_block(
-            &mut reader,
-            self.archive_block_key()?.as_ref(),
-        )? {
+        let mut blocks =
+            crate::format::rar5::headers::BlockCursor::new(file_len, self.archive_block_key()?);
+        while let Some(meta) = blocks.next(&mut reader)? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => {
                     if truncate_pos.is_none() {
@@ -624,12 +599,6 @@ impl RarArchive {
                     }
                 }
                 _ => {}
-            }
-            // Advance past the data area (headers are read separately); stop
-            // at a declared area that runs past the file instead of seeking
-            // beyond the filesystem's maximum offset.
-            if !crate::format::shared::seek_past_data_area(&mut reader, meta.data_end, file_len)? {
-                break;
             }
         }
         let truncate_pos = truncate_pos.unwrap_or(last_file_end);
@@ -675,29 +644,7 @@ impl RarArchive {
         }
         let path = self.path.clone();
         let mut reader = File::open(&path)?;
-        reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
-        let first = crate::format::rar5::headers::read_block(
-            &mut reader,
-            self.archive_block_key()?.as_ref(),
-        )?
-        .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?;
-        let main_meta = match first.block_type {
-            BLOCK_TYPE_ENCRYPT_HEADER => {
-                let params = parse_archive_encrypt_header(&first.raw)?;
-                self.handle_archive_encrypt_header(params)?;
-                crate::format::rar5::headers::read_block(
-                    &mut reader,
-                    self.archive_block_key()?.as_ref(),
-                )?
-                .ok_or_else(|| RarError::Format("archive is missing the main header".into()))?
-            }
-            BLOCK_TYPE_ARCHIVE_HEADER => first,
-            _ => {
-                return Err(RarError::Format(
-                    "archive is missing the main header".into(),
-                ));
-            }
-        };
+        let main_meta = self.read_main_header(&mut reader)?.meta;
 
         // Patch the archive-level flags in the plaintext header and
         // recompute the CRC. The flags field lives in the header body at
