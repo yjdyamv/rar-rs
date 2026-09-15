@@ -248,6 +248,64 @@ impl Drop for StagedFile {
     }
 }
 
+/// A same-directory copy of an existing file, installed over the original by
+/// [`Self::commit`] and removed on drop while uncommitted.
+///
+/// This is the public seam for "edit a copy, then replace the original" flows
+/// (the `rar` CLI's update/create staging): [`Self::create`] copies the
+/// original to a fresh sibling with `create_new` semantics, callers run their
+/// operation against [`Self::path`], and [`Self::commit`] syncs the copy and
+/// installs it with [`install_durable`] — including the Unix parent-directory
+/// fsync — so a power loss cannot persist the rename ahead of the bytes it
+/// names. A dropped, uncommitted copy is cleaned up.
+pub struct StagedCopy {
+    staged: PathBuf,
+    dest: PathBuf,
+    armed: bool,
+}
+
+impl StagedCopy {
+    /// Copy `dest` to a fresh sibling next to it.
+    pub fn create(dest: &Path) -> RarResult<Self> {
+        let staged = temp_sibling_path(dest);
+        let file = read_write_create(&staged)?;
+        drop(file);
+        if let Err(error) = fs::copy(dest, &staged) {
+            let _ = fs::remove_file(&staged);
+            return Err(RarError::Io(error));
+        }
+        Ok(Self {
+            staged,
+            dest: dest.to_path_buf(),
+            armed: true,
+        })
+    }
+
+    /// Path of the staged copy, for APIs that operate on a path.
+    pub fn path(&self) -> &Path {
+        &self.staged
+    }
+
+    /// Install the copy over the original durably. A failure before the
+    /// rename (for example the copy's sync) keeps the staged copy armed so
+    /// drop can clean it.
+    pub fn commit(&mut self) -> RarResult<()> {
+        let result = install_durable(&self.staged, &self.dest);
+        if result.is_ok() {
+            self.armed = false;
+        }
+        result
+    }
+}
+
+impl Drop for StagedCopy {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.staged);
+        }
+    }
+}
+
 /// A set of staged files installed as one journaled commit.
 ///
 /// Opening the set recovers an interrupted commit of the same parent/base so
@@ -1499,6 +1557,46 @@ mod tests {
         staged.commit().unwrap();
 
         assert_eq!(std::fs::read(&dest).unwrap(), b"durable");
+        assert!(!staged_path.exists());
+    }
+
+    /// `StagedCopy` copies the original, installs the copy over it on commit
+    /// and removes an uncommitted copy on drop.
+    #[test]
+    fn staged_copy_installs_the_copy_over_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("archive.rar");
+        std::fs::write(&dest, b"original").unwrap();
+
+        let staged_path = {
+            let mut staged = super::StagedCopy::create(&dest).unwrap();
+            assert_eq!(std::fs::read(staged.path()).unwrap(), b"original");
+            std::fs::write(staged.path(), b"updated").unwrap();
+            let staged_path = staged.path().to_path_buf();
+            staged.commit().unwrap();
+            staged_path
+        };
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"updated");
+        assert!(!staged_path.exists());
+    }
+
+    /// A dropped, uncommitted copy leaves the original untouched and cleans
+    /// up its sibling.
+    #[test]
+    fn staged_copy_drops_uncommitted_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("archive.rar");
+        std::fs::write(&dest, b"original").unwrap();
+
+        let staged_path = {
+            let staged = super::StagedCopy::create(&dest).unwrap();
+            let staged_path = staged.path().to_path_buf();
+            std::fs::write(&staged_path, b"garbage").unwrap();
+            staged_path
+        };
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"original");
         assert!(!staged_path.exists());
     }
 

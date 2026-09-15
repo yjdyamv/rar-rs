@@ -74,6 +74,7 @@ pub use codec::lzss_huff::{EncoderState, encode_chunked_mt};
 pub use detect::sfx_offset_of;
 pub use error::{ErrorCode, RarError, RarResult};
 pub use features::{Feature, FeatureSet};
+pub use fs::atomic::StagedCopy;
 pub use options::{
     ExtractOptions, FilterMode, FilterOptions, MarkOfTheWeb, SolidReset, parse_dict_bytes,
     parse_dict_size,

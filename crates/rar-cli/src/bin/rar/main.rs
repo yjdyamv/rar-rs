@@ -35,7 +35,7 @@ mod list;
 mod log;
 mod recovery;
 mod sfx;
-mod staging;
+mod transaction;
 mod update;
 
 #[cfg(test)]

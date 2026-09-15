@@ -1,5 +1,5 @@
 use crate::args::parse_size;
-use crate::staging::update_archive_transactionally;
+use crate::transaction::update_archive_transactionally;
 
 #[test]
 fn size_parsing_checks_multiplication_overflow() {

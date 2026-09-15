@@ -562,7 +562,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             .map(|c| c.name.clone())
             .chain(args.stdin_name.iter().cloned())
             .collect();
-        crate::staging::update_archive_transactionally_with(
+        crate::transaction::update_archive_transactionally_with(
             std::path::Path::new(archive_path),
             |staged_path| {
                 let mut editor = open_editor(staged_path, password.as_deref())?;

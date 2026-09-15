@@ -10,8 +10,8 @@ use crate::edit::open_editor;
 use crate::error::CliResult;
 use crate::info;
 use crate::ops;
-use crate::staging::update_archive_transactionally;
 use crate::time;
+use crate::transaction::update_archive_transactionally;
 /// Update an archive: add files not present, replace files whose source
 /// is newer (like `rar u`).
 pub(crate) fn cmd_update(args: &FilesArgs, misc: &common::MiscSwitches) -> CliResult<()> {
