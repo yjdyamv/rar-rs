@@ -1,31 +1,32 @@
-//! Shared tables and slot/level math for the legacy RAR 2.x/3.x codecs.
+//! Shared tables, slot math and level-table tokens for the legacy RAR 2.x/3.x
+//! codecs.
 //!
 //! The length-slot tables are identical across the RAR20 and RAR29 codecs
 //! (the offset tables differ: RAR20 stops at 48 slots, RAR29 has 60), and the
 //! slot-window search, the offset-dependent length adjustment, the
-//! most-recent-offset ring and the level-table token alphabet are one
-//! machine. They live here once so a fix reaches both writers, and the shared
-//! bases feed both decoders.
+//! most-recent-offset ring and the level-table token machinery are one
+//! machine. They live here once so a fix reaches both writers; the shared
+//! tables and the offset ring also feed both decoders.
 
 /// Number of length slots (shared by the RAR20/RAR29 codecs).
-pub(crate) const LENGTH_COUNT: usize = 28;
+pub(super) const LENGTH_COUNT: usize = 28;
 
 /// Base length of each slot.
-pub(crate) const LENGTH_BASES: [usize; LENGTH_COUNT] = [
+pub(super) const LENGTH_BASES: [usize; LENGTH_COUNT] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
     160, 192, 224,
 ];
 
 /// Extra bits carried by each length slot.
-pub(crate) const LENGTH_BITS: [u8; LENGTH_COUNT] = [
+pub(super) const LENGTH_BITS: [u8; LENGTH_COUNT] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5,
 ];
 
 /// Base distance of each short-distance slot.
-pub(crate) const SHORT_BASES: [usize; 8] = [0, 4, 8, 16, 32, 64, 128, 192];
+pub(super) const SHORT_BASES: [usize; 8] = [0, 4, 8, 16, 32, 64, 128, 192];
 
 /// Extra bits carried by each short-distance slot.
-pub(crate) const SHORT_BITS: [u8; 8] = [2, 2, 3, 4, 5, 6, 6, 6];
+pub(super) const SHORT_BITS: [u8; 8] = [2, 2, 3, 4, 5, 6, 6, 6];
 
 /// Shift an offset into the most-recent-first ring: `old_offsets[0]` is the
 /// last match distance.
@@ -125,48 +126,19 @@ impl LevelToken {
 /// deltas against a base table (20-symbol alphabet, short and long repeat
 /// forms).
 pub(super) trait LevelAlphabet {
-    /// The plain level token for position `pos` holding `value`.
+    /// The plain level token for position `pos` holding `value`: RAR29
+    /// subtracts `base[pos]` (its 4-bit delta), RAR20 ignores `base` and
+    /// writes the literal level.
     fn plain(pos: usize, value: u8, base: &[u8]) -> LevelToken;
 
-    /// Tokens for a run of `run` (3+) repetitions of `value`.
-    fn repeat_previous(value: u8, run: usize) -> Vec<LevelToken>;
+    /// Append the tokens for a run of `run` (3+) repetitions of `value`.
+    fn repeat_previous(value: u8, run: usize, out: &mut Vec<LevelToken>);
 
     /// The short zero-run token (runs of 3..=10).
     fn zero_run_short(run: usize) -> LevelToken;
 
     /// The long zero-run token (runs of 11+).
     fn zero_run_long(run: usize) -> LevelToken;
-}
-
-/// One piece of a zero run.
-enum ZeroChunk {
-    Long(usize),
-    Short(usize),
-    Plain(usize),
-}
-
-/// Split a zero run into long-form chunks (up to 138, never leaving a 1-2
-/// tail behind), short-form chunks (3..=10) and a plain tail (1-2).
-fn zero_run_chunks(mut run: usize) -> Vec<ZeroChunk> {
-    let mut chunks = Vec::new();
-    while run != 0 {
-        if run >= 11 {
-            let mut chunk = run.min(138);
-            if matches!(run - chunk, 1 | 2) && chunk >= 14 {
-                chunk -= 3;
-            }
-            chunks.push(ZeroChunk::Long(chunk));
-            run -= chunk;
-        } else if run >= 3 {
-            let chunk = run.min(10);
-            chunks.push(ZeroChunk::Short(chunk));
-            run -= chunk;
-        } else {
-            chunks.push(ZeroChunk::Plain(run));
-            break;
-        }
-    }
-    chunks
 }
 
 /// Encode a level table (deltas against `base`, or literals when the
@@ -186,25 +158,37 @@ pub(super) fn encode_level_tokens<A: LevelAlphabet>(
         }
 
         if value == 0 {
-            for chunk in zero_run_chunks(run) {
-                match chunk {
-                    ZeroChunk::Long(count) => tokens.push(A::zero_run_long(count)),
-                    ZeroChunk::Short(count) => tokens.push(A::zero_run_short(count)),
+            let total = run;
+            let mut remaining = run;
+            while remaining != 0 {
+                if remaining >= 11 {
+                    // Long-form chunks never leave a 1-2 tail behind (the
+                    // 7-bit form needs at least 11).
+                    let mut chunk = remaining.min(138);
+                    if matches!(remaining - chunk, 1 | 2) && chunk >= 14 {
+                        chunk -= 3;
+                    }
+                    tokens.push(A::zero_run_long(chunk));
+                    remaining -= chunk;
+                } else if remaining >= 3 {
+                    let chunk = remaining.min(10);
+                    tokens.push(A::zero_run_short(chunk));
+                    remaining -= chunk;
+                } else {
                     // A run too short for its own symbol is written out
                     // position by position, each a plain token like any
                     // other.
-                    ZeroChunk::Plain(count) => {
-                        tokens.extend((pos..pos + count).map(|at| A::plain(at, 0, base)));
-                    }
+                    tokens.extend((pos..pos + remaining).map(|at| A::plain(at, 0, base)));
+                    break;
                 }
             }
             previous = Some(0);
-            pos += run;
+            pos += total;
             continue;
         }
 
         if previous == Some(value) && run >= 3 {
-            tokens.extend(A::repeat_previous(value, run));
+            A::repeat_previous(value, run, &mut tokens);
             pos += run;
             continue;
         }
@@ -214,4 +198,66 @@ pub(super) fn encode_level_tokens<A: LevelAlphabet>(
         pos += 1;
     }
     tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A toy alphabet with distinct symbol numbers per form, so assertions
+    /// read directly as chunk counts.
+    struct TestMap;
+
+    impl LevelAlphabet for TestMap {
+        fn plain(_pos: usize, value: u8, _base: &[u8]) -> LevelToken {
+            LevelToken::plain(value as usize)
+        }
+
+        fn repeat_previous(_value: u8, run: usize, out: &mut Vec<LevelToken>) {
+            out.push(LevelToken::new(16, 3, run as u8));
+        }
+
+        fn zero_run_short(run: usize) -> LevelToken {
+            LevelToken::new(17, 3, run as u8)
+        }
+
+        fn zero_run_long(run: usize) -> LevelToken {
+            LevelToken::new(18, 7, run as u8)
+        }
+    }
+
+    fn tokens(lengths: &[u8]) -> Vec<(usize, u8, u8)> {
+        encode_level_tokens::<TestMap>(lengths, &[])
+            .into_iter()
+            .map(|token| (token.symbol, token.extra_bits, token.extra_value))
+            .collect()
+    }
+
+    /// Short zero runs are plain tokens, the 3..=10 and 11+ forms bound the
+    /// longer ones, and the long form never leaves a 1-2 tail behind.
+    #[test]
+    fn zero_runs_split_into_plain_short_and_long_forms() {
+        assert_eq!(tokens(&[0, 0]), [(0, 0, 0), (0, 0, 0)]);
+        assert_eq!(tokens(&[0, 0, 0]), [(17, 3, 3)]);
+        assert_eq!(tokens(&[0; 10]), [(17, 3, 10)]);
+        assert_eq!(tokens(&[0; 11]), [(18, 7, 11)]);
+        assert_eq!(tokens(&[0; 138]), [(18, 7, 138)]);
+        assert_eq!(tokens(&[0; 139]), [(18, 7, 135), (17, 3, 4)]);
+        assert_eq!(tokens(&[0; 140]), [(18, 7, 135), (17, 3, 5)]);
+        assert_eq!(tokens(&[0; 141]), [(18, 7, 138), (17, 3, 3)]);
+        assert_eq!(tokens(&[0; 277]), [(18, 7, 138), (18, 7, 135), (17, 3, 4)]);
+        assert_eq!(
+            tokens(&[9, 0, 0, 9]),
+            [(9, 0, 0), (0, 0, 0), (0, 0, 0), (9, 0, 0)]
+        );
+    }
+
+    /// A run of 3+ repeats is only taken against an already-seen previous
+    /// level: four equal levels are one plain token plus one repeat.
+    #[test]
+    fn repeats_need_a_previous_level() {
+        assert_eq!(tokens(&[5, 5, 5]), [(5, 0, 0), (5, 0, 0), (5, 0, 0)]);
+        assert_eq!(tokens(&[5, 5, 5, 5]), [(5, 0, 0), (16, 3, 3)]);
+        assert_eq!(tokens(&[9, 5, 5, 5, 5]), [(9, 0, 0), (5, 0, 0), (16, 3, 3)]);
+    }
 }

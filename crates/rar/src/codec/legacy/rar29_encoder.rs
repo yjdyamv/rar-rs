@@ -453,7 +453,7 @@ fn encode_tokens_with_progress(
 
 /// RAR29's level alphabet: levels are deltas against `base`, repeats use a
 /// short (symbol 16, 3 extra bits) and a long form (symbol 17, 7 extra
-/// bits), zero runs symbols 18/19.
+/// bits), zero runs symbols 18 (3 extra bits) and 19 (7 extra bits).
 struct Rar29LevelMap;
 
 impl LevelAlphabet for Rar29LevelMap {
@@ -461,25 +461,23 @@ impl LevelAlphabet for Rar29LevelMap {
         LevelToken::plain((value.wrapping_sub(base[pos]) & 0x0f) as usize)
     }
 
-    fn repeat_previous(_value: u8, mut run: usize) -> Vec<LevelToken> {
-        let mut tokens = Vec::new();
+    fn repeat_previous(_value: u8, mut run: usize, out: &mut Vec<LevelToken>) {
         while run != 0 {
             if run >= 11 {
                 let mut chunk = run.min(138);
                 if matches!(run - chunk, 1 | 2) && chunk >= 14 {
                     chunk -= 3;
                 }
-                tokens.push(LevelToken::new(17, 7, (chunk - 11) as u8));
+                out.push(LevelToken::new(17, 7, (chunk - 11) as u8));
                 run -= chunk;
             } else if run >= 3 {
                 let chunk = run.min(10);
-                tokens.push(LevelToken::new(16, 3, (chunk - 3) as u8));
+                out.push(LevelToken::new(16, 3, (chunk - 3) as u8));
                 run -= chunk;
             } else {
                 break;
             }
         }
-        tokens
     }
 
     fn zero_run_short(run: usize) -> LevelToken {
@@ -506,6 +504,7 @@ fn level_tokens_bit_cost(tokens: &[LevelToken]) -> usize {
         .map(|token| usize::from(lengths[token.symbol]) + usize::from(token.extra_bits))
         .sum()
 }
+
 /// Huffman-code-lengths for the 20-symbol level alphabet, weighted by usage.
 fn level_code_lengths(tokens: &[LevelToken]) -> [u8; LEVEL_COUNT] {
     let mut frequencies = [0usize; LEVEL_COUNT];
@@ -2020,6 +2019,57 @@ impl Unpack29Encoder {
 mod tests {
     use super::*;
 
+    /// A fixed corpus mixing structured, constant, x86-shaped and random
+    /// regions, so the per-level ladders produce distinct parses.
+    fn golden_corpus() -> Vec<u8> {
+        let mut data = Vec::with_capacity(48 * 1024);
+        data.extend((0..12_000usize).map(|i| (i * 7 % 251) as u8));
+        data.extend(std::iter::repeat_n(0x41u8, 12_000));
+        while data.len() < 36_000 {
+            data.extend_from_slice(&[0u8; 12]);
+            for k in 0..8u32 {
+                data.push(0xE8);
+                data.extend_from_slice(&(k * 0x100 + 0x40).to_le_bytes());
+                data.extend_from_slice(&[0x90, 0x90]);
+            }
+        }
+        data.truncate(36_000);
+        let mut x = 0x1234_5678u32;
+        for _ in 0..12_000 {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            data.push((x >> 24) as u8);
+        }
+        data
+    }
+
+    fn fnv(bytes: &[u8]) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        hash
+    }
+
+    /// The level-table token emission and slot math are byte-level contracts:
+    /// a different but still valid encoding would still round-trip, so pin
+    /// the exact packed bytes of a fixed corpus per level.
+    #[test]
+    fn packed_bytes_are_stable_across_refactors() {
+        let data = golden_corpus();
+        for (level, len, hash) in [
+            (1u8, 12475usize, 0x5669_7ea4_5890_fcf8u64),
+            (2, 12471, 0xb838_bfeb_bf3e_36dc),
+            (3, 12471, 0xb838_bfeb_bf3e_36dc),
+            (4, 12473, 0xc4c3_eb5e_084d_a77a),
+            (5, 12473, 0xc4c3_eb5e_084d_a77a),
+        ] {
+            let mut encoder = Unpack29Encoder::with_options(options_for_level(level));
+            let packed = encoder.encode_member(&data).expect("encode");
+            assert_eq!(packed.len(), len, "level {level} packed length");
+            assert_eq!(fnv(&packed), hash, "level {level} packed bytes");
+        }
+    }
     #[test]
     fn ppmd_roundtrip_text_hybrid() {
         let input = sample_text();

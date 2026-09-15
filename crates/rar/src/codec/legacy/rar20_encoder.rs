@@ -1259,19 +1259,8 @@ fn old_length_slot_for_match(length: usize, offset: usize) -> RarResult<(usize, 
         return Err(enc_err("old-offset match length is too short"));
     }
     let adjusted = encoded - 2;
-    for (slot, &base) in LENGTH_BASES.iter().enumerate() {
-        let extra_bits = LENGTH_BITS[slot];
-        let max = base
-            + if extra_bits == 0 {
-                0
-            } else {
-                (1usize << extra_bits) - 1
-            };
-        if adjusted >= base && adjusted <= max {
-            return Ok((slot, adjusted - base));
-        }
-    }
-    Err(enc_err("old-offset match length is too long"))
+    encode_core::slot_for(&LENGTH_BASES, &LENGTH_BITS, adjusted)
+        .ok_or_else(|| enc_err("old-offset match length is too long"))
 }
 
 fn offset_slot_for_match(offset: usize) -> RarResult<(usize, usize)> {
@@ -1295,7 +1284,8 @@ fn literal_code_len(symbol_count: usize) -> RarResult<u8> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// RAR20's level alphabet: literal levels, one repeat form (symbol 16, 2
-/// extra bits, chunks of at most 6), zero runs on symbols 17/18.
+/// extra bits, chunks of at most 6) and zero runs on symbols 17 (3 extra
+/// bits) and 18 (7 extra bits).
 struct Rar20LevelMap;
 
 impl LevelAlphabet for Rar20LevelMap {
@@ -1303,23 +1293,21 @@ impl LevelAlphabet for Rar20LevelMap {
         LevelToken::plain(value as usize)
     }
 
-    fn repeat_previous(value: u8, run: usize) -> Vec<LevelToken> {
-        let mut tokens = Vec::new();
+    fn repeat_previous(value: u8, run: usize, out: &mut Vec<LevelToken>) {
         let mut remaining = run;
         while remaining != 0 {
             let chunk = remaining.min(6);
             if chunk >= 3 {
-                tokens.push(LevelToken::new(16, 2, (chunk - 3) as u8));
+                out.push(LevelToken::new(16, 2, (chunk - 3) as u8));
                 remaining -= chunk;
             } else {
-                tokens.extend(std::iter::repeat_n(
+                out.extend(std::iter::repeat_n(
                     LevelToken::plain(value as usize),
                     chunk,
                 ));
                 remaining = 0;
             }
         }
-        tokens
     }
 
     fn zero_run_short(run: usize) -> LevelToken {
@@ -1338,6 +1326,7 @@ fn encode_table_level_tokens(lengths: &[u8; TABLE_COUNT]) -> Vec<LevelToken> {
 fn encode_level_tokens(lengths: &[u8]) -> Vec<LevelToken> {
     encode_core::encode_level_tokens::<Rar20LevelMap>(lengths, &[])
 }
+
 fn level_code_lengths_for_tokens(tokens: &[LevelToken]) -> [u8; LEVEL_COUNT] {
     let mut used = [false; LEVEL_COUNT];
     for token in tokens {
@@ -1718,6 +1707,73 @@ mod tests {
     use super::*;
     use crate::codec::legacy::rar20::Rar20Decoder;
 
+    /// A fixed corpus mixing structured, constant, x86-shaped and random
+    /// regions, so the per-level ladders produce distinct parses.
+    fn golden_corpus() -> Vec<u8> {
+        let mut data = Vec::with_capacity(48 * 1024);
+        data.extend((0..12_000usize).map(|i| (i * 7 % 251) as u8));
+        data.extend(std::iter::repeat_n(0x41u8, 12_000));
+        while data.len() < 36_000 {
+            data.extend_from_slice(&[0u8; 12]);
+            for k in 0..8u32 {
+                data.push(0xE8);
+                data.extend_from_slice(&(k * 0x100 + 0x40).to_le_bytes());
+                data.extend_from_slice(&[0x90, 0x90]);
+            }
+        }
+        data.truncate(36_000);
+        let mut x = 0x1234_5678u32;
+        for _ in 0..12_000 {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            data.push((x >> 24) as u8);
+        }
+        data
+    }
+
+    fn fnv(bytes: &[u8]) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        hash
+    }
+
+    /// Mirrors the writer's `legacy_rar20_options` ladder.
+    fn golden_options(level: u8) -> EncodeOptions {
+        let candidates = match level {
+            1 => 16,
+            2 => 64,
+            3 => 256,
+            4 => 512,
+            _ => 1024,
+        };
+        EncodeOptions::new(candidates)
+            .with_lazy_matching(true)
+            .with_lazy_lookahead(2)
+            .with_optimal_parse(level >= 4)
+            .with_try_audio(level > 1)
+    }
+
+    /// The level-table token emission and slot math are byte-level contracts:
+    /// a different but still valid encoding would still round-trip, so pin
+    /// the exact packed bytes of a fixed corpus per level.
+    #[test]
+    fn packed_bytes_are_stable_across_refactors() {
+        let data = golden_corpus();
+        for (level, len, hash) in [
+            (1u8, 14008usize, 0x9ba5_2be8_2d26_2ad1u64),
+            (2, 14008, 0x9ba5_2be8_2d26_2ad1),
+            (3, 14008, 0x9ba5_2be8_2d26_2ad1),
+            (4, 14008, 0x9ba5_2be8_2d26_2ad1),
+            (5, 14008, 0x9ba5_2be8_2d26_2ad1),
+        ] {
+            let mut encoder = Unpack20Encoder::with_options(golden_options(level));
+            let packed = encoder.encode_member(&data).expect("encode");
+            assert_eq!(packed.len(), len, "level {level} packed length");
+            assert_eq!(fnv(&packed), hash, "level {level} packed bytes");
+        }
+    }
     fn roundtrip(data: &[u8], options: EncodeOptions) {
         let mut encoder = Unpack20Encoder::with_options(options);
         let packed = encoder.encode_member(data).expect("rar20 encode");
