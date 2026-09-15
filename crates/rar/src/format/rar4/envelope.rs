@@ -88,6 +88,13 @@ impl EnvelopePolicy {
         verify_crc: false,
         retain_raw: true,
     };
+    /// A walk of an archive whose headers a previous pass already validated
+    /// and whose raw bytes nobody needs (layout planning, comment lookup):
+    /// no CRC check, no raw copy.
+    pub(crate) const PLAN: Self = Self {
+        verify_crc: false,
+        retain_raw: false,
+    };
     /// A damaged-archive scan: no CRC check, no raw copy.
     pub(crate) const REPAIR: Self = Self {
         verify_crc: false,
@@ -142,7 +149,12 @@ fn read_plain_block<R: Read + Seek>(
     let mut header = base.to_vec();
     if head_size as usize > 7 {
         let mut rest = vec![0u8; head_size as usize - 7];
-        read_exact(stream, &mut rest)?;
+        read_exact(stream, &mut rest).map_err(|err| match err {
+            RarError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                RarError::Format("RAR4: truncated block header".into())
+            }
+            other => other,
+        })?;
         header.extend_from_slice(&rest);
     }
     let mut block = read_envelope(start, header, u64::from(head_size), policy.verify_crc)?;
@@ -164,7 +176,7 @@ fn read_encrypted_block<R: Read + Seek>(
 ) -> RarResult<Option<Rar4Block>> {
     let Some(password) = password else {
         return Err(RarError::Encrypted(
-            "RAR4: header-encrypted archive, a password is required to list it".into(),
+            "RAR4: header-encrypted archive, a password is required".into(),
         ));
     };
     let Some((header, raw, on_disk_header)) = decrypt_header(stream, password)? else {
@@ -257,10 +269,13 @@ pub(crate) fn read_envelope(
     let head_type = header[2];
     let flags = u16::from_le_bytes([header[3], header[4]]);
     let head_size = u16::from_le_bytes([header[5], header[6]]);
-    if head_size < 7 || header.len() < head_size as usize {
+    if head_size < 7 {
         return Err(RarError::Format(format!(
             "RAR4: block head_size {head_size} too small"
         )));
+    }
+    if header.len() < head_size as usize {
+        return Err(RarError::Format("RAR4: truncated block header".into()));
     }
 
     // Validate header CRC (16-bit) over bytes[2..head_size], except for
@@ -362,6 +377,19 @@ mod tests {
         assert_eq!(block.raw_header().len(), 32);
         assert_eq!(stream.position(), block.end());
 
+        // A policy that does not retain raw bytes falls back to the
+        // plaintext header, which is identical for a plaintext block.
+        let plan = read_block(
+            &mut std::io::Cursor::new(header.clone()),
+            false,
+            None,
+            EnvelopePolicy::PLAN,
+        )
+        .unwrap()
+        .expect("plan block");
+        assert!(plan.raw_header.is_none());
+        assert_eq!(plan.raw_header(), plan.header.as_slice());
+
         // The stream now sits past the data area: the next read is a clean
         // end of input.
         assert!(
@@ -374,7 +402,7 @@ mod tests {
         // truncation error, not a silent end of input.
         let mut cut = std::io::Cursor::new(header[..20].to_vec());
         let err = read_block(&mut cut, false, None, EnvelopePolicy::EDIT).unwrap_err();
-        assert!(matches!(err, RarError::Io(_)), "got {err:?}");
+        assert!(matches!(err, RarError::Format(_)), "got {err:?}");
     }
 
     #[test]
@@ -404,5 +432,52 @@ mod tests {
         .unwrap()
         .expect("repair policy tolerates a bad CRC");
         assert_eq!(block.head_type, FILE_HEAD);
+    }
+
+    #[test]
+    fn encrypted_header_truncated_after_the_first_cipher_block_is_a_wrong_password() {
+        let mut header = vec![0u8; 32];
+        header[2] = FILE_HEAD;
+        header[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
+        header[5..7].copy_from_slice(&32u16.to_le_bytes());
+        header[7..11].copy_from_slice(&4u32.to_le_bytes());
+        let (encrypted, _) =
+            crate::format::rar4::write::encrypt_block_header(&header, "pw").unwrap();
+
+        // Only the salt and the first cipher block survive: the head size
+        // decrypted from it (32) promises 16 more cipher bytes, and reading
+        // past the end of input is exactly what a wrong password looks like.
+        let err = read_block(
+            &mut std::io::Cursor::new(encrypted[..24].to_vec()),
+            true,
+            Some(b"pw"),
+            EnvelopePolicy::PLAN,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RarError::WrongPassword), "got {err:?}");
+    }
+
+    #[test]
+    fn encrypted_edit_retains_the_ciphertext_and_yields_the_plaintext_header() {
+        let mut header = vec![0u8; 32];
+        header[2] = FILE_HEAD;
+        header[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
+        header[5..7].copy_from_slice(&32u16.to_le_bytes());
+        header[7..11].copy_from_slice(&4u32.to_le_bytes());
+        let (encrypted, on_disk) =
+            crate::format::rar4::write::encrypt_block_header(&header, "pw").unwrap();
+
+        let block = read_block(
+            &mut std::io::Cursor::new(encrypted.clone()),
+            true,
+            Some(b"pw"),
+            EnvelopePolicy::EDIT,
+        )
+        .unwrap()
+        .expect("encrypted block");
+        assert_eq!(block.header, header);
+        assert_eq!(block.raw_header(), &encrypted[..]);
+        assert_eq!(block.on_disk_header(), on_disk);
+        assert_eq!(block.add_size, 4);
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! `Rar4Layout` is a parsed plaintext view of an archive: the main header,
 //! every FILE_HEAD in order, the end-of-archive offset and any legacy
-//! recovery record. [`read_block_stream`] walks a `Read + Seek` source one
+//! recovery record. [`crate::format::rar4::read_block`] walks a `Read + Seek` source one
 //! block at a time (bounded buffers, member payloads never buffered),
 //! transparently decrypting block headers on `-hp` archives so callers see
 //! plaintext headers either way; [`emit_block`] is its write-side counterpart
@@ -150,21 +150,9 @@ fn read_main_from_file(path: &Path, sfx_offset: u64) -> RarResult<(u64, Vec<u8>)
             "RAR4: signature mismatch while editing".into(),
         ));
     }
-    let mut prefix = [0u8; 7];
-    file.read_exact(&mut prefix).map_err(RarError::Io)?;
-    let head_size = u16::from_le_bytes([prefix[5], prefix[6]]) as usize;
-    if head_size < 7 {
-        return Err(RarError::Format(
-            "RAR4: main header head_size too small".into(),
-        ));
-    }
-    let mut header = prefix.to_vec();
-    if head_size > 7 {
-        let mut rest = vec![0u8; head_size - 7];
-        file.read_exact(&mut rest).map_err(RarError::Io)?;
-        header.extend_from_slice(&rest);
-    }
-    Ok((sfx_offset + 7, header))
+    let block = read_block(&mut file, false, None, EnvelopePolicy::PLAN)?
+        .ok_or_else(|| RarError::Format("RAR4: missing main header".into()))?;
+    Ok((block.offset, block.header))
 }
 
 /// Refuse edits on multi-volume RAR4 sets. Used by the append path: like
@@ -337,7 +325,7 @@ pub(super) fn scan_layout_stream(
     // Latched from the main header: `MHD_PASSWORD` means every later block
     // header is encrypted.
     let mut hp: Option<&[u8]> = None;
-    while let Some(view) = read_block(stream, hp.is_some(), hp, EnvelopePolicy::EDIT)? {
+    while let Some(view) = read_block(stream, hp.is_some(), hp, EnvelopePolicy::PLAN)? {
         let start = view.offset as usize;
         if view.head_type == MAIN_HEAD && main.is_none() {
             let flags = main_flags(&view.header)?;

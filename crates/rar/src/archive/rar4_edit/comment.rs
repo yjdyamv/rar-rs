@@ -108,8 +108,7 @@ pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
     let mut saw_main = false;
     let mut hp: Option<&[u8]> = None;
     while pos < file_len {
-        file.seek(SeekFrom::Start(pos)).map_err(RarError::Io)?;
-        let Some(view) = read_block(&mut file, hp.is_some(), hp, EnvelopePolicy::EDIT)? else {
+        let Some(view) = read_block(&mut file, hp.is_some(), hp, EnvelopePolicy::PLAN)? else {
             break;
         };
         if view.head_type == MAIN_HEAD && !saw_main {

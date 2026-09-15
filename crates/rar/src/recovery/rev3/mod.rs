@@ -1545,7 +1545,8 @@ fn endarc_end(file: &mut fs::File) -> RarResult<Option<u64>> {
             crate::format::rar4::EnvelopePolicy::REPAIR,
         ) {
             Ok(Some(block)) => block,
-            Ok(None) | Err(_) => return Ok(None),
+            Ok(None) | Err(RarError::Format(_)) => return Ok(None),
+            Err(other) => return Err(other),
         };
         if block.head_type != ENDARC_HEAD {
             continue;
@@ -1554,7 +1555,6 @@ fn endarc_end(file: &mut fs::File) -> RarResult<Option<u64>> {
         if end > len {
             return Ok(None);
         }
-        file.seek(SeekFrom::Start(end))?;
         let mut tail_len = len - end;
         let mut tail = [0u8; 64 * 1024];
         while tail_len > 0 {
