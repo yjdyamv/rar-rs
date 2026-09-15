@@ -255,8 +255,8 @@ impl RarArchive {
     ///
     /// Append, lock, rewrite planning and the locked check all read the start
     /// through this opener, so the encryption branch and the missing-header
-    /// error exist once. A caller that already scanned an archive resets
-    /// `header_encryption`/`archive_encr` before calling it.
+    /// error exist once. A caller that already scanned an archive resets the
+    /// encryption state (`clear_archive_encryption`) before calling it.
     pub(crate) fn read_main_header<R: Read + Seek>(
         &mut self,
         reader: &mut R,

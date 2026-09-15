@@ -448,6 +448,9 @@ impl RarArchive {
     /// Set the password for decryption.
     pub fn set_password(&mut self, password: &str) {
         self.password = Some(password.to_string());
+        // A cached header key belongs to the previous password; the next
+        // header operation must derive from the new one.
+        self.archive_keys = None;
     }
 
     /// Open an existing single-volume RAR5 (RAR50/RAR70) archive for

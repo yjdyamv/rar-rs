@@ -1639,11 +1639,11 @@ fn extract_options_skip_and_allow_unsafe_links() {
     );
 }
 
-/// The header-encryption key is derived once and cached: later block headers
-/// (and the locator patch) reuse it instead of re-running the KDF, and the
-/// cached key must equal a fresh derivation.
+/// The header-encryption key is cached after its first derivation and must
+/// equal a fresh derivation; the scan keeps its own per-volume key, and
+/// clearing the encryption state drops the cache.
 #[test]
-fn header_encryption_key_is_derived_once_and_cached() {
+fn header_encryption_key_is_cached_and_matches_a_fresh_derivation() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hp-key.rar");
     {
@@ -1661,6 +1661,10 @@ fn header_encryption_key_is_derived_once_and_cached() {
     }
 
     let mut ar = RarArchive::open_with_password(&path, "pw").unwrap();
+    // The scan decrypts with its own per-volume key and leaves the archive
+    // cache untouched.
+    assert!(ar.archive_keys.is_none());
+
     let mut reader = File::open(&path).unwrap();
     ar.read_main_header(&mut reader).unwrap();
 
@@ -1677,4 +1681,41 @@ fn header_encryption_key_is_derived_once_and_cached() {
         "the first request must cache the keys"
     );
     assert_eq!(ar.archive_header_key().unwrap(), expected);
+
+    ar.clear_archive_encryption();
+    assert!(ar.archive_keys.is_none());
+    assert!(ar.archive_encr.is_none());
+    assert!(!ar.header_encryption);
+}
+
+/// A new password must drop the cached header key: it belongs to the old
+/// password and the next header operation has to derive from the new one.
+#[test]
+fn set_password_drops_the_cached_header_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hp-setpw.rar");
+    {
+        let mut ar = RarArchive::create_with_options(
+            &path,
+            crate::options::CreateOptions {
+                encrypt_headers: true,
+                password: Some("pw".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ar.add_bytes("a.bin", b"a", 0).unwrap();
+        ar.close().unwrap();
+    }
+
+    let mut ar = RarArchive::open_with_password(&path, "pw").unwrap();
+    let mut reader = File::open(&path).unwrap();
+    ar.read_main_header(&mut reader).unwrap();
+    assert!(ar.archive_keys.is_some(), "precondition: a cached key");
+
+    ar.set_password("other");
+    assert!(
+        ar.archive_keys.is_none(),
+        "a new password must drop the cached key"
+    );
 }
