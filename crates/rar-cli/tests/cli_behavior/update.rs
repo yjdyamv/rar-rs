@@ -334,10 +334,7 @@ fn cli_failed_update_preserves_the_original_archive() {
         std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .contains("rar-rs-update"))
+            .filter(|entry| entry.file_name().to_string_lossy().contains("rar5tmp"))
             .count(),
         0
     );
@@ -424,10 +421,7 @@ fn cli_failed_a_replace_preserves_the_original_archive() {
         std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .contains("rar-rs-update"))
+            .filter(|entry| entry.file_name().to_string_lossy().contains("rar5tmp"))
             .count(),
         0
     );

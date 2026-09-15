@@ -210,14 +210,17 @@ impl StagedFile {
     pub(crate) fn create(dest: &Path) -> RarResult<(Self, File)> {
         let staged = temp_sibling_path(dest);
         let file = read_write_create(&staged)?;
-        Ok((
-            Self {
-                staged,
-                dest: dest.to_path_buf(),
-                armed: true,
-            },
-            file,
-        ))
+        Ok((Self::adopt(staged, dest), file))
+    }
+
+    /// Adopt a freshly reserved sibling path for `dest` ([`StagedCopy`]
+    /// adopts the copy it just made).
+    fn adopt(staged: PathBuf, dest: &Path) -> Self {
+        Self {
+            staged,
+            dest: dest.to_path_buf(),
+            armed: true,
+        }
     }
 
     /// Path of the staged sibling, for writers that receive the path instead
@@ -252,16 +255,15 @@ impl Drop for StagedFile {
 /// [`Self::commit`] and removed on drop while uncommitted.
 ///
 /// This is the public seam for "edit a copy, then replace the original" flows
-/// (the `rar` CLI's update/create staging): [`Self::create`] copies the
-/// original to a fresh sibling with `create_new` semantics, callers run their
-/// operation against [`Self::path`], and [`Self::commit`] syncs the copy and
-/// installs it with [`install_durable`] — including the Unix parent-directory
-/// fsync — so a power loss cannot persist the rename ahead of the bytes it
+/// (the `rar` CLI's update/create staging): [`Self::create`] reserves a fresh
+/// sibling (`create_new`; no pre-existing file is ever followed or truncated)
+/// and copies the original into it, callers run their operation against
+/// [`Self::path`], and [`Self::commit`] installs the copy durably — syncing
+/// the bytes, replacing the original, and fsyncing the parent directory
+/// (Unix) — so a power loss cannot persist the rename ahead of the bytes it
 /// names. A dropped, uncommitted copy is cleaned up.
 pub struct StagedCopy {
-    staged: PathBuf,
-    dest: PathBuf,
-    armed: bool,
+    inner: StagedFile,
 }
 
 impl StagedCopy {
@@ -275,34 +277,20 @@ impl StagedCopy {
             return Err(RarError::Io(error));
         }
         Ok(Self {
-            staged,
-            dest: dest.to_path_buf(),
-            armed: true,
+            inner: StagedFile::adopt(staged, dest),
         })
     }
 
     /// Path of the staged copy, for APIs that operate on a path.
     pub fn path(&self) -> &Path {
-        &self.staged
+        self.inner.path()
     }
 
     /// Install the copy over the original durably. A failure before the
-    /// rename (for example the copy's sync) keeps the staged copy armed so
-    /// drop can clean it.
+    /// rename keeps the staged copy armed so drop can clean it; a failure
+    /// after the rename has already consumed it.
     pub fn commit(&mut self) -> RarResult<()> {
-        let result = install_durable(&self.staged, &self.dest);
-        if result.is_ok() {
-            self.armed = false;
-        }
-        result
-    }
-}
-
-impl Drop for StagedCopy {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.staged);
-        }
+        self.inner.commit()
     }
 }
 
@@ -1598,6 +1586,47 @@ mod tests {
 
         assert_eq!(std::fs::read(&dest).unwrap(), b"original");
         assert!(!staged_path.exists());
+    }
+
+    /// A failed commit keeps the staged copy until drop, so a caller can
+    /// retry or clean it, and never touches the original.
+    #[test]
+    fn staged_copy_keeps_the_stage_when_commit_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("archive.rar");
+        std::fs::write(&dest, b"original").unwrap();
+
+        let mut staged = super::StagedCopy::create(&dest).unwrap();
+        let staged_path = staged.path().to_path_buf();
+        std::fs::remove_file(&dest).unwrap();
+        std::fs::create_dir(&dest).unwrap();
+
+        assert!(staged.commit().is_err());
+        assert!(staged_path.exists(), "the failed stage is kept until drop");
+        drop(staged);
+        assert!(!staged_path.exists());
+        assert!(dest.is_dir(), "the destination must stay untouched");
+    }
+
+    /// A failed copy removes the reserved sibling instead of leaking it.
+    #[test]
+    fn staged_copy_leaves_nothing_behind_when_the_source_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("missing.rar");
+
+        let error = match super::StagedCopy::create(&dest) {
+            Ok(_) => panic!("create must fail when the source is missing"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, crate::error::RarError::Io(_)),
+            "got {error:?}"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no staged sibling remains"
+        );
     }
 
     /// Write a staged sibling for `final_path` the way a lower-level builder
