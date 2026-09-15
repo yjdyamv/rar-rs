@@ -36,6 +36,7 @@
 - **Service 块解析** — `format/rar5/headers/parse.rs` 独占：`parse_service_block_name`（块名 QO/RR/STM/CMT，截断返回 `None` 不再手走字段）、`parse_service_recovery_percent`（RR SUBDATA 单字节）、`parse_service_subdata`（SUBDATA 载荷，STM 流名）；extract 扫描与 archive 事务消费同一实现。
 - **MainHeader opener（`read_main_header`）** — 归档起点唯一打开者：可选明文 ENCR 头（校验口令、保留后续块密钥）+ 主头，返回 `MainHeader { meta, parsed, encrypt_header }`（encrypt_header 供重写原样再发射）；append/lock/rewrite plan/锁定检查四条路径共用，ENCR 分支与 "missing the main header" 错误只存在一处（2026-09）。
 - **BlockCursor（`headers/parse.rs`）** — 单文件 RAR5 块遍历器：固定 key、逐块跳过 data area（越出文件即停）、END 返回一次后终止；append/rewrite plan/get_comment 三处循环共用同一文件长度约束（2026-09）。
+- **ExtractionReport（`format/shared/extract/members.rs`，经 `archive/reader.rs`）** — 抽取操作的唯一回报值（2026-09）：`written`（真正写出的文件与创建的链接，按归档序）+ `skipped`（`-o-` 未动的成员，带目标路径）；目录条目不记（创建无文件数据），`-ol-` 跳过的链接也不记。`extract_all_with_options`/`extract_ids_with_options` 返回它，写入循环自己记录，因此不可能与落盘不一致；CLI 的 `Skipping` 行与 `Extracted N file(s)` 计数直接来自它（预测式 `count_extracted`/`destination_key`/`taken` 已删）。按 id 抽取同样受 `max_total_unpacked_bytes` 约束（与整档一致）。
 - **Quick-open fast path（QO 快路径）** — `RarArchive::open_quick`：只读主头 locator + QO 记录即得成员列表（O(QO) 而非 O(归档)）；无 QO 时透明回退全扫。
 - **CatalogBuilder（`format/rar5/extract/open.rs`）** — RAR5 成员目录的唯一扫描器：单卷（`self.stream` 作唯一 source）与分卷（逐卷 `File` source）走同一条 `scan_source`，continuation 合并、条目/chunk 上限、STM owner+volume、ENCR 每卷密钥重派生都只此一处；`rebuild_catalog(_capped)` 负责定位与装配（2026-09）。
 - **Streaming repair（流式修复）** — `repair_archive_path(src, dst)`：文件版 `{RB}` 扫描 + shard 级按需读取，只驻留恢复数据与损坏分片；完好不写输出、失败不残留。

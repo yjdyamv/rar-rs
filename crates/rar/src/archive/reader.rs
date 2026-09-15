@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::{ArchiveEntry, Destination, RarArchive};
+use super::{ArchiveEntry, Destination, ExtractionReport, RarArchive};
 use crate::error::{RarError, RarResult};
 use crate::options::ExtractOptions;
 
@@ -630,18 +630,77 @@ impl ArchiveReader {
     }
 
     /// Extract all archive entries with safe default options.
-    pub fn extract_all(&mut self, destination: impl AsRef<Path>) -> RarResult<()> {
+    pub fn extract_all(&mut self, destination: impl AsRef<Path>) -> RarResult<ExtractionReport> {
         self.archive
             .extract_all_with_options(destination, ExtractOptions::default())
     }
 
-    /// Extract all archive entries with explicit options.
+    /// Extract all archive entries with explicit options, returning what was
+    /// written and what the skip-existing policy left untouched.
     pub fn extract_all_with_options(
         &mut self,
         destination: impl AsRef<Path>,
         options: ExtractOptions,
-    ) -> RarResult<()> {
+    ) -> RarResult<ExtractionReport> {
         self.archive.extract_all_with_options(destination, options)
+    }
+
+    /// Extract only the listed member IDs (used by filtered `x`/`e` runs),
+    /// returning what was written and what the skip-existing policy left
+    /// untouched.
+    ///
+    /// The listed members are also checked against
+    /// `max_total_unpacked_bytes`, like a whole-archive extraction.
+    pub fn extract_ids_with_options(
+        &mut self,
+        ids: &[EntryId],
+        destination: impl AsRef<Path>,
+        options: ExtractOptions,
+    ) -> RarResult<ExtractionReport> {
+        let mut total_unpacked = 0u64;
+        for &id in ids {
+            let entry = self.entry(id)?;
+            total_unpacked = total_unpacked.checked_add(entry.size()).ok_or_else(|| {
+                RarError::LimitExceeded {
+                    limit: options.max_total_unpacked_bytes.unwrap_or(u64::MAX),
+                    context: "total unpacked size overflow while extracting archive".into(),
+                }
+            })?;
+            if let Some(limit) = options.max_total_unpacked_bytes
+                && total_unpacked > limit
+            {
+                return Err(RarError::LimitExceeded {
+                    limit,
+                    context: format!(
+                        "total unpacked size {total_unpacked} exceeds limit while extracting {}",
+                        entry.name()
+                    ),
+                });
+            }
+        }
+
+        let destination = destination.as_ref();
+        let indexes: Vec<usize> = ids
+            .iter()
+            .map(|&id| self.resolve_id(id))
+            .collect::<RarResult<_>>()?;
+        // The whole catalog in order is the common case (no name filter):
+        // take the whole-archive path so its parallel heuristic applies.
+        if indexes.len() == self.archive.entries.len()
+            && indexes.iter().enumerate().all(|(i, &idx)| i == idx)
+        {
+            return self.archive.extract_all_with_options(destination, options);
+        }
+
+        let mut report = ExtractionReport::default();
+        for &id in ids {
+            // Resolve freshly per member: the first extraction can rebuild a
+            // quick-open catalog, which may reorder the indexes.
+            let index = self.resolve_id(id)?;
+            self.archive
+                .extract_index_with_options(index, destination, options, &mut report)?;
+        }
+        Ok(report)
     }
 
     /// Install or clear a caller-owned cooperative cancellation flag.

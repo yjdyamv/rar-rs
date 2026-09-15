@@ -419,8 +419,12 @@ fn cmd_extract(
         allow_unsafe_links: misc.unsafe_links,
         ..Default::default()
     };
-    let count = ops::extract_members(&mut rar, &dest, &names, options)?;
-    info!("Extracted {count} entries to {}", dest.display());
+    let report = ops::extract_members(&mut rar, &dest, &names, options)?;
+    info!(
+        "Extracted {} entries to {}",
+        report.written_count(),
+        dest.display()
+    );
     Ok(())
 }
 
@@ -457,8 +461,12 @@ fn cmd_extract_flat(
         allow_unsafe_links: misc.unsafe_links,
         ..Default::default()
     };
-    let count = ops::extract_members(&mut rar, &dest, &names, options)?;
-    info!("Extracted {count} entries to {}", dest.display());
+    let report = ops::extract_members(&mut rar, &dest, &names, options)?;
+    info!(
+        "Extracted {} entries to {}",
+        report.written_count(),
+        dest.display()
+    );
     Ok(())
 }
 

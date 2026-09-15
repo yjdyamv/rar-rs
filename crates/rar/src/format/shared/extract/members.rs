@@ -38,8 +38,7 @@ const PARALLEL_MIN_UNPACKED: u64 = 64 * 1024 * 1024;
 /// extraction paths share it so `-e`, `-o-` and `-or` behave identically.
 ///
 /// Callers that need to know where a member *would* land without extracting
-/// it (for example a CLI reporting how many files an extraction writes) get
-/// one through [`crate::ArchiveReader::resolve_destination`].
+/// it get one through [`crate::ArchiveReader::resolve_destination`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Destination {
     /// Extract the member to this path.
@@ -69,13 +68,59 @@ impl Destination {
     }
 }
 
+/// What one extraction operation wrote and what the skip-existing policy left
+/// untouched, each in archive order.
+///
+/// Directory entries are neither: they carry no file data, so their creation
+/// is silent. Members skipped by `-ol-` (`skip_links`) are not recorded
+/// either. The report is the writer's own account — it cannot disagree with
+/// what landed on disk, unlike a caller-side prediction.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtractionReport {
+    written: Vec<PathBuf>,
+    skipped: Vec<PathBuf>,
+}
+
+impl ExtractionReport {
+    /// Destination paths of the members written by this run (files and
+    /// created links), in archive order.
+    pub fn written(&self) -> &[PathBuf] {
+        &self.written
+    }
+
+    /// Number of members written.
+    pub fn written_count(&self) -> usize {
+        self.written.len()
+    }
+
+    /// Destination paths of the members the skip-existing policy left
+    /// untouched (`-o-`), in archive order.
+    pub fn skipped(&self) -> &[PathBuf] {
+        &self.skipped
+    }
+
+    /// Number of members left untouched by the skip-existing policy.
+    pub fn skipped_count(&self) -> usize {
+        self.skipped.len()
+    }
+
+    pub(crate) fn record_written(&mut self, path: PathBuf) {
+        self.written.push(path);
+    }
+
+    pub(crate) fn record_skipped(&mut self, path: PathBuf) {
+        self.skipped.push(path);
+    }
+}
+
 impl RarArchive {
-    /// Extract all archive contents with explicit options.
+    /// Extract all archive contents with explicit options, returning what was
+    /// written and what the skip-existing policy left untouched.
     pub fn extract_all_with_options(
         &mut self,
         dest_dir: impl AsRef<Path>,
         opts: crate::options::ExtractOptions,
-    ) -> RarResult<()> {
+    ) -> RarResult<ExtractionReport> {
         let dest = dest_dir.as_ref();
         fs::create_dir_all(dest)?;
         self.read_ctx_mut().extract_options = opts;
@@ -85,12 +130,13 @@ impl RarArchive {
 
         #[cfg(feature = "parallel")]
         {
-            if self.extract_all_parallel(dest, opts)? {
-                return Ok(());
+            if let Some(report) = self.extract_all_parallel(dest, opts)? {
+                return Ok(report);
             }
         }
 
         let mut total_unpacked = 0u64;
+        let mut report = ExtractionReport::default();
         let entries: Vec<_> = self.entries.clone();
         for (index, entry) in entries.iter().enumerate() {
             self.check_cancel()?;
@@ -111,9 +157,9 @@ impl RarArchive {
                     ),
                 });
             }
-            self.extract_entry(index, entry, dest)?;
+            self.extract_entry(index, entry, dest, &mut report)?;
         }
-        Ok(())
+        Ok(report)
     }
 
     /// Parallel extraction for eligible archives (optional `parallel`
@@ -134,18 +180,18 @@ impl RarArchive {
         &mut self,
         dest: &Path,
         opts: crate::options::ExtractOptions,
-    ) -> RarResult<bool> {
+    ) -> RarResult<Option<ExtractionReport>> {
         use rayon::prelude::*;
 
         if !self.supports_parallel_extract() {
-            return Ok(false);
+            return Ok(None);
         }
         if self.progress.is_some() || self.entries.len() < PARALLEL_MIN_MEMBERS {
-            return Ok(false);
+            return Ok(None);
         }
         for (i, e) in self.entries.iter().enumerate() {
             if self.is_solid_chain_member(i) || e.chunks.len() != 1 {
-                return Ok(false);
+                return Ok(None);
             }
         }
         let mut total_packed = 0u64;
@@ -154,11 +200,11 @@ impl RarArchive {
             total_packed = total_packed.saturating_add(e.header.packed_size);
             total_unpacked = total_unpacked.saturating_add(e.header.unpacked_size);
             if total_packed > PARALLEL_BUFFER_LIMIT || total_unpacked > PARALLEL_BUFFER_LIMIT {
-                return Ok(false);
+                return Ok(None);
             }
         }
         if total_unpacked < PARALLEL_MIN_UNPACKED {
-            return Ok(false);
+            return Ok(None);
         }
         if let Some(limit) = opts.max_total_unpacked_bytes
             && total_unpacked > limit
@@ -238,12 +284,20 @@ impl RarArchive {
         });
 
         // Phase 3: replay writes sequentially in archive order.
+        let mut report = ExtractionReport::default();
         for result in results {
             let member = result?;
             let entry = &self.entries[member.idx];
             let dest_path = match self.resolve_dest_path(entry, dest)? {
                 Destination::Extract(path) => path,
-                Destination::Skip(_) => continue,
+                Destination::Skip(path) => {
+                    // Directories are not reported (their creation is
+                    // silent), matching the written side.
+                    if !entry.is_dir() {
+                        report.record_skipped(path);
+                    }
+                    continue;
+                }
             };
             if entry.is_dir() {
                 fs::create_dir_all(&dest_path)?;
@@ -258,6 +312,7 @@ impl RarArchive {
             if let Some(redir) = parse_redirect_record(&entry.header.extra_data) {
                 if !self.read_ctx().extract_options.skip_links {
                     self.extract_redirection(dest, &dest_path, &redir)?;
+                    report.record_written(dest_path);
                 }
                 continue;
             }
@@ -284,8 +339,9 @@ impl RarArchive {
             self.extract_member_streams(member.idx, &dest_path)?;
             self.propagate_member_mark_of_the_web(&dest_path);
             self.apply_member_attributes(&self.entries[member.idx].header, &dest_path);
+            report.record_written(dest_path);
         }
-        Ok(true)
+        Ok(Some(report))
     }
     /// Extract a single entry with explicit options.
     pub fn extract_with_options(
@@ -310,6 +366,19 @@ impl RarArchive {
         idx: usize,
         dest_dir: impl AsRef<Path>,
         opts: crate::options::ExtractOptions,
+    ) -> RarResult<PathBuf> {
+        let mut report = ExtractionReport::default();
+        self.extract_index_with_options(idx, dest_dir, opts, &mut report)
+    }
+
+    /// [`Self::extract_at_index_with_options`] with the outcome recorded in
+    /// `report`: batch callers build one report for the whole run.
+    pub(crate) fn extract_index_with_options(
+        &mut self,
+        idx: usize,
+        dest_dir: impl AsRef<Path>,
+        opts: crate::options::ExtractOptions,
+        report: &mut ExtractionReport,
     ) -> RarResult<PathBuf> {
         if idx >= self.entries.len() {
             return Err(RarError::InvalidState(
@@ -348,7 +417,7 @@ impl RarArchive {
             ));
         }
         self.validate_entry_limits(idx)?;
-        self.extract_entry(idx, &self.entries[idx].clone(), dest)
+        self.extract_entry(idx, &self.entries[idx].clone(), dest, report)
     }
 
     /// Validate per-entry header limits against the current extract options.
@@ -396,8 +465,8 @@ impl RarArchive {
     }
 
     /// [`Self::resolve_dest_path`] with explicit options, for callers that
-    /// resolve members outside the extraction loop (the CLI's written-file
-    /// count, via [`crate::ArchiveReader::resolve_destination`]).
+    /// resolve members outside the extraction loop (via
+    /// [`crate::ArchiveReader::resolve_destination`]).
     pub(crate) fn resolve_dest_path_with(
         &self,
         entry: &ArchiveEntry,
@@ -442,20 +511,29 @@ impl RarArchive {
         Ok(Destination::Extract(dest_path))
     }
 
-    /// Extract one entry. File contents are decoded to a temporary file and
-    /// renamed over the destination only after integrity checks pass, so a
-    /// failure never leaves partial or corrupt output behind.
+    /// Extract one entry, recording the outcome in `report`. File contents
+    /// are decoded to a temporary file and renamed over the destination only
+    /// after integrity checks pass, so a failure never leaves partial or
+    /// corrupt output behind.
     fn extract_entry(
         &mut self,
         idx: usize,
         entry: &ArchiveEntry,
         dest_dir: &Path,
+        report: &mut ExtractionReport,
     ) -> RarResult<PathBuf> {
         self.validate_entry_limits(idx)?;
 
         let dest_path = match self.resolve_dest_path(entry, dest_dir)? {
             Destination::Extract(path) => path,
-            Destination::Skip(path) => return Ok(path),
+            Destination::Skip(path) => {
+                // Directories are not reported (their creation is silent),
+                // matching the written side.
+                if !entry.is_dir() {
+                    report.record_skipped(path.clone());
+                }
+                return Ok(path);
+            }
         };
 
         if entry.is_dir() {
@@ -476,7 +554,9 @@ impl RarArchive {
             if self.read_ctx().extract_options.skip_links {
                 return Ok(dest_path);
             }
-            return self.extract_redirection(dest_dir, &dest_path, &redir);
+            let path = self.extract_redirection(dest_dir, &dest_path, &redir)?;
+            report.record_written(path.clone());
+            return Ok(path);
         }
 
         if let Some(parent) = dest_path.parent() {
@@ -516,6 +596,7 @@ impl RarArchive {
         self.extract_member_streams(idx, &dest_path)?;
         self.propagate_member_mark_of_the_web(&dest_path);
         self.apply_member_attributes(&entry.header, &dest_path);
+        report.record_written(dest_path.clone());
 
         Ok(dest_path)
     }

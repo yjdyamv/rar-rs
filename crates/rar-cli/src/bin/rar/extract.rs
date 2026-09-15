@@ -61,9 +61,9 @@ pub(crate) fn cmd_extract(
         max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
-    let count = ops::extract_members(&mut rar, &dest, &names, options)?;
+    let report = ops::extract_members(&mut rar, &dest, &names, options)?;
     write_extract_logs(misc, &rar, args, &names)?;
-    info!("{}", extract_summary(count, &dest));
+    info!("{}", extract_summary(report.written_count(), &dest));
     Ok(())
 }
 
@@ -146,8 +146,8 @@ pub(crate) fn cmd_extract_flat(
         max_dict_size: max_dict_size.or(Some(rar_rs::ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
         ..Default::default()
     };
-    let count = ops::extract_members(&mut rar, &dest, &names, options)?;
+    let report = ops::extract_members(&mut rar, &dest, &names, options)?;
     write_extract_logs(misc, &rar, args, &names)?;
-    info!("{}", extract_summary(count, &dest));
+    info!("{}", extract_summary(report.written_count(), &dest));
     Ok(())
 }

@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 
 use crate::error::{CliError, CliResult};
 use rar_rs::version::ArchiveVersion;
-use rar_rs::{ArchiveReader, EntryId, EntryRef, ExtractOptions};
+use rar_rs::{ArchiveReader, EntryId, EntryRef, ExtractOptions, ExtractionReport};
 
 /// Quiet labels (`-idq` / `-inul`) suppress the listing tables entirely,
 /// like WinRAR's `l`/`v`/`lt`.
@@ -632,18 +632,18 @@ pub(crate) fn verify_options() -> ExtractOptions {
 /// Extract the whole archive, or only the members whose stored path, mask or
 /// directory prefix matches one of `names` (see [`crate::selector`]), using
 /// the same options. Directory entries are selected too, so selecting a
-/// stored directory also materializes an empty one. Returns how many *files*
-/// were written: directory entries and members left untouched by the
-/// skip-existing policy are not counted, and skipped files are reported
-/// (WinRAR's progress label for them is "Skipping"). A name matching nothing
-/// is a hard error, so a mistyped selector is never silently swallowed or
+/// stored directory also materializes an empty one. The writer's own report
+/// says which files were written and which the skip-existing policy left
+/// untouched (the `Skipping` lines print from it); "written" counts files and
+/// created links, not directories or `-ol-` links. A name matching nothing is
+/// a hard error, so a mistyped selector is never silently swallowed or
 /// treated as a destination directory.
 pub fn extract_members(
     rar: &mut ArchiveReader,
     dest: &Path,
     names: &[String],
     options: ExtractOptions,
-) -> CliResult<usize> {
+) -> CliResult<ExtractionReport> {
     let wanted: Vec<EntryId> = if names.is_empty() {
         rar.entries().map(|entry| entry.id()).collect()
     } else {
@@ -664,89 +664,13 @@ pub fn extract_members(
         wanted
     };
 
-    // Predict the written members and report the files `-o-` (or the
-    // non-interactive default) leaves untouched; the library returns no
-    // count, and the destination path is resolved here exactly like the
-    // library's `resolve_dest_path`.
-    let written = count_extracted(rar, dest, &wanted, &options);
-
-    if names.is_empty() {
-        rar.extract_all_with_options(dest, options)
-            .map_err(CliError::from)?;
-    } else {
-        for &id in &wanted {
-            let member = rar
-                .entry(id)
-                .map_err(|error| CliError::from(error).context("resolve archive member"))?
-                .name()
-                .to_string();
-            rar.extract_entry_with_options(id, dest, options)
-                .map_err(|error| CliError::from(error).context(format!("extract {member}")))?;
-        }
+    let report = rar
+        .extract_ids_with_options(&wanted, dest, options)
+        .map_err(CliError::from)?;
+    for path in report.skipped() {
+        crate::info!("Skipping {}", display_name(&path.to_string_lossy()));
     }
-    Ok(written)
-}
-
-/// Number of members extraction will write, printing a `Skipping` line for
-/// every file the skip-existing policy leaves alone. Directory entries and
-/// `-ol-` links are not written files. Each destination comes from the
-/// library's own resolver ([`ArchiveReader::resolve_destination`]), so
-/// sanitization, case folding and `-or` renaming match what extraction does;
-/// destinations written earlier in the run are folded in so a duplicate
-/// member name counts once under `-o-`.
-fn count_extracted(
-    rar: &ArchiveReader,
-    dest: &Path,
-    ids: &[EntryId],
-    options: &ExtractOptions,
-) -> usize {
-    let mut written = 0usize;
-    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for &id in ids {
-        let Ok(entry) = rar.entry(id) else {
-            continue;
-        };
-        if entry.is_dir() || (options.skip_links && entry.redirect().is_some()) {
-            continue;
-        }
-        let destination = match rar.resolve_destination(id, dest, options) {
-            Ok(destination) => destination,
-            // Unsafe member names make extraction itself fail; they write
-            // nothing, and the extraction error is the one to report.
-            Err(_) => continue,
-        };
-        let path = destination.path();
-        if options.skip_existing {
-            let key = destination_key(path);
-            if destination.is_skipped() || taken.contains(&key) {
-                crate::info!("Skipping {}", display_name(&path.to_string_lossy()));
-                continue;
-            }
-            taken.insert(key);
-        }
-        written += 1;
-    }
-    written
-}
-
-/// Destination key for the in-run "already written" set. Windows and, by
-/// default, macOS filesystems compare case-insensitively, so `a.txt` and
-/// `A.txt` denote the same file and the second member is skipped by `-o-`.
-/// Separator folding is Windows-only: on Unix `\` is a valid file-name
-/// character and must not be conflated with `/`.
-///
-/// Caveat: a macOS volume can be formatted case-sensitively (or mounted
-/// from a case-sensitive share); the key then folds names the filesystem
-/// keeps distinct, so a same-name/different-case pair counts once.
-fn destination_key(path: &Path) -> String {
-    let mut key = path.to_string_lossy().into_owned();
-    if cfg!(windows) {
-        key = key.replace('\\', "/");
-    }
-    if cfg!(any(windows, target_os = "macos")) {
-        key.make_ascii_lowercase();
-    }
-    key
+    Ok(report)
 }
 
 /// Extract every file member to stdout, concatenated (`-so`), for piping.
@@ -844,7 +768,7 @@ pub fn print_members(
 
 #[cfg(test)]
 mod tests {
-    use super::{destination_key, extract_names_and_dest, inferred_archive_paths, verify_options};
+    use super::{extract_names_and_dest, inferred_archive_paths, verify_options};
     use rar_rs::ExtractOptions;
 
     /// `t` streams every member to a sink, so the materializing read caps
@@ -881,42 +805,6 @@ mod tests {
         } else {
             assert_eq!(names, ["dest\\"]);
             assert_eq!(dest, std::path::Path::new("."));
-        }
-    }
-
-    /// The in-run destination key folds separators on Windows only; on Unix
-    /// `a\b` and `a/b` are distinct files. Case is folded on Windows and
-    /// macOS (default APFS/HFS+ are case-insensitive), so `-o-` counting
-    /// matches what extraction does there.
-    #[test]
-    fn destination_key_is_platform_aware() {
-        #[cfg(windows)]
-        {
-            assert_eq!(
-                destination_key(std::path::Path::new("a\\b")),
-                destination_key(std::path::Path::new("a/b"))
-            );
-        }
-        #[cfg(not(windows))]
-        {
-            assert_ne!(
-                destination_key(std::path::Path::new("a\\b")),
-                destination_key(std::path::Path::new("a/b"))
-            );
-        }
-        #[cfg(any(windows, target_os = "macos"))]
-        {
-            assert_eq!(
-                destination_key(std::path::Path::new("A.TXT")),
-                destination_key(std::path::Path::new("a.txt"))
-            );
-        }
-        #[cfg(not(any(windows, target_os = "macos")))]
-        {
-            assert_ne!(
-                destination_key(std::path::Path::new("A.TXT")),
-                destination_key(std::path::Path::new("a.txt"))
-            );
         }
     }
 

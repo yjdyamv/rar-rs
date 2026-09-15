@@ -276,3 +276,61 @@ fn legacy_test_checks_each_duplicate_entry_by_index() {
     let mut archive = RarArchive::open(&path).expect("reopen corrupted archive");
     assert_eq!(archive.test().expect("test archive"), (2, 1));
 }
+
+/// Extraction reports the writer's own outcome: the selected subset is
+/// written, a `-o-` rerun reports every member as skipped, and the listed
+/// members are checked against the total unpacked cap like a whole-archive
+/// extraction.
+#[test]
+fn extraction_reports_written_and_skipped_members() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("extraction-report.rar");
+    create_duplicate_archive(&path);
+
+    let mut reader = ArchiveReader::open(&path).expect("open reader");
+    let ids: Vec<_> = reader
+        .entries_named("same.bin")
+        .map(|entry| entry.id())
+        .collect();
+    let output = dir.path().join("out");
+
+    let error = reader
+        .extract_ids_with_options(
+            &ids,
+            &output,
+            ExtractOptions {
+                max_total_unpacked_bytes: Some(20),
+                ..Default::default()
+            },
+        )
+        .expect_err("the selected members must respect the total cap");
+    assert!(matches!(error, RarError::LimitExceeded { limit: 20, .. }));
+
+    let report = reader
+        .extract_ids_with_options(&ids[..1], &output, ExtractOptions::default())
+        .expect("extract the selected member");
+    assert_eq!(report.written_count(), 1);
+    assert_eq!(report.skipped_count(), 0);
+    assert_eq!(report.written(), [output.join("same.bin")]);
+    assert_eq!(
+        std::fs::read(output.join("same.bin")).expect("read output"),
+        b"first payload"
+    );
+
+    let report = reader
+        .extract_all_with_options(
+            &output,
+            ExtractOptions {
+                skip_existing: true,
+                ..Default::default()
+            },
+        )
+        .expect("re-extract with skip-existing");
+    assert_eq!(report.written_count(), 0);
+    assert_eq!(report.skipped_count(), 2);
+    assert!(report.written().is_empty());
+    assert_eq!(
+        std::fs::read(output.join("same.bin")).expect("kept output"),
+        b"first payload"
+    );
+}
