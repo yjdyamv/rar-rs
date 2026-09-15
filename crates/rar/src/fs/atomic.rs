@@ -252,12 +252,16 @@ impl Drop for StagedFile {
 ///
 /// Opening the set recovers an interrupted commit of the same parent/base so
 /// no caller can forget it; [`Self::track`] adopts files a lower-level
-/// builder staged; [`Self::commit`] runs the whole set through
-/// [`commit_files`]. A dropped, uncommitted set removes its staged files.
+/// builder staged; [`Self::park`] records an existing file that moves to a
+/// caller-chosen name as part of the same commit; [`Self::commit`] runs the
+/// whole set through [`commit_files`]. A dropped, uncommitted set removes its
+/// staged files.
 pub(crate) struct StagedSet {
     parent: PathBuf,
     base: String,
     install: Vec<(PathBuf, PathBuf)>,
+    /// `(parked, final)` pairs: existing files renamed aside by the commit.
+    parks: Vec<(PathBuf, PathBuf)>,
     committed: bool,
 }
 
@@ -275,6 +279,7 @@ impl StagedSet {
             parent,
             base: base.to_string(),
             install: Vec::new(),
+            parks: Vec::new(),
             committed: false,
         })
     }
@@ -286,11 +291,24 @@ impl StagedSet {
         self.install.push((staged, final_path.to_path_buf()));
     }
 
+    /// Park the existing file at `final_path` as `parked` when the set
+    /// commits: on rollback the parked original returns to `final_path`; on
+    /// success it stays at `parked` (unlike a replaced original, which is
+    /// deleted). The rename is journaled before it happens, so a process
+    /// kill cannot strand the file at `parked`.
+    ///
+    /// The park also stands in for the replaced original's backup: a final
+    /// that is both parked and installed is not hidden-backed-up a second
+    /// time.
+    pub(crate) fn park(&mut self, final_path: &Path, parked: PathBuf) {
+        self.parks.push((parked, final_path.to_path_buf()));
+    }
+
     /// Install every tracked file as one journaled commit. On failure the
     /// set is rolled back and its staged files are kept (still uncommitted)
     /// until drop.
     pub(crate) fn commit(&mut self) -> RarResult<()> {
-        let result = commit_files(&self.parent, &self.base, &self.install, &[]);
+        let result = commit_files_impl(&self.parent, &self.base, &self.install, &[], &self.parks);
         if result.is_ok() {
             self.committed = true;
         }
@@ -559,6 +577,7 @@ fn write_commit_journal(
     base: &str,
     backups: &[(PathBuf, PathBuf)],
     install: &[(PathBuf, PathBuf)],
+    parks: &[(PathBuf, PathBuf)],
 ) -> RarResult<()> {
     let mut text = String::from(COMMIT_JOURNAL_VERSION);
     text.push('\n');
@@ -577,6 +596,9 @@ fn write_commit_journal(
     for (backup, final_path) in backups {
         push("backup", backup, final_path);
     }
+    for (parked, final_path) in parks {
+        push("park", parked, final_path);
+    }
     for (staged, final_path) in install {
         push("install", staged, final_path);
     }
@@ -592,13 +614,14 @@ fn write_commit_journal(
 ///
 /// Called before a write stages new output, so a process killed mid-commit
 /// never leaves a mixed volume set behind. With the done marker present the
-/// new set won and the parked originals are dropped; without it the commit had
-/// not finished, so newly installed files are removed, parked originals are
+/// new set won, the parked originals are dropped and explicit parks stay at
+/// their parked names; without it the commit had not finished, so newly
+/// installed files are removed, parked originals (and explicit parks) are
 /// restored, and leftover staged files are discarded. A final is only removed
-/// when it either had no pre-existing original (no backup record) or that
-/// original was actually parked (the backup file exists): a kill between the
-/// parks leaves later finals untouched *and* unbacked, and deleting them would
-/// destroy the old set. Malformed records (unknown escapes, wrong field
+/// when it either had no pre-existing original (no backup/park record) or that
+/// original was actually parked (the backup/park file exists): a kill between
+/// the parks leaves later finals untouched *and* unbacked, and deleting them
+/// would destroy the old set. Malformed records (unknown escapes, wrong field
 /// counts, names that are not plain siblings) and unknown record kinds are
 /// skipped and keep the journal in place, so nothing skipped is silently
 /// forgotten; a journal with an unknown version header is left untouched
@@ -618,6 +641,7 @@ pub(crate) fn recover_interrupted_commit(parent: &Path, base: &str) -> RarResult
     };
     let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut installs: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut parks: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut malformed = false;
     for line in lines {
         if line.is_empty() {
@@ -647,6 +671,7 @@ pub(crate) fn recover_interrupted_commit(parent: &Path, base: &str) -> RarResult
         }
         match kind {
             "backup" => backups.push((parent.join(from), parent.join(to))),
+            "park" => parks.push((parent.join(from), parent.join(to))),
             "install" => installs.push((parent.join(from), parent.join(to))),
             _ => malformed = true,
         }
@@ -656,18 +681,35 @@ pub(crate) fn recover_interrupted_commit(parent: &Path, base: &str) -> RarResult
             let _ = fs::remove_file(backup);
         }
     } else {
-        for (_, final_path) in &installs {
-            let has_backup_record = backups.iter().any(|(_, final_)| final_ == final_path);
-            let parked = backups
+        // A final has a recorded original when a backup or a park names it;
+        // that original was actually parked when the file exists.
+        let has_original_record = |final_path: &Path| {
+            backups.iter().any(|(_, final_)| final_ == final_path)
+                || parks.iter().any(|(_, final_)| final_ == final_path)
+        };
+        let original_parked = |final_path: &Path| {
+            backups
                 .iter()
-                .any(|(backup, final_)| final_ == final_path && backup.exists());
-            if !has_backup_record || parked {
+                .any(|(backup, final_)| final_ == final_path && backup.exists())
+                || parks
+                    .iter()
+                    .any(|(parked, final_)| final_ == final_path && parked.exists())
+        };
+        for (_, final_path) in &installs {
+            let has_record = has_original_record(final_path);
+            let parked = original_parked(final_path);
+            if !has_record || parked {
                 let _ = fs::remove_file(final_path);
             }
         }
         for (backup, final_path) in &backups {
             if backup.exists() {
                 let _ = restore_file(backup, final_path);
+            }
+        }
+        for (parked, final_path) in &parks {
+            if parked.exists() {
+                let _ = restore_file(parked, final_path);
             }
         }
         for (staged, _) in &installs {
@@ -705,7 +747,22 @@ pub(crate) fn commit_files(
     install: &[(PathBuf, PathBuf)],
     retire: &[PathBuf],
 ) -> RarResult<()> {
-    if install.is_empty() && retire.is_empty() {
+    commit_files_impl(parent, base, install, retire, &[])
+}
+
+/// [`commit_files`] with explicit parks: `(parked, final)` pairs move an
+/// existing final to a caller-chosen name as part of the same journaled
+/// commit. A park is restored on rollback and kept on success (unlike the
+/// hidden backups, which are deleted on success); a final that is both parked
+/// and installed is not backed up a second time.
+fn commit_files_impl(
+    parent: &Path,
+    base: &str,
+    install: &[(PathBuf, PathBuf)],
+    retire: &[PathBuf],
+    parks: &[(PathBuf, PathBuf)],
+) -> RarResult<()> {
+    if install.is_empty() && retire.is_empty() && parks.is_empty() {
         return Ok(());
     }
     // A bare relative archive name has an empty (not absent) parent; treat
@@ -718,40 +775,62 @@ pub(crate) fn commit_files(
     };
     let suffix = temp_suffix();
     // Plan the backups up front so the journal can name them before any file
-    // moves.
+    // moves. A final with an explicit park already has a caller-owned
+    // parking spot, so it is not backed up again.
     let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
     for final_path in install
         .iter()
         .map(|(_, final_path)| final_path)
         .chain(retire.iter())
     {
+        if parks
+            .iter()
+            .any(|(_, parked_final)| parked_final == final_path)
+        {
+            continue;
+        }
         if final_path.exists() {
             backups.push((backup_sibling_path(final_path, &suffix), final_path.clone()));
         }
     }
-    write_commit_journal(parent, base, &backups, install)?;
+    write_commit_journal(parent, base, &backups, install, parks)?;
 
     // (final path, staged path) for everything already installed.
     let mut installed: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let rollback = |backups: &[(PathBuf, PathBuf)], installed: &[(PathBuf, PathBuf)]| {
+    let rollback = |backups: &[(PathBuf, PathBuf)],
+                    parks: &[(PathBuf, PathBuf)],
+                    installed: &[(PathBuf, PathBuf)]| {
         for (final_path, staged) in installed.iter().rev() {
             let _ = restore_file(final_path, staged);
         }
         for (backup, final_path) in backups.iter().rev() {
-            // A missing backup means this final was never parked (the kill or
-            // failure happened before its phase-1 rename): leave the original
-            // untouched instead of treating the missing backup as "remove
-            // whatever is there".
+            // A missing backup means this final was never parked (the kill
+            // or failure happened before its phase-1 rename): leave the
+            // original untouched instead of treating the missing backup as
+            // "remove whatever is there".
             if backup.exists() {
                 let _ = restore_file(backup, final_path);
             }
         }
+        for (parked, final_path) in parks.iter().rev() {
+            if parked.exists() {
+                let _ = restore_file(parked, final_path);
+            }
+        }
     };
 
-    // Phase 1: park every pre-existing final (replaced or retired).
+    // Phase 1: park every pre-existing final (explicit parks first, then the
+    // replaced/retired originals).
+    for (parked, final_path) in parks {
+        if let Err(error) = fs::rename(final_path, parked) {
+            rollback(&backups, parks, &installed);
+            let _ = fs::remove_file(journal_path(parent, base));
+            return Err(RarError::Io(error));
+        }
+    }
     for (backup, final_path) in &backups {
         if let Err(error) = fs::rename(final_path, backup) {
-            rollback(&backups, &installed);
+            rollback(&backups, parks, &installed);
             let _ = fs::remove_file(journal_path(parent, base));
             return Err(RarError::Io(error));
         }
@@ -762,7 +841,7 @@ pub(crate) fn commit_files(
     // names.
     for (staged, final_path) in install {
         if let Err(error) = sync_file(staged).and_then(|()| replace_file(staged, final_path)) {
-            rollback(&backups, &installed);
+            rollback(&backups, parks, &installed);
             let _ = fs::remove_file(journal_path(parent, base));
             return Err(error);
         }
@@ -772,7 +851,7 @@ pub(crate) fn commit_files(
     // Make the swap durable before dropping the parked originals: the
     // journal, the parks and the installs all renamed entries in `parent`.
     if let Err(error) = sync_parent_dir(parent) {
-        rollback(&backups, &installed);
+        rollback(&backups, parks, &installed);
         let _ = fs::remove_file(journal_path(parent, base));
         return Err(error);
     }
@@ -781,6 +860,7 @@ pub(crate) fn commit_files(
     // must be durable before any backup goes away: if a power loss persisted
     // the backup removals while losing the marker, recovery would see "not
     // done", delete the new installs, and have no originals left to restore.
+    // Explicit parks stay: they are the caller's damaged-original copies.
     let marker = commit_done_path(parent, base);
     let marked = fs::write(&marker, b"")
         .map_err(RarError::Io)
@@ -1246,7 +1326,7 @@ mod tests {
         let from = parent.join("bad\rname\x01");
         let to = parent.join("final.rar");
 
-        super::write_commit_journal(parent, "set", &[(from, to)], &[]).unwrap();
+        super::write_commit_journal(parent, "set", &[(from, to)], &[], &[]).unwrap();
         let text = std::fs::read_to_string(super::journal_path(parent, "set")).unwrap();
         assert_eq!(
             text.lines().count(),
@@ -1273,6 +1353,7 @@ mod tests {
             "set",
             &[(backup.clone(), final_path.clone())],
             &install,
+            &[],
         )
         .unwrap();
         let text = std::fs::read_to_string(super::journal_path(parent, "set")).unwrap();
@@ -1324,6 +1405,7 @@ mod tests {
             "set",
             &[(backup.clone(), final_path.clone())],
             &install,
+            &[],
         )
         .unwrap();
         // The journal stays valid UTF-8 and carries the raw byte escaped,
@@ -1490,5 +1572,115 @@ mod tests {
             .filter(|name| name.contains("rar5"))
             .collect();
         assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
+    }
+
+    /// A parked original stays at its parked name after a successful commit
+    /// while the rebuilt staged file lands at the final path.
+    #[test]
+    fn staged_set_commit_keeps_a_parked_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("set.part2.rar");
+        let parked = final_path.with_extension("rar.bad");
+        std::fs::write(&final_path, b"damaged").unwrap();
+
+        let mut set = super::StagedSet::new(dir.path(), "set").unwrap();
+        let staged = staged_sibling(&final_path, b"rebuilt");
+        set.track(staged, &final_path);
+        set.park(&final_path, parked.clone());
+        set.commit().unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"rebuilt");
+        assert_eq!(std::fs::read(&parked).unwrap(), b"damaged");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("rar5"))
+            .collect();
+        assert!(leftovers.is_empty(), "commit leftovers: {leftovers:?}");
+    }
+
+    /// A failed commit restores the parked original and the parked name is
+    /// gone: the damaged volume is never lost, and no `.bad` copy is left.
+    #[test]
+    fn staged_set_failed_commit_restores_a_parked_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("set.part2.rar");
+        let parked = final_path.with_extension("rar.bad");
+        std::fs::write(&final_path, b"damaged").unwrap();
+
+        let mut set = super::StagedSet::new(dir.path(), "set").unwrap();
+        let staged = staged_sibling(&final_path, b"rebuilt");
+        set.track(staged.clone(), &final_path);
+        set.park(&final_path, parked.clone());
+        // Remove the staged file so the install fails after the park ran.
+        std::fs::remove_file(&staged).unwrap();
+
+        assert!(set.commit().is_err());
+        drop(set);
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"damaged");
+        assert!(!parked.exists(), "the parked copy must be moved back");
+    }
+
+    /// A kill between the journaled park and the install: the journal names
+    /// the park, so recovery removes the new install and returns the parked
+    /// original to its final name.
+    #[test]
+    fn recovery_restores_a_journaled_park() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        let final_path = parent.join("set.part2.rar");
+        let parked = parent.join("set.part2.rar.bad");
+        let staged = parent.join(".set.part2.rar.rar5tmp-x");
+        std::fs::write(&parked, b"damaged").unwrap();
+        std::fs::write(&final_path, b"rebuilt").unwrap();
+        std::fs::write(
+            super::journal_path(parent, "set"),
+            format!(
+                "rar5commit v2\npark\t{}\t{}\ninstall\t{}\t{}\n",
+                parked.file_name().unwrap().to_string_lossy(),
+                final_path.file_name().unwrap().to_string_lossy(),
+                staged.file_name().unwrap().to_string_lossy(),
+                final_path.file_name().unwrap().to_string_lossy(),
+            ),
+        )
+        .unwrap();
+
+        super::recover_interrupted_commit(parent, "set").unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"damaged");
+        assert!(!parked.exists());
+        assert!(!super::journal_path(parent, "set").exists());
+    }
+
+    /// With the done marker present the committed rebuild wins: the journaled
+    /// park stays at its parked name (it is the kept damaged original).
+    #[test]
+    fn recovery_keeps_a_journaled_park_when_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        let final_path = parent.join("set.part2.rar");
+        let parked = parent.join("set.part2.rar.bad");
+        let staged = parent.join(".set.part2.rar.rar5tmp-x");
+        std::fs::write(&parked, b"damaged").unwrap();
+        std::fs::write(&final_path, b"rebuilt").unwrap();
+        std::fs::write(
+            super::journal_path(parent, "set"),
+            format!(
+                "rar5commit v2\npark\t{}\t{}\ninstall\t{}\t{}\n",
+                parked.file_name().unwrap().to_string_lossy(),
+                final_path.file_name().unwrap().to_string_lossy(),
+                staged.file_name().unwrap().to_string_lossy(),
+                final_path.file_name().unwrap().to_string_lossy(),
+            ),
+        )
+        .unwrap();
+        std::fs::write(super::commit_done_path(parent, "set"), b"").unwrap();
+
+        super::recover_interrupted_commit(parent, "set").unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"rebuilt");
+        assert_eq!(std::fs::read(&parked).unwrap(), b"damaged");
+        assert!(!super::commit_done_path(parent, "set").exists());
+        assert!(!super::journal_path(parent, "set").exists());
     }
 }

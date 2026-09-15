@@ -1370,9 +1370,11 @@ fn rebuild_missing_volumes_chunked(
 /// Finalize and install a set of rebuilt volumes as one journaled commit.
 ///
 /// `outputs` holds `(volume index, staged path, write handle)` for each
-/// rebuilt volume; a damaged original is parked as `*.bad` and kept there
-/// on success. On any failure the parks are renamed back and the staged
-/// files are removed on drop.
+/// rebuilt volume; a damaged original is parked as `*.bad` through the set's
+/// journaled park, kept there on success and restored on any failure. The
+/// park is recorded in the commit journal before any rename, so a process
+/// kill between the park and the install cannot strand the volume at
+/// `*.bad`. Staged files are removed on drop when the commit never ran.
 fn commit_rebuilt_volumes(
     data_paths: &[PathBuf],
     damaged: &[usize],
@@ -1397,51 +1399,30 @@ fn commit_rebuilt_volumes(
     for (index, tmp, _) in &outputs {
         set.track(tmp.clone(), &data_paths[*index]);
     }
-    let mut parked: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut rebuilt = Vec::with_capacity(outputs.len());
-    let staged = (|| -> RarResult<()> {
-        for (index, tmp, file) in outputs {
-            file.sync_all().map_err(RarError::Io)?;
-            drop(file);
-            // Truncate at the `ENDARC` block when everything after it is
-            // zero padding (only the last volume of a set can be short).
-            if index == last_index {
-                let mut probe = fs::File::open(&tmp)?;
-                if let Some(end) = endarc_end(&mut probe)?
-                    && end > 0
-                    && end < shard_len
-                {
-                    let file = fs::File::options().write(true).open(&tmp)?;
-                    file.set_len(end).map_err(RarError::Io)?;
-                }
+    for (index, tmp, file) in outputs {
+        file.sync_all().map_err(RarError::Io)?;
+        drop(file);
+        // Truncate at the `ENDARC` block when everything after it is
+        // zero padding (only the last volume of a set can be short).
+        if index == last_index {
+            let mut probe = fs::File::open(&tmp)?;
+            if let Some(end) = endarc_end(&mut probe)?
+                && end > 0
+                && end < shard_len
+            {
+                let file = fs::File::options().write(true).open(&tmp)?;
+                file.set_len(end).map_err(RarError::Io)?;
             }
-            let final_path = data_paths[index].clone();
-            if damaged.contains(&index) && final_path.exists() {
-                let bad = unique_bad_path(&final_path);
-                fs::rename(&final_path, &bad).map_err(RarError::Io)?;
-                parked.push((bad, final_path.clone()));
-            }
-            rebuilt.push(final_path);
         }
-        Ok(())
-    })();
-    if let Err(error) = staged {
-        restore_parked(&parked);
-        return Err(error);
+        let final_path = data_paths[index].clone();
+        if damaged.contains(&index) && final_path.exists() {
+            set.park(&final_path, unique_bad_path(&final_path));
+        }
+        rebuilt.push(final_path);
     }
-    if let Err(error) = set.commit() {
-        restore_parked(&parked);
-        return Err(error);
-    }
+    set.commit()?;
     Ok(rebuilt)
-}
-
-/// Put every parked damaged original back at its final path (newest park
-/// first), used when the rebuild transaction fails.
-fn restore_parked(parked: &[(PathBuf, PathBuf)]) {
-    for (bad, original) in parked.iter().rev() {
-        let _ = fs::rename(bad, original);
-    }
 }
 
 /// One chunk of every volume, loaded once per streaming step.
