@@ -123,3 +123,58 @@ fn parallel_store_packed_over_unpacked_errors_like_serial() {
         "precondition: the parallel path replayed the earlier members"
     );
 }
+
+/// The mirror image: a STORE member whose packed area is *shorter* than its
+/// declared unpacked size must fail identically in parallel and serial. The
+/// parallel phase used to extract the truncated bytes whenever the stored
+/// CRC happened to cover exactly the bytes present; it now shares
+/// `payload::decode_member`'s size check with the serial path.
+#[test]
+fn parallel_short_store_payload_errors_like_serial() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("store-short.rar");
+    let payload = vec![0x5Au8; MEMBER_BYTES];
+    {
+        let mut writer = ArchiveWriter::create(&archive).unwrap();
+        for i in 0..MEMBERS {
+            writer
+                .add_bytes(&format!("member{i}.bin"), &payload, store_opts())
+                .unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    let mut bytes = std::fs::read(&archive).unwrap();
+    // 17 MiB encodes in the same 4 vint bytes as the stored 16 MiB.
+    set_unpacked_size(&mut bytes, "member2.bin", 17 * 1024 * 1024);
+    std::fs::write(&archive, &bytes).unwrap();
+
+    let serial_out = dir.path().join("serial");
+    let mut reader = ArchiveReader::open(&archive).unwrap();
+    let id = reader.unique_entry("member2.bin").unwrap();
+    let serial_err = reader
+        .extract_entry_with_options(id, &serial_out, ExtractOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(serial_err, RarError::Format(_)),
+        "serial: {serial_err:?}"
+    );
+
+    let parallel_out = dir.path().join("parallel");
+    let mut reader = ArchiveReader::open(&archive).unwrap();
+    let parallel_err = reader
+        .extract_all_with_options(&parallel_out, ExtractOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(parallel_err, RarError::Format(_)),
+        "parallel: {parallel_err:?}"
+    );
+    assert_eq!(
+        serial_err.to_string(),
+        parallel_err.to_string(),
+        "parallel and serial must report the same short-payload error"
+    );
+    assert!(
+        !parallel_out.join("member2.bin").exists(),
+        "the short member must not be written"
+    );
+}

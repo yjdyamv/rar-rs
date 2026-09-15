@@ -1,6 +1,7 @@
 #![cfg(feature = "parallel")]
 //! Parallel extraction must honor `flat_paths`, `skip_existing` and
-//! `auto_rename` exactly like the serial `extract_entry` path.
+//! `auto_rename` exactly like the serial `extract_entry` path, and decode
+//! compressed members through the same `payload::decode_member`.
 //!
 //! The archives here are deliberately eligible for the parallel path:
 //! 4 members, 4 x 16 MiB unpacked (>= 64 MiB) and no solid chain.
@@ -98,6 +99,17 @@ fn parallel_compressed_extraction_matches_serial() {
                 .unwrap();
         }
         writer.finish().unwrap();
+    }
+    // The archive must actually exercise the compressed branch: STORE
+    // members decode through a different path inside `decode_member`.
+    let reader = ArchiveReader::open(&archive).unwrap();
+    for i in 0..MEMBERS {
+        let id = reader.unique_entry(&member_name(i)).unwrap();
+        assert_ne!(
+            reader.entry(id).unwrap().method_name(),
+            "STORE",
+            "member {i} must be compressed for this test to cover the branch"
+        );
     }
 
     let parallel_out = dir.path().join("parallel");
