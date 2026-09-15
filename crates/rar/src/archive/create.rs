@@ -381,7 +381,7 @@ impl RarArchive {
     /// written before failing. Called with the staged volume base; the
     /// builder names every file after it, so the sweep cannot match
     /// anything else.
-    fn remove_staged_recovery_files(parent: &Path, tmp_base: &str) {
+    pub(super) fn remove_staged_recovery_files(parent: &Path, tmp_base: &str) {
         let Ok(entries) = std::fs::read_dir(parent) else {
             return;
         };

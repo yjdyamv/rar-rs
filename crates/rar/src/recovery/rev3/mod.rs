@@ -958,12 +958,10 @@ fn build_recovery_volumes_for_set_chunked(
 
     // Create the `.rev` files as temporary siblings and fill them stripe
     // by stripe; the trailer (when the layout has one) is appended after
-    // the last stripe. The temps are installed over the final paths only
-    // after the whole parity set is built, so a failure leaves existing
-    // `.rev` files untouched.
+    // the last stripe. The set installs them as one transaction, so a
+    // failure leaves existing `.rev` files untouched and no temps behind.
+    let mut set = crate::recovery::parity::ParitySet::new(&parent, &layout.base)?;
     struct RevOutput {
-        final_path: PathBuf,
-        tmp_path: PathBuf,
         file: fs::File,
         meta: Meta,
         payload_crc: crc32fast::Hasher,
@@ -979,23 +977,12 @@ fn build_recovery_volumes_for_set_chunked(
             Format::Trailer => layout.trailer_rev_path(&parent, k),
             Format::Legacy => layout.legacy_rev_path(&parent, k, &meta),
         };
-        let tmp_path = crate::fs::atomic::temp_sibling_path(&path);
-        match fs::File::create(&tmp_path) {
-            Ok(file) => outputs.push(RevOutput {
-                final_path: path,
-                tmp_path,
-                file,
-                meta,
-                payload_crc: crc32fast::Hasher::new(),
-            }),
-            Err(error) => {
-                for output in &outputs {
-                    let _ = fs::remove_file(&output.tmp_path);
-                }
-                let _ = fs::remove_file(&tmp_path);
-                return Err(RarError::Io(error));
-            }
-        }
+        let (_tmp, file) = set.stage(&path)?;
+        outputs.push(RevOutput {
+            file,
+            meta,
+            payload_crc: crc32fast::Hasher::new(),
+        });
     }
 
     let result = (|| -> RarResult<()> {
@@ -1048,50 +1035,16 @@ fn build_recovery_volumes_for_set_chunked(
         }
         Ok(())
     })();
-    if let Err(error) = result {
-        for output in &outputs {
-            let _ = fs::remove_file(&output.tmp_path);
-        }
-        return Err(error);
-    }
+    result?;
 
-    // The whole parity set is built: close the staged files and install
-    // them as one transaction. `commit_files` parks every pre-existing
-    // final, installs the set and rolls the old files back if any install
-    // fails, so a failure cannot leave a half-replaced parity set.
-    let mut install: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(outputs.len());
-    let mut written: Vec<PathBuf> = Vec::with_capacity(outputs.len());
+    // The whole parity set is built: close the staged files and install the
+    // set as one transaction (ParitySet refuses a non-file final and sweeps
+    // the temps on failure), so a failure cannot leave a half-replaced
+    // parity set.
     for output in outputs {
         drop(output.file);
-        install.push((output.tmp_path, output.final_path.clone()));
-        written.push(output.final_path);
     }
-    // A directory (or other non-file) at a final path is a conflict:
-    // `commit_files` would park and replace it, then strand the parked
-    // entry because only files are dropped on success.
-    if let Some(conflict) = install
-        .iter()
-        .map(|(_, final_path)| final_path)
-        .find(|final_path| final_path.exists() && !final_path.is_file())
-    {
-        for (tmp, _) in &install {
-            let _ = fs::remove_file(tmp);
-        }
-        return Err(RarError::Io(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "{}: refusing to replace a non-file entry with a recovery volume",
-                conflict.display()
-            ),
-        )));
-    }
-    if let Err(error) = crate::fs::atomic::commit_files(&parent, &layout.base, &install, &[]) {
-        for (tmp, _) in &install {
-            let _ = fs::remove_file(tmp);
-        }
-        return Err(error);
-    }
-    Ok(written)
+    set.commit()
 }
 
 /// Resolve the data-volume path of every slot, preferring the naming

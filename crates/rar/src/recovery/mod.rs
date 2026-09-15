@@ -24,6 +24,7 @@ pub(crate) mod legacy_rr {
     #[cfg(test)]
     pub(crate) use super::legacy::scan_protect;
 }
+pub(crate) mod parity;
 pub mod rar50;
 pub(crate) mod rev3;
 pub mod rev50;

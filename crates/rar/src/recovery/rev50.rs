@@ -438,10 +438,11 @@ fn rebuild_missing_volumes_chunked(
     }
 
     // Reconstructed volumes stream to temporary siblings, so neither a
-    // rebuilt volume nor a `.rev` payload is ever held in memory.
+    // rebuilt volume nor a `.rev` payload is ever held in memory. The set
+    // installs them as one transaction and sweeps the temps on any failure.
+    let mut set = crate::recovery::parity::ParitySet::new(&parent, &base)?;
     struct RebuiltOutput {
         index: usize,
-        final_path: PathBuf,
         tmp: PathBuf,
         file: fs::File,
         written: u64,
@@ -453,22 +454,13 @@ fn rebuild_missing_volumes_chunked(
             index + 1,
             width = width
         ));
-        let tmp = crate::fs::atomic::temp_sibling_path(&final_path);
-        match crate::fs::atomic::read_write_create(&tmp) {
-            Ok(file) => outputs.push(RebuiltOutput {
-                index,
-                final_path,
-                tmp,
-                file,
-                written: 0,
-            }),
-            Err(error) => {
-                for output in &outputs {
-                    let _ = fs::remove_file(&output.tmp);
-                }
-                return Err(RarError::Io(error));
-            }
-        }
+        let (tmp, file) = set.stage(&final_path)?;
+        outputs.push(RebuiltOutput {
+            index,
+            tmp,
+            file,
+            written: 0,
+        });
     }
 
     let mut offset = 0u64;
@@ -528,31 +520,24 @@ fn rebuild_missing_volumes_chunked(
         }
         Ok(())
     })();
-    if let Err(error) = result {
-        for output in &outputs {
-            let _ = fs::remove_file(&output.tmp);
-        }
-        return Err(error);
-    }
+    result?;
 
     // Validate each rebuilt volume against its recorded size and CRC32
     // before anything is installed: a corrupt reconstruction must never
     // replace a volume.
-    let tmp_paths: Vec<PathBuf> = outputs.iter().map(|output| output.tmp.clone()).collect();
-    let mut install: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(outputs.len());
-    for (slot, output) in outputs.into_iter().enumerate() {
+    for output in outputs {
         let RebuiltOutput {
             index,
-            final_path,
             tmp,
             file,
             written,
+            ..
         } = output;
         let size = volume_sizes[index];
         let expected_crc = volume_crcs[index];
         // The closure owns the write handle (it must close before install);
         // the temp path is cloned for its CRC re-read.
-        let tmp_for_check = tmp.clone();
+        let tmp_for_check = tmp;
         let step = (move || -> RarResult<()> {
             check_cancel(cancel)?;
             if written < padded_max {
@@ -574,29 +559,14 @@ fn rebuild_missing_volumes_chunked(
             }
             Ok(())
         })();
-        if let Err(error) = step {
-            for path in &tmp_paths[slot..] {
-                let _ = fs::remove_file(path);
-            }
-            return Err(error);
-        }
-        install.push((tmp, final_path));
+        // A failure leaves the set uncommitted: drop sweeps every temp.
+        step?;
     }
 
     // Install the validated set as one transaction: either every rebuilt
     // volume lands or none does, so a failure cannot leave a half-rebuilt
     // set behind.
-    let rebuilt_paths: Vec<PathBuf> = install
-        .iter()
-        .map(|(_, final_path)| final_path.clone())
-        .collect();
-    if let Err(error) = crate::fs::atomic::commit_files(&parent, &base, &install, &[]) {
-        for (tmp, _) in &install {
-            let _ = fs::remove_file(tmp);
-        }
-        return Err(error);
-    }
-    Ok(rebuilt_paths)
+    set.commit()
 }
 
 /// Build `.rev` recovery volumes for an existing multi-volume set,
@@ -675,12 +645,11 @@ fn build_recovery_volumes_for_set_chunked(
 
     // Create the `.rev` files as temporary siblings and fill them stripe
     // by stripe; the header is backfilled in place once the volume CRCs
-    // and the payload CRC are known. The temps are installed over the
-    // final paths only after the whole parity set is built, so a failure
-    // leaves existing `.rev` files untouched.
+    // and the payload CRC are known. The whole set installs as one
+    // transaction (see ParitySet), so a failure leaves existing `.rev`
+    // files untouched and no temps behind.
+    let mut set = crate::recovery::parity::ParitySet::new(parent, &base)?;
     struct RevOutput {
-        final_path: PathBuf,
-        tmp_path: PathBuf,
         file: fs::File,
         /// Header body with placeholder CRCs (finalized in place later).
         body: Vec<u8>,
@@ -690,32 +659,17 @@ fn build_recovery_volumes_for_set_chunked(
     let mut outputs: Vec<RevOutput> = Vec::with_capacity(rec_count);
     for k in 0..rec_count {
         let rev_path = parent.join(format!("{base}.part{:0pad$}.rev", k + 1, pad = pad));
-        let tmp_path = crate::fs::atomic::temp_sibling_path(&rev_path);
         let body = rev5_header_body(k, rec_count, &volume_sizes, &zero_crcs, 0);
         let header_content = rev5_header_content(&body);
-        let create = (|| -> RarResult<fs::File> {
-            let mut file = fs::File::create(&tmp_path)?;
-            file.write_all(REV5_SIGNATURE)?;
-            file.write_all(&0u32.to_le_bytes())?; // header CRC placeholder
-            file.write_all(&header_content)?;
-            Ok(file)
-        })();
-        match create {
-            Ok(file) => outputs.push(RevOutput {
-                final_path: rev_path,
-                tmp_path,
-                file,
-                body,
-                payload_crc: crc32fast::Hasher::new(),
-            }),
-            Err(error) => {
-                for output in &outputs {
-                    let _ = fs::remove_file(&output.tmp_path);
-                }
-                let _ = fs::remove_file(&tmp_path);
-                return Err(error);
-            }
-        }
+        let (_tmp, mut file) = set.stage(&rev_path)?;
+        file.write_all(REV5_SIGNATURE)?;
+        file.write_all(&0u32.to_le_bytes())?; // header CRC placeholder
+        file.write_all(&header_content)?;
+        outputs.push(RevOutput {
+            file,
+            body,
+            payload_crc: crc32fast::Hasher::new(),
+        });
     }
 
     let result = (|| -> RarResult<()> {
@@ -773,50 +727,16 @@ fn build_recovery_volumes_for_set_chunked(
         }
         Ok(())
     })();
-    if let Err(error) = result {
-        for output in &outputs {
-            let _ = fs::remove_file(&output.tmp_path);
-        }
-        return Err(error);
-    }
+    result?;
 
-    // The whole parity set is built: close the staged files and install
-    // them as one transaction. `commit_files` parks every pre-existing
-    // final, installs the set and rolls the old files back if any install
-    // fails, so a failure cannot leave a half-replaced parity set.
-    let mut install: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(outputs.len());
-    let mut written: Vec<PathBuf> = Vec::with_capacity(outputs.len());
+    // The whole parity set is built: close the staged files and install the
+    // set as one transaction (ParitySet refuses a non-file final and sweeps
+    // the temps on failure), so a failure cannot leave a half-replaced
+    // parity set.
     for output in outputs {
         drop(output.file);
-        install.push((output.tmp_path, output.final_path.clone()));
-        written.push(output.final_path);
     }
-    // A directory (or other non-file) at a final path is a conflict:
-    // `commit_files` would park and replace it, then strand the parked
-    // entry because only files are dropped on success.
-    if let Some(conflict) = install
-        .iter()
-        .map(|(_, final_path)| final_path)
-        .find(|final_path| final_path.exists() && !final_path.is_file())
-    {
-        for (tmp, _) in &install {
-            let _ = fs::remove_file(tmp);
-        }
-        return Err(RarError::Io(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "{}: refusing to replace a non-file entry with a recovery volume",
-                conflict.display()
-            ),
-        )));
-    }
-    if let Err(error) = crate::fs::atomic::commit_files(parent, &base, &install, &[]) {
-        for (tmp, _) in &install {
-            let _ = fs::remove_file(tmp);
-        }
-        return Err(error);
-    }
-    Ok(written)
+    set.commit()
 }
 
 #[cfg(test)]

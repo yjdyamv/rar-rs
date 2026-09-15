@@ -372,15 +372,7 @@ impl RarArchive {
             // A `.rev` generation failure may leave staged rev siblings that
             // never made it into `staged_paths`; sweep them by their unique
             // staged base.
-            if let Ok(entries) = fs::read_dir(&parent) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with(&tmp_base) && name.ends_with(".rev") {
-                        let _ = fs::remove_file(entry.path());
-                    }
-                }
-            }
+            Self::remove_staged_recovery_files(&parent, &tmp_base);
         }
         result
     }
