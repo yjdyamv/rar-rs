@@ -190,7 +190,7 @@ impl std::fmt::Display for ArchiveVersion {
 /// solid-chain rules, encode, member cipher, repack generation) keys on this
 /// value instead of re-matching raw `unp_ver` bytes, so alias folding lives
 /// here once.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LegacyCodec {
     /// RAR 1.5 (`unp_ver 15`): adaptive-Huffman + plain LZ.
     Rar15,
@@ -202,8 +202,8 @@ pub(crate) enum LegacyCodec {
 
 impl LegacyCodec {
     /// Fold a member `unp_ver` field onto its codec: `15` → RAR15,
-    /// `20`/`26` → RAR20, `29`/`36` → RAR29. Unknown values (and the RAR13
-    /// and RAR5 families) are `None`.
+    /// `20`/`26` → RAR20, `29`/`36` → RAR29. Unknown values (including `2`,
+    /// the RAR13 wire value, and the RAR5 values) are `None`.
     pub(crate) const fn from_unp_ver(unp_ver: u8) -> Option<Self> {
         match unp_ver {
             15 => Some(Self::Rar15),
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(
             LegacyCodec::from_unp_ver(2),
             None,
-            "the RAR13 codec is separate"
+            "the RAR13 wire value is not a legacy codec (v14 members report unp_ver 15)"
         );
         assert_eq!(
             LegacyCodec::from_unp_ver(30),

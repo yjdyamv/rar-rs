@@ -1250,9 +1250,9 @@ fn encode_legacy_codec_member(data: &[u8], level: u8, codec: LegacyCodec) -> Rar
             )
             .encode_member(data)?,
         ),
-        LegacyCodec::Rar29 => Err(RarError::InvalidState(
-            "the RAR29 member encoder is dispatched by encode_rar4_member".into(),
-        )),
+        LegacyCodec::Rar29 => {
+            unreachable!("encode_rar4_member dispatches the RAR29 encoder before this helper")
+        }
     }
 }
 
@@ -1276,9 +1276,9 @@ fn build_legacy_solid_encoder(
                 legacy_rar15_options(level),
             ),
         ))),
-        LegacyCodec::Rar29 => Err(RarError::InvalidState(
-            "the RAR29 solid encoder lives in the write context, not here".into(),
-        )),
+        LegacyCodec::Rar29 => {
+            unreachable!("RAR29 solid runs use the write context's persistent encoder")
+        }
     }
 }
 

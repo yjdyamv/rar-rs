@@ -476,11 +476,11 @@ pub(crate) fn decode_member_bytes(
     }
 }
 
-/// A member whose `unp_ver` names no legacy codec (the RAR13-era and RAR5
-/// families are handled elsewhere).
+/// A RAR4 member whose `unp_ver` names no legacy codec (the RAR13 and RAR5
+/// families have their own read paths).
 fn unsupported_unp_ver(unp_ver: u8) -> RarError {
     RarError::Unsupported(format!(
-        "RAR 1.3/1.4-era compressed members (unpack version {unp_ver}) are not yet supported"
+        "RAR4 compressed member with unsupported unpack version {unp_ver}"
     ))
 }
 
@@ -498,7 +498,7 @@ fn wrong_decoder(expected: LegacyCodec, actual: LegacyCodec) -> RarError {
 fn map_rar15_error(hdr: &FileHeader, error: crate::codec::legacy::rar15::Error) -> RarError {
     let error = match error {
         crate::codec::legacy::rar15::Error::NeedMoreInput => {
-            RarError::Format("RAR 1.5 stream is truncated".into())
+            RarError::Format("RAR 1.5 bitstream is truncated".into())
         }
         crate::codec::legacy::rar15::Error::InvalidData(message) => {
             RarError::Format(format!("RAR 1.5 stream: {message}"))
@@ -691,5 +691,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(output, b"abcd");
+    }
+
+    /// An unpack version outside the codec table is refused before any codec
+    /// work, instead of being fed to the RAR29 decoder by an `unp_ver >= 29`
+    /// range check.
+    #[test]
+    fn unknown_unpack_version_is_rejected() {
+        let header = FileHeader {
+            name: "mystery.bin".into(),
+            packed_size: 0,
+            unpacked_size: 1,
+            comp_method: crate::format::rar4::RAR4_METHOD_STORE + 1,
+            unp_ver: 33,
+            format_version: 4,
+            ..Default::default()
+        };
+        let error =
+            decode_member_bytes(&mut Cursor::new(Vec::new()), &[], &[], &header, options(16))
+                .unwrap_err();
+
+        assert!(matches!(error, RarError::Unsupported(_)), "got {error:?}");
     }
 }

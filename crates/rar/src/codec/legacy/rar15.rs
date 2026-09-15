@@ -190,10 +190,7 @@ impl Rar15Decoder {
     ) -> Result<()> {
         self.init_member(target, solid);
         self.bits = BitReader::new_final(input);
-        self.decode_loop(out).map_err(|error| match error {
-            Error::NeedMoreInput => Error::InvalidData("RAR 1.3 bitstream is truncated"),
-            error => error,
-        })
+        self.decode_loop(out)
     }
 
     fn init_member(&mut self, target: usize, solid: bool) {

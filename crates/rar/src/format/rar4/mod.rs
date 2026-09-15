@@ -4,8 +4,11 @@
 //! This is the legacy `Rar!\x1a\x07\x00` family (WinRAR 1.5 through 4.x),
 //! distinct from the RAR5 container in [`crate::format::rar5`]. Headers are
 //! fixed-width (not vint-encoded) and carry a 16-bit CRC over the header
-//! body. Member decoding dispatches on the header's `unp_ver` (15 → Unpack15,
-//! 20/26 → Unpack20, >= 29 → Unpack29) and on the `method` byte.
+//! body. Member decoding dispatches on the member's [`LegacyCodec`]
+//! (folded from `unp_ver`: 15 → Unpack15, 20/26 → Unpack20, 29/36 →
+//! Unpack29) and on the `method` byte.
+//!
+//! [`LegacyCodec`]: crate::version::LegacyCodec
 //!
 //! STORE members pass through directly; compressed members dispatch to the
 //! implemented Unpack15, Unpack20, Unpack29, and PPMd-compatible paths.
@@ -69,11 +72,10 @@ pub(crate) enum LegacyDecoder {
 impl LegacyDecoder {
     /// The codec this carrier holds: the variant *is* the codec identity.
     pub(crate) fn codec(&self) -> crate::version::LegacyCodec {
-        use crate::version::LegacyCodec;
         match self {
-            LegacyDecoder::Rar29(_) => LegacyCodec::Rar29,
-            LegacyDecoder::Rar20(_) => LegacyCodec::Rar20,
-            LegacyDecoder::Rar15(_) => LegacyCodec::Rar15,
+            LegacyDecoder::Rar29(_) => crate::version::LegacyCodec::Rar29,
+            LegacyDecoder::Rar20(_) => crate::version::LegacyCodec::Rar20,
+            LegacyDecoder::Rar15(_) => crate::version::LegacyCodec::Rar15,
         }
     }
 
@@ -146,7 +148,7 @@ pub(crate) const MHD_NEWNUMBERING: u16 = 0x0010;
 pub(crate) struct Rar4VolumeScan {
     pending: Option<ArchiveEntry>,
     /// The main header of the first volume carried MHD_SOLID: the archive is
-    /// a solid run. Members of pre-RAR3 codecs (unp_ver < 29) are chained by
+    /// a solid run. Members of pre-RAR3 codecs (anything but the RAR29 codec)
     /// this archive-level flag plus position, NOT by the per-file FHD_SOLID
     /// bit (which those codecs never write); RAR3+ members use FHD_SOLID.
     pub archive_solid: bool,
