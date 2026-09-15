@@ -124,18 +124,20 @@ impl SolidChainState {
             RarArchive::payload_extra_and_crc(archive.password.as_deref(), plain_crc, plain_blake);
         let payload = RarArchive::encrypt_payload_with(encr.as_ref(), &payload);
         archive.write_file_entry(
-            name,
-            data.len() as u64,
+            &crate::format::rar5::write::MemberPlan {
+                name: name.to_string(),
+                unpacked_size: data.len() as u64,
+                file_crc: header_crc,
+                method,
+                dict_size_log,
+                dict_size_bytes,
+                extra_data,
+                attrs: hdr.attributes,
+                mtime: hdr.mtime,
+                solid: self.enc_active,
+                stored_hash,
+            },
             &payload,
-            header_crc,
-            method,
-            dict_size_log,
-            dict_size_bytes,
-            &extra_data,
-            hdr.attributes,
-            hdr.mtime,
-            self.enc_active,
-            stored_hash,
         )?;
         Ok(())
     }

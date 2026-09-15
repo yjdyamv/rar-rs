@@ -9,6 +9,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::emit::MemberPlan;
 use super::layout::{
     SAMPLE_PROBE_HEAD, dict_params_for, hash_file, sample_is_incompressible,
     sample_is_incompressible_file,
@@ -270,26 +271,23 @@ impl RarArchive {
                 self.write_ctx().meta.blake2,
                 self.cancel.as_deref(),
             )?;
-            let (header_crc, mut extra_data, stored_hash, encr) =
+            let (header_crc, extra_data, stored_hash, encr) =
                 RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake);
-            if let Some(ref t) = time_extra {
-                extra_data.extend_from_slice(t);
-            }
-            if let Some(ref t) = owner_extra {
-                extra_data.extend_from_slice(t);
-            }
-            self.write_store_member(
-                path,
-                &name,
-                file_size,
-                header_crc,
-                &extra_data,
-                stored_hash,
-                encr.as_ref(),
+            let mut plan = MemberPlan {
+                name: name.clone(),
+                unpacked_size: file_size,
+                file_crc: header_crc,
+                method: COMP_METHOD_STORE,
+                dict_size_log: 0,
+                dict_size_bytes: dict_bytes,
+                extra_data,
                 attrs,
                 mtime,
-                dict_bytes,
-            )?;
+                solid: false,
+                stored_hash,
+            };
+            plan.push_extra(time_extra.as_deref(), owner_extra.as_deref());
+            self.write_store_member(path, &plan, encr.as_ref())?;
             self.write_member_streams(path)?;
             self.report_progress(file_size, file_size);
             return Ok(());
@@ -385,29 +383,24 @@ impl RarArchive {
             && (filtered.len() as u64) < file_size
         {
             self.reset_solid_chain();
-            let (header_crc, mut extra_data, stored_hash, encr) =
+            let (header_crc, extra_data, stored_hash, encr) =
                 RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake);
-            if let Some(ref t) = time_extra {
-                extra_data.extend_from_slice(t);
-            }
-            if let Some(ref t) = owner_extra {
-                extra_data.extend_from_slice(t);
-            }
-            let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), &filtered);
-            self.write_file_entry(
-                &name,
-                file_size,
-                &packed_data,
-                header_crc,
+            let mut plan = MemberPlan {
+                name: name.clone(),
+                unpacked_size: file_size,
+                file_crc: header_crc,
                 method,
-                dsl,
-                dict_bytes,
-                &extra_data,
+                dict_size_log: dsl,
+                dict_size_bytes: dict_bytes,
+                extra_data,
                 attrs,
                 mtime,
-                false,
+                solid: false,
                 stored_hash,
-            )?;
+            };
+            plan.push_extra(time_extra.as_deref(), owner_extra.as_deref());
+            let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), &filtered);
+            self.write_file_entry(&plan, &packed_data)?;
             self.write_member_streams(path)?;
             self.report_progress(file_size, file_size);
             return Ok(());
@@ -495,54 +488,46 @@ impl RarArchive {
         if packed.len() as u64 >= file_size {
             // Compression is a net loss: fall back to streaming STORE.
             self.reset_solid_chain();
-            let (header_crc, mut extra_data, stored_hash, encr) =
+            let (header_crc, extra_data, stored_hash, encr) =
                 RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake);
-            if let Some(ref t) = time_extra {
-                extra_data.extend_from_slice(t);
-            }
-            if let Some(ref t) = owner_extra {
-                extra_data.extend_from_slice(t);
-            }
-            self.write_store_member(
-                path,
-                &name,
-                file_size,
-                header_crc,
-                &extra_data,
-                stored_hash,
-                encr.as_ref(),
+            let mut plan = MemberPlan {
+                name: name.clone(),
+                unpacked_size: file_size,
+                file_crc: header_crc,
+                method: COMP_METHOD_STORE,
+                dict_size_log: 0,
+                dict_size_bytes: dict_bytes,
+                extra_data,
                 attrs,
                 mtime,
-                dict_bytes,
-            )?;
+                solid: false,
+                stored_hash,
+            };
+            plan.push_extra(time_extra.as_deref(), owner_extra.as_deref());
+            self.write_store_member(path, &plan, encr.as_ref())?;
             self.write_member_streams(path)?;
             self.report_progress(file_size, file_size);
             return Ok(());
         }
 
-        let (header_crc, mut extra_data, stored_hash, encr) =
+        let (header_crc, extra_data, stored_hash, encr) =
             RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake);
-        if let Some(ref t) = time_extra {
-            extra_data.extend_from_slice(t);
-        }
-        if let Some(ref t) = owner_extra {
-            extra_data.extend_from_slice(t);
-        }
-        let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), &packed);
-        self.write_file_entry(
-            &name,
-            file_size,
-            &packed_data,
-            header_crc,
+        let mut plan = MemberPlan {
+            name: name.clone(),
+            unpacked_size: file_size,
+            file_crc: header_crc,
             method,
-            dsl,
-            dict_bytes,
-            &extra_data,
+            dict_size_log: dsl,
+            dict_size_bytes: dict_bytes,
+            extra_data,
             attrs,
             mtime,
-            chain_solid,
+            solid: chain_solid,
             stored_hash,
-        )?;
+        };
+        plan.push_extra(time_extra.as_deref(), owner_extra.as_deref());
+        let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), &packed);
+        self.write_file_entry(&plan, &packed_data)?;
         self.write_member_streams(path)?;
         // Non-solid members use an independent LZ window: drop the
         // encoder state so the next member starts fresh.
@@ -757,20 +742,20 @@ impl RarArchive {
             let (header_crc, extra_data, stored_hash, encr) =
                 RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake);
             let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), data);
-            self.write_file_entry(
-                &name,
-                data.len() as u64,
-                &packed_data,
-                header_crc,
-                COMP_METHOD_STORE,
-                0,
-                None,
-                &extra_data,
-                0o100644,
+            let plan = MemberPlan {
+                name: name.clone(),
+                unpacked_size: data.len() as u64,
+                file_crc: header_crc,
+                method: COMP_METHOD_STORE,
+                dict_size_log: 0,
+                dict_size_bytes: None,
+                extra_data,
+                attrs: 0o100644,
                 mtime,
-                false,
+                solid: false,
                 stored_hash,
-            )?;
+            };
+            self.write_file_entry(&plan, &packed_data)?;
         } else {
             let (dsl, dict_bytes) = dict_params_for(
                 data.len(),
@@ -822,20 +807,20 @@ impl RarArchive {
                     plain_blake,
                 );
                 let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), data);
-                self.write_file_entry(
-                    &name,
-                    data.len() as u64,
-                    &packed_data,
-                    header_crc,
-                    COMP_METHOD_STORE,
-                    0,
-                    None,
-                    &extra_data,
-                    0o100644,
+                let plan = MemberPlan {
+                    name: name.clone(),
+                    unpacked_size: data.len() as u64,
+                    file_crc: header_crc,
+                    method: COMP_METHOD_STORE,
+                    dict_size_log: 0,
+                    dict_size_bytes: None,
+                    extra_data,
+                    attrs: 0o100644,
                     mtime,
-                    false,
+                    solid: false,
                     stored_hash,
-                )?;
+                };
+                self.write_file_entry(&plan, &packed_data)?;
             } else {
                 let (header_crc, extra_data, stored_hash, encr) = RarArchive::payload_extra_and_crc(
                     self.password.as_deref(),
@@ -843,20 +828,20 @@ impl RarArchive {
                     plain_blake,
                 );
                 let packed_data = RarArchive::encrypt_payload_with(encr.as_ref(), &packed);
-                self.write_file_entry(
-                    &name,
-                    data.len() as u64,
-                    &packed_data,
-                    header_crc,
+                let plan = MemberPlan {
+                    name: name.clone(),
+                    unpacked_size: data.len() as u64,
+                    file_crc: header_crc,
                     method,
-                    dsl,
-                    dict_bytes,
-                    &extra_data,
-                    0o100644,
+                    dict_size_log: dsl,
+                    dict_size_bytes: dict_bytes,
+                    extra_data,
+                    attrs: 0o100644,
                     mtime,
-                    chain_solid,
+                    solid: chain_solid,
                     stored_hash,
-                )?;
+                };
+                self.write_file_entry(&plan, &packed_data)?;
             }
         }
 

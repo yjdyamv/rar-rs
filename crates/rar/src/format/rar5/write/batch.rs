@@ -15,6 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "parallel")]
 use super::add::{owner_extra_cfg, time_extra_cfg};
 #[cfg(feature = "parallel")]
+use super::emit::MemberPlan;
+#[cfg(feature = "parallel")]
 use super::layout::{dict_params_for, sample_is_incompressible};
 use crate::archive::{BatchEntry, RarArchive};
 #[cfg(feature = "parallel")]
@@ -517,7 +519,7 @@ impl RarArchive {
     /// [`PreparedEntry`], deriving the header checksum/extra records and
     /// applying encryption exactly like the sequential `add*` paths.
     #[cfg(feature = "parallel")]
-    #[allow(clippy::too_many_arguments)] // mirrors the existing write_file_entry signature
+    #[allow(clippy::too_many_arguments)] // the prepare fields come from the batch entry
     fn prepared_from_payload(
         ctx: &BatchPrepareCtx<'_>,
         name: &str,
@@ -533,28 +535,24 @@ impl RarArchive {
         dict_size_bytes: Option<u64>,
         payload: Vec<u8>,
     ) -> RarResult<PreparedEntry> {
-        let (header_crc, mut extra_data, stored_hash, encr) =
+        let (header_crc, extra_data, stored_hash, encr) =
             RarArchive::payload_extra_and_crc(ctx.password, plain_crc, plain_blake);
-        if let Some(t) = time_extra {
-            extra_data.extend_from_slice(&t);
-        }
-        if let Some(t) = owner_extra {
-            extra_data.extend_from_slice(&t);
-        }
-        let payload = RarArchive::encrypt_payload_with(encr.as_ref(), &payload);
-        Ok(PreparedEntry {
+        let mut plan = MemberPlan {
             name: name.to_string(),
             unpacked_size: data_len as u64,
-            attrs,
-            mtime,
             file_crc: header_crc,
             method,
             dict_size_log,
             dict_size_bytes,
             extra_data,
+            attrs,
+            mtime,
+            solid: false,
             stored_hash,
-            payload,
-        })
+        };
+        plan.push_extra(time_extra.as_deref(), owner_extra.as_deref());
+        let payload = RarArchive::encrypt_payload_with(encr.as_ref(), &payload);
+        Ok(PreparedEntry { plan, payload })
     }
 
     #[cfg(feature = "parallel")]
@@ -567,25 +565,12 @@ impl RarArchive {
         // no-op when the member already reported its full size.
         if let Some(progress) = self.progress.clone() {
             let member = self.progress_member;
-            progress.lock().expect("progress lock").report(
-                member,
-                entry.unpacked_size,
-                entry.unpacked_size,
-            );
+            let unpacked_size = entry.plan.unpacked_size;
+            progress
+                .lock()
+                .expect("progress lock")
+                .report(member, unpacked_size, unpacked_size);
         }
-        self.write_file_entry(
-            &entry.name,
-            entry.unpacked_size,
-            &entry.payload,
-            entry.file_crc,
-            entry.method,
-            entry.dict_size_log,
-            entry.dict_size_bytes,
-            &entry.extra_data,
-            entry.attrs,
-            entry.mtime,
-            false,
-            entry.stored_hash,
-        )
+        self.write_file_entry(&entry.plan, &entry.payload)
     }
 }

@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::path::Path;
 
-use super::emit::{SplitParams, SplitPhase};
+use super::emit::{MemberPlan, SplitPhase};
 use super::engine::payload_stream;
 use crate::archive::{ArchiveEntry, RarArchive};
 use crate::codec::lzss_huff;
@@ -78,44 +78,6 @@ fn x86_region_span(regions: &mut Vec<std::ops::Range<usize>>, file_size: usize) 
 }
 
 impl RarArchive {
-    /// Stream a STORE member directly from a reader (bounded memory).
-    ///
-    /// Handles single-volume and multi-volume splitting. The plaintext CRC
-    /// must be supplied (it is part of the header, written before data).
-    /// Progress is reported per chunk (`bytes_written, unpacked_size`),
-    /// matching the historical streaming behavior.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn write_stored_file(
-        &mut self,
-        name: &str,
-        unpacked_size: u64,
-        file_crc: u32,
-        attrs: u64,
-        mtime: u32,
-        reader: &mut File,
-        extra_data: &[u8],
-        hash_value: Option<[u8; 32]>,
-    ) -> RarResult<()> {
-        self.write_streamed_payload(
-            name,
-            unpacked_size,
-            unpacked_size,
-            file_crc,
-            attrs,
-            mtime,
-            COMP_METHOD_STORE,
-            0,
-            None,
-            extra_data,
-            hash_value,
-            false,
-            reader,
-            unpacked_size,
-            None,
-            true,
-        )
-    }
-
     /// Stream a member payload (compressed data or STORE bytes) from a
     /// seekable reader into the archive with bounded memory, splitting
     /// across volumes when needed.
@@ -129,44 +91,38 @@ impl RarArchive {
     /// ciphertext length when encrypted). `progress` enables per-chunk
     /// progress callbacks (historical STORE-path behavior); the compressed
     /// path reports progress during its compression pass instead.
-    #[allow(clippy::too_many_arguments)]
     fn write_streamed_payload(
         &mut self,
-        name: &str,
-        unpacked_size: u64,
+        plan: &MemberPlan,
         packed_size: u64,
-        file_crc: u32,
-        attrs: u64,
-        mtime: u32,
-        method: u8,
-        dict_size_log: u8,
-        dict_size_bytes: Option<u64>,
-        extra_data: &[u8],
-        hash_value: Option<[u8; 32]>,
-        solid: bool,
         reader: &mut File,
         plain_len: u64,
         encr: Option<&crypto::MemberEncryption>,
         progress: bool,
     ) -> RarResult<()> {
+        let file_crc = plan.file_crc;
         let (mtime, file_flags) =
-            self.rar5_time_fields(mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
+            self.rar5_time_fields(plan.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
         let fh_base = FileHeader {
-            name: name.to_string(),
-            unpacked_size,
+            name: plan.name.clone(),
+            unpacked_size: plan.unpacked_size,
             packed_size,
-            attributes: attrs,
+            attributes: plan.attrs,
             mtime,
             crc32_val: Some(file_crc),
-            hash_type: if hash_value.is_some() { 0 } else { u8::MAX },
-            hash_value,
-            comp_method: method,
-            comp_solid: solid,
-            comp_dict_size: dict_size_log,
-            dict_size_bytes,
+            hash_type: if plan.stored_hash.is_some() {
+                0
+            } else {
+                u8::MAX
+            },
+            hash_value: plan.stored_hash,
+            comp_method: plan.method,
+            comp_solid: plan.solid,
+            comp_dict_size: plan.dict_size_log,
+            dict_size_bytes: plan.dict_size_bytes,
             host_os: OS_UNIX,
             file_flags,
-            extra_data: extra_data.to_vec(),
+            extra_data: plan.extra_data.clone(),
             ..Default::default()
         };
 
@@ -197,7 +153,7 @@ impl RarArchive {
                 if progress {
                     let mut sink = ProgressWriter {
                         inner: stream,
-                        total: unpacked_size,
+                        total: plan.unpacked_size,
                         written: 0,
                         member: self.progress_member,
                         progress: self.progress.clone(),
@@ -231,7 +187,7 @@ impl RarArchive {
                     packed_size,
                     crc32_val: Some(file_crc),
                     is_final: true,
-                    extra_data: extra_data.to_vec(),
+                    extra_data: plan.extra_data.clone(),
                 }],
             });
             return Ok(());
@@ -242,20 +198,9 @@ impl RarArchive {
         // End-of-archive block: 8 plaintext bytes, or `[IV][padded]` when
         // header encryption wraps every block.
         let eoa_size: u64 = self.on_disk_header_len(8);
-        let params = SplitParams {
-            name,
-            unpacked_size,
-            attrs,
-            mtime,
-            method,
-            solid,
-            dict_size_log,
-            dict_size_bytes,
-            extra_data,
-        };
         self.write_split_member(
             packed_size,
-            params,
+            plan,
             volume_size,
             eoa_size,
             fh_base,
@@ -286,7 +231,7 @@ impl RarArchive {
                         if progress {
                             let mut sink = ProgressWriter {
                                 inner: stream,
-                                total: unpacked_size,
+                                total: plan.unpacked_size,
                                 written: offset,
                                 member: this.progress_member,
                                 progress: this.progress.clone(),
@@ -318,51 +263,30 @@ impl RarArchive {
 
     /// Stream a STORE member directly from disk (bounded memory),
     /// encrypting on the fly when a session is set.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn write_store_member(
         &mut self,
         path: &Path,
-        name: &str,
-        file_size: u64,
-        header_crc: u32,
-        extra_data: &[u8],
-        stored_hash: Option<[u8; 32]>,
+        plan: &MemberPlan,
         encr: Option<&crypto::MemberEncryption>,
-        attrs: u64,
-        mtime: u32,
-        dict_size_bytes: Option<u64>,
     ) -> RarResult<()> {
         let mut reader = File::open(path)?;
-        match encr {
-            Some(session) => self.write_streamed_payload(
-                name,
-                file_size,
-                crypto::zero_padded_len(file_size),
-                header_crc,
-                attrs,
-                mtime,
-                COMP_METHOD_STORE,
-                0,
-                dict_size_bytes,
-                extra_data,
-                stored_hash,
-                false,
-                &mut reader,
-                file_size,
-                Some(session),
-                false,
-            ),
-            None => self.write_stored_file(
-                name,
-                file_size,
-                header_crc,
-                attrs,
-                mtime,
-                &mut reader,
-                extra_data,
-                stored_hash,
-            ),
-        }
+        // Encrypted members store the zero-padded ciphertext length in the
+        // header and on disk (the streaming encryptor pads the final partial
+        // block); plain members store the packed length as-is. Progress
+        // callbacks run on the plain path (the encrypted path reports during
+        // its compression pass).
+        let (packed_size, progress) = match encr {
+            Some(_) => (crypto::zero_padded_len(plan.unpacked_size), false),
+            None => (plan.unpacked_size, true),
+        };
+        self.write_streamed_payload(
+            plan,
+            packed_size,
+            &mut reader,
+            plan.unpacked_size,
+            encr,
+            progress,
+        )
     }
 
     /// Compress a large file (≥ [`STREAM_COMPRESS_THRESHOLD`]) with bounded
@@ -755,39 +679,44 @@ impl RarArchive {
         if packed_size >= file_size {
             // Compression is a net loss: fall back to streaming STORE.
             self.reset_solid_chain();
-            let (header_crc, mut extra_data, stored_hash, encr) =
+            let (header_crc, extra_data, stored_hash, encr) =
                 RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake);
-            if let Some(ref t) = time_extra {
-                extra_data.extend_from_slice(t);
-            }
-            if let Some(ref t) = owner_extra {
-                extra_data.extend_from_slice(t);
-            }
-            self.write_store_member(
-                path,
-                name,
-                file_size,
-                header_crc,
-                &extra_data,
-                stored_hash,
-                encr.as_ref(),
+            let mut plan = MemberPlan {
+                name: name.to_string(),
+                unpacked_size: file_size,
+                file_crc: header_crc,
+                method: COMP_METHOD_STORE,
+                dict_size_log: 0,
+                dict_size_bytes: dict_bytes,
+                extra_data,
                 attrs,
                 mtime,
-                dict_bytes,
-            )?;
+                solid: false,
+                stored_hash,
+            };
+            plan.push_extra(time_extra.as_deref(), owner_extra.as_deref());
+            self.write_store_member(path, &plan, encr.as_ref())?;
             self.write_member_streams(path)?;
             self.report_progress(file_size, file_size);
             return Ok(());
         }
 
-        let (header_crc, mut extra_data, stored_hash, encr) =
+        let (header_crc, extra_data, stored_hash, encr) =
             RarArchive::payload_extra_and_crc(self.password.as_deref(), plain_crc, plain_blake);
-        if let Some(ref t) = time_extra {
-            extra_data.extend_from_slice(t);
-        }
-        if let Some(ref t) = owner_extra {
-            extra_data.extend_from_slice(t);
-        }
+        let mut plan = MemberPlan {
+            name: name.to_string(),
+            unpacked_size: file_size,
+            file_crc: header_crc,
+            method,
+            dict_size_log: dsl,
+            dict_size_bytes: dict_bytes,
+            extra_data,
+            attrs,
+            mtime,
+            solid: chain_solid,
+            stored_hash,
+        };
+        plan.push_extra(time_extra.as_deref(), owner_extra.as_deref());
         let mut spill = File::open(&spill_path)?;
         // Encrypted members store the zero-padded ciphertext length in
         // the header and on disk (the streaming encryptor pads the final
@@ -797,18 +726,8 @@ impl RarArchive {
             None => (packed_size, packed_size),
         };
         self.write_streamed_payload(
-            name,
-            file_size,
+            &plan,
             packed_size,
-            header_crc,
-            attrs,
-            mtime,
-            method,
-            dsl,
-            dict_bytes,
-            &extra_data,
-            stored_hash,
-            chain_solid,
             &mut spill,
             plain_len,
             encr.as_ref(),

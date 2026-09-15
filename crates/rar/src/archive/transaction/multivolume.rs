@@ -237,18 +237,20 @@ impl RarArchive {
                 _ => payload.data,
             };
             self.write_file_entry(
-                &entry_name,
-                hdr.unpacked_size,
+                &crate::format::rar5::write::MemberPlan {
+                    name: entry_name,
+                    unpacked_size: hdr.unpacked_size,
+                    file_crc: hdr.crc32_val.unwrap_or(0),
+                    method: hdr.comp_method,
+                    dict_size_log: hdr.comp_dict_size,
+                    dict_size_bytes: hdr.dict_size_bytes,
+                    extra_data: hdr.extra_data.clone(),
+                    attrs: hdr.attributes,
+                    mtime: hdr.mtime,
+                    solid: hdr.comp_solid,
+                    stored_hash: hdr.hash_value,
+                },
                 &stored_payload,
-                hdr.crc32_val.unwrap_or(0),
-                hdr.comp_method,
-                hdr.comp_dict_size,
-                hdr.dict_size_bytes,
-                &hdr.extra_data,
-                hdr.attributes,
-                hdr.mtime,
-                hdr.comp_solid,
-                hdr.hash_value,
             )?;
         }
         if self.progress.is_some() {

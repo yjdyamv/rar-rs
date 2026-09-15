@@ -2,6 +2,8 @@
 //! the input description used by batch addition.
 
 use crate::format::rar5::method_name;
+#[cfg(feature = "parallel")]
+use crate::format::rar5::write::MemberPlan;
 use crate::model::{DataChunk, FileHeader};
 use crate::version::ArchiveVersion;
 use std::path::Path;
@@ -55,20 +57,11 @@ pub enum BatchEntry<'a> {
     },
 }
 
-/// A fully prepared member: hashed, filtered/compressed (or STORE) and
-/// encrypted, ready to be written in archive order.
+/// A fully prepared member: the emission plan plus its packed (and
+/// encrypted) payload, ready to be written in archive order.
 #[cfg(feature = "parallel")]
 pub(crate) struct PreparedEntry {
-    pub(crate) name: String,
-    pub(crate) unpacked_size: u64,
-    pub(crate) attrs: u64,
-    pub(crate) mtime: u32,
-    pub(crate) file_crc: u32,
-    pub(crate) method: u8,
-    pub(crate) dict_size_log: u8,
-    pub(crate) dict_size_bytes: Option<u64>,
-    pub(crate) extra_data: Vec<u8>,
-    pub(crate) stored_hash: Option<[u8; 32]>,
+    pub(crate) plan: MemberPlan,
     pub(crate) payload: Vec<u8>,
 }
 

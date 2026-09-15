@@ -12,19 +12,37 @@ use crate::format::rar5::{
 use crate::format::shared::stream_mut;
 use crate::model::{DataChunk, FileHeader};
 
-/// Scalar member fields shared by both multi-volume split drivers; the
-/// chunk headers (which repeat per volume) are built from these rather
-/// than from the base header so payload-specific fields stay defaulted.
-pub(super) struct SplitParams<'a> {
-    pub(super) name: &'a str,
-    pub(super) unpacked_size: u64,
-    pub(super) attrs: u64,
-    pub(super) mtime: u32,
-    pub(super) method: u8,
-    pub(super) solid: bool,
-    pub(super) dict_size_log: u8,
-    pub(super) dict_size_bytes: Option<u64>,
-    pub(super) extra_data: &'a [u8],
+/// Everything a member write needs besides the payload bytes: the file
+/// header fields and the extra records. Named so the serial, batch and
+/// streamed writers share one value instead of a positional slab.
+pub(crate) struct MemberPlan {
+    pub(crate) name: String,
+    pub(crate) unpacked_size: u64,
+    /// Header CRC: the plaintext CRC, or its hash-key MAC when encrypted.
+    pub(crate) file_crc: u32,
+    pub(crate) method: u8,
+    pub(crate) dict_size_log: u8,
+    pub(crate) dict_size_bytes: Option<u64>,
+    /// Encryption/hash records plus the caller's FILE_TIME/OWNER extras.
+    pub(crate) extra_data: Vec<u8>,
+    pub(crate) attrs: u64,
+    pub(crate) mtime: u32,
+    pub(crate) solid: bool,
+    /// BLAKE2sp hash value (MAC'd when encrypted).
+    pub(crate) stored_hash: Option<[u8; 32]>,
+}
+
+impl MemberPlan {
+    /// Append the caller's FILE_TIME / OWNER records after the
+    /// encryption/hash records `payload_extra_and_crc` built.
+    pub(crate) fn push_extra(&mut self, time_extra: Option<&[u8]>, owner_extra: Option<&[u8]>) {
+        if let Some(time) = time_extra {
+            self.extra_data.extend_from_slice(time);
+        }
+        if let Some(owner) = owner_extra {
+            self.extra_data.extend_from_slice(owner);
+        }
+    }
 }
 
 /// Which half of a split chunk the per-chunk source closure is asked for.
@@ -39,40 +57,34 @@ pub(super) enum SplitPhase {
 
 impl RarArchive {
     /// Write a file entry, splitting across volumes if needed.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn write_file_entry(
         &mut self,
-        name: &str,
-        unpacked_size: u64,
+        plan: &MemberPlan,
         packed_data: &[u8],
-        file_crc: u32,
-        method: u8,
-        dict_size_log: u8,
-        dict_size_bytes: Option<u64>,
-        extra_data: &[u8],
-        attrs: u64,
-        mtime: u32,
-        solid: bool,
-        hash_value: Option<[u8; 32]>,
     ) -> RarResult<()> {
+        let file_crc = plan.file_crc;
         let (mtime, file_flags) =
-            self.rar5_time_fields(mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
+            self.rar5_time_fields(plan.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
         let fh_base = FileHeader {
-            name: name.to_string(),
-            unpacked_size,
+            name: plan.name.clone(),
+            unpacked_size: plan.unpacked_size,
             packed_size: packed_data.len() as u64,
-            attributes: attrs,
+            attributes: plan.attrs,
             mtime,
             crc32_val: Some(file_crc),
-            hash_type: if hash_value.is_some() { 0 } else { u8::MAX },
-            hash_value,
-            comp_method: method,
-            comp_solid: solid,
-            comp_dict_size: dict_size_log,
-            dict_size_bytes,
+            hash_type: if plan.stored_hash.is_some() {
+                0
+            } else {
+                u8::MAX
+            },
+            hash_value: plan.stored_hash,
+            comp_method: plan.method,
+            comp_solid: plan.solid,
+            comp_dict_size: plan.dict_size_log,
+            dict_size_bytes: plan.dict_size_bytes,
             host_os: OS_UNIX,
             file_flags,
-            extra_data: extra_data.to_vec(),
+            extra_data: plan.extra_data.clone(),
             ..Default::default()
         };
 
@@ -96,7 +108,7 @@ impl RarArchive {
                 packed_size: packed_data.len() as u64,
                 crc32_val: Some(file_crc),
                 is_final: true,
-                extra_data: extra_data.to_vec(),
+                extra_data: plan.extra_data.clone(),
             };
             self.entries.push(ArchiveEntry {
                 header: FileHeader {
@@ -135,7 +147,7 @@ impl RarArchive {
                 packed_size: total_packed,
                 crc32_val: Some(file_crc),
                 is_final: true,
-                extra_data: extra_data.to_vec(),
+                extra_data: plan.extra_data.clone(),
             };
             self.entries.push(ArchiveEntry {
                 header: FileHeader {
@@ -148,20 +160,9 @@ impl RarArchive {
         }
 
         // Need to split across volumes.
-        let params = SplitParams {
-            name,
-            unpacked_size,
-            attrs,
-            mtime,
-            method,
-            solid,
-            dict_size_log,
-            dict_size_bytes,
-            extra_data,
-        };
         self.write_split_member(
             total_packed,
-            params,
+            plan,
             volume_size,
             eoa_size,
             fh_base,
@@ -203,7 +204,7 @@ impl RarArchive {
     pub(super) fn write_split_member(
         &mut self,
         total_packed: u64,
-        params: SplitParams<'_>,
+        plan: &MemberPlan,
         volume_size: u64,
         eoa_size: u64,
         fh_base: FileHeader,
@@ -223,7 +224,7 @@ impl RarArchive {
         // their record must clear the hash-key MAC bit (flags=1); the
         // final chunk keeps the full record (flags=3, MAC'd checksum).
         let encr_params = if self.password.is_some() {
-            crypto::parse_encryption_extra(params.extra_data)?
+            crypto::parse_encryption_extra(&plan.extra_data)?
         } else {
             None
         };
@@ -231,18 +232,18 @@ impl RarArchive {
         // volume's own header is self-describing (middle volumes show the
         // member's nanoseconds); the other records stay on the first and
         // final chunks (the encryption record is per chunk by design).
-        let file_time = file_time_record(params.extra_data);
+        let file_time = file_time_record(&plan.extra_data);
         let chunk_extra = |is_last: bool, is_first: bool| -> Vec<u8> {
             let mut extra = if let Some(ref p) = encr_params {
                 if is_last {
-                    params.extra_data.to_vec()
+                    plan.extra_data.to_vec()
                 } else {
                     let mut np = p.clone();
                     np.flags &= !0x02;
                     np.to_extra_bytes()
                 }
             } else if is_last || is_first {
-                params.extra_data.to_vec()
+                plan.extra_data.to_vec()
             } else {
                 Vec::new()
             };
@@ -271,18 +272,18 @@ impl RarArchive {
             // alone can turn out to be the last one and overflow the volume
             // by the extra-record delta. Budget against both.
             let (chunk_mtime, chunk_flags) =
-                self.rar5_time_fields(params.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
+                self.rar5_time_fields(plan.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
             let chunk_fh = FileHeader {
-                name: params.name.to_string(),
-                unpacked_size: params.unpacked_size,
+                name: plan.name.to_string(),
+                unpacked_size: plan.unpacked_size,
                 packed_size: remaining_vol.max(1),
-                attributes: params.attrs,
+                attributes: plan.attrs,
                 mtime: chunk_mtime,
                 crc32_val: Some(0),
-                comp_method: params.method,
-                comp_solid: params.solid,
-                comp_dict_size: params.dict_size_log,
-                dict_size_bytes: params.dict_size_bytes,
+                comp_method: plan.method,
+                comp_solid: plan.solid,
+                comp_dict_size: plan.dict_size_log,
+                dict_size_bytes: plan.dict_size_bytes,
                 host_os: OS_UNIX,
                 flags: block_flags | BLOCK_FLAG_DATA_CONTINUE_TO,
                 file_flags: chunk_flags,
@@ -344,18 +345,18 @@ impl RarArchive {
             let chunk_crc = phase(self, SplitPhase::Crc, offset, chunk_size, is_last)? as u32;
 
             let (final_mtime, final_flags) =
-                self.rar5_time_fields(params.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
+                self.rar5_time_fields(plan.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
             let final_fh = FileHeader {
-                name: params.name.to_string(),
-                unpacked_size: params.unpacked_size,
+                name: plan.name.to_string(),
+                unpacked_size: plan.unpacked_size,
                 packed_size: chunk_size,
-                attributes: params.attrs,
+                attributes: plan.attrs,
                 mtime: final_mtime,
                 crc32_val: Some(chunk_crc),
-                comp_method: params.method,
-                comp_solid: params.solid,
-                comp_dict_size: params.dict_size_log,
-                dict_size_bytes: params.dict_size_bytes,
+                comp_method: plan.method,
+                comp_solid: plan.solid,
+                comp_dict_size: plan.dict_size_log,
+                dict_size_bytes: plan.dict_size_bytes,
                 host_os: OS_UNIX,
                 flags: block_flags,
                 file_flags: final_flags,
