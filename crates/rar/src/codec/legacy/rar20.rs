@@ -8,15 +8,15 @@
 //! adaptive delta predictor. Solid chains share one decoder instance (the
 //! output window and audio predictor state persist across members).
 //!
-//! The self-contained MSB-first bit reader and canonical-Huffman tables are
-//! duplicated here on purpose, mirroring rars (each legacy codec file keeps
-//! its own primitives).
+//! The MSB-first bit reader, canonical-Huffman tables and the sliding
+//! history are shared with the RAR3/4 decoder (`super::lz`).
 
+use super::lz::{BitReader, Error as E, History, Huffman, Res, fill_levels, push_old_offset};
+use super::tables::{LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT, SHORT_BASES, SHORT_BITS};
 use crate::error::{RarError, RarResult};
 
 const MAIN_COUNT: usize = 298;
 const OFFSET_COUNT: usize = 48;
-const LENGTH_COUNT: usize = 28;
 const LEVEL_COUNT: usize = 19;
 const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LENGTH_COUNT;
 const AUDIO_COUNT: usize = 257;
@@ -26,13 +26,6 @@ const OLD_LEVEL_COUNT: usize = AUDIO_COUNT * MAX_CHANNELS;
 /// Retained look-behind history for solid chains.
 const MAX_HISTORY: usize = 1024 * 1024;
 
-const LENGTH_BASES: [usize; LENGTH_COUNT] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
-    160, 192, 224,
-];
-const LENGTH_BITS: [u8; LENGTH_COUNT] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5,
-];
 const OFFSET_BASES: [usize; OFFSET_COUNT] = [
     0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536,
     2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608,
@@ -42,191 +35,8 @@ const OFFSET_BITS: [u8; OFFSET_COUNT] = [
     0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
     13, 14, 14, 15, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
 ];
-const SHORT_BASES: [usize; 8] = [0, 4, 8, 16, 32, 64, 128, 192];
-const SHORT_BITS: [u8; 8] = [2, 2, 3, 4, 5, 6, 6, 6];
-
-// ── Internal error ─────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum E {
-    Truncated,
-    Bad(&'static str),
-}
-
 fn map_err(error: E) -> RarError {
-    match error {
-        E::Bad(message) => RarError::Format(format!("RAR 2.0 stream: {message}")),
-        E::Truncated => RarError::Format("RAR 2.0 bitstream is truncated".into()),
-    }
-}
-
-type Res<T> = Result<T, E>;
-
-// ── Bit reader (MSB-first) ─────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct BitReader {
-    input: Vec<u8>,
-    bit_pos: usize,
-}
-
-impl BitReader {
-    fn new() -> Self {
-        Self {
-            input: Vec::new(),
-            bit_pos: 0,
-        }
-    }
-
-    fn append(&mut self, input: &[u8]) {
-        self.compact();
-        self.input.extend_from_slice(input);
-    }
-
-    fn compact(&mut self) {
-        let bytes = self.bit_pos / 8;
-        if bytes == 0 {
-            return;
-        }
-        self.input.drain(..bytes);
-        self.bit_pos -= bytes * 8;
-    }
-
-    fn read_bit(&mut self) -> Res<u8> {
-        self.read_bits(1).map(|value| value as u8)
-    }
-
-    fn read_bits(&mut self, count: u8) -> Res<u32> {
-        let value = self.peek_bits(count)?;
-        self.bit_pos += count as usize;
-        Ok(value)
-    }
-
-    fn peek_bits(&self, count: u8) -> Res<u32> {
-        if count > 24 {
-            return Err(E::Bad("bit read is too wide"));
-        }
-        let mut value = 0u32;
-        for i in 0..count as usize {
-            let bit_index = self.bit_pos + i;
-            let byte = *self.input.get(bit_index / 8).ok_or(E::Truncated)?;
-            let bit = (byte >> (7 - (bit_index % 8))) & 1;
-            value = (value << 1) | bit as u32;
-        }
-        Ok(value)
-    }
-
-    fn remaining_bytes_from_current(&self) -> usize {
-        self.input.len().saturating_sub(self.bit_pos / 8)
-    }
-}
-
-// ── Canonical Huffman tables ───────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct HuffmanSymbol {
-    code: u16,
-    len: u8,
-    symbol: usize,
-}
-
-#[derive(Debug, Clone)]
-struct Huffman {
-    symbols: Vec<HuffmanSymbol>,
-    first_code: [u16; 16],
-    first_index: [usize; 16],
-    counts: [u16; 16],
-}
-
-impl Huffman {
-    fn empty() -> Self {
-        Self {
-            symbols: Vec::new(),
-            first_code: [0; 16],
-            first_index: [0; 16],
-            counts: [0; 16],
-        }
-    }
-
-    fn from_lengths(lengths: &[u8]) -> Res<Self> {
-        let mut count = [0u16; 16];
-        for &len in lengths {
-            if len > 15 {
-                return Err(E::Bad("Huffman length is too large"));
-            }
-            if len != 0 {
-                count[len as usize] += 1;
-            }
-        }
-        if count.iter().all(|&value| value == 0) {
-            return Ok(Self::empty());
-        }
-        validate_huffman_counts(&count)?;
-
-        let mut first_code = [0u16; 16];
-        let mut next_code = [0u16; 16];
-        let mut code = 0u16;
-        for len in 1..=15 {
-            code = (code + count[len - 1]) << 1;
-            first_code[len] = code;
-            next_code[len] = code;
-        }
-
-        let mut first_index = [0usize; 16];
-        let mut index = 0usize;
-        for len in 1..=15 {
-            first_index[len] = index;
-            index += usize::from(count[len]);
-        }
-
-        let mut symbols = Vec::new();
-        for (symbol, &len) in lengths.iter().enumerate() {
-            if len == 0 {
-                continue;
-            }
-            let code = next_code[len as usize];
-            next_code[len as usize] += 1;
-            symbols.push(HuffmanSymbol { code, len, symbol });
-        }
-        symbols.sort_by_key(|item| (item.len, item.code, item.symbol));
-        Ok(Self {
-            symbols,
-            first_code,
-            first_index,
-            counts: count,
-        })
-    }
-
-    fn decode(&self, bits: &mut BitReader) -> Res<usize> {
-        let mut code = 0u16;
-        if self.symbols.is_empty() {
-            return Err(E::Bad("empty Huffman table"));
-        }
-        for len in 1..=15 {
-            code = (code << 1) | u16::from(bits.read_bit()?);
-            let count = self.counts[len];
-            if count != 0 {
-                let first = self.first_code[len];
-                let offset = code.wrapping_sub(first);
-                if offset < count {
-                    let index = self.first_index[len] + usize::from(offset);
-                    return Ok(self.symbols[index].symbol);
-                }
-            }
-        }
-        Err(E::Bad("invalid Huffman code"))
-    }
-}
-
-fn validate_huffman_counts(count: &[u16; 16]) -> Res<()> {
-    let mut available = 1i32;
-    for &len_count in count.iter().skip(1) {
-        available = (available << 1) - i32::from(len_count);
-        if available < 0 {
-            return Err(E::Bad("oversubscribed Huffman table"));
-        }
-    }
-    Ok(())
+    error.into_rar("RAR 2.0")
 }
 
 // ── Audio predictor state ──────────────────────────────────────────────────
@@ -265,10 +75,8 @@ pub(crate) struct Rar20Decoder {
     old_offsets: [usize; 4],
     last_offset: usize,
     last_length: usize,
-    pending_match: Option<(usize, usize)>,
+    history: History,
     in_block: bool,
-    output: Vec<u8>,
-    base_offset: usize,
 }
 
 impl Default for Rar20Decoder {
@@ -294,10 +102,8 @@ impl Rar20Decoder {
             old_offsets: [0; 4],
             last_offset: 0,
             last_length: 0,
-            pending_match: None,
+            history: History::new(MAX_HISTORY),
             in_block: false,
-            output: Vec::new(),
-            base_offset: 0,
         }
     }
 
@@ -309,7 +115,7 @@ impl Rar20Decoder {
             limit: u64::MAX,
             context: "RAR 2.0 member is too large for this platform".into(),
         })?;
-        let start = self.current_pos();
+        let start = self.history.current_pos();
         let target = start
             .checked_add(output_size)
             .ok_or_else(|| RarError::Format("RAR 2.0 output size overflows".into()))?;
@@ -319,8 +125,12 @@ impl Rar20Decoder {
         self.bits.append(packed);
         self.decode_until(target).map_err(map_err)?;
         self.read_last_tables().map_err(map_err)?;
-        let out = self.raw_range(start, target).map_err(map_err)?.to_vec();
-        self.trim_history(target, target);
+        let out = self
+            .history
+            .raw_range(start, target)
+            .map_err(map_err)?
+            .to_vec();
+        self.history.trim(target, target);
         Ok(out)
     }
 
@@ -338,7 +148,7 @@ impl Rar20Decoder {
             limit: u64::MAX,
             context: "RAR 2.0 member is too large for this platform".into(),
         })?;
-        let start = self.current_pos();
+        let start = self.history.current_pos();
         let target = start
             .checked_add(output_size)
             .ok_or_else(|| RarError::Format("RAR 2.0 output size overflows".into()))?;
@@ -350,21 +160,21 @@ impl Rar20Decoder {
         while flushed < target {
             let next = (flushed + FLUSH).min(target);
             self.decode_until(next).map_err(map_err)?;
-            let pos = self.current_pos();
-            let chunk = self.raw_range(flushed, pos).map_err(map_err)?;
+            let pos = self.history.current_pos();
+            let chunk = self.history.raw_range(flushed, pos).map_err(map_err)?;
             writer.write_all(chunk).map_err(RarError::Io)?;
             flushed = pos;
-            self.trim_history(pos, pos);
+            self.history.trim(pos, pos);
         }
         self.read_last_tables().map_err(map_err)?;
-        self.trim_history(target, target);
+        self.history.trim(target, target);
         Ok(())
     }
 
     fn decode_until(&mut self, target: usize) -> Res<()> {
-        while self.current_pos() < target {
-            self.drain_pending_match(target)?;
-            if self.current_pos() >= target {
+        while self.history.current_pos() < target {
+            self.history.drain_pending_match(target)?;
+            if self.history.current_pos() >= target {
                 break;
             }
             if !self.in_block {
@@ -459,7 +269,7 @@ impl Rar20Decoder {
     }
 
     fn decode_lz(&mut self, output_size: usize) -> Res<()> {
-        while self.current_pos() < output_size {
+        while self.history.current_pos() < output_size {
             if self.audio_block {
                 self.decode_audio_byte()?;
                 if !self.in_block {
@@ -469,13 +279,13 @@ impl Rar20Decoder {
             }
             let symbol = self.main.decode(&mut self.bits)?;
             match symbol {
-                0..=255 => self.output.push(symbol as u8),
+                0..=255 => self.history.push(symbol as u8),
                 256 => {
                     if self.last_length != 0 {
                         let length = self.last_length;
                         let offset = self.last_offset;
                         self.push_old_offset(offset);
-                        self.copy_match(length, offset, output_size)?;
+                        self.history.copy_match(length, offset, output_size)?;
                     }
                 }
                 257..=260 => {
@@ -501,7 +311,7 @@ impl Rar20Decoder {
                     self.push_old_offset(offset);
                     self.last_offset = offset;
                     self.last_length = length;
-                    self.copy_match(length, offset, output_size)?;
+                    self.history.copy_match(length, offset, output_size)?;
                 }
                 261..=268 => {
                     let index = symbol - 261;
@@ -512,7 +322,7 @@ impl Rar20Decoder {
                     self.push_old_offset(offset);
                     self.last_offset = offset;
                     self.last_length = 2;
-                    self.copy_match(2, offset, output_size)?;
+                    self.history.copy_match(2, offset, output_size)?;
                 }
                 269 => {
                     // End of LZ block; the next block header may follow in
@@ -536,7 +346,7 @@ impl Rar20Decoder {
                     self.push_old_offset(offset);
                     self.last_offset = offset;
                     self.last_length = length;
-                    self.copy_match(length, offset, output_size)?;
+                    self.history.copy_match(length, offset, output_size)?;
                 }
                 _ => return Err(E::Bad("invalid main symbol")),
             }
@@ -554,7 +364,7 @@ impl Rar20Decoder {
             return Err(E::Bad("invalid audio symbol"));
         }
         let byte = self.decode_audio(symbol as u8);
-        self.output.push(byte);
+        self.history.push(byte);
         self.cur_channel += 1;
         if self.cur_channel == self.channels {
             self.cur_channel = 0;
@@ -637,36 +447,6 @@ impl Rar20Decoder {
         Ok(offset)
     }
 
-    fn copy_match(&mut self, length: usize, offset: usize, output_size: usize) -> Res<()> {
-        let offset = if offset == 0 { 1 } else { offset };
-        // A match reaching past the start of the stream writes zeroes rather
-        // than failing (WinRAR never clears its window; see rar29.rs).
-        let before_window = offset > self.current_pos();
-        for index in 0..length {
-            if self.current_pos() >= output_size {
-                self.pending_match = Some((length - index, offset));
-                break;
-            }
-            let byte = if before_window {
-                0
-            } else {
-                let src = self.current_pos() - offset;
-                *self
-                    .raw_byte(src)
-                    .ok_or(E::Bad("match distance is out of range"))?
-            };
-            self.output.push(byte);
-        }
-        Ok(())
-    }
-
-    fn drain_pending_match(&mut self, output_size: usize) -> Res<()> {
-        let Some((length, offset)) = self.pending_match.take() else {
-            return Ok(());
-        };
-        self.copy_match(length, offset, output_size)
-    }
-
     /// If the member ended right at a block boundary, consume the trailing
     /// end-of-block marker and load the next block's tables so a following
     /// solid member can continue.
@@ -675,7 +455,7 @@ impl Rar20Decoder {
             return Ok(());
         }
         if self.audio_block {
-            if self.audio_tables[self.cur_channel].symbols.is_empty() {
+            if self.audio_tables[self.cur_channel].is_empty() {
                 return Ok(());
             }
             if self.audio_tables[self.cur_channel].decode(&mut self.bits)? == 256 {
@@ -683,7 +463,7 @@ impl Rar20Decoder {
                 self.in_block = true;
             }
         } else {
-            if self.main.symbols.is_empty() {
+            if self.main.is_empty() {
                 return Ok(());
             }
             if self.main.decode(&mut self.bits)? == 269 {
@@ -695,69 +475,13 @@ impl Rar20Decoder {
     }
 
     fn push_old_offset(&mut self, offset: usize) {
-        self.old_offsets[3] = self.old_offsets[2];
-        self.old_offsets[2] = self.old_offsets[1];
-        self.old_offsets[1] = self.old_offsets[0];
-        self.old_offsets[0] = offset;
+        push_old_offset(&mut self.old_offsets, offset);
     }
-
-    fn current_pos(&self) -> usize {
-        self.base_offset + self.output.len()
-    }
-
-    fn raw_byte(&self, position: usize) -> Option<&u8> {
-        self.output.get(position.checked_sub(self.base_offset)?)
-    }
-
-    fn raw_range(&self, start: usize, end: usize) -> Res<&[u8]> {
-        if start < self.base_offset || end < start {
-            return Err(E::Bad("retained history is unavailable"));
-        }
-        let rel_start = start - self.base_offset;
-        let rel_end = end - self.base_offset;
-        self.output
-            .get(rel_start..rel_end)
-            .ok_or(E::Bad("retained history is unavailable"))
-    }
-
-    fn trim_history(&mut self, flushed_pos: usize, current_pos: usize) {
-        let keep_from = current_pos.saturating_sub(MAX_HISTORY).min(flushed_pos);
-        if keep_from <= self.base_offset {
-            return;
-        }
-        let drain = keep_from - self.base_offset;
-        self.output.drain(..drain);
-        self.base_offset = keep_from;
-    }
-}
-
-fn fill_levels(levels: &mut [u8], pos: &mut usize, count: usize, value: u8) -> Res<()> {
-    let end = pos
-        .checked_add(count)
-        .ok_or(E::Bad("table run overflows"))?;
-    let end = end.min(levels.len());
-    for item in &mut levels[*pos..end] {
-        *item = value;
-    }
-    *pos = end;
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn huffman_roundtrip_table_build() {
-        let lengths = [2u8, 2, 2, 2];
-        let table = Huffman::from_lengths(&lengths).expect("build");
-        let mut bits = BitReader::new();
-        bits.append(&[0b0001_1011]); // 00 01 10 11
-        assert_eq!(table.decode(&mut bits).unwrap(), 0);
-        assert_eq!(table.decode(&mut bits).unwrap(), 1);
-        assert_eq!(table.decode(&mut bits).unwrap(), 2);
-        assert_eq!(table.decode(&mut bits).unwrap(), 3);
-    }
 
     /// Push `count` bits of `value` (MSB first) onto `bits`.
     fn push_bits(bits: &mut Vec<bool>, value: u32, count: u32) {

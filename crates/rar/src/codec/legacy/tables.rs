@@ -1,8 +1,9 @@
-//! Lookup tables shared by the legacy RAR 2.x/3.x encoder implementations.
+//! Lookup tables shared by the legacy RAR 2.x/3.x codecs.
 //!
 //! The length-slot tables are identical across the RAR20 and RAR29 codecs
 //! (the offset tables differ: RAR20 stops at 48 slots, RAR29 has 60), so the
-//! shared prefix lives here instead of being copied per encoder file.
+//! shared prefix lives here instead of being copied per encoder or decoder
+//! file. The short-distance tables are shared whole.
 
 /// Number of length slots (shared by the RAR20/RAR29 codecs).
 pub(crate) const LENGTH_COUNT: usize = 28;
@@ -17,3 +18,9 @@ pub(crate) const LENGTH_BASES: [usize; LENGTH_COUNT] = [
 pub(crate) const LENGTH_BITS: [u8; LENGTH_COUNT] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5,
 ];
+
+/// Base distance of each short-distance slot.
+pub(crate) const SHORT_BASES: [usize; 8] = [0, 4, 8, 16, 32, 64, 128, 192];
+
+/// Extra bits carried by each short-distance slot.
+pub(crate) const SHORT_BITS: [u8; 8] = [2, 2, 3, 4, 5, 6, 6, 6];
