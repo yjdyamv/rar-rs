@@ -21,10 +21,12 @@
 //! standard filters natively and any other filter program through the
 //! [`rarvm`] bytecode interpreter.
 
-use super::lz::{BitReader, Error as E, History, Huffman, Res, fill_levels, push_old_offset};
+use super::encode_core::{
+    LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT, SHORT_BASES, SHORT_BITS, push_old_offset,
+};
+use super::lz::{BitReader, Error as E, History, Huffman, Res, fill_levels};
 use super::ppmd::{self, PpmdDecoder};
 use super::rarvm;
-use super::tables::{LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT, SHORT_BASES, SHORT_BITS};
 use crate::error::{RarError, RarResult};
 
 // ── Table geometry ─────────────────────────────────────────────────────────

@@ -51,7 +51,7 @@
 | `format/rar4/` | 内部 | 老容器族：`envelope.rs`（块信封/`-hp` 头解密的唯一读取器）、扫描 / 头解析、解码门面、写管线 |
 | `format/rar13/` | 内部 | DOS 时代 `RE~^` 容器：读取（旧命名分卷拼装）、创建（单卷 + `.rar/.rNN` 分卷、solid/注释/`-p`） |
 | `codec/modern/lzss_huff/` | **公开**（`codec::lzss_huff` + crate 根重导出子集） | RAR5 LZSS+Huffman 编解码器。`codec/mod.rs` 重导出整个 `lzss_huff` 模块（公有项含 `encode*` / `decode*` / `analyze_stream` / `trace_stream` / `FilterSpec` / `EncodeOptions` / `DecoderState` 与 Huffman 常量），crate 根再重导出 `encode` / `decode` / `decode_standalone` / `encode_chunked`（`parallel` 下另有 `#[doc(hidden)]` 的 `EncoderState` / `encode_chunked_mt`）；`examples/` 两者都用。ADR 0003 决策 3 明确保留 |
-| `codec/legacy/`、`codec/common/` | `pub(crate)` | 老代编解码器与 PPMd；`lz.rs`（RAR20/RAR29 共享位读器、规范 Huffman、滑窗 history）、bitstream / huffman / filters / incompressible / match_finder / window |
+| `codec/legacy/`、`codec/common/` | `pub(crate)` | 老代编解码器与 PPMd；`lz.rs`（RAR20/RAR29 共享位读器、规范 Huffman、滑窗 history）、`encode_core.rs`（LENGTH/SHORT 表、槽查找、level 表 token）、bitstream / huffman / filters / incompressible / match_finder / window |
 | `crypto/` | 内部（AES/KDF 原语经 `wire` 导出） | `rar50`（AES-256-CBC + KDF + hash-key MAC）、`rar15` / `rar20` / `rar30` |
 | `recovery/` | 内部（受支持入口在 crate 根与 `wire` 重导出） | `rar50`（内联 RR）、`parity`（`.rev`/重建卷的 staged 安装值）、`rev50`（RAR5 `.rev`）、`rev3`（RAR 1.5–4.x `.rev`，GF(2^8)）、`legacy`（PROTECT_HEAD / NEWSUB 修复）。受支持的入口在 crate 根重导出（`repair_archive_path`、`rebuild_missing_volumes`、`build_recovery_volumes_for_set` 等） |
 

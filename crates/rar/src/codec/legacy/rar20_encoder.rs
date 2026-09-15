@@ -15,8 +15,9 @@
 
 use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::huffman::build_code_lengths_from_freqs;
-use crate::codec::legacy::tables::{
-    LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT, SHORT_BASES, SHORT_BITS,
+use crate::codec::legacy::encode_core::{
+    self, LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT, LevelAlphabet, LevelToken, SHORT_BITS,
+    match_length_adjustment, push_old_offset,
 };
 use crate::error::{RarError, RarResult};
 
@@ -1242,39 +1243,12 @@ fn match_length(input: &[u8], pos: usize, distance: usize, max_length: usize) ->
     length
 }
 
-fn match_length_adjustment(offset: usize) -> usize {
-    usize::from(offset >= 0x2000) + usize::from(offset >= 0x40000)
-}
-
 fn old_length_adjustment(offset: usize) -> usize {
     usize::from(offset >= 0x101) + usize::from(offset >= 0x2000) + usize::from(offset >= 0x40000)
 }
 
-fn push_old_offset(old_offsets: &mut [usize; 4], offset: usize) {
-    old_offsets[3] = old_offsets[2];
-    old_offsets[2] = old_offsets[1];
-    old_offsets[1] = old_offsets[0];
-    old_offsets[0] = offset;
-}
-
 fn length_slot_for_match(length: usize) -> RarResult<(usize, usize)> {
-    if length < 3 {
-        return Err(enc_err("match length is too short"));
-    }
-    let adjusted = length - 3;
-    for (slot, &base) in LENGTH_BASES.iter().enumerate() {
-        let extra_bits = LENGTH_BITS[slot];
-        let max = base
-            + if extra_bits == 0 {
-                0
-            } else {
-                (1usize << extra_bits) - 1
-            };
-        if adjusted >= base && adjusted <= max {
-            return Ok((slot, adjusted - base));
-        }
-    }
-    Err(enc_err("match length is too long"))
+    encode_core::length_slot_for_match(length).map_err(enc_err)
 }
 
 fn old_length_slot_for_match(length: usize, offset: usize) -> RarResult<(usize, usize)> {
@@ -1301,43 +1275,11 @@ fn old_length_slot_for_match(length: usize, offset: usize) -> RarResult<(usize, 
 }
 
 fn offset_slot_for_match(offset: usize) -> RarResult<(usize, usize)> {
-    if offset == 0 {
-        return Err(enc_err("match offset is zero"));
-    }
-    let adjusted = offset - 1;
-    for (slot, &base) in OFFSET_BASES.iter().enumerate() {
-        let extra_bits = OFFSET_BITS[slot];
-        let max = base
-            + if extra_bits == 0 {
-                0
-            } else {
-                (1usize << extra_bits) - 1
-            };
-        if adjusted >= base && adjusted <= max {
-            return Ok((slot, adjusted - base));
-        }
-    }
-    Err(enc_err("match offset is too large"))
+    encode_core::offset_slot_for(offset, &OFFSET_BASES, &OFFSET_BITS).map_err(enc_err)
 }
 
 fn short_slot_for_match(offset: usize) -> RarResult<(usize, usize)> {
-    if offset == 0 || offset > 256 {
-        return Err(enc_err("short match offset is out of range"));
-    }
-    let adjusted = offset - 1;
-    for (slot, &base) in SHORT_BASES.iter().enumerate() {
-        let extra_bits = SHORT_BITS[slot];
-        let max = base
-            + if extra_bits == 0 {
-                0
-            } else {
-                (1usize << extra_bits) - 1
-            };
-        if adjusted >= base && adjusted <= max {
-            return Ok((slot, adjusted - base));
-        }
-    }
-    Err(enc_err("short match offset is out of range"))
+    encode_core::short_slot_for_match(offset).map_err(enc_err)
 }
 
 fn literal_code_len(symbol_count: usize) -> RarResult<u8> {
@@ -1352,44 +1294,40 @@ fn literal_code_len(symbol_count: usize) -> RarResult<u8> {
 //  Level token encoding
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LevelToken {
-    symbol: usize,
-    extra_bits: u8,
-    extra_value: u8,
-}
+/// RAR20's level alphabet: literal levels, one repeat form (symbol 16, 2
+/// extra bits, chunks of at most 6), zero runs on symbols 17/18.
+struct Rar20LevelMap;
 
-impl LevelToken {
-    const fn plain(symbol: usize) -> Self {
-        Self {
-            symbol,
-            extra_bits: 0,
-            extra_value: 0,
-        }
+impl LevelAlphabet for Rar20LevelMap {
+    fn plain(_pos: usize, value: u8, _base: &[u8]) -> LevelToken {
+        LevelToken::plain(value as usize)
     }
 
-    const fn repeat_previous(count: usize) -> Self {
-        Self {
-            symbol: 16,
-            extra_bits: 2,
-            extra_value: (count - 3) as u8,
+    fn repeat_previous(value: u8, run: usize) -> Vec<LevelToken> {
+        let mut tokens = Vec::new();
+        let mut remaining = run;
+        while remaining != 0 {
+            let chunk = remaining.min(6);
+            if chunk >= 3 {
+                tokens.push(LevelToken::new(16, 2, (chunk - 3) as u8));
+                remaining -= chunk;
+            } else {
+                tokens.extend(std::iter::repeat_n(
+                    LevelToken::plain(value as usize),
+                    chunk,
+                ));
+                remaining = 0;
+            }
         }
+        tokens
     }
 
-    const fn zero_run_short(count: usize) -> Self {
-        Self {
-            symbol: 17,
-            extra_bits: 3,
-            extra_value: (count - 3) as u8,
-        }
+    fn zero_run_short(run: usize) -> LevelToken {
+        LevelToken::new(17, 3, (run - 3) as u8)
     }
 
-    const fn zero_run_long(count: usize) -> Self {
-        Self {
-            symbol: 18,
-            extra_bits: 7,
-            extra_value: (count - 11) as u8,
-        }
+    fn zero_run_long(run: usize) -> LevelToken {
+        LevelToken::new(18, 7, (run - 11) as u8)
     }
 }
 
@@ -1398,69 +1336,8 @@ fn encode_table_level_tokens(lengths: &[u8; TABLE_COUNT]) -> Vec<LevelToken> {
 }
 
 fn encode_level_tokens(lengths: &[u8]) -> Vec<LevelToken> {
-    let mut tokens = Vec::new();
-    let mut pos = 0usize;
-    let mut previous = None;
-    while pos < lengths.len() {
-        let value = lengths[pos];
-        let mut run = 1usize;
-        while pos + run < lengths.len() && lengths[pos + run] == value {
-            run += 1;
-        }
-
-        if value == 0 {
-            emit_zero_level_run(&mut tokens, run);
-            previous = Some(0);
-            pos += run;
-            continue;
-        }
-
-        if previous == Some(value) && run >= 3 {
-            let mut remaining = run;
-            while remaining != 0 {
-                let chunk = remaining.min(6);
-                if chunk >= 3 {
-                    tokens.push(LevelToken::repeat_previous(chunk));
-                    remaining -= chunk;
-                } else {
-                    tokens.extend(std::iter::repeat_n(
-                        LevelToken::plain(value as usize),
-                        chunk,
-                    ));
-                    remaining = 0;
-                }
-            }
-            pos += run;
-            continue;
-        }
-
-        tokens.push(LevelToken::plain(value as usize));
-        previous = Some(value);
-        pos += 1;
-    }
-    tokens
+    encode_core::encode_level_tokens::<Rar20LevelMap>(lengths, &[])
 }
-
-fn emit_zero_level_run(tokens: &mut Vec<LevelToken>, mut run: usize) {
-    while run != 0 {
-        if run >= 11 {
-            let mut chunk = run.min(138);
-            if matches!(run - chunk, 1 | 2) && chunk >= 14 {
-                chunk -= 3;
-            }
-            tokens.push(LevelToken::zero_run_long(chunk));
-            run -= chunk;
-        } else if run >= 3 {
-            let chunk = run.min(10);
-            tokens.push(LevelToken::zero_run_short(chunk));
-            run -= chunk;
-        } else {
-            tokens.extend(std::iter::repeat_n(LevelToken::plain(0), run));
-            break;
-        }
-    }
-}
-
 fn level_code_lengths_for_tokens(tokens: &[LevelToken]) -> [u8; LEVEL_COUNT] {
     let mut used = [false; LEVEL_COUNT];
     for token in tokens {

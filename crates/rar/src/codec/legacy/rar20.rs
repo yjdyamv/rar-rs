@@ -11,8 +11,10 @@
 //! The MSB-first bit reader, canonical-Huffman tables and the sliding
 //! history are shared with the RAR3/4 decoder (`super::lz`).
 
-use super::lz::{BitReader, Error as E, History, Huffman, Res, fill_levels, push_old_offset};
-use super::tables::{LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT, SHORT_BASES, SHORT_BITS};
+use super::encode_core::{
+    LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT, SHORT_BASES, SHORT_BITS, push_old_offset,
+};
+use super::lz::{BitReader, Error as E, History, Huffman, Res, fill_levels};
 use crate::error::{RarError, RarResult};
 
 const MAIN_COUNT: usize = 298;

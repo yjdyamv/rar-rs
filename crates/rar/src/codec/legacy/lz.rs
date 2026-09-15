@@ -264,15 +264,6 @@ pub(super) fn fill_levels(levels: &mut [u8], pos: &mut usize, count: usize, valu
     Ok(())
 }
 
-/// Shift an offset into the most-recent-first ring: `old_offsets[0]` is the
-/// last match distance.
-pub(super) fn push_old_offset(old_offsets: &mut [usize; 4], offset: usize) {
-    old_offsets[3] = old_offsets[2];
-    old_offsets[2] = old_offsets[1];
-    old_offsets[1] = old_offsets[0];
-    old_offsets[0] = offset;
-}
-
 // ── Sliding history ────────────────────────────────────────────────────────
 
 /// The decoded output window shared by the legacy decoders: bytes since the

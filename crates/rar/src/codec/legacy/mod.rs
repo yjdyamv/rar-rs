@@ -1,6 +1,7 @@
 //! Legacy (RAR 1.5-3.x / RAR4) codecs: PPMd and the LZSS/Huffman
 //! decoders and encoder used by pre-RAR5 members.
 
+pub(crate) mod encode_core;
 pub(crate) mod lz;
 pub(crate) mod ppmd;
 pub(crate) mod rar15;
@@ -10,4 +11,3 @@ pub(crate) mod rar20_encoder;
 pub(crate) mod rar29;
 pub(crate) mod rar29_encoder;
 pub(crate) mod rarvm;
-pub(crate) mod tables;
