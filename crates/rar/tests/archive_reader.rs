@@ -330,6 +330,11 @@ fn extraction_reports_written_and_skipped_members() {
     assert_eq!(report.skipped_count(), 2);
     assert!(report.written().is_empty());
     assert_eq!(
+        report.skipped(),
+        [output.join("same.bin"), output.join("same.bin")],
+        "skipped members carry their resolved destination in archive order"
+    );
+    assert_eq!(
         std::fs::read(output.join("same.bin")).expect("kept output"),
         b"first payload"
     );

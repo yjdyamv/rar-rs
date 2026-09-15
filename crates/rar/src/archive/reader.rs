@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::{ArchiveEntry, Destination, ExtractionReport, RarArchive};
+use super::{ArchiveEntry, ExtractionReport, RarArchive};
 use crate::error::{RarError, RarResult};
 use crate::options::ExtractOptions;
 
@@ -510,29 +510,6 @@ impl ArchiveReader {
             .extract_at_index_with_options(index, destination, options)
     }
 
-    /// Resolve where `id` would be extracted under `options`, without
-    /// writing anything: the same sanitization, containment, flat-path,
-    /// `-o-` (skip existing) and `-or` (auto rename) policies the extraction
-    /// paths apply.
-    ///
-    /// Returns [`Destination::Skip`] when the skip-existing policy will
-    /// leave the member untouched, and [`Destination::Extract`] otherwise.
-    /// Resolution errors reported here are the ones extraction would raise
-    /// for the member (for example [`RarError::Security`] for unsafe names).
-    pub fn resolve_destination(
-        &self,
-        id: EntryId,
-        destination: impl AsRef<Path>,
-        options: &ExtractOptions,
-    ) -> RarResult<Destination> {
-        let index = self.resolve_id(id)?;
-        self.archive.resolve_dest_path_with(
-            &self.archive.entries[index],
-            destination.as_ref(),
-            options,
-        )
-    }
-
     /// Verify every non-directory member with safe default limits.
     ///
     /// Member-specific errors are retained in the returned report so callers
@@ -645,12 +622,14 @@ impl ArchiveReader {
         self.archive.extract_all_with_options(destination, options)
     }
 
-    /// Extract only the listed member IDs (used by filtered `x`/`e` runs),
-    /// returning what was written and what the skip-existing policy left
-    /// untouched.
+    /// Extract the listed member IDs, returning what was written and what the
+    /// skip-existing policy left untouched. The CLI routes every `x`/`e` run
+    /// through it, filtered or not.
     ///
-    /// The listed members are also checked against
-    /// `max_total_unpacked_bytes`, like a whole-archive extraction.
+    /// The listed members are checked against `max_total_unpacked_bytes`
+    /// up front (before anything is written), unlike a whole-archive
+    /// extraction, which checks the running total member by member — the
+    /// limit is the same, the failure point is not.
     pub fn extract_ids_with_options(
         &mut self,
         ids: &[EntryId],
@@ -663,7 +642,7 @@ impl ArchiveReader {
             total_unpacked = total_unpacked.checked_add(entry.size()).ok_or_else(|| {
                 RarError::LimitExceeded {
                     limit: options.max_total_unpacked_bytes.unwrap_or(u64::MAX),
-                    context: "total unpacked size overflow while extracting archive".into(),
+                    context: "total unpacked size overflow".into(),
                 }
             })?;
             if let Some(limit) = options.max_total_unpacked_bytes
@@ -680,6 +659,7 @@ impl ArchiveReader {
         }
 
         let destination = destination.as_ref();
+        std::fs::create_dir_all(destination).map_err(RarError::Io)?;
         let indexes: Vec<usize> = ids
             .iter()
             .map(|&id| self.resolve_id(id))

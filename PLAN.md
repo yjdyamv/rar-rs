@@ -173,7 +173,7 @@ fuzz 使用一个可枚举的小子集，于是删除 feature 与 `rar40`/`rar50
 - **P0**：pre-RAR3 solid 链中成员落 STORE 时写侧编码器已推进、读侧不喂解码器 → 自产档自己与官方都读不了；改为克隆试编码只在真正压缩时提交状态 + v20+ 续成员 `FHD_SOLID`（官方 UnRAR 全档验证）。journal 恢复在 park 中途被杀时不再删除尚未 park 的原件。
 - **P1 回归**：solid 续成员声明更大字典改为增长共享 `DecoderState` 窗口（此前硬拒官方可解档）；quick-open 重扫使 catalog token 失效并按 payload offset 重解析（`EntryId` 不再静默换成别的成员）；RAR4 erase 不再认领同基名 RAR5 集的 REV5 `.rev`；`-ta/-tb 19700101` 预纪元饱和为 0（东八区）；commit 失败清扫 staged `.rev`；journal v2 接受 Unix 反斜杠名、转义全部控制字符、坏记录保留 journal。
 - **P1 既存**：RAR2 keep-tables 保留旧表尾（audio↔LZ 转移）；`rc` 的 REV5 签名比较 7 vs 8 字节恒 false → 修正；`rar cf` v29+ 改独立 `COMM_HEAD` 布局（官方 6.23/7.23 `t`/`x` All OK）；多卷提取按 owning volume 读 STM、STORE 成员补写 ADS；`decode_standalone` 恶意声明尺寸报错不再 abort。
-- **P2**：多卷扫描条目上限、QO 32 位尺寸转换、crypto 记录版本/校验/KDF 单次派生、REV5 位宽与 `hsize` 约束、rar29 过滤器边界流式、VM range checked、PPMd glue O(n)、rar15 可失败预留、CLI 选择器与提取计数对齐官方（新增 `ArchiveReader::resolve_destination`）、目录去重与 `./` 归一、单卷/lock fsync、done-marker 持久化、x86-forced 跳过 auto-delta。
+- **P2**：多卷扫描条目上限、QO 32 位尺寸转换、crypto 记录版本/校验/KDF 单次派生、REV5 位宽与 `hsize` 约束、rar29 过滤器边界流式、VM range checked、PPMd glue O(n)、rar15 可失败预留、CLI 选择器与提取计数对齐官方（当时新增 `ArchiveReader::resolve_destination`；2026-09 由 `ExtractionReport` 取代：计数改由写入方回报）、目录去重与 `./` 归一、单卷/lock fsync、done-marker 持久化、x86-forced 跳过 auto-delta。
 - **基建**：fuzz 预算按 seed 轮转、write 目标不变量收紧、rev/legacy 输入驱动变异、去掉失效 panic 过滤器；CI 增 scheduled/manual 官方互操作 job（`SA_REQUIRE_OFFICIAL=1`）、Windows job 跑 `rar-rs` Windows-only 测试且门控 release、fuzz smoke 开 overflow-checks 并轮换 seed；napi 全任务 `catch_unwind` 防火墙、`rebuildMissingVolumes` JS 覆盖、删除硬编码 unrar 路径。
 - **明确不做（记录）**：`-mcd+ -mce+` 维持 `InvalidOption`——官方 `-mcde+` 产出的是按 64 KiB 块**不相交**的过滤器序列，我们无法产等价的**重叠**记录（官方 UnRAR 拒绝我们的重叠产物）；真对齐需实现按块过滤器选择，另立项。
 

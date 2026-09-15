@@ -11,7 +11,7 @@ pub(crate) mod members;
 pub(crate) mod open;
 pub(crate) mod read;
 
-pub use members::{Destination, ExtractionReport};
+pub use members::ExtractionReport;
 
 use crate::archive::RarArchive;
 use crate::error::{RarError, RarResult};

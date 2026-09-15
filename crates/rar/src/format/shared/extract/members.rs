@@ -36,36 +36,18 @@ const PARALLEL_MIN_UNPACKED: u64 = 64 * 1024 * 1024;
 
 /// Destination resolution outcome for one member; the serial and parallel
 /// extraction paths share it so `-e`, `-o-` and `-or` behave identically.
-///
-/// Callers that need to know where a member *would* land without extracting
-/// it get one through [`crate::ArchiveReader::resolve_destination`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Destination {
+pub(crate) enum Destination {
     /// Extract the member to this path.
     Extract(PathBuf),
     /// `-o-`: the destination already exists and must be left untouched.
     Skip(PathBuf),
 }
 
-impl Destination {
-    /// The resolved destination path, whether it is written or skipped.
-    pub fn path(&self) -> &Path {
-        match self {
-            Destination::Extract(path) | Destination::Skip(path) => path,
-        }
-    }
-
-    /// Whether the skip-existing policy leaves the member untouched.
-    pub fn is_skipped(&self) -> bool {
-        matches!(self, Destination::Skip(_))
-    }
-
-    /// Consume the outcome and return the resolved path.
-    pub fn into_path(self) -> PathBuf {
-        match self {
-            Destination::Extract(path) | Destination::Skip(path) => path,
-        }
-    }
+/// Whether an outcome for `entry` belongs in an [`ExtractionReport`]:
+/// directories (their creation is silent) and `-ol-`-skipped links do not.
+fn reports_outcome(entry: &ArchiveEntry, options: &crate::options::ExtractOptions) -> bool {
+    !entry.is_dir() && !(options.skip_links && entry.redirect().is_some())
 }
 
 /// What one extraction operation wrote and what the skip-existing policy left
@@ -291,9 +273,7 @@ impl RarArchive {
             let dest_path = match self.resolve_dest_path(entry, dest)? {
                 Destination::Extract(path) => path,
                 Destination::Skip(path) => {
-                    // Directories are not reported (their creation is
-                    // silent), matching the written side.
-                    if !entry.is_dir() {
+                    if reports_outcome(entry, &self.read_ctx().extract_options) {
                         report.record_skipped(path);
                     }
                     continue;
@@ -465,8 +445,7 @@ impl RarArchive {
     }
 
     /// [`Self::resolve_dest_path`] with explicit options, for callers that
-    /// resolve members outside the extraction loop (via
-    /// [`crate::ArchiveReader::resolve_destination`]).
+    /// resolve members outside the extraction loop.
     pub(crate) fn resolve_dest_path_with(
         &self,
         entry: &ArchiveEntry,
@@ -527,9 +506,7 @@ impl RarArchive {
         let dest_path = match self.resolve_dest_path(entry, dest_dir)? {
             Destination::Extract(path) => path,
             Destination::Skip(path) => {
-                // Directories are not reported (their creation is silent),
-                // matching the written side.
-                if !entry.is_dir() {
+                if reports_outcome(entry, &self.read_ctx().extract_options) {
                     report.record_skipped(path.clone());
                 }
                 return Ok(path);

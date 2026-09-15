@@ -53,9 +53,11 @@ fn parallel_flat_extraction_matches_serial() {
 
     let parallel_out = dir.path().join("parallel");
     let mut reader = ArchiveReader::open(&archive).unwrap();
-    reader
+    let report = reader
         .extract_all_with_options(&parallel_out, flat_options())
         .unwrap();
+    assert_eq!(report.written_count(), MEMBERS);
+    assert_eq!(report.skipped_count(), 0);
 
     let serial_out = dir.path().join("serial");
     let mut reader = ArchiveReader::open(&archive).unwrap();
@@ -157,9 +159,16 @@ fn parallel_skip_existing_matches_serial() {
         ..Default::default()
     };
     let mut reader = ArchiveReader::open(&archive).unwrap();
-    reader
+    let report = reader
         .extract_all_with_options(&parallel_out, options)
         .unwrap();
+    assert_eq!(report.written_count(), 0);
+    assert_eq!(report.skipped_count(), MEMBERS);
+    assert_eq!(
+        report.skipped()[0],
+        parallel_out.join(member_name(0)),
+        "skipped members keep archive order and their resolved paths"
+    );
 
     let mut reader = ArchiveReader::open(&archive).unwrap();
     for i in 0..MEMBERS {

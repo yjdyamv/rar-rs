@@ -1388,6 +1388,53 @@ fn cli_skip_links_switch() {
     assert!(out.join("target.txt").exists());
 }
 
+/// `-ol-` links are never reported as skipped, even when their destination
+/// already exists: the skip-existing policy does not apply to members the
+/// switch refuses to write.
+#[cfg(unix)]
+#[test]
+fn cli_skip_links_does_not_report_skipped_links() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("target.txt"), b"target").unwrap();
+    std::os::unix::fs::symlink("target.txt", dir.path().join("lnk.txt")).unwrap();
+    let archive = dir.path().join("links.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ol", "-idq"])
+        .arg(&archive)
+        .args(["target.txt", "lnk.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = dir.path().join("out");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-idq", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(out.join("lnk.txt").exists());
+
+    // The second run sees an existing destination for both members; only the
+    // file is reported.
+    let output = std::process::Command::new(RAR_CLI)
+        .args(["x", "-ol-", "--dest"])
+        .arg(&out)
+        .arg(&archive)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("Skipping") && !text.contains("lnk.txt"),
+        "-ol- links must stay out of the skip report: {text}"
+    );
+}
+
 /// Windows/interactive no-op switches are accepted by every command of
 /// both binaries, like WinRAR's parser (`-vd` is the documented exception:
 /// it is rejected because it would erase removable media).

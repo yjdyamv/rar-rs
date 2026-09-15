@@ -52,7 +52,7 @@ use state::{
 };
 pub(crate) use state::{DecryptedPayload, LegacySolidEncoder, Mode, PendingCommit, StreamRecord};
 
-pub use crate::format::shared::extract::{Destination, ExtractionReport};
+pub use crate::format::shared::extract::ExtractionReport;
 pub(crate) use crate::fs::volume::{
     volume_base_of, volume_part_width, volume_path, volume_path_padded, volume_path_rar4,
 };
