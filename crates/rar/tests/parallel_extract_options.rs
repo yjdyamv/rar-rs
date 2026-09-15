@@ -82,6 +82,48 @@ fn parallel_flat_extraction_matches_serial() {
     );
 }
 
+/// Compressed (non-STORE) members decode through the same
+/// `payload::decode_member` as the serial paths, in parallel; this pins the
+/// parity the earlier inline decode could drift from.
+#[test]
+fn parallel_compressed_extraction_matches_serial() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("compressed.rar");
+    let payload: Vec<u8> = (0..MEMBER_BYTES).map(|i| (i % 251) as u8).collect();
+    {
+        let mut writer = ArchiveWriter::create(&archive).unwrap();
+        for i in 0..MEMBERS {
+            writer
+                .add_bytes(&member_name(i), &payload, opts(3))
+                .unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    let parallel_out = dir.path().join("parallel");
+    let mut reader = ArchiveReader::open(&archive).unwrap();
+    reader
+        .extract_all_with_options(&parallel_out, ExtractOptions::default())
+        .unwrap();
+
+    let serial_out = dir.path().join("serial");
+    let mut reader = ArchiveReader::open(&archive).unwrap();
+    for i in 0..MEMBERS {
+        let id = reader.unique_entry(&member_name(i)).unwrap();
+        reader
+            .extract_entry_with_options(id, &serial_out, ExtractOptions::default())
+            .unwrap();
+    }
+
+    for i in 0..MEMBERS {
+        let path = member_name(i);
+        let parallel = std::fs::read(parallel_out.join(&path)).unwrap();
+        let serial = std::fs::read(serial_out.join(&path)).unwrap();
+        assert_eq!(parallel, payload, "parallel compressed payload {i}");
+        assert_eq!(serial, payload, "serial compressed payload {i}");
+    }
+}
+
 #[test]
 fn parallel_skip_existing_matches_serial() {
     let dir = make_temp_dir();

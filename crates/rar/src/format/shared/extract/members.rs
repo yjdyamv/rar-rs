@@ -15,8 +15,6 @@ use std::path::{Path, PathBuf};
 use crate::archive::DecryptedPayload;
 use crate::archive::{ArchiveEntry, MAX_DICT_SIZE_LOG, RarArchive};
 use crate::error::{RarError, RarResult};
-#[cfg(feature = "parallel")]
-use crate::format::rar5::COMP_METHOD_STORE;
 use crate::format::rar5::headers::parse_redirect_record;
 use crate::fs::atomic::{replace_file, temp_sibling_path};
 use crate::fs::safe_path::sanitize_archive_path;
@@ -213,53 +211,20 @@ impl RarArchive {
                         });
                     }
 
-                    let data = if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
-                        Vec::new()
-                    } else if hdr.comp_method == COMP_METHOD_STORE {
-                        // Mirror the serial `payload::decode_member` bound: a
-                        // crafted STORE member whose packed area exceeds the
-                        // declared unpacked size must fail before its excess
-                        // bytes can be written.
-                        let declared = usize::try_from(hdr.unpacked_size).map_err(|_| {
-                            RarError::LimitExceeded {
-                                limit: hdr.unpacked_size,
-                                context: format!(
-                                    "{}: unpacked size overflows host address space",
-                                    hdr.name
-                                ),
-                            }
-                        })?;
-                        let mut data = payload.data;
-                        if data.len() > declared {
-                            let actual = data.len();
-                            data.truncate(declared);
-                            return Err(RarError::Format(format!(
-                                "member {}: stored payload has {} bytes, header declares {}",
-                                hdr.name, actual, hdr.unpacked_size
-                            )));
-                        }
-                        data
-                    } else {
-                        crate::codec::decode_raw(
-                            &payload.data,
-                            hdr.unpacked_size,
-                            crate::codec::DecodeOptions {
-                                dict_size_log: hdr.comp_dict_size,
-                                dict_size_bytes: hdr.dict_size_bytes,
-                                variant: crate::version::ArchiveVersion::from_v70(
-                                    hdr.dict_size_bytes.is_some(),
-                                ),
-                                state: None,
-                            },
-                        )?
-                    };
+                    // The one member decoder (STORE bound, decode, size
+                    // check) the serial paths use; the Vec sink keeps the
+                    // decoded bytes for the sequential replay below.
+                    let mut data = Vec::new();
+                    if hdr.packed_size != 0 || hdr.unpacked_size != 0 {
+                        crate::format::rar5::payload::decode_member(
+                            hdr, &payload, None, &mut data,
+                        )?;
+                    }
 
                     let crc = crc32fast::hash(&data);
-                    let blake = if hdr.hash_value.is_some() {
-                        Some(crate::format::rar5::blake2sp::hash(&data))
-                    } else {
-                        None
-                    };
+                    let blake = hdr
+                        .hash_value
+                        .map(|_| crate::format::rar5::blake2sp::hash(&data));
                     verify_integrity_for(
                         hdr,
                         crc,
