@@ -232,14 +232,14 @@ impl Huffman {
         Err(Error::Bad("invalid Huffman code"))
     }
 
-    /// Whether no table was built yet (`empty()`): the family decoders skip
-    /// the trailing end-of-block probe in that case.
+    /// Whether no table was built yet (`empty()`): RAR 2.x skips its
+    /// trailing end-of-block probe in that case.
     pub(super) fn is_empty(&self) -> bool {
         self.symbols.is_empty()
     }
 }
 
-pub(super) fn validate_huffman_counts(count: &[u16; 16]) -> Res<()> {
+fn validate_huffman_counts(count: &[u16; 16]) -> Res<()> {
     let mut available = 1i32;
     for &len_count in count.iter().skip(1) {
         available = (available << 1) - i32::from(len_count);
@@ -300,7 +300,7 @@ impl History {
         self.base_offset + self.output.len()
     }
 
-    pub(super) fn raw_byte(&self, position: usize) -> Option<&u8> {
+    fn raw_byte(&self, position: usize) -> Option<&u8> {
         self.output.get(position.checked_sub(self.base_offset)?)
     }
 
@@ -320,15 +320,19 @@ impl History {
     }
 
     /// Drop decoded history beyond the sliding window, never past the last
-    /// flush.
-    pub(super) fn trim(&mut self, flushed_pos: usize, current_pos: usize) {
-        let keep_from = current_pos.saturating_sub(self.limit).min(flushed_pos);
-        if keep_from <= self.base_offset {
-            return;
+    /// flush. Returns the position the window now starts at, so a family can
+    /// drop state anchored before it.
+    pub(super) fn trim(&mut self, flushed_pos: usize) -> usize {
+        let keep_from = self
+            .current_pos()
+            .saturating_sub(self.limit)
+            .min(flushed_pos);
+        if keep_from > self.base_offset {
+            let drain = keep_from - self.base_offset;
+            self.output.drain(..drain);
+            self.base_offset = keep_from;
         }
-        let drain = keep_from - self.base_offset;
-        self.output.drain(..drain);
-        self.base_offset = keep_from;
+        self.base_offset
     }
 
     /// Copy `length` bytes from `offset` back in the window.
@@ -449,7 +453,7 @@ mod tests {
         for byte in 0u8..10 {
             history.push(byte);
         }
-        history.trim(10, 10);
+        history.trim(10);
         assert_eq!(history.current_pos(), 10);
         assert_eq!(history.raw_range(6, 10).unwrap(), &[6, 7, 8, 9]);
         assert!(history.raw_byte(5).is_none());

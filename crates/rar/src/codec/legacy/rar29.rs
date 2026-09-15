@@ -232,7 +232,7 @@ impl Rar29Decoder {
         self.validate_member_filters(start, target)
             .map_err(map_err)?;
         let out = self.filtered_range(start, target, start).map_err(map_err)?;
-        self.history.trim(target, target);
+        self.trim_history(target);
         Ok(out)
     }
 
@@ -290,7 +290,7 @@ impl Rar29Decoder {
             }
             flushed = safe_end;
             // Drop decoded history beyond the sliding window.
-            self.history.trim(flushed, self.history.current_pos());
+            self.trim_history(flushed);
             decode_target = self.history.current_pos().saturating_add(FLUSH).min(target);
         }
         self.finish_member().map_err(map_err)?;
@@ -904,6 +904,14 @@ impl Rar29Decoder {
         push_old_offset(&mut self.old_offsets, offset);
     }
 
+    /// Drop window state a family keeps alongside the history: applied VM
+    /// filters leave the decoder once their range falls behind the window.
+    fn trim_history(&mut self, flushed_pos: usize) {
+        let keep_from = self.history.trim(flushed_pos);
+        self.filters
+            .retain(|filter| filter.start.saturating_add(filter.size) > keep_from);
+    }
+
     fn rotate_old_offset(&mut self, index: usize) {
         let value = self.old_offsets[index];
         for i in (1..=index).rev() {
@@ -913,6 +921,11 @@ impl Rar29Decoder {
     }
 }
 
+// ── Standard VM filters ────────────────────────────────────────────────────
+
+// The five standard RAR3 filters are stored as RARVM bytecode in the stream;
+// the decoder recognises them by fingerprint (XOR checksum zero + (length,
+// CRC32)) and applies the native inverse transform instead of running a VM.
 fn identify_standard_filter(code: &[u8]) -> Option<StandardFilter> {
     if code.iter().fold(0u8, |acc, &byte| acc ^ byte) != 0 {
         return None;
@@ -1240,6 +1253,14 @@ mod tests {
         );
     }
 
+    fn decoder_with_zeroes(len: usize) -> Rar29Decoder {
+        let mut decoder = Rar29Decoder::new();
+        for _ in 0..len {
+            decoder.history.push(0);
+        }
+        decoder
+    }
+
     fn vm_filter(start: usize, size: usize) -> VmFilter {
         VmFilter {
             program: 0,
@@ -1252,30 +1273,21 @@ mod tests {
 
     #[test]
     fn vm_filter_overrunning_the_member_is_rejected() {
-        let mut decoder = Rar29Decoder::new();
-        for _ in 0..64 {
-            decoder.history.push(0);
-        }
+        let mut decoder = decoder_with_zeroes(64);
         decoder.filters.push(vm_filter(32, 64)); // ends at 96 > 64
         assert!(decoder.validate_member_filters(0, 64).is_err());
     }
 
     #[test]
     fn vm_filter_starting_beyond_the_member_is_rejected() {
-        let mut decoder = Rar29Decoder::new();
-        for _ in 0..64 {
-            decoder.history.push(0);
-        }
+        let mut decoder = decoder_with_zeroes(64);
         decoder.filters.push(vm_filter(64, 4));
         assert!(decoder.validate_member_filters(0, 64).is_err());
     }
 
     #[test]
     fn vm_filter_range_overflow_is_rejected() {
-        let mut decoder = Rar29Decoder::new();
-        for _ in 0..64 {
-            decoder.history.push(0);
-        }
+        let mut decoder = decoder_with_zeroes(64);
         decoder.filters.push(vm_filter(usize::MAX - 1, 8));
         assert!(decoder.validate_member_filters(0, 64).is_err());
         assert!(decoder.filtered_range(0, 64, 0).is_err());
@@ -1283,11 +1295,21 @@ mod tests {
 
     #[test]
     fn vm_filter_inside_the_member_is_accepted() {
-        let mut decoder = Rar29Decoder::new();
-        for _ in 0..64 {
-            decoder.history.push(0);
-        }
+        let mut decoder = decoder_with_zeroes(64);
         decoder.filters.push(vm_filter(8, 32));
         assert!(decoder.validate_member_filters(0, 64).is_ok());
+    }
+
+    /// Trimming the window drops filters whose whole range fell behind it,
+    /// so a long filtered member (or solid chain) cannot accumulate past the
+    /// filter cap.
+    #[test]
+    fn trimming_the_window_drops_filters_behind_it() {
+        let mut decoder = decoder_with_zeroes(4 * 1024 * 1024 + 64);
+        decoder.filters.push(vm_filter(8, 32));
+        decoder.filters.push(vm_filter(4 * 1024 * 1024 + 8, 32));
+        decoder.trim_history(decoder.history.current_pos());
+        assert_eq!(decoder.filters.len(), 1);
+        assert_eq!(decoder.filters[0].start, 4 * 1024 * 1024 + 8);
     }
 }

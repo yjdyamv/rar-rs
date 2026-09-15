@@ -15,7 +15,9 @@
 
 use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::huffman::build_code_lengths_from_freqs;
-use crate::codec::legacy::tables::{LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT};
+use crate::codec::legacy::tables::{
+    LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT, SHORT_BASES, SHORT_BITS,
+};
 use crate::error::{RarError, RarResult};
 
 // ── Table geometry ─────────────────────────────────────────────────────────
@@ -38,8 +40,6 @@ const OFFSET_BITS: [u8; OFFSET_COUNT] = [
     0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
     13, 14, 14, 15, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
 ];
-const SHORT_BASES: [usize; 8] = [0, 4, 8, 16, 32, 64, 128, 192];
-const SHORT_BITS: [u8; 8] = [2, 2, 3, 4, 5, 6, 6, 6];
 const MAX_ENCODER_MATCH_OFFSET: usize = MAX_HISTORY;
 const MAX_ENCODER_MATCH_LENGTH: usize = 258;
 const MAX_MATCH_CANDIDATES: usize = 256;

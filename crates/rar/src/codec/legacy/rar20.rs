@@ -130,7 +130,7 @@ impl Rar20Decoder {
             .raw_range(start, target)
             .map_err(map_err)?
             .to_vec();
-        self.history.trim(target, target);
+        self.history.trim(target);
         Ok(out)
     }
 
@@ -164,10 +164,10 @@ impl Rar20Decoder {
             let chunk = self.history.raw_range(flushed, pos).map_err(map_err)?;
             writer.write_all(chunk).map_err(RarError::Io)?;
             flushed = pos;
-            self.history.trim(pos, pos);
+            self.history.trim(pos);
         }
         self.read_last_tables().map_err(map_err)?;
-        self.history.trim(target, target);
+        self.history.trim(target);
         Ok(())
     }
 
