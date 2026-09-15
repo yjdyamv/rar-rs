@@ -35,7 +35,7 @@ impl SolidChainState {
             })?;
         Ok(Self {
             dec: DecoderState::new(dict_size),
-            enc: compression::EncoderState::default(),
+            enc: EncoderState::default(),
             enc_active: false,
         })
     }
@@ -55,7 +55,6 @@ impl SolidChainState {
             return Ok(Vec::new());
         }
         let payload = archive.read_member_packed(reader, idx)?;
-        let hdr = &archive.entries[idx].header;
         let mut raw_data = Vec::new();
         crate::format::rar5::payload::decode_member(
             hdr,
