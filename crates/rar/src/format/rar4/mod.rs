@@ -10,19 +10,20 @@
 //! STORE members pass through directly; compressed members dispatch to the
 //! implemented Unpack15, Unpack20, Unpack29, and PPMd-compatible paths.
 
+mod envelope;
 mod extract;
 mod read;
 pub(crate) mod write;
 use crate::archive::ArchiveEntry;
-use crate::crc32;
 use crate::error::{RarError, RarResult};
 use crate::format::decode_system_ansi;
 use crate::format::shared::legacy_time::days_from_civil;
 use crate::model::{DataChunk, FileHeader};
+pub(crate) use envelope::{EnvelopePolicy, Rar4Block, read_block};
 pub(crate) use read::{
     MemberDecodeOptions, decode_member_bytes, decode_member_bytes_to, member_crc,
 };
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek};
 
 // ── Block types ────────────────────────────────────────────────────────────
 
@@ -76,26 +77,6 @@ const MODEL_FILE_FLAG_CRC32: u64 = 0x0004;
 
 /// RAR4 header minimum size for the fixed fields before the variable tail.
 const FILE_HEADER_FIXED: usize = 32;
-
-/// A parsed RAR4 block envelope.
-#[derive(Debug, Clone)]
-pub(crate) struct Rar4Block {
-    head_crc: u16,
-    pub(crate) head_type: u8,
-    flags: u16,
-    /// Absolute offset where the block starts.
-    offset: u64,
-    /// Offset where the block's data area starts (block start + the header's
-    /// on-disk byte count: `head_size`, or `8 + align16(head_size)` for
-    /// `-hp` header-encrypted blocks).
-    header_end: u64,
-    /// Bytes on disk for this whole block (header + optional data area).
-    pub(crate) total_size: u64,
-    /// Data area length (`ADD_SIZE` when `LONG_BLOCK` is set, else `0`).
-    pub(crate) add_size: u64,
-    /// Header bytes (for validation / name parsing).
-    pub(crate) header: Vec<u8>,
-}
 
 /// File header flag: data continues from the previous volume (SPLIT_BEFORE)
 /// or into the next volume (SPLIT_AFTER).
@@ -167,7 +148,12 @@ impl Rar4VolumeScan {
         // starts with its own plaintext marker + main header).
         let mut header_encrypted = false;
         let mut password_bytes: Option<&[u8]> = None;
-        while let Some(block) = read_block(stream, password_bytes, header_encrypted)? {
+        while let Some(block) = read_block(
+            stream,
+            header_encrypted,
+            password_bytes,
+            EnvelopePolicy::SCAN,
+        )? {
             match block.head_type {
                 MARK_HEAD | MAIN_HEAD => {
                     if block.head_type == MAIN_HEAD && block.flags & MHD_PASSWORD != 0 {
@@ -240,9 +226,6 @@ impl Rar4VolumeScan {
                             chunks: vec![chunk],
                         });
                     }
-                    if block.total_size > block.header.len() as u64 {
-                        stream.seek(SeekFrom::Start(block.offset + block.total_size))?;
-                    }
                 }
                 ENDARC_HEAD => break,
                 COMM_HEAD => {
@@ -258,16 +241,10 @@ impl Rar4VolumeScan {
                             entry.header.comment = Some(comment);
                         }
                     }
-                    if block.total_size > block.header.len() as u64 {
-                        stream.seek(SeekFrom::Start(block.offset + block.total_size))?;
-                    }
                 }
                 _ => {
                     // Unknown block types (comment, protect, auth, subblock):
                     // skip over their data area when present.
-                    if block.total_size > block.header.len() as u64 {
-                        stream.seek(SeekFrom::Start(block.offset + block.total_size))?;
-                    }
                 }
             }
         }
@@ -284,196 +261,6 @@ impl Rar4VolumeScan {
             )));
         }
         Ok(())
-    }
-}
-
-fn read_block(
-    stream: &mut (impl Read + Seek),
-    password: Option<&[u8]>,
-    encrypted: bool,
-) -> RarResult<Option<Rar4Block>> {
-    let start = stream.stream_position()?;
-    if encrypted {
-        return read_encrypted_block(stream, start, password);
-    }
-    let mut base = [0u8; 7];
-    let n = read_some(stream, &mut base)?;
-    if n == 0 {
-        return Ok(None);
-    }
-    if n < 7 {
-        return Err(RarError::Format("RAR4: truncated block header".into()));
-    }
-    let head_size = u16::from_le_bytes([base[5], base[6]]);
-    if head_size < 7 {
-        return Err(RarError::Format(format!(
-            "RAR4: block head_size {head_size} too small"
-        )));
-    }
-
-    // Read the full header.
-    let mut header = base.to_vec();
-    if head_size as usize > 7 {
-        let mut rest = vec![0u8; head_size as usize - 7];
-        read_exact(stream, &mut rest)?;
-        header.extend_from_slice(&rest);
-    }
-    Ok(Some(read_envelope(
-        start,
-        header,
-        u64::from(head_size),
-        true,
-    )?))
-}
-
-/// Read an `-hp` encrypted block: `[8-byte salt][AES-128-CBC ciphertext]`,
-/// where the ciphertext holds the whole header (7-byte prefix included)
-/// padded to a 16-byte multiple. The head size only becomes known after
-/// decrypting the first block.
-fn read_encrypted_block(
-    stream: &mut (impl Read + Seek),
-    start: u64,
-    password: Option<&[u8]>,
-) -> RarResult<Option<Rar4Block>> {
-    let mut first = [0u8; 24];
-    let n = read_some(stream, &mut first)?;
-    if n == 0 {
-        return Ok(None);
-    }
-    if n < 24 {
-        return Err(RarError::Format(
-            "RAR4: truncated encrypted block header".into(),
-        ));
-    }
-    let Some(password) = password else {
-        return Err(RarError::Encrypted(
-            "RAR4: header-encrypted archive, a password is required to list it".into(),
-        ));
-    };
-    let salt: [u8; 8] = first[..8].try_into().unwrap();
-    let mut cipher = crate::crypto::Rar30Cipher::new(password, Some(salt))
-        .map_err(|e| RarError::Format(format!("RAR4 header key setup: {e}")))?;
-    let mut block0: [u8; 16] = first[8..24].try_into().unwrap();
-    cipher
-        .decrypt_in_place(&mut block0)
-        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
-    let head_size = u16::from_le_bytes([block0[5], block0[6]]);
-    if head_size < 7 {
-        return Err(RarError::Format(format!(
-            "RAR4: encrypted header head_size {head_size} too small (wrong password?)"
-        )));
-    }
-    let align16 = ((head_size as usize) + 15) & !15;
-    let mut rest = vec![0u8; align16 - 16];
-    read_exact(stream, &mut rest).map_err(|err| {
-        // A wrong password yields garbage `head_size` from the first
-        // decrypted block; following it reads past the end of the archive.
-        // Surface that as a clear password problem instead of a bare I/O
-        // error, mirroring the RAR5 wrong-password stage.
-        match err {
-            RarError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                RarError::WrongPassword
-            }
-            other => other,
-        }
-    })?;
-    cipher
-        .decrypt_in_place(&mut rest)
-        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
-    let mut header = block0.to_vec();
-    header.extend_from_slice(&rest);
-    header.truncate(head_size as usize);
-    Ok(Some(read_envelope(
-        start,
-        header,
-        8 + align16 as u64,
-        true,
-    )?))
-}
-
-/// Parse and validate a block envelope from a full plaintext header. This is
-/// the single RAR4 envelope reader: every caller (streaming scan, layout
-/// re-scan, recovery scan) routes through it so the `head_size`/`LONG_BLOCK`
-/// guards cannot diverge.
-///
-/// `on_disk_prefix` is the number of bytes the header occupies on disk
-/// (`head_size` for plaintext blocks, `8 + align16(head_size)` when the
-/// block was stored header-encrypted). `verify_crc` checks the 16-bit
-/// `HEAD_CRC`: callers whose header is already validated by a previous pass
-/// (the edit layout scan) or may legitimately be damaged (the recovery
-/// scanner looking for the record to repair) pass `false`.
-pub(crate) fn read_envelope(
-    start: u64,
-    header: Vec<u8>,
-    on_disk_prefix: u64,
-    verify_crc: bool,
-) -> RarResult<Rar4Block> {
-    if header.len() < 7 {
-        return Err(RarError::Format("RAR4: truncated block header".into()));
-    }
-    let head_crc = u16::from_le_bytes([header[0], header[1]]);
-    let head_type = header[2];
-    let flags = u16::from_le_bytes([header[3], header[4]]);
-    let head_size = u16::from_le_bytes([header[5], header[6]]);
-    if head_size < 7 || header.len() < head_size as usize {
-        return Err(RarError::Format(format!(
-            "RAR4: block head_size {head_size} too small"
-        )));
-    }
-
-    // Validate header CRC (16-bit) over bytes[2..head_size], except for
-    // MARK (which has no meaningful CRC), AV/SIGN (documented bad), and
-    // the 0xFFFF sentinel (RAR 1.5.4-era "no CRC" marker).
-    if verify_crc {
-        let should_check = !matches!(head_type, MARK_HEAD | 0x76 | 0x79) && head_crc != 0xFFFF;
-        let crc_end = header_crc_end(&header, head_type, flags);
-        if should_check {
-            let actual = (crc32::crc32(&header[2..crc_end]) & 0xffff) as u16;
-            if actual != head_crc {
-                return Err(RarError::Crc {
-                    expected: head_crc as u32,
-                    actual: actual as u32,
-                    context: format!("RAR4 block type {head_type:#x} header"),
-                });
-            }
-        }
-    }
-
-    let add_size = if flags & LONG_BLOCK != 0 {
-        if header.len() < 11 {
-            return Err(RarError::Format(
-                "RAR4: header missing LONG_BLOCK size".into(),
-            ));
-        }
-        u64::from(u32::from_le_bytes(header[7..11].try_into().unwrap()))
-    } else {
-        0
-    };
-
-    Ok(Rar4Block {
-        head_crc,
-        head_type,
-        flags,
-        offset: start,
-        header_end: start + on_disk_prefix,
-        total_size: on_disk_prefix + add_size,
-        add_size,
-        header,
-    })
-}
-
-/// Where the header CRC coverage ends: some block types with a nested
-/// comment stop before the comment (which has its own CRC).
-fn header_crc_end(header: &[u8], head_type: u8, flags: u16) -> usize {
-    match head_type {
-        MAIN_HEAD if flags & 0x0002 != 0 => 13.min(header.len()),
-        FILE_HEAD if flags & FHD_COMMENT != 0 => file_header_crc_end(header),
-        // A standalone COMM_HEAD's `HEAD_SIZE` spans the 13-byte block
-        // header plus its payload, but `HEAD_CRC` covers only the header
-        // (unrar's `SIZEOF_COMMHEAD`); the payload is protected by the
-        // block's own `COMM_CRC`.
-        COMM_HEAD => 13.min(header.len()),
-        _ => header.len(),
     }
 }
 
@@ -865,22 +652,6 @@ pub(crate) fn dos_time_to_unix(dos: u32) -> u32 {
     secs.clamp(0, u32::MAX as i64) as u32
 }
 
-fn read_some(stream: &mut impl Read, buf: &mut [u8]) -> RarResult<usize> {
-    let mut read = 0;
-    while read < buf.len() {
-        let n = stream.read(&mut buf[read..])?;
-        if n == 0 {
-            break;
-        }
-        read += n;
-    }
-    Ok(read)
-}
-
-fn read_exact(stream: &mut impl Read, buf: &mut [u8]) -> RarResult<()> {
-    stream.read_exact(buf).map_err(RarError::Io)
-}
-
 /// Whether a RAR4 member's payload uses the STORE method.
 pub(crate) fn is_stored(comp_method: u8) -> bool {
     comp_method == 0
@@ -976,66 +747,6 @@ fn decode_comment_text(payload: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) mod create;
-
-/// Decrypt one `-hp` encrypted block header from an in-memory archive copy
-/// (the reader's streaming [`read_encrypted_block`] works on files; the
-/// edit paths operate on whole-buffer reads). Returns the decrypted header
-/// (head_size bytes), the on-disk header length (`8 + align16(head_size)`),
-/// the data-area length (`add_size` from the decrypted LONG_BLOCK), and the
-/// block's total on-disk length.
-pub(crate) fn decrypt_encrypted_header(
-    bytes: &[u8],
-    offset: usize,
-    password: &[u8],
-) -> RarResult<(Vec<u8>, usize, usize, usize)> {
-    let salt_start = offset;
-    let salt_end = salt_start + 8;
-    if salt_end > bytes.len() {
-        return Err(RarError::Format("RAR4: truncated encrypted header".into()));
-    }
-    let salt: [u8; 8] = bytes[salt_start..salt_end].try_into().unwrap();
-    let mut cipher = crate::crypto::Rar30Cipher::new(password, Some(salt))
-        .map_err(|e| RarError::Format(format!("RAR4 header key setup: {e}")))?;
-    let mut block0: [u8; 16] = [0; 16];
-    let block0_end = salt_end + 16;
-    if block0_end > bytes.len() {
-        return Err(RarError::Format("RAR4: truncated encrypted header".into()));
-    }
-    block0.copy_from_slice(&bytes[salt_end..block0_end]);
-    cipher
-        .decrypt_in_place(&mut block0)
-        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
-    let head_size = u16::from_le_bytes([block0[5], block0[6]]) as usize;
-    if head_size < 7 {
-        return Err(RarError::Format(format!(
-            "RAR4: encrypted header head_size {head_size} too small (wrong password?)"
-        )));
-    }
-    let align16 = (head_size + 15) & !15;
-    let cipher_end = salt_end + align16;
-    if cipher_end > bytes.len() {
-        return Err(RarError::Format("RAR4: truncated encrypted header".into()));
-    }
-    let mut rest = vec![0u8; align16 - 16];
-    rest.copy_from_slice(&bytes[salt_end + 16..cipher_end]);
-    cipher
-        .decrypt_in_place(&mut rest)
-        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
-    let mut header = block0.to_vec();
-    header.extend_from_slice(&rest);
-    header.truncate(head_size);
-    let on_disk_header = 8 + align16;
-    // CRC verification is off: a wrong password decrypts to garbage, and the
-    // caller (the recovery scanner) must tolerate headers it is about to
-    // repair. The envelope guards still apply.
-    let block = read_envelope(offset as u64, header, on_disk_header as u64, false)?;
-    Ok((
-        block.header,
-        on_disk_header,
-        block.add_size as usize,
-        block.total_size as usize,
-    ))
-}
 
 #[cfg(test)]
 mod tests {
@@ -1163,7 +874,7 @@ mod tests {
         let head_size = header.len() as u16;
         header[5..7].copy_from_slice(&head_size.to_le_bytes());
         // HEAD_CRC covers fixed + name + ext-time, stopping at the comment.
-        let crc = (crc32::crc32(&header[2..ext_end]) & 0xffff) as u16;
+        let crc = (crate::crc32::crc32(&header[2..ext_end]) & 0xffff) as u16;
         header[..2].copy_from_slice(&crc.to_le_bytes());
 
         assert_eq!(
@@ -1171,7 +882,7 @@ mod tests {
             ext_end,
             "the ext-time nibbles locate the comment, not the 0x75 byte"
         );
-        let block = read_envelope(0, header, u64::from(head_size), true)
+        let block = envelope::read_envelope(0, header, u64::from(head_size), true)
             .expect("valid envelope and header CRC");
         let fh = parse_file_header(&block).expect("parse");
         assert_eq!(fh.comment.as_deref(), Some(&b"real comment"[..]));
@@ -1185,7 +896,7 @@ mod tests {
         // A well-formed 13-byte MAIN header with its CRC corrupted.
         let mut main = crate::format::rar4::write::build_main_header(0).to_vec();
         main[0] ^= 0xff;
-        let err = read_envelope(0, main, 13, true).unwrap_err();
+        let err = envelope::read_envelope(0, main, 13, true).unwrap_err();
         assert!(matches!(err, RarError::Crc { .. }), "got {err}");
 
         // head_size 7 + LONG_BLOCK: the ADD_SIZE field is out of bounds.
@@ -1195,7 +906,7 @@ mod tests {
         short[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
         short[5..7].copy_from_slice(&7u16.to_le_bytes());
         for verify in [true, false] {
-            let err = read_envelope(0, short.clone(), 7, verify).unwrap_err();
+            let err = envelope::read_envelope(0, short.clone(), 7, verify).unwrap_err();
             assert!(
                 matches!(err, RarError::Format(_)),
                 "verify={verify}: expected a format error, got {err}"
@@ -1222,6 +933,7 @@ mod tests {
             total_size: FILE_HEADER_FIXED as u64,
             add_size: 0,
             header,
+            raw_header: None,
         };
         let err = parse_file_header(&block).unwrap_err();
         assert!(
@@ -1242,7 +954,13 @@ mod tests {
         let (encrypted, _) =
             crate::format::rar4::write::encrypt_block_header(&header, "pw").unwrap();
 
-        let err = decrypt_encrypted_header(&encrypted, 0, b"pw").unwrap_err();
+        let err = read_block(
+            &mut std::io::Cursor::new(encrypted),
+            true,
+            Some(b"pw"),
+            EnvelopePolicy::REPAIR,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, RarError::Format(_)),
             "expected a format error, got {err}"

@@ -11,12 +11,12 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::archive::RarArchive;
 use crate::error::{RarError, RarResult};
-use crate::format::rar4::{ENDARC_HEAD, LONG_BLOCK, MAIN_HEAD, MHD_PASSWORD, NEWSUB_HEAD};
+use crate::format::rar4::{
+    ENDARC_HEAD, EnvelopePolicy, LONG_BLOCK, MAIN_HEAD, MHD_PASSWORD, NEWSUB_HEAD, read_block,
+};
 
 use super::header_crc16;
-use super::layout::{
-    first_volume, first_volume_signature_offset, header_password, main_flags, read_block_stream,
-};
+use super::layout::{first_volume, first_volume_signature_offset, header_password, main_flags};
 
 /// Encode comment text for storage, mirroring WinRAR 6.23's convention:
 /// the CMT block's `attr` bit 0 marks a UTF-16LE payload (no BOM); pure
@@ -109,7 +109,7 @@ pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
     let mut hp: Option<&[u8]> = None;
     while pos < file_len {
         file.seek(SeekFrom::Start(pos)).map_err(RarError::Io)?;
-        let Some(view) = read_block_stream(&mut file, hp)? else {
+        let Some(view) = read_block(&mut file, hp.is_some(), hp, EnvelopePolicy::EDIT)? else {
             break;
         };
         if view.head_type == MAIN_HEAD && !saw_main {

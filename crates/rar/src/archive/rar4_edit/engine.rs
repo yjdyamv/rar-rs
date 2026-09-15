@@ -18,8 +18,7 @@ use super::comment::{build_comment_block, comment_block_name_is_cmt, encode_comm
 use super::headers::{file_header_name, rebuild_rar4_header, rename_file_header};
 use super::layout::{
     archive_is_locked, copy_range, emit_block, first_volume, header_password, locate_signature,
-    main_flags, patch_main_header, read_block_stream, refuse_unsupported_containers,
-    scan_layout_stream,
+    main_flags, patch_main_header, refuse_unsupported_containers, scan_layout_stream,
 };
 use super::repack::repack_solid_archive;
 use super::{CMT_HEAD_SIZE, RECOVERY_HEAD_SIZE};
@@ -27,8 +26,8 @@ use crate::archive::RarArchive;
 use crate::archive::transaction::EditSummary;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::{
-    COMM_HEAD, FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY, MHD_SOLID, MHD_VOLUME,
-    NEWSUB_HEAD,
+    COMM_HEAD, EnvelopePolicy, FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY,
+    MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD, read_block,
 };
 use crate::fs::atomic::{commit_files, install_durable, read_write_create, temp_sibling_path};
 use crate::fs::volume::{stale_volume_paths, volume_base_of};
@@ -89,7 +88,7 @@ fn apply_multivolume_edits(
             // into ciphertext.
             let mut hp_password: Option<&str> = None;
             while pos < file_len {
-                let view = read_block_stream(&mut src, hp)?
+                let view = read_block(&mut src, hp.is_some(), hp, EnvelopePolicy::EDIT)?
                     .ok_or_else(|| RarError::Format("RAR4: truncated block stream".into()))?;
                 if view.head_type == MAIN_HEAD {
                     let flags = main_flags(&view.header)?;
@@ -97,7 +96,7 @@ fn apply_multivolume_edits(
                         hp_password = password;
                         hp = password.map(str::as_bytes);
                     }
-                    out.write_all(&view.raw_header).map_err(RarError::Io)?;
+                    out.write_all(view.raw_header()).map_err(RarError::Io)?;
                     // A comment change inserts its CMT block right after the
                     // first volume's main header (WinRAR's placement).
                     if is_first
@@ -126,7 +125,7 @@ fn apply_multivolume_edits(
                         copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
                         matched.insert(key.to_string());
                     } else {
-                        out.write_all(&view.raw_header).map_err(RarError::Io)?;
+                        out.write_all(view.raw_header()).map_err(RarError::Io)?;
                         copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
                     }
                 } else if replace_comment
@@ -137,7 +136,7 @@ fn apply_multivolume_edits(
                     // Dropped: the replacement was emitted after the main
                     // header.
                 } else {
-                    out.write_all(&view.raw_header).map_err(RarError::Io)?;
+                    out.write_all(view.raw_header()).map_err(RarError::Io)?;
                     copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
                 }
                 pos = view.end();
@@ -507,7 +506,7 @@ pub(crate) fn edit_rar4(
         // was deleted: that block is dropped.
         let mut drop_standalone_comment = false;
         while pos < region_end as u64 {
-            let view = read_block_stream(&mut src, hp_bytes)?
+            let view = read_block(&mut src, hp_bytes.is_some(), hp_bytes, EnvelopePolicy::EDIT)?
                 .ok_or_else(|| RarError::Format("RAR4: truncated block stream".into()))?;
             if view.head_type == FILE_HEAD {
                 if deleted[file_index] {
@@ -549,7 +548,7 @@ pub(crate) fn edit_rar4(
                     } else {
                         // Untouched: copy the on-disk bytes (ciphertext
                         // included).
-                        out.write_all(&view.raw_header).map_err(RarError::Io)?;
+                        out.write_all(view.raw_header()).map_err(RarError::Io)?;
                         copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
                     }
                 }
@@ -566,7 +565,7 @@ pub(crate) fn edit_rar4(
                 // A comment change replaces the existing CMT block (the new
                 // one was already emitted after the main header).
             } else {
-                out.write_all(&view.raw_header).map_err(RarError::Io)?;
+                out.write_all(view.raw_header()).map_err(RarError::Io)?;
                 copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
             }
             pos = view.end();

@@ -82,45 +82,30 @@ pub(crate) fn scan_protect_with_password(
 
     let sig = find_bytes(bytes, RAR4_SIGNATURE, 8 * 1024 * 1024)
         .ok_or_else(|| RarError::Format("not a RAR4 archive (signature not found)".into()))?;
-    let mut pos = sig + RAR4_SIGNATURE.len();
     let mut protect = None;
     // `-hp` flag, latched from the (plaintext) main header: every block
     // after it has an encrypted header.
     let mut encrypted = false;
-    while pos + 7 <= bytes.len() {
-        let start = pos;
-        // `header` is always the plaintext (decrypted) header, so every
-        // field read below is indexed from the block start either way.
-        let (header, on_disk_header, add_size) = if encrypted {
-            let password = password.ok_or_else(|| {
-                RarError::Encrypted("RAR4: header-encrypted archive, a password is required".into())
-            })?;
-            let (header, on_disk, add, _total) =
-                crate::format::rar4::decrypt_encrypted_header(bytes, pos, password)?;
-            (header, on_disk, add)
-        } else {
-            let head_size = u16::from_le_bytes([bytes[pos + 5], bytes[pos + 6]]) as usize;
-            if head_size < 7 {
-                return Err(RarError::Format("RAR4: block head_size too small".into()));
-            }
-            if pos + head_size > bytes.len() {
-                return Err(RarError::Format("RAR4: truncated block".into()));
-            }
-            // A damaged header is exactly what this scanner exists to
-            // repair, so its CRC is not checked; only the shared envelope
-            // bounds apply.
-            let envelope = crate::format::rar4::read_envelope(
-                pos as u64,
-                bytes[pos..pos + head_size].to_vec(),
-                head_size as u64,
-                false,
-            )?;
-            (envelope.header, head_size, envelope.add_size as usize)
+    let mut stream = std::io::Cursor::new(bytes);
+    stream.set_position((sig + RAR4_SIGNATURE.len()) as u64);
+    while (stream.position() as usize) + 7 <= bytes.len() {
+        // A damaged header is exactly what this scanner exists to repair, so
+        // the envelope CRC is not checked; only the shared bounds apply.
+        let Some(block) = crate::format::rar4::read_block(
+            &mut stream,
+            encrypted,
+            password,
+            crate::format::rar4::EnvelopePolicy::REPAIR,
+        )?
+        else {
+            break;
         };
-        let head_type = header[2];
-        let flags = u16::from_le_bytes([header[3], header[4]]);
-        let head_size = header.len();
-        let total = on_disk_header + add_size;
+        let start = block.offset as usize;
+        let header = &block.header;
+        let head_type = block.head_type;
+        let flags = block.flags;
+        let on_disk_header = block.on_disk_header() as usize;
+        let total = block.total_size as usize;
         if start + total > bytes.len() {
             return Err(RarError::Format("RAR4: truncated block".into()));
         }
@@ -132,7 +117,7 @@ pub(crate) fn scan_protect_with_password(
         // RAR 2.5-era PROTECT_HEAD (0x78): 26-byte fixed header with the
         // `Protect!` mark in the last eight bytes.
         if head_type == 0x78
-            && head_size == 26
+            && header.len() == 26
             && flags & 0x8000 != 0
             && header.get(18..26) == Some(b"Protect!")
         {
@@ -163,7 +148,7 @@ pub(crate) fn scan_protect_with_password(
         // (u32) + total_blocks (u32) + zero.
         if head_type == 0x7a
             && flags & 0x8000 != 0
-            && head_size >= 32 + 2 + 20
+            && header.len() >= 32 + 2 + 20
             && header.get(32..34) == Some(b"RR")
         {
             let name_size = u16::from_le_bytes(header[26..28].try_into().unwrap()) as usize;
@@ -203,7 +188,6 @@ pub(crate) fn scan_protect_with_password(
         if head_type == ENDARC_HEAD {
             break;
         }
-        pos = start + total;
     }
     Ok(Rar4ProtectScan {
         sfx_offset: sig,

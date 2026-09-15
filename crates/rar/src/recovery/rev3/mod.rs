@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rs8::{MAX_CODEWORD, Rsc8};
 
 use crate::error::{RarError, RarResult};
-use crate::format::rar4::{ENDARC_HEAD, LONG_BLOCK};
+use crate::format::rar4::ENDARC_HEAD;
 use crate::fs::volume::{legacy_volume_base, volume_part_width, volume_path_rar4};
 
 /// Metadata trailer length of the RAR 4.20+ `.rev` layout.
@@ -1521,6 +1521,10 @@ fn locate_damage(
 
 /// Offset just past the `ENDARC` block when the bytes after it are all
 /// zero, or `None` when the volume carries no parseable end block.
+///
+/// A rebuilt volume is plaintext at this point (header encryption is not
+/// re-applied by this path), so the block walk never needs a password;
+/// malformed input reads as "no end block" rather than an error.
 fn endarc_end(file: &mut fs::File) -> RarResult<Option<u64>> {
     let len = file.metadata()?.len();
     if len < 7 {
@@ -1532,50 +1536,37 @@ fn endarc_end(file: &mut fs::File) -> RarResult<Option<u64>> {
     if head != *crate::detect::RAR4_SIGNATURE {
         return Ok(None);
     }
-    let mut position = 7u64;
-    while position + 7 <= len {
-        file.seek(SeekFrom::Start(position))?;
-        let mut base = [0u8; 7];
-        file.read_exact(&mut base)?;
-        let head_type = base[2];
-        let flags = u16::from_le_bytes([base[3], base[4]]);
-        let head_size = usize::from(u16::from_le_bytes([base[5], base[6]]));
-        let header_len = if flags & LONG_BLOCK != 0 { 11usize } else { 7 };
-        if head_size < header_len {
-            return Ok(None);
-        }
-        let add_size = if flags & LONG_BLOCK != 0 {
-            let mut add = [0u8; 4];
-            file.read_exact(&mut add)?;
-            u32::from_le_bytes(add) as u64
-        } else {
-            0
+    file.seek(SeekFrom::Start(7))?;
+    loop {
+        let block = match crate::format::rar4::read_block(
+            file,
+            false,
+            None,
+            crate::format::rar4::EnvelopePolicy::REPAIR,
+        ) {
+            Ok(Some(block)) => block,
+            Ok(None) | Err(_) => return Ok(None),
         };
-        let total = head_size as u64 + add_size;
-        if total == 0 {
+        if block.head_type != ENDARC_HEAD {
+            continue;
+        }
+        let end = block.end();
+        if end > len {
             return Ok(None);
         }
-        if head_type == ENDARC_HEAD {
-            let end = position + total;
-            if end > len {
+        file.seek(SeekFrom::Start(end))?;
+        let mut tail_len = len - end;
+        let mut tail = [0u8; 64 * 1024];
+        while tail_len > 0 {
+            let want = tail_len.min(tail.len() as u64) as usize;
+            file.read_exact(&mut tail[..want])?;
+            if tail[..want].iter().any(|&byte| byte != 0) {
                 return Ok(None);
             }
-            file.seek(SeekFrom::Start(end))?;
-            let mut tail_len = len - end;
-            let mut tail = [0u8; 64 * 1024];
-            while tail_len > 0 {
-                let want = tail_len.min(tail.len() as u64) as usize;
-                file.read_exact(&mut tail[..want])?;
-                if tail[..want].iter().any(|&byte| byte != 0) {
-                    return Ok(None);
-                }
-                tail_len -= want as u64;
-            }
-            return Ok(Some(end));
+            tail_len -= want as u64;
         }
-        position += total;
+        return Ok(Some(end));
     }
-    Ok(None)
 }
 
 /// First free `*.bad` sibling for a damaged volume (`x.r00` → `x.r00.bad`).
