@@ -394,7 +394,7 @@ impl RarArchive {
     /// The scan can reorder members relative to the cached catalog, and the
     /// catalog token is deliberately *not* rotated here: [`crate::EntryId`]s
     /// carry the member's packed-payload offset and are re-resolved by
-    /// identity (see `ArchiveReader::resolve_id`), so IDs issued from the
+    /// identity (see `EntryId::resolve`), so IDs issued from the
     /// cached listing survive the reorder while an ID whose member the scan
     /// no longer contains still fails as stale.
     pub(crate) fn ensure_full_catalog(&mut self) -> RarResult<()> {

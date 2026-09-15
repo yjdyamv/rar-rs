@@ -91,11 +91,11 @@ impl fmt::Debug for OpenOptions {
 /// IDs distinguish duplicate member names and carry the member's packed-
 /// payload position, so a catalog rebuild that only reorders entries (the
 /// quick-open rescan before extraction) still resolves an ID to the member
-/// it names. They are scoped to the reader that created them: using an ID
-/// with another reader returns [`RarError::StaleEntryId`], even when both
-/// readers opened the same file. An ID whose member is no longer present in
-/// the catalog fails the same way instead of addressing whatever member now
-/// sits at its old index.
+/// it names. They are scoped to the reader or editor that created them:
+/// using an ID with another facade returns [`RarError::StaleEntryId`], even
+/// when both opened the same file. An ID whose member is no longer present
+/// in the catalog fails the same way instead of addressing whatever member
+/// now sits at its old index.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EntryId {
     catalog_token: u64,
