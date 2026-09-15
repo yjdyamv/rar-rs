@@ -1268,7 +1268,16 @@ fn symlink_and_hardlink_redirects_extract() {
 /// later member (or any other consumer) could write through them.
 #[test]
 fn symlink_targets_escaping_the_destination_are_rejected() {
-    let mut targets = vec![
+    // Drive prefixes are absolute only on Windows; on POSIX
+    // `C:/Windows/win.ini` and `\\?\C:\Windows` are ordinary relative names
+    // inside the root, so they are not escape attempts there (official unrar
+    // keeps them too).
+    let windows_targets: &[&str] = if cfg!(windows) {
+        &["C:/Windows/win.ini", "\\\\?\\C:\\Windows"]
+    } else {
+        &[]
+    };
+    for target in [
         "../../outside.txt",
         "../../../outside.txt",
         // Windows separators go through the same normalizer.
@@ -1276,17 +1285,10 @@ fn symlink_targets_escaping_the_destination_are_rejected() {
         // Absolute paths can never resolve inside.
         "/etc/passwd",
         "//server/share",
-    ];
-    // Drive prefixes are absolute only on Windows; on POSIX
-    // `C:/Windows/win.ini` and `\\?\C:\Windows` are ordinary relative names
-    // inside the root, so they are not escape attempts there (official unrar
-    // keeps them too).
-    #[cfg(windows)]
+    ]
+    .into_iter()
+    .chain(windows_targets.iter().copied())
     {
-        targets.push("C:/Windows/win.ini");
-        targets.push("\\\\?\\C:\\Windows");
-    }
-    for target in targets {
         let dir = make_temp_dir();
         let path = dir.path().join("escape.rar");
         {

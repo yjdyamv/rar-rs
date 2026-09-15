@@ -17,6 +17,25 @@ another) and prints a per-test timing report, which is the easiest way to find
 what got slow. It is a local convenience only: CI stays on plain
 `cargo test`, and read the `rarfiles.lst` trap below before trusting it.
 
+## Checking the Linux half from Windows
+
+CI's `lint` job runs on Linux, and `#[cfg(windows)]` / `cfg!(windows)` branches
+mean a green local run can still fail there (a `let mut` that is only pushed on
+Windows trips `unused_mut` under `-D warnings`, and tests asserting Windows-only
+path hazards fail when POSIX keeps the name). Compile the Linux half locally
+with the cross target (clippy/check do not link, so no cross toolchain is
+needed):
+
+```sh
+rustup target add x86_64-unknown-linux-gnu    # once
+cargo clippy --workspace --all-features --all-targets --locked \
+  --target x86_64-unknown-linux-gnu -- -D warnings
+```
+
+The cfg-gated test branches can still only *run* on Linux; assert what POSIX
+actually does (see `extract_rejects_unsafe_entry_names`) instead of assuming a
+Windows-only hazard.
+
 ## Why test targets are optimized
 
 The root `Cargo.toml` sets:

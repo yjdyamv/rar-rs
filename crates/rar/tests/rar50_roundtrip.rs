@@ -197,15 +197,19 @@ fn extract_rejects_unsafe_entry_names() {
     let dir = make_temp_dir();
     let out = dir.path().join("out");
     std::fs::create_dir_all(&out).unwrap();
-    // Names that escape on any host.
-    let mut bad = vec!["../evil.txt", "/etc/passwd", "a/../../b"];
-    // A drive/ADS colon is a Windows host hazard only: POSIX keeps
-    // `C:/windows/x` as an ordinary relative name (official unrar does the
-    // same), so it is refused on Windows and extracted literally elsewhere
-    // (see `fs::safe_path::component_is_ambiguous`).
-    #[cfg(windows)]
-    bad.push("C:/windows/x");
-    for bad in bad {
+    // Names that escape on any host; a drive/ADS colon is a Windows host
+    // hazard only: POSIX keeps `C:/windows/x` as an ordinary relative name
+    // (official unrar does the same), so it is refused on Windows and
+    // extracted literally elsewhere (see `fs::safe_path::component_is_ambiguous`).
+    let drive_letter_names: &[&str] = if cfg!(windows) {
+        &["C:/windows/x"]
+    } else {
+        &[]
+    };
+    for bad in ["../evil.txt", "/etc/passwd", "a/../../b"]
+        .into_iter()
+        .chain(drive_letter_names.iter().copied())
+    {
         let path = dir
             .path()
             .join(format!("evil-{}.rar", bad.replace(['/', ':'], "_")));
