@@ -15,7 +15,7 @@ use crate::archive::{ArchiveEntry, RarArchive};
 use crate::codec::lzss_huff;
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::{COMP_METHOD_STORE, FILE_FLAG_CRC32, FILE_FLAG_TIME_UNIX, OS_UNIX};
+use crate::format::rar5::{COMP_METHOD_STORE, FILE_FLAG_CRC32, FILE_FLAG_TIME_UNIX};
 use crate::format::shared::engine::{
     CountingWriter, CrcSink, ProgressWriter, SpillGuard, spill_path_for,
 };
@@ -103,28 +103,7 @@ impl RarArchive {
         let file_crc = plan.file_crc;
         let (mtime, file_flags) =
             self.rar5_time_fields(plan.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
-        let fh_base = FileHeader {
-            name: plan.name.clone(),
-            unpacked_size: plan.unpacked_size,
-            packed_size,
-            attributes: plan.attrs,
-            mtime,
-            crc32_val: Some(file_crc),
-            hash_type: if plan.stored_hash.is_some() {
-                0
-            } else {
-                u8::MAX
-            },
-            hash_value: plan.stored_hash,
-            comp_method: plan.method,
-            comp_solid: plan.solid,
-            comp_dict_size: plan.dict_size_log,
-            dict_size_bytes: plan.dict_size_bytes,
-            host_os: OS_UNIX,
-            file_flags,
-            extra_data: plan.extra_data.clone(),
-            ..Default::default()
-        };
+        let fh_base = plan.file_header(packed_size, mtime, file_flags);
 
         // Two independent encryptors are seeded from the session's key/IV:
         // the probe pass (chunk CRC over the on-disk ciphertext) and the
@@ -266,24 +245,30 @@ impl RarArchive {
     pub(super) fn write_store_member(
         &mut self,
         path: &Path,
-        plan: &MemberPlan,
+        mut plan: MemberPlan,
         encr: Option<&crypto::MemberEncryption>,
     ) -> RarResult<()> {
         let mut reader = File::open(path)?;
         // Encrypted members store the zero-padded ciphertext length in the
         // header and on disk (the streaming encryptor pads the final partial
         // block); plain members store the packed length as-is. Progress
-        // callbacks run on the plain path (the encrypted path reports during
-        // its compression pass).
+        // callbacks run on the plain path (the encrypted path reports
+        // nothing).
         let (packed_size, progress) = match encr {
             Some(_) => (crypto::zero_padded_len(plan.unpacked_size), false),
-            None => (plan.unpacked_size, true),
+            None => {
+                // A plain STORE member declares no byte dictionary: the
+                // payload is stored, not decoded through a window.
+                plan.dict_size_bytes = None;
+                (plan.unpacked_size, true)
+            }
         };
+        let unpacked_size = plan.unpacked_size;
         self.write_streamed_payload(
-            plan,
+            &plan,
             packed_size,
             &mut reader,
-            plan.unpacked_size,
+            unpacked_size,
             encr,
             progress,
         )
@@ -695,7 +680,7 @@ impl RarArchive {
                 stored_hash,
             };
             plan.push_extra(time_extra.as_deref(), owner_extra.as_deref());
-            self.write_store_member(path, &plan, encr.as_ref())?;
+            self.write_store_member(path, plan, encr.as_ref())?;
             self.write_member_streams(path)?;
             self.report_progress(file_size, file_size);
             return Ok(());

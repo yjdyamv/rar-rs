@@ -287,7 +287,7 @@ impl RarArchive {
                 stored_hash,
             };
             plan.push_extra(time_extra.as_deref(), owner_extra.as_deref());
-            self.write_store_member(path, &plan, encr.as_ref())?;
+            self.write_store_member(path, plan, encr.as_ref())?;
             self.write_member_streams(path)?;
             self.report_progress(file_size, file_size);
             return Ok(());
@@ -504,7 +504,7 @@ impl RarArchive {
                 stored_hash,
             };
             plan.push_extra(time_extra.as_deref(), owner_extra.as_deref());
-            self.write_store_member(path, &plan, encr.as_ref())?;
+            self.write_store_member(path, plan, encr.as_ref())?;
             self.write_member_streams(path)?;
             self.report_progress(file_size, file_size);
             return Ok(());

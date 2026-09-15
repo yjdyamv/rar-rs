@@ -43,6 +43,33 @@ impl MemberPlan {
             self.extra_data.extend_from_slice(owner);
         }
     }
+
+    /// The member's file header with the on-disk `packed_size` and the
+    /// time-derived `mtime` / `file_flags` filled in.
+    pub(super) fn file_header(&self, packed_size: u64, mtime: u32, file_flags: u64) -> FileHeader {
+        FileHeader {
+            name: self.name.clone(),
+            unpacked_size: self.unpacked_size,
+            packed_size,
+            attributes: self.attrs,
+            mtime,
+            crc32_val: Some(self.file_crc),
+            hash_type: if self.stored_hash.is_some() {
+                0
+            } else {
+                u8::MAX
+            },
+            hash_value: self.stored_hash,
+            comp_method: self.method,
+            comp_solid: self.solid,
+            comp_dict_size: self.dict_size_log,
+            dict_size_bytes: self.dict_size_bytes,
+            host_os: OS_UNIX,
+            file_flags,
+            extra_data: self.extra_data.clone(),
+            ..Default::default()
+        }
+    }
 }
 
 /// Which half of a split chunk the per-chunk source closure is asked for.
@@ -65,28 +92,7 @@ impl RarArchive {
         let file_crc = plan.file_crc;
         let (mtime, file_flags) =
             self.rar5_time_fields(plan.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
-        let fh_base = FileHeader {
-            name: plan.name.clone(),
-            unpacked_size: plan.unpacked_size,
-            packed_size: packed_data.len() as u64,
-            attributes: plan.attrs,
-            mtime,
-            crc32_val: Some(file_crc),
-            hash_type: if plan.stored_hash.is_some() {
-                0
-            } else {
-                u8::MAX
-            },
-            hash_value: plan.stored_hash,
-            comp_method: plan.method,
-            comp_solid: plan.solid,
-            comp_dict_size: plan.dict_size_log,
-            dict_size_bytes: plan.dict_size_bytes,
-            host_os: OS_UNIX,
-            file_flags,
-            extra_data: plan.extra_data.clone(),
-            ..Default::default()
-        };
+        let fh_base = plan.file_header(packed_data.len() as u64, mtime, file_flags);
 
         if self.write_ctx().output.volume_size.is_none() {
             // Single-volume

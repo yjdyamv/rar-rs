@@ -12,6 +12,7 @@ use crate::codec::{DecoderState, EncoderState, lzss_huff as compression};
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::COMP_METHOD_STORE;
 use crate::format::rar5::payload::ChunkReader;
+use crate::format::rar5::write::MemberPlan;
 
 /// Shared window/encoder state of the solid chain being rewritten.
 ///
@@ -124,7 +125,7 @@ impl SolidChainState {
             RarArchive::payload_extra_and_crc(archive.password.as_deref(), plain_crc, plain_blake);
         let payload = RarArchive::encrypt_payload_with(encr.as_ref(), &payload);
         archive.write_file_entry(
-            &crate::format::rar5::write::MemberPlan {
+            &MemberPlan {
                 name: name.to_string(),
                 unpacked_size: data.len() as u64,
                 file_crc: header_crc,
