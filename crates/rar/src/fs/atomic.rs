@@ -362,9 +362,14 @@ fn commit_done_path(parent: &Path, base: &str) -> PathBuf {
     parent.join(format!(".{base}.rar5commit.done"))
 }
 
-/// Journal format for the escaped (current) layout. Versioned so a foreign
-/// or truncated journal is never misread as a commit plan.
-const COMMIT_JOURNAL_VERSION: &str = "rar5commit v2";
+/// Journal format for the escaped layout with explicit `park` records.
+/// Versioned so a foreign or truncated journal is never misread as a commit
+/// plan, and so a reader that does not know a record kind keeps the journal
+/// instead of guessing.
+const COMMIT_JOURNAL_VERSION: &str = "rar5commit v3";
+/// Escaped layout without `park` records, written by earlier builds; still
+/// parsed so an in-flight journal survives an upgrade.
+const COMMIT_JOURNAL_VERSION_V2: &str = "rar5commit v2";
 /// Header of the unescaped format written by earlier builds; still parsed
 /// (fields taken verbatim) so an in-flight journal survives an upgrade.
 const COMMIT_JOURNAL_VERSION_V1: &str = "rar5commit v1";
@@ -568,10 +573,10 @@ fn plain_journal_name(name: &OsStr) -> bool {
     }
 }
 
-/// Serialize the commit plan: one `backup`/`install` record per file, names
-/// relative to `parent` and escaped. Written before anything moves, via a
-/// sibling rename so a torn write cannot leave a half journal for recovery
-/// to misread.
+/// Serialize the commit plan: one record per file — `backup` (hidden, dropped
+/// on success), `park` (kept on success) or `install` — with names relative to
+/// `parent` and escaped. Written before anything moves, via a sibling rename
+/// so a torn write cannot leave a half journal for recovery to misread.
 fn write_commit_journal(
     parent: &Path,
     base: &str,
@@ -631,11 +636,15 @@ pub(crate) fn recover_interrupted_commit(parent: &Path, base: &str) -> RarResult
     // A crash between writing and renaming the journal leaves only this.
     let _ = fs::remove_file(journal.with_extension("journal.tmp"));
     let Ok(text) = fs::read_to_string(&journal) else {
+        // No journal: any done marker is stale (the commit that wrote it
+        // removed its journal). Clear it so a later commit killed mid-write
+        // cannot be misread as finished.
+        let _ = fs::remove_file(commit_done_path(parent, base));
         return Ok(());
     };
     let mut lines = text.lines();
     let escaped = match lines.next() {
-        Some(COMMIT_JOURNAL_VERSION) => true,
+        Some(COMMIT_JOURNAL_VERSION) | Some(COMMIT_JOURNAL_VERSION_V2) => true,
         Some(COMMIT_JOURNAL_VERSION_V1) => false,
         _ => return Ok(()),
     };
@@ -783,16 +792,17 @@ fn commit_files_impl(
         .map(|(_, final_path)| final_path)
         .chain(retire.iter())
     {
-        if parks
-            .iter()
-            .any(|(_, parked_final)| parked_final == final_path)
-        {
+        if parks.iter().any(|(_, final_)| final_ == final_path) {
             continue;
         }
         if final_path.exists() {
             backups.push((backup_sibling_path(final_path, &suffix), final_path.clone()));
         }
     }
+    // A marker left by a commit killed between removing the journal and the
+    // marker must not make this commit look finished to recovery; clear it
+    // before this commit's journal exists.
+    let _ = fs::remove_file(commit_done_path(parent, base));
     write_commit_journal(parent, base, &backups, install, parks)?;
 
     // (final path, staged path) for everything already installed.
@@ -1636,7 +1646,7 @@ mod tests {
         std::fs::write(
             super::journal_path(parent, "set"),
             format!(
-                "rar5commit v2\npark\t{}\t{}\ninstall\t{}\t{}\n",
+                "rar5commit v3\npark\t{}\t{}\ninstall\t{}\t{}\n",
                 parked.file_name().unwrap().to_string_lossy(),
                 final_path.file_name().unwrap().to_string_lossy(),
                 staged.file_name().unwrap().to_string_lossy(),
@@ -1666,7 +1676,7 @@ mod tests {
         std::fs::write(
             super::journal_path(parent, "set"),
             format!(
-                "rar5commit v2\npark\t{}\t{}\ninstall\t{}\t{}\n",
+                "rar5commit v3\npark\t{}\t{}\ninstall\t{}\t{}\n",
                 parked.file_name().unwrap().to_string_lossy(),
                 final_path.file_name().unwrap().to_string_lossy(),
                 staged.file_name().unwrap().to_string_lossy(),
@@ -1682,5 +1692,76 @@ mod tests {
         assert_eq!(std::fs::read(&parked).unwrap(), b"damaged");
         assert!(!super::commit_done_path(parent, "set").exists());
         assert!(!super::journal_path(parent, "set").exists());
+    }
+
+    /// A kill between writing the journal and the park rename: the park file
+    /// is absent and the final still holds the original, so recovery must
+    /// leave it untouched.
+    #[test]
+    fn recovery_leaves_the_final_alone_when_the_park_never_ran() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        let final_path = parent.join("set.part2.rar");
+        let parked = parent.join("set.part2.rar.bad");
+        std::fs::write(&final_path, b"damaged").unwrap();
+        std::fs::write(
+            super::journal_path(parent, "set"),
+            format!(
+                "rar5commit v3\npark\t{}\t{}\n",
+                parked.file_name().unwrap().to_string_lossy(),
+                final_path.file_name().unwrap().to_string_lossy(),
+            ),
+        )
+        .unwrap();
+
+        super::recover_interrupted_commit(parent, "set").unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"damaged");
+        assert!(!parked.exists());
+        assert!(!super::journal_path(parent, "set").exists());
+    }
+
+    /// A park whose final vanished before the commit makes the phase-1 rename
+    /// fail; parks that already ran must be rolled back.
+    #[test]
+    fn staged_set_park_rename_failure_restores_earlier_parks() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("set.part1.rar");
+        let first_parked = dir.path().join("set.part1.rar.bad");
+        let missing = dir.path().join("set.part2.rar");
+        let missing_parked = dir.path().join("set.part2.rar.bad");
+        std::fs::write(&first, b"damaged-1").unwrap();
+
+        let mut set = super::StagedSet::new(dir.path(), "set").unwrap();
+        set.park(&first, first_parked.clone());
+        set.park(&missing, missing_parked.clone());
+
+        assert!(set.commit().is_err());
+        drop(set);
+        assert_eq!(std::fs::read(&first).unwrap(), b"damaged-1");
+        assert!(
+            !first_parked.exists(),
+            "the earlier park must be rolled back"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("rar5"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
+    }
+
+    /// A kill after the journal removal but before the marker removal leaves
+    /// a journal-less done marker; recovery clears it so a later commit
+    /// killed mid-write is not misread as finished.
+    #[test]
+    fn recovery_clears_a_stale_done_marker_without_a_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        std::fs::write(super::commit_done_path(parent, "set"), b"").unwrap();
+
+        super::recover_interrupted_commit(parent, "set").unwrap();
+
+        assert!(!super::commit_done_path(parent, "set").exists());
     }
 }

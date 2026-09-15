@@ -1371,10 +1371,11 @@ fn rebuild_missing_volumes_chunked(
 ///
 /// `outputs` holds `(volume index, staged path, write handle)` for each
 /// rebuilt volume; a damaged original is parked as `*.bad` through the set's
-/// journaled park, kept there on success and restored on any failure. The
-/// park is recorded in the commit journal before any rename, so a process
-/// kill between the park and the install cannot strand the volume at
-/// `*.bad`. Staged files are removed on drop when the commit never ran.
+/// journaled park, kept there on success and restored by rollback or by
+/// `recover_interrupted_commit` after a kill. The park is recorded in the
+/// commit journal before any rename, so a process kill between the park and
+/// the install cannot strand the volume at `*.bad`. Staged files are removed
+/// on drop when the commit never ran.
 fn commit_rebuilt_volumes(
     data_paths: &[PathBuf],
     damaged: &[usize],

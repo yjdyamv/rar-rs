@@ -91,7 +91,9 @@ packed 大小加一个发射块，而不是正比于整个文件的符号表。
 
 **多卷提交是一个事务。** `fs::atomic::commit_files` 先把已存在的目标卷 park 到隐藏旁路，
 再安装暂存的卷集；任一步失败就整体回滚（安装过的退回暂存名、park 的原件归位），因此失败的
-提交只呈现“完整新集”或“原样旧集”，不会新旧混排。更短的覆盖还会 retire 旧集的残留分卷与
+提交只呈现“完整新集”或“原样旧集”，不会新旧混排。`StagedSet::park` 还能把既有 final 按
+调用方命名入 journal（rev3 损坏卷 → `*.bad`）：rollback 还原、成功保留，kill 落在 park 与
+install 之间也由 recovery 还原。更短的覆盖还会 retire 旧集的残留分卷与
 旧 `.rev`。提交会写 journal + committed 标记，进程在 rename 序列中途被 kill 时，下次写打开
 会回滚未完成的提交或收尾已完成的提交（`atomic::recover_interrupted_commit`；只在写路径
 触发，读打开不动盘）。
