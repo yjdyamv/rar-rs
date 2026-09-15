@@ -4,6 +4,12 @@ env:
   APP_NAME: rar-rs-napi
   MACOSX_DEPLOYMENT_TARGET: '10.13'
   CARGO_INCREMENTAL: '1'
+  # Full (release-grade) work — binding matrix builds/tests, fuzz smoke runs,
+  # rustdoc — runs on tags, the weekly schedule and manual dispatches. The
+  # per-push/PR run keeps only what catches a broken change fast: fmt, the
+  # host-path guard, cargo check/clippy, the workspace tests and the Windows
+  # CLI suite. A red push is then readable in ~6-8 minutes instead of 8-25.
+  RUN_HEAVY: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v') }}
 'on':
   push:
     branches:
@@ -33,6 +39,10 @@ concurrency:
 # every release ships a SHA-256SUMS manifest for that.
 # The binding's JS tests run with `node --test` under crates/rar-napi.
 #
+# Trigger split (see `RUN_HEAVY`): pushes/PRs run `lint` + `windows-cli`
+# only; tags, the weekly schedule and manual dispatches additionally run the
+# binding build/test matrices, the fuzz smoke loop and rustdoc.
+#
 # This file must live at the repository ROOT: GitHub Actions only executes
 # .github/workflows/*.yml from the default branch root; the old copy under
 # crates/rar-napi/.github/workflows/ was never run.
@@ -43,6 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Setup node
+        if: env.RUN_HEAVY == 'true'
         uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -91,6 +102,7 @@ jobs:
           RUSTFLAGS: --cfg fuzzing
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --features fuzzing --locked
       - name: Fuzz smoke (standalone mutation loop)
+        if: env.RUN_HEAVY == 'true'
         # Bounded run so the targets are exercised, not just compiled: the
         # read-side targets are cheap, the write-side ones do real file I/O.
         env:
@@ -141,25 +153,32 @@ jobs:
         # it for real with SA_REQUIRE_OFFICIAL=1).
         run: cargo test --workspace --all-features --locked --test official_interop -- --nocapture
       - name: Cargo doc (workspace)
+        if: env.RUN_HEAVY == 'true'
         # Build-only: several pre-existing public docs link to private
         # internals, so `-D warnings` is not on yet.
         run: cargo doc --workspace --no-deps --locked
       - name: Install binding dependencies
+        if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
         run: npm ci
       - name: Build addon (native)
+        if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
         run: npx napi build --platform --release
       - name: Test addon (native)
+        if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
         run: npm test
       - name: Build WASM addon
+        if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
         run: npx napi build --platform --release --target wasm32-wasip1-threads
       - name: Patch WASI loader for Windows host paths
+        if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
         run: node scripts/patch-wasi-loader.mjs
       - name: Test addon (WASI forced)
+        if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
         run: NAPI_RS_FORCE_WASI=error npm test
   windows-cli:
@@ -274,6 +293,7 @@ jobs:
         run: echo "::warning title=Official interop skipped::rarlab console tools could not be downloaded; the official-binary suites did not run."
   build:
     name: build - ${{ matrix.settings.target }} - node@24
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ${{ matrix.settings.host }}
     strategy:
       fail-fast: false
@@ -380,6 +400,7 @@ jobs:
           if-no-files-found: error
   build-wasm:
     name: build - wasm32-wasip1-threads
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -422,6 +443,7 @@ jobs:
           if-no-files-found: error
   test-bindings:
     name: Test bindings on ${{ matrix.settings.host }} (${{ matrix.settings.target }})
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     needs:
       - build
     strategy:
@@ -484,6 +506,7 @@ jobs:
         shell: bash
   test-wasm:
     name: Test WASI binding on ${{ matrix.os }}
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     needs:
       - build-wasm
     strategy:
