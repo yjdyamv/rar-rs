@@ -536,7 +536,7 @@ fn rebuild_missing_volumes_chunked(
         let size = volume_sizes[index];
         let expected_crc = volume_crcs[index];
         // The closure owns the write handle (it must close before install);
-        // the temp path is cloned for its CRC re-read.
+        // the temp path is read back for its CRC check.
         let tmp_for_check = tmp;
         let step = (move || -> RarResult<()> {
             check_cancel(cancel)?;

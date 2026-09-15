@@ -6,44 +6,33 @@
 //! "install as one commit", "sweep the temps on failure" and "return the
 //! final paths" rules once.
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use crate::error::{RarError, RarResult};
+use crate::fs::atomic::{StagedSet, read_write_create, temp_sibling_path};
 
 /// A set of parity files staged as temporary siblings and installed as one
 /// journaled commit.
 ///
-/// Opening the set recovers an interrupted commit of the same parent/base
-/// first (the set commits through the same journal); [`Self::stage`] creates
-/// one temp sibling per final path and hands back its handle; [`Self::track`]
-/// adopts a file a builder already staged. [`Self::commit`] refuses a
-/// non-file at any final path, installs the whole set through
-/// [`crate::fs::atomic::commit_files`] and returns the final paths. A dropped,
-/// uncommitted set removes its staged files, so a failed build or install
-/// leaves existing finals untouched and no temps behind.
+/// The lifecycle is [`StagedSet`]'s: opening the set recovers an interrupted
+/// commit of the same parent/base, and a dropped, uncommitted set removes
+/// its staged files. This value adds the recovery policy on top:
+/// [`Self::stage`] mints the temp sibling and keeps its handle, and
+/// [`Self::commit`] refuses a non-file at any final path and returns the
+/// final paths in order.
 pub(crate) struct ParitySet {
-    parent: PathBuf,
-    base: String,
-    install: Vec<(PathBuf, PathBuf)>,
-    committed: bool,
+    staged: StagedSet,
+    finals: Vec<PathBuf>,
 }
 
 impl ParitySet {
     /// Open a set for `parent`/`base`, recovering an interrupted commit of
     /// the same base first (idempotent).
     pub(crate) fn new(parent: &Path, base: &str) -> RarResult<Self> {
-        let parent = if parent.as_os_str().is_empty() {
-            PathBuf::from(".")
-        } else {
-            parent.to_path_buf()
-        };
-        crate::fs::atomic::recover_interrupted_commit(&parent, base)?;
         Ok(Self {
-            parent,
-            base: base.to_string(),
-            install: Vec::new(),
-            committed: false,
+            staged: StagedSet::new(parent, base)?,
+            finals: Vec::new(),
         })
     }
 
@@ -51,10 +40,10 @@ impl ParitySet {
     /// write handle. The set removes it unless [`Self::commit`] succeeds;
     /// builders must close the handle before committing.
     pub(crate) fn stage(&mut self, final_path: &Path) -> RarResult<(PathBuf, File)> {
-        let staged = crate::fs::atomic::temp_sibling_path(final_path);
-        let file = crate::fs::atomic::read_write_create(&staged)?;
-        self.install
-            .push((staged.clone(), final_path.to_path_buf()));
+        let staged = temp_sibling_path(final_path);
+        let file = read_write_create(&staged)?;
+        self.finals.push(final_path.to_path_buf());
+        self.staged.track(staged.clone(), final_path);
         Ok((staged, file))
     }
 
@@ -64,9 +53,8 @@ impl ParitySet {
     /// parked entry because only files are dropped on success.
     pub(crate) fn commit(mut self) -> RarResult<Vec<PathBuf>> {
         if let Some(conflict) = self
-            .install
+            .finals
             .iter()
-            .map(|(_, final_path)| final_path)
             .find(|final_path| final_path.exists() && !final_path.is_file())
         {
             return Err(RarError::Io(std::io::Error::new(
@@ -77,24 +65,8 @@ impl ParitySet {
                 ),
             )));
         }
-        let written: Vec<PathBuf> = self
-            .install
-            .iter()
-            .map(|(_, final_path)| final_path.clone())
-            .collect();
-        crate::fs::atomic::commit_files(&self.parent, &self.base, &self.install, &[])?;
-        self.committed = true;
-        Ok(written)
-    }
-}
-
-impl Drop for ParitySet {
-    fn drop(&mut self) {
-        if !self.committed {
-            for (staged, _) in &self.install {
-                let _ = fs::remove_file(staged);
-            }
-        }
+        self.staged.commit()?;
+        Ok(std::mem::take(&mut self.finals))
     }
 }
 
