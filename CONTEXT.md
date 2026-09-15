@@ -33,6 +33,7 @@
 - **RAR5 block envelope（`frame_block`）** — `format/rar5/headers/serialize.rs`：`[CRC32 LE][size vint][body]`（CRC 覆盖 size vint + body）的唯一发射者；所有头序列化器与外科重写路径都经它（2026-09）。
 - **Service 块解析** — `format/rar5/headers/parse.rs` 独占：`parse_service_block_name`（块名 QO/RR/STM/CMT，截断返回 `None` 不再手走字段）、`parse_service_recovery_percent`（RR SUBDATA 单字节）、`parse_service_subdata`（SUBDATA 载荷，STM 流名）；extract 扫描与 archive 事务消费同一实现。
 - **Quick-open fast path（QO 快路径）** — `RarArchive::open_quick`：只读主头 locator + QO 记录即得成员列表（O(QO) 而非 O(归档)）；无 QO 时透明回退全扫。
+- **CatalogBuilder（`format/rar5/extract/open.rs`）** — RAR5 成员目录的唯一扫描器：单卷（`self.stream` 作唯一 source）与分卷（逐卷 `File` source）走同一条 `scan_source`，continuation 合并、条目/chunk 上限、STM owner+volume、ENCR 每卷密钥重派生都只此一处；`rebuild_catalog(_capped)` 负责定位与装配（2026-09）。
 - **Streaming repair（流式修复）** — `repair_archive_path(src, dst)`：文件版 `{RB}` 扫描 + shard 级按需读取，只驻留恢复数据与损坏分片；完好不写输出、失败不残留。
 - **Cancel flag（取消钩子）** — `set_cancel_flag(Arc<AtomicBool>)`：长操作在逐成员/逐块检查点返回 `RarError::Cancelled`；binding 映射 AbortSignal。
 - **Zero-padded volumes（零填充卷）** — WinRAR 把卷号填充到总卷数位数（`part01..part15`）；发现/重建/.rev 命名均识别。

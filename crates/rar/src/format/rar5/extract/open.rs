@@ -35,15 +35,207 @@ fn check_chunk_cap(count: usize, max: usize, member: &str) -> RarResult<()> {
     Ok(())
 }
 
-impl RarArchive {
-    /// Full RAR5 scan: multi-volume sets rescan every volume, single-volume
-    /// archives scan their block sequence.
-    pub(crate) fn open_read_rar5(&mut self) -> RarResult<()> {
-        if self.volume_paths.len() > 1 {
-            self.scan_all_volumes()
-        } else {
-            self.scan_blocks()
+/// Builds the member catalog from one or more volume sources.
+///
+/// One block walk serves single-volume archives and volume sets: a
+/// single-volume archive is a one-element source list, so continuation
+/// merging, the entry/chunk ceilings and "STM" ownership behave identically
+/// by volume count.
+struct CatalogBuilder {
+    entries: Vec<ArchiveEntry>,
+    streams: Vec<StreamRecord>,
+    pending: Option<ArchiveEntry>,
+    /// Owner of a "STM" record that may appear after its member's final
+    /// chunk (in any volume).
+    last_file_index: Option<usize>,
+    archive_solid: bool,
+    max_entries: usize,
+    max_chunks: usize,
+}
+
+impl CatalogBuilder {
+    fn new(max_entries: usize, max_chunks: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            streams: Vec::new(),
+            pending: None,
+            last_file_index: None,
+            archive_solid: false,
+            max_entries,
+            max_chunks,
         }
+    }
+
+    /// Walk one source (a volume file, or the single-volume archive stream)
+    /// positioned right after its signature. `volume_index` is recorded on
+    /// every chunk so member data is read back from the right volume;
+    /// `volume_len` bounds declared data areas against the real file.
+    ///
+    /// Returns when the source's end-of-archive block is reached, when a
+    /// declared data area runs past the source, or at EOF.
+    fn scan_source<R: Read + Seek>(
+        &mut self,
+        stream: &mut R,
+        volume_index: usize,
+        volume_len: u64,
+        password: Option<&str>,
+        cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> RarResult<()> {
+        // None until this source's plaintext archive-level encryption header
+        // arrives (header-encrypted archives: every block after it is
+        // `[IV][AES-256-CBC header]`; volume sets repeat the header on every
+        // volume, so the key is re-derived per source).
+        let mut encr_key: Option<[u8; 32]> = None;
+
+        while let Some(meta) = crate::format::rar5::headers::read_block(stream, encr_key.as_ref())?
+        {
+            if crate::archive::cancel_requested(cancel) {
+                return Err(RarError::Cancelled);
+            }
+            let raw = &meta.raw;
+            let stream_pos = stream.stream_position()?;
+
+            match raw.block_type {
+                BLOCK_TYPE_ARCHIVE_HEADER => {
+                    let ah = ArchiveHeader::from_raw(raw)?;
+                    if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
+                        self.archive_solid = true;
+                    }
+                }
+                BLOCK_TYPE_FILE_HEADER => {
+                    check_entry_cap(self.entries.len(), self.max_entries)?;
+                    let fh = FileHeader::from_raw(raw, stream_pos)?;
+                    let continues_from = raw.flags & BLOCK_FLAG_DATA_CONTINUES != 0;
+                    let continues_to = raw.flags & BLOCK_FLAG_DATA_CONTINUE_TO != 0;
+
+                    let chunk = DataChunk {
+                        volume_index,
+                        data_offset: fh.data_offset,
+                        packed_size: fh.packed_size,
+                        crc32_val: fh.crc32_val,
+                        is_final: !continues_to,
+                        extra_data: fh.extra_data.clone(),
+                    };
+
+                    if continues_from {
+                        if let Some(ref mut entry) = self.pending {
+                            check_chunk_cap(
+                                entry.chunks.len(),
+                                self.max_chunks,
+                                &entry.header.name,
+                            )?;
+                            entry.chunks.push(chunk);
+                            if !continues_to {
+                                // Final chunk: total packed size and the
+                                // final chunk's CRC (MAC'd when encrypted).
+                                // For encrypted members the final chunk also
+                                // carries the full extra records (encryption
+                                // with the hash-key MAC bit, BLAKE2sp hash,
+                                // time); the reader must verify with those,
+                                // so merge them in when present.
+                                let total_packed: u64 =
+                                    entry.chunks.iter().map(|c| c.packed_size).sum();
+                                entry.header.packed_size = total_packed;
+                                entry.header.crc32_val = fh.crc32_val;
+                                if !fh.extra_data.is_empty() {
+                                    entry.header.extra_data = fh.extra_data.clone();
+                                    entry.header.hash_type = fh.hash_type;
+                                    entry.header.hash_value = fh.hash_value;
+                                    entry.header.mtime_ns = fh.mtime_ns;
+                                    entry.header.owner = fh.owner.clone();
+                                    entry.header.group = fh.group.clone();
+                                    entry.header.version = fh.version;
+                                }
+                                self.entries.push(self.pending.take().unwrap());
+                                self.last_file_index = Some(self.entries.len() - 1);
+                            }
+                        }
+                    } else if continues_to {
+                        self.pending = Some(ArchiveEntry {
+                            header: fh,
+                            chunks: vec![chunk],
+                        });
+                    } else {
+                        self.entries.push(ArchiveEntry {
+                            header: fh,
+                            chunks: vec![chunk],
+                        });
+                        self.last_file_index = Some(self.entries.len() - 1);
+                    }
+                }
+                BLOCK_TYPE_SERVICE_HEADER
+                    if raw.flags & crate::format::rar5::BLOCK_FLAG_DEPENDS_PREV != 0 =>
+                {
+                    // NTFS stream record ("STM") owned by the preceding
+                    // member; the record can sit in a later volume than the
+                    // start of that member's data, so both the owner index
+                    // and the volume index are recorded.
+                    let name = parse_service_block_name(&meta.raw.header_data)?;
+                    if name.as_deref() == Some("STM")
+                        && let Some(owner_index) = self.last_file_index
+                    {
+                        self.record_member_stream(&meta.raw, owner_index, volume_index)?;
+                    }
+                }
+                BLOCK_TYPE_END_ARCHIVE => {
+                    let _ = EndOfArchiveHeader::from_raw(raw)?;
+                    return Ok(());
+                }
+                BLOCK_TYPE_ENCRYPT_HEADER => {
+                    encr_key = Some(crypto::derive_header_key(raw, password)?);
+                }
+                _ => {}
+            }
+
+            if raw.data_size > 0
+                && !crate::format::shared::seek_past_data_area(stream, meta.data_end, volume_len)?
+            {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Record one "STM" service block as an NTFS alternate data stream owned
+    /// by `owner_index` and stored in `volume_index` (0 = the primary
+    /// stream). `-p` streams carry their own ENCR record; the password is
+    /// only needed at read time, so listing works on locked archives like it
+    /// does for encrypted members.
+    fn record_member_stream(
+        &mut self,
+        raw: &RawBlock,
+        owner_index: usize,
+        volume_index: usize,
+    ) -> RarResult<()> {
+        let extra = crate::format::rar5::headers::block_extra_area(&raw.header_data)?;
+        if let Some(stream_name) = crate::format::rar5::headers::parse_service_subdata(&extra)
+            && !stream_name.is_empty()
+            && let Some((unpacked_size, method, dict_size_log, crc32)) =
+                crate::format::rar5::headers::parse_stream_params(&raw.header_data)
+        {
+            let params = crate::crypto::parse_encryption_extra(&extra)?;
+            self.streams.push(StreamRecord {
+                owner_index,
+                volume_index,
+                name: String::from_utf8_lossy(&stream_name).into_owned(),
+                data_offset: raw.data_offset,
+                data_size: raw.data_size,
+                unpacked_size,
+                method,
+                dict_size_log,
+                crc32,
+                params,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl RarArchive {
+    /// Full RAR5 scan: one catalog walk serves single-volume archives and
+    /// volume sets.
+    pub(crate) fn open_read_rar5(&mut self) -> RarResult<()> {
+        self.rebuild_catalog()
     }
 
     /// RAR5 quick-open: read only the main archive header, resolve the
@@ -53,17 +245,13 @@ impl RarArchive {
     /// or a corrupt record).
     pub(crate) fn open_read_quick_rar5(&mut self) -> RarResult<()> {
         if self.volume_paths.len() > 1 {
-            return self.scan_all_volumes();
+            return self.rebuild_catalog();
         }
         if !self.try_quick_open_entries()? {
-            // `try_quick_open_entries` may have consumed the leading
-            // plaintext blocks (e.g. a -hp encryption header); rewind to
-            // the archive start so the full scan sees them again.
-            let stream = stream_mut(&mut self.stream)?;
-            stream.seek(SeekFrom::Start(
-                self.sfx_offset + RAR5_SIGNATURE.len() as u64,
-            ))?;
-            self.scan_blocks()?;
+            // The full scan starts at the archive start again, so the
+            // leading plaintext blocks the quick-open probe consumed (e.g.
+            // a -hp encryption header) are seen.
+            self.rebuild_catalog()?;
         }
         Ok(())
     }
@@ -146,295 +334,83 @@ impl RarArchive {
         if !self.read_ctx().quick_open_catalog {
             return Ok(());
         }
-        let stream = stream_mut(&mut self.stream)?;
-        stream.seek(SeekFrom::Start(
-            self.sfx_offset + RAR5_SIGNATURE.len() as u64,
-        ))?;
-        self.scan_blocks()?;
-        Ok(())
+        self.rebuild_catalog()
     }
 
-    fn scan_blocks(&mut self) -> RarResult<()> {
-        self.entries.clear();
-        self.read_ctx_mut().streams.clear();
-        self.read_ctx_mut().quick_open_catalog = false;
-
-        // None until the plaintext archive-level encryption header arrives
-        // (header-encrypted archives: every block after it is `[IV][AES-256-
-        // CBC header]`).
-        let mut encr_key: Option<[u8; 32]> = None;
-        let mut last_file_index: Option<usize> = None;
-        // Declared data areas are bounded against the real file: a hostile
-        // vint size can exceed the filesystem's maximum offset, where the
-        // skip seek fails on Linux instead of hitting EOF.
-        let file_len = crate::format::shared::stream_len(stream_mut(&mut self.stream)?)?;
-
-        while let Some(meta) = crate::format::rar5::headers::read_block(
-            stream_mut(&mut self.stream)?,
-            encr_key.as_ref(),
-        )? {
-            self.check_cancel()?;
-            let raw = &meta.raw;
-            let stream_pos = stream_mut(&mut self.stream)?.stream_position()?;
-
-            match raw.block_type {
-                BLOCK_TYPE_ARCHIVE_HEADER => {
-                    let ah = ArchiveHeader::from_raw(raw)?;
-                    if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
-                        self.archive_solid = true;
-                    }
-                }
-                BLOCK_TYPE_FILE_HEADER => {
-                    check_entry_cap(self.entries.len(), MAX_CATALOG_ENTRIES)?;
-                    let fh = FileHeader::from_raw(raw, stream_pos)?;
-                    let chunk = DataChunk {
-                        volume_index: 0,
-                        data_offset: fh.data_offset,
-                        packed_size: fh.packed_size,
-                        crc32_val: fh.crc32_val,
-                        is_final: true,
-                        extra_data: fh.extra_data.clone(),
-                    };
-                    self.entries.push(ArchiveEntry {
-                        header: fh,
-                        chunks: vec![chunk],
-                    });
-                    last_file_index = Some(self.entries.len() - 1);
-                }
-                BLOCK_TYPE_SERVICE_HEADER
-                    if raw.flags & crate::format::rar5::BLOCK_FLAG_DEPENDS_PREV != 0 =>
-                {
-                    // NTFS stream record ("STM"): the SUBDATA extra holds
-                    // the stream name (":name"), the data area the content.
-                    let name = parse_service_block_name(&meta.raw.header_data)?;
-                    if name.as_deref() == Some("STM")
-                        && let Some(owner_index) = last_file_index
-                    {
-                        self.record_member_stream(&meta.raw, owner_index, 0)?;
-                    }
-                }
-                BLOCK_TYPE_END_ARCHIVE => break,
-                BLOCK_TYPE_ENCRYPT_HEADER => {
-                    encr_key = Some(crypto::derive_header_key(raw, self.password.as_deref())?);
-                }
-                _ => {}
-            }
-
-            if raw.data_size > 0
-                && !crate::format::shared::seek_past_data_area(
-                    stream_mut(&mut self.stream)?,
-                    meta.data_end,
-                    file_len,
-                )?
-            {
-                break;
-            }
-        }
-
-        Ok(())
+    /// Rebuild the catalog from every volume (a single-volume archive is one
+    /// source). Callers position `self.stream` for the single-volume case;
+    /// volume sets are reopened from `self.volume_paths`.
+    fn rebuild_catalog(&mut self) -> RarResult<()> {
+        self.rebuild_catalog_capped(MAX_CATALOG_ENTRIES, MAX_MEMBER_CHUNKS)
     }
 
-    /// Record one "STM" service block as an NTFS alternate data stream owned
-    /// by `owner_index` and stored in `volume_index` (0 = the primary
-    /// stream). `-p` streams carry their own ENCR record; the password is
-    /// only needed at read time, so listing works on locked archives like it
-    /// does for encrypted members.
-    fn record_member_stream(
-        &mut self,
-        raw: &RawBlock,
-        owner_index: usize,
-        volume_index: usize,
-    ) -> RarResult<()> {
-        let extra = crate::format::rar5::headers::block_extra_area(&raw.header_data)?;
-        if let Some(stream_name) = crate::format::rar5::headers::parse_service_subdata(&extra)
-            && !stream_name.is_empty()
-            && let Some((unpacked_size, method, dict_size_log, crc32)) =
-                crate::format::rar5::headers::parse_stream_params(&raw.header_data)
-        {
-            let params = crate::crypto::parse_encryption_extra(&extra)?;
-            self.read_ctx_mut().streams.push(StreamRecord {
-                owner_index,
-                volume_index,
-                name: String::from_utf8_lossy(&stream_name).into_owned(),
-                data_offset: raw.data_offset,
-                data_size: raw.data_size,
-                unpacked_size,
-                method,
-                dict_size_log,
-                crc32,
-                params,
-            });
-        }
-        Ok(())
-    }
-
-    ///
-    /// Header-encrypted volume sets repeat the plaintext archive-level
-    /// encryption header at the start of EVERY volume (WinRAR convention);
-    /// every block after it is `[16-byte IV][AES-256-CBC encrypted
-    /// header]`. The archive key is derived once per volume and reused for
-    /// all of its blocks.
-    fn scan_all_volumes(&mut self) -> RarResult<()> {
-        self.scan_all_volumes_capped(MAX_CATALOG_ENTRIES, MAX_MEMBER_CHUNKS)
-    }
-
-    /// [`scan_all_volumes`] with explicit entry/chunk ceilings. A crafted
+    /// [`rebuild_catalog`] with explicit entry/chunk ceilings. A crafted
     /// volume set can keep adding FILE_HEAD blocks while the catalog grows
     /// without bound (the headers on disk are tiny, the entry objects are
-    /// not), so the same ceiling [`scan_blocks`] applies is enforced here
-    /// too; a single continuing member is likewise bounded so its chunk
+    /// not), and a single continuing member is likewise bounded so its chunk
     /// vector cannot grow without limit.
-    fn scan_all_volumes_capped(&mut self, max_entries: usize, max_chunks: usize) -> RarResult<()> {
-        self.entries.clear();
-        self.read_ctx_mut().streams.clear();
-        let mut pending: Option<ArchiveEntry> = None;
-        // Owner of a "STM" record that may appear in any volume after its
-        // member's final chunk.
-        let mut last_file_index: Option<usize> = None;
-        // Cloned so the loop body can push stream records into `self`
-        // (the field-borrow checker cannot split `self.volume_paths` from
-        // the rest of `self` here).
-        let volume_paths = self.volume_paths.clone();
+    fn rebuild_catalog_capped(&mut self, max_entries: usize, max_chunks: usize) -> RarResult<()> {
+        let mut builder = CatalogBuilder::new(max_entries, max_chunks);
+        self.read_ctx_mut().quick_open_catalog = false;
 
-        for (vol_idx, vol_path) in volume_paths.iter().enumerate() {
-            let mut stream = File::open(vol_path)?;
-            // Bound declared data areas against this volume's real size (see
-            // `seek_past_data_area`: an out-of-range skip seek fails on Linux).
-            let vol_len = stream.metadata().map_err(RarError::Io)?.len();
+        if self.volume_paths.len() > 1 {
+            let volume_paths = self.volume_paths.clone();
+            for (vol_idx, vol_path) in volume_paths.iter().enumerate() {
+                let mut stream = File::open(vol_path)?;
+                // Bound declared data areas against this volume's real size
+                // (see `seek_past_data_area`: an out-of-range skip seek fails
+                // on Linux).
+                let volume_len = stream.metadata().map_err(RarError::Io)?.len();
 
-            // Verify signature. The first volume may be an SFX stub, so the
-            // archive begins at `sfx_offset` there; later volumes start at 0.
-            if vol_idx == 0 && self.sfx_offset > 0 {
-                stream.seek(SeekFrom::Start(self.sfx_offset))?;
-            }
-            let mut sig = [0u8; 8];
-            stream.read_exact(&mut sig)?;
-            if sig != *RAR5_SIGNATURE {
-                return Err(RarError::Format(format!(
-                    "volume {} has bad signature",
-                    vol_path.display()
-                )));
-            }
-
-            // None until this volume's plaintext encryption header arrives.
-            let mut encr_key: Option<[u8; 32]> = None;
-
-            while let Some(meta) =
-                crate::format::rar5::headers::read_block(&mut stream, encr_key.as_ref())?
-            {
-                self.check_cancel()?;
-                let raw = &meta.raw;
-
-                let stream_pos = stream.stream_position()?;
-
-                match raw.block_type {
-                    BLOCK_TYPE_ARCHIVE_HEADER => {
-                        let ah = ArchiveHeader::from_raw(raw)?;
-                        if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
-                            self.archive_solid = true;
-                        }
-                    }
-                    BLOCK_TYPE_FILE_HEADER => {
-                        check_entry_cap(self.entries.len(), max_entries)?;
-                        let fh = FileHeader::from_raw(raw, stream_pos)?;
-                        let continues_from = raw.flags & BLOCK_FLAG_DATA_CONTINUES != 0;
-                        let continues_to = raw.flags & BLOCK_FLAG_DATA_CONTINUE_TO != 0;
-
-                        let chunk = DataChunk {
-                            volume_index: vol_idx,
-                            data_offset: fh.data_offset,
-                            packed_size: fh.packed_size,
-                            crc32_val: fh.crc32_val,
-                            is_final: !continues_to,
-                            extra_data: fh.extra_data.clone(),
-                        };
-
-                        if continues_from {
-                            if let Some(ref mut entry) = pending {
-                                check_chunk_cap(
-                                    entry.chunks.len(),
-                                    max_chunks,
-                                    &entry.header.name,
-                                )?;
-                                entry.chunks.push(chunk);
-                                if !continues_to {
-                                    // Final chunk: total packed size and the
-                                    // final chunk's CRC (MAC'd when
-                                    // encrypted). For encrypted members the
-                                    // final chunk also carries the full extra
-                                    // records (encryption with the hash-key
-                                    // MAC bit, BLAKE2sp hash, time); the
-                                    // reader must verify with those, so merge
-                                    // them in when present.
-                                    let total_packed: u64 =
-                                        entry.chunks.iter().map(|c| c.packed_size).sum();
-                                    entry.header.packed_size = total_packed;
-                                    entry.header.crc32_val = fh.crc32_val;
-                                    if !fh.extra_data.is_empty() {
-                                        entry.header.extra_data = fh.extra_data.clone();
-                                        entry.header.hash_type = fh.hash_type;
-                                        entry.header.hash_value = fh.hash_value;
-                                        entry.header.mtime_ns = fh.mtime_ns;
-                                        entry.header.owner = fh.owner.clone();
-                                        entry.header.group = fh.group.clone();
-                                        entry.header.version = fh.version;
-                                    }
-                                    self.entries.push(pending.take().unwrap());
-                                    last_file_index = Some(self.entries.len() - 1);
-                                }
-                            }
-                        } else if continues_to {
-                            pending = Some(ArchiveEntry {
-                                header: fh,
-                                chunks: vec![chunk],
-                            });
-                        } else {
-                            self.entries.push(ArchiveEntry {
-                                header: fh,
-                                chunks: vec![chunk],
-                            });
-                            last_file_index = Some(self.entries.len() - 1);
-                        }
-                    }
-                    BLOCK_TYPE_SERVICE_HEADER
-                        if raw.flags & crate::format::rar5::BLOCK_FLAG_DEPENDS_PREV != 0 =>
-                    {
-                        // NTFS stream record ("STM") owned by the preceding
-                        // member; the record can sit in a later volume than
-                        // the start of that member's data, so both the owner
-                        // index and the volume index are recorded.
-                        let name = parse_service_block_name(&meta.raw.header_data)?;
-                        if name.as_deref() == Some("STM")
-                            && let Some(owner_index) = last_file_index
-                        {
-                            self.record_member_stream(&meta.raw, owner_index, vol_idx)?;
-                        }
-                    }
-                    BLOCK_TYPE_END_ARCHIVE => {
-                        let eoa = EndOfArchiveHeader::from_raw(raw)?;
-                        let _ = eoa;
-                        break; // continue to next volume
-                    }
-                    BLOCK_TYPE_ENCRYPT_HEADER => {
-                        encr_key = Some(crypto::derive_header_key(raw, self.password.as_deref())?);
-                    }
-                    _ => {}
+                // Verify signature. The first volume may be an SFX stub, so
+                // the archive begins at `sfx_offset` there; later volumes
+                // start at 0.
+                if vol_idx == 0 && self.sfx_offset > 0 {
+                    stream.seek(SeekFrom::Start(self.sfx_offset))?;
                 }
-
-                if raw.data_size > 0
-                    && !crate::format::shared::seek_past_data_area(
-                        &mut stream,
-                        meta.data_end,
-                        vol_len,
-                    )?
-                {
-                    break;
+                let mut sig = [0u8; 8];
+                stream.read_exact(&mut sig)?;
+                if sig != *RAR5_SIGNATURE {
+                    return Err(RarError::Format(format!(
+                        "volume {} has bad signature",
+                        vol_path.display()
+                    )));
                 }
+                builder.scan_source(
+                    &mut stream,
+                    vol_idx,
+                    volume_len,
+                    self.password.as_deref(),
+                    self.cancel.as_ref(),
+                )?;
             }
+            // Keep the first volume open as the default stream.
+            self.stream = Some(Box::new(File::open(&self.volume_paths[0])?));
+        } else {
+            // A rebuild always starts at the archive start, wherever the
+            // stream was left (the quick-open probe and earlier scans move
+            // it). Declared data areas are bounded against the real file: a
+            // hostile vint size can exceed the filesystem's maximum offset,
+            // where the skip seek fails on Linux instead of hitting EOF.
+            let volume_len = crate::format::shared::stream_len(stream_mut(&mut self.stream)?)?;
+            let password = self.password.clone();
+            let cancel = self.cancel.clone();
+            stream_mut(&mut self.stream)?.seek(SeekFrom::Start(
+                self.sfx_offset + RAR5_SIGNATURE.len() as u64,
+            ))?;
+            builder.scan_source(
+                stream_mut(&mut self.stream)?,
+                0,
+                volume_len,
+                password.as_deref(),
+                cancel.as_ref(),
+            )?;
         }
 
-        // Keep the first volume open as the default stream
-        self.stream = Some(Box::new(File::open(&self.volume_paths[0])?));
+        self.entries = builder.entries;
+        let streams = builder.streams;
+        self.read_ctx_mut().streams = streams;
+        self.archive_solid |= builder.archive_solid;
         Ok(())
     }
 }
@@ -477,7 +453,7 @@ fn parse_quick_open_payload_capped(
             RarError::Format("quick-open: relative offset points past the archive start".into())
         })?;
         let data_offset = header_abs + header_bytes.len() as u64;
-        // `stream_pos` carries the data-area offset, matching scan_blocks.
+        // `stream_pos` carries the data-area offset, matching the full scan.
         let fh = FileHeader::from_raw(&raw, data_offset)?;
         let chunk = DataChunk {
             volume_index: 0,
@@ -555,12 +531,10 @@ mod tests {
         let mut ar = RarArchive::open(&vols[0]).unwrap();
         assert_eq!(ar.entries.len(), 2, "precondition: two catalog entries");
 
-        let err = ar
-            .scan_all_volumes_capped(1, MAX_MEMBER_CHUNKS)
-            .unwrap_err();
+        let err = ar.rebuild_catalog_capped(1, MAX_MEMBER_CHUNKS).unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
 
-        ar.scan_all_volumes_capped(2, MAX_MEMBER_CHUNKS).unwrap();
+        ar.rebuild_catalog_capped(2, MAX_MEMBER_CHUNKS).unwrap();
         assert_eq!(ar.entries.len(), 2);
     }
 
@@ -603,16 +577,30 @@ mod tests {
 
         let mut ar = RarArchive::open(&path).unwrap();
         let err = ar
-            .scan_all_volumes_capped(MAX_CATALOG_ENTRIES, 3)
+            .rebuild_catalog_capped(MAX_CATALOG_ENTRIES, 3)
             .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
 
-        ar.scan_all_volumes_capped(MAX_CATALOG_ENTRIES, 4).unwrap();
+        ar.rebuild_catalog_capped(MAX_CATALOG_ENTRIES, 4).unwrap();
         assert_eq!(
             ar.entries.len(),
             1,
             "the continuation blocks are one member"
         );
+        assert_eq!(ar.entries[0].chunks.len(), 4);
+    }
+
+    /// The unified catalog walker merges `DATA_CONTINUES` headers for a
+    /// single-volume archive exactly as for a volume set; the volume-count
+    /// split used to yield one entry per header block here.
+    #[test]
+    fn single_volume_continuation_headers_merge_into_one_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("one-volume-chunks.rar");
+        std::fs::write(&path, crafted_continuation_archive(4)).unwrap();
+
+        let ar = RarArchive::open(&path).unwrap();
+        assert_eq!(ar.entries.len(), 1, "continuation blocks are one member");
         assert_eq!(ar.entries[0].chunks.len(), 4);
     }
 
