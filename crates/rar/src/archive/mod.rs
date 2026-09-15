@@ -282,7 +282,7 @@ impl RarArchive {
     /// Check the cancellation flag; returns [`crate::RarError::Cancelled`]
     /// when the caller requested an abort.
     pub(crate) fn check_cancel(&self) -> RarResult<()> {
-        if cancel_requested(self.cancel.as_ref()) {
+        if cancel_requested(self.cancel.as_deref()) {
             return Err(RarError::Cancelled);
         }
         Ok(())
@@ -988,9 +988,7 @@ impl RarArchive {
 
 /// Whether a cancellation flag has been set. Shared with the catalog walker,
 /// which cannot borrow the archive while the archive stream is borrowed.
-pub(crate) fn cancel_requested(
-    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> bool {
+pub(crate) fn cancel_requested(cancel: Option<&std::sync::atomic::AtomicBool>) -> bool {
     cancel.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
 }
 

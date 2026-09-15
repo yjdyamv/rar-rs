@@ -6,9 +6,7 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::archive::{ArchiveEntry, RarArchive, StreamRecord};
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::{
-    ArchiveHeader, EndOfArchiveHeader, RawBlock, parse_service_block_name, quick_open,
-};
+use crate::format::rar5::headers::{ArchiveHeader, RawBlock, parse_service_block_name, quick_open};
 use crate::format::rar5::{
     BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, BLOCK_TYPE_ARCHIVE_HEADER,
     BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
@@ -79,7 +77,7 @@ impl CatalogBuilder {
         volume_index: usize,
         volume_len: u64,
         password: Option<&str>,
-        cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> RarResult<()> {
         // None until this source's plaintext archive-level encryption header
         // arrives (header-encrypted archives: every block after it is
@@ -178,7 +176,9 @@ impl CatalogBuilder {
                     }
                 }
                 BLOCK_TYPE_END_ARCHIVE => {
-                    let _ = EndOfArchiveHeader::from_raw(raw)?;
+                    // Parsed for validation, like the volume-set walker
+                    // always did; the walker stops at the end block.
+                    let _ = crate::format::rar5::headers::EndOfArchiveHeader::from_raw(raw)?;
                     return Ok(());
                 }
                 BLOCK_TYPE_ENCRYPT_HEADER => {
@@ -338,8 +338,8 @@ impl RarArchive {
     }
 
     /// Rebuild the catalog from every volume (a single-volume archive is one
-    /// source). Callers position `self.stream` for the single-volume case;
-    /// volume sets are reopened from `self.volume_paths`.
+    /// source): the single-volume stream is rewound to the archive start,
+    /// while volume sets are reopened from `self.volume_paths`.
     fn rebuild_catalog(&mut self) -> RarResult<()> {
         self.rebuild_catalog_capped(MAX_CATALOG_ENTRIES, MAX_MEMBER_CHUNKS)
     }
@@ -351,7 +351,6 @@ impl RarArchive {
     /// vector cannot grow without limit.
     fn rebuild_catalog_capped(&mut self, max_entries: usize, max_chunks: usize) -> RarResult<()> {
         let mut builder = CatalogBuilder::new(max_entries, max_chunks);
-        self.read_ctx_mut().quick_open_catalog = false;
 
         if self.volume_paths.len() > 1 {
             let volume_paths = self.volume_paths.clone();
@@ -381,7 +380,7 @@ impl RarArchive {
                     vol_idx,
                     volume_len,
                     self.password.as_deref(),
-                    self.cancel.as_ref(),
+                    self.cancel.as_deref(),
                 )?;
             }
             // Keep the first volume open as the default stream.
@@ -403,13 +402,14 @@ impl RarArchive {
                 0,
                 volume_len,
                 password.as_deref(),
-                cancel.as_ref(),
+                cancel.as_deref(),
             )?;
         }
 
         self.entries = builder.entries;
         let streams = builder.streams;
         self.read_ctx_mut().streams = streams;
+        self.read_ctx_mut().quick_open_catalog = false;
         self.archive_solid |= builder.archive_solid;
         Ok(())
     }
@@ -475,6 +475,7 @@ fn parse_quick_open_payload_capped(
 mod tests {
     use super::*;
     use crate::archive::discover_volumes;
+    use crate::format::rar5::headers::EndOfArchiveHeader;
     use crate::format::rar5::vint;
 
     /// One quick-open entry, through the shared codec.
@@ -602,6 +603,32 @@ mod tests {
         let ar = RarArchive::open(&path).unwrap();
         assert_eq!(ar.entries.len(), 1, "continuation blocks are one member");
         assert_eq!(ar.entries[0].chunks.len(), 4);
+    }
+
+    /// A failed rebuild must leave the quick-open flag alone: clearing it up
+    /// front would make a retry (`ensure_full_catalog`) a silent no-op over
+    /// the stale quick-open catalog.
+    #[test]
+    fn failed_rebuild_keeps_the_quick_open_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("two.rar");
+        {
+            let mut ar =
+                RarArchive::create_with_options(&path, crate::options::CreateOptions::default())
+                    .unwrap();
+            ar.add_bytes("a.bin", b"a", 0).unwrap();
+            ar.add_bytes("b.bin", b"b", 0).unwrap();
+            ar.close().unwrap();
+        }
+        let mut ar = RarArchive::open(&path).unwrap();
+        ar.read_ctx_mut().quick_open_catalog = true;
+
+        let err = ar.rebuild_catalog_capped(1, MAX_MEMBER_CHUNKS).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
+        assert!(
+            ar.read_ctx().quick_open_catalog,
+            "the flag must survive a failed rebuild"
+        );
     }
 
     #[test]
