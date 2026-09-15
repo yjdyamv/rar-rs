@@ -92,7 +92,8 @@ impl BlockCursor {
     }
 
     /// Next block, or `None` after the end block (returned once), a data area
-    /// that runs past `file_len`, or EOF.
+    /// that runs past `file_len`, or EOF. On `Some`, `reader` is left past
+    /// the block's data area, at the next block.
     pub(crate) fn next<R: Read + Seek>(&mut self, reader: &mut R) -> RarResult<Option<BlockMeta>> {
         if self.done {
             return Ok(None);
@@ -1482,5 +1483,55 @@ mod tests {
         body.extend(vint::encode(0u64)); // attributes
         // The 4-byte Unix time field is missing.
         assert_eq!(parse_service_block_name(&body).unwrap(), None);
+    }
+
+    #[test]
+    fn block_cursor_walks_one_file_and_stops_at_the_end_block() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &FileHeader {
+                name: "a.bin".into(),
+                packed_size: 4,
+                unpacked_size: 4,
+                ..Default::default()
+            }
+            .to_bytes(),
+        );
+        bytes.extend_from_slice(&[1, 2, 3, 4]);
+        bytes.extend_from_slice(&EndOfArchiveHeader { flags: 0 }.to_bytes());
+
+        let mut cursor = BlockCursor::new(bytes.len() as u64, None);
+        let mut reader = Cursor::new(&bytes);
+        let first = cursor.next(&mut reader).unwrap().expect("file header");
+        assert_eq!(first.block_type, BLOCK_TYPE_FILE_HEADER);
+        let end = cursor.next(&mut reader).unwrap().expect("end block");
+        assert_eq!(end.block_type, BLOCK_TYPE_END_ARCHIVE);
+        assert!(
+            cursor.next(&mut reader).unwrap().is_none(),
+            "the end block is returned once"
+        );
+    }
+
+    #[test]
+    fn block_cursor_stops_at_a_data_area_past_the_file() {
+        let mut block = FileHeader {
+            name: "a.bin".into(),
+            packed_size: 64,
+            unpacked_size: 64,
+            ..Default::default()
+        }
+        .to_bytes();
+        block.extend_from_slice(&[0u8; 8]);
+
+        // The declared data area (64 bytes) runs past the declared file
+        // length, so the walk stops after returning the block.
+        let mut cursor = BlockCursor::new(16, None);
+        let mut reader = Cursor::new(&block);
+        let meta = cursor.next(&mut reader).unwrap().expect("file header");
+        assert_eq!(meta.block_type, BLOCK_TYPE_FILE_HEADER);
+        assert!(
+            cursor.next(&mut reader).unwrap().is_none(),
+            "a data area past the file must end the walk"
+        );
     }
 }

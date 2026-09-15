@@ -7,7 +7,7 @@ use std::fs::File;
 use super::super::RarArchive;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{
-    parse_service_block_name, parse_service_recovery_percent, split_main_extra,
+    BlockCursor, parse_service_block_name, parse_service_recovery_percent, split_main_extra,
 };
 use crate::format::rar5::{
     BLOCK_FLAG_DEPENDS_PREV, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
@@ -54,8 +54,7 @@ impl RarArchive {
         // was deleted.
         let mut prev_file_deleted = false;
 
-        let mut blocks =
-            crate::format::rar5::headers::BlockCursor::new(file_len, self.archive_block_key()?);
+        let mut blocks = BlockCursor::new(file_len, self.archive_block_key()?);
         while let Some(meta) = blocks.next(reader)? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,

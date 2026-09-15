@@ -237,8 +237,12 @@ impl CatalogBuilder {
 /// verbatim bytes of a leading plaintext encryption header (header-encrypted
 /// archives), which rewrites re-emit.
 pub(crate) struct MainHeader {
+    /// The raw block envelope of the main archive header.
     pub(crate) meta: BlockMeta,
+    /// The parsed archive-level fields.
     pub(crate) parsed: ArchiveHeader,
+    /// Verbatim bytes of the leading plaintext encryption header, when the
+    /// archive has one.
     pub(crate) encrypt_header: Option<Vec<u8>>,
 }
 
@@ -247,9 +251,12 @@ impl RarArchive {
     /// (verifying the password and keeping its key for the following blocks),
     /// then the main archive header. `reader` may be positioned anywhere;
     /// this seeks to the archive start (after any SFX stub) and leaves it
-    /// right after the main header. Every caller that opens a fresh reader at
-    /// the archive uses this one opener, so the encryption branch and the
-    /// missing-header error exist once.
+    /// right after the main header.
+    ///
+    /// Append, lock, rewrite planning and the locked check all read the start
+    /// through this opener, so the encryption branch and the missing-header
+    /// error exist once. A caller that already scanned an archive resets
+    /// `header_encryption`/`archive_encr` before calling it.
     pub(crate) fn read_main_header<R: Read + Seek>(
         &mut self,
         reader: &mut R,
@@ -701,11 +708,72 @@ mod tests {
             ar.close().unwrap();
         }
         let mut ar = RarArchive::open_with_password(&encrypted, "secret").unwrap();
+        let bytes = std::fs::read(&encrypted).unwrap();
         let mut reader = File::open(&encrypted).unwrap();
         let main = ar.read_main_header(&mut reader).unwrap();
         assert_eq!(main.meta.block_type, BLOCK_TYPE_ARCHIVE_HEADER);
-        assert!(main.encrypt_header.is_some());
+        let encrypt = main.encrypt_header.expect("header-encrypted archive");
+        assert_eq!(
+            encrypt.as_slice(),
+            &bytes[RAR5_SIGNATURE.len()..RAR5_SIGNATURE.len() + encrypt.len()],
+            "the encryption header must round-trip verbatim"
+        );
         assert!(ar.header_encryption);
+    }
+
+    /// An encrypted stream whose ENCR block is followed by a non-archive
+    /// block must be rejected with the shared missing-main-header error.
+    #[test]
+    fn read_main_header_rejects_a_non_archive_second_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let encrypted = dir.path().join("encrypted.rar");
+        {
+            let mut ar = RarArchive::create_with_options(
+                &encrypted,
+                crate::options::CreateOptions {
+                    encrypt_headers: true,
+                    password: Some("secret".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            ar.add_bytes("a.bin", b"a", 0).unwrap();
+            ar.close().unwrap();
+        }
+        let mut ar = RarArchive::open_with_password(&encrypted, "secret").unwrap();
+        let mut reader = File::open(&encrypted).unwrap();
+        let enc = ar
+            .read_main_header(&mut reader)
+            .unwrap()
+            .encrypt_header
+            .unwrap();
+
+        // Encrypt a file header with the archive key so the block parses,
+        // then place it where the main header should be.
+        let file_header = FileHeader {
+            name: "a.bin".into(),
+            ..Default::default()
+        }
+        .to_bytes();
+        let key = ar.archive_encr.as_ref().unwrap().get_key("secret").unwrap();
+        let iv = [0x5Au8; 16];
+        let mut bytes = RAR5_SIGNATURE.to_vec();
+        bytes.extend_from_slice(&enc);
+        bytes.extend_from_slice(&iv);
+        bytes.extend_from_slice(&crate::crypto::encrypt_data(&file_header, &key, &iv));
+
+        // Re-reading an already-keyed archive resets the encryption state
+        // first (like the locked check): the leading ENCR block is plaintext
+        // and must parse as such.
+        ar.header_encryption = false;
+        ar.archive_encr = None;
+        let mut reader = std::io::Cursor::new(bytes);
+        let err = match ar.read_main_header(&mut reader) {
+            Err(error) => error,
+            Ok(_) => panic!("a non-archive second block must be rejected"),
+        };
+        assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
+        assert!(err.to_string().contains("missing the main header"));
     }
 
     /// A stream whose first block is not the archive header is rejected by

@@ -9,7 +9,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use super::super::{Mode, RarArchive};
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::parse_service_block_name;
+use crate::format::rar5::headers::{BlockCursor, parse_service_block_name};
 use crate::format::rar5::{ARCHIVE_FLAG_LOCKED, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_SERVICE_HEADER};
 
 impl RarArchive {
@@ -251,8 +251,7 @@ impl RarArchive {
         let mut reader = File::open(&self.path)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         let file_len = reader.metadata().map_err(RarError::Io)?.len();
-        let mut blocks =
-            crate::format::rar5::headers::BlockCursor::new(file_len, self.archive_block_key()?);
+        let mut blocks = BlockCursor::new(file_len, self.archive_block_key()?);
         while let Some(meta) = blocks.next(&mut reader)? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,

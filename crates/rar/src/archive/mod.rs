@@ -35,8 +35,8 @@ use crate::crypto;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::create::Rar4WriteOptions;
 use crate::format::rar5::headers::{
-    main_header_locator_fields, parse_service_block_name, parse_service_recovery_percent,
-    split_main_extra,
+    BlockCursor, main_header_locator_fields, parse_service_block_name,
+    parse_service_recovery_percent, split_main_extra,
 };
 use crate::format::rar5::vint;
 use crate::format::rar5::{
@@ -567,8 +567,7 @@ impl RarArchive {
         let mut truncate_pos = None;
         let mut last_file_end = 0u64;
         let mut rr_percent = None;
-        let mut blocks =
-            crate::format::rar5::headers::BlockCursor::new(file_len, self.archive_block_key()?);
+        let mut blocks = BlockCursor::new(file_len, self.archive_block_key()?);
         while let Some(meta) = blocks.next(&mut reader)? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => {
