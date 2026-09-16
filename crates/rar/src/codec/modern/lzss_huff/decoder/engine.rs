@@ -162,7 +162,20 @@ fn run_engine(
     while let Some(symbol) = symbols.next()? {
         match symbol {
             Symbol::Literal(byte) => window.put_byte(byte),
-            Symbol::Match { dist, len, .. } => window.copy_match(dist as usize, len as usize),
+            Symbol::Match { dist, len, .. } => {
+                // Reject distances no real encoder can emit: zero (a match
+                // must refer back) and those beyond the retained window /
+                // produced output. `copy_match` masks the source address, so
+                // an out-of-window match would silently decode aliased ring
+                // bytes instead of failing like unrar/libarchive.
+                let max_dist = window.total_written().min(window.capacity() as u64);
+                if dist == 0 || dist > max_dist {
+                    return Err(RarError::Format(format!(
+                        "match distance {dist} exceeds the {max_dist}-byte window"
+                    )));
+                }
+                window.copy_match(dist as usize, len as usize);
+            }
             Symbol::Filter(filter) => pending_filters.push(filter),
             Symbol::BlockStart(_) => {}
         }

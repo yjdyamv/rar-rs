@@ -70,6 +70,20 @@ impl<'a> BitReader<'a> {
         copy.read_bits(n)
     }
 
+    /// Read `n` bits and return as a u64 (MSB-first). Max 64 bits; kept
+    /// separate from the hot `read_bits` so only the RAR7 extended-distance
+    /// path pays for the wider type.
+    pub fn read_bits_u64(&mut self, mut n: u8) -> Result<u64, &'static str> {
+        let mut result = 0u64;
+        while n > 32 {
+            let take = n - 32;
+            result = (result << take) | self.read_bits(take)? as u64;
+            n = 32;
+        }
+        result = (result << n) | self.read_bits(n)? as u64;
+        Ok(result)
+    }
+
     /// Skip `n` bits.
     pub fn skip_bits(&mut self, n: u32) {
         let total = self.bit_pos as u32 + n;
@@ -208,5 +222,30 @@ mod tests {
         let r = BitReader::new(&data);
         assert_eq!(r.peek_bits(3).unwrap(), 0b110);
         assert_eq!(r.peek_bits(3).unwrap(), 0b110);
+    }
+
+    /// The RAR7 extended-distance path reads up to 34-bit fields; the u64
+    /// reader must not truncate like a u32 read would.
+    #[test]
+    fn read_bits_u64_carries_more_than_32_bits() {
+        // 0x15_2345_6789: 37 significant bits, written as 40.
+        let mut w = BitWriter::new();
+        w.write_bits(0x15, 8);
+        w.write_bits(0x2345_6789, 32);
+        let data = w.into_bytes();
+
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_bits_u64(40).unwrap(), 0x15_2345_6789);
+    }
+
+    #[test]
+    fn read_bits_u64_matches_read_bits_up_to_32() {
+        let mut w = BitWriter::new();
+        w.write_bits(0xDEAD_BEEF, 32);
+        let data = w.into_bytes();
+
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_bits_u64(32).unwrap(), u64::from(0xDEAD_BEEFu32));
+        assert_eq!(r.bits_remaining(), 0);
     }
 }

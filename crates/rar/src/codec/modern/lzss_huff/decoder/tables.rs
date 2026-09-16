@@ -160,10 +160,17 @@ pub(super) fn decode_distance(
         if dbits > 0 {
             if dbits >= 4 {
                 if dbits > 4 {
-                    let upper = reader
-                        .read_bits(dbits - 4)
-                        .map_err(|e| RarError::Format(e.to_string()))?;
-                    dist = dist.wrapping_add((upper as u64) << 4);
+                    // RAR7's extended table reaches DBits 38, so the upper
+                    // field can exceed 32 bits; reading it through `read_bits`
+                    // would silently drop the high bits.
+                    let extra_bits = dbits - 4;
+                    let upper = if extra_bits > 32 {
+                        reader.read_bits_u64(extra_bits)
+                    } else {
+                        reader.read_bits(extra_bits).map(u64::from)
+                    }
+                    .map_err(|e| RarError::Format(e.to_string()))?;
+                    dist = dist.wrapping_add(upper << 4);
                 }
                 let low_dist = decode_symbol(table_ldc, reader)
                     .map_err(|e| RarError::Format(e.to_string()))?;

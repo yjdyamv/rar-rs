@@ -390,6 +390,33 @@ fn member_larger_than_shared_window_decodes() {
     assert_eq!(decoded, member);
 }
 
+/// A member whose stream uses a distance beyond the window it declares is
+/// malformed: `copy_match` masks the source address, so it used to decode
+/// aliased ring bytes instead of failing like unrar/libarchive.
+#[test]
+fn out_of_window_match_distance_is_rejected() {
+    // 200 KiB of high-entropy data repeated once becomes a 200 KiB-distance
+    // match, beyond the 128 KiB window `dict_size_log = 0` declares.
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut half = Vec::with_capacity(200 * 1024);
+    for _ in 0..200 * 1024 {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        half.push((state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8);
+    }
+    let data: Vec<u8> = half.iter().chain(half.iter()).copied().collect();
+    let packed = crate::codec::encode_raw(&data, 3, 10, ArchiveVersion::V50);
+    assert!(packed.len() < data.len(), "precondition: compressible");
+
+    let err =
+        decode_standalone(&packed, data.len() as u64, 0, None, ArchiveVersion::V50).unwrap_err();
+    assert!(
+        err.to_string().contains("exceeds the"),
+        "expected an out-of-window distance error, got {err}"
+    );
+}
+
 /// A corrupted block-header checksum must be rejected before any symbol of
 /// that block is decoded.
 #[test]
