@@ -2,7 +2,7 @@ use super::*;
 
 use super::super::{
     FILTER_DELTA, FILTER_E8, FILTER_E8E9, HUFF_DC, HUFF_LDC, HUFF_NC, HUFF_RC, MAX_CODE_LENGTH,
-    SYM_FILTER,
+    MAX_FILTER_BLOCK_LENGTH, SYM_FILTER, analyze_stream,
 };
 use super::emit::{build_block_header, ensure_nonzero, write_filter_data, write_tables};
 use crate::codec::common::bitstream::BitWriter;
@@ -237,6 +237,43 @@ fn filtered_member_roundtrips_with_multiple_regions() {
     .unwrap();
     assert_eq!(written, data.len() as u64);
     assert_eq!(streamed, data, "streamed decode");
+}
+
+/// The emitted-block policy has one owner: a filtered member must split into
+/// the same emitted blocks as the plain one. The filter here is a no-op (E8
+/// on data without 0xE8/0xE9), so the symbol streams are identical apart from
+/// the leading filter records, which the splitter ignores. Before the shared
+/// `EMITTED_BLOCK_SIZE` the sequential filtered path capped blocks at 128 KiB
+/// and split this member ~40 ways instead of 2.
+#[test]
+fn filtered_and_plain_pipelines_share_the_emitted_block_policy() {
+    let data = vec![0x11u8; 5 * 1024 * 1024];
+    let specs: Vec<FilterSpec> = (0..data.len() as u32)
+        .step_by(MAX_FILTER_BLOCK_LENGTH as usize)
+        .map(|start| {
+            FilterSpec::new(
+                FILTER_E8,
+                0,
+                start,
+                (data.len() as u32 - start).min(MAX_FILTER_BLOCK_LENGTH),
+            )
+        })
+        .collect();
+
+    let plain = crate::codec::encode_raw(&data, 3, 3, ArchiveVersion::V50);
+    let filtered = encode_with_filters(&data, 3, 3, &specs, ArchiveVersion::V50).unwrap();
+    let blocks = |packed: &[u8]| {
+        analyze_stream(packed, data.len() as u64, 3, ArchiveVersion::V50)
+            .unwrap()
+            .blocks
+            .len()
+    };
+    assert_eq!(blocks(&plain), 2, "a 5 MiB run splits at the 4 MiB cap");
+    assert_eq!(
+        blocks(&filtered),
+        blocks(&plain),
+        "filtered and plain encodes must share the emitted-block policy"
+    );
 }
 
 #[test]

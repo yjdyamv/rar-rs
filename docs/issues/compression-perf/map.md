@@ -14,6 +14,16 @@ Decisions so far:
   (gates only on zero-match runs).
 - **Measure before optimizing.** The mtprobe/ratiocheck examples are the
   regression gates; a hotspot must be confirmed by probe before any change.
+- **Emitted-block policy has one owner (2026-09).** `EMITTED_BLOCK_SIZE` +
+  `find_block_end_adaptive` live in `parse.rs`; the sequential filtered path
+  was the last user of the old fixed 128 KiB splitter. Ratio effect: a forced
+  E8 member shrinks (8 MiB of a repeated byte: 837,559 → 836,590 B, -0.12%);
+  MT unchanged. Bytes shrink, never grow — the ratio contract holds.
+- **MT low-step tier on sparse-match data (measured 2026-09).** Data whose only
+  matches are far apart (~1 MiB unique windows, repeated) hits the MT tier's
+  chain-16 cap: mt4 packed volume measured ~8x mt1 on a synthetic corpus.
+  Realistic mixed corpora stay at ~+1.9pp (issue 13's documented trade); treat
+  this corner as evidence for that accepted trade, not a new bug.
 
 - 13 collect 带宽/延迟判定 + 远带候选预算前缘（2026-09-07）：远带预算 `RAR_RS_FAR_BAND`
   是 seq opt-in 速度档（1M/2：-9% @ +0.22pp），非 mt8 解药；mt8 需每位置步数降 ~5x（架构级）。

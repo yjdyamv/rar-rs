@@ -1535,10 +1535,10 @@ fn parse_one_block(
 pub(super) const EMITTED_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
 /// Group symbols into emitted blocks of up to `cap` uncompressed bytes, but
-/// close the block early when the symbol stream's *local* literal
+/// close the block early when the symbol stream's *local* literal/match
 /// distribution drifts between adjacent ~64 KiB sub-spans.
 ///
-/// The parse-side splitter compares each sub-block against the cumulative
+/// The parse-side [`BlockSplitter`] compares each sub-block against the cumulative
 /// counts of the open block, which cannot see section boundaries once the
 /// cumulative mix stabilises (a DLL's code+data+padding blend looks stable
 /// over a 1 MiB span). Comparing each sub-span against the *previous* one

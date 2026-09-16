@@ -6,8 +6,9 @@
 //! - [`parse`] — match finding and the lazy/optimal symbol parsers,
 //! - [`emit`] — block serialisation (Huffman tables, symbols, checksum).
 //!
-//! Shared vocabulary ([`EncoderState`], [`FilterSpec`], [`Symbol`]) and the
-//! constants used by more than one role module live here.
+//! Shared vocabulary ([`EncoderState`], [`FilterSpec`], [`Symbol`]) lives
+//! here; constants shared by several role modules live with the role that
+//! owns them ([`parse`] owns the parser and the emitted-block policy).
 //!
 //! Clean-room implementation for software conservation and educational
 //! purposes.

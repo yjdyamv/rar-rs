@@ -407,7 +407,7 @@ flowchart LR
           <div class="rounded-xl border border-slate-200 bg-white p-4">
             <p class="tag text-indigo-500 mb-2">6.1 压缩块头</p>
             <p class="mono text-xs text-slate-600 mb-2">[标志 1][校验 1][大小 1–3 LE][块数据]</p>
-            <p class="text-xs text-slate-600">标志 bit 7=含 Huffman 表；bit 6=末块；bit 5–3=大小字段宽度−1；bit 2–0=末字节有效位−1。校验 = <span class="mono">0x5A ^ 标志 ^ 大小每字节</span>。空成员：单块 <span class="mono">0x40</span>。主压缩路径把 LZSS 流切成<strong>发射块</strong>合并到 ≤ 4 MiB，每块独立 Huffman 表；符号流在 ~64 KiB 子跨度间局部字面量/距离/长度分布漂移时提前闭合（重复文本整成员一块，异构二进制保持 ~64 KiB 小块，对齐 WinRAR）。解析侧分块预算上限仍 128 KiB（<span class="mono">MAX_BLOCK_SIZE</span>），滤波器编码路径也在 128 KiB 块内。</p>
+            <p class="text-xs text-slate-600">标志 bit 7=含 Huffman 表；bit 6=末块；bit 5–3=大小字段宽度−1；bit 2–0=末字节有效位−1。校验 = <span class="mono">0x5A ^ 标志 ^ 大小每字节</span>。空成员：单块 <span class="mono">0x40</span>。主压缩路径把 LZSS 流切成<strong>发射块</strong>合并到 ≤ 4 MiB，每块独立 Huffman 表；符号流在 ~64 KiB 子跨度间局部字面量/距离/长度分布漂移时提前闭合（重复文本整成员一块，异构二进制保持 ~64 KiB 小块，对齐 WinRAR）。解析侧分块预算上限仍 128 KiB（<span class="mono">MAX_BLOCK_SIZE</span>）；滤波器编码路径与普通路径共用同一发射块策略（<span class="mono">EMITTED_BLOCK_SIZE</span> + <span class="mono">find_block_end_adaptive</span>，<span class="mono">parse.rs</span> 单一 owner）。</p>
           </div>
           <div class="rounded-xl border border-slate-200 bg-white p-4">
             <p class="tag text-indigo-500 mb-2">6.2 Huffman 表</p>
