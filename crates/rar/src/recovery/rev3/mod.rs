@@ -392,6 +392,23 @@ fn slot_exists(parent: &Path, layout: &Layout, index: usize) -> bool {
     volume_path_rar4(parent, &layout.base, index + 1).exists()
 }
 
+/// Score a name parse by how many of its data volumes exist on disk.
+///
+/// Names that end in digits are ambiguous (`set44_2_1.rev` reads as `set`
+/// plus data volume 44 or `set4` plus volume 4); every caller resolves them
+/// by preferring the split whose data set is actually present, so the
+/// candidate-to-probe mapping and the score live here once.
+fn data_slots_score(parent: &Path, candidate: &RevName, meta: &Meta) -> usize {
+    let probe = Layout {
+        base: candidate.base.clone(),
+        new_naming: candidate.new_naming,
+        width: candidate.width,
+    };
+    (0..meta.data_count)
+        .filter(|index| slot_exists(parent, &probe, *index))
+        .count()
+}
+
 /// One `.rev` file's parity source. The bytes stay on disk and are seeked
 /// stripe by stripe; for trailer-format files the seven trailer bytes read
 /// back as zeros (those offsets carry no parity, matching WinRAR).
@@ -503,14 +520,7 @@ fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<RecoverySet>
             if file_meta.data_count + file_meta.rec_count > MAX_CODEWORD {
                 continue;
             }
-            let probe = Layout {
-                base: candidate.base.clone(),
-                new_naming: candidate.new_naming,
-                width: candidate.width,
-            };
-            let score = (0..file_meta.data_count)
-                .filter(|index| slot_exists(parent, &probe, *index))
-                .count();
+            let score = data_slots_score(parent, &candidate, &file_meta);
             if best
                 .as_ref()
                 .is_none_or(|(best_score, _, _)| score > *best_score)
@@ -633,11 +643,6 @@ fn identify(path: &Path) -> RarResult<(PathBuf, Layout, Option<Meta>)> {
         let trailer = parse_trailer_file(path).ok().flatten();
         let mut best: Option<(usize, RevName, Option<Meta>)> = None;
         for candidate in candidates {
-            let probe = Layout {
-                base: candidate.base.clone(),
-                new_naming: candidate.new_naming,
-                width: candidate.width,
-            };
             let file_meta = match candidate.kind.format() {
                 Format::Trailer => trailer,
                 Format::Legacy => candidate.meta,
@@ -648,9 +653,7 @@ fn identify(path: &Path) -> RarResult<(PathBuf, Layout, Option<Meta>)> {
                 }
                 continue;
             };
-            let score = (0..file_meta.data_count)
-                .filter(|index| slot_exists(&parent, &probe, *index))
-                .count();
+            let score = data_slots_score(&parent, &candidate, &file_meta);
             if best
                 .as_ref()
                 .is_none_or(|(best_score, _, _)| score > *best_score)
@@ -721,14 +724,7 @@ pub(crate) fn rev_name_belongs_to_set(parent: &Path, base: &str, name: &str) -> 
                 let Some(meta) = candidate.meta else {
                     continue;
                 };
-                let probe = Layout {
-                    base: candidate.base.clone(),
-                    new_naming: candidate.new_naming,
-                    width: candidate.width,
-                };
-                let score = (0..meta.data_count)
-                    .filter(|index| slot_exists(parent, &probe, *index))
-                    .count();
+                let score = data_slots_score(parent, &candidate, &meta);
                 if best
                     .as_ref()
                     .is_none_or(|(best_score, _)| score > *best_score)
@@ -2133,4 +2129,47 @@ fn long_trailing_groups_do_not_overflow() {
             .iter()
             .all(|candidate| !candidate.base.is_empty())
     );
+}
+
+/// `set44_2_1.rev` reads as `set` plus data volume 44 or `set4` plus volume 4;
+/// the score must follow the data set that is actually on disk, so a stale
+/// `.rev` never claims another set's parity files.
+#[test]
+fn ambiguous_legacy_names_score_the_existing_data_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let candidates = rev_name_candidates("set44_2_1.rev");
+    let best = |parent: &Path| {
+        candidates
+            .iter()
+            .filter_map(|candidate| candidate.meta.map(|meta| (candidate, meta)))
+            .fold(None::<(&RevName, usize)>, |best, (candidate, meta)| {
+                let score = data_slots_score(parent, candidate, &meta);
+                match best {
+                    Some((_, best_score)) if best_score >= score => best,
+                    _ => Some((candidate, score)),
+                }
+            })
+            .map(|(candidate, _)| candidate.base.clone())
+            .expect("set44_2_1.rev has legacy candidates")
+    };
+
+    // Only `set4`'s four data volumes exist.
+    for index in 0..4 {
+        std::fs::write(volume_path_rar4(dir.path(), "set4", index + 1), b"x").unwrap();
+    }
+    assert_eq!(best(dir.path()), "set4");
+    assert!(rev_name_belongs_to_set(dir.path(), "set4", "set44_2_1.rev"));
+    assert!(!rev_name_belongs_to_set(dir.path(), "set", "set44_2_1.rev"));
+
+    // `set`'s own 44 volumes appear; the larger existing set wins now.
+    for index in 0..44 {
+        std::fs::write(volume_path_rar4(dir.path(), "set", index + 1), b"x").unwrap();
+    }
+    assert_eq!(best(dir.path()), "set");
+    assert!(rev_name_belongs_to_set(dir.path(), "set", "set44_2_1.rev"));
+    assert!(!rev_name_belongs_to_set(
+        dir.path(),
+        "set4",
+        "set44_2_1.rev"
+    ));
 }
