@@ -347,3 +347,55 @@ fn solid_sectioned_content_decode_regression() {
     a.rar4_decode_solid_through(1)
         .expect("second solid member must decode");
 }
+
+/// The solid repack re-emits every kept member through `add_rar4_data`;
+/// the original DOS attribute byte (read-only/hidden/system) must survive.
+#[test]
+fn solid_repack_preserves_member_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("attr_solid.rar");
+    let p1 = make_text(50_000);
+    let p2 = make_text(40_000);
+    {
+        let mut a = crate::archive::RarArchive::create_with_options(
+            &path,
+            crate::options::CreateOptions {
+                compression: crate::version::ArchiveVersion::V29,
+                solid: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        a.add_rar4_data("a.txt".into(), p1.clone(), 3, 0, 0, None, Some(0x21))
+            .unwrap();
+        a.add_rar4_data("b.txt".into(), p2.clone(), 3, 0, 0, None, Some(0x02))
+            .unwrap();
+        a.close().unwrap();
+    }
+    // Sanity: the custom attribute bytes landed.
+    {
+        let a = crate::archive::RarArchive::open(&path).unwrap();
+        assert_eq!(a.entries[0].header.attributes, 0x21);
+        assert_eq!(a.entries[1].header.attributes, 0x02);
+    }
+
+    let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+    let a = editor.unique_entry("a.txt").unwrap();
+    editor
+        .apply(crate::archive::editor::EditPlan::new().delete(a))
+        .unwrap();
+    drop(editor);
+
+    let mut archive = crate::archive::RarArchive::open(&path).unwrap();
+    assert_eq!(archive.entries.len(), 1);
+    assert_eq!(
+        archive.entries[0].header.attributes, 0x02,
+        "the surviving member's attribute byte must survive the repack"
+    );
+    assert_eq!(
+        archive
+            .read_with_options("b.txt", Default::default())
+            .unwrap(),
+        p2
+    );
+}

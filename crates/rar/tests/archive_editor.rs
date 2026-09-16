@@ -300,6 +300,86 @@ fn solid_chain_delete_roundtrips_and_refreshes_catalog() {
     assert_eq!(editor.entries().count(), 2);
 }
 
+/// A solid-chain recompression must keep each survivor's metadata records
+/// (ctime/atime/nanoseconds) and must not encrypt plain members just because
+/// a password was supplied at open.
+#[test]
+fn solid_delete_preserves_member_metadata_and_plain_payloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("solid-meta.rar");
+    let mut sources = Vec::new();
+    for (index, byte) in b"abc".iter().copied().enumerate() {
+        let source = dir.path().join(format!("m{index}.bin"));
+        std::fs::write(&source, vec![byte; 64 * 1024]).unwrap();
+        sources.push(source);
+    }
+    {
+        let mut archive = ArchiveWriter::create_with(
+            &path,
+            WriterOptions::new()
+                .solid_mode(SolidMode::Continuous)
+                .save_ctime(true)
+                .save_atime(true),
+        )
+        .unwrap();
+        for (index, source) in sources.iter().enumerate() {
+            archive
+                .add_path_as(source, &format!("m{index}.bin"), level(1))
+                .unwrap();
+        }
+        archive.finish().unwrap();
+    }
+
+    let before = {
+        let reader = ArchiveReader::open(&path).unwrap();
+        reader
+            .entries()
+            .find(|entry| entry.name() == "m0.bin")
+            .map(|entry| {
+                (
+                    entry.ctime(),
+                    entry.atime(),
+                    entry.mtime_ns(),
+                    entry.mtime(),
+                    entry.owner().map(str::to_owned),
+                )
+            })
+            .expect("m0.bin")
+    };
+
+    // The password is unrelated to this archive: nothing may be encrypted.
+    let mut editor = ArchiveEditor::open_with_password(&path, "not-the-password").unwrap();
+    let middle = editor.unique_entry("m1.bin").unwrap();
+    editor.delete_entries(&[middle]).unwrap();
+    drop(editor);
+
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let after = reader
+        .entries()
+        .find(|entry| entry.name() == "m0.bin")
+        .map(|entry| {
+            (
+                entry.ctime(),
+                entry.atime(),
+                entry.mtime_ns(),
+                entry.mtime(),
+                entry.owner().map(str::to_owned),
+            )
+        })
+        .expect("m0.bin survives");
+    assert_eq!(
+        after, before,
+        "the recompressed survivor must keep its metadata records"
+    );
+    assert_eq!(
+        reader
+            .read_entry(reader.unique_entry("m0.bin").unwrap())
+            .unwrap(),
+        vec![b'a'; 64 * 1024],
+        "an unrelated password must not encrypt the survivor"
+    );
+}
+
 /// Multi-volume solid chain delete: the recompress path must run across the
 /// volume set (it used to be an untested copy of the single-volume
 /// pipeline).

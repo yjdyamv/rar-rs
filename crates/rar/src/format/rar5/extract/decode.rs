@@ -94,111 +94,130 @@ fn decode_stream_payload(
     Ok(data)
 }
 
+/// Read, decrypt and decode every record in `records`, fetching the packed
+/// bytes through `reader`. Returns `(name, bytes, was_encrypted)` in archive
+/// order.
+///
+/// Both the packed and the unpacked size are capped before they can drive an
+/// allocation (a crafted "STM" header could otherwise request a multi-TiB
+/// decode window), and the packed size is narrowed with `try_from` so 32-bit
+/// targets report an error instead of truncating.
+pub(crate) fn read_streams_with<R: crate::format::rar5::payload::ChunkReader + ?Sized>(
+    records: &[crate::archive::StreamRecord],
+    reader: &mut R,
+    password: Option<&str>,
+    limit: u64,
+    max_dict_size: Option<u64>,
+) -> RarResult<Vec<(String, Vec<u8>, bool)>> {
+    let mut out = Vec::with_capacity(records.len());
+    for s in records {
+        if s.data_size > limit {
+            return Err(RarError::LimitExceeded {
+                limit,
+                context: format!(
+                    "NTFS stream {:?} declares {} packed bytes",
+                    s.name, s.data_size
+                ),
+            });
+        }
+        let declared = usize::try_from(s.data_size).map_err(|_| RarError::LimitExceeded {
+            limit,
+            context: format!("NTFS stream {:?} packed size does not fit in usize", s.name),
+        })?;
+        if s.unpacked_size > limit {
+            return Err(RarError::LimitExceeded {
+                limit,
+                context: format!(
+                    "NTFS stream {:?} declares {} unpacked bytes",
+                    s.name, s.unpacked_size
+                ),
+            });
+        }
+        // A compressed stream allocates the same LZ window a member
+        // would, and its 4-bit dictionary field can declare up to 4 GiB.
+        // Enforce the extraction dictionary cap (`-mdx`) exactly like
+        // `member_dict_window` does for members.
+        let dict_bytes = (128u64 * 1024) << s.dict_size_log;
+        if let Some(cap) = max_dict_size
+            && dict_bytes > cap
+        {
+            return Err(RarError::LimitExceeded {
+                limit: cap,
+                context: format!(
+                    "NTFS stream {:?} dictionary size {dict_bytes} bytes exceeds the extraction cap (use -mdx to raise it)",
+                    s.name
+                ),
+            });
+        }
+        let packed = reader.read_chunk(s.volume_index, s.data_offset, s.data_size)?;
+        if packed.len() != declared {
+            return Err(RarError::Format(format!(
+                "NTFS stream {:?} is truncated: {} of {declared} bytes",
+                s.name,
+                packed.len()
+            )));
+        }
+        // Encrypted streams carry a per-stream ENCR record (own salt),
+        // so the password is checked and the keys are derived here
+        // rather than at open time. Service records accept the all-zero
+        // `PswCheck` RAR <= 5.21 wrote for "STM" items.
+        let keys = match s.params.as_ref() {
+            Some(params) => {
+                let password = password.ok_or_else(|| {
+                    RarError::Encrypted(format!(
+                        "{}: encrypted NTFS stream, no password set",
+                        s.name
+                    ))
+                })?;
+                Some(
+                    params
+                        .derive_and_verify_service(password)?
+                        .ok_or(RarError::WrongPassword)?,
+                )
+            }
+            None => None,
+        };
+        out.push((
+            s.name.clone(),
+            decode_stream_payload(s, &packed, keys.as_ref())?,
+            s.params.is_some(),
+        ));
+    }
+    Ok(out)
+}
+
 impl RarArchive {
     /// Read, decrypt and decode every "STM" stream record owned by member
     /// `idx`, returning `(name, bytes)` pairs in archive order.
-    ///
-    /// Both the packed and the unpacked size are capped before they can
-    /// drive an allocation (a crafted "STM" header could otherwise request
-    /// a multi-TiB decode window), and the packed size is narrowed with
-    /// `try_from` so 32-bit targets report an error instead of truncating.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn read_member_streams(&mut self, idx: usize) -> RarResult<Vec<(String, Vec<u8>)>> {
-        use std::io::{Read, Seek, SeekFrom};
-
-        let owned: Vec<crate::archive::StreamRecord> = self
+        let records: Vec<crate::archive::StreamRecord> = self
             .read_ctx()
             .streams
             .iter()
             .filter(|s| s.owner_index == idx)
             .cloned()
             .collect();
-        let mut out = Vec::with_capacity(owned.len());
-        for s in owned {
-            let limit = self.read_ctx().extract_options.metadata_limit();
-            if s.data_size > limit {
-                return Err(RarError::LimitExceeded {
-                    limit,
-                    context: format!(
-                        "NTFS stream {:?} declares {} packed bytes",
-                        s.name, s.data_size
-                    ),
-                });
-            }
-            let declared = usize::try_from(s.data_size).map_err(|_| RarError::LimitExceeded {
-                limit,
-                context: format!("NTFS stream {:?} packed size does not fit in usize", s.name),
-            })?;
-            if s.unpacked_size > limit {
-                return Err(RarError::LimitExceeded {
-                    limit,
-                    context: format!(
-                        "NTFS stream {:?} declares {} unpacked bytes",
-                        s.name, s.unpacked_size
-                    ),
-                });
-            }
-            // A compressed stream allocates the same LZ window a member
-            // would, and its 4-bit dictionary field can declare up to 4 GiB.
-            // Enforce the extraction dictionary cap (`-mdx`) exactly like
-            // `member_dict_window` does for members.
-            let dict_bytes = (128u64 * 1024) << s.dict_size_log;
-            if let Some(cap) = self.read_ctx().extract_options.max_dict_size
-                && dict_bytes > cap
-            {
-                return Err(RarError::LimitExceeded {
-                    limit: cap,
-                    context: format!(
-                        "NTFS stream {:?} dictionary size {dict_bytes} bytes exceeds the extraction cap (use -mdx to raise it)",
-                        s.name
-                    ),
-                });
-            }
-            let mut packed = vec![0u8; declared];
-            if s.volume_index == 0 {
-                let stream = stream_mut(&mut self.stream)?;
-                stream.seek(SeekFrom::Start(s.data_offset))?;
-                stream.read_exact(&mut packed)?;
-            } else {
-                // A multi-volume write can push the "STM" block into a later
-                // volume than the one the primary stream holds.
-                let volume_path = self.volume_paths.get(s.volume_index).ok_or_else(|| {
-                    RarError::Format(format!(
-                        "NTFS stream {:?} references missing volume {}",
-                        s.name, s.volume_index
-                    ))
-                })?;
-                let mut volume = std::fs::File::open(volume_path)?;
-                volume.seek(SeekFrom::Start(s.data_offset))?;
-                volume.read_exact(&mut packed)?;
-            }
-            // Encrypted streams carry a per-stream ENCR record (own salt),
-            // so the password is checked and the keys are derived here
-            // rather than at open time. Service records accept the all-zero
-            // `PswCheck` RAR <= 5.21 wrote for "STM" items.
-            let keys = match s.params.as_ref() {
-                Some(params) => {
-                    let password = self.password.as_deref().ok_or_else(|| {
-                        RarError::Encrypted(format!(
-                            "{}: encrypted NTFS stream, no password set",
-                            s.name
-                        ))
-                    })?;
-                    Some(
-                        params
-                            .derive_and_verify_service(password)?
-                            .ok_or(RarError::WrongPassword)?,
-                    )
-                }
-                None => None,
-            };
-            out.push((
-                s.name.clone(),
-                decode_stream_payload(&s, &packed, keys.as_ref())?,
-            ));
-        }
-        Ok(out)
+        let limit = self.read_ctx().extract_options.metadata_limit();
+        let max_dict_size = self.read_ctx().extract_options.max_dict_size;
+        let password = self.password.clone();
+        let mut reader = crate::format::rar5::payload::StreamReader {
+            stream: stream_mut(&mut self.stream)?,
+            volume_paths: &self.volume_paths,
+        };
+        let streams = read_streams_with(
+            &records,
+            &mut reader,
+            password.as_deref(),
+            limit,
+            max_dict_size,
+        )?;
+        Ok(streams
+            .into_iter()
+            .map(|(name, data, _encrypted)| (name, data))
+            .collect())
     }
+
     /// Read packed data for an entry, potentially across multiple volumes.
     ///
     /// The returned payload is decrypted (when applicable) together with
@@ -309,14 +328,12 @@ impl RarArchive {
         Ok(raw_data)
     }
 
-    /// Decode a single file, streaming output to `writer` (bounded memory),
-    /// verifying CRC32/BLAKE2sp over the written bytes.
     /// Actual dictionary size of a member in bytes: RAR5 uses
     /// `128 KiB << comp_dict_size`, RAR7 carries the byte count directly
     /// (possibly non-power-of-two). The sliding window rounds up to a
     /// power of two. Enforces the extraction dictionary cap
     /// (`ExtractOptions::max_dict_size`, WinRAR's `-mdx`).
-    pub(super) fn member_dict_window(&self, idx: usize) -> RarResult<usize> {
+    pub(crate) fn member_dict_window(&self, idx: usize) -> RarResult<usize> {
         let hdr = &self.entries[idx].header;
         let bytes = capped_dict_bytes(hdr, self.read_ctx().extract_options.max_dict_size)?;
         let bytes = usize::try_from(bytes)
@@ -326,6 +343,8 @@ impl RarArchive {
             .ok_or_else(|| RarError::Format("dictionary size overflows host address space".into()))
     }
 
+    /// Decode a single file, streaming output to `writer` (bounded memory),
+    /// verifying CRC32/BLAKE2sp over the written bytes.
     pub(crate) fn decode_file_to(
         &mut self,
         idx: usize,

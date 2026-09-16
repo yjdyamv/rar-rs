@@ -594,6 +594,11 @@ impl RarArchive {
 
             let mut work: Vec<u8> = Vec::new();
             let mut eof = false;
+            // Set once compression has already lost (`packed_size >=
+            // file_size`): stop encoding, but keep reading to hash the rest
+            // of the file, because the STORE fallback writes the whole file
+            // and its header checksum must cover every byte.
+            let mut gave_up = false;
             let mut file = io::BufReader::with_capacity(1 << 20, File::open(path)?);
             let mut buf = vec![0u8; crate::codec::DEFAULT_CHUNK_SIZE];
             let mut member_offset = 0u64;
@@ -607,10 +612,12 @@ impl RarArchive {
                     if let Some(h) = blake_hasher.as_mut() {
                         h.update(&buf[..n]);
                     }
-                    work.extend_from_slice(&buf[..n]);
+                    if !gave_up {
+                        work.extend_from_slice(&buf[..n]);
+                    }
                     self.report_progress(bytes_read, file_size);
                 }
-                if eof || work.len() >= mt_window {
+                if !gave_up && (eof || work.len() >= mt_window) {
                     let flushed = work.len() as u64;
                     // Streaming filters: apply delta (full window, lane-
                     // blocked) then x86 (clipped to detected regions) on
@@ -652,10 +659,20 @@ impl RarArchive {
                     )?;
                     member_offset += flushed;
                     if packed_size >= file_size {
-                        break;
+                        gave_up = true;
+                        work = Vec::new();
                     }
                 }
             }
+        }
+
+        if bytes_read != file_size {
+            return Err(RarError::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "file changed size while being archived: expected {file_size} bytes, read {bytes_read}"
+                ),
+            )));
         }
 
         let plain_crc = crc_hasher.finalize();
@@ -756,59 +773,73 @@ impl RarArchive {
                     Ok(d) => d,
                     Err(_) => continue, // stream vanished mid-run
                 };
-                let subdata = {
-                    let mut extra = Vec::new();
-                    extra.extend(vint::encode((1 + name.len()) as u64));
-                    extra.extend(vint::encode(crate::format::rar5::EXTRA_SERVICE_SUBDATA));
-                    extra.extend(name.as_bytes());
-                    extra
-                };
-                // `-p` streams carry their own encryption record and an
-                // encrypted payload; the stored CRC32 stays the plaintext
-                // checksum (WinRAR does not MAC stream CRCs).
-                let data_len = data.len();
-                let stream_crc = crc32fast::hash(&data);
-                let (extra, packed) = match self.password.as_deref() {
-                    Some(password) => {
-                        // Stream CRCs stay plaintext, so the record must not
-                        // request hash-MAC'd checksums (flag 0x02).
-                        let session = crypto::MemberEncryption::generate_with_flags(
-                            password,
-                            crate::format::rar5::ENCR_PBKDF2_ITER_LOG,
-                            crate::format::rar5::ENCR_FLAG_CHECKSUM,
-                        );
-                        let mut extra = session.extra_bytes();
-                        extra.extend_from_slice(&subdata);
-                        (extra, session.encrypt(&data))
-                    }
-                    None => (subdata, data),
-                };
-                let hdr = crate::format::rar5::headers::build_stream_block(
-                    packed.len() as u64,
-                    data_len as u64,
-                    stream_crc,
-                    COMP_METHOD_STORE,
-                    0,
-                    &extra,
-                );
-                self.ensure_rar5_volume_space(
-                    self.on_disk_header_len(hdr.len() as u64) + packed.len() as u64,
-                )?;
-                self.write_block_header(&hdr)?;
-                let stream = stream_mut(&mut self.stream)?;
-                stream.write_all(&packed)?;
-                self.write_ctx_mut().output.bytes_written = self
-                    .write_ctx()
-                    .output
-                    .bytes_written
-                    .saturating_add(self.on_disk_header_len(hdr.len() as u64))
-                    .saturating_add(packed.len() as u64);
+                let password = self.password.clone();
+                self.write_stream_record(&name, data, password.as_deref())?;
             }
         }
         #[cfg(not(windows))]
         {
             let _ = path;
         }
+        Ok(())
+    }
+
+    /// Write one "STM" service record for `name` (the archive form, e.g.
+    /// `:Zone.Identifier`) carrying `data`. `password` encrypts the payload
+    /// with a fresh per-stream ENCR record; the stored CRC32 stays the
+    /// plaintext checksum (WinRAR does not MAC stream CRCs). Shared by the
+    /// add-time filesystem enumerator and the multi-volume rewrite's
+    /// re-emitted records.
+    pub(crate) fn write_stream_record(
+        &mut self,
+        name: &str,
+        data: Vec<u8>,
+        password: Option<&str>,
+    ) -> RarResult<()> {
+        let subdata = {
+            let mut extra = Vec::new();
+            extra.extend(vint::encode((1 + name.len()) as u64));
+            extra.extend(vint::encode(crate::format::rar5::EXTRA_SERVICE_SUBDATA));
+            extra.extend(name.as_bytes());
+            extra
+        };
+        let data_len = data.len();
+        let stream_crc = crc32fast::hash(&data);
+        let (extra, packed) = match password {
+            Some(password) => {
+                // Stream CRCs stay plaintext, so the record must not
+                // request hash-MAC'd checksums (flag 0x02).
+                let session = crypto::MemberEncryption::generate_with_flags(
+                    password,
+                    crate::format::rar5::ENCR_PBKDF2_ITER_LOG,
+                    crate::format::rar5::ENCR_FLAG_CHECKSUM,
+                );
+                let mut extra = session.extra_bytes();
+                extra.extend_from_slice(&subdata);
+                (extra, session.encrypt(&data))
+            }
+            None => (subdata, data),
+        };
+        let hdr = crate::format::rar5::headers::build_stream_block(
+            packed.len() as u64,
+            data_len as u64,
+            stream_crc,
+            COMP_METHOD_STORE,
+            0,
+            &extra,
+        );
+        self.ensure_rar5_volume_space(
+            self.on_disk_header_len(hdr.len() as u64) + packed.len() as u64,
+        )?;
+        self.write_block_header(&hdr)?;
+        let stream = stream_mut(&mut self.stream)?;
+        stream.write_all(&packed)?;
+        self.write_ctx_mut().output.bytes_written = self
+            .write_ctx()
+            .output
+            .bytes_written
+            .saturating_add(self.on_disk_header_len(hdr.len() as u64))
+            .saturating_add(packed.len() as u64);
         Ok(())
     }
 }

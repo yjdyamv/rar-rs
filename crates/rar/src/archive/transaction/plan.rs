@@ -72,10 +72,12 @@ impl RarArchive {
                         let entry = &self.entries[idx];
                         if entry.is_dir() || entry.header.comp_method == COMP_METHOD_STORE {
                             // Directories and STORE members never
-                            // participate in the LZ window.
+                            // participate in the LZ window, but their copied
+                            // headers still belong in the rebuilt quick-open
+                            // record.
                             if !deleted[idx] {
                                 ops.push(RewriteOp::CopyBlock {
-                                    qo_header: None,
+                                    qo_header: capture_qo.then(|| meta.header_bytes.clone()),
                                     header_bytes: meta.header_bytes,
                                     src_data: meta.data_offset,
                                     len: meta.raw.data_size,

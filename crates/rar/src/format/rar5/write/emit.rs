@@ -224,6 +224,45 @@ impl RarArchive {
         // cannot fit a header, so rolling can never make progress.
         let mut rolled = false;
 
+        // A zero-length member (an empty file written through the streaming
+        // path, or a member whose payload exactly filled the previous
+        // volume) has no data to split, but it still needs its file header
+        // on disk. Emit it as a single empty chunk in the current volume,
+        // rolling to a fresh one when the header plus the end block does not
+        // fit.
+        if total_packed == 0 {
+            let hdr_bytes = fh_base.to_bytes();
+            let hdr_size = self.on_disk_header_len(hdr_bytes.len() as u64);
+            let remaining = volume_size.saturating_sub(self.write_ctx().output.bytes_written);
+            if remaining < hdr_size + eoa_size {
+                self.start_next_volume()?;
+                let remaining = volume_size.saturating_sub(self.write_ctx().output.bytes_written);
+                if remaining < hdr_size + eoa_size {
+                    return Err(RarError::InvalidOption(format!(
+                        "volume size {volume_size} is too small for a member header ({hdr_size} bytes) plus the end block"
+                    )));
+                }
+            }
+            self.write_block_header(&hdr_bytes)?;
+            let data_offset = stream_mut(&mut self.stream)?.stream_position()?;
+            self.write_ctx_mut().output.bytes_written += hdr_size;
+            self.entries.push(ArchiveEntry {
+                header: FileHeader {
+                    data_offset,
+                    ..fh_base
+                },
+                chunks: vec![DataChunk {
+                    volume_index: self.write_ctx().output.current_volume - 1,
+                    data_offset,
+                    packed_size: 0,
+                    crc32_val: Some(plan.file_crc),
+                    is_final: true,
+                    extra_data: plan.extra_data.clone(),
+                }],
+            });
+            return Ok(());
+        }
+
         // Encrypted members: every chunk header carries the encryption
         // extra record (WinRAR repeats it on every volume). Non-final
         // chunks verify with a plain crc32 of the ciphertext chunk, so
@@ -332,8 +371,11 @@ impl RarArchive {
                         "volume size {volume_size} is too small for a member header ({hdr_size} bytes) plus the end block"
                     )));
                 }
+                // Roll to a fresh volume without marking the member started:
+                // no header was emitted yet, so the first chunk written on
+                // the next volume is still the member's first and must not
+                // carry `BLOCK_FLAG_DATA_CONTINUES`.
                 self.start_next_volume()?;
-                is_first = false;
                 rolled = true;
                 continue;
             }
@@ -393,9 +435,13 @@ impl RarArchive {
             }
         }
 
+        // The header's `data_offset` mirrors the first chunk's on-disk
+        // offset, like the single-volume and fits-entirely paths.
+        let data_offset = chunks.first().map_or(0, |chunk| chunk.data_offset);
         self.entries.push(ArchiveEntry {
             header: FileHeader {
                 packed_size: total_packed,
+                data_offset,
                 ..fh_base
             },
             chunks,

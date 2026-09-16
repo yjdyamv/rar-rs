@@ -353,8 +353,14 @@ impl RarArchive {
             .unwrap_or(u64::MAX);
         let stream = stream_mut(&mut self.stream)?;
         stream.seek(SeekFrom::Start(qo_abs))?;
-        let Some(qo) = crate::format::rar5::headers::read_block(stream, None)? else {
-            return Ok(false);
+        // A corrupt QO block (bad CRC, malformed header) must fall back to
+        // the full scan like a corrupt payload does; only I/O errors
+        // propagate.
+        let qo = match crate::format::rar5::headers::read_block(stream, None) {
+            Ok(Some(qo)) => qo,
+            Ok(None) => return Ok(false),
+            Err(RarError::Io(error)) => return Err(RarError::Io(error)),
+            Err(_) => return Ok(false),
         };
         if qo.block_type != BLOCK_TYPE_SERVICE_HEADER {
             return Ok(false);

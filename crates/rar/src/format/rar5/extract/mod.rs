@@ -15,6 +15,7 @@ mod open;
 mod solid;
 mod verify;
 
+pub(crate) use decode::read_streams_with;
 #[cfg(feature = "parallel")]
 pub(crate) use verify::verify_integrity_for;
 

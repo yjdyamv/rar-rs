@@ -23,7 +23,8 @@ pub use parse::read_block;
 pub(crate) use parse::{
     BlockCursor, block_extra_area, locator_quick_open_offset, main_header_locator_fields,
     parse_block_bytes, parse_redirect_record, parse_service_block_name,
-    parse_service_recovery_percent, parse_service_subdata, parse_stream_params, split_main_extra,
+    parse_service_recovery_percent, parse_service_subdata, parse_stream_params,
+    retain_extra_records, split_main_extra,
 };
 #[cfg(unix)]
 pub(crate) use serialize::build_owner_extra_record;

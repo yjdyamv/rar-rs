@@ -9,10 +9,12 @@
 
 use super::super::{DecryptedPayload, RarArchive};
 use crate::codec::{DecoderState, EncoderState, lzss_huff as compression};
-use crate::error::{RarError, RarResult};
+use crate::error::RarResult;
 use crate::format::rar5::COMP_METHOD_STORE;
+use crate::format::rar5::headers::retain_extra_records;
 use crate::format::rar5::payload::ChunkReader;
 use crate::format::rar5::write::MemberPlan;
+use crate::format::rar5::{EXTRA_FILE_ENCRYPTION, EXTRA_FILE_HASH};
 
 /// Shared window/encoder state of the solid chain being rewritten.
 ///
@@ -27,18 +29,28 @@ pub(super) struct SolidChainState {
 }
 
 impl SolidChainState {
-    /// Start a chain whose first member declares `dict_log` (128 KiB << n).
-    pub(super) fn start(dict_log: u8) -> RarResult<Self> {
-        let dict_size = (128usize * 1024)
-            .checked_shl(dict_log as u32)
-            .ok_or_else(|| {
-                RarError::Format("dictionary size overflows host address space".into())
-            })?;
+    /// Start a chain at the window the head member declares (already
+    /// resolved through `member_dict_window`: RAR5's 4-bit log, RAR7's byte
+    /// count, rounded up to a power of two and capped by `-mdx`).
+    pub(super) fn start(window: usize) -> RarResult<Self> {
         Ok(Self {
-            dec: DecoderState::new(dict_size),
+            dec: DecoderState::new(window),
             enc: EncoderState::default(),
             enc_active: false,
         })
+    }
+
+    /// Grow the decoder window when the member about to be decoded declares
+    /// a dictionary larger than the chain head's (official archives do this;
+    /// the extraction path grows the same way). Without it, distances in the
+    /// existing packed stream exceed the ring and the member decodes to
+    /// wrong bytes.
+    fn grow_to_member_dict(&mut self, archive: &RarArchive, idx: usize) -> RarResult<()> {
+        let window = archive.member_dict_window(idx)?;
+        if window > self.dec.window_capacity() {
+            self.dec.grow_window(window);
+        }
+        Ok(())
     }
 
     /// Decode member `idx` with the shared decoder window, verifying its
@@ -51,6 +63,7 @@ impl SolidChainState {
         reader: &mut R,
         idx: usize,
     ) -> RarResult<Vec<u8>> {
+        self.grow_to_member_dict(archive, idx)?;
         let hdr = &archive.entries[idx].header;
         if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
             return Ok(Vec::new());
@@ -102,7 +115,7 @@ impl SolidChainState {
                 state: Some(&mut self.enc),
                 is_final: true,
                 variant,
-                ..compression::EncodeOptions::new(hdr.comp_method, hdr.comp_dict_size)
+                ..compression::EncodeOptions::new(hdr.comp_method, encoder_dict_log(&hdr))
             },
         )?;
 
@@ -121,8 +134,24 @@ impl SolidChainState {
                 packed,
             )
         };
-        let (header_crc, extra_data, stored_hash, encr) =
-            RarArchive::payload_extra_and_crc(archive.password.as_deref(), plain_crc, plain_blake);
+        // Only an actually encrypted member is re-encrypted: the archive
+        // password may have been supplied for an unrelated reason (or for a
+        // `-hp` archive whose payloads are plain), and encrypting a plain
+        // member would silently change it.
+        let member_encrypted = crate::crypto::parse_encryption_extra(&hdr.extra_data)?.is_some();
+        let password = if member_encrypted {
+            archive.password.as_deref()
+        } else {
+            None
+        };
+        let (header_crc, mut extra_data, stored_hash, encr) =
+            RarArchive::payload_extra_and_crc(password, plain_crc, plain_blake);
+        // Carry the member's own metadata records (nanosecond/ctime/atime
+        // FILE_TIME, OWNER, ...) over to the rebuilt header; the ENCR/HASH
+        // records just rebuilt are dropped from the old set (a fresh
+        // encryption session invalidates the old ENCR).
+        let kept = retain_extra_records(&hdr.extra_data, &[EXTRA_FILE_ENCRYPTION, EXTRA_FILE_HASH]);
+        extra_data.extend_from_slice(&kept);
         let payload = RarArchive::encrypt_payload_with(encr.as_ref(), &payload);
         archive.write_file_entry(
             &MemberPlan {
@@ -166,4 +195,20 @@ impl RarArchive {
             || Ok(()),
         )
     }
+}
+
+/// The dictionary log the encoder window is sized from when a member is
+/// recompressed. RAR7 carries the dictionary as a byte count (possibly
+/// non-power-of-two) whose 5-bit log does not fit the 4-bit
+/// `comp_dict_size`; use the byte count when present and cap at the
+/// writer's 4 GiB window (log 15).
+fn encoder_dict_log(hdr: &crate::model::FileHeader) -> u8 {
+    let Some(bytes) = hdr.dict_size_bytes else {
+        return hdr.comp_dict_size;
+    };
+    let mut log = 0u8;
+    while log < 15 && (128u64 * 1024) << (log + 1) <= bytes {
+        log += 1;
+    }
+    log
 }

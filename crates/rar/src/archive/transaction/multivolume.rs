@@ -83,6 +83,47 @@ fn rev_params_from_file(path: &Path) -> RarResult<(u32, u32)> {
 }
 
 impl RarArchive {
+    /// Re-emit every "STM" stream record owned by kept member `idx` after its
+    /// rebuilt block. Payloads are decoded through the original volumes
+    /// (decrypting/decompressing when needed) and written as fresh STORE
+    /// blocks; an originally encrypted stream is re-encrypted with its own
+    /// ENCR record, a plain one stays plain even when a password is set.
+    fn rewrite_surviving_streams(
+        &mut self,
+        readers: &mut VolumeReaders,
+        idx: usize,
+    ) -> RarResult<()> {
+        let records: Vec<crate::archive::StreamRecord> = self
+            .read_ctx()
+            .streams
+            .iter()
+            .filter(|stream| stream.owner_index == idx)
+            .cloned()
+            .collect();
+        if records.is_empty() {
+            return Ok(());
+        }
+        let limit = self.read_ctx().extract_options.metadata_limit();
+        let max_dict_size = self.read_ctx().extract_options.max_dict_size;
+        let password = self.password.clone();
+        let streams = crate::format::rar5::extract::read_streams_with(
+            &records,
+            readers,
+            password.as_deref(),
+            limit,
+            max_dict_size,
+        )?;
+        for (name, data, was_encrypted) in streams {
+            let password = if was_encrypted {
+                password.as_deref()
+            } else {
+                None
+            };
+            self.write_stream_record(&name, data, password)?;
+        }
+        Ok(())
+    }
+
     /// Rewrite a multi-volume archive, omitting deleted members.
     ///
     /// Kept members keep their exact compressed payloads but are re-split
@@ -102,6 +143,10 @@ impl RarArchive {
                 "deleting from header-encrypted multi-volume archives is not supported".into(),
             ));
         }
+        // Read the archive comment before the stream is redirected to the
+        // staged set; it is re-emitted verbatim after the rebuilt main
+        // header so a delete does not silently drop it.
+        let comment = self.get_comment()?;
         let orig_volumes = self.volume_paths.clone();
         let mut vol_sizes = Vec::with_capacity(orig_volumes.len());
         for vol in &orig_volumes {
@@ -150,6 +195,21 @@ impl RarArchive {
         self.write_archive_header_vol(None)?;
         self.write_ctx_mut().output.bytes_written =
             self.stream.as_mut().unwrap().stream_position()?;
+        if let Some(comment) = &comment
+            && !comment.is_empty()
+        {
+            let block = crate::format::rar5::headers::build_comment_block(comment);
+            let eoa_size = self.on_disk_header_len(8);
+            if self.write_ctx().output.bytes_written + block.len() as u64 + eoa_size > volume_size {
+                return Err(RarError::Unsupported(
+                    "rewriting a multi-volume archive whose comment does not fit in one volume is not supported"
+                        .into(),
+                ));
+            }
+            self.write_block_header(&block)?;
+            self.write_ctx_mut().output.bytes_written =
+                self.stream.as_mut().unwrap().stream_position()?;
+        }
 
         let mut readers = VolumeReaders::new(&orig_volumes);
         let mut chain_state: Option<super::solid::SolidChainState> = None;
@@ -173,7 +233,7 @@ impl RarArchive {
                 && s == idx
             {
                 chain_state = Some(super::solid::SolidChainState::start(
-                    self.entries[idx].header.comp_dict_size,
+                    self.member_dict_window(idx)?,
                 )?);
                 in_chain = true;
                 chain_end = e;
@@ -218,6 +278,7 @@ impl RarArchive {
                     idx,
                     &entry_name,
                 )?;
+                self.rewrite_surviving_streams(&mut readers, idx)?;
                 processed += entry.header.unpacked_size;
                 continue;
             }
@@ -253,6 +314,7 @@ impl RarArchive {
                 },
                 &stored_payload,
             )?;
+            self.rewrite_surviving_streams(&mut readers, idx)?;
         }
         if self.progress.is_some() {
             self.report_progress(processed, total_bytes);

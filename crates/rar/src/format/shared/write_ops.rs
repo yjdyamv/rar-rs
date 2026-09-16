@@ -128,6 +128,7 @@ impl RarArchive {
                 now.as_secs() as u32,
                 now.subsec_nanos(),
                 None,
+                None,
             );
         }
         self.add_bytes_rar5(arcname, data, compression_level)

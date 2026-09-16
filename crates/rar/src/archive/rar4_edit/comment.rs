@@ -129,9 +129,22 @@ pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
             let unp = u32::from_le_bytes(view.header[11..15].try_into().unwrap());
             let unicode = u32::from_le_bytes(view.header[28..32].try_into().unwrap()) & 1 != 0;
             let payload = if method == crate::format::rar4::RAR4_METHOD_STORE {
-                let data_len = usize::try_from(view.add_size).map_err(|_| {
-                    RarError::Format("RAR4: comment size overflows host address space".into())
-                })?;
+                // The declared size comes from the header alone (a hand-made
+                // archive can pass the header CRC with any size), so cap it
+                // before it can drive an allocation, like the RAR5 comment
+                // reader does.
+                let limit = archive.read_ctx().extract_options.metadata_limit();
+                if view.add_size > limit {
+                    return Err(RarError::LimitExceeded {
+                        limit,
+                        context: format!("RAR4 archive comment declares {} bytes", view.add_size),
+                    });
+                }
+                let data_len =
+                    usize::try_from(view.add_size).map_err(|_| RarError::LimitExceeded {
+                        limit,
+                        context: "RAR4: comment size does not fit in usize".into(),
+                    })?;
                 let mut data = vec![0u8; data_len];
                 file.seek(SeekFrom::Start(view.data_offset()))
                     .map_err(RarError::Io)?;

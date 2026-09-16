@@ -656,6 +656,45 @@ fn parse_extra_records(
     )
 }
 
+/// Copy the extra-area records whose type is not in `skip`, preserving the
+/// original record bytes and order. The walk is the same forgiving one
+/// [`parse_extra_records`] uses: malformed trailing bytes are dropped, so a
+/// record the parser would not have seen is not copied either.
+pub(crate) fn retain_extra_records(extra_data: &[u8], skip: &[u64]) -> Vec<u8> {
+    let mut kept = Vec::new();
+    let mut offset = 0usize;
+    while offset < extra_data.len() {
+        let record_start = offset;
+        let Ok((rec_size, n)) = vint::decode_from_slice(extra_data, offset) else {
+            break;
+        };
+        offset += n;
+        let Ok(rec_size) = usize::try_from(rec_size) else {
+            break;
+        };
+        let Some(rec_end) = offset.checked_add(rec_size) else {
+            break;
+        };
+        if rec_end > extra_data.len() {
+            break;
+        }
+        let Ok((rec_type, tn)) = vint::decode_from_slice(extra_data, offset) else {
+            break;
+        };
+        if offset
+            .checked_add(tn)
+            .is_none_or(|body_start| body_start > rec_end)
+        {
+            break;
+        }
+        if !skip.contains(&rec_type) {
+            kept.extend_from_slice(&extra_data[record_start..rec_end]);
+        }
+        offset = rec_end;
+    }
+    kept
+}
+
 /// Extract the extra area of a block body (`[type][flags][extra_size?]
 /// [data_size?][...][name][extra at end]`): the last `extra_size` bytes,
 /// like the reference reader does.

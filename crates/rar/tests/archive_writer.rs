@@ -724,6 +724,80 @@ fn rar5_directory_header_rolls_to_a_fresh_volume() {
     );
 }
 
+/// An empty file written through the streaming STORE path must still get its
+/// member header in the volume set; a zero-length split member used to emit
+/// no header at all and vanish from the archive.
+#[test]
+fn empty_member_survives_multivolume_store_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("empty-mv.rar");
+    let source = dir.path().join("empty.bin");
+    std::fs::write(&source, b"").unwrap();
+    let payload = vec![0x33u8; 16 * 1024];
+
+    let mut writer =
+        ArchiveWriter::create_with(&base, WriterOptions::new().volume_size(4096)).unwrap();
+    writer.add_bytes("first.bin", &payload, stored()).unwrap();
+    writer.add_path(&source, stored()).unwrap();
+    writer.finish().unwrap();
+
+    let mut reader = ArchiveReader::open(&base).unwrap();
+    let names: Vec<String> = reader
+        .entries()
+        .map(|entry| entry.name().to_owned())
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "empty.bin"),
+        "the empty member is missing from {names:?}"
+    );
+    let id = reader.unique_entry("empty.bin").unwrap();
+    assert!(reader.read_entry(id).unwrap().is_empty());
+    drop(reader);
+
+    let mut archive = rar_rs::archive::RarArchive::open(&base).unwrap();
+    assert_eq!(archive.test().unwrap(), (2, 0));
+}
+
+/// A member that starts within its header's worth of bytes from a volume end
+/// must roll to a fresh volume and keep its first chunk unflagged: a
+/// `BLOCK_FLAG_DATA_CONTINUES` first chunk has no pending member and readers
+/// drop it. The sweep walks a member boundary across a volume so at least one
+/// iteration lands the next member exactly on the edge.
+#[test]
+fn split_member_first_chunk_after_a_volume_boundary_keeps_its_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let volume_size = 4096u64;
+    let second = b"tail member".to_vec();
+
+    for extra in 0..220usize {
+        let base = dir.path().join(format!("boundary{extra}.rar"));
+        let first = vec![0x5Au8; (volume_size as usize) * 2 - 220 + extra];
+        let mut writer =
+            ArchiveWriter::create_with(&base, WriterOptions::new().volume_size(volume_size))
+                .unwrap();
+        writer.add_bytes("first.bin", &first, stored()).unwrap();
+        writer.add_bytes("second.bin", &second, stored()).unwrap();
+        writer.finish().unwrap();
+
+        let mut reader = ArchiveReader::open(&base).unwrap();
+        let names: Vec<String> = reader
+            .entries()
+            .map(|entry| entry.name().to_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["first.bin", "second.bin"],
+            "member missing at payload length extra={extra}"
+        );
+        let id = reader.unique_entry("second.bin").unwrap();
+        assert_eq!(
+            reader.read_entry(id).unwrap(),
+            second,
+            "second member corrupt at extra={extra}"
+        );
+    }
+}
+
 /// Part number parsed out of a `....partN.rar` staging name.
 fn part_number(path: &std::path::Path) -> u64 {
     path.file_name()

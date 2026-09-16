@@ -18,7 +18,7 @@ use crate::archive::RarArchive;
 use crate::archive::transaction::EditSummary;
 use crate::error::{RarError, RarResult};
 use crate::fs::atomic::{install_durable, temp_sibling_path};
-use crate::recovery::legacy_rr::scan_protect_with_password;
+use crate::recovery::legacy_rr::scan_protect_file;
 
 /// Member generation the repacked archive is written with, derived from the
 /// source members: RAR 1.5, RAR 2.x (the `26` alias folds onto the same
@@ -67,6 +67,8 @@ struct KeptMember {
     mtime: u32,
     mtime_ns: u32,
     comment: Option<Vec<u8>>,
+    /// On-disk DOS attribute byte to re-emit with the member.
+    attr: u32,
 }
 
 /// Repack a solid RAR4 archive (ADR 0005 stage C): every member is decoded
@@ -149,13 +151,12 @@ pub(crate) fn repack_solid_archive(
     let rr_percent: Option<u8> = if force_rr.is_some() {
         force_rr
     } else {
-        let bytes = fs::read(&archive.path).map_err(RarError::Io)?;
         let hp_bytes = if hp {
             header_password(archive).map(str::as_bytes)
         } else {
             None
         };
-        match scan_protect_with_password(&bytes, hp_bytes)?.protect {
+        match scan_protect_file(&archive.path, hp_bytes)?.protect {
             Some(protect) if &protect.mark == b"Protect+" => {
                 let prefix_len = protect.block_offset.max(1) as u64;
                 let percent =
@@ -203,6 +204,7 @@ pub(crate) fn repack_solid_archive(
                 mtime,
                 mtime_ns: entry.header.mtime_ns.unwrap_or(0),
                 comment,
+                attr: (entry.header.attributes & 0xFF) as u32,
             });
         }
     }
@@ -244,6 +246,7 @@ pub(crate) fn repack_solid_archive(
                     kept_member.mtime,
                     kept_member.mtime_ns,
                     kept_member.comment.clone(),
+                    Some(kept_member.attr),
                 )?;
             }
             // Deferred solid-append additions continue the same fresh chain.
@@ -256,6 +259,7 @@ pub(crate) fn repack_solid_archive(
                     entry.mtime,
                     entry.mtime_ns,
                     None,
+                    Some(entry.attr),
                 )?;
             }
             writer.close()?;

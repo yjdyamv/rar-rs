@@ -202,6 +202,8 @@ pub(crate) struct SolidAppendEntry {
     pub level: u8,
     pub mtime: u32,
     pub mtime_ns: u32,
+    /// On-disk DOS attribute byte to re-emit with the member.
+    pub attr: u32,
 }
 
 /// Prepare an existing single-volume RAR4 archive for appending members.

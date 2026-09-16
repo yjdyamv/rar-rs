@@ -62,7 +62,7 @@ fn emit_rar4_segment(
     salt: Option<[u8; 8]>,
     ext_time: Option<&[u8]>,
     solid_continuation: bool,
-    is_dir: bool,
+    attr: u32,
     comment: Option<Vec<u8>>,
     split_before: bool,
     split_after: bool,
@@ -113,7 +113,7 @@ fn emit_rar4_segment(
         unp_ver: this.write_ctx().solid.rar4_unp_ver,
         method,
         name: encoded_name,
-        attr: if is_dir { 0x10 } else { 0x20 }, // directory bit : regular-file archive bit
+        attr,
         salt,
         ext_time,
         window_bits: 6, // 4 MiB dictionary
@@ -229,7 +229,7 @@ struct Rar4SplitParams<'a> {
     salt: Option<[u8; 8]>,
     ext_time: Option<&'a [u8]>,
     solid_continuation: bool,
-    is_dir: bool,
+    attr: u32,
     comment: Option<Vec<u8>>,
 }
 
@@ -297,7 +297,7 @@ fn emit_rar4_split<'a>(
             params.salt,
             params.ext_time,
             params.solid_continuation,
-            params.is_dir,
+            params.attr,
             params.comment.clone(),
             split_before,
             split_after,
@@ -456,7 +456,7 @@ impl RarArchive {
         let mut reader = File::open(path)?;
         let mut data = Vec::with_capacity(file_size as usize);
         std::io::Read::read_to_end(&mut reader, &mut data)?;
-        self.add_rar4_data(name, data, level, mtime, mtime_ns, None)
+        self.add_rar4_data(name, data, level, mtime, mtime_ns, None, None)
     }
 
     /// Create one large RAR4 member with bounded memory: compress the source
@@ -652,7 +652,7 @@ impl RarArchive {
                     salt,
                     ext_time.as_deref(),
                     solid_continuation,
-                    false,
+                    0x20,
                     None,
                     false,
                     false,
@@ -690,7 +690,7 @@ impl RarArchive {
                         salt,
                         ext_time: ext_time.as_deref(),
                         solid_continuation,
-                        is_dir: false,
+                        attr: 0x20,
                         comment: None,
                     };
                     emit_rar4_split(
@@ -771,6 +771,7 @@ impl RarArchive {
         self.write_ctx_mut().rar4.writer_comment = text;
     }
 
+    #[allow(clippy::too_many_arguments)] // one member's full descriptor
     pub(crate) fn add_rar4_data(
         &mut self,
         name: String,
@@ -779,6 +780,7 @@ impl RarArchive {
         mtime: u32,
         mtime_ns: u32,
         comment: Option<Vec<u8>>,
+        attr: Option<u32>,
     ) -> RarResult<()> {
         self.check_cancel()?;
         crate::format::rar4::create::ensure_member_size(data.len() as u64)?;
@@ -793,6 +795,7 @@ impl RarArchive {
                     level,
                     mtime,
                     mtime_ns,
+                    attr: attr.unwrap_or(0x20),
                 },
             );
             return Ok(());
@@ -801,9 +804,11 @@ impl RarArchive {
         // (it must precede every member; the queue is consumed once).
         self.emit_pending_rar4_comment()?;
         // A directory member is written as a zero-byte placeholder whose name
-        // ends in `/`; its on-disk attribute is the directory bit (0x10) rather
-        // than the regular-file archive bit (0x20).
+        // ends in `/`; its on-disk attribute is the directory bit (0x10)
+        // rather than the regular-file archive bit (0x20). Callers that
+        // rebuild a foreign archive pass the original attribute byte.
         let is_dir = name.ends_with('/');
+        let attr = attr.unwrap_or(if is_dir { 0x10 } else { 0x20 });
         let file_size = data.len() as u64;
         let file_crc = crate::crc32::crc32(&data);
 
@@ -864,7 +869,7 @@ impl RarArchive {
                     salt,
                     ext_time.as_deref(),
                     solid_continuation,
-                    is_dir,
+                    attr,
                     comment.clone(),
                     false,
                     false,
@@ -909,7 +914,7 @@ impl RarArchive {
                         salt,
                         ext_time: ext_time.as_deref(),
                         solid_continuation,
-                        is_dir,
+                        attr,
                         comment: comment.clone(),
                     };
                     emit_rar4_split(self, &params, volume_size, packed_size, |_, offset, len| {
@@ -1484,7 +1489,7 @@ impl RarArchive {
                     salt,
                     ext_time.as_deref(),
                     false,
-                    false,
+                    0x20,
                     None,
                     false,
                     false,
@@ -1528,7 +1533,7 @@ impl RarArchive {
                         salt,
                         ext_time: ext_time.as_deref(),
                         solid_continuation: false,
-                        is_dir: false,
+                        attr: 0x20,
                         comment: None,
                     };
                     emit_rar4_split(self, &params, volume_size, packed_size, |_, offset, len| {

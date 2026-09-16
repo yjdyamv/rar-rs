@@ -329,6 +329,15 @@ impl RarArchive {
             let mut file = io::BufReader::with_capacity(1 << 20, File::open(path)?);
             file.read_to_end(&mut whole)?;
         }
+        if whole.len() as u64 != file_size {
+            return Err(RarError::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "file changed size while being archived: expected {file_size} bytes, read {}",
+                    whole.len()
+                ),
+            )));
+        }
         let mut crc_hasher = crc32fast::Hasher::new();
         let mut blake_hasher = if self.write_ctx().meta.blake2 {
             Some(crate::format::rar5::blake2sp::Hasher::new())
@@ -770,10 +779,14 @@ impl RarArchive {
             let chain_solid =
                 self.write_ctx().solid.mode && self.write_ctx().solid.encoder_state.is_some();
             if self.write_ctx().solid.mode {
-                self.write_ctx_mut()
+                let state = self
+                    .write_ctx_mut()
                     .solid
                     .encoder_state
                     .get_or_insert_with(Default::default);
+                // Each member starts its own frame; see
+                // `EncoderState::begin_member`.
+                state.begin_member();
             }
             let shared = self.progress.clone();
             let member = self.progress_member;

@@ -25,6 +25,18 @@ impl RarArchive {
                 "edit requires an archive opened for reading".into(),
             ));
         }
+        // A lone volume of a set (the other parts missing, so discovery
+        // reports one path) must not be rewritten as if it were a
+        // single-volume archive: the scan drops continuation fragments and
+        // the block walk would then edit the wrong members or truncate
+        // split ones. RAR4 refuses the same shape in its own edit entry
+        // points.
+        if self.volume_paths.len() <= 1 && self.main_header_declares_volume_set()? {
+            return Err(RarError::Unsupported(
+                "cannot edit an incomplete multi-volume archive; open the first volume with every part present"
+                    .into(),
+            ));
+        }
         if force_rr.is_some_and(|percent| percent > 100) {
             return Err(RarError::InvalidOption(
                 "recovery percent must be in 0..=100".into(),
@@ -247,7 +259,14 @@ impl RarArchive {
         if self.is_rar4() {
             return super::super::rar4_edit::read_comment(self);
         }
-        let mut reader = File::open(&self.path)?;
+        // The comment sits in the first volume (WinRAR's placement), which is
+        // not necessarily the part the caller opened.
+        let first = self
+            .volume_paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.path.clone());
+        let mut reader = File::open(&first)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         let file_len = reader.metadata().map_err(RarError::Io)?.len();
         let mut blocks = BlockCursor::new(file_len, self.archive_block_key()?);
@@ -300,24 +319,54 @@ impl RarArchive {
         Ok(main.parsed.flags & ARCHIVE_FLAG_LOCKED != 0)
     }
 
+    /// Whether the main header marks the archive as part of a volume set.
+    /// `volume_paths` alone cannot answer this: opening a lone middle part
+    /// (its siblings missing) makes discovery report a single path.
+    fn main_header_declares_volume_set(&mut self) -> RarResult<bool> {
+        let mut reader = File::open(&self.path)?;
+        self.clear_archive_encryption();
+        let main = self.read_main_header(&mut reader)?;
+        Ok(main.parsed.volume_number.is_some()
+            || main.parsed.flags & crate::format::rar5::ARCHIVE_FLAG_VOLUME_NUM != 0)
+    }
+
     /// Index range `[s, e]` of the solid chain affected by deleting member
     /// `idx`, when one exists.
     ///
     /// A member joins its predecessor's window when its header carries the
-    /// solid flag, so the chain extends backwards while the entry at the
-    /// boundary is solid and forwards while the next entry is solid (the
-    /// first member of a chain is not flagged solid, matching the writer).
-    /// Deleting the last member of a chain leaves the earlier members
-    /// decodable (their windows are untouched), so no chain needs to be
-    /// recompressed in that case.
-    fn chain_range_around(&self, idx: usize) -> Option<(usize, usize)> {
-        let mut s = idx;
-        while s > 0 && self.entries[s].header.comp_solid {
-            s -= 1;
+    /// solid flag, so the chain extends backwards to the first member that
+    /// is not solid and forwards while the next entries are solid (the first
+    /// member of a chain is not flagged solid, matching the writer).
+    /// Directories are transparent: they carry no data and the reader's
+    /// `find_solid_chain_start` walks across them in both directions, so a
+    /// non-solid directory between two solid members is not a chain
+    /// boundary. Deleting the last member of a chain leaves the earlier
+    /// members decodable (their windows are untouched), so no chain needs to
+    /// be recompressed in that case.
+    pub(crate) fn chain_range_around(&self, idx: usize) -> Option<(usize, usize)> {
+        // Anchor the walk at `idx` when it participates in a window, or at
+        // the next non-directory when the edit removes a directory.
+        let mut p = idx;
+        while p < self.entries.len() && self.entries[p].is_dir() {
+            p += 1;
         }
-        let mut e = idx;
-        while e + 1 < self.entries.len() && self.entries[e + 1].header.comp_solid {
-            e += 1;
+        if p >= self.entries.len() {
+            return None;
+        }
+        let mut s = p;
+        while self.entries[s].header.comp_solid {
+            let Some(previous) = (0..s).rev().find(|&i| !self.entries[i].is_dir()) else {
+                break;
+            };
+            s = previous;
+        }
+        let mut e = p;
+        while let Some(next) = (e + 1..self.entries.len()).find(|&i| !self.entries[i].is_dir()) {
+            if self.entries[next].header.comp_solid {
+                e = next;
+            } else {
+                break;
+            }
         }
         (idx < e).then_some((s, e))
     }

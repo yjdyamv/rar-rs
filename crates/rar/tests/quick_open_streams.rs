@@ -161,3 +161,117 @@ fn quick_open_extraction_restores_ntfs_streams() {
         "quick-open must restore the stream"
     );
 }
+
+/// The multi-volume re-split rewrite must carry surviving "STM" records
+/// over to the rebuilt set: a delete of a stream-free member used to drop
+/// the surviving member's streams (then briefly refused the edit).
+#[test]
+fn multivolume_delete_keeps_ntfs_streams() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("mkdir");
+    let src = src_dir.join("owner.bin");
+    let payload = vec![0x4Cu8; 100 * 1024];
+    std::fs::write(&src, &payload).expect("write member");
+    std::fs::write(format!("{}{}", src.display(), ":ads"), b"stream").expect("write stream");
+    let plain = src_dir.join("plain.bin");
+    std::fs::write(&plain, b"no streams here").expect("write plain member");
+
+    let archive = dir.path().join("streams-edit.rar");
+    {
+        let mut rar = ArchiveWriter::create_with(
+            &archive,
+            WriterOptions::default()
+                .save_streams(true)
+                .volume_size(32 * 1024),
+        )
+        .expect("create");
+        let stored = || EntryWriteOptions::new().compression_level(rar_rs::CompressionLevel::STORE);
+        rar.add_path_as(&src, "owner.bin", stored())
+            .expect("add owner");
+        rar.add_path_as(&plain, "plain.bin", stored())
+            .expect("add plain");
+        rar.finish().expect("close");
+    }
+    let volumes = rar_rs::discover_volumes(&archive);
+    assert!(volumes.len() > 1, "precondition: multi-volume set");
+
+    let mut editor = rar_rs::ArchiveEditor::open(&volumes[0]).expect("editor");
+    let id = editor.unique_entry("plain.bin").expect("member");
+    editor.delete_entries(&[id]).expect("delete");
+    drop(editor);
+
+    // The stream survives with its owner and extraction restores it.
+    let out = dir.path().join("out");
+    let mut reader = ArchiveReader::open(&archive).expect("reopen");
+    let names: Vec<String> = reader
+        .entries()
+        .map(|entry| entry.name().to_owned())
+        .collect();
+    assert_eq!(names, ["owner.bin"], "plain.bin is gone");
+    reader
+        .extract_all_with_options(&out, ExtractOptions::default())
+        .expect("extract");
+    assert_eq!(std::fs::read(out.join("owner.bin")).unwrap(), payload);
+    assert_eq!(
+        std::fs::read(format!("{}{}", out.join("owner.bin").display(), ":ads"))
+            .expect("restored stream"),
+        b"stream",
+        "the surviving member's stream must be re-emitted"
+    );
+}
+
+/// `-p` archives store each "STM" payload with its own ENCR record; the
+/// rewrite must re-encrypt surviving streams (and only those) so the set
+/// still decodes with the password.
+#[test]
+fn multivolume_delete_keeps_encrypted_ntfs_streams() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("mkdir");
+    let src = src_dir.join("owner.bin");
+    let payload = vec![0x5Du8; 100 * 1024];
+    std::fs::write(&src, &payload).expect("write member");
+    std::fs::write(format!("{}{}", src.display(), ":ads"), b"secret stream").expect("write stream");
+    let plain = src_dir.join("plain.bin");
+    std::fs::write(&plain, b"no streams here").expect("write plain member");
+
+    let archive = dir.path().join("streams-enc.rar");
+    {
+        let mut rar = ArchiveWriter::create_with(
+            &archive,
+            WriterOptions::default()
+                .password("pw")
+                .save_streams(true)
+                .volume_size(32 * 1024),
+        )
+        .expect("create");
+        let stored = || EntryWriteOptions::new().compression_level(rar_rs::CompressionLevel::STORE);
+        rar.add_path_as(&src, "owner.bin", stored())
+            .expect("add owner");
+        rar.add_path_as(&plain, "plain.bin", stored())
+            .expect("add plain");
+        rar.finish().expect("close");
+    }
+    let volumes = rar_rs::discover_volumes(&archive);
+    assert!(volumes.len() > 1, "precondition: multi-volume set");
+
+    let mut editor = rar_rs::ArchiveEditor::open_with_password(&volumes[0], "pw").expect("editor");
+    let id = editor.unique_entry("plain.bin").expect("member");
+    editor.delete_entries(&[id]).expect("delete");
+    drop(editor);
+
+    let out = dir.path().join("out");
+    let mut reader = ArchiveReader::open_with(&archive, OpenOptions::new().password("pw"))
+        .expect("reopen with password");
+    reader
+        .extract_all_with_options(&out, ExtractOptions::default())
+        .expect("extract");
+    assert_eq!(std::fs::read(out.join("owner.bin")).unwrap(), payload);
+    assert_eq!(
+        std::fs::read(format!("{}{}", out.join("owner.bin").display(), ":ads"))
+            .expect("restored stream"),
+        b"secret stream",
+        "the re-encrypted stream must decode with the archive password"
+    );
+}

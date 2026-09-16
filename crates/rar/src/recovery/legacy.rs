@@ -78,21 +78,77 @@ pub(crate) fn scan_protect_with_password(
     bytes: &[u8],
     password: Option<&[u8]>,
 ) -> RarResult<Rar4ProtectScan> {
-    const ENDARC_HEAD: u8 = 0x7b;
-
     let sig = find_bytes(bytes, RAR4_SIGNATURE, 8 * 1024 * 1024)
         .ok_or_else(|| RarError::Format("not a RAR4 archive (signature not found)".into()))?;
+    let mut stream = std::io::Cursor::new(bytes);
+    let protect = scan_protect_stream(
+        &mut stream,
+        sig + RAR4_SIGNATURE.len(),
+        bytes.len(),
+        password,
+    )?;
+    Ok(Rar4ProtectScan {
+        sfx_offset: sig,
+        protect,
+    })
+}
+
+/// [`scan_protect_with_password`] over a file path: only the signature
+/// prefix and the block headers are read, so a multi-GiB archive is scanned
+/// with bounded memory instead of being loaded whole.
+pub(crate) fn scan_protect_file(
+    path: &std::path::Path,
+    password: Option<&[u8]>,
+) -> RarResult<Rar4ProtectScan> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).map_err(RarError::Io)?;
+    let file_len_u64 = file.metadata().map_err(RarError::Io)?.len();
+    let file_len = usize::try_from(file_len_u64)
+        .map_err(|_| RarError::Format("RAR4: archive size overflows host address space".into()))?;
+    // The signature may sit behind an SFX stub, like the slice scanner.
+    let probe_len = (8 * 1024 * 1024).min(file_len);
+    let mut prefix = vec![0u8; probe_len];
+    let mut filled = 0usize;
+    while filled < probe_len {
+        let n = file.read(&mut prefix[filled..]).map_err(RarError::Io)?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    prefix.truncate(filled);
+    let sig = find_bytes(&prefix, RAR4_SIGNATURE, probe_len)
+        .ok_or_else(|| RarError::Format("not a RAR4 archive (signature not found)".into()))?;
+    file.seek(SeekFrom::Start((sig + RAR4_SIGNATURE.len()) as u64))
+        .map_err(RarError::Io)?;
+    let protect = scan_protect_stream(&mut file, sig + RAR4_SIGNATURE.len(), file_len, password)?;
+    Ok(Rar4ProtectScan {
+        sfx_offset: sig,
+        protect,
+    })
+}
+
+/// The shared block walk behind both scanners: `pos` starts just past the
+/// archive signature and `file_len` bounds every block. `password` is
+/// required once the main header latches `-hp`.
+fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
+    stream: &mut R,
+    mut pos: usize,
+    file_len: usize,
+    password: Option<&[u8]>,
+) -> RarResult<Option<Rar4Protect>> {
+    const ENDARC_HEAD: u8 = 0x7b;
+
     let mut protect = None;
     // `-hp` flag, latched from the (plaintext) main header: every block
     // after it has an encrypted header.
     let mut encrypted = false;
-    let mut stream = std::io::Cursor::new(bytes);
-    stream.set_position((sig + RAR4_SIGNATURE.len()) as u64);
-    while (stream.position() as usize) + 7 <= bytes.len() {
+    while pos + 7 <= file_len {
         // A damaged header is exactly what this scanner exists to repair, so
         // the envelope CRC is not checked; only the shared bounds apply.
         let Some(block) = crate::format::rar4::read_block(
-            &mut stream,
+            &mut *stream,
             encrypted,
             password,
             crate::format::rar4::EnvelopePolicy::REPAIR,
@@ -106,7 +162,7 @@ pub(crate) fn scan_protect_with_password(
         let flags = block.flags;
         let on_disk_header = block.on_disk_header() as usize;
         let total = block.total_size as usize;
-        if start + total > bytes.len() {
+        if start + total > file_len {
             return Err(RarError::Format("RAR4: truncated block".into()));
         }
         if head_type == 0x73 && flags & 0x0080 != 0 {
@@ -188,11 +244,9 @@ pub(crate) fn scan_protect_with_password(
         if head_type == ENDARC_HEAD {
             break;
         }
+        pos = start + total;
     }
-    Ok(Rar4ProtectScan {
-        sfx_offset: sig,
-        protect,
-    })
+    Ok(protect)
 }
 
 /// Repair a legacy archive that carries a PROTECT_HEAD recovery record.
@@ -624,5 +678,33 @@ mod tests {
             repair_protect_head(&hopeless, 0, &protect).is_err(),
             "two damaged sectors in one parity group must fail"
         );
+    }
+
+    /// The streaming file scanner must agree with the slice scanner it was
+    /// split from (signature offset and every record position).
+    #[test]
+    fn scan_protect_file_matches_the_slice_scan() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/rar40/repair/rar250_protect_head_rr5.rar"
+        );
+        let original = std::fs::read(fixture).expect("read fixture");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("protect.rar");
+        std::fs::write(&path, &original).unwrap();
+
+        let slice = scan_protect(&original).expect("slice scan");
+        let file = scan_protect_file(&path, None).expect("file scan");
+        assert_eq!(file.sfx_offset, slice.sfx_offset);
+        let (slice, file) = (
+            slice.protect.expect("slice record"),
+            file.protect.expect("file record"),
+        );
+        assert_eq!(file.mark, slice.mark);
+        assert_eq!(file.rec_sectors, slice.rec_sectors);
+        assert_eq!(file.total_blocks, slice.total_blocks);
+        assert_eq!(file.block_offset, slice.block_offset);
+        assert_eq!(file.data_start, slice.data_start);
+        assert_eq!(file.data_end, slice.data_end);
     }
 }

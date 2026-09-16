@@ -218,7 +218,7 @@ impl RarArchive {
                 RewriteOp::Recompress { idx, is_deleted } => {
                     if chain.is_none() {
                         chain = Some(super::solid::SolidChainState::start(
-                            self.entries[*idx].header.comp_dict_size,
+                            self.member_dict_window(*idx)?,
                         )?);
                     }
                     let state = chain.as_mut().unwrap();
