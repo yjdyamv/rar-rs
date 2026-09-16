@@ -981,7 +981,8 @@ fn incompressible_large_file_roundtrips_via_store() {
 
 /// Parallel extraction (feature `parallel`) must produce byte-identical
 /// output to the sequential path for an eligible archive (≥ 4 members,
-/// ≥ 64 MiB total, non-solid).
+/// ≥ 64 MiB total, non-solid), and `-kb` must keep a broken member's
+/// partial output on both paths.
 #[cfg(feature = "parallel")]
 #[test]
 fn parallel_extraction_matches_sequential() {
@@ -1011,7 +1012,14 @@ fn parallel_extraction_matches_sequential() {
     let par_dir = dir.path().join("par");
     {
         let mut rar = ArchiveReader::open(&path).expect("open");
-        rar.extract_all_with_options(&seq_dir, rar_rs::ExtractOptions::default())
+        // The whole catalog in order would take the whole-archive path (the
+        // parallel one here); permuting the ids makes
+        // `extract_ids_with_options` extract member by member through the
+        // serial path instead, so the two runs really do compare the two
+        // code paths on the same archive.
+        let mut ids: Vec<_> = rar.entries().map(|e| e.id()).collect();
+        ids.rotate_left(1);
+        rar.extract_ids_with_options(&ids, &seq_dir, rar_rs::ExtractOptions::default())
             .expect("sequential extract");
     }
     {
@@ -1024,6 +1032,76 @@ fn parallel_extraction_matches_sequential() {
         let b = std::fs::read(par_dir.join(format!("m{i}.bin"))).unwrap();
         assert_eq!(a, b, "member m{i} differs between sequential and parallel");
     }
+}
+
+/// `-kb` (keep broken) must keep the partially extracted member on the
+/// parallel path too: the failing member's bytes travel back from the decode
+/// phase and are staged through the same materialization policy as the
+/// serial path. Without `-kb` nothing is left behind.
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_extraction_keeps_broken_members_only_with_kb() {
+    const MEMBER: usize = 17 * 1024 * 1024;
+    let dir = make_temp_dir();
+    let path = dir.path().join("broken.rar");
+    {
+        let mut rar = ArchiveWriter::create(&path).expect("create");
+        for i in 0..4u8 {
+            let pattern: Vec<u8> = (0..if i == 3 { 249u32 } else { 251u32 })
+                .map(|n| n as u8)
+                .collect();
+            let mut data = Vec::with_capacity(MEMBER);
+            while data.len() < MEMBER {
+                let take = (MEMBER - data.len()).min(pattern.len());
+                data.extend_from_slice(&pattern[..take]);
+            }
+            rar.add_bytes(&format!("m{i}.bin"), &data, opts(0))
+                .expect("add");
+        }
+        rar.finish().expect("close");
+    }
+
+    // Corrupt one payload byte of the last member: the decode still produces
+    // the full output, then the CRC check fails.
+    let mut bytes = std::fs::read(&path).expect("read archive");
+    let payload = file_data_offset(&bytes, "m3.bin");
+    bytes[payload] ^= 0xFF;
+    std::fs::write(&path, &bytes).expect("write archive");
+
+    let keep_dir = dir.path().join("keep");
+    {
+        let mut rar = ArchiveReader::open(&path).expect("open");
+        let err = rar
+            .extract_all_with_options(
+                &keep_dir,
+                rar_rs::ExtractOptions {
+                    keep_broken: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, rar_rs::RarError::Crc { .. }), "{err}");
+    }
+    assert!(keep_dir.join("m0.bin").exists(), "earlier members land");
+    let kept = std::fs::metadata(keep_dir.join("m3.bin")).expect("-kb keeps the partial member");
+    assert_eq!(
+        kept.len() as usize,
+        MEMBER,
+        "the partial member is complete here"
+    );
+
+    let drop_dir = dir.path().join("drop");
+    {
+        let mut rar = ArchiveReader::open(&path).expect("open");
+        let err = rar
+            .extract_all_with_options(&drop_dir, rar_rs::ExtractOptions::default())
+            .unwrap_err();
+        assert!(matches!(err, rar_rs::RarError::Crc { .. }), "{err}");
+    }
+    assert!(
+        !drop_dir.join("m3.bin").exists(),
+        "without -kb nothing is left behind"
+    );
 }
 
 #[cfg(feature = "parallel")]

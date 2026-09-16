@@ -50,6 +50,39 @@ fn reports_outcome(entry: &ArchiveEntry, options: &crate::options::ExtractOption
     !entry.is_dir() && !(options.skip_links && entry.redirect().is_some())
 }
 
+/// Materialize one member file through a temp sibling of `dest_path`.
+///
+/// `produce` writes the member's bytes and reports the member's outcome:
+/// `Ok(())` installs the temp over the destination; `Err(e)` means the
+/// member failed (decode, integrity check, or the write itself) — with `-kb`
+/// (`keep_broken`) the partial temp is installed anyway, otherwise it is
+/// removed, and `e` is returned unchanged. The streaming serial path and the
+/// buffered parallel path share this policy so `-kb` cannot drift apart.
+fn materialize_member_file<F>(dest_path: &Path, keep_broken: bool, produce: F) -> RarResult<()>
+where
+    F: FnOnce(&mut File) -> RarResult<()>,
+{
+    let tmp_path = temp_sibling_path(dest_path);
+    let result = (|| -> RarResult<()> {
+        let mut file = File::create(&tmp_path)?;
+        produce(&mut file)?;
+        file.flush()?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => replace_file(&tmp_path, dest_path),
+        Err(e) => {
+            if keep_broken {
+                // `-kb`: keep the partially extracted file.
+                let _ = replace_file(&tmp_path, dest_path);
+            } else {
+                let _ = fs::remove_file(&tmp_path);
+            }
+            Err(e)
+        }
+    }
+}
+
 /// What one extraction operation wrote and what the skip-existing policy left
 /// untouched, each in archive order.
 ///
@@ -204,12 +237,19 @@ impl RarArchive {
         }
         let headers: Vec<FileHeader> = self.entries.iter().map(|e| e.header.clone()).collect();
 
+        /// One member decoded in phase 2: `error` carries the failure that
+        /// interrupted the decode, with `data` holding the bytes produced so
+        /// far so the replay can honor `-kb`.
         struct DecodedMember {
             idx: usize,
             data: Vec<u8>,
+            error: Option<RarError>,
         }
 
-        // Phase 2: decode + integrity-check in parallel.
+        // Phase 2: decode + integrity-check in parallel. Validation failures
+        // abort before any output is staged (like the serial path, which
+        // validates before creating its temp file); decode and integrity
+        // failures travel back with the partial bytes.
         let results: Vec<RarResult<DecodedMember>> = extraction_pool().install(|| {
             payloads
                 .into_par_iter()
@@ -243,37 +283,51 @@ impl RarArchive {
                     // check) the serial paths use; the Vec sink keeps the
                     // decoded bytes for the sequential replay below.
                     let mut data = Vec::new();
+                    let mut error = None;
                     if hdr.packed_size != 0 || hdr.unpacked_size != 0 {
-                        crate::format::rar5::payload::decode_member(
-                            hdr, &payload, None, &mut data,
-                        )?;
+                        let outcome = (|| -> RarResult<()> {
+                            crate::format::rar5::payload::decode_member(
+                                hdr, &payload, None, &mut data,
+                            )?;
+                            let crc = crc32fast::hash(&data);
+                            let blake = hdr
+                                .hash_value
+                                .map(|_| crate::format::rar5::blake2sp::hash(&data));
+                            verify_integrity_for(
+                                hdr,
+                                crc,
+                                blake,
+                                payload.params.as_ref(),
+                                payload.keys.as_ref(),
+                            )
+                        })();
+                        if let Err(e) = outcome {
+                            error = Some(e);
+                        }
                     }
-
-                    let crc = crc32fast::hash(&data);
-                    let blake = hdr
-                        .hash_value
-                        .map(|_| crate::format::rar5::blake2sp::hash(&data));
-                    verify_integrity_for(
-                        hdr,
-                        crc,
-                        blake,
-                        payload.params.as_ref(),
-                        payload.keys.as_ref(),
-                    )?;
-                    Ok(DecodedMember { idx: i, data })
+                    Ok(DecodedMember {
+                        idx: i,
+                        data,
+                        error,
+                    })
                 })
                 .collect()
         });
 
-        // Phase 3: replay writes sequentially in archive order.
+        // Phase 3: replay writes sequentially in archive order, through the
+        // same per-member materialization and post-write steps as the serial
+        // path. A member whose decode failed still stages its partial bytes
+        // so `-kb` behaves identically, then aborts the run.
         let mut report = ExtractionReport::default();
+        let keep_broken = self.read_ctx().extract_options.keep_broken;
         for result in results {
             let member = result?;
-            let entry = &self.entries[member.idx];
-            let dest_path = match self.resolve_dest_path(entry, dest)? {
+            let idx = member.idx;
+            let entry = self.entries[idx].clone();
+            let dest_path = match self.resolve_dest_path(&entry, dest)? {
                 Destination::Extract(path) => path,
                 Destination::Skip(path) => {
-                    if reports_outcome(entry, &self.read_ctx().extract_options) {
+                    if reports_outcome(&entry, &self.read_ctx().extract_options) {
                         report.record_skipped(path);
                     }
                     continue;
@@ -299,27 +353,22 @@ impl RarArchive {
             if let Some(parent) = dest_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let tmp_path = temp_sibling_path(&dest_path);
-            let write_result = (|| -> RarResult<()> {
-                let mut file = File::create(&tmp_path)?;
+            if let Some(err) = member.error {
+                // The member already failed; `materialize_member_file` keeps
+                // the partial temp only under `-kb`, and the member's own
+                // error aborts the run. The closure never reports success,
+                // so `staged` is always an error here.
+                let staged = materialize_member_file(&dest_path, keep_broken, |file| {
+                    file.write_all(&member.data)?;
+                    Err(err)
+                });
+                return staged.map(|()| None);
+            }
+            materialize_member_file(&dest_path, keep_broken, |file| {
                 file.write_all(&member.data)?;
-                file.flush()?;
                 Ok(())
-            })();
-            match write_result {
-                Ok(()) => replace_file(&tmp_path, &dest_path)?,
-                Err(e) => {
-                    let _ = fs::remove_file(&tmp_path);
-                    return Err(e);
-                }
-            }
-            if crate::archive::file_header_has_mtime(&entry.header) {
-                self.apply_member_times(&entry.header, &dest_path);
-            }
-            self.extract_member_streams(member.idx, &dest_path)?;
-            self.propagate_member_mark_of_the_web(&dest_path);
-            self.apply_member_attributes(&self.entries[member.idx].header, &dest_path);
-            report.record_written(dest_path);
+            })?;
+            self.finish_member(idx, &entry, dest_path, &mut report)?;
         }
         Ok(Some(report))
     }
@@ -540,29 +589,25 @@ impl RarArchive {
             fs::create_dir_all(parent)?;
         }
 
-        let tmp_path = temp_sibling_path(&dest_path);
-        let result = (|| -> RarResult<u64> {
-            let mut file = File::create(&tmp_path)?;
-            let written = self.decode_entry_to(idx, &mut file)?;
-            file.flush()?;
-            Ok(written)
-        })();
+        let keep_broken = self.read_ctx().extract_options.keep_broken;
+        materialize_member_file(&dest_path, keep_broken, |file| {
+            self.decode_entry_to(idx, file).map(|_| ())
+        })?;
 
-        match result {
-            Ok(_) => {
-                replace_file(&tmp_path, &dest_path)?;
-            }
-            Err(e) => {
-                if self.read_ctx().extract_options.keep_broken {
-                    // `-kb`: keep the partially extracted file.
-                    let _ = replace_file(&tmp_path, &dest_path);
-                } else {
-                    let _ = fs::remove_file(&tmp_path);
-                }
-                return Err(e);
-            }
-        }
+        self.finish_member(idx, entry, dest_path, report)
+    }
 
+    /// Post-write steps for one extracted file, shared by the serial and
+    /// parallel paths: restore mtime and attributes, attach NTFS streams,
+    /// carry the mark of the web over, and record the outcome. Returns the
+    /// destination path.
+    fn finish_member(
+        &mut self,
+        idx: usize,
+        entry: &ArchiveEntry,
+        dest_path: PathBuf,
+        report: &mut ExtractionReport,
+    ) -> RarResult<PathBuf> {
         // Restore mtime (best-effort), including the nanosecond fraction
         // from the FILE_TIME extra record when present.
         if crate::archive::file_header_has_mtime(&entry.header) {
@@ -574,7 +619,6 @@ impl RarArchive {
         self.propagate_member_mark_of_the_web(&dest_path);
         self.apply_member_attributes(&entry.header, &dest_path);
         report.record_written(dest_path.clone());
-
         Ok(dest_path)
     }
 }
