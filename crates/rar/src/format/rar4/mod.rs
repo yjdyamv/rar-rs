@@ -21,6 +21,7 @@ use crate::archive::ArchiveEntry;
 use crate::error::{RarError, RarResult};
 use crate::format::decode_system_ansi;
 use crate::format::shared::legacy_time::days_from_civil;
+use crate::format::shared::split::{SplitMerge, SplitMergeError};
 use crate::model::{DataChunk, FileHeader};
 pub(crate) use envelope::{EnvelopePolicy, Rar4Block, read_block};
 pub(crate) use read::{
@@ -143,10 +144,11 @@ pub(crate) const MHD_NEWNUMBERING: u16 = 0x0010;
 
 /// Cross-volume RAR4 block scan. A member split across volumes reappears as
 /// continuation file headers (FHD_SPLIT_BEFORE) in later volumes; the scan
-/// merges them into one entry with one chunk per volume segment.
+/// merges them into one entry with one chunk per volume segment
+/// ([`SplitMerge`] owns the ordering guards and the completion fields).
 #[derive(Default)]
 pub(crate) struct Rar4VolumeScan {
-    pending: Option<ArchiveEntry>,
+    merge: SplitMerge,
     /// The main header of the first volume carried MHD_SOLID: the archive is
     /// a solid run. Members of pre-RAR3 codecs (anything but the RAR29 codec)
     /// this archive-level flag plus position, NOT by the per-file FHD_SOLID
@@ -155,6 +157,25 @@ pub(crate) struct Rar4VolumeScan {
     /// The main header of the first volume carried MHD_NEWNUMBERING (a
     /// `.partN.rar` legacy set).
     pub new_numbering: bool,
+}
+
+/// Map the shared merge error to the RAR4 texts.
+fn rar4_split_error(error: SplitMergeError) -> RarError {
+    RarError::Format(match error {
+        SplitMergeError::ContinuationWithoutStart { fragment } => {
+            format!("RAR4: {fragment}: split continuation without a start")
+        }
+        SplitMergeError::Overlapping { .. } => "RAR4: overlapping split members".into(),
+        SplitMergeError::Interrupted { pending } => {
+            format!("RAR4: {pending}: split member is interrupted by a regular entry")
+        }
+        SplitMergeError::MissingFinal { pending } => {
+            format!("RAR4: split member {pending} is missing its final volume")
+        }
+        SplitMergeError::PackedSizeOverflow { pending } => {
+            format!("RAR4: {pending}: split packed size overflow")
+        }
+    })
 }
 
 impl Rar4VolumeScan {
@@ -212,46 +233,16 @@ impl Rar4VolumeScan {
                         is_final: !split_after,
                         extra_data: Vec::new(),
                     };
-                    if split_before {
-                        // Continuation of a member whose data started in an
-                        // earlier volume. The first header stays canonical
-                        // (name, unpacked size, method); later headers only
-                        // contribute this volume's segment.
-                        let Some(entry) = self.pending.as_mut() else {
-                            return Err(RarError::Format(format!(
-                                "RAR4: {}: split continuation without a start",
-                                fh.name
-                            )));
-                        };
-                        entry.chunks.push(chunk);
-                        if !split_after {
-                            // Final segment: this header carries the whole-
-                            // file CRC; total packed size is the chunk sum.
-                            entry.header.packed_size =
-                                entry.chunks.iter().try_fold(0u64, |total, chunk| {
-                                    total.checked_add(chunk.packed_size).ok_or_else(|| {
-                                        RarError::Format(format!(
-                                            "RAR4: {}: split packed size overflow",
-                                            entry.header.name
-                                        ))
-                                    })
-                                })?;
-                            entry.header.crc32_val = fh.crc32_val;
-                            out.push(self.pending.take().unwrap());
-                        }
-                    } else if split_after {
-                        if self.pending.is_some() {
-                            return Err(RarError::Format("RAR4: overlapping split members".into()));
-                        }
-                        self.pending = Some(ArchiveEntry {
-                            header: fh,
-                            chunks: vec![chunk],
-                        });
-                    } else {
-                        out.push(ArchiveEntry {
-                            header: fh,
-                            chunks: vec![chunk],
-                        });
+                    let entry = ArchiveEntry {
+                        header: fh,
+                        chunks: vec![chunk],
+                    };
+                    if let Some(done) = self
+                        .merge
+                        .push(entry, split_before, split_after)
+                        .map_err(rar4_split_error)?
+                    {
+                        out.push(done);
                     }
                 }
                 ENDARC_HEAD => break,
@@ -261,7 +252,7 @@ impl Rar4VolumeScan {
                     // the entry that was just completed, or to the pending
                     // split member when a volume ends mid-member.
                     if let (Some(comment), _) = parse_file_comment(&block.header, 0) {
-                        let entry = self.pending.as_mut().or_else(|| out.last_mut());
+                        let entry = self.merge.pending_mut().or_else(|| out.last_mut());
                         if let Some(entry) = entry
                             && entry.header.comment.is_none()
                         {
@@ -281,13 +272,7 @@ impl Rar4VolumeScan {
     /// Finish: any member still pending is truncated (its last volume is
     /// missing).
     pub(crate) fn finish(self) -> RarResult<()> {
-        if let Some(entry) = self.pending {
-            return Err(RarError::Format(format!(
-                "RAR4: split member {} is missing its final volume",
-                entry.header.name
-            )));
-        }
-        Ok(())
+        self.merge.finish().map_err(rar4_split_error)
     }
 }
 

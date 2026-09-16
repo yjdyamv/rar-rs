@@ -4,8 +4,23 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom};
 
 use super::{LHD_SPLIT_AFTER, LHD_SPLIT_BEFORE, MHD_SOLID, archive_comment, parse_volume};
-use crate::archive::{ArchiveEntry, RarArchive};
+use crate::archive::RarArchive;
 use crate::error::{RarError, RarResult};
+use crate::format::shared::split::{SplitMerge, SplitMergeError};
+
+/// Map the shared merge error to the RAR 1.3/1.4 texts.
+fn rar13_split_error(error: SplitMergeError) -> RarError {
+    RarError::Format(match error {
+        SplitMergeError::ContinuationWithoutStart { .. } => {
+            "RAR 1.3: split continuation without a start".into()
+        }
+        SplitMergeError::Overlapping { .. } | SplitMergeError::Interrupted { .. } => {
+            "RAR 1.3: split member is interrupted by a regular entry".into()
+        }
+        SplitMergeError::MissingFinal { .. } => "RAR 1.3: split member is incomplete".into(),
+        SplitMergeError::PackedSizeOverflow { .. } => "RAR 1.3: split packed size overflow".into(),
+    })
+}
 
 impl RarArchive {
     /// Archive comment from the first volume's main-header extension.
@@ -21,7 +36,7 @@ impl RarArchive {
         self.entries.clear();
         self.read_ctx_mut().streams.clear();
 
-        let mut pending: Option<ArchiveEntry> = None;
+        let mut merge = SplitMerge::default();
         for (vol_idx, path) in self.volume_paths.clone().iter().enumerate() {
             let mut stream = File::open(path)?;
             let file_len = stream.seek(SeekFrom::End(0))?;
@@ -41,41 +56,14 @@ impl RarArchive {
                 }
                 let split_before = entry.header.flags & u64::from(LHD_SPLIT_BEFORE) != 0;
                 let split_after = entry.header.flags & u64::from(LHD_SPLIT_AFTER) != 0;
-                if split_before {
-                    let Some(current) = pending.as_mut() else {
-                        return Err(RarError::Format(
-                            "RAR 1.3: split continuation without a start".into(),
-                        ));
-                    };
-                    current.header.packed_size += entry.header.packed_size;
-                    current.chunks.extend(entry.chunks);
-                    if !split_after {
-                        let mut finished = pending.take().expect("pending split member");
-                        // The final fragment carries the whole-member size and
-                        // checksum.
-                        finished.header.unpacked_size = entry.header.unpacked_size;
-                        finished.header.crc32_val = entry.header.crc32_val;
-                        self.entries.push(finished);
-                    }
-                } else {
-                    if pending.is_some() {
-                        return Err(RarError::Format(
-                            "RAR 1.3: split member is interrupted by a regular entry".into(),
-                        ));
-                    }
-                    if split_after {
-                        pending = Some(entry);
-                    } else {
-                        self.entries.push(entry);
-                    }
+                if let Some(done) = merge
+                    .push(entry, split_before, split_after)
+                    .map_err(rar13_split_error)?
+                {
+                    self.entries.push(done);
                 }
             }
         }
-        if pending.is_some() {
-            return Err(RarError::Format(
-                "RAR 1.3: split member is incomplete".into(),
-            ));
-        }
-        Ok(())
+        merge.finish().map_err(rar13_split_error)
     }
 }
