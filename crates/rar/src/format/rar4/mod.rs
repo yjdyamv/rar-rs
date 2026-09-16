@@ -956,20 +956,20 @@ mod tests {
 
     /// A wrong password (or a crafted block) can decrypt to `head_size = 7`
     /// with LONG_BLOCK set: there is no room for the data-size field, so the
-    /// helper must reject the block instead of slicing `[7..11]`.
+    /// helper must reject the block instead of slicing `[7..11]`. A plaintext
+    /// block reports the structural error; an encrypted one collapses to
+    /// `WrongPassword` (RAR4 has no password check value).
     #[test]
-    fn encrypted_header_with_long_block_but_short_head_size_is_rejected() {
+    fn header_with_long_block_but_short_head_size_is_rejected() {
         let mut header = vec![0u8; 7];
         header[2] = FILE_HEAD;
         header[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
         header[5..7].copy_from_slice(&7u16.to_le_bytes());
-        let (encrypted, _) =
-            crate::format::rar4::write::encrypt_block_header(&header, "pw").unwrap();
 
         let err = read_block(
-            &mut std::io::Cursor::new(encrypted),
-            true,
-            Some(b"pw"),
+            &mut std::io::Cursor::new(header.clone()),
+            false,
+            None,
             EnvelopePolicy::REPAIR,
         )
         .unwrap_err();
@@ -977,5 +977,16 @@ mod tests {
             matches!(err, RarError::Format(_)),
             "expected a format error, got {err}"
         );
+
+        let (encrypted, _) =
+            crate::format::rar4::write::encrypt_block_header(&header, "pw").unwrap();
+        let err = read_block(
+            &mut std::io::Cursor::new(encrypted),
+            true,
+            Some(b"pw"),
+            EnvelopePolicy::REPAIR,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RarError::WrongPassword), "got {err}");
     }
 }

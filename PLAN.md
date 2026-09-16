@@ -14,7 +14,29 @@
 
 优先级自上而下。完成一项勾掉一项：结论并入本文，过程留在 git 历史。
 
-### P0 · 发布收口（唯一硬门槛）
+### P0 · 正确性
+
+- [x] **legacy RAR4 `-hp` 错口令判定不确定**（已修 2026-09-16）：错口令时
+      `read_encrypted_block` 只在解密后的垃圾 `head_size` 越界/过小时报
+      `WrongPassword`；若垃圾长度恰好合理（落在界内），会继续解析并在头 CRC 上报
+      `Crc`（实测 200 次复现 1
+      次：`Crc { expected: 49511, actual: 64398,
+      context: "RAR4 block type 0xca header" }`）。RAR4
+      没有 MAC/口令校验值，错口令与损坏头本就不可区分：现把加密块的垃圾
+      `head_size`、解析/CRC 失败统一映射为 `WrongPassword`（CLI → exit
+      11），新增两个确定性单测；原 flaky 测试连续 500 次 0 失败。过程见 git
+      历史。
+- [ ] **RAR4 batch 与 sequential 偶发不一致（待定位）**：
+      `rar4_create.rs::rar4_batch_matches_sequential_bytes`（输入完全确定，断言两档
+      写出的归档字节相同）在并发/负载下偶发失败：**长度相同、字节不同**。已确认
+      **HEAD 也能复现**（`git stash` 掉本轮修改后，60 次并发跑中失败 1
+      次），与上文 `-hp`
+      修复无关，是既有问题。目前只确认「偶发」，尚无根因：可能是并行编码的
+      竞态，也可能是环境因素（非 ECC
+      内存、CPU、杀软、临时目录）。定位前不要盲改—— 先重复跑 +
+      TSan/`--test-threads` 压测，能稳定复现再进代码。
+
+### P0 · 发布收口（硬门槛）
 
 - [ ] **许可与 SPDX**：确定仓库级 SPDX 表达式。待裁定的两处：① rars workspace
       metadata（MIT OR Apache-2.0）与后来 COPYING（WTFPL）的冲突，即解码侧 WTFPL
@@ -26,6 +48,14 @@
       的 `readme` / `keywords` / `documentation` / `categories` 元数据。
 - [ ] **下一个破坏性版本**：删除 `rar_rs::archive::RarArchive` 兼容路径，公开面
       只留 `ArchiveReader` / `ArchiveWriter` / `ArchiveEditor`（ADR 0006）。
+
+### P1 · 工程加固（低成本）
+
+- [ ] **CI 开启 rustdoc `-D warnings`**：实测
+      `RUSTDOCFLAGS="-D warnings" cargo
+      doc --workspace --no-deps`
+      已零警告，但 `.github/workflows/CI.yml` 仍只 build-only，注释还写着「docs
+      link to private internals」——注释已过期。
 
 ### P1 · 功能缺口（按需，不阻塞发布）
 

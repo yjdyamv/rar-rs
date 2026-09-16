@@ -182,7 +182,19 @@ fn read_encrypted_block<R: Read + Seek>(
     let Some((header, raw, on_disk_header)) = decrypt_header(stream, password)? else {
         return Ok(None);
     };
-    let mut block = read_envelope(start, header, on_disk_header, policy.verify_crc)?;
+    // RAR4 header encryption has no MAC or password check value, so a header
+    // that does not decrypt into a valid envelope can only be attributed to
+    // the password (a genuinely corrupt header is indistinguishable). Map the
+    // parse/CRC failure deterministically instead of leaking whichever error
+    // the garbage bytes happened to hit — otherwise the same wrong password
+    // reports `Crc` or `Format` depending on the random salt.
+    let mut block = match read_envelope(start, header, on_disk_header, policy.verify_crc) {
+        Ok(block) => block,
+        Err(RarError::Crc { .. } | RarError::Format(_)) => {
+            return Err(RarError::WrongPassword);
+        }
+        Err(other) => return Err(other),
+    };
     if policy.retain_raw {
         block.raw_header = Some(raw);
     }
@@ -219,9 +231,10 @@ fn decrypt_header<R: Read>(stream: &mut R, password: &[u8]) -> RarResult<Option<
         .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
     let head_size = u16::from_le_bytes([block0[5], block0[6]]);
     if head_size < 7 {
-        return Err(RarError::Format(format!(
-            "RAR4: encrypted header head_size {head_size} too small (wrong password?)"
-        )));
+        // Garbage `head_size` from the first decrypted block: a wrong
+        // password (see `read_encrypted_block` for why that is the only
+        // deterministic attribution).
+        return Err(RarError::WrongPassword);
     }
     let align16 = ((head_size as usize) + 15) & !15;
     let mut rest = vec![0u8; align16 - 16];
@@ -452,6 +465,51 @@ mod tests {
             true,
             Some(b"pw"),
             EnvelopePolicy::PLAN,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RarError::WrongPassword), "got {err:?}");
+    }
+
+    #[test]
+    fn encrypted_block_with_a_bad_header_crc_is_a_wrong_password() {
+        // A wrong RAR4 password yields a plausible-looking head size often
+        // enough that the parser reaches the header CRC. That path must
+        // report WrongPassword too, not the Crc error the garbage happened
+        // to hit (the random salt made this nondeterministic before).
+        let mut header = vec![0u8; 32];
+        header[2] = FILE_HEAD;
+        header[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
+        header[5..7].copy_from_slice(&32u16.to_le_bytes());
+        header[7..11].copy_from_slice(&4u32.to_le_bytes());
+        // Leave HEAD_CRC zero: the computed CRC is not zero, so the
+        // decrypted header parses and then fails verification.
+        let (encrypted, _) =
+            crate::format::rar4::write::encrypt_block_header(&header, "pw").unwrap();
+
+        let err = read_block(
+            &mut std::io::Cursor::new(encrypted),
+            true,
+            Some(b"pw"),
+            EnvelopePolicy::SCAN,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RarError::WrongPassword), "got {err:?}");
+    }
+
+    #[test]
+    fn encrypted_block_with_an_impossible_head_size_is_a_wrong_password() {
+        // A garbage head size below the 7-byte minimum is the other shape a
+        // wrong password takes; it must also be WrongPassword rather than a
+        // Format error.
+        let header = vec![0u8; 16];
+        let (encrypted, _) =
+            crate::format::rar4::write::encrypt_block_header(&header, "pw").unwrap();
+
+        let err = read_block(
+            &mut std::io::Cursor::new(encrypted),
+            true,
+            Some(b"pw"),
+            EnvelopePolicy::SCAN,
         )
         .unwrap_err();
         assert!(matches!(err, RarError::WrongPassword), "got {err:?}");
