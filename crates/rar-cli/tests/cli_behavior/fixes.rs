@@ -90,9 +90,10 @@ fn cli_extraction_reports_skipped_files() {
     );
 
     let second = run(RAR_CLI, &["x", "e.rar", "--dest", "out"], dir.path());
-    assert!(
-        second.status.success(),
-        "{}",
+    assert_eq!(
+        second.status.code(),
+        Some(10),
+        "an all-skipped run exits 10 like WinRAR: {}",
         String::from_utf8_lossy(&second.stderr)
     );
     let text = String::from_utf8_lossy(&second.stdout);

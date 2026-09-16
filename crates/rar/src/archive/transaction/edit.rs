@@ -180,10 +180,6 @@ impl RarArchive {
         crate::fs::atomic::commit_files(&parent, &base, &[], &victims)
     }
 
-    /// Build the rename map (index -> new name) for resolved rename pairs,
-    /// expanding directory renames to their descendants with the same rules
-    /// as the name-based path. Returns the map and the number of explicit
-    /// rename pairs.
     /// Run one staged edit rewrite (delete mask + rename map) against the
     /// original archive and reload the catalog. Single-volume archives are
     /// rewritten through a sibling file that replaces the original only on
@@ -251,7 +247,8 @@ impl RarArchive {
     /// NEWSUB `CMT` block for RAR 1.5–4.x), if any.
     ///
     /// Header-encrypted archives store the comment encrypted; reading it
-    /// requires the password and is not supported yet.
+    /// requires the archive password, which the open path has already
+    /// verified and cached (`archive_block_key`).
     pub fn get_comment(&mut self) -> RarResult<Option<Vec<u8>>> {
         if self.is_rar13() {
             return self.rar13_archive_comment();

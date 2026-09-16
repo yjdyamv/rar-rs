@@ -72,7 +72,8 @@ fn cli_freshen_and_update_extraction() {
         path
     };
 
-    // Missing destination: freshen skips it, update extracts it.
+    // Missing destination: freshen skips it (exit 10, like official), update
+    // extracts it.
     let missing = dir.path().join("missing");
     let status = std::process::Command::new(RAR_CLI)
         .args(["x", "-f", "-idq"])
@@ -82,7 +83,7 @@ fn cli_freshen_and_update_extraction() {
         .current_dir(dir.path())
         .status()
         .unwrap();
-    assert!(status.success());
+    assert_eq!(status.code(), Some(10));
     assert!(
         !missing.join("f.txt").exists(),
         "-f must not extract a missing destination"
@@ -120,7 +121,7 @@ fn cli_freshen_and_update_extraction() {
     assert!(status.success());
     assert_eq!(std::fs::read(older.join("f.txt")).unwrap(), b"v1");
 
-    // Newer destination: left untouched by both.
+    // Newer destination: left untouched by both (all skipped -> exit 10).
     let newer = dest(
         "newer",
         b"fresh",
@@ -135,7 +136,7 @@ fn cli_freshen_and_update_extraction() {
             .current_dir(dir.path())
             .status()
             .unwrap();
-        assert!(status.success());
+        assert_eq!(status.code(), Some(10), "{flag}: all members skipped");
         assert_eq!(
             std::fs::read(newer.join("f.txt")).unwrap(),
             b"fresh",

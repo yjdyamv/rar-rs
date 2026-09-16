@@ -232,7 +232,11 @@ fn cli_overwrite_never_skips_existing_files() {
         .arg(&out)
         .status()
         .unwrap();
-    assert!(status.success());
+    assert_eq!(
+        status.code(),
+        Some(10),
+        "an all-skipped run exits 10 like official UnRAR"
+    );
     assert_eq!(
         std::fs::read(out.join("f.txt")).unwrap(),
         b"OLD",

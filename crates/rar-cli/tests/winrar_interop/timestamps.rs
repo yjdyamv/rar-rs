@@ -98,3 +98,89 @@ fn ts_file_times_interop_with_winrar() {
         }
     }
 }
+
+/// `-f` / `-u` extraction parity with UnRAR: both binaries replace only
+/// destinations older than the archived member, freshen skips a missing
+/// destination, and update extracts it.
+#[test]
+fn freshen_update_extraction_parity_with_unrar() {
+    let Some(unrar) = unrar_bin() else {
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("fu.txt");
+    std::fs::write(&src, b"v1").unwrap();
+    let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_modified(base)
+        .unwrap();
+    let archive = dir.path().join("fu.rar");
+    {
+        let mut writer = ArchiveWriter::create(&archive).unwrap();
+        writer
+            .add_path(
+                &src,
+                EntryWriteOptions::new()
+                    .compression_level(CompressionLevel::try_from(3u8).unwrap()),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+    }
+
+    // (case, existing destination content and mtime offset from `base`, flags)
+    type Case<'a> = (&'a str, Option<(&'a [u8], i64)>, &'a str);
+    let cases: [Case; 4] = [
+        ("older-f", Some((b"stale", -10)), "-f"),
+        ("newer-f", Some((b"fresh", 10)), "-f"),
+        ("missing-f", None, "-f"),
+        ("missing-u", None, "-u"),
+    ];
+    for (name, existing, flag) in cases {
+        let mut outcomes: Vec<(Option<i32>, Option<Vec<u8>>)> = Vec::new();
+        for (suffix, bin) in [
+            ("official", unrar.as_path()),
+            ("ours", Path::new(env!("CARGO_BIN_EXE_unrar"))),
+        ] {
+            let dest = dir.path().join(format!("{name}-{suffix}"));
+            std::fs::create_dir_all(&dest).unwrap();
+            if let Some((content, delta)) = existing {
+                let file = dest.join("fu.txt");
+                std::fs::write(&file, content).unwrap();
+                let mtime = if delta >= 0 {
+                    base + std::time::Duration::from_secs(delta as u64)
+                } else {
+                    base - std::time::Duration::from_secs((-delta) as u64)
+                };
+                std::fs::File::options()
+                    .write(true)
+                    .open(&file)
+                    .unwrap()
+                    .set_modified(mtime)
+                    .unwrap();
+            }
+            let output = Command::new(bin)
+                .args(["x", flag, "-y", "-idq"])
+                .arg(&archive)
+                .arg(format!("{}{}", dest.display(), std::path::MAIN_SEPARATOR))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.code().is_some(),
+                "{bin:?} x {flag} {name} was killed:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            outcomes.push((
+                output.status.code(),
+                std::fs::read(dest.join("fu.txt")).ok(),
+            ));
+        }
+        assert_eq!(
+            outcomes[0], outcomes[1],
+            "{name}: UnRAR and our unrar disagree (exit code and content must match)"
+        );
+    }
+}

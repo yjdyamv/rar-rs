@@ -172,6 +172,20 @@ fn cmd_update_freshen(
     };
 
     let updated_count = to_add.len();
+    // -tsp: snapshot source access times before the update reads them.
+    #[cfg(unix)]
+    let ts_preserve_atimes: Vec<(std::path::PathBuf, std::time::SystemTime)> = if misc.ts_preserve {
+        collected
+            .iter()
+            .filter(|item| !item.is_dir)
+            .filter_map(|item| {
+                let meta = std::fs::metadata(&item.path).ok()?;
+                Some((item.path.clone(), meta.accessed().ok()?))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     update_archive_transactionally(archive_path, |staged_path| {
         if !to_delete.is_empty() {
             if let Some(version_spec) = &misc.version_control {
@@ -342,6 +356,26 @@ fn cmd_update_freshen(
             archive: archive_path.to_string_lossy().into_owned(),
         })?;
     }
+    // `-tsp`: restore the source access times the update's reads refreshed
+    // (before `-df` removes any of the sources).
+    #[cfg(unix)]
+    if misc.ts_preserve {
+        for (path, atime) in &ts_preserve_atimes {
+            if let Err(error) = std::fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_times(std::fs::FileTimes::new().set_accessed(*atime)))
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                eprintln!(
+                    "rar: cannot restore the access time of {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = misc.ts_preserve;
     // `-t`: test the updated archive before `-df` removes the sources.
     if args.test_after {
         let mut ar = ops::open_reader(archive_path, password.as_deref())

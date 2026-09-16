@@ -114,6 +114,11 @@ pub(crate) fn build_main_header(
 /// header in place and recompute the header CRC. Offsets are stored relative
 /// to `base` (the archive start after the signature, plus any SFX stub).
 /// Returns whether any field was patched (and thus the CRC rewritten).
+///
+/// The fields are fixed 5-byte vints (35 bits). An archive larger than
+/// 32 GiB cannot name its trailing QO/RR record; a wrapped offset would
+/// point at arbitrary bytes, so the sentinel 0 is written instead: quick-open
+/// then treats the record as unusable and falls back to a full scan.
 pub(crate) fn patch_locator_fields(
     hdr: &mut [u8],
     qo_offset: Option<u64>,
@@ -122,9 +127,13 @@ pub(crate) fn patch_locator_fields(
     rr_field: Option<usize>,
     base: u64,
 ) -> RarResult<bool> {
+    // Largest offset a 5-byte vint can carry.
+    const LOCATOR_MAX_OFFSET: u64 = (1 << 35) - 1;
+
     let mut patched = false;
     if let (Some(qo), Some(field)) = (qo_offset, qo_field) {
-        let field_bytes = vint_fixed5(qo.saturating_sub(base));
+        let rel = qo.saturating_sub(base);
+        let field_bytes = vint_fixed5(if rel <= LOCATOR_MAX_OFFSET { rel } else { 0 });
         if field + field_bytes.len() > hdr.len() {
             return Err(RarError::Format("locator field out of bounds".into()));
         }
@@ -132,7 +141,8 @@ pub(crate) fn patch_locator_fields(
         patched = true;
     }
     if let (Some(rr), Some(field)) = (rr_offset, rr_field) {
-        let field_bytes = vint_fixed5(rr.saturating_sub(base));
+        let rel = rr.saturating_sub(base);
+        let field_bytes = vint_fixed5(if rel <= LOCATOR_MAX_OFFSET { rel } else { 0 });
         if field + field_bytes.len() > hdr.len() {
             return Err(RarError::Format("locator field out of bounds".into()));
         }
@@ -226,6 +236,24 @@ mod tests {
         let (qo, rr) = main_header_locator_fields(&meta).unwrap();
         assert_eq!(qo, qo_field);
         assert_eq!(rr, rr_field);
+    }
+
+    /// An offset beyond the 5-byte vint's 35 bits must land as the 0
+    /// sentinel (quick-open falls back to a full scan), not wrap.
+    #[test]
+    fn patched_offsets_beyond_35_bits_use_the_sentinel() {
+        let (mut hdr, qo_field, _) = build_main_header(0, &[], true, false, None);
+        let huge = (1u64 << 40) + 1234;
+        patch_locator_fields(&mut hdr, Some(huge), None, qo_field, None, 0).unwrap();
+        let raw = parse_block_bytes(&hdr).unwrap();
+        let ah = ArchiveHeader::from_raw(&raw).unwrap();
+        let parsed = crate::format::rar5::headers::locator_quick_open_offset(&ah.extra_data);
+        assert_eq!(
+            parsed,
+            Some(0),
+            "an unrepresentable offset uses the sentinel"
+        );
+        assert_ne!(parsed, Some(huge & ((1 << 35) - 1)), "must not wrap");
     }
 
     #[test]

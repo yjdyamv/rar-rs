@@ -456,6 +456,15 @@ impl RarArchive {
         let mut reader = File::open(path)?;
         let mut data = Vec::with_capacity(file_size as usize);
         std::io::Read::read_to_end(&mut reader, &mut data)?;
+        if data.len() as u64 != file_size {
+            return Err(RarError::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "file changed size while being archived: expected {file_size} bytes, read {}",
+                    data.len()
+                ),
+            )));
+        }
         self.add_rar4_data(name, data, level, mtime, mtime_ns, None, None)
     }
 
@@ -523,6 +532,7 @@ impl RarArchive {
             let mut source = CrcReader {
                 inner: File::open(path)?,
                 hasher: crc32fast::Hasher::new(),
+                read: 0,
             };
             let mut spill_file = crate::fs::atomic::read_write_create(&spill)?;
             let mut counter = CountingWriter::new(&mut spill_file);
@@ -573,6 +583,15 @@ impl RarArchive {
                 }
             }
             let read = source.hasher.finalize();
+            if source.read != file_size {
+                return Err(RarError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "file changed size while being archived: expected {file_size} bytes, read {}",
+                        source.read
+                    ),
+                )));
+            }
             file_crc = read;
             let compressed = counter.written();
             if compressed < file_size {

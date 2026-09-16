@@ -244,7 +244,10 @@ fn main() {
     output::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
     output::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
     if let Err(e) = run(cli) {
-        eprintln!("unrar: {e}");
+        // A silent outcome (exit code only) was already reported on stdout.
+        if !e.message().is_empty() {
+            eprintln!("unrar: {e}");
+        }
         process::exit(e.exit_code());
     }
 }
@@ -253,6 +256,7 @@ fn run(cli: Cli) -> CliResult<()> {
     let log_errors = cli.misc.log_errors.clone();
     let result = run_inner(cli);
     if let Err(e) = &result
+        && !e.message().is_empty()
         && let Some(log) = &log_errors
     {
         let _ = std::fs::OpenOptions::new()
@@ -395,6 +399,12 @@ fn cmd_extract(
     };
     let mut rar = ops::open_reader(&args.archive, password)?;
     if let Some(report) = ops::extract(&mut rar, &request)? {
+        if report.written_count() == 0 && report.skipped_count() > 0 {
+            // Like official UnRAR: every member was skipped -> "No files to
+            // extract", exit 10 (the message is the whole report).
+            info!("No files to extract");
+            return Err(error::CliError::silent(error::EXIT_NO_FILES));
+        }
         info!(
             "Extracted {} entries to {}",
             report.written_count(),
@@ -435,6 +445,10 @@ fn cmd_extract_flat(
     };
     let mut rar = ops::open_reader(&args.archive, password)?;
     if let Some(report) = ops::extract(&mut rar, &request)? {
+        if report.written_count() == 0 && report.skipped_count() > 0 {
+            info!("No files to extract");
+            return Err(error::CliError::silent(error::EXIT_NO_FILES));
+        }
         info!(
             "Extracted {} entries to {}",
             report.written_count(),

@@ -88,12 +88,16 @@ impl Write for CrcSink<'_> {
 pub(crate) struct CrcReader<R> {
     pub(crate) inner: R,
     pub(crate) hasher: crc32fast::Hasher,
+    /// Bytes actually read, so callers can detect a source that changed
+    /// size mid-archive.
+    pub(crate) read: u64,
 }
 
 impl<R: Read> Read for CrcReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
         self.hasher.update(&buf[..n]);
+        self.read += n as u64;
         Ok(n)
     }
 }

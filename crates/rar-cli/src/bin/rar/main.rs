@@ -97,16 +97,19 @@ fn main() {
     }
     let log_errors = cli.misc.log_errors.clone();
     if let Err(e) = run(cli) {
-        eprintln!("rar: {e}");
-        if let Some(log) = &log_errors {
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log)
-                .and_then(|mut f| {
-                    use std::io::Write;
-                    f.write_all(format!("rar: {e}\n").as_bytes())
-                });
+        // A silent outcome (exit code only) was already reported on stdout.
+        if !e.message().is_empty() {
+            eprintln!("rar: {e}");
+            if let Some(log) = &log_errors {
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log)
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        f.write_all(format!("rar: {e}\n").as_bytes())
+                    });
+            }
         }
         process::exit(e.exit_code());
     }

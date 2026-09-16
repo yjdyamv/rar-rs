@@ -55,6 +55,15 @@ impl CliError {
         }
     }
 
+    /// An exit-code-only outcome: the caller already reported the human
+    /// message (stdout summary), so the top-level handler prints nothing.
+    pub fn silent(exit_code: i32) -> Self {
+        Self {
+            message: String::new(),
+            exit_code,
+        }
+    }
+
     /// Prefix the message with operation context while keeping the code, e.g.
     /// `extract a.bin: <mismatch>`.
     #[must_use]

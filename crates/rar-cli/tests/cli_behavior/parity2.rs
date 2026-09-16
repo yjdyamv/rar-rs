@@ -367,19 +367,21 @@ fn cli_extract_overwrite_defaults_to_skip() {
     std::fs::create_dir_all(&out).unwrap();
     let out_file = out.join("f.txt");
 
-    for (label, extra, expected) in [
-        ("default", vec!["-idq"], "old"),
-        ("-y", vec!["-y", "-idq"], "new"),
-        ("-o+", vec!["-o+", "-idq"], "new"),
-        ("-o-", vec!["-o-", "-idq"], "old"),
+    for (label, extra, expected, code) in [
+        ("default", vec!["-idq"], "old", 10),
+        ("-y", vec!["-y", "-idq"], "new", 0),
+        ("-o+", vec!["-o+", "-idq"], "new", 0),
+        ("-o-", vec!["-o-", "-idq"], "old", 10),
     ] {
         std::fs::write(&out_file, b"old").unwrap();
         let mut command = std::process::Command::new(UNRAR_CLI);
         command.args(["x"]).args(&extra).arg(&archive);
         command.arg("--dest").arg(&out);
-        assert!(
-            command.current_dir(dir.path()).status().unwrap().success(),
-            "{label}"
+        let status = command.current_dir(dir.path()).status().unwrap();
+        assert_eq!(
+            status.code(),
+            Some(code),
+            "{label}: an all-skipped run exits 10 like official UnRAR"
         );
         assert_eq!(
             std::fs::read(&out_file).unwrap(),
