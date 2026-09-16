@@ -170,6 +170,46 @@ fn empty_member_crc_mismatch_fails_read_test_and_extract() {
     );
 }
 
+/// The parallel whole-archive path must verify empty members too: its decode
+/// phase skips `decode_member` for a zero-size payload but must still run the
+/// integrity check, or a crafted zero-size header slips through.
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_extraction_rejects_tampered_empty_member() {
+    const BIG: usize = 17 * 1024 * 1024;
+    let dir = make_temp_dir();
+    let path = dir.path().join("parallel-empty.rar");
+    {
+        let mut writer = ArchiveWriter::create(&path).unwrap();
+        for i in 0..4 {
+            writer
+                .add_bytes(&format!("big{i}.bin"), &vec![0x5A; BIG], opts(0))
+                .unwrap();
+        }
+        writer.add_bytes("empty.bin", b"", opts(0)).unwrap();
+        writer.finish().unwrap();
+    }
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    set_stored_crc(&mut bytes, "empty.bin", 0xDEAD_BEEF);
+    std::fs::write(&path, &bytes).unwrap();
+
+    let out = dir.path().join("out");
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let err = reader
+        .extract_all_with_options(&out, rar_rs::ExtractOptions::default())
+        .unwrap_err();
+    assert!(matches!(err, RarError::Crc { .. }), "parallel: {err}");
+    assert!(
+        !out.join("empty.bin").exists(),
+        "the tampered empty member must not land"
+    );
+    assert!(
+        out.join("big0.bin").exists(),
+        "members before the failure land"
+    );
+}
+
 #[test]
 fn empty_member_hash_mismatch_fails_read_and_test() {
     let dir = make_temp_dir();

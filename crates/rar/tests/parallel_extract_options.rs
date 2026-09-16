@@ -108,8 +108,8 @@ fn parallel_compressed_extraction_matches_serial() {
     for i in 0..MEMBERS {
         let id = reader.unique_entry(&member_name(i)).unwrap();
         assert_ne!(
-            reader.entry(id).unwrap().method_name(),
-            "STORE",
+            reader.entry(id).unwrap().method(),
+            0,
             "member {i} must be compressed for this test to cover the branch"
         );
     }
@@ -250,5 +250,77 @@ fn parallel_auto_rename_matches_serial() {
             serial_out.join(&renamed).exists(),
             "serial -or must create {renamed}"
         );
+    }
+}
+
+/// `-kb` (keep broken): the parallel replay stages a failed member's decoded
+/// bytes through the same materialization policy as the serial path, so the
+/// partial output is kept exactly when `-kb` asks for it; the failure still
+/// aborts the run and later members stay unwritten.
+#[test]
+fn parallel_keep_broken_matches_serial() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("broken.rar");
+    build_eligible_archive(&archive);
+    let victim_name = member_name(MEMBERS - 1);
+
+    // The victim must be a STORE member so the corrupted payload still
+    // decodes into the full output and only the CRC check fails.
+    {
+        let reader = ArchiveReader::open(&archive).unwrap();
+        let id = reader.unique_entry(&victim_name).unwrap();
+        assert_eq!(reader.entry(id).unwrap().method(), 0);
+    }
+    let mut bytes = std::fs::read(&archive).unwrap();
+    let payload = file_data_offset(&bytes, &victim_name);
+    bytes[payload] ^= 0xFF;
+    std::fs::write(&archive, &bytes).unwrap();
+
+    for keep_broken in [false, true] {
+        let options = ExtractOptions {
+            keep_broken,
+            ..Default::default()
+        };
+        let parallel_out = dir.path().join(format!("par-{keep_broken}"));
+        let serial_out = dir.path().join(format!("ser-{keep_broken}"));
+
+        let mut reader = ArchiveReader::open(&archive).unwrap();
+        let err = reader
+            .extract_all_with_options(&parallel_out, options)
+            .unwrap_err();
+        assert!(matches!(err, rar_rs::RarError::Crc { .. }), "{err}");
+
+        let mut reader = ArchiveReader::open(&archive).unwrap();
+        for i in 0..MEMBERS - 1 {
+            let id = reader.unique_entry(&member_name(i)).unwrap();
+            reader
+                .extract_entry_with_options(id, &serial_out, options)
+                .unwrap();
+        }
+        let id = reader.unique_entry(&victim_name).unwrap();
+        let err = reader
+            .extract_entry_with_options(id, &serial_out, options)
+            .unwrap_err();
+        assert!(matches!(err, rar_rs::RarError::Crc { .. }), "{err}");
+
+        for out in [&parallel_out, &serial_out] {
+            assert!(
+                out.join(member_name(0)).exists(),
+                "members before the failure land ({out:?})"
+            );
+            let kept = out.join(&victim_name);
+            assert_eq!(
+                kept.exists(),
+                keep_broken,
+                "-kb decides whether {kept:?} stays on disk"
+            );
+            if keep_broken {
+                assert_eq!(
+                    std::fs::metadata(&kept).unwrap().len(),
+                    MEMBER_BYTES as u64,
+                    "the STORE victim decodes fully before the CRC check"
+                );
+            }
+        }
     }
 }

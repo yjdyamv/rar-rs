@@ -16,7 +16,7 @@ use crate::archive::DecryptedPayload;
 use crate::archive::{ArchiveEntry, MAX_DICT_SIZE_LOG, RarArchive};
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::parse_redirect_record;
-use crate::fs::atomic::{replace_file, temp_sibling_path};
+use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path};
 use crate::fs::safe_path::sanitize_archive_path;
 #[cfg(feature = "parallel")]
 use crate::model::FileHeader;
@@ -56,15 +56,22 @@ fn reports_outcome(entry: &ArchiveEntry, options: &crate::options::ExtractOption
 /// `Ok(())` installs the temp over the destination; `Err(e)` means the
 /// member failed (decode, integrity check, or the write itself) — with `-kb`
 /// (`keep_broken`) the partial temp is installed anyway, otherwise it is
-/// removed, and `e` is returned unchanged. The streaming serial path and the
-/// buffered parallel path share this policy so `-kb` cannot drift apart.
+/// removed, and `e` is returned unchanged. Reporting a member failure
+/// through this closure is what applies the `-kb` policy, so a caller holding
+/// already-failed bytes must return `Err`, never `Ok`.
+///
+/// The streaming serial path and the buffered parallel path share this
+/// policy so `-kb` cannot drift apart. It is deliberately not a
+/// [`crate::fs::atomic::StagedFile`]: extraction never fsyncs a member, and
+/// the failure path needs install-on-error rather than unconditional
+/// cleanup.
 fn materialize_member_file<F>(dest_path: &Path, keep_broken: bool, produce: F) -> RarResult<()>
 where
     F: FnOnce(&mut File) -> RarResult<()>,
 {
     let tmp_path = temp_sibling_path(dest_path);
     let result = (|| -> RarResult<()> {
-        let mut file = File::create(&tmp_path)?;
+        let mut file = read_write_create(&tmp_path)?;
         produce(&mut file)?;
         file.flush()?;
         Ok(())
@@ -247,9 +254,9 @@ impl RarArchive {
         }
 
         // Phase 2: decode + integrity-check in parallel. Validation failures
-        // abort before any output is staged (like the serial path, which
-        // validates before creating its temp file); decode and integrity
-        // failures travel back with the partial bytes.
+        // abort before that member's output is staged (like the serial path,
+        // which validates before creating its temp file); decode and
+        // integrity failures travel back with the partial bytes.
         let results: Vec<RarResult<DecodedMember>> = extraction_pool().install(|| {
             payloads
                 .into_par_iter()
@@ -281,29 +288,32 @@ impl RarArchive {
 
                     // The one member decoder (STORE bound, decode, size
                     // check) the serial paths use; the Vec sink keeps the
-                    // decoded bytes for the sequential replay below.
+                    // decoded bytes for the sequential replay below. Empty
+                    // members have nothing to decode but still carry an
+                    // integrity value (a crafted zero-size header must not
+                    // bypass the check), so verification runs either way.
                     let mut data = Vec::new();
                     let mut error = None;
-                    if hdr.packed_size != 0 || hdr.unpacked_size != 0 {
-                        let outcome = (|| -> RarResult<()> {
+                    let outcome = (|| -> RarResult<()> {
+                        if hdr.packed_size != 0 || hdr.unpacked_size != 0 {
                             crate::format::rar5::payload::decode_member(
                                 hdr, &payload, None, &mut data,
                             )?;
-                            let crc = crc32fast::hash(&data);
-                            let blake = hdr
-                                .hash_value
-                                .map(|_| crate::format::rar5::blake2sp::hash(&data));
-                            verify_integrity_for(
-                                hdr,
-                                crc,
-                                blake,
-                                payload.params.as_ref(),
-                                payload.keys.as_ref(),
-                            )
-                        })();
-                        if let Err(e) = outcome {
-                            error = Some(e);
                         }
+                        let crc = crc32fast::hash(&data);
+                        let blake = hdr
+                            .hash_value
+                            .map(|_| crate::format::rar5::blake2sp::hash(&data));
+                        verify_integrity_for(
+                            hdr,
+                            crc,
+                            blake,
+                            payload.params.as_ref(),
+                            payload.keys.as_ref(),
+                        )
+                    })();
+                    if let Err(e) = outcome {
+                        error = Some(e);
                     }
                     Ok(DecodedMember {
                         idx: i,
@@ -323,6 +333,10 @@ impl RarArchive {
         for result in results {
             let member = result?;
             let idx = member.idx;
+            // `resolve_dest_path` and `finish_member` both need the archive,
+            // and the latter takes `&mut self`, so the entry is cloned out
+            // of the catalog first (the serial loop keeps a whole-catalog
+            // snapshot for the same reason).
             let entry = self.entries[idx].clone();
             let dest_path = match self.resolve_dest_path(&entry, dest)? {
                 Destination::Extract(path) => path,
@@ -354,15 +368,21 @@ impl RarArchive {
                 fs::create_dir_all(parent)?;
             }
             if let Some(err) = member.error {
-                // The member already failed; `materialize_member_file` keeps
-                // the partial temp only under `-kb`, and the member's own
-                // error aborts the run. The closure never reports success,
-                // so `staged` is always an error here.
+                // Report the failure through the closure: that is what makes
+                // `materialize_member_file` apply the `-kb` policy to the
+                // decoded bytes (returning `Ok` here would install them even
+                // without `-kb`). A staging I/O error would win over `err`.
                 let staged = materialize_member_file(&dest_path, keep_broken, |file| {
                     file.write_all(&member.data)?;
                     Err(err)
                 });
-                return staged.map(|()| None);
+                return match staged {
+                    Err(e) => Err(e),
+                    // Unreachable: the closure above never reports success.
+                    Ok(()) => Err(RarError::InvalidState(
+                        "failed member staged as complete".into(),
+                    )),
+                };
             }
             materialize_member_file(&dest_path, keep_broken, |file| {
                 file.write_all(&member.data)?;
@@ -541,8 +561,9 @@ impl RarArchive {
 
     /// Extract one entry, recording the outcome in `report`. File contents
     /// are decoded to a temporary file and renamed over the destination only
-    /// after integrity checks pass, so a failure never leaves partial or
-    /// corrupt output behind.
+    /// after integrity checks pass, so a failure leaves no output behind —
+    /// unless `-kb` asked for the partial file
+    /// ([`materialize_member_file`]).
     fn extract_entry(
         &mut self,
         idx: usize,
