@@ -1,0 +1,32 @@
+name: Docs
+
+# Markdown-only gate: keeps every `.md` canonically formatted by dprint
+# (80-column prose). It is a separate workflow because the main CI run
+# ignores `**/*.md` paths, so a docs-only change would otherwise bypass the
+# check entirely. Rules and config: docs/README.md, dprint.json.
+
+on:
+  push:
+    paths:
+      - '**/*.md'
+      - dprint.json
+      - .github/workflows/docs.yml
+  pull_request:
+    paths:
+      - '**/*.md'
+      - dprint.json
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+jobs:
+  format:
+    name: Markdown formatting (dprint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Check Markdown formatting
+        run: npx --yes dprint@0.50.2 check

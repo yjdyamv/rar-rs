@@ -1,40 +1,44 @@
 # RAR4 Creation Feature Spec
 
+> 最后核对：2026-09-16 @ `c2c43d4`；字节级行为由测试与官方工具对拍锁定。
+
 ## 目标
 
-rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver 15/20/29）归档，创建的归档**必须能被 WinRAR 6.23 解压**。
+rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver
+15/20/29）归档，创建的归档**必须能被 WinRAR 6.23 解压**。
 
 ## 范围
 
 ### Phase 1（本次实现）
 
-| 功能 | 状态 |
-|------|------|
-| STORE（不压缩） | ✅ |
-| LZSS+Huffman m1-m5 | ✅ |
-| Solid 模式（-s） | ✅ |
-| 成员级加密（-p） | ✅ |
-| 多卷（-v） | ✅ |
-| 单卷创建 | ✅ |
-| CLI -ma4 开关 | ✅ |
+| 功能               | 状态 |
+| ------------------ | ---- |
+| STORE（不压缩）    | ✅   |
+| LZSS+Huffman m1-m5 | ✅   |
+| Solid 模式（-s）   | ✅   |
+| 成员级加密（-p）   | ✅   |
+| 多卷（-v）         | ✅   |
+| 单卷创建           | ✅   |
+| CLI -ma4 开关      | ✅   |
 
 ### Phase 2（已完成，2026-09）
 
-| 功能 | 状态 |
-|------|------|
-| PPMd 编码 | ✅ |
-| 头加密（-hp） | ✅ |
-| 自动 VM 过滤器（E8/E8E9/Delta/Audio 探测 + RGB/Itanium 编码） | ✅ |
-| 内联恢复记录（NEWSUB 0x7a RR）写/修 | ✅ |
-| 多文件并行 batch | ✅ |
-| solid 链 PPMd 模型延续 | ✅ |
+| 功能                                                          | 状态 |
+| ------------------------------------------------------------- | ---- |
+| PPMd 编码                                                     | ✅   |
+| 头加密（-hp）                                                 | ✅   |
+| 自动 VM 过滤器（E8/E8E9/Delta/Audio 探测 + RGB/Itanium 编码） | ✅   |
+| 内联恢复记录（NEWSUB 0x7a RR）写/修                           | ✅   |
+| 多文件并行 batch                                              | ✅   |
+| solid 链 PPMd 模型延续                                        | ✅   |
 
 > PPMd 不是独立开关：`-m0` = STORE（WinRAR 定义）；PPMd 由 RAR29 编码器在
-> `-m4/-m5`（非 solid）按候选竞争，solid 链内作为与 LZ 并行的模型链赢者推进
-> （见 `codec/legacy/rar29_encoder.rs` 与 `PLAN.md` "RAR4 写侧 Tier 2 全闭"）。
+> `-m4/-m5`（非 solid）按候选竞争，solid 链内作为与 LZ 并行的模型链赢者推进（见
+> `codec/legacy/rar29_encoder.rs` 与 `PLAN.md` "RAR4 写侧 Tier 2 全闭"）。
 > 方法字节仍按 `-m` 级写（0x30+m），块内首个标志位指示 PPMd。
 
-Recovery volumes（`.rev`）两种布局均已支持，见 `docs/issues/rar4-recovery-volumes.md`。
+Recovery volumes（`.rev`）两种布局均已支持，见
+`docs/issues/rar4-recovery-volumes.md`。
 
 ### 不支持（RAR4 格式无此功能）
 
@@ -46,12 +50,12 @@ Recovery volumes（`.rev`）两种布局均已支持，见 `docs/issues/rar4-rec
 
 ## 验证记录（2026-09-07 CLI 实测）
 
-`rar a -ma4` 压缩创建端到端可用：2.36 MB 文本语料上 `-m0` → Store
-（2,367,201 B）、`-m3` → Normal（23,048 B，1.0%）、`-m5` → Best
-（17,497 B，0.7%）、`-ma4 -s -m5` → Best。互操作覆盖见
-`crates/rar-cli/tests/winrar_interop/rar4_create.rs` 的 `we_create_rar4_*`（m3/m5、
-solid PPMd、Delta 过滤器、`-p`、`-hp`、`-rr` 双字节校验）与
-`cli_behavior/legacy.rs` 的 `cli_ma4_*`。
+`rar a -ma4` 压缩创建端到端可用：2.36 MB 文本语料上 `-m0` → Store （2,367,201
+B）、`-m3` → Normal（23,048 B，1.0%）、`-m5` → Best （17,497
+B，0.7%）、`-ma4 -s -m5` → Best。互操作覆盖见
+`crates/rar-cli/tests/winrar_interop/rar4_create.rs` 的
+`we_create_rar4_*`（m3/m5、 solid PPMd、Delta 过滤器、`-p`、`-hp`、`-rr`
+双字节校验）与 `cli_behavior/legacy.rs` 的 `cli_ma4_*`。
 
 ## 架构设计
 
@@ -95,7 +99,8 @@ ArchiveWriter::close()
 ```
 
 - CRC16：标准 CRC-32 截断为 16 位，存储在块的前 2 字节
-- head_type：MARK_HEAD(0x72) / MAIN_HEAD(0x73) / FILE_HEAD(0x74) / ENDARC_HEAD(0x7b)
+- head_type：MARK_HEAD(0x72) / MAIN_HEAD(0x73) / FILE_HEAD(0x74) /
+  ENDARC_HEAD(0x7b)
 - flags：低位=块标志，高位=字典大小（压缩块）或额外标志
 - head_size：包含 CRC + type + flags + size 自身的总头大小
 
@@ -133,7 +138,9 @@ pub fn encode_member(
 ) -> RarResult<Vec<u8>>
 ```
 
-编码器输出 RAR3/4 格式的压缩块序列（不含 FILE_HEAD，只含压缩数据流）。写管线负责：
+编码器输出 RAR3/4 格式的压缩块序列（不含
+FILE_HEAD，只含压缩数据流）。写管线负责：
+
 1. 调用编码器得到压缩数据 `Vec<u8>`
 2. 如果有密码，用 Rar30Cipher 加密
 3. 构造 FILE_HEAD（含 packed_size、unpacked_size、CRC32）
@@ -141,16 +148,18 @@ pub fn encode_member(
 
 ### 多卷切分
 
-RAR4 多卷按 `-v` 精确填充：成员可跨卷，中碎片带 `FHD_SPLIT_BEFORE/AFTER`、各自携带片段 CRC，
-末碎片携带整成员 CRC 与完整 extra；每卷开头写 MAIN_HEAD。
+RAR4 多卷按 `-v` 精确填充：成员可跨卷，中碎片带
+`FHD_SPLIT_BEFORE/AFTER`、各自携带片段 CRC，末碎片携带整成员 CRC 与完整
+extra；每卷开头写 MAIN_HEAD。
 
 ### 加密
 
 RAR4 成员级加密（-p）按代分派（`archive/create.rs` 的 `rar4_member_encrypt`）：
 
 - **v29（RAR3/4，`crypto/rar30.rs`）**：每成员 8 字节随机 salt；密钥/IV 由 SHA-1
-  链式 KDF（`HASH_ROUNDS = 0x40000`）从口令 + salt 派生（AES-128-CBC，非 PBKDF2）；
-  加密范围为 FILE_HEAD 中 `packed_size` 之后的头字段 + 数据区，未加密字段保持明文。
+  链式 KDF（`HASH_ROUNDS = 0x40000`）从口令 + salt 派生（AES-128-CBC，非
+  PBKDF2）；加密范围为 FILE_HEAD 中 `packed_size` 之后的头字段 +
+  数据区，未加密字段保持明文。
 - **v20（RAR2.x）**：块密码，16 字节对齐，无 salt。
 - **v15（RAR1.5）**：流式 XOR 密码，无 salt、无 padding。
 
@@ -178,10 +187,15 @@ rar a -ma4 -v1m archive.rar file1 file2
 ```
 
 在 `crates/rar-cli/src/bin/rar/{args,create}.rs` 中：
-- `archive_version()` 解析 `"4"` → `ArchiveVersion::V29`（旧 `archive_format_force_v70()`，
-  2026-09 收敛为单一版本表）
-- `CreateOptions` 的 `compression` 字段类型为 `ArchiveVersion`（`"4"` → `V29`，字段原名 `format_version`，2026-09 与 `WriterOptions::compression` 统一）
-- RAR4 不兼容的选项（quick_open、blake2、owner/streams、RAR7 字典）在 `-ma4` 时报错；内联 RR（`-rr`）、头加密（`-hp`）与 `.rev` 恢复卷（`-rv`/`rv`/`rc`，2026-09）**已支持**
+
+- `archive_version()` 解析 `"4"` → `ArchiveVersion::V29`（旧
+  `archive_format_force_v70()`， 2026-09 收敛为单一版本表）
+- `CreateOptions` 的 `compression` 字段类型为 `ArchiveVersion`（`"4"` →
+  `V29`，字段原名 `format_version`，2026-09 与 `WriterOptions::compression`
+  统一）
+- RAR4 不兼容的选项（quick_open、blake2、owner/streams、RAR7 字典）在 `-ma4`
+  时报错；内联 RR（`-rr`）、头加密（`-hp`）与 `.rev`
+  恢复卷（`-rv`/`rv`/`rc`，2026-09）**已支持**
 
 ## 测试策略
 
@@ -204,7 +218,8 @@ rar a -ma4 -v1m archive.rar file1 file2
 
 ## 实现顺序
 
-1. **RAR4 头序列化**：`format/rar4/write/mod.rs` 中的 `build_file_header()`、`write_file_header()`、`build_main_header()`
+1. **RAR4 头序列化**：`format/rar4/write/mod.rs` 中的
+   `build_file_header()`、`write_file_header()`、`build_main_header()`
 2. **STORE-only 创建**：最简单的路径，验证头格式正确
 3. **RAR29 编码器移植**：从 rars 移植 `Unpack29Encoder`，适配 rar-rs 错误类型
 4. **LZSS 压缩创建**：m1-m5 各级别

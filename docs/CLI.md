@@ -1,9 +1,12 @@
 # Command-Line Reference
 
-rar-rs ships two binaries, `rar` and `unrar`, modelled on the WinRAR 7.x
-console tools. Every official command is implemented. Switches follow
-WinRAR 7.23 semantics; unsupported switches are either rejected or accepted
-as no-ops where WinRAR does the same. This page is the usage reference.
+> Last verified: 2026-09-16 @ `c2c43d4`; switch coverage is checked against the
+> clap surface, behavior against the tests and the official WinRAR 7.23 tools.
+
+rar-rs ships two binaries, `rar` and `unrar`, modelled on the WinRAR 7.x console
+tools. Every official command is implemented. Switches follow WinRAR 7.23
+semantics; unsupported switches are either rejected or accepted as no-ops where
+WinRAR does the same. This page is the usage reference.
 
 ---
 
@@ -22,154 +25,146 @@ never a silent dump into a `<name>/` folder.
 
 ### Commands
 
-| Command | Alias | Action |
-|---|---|---|
-| `a` | | Add files (creates the archive if missing); `a -f`/`a -u` behave like the `f`/`u` commands, `-k` locks the result and `-z<file>` sets the comment |
-| `u` | | Update: add missing files, replace newer ones |
-| `f` | | Freshen: update existing members only |
-| `m` | | Move: add files, then erase the sources |
-| `mf` | | Move files only: the tree is archived like `m`, but directories are left on disk |
-| `d` | | Delete members without rebuilding the archive |
-| `rn` | | Rename archived members |
-| `ch` | | Change parameters (`-cl`/`-cu` name case conversion) |
-| `k` | | Lock the archive (read-only) |
-| `rr` | | Add an inline recovery record (percent is a trailing argument: `rar rr archive.rar 10`, default 10%) |
-| `rv[N]` | | Create `.rev` recovery volumes for an existing set (`rv3` / `rv10%`, default 10%) |
-| `r` | | Repair the archive with its recovery record |
-| `rc` | | Rebuild missing volumes from `.rev` files |
-| `s` | | Convert the archive to self-extracting (SFX) |
-| `s-` | | Strip the SFX module from an SFX archive |
-| `c` | | Set the archive comment (stdin, or `-z<file>`) |
-| `cw` | | Write the archive comment to stdout, or to a file with `cw archive file` |
-| `cf` | | Set/remove a per-member comment (RAR4 only; the library rejects it for RAR5, which has no member-comment block) |
-| `p` | | Print a member to stdout |
-| `x` | | Extract with full paths |
-| `e` | | Extract without paths (flat) |
-| `t` | | Test archive contents |
-| `v` | | Verbose list (WinRAR's `Attributes/Size/Packed/Ratio/Date/Time/Checksum/Name` table; on a volume set only the opened volume's members, with `-->`/`<->`/`<--` fragment ratios and per-fragment `Pack-CRC32`) |
-| `l` | | List contents (WinRAR's `Attributes/Size/Date/Time/Name` table; volume sets list only the opened volume's members) |
-| `lb` | | List bare (names only) |
-| `lt` | | List technical (WinRAR's per-member block: type, sizes, ratio, nanosecond mtime, attributes, CRC32, host OS, compression); `lta` accepted as an alias |
-| `vb` / `vt` | | Verbose bare / verbose technical (`vta` alias accepted) |
-| `i` | | Show archive info (file/dir counts, total & packed size, ratio) |
-| `i<string>` | | Find a string inside members (`ic`/`ih` variants); **`i` alone is Info, not search** |
+| Command     | Alias | Action                                                                                                                                                                                                       |
+| ----------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `a`         |       | Add files (creates the archive if missing); `a -f`/`a -u` behave like the `f`/`u` commands, `-k` locks the result and `-z<file>` sets the comment                                                            |
+| `u`         |       | Update: add missing files, replace newer ones                                                                                                                                                                |
+| `f`         |       | Freshen: update existing members only                                                                                                                                                                        |
+| `m`         |       | Move: add files, then erase the sources                                                                                                                                                                      |
+| `mf`        |       | Move files only: the tree is archived like `m`, but directories are left on disk                                                                                                                             |
+| `d`         |       | Delete members without rebuilding the archive                                                                                                                                                                |
+| `rn`        |       | Rename archived members                                                                                                                                                                                      |
+| `ch`        |       | Change parameters (`-cl`/`-cu` name case conversion)                                                                                                                                                         |
+| `k`         |       | Lock the archive (read-only)                                                                                                                                                                                 |
+| `rr`        |       | Add an inline recovery record (percent is a trailing argument: `rar rr archive.rar 10`, default 10%)                                                                                                         |
+| `rv[N]`     |       | Create `.rev` recovery volumes for an existing set (`rv3` / `rv10%`, default 10%)                                                                                                                            |
+| `r`         |       | Repair the archive with its recovery record                                                                                                                                                                  |
+| `rc`        |       | Rebuild missing volumes from `.rev` files                                                                                                                                                                    |
+| `s`         |       | Convert the archive to self-extracting (SFX)                                                                                                                                                                 |
+| `s-`        |       | Strip the SFX module from an SFX archive                                                                                                                                                                     |
+| `c`         |       | Set the archive comment (stdin, or `-z<file>`)                                                                                                                                                               |
+| `cw`        |       | Write the archive comment to stdout, or to a file with `cw archive file`                                                                                                                                     |
+| `cf`        |       | Set/remove a per-member comment (RAR4 only; the library rejects it for RAR5, which has no member-comment block)                                                                                              |
+| `p`         |       | Print a member to stdout                                                                                                                                                                                     |
+| `x`         |       | Extract with full paths                                                                                                                                                                                      |
+| `e`         |       | Extract without paths (flat)                                                                                                                                                                                 |
+| `t`         |       | Test archive contents                                                                                                                                                                                        |
+| `v`         |       | Verbose list (WinRAR's `Attributes/Size/Packed/Ratio/Date/Time/Checksum/Name` table; on a volume set only the opened volume's members, with `-->`/`<->`/`<--` fragment ratios and per-fragment `Pack-CRC32`) |
+| `l`         |       | List contents (WinRAR's `Attributes/Size/Date/Time/Name` table; volume sets list only the opened volume's members)                                                                                           |
+| `lb`        |       | List bare (names only)                                                                                                                                                                                       |
+| `lt`        |       | List technical (WinRAR's per-member block: type, sizes, ratio, nanosecond mtime, attributes, CRC32, host OS, compression); `lta` accepted as an alias                                                        |
+| `vb` / `vt` |       | Verbose bare / verbose technical (`vta` alias accepted)                                                                                                                                                      |
+| `i`         |       | Show archive info (file/dir counts, total & packed size, ratio)                                                                                                                                              |
+| `i<string>` |       | Find a string inside members (`ic`/`ih` variants); **`i` alone is Info, not search**                                                                                                                         |
 
 Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
-`--work-dir <path>` (`-w<path>`; the directory WinRAR uses for temporary
-files — it must exist and never changes where outputs are written).
+`--work-dir <path>` (`-w<path>`; the directory WinRAR uses for temporary files —
+it must exist and never changes where outputs are written).
 
 ### Input syntax (WinRAR parity)
 
-- **List files**: any file/member argument starting with `@` names a plain
-  text list (`rar a arc @files.lst`, `unrar x arc @members.lst`); `@` alone
-  reads the list from stdin. `//` starts a comment, blank lines are
-  ignored, and `-@` disables list processing (`-@+` re-enables). Lists are
-  decoded as UTF-8 with a Latin-1 fallback; UTF-16 lists are detected by
-  BOM. `-sc<charset>l` is accepted (its charset conversion is not applied).
+- **List files**: any file/member argument starting with `@` names a plain text
+  list (`rar a arc @files.lst`, `unrar x arc @members.lst`); `@` alone reads the
+  list from stdin. `//` starts a comment, blank lines are ignored, and `-@`
+  disables list processing (`-@+` re-enables). Lists are decoded as UTF-8 with a
+  Latin-1 fallback; UTF-16 lists are detected by BOM. `-sc<charset>l` is
+  accepted (its charset conversion is not applied).
 - **Implicit `*.*`**: `rar a archive` with no files (and no `-si`) archives
   everything in the current directory, like WinRAR.
-- **Creation names**: `rar a foo f.txt` writes `foo.rar` — a missing
-  extension is filled in with `.rar`.
+- **Creation names**: `rar a foo f.txt` writes `foo.rar` — a missing extension
+  is filled in with `.rar`.
 - **Member filters**: `t`, `v`, `l`, `lb`, `lt`, `vb`, `vt` (and the UnRAR
   equivalents) accept member names after the archive and process only the
-  matches; a filter matching nothing is an error for `t` (exit 10) while the listing commands print an empty table and exit 0, like WinRAR.
-- **Extraction destination**: the trailing argument is the destination when
-  it ends with a path separator (`rar x arc.rar dest\`); an explicit
-  `--dest` wins.
+  matches; a filter matching nothing is an error for `t` (exit 10) while the
+  listing commands print an empty table and exit 0, like WinRAR.
+- **Extraction destination**: the trailing argument is the destination when it
+  ends with a path separator (`rar x arc.rar dest\`); an explicit `--dest` wins.
 - `rar d archive` without members is a successful no-op, like WinRAR.
 
 ### Compression & format
 
-| Switch | Meaning |
-|---|---|
-| `-m0` … `-m5` | Compression level (Store … Best) |
-| `-ma5` | RAR5 format (default; v50, with a > 4 GiB `-md` keeping WinRAR's auto v50/v70 semantics) |
-| `-ma7` | Force RAR7 (v70) members at any dictionary size — an extension beyond WinRAR 7.23, which only switches to v70 above a 4 GiB dictionary |
-| `-ma4` | Legacy RAR3/4 container (v29): full write-side since 2026-09 — STORE + LZSS m1–m5 + PPMd, VM filters, -hp, RR, solid chains; byte-verified against WinRAR 6.23 (the last RAR4 producer) and read by 7.23/UnRAR |
-| `-ma13` / `-ma14` | DOS-era RAR 1.3/1.4 container (`RE~^`, v14): STORE + Unpack15 m1–m5, solid chains, archive comments, `-p` member encryption and old-style `.rar`/`.r00` volume sets (`-v`, up to 901 volumes); `-hp`/recovery/quick-open/owner/streams/BLAKE2sp/dictionaries are rejected, and `-sfx` is rejected because official tools only recognize the legacy DOS stub. Extension beyond WinRAR 7.23 (which cannot write this container); UnRAR 7.23 reads the output |
-| `-ma2` | Legacy RAR 2.x container (v20) member writer |
-| `-ma15` | Legacy RAR 1.5 container (v15) member writer |
-| `-md<size>` | Dictionary size (incl. RAR7 >4 GiB when `-ma7`); follows `-md`, default 32 MiB, capped at 2× member size |
-| `-mdx<size>` | Decompression dictionary cap (default 4 GiB) |
-| `-mt<threads>` | Compression/decompression thread count |
-| `-s` / `-ds` | Solid archive / disable solid sorting |
-| `-s=d` / `-s=v` / `-s=e` (aliases `-sd` / `-sv` / `-se`) | Split the solid statistics: continuously (default), at each volume (`-sv`) or when the member extension changes (`-se`); `-sv` is rejected for RAR4 and both resets are rejected for RAR 1.3–2.x, whose chains cannot carry a reset flag. The switch is accepted (and ignored) on read commands, like WinRAR |
-| `-ms<list>` | List of file types to store without compressing |
-| `-mcl` | Long-distance matching (WinRAR hidden switch) — automatic at `-m2`…`-m5`; the `-mcl` switch is accepted (no-op) because long-range matching is always on for those levels, matching WinRAR 7.23 |
-| `-mc[ch][mode][+/-]` | Advanced filter policy: `-mc-` disables every filter, `-mcd-`/`-mce-` disable delta/x86, `-mcd+`/`-mce+` force them on all data (`-mcd<N>+` picks the delta channel count, 1–31); forcing both at once (`-mcd+ -mce+` / `-mcde+`) is rejected with `InvalidOption`, since the two transforms would cover the same member (the streaming writer reports "cannot force the delta and x86 filters on the same member; choose one filter mode"); `-mcl±`/`-mcx±` are accepted without effect (long-range always on, exhaustive search not implemented) |
-| filters | Automatic output filters: x86 `E8`/`E8E9` for code **and delta (multimedia) for correlated multi-channel data** (audio PCM, raw bitmaps, database pages) are applied per-member before LZSS and written as non-solid filter members; both decode byte-for-byte under WinRAR/UnRAR |
+| Switch                                                   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-m0` … `-m5`                                            | Compression level (Store … Best)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `-ma5`                                                   | RAR5 format (default; v50, with a > 4 GiB `-md` keeping WinRAR's auto v50/v70 semantics)                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `-ma7`                                                   | Force RAR7 (v70) members at any dictionary size — an extension beyond WinRAR 7.23, which only switches to v70 above a 4 GiB dictionary                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `-ma4`                                                   | Legacy RAR3/4 container (v29): full write-side since 2026-09 — STORE + LZSS m1–m5 + PPMd, VM filters, -hp, RR, solid chains; byte-verified against WinRAR 6.23 (the last RAR4 producer) and read by 7.23/UnRAR                                                                                                                                                                                                                                                                                                                                     |
+| `-ma13` / `-ma14`                                        | DOS-era RAR 1.3/1.4 container (`RE~^`, v14): STORE + Unpack15 m1–m5, solid chains, archive comments, `-p` member encryption and old-style `.rar`/`.r00` volume sets (`-v`, up to 901 volumes); `-hp`/recovery/quick-open/owner/streams/BLAKE2sp/dictionaries are rejected, and `-sfx` is rejected because official tools only recognize the legacy DOS stub. Extension beyond WinRAR 7.23 (which cannot write this container); UnRAR 7.23 reads the output                                                                                         |
+| `-ma2`                                                   | Legacy RAR 2.x container (v20) member writer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `-ma15`                                                  | Legacy RAR 1.5 container (v15) member writer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `-md<size>`                                              | Dictionary size (incl. RAR7 >4 GiB when `-ma7`); follows `-md`, default 32 MiB, capped at 2× member size                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `-mdx<size>`                                             | Decompression dictionary cap (default 4 GiB)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `-mt<threads>`                                           | Compression/decompression thread count                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `-s` / `-ds`                                             | Solid archive / disable solid sorting                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `-s=d` / `-s=v` / `-s=e` (aliases `-sd` / `-sv` / `-se`) | Split the solid statistics: continuously (default), at each volume (`-sv`) or when the member extension changes (`-se`); `-sv` is rejected for RAR4 and both resets are rejected for RAR 1.3–2.x, whose chains cannot carry a reset flag. The switch is accepted (and ignored) on read commands, like WinRAR                                                                                                                                                                                                                                       |
+| `-ms<list>`                                              | List of file types to store without compressing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `-mcl`                                                   | Long-distance matching (WinRAR hidden switch) — automatic at `-m2`…`-m5`; the `-mcl` switch is accepted (no-op) because long-range matching is always on for those levels, matching WinRAR 7.23                                                                                                                                                                                                                                                                                                                                                    |
+| `-mc[ch][mode][+/-]`                                     | Advanced filter policy: `-mc-` disables every filter, `-mcd-`/`-mce-` disable delta/x86, `-mcd+`/`-mce+` force them on all data (`-mcd<N>+` picks the delta channel count, 1–31); forcing both at once (`-mcd+ -mce+` / `-mcde+`) is rejected with `InvalidOption`, since the two transforms would cover the same member (the streaming writer reports "cannot force the delta and x86 filters on the same member; choose one filter mode"); `-mcl±`/`-mcx±` are accepted without effect (long-range always on, exhaustive search not implemented) |
+| filters                                                  | Automatic output filters: x86 `E8`/`E8E9` for code **and delta (multimedia) for correlated multi-channel data** (audio PCM, raw bitmaps, database pages) are applied per-member before LZSS and written as non-solid filter members; both decode byte-for-byte under WinRAR/UnRAR                                                                                                                                                                                                                                                                  |
 
 ### Encryption & integrity
 
-| Switch | Meaning |
-|---|---|
-| `-p<password>` / `-p-` | Set / clear password (file-level; AES-256 for RAR5, the legacy per-generation ciphers for RAR 1.5–4.x) |
-| `-hp<password>` | Encrypt headers too (`-hp`); multi-volume sets repeat the plaintext encryption header on every volume. RAR5 header-encrypted archives refuse `rn`/`ch` and archive-comment edits (rewritten headers cannot be re-encrypted yet); single-volume delete and recovery-record edits work, as do RAR4 `-hp` comments; deleting from a header-encrypted multi-volume set is refused (the set is left untouched) |
-| `-htb` | BLAKE2sp hash records (verified on read) |
-| `-htc` | CRC32 hash records (the default; accepted on every command, like WinRAR) |
+| Switch                 | Meaning                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-p<password>` / `-p-` | Set / clear password (file-level; AES-256 for RAR5, the legacy per-generation ciphers for RAR 1.5–4.x)                                                                                                                                                                                                                                                                                                    |
+| `-hp<password>`        | Encrypt headers too (`-hp`); multi-volume sets repeat the plaintext encryption header on every volume. RAR5 header-encrypted archives refuse `rn`/`ch` and archive-comment edits (rewritten headers cannot be re-encrypted yet); single-volume delete and recovery-record edits work, as do RAR4 `-hp` comments; deleting from a header-encrypted multi-volume set is refused (the set is left untouched) |
+| `-htb`                 | BLAKE2sp hash records (verified on read)                                                                                                                                                                                                                                                                                                                                                                  |
+| `-htc`                 | CRC32 hash records (the default; accepted on every command, like WinRAR)                                                                                                                                                                                                                                                                                                                                  |
 
 ### Volumes & recovery
 
-| Switch | Meaning |
-|---|---|
-| `-v<size>` | Multi-volume (e.g. `-v1m` ≈ 1 MB, `-v100k` ≈ 100 KB); sets of 10+ volumes use zero-padded `part01` names like WinRAR |
-| `-rr[N]` | Inline recovery record; N = count or `N%` percent, default 10% (the `-rv` switch below takes a **required** value, no default) |
+| Switch       | Meaning                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-v<size>`   | Multi-volume (e.g. `-v1m` ≈ 1 MB, `-v100k` ≈ 100 KB); sets of 10+ volumes use zero-padded `part01` names like WinRAR                                                                                                                                                                                                                                                                                     |
+| `-rr[N]`     | Inline recovery record; N = count or `N%` percent, default 10% (the `-rv` switch below takes a **required** value, no default)                                                                                                                                                                                                                                                                           |
 | `-rv<N\|N%>` | Recovery volumes; at creation the count is capped at the data-volume count (the standalone `rv` command at 10×). RAR4 sets (`-ma4`) use the legacy `.rev` layout: trailer format (`base.partNN.rev` / `baseN.rev`) when the volumes end in zero bytes (WinRAR-created sets), legacy full-parity format (`base<data>_<rec>_<idx>.rev`) otherwise; silently skipped when the archive ends up single-volume |
-| `-qo[-|+]` | Quick-open records: `-qo`/`-qo+` enable, `-qo-` disables (opt-in) |
+| `-qo[-       | +]`                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 ### Paths, time & misc
 
 `-r`/`-r0`/`-r-` (recurse), `-ep`/`-ep1`/`-ep2`/`-ep3`/`-ep4<path>` (path
-strip), `-ap<path>` (archive path prefix), `-x`/`-x@` (exclude),
-`-n`/`-n@` (include), `-ed`/`-as`/`-ad`/`-ad1`/`-ad2`/`-am` (empty dirs /
-sync / append the archive name to the destination / extract into each
-archive's own directory (with / without a per-archive subdirectory) /
-archive metadata),
-`-ol`/`-ol-`/`-ola`/`-oh` (store symlinks as
-redirects / skip links when archiving and extracting / extract links with
-dangerous targets as-is (disables the link safety checks); with `-ol` a
-directory symlink or junction is stored as a redirect instead of walking
-its target — Windows writes a Windows symlink (2) or junction (3) like
-WinRAR; hard links: hard-link groups store the first path and redirect the
-rest, and every redirect keeps the link's modification time — Windows and
-Unix, RAR5 only),
-`-op<path>`/`-or` (output path / auto-rename), `-os`/`-ow` (NTFS streams /
-owner), `-om[-|1][=ext;ext]` (propagate the archive's Mark of the Web to
-extracted files: zone value only, every field with `1`, optional extension
-filter; Windows only),
-`-oi[0-4][:<minsize>]` (identical files as references: `-oi`/`-oi1`
-store the first file and reference the rest, `-oi2` announces the groups,
-`-oi3`/`-oi4` list them and create no archive; default 64 KiB minimum,
-RAR5 only), `-df`/`-kb`/`-si<name>` (delete sources / keep broken / stdin
-member), `-sfx[name]` (create an SFX archive at create time),
-`-ta`/`-tb`/`-tn`/`-to` (time filters), `-tl`/`-tk[<date>]` (set archive
+strip), `-ap<path>` (archive path prefix), `-x`/`-x@` (exclude), `-n`/`-n@`
+(include), `-ed`/`-as`/`-ad`/`-ad1`/`-ad2`/`-am` (empty dirs / sync / append the
+archive name to the destination / extract into each archive's own directory
+(with / without a per-archive subdirectory) / archive metadata),
+`-ol`/`-ol-`/`-ola`/`-oh` (store symlinks as redirects / skip links when
+archiving and extracting / extract links with dangerous targets as-is (disables
+the link safety checks); with `-ol` a directory symlink or junction is stored as
+a redirect instead of walking its target — Windows writes a Windows symlink (2)
+or junction (3) like WinRAR; hard links: hard-link groups store the first path
+and redirect the rest, and every redirect keeps the link's modification time —
+Windows and Unix, RAR5 only), `-op<path>`/`-or` (output path / auto-rename),
+`-os`/`-ow` (NTFS streams / owner), `-om[-|1][=ext;ext]` (propagate the
+archive's Mark of the Web to extracted files: zone value only, every field with
+`1`, optional extension filter; Windows only), `-oi[0-4][:<minsize>]` (identical
+files as references: `-oi`/`-oi1` store the first file and reference the rest,
+`-oi2` announces the groups, `-oi3`/`-oi4` list them and create no archive;
+default 64 KiB minimum, RAR5 only), `-df`/`-kb`/`-si<name>` (delete sources /
+keep broken / stdin member), `-sfx[name]` (create an SFX archive at create
+time), `-ta`/`-tb`/`-tn`/`-to` (time filters), `-tl`/`-tk[<date>]` (set archive
 time to newest / keep, or set it to the given local date), `-ts[mca][±,1]`
-(three timestamps; `-ts-` omits the time field for RAR5 and is ignored for
-RAR 1.3–4.x, whose fixed headers always carry DOS local time), `-tsp` (preserve
-source access time), `-ver[n]` (versioning), `-ag[fmt]` (auto-name, local
-time),
+(three timestamps; `-ts-` omits the time field for RAR5 and is ignored for RAR
+1.3–4.x, whose fixed headers always carry DOS local time), `-tsp` (preserve
+source access time), `-ver[n]` (versioning), `-ag[fmt]` (auto-name, local time),
 `-z<file>`/`-c-` (comment file / no comment; `-z` is accepted and ignored
-outside the create and comment commands), `-y`/`-o±` (yes / overwrite
-mode), `-ierr`/`-ilog`/`-iver`, `-cfg-`/`-sc<charset>`. With no interactive
-prompt, extraction without `-y`/`-o+` skips existing files (WinRAR's
-non-interactive outcome); `-o+` overwrites, `-o-` skips and `-or`
-auto-renames.
+outside the create and comment commands), `-y`/`-o±` (yes / overwrite mode),
+`-ierr`/`-ilog`/`-iver`, `-cfg-`/`-sc<charset>`. With no interactive prompt,
+extraction without `-y`/`-o+` skips existing files (WinRAR's non-interactive
+outcome); `-o+` overwrites, `-o-` skips and `-or` auto-renames.
 
-Switches that are Windows-only or interactive in WinRAR (`-ac`, `-ai`,
-`-ao`, `-e[+]<attr>`, `-dh`, `-ieml`, `-ioff`, `-isnd`, `-ri`, `-mlp`,
-`-oc`, `-oni`, `-am[s,r]`, `-vp`, `-sc`) are **accepted as no-ops** on
-every command of both binaries, like WinRAR's own parser. `-os` (NTFS
-streams) is implemented on Windows:
-create stores the file's alternate data streams as `STM` records (each
+Switches that are Windows-only or interactive in WinRAR (`-ac`, `-ai`, `-ao`,
+`-e[+]<attr>`, `-dh`, `-ieml`, `-ioff`, `-isnd`, `-ri`, `-mlp`, `-oc`, `-oni`,
+`-am[s,r]`, `-vp`, `-sc`) are **accepted as no-ops** on every command of both
+binaries, like WinRAR's own parser. `-os` (NTFS streams) is implemented on
+Windows: create stores the file's alternate data streams as `STM` records (each
 stream is encrypted with the archive password when `-p`/`-hp` is set) and
-extraction restores them; on other platforms it is a no-op. `-dr` (recycle
-bin), `-dw` (wipe) and `-vd` (erase disk) are **rejected with an error**
-rather than silently ignored, since they would otherwise imply destructive
-changes. `-me<par>`
-(including the undocumented `-mes`) is accepted as a no-op.
+extraction restores them; on other platforms it is a no-op. `-dr` (recycle bin),
+`-dw` (wipe) and `-vd` (erase disk) are **rejected with an error** rather than
+silently ignored, since they would otherwise imply destructive changes.
+`-me<par>` (including the undocumented `-mes`) is accepted as a no-op.
 `-log[AFPU]*[=name]` (rar only; UnRAR rejects it like the official binary)
-writes archive names (`A`), processed member names (`F`), appending with
-`P` and UTF-16LE output with `U` to a log file (default `rarinfo.log`).
+writes archive names (`A`), processed member names (`F`), appending with `P` and
+UTF-16LE output with `U` to a log file (default `rarinfo.log`).
 
 ---
 
@@ -182,20 +177,20 @@ unrar <command> [-p<password>] [--dest <path>] archive[.rar] [names...]
 The destination directory is set with `--dest <path>` (default `.`); every
 `names...` argument is a **member selector**: a non-mask name must match the
 full stored path or name a directory (selecting its subtree), while `*`/`?`
-masks also match the basename anywhere in the tree. A name matching nothing
-is a hard error, never a silent dump into a `<name>/` folder.
+masks also match the basename anywhere in the tree. A name matching nothing is a
+hard error, never a silent dump into a `<name>/` folder.
 
-| Command | Action |
-|---|---|
-| `x` | Extract with full paths |
-| `e` | Extract without paths (flat) |
-| `l` | List contents |
-| `t` | Test integrity |
-| `p` | Print a member to stdout |
+| Command                         | Action                                                                       |
+| ------------------------------- | ---------------------------------------------------------------------------- |
+| `x`                             | Extract with full paths                                                      |
+| `e`                             | Extract without paths (flat)                                                 |
+| `l`                             | List contents                                                                |
+| `t`                             | Test integrity                                                               |
+| `p`                             | Print a member to stdout                                                     |
 | `v` / `lb` / `lt` / `vb` / `vt` | Verbose list / list bare / list technical / verbose bare / verbose technical |
 
-`unrar` accepts the same password/path/time switches as `rar` where they
-apply (e.g. `-p<password>`, `-o±`, `-y`, `-kb`).
+`unrar` accepts the same password/path/time switches as `rar` where they apply
+(e.g. `-p<password>`, `-o±`, `-y`, `-kb`).
 
 ---
 
@@ -241,8 +236,8 @@ unrar t backup.rar               # test
 ### A note on `rar d`
 
 `rar d` removes members without recompressing the rest: kept file blocks
-(header + compressed payload) are copied byte-for-byte, so the operation
-scales with the archive size — not with the remaining data. RAR5 solid
-archives recompress only the chain affected by the deletion. Solid RAR4
-archives are fully repacked (decode → re-encode), matching WinRAR 7.21+.
-Inline recovery records are dropped and the quick-open record is rebuilt.
+(header + compressed payload) are copied byte-for-byte, so the operation scales
+with the archive size — not with the remaining data. RAR5 solid archives
+recompress only the chain affected by the deletion. Solid RAR4 archives are
+fully repacked (decode → re-encode), matching WinRAR 7.21+. Inline recovery
+records are dropped and the quick-open record is rebuilt.

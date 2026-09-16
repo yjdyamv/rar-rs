@@ -2,17 +2,17 @@
 
 ## Supported versions
 
-Security fixes target the latest released version and the current `main`
-branch. Older releases are not maintained separately unless a release note says
+Security fixes target the latest released version and the current `main` branch.
+Older releases are not maintained separately unless a release note says
 otherwise.
 
 ## Reporting a vulnerability
 
 Please report vulnerabilities privately when the repository host offers a
-private security-report or advisory channel. If no private channel is
-available, contact a maintainer through a private channel listed on their host
-profile. As a last resort, open a public issue asking for a private contact,
-but do not include exploit details or attach a malicious archive.
+private security-report or advisory channel. If no private channel is available,
+contact a maintainer through a private channel listed on their host profile. As
+a last resort, open a public issue asking for a private contact, but do not
+include exploit details or attach a malicious archive.
 
 Include, when possible:
 

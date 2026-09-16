@@ -1,7 +1,10 @@
 # Testing
 
-How the suite is organized, what it costs, and the traps to know before
-changing it.
+> Last verified: 2026-09-16 @ `c2c43d4`; the timing table is a host-specific
+> snapshot, not a contract.
+
+How the suite is organized, what it costs, and the traps to know before changing
+it.
 
 ## Running
 
@@ -14,8 +17,8 @@ cargo test --package rar-rs --lib -- archive::   # one module
 `cargo nextest run --workspace --all-features` also works, is roughly twice as
 fast (it parallelizes across test binaries instead of running them one after
 another) and prints a per-test timing report, which is the easiest way to find
-what got slow. It is a local convenience only: CI stays on plain
-`cargo test`, and read the `rarfiles.lst` trap below before trusting it.
+what got slow. It is a local convenience only: CI stays on plain `cargo test`,
+and read the `rarfiles.lst` trap below before trusting it.
 
 ## Checking the Linux half from Windows
 
@@ -32,7 +35,7 @@ cargo clippy --workspace --all-features --all-targets --locked \
   --target x86_64-unknown-linux-gnu -- -D warnings
 ```
 
-The cfg-gated test branches can still only *run* on Linux; assert what POSIX
+The cfg-gated test branches can still only _run_ on Linux; assert what POSIX
 actually does (see `extract_rejects_unsafe_entry_names`) instead of assuming a
 Windows-only hazard.
 
@@ -47,9 +50,9 @@ opt-level = 2
 
 The compression paths (match finding, PPMd, AES) are pure CPU work and ran an
 order of magnitude slower unoptimized — the full suite took ~9 minutes and now
-takes ~2. Only test targets are affected; `cargo build` keeps the debug
-profile. `debug-assertions` and `overflow-checks` are still inherited from
-`dev`, so arithmetic panics and `debug_assert!` fire exactly as before.
+takes ~2. Only test targets are affected; `cargo build` keeps the debug profile.
+`debug-assertions` and `overflow-checks` are still inherited from `dev`, so
+arithmetic panics and `debug_assert!` fire exactly as before.
 
 ## Where the time goes
 
@@ -57,16 +60,16 @@ Measured on a 16-core host with `--all-features`, after the optimization above
 (per-test times from `cargo nextest run`):
 
 The numbers below are a snapshot measured on one host, not a contract. They are
-here to tell you *which* tests dominate, so you can filter — re-measure with
+here to tell you _which_ tests dominate, so you can filter — re-measure with
 `cargo nextest run` instead of updating this table when they drift.
 
-| Test | Time | What it does |
-|---|---|---|
+| Test                                                                        | Time  | What it does                                                                                         |
+| --------------------------------------------------------------------------- | ----- | ---------------------------------------------------------------------------------------------------- |
 | `codec::modern::lzss_huff::mt_tests::matchless_fast_path_is_byte_identical` | ~89 s | 7 corpora (~89 MiB) × 9 (level, dictionary, variant) combos × 2 (fast path on/off): ~1.6 GiB encoded |
-| `...::mt_tests::cli_like_external_chunking_serial_chain` | ~20 s | three 14 MiB members, chunked the way `add_file` does |
-| `...::mt_tests::sequential_solid_chain_random_shared_blocks` | ~18 s | three 13 MiB members against a 16 MiB dictionary |
-| `rar50_roundtrip` (3 tests) | ~22 s | large-file batch, parallel extraction, per-archive thread counts |
-| everything else | ~40 s | |
+| `...::mt_tests::cli_like_external_chunking_serial_chain`                    | ~20 s | three 14 MiB members, chunked the way `add_file` does                                                |
+| `...::mt_tests::sequential_solid_chain_random_shared_blocks`                | ~18 s | three 13 MiB members against a 16 MiB dictionary                                                     |
+| `rar50_roundtrip` (3 tests)                                                 | ~22 s | large-file batch, parallel extraction, per-archive thread counts                                     |
+| everything else                                                             | ~40 s |                                                                                                      |
 
 About 80% of the wall clock is three tests. They are **not** shrunk and **not**
 marked `#[ignore]`, on purpose: each one guards a regression that already
@@ -84,18 +87,18 @@ cargo nextest run -E 'not test(/mt_tests::/)'
 
 ## Traps
 
-- **`rarfiles_lst_lock()` is process-local.** `crates/rar-cli/tests/cli_behavior/`
-  guards the tests that read `rarfiles.lst` with a `static OnceLock<Mutex<()>>`
-  in its `support` module.
-  That works under `cargo test` (one process per test binary) but not under
-  `cargo nextest` (one process per test), where those tests can race and fail
-  intermittently. It is a test-isolation artifact, not a product defect — but
-  it is why CI does not use nextest.
+- **`rarfiles_lst_lock()` is process-local.**
+  `crates/rar-cli/tests/cli_behavior/` guards the tests that read `rarfiles.lst`
+  with a `static OnceLock<Mutex<()>>` in its `support` module. That works under
+  `cargo test` (one process per test binary) but not under `cargo nextest` (one
+  process per test), where those tests can race and fail intermittently. It is a
+  test-isolation artifact, not a product defect — but it is why CI does not use
+  nextest.
 
 - **Concurrency is not free.** Compression tests build Rayon pools sized from
-  `available_parallelism()`, so running every test at once can oversubscribe
-  the machine. On a 16-core host the library's own test binary went from 104 s
-  at 16 concurrent tests to 6.5 s at 8 when built without the `parallel`
-  feature; with it enabled the difference is only ~8%. If a run looks
-  pathologically slow, try `RUST_TEST_THREADS=8 cargo test …`. There is no
-  committed default — CI hosts are small enough that the default is fine.
+  `available_parallelism()`, so running every test at once can oversubscribe the
+  machine. On a 16-core host the library's own test binary went from 104 s at 16
+  concurrent tests to 6.5 s at 8 when built without the `parallel` feature; with
+  it enabled the difference is only ~8%. If a run looks pathologically slow, try
+  `RUST_TEST_THREADS=8 cargo test …`. There is no committed default — CI hosts
+  are small enough that the default is fine.

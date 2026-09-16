@@ -1,356 +1,128 @@
 # rar-rs 计划
 
-完成一项勾掉一项。本文件只留**结论**与**警告**；验证过程和工程细节见 git 历史（旧版详单：`git show d9201cf:PLAN.md`）。已落地的加固记在文末「加固记录」，不再单独维护 CHANGELOG。
+> 最后核对：2026-09-16 @ `c2c43d4`；实现细节以源码为准。
+
+本文件只留**结论**与**下一步**。历次审计、逐批修复与加固的过程记录在 git 历史
+（旧版详单：`git show d9201cf:PLAN.md`）；本文件不再维护 CHANGELOG。
+
+相关文档：术语见 [`CONTEXT.md`](CONTEXT.md)，模块图见
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，格式细节见
+[`docs/FORMAT_RAR5_RAR7.html`](docs/FORMAT_RAR5_RAR7.html)，性能议题见
+[`docs/issues/compression-perf/map.md`](docs/issues/compression-perf/map.md)。
+
+## 下一步
+
+优先级自上而下。完成一项勾掉一项：结论并入本文，过程留在 git 历史。
+
+### P0 · 发布收口（唯一硬门槛）
+
+- [ ] **许可与 SPDX**：确定仓库级 SPDX 表达式。待裁定的两处：① rars workspace
+      metadata（MIT OR Apache-2.0）与后来 COPYING（WTFPL）的冲突，即解码侧 WTFPL
+      / 编码侧 MIT OR Apache-2.0 的来源；② `recovery/legacy.rs` 声明了 rars
+      移植但缺许可行。逐文件出处清单见
+      [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)。
+- [ ] **打包与发布顺序**：`rar-rs`（0.1.2）已能 `cargo package` 并通过校验；
+      `rar-cli` 依赖 workspace 内的 `rar-rs`，需先发布 `rar-rs`。补齐三个 crate
+      的 `readme` / `keywords` / `documentation` / `categories` 元数据。
+- [ ] **下一个破坏性版本**：删除 `rar_rs::archive::RarArchive` 兼容路径，公开面
+      只留 `ArchiveReader` / `ArchiveWriter` / `ArchiveEditor`（ADR 0006）。
+
+### P1 · 功能缺口（按需，不阻塞发布）
+
+- [ ] **RAR4 solid 链内过滤器**：写侧尚未在 solid 链内应用 VM 过滤器（窗口=
+      变换后字节语义，LZ 收益有限）。
+- [ ] **RAR4 solid 归档 MT**：legacy solid 链保持串行；成员级并行需跨成员共享
+      窗口，属结构性代价（RAR5 的 chunk 级 MT 已兑现）。
+- [ ] **`-mcde+` 按块过滤器选择**：官方 `-mcde+` 产出按 64 KiB 块*不相交*的过滤
+      器序列，我们无法产等价的重叠记录，当前显式 `InvalidOption`；真对齐需实现
+      按块过滤器选择（新立项，见「一致拒绝」）。
+
+### P2 · 性能（未关闭议题，已 park）
+
+- [ ] **issue 09 — DLL 单线程解析速度**：真实 DLL 上 m3 `-mt1` 落后 WinRAR 约
+      5.9x，瓶颈是 BT4 下降步数（结构锁定：HASH_BITS、dict-log、提交阈值、近/远
+      带宽四个旋钮已验证弹回）。
+- [ ] **issue 04 — MT 随机数据窗口级不可压缩跳过**：已 park（低价值）——成员级
+      STORE 兜底已让随机数据领先 WinRAR 10–80x；窗口级跳过有把边界成员从压缩翻
+      成 STORE 的比率风险，需先有边界语料量化。
+
+### 暂缓（等决策，不自行推进）
+
+- **退出码差异**（用户要求暂缓）：
+  - 缺失归档：我们 exit 2，官方 exit 10。
+  - 未知开关：我们经 clap 解析失败 exit 2，官方 exit 7（未单独映射）。
+- **STORE 成员竞态**：单遍 STORE 先 `hash_file` 再重读同一路径，同尺寸改写真可能
+  写出旧 CRC/BLAKE2；回填头需要 patching（`-hp` 还要重加密），已接受。
+- **交互式覆盖询问**：默认按官方非交互语义跳过已存在（`-o+`/`-y` 覆盖，`-or`
+  自动改名）；交互询问未实现。
 
 ## 现状
 
-- RAR5 创建/读取全功能对齐 WinRAR 7.23：压缩、`-hp` 头加密、分卷、solid、内联恢复记录、`.rev` 恢复卷、quick-open、NTFS ADS、三时间戳、owner；另含 RAR7 (v70) 读写、`-mt` 多线程压缩、长距离匹配。
-- **最优解析**（m2-m5 全部）：rars 移植的 forward shortest-path DP（每块收集一次匹配、按上一 pass 的 Huffman 表重新定价 3 次、LZMA BT4 tree finder 全程 + 历史种子、BlockSplitter 按字节分布切 64-128 KiB 块、每块独立表）。m3（默认）vs WinRAR 7.23：生成代码 -52%、XML -24%、文本 -13%、DLL +2-6%（此前 +3-23%）；m2 在 DLL 上已反超 WinRAR。所有输出 WinRAR 字节级可解。
-- **MT 低步数解析（2026-09，issue 13 定论）**：`-mt` worker slice 走独立 hash-chain 低步数搜索（`mt_slice_symbols_low_step`，链预算 16，WinRAR m3 式），不再跑 seq 的最优解析——砍每位置步数 ~5x 以兑现 mt8 带宽悬崖，MT 输出进一步偏离 seq（文档化接受的分歧）。mt8 m3 实测：tsc x86 2791→1569 ms（ratio +2.43pp）、repeated text 1075→238 ms（+0.49pp）；random ~0.34x（STORE 兜底）。seq 与最优解析字节级契约不动。
-- **自适应发射块大小（2026-09）**：解剖 WinRAR 7.23 符号流（analyze_stream 工具）定位到 text64 压缩率差（12681 vs 8769 B）纯粹是每块表开销——WinRAR 在分布稳定数据上整成员一块，我们硬限 128 KiB。发射块现在合并到 4 MiB，符号流在 64 KiB 子跨度间的局部字面量/距离/长度分布漂移时提前闭合（异构二进制——DLL 节、XML——保持小块，对齐 WinRAR 的 ~64 KiB DLL 块）。解析本身不变（仍 64-128 KiB，DP 内存有界）。实测 m3 seq：text64 12607→6058（-52%，赢 WinRAR 8696）、dll -0.5%、mixed -640 B、xml +157 B（+0.18%，记录在案）、sparse/random 不变
-- **持久树跨 chunk 损坏修复（2026-09）**：验证新块大小时发现既有静默损坏——窗口跨 chunk 增长时 `grow_to` 用新零数组替换 son（head 表幸存），而 0 是到位置 0 的合法链接；`rebase` 同类缺陷（链接只改值不迁槽）。密集 x86 成员产生抄 MZ 头的假匹配，unrar 与 WinRAR 双双报 checksum error。修复：grow_to 复制旧链接、rebase 把链接迁移到新环槽、收集器在解析定价前逐字节验证每个树报告（未来任何不变量破坏的安全网）。回归：129 KB 真实内核镜像前缀（旧代码在 129,334 字节处损坏，dict 2^3 + 64 KiB chunk）现字节级回环。DLL 自动 x86 过滤器产物 5.75 MB（43.90%），赢 WinRAR 7.23 的 5.87 MB（44.81%），双向完整性校验通过
-- **自动 x86 过滤器**：rars 移植的结构扫描（E8/E8E9 簇/跨度检测）自动应用于内存路径成员；过滤器成员按非 solid 写出。修复了 solid 链中过滤器位置的流式绝对/成员相对语义（unrar `WrittenFileSize` 为成员相对、区域定位为流绝对、E8 偏移按 16 MiB 取模）。
-- 命令面：官方 rar 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt` 列表变体）。
-- **老容器族读取（RAR 1.5–4.x，2026-09 起）**：`Rar!\x1a\x07\x00` 容器族（RAR 1.5–4.x）读取——块扫描/文件头（unicode 名、DOS 时间、salt、字典位）、STORE 直通 + **三代解码器全覆盖**：RAR3/4（unp_ver ≥ 29）LZSS+Huffman + PPMd 变体 H + 五大标准 VM 过滤器（E8/E8E9/Itanium/Delta/RGB/Audio）、RAR 2.x（20/26，LZSS+Huffman + 音频块）、RAR 1.5（15，自适应 Huffman 老 LZ）——（`codec/legacy/rar29.rs`+`codec/legacy/ppmd.rs`+`codec/legacy/rar20.rs`+`codec/legacy/rar15.rs`，rars 解码半移植）含 RAR3/4 solid 链共享窗口 + **分卷（`.partN.rar` 新命名 + `.r00/.r01` 老命名，任意卷入口，split 成员合并为多 chunk）** + **`-hp` 头加密（主头 MHD_PASSWORD 后每块 `[8B salt][align16 密文]`，列表即需口令）** + RAR15/20/30 全代数据解密。对 WinRAR 5.91 `-ma4` 夹具与 rars 语料（真 RAR 3.0/2.0/2.5/1.5.4：PPMd、六种过滤器、solid-PPMd、PPMd 内嵌过滤器、音频 WAV、17 文件 doc 集、RAR20/RAR15 老密码、2–5 卷 split 集、-hp 含中文名/分卷）字节级通过（CRC 门）。WinRAR 5.x/7.x 的 RAR4 写器不再产 PPMd，老格式夹具只能来自 rars 语料（现代 WinRAR 连 RAR2.x/1.5 也不能产）。非标准（通用）VM 程序仍不支持。生成夹具工具（人工验证）：WinRAR 5.91（历史夹具）/6.23（最后的 -ma4，与 5.91 产物等价）；7.23 无 -ma4 不能产 RAR4。
-- **RAR4 写侧 Tier 2 全闭（2026-09）**：`-hp` 头加密写侧（主头 MHD_PASSWORD + 每块 `[8B salt][AES-128-CBC]`，64e280e）；PPMd 编码（rars 编码半：order-8/25 MiB 模型 + hybrid LZ-escape tokeniser，m4/m5 文本比 LZ 小 46%，9631d18）；NEWSUB 0x7a 恢复记录写+修（逐字段复刻 6.23，双向互修字节一致，0e65b44）；六大标准 VM 过滤器写侧（E8/E8E9/Delta/Audio 自动探测 + RGB/Itanium 编码能力；复用 RAR5 filters.rs 变换，fa4c038/f16c8b4）；**solid 链 PPMd 模型延续**（LZ levels 与 PPMd model 独立链状态、赢者推进、PPMd 赢回滚 LZ 表；ppmd 字段 Box 化避免 1 MiB 主线程栈溢出；-s 文本树自动建/续模型，cce4e15）。每项均有 WinRAR 6.23 双向逐字节互操作测试（7.23 无 `-ma4`，不能自产或修复 RAR4，只能作读取校验）。已知边界：solid 链内 filter（窗口=变换字节语义,我们 LZ 上收益有限,留后续）、solid 归档 MT。
-- **RAR 1.5/2.x 写侧（2026-09 Phase 1）**：版本表收敛只读轴后把 rars `Unpack15Encoder`/`Unpack20Encoder` 原样移植（`codec/legacy/rar15_encoder.rs`/`rar20_encoder.rs`；错误映射 `RarError::Format`/`Cancelled`，MatchFinder 按 rar29_encoder 模式适配；rar20 保留自含 `Rar20MatchFinder` + 音频块编码，rar15 保留自含 `Rar13MatchFinder` + stmode）。`is_writable()` 扩为 `{v14, v15, v20, v29, v50, v70}`；v26（同 v20 codec）/v36（同 v29 codec）仍只读。写管线新 `encode_rar4_member` 按 `WriteState.solid.rar4_unp_ver` 分派（15/20/29），成员头 `unp_ver` 字段参数化（单卷/多卷两条写路径），repack/repair 寄居路径仍 v29-only。选件梯与 rars `write.rs` 逐字一致（rar20：candidates 16/64/256/512/1024 + lazy + lookahead2 + 最优解析 m4/m5 + 音频 m2–m5；rar15：old_distance/stmode/maxdist 4–24 KiB 五档，全 lazy off）。**v15/v20 写侧（2026-09 全能力）**：solid 链（`build_legacy_solid_encoder` 首成员 level 建持久编码器，跨成员续表/续窗，归档级 MHD_SOLID、STORE 断链）与 `-p`/`-hp` 加密（`rar4_member_encrypt` 按代分派：15=RAR15 流 XOR 无盐无 pad、20=RAR20 块密码 16 对齐无盐、29=RAR30+盐；仅 29 置 `FHD_SALT`，v15/v20 只置 `FHD_PASSWORD`；`-hp` 头加密读写两侧统一 AES-128 `Rar30Cipher`，与成员版本无关）均已支持；官方 unrar 7.23 双侧 `t` 通过（solid 文本档 `x` 字节一致、v20-pw/v15-hp 均 All OK）。CLI `-ma2`→v20、`-ma15`→v15（默认 `-ma4` 保持 v29），napi format `rar2`/`rar15`。验证：roundtrip 全级别（v15/v20 × m1–m5 × 文本/随机/音频扫频，音频成员校验触发 try_audio）、solid 与加密多卷 CLI 回归、`SA_OFFICIAL_UNRAR` 门控 `unrar t`。
-- 工程：fmt/clippy `-D warnings` 双门（本地，含测试目标）、七目标 fuzz（`fuzz/`）、取消钩子、QO 快路径 `open_quick`、流式修复 `repair_archive_path`、零填充分卷集支持。
-- 架构：workspace `crates/rar`（库 crate `rar-rs`）+ `crates/rar-cli`（rar/unrar）+ `crates/rar-napi`（native/WASI binding），按 rars 分层——词汇见 `CONTEXT.md`，格式细节见 `docs/FORMAT_RAR5_RAR7.html`。
-- **已废弃 API 面移除（2026-09，Phase 6 收尾）**：全仓库不再有 `#[deprecated]` 标注；`RarArchive` 写侧方法（`create_with_options`/`add`/`add_as`/`add_bytes`/`add_directory_only`/`add_batch`/`close`）降 `pub(crate)`，读侧 `list`/`get_entry`/`namelist`/`read`/`extract`/`extract_all` 与事务方法/`lock` 已删除。所有期货已迁到角色门面：`ArchiveWriter`（`create_with`/`append`/`add_path`/`add_bytes`/`add_directory`/`add_redirect`/`add_batch`/`finish()`，消费 self）+ `ArchiveReader`（`unique_entry`/`entries[_named]`/`read_entry[_with_options]`/`copy_entry_to[_with_options]`/`extract_entry`）+ `ArchiveEditor`（`delete_entries`/`rename_entries`/`apply(EditPlan)`/`set_comment`/`set_recovery`/`lock`）。**测试共 31 文件 2600+/2760− 行改**，examples/fuzz 同步；`RarArchive` 保留构造器（`open`/`open_quick`/`open_with_password`/`open_quick_with_password`/`open_append`/`open_append_with_password`）、配置（`set_password`/`set_dictionary`/`set_compression_threads`）与钩子（`set_cancel_flag`/`set_progress_callback`/`set_progress_total`）供有绑定兼容需求的调用方；读侧便捷方法都在 `ArchiveReader` 上。**迁移中两处语义回归已修**：① 旧 `read(name)` 对重名成员取第一个，新 `unique_entry` 报 `AmbiguousMember`——重名场景改用 `entries_named(name).next()`；② v70 非 2 的幂小字典已解锁（见「已完成」首个条目）；此前非幂 1/32 增量位覆盖仅在 >4 GiB（`-md8g`/writer 单测）。**验证**：`cargo check --workspace --all-features --all-targets` 零 error、`cargo clippy --workspace --all-features --all-targets -- -D warnings` 全绿（含全部测试 target）、`cargo test --workspace --all-features` 全过（rar-rs 247 lib + 17 集成 + rar-cli 58+37 incl. 本机 WinRAR 互操作 + rar-napi 3）、fuzz 独立 workspace `cargo check` 通过。15 个测试文件的 `#![allow(deprecated)]` 已全部移除（库内已无 deprecated 项，属惰性标记）。逐文件迁移记录见 git 历史。
-
-## 独立审计 2026-09-11（不看 backlog 的优先级）
-
-一次“假设没有 PLAN/issues”的健康与风险审计的结论。做法：全量测试 + 真跑五个 fuzz 目标 + 逐行读三条最危险路径（写、读/解、恢复/加密）。全量测试绿（lib 266、CLI 62、WinRAR 互操作 32），但发现的问题大多不在本文件里，而且比压缩性能更该先做。**[读码确认]** = 逐行读过源码；**[待复现]** = 尚未写成失败测试。**P0/P1 已于 2026-09-11 修复（见各条“已修”）；P2：1/3/4/7 已修，2/5/6 记录理由。**
-
-### P0（现在做，成本 S，影响大）
-
-- **fuzz 工程缺 `raw` → 五目标全部失效、CI 的 fuzz check 必红** **[读码确认，已实测]**：`fuzz/Cargo.toml` 依赖 `rar-rs = { features = ["parallel","simd"] }`；`raw` 门控（见「为什么要有 `raw` feature」那次改动）只给 `crates/rar` 的 dev-dep 补了 `raw`，漏了 fuzz。`cargo check --manifest-path fuzz/Cargo.toml` 报 9 个 E0433/E0425/E0603，即 `.github/workflows/CI.yml` 第 58 行必红。补 `raw` 后 5 个目标（parse/crypto/recovery 各 20k、write/rewrite 各 2k）全部无 panic 通过。修：1 行 + CI 加真跑。 **已修（2026-09-11）**：`fuzz/Cargo.toml` 补 `raw`；CI 增 `Fuzz smoke` 步骤（parse/crypto/recovery 5k + write/rewrite 500）；`cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked` 与五目标短跑均通过。
-- **两处恶意归档可触发的 panic（进程 abort；napi/WASM 绑定同样暴露）** **[读码确认，待复现]**：
-  - `crypto/rar50.rs:619`：`let rec_end = offset + rec_size as usize;` 未检查；`rec_size` 是 vint（可达 `u64::MAX`），release 回绕后 `&extra_data[offset + tn..rec_end]` 出现 start>end → panic。任何带 extra 的文件头都会进 `read_packed`。
-  - `recovery/legacy.rs:173-175`：只用 `header.get(tail..tail+8) == Some(b"Protect+")` 证明 8 字节存在，随即索引 `tail+8..tail+16`；`name_size = header[26..28]` 攻击者可控（`head_size=54, name_size=14` 即越界）。`rar r` 与 RAR4 create/edit 的 `scan_protect*` 都可达。
-  修：`checked_add`/`get` + 两个单测。 **已修（2026-09-11）**：加上边界检查；复现测试 `crypto::rar50::tests::hostile_extra_record_size_does_not_panic`、`recovery::legacy::tests::crafted_rr_name_size_does_not_panic`。
-- **缓冲读 / `t` / 并行提取缺字典上限（分配型 DoS）** **[读码确认，待复现]**：`format/rar5/extract/`（`decode_file_at`，及并行 worker）没调 `member_dict_window`（`decode_file_to` 调了）；`codec/modern/lzss_huff/decoder.rs:210 checked_dict_size` 对 `dict_size_bytes` 无上界 → `codec/common/window.rs:20 vec![0u8; size]`。伪造 v70 头声明 ~2^48 B 即可让 `test`/`read` 分配失败 abort（streaming 路径有 4 GiB `-mdx` 上限，此处没有）。修：两处补 `member_dict_window` + 测试。 **已修（2026-09-11）**：抽出 `capped_dict_bytes`，`decode_file_at` 与并行 worker 共用；测试 `rar50_roundtrip::buffered_read_enforces_the_dictionary_cap`（1 字节 cap 拒绝、默认 cap 可读）。
-
-### P1（静默产出坏档案 / 回归）
-
-- **RAR4 >4 GiB 成员被 `as u32` 静默截断进头** **[读码确认]**：`format/rar5/write/mod.rs:901,987`（单/多卷）与 `:3829,3904`（并行）把 `packed_size`/`unpacked_size`/`chunk_size` 直接 `as u32`；`add_file_rar4` 与 `validate_rar4_only` 都没有大小守卫。RAR4 尺寸字段本就是 32 位，正确行为是**拒绝**而不是写出头尺寸与载荷不符的归档。 **已修（2026-09-11）**：`format/rar4/create.rs::ensure_member_size` 在 `add_rar4_data` 入口拒绝 >u32::MAX，带单测。
-- **`-v` 过小 → 卷循环零进展、无限建文件** **[读码确认]**：RAR5 `write/mod.rs:2520-2524`（`bytes_for_data == 0` 时 `start_next_volume(); continue;` 且不推进 offset）、RAR4 `:958-969`（剩余 ≤7 时同样死循环）。目前只拒绝 `volume_size == 0`，`rar a -v50 big.rar` 会挂住并写满磁盘。修：最小卷大小校验。 **已修（2026-09-11）**：两处 split 循环加“一次 roll 无进展即报错”守卫（RAR5 `rolled` / RAR4 同样）；测试 `archive_writer::tiny_volume_size_is_rejected_instead_of_looping`（`volume_size(16)`）。
-- **流式 RAR5 修复校验弱于其缓冲孪生** **[读码确认]**：`recovery/rar50/`（`stream.rs`）的交叉校验少了 `data_shard_states` 项（缓冲版 `repair.rs` 有），且流式解完不按 `first.data_shard_states` 校验 CRC64 → 含两代 RR 块的文件可能解出“貌似合理但错误”的字节，写进 `fixed.*` 并报 Repaired（CLI 只用 `RarArchive::open` 验头）。修：2 行 + 解后校验。 **已修（2026-09-11）**：流式路径补上 `data_shard_states` 交叉项，并在返回前按 `first.data_shard_states` 校验每个解出的 shard；单测 `rar5_inline_recovery_rejects_mismatched_generations`。
-- **RAR4 多卷不预留 FILE_HEAD** **[读码确认]**：`write/mod.rs:966-967` 只减 7（EOA），`emit_segment` 写头+数据 → 每卷超出 `-v` 约一个头长，`-v` 契约失效。 **已修（2026-09-11）**：split 预算改为 `7 + FILE_HEAD（32+名+盐+exttime，`-hp` 含加密块）`；测试 `rar4_create::rar4_multivolume_volumes_do_not_exceed_the_requested_size`。
-- **截断/损坏 `.rev` 使重建 panic** **[读码确认]**：`recovery/rev50.rs:266`（`data[16 + hsize..]`）与 `:298`（`&payload[start..start+want]`）无边界检查；`rar rc`、`rebuild_missing_volumes`、napi 均可达。 **已修（2026-09-11）**：`data[16+hsize..]` 与 `payload[start..start+want]` 改为 `get` + 报错；测试 `rar50_roundtrip::truncated_recovery_volume_errors_instead_of_panicking`。
-
-### P2（健壮性 / 覆盖率 / 发布）
-
-- create 路径 quick-open 只缓存文件头（`write/mod.rs:2334,2800`），目录/重定向不缓存，而 append（`archive/mod.rs:783`）与 rewrite（`archive/transaction/`）全缓存 → `open_quick`/`list_entries_quick` 少列成员。**[待复现]** **已修（2026-09-11）**：redirect/dir_only/dir 三个直接写头处补 QO 缓存；测试 `quick_open_listing::open_quick_lists_directories_like_the_full_scan`。
-- STORE 成员先 `hash_file` 再重读同一路径（`write/mod.rs:321` vs `:334,2810`），只比字节数 → 同尺寸改写真会写出旧 CRC/BLAKE2。**[待复现]** **未修（接受）**：单遍 STORE 必须先写头再流式，回填头需要 patching（`-hp` 还要重加密），影响面大于收益；记为已接受的竞态。
-- Windows STM 流名（`extract.rs:1020`）是唯一没过 `sanitize_archive_path` 的命名记录（是否真能逃出目标目录未在 Windows 实测）。**[待复现]** **已修（2026-09-11）**：`valid_stream_name`（只允许单个前导 `:`，禁分隔符/保留字符）+ 单测；`write_windows_stream` 拒绝非法名。
-- 未被真实夹具覆盖的 crypto 分支：RAR3 慢 KDF 的单测是同义反复（`crypto/rar30.rs:288-301`，长度 `<64` 时 `update_password_data_sha1` 分支根本不跑）、RAR20 >16 字节口令链只有 8 字节口令覆盖。**[待复现]** **已补覆盖（2026-09-11）**：用本机 Rar 6.23 生成 49 字符口令的 `-ma4 -p` / `-ma4 -hp` 夹具（`rar40/encrypted/rar4_longpw_{p,hp}.rar`）+ `rar4_read` 两测试，外部验证 RAR30 慢 KDF 分支；`-ma2 -p<20 字节>` 由我们写、由 UnRAR 读出（`winrar_interop::we_create_rar2_long_password_members_winrar_valid`），覆盖 RAR20 >16B 密钥链。
-- legacy 修复对“最后不满 512 B 的扇区”报 "All OK" 却不修（`recovery/legacy.rs:252-265`）。**[读码确认]** **未修（记录）**：尾扇区写侧对零填充算 tag，本就无法校验真实字节，无法检测其损坏；只能改措辞或接受该未保护区。
-- 恒真/自比校验（可顺手删）：`recovery/rar50/`（恒真/自比比较）。**[读码确认]** **未修（低价值）**：纯恒真比较，不影响行为。
-- **发布就绪**：`rar-cli` 因 workspace path 依赖缺 version 无法打包（`cargo package -p rar-cli` 实测报 “does not specify a version”）；三个 crate 都没有 `readme`/`keywords`/`documentation`；SPDX/逐文件来源审计仍未闭环。 **部分已修（2026-09-11）**：workspace 依赖补 `version`，`rar-rs` 增 `readme`/`documentation`/`keywords`/`categories`，`cargo package -p rar-rs` 打包并验证通过（含 README）；`rar-cli` 现在只因 `rar-rs` 未发布而无法解析，属发布顺序。SPDX 仍需法务。**逐文件出处清单已完成（2026-09-11）**：`THIRD_PARTY_LICENSES.md` 新增「File-level `rars` port notices」表（每个 rars 移植文件的 in-file 声明），并给缺失声明的 `crypto/rar50.rs`、`recovery/rar50.rs` 补了出处头（NOTICE 同步）。剩下明确为两项法律裁定：① rars workspace metadata（MIT OR Apache-2.0）vs 后来 COPYING（WTFPL）的冲突（即解码侧 WTFPL / 编码侧 MIT OR Apache-2.0 的来源）；② `recovery/legacy.rs` 声明了 rars 移植但无许可行。
-
-**与 backlog 的差异**：以上 P0/P1 基本都不在本文件原有条目里——文档把我引向 BT4 压缩性能深挖（已证否），而真正的风险是“CI 已红 + 两处 panic + 字典 DoS + 几个静默产坏档的守卫”。建议先按本节 P0/P1 排序推进，压缩性能线（issue 09/04）暂缓。
-
-## 技术债（2026-09 审查的未闭环项）
-
-`docs/CODE_AUDIT_2026-09-05.md` 已删除（一次性基线，结论归到这里）。仍未闭环的：
-
-### `raw` feature（2026-09 已删除，ADR 0007）
-
-原设计（ADR 0003）：`format` / `recovery` / `crypto` 三棵树默认不可达，`raw` 显式开启，
-以保护 SemVer。2026-09 审计发现没有外部或产品消费者（CLI/napi 都不开），只有自家测试与
-fuzz 使用一个可枚举的小子集，于是删除 feature 与 `rar40`/`rar50` 别名：三棵树永久
-`pub(crate)`，受支持子集经常驻 `wire` 模块导出（块信封 + varint + 模型结构 + 恢复构建 +
-加密原语）。自引用 dev-dependency 与三处 `allow(dead_code, unused_imports)` 一并移除。
-详见 `docs/adr/0007-raw-feature-retired.md`。
-
-- **热点文件拆分（2026-09 完成）**：`format/rar5/write/mod.rs` 已拆为 `write/{mod,add,emit,stream,batch,engine,layout}.rs`
-  （只含 RAR5，mod.rs 22 行门面），RAR4 编排回到 `format/rar4/write/{mod,pipeline,cbc}.rs`，格式中性写机制在
-  `format/shared/{write_ops,engine,stream}.rs`；`codec/modern/lzss_huff/{encoder,decoder}.rs`（3940/1736）拆为
-  `encoder/{mod,chunked,parse,emit,filter,tests}.rs` 与 `decoder/{mod,engine,analysis,tables,tests}.rs`
-  （mod.rs 共享词汇 + 角色模块，公开路径与输出不变）；`archive/rar4_edit.rs`（2924）拆为
-  `archive/rar4_edit/{mod,layout,headers,comment,engine,repack}.rs` + `tests/`（五个用例文件）；
-  `recovery/rar50.rs`（2141）拆为 `recovery/rar50/{mod,plan,gf16,encode,repair,stream}.rs`（rars 移植核心保留在 `gf16`）；
-  `format/rar5/extract.rs`（1975）拆为 `extract/{mod,open,read,members,dest,solid,decode,verify}.rs`（共享导入留在 `mod.rs`，
-  角色文件各持 `impl RarArchive` 分片）；`archive/transaction.rs`（1728）拆为
-  `archive/transaction/{mod,multivolume,edit,plan,execute,header}.rs` + `tests.rs`；`archive/mod.rs`（1180）拆出
-  `archive/state.rs`（`ReadState`/`WriteState` + 六组 + `Mode`/`PendingCommit`/`StreamRecord`），mod.rs 只留引擎与生命周期；
-  `rar-cli` 的 `bin/rar.rs`（2930）拆为 `bin/rar/{main,args,create,edit,update,list,extract,comment,recovery,sfx,filters,staging}.rs`
-  （+ `tests.rs`，`cargo` bin path 随之更新）。
-  至此自研大文件清零，剩余大文件均为 rars 移植的逐文件隔离（`codec/legacy/rar29_encoder.rs` 2747、
-  `rar20_encoder` 1902、`ppmd` 1737、`rar15_encoder` 1585、`rar29` 1421），拆分收益低。
-- **WriteState 字段分组（2026-09）**：`WriteState`（32 字段）按角色拆为 `solid: SolidChain`（共享 LZ 窗口与
-  reset 策略）、`rar4: Rar4Append`（老容器追加记账）、`compression: CompressionSettings`（`-mt`/`-md`/v70 seam）、
-  `meta: MetadataSettings`（`-ts*`/`-ow`/`-os`/`-htb`）、`locator: LocatorState`（QO/RR 回填位）、
-  `output: OutputState`（staged commit + 卷计数）；调用点经 `write_ctx()/write_ctx_mut()` 统一迁移，行为不变。
-- **PPMd 直接单测（2026-09）**：`codec/legacy/ppmd.rs` 新增 8 个同文件单测：字面量/转义字面量 roundtrip、
-  match(4)/repeat(5) 命令布局展开（按 rar29 解释器口径）、续模型块（`finish_keeping_model` +
-  `PpmdEncoder::continuing` + 非 reset `decode_init`）、无模型续块/非法 order/dict/参数/截断/保留 range code
-  错误路径、24 KiB 偏斜负载经 suballocator/glue 的 roundtrip；模块文档同步（编码半已用于 `rar29_encoder`）。
-- **双 options 面（2026-09 收敛，ADR 0006）**：`WriterOptions`（私有字段 builder）是唯一公开构造器；
-  `CreateOptions` 已降为 `pub(crate)` 并从 crate 根移除（此前是零公开入口的死类型）。组合规则仍由
-  `options::validate_combinations` 共用，`CreateOptions` 不静默丢弃/钳制（quick-open×分卷或 -hp、
-  内联 RR×分卷、rv 无分卷、recovery>100、`volume_size=0`、-hp 无口令同样报 `InvalidOption`）。
-- **双 API 收敛（2026-09，ADR 0006）**：`ArchiveReader`/`ArchiveWriter`/`ArchiveEditor` 是唯一受支持
-  公开面。`RarArchive` 从 crate 根移除并 `#[doc(hidden)]`，仅留 `rar_rs::archive::RarArchive` 作为
-  字节比对测试语料/内部委托的兼容路径（完整删除留待下一个破坏性版本）。CLI/N-API/examples/fuzz 已全部
-  迁到角色面；补齐 `ArchiveReader::comment()`（原只有 `RarArchive::get_comment`）使读侧无缺口。
-- **老编码器去重（2026-09）**：`rar20_encoder`/`rar15_encoder` 各自私有的 BitWriter 删除，统一
-  `codec::common::bitstream::BitWriter`（同为 MSB-first，`finish()`→`into_bytes()`，rar15 的 usize
-  位宽调用点改 u8）；新增 `codec/legacy/tables.rs` 共享 RAR20/29 完全相同的 LENGTH 槽表，OFFSET 表因
-  槽数不同（48 vs 60）各留副本。解码器与 match finder 按 rars 逐文件隔离设计不动。验证：全量测试 +
-  本机 WinRAR 互操作（35/6）字节不变。该文件 2026-09 晚些已深化为 `codec/legacy/encode_core.rs`
-  （槽窗口查找、`match_length_adjustment`、`push_old_offset`、`LevelToken` + `LevelAlphabet` trait
-  与通用 level 表 token 生成；两个编码器与解码器共用，见下条）。
-- **架构收敛（2026-09，两轮八项）**：跨层重复收敛为单一 owner——`format/rar4/envelope.rs`
-  （RAR4 块信封/`-hp` 头解密唯一读取器）、`codec/legacy/lz.rs`（RAR20/RAR29 共享位读器/Huffman/
-  滑窗）、`ExtractionReport`（写入方回报 written/skipped，删 CLI 预测式 `count_extracted`/
-  `destination_key`）、`LegacyCodec`（legacy 别名折叠与读/写/密码/repack 分派）、`ops::ExtractRequest`
-  （四 `x`/`e` 臂的唯一请求值；磁盘抽取清空内存尺寸上限，修掉 `rar x` 与 `unrar x` 的分叉）、
-  `EntryId::resolve` + 单一 catalog token（读/编辑同一身份约定）、`codec/legacy/encode_core.rs`
-  （槽/level 核心，差分探针对拍 30 组配置逐字节一致 + 逐 level golden 字节测试）、公开
-  `rar_rs::StagedCopy`（CLI `rar u`/`f`/`a` 的替换事务；`bin/rar/staging.rs` 删除）。全部经双轴
-  code review 并出修复提交。
-- **审查修复（2026-09，三项正确性 + 一项契约）**：① RAR4 目录头滚动循环补 `rolled` 守卫
-  （`format/rar4/write/pipeline.rs`，`-v` 过小不再死循环，报 `InvalidOption`）；② RAR5 目录/重定向
-  头新增 `ensure_rar5_volume_space`（预留 EOA、必要时滚卷、装不下报错），并补上重定向头缺失的
-  `volume_bytes_written` 记账；③ 删除 `ArchiveEditor::ensure_rewritable` 死检查，修正 RAR4/RAR5 编辑
-  文档的矛盾描述；④ RAR4 队列注释在目录成员前落盘（`write_rar4_dir_entry` 调
-  `emit_pending_rar4_comment`）。回归测试：`rar5_directory_header_rolls_to_a_fresh_volume`、
-  `tiny_volume_size_rejects_directory_and_redirect_members`、
-  `rar4_writer_comment_precedes_a_directory_first_member`（三者均验证过撤掉修复即失败）。
-- **审查四修（2026-09，候选选择/重命名映射去重 + 老编码器单测）**：RAR29 非 solid 候选选择
-  （LZ/自动过滤器/PPMd/STORE 回退）抽为 `best_rar29_member`，缓冲编码与并行准备两处共用（返回
-  `None` 让拥有缓冲的调用方零拷贝回退 STORE）；`archive/rename.rs::build_rename_map` 统一 RAR4/RAR5
-  编辑引擎逐字相同的两份实现；`write_progress` 的 `WriteOperation`/`WriteProgressEvent`/
-  `WriteProgress` 降为 `pub(crate)`（模块私有且无 re-export）；`rar15_encoder`/`rar20_encoder` 首次
-  补直接 roundtrip 单测（文本/二进制/音频/空 × 各主要选项档）。
-- **审查三修（2026-09，solid/entry 组装去重）**：RAR4 三处 solid 记账收敛为
-  `track_rar4_solid_member`（并删掉 `add_rar4_data` 里重复的 `maybe_reset_solid_for_extension`
-  调用）；五处 `ArchiveEntry` 组装收敛为 `push_rar4_entry`，顺带修正两处多卷 push 丢失 `mtime_ns`
-  的不一致（回归测试 `rar4_multivolume_entry_keeps_nanosecond_mtime`，验证过撤掉修复即失败）。
-- **审查续修（2026-09，结构 + 文档 + 死代码）**：RAR4 三份重复的分卷切分循环（流式/缓冲/并行）收敛为
-  单一驱动 `emit_rar4_split` + `Rar4SplitParams`（`Cow` 源闭包；流式路径在闭包内报进度），
-  `pipeline.rs` 1616→1535 行且漂移源归一；修 `safe_path.rs` 错挂文档、`rar5/mod.rs` 孤儿
-  `stream_mut` 文档、`codec/mod.rs` 许可声明挂错（改 `//!`）；补 12 个模块的 `//!`；清理过期注释
-  （rar15/rar20/rar29/ppmd/writer.rs 的 "later phase"/"not yet wired"/deprecation 措辞）；删除
-  `format/rar4/write/mod.rs` 六个被 `build_*` 取代的写流 helper（`dictionary_flags` /
-  `DIRECTORY_WINDOW_BITS` 保留为 `#[cfg(test)]`）；rar15/rar20 编码器的 blanket `dead_code` allow
-  补上真实理由（rars 参考 API 保留，非"未接线"）；`architecture_boundaries` 去掉重复 forbidden 项。
-- **CLI 两个二进制（2026-09，主体去重）**：`selector.rs` / `password.rs` 已有；新增共享
-  `ops.rs`（`#[path]` 双二进制共用）：`open_reader`、`extract_members`（整档/选成员）、
-  `extract_to_stdout`（`-so`）、`print_members`（`p`）、列表三态（`list_entries` /
-  `list_bare` / `list_technical`）与时间格式化。两个二进制只留开关面与消息措辞（`rar l`
-  多一行 totals，`t` 措辞不同）。剩余：`t` 的编排可再抽（仅文案不同）、`extract_dest`
-  的 base 解析近似。
-## 待办（下一批；未关闭 issue：04、09，见 `docs/issues/compression-perf/`）
-
-- **未关闭议题**：04（MT 随机数据的窗口级不可压缩跳过）、09（DLL 单线程解析速度）。
-  issue 文件在 `docs/issues/compression-perf/issues/`，判决与基线在 `map.md`。
-
-### 独立审计 2026-09-13（WinRAR 7.23 行为对照；性能项暂缓）
-
-以本机 WinRAR 7.23（`Rar.exe`/`UnRAR.exe`）+ `Rar.txt` 为基准逐项实测的功能差距（04/09 性能线不在此列）：
-
-- [x] **`-os` NTFS ADS 写侧完整化（2026-09）**：CLI `-os` 接线；流块补明文 CRC32、`-p` 时每流独立 ENCR（flags=1，不 MAC）+ 加密载荷；batch 并行在 `meta.streams` 时强制顺序。读侧 `StreamRecord` 增 `crc32`/`params`，密码改为读取时校验/派生（锁定档可正常列表）；`extract/decode.rs::read_member_streams` 统一读取/解密/CRC 校验（Linux 可测）。官方双向互操作（明文与 `-ppw`）+ 两个官方 `-os` 夹具单测。
-- [x] **`-oh` 硬链接写侧（2026-09）**：`rar a`/`u`/`f` 按文件身份（Unix `dev/ino`、Windows `GetFileInformationByHandle` 的卷序列+文件索引）把同组后续路径写成 type-4 "Hard link" redirect（`bin/rar/links.rs`）；`-ma4` 与官方一致地存完整文件（RAR4 无 redirect 记录）；官方 UnRAR 双向互操作 + `cli_behavior` 硬链接回环测试。
-- [x] **`-oi` 相同文件引用（2026-09）**：`rar a`/`u`/`f` 支持 `-oi[0-4][:<minsize>]`——默认 64 KiB 阈值（`b/B/k/K/m/M/g/G/t/T` 单位，小写二进制/大写十进制）、`-oi1` 存首文件+type-5 "File copy" redirect、`-oi2` 打印分组、`-oi3`/`-oi4` 只列分组且不创建归档、`-oi0`/`-oi-` 关闭；CRC32 相同后逐字节复核防碰撞；RAR4 与官方一致忽略 dedup。官方 UnRAR 双向互操作 + `cli_behavior` 两测试。
-- [x] **`-om` MOTW 传播 + `-mes`（2026-09）**：`-om[-|1][=ext;ext]`（默认只传播安全区 `ZoneId=`，`1` 全字段，扩展名过滤，Windows；库 `MarkOfTheWeb` + `ArchiveReader::set_mark_of_the_web`，`rar`/`unrar` 双侧接线）；与 WinRAR 输出逐字节一致（互操作测试）；`-me<par>`（含未文档化的 `-mes`）改为全局接受（原先仅 create 接受、extract/test 报错）。
-- [x] **`-log[AFPU]*[=name]`（2026-09）**：`rar` 侧日志（默认 `rarinfo.log`；`A` 归档名（含分卷全部路径）/`F` 处理成员名（a/u/f/x/e/d/l/lb/lt/v/vb/vt）/`P` 追加/`U` UTF-16LE；多次 `-log` 各写各的；写失败退出码 9）。官方 UnRAR 拒绝 `-log`（`Unknown option`，退出 7），我们 unrar 同样拒绝（消息与退出码一致）。注：官方 `-logAF` 只留最后一类（内部截断怪癖），我们写 A+F 正常叠加。
-- [x] **`-mc<par>` 过滤器策略（2026-09）**：`-mc[channels][mode][+/-]` 解析为 `FilterOptions`（`WriterOptions::filters`，`FilterMode::{Auto,Disabled,Forced}`）——`-mc-` 全禁、`-mcd-`/`-mce-` 单项禁、`-mcd+`/`-mce+` 强制（`-mcd<N>+` 指定 delta 通道 1–31），`-mcl±`/`-mcx±` 无效果（长距恒开、exhaustive 未实现）；与官方同样宽容（无法识别的字符忽略，`-mcd6+`/`-mc6d+`/`-mc5` 均接受）。RAR5 三条编码路径（常驻/batch/流式）与 RAR4 非 solid 候选都接策略；通道越界由 `WriterOptions` 校验拒绝。测试：库级 roundtrip + packed 对比、CLI 策略/宽容形式/RAR4、70 MiB 流式回环。**强制 delta + 强制 x86 同时给出**（`-mcde+`）自 2026-09-14 起显式 `InvalidOption`：官方产出按 64 KiB 块不相交的过滤器序列，我们无法产等价重叠记录（官方 UnRAR 拒绝重叠产物），见「一致拒绝」。
-- [x] **CLI 形态（2026-09）**：`mf`（归档含目录项、只删文件留目录，与官方逐项对照）、`lta`/`vta` 别名、`rar x -kb/-or/-op<path>`、`a -f`/`a -u`（命令串等价于 `f`/`u`）、`a -k`、`a -z<file>`、`-qo+`/`-qo-`、`-ol-`（归档与提取都跳过链接）、`-ola`（提取链接禁用安全校验，`ExtractOptions::allow_unsafe_links`）；另修 `d`/`rn` 的错误码丢失（锁定档现在报退出码 4，与官方一致）。注：官方只支持 `--` 停止开关扫描（单 `-` 报错 7），我们 `--` 已可用。
-- [x] **RAR3/4 非标准 VM 过滤器（2026-09）**：移植 rars `codec/rarvm.rs` 解释器（`codec/legacy/rarvm.rs`，21 个单元测试全过），`rar29` 的 `VmProgramKind::{Standard, Generic}` 分派——标准五过滤器仍走原生实现，任意字节码走 VM（globals 跨调用持久化）；夹具 `rar40/rarvm/`（rars 语料）+ `tests/rar_vm_filters.rs` 六例（generic delta、PPMd esc-3 过滤、32-bit 编码整数、solid E8 偏移、真实 exe、64 通道 delta）全过。
-- [x] **pre-RAR3 solid repack（2026-09）**：`solid_repack_version` 按源成员 unp_ver 选生成（15→v15、20/26→v20、29/36→v29，混合代际拒绝），`repack_solid_archive` 用同一代编码器重建链——官方 6.23 的 `-ma1`/`-ma2 -s` 档经我们 `d`/`a` 编辑后 UnRAR 7.23 `t` 通过，成员字节精确（库测试 + winrar_interop 各一）。
-- [x] **RAR 1.3/1.4 读取（2026-09）**：移植 rars `rar13.rs` 解码半——`RE~^` 4 字节签名 + SFX 扫描（强签名优先）、7 字节主头（无头 CRC）、21 字节固定文件头、16 位滚动校验（`file_checksum`）、`LHD_PASSWORD` 的 RAR13 加性流密码（`crypto/rar13.rs`，逐卷段重置）、旧命名 `.rar/.r00/.r01` 分卷跨卷拼装、`LHD_COMMENT` 成员注释与主头扩展的归档注释（含 packed 注释：注释密钥 + Unpack15）、目录与空文件、solid 链（MHD_SOLID 复用 pre-RAR3 链）；成员解码复用现有 `Rar15Decoder`。夹具 `tests/fixtures/rar13/`（rars 语料，git blob 复制避免 CRLF 污染）+ `tests/rar13_read.rs` 10 例；官方 UnRAR 7.23 对 SOLID/CMULTIV/README/FCOMM/SFX/加密档逐成员字节一致（winrar_interop 两例）。
-- [x] **RAR 1.3/1.4 创建（2026-09，单卷基线）**：版本表 `V14` 转为可写（`is_writable()` 加 `v14`），写侧 `format/rar13/write.rs`——`Unpack15` 候选+解码回验（失败落 STORE，level 0 直接 STORE）、solid 用持久 `Unpack15Encoder`（solid 不 STORE）、21 字节固定文件头 + `LHD_COMMENT`/`LHD_PASSWORD`/`LHD_SOLID`、`file_checksum` 16 位滚动校验、`-p` 走 RAR13 流密码；主头延迟到首个成员/close 前发出（归档注释先入主头扩展，packed 注释 = 注释密钥 + Unpack15）；`format/rar13/create.rs::validate_rar13_only` 拒字典/quick-open/recovery/`-hp`/owner/streams/blake2/多卷，`ensure_member_size` u32 上限；`ArchiveWriter::set_archive_comment` 建前排队（RAR5 拒绝）；append/editor 对 v14 拒绝。CLI `-ma13`/`-ma14`（`-z` 建前排队）；测试：库 9 例（`tests/rar13_create.rs`）、CLI 2 例（`cli_behavior/legacy.rs`）、官方 UnRAR 7.23 写侧互操作（store/m5/solid/注释+口令 × `t`/`x`/`l`，逐成员字节一致；`l` 显示 "Details: RAR 1.4"）。
-- [x] **RAR 1.3/1.4 多卷创建（2026-09，补基线）**：对拍夹具 MULTIVOL（STORE）/CMULTIV（m3）逆向出分卷约定——每卷 `RE~^` + 7B 主头（`MHD_VOLUME 0x01`；仅首卷带归档注释扩展），成员跨卷时每片重复完整文件头（`LHD_SPLIT_BEFORE/AFTER`、`unp_size` 每片为整成员大小；STORE 中间片存累计 packed 滚动校验、末片存整成员校验；压缩中间片历史值为"已消费 unpacked"累计，阅读侧不校验，我们统一写累计 packed），`-p` 成员整段 packed 用**同一条** RAR13 流密码（官方 UnRAR 判定：分卷不重置——先按逐片重置实验被 UnRAR 拒，改连续后 `t`/`x` 通过），`volume_size` 精确填满（末卷除外）。实现：`write_rar13_split_member`（跨卷发射 + 头重建 + 目录/空成员滚动）、`create.rs::open_write_rar13` 分卷暂存/`start_next_volume_rar13`、`commit_pending` 对 rar13 用旧命名、`validate_rar13_only` 去掉多卷拒绝、卷名上限 901（超出 `InvalidOption`，staged 清理）、`fs::volume::LEGACY_VOLUME_MAX` 同时护栏 RAR4。测试：库 5 例（精确卷大小/固实+加密/注释+目录/901 上限/过小卷拒绝）、CLI 1 例（`-ma13`/`-ma14` × 明文/口令分卷往返）、winrar_interop 1 例（store/solid/加密三档官方 `x` 逐成员字节一致）。
-- [x] **格式硬限（记录）**：RAR5 filter type ≥4（RAR5 只定义 0–3：delta/E8/E8E9/ARM，≥4 为非法数据）；RAR4 分卷 `d/a`（官方同样拒绝）；RAR4 成员注释 v29+ 已与官方互操作（2026-09-14 修），pre-RAR3 保持嵌套布局，见「已知小差异」。
-- [x] **RAR4 `.rev` 恢复卷（2026-09）**：逆向出两种布局并与官方逐字节对拍——trailer（末 7 字节 `data-1/rec-1/index/CRC32`，只保护 `len-7`，重建尾 7 字节置零；新命名 `base.partNN.rev`、老命名 `baseN.rev`）与 legacy 全量奇偶（`base<data>_<rec>_<idx>.rev`，新命名带 `.part` 中缀）；WinRAR 按卷尾是否为零字节选择布局（其 20 字节 ENDARC 使卷尾为 8 个零），我们逐字节一致。实现：`recovery/rev3/rs8.rs`（GF(2^8) RS，生成元与官方 11 系数对拍）+ `rev3/mod.rs`（命名候选消歧（base 以数字结尾时 mv4+4_1_1 vs mv+44_1_1 按实际卷存在性选择）、trailer 解析/CRC、流式奇偶构建、缺失卷修复、syndrome+Berlekamp-Massey 定位损坏卷并改名 `*.bad`、末卷按 ENDARC 截断）；`rv`/`rc` 与建时 `-rv` 经 `rev50` 签名分流接入。验证：库 5 例 + rev3 单测 9 例、CLI 2 例、winrar_interop 3 例（同卷集下我们与 7.23 的 `.rev` 字节一致（legacy+trailer），官方 `rc` 从我们 `.rev` 重建、我们 `rc` 从官方 `.rev` 重建均字节一致；`a -ma4 -rv2` 产物官方可修）。
-- [x] **Windows/no-op 开关全命令接受（2026-09）**：`-ac`/`-ai`/`-ao`/`-e[+]<attr>`/`-dh`/`-oc`/`-oni`/`-ri`/`-vp`/`-ioff`/`-isnd`/`-ieml`/`-mlp`/`-am[s,r]`/`-sc` 从 create-only 移到全局（`rar`/`unrar` 每个命令都接受，官方解析器模型），重复出现按最后一次生效（`overrides_with`，如 `-ams -amr`）；`-vd` 保持明确拒绝（会擦盘）。测试 `cli_noop_switches_accepted_everywhere`。
-- [x] **审计补漏（2026-09-13，第二批）**：`-w<p>` 修正为官方语义——只是临时文件工作目录且必须存在（退出 7），不再 chdir（原实现会把归档静默写到工作目录里）；`-ag` 改用本地时间（Windows `GetLocalTime` / Unix `localtime_r`，workspace 新增 `libc` 依赖；`time.rs` 增 `local_civil_now`/`days_from_civil`/`format_auto_name`）；`-tk[<date>]` 支持日期形式（`YYYYMMDDHHMMSS`，可带 `-`/`:` 分隔、缺省分量按 1 月 1 日 0 时补齐，本地时间；create/update 均生效）；`a -sfx[name]` 建时前置 SFX 模块（`sfx.rs::prepend_module_in_place`，幂等，先于 `-tk`/`-t`/日志等收尾）；`-ad1`/`-ad2` 提取目标模式（`output::AppendDir`，dest 参数按官方忽略）；`-htc` 接受于所有命令；相关开关统一 `require_equals` 防吞位置参数。测试：`time.rs` 单测 2 例、`cli_behavior/parity2.rs` 4 例、`cli_behavior/timestamps.rs` 2 例。
-- [x] **审计补漏（2026-09-13，第三批：输入语法）**：`@listfile` 全面接入（新增 `listfile.rs`：`@file`/`@`=stdin、`//` 注释、行尾空白裁剪、UTF-8+拉丁回退解码、UTF-16 BOM 识别；`-@`/`-@+` 开关全局化；a/u/f/d 文件位与 x/e/l/t/v 系列成员位统一展开）；`a <archive>` 无文件隐式 `*.*`（有 `-si` 时仅 stdin）；`a foo` 自动补 `.rar`；`t`/`l`/`v`/`lt`/`lb`/`vt`/`vb`（rar+unrar）支持成员过滤（库新增 `ArchiveReader::verify_ids_with_options`，未命中报 exit 10）；`x`/`e` 尾随带分隔符参数作为目标目录（`--dest` 优先；移除 `trailing_var_arg` 使开关可跟在成员名后）；`d` 无成员 exit 0 no-op。测试 `cli_behavior/input.rs` 6 例 + `listfile` 单测 2 例。
-- [x] **独立审查修复（2026-09-13，第四批）**：`-hp`（RAR5 头加密）归档的编辑曾**静默产出坏档**——`rn`/`ch`、归档注释（`c`/`a -z`）在重写成员/服务头时不重新加密，错误中途替换原文件（官方 `t` 报 corrupt）。修复：库侧 `edit_plan` 在检测到头加密且计划含 rename/comment 时返回 `Unsupported`（不改文件；delete 与 `rr` 仍可用，RAR4 `-hp` 注释不受影响）；CLI `a -hp -z`/`a -hp -k` 在创建前拒绝（RAR5）；create 的注释/锁收尾改用解析后的口令（含 `-hp` 值，RAR4 `-hp -z` 依赖它）。同批：`lt` 成员时间改本地时区（`time::format_local_time`）；`fs/volume.rs`/`output.rs` 的 `to_lowercase()` 切片改为 ASCII 小写（土耳其 `İ` 归档名曾 panic）；`recovery/rev3` 的 `10usize.pow` 改 `checked_pow`（20 位数字组曾 panic）；`make_encoder_matrix` 增加乘积上限（伪造 `{RB}` 头曾可强制约 2 GiB 分配）；提取默认覆盖语义改为官方非交互结果——无 `-y`/`-o+` 时跳过已存在文件（`-or` 仍自动改名，交互式询问未实现）。测试：库 3 例（矩阵上限、rev3 长数字组、Unicode 卷名）+ CLI 2 例（`-hp` 编辑拒绝且文件不变、覆盖语义矩阵）+ time 单测 1 例。
-- [x] **独立审查修复（2026-09-13，第四批续：列表形态 + 残余项，退出码暂缓）**：`l`/`v`/`lt` 重写为 WinRAR 表格形态并与 7.23 逐字节对拍（RAR5、小字典 v70、我方与官方 RAR4、v15、v20、RAR13 六档 × 三命令零差异，仅官方 Banner 不伪造）——`Archive:`/`Details:`（RAR 1.4/1.5/5/7）前言、7 字符 DOS 属性或 POSIX 权限列、合计行（大小+计数）、`lt` 逐成员块（Type/Size/Packed/Ratio/Modified 含纳秒/Attributes/CRC32/Host OS/Compression `RAR x.y(vNN) -mN -md=…`）；`l`/`v`/`lt`/`lb` 在 `-idq` 下完全静默（同官方）。支撑：RAR4 文件头经 `comp_dict_size` 暴露 window-bits（按族文档化）、RAR4 写侧 host 字节改 2（Windows，`Host OS` 与官方一致）。其余：`-z<file>` 全局化（注释/建档使用，其余命令接受并忽略，`l -zz` 不再报错）；`cw <archive> <file>` 写注释到文件（官方语法与提示，无注释时 `Comment is not present`）；`ops::extract_names_and_dest`/`ops::verify_members` 收敛 rar/unrar 重复实现（仅消息措辞留各自二进制）；文档漂移修正（README RAR4 `.rev` 已支持、CLI.md 记全局 `-z` 与 `-vd` 拒绝、napi 去掉 `-hp` 多卷与 RAR4 恢复卷的过时说法）。Standards 残余：`rev3` 复用 `format::rar4` 常量、`filters` 直调 `time::days_from_civil`、`sfx` 安装走 `.sfxtmp-<pid>` 暂存并失败清理、`rar13/write.rs` 的 `MemberHeader` 结构体。测试：`parity2` 列表形态 1 例、`input`/`edits` 的 `-idq`/`cw` 更新与新增断言。退出码差异（缺失档 2 vs 官方 10）按用户要求暂不修。
-- [x] **独立复审修复（2026-09-13，第五批：实测 bug）**：第二轮独立审查（4 个并行代理：bug/互操作/文档/架构）复现并修复——① **RAR5 `-hp` 多卷 `d` 曾静默产坏档**（退出 0，官方 `t` 报 checksum error）：`rewrite_multivolume` 的 `header_encryption` 守卫对 delete-only 计划失效（探测只在 rename/comment 时跑），现于多卷重写前统一 `main_header_is_locked()` 探测（顺带让锁定多卷删除返回 `ArchiveLocked`）。② **pre-RAR3 solid 链断点**（`-ma15/-ma2 -s` 链中夹 STORE 成员（`-ms`）、`-se` 或目录条目 → 后续成员 CRC/格式错）：位置推导链无视 per-member 标志，新增 `solid_chain_is_position_derived()`（v14/v15/v20 目录不重置编码器；`track_rar4_solid_member` 对 pre-RAR3 的 STORE 保留 encoder），`validate_solid_reset` 拒绝 pre-RAR3 的 `-se` 与全 legacy 的 `-sv`（v29 `-se` 保留）。③ **`-ma13/-ma14` + `-sfx` 产物官方无法识别**（官方只认 DOS stub）：create 与 `sfx` 命令对 v14 明确拒绝。④ **RAR13 首卷无成员**（大注释+小卷）→ 官方从 `.rar` 报 "No files to extract"：分卷发射器在首卷尚无成员时拒绝滚动。⑤ **redirect（`-ol`/`-oh`/`-oi`）丢失 mtime**：`add_redirect_with_time`（mtime 秒 + FILE_TIME extra）接线 CLI `links.rs`。⑥ 附带：`ArchiveEditor::apply`/`lock` 对 RAR13 显式 `Unsupported`（原先会落到 RAR5 重写路径）。测试：库 3 例（V14 `-ma13` solid+STORE+目录、V15/V20 同型、首卷无成员拒绝）、CLI 3 例（`-hp` 多卷删除拒绝且卷不变、`-se`/`-sv` 拒绝矩阵、hardlink redirect mtime），interop 全量回归通过。
-- [x] **独立复审残留（2026-09-13，第六批：形态/路由/清理/文档/napi/裸开关）**：① **列表形态补齐**（与官方 7.23 逐字节对拍 17 档 × l/v/lt 零差异）：多卷 `l`/`v`/`lt`/`lb` 只列**所开卷**成员（按 chunk 过滤），`v`/`lt` 显示该片段 packed、`-->`/`<->`/`<--` 比率与 `Pack-CRC32`（末片段 `CRC32` 为整成员校验），合计行按官方规则（size/count 只计本卷起始成员、packed 计全部片段，RAR13 文件 `????????`、目录留空），`Details:` 带 `, solid` 与 `, volume N`（RAR5 带卷号、legacy 仅 `volume`）；`lt` 增补 `Flags: solid `（chain continuation，RAR13 不显示）、redirect 的 `Type: Unix/Windows symbolic link`/`NTFS junction point`/`Hard link`/`File copy` 与 `Target:`、无时间成员 `????-??-?? ??:??` 且省略 `Modified:` 行；库里新增 `ArchiveEntry::{redirect, has_mtime}`、`ArchiveReader::is_solid`，RAR4 分片 CRC 填入 `DataChunk`，RAR5 主头 solid 标志在两条扫描路径都记录；CLI `--links` 在 Windows 写 2/3 型（symlink/junction）与官方一致。② **v14 修复路由**：`rar r` 用 `is_rar13_file` 识别 `RE~^` 并明确拒绝（不再落 RAR5 修复）。③ **rev3 `.rev` stale 清理**：`stale_volume_paths` 的 legacy 分支经 `rev3::rev_name_belongs_to` 也回收旧 `.rev`（覆盖/取消 `-rv` 时不再残留）。④ **裸开关**：裸 `-z` 读 stdin（`c`/`a` 两路径）、裸 `-si` 成员名 `stdin`。⑤ **文档漂移 21 处**：README（多卷编辑能力）、CLI.md（`-hp` 多卷删除拒绝、过滤 exit 10 语义、`-rv` 上限、卷列表说明）、ARCHITECTURE（v14 范围 + rar13 行 + rar5 写文件集）、CONTEXT（extract/ 目录、创建矩阵、列表形态）、rar4 规格（`.rev` 已支持、`-ms`→`-s`、失效路径）、features/version/writer/args 文档、napi `index.d.ts` 与 Rust 文档。⑥ **napi 选项补齐**：`saveMtime`、`recoveryVolumesPercent`、`solidReset`（continuous/volume/extension，隐含 solid）、`threads: 0`=自动、`append` 的 `threadCount`；`-mc`/filterOptions 记为有意不暴露。测试：库 2 例（rev 清理、`has_mtime` 由 CLI 测试覆盖）、CLI 4 例（分卷列表形态、solid Flags、缺时间戳、裸 `-z`/`-si`）、CLI 1 例（v14 repair 拒绝）。退出码差异仍按用户要求暂缓。
-- [x] **第三轮审查残留（2026-09-13，第八批：P3 清理）**：① host OS 保真——RAR4 解析保留原始 host 字节（0 DOS/1 OS2/2 Win/3 Unix/4 Mac），新增 `ArchiveEntry::{host_os_raw, host_os_name}`（`host_os()` 仍归一化 0/1），`lt` 对 DOS/OS-2 档显示官方一致的 `DOS`/`OS/2`（属性列按原始 host 选 DOS/Unix 风格）。② quick-open 路径补记 `ARCHIVE_FLAG_SOLID`（`is_solid()` 在 `PreferQuickOpen` 下不再漏报）。③ RAR5 分片成员每片重复 FILE_TIME extra（`chunk_extra` 中间片追加 FT），官方 `lt` 从任意卷可见纳秒时间；首片不再重复。④ legacy 新编号（`MHD_NEWNUMBERING`）卷集在 `l`/`v` 合计行打印官方一致的 `volume N`（新增 `RarArchive.rar4_new_numbering` + `ArchiveReader::is_new_numbering`，`Rar4VolumeScan` 解析标志）。⑤ `-s=d/-s=v/-s=e` 与 junction/`Host OS` 相关文档、ADR 0004（v14 行）、rar4 规格（FILE_HEAD 偏移表、ENDARC/多卷/模块图）、napi `saveMtime`/`solid` 文档修正；PLAN 记录 `lb` 与官方 `Rar.exe` 的差异（我们随 `UnRAR.exe`）。⑥ napi 补 `skipLinks`/`allowUnsafeLinks` 提取选项与 `setMemberComment` binding。⑦ `ops.rs` 分片末片判定收敛为 `VolumeView::is_final_fragment`。测试：库 4 例（quick-open solid、DOS host 名、新编号标志、分片 FT extra）、CLI 1 例（新编号合计行）、interop 1 例（官方从中间卷读到纳秒）。
-- [x] **独立复审修复（2026-09-13，第七批：时间戳/链接/归属/开关）**：第三轮独立审查（4 代理）确认并修复——① **legacy 写入器 1980 下溢 panic**：`unix_to_dos_time` 对 pre-1980 mtime 做 `(year-1980)` u32 减法（debug panic / release 写垃圾日期）；改为 7 位年域回绕（与官方 C 语义一致，1970 → 2098）。② **RAR4/13 时间戳三处偏差**：写侧把 UTC 当 DOS 本地字段、读侧把 DOS 本地当 UTC、抽取再叠时区（官方档抽取差整个时区）；且 ext-time 的 `ADD_SECOND` 读写两侧都忽略（奇数秒差 1s）。现在写侧 `unix_to_dos_time` 先转本地再打包、`build_ext_time(mtime, ns)` 补 `ADD_SECOND` 标志，读侧 `extract_mtime_refinement` 返回并应用 `ADD_SECOND`，抽取经 `local_civil_to_epoch` 还原即时（solid repack 的 catalog civil 也先转回 epoch）；库内新增 `epoch_to_local_civil`/`local_civil_to_epoch`（Windows `GetLocalTime`、Unix `localtime_r`，rar crate 增 unix `libc` 依赖）。官方 RAR4 夹具抽取时间、奇数秒回环、1970 档均与 UnRAR 7.23 一致。③ **RAR5 `-ts-`/napi `saveMtime:false` 未真正省略头时间**：`rar5_time_fields` 在全部 RAR5 头发射路径（emit/stream/add/redirect）统一去 `FILE_FLAG_TIME_UNIX` 并置 0，`has_mtime` 改为按 `FILE_FLAG_TIME_UNIX`/`mtime_ns`/FILE_TIME extra 判定（显式零时刻显示 1970、无时间显示 `????`，与官方一致；抽取对无时间成员不再伪造当前时间）。④ **`.rev` 归属歧义误删别的卷集**（`set4` 的 `set44_2_1.rev` 被当作 `set` 的）：`rev_name_belongs_to_set` 按现存数据卷评分消解（复用 `collect_recovery_volumes` 逻辑），匹配改 ASCII 大小写不敏感（`rc` 与 stale 清理都能处理 `.REV`；重建名沿用数据卷 base 大小写）。⑤ **`-ol` 把目录 symlink/junction 当真实目录递归**（复制目标内容、自环递归）：`collect` 增加 `store_links`/`skip_links`，walk 对链接类条目（`is_link_like`，Windows 含 reparse point）不跟随、作叶子交给 `links.rs`；Windows 按 reparse tag 区分 symlink(2)/junction(3)（`FindFirstFileW`，官方 `-ol` 同型）。⑥ **v14 的 `rv`/`rc` 未设门**：`ensure_rar5_volume_set` 识别 `RE~^` 并返回 `Unsupported`（原先会写 REV5 `.rev`）。⑦ **`-s=d/-s=v/-s=e` 丢失模式**：normalize 映射到 `--solid-reset`，该开关移入 `MiscSwitches` 全局（`l -se` 不再报错、读取命令忽略）。⑧ napi JS 测试移除 `threads:0` 误判并覆盖 `saveMtime`/`recoveryVolumesPercent`/`solidReset`。测试：库 4 例（DOS 回环/1980 回绕/ADD_SECOND/rev 归属与大小写）、CLI 4 例（v14 rv/rc 拒绝、`-s=` 别名与 `l -se`、`-ts-` `????`、Windows 目录 symlink redirect）。
-- 注：官方 7.23 已移除 `-ma4`（RAR4 创建，报 `Unknown option`）；我们的 RAR4/v15/v20 创建是超出官方的扩展。
-
-### 独立审查 2026-09-14（回归复查 + 四批修复）
-
-六代理只读复查当前树（P0/P1/A/B/C/D 各轮修复后的 HEAD 35ceeb4）发现 2 个 P0、5 项回归、若干既存 P1/P2 与测试基建缺口；按 **P0 → P1 → P2 → 基建** 四批修完（`436f473`、`036479a`、`1c1e890`）：
-
-- **P0**：pre-RAR3 solid 链中成员落 STORE 时写侧编码器已推进、读侧不喂解码器 → 自产档自己与官方都读不了；改为克隆试编码只在真正压缩时提交状态 + v20+ 续成员 `FHD_SOLID`（官方 UnRAR 全档验证）。journal 恢复在 park 中途被杀时不再删除尚未 park 的原件。
-- **P1 回归**：solid 续成员声明更大字典改为增长共享 `DecoderState` 窗口（此前硬拒官方可解档）；quick-open 重扫使 catalog token 失效并按 payload offset 重解析（`EntryId` 不再静默换成别的成员）；RAR4 erase 不再认领同基名 RAR5 集的 REV5 `.rev`；`-ta/-tb 19700101` 预纪元饱和为 0（东八区）；commit 失败清扫 staged `.rev`；journal v2 接受 Unix 反斜杠名、转义全部控制字符、坏记录保留 journal。
-- **P1 既存**：RAR2 keep-tables 保留旧表尾（audio↔LZ 转移）；`rc` 的 REV5 签名比较 7 vs 8 字节恒 false → 修正；`rar cf` v29+ 改独立 `COMM_HEAD` 布局（官方 6.23/7.23 `t`/`x` All OK）；多卷提取按 owning volume 读 STM、STORE 成员补写 ADS；`decode_standalone` 恶意声明尺寸报错不再 abort。
-- **P2**：多卷扫描条目上限、QO 32 位尺寸转换、crypto 记录版本/校验/KDF 单次派生、REV5 位宽与 `hsize` 约束、rar29 过滤器边界流式、VM range checked、PPMd glue O(n)、rar15 可失败预留、CLI 选择器与提取计数对齐官方（当时新增 `ArchiveReader::resolve_destination`；2026-09 由 `ExtractionReport` 取代：计数改由写入方回报）、目录去重与 `./` 归一、单卷/lock fsync、done-marker 持久化、x86-forced 跳过 auto-delta。
-- **基建**：fuzz 预算按 seed 轮转、write 目标不变量收紧、rev/legacy 输入驱动变异、去掉失效 panic 过滤器；CI 增 scheduled/manual 官方互操作 job（`SA_REQUIRE_OFFICIAL=1`）、Windows job 跑 `rar-rs` Windows-only 测试且门控 release、fuzz smoke 开 overflow-checks 并轮换 seed；napi 全任务 `catch_unwind` 防火墙、`rebuildMissingVolumes` JS 覆盖、删除硬编码 unrar 路径。
-- **明确不做（记录）**：`-mcd+ -mce+` 维持 `InvalidOption`——官方 `-mcde+` 产出的是按 64 KiB 块**不相交**的过滤器序列，我们无法产等价的**重叠**记录（官方 UnRAR 拒绝我们的重叠产物）；真对齐需实现按块过滤器选择，另立项。
-
-### 老容器族读取（RAR 1.5–4.x，继续）
-- [x] solid RAR2.x/1.5 链（2026-09）：unp_ver<29 的链按归档级 MHD_SOLID+位置判定（该代编码器从不写 FHD_SOLID；rars crafted fixture 第二成员清除标志仍须共享窗口），`rar4_solid_archive` 标志接线；RAR3+ 维持 FHD_SOLID 语义。验证：solid_flag_cleared_rar15（46B→2700B 续窗）、rar250 SOLID.RAR（CRC 0x97668cf2/0x28833332 精确）b3d19a7
-- [x] EXTTIME mtime 亚秒（9845c34；RAR4 无 ctime/atime 秒基字段，亚秒无从附着——记录为格式事实）；FHD_COMMENT 读取已做（`format/rar4/mod.rs::parse_file_comment` 解析 COMM_HEAD 0x75 嵌套块，STORE 载荷按 UTF-8/UTF-16LE 解码），接到 `FileHeader::comment` 并经 `ArchiveEntry::comment()` 暴露，CLI `l`/`v` 显示成员注释（2026-09；2026-09-13 列表对齐 WinRAR 表格形态后不再显示，注释仅经库接口可见）；FHD_COMMENT 写侧已做（`format/rar4/write/mod.rs::build_file_comment_block` 构造 COMM_HEAD 0x75 子块，`add_rar4_data`/`emit_segment` 追加并置 FHD_COMMENT、按 `file_header_crc_end` 重算头 CRC；编辑器新增 `EditOp::SetMemberComment`/`EditPlan::set_member_comment`，非 solid 走字节级 `rebuild_rar4_header`（rename + comment strip/set，其余字段原样保留），solid repack 由 `kept` 元组携带覆盖；RAR5 明确拒绝；CLI `cf` 设置/清除成员注释；2026-09。**2026-09-14 起 v29+ 写侧改为成员数据后的独立 0x75 块（外层不带 FHD_COMMENT、外层 CRC 覆盖固定+名、0x75 自身 CRC 按 unrar 11 字节体），官方 6.23/7.23 `t`/`x` All OK；读侧与编辑器同步支持，pre-RAR3 保持嵌套布局——见「已知小差异」**）
-- [x] store-in-solid 窗口语义（2026-09 实测；2026-09-14 修复）：WinRAR 6.23 RAR4 solid 强制压缩不产 store 成员（随机也压）。我们的写侧曾把持久编码器先推进再落 STORE，v15/v20 位置推导链因此与读侧脱同步（自产档自己与官方都读不了：CRC/格式错）；现改为克隆试编码、仅在真正压缩时提交状态，v20/26 续成员置 `FHD_SOLID`（v15 仍位置推导），官方 UnRAR 对 store-first/middle/last/run 全档 `t` 通过。v29（`-ma4`）的 STORE 断链保留。
-- [x] rar154 老命名 split 集（2026-09）：random.rar+.r00+.r01 三卷 2 MiB 成员，头 CRC 0xFFFF 哨兵容忍，CRC 0x1c9eb697 精确
-- [x] 大成员流式提取（2026-09，8588302）：提取到 writer 不再整驻留——STORE 明文成员按 1 MiB 分块直拷（零整缓冲）；压缩成员（RAR29/20/15）packed 小流整读后解码器每 1 MiB flush + 窗口裁剪（峰值=窗口+一块，与成员大小无关）；VM-filter 成员整解码后还原；solid 链保持共享窗口单遍；流式 CRC 校验。验证：CLI 解 250 MB store + 67 MB m5 文本字节一致、extract 96 MiB store+压缩成员测试。错误口令提示已映射 WrongPassword（9845c34）
-- [x] **RAR4 `.rev`（旧恢复卷容器）（2026-09）**：官方 5.91/6.23/7.23 均支持；已实现 `rv` 写 + `rc` 修（含损坏卷定位与 `*.bad` 改名）与建时 `-rv`，`.rev` 字节与官方一致、双向 `rc` 互操作（见「独立审计 2026-09-13」）。
-
-
-### RAR4（创建面·速度，后续）
-- [x] 多文件并行 batch（2026-09，7c07e77）：非 solid 独立成员在线程池压缩（每成员独立引擎 + 全候选 LZ/PPMd/filter/STORE），顺序 emit（`emit_rar4_prepared` 镜像 add_file_rar4 发射半）；solid/目录/超大成员落回顺序原位。字节与顺序一致（双 feature 模式测试锁定）。实测 8×2.7 MB m5 文本 2.45s vs 单线程 14.2s（~5.8x）
-- [x] 单大成员块级并行（2026-09，字节同等 MT）：>64 MiB 单文件 `-ma4` 成员级并行已做、块级未做 → 现在按 **字节同等** 原则做：64 KiB LZ 块拆解为 `analyze_block`（每块独立：token 解析 + 频率统计 + 建表，与串行逐块一致）+ `serialize_block`（顺序：keep/差分表决策推进 `previous_levels` + 位写入，MT/串行逐字节相同）。每块 history 窗口 = 串行 `local_history` 在该块的精确值（≤ `MAX_ENCODER_MATCH_OFFSET`，跨缓冲区用 `Cow::Owned`）；wave = 线程数（上限 64）限峰值内存，结果入 slot 数组按序序列化。阈值 `RAR29_PARALLEL_MEMBER_THRESHOLD` = 64 MiB；PPMd（m4/m5）不做块级。测试锁定：`mt_matches_sequential_bytes`（多 level/prior-history 逐字节 + carried levels 相等）、`block_history_matches_sequential_window`、`mt_dispatch_large_member_roundtrips`（64 MiB+ 生产路径触发 + 解码全量比对）
-
-
-### RAR4（编辑面，方向已定 2026-09，实施见 ADR 0005）
-
-- **已存在 RAR4 的编辑全补（2026-09 方向定稿，分阶段实施）**：对齐官方 rar/WinRAR。机制分层：头/块级操作（`rr` 原地补/换、`k`、`rn`/`ch`、`c`/`cw` 注释读写与展示）走结构补丁——不碰压缩数据，solid 同样可做；非 solid `d/u/f/a` 走块拷贝 + RAR4 写侧重发新成员（不重压）；**solid `d/u/f/a` 走整档 repack（解码→重编）**，对齐官方 7.21+——官方 7.20 曾做 surgical 部分重处理，在 RAR4 产坏档后 7.21 回退 full repack，surgical 仅存 RAR5，不仿 7.20。v1 边界（清晰报错拒绝）：分卷、已锁定档（`-hp` 已解除，见下）。阶段 A 头级操作 → B 非 solid 成员操作 → C solid repack。验证锁定：A = WinRAR 6.23 双向 + repair 往返；B = 6.23 `t` + 与官方操作比对；C = repack 前后解出字节一致 + 6.23 `t`。缺口现状、官方依据与代码位置见 `docs/adr/0005-rar4-edit-architecture.md`。阶段 A 进度（2026-09）：`rr` 原地补/换、`k` 锁、`rn`/`ch`、`c`/`cw` 注释读写与展示已全部落地（`archive/rar4_edit/`；6.23 双向验证：`UnRAR t`、`Rar.exe r` 消费我们的 NEWSUB 记录且修复字节一致、6.23 `cw` 逐字节还原我们写入的注释、我们读 6.23 注释夹具一致）。注释存储约定已逆向：NEWSUB `CMT` 块、载荷 STORE 或 RAR29-LZSS、`attr` 位 0 = UTF-16LE（6.23 实证）。阶段 A 完。另记：RAR4 创建面 `add_bytes` 曾无 RAR4 分支（非 ASCII 名混入 RAR5 块产出坏档）——已修：抽 `add_rar4_data` 共享管线，bytes 走同路径（含压缩/加密/分卷），6.23 `UnRAR t` 通过（`rar4_writer_add_bytes_handles_unicode_and_ascii_names` 锁定）
-
-阶段 B 进度（2026-09）：非 solid `d/u/f/a` 全部落地（见下）
-
-阶段 C 进度（2026-09）：solid `d` 与 `a/u/f` 全部落地——`repack_solid_archive` 整档 repack（逐成员带链解码 → 新 solid 档按原 level/mtime 重发 → 注释/rr 结构补 → 原子替换），对齐官方 7.21+ full repack。solid `a/u/f` 走**延迟 repack**：open_append 对 solid 置 deferred 标记（不截断/不暂存），add 阶段缓冲新成员，close 时整档 repack（既有成员 + 新成员），注释保留、rr 按原强度重建；已修 parallel 分支路由（append 档 write_ctx.solid_mode=false 曾误走并行写 → 写只读源档 os5）。6.23 `UnRAR t` 通过（d/a/u/f），CLI `rar d/rn/a/u/f` solid 冒烟通过。pre-RAR3 codec 成员的 solid repack 已于 2026-09 支持（按源成员 unp_ver 选 v15/v20 编码器重建，混合代际拒绝）；含目录成员的 solid repack 已支持（`add_rar4_data` 按尾部 `/` 判定目录并置 attr 0x10，repack 循环对目录成员传空数据而非解码前序运行，2026-09）。另记：排查「分节文本 solid 链第二成员解码失败」时发现并修复**既有 codec bug**（`rar29_encoder::encode_solid_member` 在 LZ 胜出时也把 levels 回滚到成员前，而解码器保留成员末表 → 下一成员 keep/delta 表头套错基准）——LZ 胜保留、PPMd 胜回滚，两臂对调；回归测试 `solid_sectioned_content_decode_regression` 转正（自家与 6.23 双向 `t` 通过）
-
-阶段 B+C 落地内容：`d`（`edit_rar4` 支持 delete：块拷贝跳过成员 + 既有 rr 按原强度重建；删光=抹档，与 RAR5 一致；solid 走整档 repack；rename+delete 同成员冲突拒绝）；`a/u/f`（RAR4 append：`prepare_append` rar4 分支门禁 + 截断尾部 NEWSUB/ENDARC 暂存前缀，关闭时按原强度重建 rr；`rar a/u/f` CLI 编排即 editor 删 + append 追加，格式随容器自动保持 RAR4）。6.23 双向 `UnRAR t` 通过（含 6.23 自建档删/追加/repack）；**追加后重建的 rr 可被 6.23 `Rar.exe r` 修复追加成员（逐字节还原）**
-
-**`-hp` 头加密编辑全补（2026-09）**：v1 的「`-hp` 拒绝」边界解除——主头是带 MHD_PASSWORD 的明文标记，`format/rar4/envelope.rs::read_block`（2026-09 收敛后的唯一块信封读取器）逐块读取并解密头，`archive/rar4_edit/` 的布局扫描/注释读/`edit_rar4`/`append_prelude` 全部按口令工作：未改动块整段（含密文与盐）原样拷贝，重建/插入的块（重命名后的 FILE_HEAD、CMT、RR）用新盐重加密，**只加密头**（CMT 35 B、RR 54 B），载荷/标签表/奇偶区保持明文。solid repack 用同一口令 + `encrypt_headers` 重建保护（`-hp` 同时含数据加密，与官方一致），注释改由写侧队列 `emit_pending_rar4_comment` 在首成员前发射（`-hp` 下同样只加密 35 B 头）。恢复记录侧新增 `scan_protect_with_password` / `repair_legacy_archive_path_with_password`（CLI `rar r` 已接线），`-hp` 档的 rr 可定位、可重建、可修复。缺口令报 `RarError::Encrypted`。另修创建面 bug：`-hp` 下 NEWSUB 恢复记录曾整块加密（应为只加密 54 B 头，否则奇偶区失效）。测试锁定 `archive/rar4_edit/tests/hp.rs` 八例（rename/delete/comment/rr+修复/lock/append/solid repack/缺口令）
-
-### RAR5（压缩面）
-
-- [x] **流式路径自动过滤器（05，已完成）**：~~delta/x86 过滤器只走内存路径（<64 MiB 成员）；大音频/裸盘镜像 >64 MiB 走 spill 流式路径无过滤器，ratio 远差于 WinRAR——需调研 delta 可否按窗口应用、区域保持成员相对~~ 已完成：流式路径按窗口应用 delta（区域按绝对成员坐标、上限 `MAX_FILTER_BLOCK_LENGTH`，`delta_stream_window`）与 x86（`x86_stream_window`，样本检测的 E8/E8E9 区域按窗口裁剪并切块、`merge_ranges` 去重），E8/E8E9 变体及 delta 频道按 64 KiB 样本压缩尺寸选择；过滤成员独占 solid 链
-- [x] **solid 归档 MT（06，定论）**（2026-09 评估）：chunk 级并行（成员内 64 KiB 块跨线程波次）已工作——64 MiB 语料实测：text 2443→593 ms（4.1x）、dll-like 20678→5187 ms（4.0x）、x86syn 3303→847 ms（3.9x）、mixed 1119→399 ms（2.8x）（`--features parallel --solid-mt`，每个成员 16 MiB）。**剩余差距是结构性的**：non-solid 的 `add_batch_parallel` 可并行处理 4 个成员（各自独立 EncoderState），而 solid 必须串行处理成员（共享窗口语义）。64 MiB 4 成员实测：non-solid archive 343 ms (text) / 2871 ms (dll-like) vs solid MT8 593 ms / 5187 ms——差距 1.7-1.8x，来自成员级并行 vs 成员内 chunk 并行的本质差异。成员级 solid 并行需要跨成员窗口共享，无法简单引入 batch 路径；唯一可能的优化是"预合并小成员为一个大逻辑块再 chunk 并行"，但对已超 12 MiB 的成员无效。**结论**：chunk 级并行已兑现，成员级差距是 solid 格式的固有代价；不建议为此引入 seq/MT 分支分歧（已有 x86 +8.2% 先例）。`--solid-mt` 扫描已加到 perfbench（`--features parallel`）
-- [x] **随机数据不可压缩开销归因+STORE 预检（2026-09，A+B+C）**：原「~800 ms 未记账」被低估。用 `perfbench --only random --dict-log N` 扫描：64 MiB 随机 m3 在 dict 128KiB→32MiB 仅 2.3x（2289→5262 ms），最小字典仍 2.3s，说明瓶颈**不是匹配树**，而是**不可压缩数据上的最优解析 DP**。修复：①**已实现（B）**：放宽 matchless 快路径——`collect_block_matches` 只报 ≥4 字节匹配，把触发条件从「`runs` 为空」放宽到「最长匹配 ≤ 4 且前 2 个重复距离均为 0」。效果：64 MiB 随机 m3 @32MiB 字典 5262→3260 ms（~38%）；残余 ~1.5s 来自「最长 5+ 字节偶发碰撞块」仍走 DP；②**已实现（C）**：`encode_chunked` 入口已有 `sample_is_incompressible` 预检（`encode.rs:118-134`），64 MiB 随机 m3 codec = 46 ms（probe ~192 KiB 采样 → STORE 返回），连字面量熵编码地板也省掉——本项已完全关闭
-- **dll 单线程解析速度**（map 追踪）：WinRAR m3 -mt1 522 ms、MT 171 ms（同机 smartscreen.dll 5.7 MiB）；我们 codec（裸 encode，无过滤）~3.5 s，archive（含 E8E9 过滤，真实产品路径）~3.6 s；ratio 40.72% vs WinRAR 38.64%（archive 列已于 2026-09 修正为走 `add_file` 路径，此前用 `add_bytes` 无过滤，ratio 误报为 43.21%）。速度差距 ~5.9x -mt1，~6.8x MT，瓶颈定位在 BT4 树下降步数（20M 步，每步 ~50 ns 延迟绑定），结构锁定（已验证：HASH_BITS 20→22、dict-log、commit 阈值、近/远带宽四个旋钮均弹回）
-- [x] **napi 编辑操作接线 + EntryInfo 扩展（2026-09）**：binding 补齐库侧 `ArchiveEditor` 全编辑面——`renameEntries`（名字解析镜像 `rar rn`，目录展开由库处理）、`setComment`（null/空删除，`rar c`）、`setRecovery`（0–100，`rar rr`）、`lockArchive`（`rar k`），均支持 `-hp` 密码与 RAR4 头编辑；`EntryInfo` 从 6 字段扩到 16（crc32/ctime/atime/hostOs/attributes/compVersion/version/dictSizeBytes/comment/solid）。napi `Option` 在 JS 侧序列化为 `undefined` 而非 `null`（d.ts 为可选属性）。验证：native 构建 + node --test 38/38。另修 CLI.md 文档漂移（`-ma4` 已实现、补 `cf` 命令）
-- [x] **napi 格式选择 + 单成员提取 + 解压冲突策略（2026-09）**：`CreateArchiveOptions.format`（"rar5" 默认 / "rar7" / "rar4"，见写侧可写子集 {v15,v20,v29,v50,v70}）——"rar4" 走 RAR4 写管线并拒绝 RAR5-only 选项（dictionary 显式报错，其余经 `validate_rar4_only`），"rar7" 强制 v70 member（仅 LZSS 路径；STORE 回退不写 comp_version，与容器语义一致，字典被 2x 文件大小上限钳到 128 KiB 地板）；`extractMember(archivePath, name, destDir, password?, signal?)` 流式单成员落地（`ArchiveReader::unique_entry` + `extract_entry_with_options`，无大小上限、可取消，返回解析后路径）；`ExtractArchiveOptions` 补 `skipExisting`/`autoRename`/`keepBroken`/`setCreationTime`/`setAccessTime`。验证：native 构建 + node --test 41/41（38+3）、workspace clippy -D warnings、napi 单测 2/2
-- [x] **可复现基准 `crates/rar/examples/perfbench.rs`（2026-09）**：上述三项都没有可复现的基线（`bench.rs` 语料临时合成无指纹，`collectbench`/`mtbench` 需外部语料文件 + `parallel`）。新基准：语料全部由固定种子生成并打印 CRC32（跨机逐字节可校验）、`--repeats` 取 min/中位数、字典按 `min(32 MiB, 2*floor_pow2(size))` 裁剪（与归档路径一致，否则裸 codec 为 2 MiB 输入建 32 MiB 匹配树，`random` 出现负开销）。三口径：`codec`（裸 `rar_rs::encode`，无过滤）、`archive`（完整 create+add_file on 临时输入文件+close，RAR5 v50，**delta/x86 过滤器活跃**——与产品 `rar a` 路径一致）、`solid`（同数据切 4 成员）。语料 `text`/`mixed`/`x86syn` 沿用 `bench.rs` 的 lorem/xorshift/假 x86 定义以便与 PLAN 数字对齐，另加 `wordtext`（20 词随机散文，比 lorem 难得多）、`xml`、`dll-like`（PE 形：MZ/PE 头 + 密集 E8/E9 的 .text + 字符串 .rdata + 不可压缩块 + 对齐零填充）；`--file <path>` 可测真实文件。
-  复现：`cargo run --release --example perfbench -- --size-mb 8 --repeats 3`（`--only <kind>`/`--level`/`--no-solid`/`--dict-log N` 固定字典）。不可压缩开销归因：64 MiB 随机加 `--dict-log 0..8` 扫描（见 A 项）。
-  实测（8 MiB、m3、3 次；ms 依机器，ratio 与 crc32 可移植）：text 198/304/393、wordtext 7669/7748/8476、xml 1794/2356/4404、random 466/49/140、mixed 448/492/224、x86syn 284/348/475、dll-like 1894/2220/3135（codec/archive/solid 中位数）；ratio 0.01%/16.85%/7.91%/100.02%/50.01%/1.89%/32.83%。（archive 列于 2026-09 改走 `add_file` 路径；上述 ratio 为旧 `add_bytes` 口径，`x86syn`/`dll-like` 在新口径下更小——实际 `rar a` 产出的 ratio 才是产品数字。）
-  结论与纠偏：① `text`/`mixed`/`x86syn` 与 `bench.rs` 及 PLAN 的 30/14/19 MiB/s 吻合，基准可信；② **`random` 的 `delta` 恒为负不是异常**——归档路径有 STORE 回退预检（`format/rar5/write/layout.rs`），64 MiB 随机下 codec 5546 ms 而 archive 仅 101 ms（纯拷贝），故「随机数据 ~800 ms 未记账开销」应改为追**真正尝试压缩的 codec 路径**（64 MiB 随机 5.5 s），而非归档层开销；③ PLAN「WinRAR 1.8s vs 我们 ~6s」出自 5.75 MB 真实 DLL，合成 `dll-like`（8 MiB codec 1894 ms / 4.2 MiB/s）只是代理，无法证实该数字，须用 `--file <真实 DLL>` 复测；④ **8 MiB/4 成员下 solid 比非 solid 明显慢**（xml 4404 vs 2356、wordtext 8476 vs 7748）——这是 solid MT（06）的起点基线。
-  附注：clippy 已全量清零（见下述「已废弃 API 面移除」），本条不再适用
-
-## 已取消 / 不做
-
-- ~~RAR 1.3/1.4（`RE~^` 族）：rars 支持但本实现不追（夹具稀少、DOS 时代）~~ 2026-09 已实现读取与创建（单卷 + 旧命名分卷，见「独立审计 2026-09-13」）
-- unrar `s`（转 SFX）：官方 UnRAR 7.23 无此命令，非差距
-
-## 加固记录（原 CHANGELOG，2026-09 迁入本文件）
-
-`CHANGELOG.md` 已删除：它的版本序列与 crate 版本不同源，且与本文件重复维护、容易漂移。
-改动记录归位到**本文件的这一节（结论级）+ git 历史（过程级）**。
-
-- **不可压缩采样预检**：不可压缩输入（媒体 / 归档 / 随机数据）采样编码后直接落 STORE，不再跑完整
-  匹配查找；长距离重复兜底保证「看似随机、彼此却是远端副本」的文件仍被压缩。
-- **solid 链跨成员 / 跨窗口加固**：成员边界丢弃逐帧 hash-chain 树，保留窗口尾、重复缓存与长距离
-  历史；修掉 16 MiB 字典下第 3 个及以后成员丢失共享窗口的问题。
-- **重定向目标包含性**：symlink / junction 的 target 是归档可控数据，按安全路径策略做词法包含性
-  校验（拒绝绝对路径、盘符 / UNC、爬出根目录的 `..`）；Windows 侧改用 `symlink_file` /
-  `symlink_dir` 实际创建，不再一律 `Unsupported`。
-- **服务块声明大小上限**：CMT 注释 / STM 交替数据流 / QO 记录共用 64 MiB 上限，`as usize` 换
-  `usize::try_from`；`ExtractOptions::max_metadata_bytes`（napi `maxMetadataBytes`）可上调或取消。
-  背景：头里的 `data_size` 只被 CRC 保护，而 CRC 是打包方自算的，不是防篡改。
-- **目标目录包含性先于建目录**：被拒绝的成员名不再留下空目录，判定也不再依赖刚创建的目录。
-- **Windows 歧义名**：拒绝尾点 / 尾空格分量与保留设备名（CON / PRN / AUX / NUL / COM1-9 /
-  LPT1-9，带扩展名也算），仅 Windows 编译进。
-- **分块读取限流**：`VolumeReaders` 改为边读边长 + `take`，与另两个 `ChunkReader` 实现一致。
-
-## 已完成（要点）
-
-- **多卷提交事务全闭环（2026-09）**：单卷是 staging + `replace_file` 原子替换；多卷提交走
-  `fs::atomic::commit_files`（park 已存在目标卷 → 安装暂存集 → 失败整体回滚 → 成功删旁路），
-  更短的覆盖 retire 旧集残留分卷，旧集 `.rev` 也一并 retire。提交写
-  `.{base}.rar5commit.journal` + committed 标记，进程在 rename 中途被 kill 后，下次写打开
-  （`open_write`/`open_write_rar4`/`prepare_append`/`rewrite_multivolume`）会回滚未完成提交
-  或收尾已完成提交；恢复只在写路径触发（读打开不动盘）。单测覆盖 prepared 回滚与
-  committed 收尾两条路径。
-
-- **低层公开面已收敛（2026-09）**：`format` / `recovery` / `crypto` 三棵树 + `rar40`/`rar50` 别名
-  已 `raw` 门控；`codec` 子树里 `common` / `legacy` / `modern` 全是 `pub(crate)`，唯一公开的
-  `codec::lzss_huff`（及根上的 `encode` / `decode` / `EncodeOptions` / `EncoderState` /
-  `encode_chunked*`）是 ADR 0003 决策 3 明确「stable enough」要保留的，examples 依赖它。
-  剩下的低层公开面只有 `detect`（`sfx_offset_of` 是正经 API，留着）。
-  若将来要把 `lzss_huff` 也门控，前置是把 `examples/`（analyze_stream、clioverhead、mtbench 等）
-  改用根重导出或加 `required-features` —— 目前按 ADR 不做。
-
-- [x] **RAR7 非 2 的幂小字典解锁（2026-09）**：`DictionarySize` ≤4 GiB 锁死 2 的幂的既有判定解除（`TryFrom` 只做范围校验），`rar5_log()` 加幂守卫（此前 NON-pow2 ≤4 GiB 会给出错误 log），非幂字节 `None`-log 路由回归正确；≤4 GiB 非幂（如 6 MiB）为 **v70-only** 声明（serializer 5 位基+1/32 增量位本就精确编码，读侧窗口幂等取整不受影响）；v50 路径对同请求保持纯 log 语义（6 MiB→8 MiB 向上取整 log，仍 v50）。CLI `-ma7 -md6m` 经新 `parse_dict_bytes` 兜底放行（`-ma7` 是我们扩展，WinRAR 无此开关故无对齐约束）；`-md6m` 不带 `-ma7` 仍报 Unknown option（对齐 WinRAR）。napi `format:'rar7'` + `dictSize:'6m'` 同样放行，`rar5` 仍严格拒绝。测试：`v70_forced_non_power_of_two_dictionary`（6MiB 精确回环 + v50 对照）、CLI `-ma7 -md6m` 精确声明、napi rar7/6m 回环、`parse_dict_bytes` 单测
-
-- [x] **napi WASI 加载器 API 面对齐（2026-09）**：`a07b999`/`b582bdb` 新增的 5 个原生 API（`extractMember`/`renameEntries`/`setComment`/`setRecovery`/`lockArchive`）在 wasm loader 里此前只有裸导出、无 host 路径映射——`extractMember` 的新旧 `destDir`、四个编辑操作的首个归档路径在 WASI+Windows 上会原样传 guest。修：`wasi-path-map.cjs` 加 5 个命名映射器（extractMember/rename/comment/recovery/lock 均映射首参归档路径，extractMember 还映射 destDir），`patch-wasi-loader.mjs` 加 5 个导出行 + 包装模板（extractMember 的返回路径再 `toHostPath` 映射回 host），模板契约测试断言 5 个包装器存在。本地重建 `wasm32-wasip1-threads` bundle + 重跑 patch（产物 gitignored，CI `build-wasm`/`test-bindings` 两条 job 均构建后重跑 patch 自动生效），`node --test` 44/44（+3 映射器单测 + 契约断言）
-
-- [x] **老版本 RAR 创建（`-ma4`）Phase 1.2：STORE + 成员边界多卷（2026-09）**：`options.rs` 增 `CreateOptions::format_version`（默认 Rar50，`Rar40` 拒绝 RAR5-only 特性：quick-open/BLAKE2/恢复记录/恢复卷/-hp/owner/streams/RAR7 字典）；`rar40/write.rs` 固定宽度头序列化（签名/主头/文件头/endarc、CRC16、DOS 时间、ext-time、文件名编码、字典位）；`archive/create.rs` 独立 RAR4 写管线（`open_write_rar4`/`finish_writing_rar4`/`start_next_volume_rar4`）；`rar50/write/mod.rs::add_file_rar4` STORE 成员写器（单卷 + 分卷切分）。跨卷规范对齐 WinRAR 7.23（`unrar t` All OK + `unrar x` SHA256 字节级一致）：主头首卷 `MHD_FIRSTVOLUME|MHD_VOLUME`；分块头 **非末块 CR C32=本段数据**、**末块 CR C32=整文件**，packed_size=段、unpacked_size=每头整文件长；分卷用**老命名** `x.rar`/`x.r00`/`.rNN`（每百卷升字母 r→z，`volume_path_rar4`）。读回经自身 RAR4 reader 分卷合并 roundtrip 通过。**CLI `-ma4`（Phase 1.3 a）：`crates/rar-cli/src/bin/rar/{args,create}.rs` 版本表把 `-ma4` 映射到 v29；修 `add_batch` 并行路径对 RAR4 落回顺序写（并行压缩管线只产 RAR5，否则 RAR4 主头+ RAR5 成员混排被 WinRAR 判 Unexpected end of archive）；RAR4 不兼容开关（`-hp` 等）报错**。LZSS/PPMd 压缩留待下一阶段。设计见 `docs/rar4-creation-spec.md` + `docs/adr/0001-rar4-creation-architecture.md`
-- [x] **delta 自动过滤器候选通道扩到帧尺寸 + 预门采样（2026-08）**：修 `picks_correct_channel_count_for_interleaved_streams`（自 be7a254 引入即失败，simd feature 下 CI 未跑到）暴露的两个真实缺陷——①候选通道 [1,2,3,4] 到不了多字节采样帧尺寸（16 位立体声需 4、32 位立体声需 8、24 位三声道需 9、32 位四声道需 16），扩为 [1,2,3,4,6,8,9,12,16]；实测 32 位立体声 11%（原限 ch4 时 ~18%）、24 位三声道 14%、16 位四声道 22% vs plain 84%；②预门 `auto_delta_filter_channels` 全量扫描成员（63 MiB 成员 ~300ms+，只为保护一次 64 KiB 采样编码）改为 64 KiB 头部采样；接受判据从 min-mag 通道的 near-zero 改为跨通道最大 near-zero（0/255 回绕会误导 mag 选粗通道而误拒，如 8 位单声道回绕 walk 曾拒收）。尺寸选择提取为 `pick_delta_channel` 供测试直接验证（9 种帧布局全对）。测试重写：预门只断言开关（Some/None），新增 `delta_selection_prefers_frame_size`（9 布局 × 帧尺寸）、roundtrip 扩到 2/3/4 字节采样、text 拒绝断言。全部 120 lib 测试绿
-
-- [x] **不可压缩数据压缩提速（2026-08）**：collect 快模式阈值 4096→256 且命中判据 `longest<16`→`longest==0`（文本 4-15 字节匹配不再误触发快模式，text ratio 保持 15.32% 与基线同）；无匹配块 DP 快路径（空候选 + 缓存距离探针验证 → 直接全字面量，跳过 3 次定价 pass，输出字节级一致，测试 `matchless_fast_path_is_byte_identical` 锁定）。64 MiB 随机 m3：mt1 5044→1751、mt8 1253→486 ms，ratio 100.02%→100.01%；text/mixed/xml/sparse ratio 与基线完全一致、速度持平或更快
-
-- [x] **MT 扩展性（2026-08）**：`compression_pool` OnceLock 永久缓存首用线程数（mtbench 里 mt4/mt8 实际跑 2 线程）→ 改为配置变化时重建池（RwLock<Arc>，在飞任务持 Arc 安全）；`extraction_pool` 同步修。不可压缩 slice 跳过片内 2 MiB 树播种（`mt_tail_is_incompressible`：stride-16 采样 256 KiB、4 字节窗去重率 ≥95% 判随机；head 仍清、chunk 自身插入与共享 LR 不变）。实测 64 MiB mixed m3：seq 17.5、mt2 36.8、mt4 62.1、mt8 84.0 MiB/s（此前 mt2=mt8≈20）；text mt8 179 MiB/s；ratio mixed 与 seq 字节级同、x86 +8.2%（既有分歧）。另修持久树 `resolve` 下溢（`rebase` 的环绕链接在非环绕减法下 panic）——`long_range_respects_dictionary_window` 测试由此从失败转绿
-- [x] **napi/wasm binding 迁入 workspace（2026-08）**：`smart-archive-rar`（napi-rs，native 8 平台 + wasm32-wasip1-threads）整体迁入 `crates/rar-napi`——依赖从 git rev pin（5376c80，缺 15 提交含编码器 lock-in 修复）改为 path 依赖，rev 漂移根除；补 `..Default::default()` 修 force_v70 编译。不发布 npm 包：CI（`.github/workflows/CI.yml`，tag `v*`）矩阵构建 `.node` + wasm bundle → GitHub Release assets（含 `SHA-256SUMS` 清单），vscode 消费方 SHA-256 pin 直连下载。release profile（lto+strip）上移 workspace 根。本地验证：native + wasm 双 target 构建、node --test 29/29 通过。2026-08 CI 激活：工作流从 `crates/rar-napi/.github/`（GitHub 不执行子目录工作流）迁至仓库根；`origin` 指向 GitHub（Actions 跑 CI），codeberg 留作镜像
-- [x] **batch 与 seq 字节统一（2026-08）**：`prepare_data_entry(file_origin=true)` 完整镜像 `add_file`——补上 x86 过滤器尝试（胜 STORE 时用之）与末 chunk finality 语义（`processed+len >= total`，整 4 MiB 末块也标终）。`batch_archive_matches_sequential_bytes` 全绿，seq/batch 输出 4130==4130 字节级一致
-- [x] **最优解析速度/等级梯子（2026-08）**：m2/m3 降为 2 次 pass、m4 3 次、m5 4 次（此前全 3 次，梯子是假的）；定价预算 `MAX_PARSE_STEPS_PER_POSITION=12`/位置（最长 run 恒完整定价以保住 committed_through 跳步——砍掉它会让 text 变慢 44x）；快速提交阈值 NICE 512→64（x86 案例 m3 提速 37x 且压缩率 4.06%→2.85%）；缓存距离探测仅前两个。实测 m3：text 32 MiB/s、mixed 12.7 MiB/s、x86 合成 19 MiB/s、真实 DLL ~3.5 MiB/s（原 2.1）
-- [x] **大文件多 chunk 退化修复（2026-08）**：插桩定位三个根因——每 chunk 重建 32 MiB 树（memset+页错误）、随机段每位置 LR 探测（12 MB 表缓存 miss）、随机段每位置树下降（32 MiB son 全 miss）。修复：树跨 chunk 持久化（只清 head 表）、LR 探测失败 4096 次后降频 1/128、树 fast mode（4096 位置无匹配跳过搜索、每 128 恢复一次）。实测 16 MiB mixed 6300→1245ms（5.1x），32 MiB 线性 10.1 MiB/s，全部解码字节级一致，压缩率 50.04%→50.02%
-- [x] **多线程路径切换最优解析（2026-08）**：`encode_mt_slice` 由贪心+lazy 换为 `find_matches_optimal`（每片：新树 + budget-4 播种 2 MiB 近窗 + 共享只读 LR 绝对锚点查询；worker 状态跨 wave 复用保 son 数组暖）。实测 64 MiB mixed m3：seq 17 MiB/s、mt8 21 MiB/s，压缩率与 seq 字节级同（50.02%）；x86 合成 mt8 50 MiB/s。所有 MT 输出解码字节级一致。导出 `encode_chunked_mt`/`EncoderState`（lib.rs，parallel feature）供基准
-- [x] **顺序路径大字典提速（2026-08）**：树跨 chunk 真持久化——链接按帧滑动量重定基（`TreeMatchFinder::grow_to`/`rebase`），不再每 chunk 重建树 + 重播种 8 MiB 尾部（重播种在稠密桶数据上每 chunk 3.4s）。实测 64 MiB mixed（32 MiB dict）：26.6s→3.8s（16.6 MiB/s，7x），32 MiB 线性 10 MiB/s+；压缩率不变，解码字节级一致。多线程 worker（新树）保留 budget 4 播种
-- [x] 过滤器只实现 0–3（Delta/E8/E8E9/ARM），未知类型显式报错——类型 4–7 现实归档中不存在
-- [x] **自动 x86 (E8/E8E9) 过滤器**：rars `x86_filter_scan` 移植（簇/跨度聚类 + 填充边界）；`encode_with_auto_x86_filter` 试 E8E9 与 E8 取小；内存路径成员（<64 MiB）自动应用；过滤器成员按非 solid 写出。实测 m5 DLL 差距从 21-23% 降到 6-14%（后由最优解析进一步收窄）
-- [x] **自动 delta (multimedia) 过滤器**：内存路径成员先试 delta 再试 x86（真实 x86 代码非多通道相关，廉价 delta 扫描快速返回 None 落入 x86；音频/原始数据由 delta 胜出，避免无用的 x86 扫描）。通道选择按**压缩后尺寸**（采样前 64 KiB 各候选通道试压取最小），对字节回绕稳健——原始幅度启发式会被 0/255 边界回绕产生的大 delta 误导选错通道；且仅当严格优于 plain LZSS 才保留（结构化但非多通道数据如文本绝不劣化）。实测 8-bit walk 800000→25868、16-bit 立体声 1600000→48591，随机数据不触发（留给 plain LZSS）。`unrar` 读我们 delta 输出、`rar-rs` 读 WinRAR delta WAV 均字节级一致；顺序/批量字节级一致
-- [x] **最优解析（m2-m5）**：rars `optimal_tokens`/`TokenPrices`/`BlockSplitter`/BT4 tree finder 移植；每块收集一次 + 3 次定价（首次估计、后两次用上一 pass 的真实表）；不可编码匹配（距离 bonus 使 raw < 2）在定价期拒绝；过滤器路径同样启用。实测 m3 默认级：code -52%、xml -24%、text -13%、DLL +2-6%
-- [x] 解码器修复：RAR5 过滤器位置为流绝对（solid 链），但 E8/ARM 变换偏移为成员相对（unrar `WrittenFileSize`），且 x86 偏移按 16 MiB 取模——此前 solid+filter 归档跨成员引用会 CRC 错（已用真实 WinRAR 归档验证）
-- [x] 大字典内存防护：读侧上限改为可配置 `ExtractOptions::max_dict_size`（默认 4 GiB，`-mdx` 语义；`None` = 不限），RAR7 v70 >4 GiB 字典按上限拒绝
-- [x] 字典：`-md` 全量语义（非法值报 Unknown option 与 WinRAR 一致）；默认 32 MiB；按 `min(-md, 2×floor_pow2(文件大小))` 裁剪；读侧上限 4 GiB（RAR5 格式上限）
-- [x] RAR7 (v70) 读+写：>4 GiB 字典（5 位+1/32 非幂编码）、DCX=80 扩展距离表、u64 距离；裁剪落回 ≤4 GiB 自动降级 v50；`CreateOptions::force_v70` 测试缝 + CLI `-ma7`（扩展：任意字典大小强制 v70，WinRAR 7.23 无此开关）——小字典 v70 已由真 WinRAR 验证可解（含修复 read() 路径丢失 dict_size_bytes/DCX 的 bug）
-- [x] 长距离匹配（`-mcl` 语义）：采样哈希表覆盖 ≤ min(128 MiB, 字典) 历史；匹配距离受字典窗口限制（与 WinRAR 一致——实测默认/`-md32m` 下 32 MiB 远端副本双方都不压缩，`-md128m` 才压缩）；内存按实际数据惰性增长（历史 + 表，不再按字典预分配 ~2×）；128 MiB 副本实测压缩率差 0.3%、速度持平
-- [x] solid + 分卷创建（encoder state 跨成员/跨卷保持，双向字节级验证）
-- [x] >4 GiB 单文件创建（spill 流式管线：分块压缩 + 链式 CBC + 精确切卷，内存与文件大小无关）
-- [x] **单文件多线程压缩（`-mt` 全速生效）**（2026-08）：流式路径按窗口缓冲，`codec/rar50.rs::encode_chunked_mt`
-      将窗口切成 4 MiB 细粒度切片并行编码——每片带前文 tail 上下文 + 共享长距离表
-      （`LongRange::find_from` 绝对锚点查询），重复距离缓存按片重置。实测 308.8 MiB 混合文件：
-      `-mt8` 4.11s → **1.45–1.51s（≈2.7×）**，已超 WinRAR 7.23 同参 1.80s；压缩率 16.2%→16.7%
-      （+3%，缓存重置代价）；`-mt1` 回退旧路径字节级一致；字典 128K/1M/8M/v70 标志全回环验证；
-      RAR5 solid 链同样走 chunk 级 MT（窗口经共享 tail/长距离表延续）；RAR4 老编码器 solid 链保持串行
-
-### 命令
-
-- [x] `ch`（大小写转换）、`p`（打印）、SFX 转换 `s`/`s-`、列表变体 `lt/lb/vt/vb`（`rar` 与 `unrar` 均已支持）
-- [x] `rv[N]` 补恢复卷：对**已存在**分卷集生成 .rev；计数/百分比/默认 10%、封顶 10×ND，官方语义逐项实测；`.rev` 命名跟随卷集零填充
-- [x] `r` 修复改流式（`repair_archive_path`）：只驻留恢复数据，超大归档可修复；完好不写输出
-
-### 开关（批次 1–3 完成，均与 WinRAR 实测对照）
-
-| 类别 | 开关 |
-|---|---|
-| 路径/掩码 | `-r/-r0` `-ep1..4` `-x@/-n@` `-ed` `-as` `-ad/-am` `-ver[n]` `-ms` |
-| 时间 | `-ta/-tb/-tl/-tk` `-tn/-to` 过滤；`-ts[m,c,a][+,-,1]` 三时间戳存取；`-tsp` |
-| 文件系统 | `-ol/-oh` 链接 redirect；`-os` NTFS ADS 双向；`-ow` owner |
-| 归档组织 | `-z` 注释 `-ag` 命名 `-sl/-sm` 大小过滤 `-df` `-t` `-kb` `-op` `-or` |
-| 配置体系 | rar.ini / .rarrc / RARINISWITCHES；rarfiles.lst solid 排序（子集规则） |
-| 交互/消息 | `-y -o± -idq -ierr -ilog -iver -cfg-` 等；系统动作类（-ieml/-ioff/-isnd）只接受不执行 |
-
-### 工程里程碑
-
-- [x] fmt/clippy 双门：workspace 全量 `cargo fmt --check` + `cargo clippy --all-features -- -D warnings`（codec 热路径的 `too_many_arguments` 用针对性 allow，不做风险重构）
-- [x] fuzz：`fuzz/` 独立 crate 七目标（parse/crypto/recovery/rev/legacy 读侧 + write/rewrite 写侧；rev/legacy 为 2026-09-14 新增结构化变异目标），standalone 变异循环 + libFuzzer 双模式；种子语料嵌入真实 WinRAR fixture；CI smoke 覆盖全部读侧目标（seed 随 run 轮换、overflow-checks/debug-assertions 开启）。（2026-09-11 记录的 `raw` 依赖缺口随 `raw` feature 删除而失效，见 ADR 0007。）
-- [x] 根 CI 恢复（2026-08）：`.github/workflows/CI.yml` 运行 workspace fmt/check/clippy/test、独立 fuzz workspace check、native/WASI binding 构建测试与 tag release；2026-09-14 起另有 schedule/manual 的 `interop` job 拉取 rarlab 官方控制台工具跑 `official_interop`/`rewrite_tests`（`SA_REQUIRE_OFFICIAL=1`），普通 job 会打印可见 SKIP、Windows job 一并跑 `rar-rs` 的 Windows-only 测试并被 release 门控
-- [x] 取消钩子 `RarArchive::set_cancel_flag(Arc<AtomicBool>)`：创建/提取/重写/分卷全检查点，`RarError::Cancelled`；binding 的 AbortSignal 接上
-- [x] QO 快路径 `RarArchive::open_quick`：只读主头 + QO 记录即可列出（无 QO 回退全扫）；binding `listEntriesQuick`
-- [x] 零填充分卷集：写侧对齐——≥10 卷时 writer 直接输出 `part01..partNN`（与 WinRAR 一致，close 收尾 rename）；`discover_volumes` 增加从基名探测 padded 首卷；`.rev` 命名跟随卷集填充；`rec_count > data_count` 误拒已修
-
-- [x] atomic create/append：temp sibling 暂存，close 原子提交
-- [x] 加密分卷每块加密记录（flags=1/3）+ `-hp` 分卷读取 + ENDARC flags 修复
-- [x] deep-module 九项重构 → 仿 rars workspace 架构迁移（15636d8）
+- **RAR5 / RAR7**：创建与读取全功能对齐 WinRAR 7.23——压缩（m0–m5、DP 最优解
+  析）、`-hp` 头加密、分卷、solid、内联恢复记录、`.rev` 恢复卷、quick-open、
+  NTFS ADS、三时间戳、owner、`-mt` 多线程、长距离匹配、v70 大字典。
+- **老容器族读取（RAR 1.3–4.x）**：三代解码器（RAR29/20/15）+ PPMd + 五大标准 VM
+  过滤器 + 通用 RARVM 解释器，solid 链、分卷、`-hp`、各代数据解密。
+- **RAR4 创建全能力**：LZSS m1–m5 + PPMd + 六大标准 VM 过滤器 + `-hp` + 多卷 +
+  solid（含 PPMd 模型延续）+ 并行 batch + 单大成员块级 MT（字节同等）+ NEWSUB
+  恢复记录。
+- **RAR 1.3 / 1.4 / 1.5 / 2.x 创建**：`-ma13` / `-ma14` / `-ma15` / `-ma2`，含
+  solid、`-p` / `-hp`、旧命名分卷。
+- **RAR4 编辑全补**（ADR 0005）：头/块级操作 + 非 solid 块拷贝 + solid 整档
+  repack；`-hp` 与分卷（`rn`/`ch`/`k`/注释）均已支持。
+- **命令面**：官方 `rar` 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt` 列表变体）。
+- **工程**：workspace 三 crate（`rar-rs` / `rar-cli` / `rar-rs-napi`）；CI
+  fmt/clippy `-D warnings`/测试/fuzz smoke + 定时官方互操作 job；七目标
+  fuzz；取消钩子；QO 快路径；流式修复；零填充分卷。
 
 ## 一致拒绝（别"修"）
 
-- 分卷 + 内联恢复记录（`-rr`）——WinRAR 分卷只能用 `.rev`；官方 6.23 自己的 `rar r` 在带内联 RR 的分卷集上挂死（产出 0 字节 fixed），因此分卷 RR 编辑也保持拒绝。
-- 分卷 append、分卷删除：官方 `rar` 同样拒绝（"Cannot modify volume"）。分卷的 `rn`/`ch`、`k` 与归档注释**不是**拒绝项：官方支持，我们也已支持（逐卷重写 / 注释插在首卷主头后）。
-- **强制 delta + 强制 x86（`-mcd+ -mce+`）**：官方 `-mcde+` 产出按 64 KiB 块**不相交**的过滤器记录；重叠记录无法被官方 UnRAR 反转（实测两种记录顺序都被判 checksum error），因此保持 `InvalidOption`。真对齐需实现按块过滤器选择（另立项）。
+- 分卷 + 内联恢复记录（`-rr`）：WinRAR 分卷只能用 `.rev`；官方 6.23 自己的
+  `rar r` 在带内联 RR 的分卷集上挂死（产出 0 字节 fixed），因此分卷 RR
+  编辑也保持拒绝。
+- 分卷 append、分卷删除：官方 `rar` 同样拒绝（"Cannot modify volume"）。分卷的
+  `rn` / `ch`、`k` 与归档注释**不是**拒绝项：官方支持，我们也已支持（逐卷重写 /
+  注释插在首卷主头后）。
+- **强制 delta + 强制 x86（`-mcd+ -mce+`）**：官方 `-mcde+` 产出按 64 KiB 块
+  *不相交*的过滤器记录；重叠记录无法被官方 UnRAR 反转（实测两种记录顺序都被判
+  checksum error），因此保持 `InvalidOption`。真对齐需实现按块过滤器选择。
 
 ## 已知小差异（记录，互操作无碍）
 
-- **RAR4 成员注释（`cf`）互操作（2026-09-14 修复）**：v29+ 写侧改为在成员数据后发射**独立** `COMM_HEAD`（0x75）块（外层不带 `FHD_COMMENT`、外层 CRC 覆盖固定+名；0x75 自身 CRC 按 unrar 的 11 字节体覆盖），官方 UnRAR 6.23/7.23 `t`/`x` 均 `All OK` 且解出字节一致，`-hp` 下只加密 35 B 头；读侧与编辑器同步支持该布局（编辑器为改注释成员重发 0x75、删除时一并移除）。pre-RAR3（unp_ver<29）仍保持嵌套布局——官方对 1.5/2.x 注释的校验本身不可作基准（唯一真实样本 `comment_nopsw.rar` 在官 5.91/6.23/7.23 上同样报 `The archive comment is corrupt`），且官方无 `cf` 不能生成对照。多卷成员注释继续拒绝。
+- **RAR4 成员注释（`cf`）**：v29+ 写侧在成员数据后发射**独立** `COMM_HEAD`
+  （0x75）块（外层不带 `FHD_COMMENT`、外层 CRC 覆盖固定+名；0x75 自身 CRC 按
+  unrar 的 11 字节体覆盖），官方 UnRAR 6.23/7.23 `t`/`x` 均 `All OK` 且解出字节
+  一致，`-hp` 下只加密 35 B 头；pre-RAR3（unp_ver<29）保持嵌套布局——官方对
+  1.5/2.x 注释的校验本身不可作基准，且官方无 `cf` 不能生成对照。多卷成员注释继续
+  拒绝。
+- solid 且无 `rarfiles.lst` 时：WinRAR 按扩展名/名字启发式排序，我们按参数顺序。
+- 目录条目名带尾斜杠。
+- **`lb` 分片成员**：官方 `Rar.exe lb` 对跨卷成员不打印该成员名，官方
+  `UnRAR.exe lb` 与我们一致；我们随 UnRAR，不追 `Rar.exe` 的省略行为。
+- **WinRAR 的 RAR4 修复对周期数据的缺陷**：当恢复记录块本身落入其保护的最后部分
+  扇区且成员数据是短周期重复（如 64 B pattern）时，WinRAR 自己的 `rar r` 会把 RR
+  尾部修坏（产物 `Unexpected end of archive`），6.23 与 7.23
+  一致。我们的写侧把部分尾扇区排除出 parity
+  组、读侧只重建完整扇区，故能正确修复同样损坏。这是 WinRAR
+  侧缺陷，不追平；互操作测试因此用伪随机成员数据。
 
-- solid 且无 rarfiles.lst 时：WinRAR 按扩展名/名字启发式排序，我们按参数顺序
-- 目录条目名带尾斜杠
-- **`lb` 分片成员**：官方 `Rar.exe lb` 对跨卷成员不打印该成员名，官方 `UnRAR.exe lb` 与我们一致（每个有片段的卷都打印）；我们随 UnRAR，不追 `Rar.exe` 的省略行为
-- **WinRAR 6.23/7.23 的 RAR4 修复对周期数据的缺陷（2026-09 实测）**：当归档的恢复记录块本身落入其保护的最后部分扇区（必然如此——RR 在归档尾，`total_blocks` 覆盖到 RR 头）且成员数据是短周期重复（如 64B pattern）时，WinRAR 自己的 `rar r` 会把 RR 尾部修坏（产物 `Unexpected end of archive`），无论记录是其自产还是我们产——实测 6.23 与 7.23 行为一致。我们的写侧把部分尾扇区排除出 parity 组、读侧只重建完整扇区，故我们能正确修复同样损坏（字节级回环）。互操作测试因此用伪随机成员数据；这是 WinRAR 侧缺陷，不追平。
+## 归属（谁记录什么，别再重新论证）
+
+- **压缩与性能**的结论、负例与基线 →
+  [`docs/issues/compression-perf/map.md`](docs/issues/compression-perf/map.md)：
+  seq 与最优解析的字节契约不动；`-mt` 低步数搜索是**接受的取舍**；BT4
+  字节级流水、 FAR_BAND、两制近存等方向已实测为负例。
+- **模块、分层与设计不变量**（有界内存/spill、安全提取、solid 与 MT、多卷
+  journaled 提交）→ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+- **术语** → [`CONTEXT.md`](CONTEXT.md)；**字节格式** →
+  [`docs/FORMAT_RAR5_RAR7.html`](docs/FORMAT_RAR5_RAR7.html)；**架构决策** →
+  [`docs/adr/`](docs/adr/)；**测试与 CI** →
+  [`docs/testing.md`](docs/testing.md)。
 
 ## 备注（改代码前必读）
 
-- 卷大小必须精确：新增块类型（如 QO）记得同步配额记账
-- 加密块 padding 是 **zero-fill 不是 PKCS7**——7-Zip 会校验 padding 区全零
+- 卷大小必须精确：新增块类型（如 QO）记得同步配额记账。
+- 加密块 padding 是 **zero-fill 不是 PKCS7**——7-Zip 会校验 padding 区全零。
+- **Markdown 文档由 `dprint` 格式化，正文 80 列**；改完文档跑
+  `npx dprint@0.50.2 fmt`（配置见 `dprint.json`，约定见
+  [`docs/README.md`](docs/README.md)）。

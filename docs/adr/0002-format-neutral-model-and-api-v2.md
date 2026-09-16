@@ -6,8 +6,8 @@
 
 ## Context
 
-The core crate supports RAR 1.5–4.x, RAR5, and RAR7, but its shared entry
-model is still owned by `rar50::headers`. `rar40`, `archive`, and the public
+The core crate supports RAR 1.5–4.x, RAR5, and RAR7, but its shared entry model
+is still owned by `rar50::headers`. `rar40`, `archive`, and the public
 `ArchiveEntry` therefore depend on a RAR5 wire-format module even when they
 operate on legacy archives.
 
@@ -17,8 +17,8 @@ write state. This makes invalid-state errors possible and leaves several
 low-level format types in the public compatibility surface.
 
 A full crate split or immediate replacement of `RarArchive` would mix internal
-architecture work with a large SemVer change and make byte-level interoperability
-regressions difficult to isolate.
+architecture work with a large SemVer change and make byte-level
+interoperability regressions difficult to isolate.
 
 ## Decision
 
@@ -43,12 +43,12 @@ real re-exports from `rar50::headers`:
 pub use crate::model::{DataChunk, FileHeader};
 ```
 
-This keeps `rar_rs::rar50::headers::FileHeader` and
-`rar_rs::rar50::FileHeader` source-compatible while internal consumers migrate to
-`crate::model`.
+This keeps `rar_rs::rar50::headers::FileHeader` and `rar_rs::rar50::FileHeader`
+source-compatible while internal consumers migrate to `crate::model`.
 
 > 2026-09：这两个重导出路径先后经 `raw` feature（ADR 0003 决策 3）与 `wire` 模块
-> （ADR 0007）承接；`rar40`/`rar50` 别名已随 `raw` 一并删除，`wire` 直接导出模型结构。
+> （ADR 0007）承接；`rar40`/`rar50` 别名已随 `raw` 一并删除，`wire`
+> 直接导出模型结构。
 
 ### 2. Keep format-specific wire structures in format modules
 
@@ -75,8 +75,8 @@ API v2 will introduce an opaque `EntryId` and borrowed `EntryRef`. Duplicate
 member names must remain distinct. Names become query keys rather than stable
 identity.
 
-An ID is valid only for the catalog generation that created it. Structural
-edits invalidate prior IDs. Data offsets and member names are not IDs.
+An ID is valid only for the catalog generation that created it. Structural edits
+invalidate prior IDs. Data offsets and member names are not IDs.
 
 ### 5. Introduce validated option types incrementally
 
@@ -90,6 +90,10 @@ New APIs use private-field builders and validated domain types such as:
 - `OverwritePolicy`;
 - `PathLayout`;
 - `ScanStrategy`.
+
+> 复核 2026-09：`OverwritePolicy` 与 `PathLayout` **未采用**——覆盖语义在 CLI
+> `output.rs`（`-o+`/`-o-`/`-or`），路径规则在 `name_policy` 与
+> `fs::safe_path`；其余类型均已在库中。
 
 Existing `CreateOptions` and `ExtractOptions` retain their source-compatible
 fields. Conversion into the new options performs strict validation; old API
