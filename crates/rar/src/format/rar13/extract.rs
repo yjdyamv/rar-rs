@@ -9,7 +9,7 @@ use crate::error::{RarError, RarResult};
 use crate::format::shared::split::{SplitMerge, SplitMergeError};
 
 /// Map the shared merge error to the RAR 1.3/1.4 texts.
-fn rar13_split_error(error: SplitMergeError) -> RarError {
+fn map_rar13_split_error(error: SplitMergeError) -> RarError {
     RarError::Format(match error {
         SplitMergeError::ContinuationWithoutStart { .. } => {
             "RAR 1.3: split continuation without a start".into()
@@ -58,12 +58,12 @@ impl RarArchive {
                 let split_after = entry.header.flags & u64::from(LHD_SPLIT_AFTER) != 0;
                 if let Some(done) = merge
                     .push(entry, split_before, split_after)
-                    .map_err(rar13_split_error)?
+                    .map_err(map_rar13_split_error)?
                 {
                     self.entries.push(done);
                 }
             }
         }
-        merge.finish().map_err(rar13_split_error)
+        merge.finish().map_err(map_rar13_split_error)
     }
 }

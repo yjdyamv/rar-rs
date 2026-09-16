@@ -160,7 +160,7 @@ pub(crate) struct Rar4VolumeScan {
 }
 
 /// Map the shared merge error to the RAR4 texts.
-fn rar4_split_error(error: SplitMergeError) -> RarError {
+fn map_rar4_split_error(error: SplitMergeError) -> RarError {
     RarError::Format(match error {
         SplitMergeError::ContinuationWithoutStart { fragment } => {
             format!("RAR4: {fragment}: split continuation without a start")
@@ -240,7 +240,7 @@ impl Rar4VolumeScan {
                     if let Some(done) = self
                         .merge
                         .push(entry, split_before, split_after)
-                        .map_err(rar4_split_error)?
+                        .map_err(map_rar4_split_error)?
                     {
                         out.push(done);
                     }
@@ -272,7 +272,7 @@ impl Rar4VolumeScan {
     /// Finish: any member still pending is truncated (its last volume is
     /// missing).
     pub(crate) fn finish(self) -> RarResult<()> {
-        self.merge.finish().map_err(rar4_split_error)
+        self.merge.finish().map_err(map_rar4_split_error)
     }
 }
 

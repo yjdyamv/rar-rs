@@ -3,22 +3,23 @@
 //!
 //! A member whose data spans volumes reappears as continuation file headers
 //! (`SPLIT_BEFORE`) in later volumes; the fragments merge into one entry with
-//! one chunk per volume segment, completed by the fragment that is not
-//! `SPLIT_AFTER`. The ordering guards and the completion fields live here
-//! once so the two families cannot drift; each family maps
+//! one chunk per volume segment, completed by the continuation fragment that
+//! drops `SPLIT_AFTER`. The ordering guards and the completion fields live
+//! here once so the two families cannot drift; each family maps
 //! [`SplitMergeError`] to its own message.
 
 use crate::archive::ArchiveEntry;
 
 /// Why a fragment could not be merged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SplitMergeError {
     /// A continuation fragment arrived with no member pending.
     ContinuationWithoutStart { fragment: String },
     /// A new split member started while one was still pending.
     Overlapping { pending: String },
-    /// A regular (unsplit) member appeared while one was pending: its chunks
-    /// would land out of order between the pending member's fragments.
+    /// A regular (unsplit) member appeared while one was pending: completing
+    /// the pending member later would append it to the catalog out of archive
+    /// order (a later member would precede it).
     Interrupted { pending: String },
     /// The scan ended mid-member (its final volume is missing).
     MissingFinal { pending: String },
@@ -40,7 +41,8 @@ impl SplitMerge {
     /// `Ok(None)` and stays pending. The first fragment stays canonical
     /// (name, method, attributes); the final fragment supplies the
     /// whole-member CRC and unpacked size, and the packed size is the
-    /// checked sum of the fragments.
+    /// checked sum of the fragments. Rejections leave the pending member
+    /// untouched.
     pub(crate) fn push(
         &mut self,
         entry: ArchiveEntry,
@@ -113,7 +115,13 @@ mod tests {
     use super::*;
     use crate::model::{DataChunk, FileHeader};
 
-    fn fragment(name: &str, packed: u64, crc: u32, unpacked: u64) -> ArchiveEntry {
+    fn fragment(
+        name: &str,
+        volume_index: usize,
+        packed: u64,
+        crc: u32,
+        unpacked: u64,
+    ) -> ArchiveEntry {
         ArchiveEntry {
             header: FileHeader {
                 name: name.to_string(),
@@ -123,7 +131,7 @@ mod tests {
                 ..Default::default()
             },
             chunks: vec![DataChunk {
-                volume_index: 0,
+                volume_index,
                 data_offset: 0,
                 packed_size: packed,
                 crc32_val: None,
@@ -138,20 +146,20 @@ mod tests {
         let mut merge = SplitMerge::default();
         assert!(
             merge
-                .push(fragment("m", 100, 1, 999), false, true)
+                .push(fragment("m", 0, 100, 1, 111), false, true)
                 .unwrap()
                 .is_none()
         );
         assert!(
             merge
-                .push(fragment("m", 50, 2, 999), true, true)
+                .push(fragment("m", 1, 50, 2, 222), true, true)
                 .unwrap()
                 .is_none()
         );
         assert_eq!(merge.pending_mut().unwrap().header.packed_size, 150);
 
         let done = merge
-            .push(fragment("m", 25, 0xABCD, 999), true, false)
+            .push(fragment("m", 2, 25, 0xABCD, 333), true, false)
             .unwrap()
             .expect("final fragment completes the member");
         assert_eq!(
@@ -159,16 +167,32 @@ mod tests {
             "packed size is the fragment sum"
         );
         assert_eq!(done.header.crc32_val, Some(0xABCD), "final CRC wins");
-        assert_eq!(done.header.unpacked_size, 999);
-        assert_eq!(done.chunks.len(), 3);
+        assert_eq!(done.header.unpacked_size, 333, "final unpacked size wins");
+        let volumes: Vec<usize> = done.chunks.iter().map(|chunk| chunk.volume_index).collect();
+        assert_eq!(volumes, [0, 1, 2], "chunks keep volume order");
         assert!(merge.pending_mut().is_none());
         merge.finish().unwrap();
+    }
+
+    /// A last fragment may carry no data (the member's bytes all fit in the
+    /// earlier fragments); it still completes the member.
+    #[test]
+    fn zero_length_final_fragment_completes() {
+        let mut merge = SplitMerge::default();
+        merge.push(fragment("m", 0, 10, 1, 5), false, true).unwrap();
+        let done = merge
+            .push(fragment("m", 1, 0, 7, 5), true, false)
+            .unwrap()
+            .expect("empty final fragment completes the member");
+        assert_eq!(done.header.packed_size, 10);
+        assert_eq!(done.header.crc32_val, Some(7));
+        assert_eq!(done.chunks.len(), 2);
     }
 
     #[test]
     fn regular_members_pass_through() {
         let mut merge = SplitMerge::default();
-        let done = merge.push(fragment("a", 1, 2, 3), false, false).unwrap();
+        let done = merge.push(fragment("a", 0, 1, 2, 3), false, false).unwrap();
         assert_eq!(done.unwrap().header.name, "a");
         merge.finish().unwrap();
     }
@@ -179,7 +203,7 @@ mod tests {
         let mut merge = SplitMerge::default();
         assert_eq!(
             merge
-                .push(fragment("orphan", 1, 0, 0), true, false)
+                .push(fragment("orphan", 0, 1, 0, 0), true, false)
                 .unwrap_err(),
             SplitMergeError::ContinuationWithoutStart {
                 fragment: "orphan".into()
@@ -188,10 +212,12 @@ mod tests {
 
         // A second split member starts while one is pending.
         let mut merge = SplitMerge::default();
-        merge.push(fragment("first", 1, 0, 0), false, true).unwrap();
+        merge
+            .push(fragment("first", 0, 1, 0, 0), false, true)
+            .unwrap();
         assert_eq!(
             merge
-                .push(fragment("second", 1, 0, 0), false, true)
+                .push(fragment("second", 0, 1, 0, 0), false, true)
                 .unwrap_err(),
             SplitMergeError::Overlapping {
                 pending: "first".into()
@@ -200,10 +226,12 @@ mod tests {
 
         // A regular member interrupts a pending one.
         let mut merge = SplitMerge::default();
-        merge.push(fragment("first", 1, 0, 0), false, true).unwrap();
+        merge
+            .push(fragment("first", 0, 1, 0, 0), false, true)
+            .unwrap();
         assert_eq!(
             merge
-                .push(fragment("interloper", 1, 0, 0), false, false)
+                .push(fragment("interloper", 0, 1, 0, 0), false, false)
                 .unwrap_err(),
             SplitMergeError::Interrupted {
                 pending: "first".into()
@@ -213,7 +241,7 @@ mod tests {
         // The scan ends mid-member.
         let mut merge = SplitMerge::default();
         merge
-            .push(fragment("truncated", 1, 0, 0), false, true)
+            .push(fragment("truncated", 0, 1, 0, 0), false, true)
             .unwrap();
         assert_eq!(
             merge.finish().unwrap_err(),
@@ -227,15 +255,20 @@ mod tests {
     fn packed_size_overflow_is_checked() {
         let mut merge = SplitMerge::default();
         merge
-            .push(fragment("huge", u64::MAX, 0, 0), false, true)
+            .push(fragment("huge", 0, u64::MAX, 0, 0), false, true)
             .unwrap();
         assert_eq!(
             merge
-                .push(fragment("huge", 1, 0, 0), true, false)
+                .push(fragment("huge", 1, 1, 0, 0), true, false)
                 .unwrap_err(),
             SplitMergeError::PackedSizeOverflow {
                 pending: "huge".into()
             }
+        );
+        assert_eq!(
+            merge.pending_mut().unwrap().header.packed_size,
+            u64::MAX,
+            "a rejected fragment leaves the pending member untouched"
         );
     }
 }
