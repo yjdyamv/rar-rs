@@ -46,9 +46,12 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         }
     }
     let case = match (args.lowercase, args.uppercase) {
+        (false, false) => None,
         (true, false) => Some(crate::name_policy::CaseKind::Lower),
         (false, true) => Some(crate::name_policy::CaseKind::Upper),
-        _ => None,
+        (true, true) => {
+            return Err("-cl and -cu cannot be combined; choose one case conversion".into());
+        }
     };
     let header_encrypt = args.header_encrypt.is_some();
     if let Some(pw) = &args.header_encrypt
@@ -68,12 +71,22 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         let stamp = time::format_auto_name(fmt, y, mo, d, hour, minute, second);
         archive_path = if archive_path.contains('*') {
             archive_path.replace('*', &stamp)
-        } else if let Some(dot) = archive_path.rfind('.') {
-            archive_path.insert_str(dot, &stamp);
-            archive_path
         } else {
-            archive_path.push_str(&stamp);
-            archive_path
+            // Only the file name's extension matters: a dot in a parent
+            // directory (`out.dir/archive`) is not an extension separator.
+            let name_start = archive_path
+                .rfind(std::path::is_separator)
+                .map_or(0, |index| index + 1);
+            match archive_path[name_start..].rfind('.') {
+                Some(dot) => {
+                    archive_path.insert_str(name_start + dot, &stamp);
+                    archive_path
+                }
+                None => {
+                    archive_path.push_str(&stamp);
+                    archive_path
+                }
+            }
         };
     }
     // WinRAR appends `.rar` when the archive name carries no extension.
@@ -150,7 +163,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // enable solid creation).
     let solid_mode = match (
         misc.solid_reset.as_str(),
-        args.solid || args.solid_params.is_some() || misc.solid_reset != "continuous",
+        args.solid || args.solid_params.is_some() || misc.solid_reset != "off",
     ) {
         (_, false) => rar_rs::SolidMode::Disabled,
         ("volume", _) => rar_rs::SolidMode::PerVolume,
@@ -429,7 +442,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // highest-priority mask, where a mask whose matches are a subset of
     // another mask's wins regardless of position (WinRAR semantics).
     // `-ds` disables the sorting (like WinRAR).
-    if (args.solid || args.solid_params.is_some()) && !args.no_sort {
+    if (args.solid || args.solid_params.is_some() || misc.solid_reset != "off") && !args.no_sort {
         let masks = input::read_rarfiles_lst();
         if !masks.is_empty() {
             apply_rarfiles_order(&mut collected, &masks);
@@ -626,10 +639,14 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     if misc.ts_preserve {
         #[cfg(unix)]
         for (path, atime) in &ts_preserve_atimes {
-            let _ = std::fs::File::options()
-                .write(true)
-                .open(path)
-                .and_then(|f| f.set_times(std::fs::FileTimes::new().set_accessed(*atime)));
+            warn_on_time_error(
+                "restore the access time of",
+                path,
+                std::fs::File::options()
+                    .write(true)
+                    .open(path)
+                    .and_then(|f| f.set_times(std::fs::FileTimes::new().set_accessed(*atime))),
+            );
         }
         #[cfg(not(unix))]
         {
@@ -639,10 +656,15 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     }
     // -tk: restore the archive's original modification time.
     if let Some(t) = orig_mtime {
-        let _ = std::fs::File::options()
-            .write(true)
-            .open(archive_path)
-            .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(t)));
+        let path = std::path::Path::new(archive_path);
+        warn_on_time_error(
+            "restore the archive time of",
+            path,
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(t))),
+        );
     }
     // -tl: set the archive's modification time to the newest member.
     if args.latest_time && !collected.is_empty() {
@@ -652,27 +674,29 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             .filter_map(|c| std::fs::metadata(&c.path).ok()?.modified().ok())
             .max();
         if let Some(t) = latest {
-            let _ = std::fs::File::options()
-                .write(true)
-                .open(archive_path)
-                .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(t)));
+            let path = std::path::Path::new(archive_path);
+            warn_on_time_error(
+                "set the archive time of",
+                path,
+                std::fs::File::options()
+                    .write(true)
+                    .open(path)
+                    .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(t))),
+            );
         }
     }
     // -tk<date>: assign the requested archive modification time.
     if let Some(t) = tk_date {
-        let _ = time::set_file_mtime(std::path::Path::new(archive_path), t);
-    }
-    // -df: delete the source files after archiving (the archive keeps
-    // them; directories are left in place, like WinRAR).
-    if args.delete_after {
-        for c in &collected {
-            if !c.is_dir {
-                let _ = std::fs::remove_file(&c.path);
-            }
-        }
+        let path = std::path::Path::new(archive_path);
+        warn_on_time_error(
+            "set the archive time of",
+            path,
+            time::set_file_mtime(path, t),
+        );
     }
     // -t: test the archive right after creating it without materializing
-    // member contents or extracting to a temporary directory.
+    // member contents or extracting to a temporary directory. Runs before
+    // -df so a failed post-test never destroys the source files.
     if args.test_after {
         let mut ar =
             ops::open_reader(archive_path, password.as_deref()).map_err(|e| e.context("open"))?;
@@ -682,6 +706,30 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         if report.failed() != 0 {
             return Err(format!("test failed: {} member(s) failed", report.failed()).into());
         }
+    }
+    // -df: delete the source files after archiving (the archive keeps
+    // them; directories are left in place, like WinRAR). Failures surface as
+    // a warning: a locked or read-only source must not look like a success.
+    let mut undeleted = 0usize;
+    if args.delete_after {
+        for c in &collected {
+            if !c.is_dir {
+                match std::fs::remove_file(&c.path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        eprintln!("rar: cannot delete {}: {error}", c.path.display());
+                        undeleted += 1;
+                    }
+                }
+            }
+        }
+    }
+    if undeleted > 0 {
+        return Err(error::CliError::with_code(
+            format!("-df: {undeleted} source file(s) could not be deleted"),
+            error::EXIT_WARNING,
+        ));
     }
     // -as: synchronize the archive contents — drop members that are not
     // part of the file list (only meaningful when appending to an
@@ -750,4 +798,13 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         })?;
     }
     Ok(())
+}
+
+/// Report a failed best-effort time restoration without failing the create:
+/// `-tsp`/`-tk`/`-tl` only move metadata, but a silent failure hid a
+/// filesystem that refused it.
+fn warn_on_time_error(what: &str, path: &std::path::Path, result: std::io::Result<()>) {
+    if let Err(error) = result {
+        eprintln!("rar: cannot {what} {}: {error}", path.display());
+    }
 }

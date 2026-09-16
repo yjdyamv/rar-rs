@@ -109,6 +109,15 @@ fn cmd_update_freshen(
             .as_secs();
         let source_mtime = u32::try_from(source_mtime).unwrap_or(u32::MAX);
         if let Some(entry) = archive.entries_named(&item.name).next() {
+            // Legacy headers store local wall-clock time; the source's Unix
+            // instant must be compared in that same civil space (RAR5 stores
+            // an instant directly).
+            let version = entry.version();
+            let source_mtime = if version.is_legacy() || version.is_rar13() {
+                time::epoch_to_local_civil(source_mtime)
+            } else {
+                source_mtime
+            };
             if source_mtime > entry.mtime() {
                 to_delete.push(item.name.clone());
                 to_add.push(item.clone());
@@ -332,6 +341,40 @@ fn cmd_update_freshen(
             password: args.password.clone(),
             archive: archive_path.to_string_lossy().into_owned(),
         })?;
+    }
+    // `-t`: test the updated archive before `-df` removes the sources.
+    if args.test_after {
+        let mut ar = ops::open_reader(archive_path, password.as_deref())
+            .map_err(|error| error.context("open"))?;
+        let report: rar_rs::VerificationReport = ar
+            .verify_with_options(ops::verify_options())
+            .map_err(|error| crate::error::CliError::from(error).context("test failed"))?;
+        if report.failed() != 0 {
+            return Err(format!("test failed: {} member(s) failed", report.failed()).into());
+        }
+    }
+    // `-df`: delete the updated sources; a failure surfaces as a warning.
+    let mut undeleted = 0usize;
+    if args.delete_after {
+        for item in &to_add {
+            if item.is_dir {
+                continue;
+            }
+            match std::fs::remove_file(&item.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    eprintln!("rar: cannot delete {}: {error}", item.path.display());
+                    undeleted += 1;
+                }
+            }
+        }
+    }
+    if undeleted > 0 {
+        return Err(crate::error::CliError::with_code(
+            format!("-df: {undeleted} source file(s) could not be deleted"),
+            crate::error::EXIT_WARNING,
+        ));
     }
 
     info!(

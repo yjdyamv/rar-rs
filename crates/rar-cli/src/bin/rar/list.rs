@@ -15,7 +15,8 @@ fn filter_names(args: &ListArgs, misc: &common::MiscSwitches) -> Result<Vec<Stri
 ///
 /// The search string is attached to the command: `rar i<str> archive.rar`,
 /// with optional modifiers `ic` (case sensitive) and `ih` (hex bytes).
-pub(crate) fn cmd_find(cmd: &str, args: &[String]) -> CliResult<()> {
+/// `password` comes from the external command's trailing switch block.
+pub(crate) fn cmd_find(cmd: &str, args: &[String], password: Option<&str>) -> CliResult<()> {
     if args.is_empty() {
         return Err("usage: rar i<string> <archive.rar>".into());
     }
@@ -51,7 +52,7 @@ pub(crate) fn cmd_find(cmd: &str, args: &[String]) -> CliResult<()> {
     if needle.is_empty() {
         return Err("empty search string".into());
     }
-    let mut rar = ops::open_reader(archive_path, None).map_err(|e| format!("open: {e}"))?;
+    let mut rar = ops::open_reader(archive_path, password).map_err(|e| format!("open: {e}"))?;
     let entries: Vec<(rar_rs::EntryId, String)> = rar
         .entries()
         .filter(|e| !e.is_dir())

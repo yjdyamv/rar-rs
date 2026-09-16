@@ -309,19 +309,14 @@ fn run_inner(cli: Cli) -> CliResult<()> {
         Command::Test(args) => cmd_test(&args, password, &cli.misc),
         Command::Print(args) => cmd_print(&args, password, max_dict_size),
         Command::External(ext) => {
+            // A bare archive path is not a command: official UnRAR prints
+            // usage and exits 7. Listing used to happen silently and dropped
+            // any member names or switches after the path.
             let name = ext.first().cloned().unwrap_or_default();
-            if name.ends_with(".rar") || name.ends_with(".cbr") {
-                cmd_list(
-                    &ArchiveArgs {
-                        archive: name,
-                        names: Vec::new(),
-                    },
-                    password,
-                    &cli.misc,
-                )
-            } else {
-                Err(format!("unknown command: {name}").into())
-            }
+            Err(error::CliError::with_code(
+                format!("unknown command: {name}"),
+                error::EXIT_BAD_COMMAND,
+            ))
         }
     }
 }
@@ -390,6 +385,8 @@ fn cmd_extract(
         overwrite: args.overwrite.clone(),
         assume_yes,
         auto_rename: args.auto_rename,
+        freshen: misc.freshen,
+        update: misc.update_files,
         keep_broken: args.keep_broken,
         set_creation_time: ts.save_ctime,
         set_access_time: ts.save_atime,
@@ -428,6 +425,8 @@ fn cmd_extract_flat(
         overwrite: args.overwrite.clone(),
         assume_yes,
         auto_rename: args.auto_rename,
+        freshen: misc.freshen,
+        update: misc.update_files,
         keep_broken: args.keep_broken,
         set_creation_time: ts.save_ctime,
         set_access_time: ts.save_atime,

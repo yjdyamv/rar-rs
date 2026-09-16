@@ -217,3 +217,88 @@ fn cli_legacy_new_numbering_totals_show_the_volume() {
         assert!(text.contains("volume 2"), "{command}: {text}");
     }
 }
+
+/// A switch between the embedded `rv<N>` token and the archive path must not
+/// be mistaken for the archive.
+#[test]
+fn cli_rv_embedded_count_skips_switches_before_the_archive() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join("sw");
+    let src = dir.path().join("payload.bin");
+    std::fs::write(&src, vec![0x21u8; 200_000]).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-v50k", "-m0", "-idq"])
+        .arg(&base)
+        .arg(&src)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let first = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".part1.rar"))
+        })
+        .expect("first volume");
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["rv2", "-m0", "-idq"])
+        .arg(&first)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "rv2 must accept a switch between the token and the archive"
+    );
+    let revs = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .is_ok_and(|entry| entry.file_name().to_string_lossy().ends_with(".rev"))
+        })
+        .count();
+    assert_eq!(revs, 2, "rv2 must write two recovery volumes");
+}
+
+/// `rar i<string>` must honor `-p<password>` after the archive: external
+/// commands bypass clap, so the password used to be dropped and an
+/// encrypted archive could never be searched.
+#[test]
+fn cli_find_honors_a_password_after_the_archive() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("secret.txt");
+    std::fs::write(&src, b"the needle lives here").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-hp1234", "-idq"])
+        .arg("enc.rar")
+        .arg("secret.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    for args in [
+        vec!["ineedle", "enc.rar", "-p1234"],
+        vec!["-p1234", "ineedle", "enc.rar"],
+    ] {
+        let output = std::process::Command::new(RAR_CLI)
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("Found"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}

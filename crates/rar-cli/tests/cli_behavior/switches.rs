@@ -1469,3 +1469,25 @@ fn cli_noop_switches_accepted_everywhere() {
         }
     }
 }
+
+/// Long-form `--mark-web` / `--identical` / `--log-errors` take their value
+/// only with `=`; the following positional must stay the archive path
+/// instead of being swallowed as the option's value.
+#[test]
+fn cli_optional_value_long_options_keep_the_positional() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    let archive = dir.path().join("optval.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq", "--mark-web", "--identical", "--log-errors"])
+        .arg(&archive)
+        .arg("f1.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "bare long options must not eat the archive path"
+    );
+    assert_eq!(cli_names(&archive), ["f1.txt"]);
+}

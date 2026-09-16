@@ -286,6 +286,77 @@ fn cli_solid_reset_switches_accepted_and_roundtrip() {
     let c_id = rar.unique_entry("c.txt").unwrap();
     assert_eq!(rar.read_entry(c_id).unwrap(), std::fs::read(&c).unwrap());
 }
+/// A bare `-sd` (no `-s`) must still enable solid creation: it used to
+/// normalize onto the plain default and silently produce a non-solid
+/// archive, even though `-sv`/`-se` did enable solid mode.
+#[test]
+fn cli_bare_sd_is_solid() {
+    let dir = make_temp_dir();
+    std::fs::write(
+        dir.path().join("payload.txt"),
+        b"solid chain payload ".repeat(30_000),
+    )
+    .unwrap();
+
+    let plain = dir.path().join("plain.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-s", "-idq"])
+        .arg(&plain)
+        .arg("payload.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "-s must be accepted");
+
+    let sd = dir.path().join("sd.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-sd", "-idq"])
+        .arg(&sd)
+        .arg("payload.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "a bare -sd must be accepted");
+    assert_eq!(
+        std::fs::read(&sd).unwrap(),
+        std::fs::read(&plain).unwrap(),
+        "bare -sd must produce the same solid archive as -s"
+    );
+}
+
+/// `-ag` stamps the archive *file name*: a dot in a parent directory name
+/// is not an extension separator and must not receive the timestamp.
+#[test]
+fn cli_auto_name_ignores_dots_in_directories() {
+    let dir = make_temp_dir();
+    let sub = dir.path().join("out.dir");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(dir.path().join("payload.txt"), b"x").unwrap();
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ag", "-idq"])
+        .arg(sub.join("archive"))
+        .arg("payload.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "-ag must stamp the file name only");
+    let created: Vec<String> = std::fs::read_dir(&sub)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        created.len(),
+        1,
+        "exactly one archive in {sub:?}: {created:?}"
+    );
+    assert!(
+        created[0].starts_with("archive") && created[0].ends_with(".rar"),
+        "unexpected archive name {}",
+        created[0]
+    );
+    assert!(sub.is_dir(), "the parent directory keeps its own name");
+}
 
 /// `-mct` / `-mcd` (advanced compression sub-switches) are accepted without
 /// changing the outcome. WinRAR recognizes them; mapping them through the

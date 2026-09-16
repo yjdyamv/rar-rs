@@ -698,3 +698,53 @@ fn cli_misc_switches_are_accepted_and_ilog_logs_errors() {
         "-ilog must record the error"
     );
 }
+
+/// `u -t -df`: the archive is tested after the update, then the updated
+/// sources are deleted. Both switches used to be clap errors on `u`/`f`.
+#[test]
+fn cli_update_test_after_and_delete_after() {
+    let dir = make_temp_dir();
+    let file = dir.path().join("u.txt");
+    let archive = dir.path().join("u.rar");
+    let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+
+    std::fs::write(&file, b"v1").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(base)
+        .unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("u.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    std::fs::write(&file, b"v2").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(base + std::time::Duration::from_secs(10))
+        .unwrap();
+    let output = std::process::Command::new(RAR_CLI)
+        .args(["u", "-t", "-df", "-idq"])
+        .arg(&archive)
+        .arg("u.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "u -t -df: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!file.exists(), "-df must delete the updated source");
+    let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let id = rar.unique_entry("u.txt").unwrap();
+    assert_eq!(rar.read_entry(id).unwrap(), b"v2");
+}

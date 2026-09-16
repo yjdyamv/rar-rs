@@ -202,6 +202,19 @@ pub fn format_civil_time(secs: u32) -> String {
     )
 }
 
+/// Convert a Unix instant to the local-civil encoding legacy (RAR 1.3–4.x)
+/// headers store, mirroring the library's `epoch_to_local_civil`. Update
+/// comparisons against a legacy member's stored `mtime()` must run in that
+/// same civil space, or files modified within the UTC offset of the archived
+/// timestamp look older than the member.
+pub fn epoch_to_local_civil(secs: u32) -> u32 {
+    epoch_to_local_civil_with_offset(secs, local_offset_secs())
+}
+
+fn epoch_to_local_civil_with_offset(secs: u32, offset: i64) -> u32 {
+    (i64::from(secs) + offset).clamp(0, u32::MAX as i64) as u32
+}
+
 /// Set a file's modification time.
 pub fn set_file_mtime(path: &std::path::Path, time: SystemTime) -> std::io::Result<()> {
     let file = std::fs::File::options().write(true).open(path)?;
@@ -339,6 +352,26 @@ mod tests {
         assert_eq!(
             format_auto_name("x_YYYYMMDD-HHmmSS", 2026, 9, 13, 16, 18, 52),
             "x_20260913-161852"
+        );
+    }
+
+    /// The legacy-civil conversion must add the local offset (and clamp);
+    /// update comparisons depend on it being monotone with the stored time.
+    #[test]
+    fn epoch_to_local_civil_adds_the_offset() {
+        assert_eq!(
+            epoch_to_local_civil_with_offset(1_000_000, 28_800),
+            1_028_800
+        );
+        assert_eq!(
+            epoch_to_local_civil_with_offset(1_000_000, -28_800),
+            971_200
+        );
+        assert_eq!(epoch_to_local_civil_with_offset(0, -28_800), 0, "clamped");
+        assert_eq!(
+            epoch_to_local_civil_with_offset(u32::MAX, 28_800),
+            u32::MAX,
+            "clamped"
         );
     }
 

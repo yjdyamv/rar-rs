@@ -655,6 +655,10 @@ pub struct ExtractRequest {
     pub assume_yes: bool,
     /// Rename an existing destination instead of overwriting (like `-or`).
     pub auto_rename: bool,
+    /// Freshen (`-f`): replace only existing, older destinations.
+    pub freshen: bool,
+    /// Update (`-u`): like freshen, but extract missing destinations too.
+    pub update: bool,
     /// Keep partially extracted files on decode failure (like `-kb`).
     pub keep_broken: bool,
     /// Skip link/copy redirect members (like `-ol-`).
@@ -681,12 +685,19 @@ impl ExtractRequest {
             max_dict_size: self
                 .max_dict_size
                 .or(Some(ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
-            skip_existing: output::skip_existing(
-                self.overwrite.as_deref(),
-                self.assume_yes,
-                self.auto_rename,
-            ),
+            // `-f`/`-u` decide overwrites by timestamp themselves; without
+            // them the non-interactive default is skip-except-`-y`. An
+            // explicit `-o-` still wins.
+            skip_existing: if (self.freshen || self.update)
+                && self.overwrite.as_deref() != Some("never")
+            {
+                false
+            } else {
+                output::skip_existing(self.overwrite.as_deref(), self.assume_yes, self.auto_rename)
+            },
             auto_rename: self.auto_rename,
+            freshen: self.freshen,
+            update: self.update,
             keep_broken: self.keep_broken,
             set_creation_time: self.set_creation_time,
             set_access_time: self.set_access_time,

@@ -68,8 +68,10 @@ fn main() {
         .map(|a| common::normalize_switch(a))
         .collect();
     // WinRAR accepts switches before the command; clap's subcommand-scoped
-    // options do not, so move that block behind the command token.
+    // options do not, so move that block behind the command token. External
+    // commands (`i<string>`, `rv<N>`) get the same treatment.
     let cli_args = common::switches_after_command(cli_args, &surface);
+    let cli_args = common::switches_after_external_command(cli_args);
     let args = common::merge_default_switches(defaults, cli_args, &value_options);
     if let Err(e) = password::reject_bare_password(&args) {
         eprintln!("rar: {e}");
@@ -157,9 +159,14 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Info(args) => list::cmd_info(&args),
         Command::External(ext) => {
             let name = ext.first().cloned().unwrap_or_default();
+            // The external commands (`i<string>`, `rv[N]`) have no clap
+            // surface of their own, so their trailing arguments arrive raw:
+            // split out a password and the positionals, ignoring the other
+            // normalized switches.
+            let (password, positionals) = split_external_args(&ext[1..]);
             // `i<string>` (and `ic`/`ih` variants) find strings in members.
             if name.len() > 1 && name.starts_with('i') {
-                list::cmd_find(&name, &ext[1..])
+                list::cmd_find(&name, &positionals, password.as_deref())
             // WinRAR's canonical `rv[N]` embeds the count in the command
             // token (`rar rv3 data.part01.rar`); route those here.
             } else if name.len() > 2
@@ -168,8 +175,8 @@ fn run(cli: Cli) -> CliResult<()> {
             {
                 let spec = name[2..].to_string();
                 recovery::cmd_recovery_volumes(&RecoveryVolumesArgs {
-                    password: password::PasswordArgs { password: None },
-                    archive: ext.get(1).cloned().unwrap_or_default(),
+                    password: password::PasswordArgs { password },
+                    archive: positionals.first().cloned().unwrap_or_default(),
                     count_spec: if spec.is_empty() { "10%".into() } else { spec },
                 })
             } else {
@@ -177,6 +184,30 @@ fn run(cli: Cli) -> CliResult<()> {
             }
         }
     }
+}
+
+/// Split an external command's trailing arguments into an optional password
+/// and the positionals. Normalized switches arrive as their long forms
+/// (`-m0` became `--level=0`), so anything starting with `--` is a switch;
+/// `--password` accepts both the attached and the spaced value forms.
+fn split_external_args(args: &[String]) -> (Option<String>, Vec<String>) {
+    let mut password = None;
+    let mut positionals = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if let Some(value) = arg.strip_prefix("--password=") {
+            password = Some(value.to_string());
+        } else if arg == "--password" {
+            if let Some(value) = iter.next() {
+                password = Some(value.clone());
+            }
+        } else if arg.starts_with("--") {
+            // Another switch: accepted and ignored for these commands.
+        } else {
+            positionals.push(arg.clone());
+        }
+    }
+    (password, positionals)
 }
 
 #[cfg(test)]

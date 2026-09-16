@@ -311,3 +311,30 @@ fn unrar_list_variants_bare_and_technical() {
     let row = text.lines().find(|l| l.ends_with("a.txt")).unwrap();
     assert!(!row.trim_start().starts_with("-"), "{row}");
 }
+
+/// A bare archive path is not a command: official UnRAR prints usage and
+/// exits 7. It used to list silently while dropping any member names or
+/// switches that followed the path.
+#[test]
+fn cli_unrar_bare_archive_is_rejected() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq", "bare.rar", "f.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    for extra in [&[][..], &["f.txt"][..], &["-idq"][..]] {
+        let mut command = std::process::Command::new(UNRAR_CLI);
+        command.arg("bare.rar").args(extra).current_dir(dir.path());
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(7),
+            "unrar bare.rar {extra:?} must exit 7, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

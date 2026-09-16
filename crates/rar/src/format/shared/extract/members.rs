@@ -50,6 +50,26 @@ fn reports_outcome(entry: &ArchiveEntry, options: &crate::options::ExtractOption
     !entry.is_dir() && !(options.skip_links && entry.redirect().is_some())
 }
 
+/// The member's stored modification time as an instant, when the header
+/// carries one (legacy local-civil converted, like `apply_member_times`).
+fn member_mtime(hdr: &crate::model::FileHeader) -> Option<std::time::SystemTime> {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    if !crate::archive::file_header_has_mtime(hdr) {
+        return None;
+    }
+    let secs = if hdr.uses_local_civil_time() {
+        crate::format::shared::legacy_time::local_civil_to_epoch(hdr.mtime)
+    } else {
+        hdr.mtime
+    };
+    Some(
+        UNIX_EPOCH
+            + Duration::from_secs(u64::from(secs))
+            + Duration::from_nanos(u64::from(hdr.mtime_ns.unwrap_or(0))),
+    )
+}
+
 /// Materialize one member file through a temp sibling of `dest_path`.
 ///
 /// `produce` writes the member's bytes and reports the member's outcome:
@@ -536,6 +556,28 @@ impl RarArchive {
         // are left untouched.
         if options.skip_existing && dest_path.exists() {
             return Ok(Destination::Skip(dest_path));
+        }
+
+        // `-f` / `-u` (freshen/update): only replace a destination that is
+        // older than the archived member. A missing destination is skipped
+        // by freshen and extracted by update.
+        if !entry.is_dir() && (options.freshen || options.update) {
+            match fs::metadata(&dest_path) {
+                Ok(meta) => {
+                    let newer = match (member_mtime(&entry.header), meta.modified().ok()) {
+                        (Some(archived), Some(dest_time)) => archived > dest_time,
+                        _ => false,
+                    };
+                    if !newer {
+                        return Ok(Destination::Skip(dest_path));
+                    }
+                }
+                Err(_) => {
+                    if options.freshen && !options.update {
+                        return Ok(Destination::Skip(dest_path));
+                    }
+                }
+            }
         }
 
         // `-or` (auto rename): when the destination exists, insert `(N)`

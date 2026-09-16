@@ -239,3 +239,47 @@ fn cli_ag_generates_a_stamped_name() {
     assert_eq!(stamp.len(), 14, "{name}");
     assert!(stamp.chars().all(|c| c.is_ascii_digit()), "{name}");
 }
+
+/// `rar x -ts` restores creation/access times like `unrar x -ts`: the `rar`
+/// binary used to reject `-ts` on extraction while `unrar` accepted it.
+#[test]
+fn cli_rar_extract_ts_restores_creation_time() {
+    let dir = make_temp_dir();
+    let file = dir.path().join("t.txt");
+    std::fs::write(&file, b"ts payload").unwrap();
+    let src_ctime = created_time(&file);
+
+    let archive = dir.path().join("rar-ts.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ts", "-idq"])
+        .arg(&archive)
+        .arg("t.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = dir.path().join("out");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-tsc", "-tsa", "-y"])
+        .arg(&archive)
+        .arg("--dest")
+        .arg(&out)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "rar x -tsc must be accepted");
+    let extracted = out.join("t.txt");
+    assert!(extracted.exists(), "extraction must write the member");
+    if let Some(src_ctime) = src_ctime
+        && let Some(dst_ctime) = created_time(&extracted)
+    {
+        let diff = dst_ctime
+            .duration_since(src_ctime)
+            .unwrap_or_else(|_| src_ctime.duration_since(dst_ctime).unwrap());
+        assert!(
+            diff < std::time::Duration::from_secs(2),
+            "rar x -tsc must restore the creation time ({dst_ctime:?} vs {src_ctime:?})"
+        );
+    }
+}

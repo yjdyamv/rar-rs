@@ -163,6 +163,11 @@ pub(crate) struct ListArgs {
     /// Member names to list/test (empty = every member)
     #[arg(value_name = "NAMES")]
     pub(crate) names: Vec<String>,
+    /// Save/restore file times (like `-ts[m,c,a][+,-,1]`; accepted on
+    /// listing for parity — the display uses the stored times as-is)
+    #[arg(long = "ts", value_name = "SPEC", action = clap::ArgAction::Append)]
+    #[allow(dead_code)]
+    pub(crate) ts_specs: Vec<String>,
 }
 
 /// `rar ch` parameters: member name case conversion (-cl / -cu).
@@ -284,6 +289,10 @@ pub(crate) struct ExtractArgs {
     /// Extraction dictionary cap (like `-mdx<size>`; no unit means GiB)
     #[arg(long = "dict-extract", value_name = "SIZE")]
     pub(crate) dict_extract: Option<String>,
+    /// Restore file times (like `-ts[m,c,a][+,-,1]`; repeatable — `-tsc`
+    /// restores creation times and `-tsa` access times on top of mtime)
+    #[arg(long = "ts", value_name = "SPEC", action = clap::ArgAction::Append)]
+    pub(crate) ts_specs: Vec<String>,
 }
 
 /// Archive path plus one or more source files.
@@ -322,6 +331,12 @@ pub(crate) struct FilesArgs {
     /// Save/restore file times (like `-ts[m,c,a][+,-,1]`; repeatable)
     #[arg(long = "ts", value_name = "SPEC", action = clap::ArgAction::Append)]
     pub(crate) ts_specs: Vec<String>,
+    /// Test the archive after updating it (like `-t`)
+    #[arg(long = "test-after")]
+    pub(crate) test_after: bool,
+    /// Delete source files after a successful update (like `-df`)
+    #[arg(long = "delete-after")]
+    pub(crate) delete_after: bool,
     /// Keep the archive's original modification time, or set it to the
     /// given date (like `-tk[<date>]`, YYYYMMDDHHMMSS with optional
     /// separators)
@@ -811,6 +826,8 @@ pub(crate) fn as_files_args(args: &CreateArgs) -> FilesArgs {
         archive_format: args.archive_format.clone(),
         dict_extract: args.dict_extract.clone(),
         ts_specs: args.ts_specs.clone(),
+        test_after: args.test_after,
+        delete_after: args.delete_after,
         keep_time: args.keep_time.clone(),
         store_links: args.store_links,
         store_hardlinks: args.store_hardlinks,

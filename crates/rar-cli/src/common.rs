@@ -227,6 +227,35 @@ pub fn switches_after_command(args: Vec<String>, cmd: &clap::Command) -> Vec<Str
     reordered
 }
 
+/// Move a normalized switch block that precedes an external subcommand token
+/// (`i<string>`, `rv<N>`) behind it. Clap only knows the declared
+/// subcommands, so `rar -p123 iREADME arc` would otherwise be rejected as a
+/// root option while the external handlers expect their switches after the
+/// token. Any non-switch token before the external one (a real subcommand)
+/// leaves the arguments untouched.
+///
+/// The `unrar` binary shares this module but has no external commands.
+#[allow(dead_code)]
+pub fn switches_after_external_command(args: Vec<String>) -> Vec<String> {
+    let is_external = |arg: &String| -> bool {
+        (arg.len() > 1 && arg.starts_with('i'))
+            || (arg.len() > 2
+                && arg.starts_with("rv")
+                && arg[2..].chars().all(|c| c.is_ascii_digit() || c == '%'))
+    };
+    let Some(index) = args.iter().position(is_external) else {
+        return args;
+    };
+    if index == 0 || !args[..index].iter().all(|arg| arg.starts_with("--")) {
+        return args;
+    }
+    let mut reordered = Vec::with_capacity(args.len());
+    reordered.push(args[index].clone());
+    reordered.extend(args[..index].iter().cloned());
+    reordered.extend(args[index + 1..].iter().cloned());
+    reordered
+}
+
 /// Read the configuration file (`rar.ini` next to the executable on
 /// Windows, `~/.rarrc` on Unix) and return the `switches` /
 /// `switches_<command>` entries (raw, unnormalized).
@@ -390,11 +419,11 @@ pub struct MiscSwitches {
     pub erase_disk: bool,
     /// Save identical files as references (`-oi[0-4][:<minsize>]`; create
     /// side; accepted as a no-op on extraction)
-    #[arg(global = true, long = "identical", value_name = "OPTS", num_args = 0..=1, default_missing_value = "", overrides_with = "identical")]
+    #[arg(global = true, long = "identical", value_name = "OPTS", num_args = 0..=1, default_missing_value = "", require_equals = true, overrides_with = "identical")]
     pub identical: Option<String>,
     /// Propagate Mark of the Web from the archive to extracted files
     /// (`-om[-|1][=ext;ext]`; Windows only)
-    #[arg(global = true, long = "mark-web", value_name = "OPTS", num_args = 0..=1, default_missing_value = "", overrides_with = "mark_web")]
+    #[arg(global = true, long = "mark-web", value_name = "OPTS", num_args = 0..=1, default_missing_value = "", require_equals = true, overrides_with = "mark_web")]
     pub mark_web: Option<String>,
     /// Encryption parameters (`-me<par>`; accepted)
     #[arg(
@@ -422,16 +451,18 @@ pub struct MiscSwitches {
     #[arg(global = true, long = "lock")]
     pub lock: bool,
     /// How the solid chain splits (`-sd`/`-sv`/`-se`, also `-s=d`/`-s=v`/
-    /// `-s=e`): `continuous` (default) keeps the statistics across the whole
-    /// archive, `volume` resets them at each volume boundary and `extension`
-    /// resets them when the member's file extension changes. Implies solid;
-    /// accepted on every command, like WinRAR's parser.
+    /// `-s=e`): `continuous` keeps the statistics across the whole archive,
+    /// `volume` resets them at each volume boundary and `extension` resets
+    /// them when the member's file extension changes. Any of them enables
+    /// solid mode; `off` is the unset default (`-s`/`-s=` are the only other
+    /// enablers, so a bare `-sd` must not collapse into the default).
+    /// Accepted on every command, like WinRAR's parser.
     #[arg(
         global = true,
         long = "solid-reset",
         value_name = "MODE",
-        default_value = "continuous",
-        value_parser = ["continuous", "volume", "extension"]
+        default_value = "off",
+        value_parser = ["off", "continuous", "volume", "extension"]
     )]
     pub solid_reset: String,
     /// Read the comment from a file (`-z<file>`; a bare `-z` reads stdin).
@@ -454,7 +485,7 @@ pub struct MiscSwitches {
     #[allow(dead_code)]
     pub archive_meta: Option<String>,
     /// Log errors to a file (`-ilog[name]`; default `rar.log`)
-    #[arg(global = true, long = "log-errors", num_args = 0..=1, default_missing_value = "", overrides_with = "log_errors")]
+    #[arg(global = true, long = "log-errors", num_args = 0..=1, default_missing_value = "", require_equals = true, overrides_with = "log_errors")]
     pub log_errors: Option<String>,
     /// File version control (`-ver[n]`; keep old versions on update)
     #[arg(global = true, long = "version-control", value_name = "N")]

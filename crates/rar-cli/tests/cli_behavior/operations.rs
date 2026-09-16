@@ -32,6 +32,118 @@ fn cli_store_types_ms_stores_matching_files() {
     assert_eq!(rar.read_entry(a_id).unwrap(), std::fs::read(&txt).unwrap());
 }
 
+/// `-f` / `-u` on extraction: freshen replaces only existing destinations
+/// older than the archived member (missing ones are skipped); update also
+/// extracts missing ones. Both used to be silent no-ops.
+#[test]
+fn cli_freshen_and_update_extraction() {
+    let dir = make_temp_dir();
+    let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+    let file = dir.path().join("f.txt");
+    std::fs::write(&file, b"v1").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(base)
+        .unwrap();
+    let archive = dir.path().join("f.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let dest = |name: &str, content: &[u8], mtime: Option<std::time::SystemTime>| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("f.txt"), content).unwrap();
+        if let Some(mtime) = mtime {
+            std::fs::File::options()
+                .write(true)
+                .open(path.join("f.txt"))
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
+        }
+        path
+    };
+
+    // Missing destination: freshen skips it, update extracts it.
+    let missing = dir.path().join("missing");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-f", "-idq"])
+        .arg(&archive)
+        .arg("--dest")
+        .arg(&missing)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        !missing.join("f.txt").exists(),
+        "-f must not extract a missing destination"
+    );
+    let updated = dir.path().join("updated");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-u", "-idq"])
+        .arg(&archive)
+        .arg("--dest")
+        .arg(&updated)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read(updated.join("f.txt")).unwrap(),
+        b"v1",
+        "-u must add a missing destination"
+    );
+
+    // Older destination: replaced by both.
+    let older = dest(
+        "older",
+        b"stale",
+        Some(base - std::time::Duration::from_secs(10)),
+    );
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-f", "-idq"])
+        .arg(&archive)
+        .arg("--dest")
+        .arg(&older)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read(older.join("f.txt")).unwrap(), b"v1");
+
+    // Newer destination: left untouched by both.
+    let newer = dest(
+        "newer",
+        b"fresh",
+        Some(base + std::time::Duration::from_secs(10)),
+    );
+    for flag in ["-f", "-u"] {
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["x", flag, "-idq"])
+            .arg(&archive)
+            .arg("--dest")
+            .arg(&newer)
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read(newer.join("f.txt")).unwrap(),
+            b"fresh",
+            "{flag} must leave a newer destination untouched"
+        );
+    }
+}
+
 /// `-df` deletes the source files after archiving (the archive keeps them).
 #[test]
 fn cli_delete_after_df_removes_sources() {
@@ -51,6 +163,44 @@ fn cli_delete_after_df_removes_sources() {
     let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
     let gone_id = rar.unique_entry("gone.txt").unwrap();
     assert_eq!(rar.read_entry(gone_id).unwrap(), b"will be deleted");
+}
+
+/// A source that cannot be deleted must surface as a warning, not a silent
+/// success: a non-writable parent directory blocks `remove_file` on Unix.
+#[cfg(unix)]
+#[test]
+fn cli_delete_after_reports_sources_it_could_not_delete() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = make_temp_dir();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let file = sub.join("locked.txt");
+    std::fs::write(&file, b"locked").unwrap();
+
+    let archive = dir.path().join("locked.rar");
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let output = std::process::Command::new(RAR_CLI)
+        .args(["a", "-df", "-idq"])
+        .arg(&archive)
+        .arg("sub/locked.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "an undeleted source must be a warning, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(file.exists(), "the locked source survives");
+
+    // The archive was still written and holds the member.
+    let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let id = rar.unique_entry("sub/locked.txt").unwrap();
+    assert_eq!(rar.read_entry(id).unwrap(), b"locked");
+
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// `-t` tests the archive right after creating it.

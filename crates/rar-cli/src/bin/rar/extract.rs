@@ -24,6 +24,7 @@ pub(crate) fn cmd_extract(
     assume_yes: bool,
 ) -> CliResult<()> {
     let max_dict_size = dict_cap(args.dict_extract.as_deref())?;
+    let ts = crate::time::parse_ts_specs(&args.ts_specs)?;
     let (names, dest) = resolve_target(args, misc)?;
     let request = ops::ExtractRequest {
         names,
@@ -35,9 +36,13 @@ pub(crate) fn cmd_extract(
         overwrite: args.overwrite.clone(),
         assume_yes,
         auto_rename: args.auto_rename,
+        freshen: misc.freshen,
+        update: misc.update_files,
         keep_broken: args.keep_broken,
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
+        set_creation_time: ts.save_ctime,
+        set_access_time: ts.save_atime,
         ..ops::ExtractRequest::default()
     };
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
@@ -104,6 +109,7 @@ pub(crate) fn cmd_extract_flat(
     assume_yes: bool,
 ) -> CliResult<()> {
     let max_dict_size = dict_cap(args.dict_extract.as_deref())?;
+    let ts = crate::time::parse_ts_specs(&args.ts_specs)?;
     let (names, dest) = resolve_target(args, misc)?;
     let request = ops::ExtractRequest {
         names,
@@ -116,10 +122,13 @@ pub(crate) fn cmd_extract_flat(
         overwrite: args.overwrite.clone(),
         assume_yes,
         auto_rename: args.auto_rename,
+        freshen: misc.freshen,
+        update: misc.update_files,
         keep_broken: args.keep_broken,
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
-        ..ops::ExtractRequest::default()
+        set_creation_time: ts.save_ctime,
+        set_access_time: ts.save_atime,
     };
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     if let Some(report) = ops::extract(&mut rar, &request)? {

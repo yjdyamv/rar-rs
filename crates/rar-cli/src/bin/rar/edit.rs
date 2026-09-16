@@ -198,7 +198,7 @@ pub(crate) fn cmd_move(
     // archive; appending to an existing archive keeps its own mode.
     let solid_mode = match (
         misc.solid_reset.as_str(),
-        args.solid || misc.solid_reset != "continuous",
+        args.solid || misc.solid_reset != "off",
     ) {
         (_, false) => rar_rs::SolidMode::Disabled,
         ("volume", _) => rar_rs::SolidMode::PerVolume,

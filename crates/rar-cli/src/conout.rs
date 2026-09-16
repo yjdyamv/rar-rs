@@ -28,14 +28,23 @@ const CONSOLE_CHUNK: usize = 8192;
 /// Write `bytes` to stdout, converting to UTF-16 when stdout is a console.
 pub fn write_stdout(bytes: &[u8]) {
     if let Err(error) = write_stdout_impl(bytes) {
-        panic!("failed printing to stdout: {error}");
+        handle_write_error(error, "stdout");
     }
 }
 
 /// Write `bytes` to stderr, converting to UTF-16 when stderr is a console.
 pub fn write_stderr(bytes: &[u8]) {
     if let Err(error) = write_stderr_impl(bytes) {
-        panic!("failed printing to stderr: {error}");
+        handle_write_error(error, "stderr");
+    }
+}
+
+/// A closed pipe (`rar l big.rar | head -1`) is not an output failure worth
+/// a panic: the reader is gone on purpose. Every other error keeps the loud
+/// behavior so a full disk or a broken console handle is not swallowed.
+fn handle_write_error(error: std::io::Error, target: &str) {
+    if error.kind() != std::io::ErrorKind::BrokenPipe {
+        panic!("failed printing to {target}: {error}");
     }
 }
 
@@ -284,5 +293,21 @@ mod tests {
         eprint!("b");
         let captured = test_capture::take().expect("capture was on");
         assert_eq!(captured, b"ab");
+    }
+
+    /// A broken pipe must not panic (`rar l archive | head -1`).
+    #[test]
+    fn broken_pipe_is_swallowed() {
+        super::handle_write_error(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"),
+            "stdout",
+        );
+    }
+
+    /// Any other write failure keeps the loud behavior.
+    #[test]
+    #[should_panic(expected = "failed printing to stdout")]
+    fn other_write_errors_still_panic() {
+        super::handle_write_error(std::io::Error::other("disk full"), "stdout");
     }
 }

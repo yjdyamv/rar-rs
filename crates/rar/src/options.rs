@@ -393,6 +393,13 @@ pub struct ExtractOptions {
     /// Rename the destination automatically when it already exists
     /// (like `-or`): `name.ext` becomes `name(1).ext`, `name(2).ext`, ...
     pub auto_rename: bool,
+    /// Freshen (`-f`): extract a member only when its destination exists and
+    /// the archived modification time is newer; a missing destination is
+    /// skipped.
+    pub freshen: bool,
+    /// Update (`-u`): like [`freshen`](Self::freshen), but a missing
+    /// destination is extracted. Takes precedence when both are set.
+    pub update: bool,
     /// Keep partially extracted files when a member fails to decode
     /// (like `-kb`): the incomplete output is left on disk.
     pub keep_broken: bool,
@@ -460,6 +467,8 @@ impl Default for ExtractOptions {
             flat_paths: false,
             skip_existing: false,
             auto_rename: false,
+            freshen: false,
+            update: false,
             keep_broken: false,
             set_creation_time: false,
             set_access_time: false,
