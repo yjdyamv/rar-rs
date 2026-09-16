@@ -28,7 +28,6 @@ pub(crate) use parse::{
 };
 #[cfg(unix)]
 pub(crate) use serialize::build_owner_extra_record;
-#[cfg(windows)]
 pub(crate) use serialize::build_stream_block;
 pub use serialize::hash_extra_record;
 pub(crate) use serialize::{

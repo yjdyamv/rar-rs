@@ -154,8 +154,12 @@ jobs:
         run: cargo test --workspace --all-features --locked --test official_interop -- --nocapture
       - name: Cargo doc (workspace)
         if: env.RUN_HEAVY == 'true'
-        # Build-only: several pre-existing public docs link to private
-        # internals, so `-D warnings` is not on yet.
+        # `-D warnings` catches broken intra-doc links and malformed docs.
+        # The tree is clean today (the old note about public docs linking to
+        # private internals no longer applies), so treat any new warning as a
+        # failure instead of silently publishing it.
+        env:
+          RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked
       - name: Install binding dependencies
         if: env.RUN_HEAVY == 'true'

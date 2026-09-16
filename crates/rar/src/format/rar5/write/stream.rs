@@ -25,7 +25,6 @@ use crate::options::FilterMode;
 
 #[cfg(windows)]
 use super::windows;
-#[cfg(windows)]
 use crate::format::rar5::vint;
 
 /// The streaming writer records its delta and x86 filters as pre-built

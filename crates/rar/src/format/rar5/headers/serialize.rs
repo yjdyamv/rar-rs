@@ -315,7 +315,6 @@ pub(crate) fn build_service_block(
 /// [`build_service_block`], but carrying the plaintext CRC32 over the
 /// decoded stream bytes, the stream's compression info, and the full
 /// extra area (optional encryption record plus the SUBDATA stream name).
-#[cfg(windows)]
 pub(crate) fn build_stream_block(
     packed_size: u64,
     unpacked_size: u64,

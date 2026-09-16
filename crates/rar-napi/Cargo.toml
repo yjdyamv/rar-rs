@@ -5,6 +5,10 @@ edition.workspace = true
 description = "RAR archive toolkit — napi-rs bindings for creating, reading, extracting, modifying, and repairing archives"
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
+documentation = "https://docs.rs/rar-rs-napi"
+keywords = ["rar", "archive", "napi", "nodejs", "extract"]
+categories = ["api-bindings", "compression"]
 
 [lib]
 crate-type = ["cdylib"]

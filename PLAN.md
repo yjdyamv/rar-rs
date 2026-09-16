@@ -26,6 +26,18 @@
       `head_size`、解析/CRC 失败统一映射为 `WrongPassword`（CLI → exit
       11），新增两个确定性单测；原 flaky 测试连续 500 次 0 失败。过程见 git
       历史。
+- [x] **Linux 构建断裂**（已修
+      2026-09-16）：`format/rar5/headers/serialize.rs::
+      build_stream_block`、它在
+      `format/rar5/headers/mod.rs` 的重导出、以及 `format/rar5/write/stream.rs`
+      的 `vint` 导入都被 `#[cfg(windows)]` 门控；但
+      跨平台的多卷重写（`transaction/multivolume.rs` 重发 "STM" 记录）与
+      `write_stream_record` 会在所有平台调它们，导致
+      `cargo check -p rar-rs --target x86_64-unknown-linux-gnu` 报 3 个错——**已
+      推送的 `main` 在 Linux 上编不过（CI lint job 会红）**。修法：去掉这三处
+      `#[cfg(windows)]`（`OS_WINDOWS` 只是格式常量，不是编译门）。已验证 Linux
+      check / clippy `-D warnings` / rustdoc `-D warnings` 与 Windows
+      全量测试均过。
 - [ ] **RAR4 batch 与 sequential 偶发不一致（待定位）**：
       `rar4_create.rs::rar4_batch_matches_sequential_bytes`（输入完全确定，断言两档
       写出的归档字节相同）在并发/负载下偶发失败：**长度相同、字节不同**。已确认
@@ -44,18 +56,18 @@
       移植但缺许可行。逐文件出处清单见
       [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)。
 - [ ] **打包与发布顺序**：`rar-rs`（0.1.2）已能 `cargo package` 并通过校验；
-      `rar-cli` 依赖 workspace 内的 `rar-rs`，需先发布 `rar-rs`。补齐三个 crate
-      的 `readme` / `keywords` / `documentation` / `categories` 元数据。
+      `rar-cli` 依赖 workspace 内的 `rar-rs`，需先发布 `rar-rs`。三个 crate 的
+      `readme` / `keywords` / `documentation` / `categories` 元数据已补齐
+      （2026-09-16），但 `rar-cli` / `rar-rs-napi` 仍因 `rar-rs`
+      未发布而无法解析依赖。
 - [ ] **下一个破坏性版本**：删除 `rar_rs::archive::RarArchive` 兼容路径，公开面
       只留 `ArchiveReader` / `ArchiveWriter` / `ArchiveEditor`（ADR 0006）。
 
 ### P1 · 工程加固（低成本）
 
-- [ ] **CI 开启 rustdoc `-D warnings`**：实测
-      `RUSTDOCFLAGS="-D warnings" cargo
-      doc --workspace --no-deps`
-      已零警告，但 `.github/workflows/CI.yml` 仍只 build-only，注释还写着「docs
-      link to private internals」——注释已过期。
+- [x] **CI 开启 rustdoc `-D warnings`**（2026-09-16）：`CI.yml` 的 doc 步骤加
+      `RUSTDOCFLAGS: -D warnings` 并更新过期注释；Windows 与 Linux
+      两个目标均实测零警告。
 
 ### P1 · 功能缺口（按需，不阻塞发布）
 
