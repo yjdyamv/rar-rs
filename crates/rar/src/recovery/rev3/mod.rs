@@ -184,6 +184,18 @@ struct RevName {
     meta: Option<Meta>,
 }
 
+impl RevName {
+    /// The volume layout this parse describes; the candidate-to-probe
+    /// mapping every caller shares.
+    fn layout(&self) -> Layout {
+        Layout {
+            base: self.base.clone(),
+            new_naming: self.new_naming,
+            width: self.width,
+        }
+    }
+}
+
 /// Split trailing decimal groups off a stem. Groups are returned
 /// right-to-left (closest to the end first) so `x4_2_1` yields `[1, 2, 4]`.
 fn trailing_groups(stem: &str, count: usize) -> Option<(Vec<usize>, usize)> {
@@ -396,14 +408,10 @@ fn slot_exists(parent: &Path, layout: &Layout, index: usize) -> bool {
 ///
 /// Names that end in digits are ambiguous (`set44_2_1.rev` reads as `set`
 /// plus data volume 44 or `set4` plus volume 4); every caller resolves them
-/// by preferring the split whose data set is actually present, so the
-/// candidate-to-probe mapping and the score live here once.
+/// by preferring the split whose data set is actually present — ties keep
+/// the first candidate, like WinRAR's scan order.
 fn data_slots_score(parent: &Path, candidate: &RevName, meta: &Meta) -> usize {
-    let probe = Layout {
-        base: candidate.base.clone(),
-        new_naming: candidate.new_naming,
-        width: candidate.width,
-    };
+    let probe = candidate.layout();
     (0..meta.data_count)
         .filter(|index| slot_exists(parent, &probe, *index))
         .count()
@@ -662,15 +670,7 @@ fn identify(path: &Path) -> RarResult<(PathBuf, Layout, Option<Meta>)> {
             }
         }
         if let Some((_, parsed, file_meta)) = best {
-            return Ok((
-                parent,
-                Layout {
-                    base: parsed.base,
-                    new_naming: parsed.new_naming,
-                    width: parsed.width,
-                },
-                file_meta,
-            ));
+            return Ok((parent, parsed.layout(), file_meta));
         }
     }
 
@@ -1595,10 +1595,12 @@ mod tests {
     use super::rs8::Rsc8;
     use super::{
         Meta, NameKind, build_recovery_volumes_for_set_chunked, collect_recovery_volumes,
-        commit_rebuilt_volumes, parse_trailer, parse_trailer_file, part_width_candidates,
-        rebuild_missing_volumes_chunked, rev_name_candidates, trailer_style, write_trailer,
+        commit_rebuilt_volumes, identify, parse_trailer, parse_trailer_file, part_width_candidates,
+        rebuild_missing_volumes_chunked, rev_name_belongs_to_set, rev_name_candidates,
+        trailer_style, write_trailer,
     };
     use super::{RarError, TRAILER_LEN};
+    use crate::fs::volume::volume_path_rar4;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -2117,59 +2119,42 @@ mod tests {
         assert_eq!(rebuilt, vec![volumes[2].clone()]);
         assert_eq!(std::fs::read(&volumes[2]).unwrap(), missing);
     }
-}
 
-#[test]
-fn long_trailing_groups_do_not_overflow() {
-    // A 20-digit group used to panic in `10usize.pow(20)` while
-    // enumerating the ambiguous splits of a `.rev` name.
-    let candidates = rev_name_candidates("mv4_10000000000000000000_1_1.rev");
-    assert!(
-        candidates
-            .iter()
-            .all(|candidate| !candidate.base.is_empty())
-    );
-}
-
-/// `set44_2_1.rev` reads as `set` plus data volume 44 or `set4` plus volume 4;
-/// the score must follow the data set that is actually on disk, so a stale
-/// `.rev` never claims another set's parity files.
-#[test]
-fn ambiguous_legacy_names_score_the_existing_data_set() {
-    let dir = tempfile::tempdir().unwrap();
-    let candidates = rev_name_candidates("set44_2_1.rev");
-    let best = |parent: &Path| {
-        candidates
-            .iter()
-            .filter_map(|candidate| candidate.meta.map(|meta| (candidate, meta)))
-            .fold(None::<(&RevName, usize)>, |best, (candidate, meta)| {
-                let score = data_slots_score(parent, candidate, &meta);
-                match best {
-                    Some((_, best_score)) if best_score >= score => best,
-                    _ => Some((candidate, score)),
-                }
-            })
-            .map(|(candidate, _)| candidate.base.clone())
-            .expect("set44_2_1.rev has legacy candidates")
-    };
-
-    // Only `set4`'s four data volumes exist.
-    for index in 0..4 {
-        std::fs::write(volume_path_rar4(dir.path(), "set4", index + 1), b"x").unwrap();
+    #[test]
+    fn long_trailing_groups_do_not_overflow() {
+        // A 20-digit group used to panic in `10usize.pow(20)` while
+        // enumerating the ambiguous splits of a `.rev` name.
+        let candidates = rev_name_candidates("mv4_10000000000000000000_1_1.rev");
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| !candidate.base.is_empty())
+        );
     }
-    assert_eq!(best(dir.path()), "set4");
-    assert!(rev_name_belongs_to_set(dir.path(), "set4", "set44_2_1.rev"));
-    assert!(!rev_name_belongs_to_set(dir.path(), "set", "set44_2_1.rev"));
 
-    // `set`'s own 44 volumes appear; the larger existing set wins now.
-    for index in 0..44 {
-        std::fs::write(volume_path_rar4(dir.path(), "set", index + 1), b"x").unwrap();
+    /// `set44_2_1.rev` reads as `set` plus data volume 44 or `set4` plus
+    /// volume 4; the scan must follow the data set that is actually on disk,
+    /// so a stale `.rev` never claims another set's parity files.
+    #[test]
+    fn ambiguous_legacy_names_score_the_existing_data_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let rev_name = "set44_2_1.rev";
+        let base = |parent: &Path| identify(&parent.join(rev_name)).unwrap().1.base;
+
+        // Only `set4`'s four data volumes exist.
+        for index in 0..4 {
+            std::fs::write(volume_path_rar4(dir.path(), "set4", index + 1), b"x").unwrap();
+        }
+        assert_eq!(base(dir.path()), "set4");
+        assert!(rev_name_belongs_to_set(dir.path(), "set4", rev_name));
+        assert!(!rev_name_belongs_to_set(dir.path(), "set", rev_name));
+
+        // `set`'s own 44 volumes appear; the larger existing set wins now.
+        for index in 0..44 {
+            std::fs::write(volume_path_rar4(dir.path(), "set", index + 1), b"x").unwrap();
+        }
+        assert_eq!(base(dir.path()), "set");
+        assert!(rev_name_belongs_to_set(dir.path(), "set", rev_name));
+        assert!(!rev_name_belongs_to_set(dir.path(), "set4", rev_name));
     }
-    assert_eq!(best(dir.path()), "set");
-    assert!(rev_name_belongs_to_set(dir.path(), "set", "set44_2_1.rev"));
-    assert!(!rev_name_belongs_to_set(
-        dir.path(),
-        "set4",
-        "set44_2_1.rev"
-    ));
 }
