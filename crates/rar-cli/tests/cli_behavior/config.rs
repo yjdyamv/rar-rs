@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::support::{RAR_CLI, make_temp_dir};
+use crate::support::{RAR_CLI, make_temp_dir, status_retrying_busy};
 // ── configuration sources: RARINISWITCHES / -cfg- / command-line priority ──
 
 #[test]
@@ -91,13 +91,13 @@ fn cli_rarfiles_lst_orders_solid_members() {
     std::fs::write(&lst, "; test list\n*.txt\nf*.cpp\n*.cpp\n$default\n").unwrap();
     let result = std::panic::catch_unwind(|| {
         let archive = dir.path().join("rfl.rar");
-        let status = std::process::Command::new(&bin)
-            .args(["a", "-s", "-idq"])
-            .arg(&archive)
-            .args(["*.cpp", "*.h", "*.txt", "subd"])
-            .current_dir(dir.path())
-            .status()
-            .unwrap();
+        let status = status_retrying_busy(
+            std::process::Command::new(&bin)
+                .args(["a", "-s", "-idq"])
+                .arg(&archive)
+                .args(["*.cpp", "*.h", "*.txt", "subd"])
+                .current_dir(dir.path()),
+        );
         assert!(status.success());
 
         let rar = rar_rs::ArchiveReader::open(&archive).unwrap();

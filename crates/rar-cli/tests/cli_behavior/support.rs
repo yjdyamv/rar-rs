@@ -6,6 +6,30 @@ use std::path::Path;
 pub(crate) fn make_temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
 }
+
+/// Run a command that execs a **freshly copied** binary, retrying Linux's
+/// `ETXTBSY` window.
+///
+/// Linux refuses `execve` while any process holds a write descriptor for the
+/// image (`deny_write_access`). A copy closes its descriptor before the spawn,
+/// but on a busy box the kernel can still surface `ETXTBSY` for a just-written
+/// image: it was seen once in a full `--all-features` workspace run on a
+/// 16-core WSL2 box and never on a quiet run of the same binary. Go's
+/// `os/exec` retries the same error for the same reason; the window is
+/// microseconds, so a few retries are plenty.
+pub(crate) fn status_retrying_busy(
+    command: &mut std::process::Command,
+) -> std::process::ExitStatus {
+    for attempt in 0..10u64 {
+        match command.status() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(5 * (attempt + 1)));
+            }
+            other => return other.expect("spawn command"),
+        }
+    }
+    panic!("spawning {command:?} kept failing with ETXTBSY");
+}
 pub(crate) const RAR_CLI: &str = env!("CARGO_BIN_EXE_rar");
 
 pub(crate) fn make_tree(dir: &std::path::Path) {
