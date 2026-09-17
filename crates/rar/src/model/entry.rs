@@ -81,6 +81,7 @@ pub struct FileHeader {
 }
 
 /// Which attribute encoding a member's attribute field holds.
+#[cfg(any(unix, windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HostAttributes {
     /// Unix permission bits (RAR5 Unix-host members; RAR 1.5–4.x hosts 3
@@ -107,6 +108,7 @@ impl FileHeader {
     }
 
     /// How to interpret the attribute field.
+    #[cfg(any(unix, windows))]
     pub(crate) fn host_attributes(&self) -> HostAttributes {
         match self.format_version {
             // RAR 1.3/1.4 carry DOS attributes only.

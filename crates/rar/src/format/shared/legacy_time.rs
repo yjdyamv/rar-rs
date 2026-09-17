@@ -23,6 +23,7 @@ pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 /// yield an offset off by a second. A one-second wobble would flip the legacy
 /// DOS field's `ADD_SECOND` parity (2-second resolution) and make the encoded
 /// timestamp depend on *when* it was read.
+#[cfg(any(unix, windows))]
 fn snap_to_minute(secs: i64) -> i64 {
     let rem = secs.rem_euclid(60);
     if rem >= 30 {

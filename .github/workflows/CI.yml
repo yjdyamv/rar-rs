@@ -85,6 +85,13 @@ jobs:
         run: cargo check --workspace --all-targets --locked
       - name: Cargo check (rar-rs, no default features)
         run: cargo check -p rar-rs --no-default-features --locked
+      - name: Cargo check (rar-rs, wasm target, -D warnings)
+        # The binding's wasm build only runs in the heavy matrix, which does not
+        # deny warnings, so wasm-only dead code (helpers gated to unix/windows)
+        # went unnoticed. The toolchain install above already adds the target.
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check -p rar-rs --all-features --target wasm32-wasip1-threads --locked
       - name: Cargo check (fuzz workspace)
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
       - name: Cargo fmt (fuzz workspace)

@@ -9,6 +9,9 @@ mod entry;
 
 pub use chunk::DataChunk;
 pub use entry::FileHeader;
+// Only the unix/windows extraction paths interpret host attributes; a wasm
+// build drops the enum, the accessor and this re-export together.
+#[cfg(any(unix, windows))]
 pub(crate) use entry::HostAttributes;
 
 #[cfg(test)]

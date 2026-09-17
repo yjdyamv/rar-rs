@@ -118,6 +118,7 @@ fn component_is_ambiguous(_component: &str) -> bool {
 ///
 /// A target that merely moves sideways inside the root (`sub/../target.txt`)
 /// is accepted, matching the member-name policy in [`sanitize_archive_path`].
+#[cfg(any(unix, windows))]
 pub(crate) fn resolve_redirect_target(link_dir: &str, target: &str) -> RarResult<Vec<String>> {
     if target.is_empty() {
         return Err(RarError::Security("redirect target is empty".into()));
