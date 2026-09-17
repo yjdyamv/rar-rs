@@ -72,12 +72,24 @@ comment: `ArchiveReader` had no counterpart to `RarArchive::get_comment`.
 
 ## Consequences
 
-- `rar_rs::RarArchive` stops compiling for downstream users; the compat path is
-  `rar_rs::archive::RarArchive` (undocumented). This is a breaking change,
-  acceptable in the pre-1.0 series and consistent with ADR 0003's scope.
+- `rar_rs::RarArchive` and `rar_rs::archive::*` stop compiling for downstream
+  users (the module is `pub(crate)` now): only the role facades are public. This
+  is a breaking change, acceptable in the pre-1.0 series and consistent with ADR
+  0003's scope.
 - `rar_rs::CreateOptions` stops compiling; `WriterOptions` is the replacement
   and already validates every combination the internal struct does.
 - The compat-test corpus keeps compiling unchanged except for the import path,
   so the byte-parity guarantees stay covered.
 - Filling `ArchiveReader::comment()` makes the reader role complete with respect
   to read-only archive metadata.
+
+## Amendment (2026-09-17): the compatibility path is removed
+
+Decision 2's "reachable as `rar_rs::archive::RarArchive`" is superseded. The
+`archive` module is now `pub(crate)`, so the engine type is unreachable from
+outside (and public docs no longer link to it). The 29 in-tree integration-test
+uses migrated to the role facades (`comment()`, `verify()`, `copy_entry_to`);
+the few `RarArchive` methods only in-crate tests still use (`read_with_options`,
+`test`, `set_password`) are `#[cfg(test)]`, and the unused
+`read_to_writer(_with_options)` / `extract_with_options` wrappers are gone. The
+crate is unpublished, so no downstream user is affected by the break.

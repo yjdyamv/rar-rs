@@ -1,7 +1,6 @@
 use std::fs::OpenOptions as FsOpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
-use rar_rs::archive::RarArchive;
 use rar_rs::{
     ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, EntryWriteOptions, ErrorCode,
     ExtractOptions, OpenOptions, RarError, ScanStrategy, SolidMode, WriterOptions,
@@ -273,8 +272,9 @@ fn legacy_test_checks_each_duplicate_entry_by_index() {
     assert_eq!(report.failures()[0].entry_id(), report_ids[1]);
     assert_eq!(report.failures()[0].error().code(), ErrorCode::CrcMismatch);
 
-    let mut archive = RarArchive::open(&path).expect("reopen corrupted archive");
-    assert_eq!(archive.test().expect("test archive"), (2, 1));
+    let mut archive = ArchiveReader::open(&path).expect("reopen corrupted archive");
+    let report = archive.verify().expect("test archive");
+    assert_eq!((report.passed() + report.failed(), report.failed()), (2, 1));
 }
 
 /// Extraction reports the writer's own outcome: the selected subset is

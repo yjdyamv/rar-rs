@@ -5,7 +5,7 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar_rs::archive::RarArchive;
+use rar_rs::ArchiveReader;
 
 #[test]
 fn synthetic_rar4_with_bogus_header_is_refused_with_clear_error() {
@@ -17,7 +17,7 @@ fn synthetic_rar4_with_bogus_header_is_refused_with_clear_error() {
     data.extend_from_slice(&[0x72, 0x04, 0x00, 0x00, 0x00]);
     std::fs::write(&path, &data).unwrap();
 
-    let err = match RarArchive::open(&path) {
+    let err = match ArchiveReader::open(&path) {
         Ok(_) => panic!("expected synthetic RAR4 with broken header to fail"),
         Err(e) => e,
     };

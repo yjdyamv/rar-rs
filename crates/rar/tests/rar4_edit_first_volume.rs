@@ -2,7 +2,6 @@
 //! set's first volume regardless of which part was opened, and the comment
 //! must read back from any part.
 
-use rar_rs::archive::RarArchive;
 use rar_rs::{
     ArchiveEditor, ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, EditPlan,
     EntryWriteOptions, RarError, WriterOptions,
@@ -56,8 +55,8 @@ fn main_flags(bytes: &[u8]) -> u16 {
 }
 
 fn comment_of(path: &std::path::Path) -> Option<Vec<u8>> {
-    let mut archive = RarArchive::open(path).unwrap();
-    archive.get_comment().unwrap()
+    let mut archive = ArchiveReader::open(path).unwrap();
+    archive.comment().unwrap()
 }
 
 #[test]

@@ -8,7 +8,6 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar_rs::archive::RarArchive;
 use rar_rs::{ArchiveReader, RarError};
 
 const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/");
@@ -304,7 +303,7 @@ fn rar4_header_encrypted_archives_decode() {
     // -hp hides file names behind AES-128 header encryption; listing needs
     // the password at open time.
     assert!(matches!(
-        RarArchive::open(format!("{ENC}header_rar300_password.rar")),
+        ArchiveReader::open(format!("{ENC}header_rar300_password.rar")),
         Err(RarError::Encrypted(_))
     ));
 
@@ -333,7 +332,11 @@ fn rar4_header_encrypted_archives_decode() {
 
     // Wrong password must not silently list garbage.
     assert!(
-        RarArchive::open_with_password(format!("{ENC}header_rar300_password.rar"), "nope").is_err()
+        ArchiveReader::open_with(
+            format!("{ENC}header_rar300_password.rar"),
+            rar_rs::OpenOptions::new().password("nope")
+        )
+        .is_err()
     );
 }
 
@@ -382,7 +385,7 @@ fn rar4_rar30_long_password_header_encryption_decodes() {
     const PW: &str = "0123456789012345678901234567890123456789012345678";
 
     assert!(matches!(
-        RarArchive::open(format!("{ENC}rar4_longpw_hp.rar")),
+        ArchiveReader::open(format!("{ENC}rar4_longpw_hp.rar")),
         Err(RarError::Encrypted(_))
     ));
     let mut archive = ArchiveReader::open_with(

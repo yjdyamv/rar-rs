@@ -26,7 +26,11 @@
 //!
 //! BSD-2-Clause. See LICENSE for details.
 
-pub mod archive;
+// Role facades ([`ArchiveReader`] / [`ArchiveWriter`] / [`ArchiveEditor`]) and
+// the crate-internal `RarArchive` engine behind them (ADR 0006: the engine is
+// not part of the public surface). The facades are re-exported at the crate
+// root; nothing else in here is reachable from outside.
+pub(crate) mod archive;
 pub mod codec;
 pub(crate) mod crc32;
 

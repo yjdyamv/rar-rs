@@ -1,6 +1,6 @@
 //! Edit transactions: delete, rename, comment and recovery-record
 //! mutation share one plan/execute pipeline (the rewrite engine behind
-//! [`RarArchive`] and [`super::ArchiveEditor`]). Methods on [`RarArchive`]
+//! `RarArchive` and [`super::ArchiveEditor`]). Methods on `RarArchive`
 //! in a sibling impl block (see `crate::archive::mod`).
 //!
 //! Role split:

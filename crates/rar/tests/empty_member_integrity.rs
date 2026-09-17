@@ -122,9 +122,10 @@ fn valid_empty_member_passes_verification() {
     assert_eq!(std::fs::metadata(&extracted).unwrap().len(), 0);
 
     drop(reader);
-    let mut archive = rar_rs::archive::RarArchive::open(&path).unwrap();
+    let mut archive = ArchiveReader::open(&path).unwrap();
+    let report = archive.verify().unwrap();
     assert_eq!(
-        archive.test().unwrap(),
+        (report.passed() + report.failed(), report.failed()),
         (1, 0),
         "a valid empty member must pass verification"
     );
@@ -162,9 +163,10 @@ fn empty_member_crc_mismatch_fails_read_test_and_extract() {
     );
 
     drop(reader);
-    let mut archive = rar_rs::archive::RarArchive::open(&path).unwrap();
+    let mut archive = ArchiveReader::open(&path).unwrap();
+    let report = archive.verify().unwrap();
     assert_eq!(
-        archive.test().unwrap(),
+        (report.passed() + report.failed(), report.failed()),
         (1, 1),
         "test must report the tampered empty member"
     );
@@ -237,9 +239,10 @@ fn empty_member_hash_mismatch_fails_read_and_test() {
     assert!(matches!(err, RarError::HashMismatch { .. }), "read: {err}");
 
     drop(reader);
-    let mut archive = rar_rs::archive::RarArchive::open(&path).unwrap();
+    let mut archive = ArchiveReader::open(&path).unwrap();
+    let report = archive.verify().unwrap();
     assert_eq!(
-        archive.test().unwrap(),
+        (report.passed() + report.failed(), report.failed()),
         (1, 1),
         "test must report the tampered empty-member hash"
     );

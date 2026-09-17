@@ -31,7 +31,7 @@ AES / HMAC / SHA / rand / zeroize，`parallel` / `simd` 可选）。
 | `lib.rs`                                                        | 公开面：角色门面 + 选项/错误/版本 + `wire` 工具箱（块信封 / varint / 模型结构 / 恢复构建 / 加密原语）                                         |
 | `crc32.rs`                                                      | crate 级 CRC32 实现（`pub(crate)`）                                                                                                           |
 | `archive/reader.rs` / `writer.rs` / `editor.rs`                 | 读 / 写 / 改三个角色门面（共用 `EntryId::resolve` 身份约定与单一 catalog token）                                                              |
-| `archive/mod.rs`                                                | `RarArchive` 共享状态与生命周期（内部）                                                                                                       |
+| `archive/mod.rs`                                                | `RarArchive` 共享状态与生命周期（`pub(crate)` 模块内部；公开面只有 `pub use` 的角色门面）                                                     |
 | `archive/state.rs`                                              | `ReadState`/`WriteState`（+ `solid`/`rar4`/`compression`/`meta`/`locator`/`output` 组）与 `Mode`/`PendingCommit`/`StreamRecord`               |
 | `archive/transaction/`                                          | 手术式 delete / rename（字节级重写；`multivolume`/`edit`/`plan`/`execute`/`solid`/`header` 角色模块）                                         |
 | `archive/create.rs` / `entry.rs` / `discovery.rs`               | 写生命周期、条目类型、分卷发现                                                                                                                |

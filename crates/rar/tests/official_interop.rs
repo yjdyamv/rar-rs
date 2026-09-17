@@ -5,7 +5,7 @@ mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar_rs::{CompressionLevel, EntryWriteOptions};
+use rar_rs::{ArchiveReader, CompressionLevel, EntryWriteOptions};
 
 /// The official-binary tests skip when `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR`
 /// are not configured. The skip prints a visible marker so a green run is not
@@ -1377,9 +1377,9 @@ fn official_tools_validate_rar4_comments() {
         .status()
         .unwrap();
     assert!(status.success(), "6.23 could not set the comment");
-    let mut archive = rar_rs::archive::RarArchive::open(&theirs).unwrap();
+    let mut archive = ArchiveReader::open(&theirs).unwrap();
     assert_eq!(
-        archive.get_comment().unwrap(),
+        archive.comment().unwrap(),
         Some(b"official comment \xe4\xb8\xad\xe6\x96\x87".to_vec())
     );
 }

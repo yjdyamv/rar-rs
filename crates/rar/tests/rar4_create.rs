@@ -1237,7 +1237,7 @@ fn create_rar4_solid_ppmd_text_chain() {
 /// Large-member extraction takes the streaming path: a ~96 MB STORE member
 /// is copied chunk-by-chunk (never buffered whole) and a compressed member
 /// decodes incrementally, both verified byte-identical via
-/// `RarArchive::extract` (the writer path, not the buffering `read`).
+/// the extraction writer path (not the buffering `read`).
 #[test]
 fn create_rar4_large_members_stream_on_extract() {
     let dir = make_temp_dir();

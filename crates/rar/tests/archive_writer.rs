@@ -450,7 +450,7 @@ fn append_on_rar4_archives_is_supported() {
         .id();
     assert_eq!(reader.read_entry(a).unwrap(), b"original");
 
-    // The legacy RarArchive::open_append facade is still usable.
+    // Append through the writer facade.
     {
         let mut archive = ArchiveWriter::append(&path).unwrap();
         archive.add_bytes("c.txt", b"third", stored()).unwrap();
@@ -754,8 +754,9 @@ fn empty_member_survives_multivolume_store_write() {
     assert!(reader.read_entry(id).unwrap().is_empty());
     drop(reader);
 
-    let mut archive = rar_rs::archive::RarArchive::open(&base).unwrap();
-    assert_eq!(archive.test().unwrap(), (2, 0));
+    let mut archive = ArchiveReader::open(&base).unwrap();
+    let report = archive.verify().unwrap();
+    assert_eq!((report.passed() + report.failed(), report.failed()), (2, 0));
 }
 
 /// A member that starts within its header's worth of bytes from a volume end

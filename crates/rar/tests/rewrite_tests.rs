@@ -1077,15 +1077,15 @@ fn comment_set_get_roundtrip() {
         rar.finish().unwrap();
     }
     {
-        let mut rar = rar_rs::archive::RarArchive::open(&path).unwrap();
-        assert_eq!(rar.get_comment().unwrap(), None);
+        let mut rar = rar_rs::ArchiveReader::open(&path).unwrap();
+        assert_eq!(rar.comment().unwrap(), None);
         let mut ed = ArchiveEditor::open(&path).unwrap();
         ed.apply(rar_rs::EditPlan::new().set_comment(b"my comment\n"))
             .unwrap();
     }
     {
-        let mut rar = rar_rs::archive::RarArchive::open(&path).unwrap();
-        assert_eq!(rar.get_comment().unwrap(), Some(b"my comment\n".to_vec()));
+        let mut rar = rar_rs::ArchiveReader::open(&path).unwrap();
+        assert_eq!(rar.comment().unwrap(), Some(b"my comment\n".to_vec()));
         // The member survives the comment rewrite.
         let mut rar2 = ArchiveReader::open(&path).unwrap();
         assert_eq!(
@@ -1098,8 +1098,8 @@ fn comment_set_get_roundtrip() {
         ed.apply(rar_rs::EditPlan::new().set_comment(b"")).unwrap();
     }
     {
-        let mut rar = rar_rs::archive::RarArchive::open(&path).unwrap();
-        assert_eq!(rar.get_comment().unwrap(), None);
+        let mut rar = rar_rs::ArchiveReader::open(&path).unwrap();
+        assert_eq!(rar.comment().unwrap(), None);
     }
 
     // The comment must be readable by the official tool (env-gated).

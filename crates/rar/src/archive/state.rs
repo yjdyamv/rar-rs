@@ -1,4 +1,4 @@
-//! Archive read/write state owned by [`RarArchive`](super::RarArchive).
+//! Archive read/write state owned by `RarArchive`.
 //!
 //! [`ReadState`]/[`WriteState`] carry everything that survives across the
 //! calls of one operation: solid-chain decoders/encoders, extraction
@@ -53,7 +53,7 @@ impl Default for LegacyReadState {
 /// Read-side state for extraction and listing.
 ///
 /// Groups fields exclusively used by read/extract paths (extract.rs).
-/// Owned as `Option<ReadState>` inside [`RarArchive`](super::RarArchive); `None` when the
+/// Owned as `Option<ReadState>` inside `RarArchive`; `None` when the
 /// archive is opened for writing only.
 pub(crate) struct ReadState {
     /// Persistent decoder state for RAR5 solid archive chains.
@@ -116,7 +116,7 @@ pub(crate) enum LegacySolidEncoder {
 ///
 /// Groups fields exclusively used by write/create/append paths
 /// (write/mod.rs + transaction.rs). Owned as `Option<WriteState>` inside
-/// [`RarArchive`]; `None` when the archive is opened for reading only.
+/// `RarArchive`; `None` when the archive is opened for reading only.
 ///
 /// The fields are grouped by role: [`SolidChain`] carries the shared LZ
 /// window and its reset policy, [`Rar4Append`] the legacy append
@@ -149,7 +149,7 @@ pub(crate) struct SolidChain {
     /// current RAR5 solid chain's first member. The shared decoder window
     /// is fixed there (the reader builds one `DecoderState` from the chain
     /// head), so later members of the run are clamped to it; cleared by
-    /// [`crate::archive::RarArchive::reset_solid_chain`].
+    /// `RarArchive::reset_solid_chain`.
     pub chain_dict: Option<(u8, Option<u64>)>,
     /// Persistent RAR4 LZSS encoder for solid archives; the sliding window
     /// and Huffman table state carry across the members of a solid run.

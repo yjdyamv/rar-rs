@@ -1,4 +1,4 @@
-//! Typed, mutation-capable archive API built on the legacy [`RarArchive`]
+//! Typed, mutation-capable archive API built on the legacy `RarArchive`
 //! facade and its index-based rewrite core.
 //!
 //! [`ArchiveEditor`] exposes a duplicate-safe entry catalog (the same ID
@@ -26,7 +26,7 @@ use crate::error::{RarError, RarResult};
 
 /// Mutable archive role with duplicate-safe entry identities.
 ///
-/// This type wraps the existing [`RarArchive`] implementation but exposes
+/// This type wraps the existing `RarArchive` implementation but exposes
 /// only catalog listing and ID-based structural edits. Open the archive,
 /// resolve members to [`EntryId`]s through the catalog, then delete or
 /// rename them; IDs issued before an edit fail with

@@ -1442,10 +1442,10 @@ fn concurrent_creates_with_different_threads_are_isolated() {
     }
 }
 
-// ── Streaming single-member read (read_to_writer) ──────────────────────────
+// ── Streaming single-member read (copy_entry_to) ──────────────────────────
 
-/// read_to_writer must decode a member into a sink byte-identically to
-/// `read`, with bounded memory (no per-member materialization), and work
+/// `copy_entry_to` must decode a member into a sink byte-identically to
+/// `read_entry`, with bounded memory (no per-member materialization), and work
 /// for solid-chain members too.
 #[test]
 fn read_to_writer_matches_read_and_streams() {
@@ -1458,9 +1458,10 @@ fn read_to_writer_matches_read_and_streams() {
         ar.finish().unwrap();
     }
 
-    let mut ar = rar_rs::archive::RarArchive::open(&path).unwrap();
+    let mut ar = rar_rs::ArchiveReader::open(&path).unwrap();
+    let id = ar.unique_entry("m.bin").unwrap();
     let mut sink = Vec::new();
-    let n = ar.read_to_writer("m.bin", &mut sink).unwrap();
+    let n = ar.copy_entry_to(id, &mut sink).unwrap();
     assert_eq!(n as usize, payload.len());
     assert_eq!(sink, payload);
 
@@ -1476,16 +1477,15 @@ fn read_to_writer_matches_read_and_streams() {
         ar.add_bytes("b.bin", &payload, opts(3)).unwrap();
         ar.finish().unwrap();
     }
-    let mut ar = rar_rs::archive::RarArchive::open(&solid).unwrap();
+    let mut ar = rar_rs::ArchiveReader::open(&solid).unwrap();
+    let id = ar.unique_entry("b.bin").unwrap();
     let mut sink = Vec::new();
-    let n = ar.read_to_writer("b.bin", &mut sink).unwrap();
+    let n = ar.copy_entry_to(id, &mut sink).unwrap();
     assert_eq!(n as usize, payload.len());
     assert_eq!(sink, payload);
 
     // Missing member -> MemberNotFound.
-    let err = ar
-        .read_to_writer("nope.bin", &mut std::io::sink())
-        .unwrap_err();
+    let err = ar.unique_entry("nope.bin").unwrap_err();
     assert!(matches!(err, rar_rs::RarError::MemberNotFound { .. }));
 }
 
@@ -1503,8 +1503,13 @@ fn test_reports_member_integrity() {
         ar.add_bytes("b.bin", &b, opts(0)).unwrap();
         ar.finish().unwrap();
     }
-    let mut ar = rar_rs::archive::RarArchive::open(&path).unwrap();
-    assert_eq!(ar.test().unwrap(), (2, 0), "healthy archive: all ok");
+    let mut ar = rar_rs::ArchiveReader::open(&path).unwrap();
+    let report = ar.verify().unwrap();
+    assert_eq!(
+        (report.passed() + report.failed(), report.failed()),
+        (2, 0),
+        "healthy archive: all ok"
+    );
 
     // Corrupt a byte inside the compressed payload of a.bin (not the
     // header), so only that member fails.
@@ -1518,10 +1523,10 @@ fn test_reports_member_integrity() {
     drop(ar);
     std::fs::write(&path, &damaged).unwrap();
 
-    let mut ar = rar_rs::archive::RarArchive::open(&path).unwrap();
-    let (checked, failed) = ar.test().unwrap();
-    assert_eq!(checked, 2);
-    assert_eq!(failed, 1, "corrupted a.bin must fail");
+    let mut ar = rar_rs::ArchiveReader::open(&path).unwrap();
+    let report = ar.verify().unwrap();
+    assert_eq!(report.passed() + report.failed(), 2);
+    assert_eq!(report.failed(), 1, "corrupted a.bin must fail");
 }
 
 /// The buffered read path must enforce the `-mdx` dictionary cap too, not

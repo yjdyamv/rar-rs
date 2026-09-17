@@ -7,6 +7,9 @@ use crate::error::{RarError, RarResult};
 
 impl RarArchive {
     /// Read a member with explicit limits (see [`crate::ExtractOptions`]).
+    /// In-crate test helper: the public surface reads through
+    /// [`ArchiveReader`](crate::ArchiveReader).
+    #[cfg(test)]
     pub fn read_with_options(
         &mut self,
         name: &str,
@@ -38,36 +41,6 @@ impl RarArchive {
         self.decode_entry_at(target_idx)
     }
 
-    /// Stream one member's uncompressed content into `writer` (bounded
-    /// memory: the member is decoded block by block, never materialized).
-    /// Returns the number of bytes written. The default limits of
-    /// [`ExtractOptions`] still apply (4 GiB per member); pass
-    /// [`ExtractOptions`] with `max_unpacked_bytes: None` via
-    /// [`Self::read_to_writer_with_options`] for arbitrarily large members.
-    /// Solid-chain members decode the whole chain through the member, like
-    /// [`Self::read`].
-    pub fn read_to_writer(&mut self, name: &str, writer: &mut dyn Write) -> RarResult<u64> {
-        self.read_to_writer_with_options(name, writer, crate::options::ExtractOptions::default())
-    }
-
-    /// [`Self::read_to_writer`] with explicit limits (see
-    /// [`crate::ExtractOptions`]).
-    pub fn read_to_writer_with_options(
-        &mut self,
-        name: &str,
-        writer: &mut dyn Write,
-        opts: crate::options::ExtractOptions,
-    ) -> RarResult<u64> {
-        let target_idx = self
-            .entries
-            .iter()
-            .position(|e| e.name() == name)
-            .ok_or_else(|| RarError::MemberNotFound {
-                name: name.to_string(),
-            })?;
-        self.read_to_writer_at_index_with_options(target_idx, writer, opts)
-    }
-
     /// Stream an entry selected by its archive-order catalog index.
     pub(crate) fn read_to_writer_at_index_with_options(
         &mut self,
@@ -88,6 +61,9 @@ impl RarArchive {
     /// decoded and its CRC32/BLAKE2sp verified without writing anything.
     /// Returns `(checked, failed)`; a nonzero `failed` is still `Ok` so
     /// callers can report per-member failures. Directories are skipped.
+    /// In-crate test helper: the public surface uses
+    /// [`ArchiveReader::verify`](crate::ArchiveReader::verify).
+    #[cfg(test)]
     pub fn test(&mut self) -> RarResult<(usize, usize)> {
         let mut checked = 0usize;
         let mut failed = 0usize;

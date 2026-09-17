@@ -1,4 +1,4 @@
-//! Typed, transactional archive writer built on the legacy [`RarArchive`]
+//! Typed, transactional archive writer built on the legacy `RarArchive`
 //! implementation.
 
 use std::fmt;

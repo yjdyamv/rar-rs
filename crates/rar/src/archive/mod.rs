@@ -88,7 +88,7 @@ pub(crate) const MAX_DICT_SIZE_LOG: u8 = 15;
 #[cfg(feature = "parallel")]
 pub(crate) const PARALLEL_COMPRESS_MAX_MEMBER: u64 = 64 * 1024 * 1024;
 /// Members at least this large take the streaming compressed path in
-/// [`RarArchive::add_file`]: input is compressed in bounded chunks into a
+/// `RarArchive::add_file`: input is compressed in bounded chunks into a
 /// temporary spill file and then streamed into the archive, so memory
 /// stays bounded for any file size (P4: >4 GiB single-file creation).
 pub(crate) const STREAM_COMPRESS_THRESHOLD: u64 = 64 * 1024 * 1024;
@@ -100,19 +100,16 @@ pub(crate) const PARALLEL_COMPRESS_WAVE_BUDGET: u64 = 256 * 1024 * 1024;
 /// Legacy RAR archive engine: the shared implementation behind
 /// [`ArchiveReader`], [`ArchiveWriter`] and [`ArchiveEditor`].
 ///
-/// Not part of the supported public API (ADR 0006): new code uses the typed
-/// role facades. It stays reachable as `rar_rs::archive::RarArchive` because
-/// the in-tree byte-parity test corpus and the internal role delegation build
-/// on it; it is hidden from the rustdoc surface and will be removed in a
-/// future breaking release.
-#[doc(hidden)]
+/// Crate-internal (ADR 0006): the public surface is the typed role facades
+/// only. This module is private, so the type is unreachable from outside even
+/// though it stays `pub` for in-crate tests and the facade delegation.
 pub struct RarArchive {
     pub(crate) path: PathBuf,
     pub(crate) mode: Mode,
-    /// Set before the first trailing write of [`RarArchive::finish_writing`].
+    /// Set before the first trailing write of `RarArchive::finish_writing`.
     /// Once finalization has been attempted, a failed/partial result must
     /// never be finalized again (a retry could append a second quick-open /
-    /// recovery record or patch the wrong offset): [`RarArchive::close`] and
+    /// recovery record or patch the wrong offset): `RarArchive::close` and
     /// [`Drop`] both refuse to re-enter it.
     pub(crate) finalize_started: bool,
     pub(crate) entries: Vec<ArchiveEntry>,
@@ -445,7 +442,10 @@ impl RarArchive {
         Ok(archive)
     }
 
-    /// Set the password for decryption.
+    /// Set the password for decryption. In-crate test helper: public callers
+    /// pass the password to [`ArchiveReader::open_with`] /
+    /// [`ArchiveWriter::create_with`].
+    #[cfg(test)]
     pub fn set_password(&mut self, password: &str) {
         self.password = Some(password.to_string());
         // A cached header key belongs to the previous password; the next
@@ -929,7 +929,7 @@ impl RarArchive {
     /// The callback receives `(bytes_committed, bytes_total)` where
     /// `bytes_total` is the total input byte count of the whole write
     /// operation (a single member, or the full batch passed to
-    /// [`RarArchive::add_batch`]) and `bytes_committed` is the monotonic,
+    /// `RarArchive::add_batch`) and `bytes_committed` is the monotonic,
     /// operation-global number of input bytes processed so far. Events are
     /// delivered serially even when members compress concurrently on the
     /// Rayon pool, and `bytes_committed` never moves backwards.

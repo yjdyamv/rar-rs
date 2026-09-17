@@ -412,23 +412,6 @@ impl RarArchive {
         }
         Ok(Some(report))
     }
-    /// Extract a single entry with explicit options.
-    pub fn extract_with_options(
-        &mut self,
-        name: &str,
-        dest_dir: impl AsRef<Path>,
-        opts: crate::options::ExtractOptions,
-    ) -> RarResult<PathBuf> {
-        let idx = self
-            .entries
-            .iter()
-            .position(|e| e.name() == name)
-            .ok_or_else(|| RarError::MemberNotFound {
-                name: name.to_string(),
-            })?;
-        self.extract_at_index_with_options(idx, dest_dir, opts)
-    }
-
     /// Extract an entry selected by its archive-order catalog index.
     pub(crate) fn extract_at_index_with_options(
         &mut self,

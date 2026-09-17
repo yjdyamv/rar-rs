@@ -92,8 +92,15 @@
       `readme` / `keywords` / `documentation` / `categories` 元数据已补齐
       （2026-09-16），但 `rar-cli` / `rar-rs-napi` 仍因 `rar-rs`
       未发布而无法解析依赖。
-- [ ] **下一个破坏性版本**：删除 `rar_rs::archive::RarArchive` 兼容路径，公开面
-      只留 `ArchiveReader` / `ArchiveWriter` / `ArchiveEditor`（ADR 0006）。
+- [x] **删除 `rar_rs::archive::RarArchive` 兼容路径**（2026-09-17）：`lib.rs` 的
+      `pub mod archive` 改为 `pub(crate)`，角色门面经 crate 根重导出；
+      `rar_rs::archive::RarArchive` 不再可达。29 处集成测试改用门面
+      （`comment()` / `verify()` / `copy_entry_to`）；仅测试使用的 `RarArchive`
+      方法（`read_with_options` / `test` / `set_password`）标
+      `#[cfg(test)]`，真正无用的 `read_to_writer(_with_options)` /
+      `extract_with_options` 删除；公开文档不再链接私有类型。破坏性变更，但
+      crate 未发布故无下游影响。验证：全量测试 54 targets、 clippy
+      `-D warnings`、`rustdoc -D warnings` 全绿。
 
 ### P1 · 工程加固（低成本）
 

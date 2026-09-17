@@ -1,4 +1,4 @@
-//! Typed, read-only archive API built on top of the legacy [`RarArchive`]
+//! Typed, read-only archive API built on top of the legacy `RarArchive`
 //! facade.
 //!
 //! [`ArchiveReader`] exposes only listing, reading, verification-adjacent and
@@ -350,7 +350,7 @@ impl VerificationReport {
 
 /// Read-only archive role with duplicate-safe member identities.
 ///
-/// This type wraps the existing [`RarArchive`] implementation but deliberately
+/// This type wraps the existing `RarArchive` implementation but deliberately
 /// exposes no creation, append, rewrite or locking operations. IDs embed both
 /// the catalog generation and the member's packed-payload position, so a
 /// catalog rebuild that only reorders entries (a quick-open rescan before

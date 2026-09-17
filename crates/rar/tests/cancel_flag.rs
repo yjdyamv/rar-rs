@@ -1,4 +1,4 @@
-//! Cancellation flag tests: `RarArchive::set_cancel_flag` must abort
+//! Cancellation flag tests: the role facades' `set_cancel_flag` must abort
 //! create/extract at the next per-member or per-chunk check point with
 //! `RarError::Cancelled`.
 

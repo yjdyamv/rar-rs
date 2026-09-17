@@ -3,7 +3,6 @@
 //! after structural edits. Byte parity with the legacy name-based
 //! operations is checked on twin archive copies.
 
-use rar_rs::archive::RarArchive;
 use rar_rs::{
     ArchiveEditor, ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, EditPlan,
     EntryWriteOptions, RarError, SolidMode, WriterOptions,
@@ -670,8 +669,8 @@ fn comment_op_matches_legacy_set_comment_bytes_and_clears() {
     editor
         .apply(EditPlan::new().set_comment(Vec::new()))
         .unwrap();
-    let mut archive = RarArchive::open(&twin).unwrap();
-    assert_eq!(archive.get_comment().unwrap(), None);
+    let mut archive = ArchiveReader::open(&twin).unwrap();
+    assert_eq!(archive.comment().unwrap(), None);
 }
 
 #[test]
@@ -716,11 +715,8 @@ fn combined_plan_with_comment_and_recovery_applies_atomically() {
         sorted_names(&path),
         ["renamed/", "renamed/x.txt", "same.txt", "same.txt"]
     );
-    let mut archive = RarArchive::open(&path).unwrap();
-    assert_eq!(
-        archive.get_comment().unwrap(),
-        Some(b"combined plan".to_vec())
-    );
+    let mut archive = ArchiveReader::open(&path).unwrap();
+    assert_eq!(archive.comment().unwrap(), Some(b"combined plan".to_vec()));
     // The rewritten archive still verifies (the RR record is structurally
     // present and the main-header locator consistent).
     let mut reader = ArchiveReader::open(&path).unwrap();
@@ -1196,8 +1192,8 @@ fn rar4_archive_comments_roundtrip_and_read_623_fixture() {
 
 /// Open the archive and return its comment (helper for the tests above).
 fn comment_of(path: impl AsRef<std::path::Path>) -> Option<Vec<u8>> {
-    let mut rar = RarArchive::open(path).unwrap();
-    rar.get_comment().unwrap()
+    let mut rar = ArchiveReader::open(path).unwrap();
+    rar.comment().unwrap()
 }
 
 /// RAR4 append (`rar a` on an existing archive, ADR 0005 stage B): new
