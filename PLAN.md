@@ -156,13 +156,19 @@
       全部字节一致；库测试
       `create_rar4_legacy_large_encrypted_members_roundtrip` （v15/v20 × 单卷/8
       MiB 分卷，v20 断言 method ≠ 0）。
-- [ ] **(C) Stage 3 · RAR15/RAR13 窗口压缩流式（未做）**：这两代是**自适应
-      Huffman**（表随成员演化，不是每块重发一张平坦表），窗口化需要「每窗口
-      重发自适应表 + 边界状态」的独立设计并重新对拍，收益仅「老格式 >64 MiB
-      成员压缩率」。现状：v15 大成员 STORE（Stage 1 已保证有界内存、含
-      加密），RAR13 大成员 STORE 流式（已实现，含加密）。另外 Stage 1 的
-      `BitSink` + `write_lz_block` 把 v20 的**块级 MT** 从「结构性不可行」变成
-      「多窗口并行解析 + 顺序写位流」（见下方「有意不做」未改动的原因）。
+- [ ] **(C) Stage 3 · RAR15/RAR13 压缩流式（原「窗口化」方案不可行，待定）**：
+      RAR 1.5 与 RAR13（后者复用一个 `Unpack15` 编码器）是**单一自适应流**：
+      解码端 `init_huff` 只在成员/链开始时建初表，之后每符号经 `corr_huff`
+      演化，`get_flags_buf` 读的是同一个自适应集合；**格式里既无块结束标记、
+      也无重发表语法**，所以 Stage 1 那种「每窗口重发一张表」在这里**不存在**
+      （与「PPMd 块级 MT」同类的结构性限制）。可行替代是把 `Unpack15Encoder`
+      改成**增量（跨块续传状态）编码器**：
+      状态已经可整体克隆（`clone_for_planning()` 列全了自适应字段），只差 (a)
+      `long_lz_buckets` 从「先建全量索引」改成边插边查、 (b)
+      `pos + 1 < input.len()` 这类向前看改成带 carry（≤ 最大匹配长度）、 (c)
+      跨块保留 flag 组 / `straddle` / stmode 局部量。产物与整块编码
+      **逐字节相同**，用「整块 vs 分块」对拍即可直接验证，无互操作风险。
+      收益：>64 MiB 的 v15/RAR13 成员从 STORE 变成压缩（现已是有界内存）。
 - [x] **RAR13 大成员 STORE 流式**（已实现 2026-09-17）：`add_file_rar13` 对 ≥
       `STREAM_COMPRESS_THRESHOLD` 的成员改走新的
       `add_rar13_file_streaming_store`：
