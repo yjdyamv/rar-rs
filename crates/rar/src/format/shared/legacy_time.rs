@@ -17,6 +17,21 @@ pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146097 + doe - 719468
 }
 
+/// Real time zones are whole minutes. Snap a raw `local - utc` sample to the
+/// nearest minute so a platform clock that lags the high-resolution UTC sample
+/// — Windows' `GetLocalTime` only advances on the ~15.6 ms system tick — cannot
+/// yield an offset off by a second. A one-second wobble would flip the legacy
+/// DOS field's `ADD_SECOND` parity (2-second resolution) and make the encoded
+/// timestamp depend on *when* it was read.
+fn snap_to_minute(secs: i64) -> i64 {
+    let rem = secs.rem_euclid(60);
+    if rem >= 30 {
+        secs + (60 - rem)
+    } else {
+        secs - rem
+    }
+}
+
 /// Seconds east of UTC for the local time zone, at "now" (minute precision;
 /// targets without a local-time API report UTC).
 fn local_offset_secs() -> i64 {
@@ -37,7 +52,7 @@ fn local_offset_secs() -> i64 {
             + i64::from(st.wHour) * 3_600
             + i64::from(st.wMinute) * 60
             + i64::from(st.wSecond);
-        civil - utc
+        snap_to_minute(civil - utc)
     }
     #[cfg(unix)]
     {
@@ -52,7 +67,7 @@ fn local_offset_secs() -> i64 {
             + i64::from(tm.tm_hour) * 3_600
             + i64::from(tm.tm_min) * 60
             + i64::from(tm.tm_sec);
-        civil - utc
+        snap_to_minute(civil - utc)
     }
     #[cfg(not(any(windows, unix)))]
     {
@@ -70,4 +85,30 @@ pub(crate) fn epoch_to_local_civil(secs: u32) -> u32 {
 /// Convert a legacy "local civil" time back to a Unix instant.
 pub(crate) fn local_civil_to_epoch(secs: u32) -> u32 {
     (i64::from(secs) - local_offset_secs()).clamp(0, u32::MAX as i64) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{local_offset_secs, snap_to_minute};
+
+    #[test]
+    fn snap_to_minute_rounds_the_clock_tick_wobble() {
+        assert_eq!(snap_to_minute(28_800), 28_800);
+        // `GetLocalTime` a tick behind/ahead still lands on the whole minute.
+        assert_eq!(snap_to_minute(28_799), 28_800);
+        assert_eq!(snap_to_minute(28_801), 28_800);
+        assert_eq!(snap_to_minute(-28_799), -28_800);
+        assert_eq!(snap_to_minute(-28_801), -28_800);
+        assert_eq!(snap_to_minute(0), 0);
+    }
+
+    /// Every conversion of one member must see the same offset: a one-second
+    /// change flips the 2-second DOS field's `ADD_SECOND` bit, so sequential
+    /// and batch writes of the same file would differ byte-for-byte.
+    #[test]
+    fn local_offset_is_minute_aligned() {
+        for _ in 0..200_000 {
+            assert_eq!(local_offset_secs() % 60, 0);
+        }
+    }
 }

@@ -66,15 +66,20 @@
       admin（公开 API 403），本机无 Linux/qemu/容器。已在 CI 加「失败用例 →
       check-run annotation」（annotation
       公开可读），下一次红就能拿到名字，再对症修。
-- [ ] **RAR4 batch 与 sequential 偶发不一致（待定位）**：
-      `rar4_create.rs::rar4_batch_matches_sequential_bytes`（输入完全确定，断言两档
-      写出的归档字节相同）在并发/负载下偶发失败：**长度相同、字节不同**。已确认
-      **HEAD 也能复现**（`git stash` 掉本轮修改后，60 次并发跑中失败 1
-      次），与上文 `-hp`
-      修复无关，是既有问题。目前只确认「偶发」，尚无根因：可能是并行编码的
-      竞态，也可能是环境因素（非 ECC
-      内存、CPU、杀软、临时目录）。定位前不要盲改—— 先重复跑 +
-      TSan/`--test-threads` 压测，能稳定复现再进代码。
+- [x] **RAR4 batch 与 sequential 偶发不一致**（已修 2026-09-17）：**不是竞态**，
+      是 `local_offset_secs()`（库 `format/shared/legacy_time.rs` + CLI
+      `time.rs`）把 “本地时间”与 UTC **分两次采样**：Windows 的 `GetLocalTime`
+      只按 ~15.6 ms 系统 tick 前进，在高精度 `SystemTime::now()`
+      跨秒后仍可能停留在前一秒，于是 `local - utc` 偶发差 1 秒（探针实测：3 秒内
+      37,717 次返回 28799 = 28800-1，约 1.9%）。RAR4 DOS 时间只有 2
+      秒分辨率、由本地秒奇偶决定 ext-time 的 `ADD_SECOND` 位，所以 ±1
+      秒会翻转该位 → 同一文件在不同时刻编码出不同字节（长度相同），seq 与 batch
+      于是偶发不等。定位手段：给偶发失败时 dump 两个归档 → 解码发现 DOS
+      时间相同、仅 ext-time 旗标字串节 0xF000 vs 0xB000。
+      **修法**：把原始差值吸附到最近整分钟（真实时区都是整分钟）；两处都改，新增
+      `snap_to_minute` 确定性单测 + 真实时钟对齐测试。修后 4 路并发 160 次 0
+      失败（修前约 1/20）。**Linux 不受影响**：`localtime_r(&utc)` 用的是同一个
+      UTC 采样，本身精确。
 
 ### P0 · 发布收口（硬门槛）
 

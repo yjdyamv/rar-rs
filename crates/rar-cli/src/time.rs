@@ -79,6 +79,19 @@ pub fn local_civil_now() -> (i64, u32, u32, u32, u32, u32) {
     }
 }
 
+/// Real time zones are whole minutes; snap a raw local-minus-UTC sample so a
+/// platform clock that lags the high-resolution UTC read (Windows'
+/// `GetLocalTime` advances on the ~15.6 ms system tick) cannot make the value
+/// wobble by a second.
+fn snap_to_minute(secs: i64) -> i64 {
+    let rem = secs.rem_euclid(60);
+    if rem >= 30 {
+        secs + (60 - rem)
+    } else {
+        secs - rem
+    }
+}
+
 /// Seconds east of UTC for the current local time (minute precision; the
 /// DST edge is not resolved beyond "now", like WinRAR's date switches).
 fn local_offset_secs() -> i64 {
@@ -87,7 +100,9 @@ fn local_offset_secs() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let (y, mo, d, h, mi, s) = local_civil_now();
-    epoch_secs(y, mo, d, h, mi, s) - utc
+    // `local_civil_now` samples the clock separately from `utc`; snap the
+    // difference so the two reads can never straddle a second boundary.
+    snap_to_minute(epoch_secs(y, mo, d, h, mi, s) - utc)
 }
 
 /// Interpret a civil time as if it were UTC, returning Unix seconds.
