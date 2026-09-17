@@ -38,6 +38,17 @@
       `#[cfg(windows)]`（`OS_WINDOWS` 只是格式常量，不是编译门）。已验证 Linux
       check / clippy `-D warnings` / rustdoc `-D warnings` 与 Windows
       全量测试均过。
+- [x] **`cli_behavior` 的 `rarfiles.lst` 竞态**（已修 2026-09-17）：
+      `cli_rarfiles_lst_orders_solid_members` 把顺序列表写到二进制旁的
+      `target/debug/rarfiles.lst`，而 `argv.rs` / `legacy.rs` / `parity2.rs`
+      里建 solid 归档的测试**没有拿那把「进程内」锁**，同进程并行时会读到 stray
+      列表、成员顺序被改 → CI 的 `Cargo test` 间歇性在
+      `-p rar-cli --test
+      cli_behavior` 上红（本地 4 路并发实测 31/60
+      失败）。修法：该测试改用**二进制
+      私有副本**（拷到临时目录，列表放副本旁边），不再污染共享路径；随之删掉不再
+      需要的 `rarfiles_lst_lock`。修后 4 路并发 0/60。顺带修了 `input.rs` 一行
+      被写坏的文档注释。
 - [ ] **RAR4 batch 与 sequential 偶发不一致（待定位）**：
       `rar4_create.rs::rar4_batch_matches_sequential_bytes`（输入完全确定，断言两档
       写出的归档字节相同）在并发/负载下偶发失败：**长度相同、字节不同**。已确认

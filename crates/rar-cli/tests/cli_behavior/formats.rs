@@ -1,4 +1,4 @@
-use crate::support::{RAR_CLI, UNRAR_CLI, make_temp_dir, rarfiles_lst_lock, write_rep_text};
+use crate::support::{RAR_CLI, UNRAR_CLI, make_temp_dir, write_rep_text};
 // ── -ma archive format version (extension: -ma7 forces RAR7/v70) ───────────
 
 /// `-ma7` forces RAR7 (v70) members at any dictionary size (an extension
@@ -199,9 +199,6 @@ fn cli_stdout_extract_writes_members_to_stdout() {
 /// file-extension change. All must round-trip byte-identically.
 #[test]
 fn cli_solid_reset_switches_accepted_and_roundtrip() {
-    let _guard = rarfiles_lst_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let dir = make_temp_dir();
     let a = dir.path().join("a.txt");
     let b = dir.path().join("b.bin");
@@ -473,9 +470,6 @@ fn cli_extract_member_selection_never_hijacks_dest() {
 /// statistics are simply reset as a new extension is encountered.
 #[test]
 fn cli_se_preserves_input_order() {
-    let _guard = rarfiles_lst_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let dir = make_temp_dir();
     let a = dir.path().join("a.txt");
     let b = dir.path().join("b.bin");

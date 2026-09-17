@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::support::{RAR_CLI, make_temp_dir, rarfiles_lst_lock};
+use crate::support::{RAR_CLI, make_temp_dir};
 // ── configuration sources: RARINISWITCHES / -cfg- / command-line priority ──
 
 #[test]
@@ -64,10 +64,19 @@ fn cli_config_sources_apply_with_winrar_priority() {
 
 #[test]
 fn cli_rarfiles_lst_orders_solid_members() {
-    let _guard = rarfiles_lst_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let dir = make_temp_dir();
+    // `rarfiles.lst` is looked up next to the executable — a location shared
+    // by every test in this binary (and every parallel test thread). Run a
+    // private copy of the rar binary so this test never drops a stray list
+    // into `target/debug/`, where the other solid-order tests would pick it
+    // up and flake.
+    let bin_dir = make_temp_dir();
+    let bin = bin_dir.path().join(
+        Path::new(RAR_CLI)
+            .file_name()
+            .expect("rar binary file name"),
+    );
+    std::fs::copy(RAR_CLI, &bin).expect("copy the rar binary");
     std::fs::write(dir.path().join("aaa.cpp"), b"a").unwrap();
     std::fs::write(dir.path().join("f1.cpp"), b"b").unwrap();
     std::fs::write(dir.path().join("ddd.cpp"), b"c").unwrap();
@@ -77,12 +86,12 @@ fn cli_rarfiles_lst_orders_solid_members() {
     std::fs::write(dir.path().join("subd").join("nested.txt"), b"n").unwrap();
     std::fs::write(dir.path().join("subd").join("deep.cpp"), b"p").unwrap();
 
-    // rarfiles.lst next to the rar binary (Windows/Unix lookup path).
-    let lst = Path::new(RAR_CLI).parent().unwrap().join("rarfiles.lst");
+    // rarfiles.lst next to the (private copy of the) rar binary.
+    let lst = bin_dir.path().join("rarfiles.lst");
     std::fs::write(&lst, "; test list\n*.txt\nf*.cpp\n*.cpp\n$default\n").unwrap();
     let result = std::panic::catch_unwind(|| {
         let archive = dir.path().join("rfl.rar");
-        let status = std::process::Command::new(RAR_CLI)
+        let status = std::process::Command::new(&bin)
             .args(["a", "-s", "-idq"])
             .arg(&archive)
             .args(["*.cpp", "*.h", "*.txt", "subd"])

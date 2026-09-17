@@ -2,18 +2,6 @@
 //! binary paths and the helpers that drive them.
 use rar_rs::{CompressionLevel, EntryWriteOptions};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
-
-/// Serializes tests that (a) write `rarfiles.lst` next to the rar binary
-/// (`cli_rarfiles_lst_orders_solid_members`) with (b) tests whose member
-/// order would be corrupted if a stray `rarfiles.lst` were present
-/// (`cli_se_preserves_input_order`, and the `-s` round-trip test). Without
-/// it the parallel test threads race on `target/debug/rarfiles.lst` and the
-/// order-sensitive tests flake.
-pub(crate) fn rarfiles_lst_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
 
 pub(crate) fn make_temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")

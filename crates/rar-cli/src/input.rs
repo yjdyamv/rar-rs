@@ -1,4 +1,5 @@
-//! Solid-order input list (rarfiles.lst) shared by the `rar` and`n//! `unrar` binaries.
+//! Solid-order input list (rarfiles.lst) shared by the `rar` and `unrar`
+//! binaries.
 
 #[allow(dead_code)] // used by the `rar` binary only
 pub fn read_rarfiles_lst() -> Vec<Option<String>> {
