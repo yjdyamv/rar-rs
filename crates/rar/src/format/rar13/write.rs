@@ -270,7 +270,9 @@ impl RarArchive {
         }
 
         let file_crc = super::file_checksum(&data);
-        let (payload, method) = if level == 0 || data.is_empty() {
+        let store_incompressible = !self.write_ctx().solid.mode
+            && crate::format::shared::write_ops::whole_member_is_incompressible(&data, level);
+        let (payload, method) = if level == 0 || data.is_empty() || store_incompressible {
             (data, METHOD_STORE)
         } else if self.write_ctx().solid.mode {
             // One shared encoder per chain; a solid run never stores (the

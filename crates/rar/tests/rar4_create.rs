@@ -259,6 +259,82 @@ fn create_rar4_compressed_store_fallback_random() {
     }
 }
 
+/// Random-data members of the old codecs go straight to STORE: those encoders
+/// build an `O(input)` token vector, so probing first keeps memory bounded.
+/// The archived bytes are identical to the post-encode size fallback.
+#[test]
+fn create_rar4_legacy_incompressible_members_store() {
+    let dir = make_temp_dir();
+    let size = 8 * 1024 * 1024usize;
+    let src = dir.path().join("random.bin");
+    let mut content = vec![0u8; size];
+    let mut state = 0x9E37_9B97_7F4A_7C15u64;
+    for byte in content.iter_mut() {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        *byte = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8;
+    }
+    std::fs::write(&src, &content).unwrap();
+
+    for (version, tag) in [(ArchiveVersion::V15, "v15"), (ArchiveVersion::V20, "v20")] {
+        let arc = dir.path().join(format!("{tag}-random.rar"));
+        let mut archive =
+            ArchiveWriter::create_with(&arc, WriterOptions::default().compression(version))
+                .unwrap();
+        archive.add_path(&src, ewo(5)).unwrap();
+        archive.finish().unwrap();
+
+        let mut archive = ArchiveReader::open(&arc).unwrap();
+        let entries: Vec<_> = archive.entries().collect();
+        assert_eq!(entries[0].method(), 0, "{tag}: incompressible must STORE");
+        let out = archive
+            .read_entry(archive.unique_entry("random.bin").unwrap())
+            .unwrap();
+        assert_eq!(out, content, "{tag} roundtrip");
+    }
+}
+
+/// A legacy member at or above the streaming threshold is streamed as STORE:
+/// the old codecs can only encode a whole member, so buffering it would put
+/// the member in memory twice. Compressible content proves this is the
+/// size-based streaming decision, not the incompressibility probe.
+#[test]
+fn create_rar4_legacy_large_members_stream_as_store() {
+    let dir = make_temp_dir();
+    let size = 66 * 1024 * 1024usize;
+    let src = dir.path().join("big.bin");
+    let block = b"streamed legacy member payload 0123456789abcdef\n";
+    let mut content = Vec::with_capacity(size);
+    while content.len() < size {
+        content.extend_from_slice(block);
+    }
+    content.truncate(size);
+    std::fs::write(&src, &content).unwrap();
+
+    let arc = dir.path().join("big-v20.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default().compression(ArchiveVersion::V20),
+    )
+    .unwrap();
+    archive.add_path(&src, ewo(5)).unwrap();
+    archive.finish().unwrap();
+
+    let mut archive = ArchiveReader::open(&arc).unwrap();
+    let entries: Vec<_> = archive.entries().collect();
+    assert_eq!(
+        entries[0].method(),
+        0,
+        "a huge legacy member must be streamed as STORE, not buffered"
+    );
+    let out = archive
+        .read_entry(archive.unique_entry("big.bin").unwrap())
+        .unwrap();
+    assert_eq!(out.len(), content.len());
+    assert_eq!(out, content, "streamed STORE roundtrip");
+}
+
 #[test]
 fn create_rar4_compressed_multivolume_split_member() {
     let dir = make_temp_dir();

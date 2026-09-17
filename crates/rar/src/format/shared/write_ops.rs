@@ -10,6 +10,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::archive::{BatchEntry, RarArchive};
 use crate::error::{RarError, RarResult};
 
+/// Whether a *whole-member* legacy RAR 1.5–4.x payload should be stored
+/// instead of encoded.
+///
+/// Those encoders build an `O(input)` token vector before emitting anything, so
+/// a random-data member (media, archives, encrypted files) would allocate
+/// hundreds of MiB for a guaranteed-losing encode. The shared stride probe —
+/// the same gate the RAR5 path uses — routes such members straight to STORE.
+/// Level 0 already stores, and a member with distant byte-identical copies is
+/// still compressible (the probe's repeat escape hatch keeps it).
+pub(crate) fn whole_member_is_incompressible(data: &[u8], level: u8) -> bool {
+    level != 0 && crate::codec::common::incompressible::sample_is_incompressible(data, level)
+}
+
 /// Derive an archive member name from a filesystem path when the caller did
 /// not supply one. Root paths (`/`, `C:\`) have no final component; that is
 /// a caller error rather than an internal invariant, so it maps to

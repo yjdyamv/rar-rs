@@ -441,15 +441,27 @@ impl RarArchive {
 
         // Large members stream: the file is compressed (or copied) into a
         // spill file and then streamed into the archive, so the whole member
-        // never enters memory. The old codecs (v15/v20) and the deferred
-        // solid append keep the buffered path — their encoders need the whole
-        // input.
-        if file_size >= STREAM_COMPRESS_THRESHOLD
-            && LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver)
+        // never enters memory. RAR29 streams with its LZ engine; RAR 1.5/2.x
+        // can only encode a whole member (global tables + a two-pass parse),
+        // so a member at or above the threshold is streamed as STORE instead —
+        // bounded memory at the cost of compression for huge legacy members.
+        // A deferred solid append still buffers (close() repacks the archive).
+        if file_size >= STREAM_COMPRESS_THRESHOLD && !self.write_ctx().rar4.solid_append {
+            let stream_level = if LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver)
                 == Some(LegacyCodec::Rar29)
-            && !self.write_ctx().rar4.solid_append
-        {
-            return self.add_rar4_file_streaming(path, &name, file_size, mtime, mtime_ns, level);
+            {
+                level
+            } else {
+                0
+            };
+            return self.add_rar4_file_streaming(
+                path,
+                &name,
+                file_size,
+                mtime,
+                mtime_ns,
+                stream_level,
+            );
         }
 
         // Read the whole member, then (for level >= 1) LZSS-compress it.
@@ -842,7 +854,14 @@ impl RarArchive {
         if self.write_ctx().solid.mode {
             self.maybe_reset_solid_for_extension(&name);
         }
-        let (mut packed, method) = self.encode_rar4_member(&data, level)?;
+        let (mut packed, method) =
+            if crate::format::shared::write_ops::whole_member_is_incompressible(&data, level) {
+                // Random-data members would only build an O(input) token
+                // vector: store them (the RAR5 path stores them too).
+                (data, crate::format::rar4::RAR4_METHOD_STORE)
+            } else {
+                self.encode_rar4_member(&data, level)?
+            };
         let unpacked_size = file_size;
 
         // Solid-chain bookkeeping (mirrors rars' `solid_run_has_member`
@@ -1437,21 +1456,24 @@ pub(crate) fn prepare_rar4_file_member(
     std::io::Read::read_to_end(&mut reader, &mut data)?;
     let file_crc = crate::crc32::crc32(&data);
 
-    let (packed, method) = if (1..=5).contains(&level) && codec != LegacyCodec::Rar29 {
-        let packed = encode_legacy_codec_member(&data, level, codec)?;
-        if packed.len() < data.len() {
-            (packed, crate::format::rar4::RAR4_METHOD_STORE + level)
+    let (packed, method) =
+        if crate::format::shared::write_ops::whole_member_is_incompressible(&data, level) {
+            (data, crate::format::rar4::RAR4_METHOD_STORE)
+        } else if (1..=5).contains(&level) && codec != LegacyCodec::Rar29 {
+            let packed = encode_legacy_codec_member(&data, level, codec)?;
+            if packed.len() < data.len() {
+                (packed, crate::format::rar4::RAR4_METHOD_STORE + level)
+            } else {
+                (data, crate::format::rar4::RAR4_METHOD_STORE)
+            }
+        } else if (1..=5).contains(&level) {
+            match best_rar29_member(&data, level, filters)? {
+                Some(best) => best,
+                None => (data, crate::format::rar4::RAR4_METHOD_STORE),
+            }
         } else {
             (data, crate::format::rar4::RAR4_METHOD_STORE)
-        }
-    } else if (1..=5).contains(&level) {
-        match best_rar29_member(&data, level, filters)? {
-            Some(best) => best,
-            None => (data, crate::format::rar4::RAR4_METHOD_STORE),
-        }
-    } else {
-        (data, crate::format::rar4::RAR4_METHOD_STORE)
-    };
+        };
     Ok(Rar4PreparedMember {
         name: name.to_string(),
         mtime,
