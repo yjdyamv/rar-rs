@@ -55,17 +55,16 @@
   - 复查其余无同类问题：`winrar_interop` / `rar-rs` 测试都用 per-test
     `tempdir`； napi 的 `set_var` 测试由 `test_lock` 串行化；库的运行时 env 开关
     （`RAR_RS_FAR_BAND` 等）测试不设置。
-- [ ] **CI `cli_behavior` 的 Linux 失败（根因待确认）**：`460c781` 的 CI 挂在
-      `Cargo test (workspace)` →
-      `-p rar-cli --test cli_behavior`（`1 target
-      failed`）。已知：最后一次
-      Linux 绿灯是 `ba58d66`；其后 `a82bb96` 引入 Linux 编译断裂，直到 `460c781`
-      才恢复，所以 cli_behavior 有段时间没在 Linux 上跑过；窗口内新增的
-      Linux-only 用例只有 `cli_delete_after_reports_sources_it_could_not_delete`
-      （`3ab5ed2`）。**缺的是具体失败用例名**——GitHub job log 需 repo
-      admin（公开 API 403），本机无 Linux/qemu/容器。已在 CI 加「失败用例 →
-      check-run annotation」（annotation
-      公开可读），下一次红就能拿到名字，再对症修。
+- [x] **CI `cli_behavior` 的 Linux 失败**（已定位并修复 2026-09-17）：失败用例是
+      `switches::cli_skip_links_does_not_report_skipped_links`（`#[cfg(unix)]`）。它
+      在 `93ae9ce` 写成时断言“全部跳过 → exit 0”；`c2c43d4`
+      加“全部选中成员都被跳过 → exit 10（No files to
+      extract）”后它就陈旧了，而因为它只在 Linux 跑、Linux
+      又被编译断裂挡住，一直没暴露。用**本机官方 UnRAR 7.23 对照**确认：
+      “已存在文件 + `-ol-` 链接 + `-o-` 跳过”时官方也是 **exit 10**（且打印 "No
+      files to extract"）——所以行为正确、测试期望过期；已把断言改成 exit 10，
+      保留「链接不得出现在 Skipping 报告里」。定位手段正是本轮加的 CI「失败用例
+      → check-run annotation」，它一次就给出了用例名。
 - [x] **RAR4 batch 与 sequential 偶发不一致**（已修 2026-09-17）：**不是竞态**，
       是 `local_offset_secs()`（库 `format/shared/legacy_time.rs` + CLI
       `time.rs`）把 “本地时间”与 UTC **分两次采样**：Windows 的 `GetLocalTime`

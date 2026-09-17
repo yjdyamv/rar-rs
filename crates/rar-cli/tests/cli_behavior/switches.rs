@@ -1420,8 +1420,10 @@ fn cli_skip_links_does_not_report_skipped_links() {
     assert!(status.success());
     assert!(out.join("lnk.txt").exists());
 
-    // The second run sees an existing destination for both members; only the
-    // file is reported.
+    // The second run sees an existing destination for both members. Nothing is
+    // written (`target.txt` is skipped, the link is refused by `-ol-`), so the
+    // run ends like WinRAR's "No files to extract" (exit 10, official UnRAR
+    // parity) — but the link must stay out of the skip report.
     let output = std::process::Command::new(RAR_CLI)
         .args(["x", "-ol-", "--dest"])
         .arg(&out)
@@ -1429,7 +1431,11 @@ fn cli_skip_links_does_not_report_skipped_links() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(output.status.success());
+    assert_eq!(
+        output.status.code(),
+        Some(10),
+        "an all-skipped extraction exits 10, like WinRAR"
+    );
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(
         text.contains("Skipping") && !text.contains("lnk.txt"),
