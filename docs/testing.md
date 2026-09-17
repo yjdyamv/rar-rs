@@ -53,6 +53,53 @@ The binding crate cannot be checked that way (`napi-build` needs the
 `EMNAPI_LINK_DIR` that `napi build` injects); build it with
 `npx napi build --platform --release --target wasm32-wasip1-threads` instead.
 
+## Running the Linux half under WSL2
+
+WSL2 runs the job for real, including the official-tool interop suites. The
+`scripts/wsl/` helpers set the box up and drive it; mirrors were picked from
+measurements on the author's box (2026-09-17: 8 MiB ranges of the real `rustc`
+tarball, a real crate download, a real `Packages.gz` — re-measure before
+trusting them elsewhere):
+
+| mirror  | toolchain | crate     | ubuntu    |
+| ------- | --------- | --------- | --------- |
+| aliyun  | 2.41 MB/s | 2.08 MB/s | 2.78 MB/s |
+| tencent | 2.50 MB/s | —         | 2.69 MB/s |
+| nju     | 2.31 MB/s | 403       | 1.70 MB/s |
+| ustc    | 0.89 MB/s | 0.13 MB/s | 0.87 MB/s |
+| tuna    | 0.20 MB/s | 0.05 MB/s | 0.36 MB/s |
+| sustech | —         | —         | 1.96 MB/s |
+
+Caveats behind those columns: Aliyun's rustup manifest was months stale (1.96.0
+vs the then-current 1.98.1) and rewrites component URLs to itself, which is why
+`rustup target add wasm32-wasip1-threads` 404s there, and it does not mirror
+`rustup-init`; NJU refuses the crate download (`dl` URL 403); TUNA, USTC,
+Tencent and NJU keep the manifests pointing at `static.rust-lang.org`, so they
+honor `RUSTUP_DIST_SERVER`; SUSTech has no Rust mirror at all.
+
+The scripts therefore use: apt and crates.io from Aliyun, the toolchain from
+Tencent, `rustup-init` from USTC, Node 24 from Aliyun (the only mirror that
+carries it here) and npm from `registry.npmmirror.com`.
+
+```sh
+sudo bash scripts/wsl/setup-apt.sh     # mirror + build-essential (root)
+bash scripts/wsl/setup-rust.sh         # toolchain, cargo/crates mirrors
+bash scripts/wsl/setup-node.sh         # Node 24 + npm mirror
+git clone /mnt/c/path/to/rar-rs ~/rar-rs   # ext4 target/ beats building there
+bash scripts/wsl/fetch-rarlab.sh       # official rar 6.23 / unrar 7.23
+cd ~/rar-rs
+bash scripts/wsl/ci-linux.sh           # CI's lint + interop + binding steps
+bash scripts/wsl/stage12-linux.sh      # legacy streaming vs official unrar
+```
+
+`ci-linux.sh` takes a step range: `1-12` the lint job, `13` official interop,
+`14-18` the binding job, `19` the heavy fuzz smoke (CI runs that on tags and the
+weekly schedule only). It follows the workflow step for step, except that CI's
+log-only plumbing becomes plain output. When the rarlab tools are present it
+exports `SA_OFFICIAL_*`, so the interop suites run instead of skipping —
+including the binding test that otherwise reports `SA_OFFICIAL_UNRAR is not set`
+(59 passed, 0 skipped, instead of 58 + 1).
+
 ## Why test targets are optimized
 
 The root `Cargo.toml` sets:
