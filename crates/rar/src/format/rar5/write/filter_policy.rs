@@ -29,6 +29,29 @@ pub(super) fn encode_with_filter_policy(
     if data.is_empty() || method == 0 || data.len() > u32::MAX as usize {
         return Ok(None);
     }
+    if policy.delta == FilterMode::Forced && policy.x86 == FilterMode::Forced {
+        // `-mcd+ -mce+` forces both transforms over the same bytes, but
+        // RARLAB readers reject overlapping filter records. WinRAR splits the
+        // member into 64 KiB blocks and emits one non-overlapping filter per
+        // block; pick the same way instead of refusing the combination.
+        let channels = policy.delta_channels.unwrap_or_else(|| {
+            lzss_huff::pick_delta_channel(data, method, dsl, variant)
+                .ok()
+                .flatten()
+                .unwrap_or(1)
+        });
+        let specs = lzss_huff::forced_combined_specs(
+            data,
+            method,
+            dsl,
+            variant,
+            channels,
+            lzss_huff::FILTER_E8E9,
+        );
+        return Ok(Some(lzss_huff::encode_with_filters_mt(
+            data, method, dsl, &specs, variant, threads, cancel,
+        )?));
+    }
     if policy.delta == FilterMode::Forced || policy.x86 == FilterMode::Forced {
         let mut specs = Vec::new();
         if policy.delta == FilterMode::Forced {

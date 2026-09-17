@@ -1082,7 +1082,9 @@ fn cli_mc_filter_policy_controls_filters() {
     );
 
     // lenient forms stay accepted, like WinRAR's parser
-    for spec in ["-mc5", "-mcz", "-mcl-", "-mcx", "-mcd6+", "-mc6d+", "-mce+"] {
+    for spec in [
+        "-mc5", "-mcz", "-mcl-", "-mcx", "-mcd6+", "-mc6d+", "-mce+", "-mcde+",
+    ] {
         let packed = create(Some(spec), "lenient.rar");
         assert!(packed > 0, "{spec}");
     }

@@ -27,14 +27,14 @@ use crate::options::FilterMode;
 use super::windows;
 use crate::format::rar5::vint;
 
-/// The streaming writer records its delta and x86 filters as pre-built
-/// `Symbol::Filter` leads, bypassing `encode_with_filters`' overlap
-/// validation. Forced delta + forced x86 (`-mcd+ -mce+`) transform
-/// overlapping regions, and the decoder applies records in stream order, so
-/// the pair silently corrupts the member. Reject it before any bytes are
-/// spilled or written, matching the buffered path's `InvalidOption`.
-/// Auto-delta under a forced x86 is not an overlap: that probe is skipped
-/// (`auto_delta_probe_enabled`), mirroring the buffered policy.
+/// Defensive guard: the streaming writer emits its delta and x86 filters as
+/// pre-built `Symbol::Filter` leads, bypassing `encode_with_filters`' overlap
+/// validation, and a reader applies records in stream order, so overlapping
+/// records would corrupt the member. `-mcd+ -mce+` no longer reaches this
+/// point (the window loop picks one filter per 64 KiB block through
+/// `forced_combined_stream_window`), and auto-delta under a forced x86 is
+/// skipped (`auto_delta_probe_enabled`); the check stays as a cheap invariant
+/// against a future regression.
 fn ensure_compatible_stream_filters(delta_used: bool, x86_used: bool) -> RarResult<()> {
     if delta_used && x86_used {
         return Err(RarError::InvalidOption(
@@ -322,6 +322,9 @@ impl RarArchive {
         let mut delta_channels: Option<u8> = None;
         let mut x86_filter_type: Option<u8> = None;
         let mut x86_regions: Vec<std::ops::Range<usize>> = Vec::new();
+        // Set when `-mcd+ -mce+` forces both filters: the window loop then
+        // picks one filter per 64 KiB block instead of overlapping records.
+        let mut forced_combined: Option<u8> = None;
         if file_size < u32::MAX as u64 {
             let sample_len = ((64 * 1024) as u64).min(file_size) as usize;
             let mut sample = vec![0u8; sample_len];
@@ -341,6 +344,9 @@ impl RarArchive {
                             .flatten()
                             .unwrap_or(1)
                     }));
+                    if filter_policy.x86 == crate::options::FilterMode::Forced {
+                        forced_combined = Some(lzss_huff::FILTER_E8E9);
+                    }
                 }
                 // Try delta filter first (cheap pre-gate on sample); a
                 // forced x86 owns the whole member, so the auto probe is
@@ -352,8 +358,10 @@ impl RarArchive {
                 }
                 // -mce+ forces the x86 filter over the whole member.
                 if filter_policy.x86 == crate::options::FilterMode::Forced {
-                    x86_filter_type = Some(lzss_huff::FILTER_E8E9);
-                    x86_regions = std::iter::once(0..file_size as usize).collect();
+                    if forced_combined.is_none() {
+                        x86_filter_type = Some(lzss_huff::FILTER_E8E9);
+                        x86_regions = std::iter::once(0..file_size as usize).collect();
+                    }
                 } else if filter_policy.x86 == crate::options::FilterMode::Auto
                     && delta_channels.is_none()
                     && got > 5
@@ -626,20 +634,40 @@ impl RarArchive {
                     // order — both are linear and region-independent so
                     // composition is correct regardless of overlap.
                     let mut window_specs: Option<Vec<lzss_huff::FilterSpec>> = None;
-                    if let Some(ch) = delta_channels {
-                        let (transformed, specs) =
-                            lzss_huff::delta_stream_window(&work, member_offset, ch);
+                    if let Some(x86_type) = forced_combined {
+                        let variant =
+                            crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
+                        let (transformed, specs) = lzss_huff::forced_combined_stream_window(
+                            &work,
+                            member_offset,
+                            method,
+                            dsl,
+                            variant,
+                            delta_channels.unwrap_or(1),
+                            x86_type,
+                        );
                         work = transformed;
                         window_specs = Some(specs);
-                    }
-                    if let Some(ft) = x86_filter_type {
-                        let (transformed, specs) =
-                            lzss_huff::x86_stream_window(&work, member_offset, ft, &x86_regions);
-                        work = transformed;
-                        if let Some(ref mut existing) = window_specs {
-                            existing.extend(specs);
-                        } else {
+                    } else {
+                        if let Some(ch) = delta_channels {
+                            let (transformed, specs) =
+                                lzss_huff::delta_stream_window(&work, member_offset, ch);
+                            work = transformed;
                             window_specs = Some(specs);
+                        }
+                        if let Some(ft) = x86_filter_type {
+                            let (transformed, specs) = lzss_huff::x86_stream_window(
+                                &work,
+                                member_offset,
+                                ft,
+                                &x86_regions,
+                            );
+                            work = transformed;
+                            if let Some(ref mut existing) = window_specs {
+                                existing.extend(specs);
+                            } else {
+                                window_specs = Some(specs);
+                            }
                         }
                     }
                     flush_window(

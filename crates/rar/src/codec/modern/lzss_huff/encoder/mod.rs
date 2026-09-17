@@ -30,9 +30,11 @@ pub use chunked::{
 };
 pub use filter::{
     MAX_FILTER_BLOCK_LENGTH, encode_with_auto_delta_filter, encode_with_auto_x86_filter,
-    encode_with_filters, encode_with_filters_mt, pick_delta_channel,
+    encode_with_filters, encode_with_filters_mt, forced_combined_specs, pick_delta_channel,
 };
-pub(crate) use filter::{delta_stream_window, merge_ranges, x86_stream_window};
+pub(crate) use filter::{
+    delta_stream_window, forced_combined_stream_window, merge_ranges, x86_stream_window,
+};
 #[cfg(all(test, feature = "parallel"))]
 pub(crate) use parse::set_fast_path_enabled;
 

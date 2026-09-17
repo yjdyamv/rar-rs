@@ -1,7 +1,8 @@
 use std::process::Command;
 
 use rar_rs::{
-    ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions, OpenOptions, WriterOptions,
+    ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions, FilterMode, FilterOptions,
+    OpenOptions, WriterOptions,
 };
 
 use crate::support::{
@@ -237,4 +238,103 @@ fn filtered_member_with_multivolume_interops() {
             "WinRAR extracted different bytes from our multi-volume delta archive"
         );
     }
+}
+
+/// `-mcd+ -mce+` forces both transforms. A RARLAB reader rejects overlapping
+/// filter records, so we emit one non-overlapping filter per 64 KiB block
+/// (WinRAR's layout); the official UnRAR must accept and extract the result.
+#[test]
+fn unrar_reads_our_combined_forced_filters_output() {
+    let Some(_unrar) = unrar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("mix.bin");
+    let mut data: Vec<u8> = (0..512 * 1024u32).map(|i| ((i / 64) % 251) as u8).collect();
+    // Dense E8 opcodes make the x86 candidate win some blocks.
+    let mut i = 200_000usize;
+    while i + 4 < data.len() {
+        data[i] = 0xE8;
+        data[i + 1] = 0x10;
+        data[i + 2] = 0;
+        data[i + 3] = 0;
+        data[i + 4] = 0;
+        i += 5;
+    }
+    std::fs::write(&src, &data).unwrap();
+
+    let arc = dir.path().join("mcde.rar");
+    write_combined_forced(&arc, &src);
+
+    let (ok, out) = unrar_test(&arc, None);
+    assert!(
+        ok,
+        "official UnRAR rejected our -mcd+ -mce+ archive:\n{out}"
+    );
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let (ok, out) = unrar_extract(&arc, &dest, None);
+    assert!(ok, "official UnRAR failed to extract:\n{out}");
+    assert_eq!(
+        std::fs::read(dest.join("mix.bin")).unwrap(),
+        data,
+        "official UnRAR extracted different bytes"
+    );
+}
+
+/// The streaming path (members >= 64 MiB) must also emit non-overlapping
+/// per-block records. `#[ignore]`d: the member has to exceed the 64 MiB
+/// streaming threshold.
+#[test]
+#[ignore = "slow: needs a >64 MiB member to take the streaming path"]
+fn unrar_reads_our_streamed_combined_forced_filters_output() {
+    let Some(_unrar) = unrar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    let mut data: Vec<u8> = (0..(64 * 1024 * 1024 + 1024) as u32)
+        .map(|i| ((i / 32) % 251) as u8)
+        .collect();
+    let mut i = 1_000_000usize;
+    while i + 4 < data.len() {
+        data[i] = 0xE8;
+        data[i + 1] = 0x10;
+        i += 9;
+    }
+    std::fs::write(&src, &data).unwrap();
+
+    let arc = dir.path().join("mcde-big.rar");
+    write_combined_forced(&arc, &src);
+
+    let (ok, out) = unrar_test(&arc, None);
+    assert!(
+        ok,
+        "official UnRAR rejected our streamed -mcd+ -mce+ archive:\n{out}"
+    );
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let (ok, out) = unrar_extract(&arc, &dest, None);
+    assert!(ok, "official UnRAR failed to extract:\n{out}");
+    assert_eq!(std::fs::read(dest.join("big.bin")).unwrap(), data);
+}
+
+fn write_combined_forced(arc: &std::path::Path, src: &std::path::Path) {
+    let mut rar = ArchiveWriter::create_with(
+        arc,
+        WriterOptions::new().filters(FilterOptions {
+            delta: FilterMode::Forced,
+            x86: FilterMode::Forced,
+            delta_channels: Some(2),
+        }),
+    )
+    .unwrap();
+    rar.add_path(
+        src,
+        EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap()),
+    )
+    .unwrap();
+    rar.finish().unwrap();
 }

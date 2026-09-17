@@ -421,6 +421,89 @@ pub(crate) fn x86_stream_window(
     (transformed, specs)
 }
 
+/// Block size for the per-block forced-filter choice in
+/// [`forced_combined_specs`] (the 64 KiB granularity WinRAR uses for
+/// `-mcd+ -mce+`).
+pub const FORCED_FILTER_BLOCK: usize = 64 * 1024;
+
+/// Choose one forced filter per [`FORCED_FILTER_BLOCK`] chunk of `data`.
+///
+/// `-mcd+ -mce+` forces delta *and* x86 over the same bytes, but RARLAB
+/// readers reject overlapping filter records. WinRAR splits the member into
+/// 64 KiB blocks and emits one non-overlapping filter per block; do the same,
+/// picking the candidate whose trial encode of the chunk is smaller (ties keep
+/// delta). Feed the result to [`encode_with_filters`]/
+/// [`encode_with_filters_mt`].
+pub fn forced_combined_specs(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    variant: ArchiveVersion,
+    delta_channels: u8,
+    x86_type: u8,
+) -> Vec<FilterSpec> {
+    data.chunks(FORCED_FILTER_BLOCK)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let start = (index * FORCED_FILTER_BLOCK) as u32;
+            let length = chunk.len() as u32;
+            let delta = FilterSpec::new(FILTER_DELTA, delta_channels, start, length);
+            let x86 = FilterSpec::new(x86_type, 0, start, length);
+            // The trial encode sees the chunk on its own, so its spec must be
+            // block-local (member-absolute offsets would fail validation).
+            let trial = |spec: FilterSpec| {
+                encode_with_filters(chunk, method, dict_size_log, &[spec], variant)
+                    .map(|packed| packed.len())
+                    .unwrap_or(usize::MAX)
+            };
+            let delta_len = trial(FilterSpec::new(FILTER_DELTA, delta_channels, 0, length));
+            let x86_len = trial(FilterSpec::new(x86_type, 0, 0, length));
+            if delta_len <= x86_len { delta } else { x86 }
+        })
+        .collect()
+}
+
+/// Streaming counterpart of [`forced_combined_specs`]: transform `window` one
+/// 64 KiB block at a time (choosing delta or x86 per block) and return the
+/// transformed bytes plus the non-overlapping records, whose offsets are
+/// member-absolute (`base_offset` is the window's member offset).
+pub fn forced_combined_stream_window(
+    window: &[u8],
+    base_offset: u64,
+    method: u8,
+    dict_size_log: u8,
+    variant: ArchiveVersion,
+    delta_channels: u8,
+    x86_type: u8,
+) -> (Vec<u8>, Vec<FilterSpec>) {
+    let mut transformed = Vec::with_capacity(window.len());
+    let mut specs = Vec::new();
+    for (index, chunk) in window.chunks(FORCED_FILTER_BLOCK).enumerate() {
+        let block_offset = (index * FORCED_FILTER_BLOCK) as u64;
+        let absolute = base_offset + block_offset;
+        let length = chunk.len() as u32;
+        let trial = |spec: FilterSpec| {
+            encode_with_filters(chunk, method, dict_size_log, &[spec], variant)
+                .map(|packed| packed.len())
+                .unwrap_or(usize::MAX)
+        };
+        let delta_len = trial(FilterSpec::new(FILTER_DELTA, delta_channels, 0, length));
+        let x86_len = trial(FilterSpec::new(x86_type, 0, 0, length));
+        if delta_len <= x86_len {
+            let (bytes, mut block_specs) = delta_stream_window(chunk, absolute, delta_channels);
+            transformed.extend_from_slice(&bytes);
+            specs.append(&mut block_specs);
+        } else {
+            let region = 0..chunk.len();
+            let (bytes, mut block_specs) =
+                x86_stream_window(chunk, absolute, x86_type, std::slice::from_ref(&region));
+            transformed.extend_from_slice(&bytes);
+            specs.append(&mut block_specs);
+        }
+    }
+    (transformed, specs)
+}
+
 /// Merge overlapping or adjacent ranges (the x86 scan can return a broad
 /// span plus tighter clusters inside it; overlapping filter records would
 /// double-transform the overlap).
@@ -661,5 +744,60 @@ pub fn encode_with_auto_delta_filter(
         Ok(Some(delta_packed))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(len: usize) -> Vec<u8> {
+        (0..len as u32).map(|i| ((i / 64) % 251) as u8).collect()
+    }
+
+    /// `-mcd+ -mce+` must produce one non-overlapping record per 64 KiB block
+    /// that tiles the whole member (RARLAB readers reject overlaps and records
+    /// longer than 256 KiB).
+    #[test]
+    fn forced_combined_specs_tile_the_member_without_overlap() {
+        let data = sample(300_000);
+        let specs = forced_combined_specs(&data, 3, 5, ArchiveVersion::V50, 1, FILTER_E8E9);
+        assert!(!specs.is_empty());
+        let mut cursor = 0u32;
+        for spec in &specs {
+            assert_eq!(spec.block_start, cursor, "records must tile the member");
+            assert!(spec.block_length > 0);
+            assert!(spec.block_length <= FORCED_FILTER_BLOCK as u32);
+            assert!(matches!(spec.filter_type, FILTER_DELTA | FILTER_E8E9));
+            cursor += spec.block_length;
+        }
+        assert_eq!(cursor as usize, data.len());
+        // The validator the encoder runs must accept the sequence.
+        validate_filter_specs(data.len(), &specs).unwrap();
+    }
+
+    /// The streaming helper returns both the transformed window and the specs;
+    /// re-applying the specs to the raw window must reproduce those bytes, so
+    /// the encoder and decoder agree.
+    #[test]
+    fn forced_combined_stream_window_matches_its_records() {
+        let data = sample(200_000);
+        let (transformed, specs) =
+            forced_combined_stream_window(&data, 0, 3, 5, ArchiveVersion::V50, 2, FILTER_E8E9);
+        assert_eq!(transformed.len(), data.len());
+        validate_filter_specs(data.len(), &specs).unwrap();
+        let mut reference = data.clone();
+        for spec in &specs {
+            let start = spec.block_start as usize;
+            let end = start + spec.block_length as usize;
+            let piece = apply_filter_encode(
+                spec.filter_type,
+                &mut reference[start..end],
+                spec.channels,
+                spec.block_start as u64,
+            );
+            reference[start..end].copy_from_slice(&piece);
+        }
+        assert_eq!(reference, transformed);
     }
 }

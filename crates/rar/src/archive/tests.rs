@@ -1573,6 +1573,20 @@ fn writer_filter_policy_controls_member_filters() {
         "forced delta must be at least as good as auto on ramp data ({auto} vs {forced})"
     );
 
+    // `-mcd+ -mce+`: both transforms forced. A reader rejects overlapping
+    // filter records, so both write paths must split the member into 64 KiB
+    // blocks and pick one filter per block (WinRAR's layout) instead of
+    // failing with `InvalidOption`.
+    let both = create(
+        "both.rar",
+        FilterOptions {
+            delta: FilterMode::Forced,
+            x86: FilterMode::Forced,
+            delta_channels: Some(2),
+        },
+    );
+    assert!(both > 0, "combined forced filters must produce a member");
+
     // Out-of-range channel counts are rejected by the typed builder.
     let bad = crate::archive::ArchiveWriter::create_with(
         dir.path().join("bad.rar"),
