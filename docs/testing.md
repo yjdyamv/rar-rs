@@ -1,6 +1,6 @@
 # Testing
 
-> Last verified: 2026-09-16 @ `c2c43d4`; the timing table is a host-specific
+> Last verified: 2026-09-17 @ `ee17a08`; the timing table is a host-specific
 > snapshot, not a contract.
 
 How the suite is organized, what it costs, and the traps to know before changing
@@ -38,6 +38,20 @@ cargo clippy --workspace --all-features --all-targets --locked \
 The cfg-gated test branches can still only _run_ on Linux; assert what POSIX
 actually does (see `extract_rejects_unsafe_entry_names`) instead of assuming a
 Windows-only hazard.
+
+The `wasm32-wasip1-threads` half is a third such surface, and the quietest: it
+is neither unix nor windows, so helpers those two branches use are dead there.
+The `lint` job lints it (a `-D warnings` check) and locally:
+
+```sh
+rustup target add wasm32-wasip1-threads    # once
+RUSTFLAGS="-D warnings" cargo check -p rar-rs --all-features \
+  --target wasm32-wasip1-threads --locked
+```
+
+The binding crate cannot be checked that way (`napi-build` needs the
+`EMNAPI_LINK_DIR` that `napi build` injects); build it with
+`npx napi build --platform --release --target wasm32-wasip1-threads` instead.
 
 ## Why test targets are optimized
 

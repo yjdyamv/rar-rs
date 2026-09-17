@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-17 @ `3c10f14`；实现细节以源码为准。
+> 最后核对：2026-09-17 @ `ee17a08`；实现细节以源码为准。
 
 本文件只留**结论**与**下一步**。历次审计、逐批修复与加固的过程记录在 git 历史
 （旧版详单：`git show d9201cf:PLAN.md`）；本文件不再维护 CHANGELOG。
@@ -107,6 +107,16 @@
 - [x] **CI 开启 rustdoc `-D warnings`**（2026-09-16）：`CI.yml` 的 doc 步骤加
       `RUSTDOCFLAGS: -D warnings` 并更新过期注释；Windows 与 Linux
       两个目标均实测零警告。
+- [x] **wasm 目标纳入 lint**（2026-09-17）：`wasm32-wasip1-threads` 既非 unix
+      也非 windows，`HostAttributes`、`FileHeader::host_attributes`、
+      `resolve_redirect_target`、`snap_to_minute` 这些只在 unix/windows
+      分支使用的项在该目标下会被编译却无人使用 → 5 条 dead_code
+      警告。之所以一直潜伏：lint job 装了 wasm target 却从未 check 它，而 heavy
+      matrix 的 wasm 构建不 `-D warnings`。按使用点的 `any(unix, windows)`
+      精确门控这几项（unix/windows 构建行为不变），并在 lint job 加 wasm
+      `-D warnings` 检查。验证：wasm 目标 `-D warnings`
+      零警告、`napi build --target wasm32-wasip1-threads` 0 警告、原生与 WASI
+      `npm test` 各 58 passed / 0 failed，两平台全量测试保持全绿。
 
 ### P1 · 功能缺口（按需，不阻塞发布）
 
