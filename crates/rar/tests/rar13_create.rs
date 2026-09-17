@@ -256,6 +256,72 @@ fn rar13_multivolume_store_fills_volumes_exactly() {
     assert_eq!(reader.read_entry(id).unwrap(), tail);
 }
 
+/// A member at or above the streaming threshold cannot be compressed in
+/// bounded memory (`Unpack15` is a whole-member codec), so it is streamed as
+/// STORE instead of buffered — the same trade the RAR4 legacy path makes.
+#[test]
+fn rar13_create_large_member_streams_as_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.rar");
+    let src = dir.path().join("big.txt");
+    let block = b"streamed rar13 member payload 0123456789abcdef\n";
+    let size = 66 * 1024 * 1024usize;
+    let mut payload = Vec::with_capacity(size);
+    while payload.len() < size {
+        payload.extend_from_slice(block);
+    }
+    payload.truncate(size);
+    std::fs::write(&src, &payload).unwrap();
+
+    let mut writer = ArchiveWriter::create_with(&path, writer_options()).unwrap();
+    writer.add_path(&src, level(5)).unwrap();
+    writer.finish().unwrap();
+
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let id = reader.unique_entry("big.txt").unwrap();
+    assert_eq!(
+        reader.entry(id).unwrap().method(),
+        0,
+        "a huge RAR13 member must be stored, not buffered"
+    );
+    assert_eq!(reader.read_entry(id).unwrap(), payload);
+}
+
+/// Multi-volume streamed STORE: each fragment is copied from the file and the
+/// RAR13 cipher continues across fragments (one stream per member).
+#[test]
+fn rar13_multivolume_large_member_streams_as_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mv.rar");
+    let src = dir.path().join("big.txt");
+    let block = b"streamed rar13 multivolume payload 0123456789abcdef\n";
+    let size = 66 * 1024 * 1024usize;
+    let mut payload = Vec::with_capacity(size);
+    while payload.len() < size {
+        payload.extend_from_slice(block);
+    }
+    payload.truncate(size);
+    std::fs::write(&src, &payload).unwrap();
+
+    let mut writer = ArchiveWriter::create_with(
+        &path,
+        writer_options().password("pw").volume_size(8 * 1024 * 1024),
+    )
+    .unwrap();
+    writer.add_path(&src, level(5)).unwrap();
+    let report = writer.finish().unwrap();
+    assert!(
+        report.volume_paths().len() > 1,
+        "expected a volume set, got {}",
+        report.volume_paths().len()
+    );
+
+    let mut reader = ArchiveReader::open_with(&path, OpenOptions::new().password("pw")).unwrap();
+    let id = reader.unique_entry("big.txt").unwrap();
+    assert_eq!(reader.entry(id).unwrap().method(), 0);
+    assert_eq!(reader.read_entry(id).unwrap(), payload);
+}
+
 /// Compressed solid chains keep their window across volume boundaries, and
 /// the RAR13 cipher is one stream over each member's packed data.
 #[test]

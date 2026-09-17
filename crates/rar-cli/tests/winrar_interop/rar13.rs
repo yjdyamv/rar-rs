@@ -3,7 +3,9 @@
 
 use std::process::Command;
 
-use crate::support::{run, temp_dir, unrar_bin};
+use rar_rs::{ArchiveVersion, ArchiveWriter, CompressionLevel, EntryWriteOptions, WriterOptions};
+
+use crate::support::{run, temp_dir, unrar_bin, unrar_extract, unrar_test};
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -276,4 +278,58 @@ fn rar13_created_volume_sets_roundtrip_through_unrar() {
             );
         }
     }
+}
+
+/// Write-side interop: a RAR 1.3/1.4 member at or above the streaming
+/// threshold is stored without buffering, and a multi-volume encrypted set
+/// keeps one cipher stream across its fragments. UnRAR 7.23 must extract it
+/// byte-identically. `#[ignore]`d: needs a 66 MiB member.
+#[test]
+#[ignore = "slow: 66 MiB member"]
+fn rar13_streamed_store_matches_unrar() {
+    let Some(_unrar) = unrar_bin() else {
+        eprintln!("skipped: UnRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("big.txt");
+    let block = b"streamed rar13 multivolume payload 0123456789abcdef\n";
+    let size = 66 * 1024 * 1024usize;
+    let mut payload = Vec::with_capacity(size);
+    while payload.len() < size {
+        payload.extend_from_slice(block);
+    }
+    payload.truncate(size);
+    std::fs::write(&src, &payload).unwrap();
+
+    let arc = dir.path().join("big.rar");
+    {
+        let mut writer = ArchiveWriter::create_with(
+            &arc,
+            WriterOptions::new()
+                .compression(ArchiveVersion::V14)
+                .password("pw")
+                .volume_size(8 * 1024 * 1024),
+        )
+        .unwrap();
+        writer
+            .add_path(
+                &src,
+                EntryWriteOptions::new()
+                    .compression_level(CompressionLevel::try_from(5u8).unwrap()),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+    }
+
+    let (ok, out) = unrar_test(&arc, Some("pw"));
+    assert!(ok, "UnRAR rejected our streamed RAR13 set:\n{out}");
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let (ok, out) = unrar_extract(&arc, &dest, Some("pw"));
+    assert!(
+        ok,
+        "UnRAR extraction of our streamed RAR13 set failed:\n{out}"
+    );
+    assert_eq!(std::fs::read(dest.join("big.txt")).unwrap(), payload);
 }

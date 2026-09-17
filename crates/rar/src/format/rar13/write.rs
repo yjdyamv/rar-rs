@@ -15,11 +15,12 @@
 //! a member spanning volumes repeats its file header per fragment with
 //! `LHD_SPLIT_BEFORE`/`LHD_SPLIT_AFTER`. Intermediate fragments carry the
 //! cumulative packed checksum (matching the historical STORE convention),
-//! the final fragment the whole-member checksum; encrypted members restart
-//! the RAR13 cipher at every fragment, like the reference decoder expects.
+//! the final fragment the whole-member checksum. An encrypted member is one
+//! cipher stream: the whole payload is encrypted before the split, so volume
+//! fragments continue the same stream (the reader decrypts after assembling).
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,7 +29,7 @@ use super::{
     MAIN_HEAD_SIZE, METHOD_BEST, METHOD_STORE, MHD_ALWAYS_SET, MHD_COMMENT, MHD_PACK_COMMENT,
     MHD_SOLID, MHD_VOLUME,
 };
-use crate::archive::{ArchiveEntry, LegacySolidEncoder, RarArchive};
+use crate::archive::{ArchiveEntry, LegacySolidEncoder, RarArchive, STREAM_COMPRESS_THRESHOLD};
 use crate::codec::legacy::rar15_encoder::{EncodeOptions, Unpack15Encoder};
 use crate::error::{RarError, RarResult};
 use crate::format::shared::stream_mut;
@@ -330,6 +331,230 @@ impl RarArchive {
         Ok(())
     }
 
+    /// Emit a large RAR 1.3/1.4 member as STORE without buffering it.
+    ///
+    /// `Unpack15` is a whole-member codec (adaptive Huffman over the whole
+    /// input), so a member at or above the streaming threshold cannot be
+    /// compressed in bounded memory; this path stores it instead. The
+    /// whole-member rolling checksum is one cheap sequential pass over the
+    /// file, then the payload is copied in chunks — encrypted on the fly under
+    /// `-p`, since the RAR13 cipher is one stream over the member and volume
+    /// fragments continue it.
+    fn add_rar13_file_streaming_store(
+        &mut self,
+        path: &Path,
+        name: &str,
+        mtime: u32,
+        file_size: u64,
+    ) -> RarResult<()> {
+        self.check_cancel()?;
+        super::create::ensure_member_size(file_size)?;
+        self.emit_rar13_main_header()?;
+        let file_time = crate::format::rar4::write::unix_to_dos_time(mtime);
+
+        // Pass 1: the whole-member checksum, which the file header needs
+        // before the payload can be copied.
+        let file_crc = {
+            let mut reader = fs::File::open(path)?;
+            let mut buf = vec![0u8; 1 << 20];
+            let mut value = 0u16;
+            loop {
+                self.check_cancel()?;
+                let n = reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                for &byte in &buf[..n] {
+                    value = value.wrapping_add(u16::from(byte)).rotate_left(1);
+                }
+            }
+            value
+        };
+
+        let mut flags = 0u8;
+        let mut cipher = None;
+        if self.password.is_some() {
+            flags |= LHD_PASSWORD;
+            let password = self.password.as_deref().ok_or_else(|| {
+                RarError::Encrypted("encrypted member, no password provided".into())
+            })?;
+            cipher = Some(crate::crypto::Rar13Cipher::new(password.as_bytes()));
+        }
+        let member = MemberHeader {
+            name,
+            packed_size: file_size,
+            unpacked_size: file_size,
+            file_crc,
+            file_time,
+            file_attr: 0x20,
+            flags,
+            method: METHOD_STORE,
+            extra: Vec::new(),
+        };
+
+        let mut reader = fs::File::open(path)?;
+        let mut read = 0u64;
+        let mut running = 0u16;
+        let mut chunks = Vec::new();
+        match self.write_ctx().output.volume_size {
+            None => {
+                let header = build_file_header(&member)?;
+                let mut first = true;
+                let mut data_offset = 0u64;
+                let mut buf = vec![0u8; 1 << 20];
+                while read < file_size {
+                    self.check_cancel()?;
+                    let want = ((file_size - read) as usize).min(buf.len());
+                    let n = reader.read(&mut buf[..want])?;
+                    if n == 0 {
+                        return Err(RarError::Io(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            format!(
+                                "file changed size while being archived: expected {file_size} bytes, read {read}"
+                            ),
+                        )));
+                    }
+                    if let Some(cipher) = cipher.as_mut() {
+                        for byte in &mut buf[..n] {
+                            *byte = cipher.encrypt_byte(*byte);
+                        }
+                    }
+                    let (_, offset) =
+                        self.write_rar13_bytes(if first { &header } else { &[] }, &buf[..n])?;
+                    if first {
+                        data_offset = offset;
+                        first = false;
+                    }
+                    read += n as u64;
+                    self.report_progress(read, file_size);
+                }
+                chunks.push(DataChunk {
+                    volume_index: self.write_ctx().output.current_volume.saturating_sub(1),
+                    data_offset,
+                    packed_size: file_size,
+                    crc32_val: None,
+                    is_final: true,
+                    extra_data: Vec::new(),
+                });
+            }
+            Some(volume_size) => {
+                // Mirrors `write_rar13_split_member`, sourcing each fragment
+                // from the file instead of a packed buffer. A fragment is
+                // buffered whole because its header carries the cumulative
+                // packed checksum, which is only known after reading it.
+                let continuation = MemberHeader {
+                    name: member.name,
+                    packed_size: 0,
+                    unpacked_size: member.unpacked_size,
+                    file_crc: member.file_crc,
+                    file_time: member.file_time,
+                    file_attr: member.file_attr,
+                    flags: (member.flags | LHD_SPLIT_BEFORE) & !LHD_COMMENT,
+                    method: member.method,
+                    extra: Vec::new(),
+                };
+                let continuation_len = build_file_header(&continuation)?.len() as u64;
+                let first_len = build_file_header(&member)?.len() as u64;
+                let mut sent = 0u64;
+                let mut split_before = false;
+                let mut buf = vec![0u8; 1 << 20];
+                while sent < file_size {
+                    let header_len = if split_before {
+                        continuation_len
+                    } else {
+                        first_len
+                    };
+                    let mut rolled = false;
+                    loop {
+                        let used = self.write_ctx().output.bytes_written;
+                        if volume_size.saturating_sub(used) > header_len {
+                            break;
+                        }
+                        if rolled {
+                            return Err(RarError::InvalidOption(format!(
+                                "volume size {volume_size} is too small for a RAR 1.3/1.4 member header"
+                            )));
+                        }
+                        if self.rar13_first_volume_is_empty(chunks.len()) {
+                            return Err(RarError::InvalidOption(format!(
+                                "volume size {volume_size} leaves no room for the first member after the archive main header"
+                            )));
+                        }
+                        self.start_next_volume_rar13()?;
+                        rolled = true;
+                    }
+                    let used = self.write_ctx().output.bytes_written;
+                    let available = volume_size - used - header_len;
+                    let chunk_len = (file_size - sent).min(available);
+                    let split_after = sent + chunk_len < file_size;
+                    let mut chunk = Vec::with_capacity(chunk_len as usize);
+                    while (chunk.len() as u64) < chunk_len {
+                        self.check_cancel()?;
+                        let want = ((chunk_len - chunk.len() as u64) as usize).min(buf.len());
+                        let n = reader.read(&mut buf[..want])?;
+                        if n == 0 {
+                            return Err(RarError::Io(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                format!(
+                                    "file changed size while being archived: expected {file_size} bytes, read {}",
+                                    sent + chunk.len() as u64
+                                ),
+                            )));
+                        }
+                        chunk.extend_from_slice(&buf[..n]);
+                    }
+                    if let Some(cipher) = cipher.as_mut() {
+                        for byte in &mut chunk {
+                            *byte = cipher.encrypt_byte(*byte);
+                        }
+                    }
+                    for &byte in &chunk {
+                        running = running.wrapping_add(u16::from(byte)).rotate_left(1);
+                    }
+                    let split_flags = match (split_before, split_after) {
+                        (true, true) => LHD_SPLIT_BEFORE | LHD_SPLIT_AFTER,
+                        (true, false) => LHD_SPLIT_BEFORE,
+                        (false, true) => LHD_SPLIT_AFTER,
+                        (false, false) => 0,
+                    };
+                    let fragment = MemberHeader {
+                        name: member.name,
+                        packed_size: chunk_len,
+                        unpacked_size: member.unpacked_size,
+                        file_crc: if split_after {
+                            running
+                        } else {
+                            member.file_crc
+                        },
+                        file_time: member.file_time,
+                        file_attr: member.file_attr,
+                        flags: (member.flags & !LHD_COMMENT) | split_flags,
+                        method: member.method,
+                        extra: if split_before {
+                            Vec::new()
+                        } else {
+                            member.extra.clone()
+                        },
+                    };
+                    let header = build_file_header(&fragment)?;
+                    let (volume_index, data_offset) = self.write_rar13_bytes(&header, &chunk)?;
+                    chunks.push(DataChunk {
+                        volume_index,
+                        data_offset,
+                        packed_size: chunk_len,
+                        crc32_val: None,
+                        is_final: !split_after,
+                        extra_data: Vec::new(),
+                    });
+                    sent += chunk_len;
+                    split_before = true;
+                    self.report_progress(sent, file_size);
+                }
+            }
+        }
+        self.push_rar13_entry(&member, chunks)
+    }
+
     /// Emit one member: a single fragment when the archive is single-volume,
     /// otherwise the volume split driver. Encrypted payloads are encrypted
     /// whole before the split (the RAR13 cipher is one stream over the
@@ -591,6 +816,12 @@ impl RarArchive {
             None => crate::format::shared::write_ops::archive_name_from_path(path)?,
         };
         let name = name.replace('\\', "/");
+        // `Unpack15` is a whole-member codec, so a large member cannot be
+        // compressed in bounded memory; stream it as STORE instead (the same
+        // trade the RAR4 legacy path makes).
+        if file_size >= STREAM_COMPRESS_THRESHOLD {
+            return self.add_rar13_file_streaming_store(path, &name, mtime, file_size);
+        }
         let data = fs::read(path)?;
         self.add_rar13_data(name, data, level, mtime, 0, None)
     }
