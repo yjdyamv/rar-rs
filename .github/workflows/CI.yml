@@ -144,7 +144,25 @@ jobs:
         # `--no-fail-fast`: a platform-specific failure in an early target
         # must not hide failures in later targets, so one red run reports the
         # whole list instead of revealing them one per push.
-        run: cargo test --workspace --all-features --locked --no-fail-fast
+        #
+        # A stale `rarfiles.lst` next to the binary (left by a killed run in a
+        # cached `target/`) would reorder the solid tests, so drop it first.
+        # Tee the output so the failing test names can be surfaced as check-run
+        # annotations: the raw job log needs repo-admin auth even on a public
+        # repository, while annotations are readable by anyone.
+        run: |
+          set -o pipefail
+          rm -f target/debug/rarfiles.lst
+          cargo test --workspace --all-features --locked --no-fail-fast 2>&1 \
+            | tee target/workspace-tests.log
+      - name: Annotate failing tests
+        if: failure()
+        # `--no-fail-fast` prints one `test <name> ... FAILED` line per slow
+        # check before the final summary; turn each into a check-run
+        # annotation so a red run names the failing test without log access.
+        run: |
+          grep -hE '^test .* \.\.\. FAILED$' target/workspace-tests.log 2>/dev/null \
+            | sed -E 's/^test (.*) \.\.\. FAILED$/::error::failing test: \1/' || true
       - name: Official interop skip visibility
         # The workspace test above runs this target with its output captured,
         # hiding the gating helpers' SKIPPED markers. Replay just the cheap

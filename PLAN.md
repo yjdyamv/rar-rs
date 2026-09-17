@@ -38,17 +38,34 @@
       `#[cfg(windows)]`（`OS_WINDOWS` 只是格式常量，不是编译门）。已验证 Linux
       check / clippy `-D warnings` / rustdoc `-D warnings` 与 Windows
       全量测试均过。
-- [x] **`cli_behavior` 的 `rarfiles.lst` 竞态**（已修 2026-09-17）：
-      `cli_rarfiles_lst_orders_solid_members` 把顺序列表写到二进制旁的
-      `target/debug/rarfiles.lst`，而 `argv.rs` / `legacy.rs` / `parity2.rs`
-      里建 solid 归档的测试**没有拿那把「进程内」锁**，同进程并行时会读到 stray
-      列表、成员顺序被改 → CI 的 `Cargo test` 间歇性在
-      `-p rar-cli --test
-      cli_behavior` 上红（本地 4 路并发实测 31/60
-      失败）。修法：该测试改用**二进制
-      私有副本**（拷到临时目录，列表放副本旁边），不再污染共享路径；随之删掉不再
-      需要的 `rarfiles_lst_lock`。修后 4 路并发 0/60。顺带修了 `input.rs` 一行
-      被写坏的文档注释。
+- [x] **测试共享状态审计 + 修复**（2026-09-17）：
+  - `cli_behavior` 的 `rarfiles.lst`：`cli_rarfiles_lst_orders_solid_members`
+    把列表写到二进制旁（`target/debug/rarfiles.lst`）——**跨进程**共享位置，本地
+    4 路并发实测 31/60 失败（且会把 `cli_se_preserves_input_order`
+    拉挂）。已改为**二进制私有副本**（拷贝到 temp
+    dir、列表放副本旁），并删掉那把只是**进程内**的
+    `rarfiles_lst_lock`。**注意**：实测 `cargo test` 是**顺序**跑各测试二进制的
+    （`Running`→`test result`→`Running`），所以这条**不是** CI `cli_behavior`
+    失败的根因；它是 nextest / 并发 / 陈旧缓存下的隐患，已消除。顺带修了
+    `input.rs` 一行被写坏的文档注释。
+  - `name_policy` 单测用 `std::env::set_current_dir`（进程级
+    CWD，与同二进制内并行的其他单测天然冲突）：已给 `collect` 加显式
+    `base: Option<&Path>`（生产传 `None` = 仍按 CWD；测试传 temp
+    dir），测试不再改 CWD。
+  - 复查其余无同类问题：`winrar_interop` / `rar-rs` 测试都用 per-test
+    `tempdir`； napi 的 `set_var` 测试由 `test_lock` 串行化；库的运行时 env 开关
+    （`RAR_RS_FAR_BAND` 等）测试不设置。
+- [ ] **CI `cli_behavior` 的 Linux 失败（根因待确认）**：`460c781` 的 CI 挂在
+      `Cargo test (workspace)` →
+      `-p rar-cli --test cli_behavior`（`1 target
+      failed`）。已知：最后一次
+      Linux 绿灯是 `ba58d66`；其后 `a82bb96` 引入 Linux 编译断裂，直到 `460c781`
+      才恢复，所以 cli_behavior 有段时间没在 Linux 上跑过；窗口内新增的
+      Linux-only 用例只有 `cli_delete_after_reports_sources_it_could_not_delete`
+      （`3ab5ed2`）。**缺的是具体失败用例名**——GitHub job log 需 repo
+      admin（公开 API 403），本机无 Linux/qemu/容器。已在 CI 加「失败用例 →
+      check-run annotation」（annotation
+      公开可读），下一次红就能拿到名字，再对症修。
 - [ ] **RAR4 batch 与 sequential 偶发不一致（待定位）**：
       `rar4_create.rs::rar4_batch_matches_sequential_bytes`（输入完全确定，断言两档
       写出的归档字节相同）在并发/负载下偶发失败：**长度相同、字节不同**。已确认

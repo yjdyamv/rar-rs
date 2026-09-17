@@ -172,6 +172,7 @@ pub fn collect(
     level: u8,
     store_links: bool,
     skip_links: bool,
+    base: Option<&Path>,
 ) -> Result<Vec<Collected>, String> {
     let mut pending: Vec<Collected> = Vec::new();
     // Deduplicate by *source path*, never by stored name: the official tool
@@ -187,6 +188,7 @@ pub fn collect(
             store_links,
             skip_links,
             &mut added,
+            base,
         )
         .map_err(|e| format!("add {arg}: {e}"))?;
     }
@@ -214,6 +216,7 @@ pub(crate) fn is_link_like(path: &Path) -> bool {
 }
 
 /// Add a file or directory tree honoring the name/filter policy.
+#[allow(clippy::too_many_arguments)]
 fn add_with_policy(
     pending: &mut Vec<Collected>,
     arg: &str,
@@ -222,18 +225,34 @@ fn add_with_policy(
     store_links: bool,
     skip_links: bool,
     added: &mut HashSet<PathBuf>,
+    base: Option<&Path>,
 ) -> Result<(), String> {
     if has_wildcards(arg) {
-        return add_wildcard_arg(pending, arg, level, policy, store_links, skip_links, added);
+        return add_wildcard_arg(
+            pending,
+            arg,
+            level,
+            policy,
+            store_links,
+            skip_links,
+            added,
+            base,
+        );
     }
-    let path = Path::new(arg);
+    // Resolve filesystem access against `base` (tests pass a temp dir) while
+    // the *stored name* keeps coming from `arg`; production passes `None`,
+    // i.e. the process CWD, matching the official relative-argument rules.
+    let path = match base {
+        Some(base) => base.join(arg),
+        None => PathBuf::from(arg),
+    };
     if !path.exists() {
         return Err(format!("path not found: {arg}"));
     }
     // With `-ol` / `-ol-` a directory symlink is a leaf: the link collector
     // stores it as a redirect or drops it, instead of walking the target.
     let links_active = store_links || skip_links;
-    if path.is_file() || (links_active && is_link_like(path)) {
+    if path.is_file() || (links_active && is_link_like(&path)) {
         // Relative path names, matching the official `rar a`; `-ep1`
         // strips the parent directories, `-ep2`/`-ep3` store full paths
         // (like the official tool).
@@ -299,7 +318,7 @@ fn add_with_policy(
     }
     walk_directory(
         pending,
-        path,
+        &path,
         &rel,
         level,
         &plain,
@@ -312,6 +331,7 @@ fn add_with_policy(
 /// Expand a wildcard argument (`sub/*.txt`, like the official `rar`, which
 /// performs its own pattern expansion). `-ep1` drops the pattern's base
 /// directory from the stored names.
+#[allow(clippy::too_many_arguments)]
 fn add_wildcard_arg(
     pending: &mut Vec<Collected>,
     pattern: &str,
@@ -320,6 +340,7 @@ fn add_wildcard_arg(
     store_links: bool,
     skip_links: bool,
     added: &mut HashSet<PathBuf>,
+    base: Option<&Path>,
 ) -> Result<(), String> {
     let pattern = crate::selector::normalize_mask_separators(pattern);
     let pattern = pattern.as_ref();
@@ -332,12 +353,15 @@ fn add_wildcard_arg(
     if base_dir.is_empty() {
         return Ok(());
     }
-    let base_path = Path::new(base_dir);
+    let base_path = match base {
+        Some(base) => base.join(base_dir),
+        None => PathBuf::from(base_dir),
+    };
     if !base_path.is_dir() {
         return Ok(());
     }
     let rel_base = arg_to_name(base_dir);
-    let mut children: Vec<_> = std::fs::read_dir(base_path)
+    let mut children: Vec<_> = std::fs::read_dir(&base_path)
         .map_err(|e| format!("read dir {}: {e}", base_path.display()))?
         .filter_map(|e| e.ok())
         .collect();
@@ -504,12 +528,12 @@ mod tests {
             first.to_string_lossy().into_owned(),
             second.to_string_lossy().into_owned(),
         ];
-        let collected = collect(&policy, &args, 3, false, false).unwrap();
+        let collected = collect(&policy, &args, 3, false, false, None).unwrap();
         assert_eq!(collected.len(), 2, "colliding stored names must both stay");
         assert!(collected.iter().all(|c| c.name == "f.txt"));
 
         let twice = vec![args[0].clone(), args[0].clone()];
-        let collected = collect(&policy, &twice, 3, false, false).unwrap();
+        let collected = collect(&policy, &twice, 3, false, false, None).unwrap();
         assert_eq!(collected.len(), 1, "one source added twice stays single");
     }
 
@@ -521,33 +545,24 @@ mod tests {
         std::fs::write(dir.path().join("f2.tmp"), b"2").unwrap();
         std::fs::write(dir.path().join("sub").join("f3.txt"), b"3").unwrap();
 
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        let result: Result<Vec<Collected>, String> = {
-            let args: Vec<String> = vec!["sub".into()];
-            let policy = NamePolicy {
-                exclude_masks: vec!["*.tmp".into()],
-                ..Default::default()
-            };
-            collect(&policy, &args, 3, false, false)
+        // Relative arguments are resolved against the explicit `base`, so
+        // the test never mutates the process CWD (a process-global that
+        // would race the other parallel unit tests).
+        let args: Vec<String> = vec!["sub".into()];
+        let policy = NamePolicy {
+            exclude_masks: vec!["*.tmp".into()],
+            ..Default::default()
         };
-        std::env::set_current_dir(cwd).unwrap();
-        let collected = result.unwrap();
+        let collected = collect(&policy, &args, 3, false, false, Some(dir.path())).unwrap();
         let names: Vec<String> = collected.iter().map(|c| c.name.clone()).collect();
         assert_eq!(names, ["sub", "sub/f3.txt"], "exclude mask must apply");
 
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        let flat: Result<Vec<Collected>, String> = {
-            let args: Vec<String> = vec!["sub/f3.txt".into()];
-            let policy = NamePolicy {
-                basename_only: true,
-                ..Default::default()
-            };
-            collect(&policy, &args, 3, false, false)
+        let args: Vec<String> = vec!["sub/f3.txt".into()];
+        let policy = NamePolicy {
+            basename_only: true,
+            ..Default::default()
         };
-        std::env::set_current_dir(cwd).unwrap();
-        let flat = flat.unwrap();
+        let flat = collect(&policy, &args, 3, false, false, Some(dir.path())).unwrap();
         assert_eq!(flat.len(), 1);
         assert_eq!(flat[0].name, "f3.txt", "-ep must store the basename");
     }

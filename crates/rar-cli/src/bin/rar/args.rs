@@ -849,8 +849,9 @@ pub(crate) fn collect_inputs(
     store_links: bool,
     skip_links: bool,
 ) -> Result<Vec<crate::name_policy::Collected>, String> {
-    let mut collected = crate::name_policy::collect(policy, files, level, store_links, skip_links)
-        .map_err(|e| format!("collect: {e}"))?;
+    let mut collected =
+        crate::name_policy::collect(policy, files, level, store_links, skip_links, None)
+            .map_err(|e| format!("collect: {e}"))?;
     if let Ok(abs_archive) = std::fs::canonicalize(archive_path) {
         collected.retain(
             |item| !matches!(std::fs::canonicalize(&item.path), Ok(path) if path == abs_archive),
