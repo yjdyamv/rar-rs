@@ -335,6 +335,46 @@ fn create_rar4_legacy_large_members_stream_as_store() {
     assert_eq!(out, content, "streamed STORE roundtrip");
 }
 
+/// Encrypted RAR 1.5/2.x members keep their own cipher: the streaming emitter
+/// speaks the RAR30 (v29) cipher, so these must stay on the buffered path. A
+/// wrong cipher only "round-trips" when both sides are wrong, so the reader's
+/// CRC check is the guard (official UnRAR covers the interop side).
+#[test]
+fn create_rar4_legacy_large_encrypted_members_roundtrip() {
+    let dir = make_temp_dir();
+    let size = 64 * 1024 * 1024usize;
+    let src = dir.path().join("big-enc.bin");
+    let block = b"streamed+encrypted legacy member payload 0123456789abcdef\n";
+    let mut content = Vec::with_capacity(size);
+    while content.len() < size {
+        content.extend_from_slice(block);
+    }
+    content.truncate(size);
+    std::fs::write(&src, &content).unwrap();
+
+    for (version, tag) in [(ArchiveVersion::V15, "v15"), (ArchiveVersion::V20, "v20")] {
+        let arc = dir.path().join(format!("{tag}-big-pw.rar"));
+        let mut writer = ArchiveWriter::create_with(
+            &arc,
+            WriterOptions::default().compression(version).password("pw"),
+        )
+        .unwrap();
+        // STORE: this test only needs the buffered, per-generation cipher
+        // path (encoding 64 MiB of legacy data costs minutes in the test
+        // profile).
+        writer.add_path(&src, ewo(0)).unwrap();
+        writer.finish().unwrap();
+
+        let mut reader = ArchiveReader::open_with(&arc, OpenOptions::new().password("pw")).unwrap();
+        let id = reader.unique_entry("big-enc.bin").unwrap();
+        assert_eq!(
+            reader.read_entry(id).unwrap(),
+            content,
+            "{tag} encrypted roundtrip"
+        );
+    }
+}
+
 #[test]
 fn create_rar4_compressed_multivolume_split_member() {
     let dir = make_temp_dir();

@@ -445,11 +445,18 @@ impl RarArchive {
         // can only encode a whole member (global tables + a two-pass parse),
         // so a member at or above the threshold is streamed as STORE instead —
         // bounded memory at the cost of compression for huge legacy members.
+        //
+        // Encrypted RAR 1.5/2.x members stay on the buffered path: the
+        // streaming emitter's cipher is the RAR30 (v29) one, while the older
+        // generations use their own ciphers through `rar4_member_encrypt`.
         // A deferred solid append still buffers (close() repacks the archive).
-        if file_size >= STREAM_COMPRESS_THRESHOLD && !self.write_ctx().rar4.solid_append {
-            let stream_level = if LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver)
-                == Some(LegacyCodec::Rar29)
-            {
+        let streaming_codec = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver);
+        let password_encrypted = self.password.as_deref().is_some_and(|pw| !pw.is_empty());
+        if file_size >= STREAM_COMPRESS_THRESHOLD
+            && !self.write_ctx().rar4.solid_append
+            && (streaming_codec == Some(LegacyCodec::Rar29) || !password_encrypted)
+        {
+            let stream_level = if streaming_codec == Some(LegacyCodec::Rar29) {
                 level
             } else {
                 0
