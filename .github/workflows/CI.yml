@@ -4,6 +4,13 @@ env:
   APP_NAME: rar-rs-napi
   MACOSX_DEPLOYMENT_TARGET: '10.13'
   CARGO_INCREMENTAL: '1'
+  # Static musl addons are cross-built with cargo-zigbuild, which needs a
+  # `zig`. Pinned here (not by an action) and verified against the SHA-256
+  # from ziglang.org's own index: the download stays on the official host,
+  # and the checksum makes a corrupted or substituted tarball a hard error.
+  ZIG_VERSION: '0.16.0'
+  ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+  CARGO_ZIGBUILD_VERSION: '0.23.4'
   # Full (release-grade) work — binding matrix builds/tests, fuzz smoke runs,
   # rustdoc — runs on tags, the weekly schedule and manual dispatches. The
   # per-push/PR run keeps only what catches a broken change fast: fmt, the
@@ -408,16 +415,27 @@ jobs:
             ~/.cargo/registry/
             target/
           key: ${{ runner.os }}-${{ matrix.settings.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache zig and cargo-zigbuild
+        if: contains(matrix.settings.target, 'musl')
+        # The ziglang.org download is the slow part of the two musl jobs, so the
+        # unpacked toolchain is cached and the download happens once per version.
+        # `cargo install cargo-zigbuild` compiles from source, so its binary is
+        # cached too.
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ runner.temp }}/zig
+            ~/.cargo/bin/cargo-zigbuild
+          key: zig-${{ runner.os }}-${{ runner.arch }}-${{ env.ZIG_VERSION }}-zigbuild-${{ env.CARGO_ZIGBUILD_VERSION }}
       - name: Install zig (musl cross builds)
         if: contains(matrix.settings.target, 'musl')
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.14.0
+        timeout-minutes: 60
+        env:
+          ZIG_HOME: ${{ runner.temp }}/zig
+        run: bash scripts/ci/install-zig.sh
       - name: Install cargo-zigbuild
         if: contains(matrix.settings.target, 'musl')
-        run: |
-          cargo install cargo-zigbuild --version 0.23.4 --locked
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        run: bash scripts/ci/install-cargo-zigbuild.sh
       - name: Install dependencies
         working-directory: crates/rar-napi
         run: npm ci
