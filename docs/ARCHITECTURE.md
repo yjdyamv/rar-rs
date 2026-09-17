@@ -1,6 +1,6 @@
 # 架构与模块布局
 
-> 最后核对：2026-09-17 @ `3c10f14`；实现细节以源码为准。
+> 最后核对：2026-09-17 @ `5bf0918`；实现细节以源码为准。
 
 库 crate `crates/rar`（crate 名 `rar-rs`）的内部模块地图与设计笔记。
 
@@ -21,6 +21,22 @@
 
 三个 crate 都不依赖外部 RAR/UNRAR 二进制；库 crate 只用纯 Rust 基础依赖（CRC /
 AES / HMAC / SHA / rand / zeroize，`parallel` / `simd` 可选）。
+
+**版本号一致（发布不变式）。** 四个字段必须相同：`crates/rar`、
+`crates/rar-cli`、`crates/rar-napi` 的 `[package] version`，以及
+`crates/rar-napi/package.json` 的 `version`。原生 `.node` 与
+`wasm32-wasip1-threads` 产物都出自 `rar-rs-napi`，**没有独立版本号**；所以
+「napi 版本」就是「wasm 版本」。另有两处必须与 `crates/rar` 对齐：
+
+- 根 `Cargo.toml` 的 `[workspace.dependencies] rar-rs` 的 `version`：不等时
+  `cargo package` 直接拒绝（`rar-cli` / `rar-rs-napi` 打包要靠它解析依赖）。
+- 发布 tag `vX.Y.Z`：Release job 只校验它等于 `crates/rar-napi` 的 Cargo.toml 与
+  package.json（历史 tag：`v0.4.0` / `v0.5.0` / `v0.7.0`）。
+
+改版本号时还要刷新 `Cargo.lock` 与 `fuzz/Cargo.lock`（fuzz 工作区的 CI 检查带
+`--locked`）。四者一致由 `lint` job 的 “Workspace versions agree” 步骤守住
+（2026-09-17 加：此前库/CLI 漂在 `0.1.2` 而绑定在 `0.7.0`）。当前四者同为
+`0.8.0`。
 
 ## 2 · 模块地图
 
