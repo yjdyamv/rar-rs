@@ -36,7 +36,7 @@ AES / HMAC / SHA / rand / zeroize，`parallel` / `simd` 可选）。
 改版本号时还要刷新 `Cargo.lock` 与 `fuzz/Cargo.lock`（fuzz 工作区的 CI 检查带
 `--locked`）。四者一致由 `lint` job 的 “Workspace versions agree” 步骤守住
 （2026-09-17 加：此前库/CLI 漂在 `0.1.2` 而绑定在 `0.7.0`）。当前四者同为
-`0.8.0`。
+`0.9.0`。
 
 ## 2 · 模块地图
 
