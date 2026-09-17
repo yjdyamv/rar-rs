@@ -85,7 +85,7 @@ AES / HMAC / SHA / rand / zeroize，`parallel` / `simd` 可选）。
 缓冲**：近程 tail ≤ `min(dict, NEAR_WINDOW_MAX = 8 MiB)`；短程 match finder 的
 head/prev（或 BT4 son，页按插入惰性提交）与近程窗口同阶；长程采样历史（`-mcl`
 风格）≤ `min(dict, LONG_RANGE_MAX = 128 MiB)` 字节 + 每 16 B 一个样本、≤50%
-负载的 采样表（随数据量增长；默认 32 MiB 字典下 hist ≤ 32
+负载的采样表（随数据量增长；默认 32 MiB 字典下 hist ≤ 32
 MiB）；并行时（`parallel` + `-mt>1`）成员按
 `clamp(8 MiB × 线程数, 24 MiB, 64 MiB)` 的工作窗切片、每片再带 ≤ 8 MiB tail
 上下文，顺序路径每个 4 MiB 读块立即 flush（工作缓冲 ≈ 4 MiB 读 + 1 MiB

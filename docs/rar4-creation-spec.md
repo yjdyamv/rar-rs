@@ -148,7 +148,7 @@ FILE_HEAD，只含压缩数据流）。写管线负责：
 4. 写入 [FILE_HEAD + encrypted_data]
 
 RAR2 成员是**LZ 块序列**：块以主表符号 269（end-of-block）结束，下一块重新读
-表；块之间**位连续**（无字节对齐），因此整个成员是一条位流。整成员单遍编码器 （<
+表；块之间**位连续**（无字节对齐），因此整个成员是一条位流。整成员单遍编码器（<
 64 MiB 的缓冲路径）只写一块；≥ `STREAM_COMPRESS_THRESHOLD` 的大成员由
 `codec/legacy/rar20_encoder.rs::encode_member_windowed_streaming` 每 64 KiB 写
 一块（有界内存），块间用 `ParseState` 续传 `old_offsets`/last-match——解码端
@@ -181,7 +181,7 @@ RAR4 成员级加密（-p）按代分派（`archive/create.rs` 的 `rar4_member_
 
 大成员的流式发射用 `format/rar4/write/cbc.rs` 的**范围密码发射器**：
 `Rar4BlockRangeEmitter<C>`（v29/v20，按 16 字节分组、末块零填充、跨范围 carry）
-与 `Rar15RangeEmitter`（推进 XOR keystream，新增 `Rar15Cipher::skip`）， 接口是
+与 `Rar15RangeEmitter`（推进 XOR keystream，新增 `Rar15Cipher::skip`），接口是
 `Rar4RangeEmitter::emit_to(reader, plain_len, start, end, out)`，
 供单卷与分卷共用，因此 `-p` 不再迫使整个成员进内存。
 
