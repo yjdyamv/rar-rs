@@ -1,6 +1,6 @@
 # 架构与模块布局
 
-> 最后核对：2026-09-16 @ `c2c43d4`；实现细节以源码为准。
+> 最后核对：2026-09-17 @ `3c10f14`；实现细节以源码为准。
 
 库 crate `crates/rar`（crate 名 `rar-rs`）的内部模块地图与设计笔记。
 
@@ -75,17 +75,22 @@ AES / HMAC / SHA / rand / zeroize，`parallel` / `simd` 可选）。
 块直拷进归档；压缩成员走 **spill
 文件**——逐窗压缩并把压缩字节先写进归档旁的临时文件（`SpillGuard`，`*.spill-*`），同时
 算明文 CRC/BLAKE2；等 packed 大小与校验和齐了才写成员头，再把 spill 流式拷进归档
-（`rar5/write/stream.rs::add_file_streaming`；RAR4 v29 同理，见
-`format/rar4/write/pipeline.rs::add_rar4_file_streaming`）。磁盘上因此有一份
-packed 大小的中间文件，内存只驻留**编码器状态 + I/O 缓冲**：近程 tail ≤
-`min(dict, NEAR_WINDOW_MAX = 8 MiB)`；短程 match finder 的 head/prev（或 BT4
-son，页按插入惰性提交）与近程窗口同阶；长程采样历史（`-mcl` 风格）≤
-`min(dict, LONG_RANGE_MAX = 128 MiB)` 字节 + 每 16 B 一个样本、≤50% 负载的
-采样表（随数据量增长；默认 32 MiB 字典下 hist ≤ 32 MiB）；并行时（`parallel` +
-`-mt>1`）成员按 `clamp(8 MiB × 线程数, 24 MiB, 64 MiB)` 的工作窗切片、每片再带 ≤
-8 MiB tail 上下文，顺序路径每个 4 MiB 读块立即 flush（工作缓冲 ≈ 4 MiB 读 + 1
-MiB BufReader）；拷贝阶段 1 MiB 缓冲。实测（release，1 GiB 高度可压成员，默认 32
-MiB 字典）：m1 顺序峰值 ≈ 130 MB、m3/m5 顺序 ≈ 365 MB （BT4 son 数组 +
+（`rar5/write/stream.rs::add_file_streaming`；RAR4 同理，见
+`format/rar4/write/pipeline.rs::add_rar4_file_streaming`：v29 用其 LZ
+流式引擎，v20 用**窗口多块**编码器
+`rar20_encoder::encode_member_windowed_streaming`（64 KiB 一块，块间位连续，
+`ParseState` 续传匹配状态），v15 与 RAR13 走 STORE 流式；加密由
+`format/rar4/write/cbc.rs` 的**范围密码发射器**分代发射，因此密码不再迫使成员
+进内存）。磁盘上因此有一份 packed 大小的中间文件，内存只驻留**编码器状态 + I/O
+缓冲**：近程 tail ≤ `min(dict, NEAR_WINDOW_MAX = 8 MiB)`；短程 match finder 的
+head/prev（或 BT4 son，页按插入惰性提交）与近程窗口同阶；长程采样历史（`-mcl`
+风格）≤ `min(dict, LONG_RANGE_MAX = 128 MiB)` 字节 + 每 16 B 一个样本、≤50%
+负载的 采样表（随数据量增长；默认 32 MiB 字典下 hist ≤ 32
+MiB）；并行时（`parallel` + `-mt>1`）成员按
+`clamp(8 MiB × 线程数, 24 MiB, 64 MiB)` 的工作窗切片、每片再带 ≤ 8 MiB tail
+上下文，顺序路径每个 4 MiB 读块立即 flush（工作缓冲 ≈ 4 MiB 读 + 1 MiB
+BufReader）；拷贝阶段 1 MiB 缓冲。实测（release，1 GiB 高度可压成员，默认 32 MiB
+字典）：m1 顺序峰值 ≈ 130 MB、m3/m5 顺序 ≈ 365 MB （BT4 son 数组 +
 长程采样历史为主），`-mt8` m3 ≈ 840 MB——内存与成员大小无关，但随线程数增长
 （每片 tail + 工作窗）。压缩发射块合并到 ≤ 4 MiB （每块独立 Huffman
 表，符号流局部分布漂移时提前闭合），解析侧分块预算上限 128 KiB

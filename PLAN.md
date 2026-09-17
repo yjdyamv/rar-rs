@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-16 @ `c2c43d4`；实现细节以源码为准。
+> 最后核对：2026-09-17 @ `3c10f14`；实现细节以源码为准。
 
 本文件只留**结论**与**下一步**。历次审计、逐批修复与加固的过程记录在 git 历史
 （旧版详单：`git show d9201cf:PLAN.md`）；本文件不再维护 CHANGELOG。
@@ -122,18 +122,47 @@
       仍走压缩流式），从而有界内存；代价是大成员不压缩（文档化
       取舍）。验证：本机官方 UnRAR 7.23 对 `-ma15`/`-ma2` × {66 MiB 可压、8 MiB
       随机} 的 `t`/`x` 全部字节一致；`-ma4` 大成员仍压缩（archive 55 KB / raw 66
-      MiB）。**修复（2026-09-17）**：流式发射器的密码是 RAR30（v29）那一代，所以
-      **加密的 v15/v20 大成员必须留在缓冲路径**（`add_file_rar4` 的流式条件加了
-      `!password_encrypted`）——否则会用错密码流（官方 UnRAR 报 CRC 错、exit
-      3）。已加回归测试（64 MiB `-ma2`/`-ma15` + `-p` 回环）与本机官方 `t`/`x`
-      对照。
-- [ ] **(C) 窗口多块压缩流式（v15/v20/RAR13）（立项）**：要让这几代的大成员
-      「压缩 **且** 有界内存」，必须把编码器改成**单一 BitWriter 内逐窗口写块**
-      （RAR20 最可行；RAR15/RAR13 的自适应 Huffman
-      更难），且**大成员输出会不同于单块** （多块/多表），需与官方 UnRAR
-      对拍并文档化。同一套窗口化也能顺带解锁「有意不做」里的老编码器块级 MT。
-      另：v20 的**流式加密**还需把 RAR20 分组密码也流式化（现有 spill 流式只有
-      RAR30 密码），RAR15/RAR13 各自同理。
+      MiB）。**回归修复（2026-09-17）**：流式发射器当时写死 RAR30（v29）密码，
+      于是加密的 v15/v20 大成员一度用错密码流（官方 UnRAR 报 CRC 错、exit
+      3）；先以 `!password_encrypted` 守卫留在缓冲路径并加回归测试，随后由下面
+      (C) Stage 2 的**分代流式密码**彻底取代该守卫（现在加密大成员也有界内存）。
+- [x] **(C) Stage 1 · RAR20 窗口多块压缩流式**（2026-09-17，已完成）：
+      `rar20_encoder.rs` 新增 `EncodeToken::EndOfBlock`（主表符号 269，**仅在
+      用到时给码**，单块输出逐字节不变）、`BitSink` trait + `StreamingBitSink`
+      （只驻留半个字节 + 64 KiB 刷缓冲）、`write_lz_block<S: BitSink>`（从
+      `encode_member_with_tables` 拆出）与 `ParseState`（`old_offsets` +
+      last-match **跨窗口续传**，因为解码端这两个寄存器本来就不随块边界重置，
+      所以窗口 token
+      不需要改写，压缩率不降）。`encode_member_windowed_streaming` 按 64 KiB
+      窗口写块：每块 keep_tables=0 + 平坦表，非末块追加 269；块位连续，
+      因此共用一个 sink。`add_rar4_file_streaming` 对 Rar20（非 solid）调用它；
+      `add_file_rar4` 的 `stream_level` 用真实 level。大成员先跑
+      `sample_is_incompressible_file` 探针，不可压就直接 STORE（66 MiB 随机：76
+      s → 0.65 s，避免白跑一遍再回退）。验证：本机官方 UnRAR 7.23 对
+      `-ma2 -m1..-m5`（66 MiB 可压，350–356 KB）、`-v100k` 4 卷、66 MiB
+      随机（STORE 兜底）的 `t`/`x` 全部字节一致；库测试
+      `create_rar4_legacy_large_members_stream_compressed`（单卷 + 100 KiB
+      分卷，断言 method ≠ 0）。
+- [x] **(C) Stage 2 · legacy 大成员流式加密**（2026-09-17，已完成）：`cbc.rs`
+      泛化为 `Rar4RangeEmitter` trait +
+      `Rar4BlockRangeEmitter<C: Rar4BlockCipher>`
+      （`Rar30RangeEmitter`/`Rar20RangeEmitter` 别名，块密码按 16 字节对齐 +
+      carry）与 `Rar15RangeEmitter`（流密码靠新增的 `Rar15Cipher::skip`
+      前进）；`add_rar4_file_streaming` 按代选密码：v29 带 salt、v20 补 16 字节
+      padding、v15 无 salt 无 padding。`add_file_rar4` 去掉
+      `!password_encrypted` 守卫（只有无密码实现的版本才留缓冲路径报错）。
+      验证：本机官方 UnRAR 7.23 对 `-ma2 -p -v100k`（压缩+加密+4 卷）、
+      `-ma15 -p -v100k`（676 卷，STORE+加密）、`-ma4 -p` 的 `t`/`x`
+      全部字节一致；库测试
+      `create_rar4_legacy_large_encrypted_members_roundtrip` （v15/v20 × 单卷/8
+      MiB 分卷，v20 断言 method ≠ 0）。
+- [ ] **(C) Stage 3 · RAR15/RAR13 窗口压缩流式（未做）**：这两代是**自适应
+      Huffman**（表随成员演化，不是每块重发一张平坦表），窗口化需要「每窗口
+      重发自适应表 + 边界状态」的独立设计并重新对拍，收益仅「老格式 >64 MiB
+      成员压缩率」。现状：v15 大成员 STORE（Stage 1 已保证有界内存、含
+      加密），RAR13 大成员 STORE 流式（已实现，含加密）。另外 Stage 1 的
+      `BitSink` + `write_lz_block` 把 v20 的**块级 MT** 从「结构性不可行」变成
+      「多窗口并行解析 + 顺序写位流」（见下方「有意不做」未改动的原因）。
 - [x] **RAR13 大成员 STORE 流式**（已实现 2026-09-17）：`add_file_rar13` 对 ≥
       `STREAM_COMPRESS_THRESHOLD` 的成员改走新的
       `add_rar13_file_streaming_store`：
@@ -152,10 +181,11 @@
 - [ ] **RAR4 solid 归档 MT**：legacy solid 链保持串行；成员级并行需跨成员共享
       窗口，属结构性代价（RAR5 的 chunk 级 MT 已兑现）。
 - **有意不做（设计决定，2026-09-17）**：
-  - **老编码器块级 MT（v15/v20 单个大成员）**：rars
-    逐字节移植的自含状态机，块并行需重构成「按块 analyze + 顺序
-    serialize」并证明字节一致；价值极低（官方 7.23 已移除
-    `-ma4`，老格式创建只是我们的扩展）。
+  - **老编码器块级 MT（v15/v20 单个大成员）**：Stage 1 之后 v20 已具备「多窗口
+    并行解析 + 顺序写位流」的骨架，但需要每窗口独立的 match finder
+    状态与确定性的窗口边界才能保证字节一致，收益仅「老格式大成员的创建
+    速度」（官方 7.23 已移除 `-ma4`，老格式创建只是我们的扩展），故仍不做； v15
+    另受自适应表限制。
   - **PPMd 块级
     MT**：单自适应模型，切块会改变输出（结构上不可行）；成员级并行已有。
   - **RAR13 非 solid 成员级 batch**：成本低但价值最低（DOS

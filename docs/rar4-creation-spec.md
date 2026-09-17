@@ -1,6 +1,6 @@
 # RAR4 Creation Feature Spec
 
-> 最后核对：2026-09-16 @ `c2c43d4`；字节级行为由测试与官方工具对拍锁定。
+> 最后核对：2026-09-17 @ `3c10f14`；字节级行为由测试与官方工具对拍锁定。
 
 ## 目标
 
@@ -142,9 +142,22 @@ pub fn encode_member(
 FILE_HEAD，只含压缩数据流）。写管线负责：
 
 1. 调用编码器得到压缩数据 `Vec<u8>`
-2. 如果有密码，用 Rar30Cipher 加密
+2. 如果有密码，用**该代的密码**加密（v29 = AES-128-CBC + salt、v20 = 16
+   字节分组、v15 = XOR 流；见下面「加密」）
 3. 构造 FILE_HEAD（含 packed_size、unpacked_size、CRC32）
 4. 写入 [FILE_HEAD + encrypted_data]
+
+RAR2 成员是**LZ 块序列**：块以主表符号 269（end-of-block）结束，下一块重新读
+表；块之间**位连续**（无字节对齐），因此整个成员是一条位流。整成员单遍编码器 （<
+64 MiB 的缓冲路径）只写一块；≥ `STREAM_COMPRESS_THRESHOLD` 的大成员由
+`codec/legacy/rar20_encoder.rs::encode_member_windowed_streaming` 每 64 KiB 写
+一块（有界内存），块间用 `ParseState` 续传 `old_offsets`/last-match——解码端
+这两个寄存器本来就不随块边界重置，所以与单块路径压缩率一致。因此**大成员产物
+与单块路径不同**（多块/多表），两者都被官方 UnRAR 7.23 接受。
+
+≥ 64 MiB 的成员统一走 spill 流式：v29 = LZ 流式引擎、v20 = 上面的窗口多块、 v15
+与 RAR13 = STORE；加密由范围发射器（`format/rar4/write/cbc.rs`）分代
+产生，所以大成员（含 `-p`）不再整块进内存。
 
 ### 多卷切分
 
@@ -165,6 +178,12 @@ RAR4 成员级加密（-p）按代分派（`archive/create.rs` 的 `rar4_member_
 
 仅 v29 置 `FHD_SALT`；v15/v20 只置 `FHD_PASSWORD`。`-hp` 头加密与成员版本无关，
 读写两侧统一 AES-128（`Rar30Cipher`），只加密头（每块 `[8B salt][密文]`）。
+
+大成员的流式发射用 `format/rar4/write/cbc.rs` 的**范围密码发射器**：
+`Rar4BlockRangeEmitter<C>`（v29/v20，按 16 字节分组、末块零填充、跨范围 carry）
+与 `Rar15RangeEmitter`（推进 XOR keystream，新增 `Rar15Cipher::skip`）， 接口是
+`Rar4RangeEmitter::emit_to(reader, plain_len, start, end, out)`，
+供单卷与分卷共用，因此 `-p` 不再迫使整个成员进内存。
 
 ### CLI 集成
 
