@@ -13,6 +13,8 @@
 // even where this pipeline does not call them yet.
 #![allow(dead_code)]
 
+use std::io::{Read, Write};
+
 use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::huffman::build_code_lengths_from_freqs;
 use crate::codec::legacy::encode_core::{
@@ -344,6 +346,7 @@ fn table_lengths_for_tokens(
                 let (offset_slot, _) = offset_slot_for_match(offset)?;
                 offset_frequencies[offset_slot] += 1;
             }
+            EncodeToken::EndOfBlock => main_frequencies[269] += 1,
         }
     }
     let mut table_lengths = [0u8; TABLE_COUNT];
@@ -370,6 +373,12 @@ fn table_lengths_for_tokens(
             *len = literal_len;
         }
         table_lengths[256] = literal_len;
+        // Symbol 269 is the LZ end-of-block marker; only the windowed encoder
+        // emits it. Giving it a code just when it appears keeps the
+        // single-block output bit-identical.
+        if main_frequencies[269] != 0 {
+            table_lengths[269] = literal_len;
+        }
         for len in &mut table_lengths[270..270 + LENGTH_COUNT] {
             *len = literal_len;
         }
@@ -403,22 +412,55 @@ fn encode_member_with_tables(
     fixed_table: Option<FixedEncodeTable>,
     table_lengths: &[u8; TABLE_COUNT],
 ) -> RarResult<Vec<u8>> {
+    let mut bits = BitWriter::default();
+    write_lz_block(
+        &mut bits,
+        tokens,
+        table_lengths,
+        fixed_table.is_none() || history.is_empty(),
+    )?;
+    Ok(bits.into_bytes())
+}
+
+/// Minimum interface the block writer needs: append `n` bits of `value`
+/// (MSB-first). Implemented by the in-memory [`BitWriter`] and by
+/// [`StreamingBitSink`], which flushes whole bytes so a streamed member never
+/// holds its packed output.
+trait BitSink {
+    fn write_bits(&mut self, value: u32, n: u8);
+}
+
+impl BitSink for BitWriter {
+    fn write_bits(&mut self, value: u32, n: u8) {
+        BitWriter::write_bits(self, value, n);
+    }
+}
+
+/// Append one LZ block to `sink`: the optional block header + level table, then
+/// the token stream. `with_header` writes a fresh block (`keep_tables = 0`);
+/// the single-block path writes it only for a fresh member, while the windowed
+/// streaming encoder writes one per window.
+fn write_lz_block<S: BitSink>(
+    sink: &mut S,
+    tokens: &[EncodeToken],
+    table_lengths: &[u8; TABLE_COUNT],
+    with_header: bool,
+) -> RarResult<()> {
     let level_tokens = encode_table_level_tokens(table_lengths);
     let level_lengths = level_code_lengths_for_tokens(&level_tokens);
     let level_codes = canonical_codes(&level_lengths)?;
     let main_codes = canonical_codes(&table_lengths[..MAIN_COUNT])?;
 
-    let mut bits = BitWriter::default();
-    if fixed_table.is_none() || history.is_empty() {
-        bits.write_bits(0, 2); // LZ block, do not keep previous tables.
+    if with_header {
+        sink.write_bits(0, 2); // LZ block, do not keep previous tables.
         for &len in &level_lengths {
-            bits.write_bits(len as u32, 4);
+            sink.write_bits(len as u32, 4);
         }
         for token in level_tokens {
             let code = level_codes[token.symbol].ok_or(enc_err("missing level Huffman code"))?;
-            bits.write_bits(code.code as u32, code.len);
+            sink.write_bits(code.code as u32, code.len);
             if token.extra_bits != 0 {
-                bits.write_bits(token.extra_value as u32, token.extra_bits);
+                sink.write_bits(token.extra_value as u32, token.extra_bits);
             }
         }
     }
@@ -429,11 +471,11 @@ fn encode_member_with_tables(
             EncodeToken::Literal(byte) => {
                 let code =
                     main_codes[byte as usize].ok_or(enc_err("missing literal Huffman code"))?;
-                bits.write_bits(code.code as u32, code.len);
+                sink.write_bits(code.code as u32, code.len);
             }
             EncodeToken::RepeatLast => {
                 let code = main_codes[256].ok_or(enc_err("missing repeat-last Huffman code"))?;
-                bits.write_bits(code.code as u32, code.len);
+                sink.write_bits(code.code as u32, code.len);
             }
             EncodeToken::OldOffset {
                 index,
@@ -442,22 +484,22 @@ fn encode_member_with_tables(
             } => {
                 let code =
                     main_codes[257 + index].ok_or(enc_err("missing old-offset Huffman code"))?;
-                bits.write_bits(code.code as u32, code.len);
+                sink.write_bits(code.code as u32, code.len);
                 let (slot, extra) = old_length_slot_for_match(length, offset)?;
                 let length_code =
                     length_codes[slot].ok_or(enc_err("missing old-offset length Huffman code"))?;
-                bits.write_bits(length_code.code as u32, length_code.len);
+                sink.write_bits(length_code.code as u32, length_code.len);
                 if LENGTH_BITS[slot] != 0 {
-                    bits.write_bits(extra as u32, LENGTH_BITS[slot]);
+                    sink.write_bits(extra as u32, LENGTH_BITS[slot]);
                 }
             }
             EncodeToken::ShortOffset { offset } => {
                 let (slot, extra) = short_slot_for_match(offset)?;
                 let code =
                     main_codes[261 + slot].ok_or(enc_err("missing short-offset Huffman code"))?;
-                bits.write_bits(code.code as u32, code.len);
+                sink.write_bits(code.code as u32, code.len);
                 if SHORT_BITS[slot] != 0 {
-                    bits.write_bits(extra as u32, SHORT_BITS[slot]);
+                    sink.write_bits(extra as u32, SHORT_BITS[slot]);
                 }
             }
             EncodeToken::Match { length, offset } => {
@@ -466,21 +508,194 @@ fn encode_member_with_tables(
                     .ok_or(enc_err("adjusted match length underflows"))?;
                 let (slot, extra) = length_slot_for_match(encoded_length)?;
                 let code = main_codes[270 + slot].ok_or(enc_err("missing match Huffman code"))?;
-                bits.write_bits(code.code as u32, code.len);
+                sink.write_bits(code.code as u32, code.len);
                 if LENGTH_BITS[slot] != 0 {
-                    bits.write_bits(extra as u32, LENGTH_BITS[slot]);
+                    sink.write_bits(extra as u32, LENGTH_BITS[slot]);
                 }
                 let (offset_slot, offset_extra) = offset_slot_for_match(offset)?;
                 let offset =
                     offset_codes[offset_slot].ok_or(enc_err("missing offset Huffman code"))?;
-                bits.write_bits(offset.code as u32, offset.len);
+                sink.write_bits(offset.code as u32, offset.len);
                 if OFFSET_BITS[offset_slot] != 0 {
-                    bits.write_bits(offset_extra as u32, OFFSET_BITS[offset_slot]);
+                    sink.write_bits(offset_extra as u32, OFFSET_BITS[offset_slot]);
                 }
+            }
+            EncodeToken::EndOfBlock => {
+                let code = main_codes[269].ok_or(enc_err("missing end-of-block Huffman code"))?;
+                sink.write_bits(code.code as u32, code.len);
             }
         }
     }
-    Ok(bits.into_bytes())
+    Ok(())
+}
+
+/// Bytes buffered by [`StreamingBitSink`] before a write.
+const STREAM_SINK_FLUSH: usize = 64 * 1024;
+
+/// A [`BitSink`] that flushes whole bytes to `writer`, keeping only the partial
+/// byte and a small buffer, so a streamed member's packed output is bounded.
+struct StreamingBitSink<'a, W: Write> {
+    writer: &'a mut W,
+    buf: Vec<u8>,
+    current_byte: u8,
+    bit_pos: u8,
+    written: u64,
+    error: Option<std::io::Error>,
+}
+
+impl<'a, W: Write> StreamingBitSink<'a, W> {
+    fn new(writer: &'a mut W) -> Self {
+        Self {
+            writer,
+            buf: Vec::with_capacity(STREAM_SINK_FLUSH),
+            current_byte: 0,
+            bit_pos: 0,
+            written: 0,
+            error: None,
+        }
+    }
+
+    fn push_byte(&mut self, byte: u8) {
+        self.buf.push(byte);
+        self.written += 1;
+        if self.buf.len() >= STREAM_SINK_FLUSH {
+            self.flush_buf();
+        }
+    }
+
+    fn flush_buf(&mut self) {
+        if self.error.is_none()
+            && !self.buf.is_empty()
+            && let Err(error) = self.writer.write_all(&self.buf)
+        {
+            self.error = Some(error);
+        }
+        self.buf.clear();
+    }
+
+    /// Surface a buffered write error (none is reported while bits are written,
+    /// because [`BitSink::write_bits`] cannot fail).
+    fn check(&mut self) -> RarResult<()> {
+        match self.error.take() {
+            Some(error) => Err(RarError::Io(error)),
+            None => Ok(()),
+        }
+    }
+
+    fn finish(mut self) -> RarResult<u64> {
+        if self.bit_pos > 0 {
+            let byte = self.current_byte;
+            self.push_byte(byte);
+            self.current_byte = 0;
+            self.bit_pos = 0;
+        }
+        self.flush_buf();
+        self.check()?;
+        Ok(self.written)
+    }
+}
+
+impl<W: Write> BitSink for StreamingBitSink<'_, W> {
+    fn write_bits(&mut self, value: u32, n: u8) {
+        if n == 0 {
+            return;
+        }
+        let mut remaining = n;
+        while remaining > 0 {
+            let avail = 8 - self.bit_pos;
+            let take = avail.min(remaining);
+            let shift = remaining - take;
+            let bits = ((value >> shift) & ((1 << take) - 1)) as u8;
+            self.current_byte |= bits << (avail - take);
+            self.bit_pos += take;
+            remaining -= take;
+            if self.bit_pos >= 8 {
+                let byte = self.current_byte;
+                self.push_byte(byte);
+                self.current_byte = 0;
+                self.bit_pos = 0;
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Windowed streaming (multi-block members)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Window size for [`encode_member_windowed_streaming`]: the encoder emits one
+/// LZ block per window, which bounds its working set.
+pub(crate) const RAR20_STREAM_WINDOW: usize = 64 * 1024;
+
+/// Encode one member as independent LZ blocks, one per `window`, so a member at
+/// or above the streaming threshold can be compressed with bounded memory.
+///
+/// [`encode_member`] emits a single block for the whole input; this emits the
+/// multi-block shape RAR2 also allows (see the `unpack20_multiblock` fixture):
+/// each block carries its own flat table and, unless it is the last, the
+/// end-of-block symbol 269 — `decode_lz` returns on 269 and `decode_until` then
+/// reads the next block's tables. Blocks are bit-contiguous, so they all go
+/// through one [`BitSink`] and the member's packed output is never held in
+/// memory.
+///
+/// The match state ([`ParseState`]) is threaded across windows, so a window may
+/// reference matches from earlier windows exactly like a single-block parse
+/// would.
+pub(crate) fn encode_member_windowed_streaming<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    options: EncodeOptions,
+    window: usize,
+    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+) -> RarResult<u64> {
+    let table = FixedEncodeTable::new()?;
+    let mut sink = StreamingBitSink::new(writer);
+    let mut state = ParseState::default();
+    let mut history: Vec<u8> = Vec::new();
+    let mut consumed = 0usize;
+    let mut current = read_window(reader, window)?;
+    while !current.is_empty() {
+        let next = read_window(reader, window)?;
+        let is_last = next.is_empty();
+
+        let mut tokens =
+            encode_tokens_with_state(&current, &history, options, None, None, &mut state)?;
+        if !is_last {
+            tokens.push(EncodeToken::EndOfBlock);
+        }
+        let table_lengths = table_lengths_for_tokens(&tokens, Some(table))?;
+        write_lz_block(&mut sink, &tokens, &table_lengths, true)?;
+        sink.check()?;
+
+        history.extend_from_slice(&current);
+        let excess = history.len().saturating_sub(options.max_match_distance);
+        if excess > 0 {
+            history.drain(..excess);
+        }
+        consumed += current.len();
+        if let Some(report) = progress.as_deref_mut()
+            && !report(consumed)
+        {
+            return Err(RarError::Cancelled);
+        }
+        current = next;
+    }
+    sink.finish()
+}
+
+/// Read up to `window` bytes (fewer only at end of input).
+fn read_window<R: Read>(reader: &mut R, window: usize) -> RarResult<Vec<u8>> {
+    let mut buf = vec![0u8; window.max(1)];
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        let n = reader.read(&mut buf[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    buf.truncate(filled);
+    Ok(buf)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -520,6 +735,9 @@ enum EncodeToken {
         length: usize,
         offset: usize,
     },
+    /// End of an LZ block (main symbol 269). Only the windowed streaming
+    /// encoder emits it, between windows.
+    EndOfBlock,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -700,12 +918,41 @@ fn match_run_length(input: &[u8], pos: usize, offset: usize, cap: usize) -> usiz
 //  Tokenizer (greedy + lazy)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Parse state that outlives one LZ block: the repeat-offset ring and the
+/// last-match registers. The decoder keeps both across a block boundary, so the
+/// windowed encoder threads them from window to window instead of rewriting
+/// tokens.
+#[derive(Default, Clone, Copy)]
+struct ParseState {
+    old_offsets: [usize; 4],
+    last_match: Option<(usize, usize)>,
+}
+
 fn encode_tokens_with_progress(
     input: &[u8],
     history: &[u8],
     options: EncodeOptions,
     cost_model: Option<&CostModel>,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+) -> RarResult<Vec<EncodeToken>> {
+    let mut state = ParseState::default();
+    encode_tokens_with_state(input, history, options, cost_model, progress, &mut state)
+}
+
+/// Like [`encode_tokens_with_progress`], but continues (and updates) the match
+/// state a previous block left behind, so consecutive blocks stay decodable
+/// without rewriting their tokens.
+///
+/// Only the greedy/lazy parser maintains `state`: a `cost_model` parse runs the
+/// shortest-path parser, which restarts from a fresh state and is only used by
+/// the single-block refinement passes.
+fn encode_tokens_with_state(
+    input: &[u8],
+    history: &[u8],
+    options: EncodeOptions,
+    cost_model: Option<&CostModel>,
     mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    state: &mut ParseState,
 ) -> RarResult<Vec<EncodeToken>> {
     let mut tokens = Vec::new();
     let history = &history[history.len().saturating_sub(options.max_match_distance)..];
@@ -718,6 +965,10 @@ fn encode_tokens_with_progress(
     }
 
     if let Some(cost_model) = cost_model.filter(|_| options.optimal_parse) {
+        debug_assert!(
+            state.last_match.is_none() && state.old_offsets == [0; 4],
+            "the shortest-path parser restarts from a fresh state"
+        );
         let start = history.len();
         let end = combined.len();
         return Ok(encode_tokens_optimal(
@@ -732,8 +983,8 @@ fn encode_tokens_with_progress(
 
     let mut pos = history.len();
     let end = combined.len();
-    let mut last_match = None;
-    let mut old_offsets = [0usize; 4];
+    let mut last_match = state.last_match;
+    let mut old_offsets = state.old_offsets;
     let mut next_report = 0usize;
     while pos < end {
         let selected = select_match(
@@ -818,6 +1069,8 @@ fn encode_tokens_with_progress(
     if progress.is_some_and(|report| !report(input.len())) {
         return Err(RarError::Cancelled);
     }
+    state.last_match = last_match;
+    state.old_offsets = old_offsets;
     Ok(tokens)
 }
 

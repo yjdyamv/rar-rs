@@ -36,6 +36,15 @@ impl Rar15Cipher {
         }
     }
 
+    /// Advance the keystream by `n` bytes without producing output, so a range
+    /// of a member's ciphertext can be produced without re-keying from the
+    /// start (used by the multi-volume payload emitter).
+    pub fn skip(&mut self, n: u64) {
+        for _ in 0..n {
+            let _ = self.next_mask();
+        }
+    }
+
     fn next_mask(&mut self) -> u8 {
         self.key[0] = self.key[0].wrapping_add(0x1234);
         let crc = crc32_table_entry(((self.key[0] & 0x01fe) >> 1) as u8);

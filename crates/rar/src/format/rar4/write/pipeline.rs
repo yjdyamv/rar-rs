@@ -12,7 +12,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::cbc::Rar30RangeEmitter;
+use super::cbc::{Rar4RangeEmitter, Rar15RangeEmitter, Rar20RangeEmitter, Rar30RangeEmitter};
 use crate::archive::{ArchiveEntry, RarArchive, STREAM_COMPRESS_THRESHOLD};
 #[cfg(feature = "parallel")]
 use crate::archive::{BatchEntry, PARALLEL_COMPRESS_MAX_MEMBER, PARALLEL_COMPRESS_WAVE_BUDGET};
@@ -190,7 +190,7 @@ enum Rar4PayloadSource {
     Encrypted {
         file: File,
         plain_len: u64,
-        emitter: Box<Rar30RangeEmitter>,
+        emitter: Box<dyn Rar4RangeEmitter>,
     },
 }
 
@@ -441,26 +441,46 @@ impl RarArchive {
 
         // Large members stream: the file is compressed (or copied) into a
         // spill file and then streamed into the archive, so the whole member
-        // never enters memory. RAR29 streams with its LZ engine; RAR 1.5/2.x
-        // can only encode a whole member (global tables + a two-pass parse),
-        // so a member at or above the threshold is streamed as STORE instead —
-        // bounded memory at the cost of compression for huge legacy members.
-        //
-        // Encrypted RAR 1.5/2.x members stay on the buffered path: the
-        // streaming emitter's cipher is the RAR30 (v29) one, while the older
-        // generations use their own ciphers through `rar4_member_encrypt`.
-        // A deferred solid append still buffers (close() repacks the archive).
+        // never enters memory. RAR29 streams with its LZ engine, RAR 2.x with
+        // its windowed multi-block encoder, and RAR 1.5 (plus any member whose
+        // streaming codec cannot compress here) as STORE — bounded memory, at
+        // the cost of compression for the STORE cases. Each generation's own
+        // cipher is emitted over the streamed payload, so a password no longer
+        // forces the member into memory either. A deferred solid append still
+        // buffers (close() repacks the archive).
         let streaming_codec = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver);
         let password_encrypted = self.password.as_deref().is_some_and(|pw| !pw.is_empty());
+        let solid_mode = self.write_ctx().solid.mode;
+        // A version whose cipher this pipeline does not implement keeps the
+        // buffered path, where it reports the unsupported version.
+        let streamable = !password_encrypted
+            || matches!(
+                streaming_codec,
+                Some(LegacyCodec::Rar15 | LegacyCodec::Rar20 | LegacyCodec::Rar29)
+            );
         if file_size >= STREAM_COMPRESS_THRESHOLD
             && !self.write_ctx().rar4.solid_append
-            && (streaming_codec == Some(LegacyCodec::Rar29) || !password_encrypted)
+            && streamable
         {
-            let stream_level = if streaming_codec == Some(LegacyCodec::Rar29) {
-                level
-            } else {
-                0
+            // A windowed member the sample probe calls incompressible would
+            // emit literals for minutes only for the pipeline to fall back to
+            // STORE, so probe first (the buffered path does the same through
+            // `whole_member_is_incompressible`).
+            let compressible = match streaming_codec {
+                // RAR 3.x streams with its LZ engine (solid chains included).
+                Some(LegacyCodec::Rar29) => true,
+                // RAR 2.x streams as a sequence of LZ blocks. Its solid chains
+                // have no streaming form yet, so those members stream STORE
+                // instead (bounded memory, no ratio).
+                Some(LegacyCodec::Rar20) if !solid_mode => {
+                    !crate::codec::common::incompressible::sample_is_incompressible_file(
+                        path, file_size, level,
+                    )?
+                }
+                // RAR 1.5 and anything without a streaming encoder.
+                _ => false,
             };
+            let stream_level = if compressible { level } else { 0 };
             return self.add_rar4_file_streaming(
                 path,
                 &name,
@@ -513,6 +533,8 @@ impl RarArchive {
         }
 
         let password = self.password.as_deref().is_some_and(|pw| !pw.is_empty());
+        let codec = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver);
+        let solid_mode = self.write_ctx().solid.mode;
         let spill = spill_path_for(&self.path);
         let _guard = SpillGuard(spill.clone());
 
@@ -556,7 +578,7 @@ impl RarArchive {
             let mut spill_file = crate::fs::atomic::read_write_create(&spill)?;
             let mut counter = CountingWriter::new(&mut spill_file);
             {
-                let options = crate::codec::legacy::rar29_encoder::options_for_level(level);
+                let codec = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver);
                 let progress = self.progress.clone();
                 let cancel = self.cancel.clone();
                 let member = self.progress_member;
@@ -576,29 +598,41 @@ impl RarArchive {
                     }
                     true
                 };
-                if self.write_ctx().solid.mode {
-                    let encoder =
-                        self.write_ctx_mut()
-                            .solid
-                            .rar4_encoder
-                            .get_or_insert_with(|| {
-                                crate::codec::legacy::rar29_encoder::Unpack29Encoder::with_options(
-                                    options,
-                                )
-                            });
-                    encoder.encode_member_streaming(
+                if codec == Some(LegacyCodec::Rar20) && !solid_mode {
+                    // RAR 2.x streams as a sequence of LZ blocks, one per window.
+                    crate::codec::legacy::rar20_encoder::encode_member_windowed_streaming(
                         &mut source,
                         &mut counter,
+                        legacy_rar20_options(level),
+                        crate::codec::legacy::rar20_encoder::RAR20_STREAM_WINDOW,
                         Some(&mut report),
                     )?;
                 } else {
-                    let mut encoder =
-                        crate::codec::legacy::rar29_encoder::Unpack29Encoder::with_options(options);
-                    encoder.encode_member_streaming(
-                        &mut source,
-                        &mut counter,
-                        Some(&mut report),
-                    )?;
+                    let options = crate::codec::legacy::rar29_encoder::options_for_level(level);
+                    if solid_mode {
+                        let encoder = self.write_ctx_mut().solid.rar4_encoder.get_or_insert_with(
+                            || {
+                                crate::codec::legacy::rar29_encoder::Unpack29Encoder::with_options(
+                                    options,
+                                )
+                            },
+                        );
+                        encoder.encode_member_streaming(
+                            &mut source,
+                            &mut counter,
+                            Some(&mut report),
+                        )?;
+                    } else {
+                        let mut encoder =
+                            crate::codec::legacy::rar29_encoder::Unpack29Encoder::with_options(
+                                options,
+                            );
+                        encoder.encode_member_streaming(
+                            &mut source,
+                            &mut counter,
+                            Some(&mut report),
+                        )?;
+                    }
                 }
             }
             let read = source.hasher.finalize();
@@ -632,30 +666,54 @@ impl RarArchive {
         } else {
             spill.clone()
         };
+        // Each generation has its own cipher for the member payload, and only
+        // RAR 3.x adds a salt: RAR 2.x and 3.x encrypt whole 16-byte blocks
+        // (the final one zero-padded), RAR 1.5 XORs a keystream.
         let mut salt = None;
+        let mut padded = false;
         let mut source = if password {
-            let mut salt_bytes = [0u8; 8];
-            rand::fill(&mut salt_bytes);
-            let cipher = crate::crypto::Rar30Cipher::new(
-                self.password
-                    .as_deref()
-                    .expect("password checked above")
-                    .as_bytes(),
-                Some(salt_bytes),
-            )
-            .map_err(|e| RarError::Format(format!("RAR4 member key setup: {e:?}")))?;
-            salt = Some(salt_bytes);
+            let password_bytes = self
+                .password
+                .as_deref()
+                .expect("password checked above")
+                .as_bytes();
+            let emitter: Box<dyn Rar4RangeEmitter> = match codec {
+                Some(LegacyCodec::Rar29) => {
+                    let mut salt_bytes = [0u8; 8];
+                    rand::fill(&mut salt_bytes);
+                    salt = Some(salt_bytes);
+                    padded = true;
+                    let cipher = crate::crypto::Rar30Cipher::new(password_bytes, Some(salt_bytes))
+                        .map_err(|e| RarError::Format(format!("RAR4 member key setup: {e:?}")))?;
+                    Box::new(Rar30RangeEmitter::new(cipher))
+                }
+                Some(LegacyCodec::Rar20) => {
+                    padded = true;
+                    Box::new(Rar20RangeEmitter::new(crate::crypto::Rar20Cipher::new(
+                        password_bytes,
+                    )))
+                }
+                Some(LegacyCodec::Rar15) => Box::new(Rar15RangeEmitter::new(
+                    crate::crypto::Rar15Cipher::new(password_bytes),
+                )),
+                _ => {
+                    return Err(RarError::Unsupported(format!(
+                        "RAR4 write encryption: unp_ver {} has no cipher",
+                        self.write_ctx().solid.rar4_unp_ver
+                    )));
+                }
+            };
             Rar4PayloadSource::Encrypted {
                 file: File::open(&source_path)?,
                 plain_len,
-                emitter: Box::new(Rar30RangeEmitter::new(cipher)),
+                emitter,
             }
         } else {
             Rar4PayloadSource::Plain {
                 file: File::open(&source_path)?,
             }
         };
-        let packed_size = if password {
+        let packed_size = if padded {
             plain_len.next_multiple_of(16)
         } else {
             plain_len
