@@ -92,6 +92,28 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
         run: cargo check -p rar-rs --all-features --target wasm32-wasip1-threads --locked
+      - name: Workspace versions agree
+        # The release job only compares the tag against `crates/rar-napi`, so the
+        # library and CLI drifted (0.1.2 vs the binding's 0.7.0). Everything here
+        # ships from one tree, so hold all four files to the same version.
+        run: |
+          set -euo pipefail
+          version() {
+            sed -n '/^\[package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p}' "$1" | head -1
+          }
+          lib=$(version crates/rar/Cargo.toml)
+          cli=$(version crates/rar-cli/Cargo.toml)
+          napi=$(version crates/rar-napi/Cargo.toml)
+          pkg=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
+            crates/rar-napi/package.json | head -1)
+          printf 'rar-rs=%s rar-cli=%s rar-rs-napi=%s package.json=%s\n' \
+            "$lib" "$cli" "$napi" "$pkg"
+          if [ -z "$lib" ] || [ "$lib" != "$cli" ] || [ "$lib" != "$napi" ] \
+            || [ "$lib" != "$pkg" ]; then
+            echo "::error::library, CLI, binding and package.json versions must match"
+            exit 1
+          fi
+        shell: bash
       - name: Cargo check (fuzz workspace)
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
       - name: Cargo fmt (fuzz workspace)

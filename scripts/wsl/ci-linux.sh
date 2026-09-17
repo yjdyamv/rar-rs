@@ -64,13 +64,29 @@ if want 1; then
 fi
 
 if want 2; then
-  step "2/19 host-path separator guard"
+  step "2/19 static guards (host paths, workspace versions)"
   printf "ends_with('%s')\nstarts_with('%s')\n" '\\' '\\' > /tmp/host-sep-patterns
   if grep -rnFf /tmp/host-sep-patterns --include='*.rs' crates/rar-cli/src crates/rar/src; then
     echo "!!! host paths must use std::path::is_separator, not a literal backslash" >&2
     exit 1
   fi
-  echo "clean"
+  # Mirrors the workflow's "Workspace versions agree": the release tag is only
+  # compared against the binding, so the library and CLI drifted once.
+  version() {
+    sed -n '/^\[package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p}' "$1" | head -1
+  }
+  lib=$(version crates/rar/Cargo.toml)
+  cli=$(version crates/rar-cli/Cargo.toml)
+  napi=$(version crates/rar-napi/Cargo.toml)
+  pkg=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
+    crates/rar-napi/package.json | head -1)
+  printf '  rar-rs=%s rar-cli=%s rar-rs-napi=%s package.json=%s\n' \
+    "$lib" "$cli" "$napi" "$pkg"
+  if [ -z "$lib" ] || [ "$lib" != "$cli" ] || [ "$lib" != "$napi" ] \
+    || [ "$lib" != "$pkg" ]; then
+    echo "!!! library, CLI, binding and package.json versions must match" >&2
+    exit 1
+  fi
 fi
 
 if want 3; then

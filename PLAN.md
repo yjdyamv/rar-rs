@@ -87,7 +87,7 @@
       / 编码侧 MIT OR Apache-2.0 的来源；② `recovery/legacy.rs` 声明了 rars
       移植但缺许可行。逐文件出处清单见
       [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)。
-- [ ] **打包与发布顺序**：`rar-rs`（0.1.2）已能 `cargo package` 并通过校验；
+- [ ] **打包与发布顺序**：`rar-rs`（0.8.0）已能 `cargo package` 并通过校验；
       `rar-cli` 依赖 workspace 内的 `rar-rs`，需先发布 `rar-rs`。三个 crate 的
       `readme` / `keywords` / `documentation` / `categories` 元数据已补齐
       （2026-09-16），但 `rar-cli` / `rar-rs-napi` 仍因 `rar-rs`
