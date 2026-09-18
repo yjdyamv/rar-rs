@@ -111,24 +111,50 @@ open ones (04, 09, 15) still have their own file.
 
 ## Measured level ladder (2026-09-18, single host)
 
-`cargo run --release --features parallel --example collectbench -- \
-/Windows/System32/ntoskrnl.exe <level> 8`
-(12.5 MiB DLL, dict 32 MiB). Snapshot, not a contract:
+`rar a -m<level> --dict-size 32m --threads <t>` on a 12.5 MiB DLL (the CLI path,
+so the x86 filter policy is in play). Snapshot, not a contract:
 
-| level | seq     | seq ratio | mt8     | mt8 ratio | mt8 vs seq |
-| ----- | ------- | --------- | ------- | --------- | ---------- |
-| m1    | 1067 ms | 54.05%    | 419 ms  | 53.77%    | -0.5%      |
-| m2    | 6548 ms | 46.88%    | 1006 ms | 52.70%    | +12.4%     |
-| m3    | 7242 ms | 46.67%    | 1166 ms | 52.05%    | +11.5%     |
-| m5    | 9247 ms | 46.67%    | 1221 ms | 52.05%    | +11.5%     |
+| level | seq (mt1)           | mt8, before ③       | mt8, row index      |
+| ----- | ------------------- | ------------------- | ------------------- |
+| m1    | 974 ms / 6,766,361  | (chain 4, not run)  | 1809 ms / 5,897,174 |
+| m2    | 6137 ms / 5,779,542 | (chain 16, not run) | 1755 ms / 5,897,174 |
+| m3    | 6727 ms / 5,751,821 | 1769 ms / 6,516,302 | 1850 ms / 5,897,174 |
+| m4    | 7705 ms / 5,750,782 | (chain 16, not run) | 1804 ms / 5,897,174 |
+| m5    | 9324 ms / 5,751,001 | (chain 16, not run) | 1886 ms / 5,897,174 |
 
-Readings: (1) the cliff is m1 -> m2 — one unpriced DP pass buys 7.2pp for ~6x
-the time, so the DP's per-position cost (not the repricing passes, which add
-0.2pp for up to 2.7 s) is what issue 09 is up against; (2) the MT tier is the
-hash-chain greedy+lazy parse at every level, capped at a 16-step chain, so its
-_level_ mostly changes that budget: mt8 m1 (`chain = 4`) is 419 ms at 53.77%
-against mt8 m3's 1166 ms at 52.05% — 2.6x for 1.7pp. The chain budget is the MT
-speed dial, and m1-quality ratio is the price of the cheap parse.
+The codec-only ladder measured earlier through `collectbench` (no filter policy,
+same file, same dictionary) is the frame of reference for the "cliff": m1 1067
+ms / 54.05%, m2 6548 ms / 46.88%, m3 7242 ms / 46.67%, m5 9247 ms / 46.67%. On
+the CLI numbers the m1 -> m2 step is 6,766,361 -> 5,779,542 B (**-14.6%** for
+6.3x the time), and above m2 the ladder is nearly flat: m3 -> m5 buys under
+0.02% for +39% time, with m5 not even monotone (5,751,001 B against m4's
+5,750,782 B) — the repricing passes add fraction-of-a-percent noise, which is
+what issue 09 records.
+
+What a level changes comes from `LEVEL_PARAMS` plus the parse-pass table, and
+nothing else (the dictionary is **not** level-dependent: `dict_log_for` defaults
+to 32 MiB at every level, capped at twice the file size, and `max_match` is
+0x1001 everywhere):
+
+| level | matcher       | chain budget | price passes | long-range table |
+| ----- | ------------- | ------------ | ------------ | ---------------- |
+| 1     | greedy + lazy | 4            | 0            | no               |
+| 2     | optimal DP    | 16           | 2            | yes              |
+| 3     | optimal DP    | 96           | 2            | yes              |
+| 4     | optimal DP    | 256          | 3            | yes              |
+| 5     | optimal DP    | 1024         | 4            | yes              |
+
+One consequence of ③ to be explicit about: the MT row-index tier takes a fixed
+candidate depth and DP block and ignores `chain budget`/`price passes`, so its
+output is **byte-identical at every level** (measured in the table above; `-m1`
+differs only by dropping the long-range table, which a single-member archive
+cannot use). That removes the old property that `-m` was the MT speed dial —
+before ③ the MT tier was the chain greedy capped at 16, so m1 (`chain 4`) ran
+419 ms at 53.77% against m3's 1166 ms at 52.05% in the codec-only frame. Wiring
+the depth back to the level (a `{8, 16, 32, 64, 128}` table) is a one-line
+change if `-m` should stay that dial; it is deliberately not done yet, because
+the measured spread above m2 sits inside run-to-run noise and depth 32 already
+costs text nothing.
 
 ### Issue 15 lever "cheaper incompressibility gate": landed (2026-09-18)
 
