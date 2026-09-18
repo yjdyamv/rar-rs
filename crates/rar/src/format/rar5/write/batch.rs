@@ -37,6 +37,27 @@ use crate::parallel::BatchWorkerGuard;
 #[cfg(feature = "parallel")]
 use crate::write_progress::ProgressTracker;
 
+/// Counts how often a batch member took the per-member MT branch. Test seam:
+/// the gate is a routing decision, so it needs a counter rather than a byte
+/// comparison (MT bytes are deliberately not pinned).
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) static MEMBER_MT_USES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Smallest member a wave will slice across the pool, or `None` when it cannot
+/// slice at all. A wave already runs one member per worker, so a member only
+/// has spare workers for its own MT slices when the wave is smaller than the
+/// pool; otherwise it keeps the three-chunk floor that kept member-level MT
+/// from nesting inside a saturated pool.
+#[cfg(feature = "parallel")]
+fn member_mt_min_len(threads: usize, wave_len: usize) -> Option<usize> {
+    (threads > 1).then_some(if wave_len < threads {
+        crate::codec::DEFAULT_CHUNK_SIZE
+    } else {
+        3 * crate::codec::DEFAULT_CHUNK_SIZE
+    })
+}
+
 impl RarArchive {
     #[cfg(feature = "parallel")]
     pub(crate) fn add_batch_parallel(&mut self, entries: &[BatchEntry<'_>]) -> RarResult<()> {
@@ -126,6 +147,7 @@ impl RarArchive {
             save_owner: self.write_ctx().meta.owner,
             time_precision_seconds: self.write_ctx().meta.time_precision_seconds,
             threads,
+            wave_len: wave.len(),
             cancel: self.cancel.clone(),
         };
         let results: Vec<RarResult<(usize, PreparedEntry)>> =
@@ -278,8 +300,17 @@ impl RarArchive {
                     // with one shared encoder state); smaller ones or
                     // solid chains keep the sequential chunk loop with
                     // per-64 KiB progress.
-                    const MT_MIN: usize = 3 * crate::codec::DEFAULT_CHUNK_SIZE;
-                    if ctx.threads > 1 && data.len() >= MT_MIN {
+                    //
+                    // The gate is the wave's shape, not the member alone (see
+                    // [`member_mt_min_len`]): a wave that fills the pool with
+                    // members has no workers left to hand a member's slices
+                    // to, while a smaller wave — the common single-file
+                    // `rar a` — slices from one chunk, which is what makes
+                    // `-mt` do something for the 4-12 MiB band there.
+                    let mt_min = member_mt_min_len(ctx.threads, ctx.wave_len);
+                    if mt_min.is_some_and(|min| data.len() >= min) {
+                        #[cfg(test)]
+                        MEMBER_MT_USES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let progress = progress.cloned();
                         let mut cb = move |done: u64, _total: u64| {
                             if let Some(progress) = &progress {
@@ -361,9 +392,11 @@ impl RarArchive {
             }
         } else {
             // add_bytes path: no filter attempt, one shared window. Same MT
-            // gate as the file path.
-            const MT_MIN: usize = 3 * crate::codec::DEFAULT_CHUNK_SIZE;
-            if ctx.threads > 1 && data.len() >= MT_MIN {
+            // gate as the file path, wave shape included.
+            let mt_min = member_mt_min_len(ctx.threads, ctx.wave_len);
+            if mt_min.is_some_and(|min| data.len() >= min) {
+                #[cfg(test)]
+                MEMBER_MT_USES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let progress = progress.cloned();
                 let mut cb = move |done: u64, _total: u64| {
                     if let Some(progress) = &progress {
@@ -572,5 +605,28 @@ impl RarArchive {
                 .report(member, unpacked_size, unpacked_size);
         }
         self.write_file_entry(&entry.plan, &entry.payload)
+    }
+}
+
+#[cfg(all(test, feature = "parallel"))]
+mod tests {
+    use super::member_mt_min_len;
+
+    /// The member-level MT gate is a routing decision ("did `-mt` do
+    /// anything?"), and it was wrong twice: `add.rs` sliced from one chunk
+    /// while the batch path the CLI actually uses kept a three-chunk floor,
+    /// so a 4.88 MiB member ignored `--threads 8` entirely (measured: a source
+    /// tree encoded identically at `--threads 1` and `8`).
+    #[test]
+    fn member_mt_gate_follows_the_wave_shape() {
+        let chunk = crate::codec::DEFAULT_CHUNK_SIZE;
+        // A solo member has the rest of the pool for its slices.
+        assert_eq!(member_mt_min_len(8, 1), Some(chunk));
+        assert_eq!(member_mt_min_len(8, 7), Some(chunk));
+        // A wave that fills the pool leaves no workers to slice with.
+        assert_eq!(member_mt_min_len(8, 8), Some(3 * chunk));
+        assert_eq!(member_mt_min_len(8, 64), Some(3 * chunk));
+        // One thread cannot slice at all.
+        assert_eq!(member_mt_min_len(1, 1), None);
     }
 }

@@ -116,11 +116,11 @@ so the x86 filter policy is in play). Snapshot, not a contract:
 
 | level | seq (mt1)           | mt8, before ③       | mt8, row index      |
 | ----- | ------------------- | ------------------- | ------------------- |
-| m1    | 974 ms / 6,766,361  | (chain 4, not run)  | 1809 ms / 5,897,174 |
-| m2    | 6137 ms / 5,779,542 | (chain 16, not run) | 1755 ms / 5,897,174 |
-| m3    | 6727 ms / 5,751,821 | 1769 ms / 6,516,302 | 1850 ms / 5,897,174 |
-| m4    | 7705 ms / 5,750,782 | (chain 16, not run) | 1804 ms / 5,897,174 |
-| m5    | 9324 ms / 5,751,001 | (chain 16, not run) | 1886 ms / 5,897,174 |
+| m1    | 974 ms / 6,766,361  | (chain 4, not run)  | 2106 ms / 5,949,729 |
+| m2    | 6137 ms / 5,779,542 | (chain 16, not run) | 1787 ms / 5,897,174 |
+| m3    | 6727 ms / 5,751,821 | 1769 ms / 6,516,302 | 2013 ms / 5,858,387 |
+| m4    | 7705 ms / 5,750,782 | (chain 16, not run) | 2306 ms / 5,830,234 |
+| m5    | 9324 ms / 5,751,001 | (chain 16, not run) | 2791 ms / 5,809,527 |
 
 The codec-only ladder measured earlier through `collectbench` (no filter policy,
 same file, same dictionary) is the frame of reference for the "cliff": m1 1067
@@ -144,17 +144,19 @@ to 32 MiB at every level, capped at twice the file size, and `max_match` is
 | 4     | optimal DP    | 256          | 3            | yes              |
 | 5     | optimal DP    | 1024         | 4            | yes              |
 
-One consequence of ③ to be explicit about: the MT row-index tier takes a fixed
-candidate depth and DP block and ignores `chain budget`/`price passes`, so its
-output is **byte-identical at every level** (measured in the table above; `-m1`
-differs only by dropping the long-range table, which a single-member archive
-cannot use). That removes the old property that `-m` was the MT speed dial —
-before ③ the MT tier was the chain greedy capped at 16, so m1 (`chain 4`) ran
-419 ms at 53.77% against m3's 1166 ms at 52.05% in the codec-only frame. Wiring
-the depth back to the level (a `{8, 16, 32, 64, 128}` table) is a one-line
-change if `-m` should stay that dial; it is deliberately not done yet, because
-the measured spread above m2 sits inside run-to-run noise and depth 32 already
-costs text nothing.
+`-m` under `-mt`: the MT row-index tier carries its own level dial, a candidate
+depth per level (`MT_ROW_INDEX_DEPTH` = 16/32/64/128/256 for m1..m5, measured in
+the table above), because the chain budget and the pricing passes are
+sequential-tier concepts. The packed column is monotone in depth and the time
+column is not — on text a deeper walk is _faster_ as well as smaller, since the
+long match it finds lets the priced DP commit and skip the positions it covers.
+On the 4.88 MiB source tree at `-mt8` the ladder is 973,459 / 951,894 / 935,472
+/ 923,202 / 914,457 B against a sequential 1,180,957 (m1, greedy) / 922,257 (m3)
+/ 921,710 (m5), so m5 beats the sequential parse there while m1 stays the cheap
+rung. The remaining known gap: the MT DP runs one pricing pass where the
+sequential m3 runs two and m5 four, which is why the MT _default_ level is still
+1.4% behind sequential on text (935,472 against 922,257 B); giving the MT DP the
+level's pass count is the next lever, not a tuning constant.
 
 ### Issue 15 lever "cheaper incompressibility gate": landed (2026-09-18)
 
@@ -229,21 +231,24 @@ members, an earlier MT window).
 
 Each step, measured on dll.bin 12.5 MiB m3 mt8 (greedy 6,516,302 B):
 
-| step                                                | time    | packed    |
-| --------------------------------------------------- | ------- | --------- |
-| chain candidates, one run per position (old tier)   | 3211 ms | 5,997,137 |
-| row index, 3-byte hash, one run, depth 32           | 2461 ms | 6,115,336 |
-| + multi-run candidates, depth 64 (still 3-byte)     | 2404 ms | 5,999,488 |
-| + 4-byte hash and 2^20 buckets, depth 32            | 1719 ms | 5,897,159 |
-| + DP block 1 MiB instead of 64 KiB (depth 64)       | 2184 ms | 5,999,545 |
-| **landed: 4-byte hash, depth 32, DP block 256 KiB** | 2328 ms | 5,897,174 |
+| step                                                       | time    | packed    |
+| ---------------------------------------------------------- | ------- | --------- |
+| chain candidates, one run per position (old tier)          | 3211 ms | 5,997,137 |
+| row index, 3-byte hash, one run, depth 32                  | 2461 ms | 6,115,336 |
+| + multi-run candidates, depth 64 (still 3-byte)            | 2404 ms | 5,999,488 |
+| + 4-byte hash and 2^20 buckets, depth 32                   | 1719 ms | 5,897,159 |
+| + DP block 1 MiB instead of 64 KiB (depth 64)              | 2184 ms | 5,999,545 |
+| **landed: 4-byte hash, DP block 256 KiB, depth per level** | 2013 ms | 5,858,387 |
 
 The 4-byte key is what made it cheap: every bucket member is then a potential
 4-byte match, so no probe is spent on candidates that cannot reach the minimum
 length (2^16 three-byte buckets over 12.5 MiB average ~190 entries). Depth is a
-dial on dense binaries only (128 -> 5,830,216 B, 512 -> 5,794,406 B) and costs
-text nothing, because a 4-byte hash over 4.88 MiB of source leaves ~5 entries
-per bucket.
+dial on dense binaries (128 -> 5,830,216 B, 256 -> 5,809,527 B) and is now the
+per-level MT dial again (see the ladder section). An earlier version of this
+file claimed depth "costs text nothing, because a 4-byte hash over 4.88 MiB of
+source leaves ~5 entries per bucket"; that was measured while MT was not
+engaging for that member at all (routing bug recorded below), and the real text
+ladder is 951,894 / 935,472 / 923,202 / 914,457 B for depth 32 / 64 / 128 / 256.
 
 Results (m3, dict 32m, `-mt8`, real CLI, this host):
 
@@ -292,11 +297,24 @@ member in the 4-12 MiB band (a very common size) took the sequential path even
 with `-mt8` — measured: a 4.88 MiB source tree encoded identically, same bytes
 and same milliseconds, at `--threads` 1 and 8.
 
+Lowering the buffered (`add.rs`) gate to one chunk was the first attempt, and it
+did not fix the CLI: `rar a` routes through `batch.rs` and never touches that
+branch (instrumented — the `add.rs` print never fired). That is also why every
+"MT on src.txt" number recorded earlier in this file was really a sequential
+number. The batch gate is **wave-shape aware** now: a wave that already fills
+the pool with members keeps the three-chunk floor (slicing there would nest MT
+in a saturated pool), while a smaller wave — the common single-file `rar a` —
+slices from one chunk. Measured on a 4.88 MiB source tree at `-m3`:
+`--threads 8` now differs from `--threads 1` (935,472 B / 1133 ms against
+922,257 B / 2669 ms), where before it produced byte-identical output at both
+settings.
+
 What the floor implicitly balanced, now measured: a slice re-inserts its
 lookbehind (up to `NEAR_WINDOW_MAX` = 8 MiB) for a slice floored at 2 MiB, so
-the band pays a large insert volume for only 2-5 slices. Lowering it to one
-chunk (`add.rs`, single-member path only; the batch gate stays at 3 chunks to
-avoid nested MT inside a pool wave) gives: 4.88 MiB text 2799 -> 2340 ms
+the band pays a large insert volume for only 2-5 slices. That insert is exactly
+what the row index removed (above), which is why the floor could come down at
+all. chunk (`add.rs`, single-member path only; the batch gate stays at 3 chunks
+to avoid nested MT inside a pool wave) gives: 4.88 MiB text 2799 -> 2340 ms
 (**+1.2x**) with **byte-identical** output, very compressible data unchanged (6
 MiB XML: 617 vs 614 ms, same bytes — the sequential parse already steps over
 it), DLL and sub-4 MiB members unchanged.

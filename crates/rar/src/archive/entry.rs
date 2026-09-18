@@ -84,6 +84,10 @@ pub(crate) struct BatchPrepareCtx<'a> {
     pub(crate) time_precision_seconds: bool,
     /// Compression worker count for this batch (per-file MT slicing).
     pub(crate) threads: usize,
+    /// Members in this wave. The wave already runs one member per worker, so
+    /// a member only has spare workers to hand its MT slices to when the wave
+    /// is smaller than `threads`; slicing anyway nests MT in a saturated pool.
+    pub(crate) wave_len: usize,
     /// Caller-owned cancellation flag, checked per chunk in the parallel
     /// prepare loop; `None` = never cancelled.
     pub(crate) cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,

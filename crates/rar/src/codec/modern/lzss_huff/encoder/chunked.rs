@@ -336,6 +336,9 @@ pub(crate) fn encode_chunked_mt_with_progress(
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     let long_range = level >= 2;
+    // The row index's candidate depth is the MT tier's level dial (see
+    // [`MT_ROW_INDEX_DEPTH`]); the chain budget above is the fallback tier's.
+    let row_depth = MT_ROW_INDEX_DEPTH[level];
     // MT parse is the low-step tier by design: workers slice with the cheap
     // hash-chain greedy+lazy search instead of the optimal (BT4) parse,
     // cutting the per-position step count well below the tree's. It accepts
@@ -455,6 +458,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
                             variant,
                             (k == 0).then_some(lead_symbols).flatten(),
                             Some(row_index_ref),
+                            row_depth,
                             state,
                             // Only the first slice sees chain history as its
                             // lookbehind; later slices look into this window.
@@ -511,16 +515,6 @@ pub(crate) fn encode_chunked_mt_with_progress(
 /// binary keep their repeated windows and seed normally. Shares the window
 /// statistic with the write path's incompressibility screen
 /// ([`crate::codec::common::incompressible::distinct_window_percent`]).
-/// Candidates the MT row-index parse compares per position. Fixed like the
-/// low-step tier's chain cap: MT is the speed tier, and 32 is where a deeper
-/// walk still buys ratio on dense binaries while costing text nothing (its
-/// buckets hold a handful of positions).
-const MT_ROW_INDEX_DEPTH: usize = 32;
-
-/// How far one DP block spans in the MT row-index parse. The driver in
-/// `parse.rs` owns the number; this is the value it uses.
-pub(super) const MT_ROW_INDEX_DP_BLOCK: usize = super::parse::MT_DP_BLOCK_SIZE;
-
 #[cfg(feature = "parallel")]
 fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
     const PROBE_LEN: usize = 256 * 1024;
@@ -529,6 +523,36 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
     crate::codec::common::incompressible::distinct_window_percent(probe)
         .is_some_and(|percent| percent >= DISTINCT_PERCENT)
 }
+
+/// Candidates the MT row-index parse compares per position, by level: this is
+/// the MT tier's speed/ratio dial, the job the chain budget did for the old
+/// greedy tier, and what makes `-m` mean something under `-mt` again.
+///
+/// Measured at `-mt8`, dict 32m, real CLI (level 0 is store, unused):
+///
+/// | level | depth | 12.5 MiB DLL        | 4.88 MiB source tree |
+/// | ----- | ----- | ------------------- | -------------------- |
+/// | 1     | 16    | 2106 ms / 5,949,729 | 739 ms / 973,459     |
+/// | 2     | 32    | 1787 ms / 5,897,174 | 897 ms / 951,894     |
+/// | 3     | 64    | 2013 ms / 5,858,387 | 2167 ms / 935,472    |
+/// | 4     | 128   | 2306 ms / 5,830,234 | 1992 ms / 923,202    |
+/// | 5     | 256   | 2791 ms / 5,809,527 | 1891 ms / 914,457    |
+///
+/// The packed column is monotone in depth on both corpora; the **time is not**,
+/// which is worth remembering when tuning: a deeper walk finds the long match
+/// that lets the priced DP commit and skip every position it covers, so on text
+/// m3 -> m5 is both smaller *and* faster (2167 -> 1891 ms), while on dense
+/// binaries depth buys ratio at a real time cost (2106 -> 2791 ms on the DLL).
+///
+/// For scale, the sequential parse of the DLL at m3 is 5,751,821 B / 6727 ms and
+/// of the source tree 922,257 B / 2669 ms, so m5 lands within 1% of the
+/// sequential ratio on the DLL and *below* it on the source tree, while m1 stays
+/// the cheap rung (+2.3% on the source tree, still 3.6x faster than sequential).
+const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 32, 64, 128, 256];
+
+/// How far one DP block spans in the MT row-index parse. The driver in
+/// `parse.rs` owns the number; this is the value it uses.
+pub(super) const MT_ROW_INDEX_DP_BLOCK: usize = super::parse::MT_DP_BLOCK_SIZE;
 
 /// MT-only row-index parse (issue 15 / step ③): the sequential path's optimal
 /// parse over candidates from a **shared, read-only** row index built once per
@@ -539,12 +563,17 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 /// arrays — which is what makes the priced DP affordable at MT speed, and every
 /// worker can reach the member's whole dictionary instead of just its tail.
 ///
-/// Measured on a 12.5 MiB DLL at `-m3 -mt8` against the greedy chain tier it
-/// replaces: 1719 ms / 5,897,159 B versus 1769 ms / 6,516,302 B — the same time
-/// for 9.5% fewer bytes. A 75 MB binary stream lands at 17,935,661 B, within
-/// 0.25% of the sequential parse (17,894,515 B) at 2.1x its speed. Text, XML and
-/// mixed corpora come out byte-identical to that tier: their 4-byte buckets hold
-/// a handful of positions, so the candidate set is the same.
+/// Measured at `-m3 -mt8` against the greedy chain tier it replaces: on the
+/// 12.5 MiB DLL 5,858,387 B / 2013 ms against 6,516,302 B / 1769 ms, and on a
+/// 75 MB binary stream 17,838,318 B / 15936 ms against 20,021,162 B / 7513 ms —
+/// the streaming number is within 0.32% of the *sequential* parse (17,894,515 B,
+/// ~28 s) at 1.75x its speed.
+///
+/// On text it costs ratio at the default level (4.88 MiB source tree: 935,472 B
+/// against sequential 922,257 B, for 2.4x the speed) because this tier spends its
+/// budget on candidates while the sequential path spends it on 2-4 pricing
+/// passes; deeper levels beat sequential there instead (m5: 914,457 B against
+/// 921,710 B). The level's candidate depth is [`MT_ROW_INDEX_DEPTH`].
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
 fn mt_slice_symbols_row_index(
@@ -555,6 +584,8 @@ fn mt_slice_symbols_row_index(
     index: &super::parse::RowIndex,
     lr_shared: &match_finder::LongRange,
     entry_len: usize,
+    // Candidates compared per position; the MT tier's level dial.
+    depth: usize,
     max_match: usize,
     dict_size: usize,
     long_range: bool,
@@ -580,16 +611,7 @@ fn mt_slice_symbols_row_index(
         dict_size,
         variant,
         lr_q,
-        |pos, _cache, runs| {
-            index.collect(
-                data,
-                pos,
-                dict_size.min(pos),
-                max_match,
-                MT_ROW_INDEX_DEPTH,
-                runs,
-            )
-        },
+        |pos, _cache, runs| index.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
     );
     state.dist_cache = dist_cache;
     state.last_length = last_length;
@@ -625,6 +647,9 @@ fn encode_mt_slice(
     // Shared read-only row index over the whole member (issue 15 step ③): every
     // MT slice parses against it, which is what makes a slice self-sufficient.
     index: Option<&super::parse::RowIndex>,
+    // Candidates compared per position (the level dial); only the row-index
+    // branch reads it.
+    depth: usize,
     state: &mut EncoderState,
     // Seed the lookbehind even when its sampled windows look random. The
     // probe above only measures whether the tail repeats *inside itself*,
@@ -696,8 +721,8 @@ fn encode_mt_slice(
     // do not (the sequential-quality probe and tests).
     let mut symbols = if let Some(index) = index {
         mt_slice_symbols_row_index(
-            state, data, s0, e0, index, lr_shared, entry_len, max_match, dict_size, long_range,
-            variant,
+            state, data, s0, e0, index, lr_shared, entry_len, depth, max_match, dict_size,
+            long_range, variant,
         )
     } else {
         mt_slice_symbols_low_step(
