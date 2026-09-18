@@ -1,7 +1,7 @@
 # rar-rs 计划
 
 > 最后核对：2026-09-18 @ `1fbfaba`（solid 链内过滤器、v15/RAR13
-> 大成员增量压缩为本轮改动）；实现细节以源码为准。
+> 大成员增量压缩、solid PPMd 续模型为本轮改动）；实现细节以源码为准。
 
 本文件只留**结论**与**下一步**。历次审计、逐批修复与加固的过程记录在 git 历史
 （旧版详单：`git show c2c43d4:PLAN.md`）；本文件不再维护 CHANGELOG。
@@ -229,14 +229,21 @@
       `official_unrar_validates_solid_legacy_filter_chain`（本机官方 UnRAR 7.23
       `t` 通过）；重构对无过滤路径逐字节不变（7 组语料 packed
       流哈希与改动前一致）。
-- [ ] **RAR4 solid 链 PPMd 续模型实际未生效**（2026-09-18 核对时发现）：
-      `encode_solid_member` 先调 `encode_member`，后者把 `last_was_ppmd` 置
-      false，随后 `encode_ppmd_member_chain` 的 `continuing` 恒为 false——所以
-      solid PPMd 成员每块都发新模型头（0xA7），0x87 续模型分支在产物里不可达。
-      自引入该特性的提交 `cce4e15` 起就是这样（当时 `encode_member` 已清标志），
-      互操作测试仍全绿只是因为「新模型」本身合法。修法：在 PPMd 试验前使用上一
-      成员的真实 `last_was_ppmd`（本轮重构已刻意保留现状字节，未启用该分支）。
-      属字节契约变更，需官方解码器与文档一并复核。
+- [x] **RAR4 solid 链 PPMd 续模型**（已修 2026-09-18）：`encode_solid_member`
+      原先经 `encode_member` 把 `last_was_ppmd` 置 false，随后
+      `encode_ppmd_member_chain` 的 `continuing` 恒为 false——solid PPMd
+      每块都发新模型头（0xA7），0x87 续模型分支自 `cce4e15`
+      引入起在产物里不可达。现改为试验前保留链上标志，LZ 胜出时显式置
+      false，即「上一个已发射成员是 PPMd」⇒ 续模型（见
+      [`docs/rar4-creation-spec.md`](docs/rar4-creation-spec.md)）。验证：单测
+      `solid_ppmd_chain_continues_the_carried_model`（连续 PPMd
+      成员续模型且更小、 中间夹 LZ
+      成员后与全新模型逐字节相同、整链单解码器逐成员回环）；4×250 KB 词随机文本
+      solid m5 归档 99755 → 97696 B（−2.06%，续用成员各小 635–735
+      B）；新增官方互操作 `official_unrar_validates_solid_ppmd_chain`（本机官方
+      UnRAR 7.23 `t` + 逐成员 `x` 字节一致）；库级
+      `create_rar4_solid_ppmd_text_chain` 改用词随机语料，使 PPMd
+      真正胜出（原先的重复语料会被 LZ 接管）。
 - [ ] **RAR4 solid 归档 MT**：legacy solid 链保持串行；成员级并行需跨成员共享
       窗口，属结构性代价（RAR5 的 chunk 级 MT 已兑现）。
 - **有意不做（设计决定，2026-09-17）**：
@@ -286,8 +293,8 @@
 - **老容器族读取（RAR 1.3–4.x）**：三代解码器（RAR29/20/15）+ PPMd + 五大标准 VM
   过滤器 + 通用 RARVM 解释器，solid 链、分卷、`-hp`、各代数据解密。
 - **RAR4 创建全能力**：LZSS m1–m5 + PPMd + 六大标准 VM 过滤器 + `-hp` + 多卷 +
-  solid（链内亦应用 VM 过滤器；PPMd 模型续见「下一步」的开放项）+ 并行 batch +
-  单大成员块级 MT（字节同等）+ NEWSUB 恢复记录。
+  solid（链内亦应用 VM 过滤器与 PPMd 模型延续）+ 并行 batch + 单大成员块级
+  MT（字节同等）+ NEWSUB 恢复记录。
 - **RAR 1.3 / 1.4 / 1.5 / 2.x 创建**：`-ma13` / `-ma14` / `-ma15` / `-ma2`，含
   solid、`-p` / `-hp`、旧命名分卷；≥ 64 MiB 的 v15/RAR13 成员也增量压缩流式
   （spill，内存有界），v20 大成员仍走 STORE 流式。

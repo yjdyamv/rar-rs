@@ -250,6 +250,79 @@ fn official_unrar_validates_streamed_rar13_large_member() {
     );
 }
 
+/// A solid RAR4 m5 archive whose members are all coded PPMd carries one model
+/// across the chain: after the first member the encoder emits 0x87 continuing
+/// headers instead of fresh 0xA7 models. Official UnRAR has to rebuild the
+/// shared model and extract the members byte-identically.
+#[test]
+fn official_unrar_validates_solid_ppmd_chain() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(), // skipped unless the interop script sets it
+    };
+    let dir = make_temp_dir();
+    const VOCAB: [&str; 16] = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+        "lambda", "mu", "nu", "xi", "omicron", "pi",
+    ];
+    // Word-random text: weak distance matches, strong context model, so every
+    // member is coded PPMd and the chain really continues.
+    let mut members = Vec::new();
+    for chapter in 1..=4u64 {
+        let mut state = 0x1234_5678u64 ^ (chapter * 0x9E37_79B9);
+        let mut content = Vec::with_capacity(250_000);
+        while content.len() < 250_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            content.extend_from_slice(VOCAB[(state >> 33) as usize % VOCAB.len()].as_bytes());
+            content.push(b' ');
+        }
+        members.push((format!("chap{chapter}.txt"), content));
+    }
+
+    let path = dir.path().join("solid-ppmd.rar");
+    let mut rar = rar_rs::ArchiveWriter::create_with(
+        &path,
+        rar_rs::WriterOptions::default()
+            .compression(rar_rs::ArchiveVersion::V29)
+            .solid_mode(rar_rs::SolidMode::Continuous),
+    )
+    .unwrap_or_else(|e| panic!("create solid PPMd chain: {e}"));
+    let opts = EntryWriteOptions::new().compression_level(CompressionLevel::try_from(5u8).unwrap());
+    for (name, content) in &members {
+        rar.add_bytes(name, content, opts).unwrap();
+    }
+    rar.finish().unwrap();
+
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg("-idq")
+        .arg(path.as_os_str())
+        .status()
+        .expect("spawn unrar");
+    assert!(status.success(), "unrar t rejected the solid PPMd chain");
+
+    let out = dir.path().join("out-ppmd");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(&unrar)
+        .arg("x")
+        .arg("-idq")
+        .arg("-o+")
+        .arg(path.as_os_str())
+        .arg(out.as_os_str())
+        .status()
+        .expect("spawn unrar");
+    assert!(status.success(), "unrar x failed on the solid PPMd chain");
+    for (name, content) in &members {
+        assert_eq!(
+            &std::fs::read(out.join(name)).unwrap(),
+            content,
+            "UnRAR must rebuild the shared PPMd model for {name}"
+        );
+    }
+}
+
 #[test]
 #[allow(clippy::type_complexity)]
 fn official_unrar_validates_our_feature_archives() {

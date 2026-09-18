@@ -1932,14 +1932,12 @@ impl Unpack29Encoder {
         // stay at the pre-member value). The next member's keep/delta table
         // decision is made against exactly that state.
         let lz = self.best_lz_candidate(input, candidates)?;
-        // The plain candidate used to run through `encode_member`, which
-        // clears this flag; keep that exact starting state so the refactor
-        // stays byte-identical (see the note on `encode_ppmd_member_chain`).
-        self.last_was_ppmd = false;
-        // The PPMd trial may continue the carried model; try on a clone so a
-        // loss leaves the model untouched for a later member.
+        // The PPMd trial continues the carried model when the previous
+        // compressed member was PPMd (`encode_ppmd_member_chain` reads
+        // `last_was_ppmd` for that) and starts a fresh one otherwise. Trying
+        // on a clone means a loss leaves the model untouched for a later
+        // member.
         let saved = self.ppmd.clone();
-        let saved_flag = self.last_was_ppmd;
         let trial = self.encode_ppmd_member_chain(input);
         match trial {
             Ok(ppmd) if ppmd.len() < lz.packed.len() => {
@@ -1953,9 +1951,11 @@ impl Unpack29Encoder {
             _ => {
                 // LZ member emitted: commit this candidate's table and the
                 // bytes its LZ layer actually coded. Only the failed or
-                // losing PPMd trial is rolled back.
+                // losing PPMd trial is rolled back, and the next PPMd member
+                // starts a fresh model because the last emitted member was
+                // not PPMd.
                 self.ppmd = saved;
-                self.last_was_ppmd = saved_flag;
+                self.last_was_ppmd = false;
                 self.levels = lz.levels;
                 self.remember(lz.coded.as_deref().unwrap_or(input));
                 Ok(lz.packed)
@@ -2594,6 +2594,119 @@ mod tests {
             fourth.len(),
             second.len()
         );
+    }
+
+    /// A solid chain must actually continue the carried PPMd model. Two PPMd
+    /// members in a row share it (the second beats a fresh model on new text
+    /// from the same vocabulary), while a member whose PPMd trial loses clears
+    /// the gate so the next PPMd member starts fresh — byte-identically to a
+    /// chain that never saw a PPMd member. Every text member here is
+    /// word-random *and distinct*, so PPMd wins it in both chains: a repeated
+    /// text would let the LZ side match the history and flip the winner, which
+    /// would hide what the PPMd gate did. The reader rejects a continuing
+    /// header when it has no model, so the chain is also decoded member by
+    /// member with one decoder.
+    #[test]
+    fn solid_ppmd_chain_continues_the_carried_model() {
+        const VOCAB: [&str; 12] = [
+            "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+            "lambda", "mu",
+        ];
+        fn word_random_text(seed: u64, words: usize) -> Vec<u8> {
+            let mut state = seed;
+            let mut out = String::new();
+            for _ in 0..words {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                out.push_str(VOCAB[(state >> 33) as usize % VOCAB.len()]);
+                out.push(' ');
+            }
+            out.into_bytes()
+        }
+        let text = word_random_text(0x1234_5678, 4_000);
+        let other = word_random_text(0x9E37_79B9_7F4A_7C15, 4_000);
+        let third = word_random_text(0xDEAD_BEEF_CAFE_F00D, 4_000);
+        // x86-shaped: the E8/E8E9 candidate packs it hard while PPMd (which has
+        // no filters) cannot, so this member's PPMd trial must lose.
+        let lz_member = x86_shaped(60_000);
+        let lz_candidates = [(
+            Rar29FilterKind::E8E9,
+            std::iter::once(0..lz_member.len()).collect::<Vec<_>>(),
+        )];
+        let level = options_for_level(5);
+        let encode =
+            |encoder: &mut Unpack29Encoder,
+             data: &[u8],
+             candidates: &[(Rar29FilterKind, Vec<std::ops::Range<usize>>)]| {
+                encoder
+                    .encode_solid_member_with_filter_candidates(data, candidates)
+                    .unwrap()
+            };
+
+        let mut chain = Unpack29Encoder::with_options(level);
+        let first = encode(&mut chain, &text, &[]);
+        let continued = encode(&mut chain, &other, &[]);
+        let middle = encode(&mut chain, &lz_member, &lz_candidates);
+        let after_lz = encode(&mut chain, &third, &[]);
+
+        // The same two members coded as the first member of a fresh chain.
+        let fresh_other = encode(&mut Unpack29Encoder::with_options(level), &other, &[]);
+        let fresh_third = encode(&mut Unpack29Encoder::with_options(level), &third, &[]);
+
+        // The high bit of the first byte is the block-type bit the reader
+        // reads first: set = PPMd block, clear = LZ block.
+        for (tag, packed) in [
+            ("first", &first),
+            ("continued", &continued),
+            ("after_lz", &after_lz),
+        ] {
+            assert!(
+                packed[0] & 0x80 != 0,
+                "{tag}: the text member must be coded PPMd"
+            );
+        }
+        assert!(
+            middle[0] & 0x80 == 0,
+            "the x86 member must be an LZ (filter) win"
+        );
+        assert!(
+            middle.len() < lz_member.len() / 4,
+            "the middle member must really compress ({} of {} packed)",
+            middle.len(),
+            lz_member.len()
+        );
+        assert_ne!(
+            continued, fresh_other,
+            "the second PPMd member must continue the carried model"
+        );
+        assert!(
+            continued.len() < fresh_other.len(),
+            "continuing must beat a fresh model on new text from the same vocabulary ({} vs {})",
+            continued.len(),
+            fresh_other.len()
+        );
+        assert_eq!(
+            after_lz, fresh_third,
+            "an LZ member must clear the gate, so the next PPMd member starts fresh"
+        );
+
+        // One reader across the whole chain: it must reproduce every member
+        // (its model carries across the LZ member without a reset).
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
+        for (packed, expected) in [
+            (&first, &text),
+            (&continued, &other),
+            (&middle, &lz_member),
+            (&after_lz, &third),
+        ] {
+            assert_eq!(
+                decoder
+                    .decode_member(packed, expected.len() as u64)
+                    .unwrap(),
+                *expected
+            );
+        }
     }
 
     #[test]

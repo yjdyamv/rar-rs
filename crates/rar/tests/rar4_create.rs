@@ -1406,20 +1406,29 @@ fn create_rar4_auto_audio_filter_on_waveform() {
 /// carried model across members where it pays), so a run of near-identical
 /// text files must compress far better solid than non-solid, and every
 /// member round-trips byte-identically through the RAR4 reader.
+///
+/// The corpus is word-random from a small vocabulary: distance matches are
+/// short, so PPMd wins every member and the chain's model is what carries —
+/// a repetitive corpus would let the LZ side match the history and flip the
+/// winner, hiding the continuation.
 #[test]
 fn create_rar4_solid_ppmd_text_chain() {
     let dir = make_temp_dir();
+    const VOCAB: [&str; 16] = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+        "lambda", "mu", "nu", "xi", "omicron", "pi",
+    ];
     let mut sources = Vec::new();
-    for chapter in 1..=4u8 {
+    for chapter in 1..=4u64 {
         let src = dir.path().join(format!("chap{chapter}.txt"));
+        let mut state = 0x1234_5678u64 ^ (chapter * 0x9E37_79B9);
         let mut content = Vec::with_capacity(250_000);
-        for line in 0..2500u32 {
-            content.extend_from_slice(
-                format!(
-                    "chapter {chapter} line {line:05}: shared boilerplate text that repeats across every chapter of this archive body body body\n"
-                )
-                .as_bytes(),
-            );
+        while content.len() < 250_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            content.extend_from_slice(VOCAB[(state >> 33) as usize % VOCAB.len()].as_bytes());
+            content.push(b' ');
         }
         std::fs::write(&src, &content).unwrap();
         sources.push((src, content));
