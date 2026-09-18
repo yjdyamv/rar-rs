@@ -497,33 +497,19 @@ pub(crate) fn encode_chunked_mt_with_progress(
 }
 
 /// Cheap per-slice probe: would inserting this tail into the low-step
-/// finder ever pay off? Samples 4-byte windows every [`MT_SEED_PROBE_STRIDE`]
-/// bytes over the tail's head. A tail whose sampled windows are (almost)
+/// finder ever pay off? A tail whose sampled 4-byte windows are (almost)
 /// all distinct has no long repeats, so seeding it is wasted work — random
 /// media, compressed/encrypted data — while text, code and structured
-/// binary keep their repeated windows and seed normally.
-///
-/// The 4-byte windows are compared raw (no hash), so the distinct count
-/// is exact: random input measures ~100%, any input with real repeats
-/// (including base64/hex text, whose alphabet still cycles within a
-/// window) stays well below the threshold.
+/// binary keep their repeated windows and seed normally. Shares the window
+/// statistic with the write path's incompressibility screen
+/// ([`crate::codec::common::incompressible::distinct_window_percent`]).
 #[cfg(feature = "parallel")]
 fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
-    const STRIDE: usize = 16;
     const PROBE_LEN: usize = 256 * 1024;
-    const MIN_WINDOWS: usize = 4096; // 64 KiB of sampled windows
     const DISTINCT_PERCENT: usize = 95;
     let probe = &tail[..tail.len().min(PROBE_LEN)];
-    let mut seen = std::collections::HashSet::with_capacity(probe.len() / STRIDE + 1);
-    let mut windows = 0usize;
-    let mut off = 0usize;
-    while off + 4 <= probe.len() {
-        let v = u32::from_le_bytes([probe[off], probe[off + 1], probe[off + 2], probe[off + 3]]);
-        seen.insert(v);
-        windows += 1;
-        off += STRIDE;
-    }
-    windows >= MIN_WINDOWS && seen.len() * 100 >= windows * DISTINCT_PERCENT
+    crate::codec::common::incompressible::distinct_window_percent(probe)
+        .is_some_and(|percent| percent >= DISTINCT_PERCENT)
 }
 
 /// Encode one worker slice `[s0, e0)` of [`encode_chunked_mt`].

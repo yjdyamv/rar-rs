@@ -1692,6 +1692,86 @@ fn writer_solid_chain_applies_member_filters_and_stays_solid() {
     );
 }
 
+/// The cheap incompressibility screen is a pure optimization: skipping a probe
+/// it clears can only ever remove a STORE verdict the codec would have reached
+/// itself, so a compressible member's archive bytes must not move. This pins
+/// that end to end (the two builds differ only in the screen).
+#[test]
+fn writer_structural_screen_keeps_archive_bytes_identical() {
+    use crate::codec::common::incompressible::{screen_test_lock, set_screen_enabled};
+
+    let _lock = screen_test_lock();
+    let dir = tempfile::tempdir().unwrap();
+    // Structured members well above the 2 MiB probe floor, so the probe (and
+    // therefore the screen) is in play for both of them.
+    let mut state = 0x1234_5678u64;
+    let mut text = Vec::with_capacity(3 << 20);
+    let words = ["the", "quick", "brown", "fox", "archive", "window", "match"];
+    while text.len() < 3 << 20 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_088_963_407);
+        text.extend_from_slice(words[(state >> 33) as usize % words.len()].as_bytes());
+        text.push(b' ');
+    }
+    let mut code = Vec::with_capacity(3 << 20);
+    while code.len() < 3 << 20 {
+        code.push(0xE8);
+        let target = 0x40_0000u32.wrapping_sub(code.len() as u32);
+        code.extend_from_slice(&target.to_le_bytes());
+        code.extend_from_slice(&[0x90, 0x90, 0x90]);
+    }
+
+    let build = |name: &str| -> (Vec<(u64, u64)>, u64) {
+        let path = dir.path().join(name);
+        let mut archive = RarArchive::create_with_options(&path, Default::default()).unwrap();
+        archive.add_bytes("text.txt", &text, 3).unwrap();
+        archive.add_bytes("code.exe", &code, 3).unwrap();
+        archive.close().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        // Only the packed member streams are compared: the headers carry the
+        // wall-clock time, so two builds seconds apart can never be
+        // byte-identical as files.
+        let archive = crate::archive::ArchiveReader::open(&path).unwrap();
+        let names: Vec<String> = archive
+            .entries()
+            .map(|entry| entry.name().to_string())
+            .collect();
+        let mut streams = Vec::new();
+        for name in &names {
+            let id = archive.unique_entry(name).unwrap();
+            let entry = archive.entry(id).unwrap();
+            let start = entry.data_offset() as usize;
+            let end = start + entry.compressed_size() as usize;
+            let mut hash = 0xcbf2_9ce4_8422_2325u64;
+            for byte in &bytes[start..end] {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+            streams.push((hash, entry.compressed_size()));
+        }
+        (streams, bytes.len() as u64)
+    };
+
+    set_screen_enabled(true);
+    let (screened, screened_len) = build("screened.rar");
+    set_screen_enabled(false);
+    let (raw, raw_len) = build("raw.rar");
+    set_screen_enabled(true);
+
+    // The members really compressed (so the probe was consulted and cleared),
+    // and every packed stream is the same either way.
+    let packed: u64 = screened.iter().map(|&(_, size)| size).sum();
+    assert!(
+        packed < (text.len() + code.len()) as u64 / 2,
+        "the structured members must compress, got {packed} packed bytes"
+    );
+    assert_eq!(
+        screened, raw,
+        "the screen must not change the packed streams ({screened_len} vs {raw_len} archive bytes)"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn extract_options_skip_and_allow_unsafe_links() {

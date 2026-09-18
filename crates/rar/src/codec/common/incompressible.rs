@@ -8,6 +8,10 @@
 //! Compressing a few small samples with the same method costs ~20 ms per
 //! sample and reliably identifies media/archives/random data, which would
 //! otherwise spend minutes in the match finder only to end up STORE anyway.
+//! A cheap structural screen ([`samples_look_structured`]) runs first and
+//! skips those encodes for members that are clearly compressible — the common
+//! case, where the samples cost 18-28% of the member's own encode time and
+//! cannot change the verdict anyway.
 //! The 90% threshold is conservative: genuinely compressible inputs (text,
 //! code, structured binary) compress the samples far below it. Sampling the
 //! head plus quarter points catches files whose tails are incompressible
@@ -15,7 +19,7 @@
 //! where at least half of the samples are incompressible are declared
 //! incompressible, so files with a small random section keep compressing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
@@ -38,25 +42,120 @@ const SAMPLE_REPEAT_MIN_MATCH: usize = 64;
 /// dominate the input and the codec would finish anyway.
 pub(crate) const SAMPLE_PROBE_MIN_INPUT: usize = 4 * SAMPLE_PROBE_HEAD;
 
+/// Stride used when sampling 4-byte windows for the structural screen.
+const SCREEN_STRIDE: usize = 16;
+/// Sampled windows below this count cannot judge a region (64 KiB of input).
+const SCREEN_MIN_WINDOWS: usize = 4096;
+/// A region counts as structured when at most this share of its sampled
+/// 4-byte windows are distinct: repeated windows at a fixed stride are what a
+/// match finder turns into matches, while random and already-compressed data
+/// keep them all distinct.
+const SCREEN_DISTINCT_PERCENT: usize = 95;
+
+/// Share of distinct 4-byte windows sampled every [`SCREEN_STRIDE`] bytes, or
+/// `None` when the region is too short to judge (fewer than
+/// [`SCREEN_MIN_WINDOWS`] windows). Windows are compared raw (no hashing), so
+/// the count is exact: random input measures ~100%, and anything with real
+/// repeats — text, code, structured binary, even base64/hex whose alphabet
+/// cycles within a window — stays well below.
+pub(crate) fn distinct_window_percent(region: &[u8]) -> Option<usize> {
+    let mut seen = HashSet::with_capacity(region.len() / SCREEN_STRIDE + 1);
+    let mut windows = 0usize;
+    let mut off = 0usize;
+    while off + 4 <= region.len() {
+        let value = u32::from_le_bytes([
+            region[off],
+            region[off + 1],
+            region[off + 2],
+            region[off + 3],
+        ]);
+        seen.insert(value);
+        windows += 1;
+        off += SCREEN_STRIDE;
+    }
+    (windows >= SCREEN_MIN_WINDOWS).then(|| seen.len() * 100 / windows)
+}
+
+/// Cheap structural screen over the probe's own sample regions: `true` when
+/// *every* region shows repeated 4-byte windows, i.e. the member clearly has
+/// structure to compress. A region too short to judge blocks the screen.
+///
+/// It exists to skip the sample encodes below (four encodes of up to 512 KiB
+/// each, at the member's own method — measured at 18-28% of a 4 MiB
+/// compressible member's encode time). Skipping only ever removes a probe that
+/// could have forced STORE, so the archive either keeps its bytes or gets
+/// smaller, never larger; a screen that misses a structured region costs the
+/// old sample encodes, and one that calls incompressible data structured costs
+/// a full parse that still falls back to STORE. Both are time only.
+///
+/// The window test separates the cases order-0 entropy cannot: base64 of random
+/// data sits at ~6 bits/byte like real DLLs, but its windows are all distinct.
+pub(crate) fn samples_look_structured(samples: &[&[u8]]) -> bool {
+    // Test seam: the byte-identity contract is "the screen may only skip a
+    // probe whose verdict is `false`", so tests re-run the same inputs with
+    // the screen disabled and compare verdicts (and whole archives).
+    #[cfg(test)]
+    if SCREEN_DISABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    !samples.is_empty()
+        && samples.iter().all(|sample| {
+            distinct_window_percent(sample).is_some_and(|percent| percent < SCREEN_DISTINCT_PERCENT)
+        })
+}
+
+#[cfg(test)]
+static SCREEN_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The screen switch is process-global, so the tests that read or flip it must
+/// not run next to each other (the same reason the napi `set_var` tests take a
+/// lock). The probe's verdicts do not depend on it, so no other test needs it.
+#[cfg(test)]
+pub(crate) fn screen_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Test seam: turn the cheap screen off, so the sample encodes run exactly as
+/// they did before it existed.
+#[cfg(test)]
+pub(crate) fn set_screen_enabled(enabled: bool) {
+    SCREEN_DISABLED.store(!enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// In-memory stride probe (used by `add_bytes` and the codec entry points).
 pub(crate) fn sample_is_incompressible(data: &[u8], method: u8) -> bool {
     if data.len() < SAMPLE_PROBE_MIN_INPUT {
         return false;
     }
+    let mut samples: Vec<&[u8]> = Vec::with_capacity(3);
+    let mut voting: Vec<&[u8]> = Vec::with_capacity(3);
+    for &pos in &[data.len() / 4, data.len() / 2, data.len() * 3 / 4] {
+        if pos + SAMPLE_PROBE_TAIL <= data.len() {
+            samples.push(&data[pos..pos + SAMPLE_PROBE_TAIL]);
+            // A quarter sample that overlaps the head adds no information.
+            if pos >= SAMPLE_PROBE_HEAD {
+                voting.push(&data[pos..pos + SAMPLE_PROBE_TAIL]);
+            }
+        }
+    }
+    // Cheap screen first: a member whose every sample shows structure is
+    // compressible, so the sample encodes below cannot change the verdict and
+    // their cost is pure waste.
+    let mut regions = Vec::with_capacity(samples.len() + 1);
+    regions.push(&data[..SAMPLE_PROBE_HEAD]);
+    regions.extend(samples.iter().copied());
+    if samples_look_structured(&regions) {
+        return false;
+    }
+
     let mut bad = 0;
     if incompressible_sample(&data[..SAMPLE_PROBE_HEAD], method) {
         bad += 1;
     }
-    let mut samples: Vec<&[u8]> = Vec::new();
-    for &pos in &[data.len() / 4, data.len() / 2, data.len() * 3 / 4] {
-        if pos >= SAMPLE_PROBE_HEAD
-            && pos + SAMPLE_PROBE_TAIL <= data.len()
-            && incompressible_sample(&data[pos..pos + SAMPLE_PROBE_TAIL], method)
-        {
+    for sample in &voting {
+        if incompressible_sample(sample, method) {
             bad += 1;
-        }
-        if pos + SAMPLE_PROBE_TAIL <= data.len() {
-            samples.push(&data[pos..pos + SAMPLE_PROBE_TAIL]);
         }
     }
     // A file whose random-looking regions repeat each other (e.g. a
@@ -75,11 +174,8 @@ pub(crate) fn sample_is_incompressible_file(path: &Path, size: u64, method: u8) 
     let mut f = File::open(path)?;
     let mut head = vec![0u8; SAMPLE_PROBE_HEAD];
     let n = read_up_to(&mut f, &mut head)?;
-    let mut bad = 0;
-    if incompressible_sample(&head[..n], method) {
-        bad += 1;
-    }
     let mut samples: Vec<Vec<u8>> = Vec::new();
+    let mut voting: Vec<Vec<u8>> = Vec::new();
     for &quarter in &[size / 4, size / 2, size * 3 / 4] {
         if quarter < SAMPLE_PROBE_HEAD as u64 {
             continue;
@@ -87,11 +183,30 @@ pub(crate) fn sample_is_incompressible_file(path: &Path, size: u64, method: u8) 
         f.seek(SeekFrom::Start(quarter))?;
         let mut sample = vec![0u8; SAMPLE_PROBE_TAIL];
         let n = read_up_to(&mut f, &mut sample)?;
-        if n > 0 && incompressible_sample(&sample[..n], method) {
-            bad += 1;
-        }
         if n > 0 {
             samples.push(sample[..n].to_vec());
+            voting.push(sample[..n].to_vec());
+        }
+    }
+
+    // Same cheap screen as the in-memory probe: every sample structured means
+    // the encodes cannot change the verdict.
+    {
+        let mut regions: Vec<&[u8]> = Vec::with_capacity(samples.len() + 1);
+        regions.push(&head[..n]);
+        regions.extend(samples.iter().map(|sample| sample.as_slice()));
+        if samples_look_structured(&regions) {
+            return Ok(false);
+        }
+    }
+
+    let mut bad = 0;
+    if incompressible_sample(&head[..n], method) {
+        bad += 1;
+    }
+    for sample in &voting {
+        if incompressible_sample(sample, method) {
+            bad += 1;
         }
     }
     // Same long-range-repeat escape hatch as the in-memory probe.
@@ -215,5 +330,146 @@ mod probe_tests {
             .collect::<Vec<u8>>();
         data.extend_from_slice(&data.clone());
         assert!(!sample_is_incompressible(&data, 3));
+    }
+
+    /// Structured corpora for the screen tests: text with a small vocabulary,
+    /// x86-shaped code, and markup.
+    fn structured_corpora() -> Vec<(&'static str, Vec<u8>)> {
+        let words = [
+            "the", "quick", "brown", "fox", "archive", "window", "match", "price",
+        ];
+        let mut state = 0x1234_5678u64;
+        let mut text = Vec::with_capacity(4 << 20);
+        while text.len() < 4 << 20 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            text.extend_from_slice(words[(state >> 33) as usize % words.len()].as_bytes());
+            text.push(b' ');
+        }
+
+        let mut code = Vec::with_capacity(4 << 20);
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        while code.len() < 4 << 20 {
+            match pseudo_random(1, state)[0] % 5 {
+                0 => {
+                    code.push(0xE8);
+                    let target = 0x40_0000u32.wrapping_sub(code.len() as u32);
+                    code.extend_from_slice(&target.to_le_bytes());
+                }
+                1 => code.extend_from_slice(&[0x90; 3]),
+                2 => code.extend_from_slice(&[0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20]),
+                _ => code.push(pseudo_random(1, state)[0]),
+            }
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        }
+
+        let mut xml = Vec::with_capacity(4 << 20);
+        let mut index = 0u32;
+        while xml.len() < 4 << 20 {
+            xml.extend_from_slice(
+                format!(
+                    "<item id=\"{index}\"><name>element {}</name></item>\n",
+                    index % 97
+                )
+                .as_bytes(),
+            );
+            index += 1;
+        }
+
+        vec![("text", text), ("code", code), ("xml", xml)]
+    }
+
+    /// The screen must fire on structured data, and stay quiet on data whose
+    /// sample encodes would call it incompressible — firing there would cost
+    /// the full parse the probe exists to avoid.
+    #[test]
+    fn structural_screen_separates_structured_from_random() {
+        let _lock = screen_test_lock();
+        for (tag, data) in structured_corpora() {
+            let regions: Vec<&[u8]> = vec![&data[..SAMPLE_PROBE_HEAD]];
+            assert!(
+                samples_look_structured(&regions),
+                "{tag} must screen as structured"
+            );
+        }
+
+        let random = pseudo_random(4 << 20, 7);
+        let regions: Vec<&[u8]> = vec![&random[..SAMPLE_PROBE_HEAD]];
+        assert!(
+            !samples_look_structured(&regions),
+            "random data must not screen as structured"
+        );
+
+        // Base64 of random bytes sits at ~6 bits/byte, like a real DLL, but it
+        // has no repeated windows: entropy alone cannot separate the two.
+        let raw = pseudo_random(1 << 20, 11);
+        let b64 = base64(&raw);
+        let regions: Vec<&[u8]> = vec![&b64[..SAMPLE_PROBE_HEAD]];
+        assert!(
+            !samples_look_structured(&regions),
+            "base64 of random data must not screen as structured"
+        );
+    }
+
+    /// The contract that makes the screen safe: whenever it fires, the sample
+    /// encodes (run as they were before the screen existed) also call the
+    /// member compressible, so skipping them cannot change the archive.
+    #[test]
+    fn structural_screen_only_skips_probes_that_would_say_compressible() {
+        let _lock = screen_test_lock();
+        for (tag, data) in structured_corpora() {
+            let regions: Vec<&[u8]> = vec![&data[..SAMPLE_PROBE_HEAD]];
+            assert!(
+                samples_look_structured(&regions),
+                "{tag} must screen as structured"
+            );
+
+            set_screen_enabled(false);
+            let raw = sample_is_incompressible(&data, 3);
+            set_screen_enabled(true);
+            assert!(
+                !raw,
+                "{tag}: the screen fired, so the raw probe must also say compressible"
+            );
+            assert!(!sample_is_incompressible(&data, 3));
+        }
+
+        // And the screen must not change the incompressible verdicts either.
+        let random = pseudo_random(4 << 20, 7);
+        assert!(sample_is_incompressible(&random, 3));
+        set_screen_enabled(false);
+        let raw = sample_is_incompressible(&random, 3);
+        set_screen_enabled(true);
+        assert!(raw);
+    }
+
+    /// Minimal standard base64 (test-only): enough to build a high-entropy
+    /// text corpus without a dependency.
+    fn base64(data: &[u8]) -> Vec<u8> {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = Vec::with_capacity(data.len().div_ceil(3) * 4);
+        for chunk in data.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let triple = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            out.push(ALPHABET[(triple >> 18) as usize & 0x3F]);
+            out.push(ALPHABET[(triple >> 12) as usize & 0x3F]);
+            out.push(if chunk.len() > 1 {
+                ALPHABET[(triple >> 6) as usize & 0x3F]
+            } else {
+                b'='
+            });
+            out.push(if chunk.len() > 2 {
+                ALPHABET[triple as usize & 0x3F]
+            } else {
+                b'='
+            });
+        }
+        out
     }
 }

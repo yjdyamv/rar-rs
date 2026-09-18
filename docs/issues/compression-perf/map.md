@@ -130,6 +130,37 @@ _level_ mostly changes that budget: mt8 m1 (`chain = 4`) is 419 ms at 53.77%
 against mt8 m3's 1166 ms at 52.05% — 2.6x for 1.7pp. The chain budget is the MT
 speed dial, and m1-quality ratio is the price of the cheap parse.
 
+### Issue 15 lever "cheaper incompressibility gate": landed (2026-09-18)
+
+The probe's own cost was measured first: on a 4 MiB member it encodes 512 KiB +
+3x256 KiB of samples at the member's own method — 18-28% of that member's total
+encode time (text m1 18.1/83.6 ms, text m5 1234/6872 ms), while on random data
+it is the short-circuit itself (35 ms vs the full parse). So the win is on
+_compressible_ members, and the probe has to keep running on incompressible
+ones.
+
+`sample_is_incompressible` / `sample_is_incompressible_file` now run a cheap
+structural screen over the same sample regions first: sampled 4-byte windows
+every 16 bytes, all-distinct-windows = no structure (the statistic the MT tail
+probe already used, now owned by
+`codec/common/incompressible.rs::distinct_window_percent`). When _every_ region
+shows repeated windows the sample encodes are skipped. Measured on 8 MiB corpora
+(two binaries, interleaved): text m3 180 -> 155 ms, text m5 288 -> 256 ms (-13%
+/ -11%), `wordtext`/`x86syn` likewise; `random` unchanged (34 ms, the screen
+stays quiet). Ratios unchanged everywhere.
+
+Why it cannot change an archive: skipping the probe only removes a verdict that
+could have forced STORE, so the codec's own result decides and a member it
+cannot shrink still falls back to STORE byte-identically — the archive keeps its
+bytes or gets smaller, never larger (map's rule). A screen that misses a
+structured region costs the old sample encodes; one that calls incompressible
+data structured costs a full parse that still STOREs. The window test separates
+the case order-0 entropy cannot: base64 of random bytes sits at ~6 bits/byte
+like a real DLL, but its windows are all distinct. Pinned by
+`structural_screen_only_skips_probes_that_would_say_compressible` and, end to
+end, `writer_structural_screen_keeps_archive_bytes_identical` (packed streams
+compared with the screen on and off).
+
 ### Issue 15 lever "priced cheap tier": measured negative (2026-09-18)
 
 Replacing the MT tier's raw-length lazy rule with a price-driven choice (the
