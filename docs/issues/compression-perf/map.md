@@ -56,9 +56,10 @@ Open frontier (see issues/):
   BT4 descent steps are structurally locked, see issue 09)
 
 Closed: 05 streaming delta + x86 landed (`delta_stream_window` /
-`x86_stream_window`, PLAN RAR5·压缩面, 2026-09); 06 solid-mt member-level gap is
-structural (chunk-level MT landed; member-level parallelism needs a shared
-window, PLAN 定论 2026-09).
+`x86_stream_window`, PLAN 旧版 `git show c2c43d4:PLAN.md`「RAR5（压缩面）」,
+2026-09); 06 solid-mt member-level gap is structural (chunk-level MT landed;
+member-level parallelism needs a shared window, PLAN 旧版
+`git show c2c43d4:PLAN.md`「定论」, 2026-09).
 
 ## Fog
 
