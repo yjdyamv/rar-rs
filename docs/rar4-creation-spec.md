@@ -1,6 +1,7 @@
 # RAR4 Creation Feature Spec
 
-> 最后核对：2026-09-17 @ `3c10f14`；字节级行为由测试与官方工具对拍锁定。
+> 最后核对：2026-09-18 @ `1fbfaba`（solid 链内自动 VM 过滤器为本轮改动）；字节级
+> 行为由测试与官方工具对拍锁定。
 
 ## 目标
 
@@ -28,14 +29,20 @@ rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver
 | PPMd 编码                                                     | ✅   |
 | 头加密（-hp）                                                 | ✅   |
 | 自动 VM 过滤器（E8/E8E9/Delta/Audio 探测 + RGB/Itanium 编码） | ✅   |
+| solid 链内自动 VM 过滤器                                      | ✅   |
 | 内联恢复记录（NEWSUB 0x7a RR）写/修                           | ✅   |
 | 多文件并行 batch                                              | ✅   |
-| solid 链 PPMd 模型延续                                        | ✅   |
+| solid 链 PPMd 模型延续（0x87 头）                             | ⚠️    |
 
 > PPMd 不是独立开关：`-m0` = STORE（WinRAR 定义）；PPMd 由 RAR29 编码器在
 > `-m4/-m5`（非 solid）按候选竞争，solid 链内作为与 LZ 并行的模型链赢者推进（见
-> `codec/legacy/rar29_encoder.rs` 与 `PLAN.md` "RAR4 写侧 Tier 2 全闭"）。
+> `codec/legacy/rar29_encoder.rs` 与 `PLAN.md`「现状」的 RAR4 创建能力）。
 > 方法字节仍按 `-m` 级写（0x30+m），块内首个标志位指示 PPMd。
+>
+> solid 链内 PPMd 成员目前每块都发新模型头（0xA7）：0x87
+> 续模型分支在产物里不可达。 开放项见
+> [`../PLAN.md`](../PLAN.md)「下一步」。solid 链内的自动 VM 过滤器与之相反，
+> 已生效（读者窗口持有的即 LZ 层编码的字节，过滤成员仍是普通链环）。
 
 Recovery volumes（`.rev`）两种布局均已支持，见
 `docs/issues/rar4-recovery-volumes.md`。
@@ -46,7 +53,7 @@ Recovery volumes（`.rev`）两种布局均已支持，见
 - BLAKE2sp 哈希
 - RAR5 vint 编码头
 
-（内联 RR 已支持，见 `PLAN.md` "RAR4 写侧 Tier 2 全闭"。）
+（内联 RR 已支持，见 `PLAN.md`「现状」的 RAR4 创建能力。）
 
 ## 验证记录（2026-09-07 CLI 实测）
 

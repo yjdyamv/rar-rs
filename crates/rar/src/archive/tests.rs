@@ -1598,6 +1598,100 @@ fn writer_filter_policy_controls_member_filters() {
     assert!(matches!(bad, Err(RarError::InvalidOption(_))));
 }
 
+#[test]
+fn writer_solid_chain_applies_member_filters_and_stays_solid() {
+    use crate::options::{FilterMode, FilterOptions};
+    use crate::version::ArchiveVersion;
+
+    let dir = tempfile::tempdir().unwrap();
+    // x86-shaped: every call site encodes the same absolute target as a
+    // relative displacement, which the E8/E8E9 transform turns into a
+    // constant, so the forced filter must shrink the member.
+    let mut x86 = Vec::new();
+    let mut pos = 0usize;
+    while pos < 96_000 {
+        x86.push(0xE8);
+        x86.extend_from_slice(&((0x60_0000i64 - pos as i64) as i32).to_le_bytes());
+        x86.push(0x90);
+        pos += 6;
+    }
+    let first = dir.path().join("first.exe");
+    let second = dir.path().join("second.exe");
+    std::fs::write(&first, &x86).unwrap();
+    std::fs::write(&second, &x86).unwrap();
+
+    let create = |name: &str, filters: FilterOptions| -> (u64, u64, bool) {
+        let path = dir.path().join(name);
+        let mut archive = RarArchive::create_with_options(
+            &path,
+            crate::options::CreateOptions {
+                compression: ArchiveVersion::V29,
+                solid: true,
+                filters,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add(&first, 3).unwrap();
+        archive.add(&second, 3).unwrap();
+        archive.close().unwrap();
+
+        let mut archive = RarArchive::open(&path).unwrap();
+        assert_eq!(
+            archive
+                .read_with_options("first.exe", Default::default())
+                .unwrap(),
+            x86,
+            "{name}: first member must round-trip"
+        );
+        assert_eq!(
+            archive
+                .read_with_options("second.exe", Default::default())
+                .unwrap(),
+            x86,
+            "{name}: second member must round-trip"
+        );
+        (
+            archive.entries[0].compressed_size(),
+            archive.entries[1].compressed_size(),
+            archive.entries[1].comp_solid(),
+        )
+    };
+
+    let forced = create(
+        "forced.rar",
+        FilterOptions {
+            x86: FilterMode::Forced,
+            delta: FilterMode::Disabled,
+            ..Default::default()
+        },
+    );
+    let off = create(
+        "off.rar",
+        FilterOptions {
+            x86: FilterMode::Disabled,
+            delta: FilterMode::Disabled,
+            ..Default::default()
+        },
+    );
+    assert!(
+        forced.0 < off.0,
+        "a solid member must still take the forced -mcx x86 filter ({} vs {} packed bytes)",
+        forced.0,
+        off.0
+    );
+    assert!(
+        forced.2,
+        "the member after a filtered one must stay in the solid chain"
+    );
+    assert!(
+        forced.1 < forced.0,
+        "the repeated member must match the transformed chain history ({} vs {} packed bytes)",
+        forced.1,
+        forced.0
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn extract_options_skip_and_allow_unsafe_links() {

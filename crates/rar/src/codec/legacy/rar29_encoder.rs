@@ -13,7 +13,8 @@
 //! matches escaped into the model where the tokeniser prices them cheaper
 //! than literals.  Phase 3 adds the six standard VM filters (E8/E8E9,
 //! Delta, Audio, RGB, Itanium) through
-//! [`Unpack29Encoder::encode_member_with_filter_ranges`].
+//! [`Unpack29Encoder::encode_member_with_filter_ranges`], and the solid-chain
+//! variant [`Unpack29Encoder::encode_solid_member_with_filter_candidates`].
 
 use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::huffman::EncodeTable;
@@ -1738,6 +1739,21 @@ fn encode_filtered_member_blocks(
 
 /// RAR 3.x/4.x LZSS+Huffman encoder.
 ///
+/// One LZ way of coding a solid-chain member and the chain state it would
+/// leave behind.
+///
+/// A candidate is measured without committing: the reader rebuilds its
+/// code-length table from the bytes it actually reads and holds the coded
+/// (possibly filtered) bytes in its window, so a loser must not move the
+/// chain at all.
+struct LzCandidate {
+    packed: Vec<u8>,
+    /// The bytes the LZ layer coded when a filter rewrote them; `None` when
+    /// the candidate coded the input as it came.
+    coded: Option<Vec<u8>>,
+    levels: [u8; TABLE_COUNT],
+}
+
 /// Maintains the sliding window and Huffman table state needed for solid
 /// chains.  For non-solid archives, create a fresh encoder per member.
 #[derive(Debug, Clone)]
@@ -1893,40 +1909,129 @@ impl Unpack29Encoder {
         Ok(out)
     }
 
-    /// Solid-run member: code it both ways (LZ and PPMd) and keep the
-    /// smaller, advancing only the winner's chain state. PPMd reuses the
-    /// carried model when the last member was PPMd (the model is cloned so a
-    /// losing trial never disturbs it).
-    pub fn encode_solid_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
-        // LZ first (submits levels + window). The member's table levels must
-        // end in the state a decoder holds after reading it: an LZ member's
-        // decoder read the LZ tables (so levels are the member's final
-        // absolute tables), while a PPMd member's decoder never read them
-        // (so levels stay at the pre-member value). The next member's
-        // keep/delta table decision is made against exactly that state.
-        let levels_before = self.levels;
-        let lz = self.encode_member(input)?;
+    /// Solid-run member: the plain member and every `(kind, ranges)` filter
+    /// candidate are measured against the chain as it stands, the smallest LZ
+    /// result then competes with the chain-continuing PPMd trial (which reuses
+    /// the carried model when the last member was PPMd; the model is cloned so
+    /// a losing trial never disturbs it), and only the winner advances the
+    /// chain state.
+    /// A filtered member stays an ordinary chain link: the LZ layer codes the
+    /// transformed bytes, so those are what the reader's window holds and what
+    /// the next member matches against — the same thing this encoder
+    /// remembers (`remember(coded)`), which is why a solid `-mcx` run keeps
+    /// its cross-member wins instead of breaking the chain.
+    pub(crate) fn encode_solid_member_with_filter_candidates(
+        &mut self,
+        input: &[u8],
+        candidates: &[(Rar29FilterKind, Vec<std::ops::Range<usize>>)],
+    ) -> RarResult<Vec<u8>> {
+        // LZ first, without committing: the member's table levels must end in
+        // the state a decoder holds after reading it. An LZ member's decoder
+        // read the LZ tables (so levels are the member's final absolute
+        // tables), while a PPMd member's decoder never read them (so levels
+        // stay at the pre-member value). The next member's keep/delta table
+        // decision is made against exactly that state.
+        let lz = self.best_lz_candidate(input, candidates)?;
+        // The plain candidate used to run through `encode_member`, which
+        // clears this flag; keep that exact starting state so the refactor
+        // stays byte-identical (see the note on `encode_ppmd_member_chain`).
+        self.last_was_ppmd = false;
         // The PPMd trial may continue the carried model; try on a clone so a
         // loss leaves the model untouched for a later member.
         let saved = self.ppmd.clone();
         let saved_flag = self.last_was_ppmd;
         let trial = self.encode_ppmd_member_chain(input);
         match trial {
-            Ok(ppmd) if ppmd.len() < lz.len() => {
-                // PPMd member emitted: roll the LZ table advance back, since
-                // the decoder's levels never moved past the pre-member value.
-                self.levels = levels_before;
+            Ok(ppmd) if ppmd.len() < lz.packed.len() => {
+                // PPMd member emitted: the decoder's levels never moved past
+                // the pre-member value, and both engines feed the window with
+                // the member's own bytes.
+                self.last_was_ppmd = true;
+                self.remember(input);
                 Ok(ppmd)
             }
             _ => {
-                // LZ member emitted: the decoder holds this member's final
-                // tables, so leave the levels exactly where `encode_member`
-                // put them. Only the failed PPMd trial is rolled back.
+                // LZ member emitted: commit this candidate's table and the
+                // bytes its LZ layer actually coded. Only the failed or
+                // losing PPMd trial is rolled back.
                 self.ppmd = saved;
                 self.last_was_ppmd = saved_flag;
-                Ok(lz)
+                self.levels = lz.levels;
+                self.remember(lz.coded.as_deref().unwrap_or(input));
+                Ok(lz.packed)
             }
         }
+    }
+
+    /// Measure the plain member and every filter candidate against the chain
+    /// as it stands, keeping the smallest. Nothing is committed: each
+    /// candidate codes against `self.history` with its own copy of the
+    /// code-length table, so a loser cannot move the chain. Ties keep the
+    /// earlier candidate (the plain one first), matching the non-solid path.
+    fn best_lz_candidate(
+        &self,
+        input: &[u8],
+        candidates: &[(Rar29FilterKind, Vec<std::ops::Range<usize>>)],
+    ) -> RarResult<LzCandidate> {
+        let mut levels = self.levels;
+        let mut best = LzCandidate {
+            packed: encode_member_with_options_impl(
+                input,
+                &self.history,
+                self.options,
+                &mut levels,
+                None,
+            )?,
+            coded: None,
+            levels,
+        };
+        for (kind, ranges) in candidates {
+            if ranges.is_empty() {
+                continue;
+            }
+            // A filter these bytes cannot carry (bad range, degenerate
+            // program) is simply not a candidate; the plain result stands,
+            // the same tolerance the non-solid search has.
+            let Ok(candidate) = self.filtered_lz_candidate(input, *kind, ranges) else {
+                continue;
+            };
+            if candidate.packed.len() < best.packed.len() {
+                best = candidate;
+            }
+        }
+        Ok(best)
+    }
+
+    /// One filtered LZ candidate, measured without committing.
+    fn filtered_lz_candidate(
+        &self,
+        input: &[u8],
+        kind: Rar29FilterKind,
+        ranges: &[std::ops::Range<usize>],
+    ) -> RarResult<LzCandidate> {
+        let mut data = input.to_vec();
+        let mut records = Vec::new();
+        for range in ranges {
+            for chunk in split_rar29_filter_range(kind, range.clone()) {
+                records.push(apply_rar29_filter(&mut data, kind, chunk)?);
+            }
+        }
+        if records.is_empty() {
+            return Err(enc_err("RAR 2.9 filter candidate covers no bytes"));
+        }
+        let mut levels = self.levels;
+        let (packed, coded) = encode_filtered_member_blocks(
+            &data,
+            &self.history,
+            &records,
+            self.options,
+            &mut levels,
+        )?;
+        Ok(LzCandidate {
+            packed,
+            coded: Some(coded),
+            levels,
+        })
     }
 
     /// Code one member as a PPMd block (m4/m5 text path). Always starts a
@@ -2396,6 +2501,99 @@ mod tests {
             all_packed.extend_from_slice(&packed);
         }
         assert!(!all_packed.is_empty());
+    }
+
+    /// x86-shaped member: every call site encodes the same absolute target as
+    /// a relative displacement, which the E8/E8E9 transform turns into a
+    /// constant, so a filter candidate must beat the plain parse.
+    fn x86_shaped(len: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len + 6);
+        let mut pos = 0usize;
+        while pos < len {
+            out.push(0xE8);
+            let rel = 0x40_0000i64 - pos as i64;
+            out.extend_from_slice(&(rel as i32).to_le_bytes());
+            out.push(0x90);
+            pos += 6;
+        }
+        out
+    }
+
+    /// The solid path searches the `-mc` filter list against the carried
+    /// chain, and a filtered member stays an ordinary chain link: the encoder
+    /// commits the winning table and the bytes its LZ layer coded, so the
+    /// reader — which holds exactly those — decodes the members after it.
+    /// Candidates are measured without committing, so a loser must leave
+    /// nothing behind or a later member decodes against a table no reader
+    /// holds.
+    #[test]
+    fn solid_filter_candidate_roundtrips_and_keeps_the_chain() {
+        let x86 = x86_shaped(24_000);
+        let candidates = [(
+            Rar29FilterKind::E8E9,
+            std::iter::once(0..x86.len()).collect::<Vec<_>>(),
+        )];
+
+        let base = Unpack29Encoder::with_options(options_for_level(3));
+        let mut with = base.clone();
+        let filtered = with
+            .encode_solid_member_with_filter_candidates(&x86, &candidates)
+            .unwrap();
+        let mut without = base.clone();
+        let plain = without
+            .encode_solid_member_with_filter_candidates(&x86, &[])
+            .unwrap();
+        assert!(
+            filtered.len() < plain.len(),
+            "the E8/E8E9 candidate must win on x86-shaped data: {} vs {}",
+            filtered.len(),
+            plain.len()
+        );
+
+        // One chain: unrelated head, the filtered member, a plain copy of it
+        // (whose matches may only cover bytes the transform left equal), then
+        // the filtered member again, which should match the transformed
+        // history the first filtered member left behind.
+        let mut encoder = base.clone();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
+        let head: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let first = encoder
+            .encode_solid_member_with_filter_candidates(&head, &[])
+            .unwrap();
+        assert_eq!(
+            decoder.decode_member(&first, head.len() as u64).unwrap(),
+            head
+        );
+        let second = encoder
+            .encode_solid_member_with_filter_candidates(&x86, &candidates)
+            .unwrap();
+        assert_eq!(
+            decoder.decode_member(&second, x86.len() as u64).unwrap(),
+            x86,
+            "the filtered member must decode"
+        );
+        let third = encoder
+            .encode_solid_member_with_filter_candidates(&x86, &[])
+            .unwrap();
+        assert_eq!(
+            decoder.decode_member(&third, x86.len() as u64).unwrap(),
+            x86,
+            "a plain member after a filtered one must still decode to its own bytes"
+        );
+        let fourth = encoder
+            .encode_solid_member_with_filter_candidates(&x86, &candidates)
+            .unwrap();
+        assert_eq!(
+            decoder.decode_member(&fourth, x86.len() as u64).unwrap(),
+            x86,
+            "a filtered member after a filtered one must decode"
+        );
+        assert!(
+            fourth.len() < second.len(),
+            "the repeated filtered member must match the transformed history: {} vs {}",
+            fourth.len(),
+            second.len()
+        );
     }
 
     #[test]

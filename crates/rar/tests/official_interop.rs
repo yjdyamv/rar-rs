@@ -70,6 +70,59 @@ fn official_unrar_validates_old_format_writers() {
     }
 }
 
+/// A solid RAR4 chain whose members carry `-mcx` x86 filters: the filtered
+/// member's window holds the transformed bytes, so the member after it — and a
+/// repeated filtered member matching that history — only decode if the
+/// writer's window bookkeeping matches the official reader's. `unrar t`
+/// decompresses every member and checks its CRC, which is exactly that gate.
+#[test]
+fn official_unrar_validates_solid_legacy_filter_chain() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(), // skipped unless the interop script sets it
+    };
+    let dir = make_temp_dir();
+    let path = dir.path().join("solid-x86.rar");
+    // x86-shaped: every call site encodes the same absolute target as a
+    // relative displacement, which the E8/E8E9 transform makes constant.
+    let mut x86 = Vec::new();
+    let mut pos = 0usize;
+    while pos < 96_000 {
+        x86.push(0xE8);
+        x86.extend_from_slice(&((0x60_0000i64 - pos as i64) as i32).to_le_bytes());
+        x86.push(0x90);
+        pos += 6;
+    }
+    {
+        let mut rar = rar_rs::ArchiveWriter::create_with(
+            &path,
+            rar_rs::WriterOptions::default()
+                .compression(rar_rs::ArchiveVersion::V29)
+                .solid_mode(rar_rs::SolidMode::Continuous)
+                .filters(rar_rs::FilterOptions {
+                    x86: rar_rs::FilterMode::Forced,
+                    ..Default::default()
+                }),
+        )
+        .unwrap_or_else(|e| panic!("create solid RAR4 + -mcx: {e}"));
+        let opts =
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(3u8).unwrap());
+        rar.add_bytes("first.exe", &x86, opts).unwrap();
+        rar.add_bytes("second.exe", &x86, opts).unwrap();
+        rar.finish().unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg("-idq")
+        .arg(path.as_os_str())
+        .status()
+        .expect("spawn unrar");
+    assert!(
+        status.success(),
+        "unrar t rejected the solid RAR4 + -mcx chain"
+    );
+}
+
 #[test]
 #[allow(clippy::type_complexity)]
 fn official_unrar_validates_our_feature_archives() {

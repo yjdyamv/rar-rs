@@ -1,9 +1,10 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-17 @ `5bf0918`；实现细节以源码为准。
+> 最后核对：2026-09-18 @ `1fbfaba`（solid
+> 链内过滤器为本轮改动）；实现细节以源码为准。
 
 本文件只留**结论**与**下一步**。历次审计、逐批修复与加固的过程记录在 git 历史
-（旧版详单：`git show d9201cf:PLAN.md`）；本文件不再维护 CHANGELOG。
+（旧版详单：`git show c2c43d4:PLAN.md`）；本文件不再维护 CHANGELOG。
 
 相关文档：术语见 [`CONTEXT.md`](CONTEXT.md)，模块图见
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，格式细节见
@@ -82,10 +83,10 @@
 
 ### P0 · 发布收口（硬门槛）
 
-- [ ] **许可与 SPDX**：确定仓库级 SPDX 表达式。待裁定的两处：① rars workspace
-      metadata（MIT OR Apache-2.0）与后来 COPYING（WTFPL）的冲突，即解码侧 WTFPL
-      / 编码侧 MIT OR Apache-2.0 的来源；② `recovery/legacy.rs` 声明了 rars
-      移植但缺许可行。逐文件出处清单见
+- [ ] **许可与 SPDX**：确定仓库级 SPDX 表达式。待裁定的两处：① 上游 `rars`
+      仓库的 workspace metadata（MIT OR Apache-2.0）与它后来加入的 `COPYING`
+      （WTFPL）两者的冲突，即解码侧 WTFPL / 编码侧 MIT OR Apache-2.0 的来源；②
+      `recovery/legacy.rs` 声明了 rars 移植但缺许可行。逐文件出处清单见
       [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)。
 - [ ] **打包与发布顺序**：`rar-rs`（0.9.0）已能 `cargo package` 并通过校验；
       `rar-cli` 依赖 workspace 内的 `rar-rs`，需先发布 `rar-rs`。三个 crate 的
@@ -192,8 +193,31 @@
       `t`/`x` 全部字节一致；另加了 `#[ignore]` 的 winrar_interop 用例。顺带修了
       `format/rar13/write.rs`
       模块注释里「加密成员每片重置密码流」的陈旧说法（代码是整段加密后切片、连续流）。
-- [ ] **RAR4 solid 链内过滤器**：写侧尚未在 solid 链内应用 VM 过滤器（窗口=
-      变换后字节语义，LZ 收益有限）。
+- [x] **RAR4 solid 链内过滤器**（已实现 2026-09-18）：写侧在 solid
+      链内搜索同一份 `-mc` 候选（`rar29_filter_candidates` 供非 solid 与 solid
+      共用，顺序一致、
+      平手取先者）。`Unpack29Encoder::encode_solid_member_with_filter_candidates`
+      改为「先测量后提交」：plain 与每个 filter 候选都用 `self.history` + 本地
+      `levels` 拷贝编码（候选不提交，败者不会移动链），最小者再与续链 PPMd
+      试验竞争，胜者才 `levels = winner.levels` +
+      `remember(coded)`。读者窗口持有 的正是 LZ 层编码的字节（过滤成员 =
+      变换后字节），所以过滤成员仍是普通链环：
+      后续成员可继续匹配该历史，同样的过滤成员几乎免费。验证：编码器单测
+      （plain/filtered/plain/refiltered
+      四成员链逐成员回环，且重复过滤成员更小）、 库级
+      `writer_solid_chain_applies_member_filters_and_stays_solid`（forced `-mcx`
+      必须缩小 solid 成员，且其后的成员仍标 solid）、新增官方互操作
+      `official_unrar_validates_solid_legacy_filter_chain`（本机官方 UnRAR 7.23
+      `t` 通过）；重构对无过滤路径逐字节不变（7 组语料 packed
+      流哈希与改动前一致）。
+- [ ] **RAR4 solid 链 PPMd 续模型实际未生效**（2026-09-18 核对时发现）：
+      `encode_solid_member` 先调 `encode_member`，后者把 `last_was_ppmd` 置
+      false，随后 `encode_ppmd_member_chain` 的 `continuing` 恒为 false——所以
+      solid PPMd 成员每块都发新模型头（0xA7），0x87 续模型分支在产物里不可达。
+      自引入该特性的提交 `cce4e15` 起就是这样（当时 `encode_member` 已清标志），
+      互操作测试仍全绿只是因为「新模型」本身合法。修法：在 PPMd 试验前使用上一
+      成员的真实 `last_was_ppmd`（本轮重构已刻意保留现状字节，未启用该分支）。
+      属字节契约变更，需官方解码器与文档一并复核。
 - [ ] **RAR4 solid 归档 MT**：legacy solid 链保持串行；成员级并行需跨成员共享
       窗口，属结构性代价（RAR5 的 chunk 级 MT 已兑现）。
 - **有意不做（设计决定，2026-09-17）**：
@@ -243,8 +267,8 @@
 - **老容器族读取（RAR 1.3–4.x）**：三代解码器（RAR29/20/15）+ PPMd + 五大标准 VM
   过滤器 + 通用 RARVM 解释器，solid 链、分卷、`-hp`、各代数据解密。
 - **RAR4 创建全能力**：LZSS m1–m5 + PPMd + 六大标准 VM 过滤器 + `-hp` + 多卷 +
-  solid（含 PPMd 模型延续）+ 并行 batch + 单大成员块级 MT（字节同等）+ NEWSUB
-  恢复记录。
+  solid（链内亦应用 VM 过滤器；PPMd 模型续见「下一步」的开放项）+ 并行 batch +
+  单大成员块级 MT（字节同等）+ NEWSUB 恢复记录。
 - **RAR 1.3 / 1.4 / 1.5 / 2.x 创建**：`-ma13` / `-ma14` / `-ma15` / `-ma2`，含
   solid、`-p` / `-hp`、旧命名分卷。
 - **RAR4 编辑全补**（ADR 0005）：头/块级操作 + 非 solid 块拷贝 + solid 整档

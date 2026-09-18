@@ -16,6 +16,7 @@ use super::cbc::{Rar4RangeEmitter, Rar15RangeEmitter, Rar20RangeEmitter, Rar30Ra
 use crate::archive::{ArchiveEntry, RarArchive, STREAM_COMPRESS_THRESHOLD};
 #[cfg(feature = "parallel")]
 use crate::archive::{BatchEntry, PARALLEL_COMPRESS_MAX_MEMBER, PARALLEL_COMPRESS_WAVE_BUDGET};
+use crate::codec::legacy::rar29_encoder::Rar29FilterKind;
 use crate::error::{RarError, RarResult};
 use crate::format::shared::engine::{CountingWriter, CrcReader, SpillGuard, spill_path_for};
 use crate::format::shared::stream_mut;
@@ -1166,11 +1167,15 @@ impl RarArchive {
         // Solid: reuse the persistent encoder so its sliding window, Huffman
         // table and PPMd model state carry across the members of the run
         // (this is what makes a real -ms archive compress better than
-        // independent members). Each compressed member is measured both ways
-        // (LZ and PPMd, continuing the model when the run is already in PPMd)
-        // and the smaller wins. Filters stay out of solid runs (a filtered
-        // member's window holds the transformed bytes).
+        // independent members). The plain member and every `-mc` filter
+        // candidate are measured against the chain as it stands, the smallest
+        // LZ result then competes with the chain-continuing PPMd trial, and
+        // only the winner advances the chain (see
+        // `Unpack29Encoder::encode_solid_member_with_filter_candidates`). A
+        // filtered member stays an ordinary chain link: the reader's window
+        // holds the coded bytes, so the next member may keep matching them.
         use crate::codec::legacy::rar29_encoder::{Unpack29Encoder, options_for_level};
+        let candidates = rar29_filter_candidates(data, self.write_ctx().compression.filters);
         let encoder = self
             .write_ctx_mut()
             .solid
@@ -1179,7 +1184,7 @@ impl RarArchive {
         let lz = if data.is_empty() {
             encoder.encode_member(data)?
         } else {
-            encoder.encode_solid_member(data)?
+            encoder.encode_solid_member_with_filter_candidates(data, &candidates)?
         };
         if lz.len() < data.len() {
             Ok((lz, crate::format::rar4::RAR4_METHOD_STORE + level))
@@ -1395,18 +1400,76 @@ fn build_legacy_solid_encoder(
 /// `None` when nothing shrinks the input, so an owning caller can fall back
 /// to STORE without copying its buffer.
 ///
-/// The solid-run path is separate: it reuses the persistent encoder and
-/// measures LZ against the chain-continuing PPMd trial
-/// (`Unpack29Encoder::encode_solid_member`).
+/// The solid-run path is separate: it reuses the persistent encoder,
+/// searches the same filter list against the carried chain, and then pits
+/// the best LZ result against the chain-continuing PPMd trial
+/// (`Unpack29Encoder::encode_solid_member_with_filter_candidates`).
+/// The standard-filter candidates the `-mc` policy allows for one member.
+///
+/// Shared by the non-solid and solid paths so both search the same list in
+/// the same order; a tie keeps the earlier candidate because every comparison
+/// is a strict `<`. Auto mode keeps the scanner-gated search — text never
+/// produces x86 clusters or structured deltas — while forced modes run on the
+/// whole member.
+fn rar29_filter_candidates(
+    data: &[u8],
+    policy: crate::options::FilterOptions,
+) -> Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> {
+    use crate::options::FilterMode;
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> = Vec::new();
+    if policy.x86 == FilterMode::Forced {
+        candidates.push((
+            Rar29FilterKind::E8E9,
+            std::iter::once(0..data.len()).collect(),
+        ));
+    } else if policy.x86 == FilterMode::Auto {
+        let e8e9 = crate::codec::common::filters::auto_x86_filter_ranges(data, true);
+        if !e8e9.is_empty() {
+            candidates.push((Rar29FilterKind::E8E9, e8e9));
+        }
+        let e8 = crate::codec::common::filters::auto_x86_filter_ranges(data, false);
+        if !e8.is_empty() {
+            candidates.push((Rar29FilterKind::E8, e8));
+        }
+    }
+    if policy.delta == FilterMode::Forced {
+        let channels = policy.delta_channels.unwrap_or_else(|| {
+            crate::codec::common::filters::auto_delta_filter_channels(data).unwrap_or(1)
+        });
+        candidates.push((
+            Rar29FilterKind::Delta {
+                channels: channels as usize,
+            },
+            std::iter::once(0..data.len()).collect(),
+        ));
+    } else if policy.delta == FilterMode::Auto
+        && let Some(channels) = crate::codec::common::filters::auto_delta_filter_channels(data)
+    {
+        candidates.push((
+            Rar29FilterKind::Delta {
+                channels: channels as usize,
+            },
+            std::iter::once(0..data.len()).collect(),
+        ));
+    }
+    if let Some(channels) = crate::codec::common::filters::auto_audio_filter_channels(data) {
+        candidates.push((
+            Rar29FilterKind::Audio { channels },
+            std::iter::once(0..data.len()).collect(),
+        ));
+    }
+    candidates
+}
+
 fn best_rar29_member(
     data: &[u8],
     level: u8,
     policy: crate::options::FilterOptions,
 ) -> RarResult<Option<(Vec<u8>, u8)>> {
-    use crate::codec::legacy::rar29_encoder::{
-        Rar29FilterKind, Unpack29Encoder, options_for_level,
-    };
-    use crate::options::FilterMode;
+    use crate::codec::legacy::rar29_encoder::{Unpack29Encoder, options_for_level};
     if !(1..=5).contains(&level) {
         return Ok(None);
     }
@@ -1416,63 +1479,17 @@ fn best_rar29_member(
     let mut best_len = lz.len();
     let mut best: (Vec<u8>, u8) = (lz, method);
 
-    if !data.is_empty() {
-        // Filters under the -mc policy: every candidate is measured with
-        // its own throwaway encoder (no chain state). Auto mode keeps the
-        // scanner-gated search — text never produces x86 clusters or
-        // structured deltas — while forced modes run on the whole member.
-        let mut candidates: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> = Vec::new();
-        if policy.x86 == FilterMode::Forced {
-            candidates.push((
-                Rar29FilterKind::E8E9,
-                std::iter::once(0..data.len()).collect(),
-            ));
-        } else if policy.x86 == FilterMode::Auto {
-            let e8e9 = crate::codec::common::filters::auto_x86_filter_ranges(data, true);
-            if !e8e9.is_empty() {
-                candidates.push((Rar29FilterKind::E8E9, e8e9));
-            }
-            let e8 = crate::codec::common::filters::auto_x86_filter_ranges(data, false);
-            if !e8.is_empty() {
-                candidates.push((Rar29FilterKind::E8, e8));
-            }
-        }
-        if policy.delta == FilterMode::Forced {
-            let channels = policy.delta_channels.unwrap_or_else(|| {
-                crate::codec::common::filters::auto_delta_filter_channels(data).unwrap_or(1)
-            });
-            candidates.push((
-                Rar29FilterKind::Delta {
-                    channels: channels as usize,
-                },
-                std::iter::once(0..data.len()).collect(),
-            ));
-        } else if policy.delta == FilterMode::Auto
-            && let Some(channels) = crate::codec::common::filters::auto_delta_filter_channels(data)
-        {
-            candidates.push((
-                Rar29FilterKind::Delta {
-                    channels: channels as usize,
-                },
-                std::iter::once(0..data.len()).collect(),
-            ));
-        }
-        if let Some(channels) = crate::codec::common::filters::auto_audio_filter_channels(data) {
-            candidates.push((
-                Rar29FilterKind::Audio { channels },
-                std::iter::once(0..data.len()).collect(),
-            ));
-        }
-        for (kind, ranges) in candidates {
-            let Ok(candidate) = Unpack29Encoder::with_options(options)
-                .encode_member_with_filter_ranges(data, kind, &ranges)
-            else {
-                continue;
-            };
-            if candidate.len() < best_len {
-                best_len = candidate.len();
-                best = (candidate, method);
-            }
+    // Filters under the -mc policy: every candidate is measured with its own
+    // throwaway encoder (no chain state).
+    for (kind, ranges) in rar29_filter_candidates(data, policy) {
+        let Ok(candidate) = Unpack29Encoder::with_options(options)
+            .encode_member_with_filter_ranges(data, kind, &ranges)
+        else {
+            continue;
+        };
+        if candidate.len() < best_len {
+            best_len = candidate.len();
+            best = (candidate, method);
         }
     }
     if level >= 4
