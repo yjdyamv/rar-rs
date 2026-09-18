@@ -100,6 +100,35 @@ exports `SA_OFFICIAL_*`, so the interop suites run instead of skipping —
 including the binding test that otherwise reports `SA_OFFICIAL_UNRAR is not set`
 (59 passed, 0 skipped, instead of 58 + 1).
 
+## 本地官方工具与互操作套件
+
+Windows 上不装 WinRAR 也能跑互操作：`.cache/winrar/`（被 `.gitignore` 忽略的本地
+参考工具）下按版本放控制台工具（`5-91/`、`6-23/`、`7-23/`）。分工是有原因的：
+**7.23 的 `Rar.exe` 既不创建（`-ma4`）也不修复 RAR4 归档**，所以 RAR4
+写入/修复的 参考必须是 6.23；读取侧以 7.23 为准（`scripts/wsl/ci-linux.sh` 就是
+`SA_OFFICIAL_RAR=rar623` + `SA_OFFICIAL_UNRAR=rar723`）。缓存不存在时用
+`scripts/wsl/fetch-rarlab.sh` 拉，或装 WinRAR 后靠默认安装路径。
+
+`SA_WINRAR_DIR` 选整套工具目录（`rar-cli` 的 `winrar_interop` 套件）；
+`SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` 直接指可执行文件（`rar-rs` 的
+`official_interop` 套件）。从仓库根运行，路径要给 Windows 形式 （Git Bash
+下：`cygpath -w "$PWD/.cache/winrar"`）：
+
+```sh
+SA_WINRAR_DIR='C:\path\to\rar-rs\.cache\winrar\6-23' \
+  cargo test -p rar-cli --test winrar_interop
+
+SA_OFFICIAL_RAR='C:\path\to\rar-rs\.cache\winrar\6-23\Rar.exe' \
+SA_OFFICIAL_UNRAR='C:\path\to\rar-rs\.cache\winrar\7-23\UnRAR.exe' \
+  cargo test -p rar-rs --test official_interop
+```
+
+工具缺失时套件打印 `SKIPPED` 并跳过；`SA_REQUIRE_WINRAR=1` /
+`SA_REQUIRE_OFFICIAL=1` 把缺工具变成硬失败。**注意**：把 `SA_OFFICIAL_UNRAR`
+指向 6.23 时，`v70::*`（RAR7 归档）与 `om_mark_of_the_web_matches_winrar` 会失败
+——6.23 早于 RAR7、MOTW 行为也不同，是版本差异而非回归（已在 `1fbfaba` 上确认
+同样失败）。
+
 ## Why test targets are optimized
 
 The root `Cargo.toml` sets:

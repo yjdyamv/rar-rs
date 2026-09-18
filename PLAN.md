@@ -241,8 +241,10 @@
       成员后与全新模型逐字节相同、整链单解码器逐成员回环）；4×250 KB 词随机文本
       solid m5 归档 99755 → 97696 B（−2.06%，续用成员各小 635–735
       B）；新增官方互操作 `official_unrar_validates_solid_ppmd_chain`（本机官方
-      UnRAR 7.23 `t` + 逐成员 `x` 字节一致）；库级
-      `create_rar4_solid_ppmd_text_chain` 与 CLI 互操作
+      UnRAR 7.23 与 6.23 的 `t` + 逐成员 `x` 字节一致；注意 **6.23 的 RAR4
+      写入器根本不产 PPMd**：它对同一份词随机语料写出的是 LZ 块，且比我们的 PPMd
+      产物 大约 50%（35–37 KB vs 23–24 KB），所以 RAR4 PPMd
+      链只有解码侧参考）；库级 `create_rar4_solid_ppmd_text_chain` 与 CLI 互操作
       `we_create_rar4_solid_ppmd_text_winrar_valid`
       均改用词随机语料（原先的重复语料 会被 LZ 接管，用例名里的「PPMd
       链」名不副实），后者还断言每个成员的 packed 区 以 PPMd

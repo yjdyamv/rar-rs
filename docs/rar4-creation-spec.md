@@ -41,8 +41,9 @@ rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver
 >
 > solid 链内 PPMd 成员续用链上模型：首个 PPMd 成员发新模型头（0xA7），其后连续
 > 的 PPMd 成员发续模型头（0x87）并共享模型（`encode_ppmd_member_chain` 以
-> `last_was_ppmd` 判定，中间夹 LZ 成员则回到新模型）。solid 链内的自动 VM 过滤器
-> 同样生效（读者窗口持有的即 LZ 层编码的字节，过滤成员仍是普通链环）。
+> `last_was_ppmd` 判定，中间夹 LZ 成员则回到新模型）。官方 6.23 与 7.23 的 UnRAR
+> 都能解出该形态（6.23 的 RAR4 写入器不产 PPMd，无写入侧参考）。solid 链内的自动
+> VM 过滤器同样生效（读者窗口持有的即 LZ 层编码的字节，过滤成员仍是普通链环）。
 
 Recovery volumes（`.rev`）两种布局均已支持，见
 `docs/issues/rar4-recovery-volumes.md`。
