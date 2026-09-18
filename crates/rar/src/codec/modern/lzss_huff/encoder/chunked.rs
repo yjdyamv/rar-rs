@@ -512,6 +512,73 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
         .is_some_and(|percent| percent >= DISTINCT_PERCENT)
 }
 
+/// MT-only priced tier (issue 15 experiment, `RAR_RS_MT_WINDOW_DP`): the
+/// sequential path's optimal parse over the same chain frame, one candidate per
+/// position, instead of the greedy decisions. Shares the frame setup with
+/// [`mt_slice_symbols_low_step`].
+#[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)]
+fn mt_slice_symbols_windowed(
+    state: &mut EncoderState,
+    data: &[u8],
+    s0: usize,
+    e0: usize,
+    lr_shared: &match_finder::LongRange,
+    entry_len: usize,
+    chain_len: usize,
+    max_match: usize,
+    dict_size: usize,
+    long_range: bool,
+    seed_tail: bool,
+    variant: ArchiveVersion,
+) -> Vec<Symbol> {
+    let tail_ctx = &state.tail;
+    let tl = tail_ctx.len();
+    let mut combined = Vec::with_capacity(tl + (e0 - s0));
+    combined.extend_from_slice(tail_ctx);
+    combined.extend_from_slice(&data[s0..e0]);
+
+    const MT_LOW_STEP_CHAIN: usize = 16;
+    let chain = chain_len.min(MT_LOW_STEP_CHAIN);
+    let parts = state.chain_parts.take();
+    let mut finder = match parts {
+        Some((head, prev)) => {
+            match_finder::MatchFinder::reuse(&combined, 2, max_match, chain, dict_size, head, prev)
+        }
+        None => match_finder::MatchFinder::new(&combined, 2, max_match, chain, dict_size),
+    };
+    if seed_tail {
+        for pos in 0..tl {
+            finder.insert(pos);
+        }
+    }
+
+    let lr_q = if long_range {
+        Some((lr_shared, tl + (e0 - s0), entry_len + s0))
+    } else {
+        None
+    };
+
+    let mut dist_cache = [0u32; DIST_CACHE_SIZE];
+    let mut last_length = 0u32;
+    let symbols = super::parse::windowed_chain_parse(
+        &combined,
+        &mut finder,
+        tl,
+        combined.len(),
+        &mut dist_cache,
+        &mut last_length,
+        max_match,
+        dict_size,
+        variant,
+        lr_q,
+    );
+    state.chain_parts = Some(finder.into_parts());
+    state.dist_cache = dist_cache;
+    state.last_length = last_length;
+    symbols
+}
+
 /// Encode one worker slice `[s0, e0)` of [`encode_chunked_mt`].
 ///
 /// Each worker runs the MT low-step parse (hash-chain greedy+lazy over the
@@ -599,20 +666,28 @@ fn encode_mt_slice(
     // ones from the sampled history. Cuts the per-position step count
     // (a bounded chain walk + lazy skip instead of a tree descent at
     // every position) at the price of MT output divergence.
-    let mut symbols = mt_slice_symbols_low_step(
-        state,
-        data,
-        s0,
-        e0,
-        lr_shared,
-        entry_len,
-        chain_len,
-        lazy_thresh,
-        max_match,
-        dict_size,
-        long_range,
-        seed_tail,
-    );
+    // Issue 15 experiment: the priced tier, off by default until measured.
+    let mut symbols = if std::env::var_os("RAR_RS_MT_WINDOW_DP").is_some() {
+        mt_slice_symbols_windowed(
+            state, data, s0, e0, lr_shared, entry_len, chain_len, max_match, dict_size, long_range,
+            seed_tail, variant,
+        )
+    } else {
+        mt_slice_symbols_low_step(
+            state,
+            data,
+            s0,
+            e0,
+            lr_shared,
+            entry_len,
+            chain_len,
+            lazy_thresh,
+            max_match,
+            dict_size,
+            long_range,
+            seed_tail,
+        )
+    };
     if let Some(lead) = lead_symbols {
         let mut joined = lead.to_vec();
         joined.append(&mut symbols);

@@ -104,6 +104,104 @@ pub(super) fn find_matches_with_tail(
     symbols
 }
 
+/// MT-only priced tier (issue 15): the sequential path's optimal parse over
+/// candidates from the cheap chain finder — one run per position instead of
+/// the BT4 collector's — with the pre-block price estimate its first pass uses.
+///
+/// The greedy tier decides per position on raw length; this decides globally
+/// per block, which is where the sequential ratio comes from, and it costs the
+/// chain walk plus a bounded DP (no statistics pass, no tree descent). The
+/// matchless fast path is kept: an all-literal block skips the DP entirely, so
+/// incompressible slices stay cheap.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn windowed_chain_parse(
+    combined: &[u8],
+    finder: &mut MatchFinder<'_>,
+    start: usize,
+    end: usize,
+    dist_cache: &mut [u32; DIST_CACHE_SIZE],
+    last_length: &mut u32,
+    max_match: usize,
+    window: usize,
+    variant: ArchiveVersion,
+    lr: Option<(&match_finder::LongRange, usize, usize)>,
+) -> Vec<Symbol> {
+    let mut symbols = Vec::with_capacity(end - start);
+    let mut state = EncoderMatchState::new(*dist_cache, *last_length);
+    let mut block_start = start;
+    while block_start < end {
+        let block_end = (block_start + OPT_BLOCK_SIZE).min(end);
+        let span = block_end - block_start;
+        let mut matches = BlockMatches {
+            runs: Vec::with_capacity(span),
+            starts: Vec::with_capacity(span + 1),
+        };
+        let mut longest = 0usize;
+        for pos in block_start..block_end {
+            matches.starts.push(matches.runs.len() as u32);
+            let (mut dist, mut length) = finder.find_match_cached(pos, dist_cache);
+            // The shared long-range table is the only source of cross-slice
+            // matches, so probe it where the greedy tier does: a good near
+            // match is never worse than a far one.
+            if let Some((long_range, near_max, anchor)) = lr
+                && length < 64
+                && pos + 4 <= end
+            {
+                let chunk_off = pos - start;
+                if let Some((long_dist, long_length)) = long_range.find_from(
+                    &combined[start..end],
+                    chunk_off,
+                    anchor,
+                    near_max + 1,
+                    max_match,
+                ) && long_length > length
+                {
+                    dist = long_dist as usize;
+                    length = long_length;
+                }
+            }
+            longest = longest.max(length);
+            if length >= 4 && dist > 0 {
+                matches.runs.push((length as u32, dist as u32));
+            }
+        }
+        matches.starts.push(matches.runs.len() as u32);
+
+        let live_repeat = state.reps.iter().any(|&distance| distance != 0);
+        if longest <= RELAXED_MATCHLESS_MAX_LEN && !live_repeat {
+            symbols.extend(
+                combined[block_start..block_end]
+                    .iter()
+                    .map(|&byte| Symbol::Literal(byte)),
+            );
+            state.last_length = 0;
+        } else {
+            let tokens = optimal_parse_tokens(
+                combined,
+                block_start..block_end,
+                max_match,
+                window,
+                variant,
+                None,
+                &matches,
+                state,
+            );
+            let (block_symbols, _) = convert_tokens(
+                &tokens,
+                combined,
+                block_start..block_end,
+                &mut state,
+                variant,
+            );
+            symbols.extend(block_symbols);
+        }
+        block_start = block_end;
+    }
+    *dist_cache = state.reps;
+    *last_length = state.last_length;
+    symbols
+}
+
 /// Match-finding loop over `data[start..end]` with a distance cache.
 /// `lr` (when present) adds long-range candidates from the sampled
 /// history: `(long_range, near_max)` where `near_max` is the largest

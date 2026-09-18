@@ -161,6 +161,29 @@ like a real DLL, but its windows are all distinct. Pinned by
 end, `writer_structural_screen_keeps_archive_bytes_identical` (packed streams
 compared with the screen on and off).
 
+### Issue 15 lever "windowed priced DP": measured positive (2026-09-18)
+
+The global-decision half of the priced tier works where the per-byte half did
+not. `windowed_chain_parse` feeds the _sequential_ path's own optimal parse
+(`optimal_parse_tokens` + `convert_tokens`, no new decision logic) with one
+candidate run per position from the cheap chain finder, plus the shared
+long-range probe and the estimated first-pass prices. Measured on `ntoskrnl.exe`
+12.5 MiB, mt8, same binary via `RAR_RS_MT_WINDOW_DP`:
+
+| mt8           | greedy (today)   | windowed DP         |
+| ------------- | ---------------- | ------------------- |
+| m1 (chain 4)  | 438 ms / 53.77%  | 754 ms / 49.98%     |
+| m3 (chain 16) | 1117 ms / 52.05% | ~2.8-3.1 s / 48.48% |
+
+Readings: (1) the windowed DP recovers ~3.6-3.8pp of the ~5.4pp MT-vs-seq gap,
+i.e. MT can reach near-seq ratio (48.48% against seq's 46.67%) at ~2.3x the
+speed of seq m3; (2) more usefully for speed, **m1 + windowed DP (754 ms /
+49.98%) beats today's m3 greedy (1117 ms / 52.05%) on both axes**, so the MT
+ratio floor is no longer ~52%; (3) it is a time-for-ratio trade at a fixed level
+(1.7x at m1, ~2.5x at m3), which is why it stays behind the switch: changing an
+existing `-m` level's MT timing/output is a product decision, not a free
+optimization. Output decodes byte-identically (`collectbench` asserts it).
+
 ### Issue 15 lever "priced cheap tier": measured negative (2026-09-18)
 
 Replacing the MT tier's raw-length lazy rule with a price-driven choice (the
