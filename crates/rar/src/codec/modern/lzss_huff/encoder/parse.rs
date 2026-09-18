@@ -104,19 +104,25 @@ pub(super) fn find_matches_with_tail(
     symbols
 }
 
-/// MT-only priced tier (issue 15): the sequential path's optimal parse over
-/// candidates from the cheap chain finder — one run per position instead of
-/// the BT4 collector's — with the pre-block price estimate its first pass uses.
+/// The priced tier's driver: a block-global DP (the sequential path's
+/// `optimal_parse_tokens`) over candidates supplied by `emit`.
 ///
-/// The greedy tier decides per position on raw length; this decides globally
-/// per block, which is where the sequential ratio comes from, and it costs the
-/// chain walk plus a bounded DP (no statistics pass, no tree descent). The
-/// matchless fast path is kept: an all-literal block skips the DP entirely, so
-/// incompressible slices stay cheap.
+/// `emit(pos, cache, runs)` reports the candidates worth starting at `pos` as
+/// `(length, distance)` pairs with **increasing** length, nearest distance
+/// first — the same shape and order the sequential collector produces, so the
+/// DP's "each report that improves on the longest so far owns one run of
+/// lengths" reading applies unchanged. A source that only has one candidate
+/// pushes one pair.
+///
+/// `lr` (when present) adds candidates from the sampled long-range table:
+/// `(long_range, near_reach, anchor)`, where `near_reach` is how many bytes of
+/// history the near source holds at `start` and `anchor` is the absolute
+/// history offset of `start`. A position `k` bytes into the buffer must be
+/// complemented from distance `near_reach + k + 1` on, which is what keeps the
+/// buffer's own bytes from being probed twice.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn windowed_chain_parse(
+pub(super) fn windowed_priced_parse<F>(
     combined: &[u8],
-    finder: &mut MatchFinder<'_>,
     start: usize,
     end: usize,
     dist_cache: &mut [u32; DIST_CACHE_SIZE],
@@ -125,12 +131,18 @@ pub(super) fn windowed_chain_parse(
     window: usize,
     variant: ArchiveVersion,
     lr: Option<(&match_finder::LongRange, usize, usize)>,
-) -> Vec<Symbol> {
+    mut emit: F,
+) -> Vec<Symbol>
+where
+    F: FnMut(usize, &[u32; DIST_CACHE_SIZE], &mut Vec<(u32, u32)>),
+{
     let mut symbols = Vec::with_capacity(end - start);
     let mut state = EncoderMatchState::new(*dist_cache, *last_length);
+    let probe_cache = *dist_cache;
+    let block_size = super::chunked::MT_ROW_INDEX_DP_BLOCK;
     let mut block_start = start;
     while block_start < end {
-        let block_end = (block_start + OPT_BLOCK_SIZE).min(end);
+        let block_end = (block_start + block_size).min(end);
         let span = block_end - block_start;
         let mut matches = BlockMatches {
             runs: Vec::with_capacity(span),
@@ -139,11 +151,17 @@ pub(super) fn windowed_chain_parse(
         let mut longest = 0usize;
         for pos in block_start..block_end {
             matches.starts.push(matches.runs.len() as u32);
-            let (mut dist, mut length) = finder.find_match_cached(pos, dist_cache);
-            // The shared long-range table is the only source of cross-slice
-            // matches, so probe it where the greedy tier does: a good near
-            // match is never worse than a far one.
-            if let Some((long_range, near_max, anchor)) = lr
+            let before = matches.runs.len();
+            emit(pos, &probe_cache, &mut matches.runs);
+            let mut length = 0usize;
+            for &(run_length, _) in &matches.runs[before..] {
+                length = length.max(run_length as usize);
+            }
+            // The shared long-range table is the only source of matches into
+            // history before this buffer (a solid chain's earlier members, or an
+            // earlier MT window), so probe it where the greedy tier does: a good
+            // near match is never worse than a far one.
+            if let Some((long_range, near_reach, anchor)) = lr
                 && length < 64
                 && pos + 4 <= end
             {
@@ -152,18 +170,15 @@ pub(super) fn windowed_chain_parse(
                     &combined[start..end],
                     chunk_off,
                     anchor,
-                    near_max + 1,
+                    near_reach + chunk_off + 1,
                     max_match,
                 ) && long_length > length
                 {
-                    dist = long_dist as usize;
+                    matches.runs.push((long_length as u32, long_dist));
                     length = long_length;
                 }
             }
             longest = longest.max(length);
-            if length >= 4 && dist > 0 {
-                matches.runs.push((length as u32, dist as u32));
-            }
         }
         matches.starts.push(matches.runs.len() as u32);
 
@@ -201,6 +216,125 @@ pub(super) fn windowed_chain_parse(
     *last_length = state.last_length;
     symbols
 }
+
+/// Buckets in [`RowIndex`]: a 4-byte hash, like the sequential finders' key
+/// length. Hashing four bytes means every bucket member is a potential 4-byte
+/// match, so no candidate is probed and thrown away on the minimum length.
+const ROW_INDEX_HASH_BITS: u32 = 20;
+const ROW_INDEX_BUCKETS: usize = 1 << ROW_INDEX_HASH_BITS;
+
+/// A shared, read-only row index over one member buffer: every position grouped
+/// by the hash of its first three bytes, as a counting-sorted CSR.
+///
+/// Unlike the BT4 tree or the per-frame hash chain it carries no
+/// insertion-order state and needs no per-worker copy, so workers can query the
+/// member's whole history without re-inserting it — which is exactly what made
+/// a per-slice *sequential* parse cost more than the sequential member (the tree
+/// re-insert of a slice's lookbehind measured ~5x the member at ~5.3 MiB/s).
+/// Candidates come out newest-first within the distance window, like the chain's.
+pub(crate) struct RowIndex {
+    starts: Vec<u32>,
+    positions: Vec<u32>,
+}
+
+impl RowIndex {
+    /// Build the index in two passes (count, then place). O(n) at memory
+    /// bandwidth, paid once per member instead of per slice.
+    pub(super) fn build(data: &[u8]) -> Self {
+        let count = data.len().saturating_sub(3);
+        let mut starts = vec![0u32; ROW_INDEX_BUCKETS + 1];
+        for pos in 0..count {
+            starts[Self::hash(data, pos) + 1] += 1;
+        }
+        for hash in 0..ROW_INDEX_BUCKETS {
+            starts[hash + 1] += starts[hash];
+        }
+        // Place through a private cursor: `starts` must keep the bucket ends,
+        // so writing back into it would collapse every range to empty.
+        let mut cursor = starts.clone();
+        let mut positions = vec![0u32; count];
+        for pos in 0..count {
+            let hash = Self::hash(data, pos);
+            positions[cursor[hash] as usize] = pos as u32;
+            cursor[hash] += 1;
+        }
+        Self { starts, positions }
+    }
+
+    fn hash(data: &[u8], pos: usize) -> usize {
+        let value = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        (value.wrapping_mul(0x9E37_79B1) >> (32 - ROW_INDEX_HASH_BITS)) as usize
+    }
+
+    /// Longest match at `pos` among the newest `depth` candidates within
+    /// `max_distance` bytes, or `None` when nothing reaches four bytes.
+    #[cfg(test)]
+    pub(super) fn longest(
+        &self,
+        data: &[u8],
+        pos: usize,
+        max_distance: usize,
+        max_match: usize,
+        depth: usize,
+    ) -> Option<(u32, u32)> {
+        let mut runs = Vec::with_capacity(4);
+        self.collect(data, pos, max_distance, max_match, depth, &mut runs);
+        runs.last().copied()
+    }
+
+    /// Report the candidates at `pos` the way the sequential collector does:
+    /// walks the bucket newest-first (distance ascending) and pushes one
+    /// `(length, distance)` run per candidate that beats the best length so
+    /// far, so the DP can trade a shorter near match against a longer far one.
+    /// At most `depth` candidates are compared.
+    pub(super) fn collect(
+        &self,
+        data: &[u8],
+        pos: usize,
+        max_distance: usize,
+        max_match: usize,
+        depth: usize,
+        out: &mut Vec<(u32, u32)>,
+    ) {
+        if pos + 3 >= data.len() {
+            return;
+        }
+        let hash = Self::hash(data, pos);
+        let bucket = &self.positions[self.starts[hash] as usize..self.starts[hash + 1] as usize];
+        let end = bucket.partition_point(|&candidate| (candidate as usize) < pos);
+        let max_length = max_match.min(data.len() - pos);
+        let mut best_length = 0usize;
+        let mut checked = 0usize;
+        for &candidate in bucket[..end].iter().rev() {
+            let distance = pos - candidate as usize;
+            if distance > max_distance {
+                break;
+            }
+            // A candidate only improves the best when its byte at the current
+            // best length matches, so probe that byte before the full compare.
+            if best_length == 0 || data[candidate as usize + best_length] == data[pos + best_length]
+            {
+                let length = match_length_at(data, pos, distance, max_length);
+                if length >= 4 && length > best_length {
+                    out.push((length as u32, distance as u32));
+                    best_length = length;
+                    if length == max_length {
+                        break;
+                    }
+                }
+            }
+            checked += 1;
+            if checked >= depth {
+                break;
+            }
+        }
+    }
+}
+
+/// How far one DP block spans in [`windowed_priced_parse`]. Bigger blocks buy
+/// lookahead and fewer block restarts at the cost of the DP's per-position
+/// arrays (about 16 bytes per block byte, per worker).
+pub(super) const MT_DP_BLOCK_SIZE: usize = 256 * 1024;
 
 /// Match-finding loop over `data[start..end]` with a distance cache.
 /// `lr` (when present) adds long-range candidates from the sampled

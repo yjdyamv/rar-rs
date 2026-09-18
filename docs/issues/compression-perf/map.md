@@ -176,18 +176,81 @@ _worse in both directions_ (dll.bin 12.5 MiB, m3, mt8, real CLI):
 | every 16th byte (grid)            | 2592 ms | **8,103,275 (+24%)** |
 
 So the DP's gain is _made of_ dense candidates; there is no cheap-candidate
-shortcut. Combined with the BT4 finding (re-inserting a slice's lookbehind costs
-~5x the member at the tree's measured 5.3 MiB/s, so a per-slice sequential parse
-is slower than the sequential member), the frontier for "MT with near-seq ratio"
-is the full windowed tier: **~2.2x today's MT time for -8% packed** on this
-member (6,516,302 -> 5,997,137), i.e. still ~1.9x slower than WinRAR's
-single-threaded m3 and ~8x slower than its mt8. Matching WinRAR's MT (fast _and_
-ratio-neutral) needs a parallelizable finder this codebase does not have; that
-is a design change, not a tuning one.
+shortcut. The BT4 finding stands (re-inserting a slice's lookbehind costs ~5x
+the member at the tree's measured 5.3 MiB/s, so a per-slice sequential parse is
+slower than the sequential member) — but it only rules out _re-inserting_, and
+that turned out to be avoidable: see the landed row index below, which keeps the
+candidates dense by building the candidate source once for the whole member
+(6,516,302 -> 5,897,174 B at 1.3x greedy's MT time).
 
 Measured while sweeping: the buffered writer only parallelized a single member
 at or above its `MT_MIN` (3 x 4 MiB), so a 4.88 MiB member ignored `-mt`
 entirely. Text at m3 therefore reports seq numbers for every `-threads` value.
+
+### Issue 15 lever "shared row index + priced DP": landed (2026-09-18)
+
+The thing that makes MT-with-near-seq-ratio possible is not a cheaper search but
+a candidate source with **no per-slice state**: a shared, read-only row index
+over the whole member, built once, queried by every worker. It is a
+counting-sorted CSR keyed on the _4-byte_ window (2^20 buckets, positions as
+`u32`, ~4 B/byte plus a 4 MB table), so workers never build a lookbehind frame,
+never insert, and can still reach the whole dictionary instead of an 8 MiB tail.
+On top of it each slice runs the sequential path's own block-global priced DP
+(`optimal_parse_tokens`), with the sequential collector's multi-run candidate
+shape (every candidate that beats the best length gets its own run) and the
+sampled long-range table for bytes older than the buffer (a solid chain's other
+members, an earlier MT window).
+
+Each step, measured on dll.bin 12.5 MiB m3 mt8 (greedy 6,516,302 B):
+
+| step                                                | time    | packed    |
+| --------------------------------------------------- | ------- | --------- |
+| chain candidates, one run per position (old tier)   | 3211 ms | 5,997,137 |
+| row index, 3-byte hash, one run, depth 32           | 2461 ms | 6,115,336 |
+| + multi-run candidates, depth 64 (still 3-byte)     | 2404 ms | 5,999,488 |
+| + 4-byte hash and 2^20 buckets, depth 32            | 1719 ms | 5,897,159 |
+| + DP block 1 MiB instead of 64 KiB (depth 64)       | 2184 ms | 5,999,545 |
+| **landed: 4-byte hash, depth 32, DP block 256 KiB** | 2328 ms | 5,897,174 |
+
+The 4-byte key is what made it cheap: every bucket member is then a potential
+4-byte match, so no probe is spent on candidates that cannot reach the minimum
+length (2^16 three-byte buckets over 12.5 MiB average ~190 entries). Depth is a
+dial on dense binaries only (128 -> 5,830,216 B, 512 -> 5,794,406 B) and costs
+text nothing, because a 4-byte hash over 4.88 MiB of source leaves ~5 entries
+per bucket.
+
+Results (m3, dict 32m, `-mt8`, real CLI, this host):
+
+| corpus                    | sequential (mt1)    | MT greedy (before)   | MT row index (now)        |
+| ------------------------- | ------------------- | -------------------- | ------------------------- |
+| dll.bin 12.5 MiB          | 5,751,821 / 6120 ms | 6,516,302 / 1769 ms  | **5,897,174 / 2328 ms**   |
+| big.bin 75 MB (streaming) | 17,894,515 / ~28 s  | 20,021,162 / 7513 ms | **17,935,613 / 13047 ms** |
+| src.txt 4.88 MiB          | 922,257             | 922,257              | **922,257** (identical)   |
+| xml6 / mixed6             | unchanged           | unchanged            | **identical**             |
+
+So the streaming tier now lands within 0.23% of the sequential parse at 2.1x its
+speed (and 1.7x faster than the chain-candidate windowed DP for the same bytes),
+while text and structured members are byte-identical to what the greedy tier
+produced. Official UnRAR 6.23 and 7.23 both accept a 75 MB `-mt8` archive (`t`
+OK) and 7.23 extracts it byte-identically. WinRAR's own mt8 on dll.bin is 450 ms
+/ 5,645,746 B, so the remaining gap is still a faster finder, not the parse
+tier.
+
+Three defects this work surfaced, all now covered: the CSR cursor must not write
+back through the bucket-end array (it collapses every range to empty and the
+parse silently emits literals — 10,208,233 B on the DLL; unit-tested), the
+long-range probe's `min_dist` must be "bytes the near source owns at the slice
+start + offset", not the dictionary size (using the dictionary hid every
+cross-member match, which `mt_tests::solid_members_share_the_window_through_mt`
+caught), and the windowed driver needed multi-run candidates to match the
+sequential collector's reach.
+
+Superseded and removed in the same change: `RAR_RS_MT_WINDOW_DP`,
+`mt_slice_symbols_windowed` and `windowed_chain_parse` (the chain-candidate
+windowed DP is strictly dominated by the row index: same packed size, 25% slower
+on the DLL), plus the three experimental switches of this work
+(`RAR_RS_MT_ROW_INDEX`, `RAR_RS_MT_ROW_DEPTH`, `RAR_RS_MT_DP_BLOCK`). The
+sequential path never reaches any of this, so the ratio contract is untouched.
 
 ### The MT floor was silently excluding 4-12 MiB unfiltered members (2026-09-18)
 
