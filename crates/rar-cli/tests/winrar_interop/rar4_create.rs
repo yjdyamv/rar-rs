@@ -505,23 +505,30 @@ fn we_create_rar4_delta_filtered_member_winrar_valid() {
     }
 }
 
-/// RAR4 solid m5 on a run of near-identical text files: the run is coded
-/// with a shared PPMd model (members 2.. continue it), and WinRAR's UnRAR
-/// must decode every member byte-identically. WinRAR 6.23's RAR4 writer
-/// never produced PPMd, so this is one-way interop.
+/// RAR4 solid m5 on a run of word-random text files: every member is PPMd
+/// and members 2.. continue the shared model (0x87 headers), and WinRAR's
+/// UnRAR must decode every member byte-identically. WinRAR 6.23's RAR4 writer
+/// never produced PPMd, so this is one-way interop. The corpus is word-random
+/// from a small vocabulary so distance matches stay short and PPMd really
+/// wins each member; a repetitive corpus would let the LZ side match the
+/// history and take over, leaving the continuation untested.
 #[test]
 fn we_create_rar4_solid_ppmd_text_winrar_valid() {
+    const VOCAB: [&str; 16] = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+        "lambda", "mu", "nu", "xi", "omicron", "pi",
+    ];
     let dir = temp_dir();
     let mut content = Vec::new();
-    for chapter in 1..=4u8 {
+    for chapter in 1..=4u64 {
+        let mut state = 0x1234_5678u64 ^ (chapter * 0x9E37_79B9);
         let mut body = Vec::with_capacity(240_000);
-        for line in 0..2200u32 {
-            body.extend_from_slice(
-                format!(
-                    "chapter {chapter} line {line:05}: shared boilerplate that repeats across every chapter of this archive body body body tail tail\n"
-                )
-                .as_bytes(),
-            );
+        while body.len() < 240_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            body.extend_from_slice(VOCAB[(state >> 33) as usize % VOCAB.len()].as_bytes());
+            body.push(b' ');
         }
         let src = dir.path().join(format!("chap{chapter}.txt"));
         std::fs::write(&src, &body).unwrap();
@@ -538,12 +545,22 @@ fn we_create_rar4_solid_ppmd_text_winrar_valid() {
     let (ok, out) = run(&mut cmd);
     assert!(ok, "our rar -s -ma4 -m5 failed:\n{out}");
 
-    // Our own reader round-trips the chain.
+    // Our own reader round-trips the chain, and every member's packed region
+    // starts with the PPMd block-type bit (the reader reads it first): with
+    // the model gate working, members 2.. continue the shared model.
     {
+        let bytes = std::fs::read(&arc).unwrap();
         let mut ar = ArchiveReader::open(&arc).unwrap();
         for (name, body) in &content {
+            let id = ar.unique_entry(name).unwrap();
+            let entry = ar.entry(id).unwrap();
             assert_eq!(
-                &ar.read_entry(ar.unique_entry(name).unwrap()).unwrap(),
+                bytes[entry.data_offset() as usize] & 0x80,
+                0x80,
+                "{name} must be coded as a PPMd block"
+            );
+            assert_eq!(
+                &ar.read_entry(id).unwrap(),
                 body,
                 "{name} solid-PPMd mismatch"
             );

@@ -242,8 +242,11 @@
       solid m5 归档 99755 → 97696 B（−2.06%，续用成员各小 635–735
       B）；新增官方互操作 `official_unrar_validates_solid_ppmd_chain`（本机官方
       UnRAR 7.23 `t` + 逐成员 `x` 字节一致）；库级
-      `create_rar4_solid_ppmd_text_chain` 改用词随机语料，使 PPMd
-      真正胜出（原先的重复语料会被 LZ 接管）。
+      `create_rar4_solid_ppmd_text_chain` 与 CLI 互操作
+      `we_create_rar4_solid_ppmd_text_winrar_valid`
+      均改用词随机语料（原先的重复语料 会被 LZ 接管，用例名里的「PPMd
+      链」名不副实），后者还断言每个成员的 packed 区 以 PPMd
+      块位（首字节高位）开头。
 - [ ] **RAR4 solid 归档 MT**：legacy solid 链保持串行；成员级并行需跨成员共享
       窗口，属结构性代价（RAR5 的 chunk 级 MT 已兑现）。
 - **有意不做（设计决定，2026-09-17）**：
