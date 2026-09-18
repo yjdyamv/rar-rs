@@ -161,6 +161,42 @@ like a real DLL, but its windows are all distinct. Pinned by
 end, `writer_structural_screen_keeps_archive_bytes_identical` (packed streams
 compared with the screen on and off).
 
+### Streaming member filter gate: measured, not guessed (fixed 2026-09-18)
+
+The streaming writer (members at or above the 64 MiB threshold) had to commit to
+a delta/x86 filter _before_ compressing, and it decided from a 64 KiB head
+sample. On real DLLs that sample looks delta-friendly (PE headers, import
+tables) so delta was applied to the whole body — and delta destroys x86 match
+structure, so the member packed far larger while still decoding correctly (the
+transform is invertible, which is why every test stayed green).
+
+Decisive measurement, same content, 1 MB apart across the threshold (m1):
+
+| member       | path      | packed             |
+| ------------ | --------- | ------------------ |
+| 67,000,000 B | buffered  | 13,676,143 (20.4%) |
+| 68,000,000 B | streaming | 28,451,342 (41.8%) |
+
+Bisected by disabling one filter at a time: `--mc d-` restored parity (16.5 vs
+17.7 MB), `--mc e-` kept the blowup. The 75 MB `big.bin` corpus went 34,737,024
+-> 21,580,579 (-38%) after the fix.
+
+The gate is now a measurement: every _auto_ candidate is transformed with the
+production helper (the same `delta_stream_window` / `x86_stream_window` the
+window loop uses) and packed at two probe points (head and middle, 512 KiB
+each); it is kept only if it beats plain LZSS by `FILTER_TRIAL_MARGIN_PERCENT`
+on **both**, and when both delta and x86 survive the smaller wins instead of
+hitting the old `InvalidOption`. The margin is load-bearing: on incompressible
+data the delta transform packed 524423 B against plain's 524424 B — a one-byte
+"win" that a strict `<` accepted and that cost a whole member. Forced filters
+(`-mcd+` / `-mce+`) skip the gate, so their bytes are unchanged (verified:
+forced-delta output identical to before).
+
+Verification: our extraction byte-identical, official UnRAR 7.23 and 6.23 `t`
+pass on the fixed archive and on a 64 MiB delta-friendly member (still filtered,
+64 MiB -> 5,531 B), `large_paths` green including the legit-delta round-trip,
+and the RAR5 streaming interop suite (8 cases) green.
+
 ### Issue 15 lever "windowed priced DP": measured positive (2026-09-18)
 
 The global-decision half of the priced tier works where the per-byte half did

@@ -492,3 +492,140 @@ fn long_range_matches_roundtrip_at_scale() {
     );
     assert_eq!(sha256(&out.join("pair.bin")), sha256(&src));
 }
+
+/// A large streamed member whose *head* looks delta-friendly must not get the
+/// delta filter over its whole body: the streaming writer measures each
+/// candidate filter on probe points (head + middle) and only keeps one that
+/// beats plain LZSS everywhere. Before that gate existed the choice came from a
+/// 64 KiB head sample alone, and a member like this one (delta-friendly head,
+/// incompressible body) came out ~1.7x larger than the same member with
+/// `FilterMode::Disabled` on delta — while still decoding correctly, because
+/// the transform is invertible.
+#[test]
+fn large_streamed_delta_filter_is_measured_not_guessed() {
+    use rar_rs::{FilterMode, FilterOptions};
+
+    let dir = make_temp_dir();
+    let size = 64 * 1024 * 1024usize;
+    let src = dir.path().join("mixed.bin");
+    let mut data = Vec::with_capacity(size);
+    let mut state = 0x1234_5678u64;
+    // Head: a random walk, which delta compresses well and plain LZSS cannot.
+    let mut value = 0u8;
+    while data.len() < 1024 * 1024 {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        value = value.wrapping_add((state % 15) as u8).wrapping_sub(7);
+        data.push(value);
+    }
+    // Body: a repeated 512-byte code-like block with a few random patched
+    // bytes per copy. Plain LZSS matches each block at distance 512, so the
+    // member really compresses; delta carries the patch noise plus the block's
+    // own differences, so it cannot strictly beat plain — the shape where
+    // guessing from the head alone is wrong.
+    let mut block = Vec::with_capacity(512);
+    while block.len() < 512 {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        match state % 4 {
+            0 => {
+                block.push(0xE8);
+                block.extend_from_slice(&(state as u32).to_le_bytes());
+            }
+            1 => block.extend_from_slice(&[0x90; 3]),
+            _ => block.push((state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8),
+        }
+    }
+    block.truncate(512);
+    while data.len() < size {
+        let mut copy = block.clone();
+        for _ in 0..8 {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let at = (state as usize) % copy.len();
+            copy[at] = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8;
+        }
+        data.extend_from_slice(&copy);
+    }
+    // The middle probe window must be data delta cannot help (the gate's second
+    // probe point); the head alone must not be allowed to decide.
+    let mid = size / 2;
+    for byte in data[mid..mid + 512 * 1024].iter_mut() {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        *byte = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8;
+    }
+    data.truncate(size);
+    std::fs::write(&src, &data).unwrap();
+
+    let create = |name: &str, filters: FilterOptions| -> u64 {
+        let path = dir.path().join(name);
+        let mut archive =
+            ArchiveWriter::create_with(&path, WriterOptions::default().filters(filters)).unwrap();
+        archive
+            .add_path(
+                &src,
+                EntryWriteOptions::new()
+                    .compression_level(CompressionLevel::try_from(1u8).unwrap()),
+            )
+            .unwrap();
+        archive.finish().unwrap();
+        std::fs::metadata(&path).unwrap().len()
+    };
+
+    // x86 is disabled in all three cases: the auto x86 detection only runs
+    // when delta was *not* chosen, so mixing it in would compare different
+    // filter sets instead of isolating the delta decision this test is about.
+    let auto = create(
+        "auto.rar",
+        FilterOptions {
+            x86: FilterMode::Disabled,
+            ..Default::default()
+        },
+    );
+    let delta_off = create(
+        "delta-off.rar",
+        FilterOptions {
+            delta: FilterMode::Disabled,
+            x86: FilterMode::Disabled,
+            ..Default::default()
+        },
+    );
+    let delta_forced = create(
+        "delta-forced.rar",
+        FilterOptions {
+            delta: FilterMode::Forced,
+            delta_channels: Some(2),
+            x86: FilterMode::Disabled,
+        },
+    );
+    // The member must really compress: if it stored, the filter decision never
+    // mattered and the test would pass for the wrong reason.
+    assert!(
+        delta_off < size as u64,
+        "the member must compress for the filter gate to matter (delta-off {delta_off} vs {size})"
+    );
+    // Forcing delta (or x86) would change this member's size, so the equality
+    // below is a real statement about which filters the auto path applied.
+    assert!(
+        delta_forced != delta_off,
+        "forced delta must change the size on this member (forced {delta_forced} vs delta-off {delta_off})"
+    );
+    // The head looks delta-friendly but the middle probe window does not, so
+    // the auto path must apply no delta at all: same packed size as
+    // delta-disabled. Before the gate, the head sample alone chose delta and
+    // this came out near the forced size.
+    assert_eq!(
+        auto, delta_off,
+        "the auto path must not apply delta here (auto {auto} vs delta-off {delta_off}, forced delta {delta_forced})"
+    );
+
+    // And the member round-trips.
+    let mut archive = ArchiveReader::open(dir.path().join("auto.rar")).unwrap();
+    let id = archive.unique_entry("mixed.bin").unwrap();
+    assert_eq!(archive.read_entry(id).unwrap(), data);
+}
