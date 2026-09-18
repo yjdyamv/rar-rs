@@ -703,6 +703,85 @@ pub fn pick_delta_channel(
 /// by the large deltas that wrapping introduces), and the plain-LZSS
 /// comparison guarantees structured-but-not-multi-channel data (text, prose)
 /// is never made worse than the unfiltered pack.
+/// Bytes measured at each probe point by [`filter_transform_wins`].
+///
+/// A filter candidate used to be chosen from a 64 KiB head sample, which real
+/// DLLs fool (PE headers look delta-friendly) — and on this path the decision
+/// then costs a whole-member encode. The streaming writer had the same defect
+/// in a worse form (it transformed 68 MiB on that evidence); both paths now
+/// share this measured gate.
+pub const FILTER_PROBE_LEN: usize = 512 * 1024;
+
+/// How far a candidate must beat plain LZSS at every probe point, in percent.
+///
+/// A strict `<` is not enough: incompressible data can pack one byte smaller
+/// with the transform applied (measured: 524423 vs 524424 on 512 KiB), and a
+/// one-byte "win" is noise. It also has to cover the filter *records* the
+/// competition does not count — a marginal sample win once shipped an archive
+/// that was 53 bytes larger than the unfiltered one on 4.88 MiB of text.
+pub const FILTER_PROBE_MARGIN_PERCENT: usize = 1;
+
+/// One probe window of a member: `bytes` starting at member offset `offset`.
+#[derive(Debug, Clone, Copy)]
+pub struct FilterProbe<'a> {
+    pub offset: u64,
+    pub bytes: &'a [u8],
+}
+
+/// Measure `transform` against plain LZSS over the probe windows, packing both
+/// sides with the member's own method.
+///
+/// Returns `None` when the transform fails to beat plain by
+/// [`FILTER_PROBE_MARGIN_PERCENT`] at any probe point (the candidate is
+/// rejected), otherwise the summed `(filtered, plain)` packed sizes so callers
+/// can rank the candidates that did win. `transform` is the production
+/// transform (the same helper the emit path applies); only the records are
+/// skipped, and they cost the same on both sides of a comparison.
+pub fn filter_transform_wins<F>(
+    probes: &[FilterProbe<'_>],
+    method: u8,
+    dict_size_log: u8,
+    variant: ArchiveVersion,
+    transform: F,
+) -> RarResult<Option<(usize, usize)>>
+where
+    F: Fn(&[u8], u64) -> Vec<u8>,
+{
+    let mut filtered_total = 0usize;
+    let mut plain_total = 0usize;
+    let mut probed = 0usize;
+    for probe in probes {
+        let plain = encode_with_filters(probe.bytes, method, dict_size_log, &[], variant)?.len();
+        let transformed = transform(probe.bytes, probe.offset);
+        let filtered =
+            encode_with_filters(&transformed, method, dict_size_log, &[], variant)?.len();
+        if filtered * 100 > plain * (100 - FILTER_PROBE_MARGIN_PERCENT) {
+            return Ok(None);
+        }
+        filtered_total += filtered;
+        plain_total += plain;
+        probed += 1;
+    }
+    if probed == 0 {
+        return Ok(None);
+    }
+    Ok(Some((filtered_total, plain_total)))
+}
+
+/// The probe windows of an in-memory member: its head and its middle.
+pub fn member_filter_probes(data: &[u8]) -> Vec<FilterProbe<'_>> {
+    [0usize, data.len() / 2]
+        .into_iter()
+        .filter_map(|offset| {
+            let len = FILTER_PROBE_LEN.min(data.len().saturating_sub(offset));
+            (len >= 64 * 1024).then(|| FilterProbe {
+                offset: offset as u64,
+                bytes: &data[offset..offset + len],
+            })
+        })
+        .collect()
+}
+
 pub fn encode_with_auto_delta_filter(
     data: &[u8],
     method: u8,

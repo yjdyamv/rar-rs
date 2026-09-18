@@ -29,8 +29,9 @@ pub use chunked::{
     DEFAULT_CHUNK_SIZE, encode_chunked_mt, encode_chunked_raw, encode_raw, encode_with_progress_raw,
 };
 pub use filter::{
-    MAX_FILTER_BLOCK_LENGTH, encode_with_auto_delta_filter, encode_with_auto_x86_filter,
-    encode_with_filters, encode_with_filters_mt, forced_combined_specs, pick_delta_channel,
+    FILTER_PROBE_LEN, FilterProbe, MAX_FILTER_BLOCK_LENGTH, encode_with_auto_delta_filter,
+    encode_with_auto_x86_filter, encode_with_filters, encode_with_filters_mt,
+    filter_transform_wins, forced_combined_specs, member_filter_probes, pick_delta_channel,
 };
 pub(crate) use filter::{
     delta_stream_window, forced_combined_stream_window, merge_ranges, x86_stream_window,

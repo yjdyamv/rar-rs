@@ -161,6 +161,44 @@ like a real DLL, but its windows are all distinct. Pinned by
 end, `writer_structural_screen_keeps_archive_bytes_identical` (packed streams
 compared with the screen on and off).
 
+### Buffered members: the filter competition was half the runtime (fixed 2026-09-18)
+
+Same defect as the streaming gate above, one layer down. On a 4.88 MiB source
+tree at m3 the buffered writer spent **4434 ms** against **2198 ms** with
+`-mc de-`, for an archive **53 bytes larger** than unfiltered: the sample-based
+candidates each cost a whole-member encode, and the comparison did not count the
+filter _records_ the winner then pays.
+
+Bisected by filter: `-mc d-` (x86 auto only) reproduced the cost and the 53
+bytes, `-mc e-` did not, and 1 MiB probes of a real DLL showed why a window
+cannot judge x86: the prefix _loses_ 0.07% there while the member _wins_ 6%, so
+x86's gain is a long-range whole-member effect. Delta's effect is local, so the
+probe gate applies to delta only; x86 keeps its detection-based decision.
+
+Sizes are all the codec's now:
+
+| member           | before                | after                 | WinRAR 7.23 (m3 mt1)  |
+| ---------------- | --------------------- | --------------------- | --------------------- |
+| src.txt 4.88 MiB | 4434 ms / 922,310 B   | 2819 ms / 922,257 B   | 411 ms / 930,583 B    |
+| dll.bin 12.5 MiB | 6495 ms / 5,751,821 B | 6898 ms / 5,751,821 B | 1892 ms / 5,645,705 B |
+| 68 MB mixed      | 28,451,342 B          | 14,620,275 B          | —                     |
+| 75 MB mixed      | 34,737,024 B          | 17,894,515 B          | 17,023,103 B          |
+
+The text case is **-36%** (and smaller); the DLL pays +6% for the probe and
+keeps its bytes exactly.
+
+### The x86 detector needed a density floor (2026-09-18)
+
+The 53-byte regression came from the _x86_ candidate, not delta: its cluster
+scan only needs two opcodes within a few KiB, so text passes it (0.030% of its
+bytes look like E8/E9) and then pays a whole-member encode; the archive came out
+53 bytes _larger_ than unfiltered. `auto_x86_filter_ranges` now requires
+**0.5%** opcode density for inputs at or above 1 MiB (below that the extra
+encode is microseconds and synthetic inputs legitimately carry few opcodes).
+Real code sits two orders of magnitude above the floor: a 12.5 MiB system DLL
+measures 2.08%. After the floor, text at m3 goes 4434 -> 2819 ms and 922,310 ->
+922,257 B, while the DLL's bytes are unchanged (5,751,821 B, x86 still applied).
+
 ### Streaming member filter gate: measured, not guessed (fixed 2026-09-18)
 
 The streaming writer (members at or above the 64 MiB threshold) had to commit to

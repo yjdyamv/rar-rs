@@ -81,6 +81,15 @@ pub(super) fn encode_with_filter_policy(
         )?));
     }
     if policy.delta != FilterMode::Disabled
+        && let Some(channels) = lzss_huff::pick_delta_channel(data, method, dsl, variant)?
+        && lzss_huff::filter_transform_wins(
+            &lzss_huff::member_filter_probes(data),
+            method,
+            dsl,
+            variant,
+            |bytes, offset| lzss_huff::delta_stream_window(bytes, offset, channels).0,
+        )?
+        .is_some()
         && let Some(filtered) =
             lzss_huff::encode_with_auto_delta_filter(data, method, dsl, variant, threads, cancel)?
     {

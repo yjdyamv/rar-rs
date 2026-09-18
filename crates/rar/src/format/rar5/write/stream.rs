@@ -55,35 +55,11 @@ fn auto_delta_probe_enabled(delta: FilterMode, x86: FilterMode) -> bool {
     delta == FilterMode::Auto && x86 != FilterMode::Forced
 }
 
-/// Bytes read at each probe point when the streaming writer measures its
-/// filter candidates. The old decision trusted a single 64 KiB head sample,
-/// which is enough to fool it: a member whose head looks delta-friendly (a PE
-/// header, say) had the delta transform applied to the whole member, and on
-/// x86 code that destroys the match structure — measured at 1.7-2x larger
-/// output on real DLLs at 68 MiB (`--mc d-` restored parity), with decoding
-/// still correct because the transform is invertible.
-const FILTER_TRIAL_LEN: usize = 512 * 1024;
-
-/// How far a candidate must beat plain LZSS at every probe point, in percent.
-///
-/// A strict `<` is not enough: incompressible data can pack one byte smaller
-/// with the transform applied (measured: 524423 vs 524424 on 512 KiB), and a
-/// one-byte "win" on a probe window is noise, not evidence — accepting it
-/// applied delta to a whole 64 MiB body. Real wins are percent-sized (x86 on
-/// code ~3%, delta on audio far more), so a small margin rejects the noise
-/// without blocking the filters this path exists for.
-const FILTER_TRIAL_MARGIN_PERCENT: usize = 1;
-
-/// Measure `transform` against plain LZSS on the probe points, packing both
-/// sides with the member's own method.
-///
-/// Returns `None` when the transform fails to beat plain by
-/// [`FILTER_TRIAL_MARGIN_PERCENT`] on any probe point (the candidate is
-/// rejected), otherwise the summed `(filtered, plain)` packed sizes so callers
-/// can rank the candidates that did win. The transform is the production one
-/// (the same helper the window loop applies), only the records are skipped:
-/// they cost bytes in the real stream but the same on both sides of a
-/// comparison, so the ranking stands.
+/// Read the member's probe windows (head and middle) and measure each filter
+/// candidate with the shared gate in [`lzss_huff::filter_transform_wins`].
+/// Reading the windows here (rather than probing in memory) is what lets the
+/// streaming writer use the same gate as the buffered path even though it
+/// never holds the member.
 fn probe_filter_candidate<F>(
     path: &Path,
     file_size: u64,
@@ -95,34 +71,27 @@ fn probe_filter_candidate<F>(
 where
     F: Fn(&[u8], u64) -> Vec<u8>,
 {
-    let mut filtered_total = 0usize;
-    let mut plain_total = 0usize;
-    let mut probed = 0usize;
+    let mut windows: Vec<(u64, Vec<u8>)> = Vec::with_capacity(2);
     for offset in [0u64, file_size / 2] {
-        let len = FILTER_TRIAL_LEN.min(file_size.saturating_sub(offset) as usize);
+        let len = crate::codec::lzss_huff::FILTER_PROBE_LEN
+            .min(file_size.saturating_sub(offset) as usize);
         if len < 64 * 1024 {
             continue;
         }
-        let mut probe = vec![0u8; len];
+        let mut window = vec![0u8; len];
         let mut file = File::open(path)?;
         file.seek(std::io::SeekFrom::Start(offset))?;
-        file.read_exact(&mut probe)?;
-
-        let plain = lzss_huff::encode_with_filters(&probe, method, dsl, &[], variant)?.len();
-        let transformed = transform(&probe, offset);
-        let filtered =
-            lzss_huff::encode_with_filters(&transformed, method, dsl, &[], variant)?.len();
-        if filtered * 100 > plain * (100 - FILTER_TRIAL_MARGIN_PERCENT) {
-            return Ok(None);
-        }
-        filtered_total += filtered;
-        plain_total += plain;
-        probed += 1;
+        file.read_exact(&mut window)?;
+        windows.push((offset, window));
     }
-    if probed == 0 {
-        return Ok(None);
-    }
-    Ok(Some((filtered_total, plain_total)))
+    let probes: Vec<lzss_huff::FilterProbe<'_>> = windows
+        .iter()
+        .map(|(offset, bytes)| lzss_huff::FilterProbe {
+            offset: *offset,
+            bytes,
+        })
+        .collect();
+    lzss_huff::filter_transform_wins(&probes, method, dsl, variant, transform)
 }
 
 /// Collapse the merged sample-detected x86 regions into the single
@@ -514,69 +483,28 @@ impl RarArchive {
             }
         }
         let delta_used = delta_channels.is_some();
-        let x86_used = x86_filter_type.is_some();
-        if delta_used || x86_used {
-            // Auto candidates were chosen from scanners and a 64 KiB head
-            // sample; measure them on real probe points before letting one
-            // transform the whole member. Forced filters skip this: the user
-            // asked for them, so the bytes must not change.
-            let method_variant = crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
-            let delta_auto = filter_policy.delta != FilterMode::Forced && delta_used;
-            let x86_auto = filter_policy.x86 != FilterMode::Forced && x86_used;
-            if delta_auto || x86_auto {
-                let delta_probe = if delta_auto {
-                    let channels = delta_channels.expect("checked above");
-                    probe_filter_candidate(
-                        path,
-                        file_size,
-                        method,
-                        dsl,
-                        method_variant,
-                        |bytes, offset| lzss_huff::delta_stream_window(bytes, offset, channels).0,
-                    )?
-                } else {
-                    None
-                };
-                let x86_probe = if x86_auto {
-                    let filter_type = x86_filter_type.expect("checked above");
-                    let regions = x86_regions.clone();
-                    probe_filter_candidate(
-                        path,
-                        file_size,
-                        method,
-                        dsl,
-                        method_variant,
-                        |bytes, offset| {
-                            lzss_huff::x86_stream_window(bytes, offset, filter_type, &regions).0
-                        },
-                    )?
-                } else {
-                    None
-                };
-                // Keep the better of the two that survived, and drop the ones
-                // that did not. Dropping is the fix: a candidate that loses on
-                // a probe must not transform the member. Ranking keeps the old
-                // `InvalidOption` on two surviving auto candidates from firing.
-                match (delta_probe, x86_probe) {
-                    (Some((delta_len, _)), Some((x86_len, _))) => {
-                        if x86_len < delta_len {
-                            delta_channels = None;
-                        } else {
-                            x86_filter_type = None;
-                            x86_regions = Vec::new();
-                        }
-                    }
-                    (None, Some(_)) => delta_channels = None,
-                    (Some(_), None) => {
-                        x86_filter_type = None;
-                        x86_regions = Vec::new();
-                    }
-                    (None, None) => {
-                        delta_channels = None;
-                        x86_filter_type = None;
-                        x86_regions = Vec::new();
-                    }
-                }
+        // Measure the *delta* candidate before it may transform the member:
+        // its effect is local (neighbour correlation), so probe windows judge
+        // it faithfully, and the sample-based pick can win by a hair on a 64 KiB
+        // head and then cost the whole member (measured: 1.7-2x larger output
+        // on real DLLs at 68 MiB with decoding still correct, because the
+        // transform is invertible) or a whole-member encode for nothing.
+        //
+        // The x86 candidate is deliberately *not* measured this way: its gain
+        // comes from making code match across the whole member, so on an
+        // isolated window it looks worse by construction (measured: every
+        // window of a real DLL loses 15-45% with delta, and an x86 window probe
+        // rejected a filter that wins ~6% on the member). It keeps its
+        // detection-based decision, exactly as before.
+        if delta_used && filter_policy.delta != FilterMode::Forced {
+            let channels = delta_channels.expect("checked above");
+            let variant = crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
+            let probed =
+                probe_filter_candidate(path, file_size, method, dsl, variant, |bytes, offset| {
+                    lzss_huff::delta_stream_window(bytes, offset, channels).0
+                })?;
+            if probed.is_none() {
+                delta_channels = None;
             }
         }
         let delta_used = delta_channels.is_some();
@@ -1010,8 +938,8 @@ impl RarArchive {
 #[cfg(test)]
 mod tests {
     use super::{
-        FILTER_TRIAL_LEN, auto_delta_probe_enabled, ensure_compatible_stream_filters,
-        probe_filter_candidate, x86_region_span,
+        auto_delta_probe_enabled, ensure_compatible_stream_filters, probe_filter_candidate,
+        x86_region_span,
     };
     use crate::error::RarError;
     use crate::options::FilterMode;
@@ -1032,7 +960,7 @@ mod tests {
         // Random walk: correlated neighbours, no repeats for LZSS.
         let mut value = 0u8;
         let mut state = 0x1234_5678u64;
-        while data.len() < FILTER_TRIAL_LEN {
+        while data.len() < crate::codec::lzss_huff::FILTER_PROBE_LEN {
             state ^= state >> 12;
             state ^= state << 25;
             state ^= state >> 27;
@@ -1044,7 +972,7 @@ mod tests {
         // shape the gate exists for: a head that looks delta-friendly (a PE
         // header, a media header) in front of 60 MiB of body that delta cannot
         // help.
-        while data.len() < 2 * FILTER_TRIAL_LEN + 64 {
+        while data.len() < 2 * crate::codec::lzss_huff::FILTER_PROBE_LEN + 64 {
             state ^= state >> 12;
             state ^= state << 25;
             state ^= state >> 27;
@@ -1070,7 +998,7 @@ mod tests {
         let mut walk = Vec::new();
         let mut value = 0u8;
         let mut state = 0x9E37_79B9u64;
-        while walk.len() < 2 * FILTER_TRIAL_LEN + 64 {
+        while walk.len() < 2 * crate::codec::lzss_huff::FILTER_PROBE_LEN + 64 {
             state ^= state >> 12;
             state ^= state << 25;
             state ^= state >> 27;

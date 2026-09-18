@@ -308,6 +308,14 @@ const AUTO_X86_MAX_RANGES: usize = 8;
 const AUTO_X86_MAX_SPAN_RANGES: usize = 4;
 /// Minimum total opcodes in a span for it to be filtered.
 const AUTO_X86_MIN_SPAN_OPCODES: usize = 4;
+/// Minimum share of bytes that must look like an x86 call/jump opcode before
+/// the automatic x86 filter is worth applying, in hundredths of a percent
+/// (see [`auto_x86_filter_ranges`]).
+const AUTO_X86_MIN_OPCODE_PERCENT_HUNDREDTHS: usize = 50;
+/// Input size at or above which the density floor is enforced. Below it the
+/// whole-member encode a misfire costs is microseconds, and small synthetic
+/// inputs legitimately carry few opcodes.
+const AUTO_X86_DENSITY_MIN_LEN: usize = 1024 * 1024;
 
 /// Find the next x86 E8 (or E9 when `cmp_mask == 0xFE`) opcode at or after
 /// `start`, scanning up to `end_exclusive`.
@@ -330,10 +338,24 @@ fn next_x86_opcode(data: &[u8], start: usize, end_exclusive: usize, cmp_mask: u8
 /// [`AUTO_X86_MAX_RANGES`]) and broad spans become additional ranges
 /// (capped at [`AUTO_X86_MAX_SPAN_RANGES`]).
 pub fn auto_x86_filter_ranges(data: &[u8], include_e9: bool) -> Vec<std::ops::Range<usize>> {
-    let mut ranges =
+    let (mut ranges, opcodes) =
         auto_x86_filter_ranges_with_cluster_gap(data, include_e9, AUTO_X86_CLUSTER_GAP);
+    // The widest-gap scan visits every candidate opcode, so its count is the
+    // member's x86 density. Too few of them and the filter cannot pay for its
+    // records, let alone for the extra parse a whole-member encode costs: a
+    // text member measures 0.03% against a real DLL's 2.08%, and the sparse
+    // case was a whole-member encode (half the member's runtime) that shipped
+    // an archive 53 bytes larger than unfiltered.
+    if data.len() >= AUTO_X86_DENSITY_MIN_LEN
+        && opcodes.saturating_mul(10_000)
+            < data
+                .len()
+                .saturating_mul(AUTO_X86_MIN_OPCODE_PERCENT_HUNDREDTHS)
+    {
+        return Vec::new();
+    }
     for range in
-        auto_x86_filter_ranges_with_cluster_gap(data, include_e9, AUTO_X86_TIGHT_CLUSTER_GAP)
+        auto_x86_filter_ranges_with_cluster_gap(data, include_e9, AUTO_X86_TIGHT_CLUSTER_GAP).0
     {
         if !ranges.contains(&range) {
             ranges.push(range);
@@ -346,16 +368,18 @@ fn auto_x86_filter_ranges_with_cluster_gap(
     data: &[u8],
     include_e9: bool,
     cluster_gap: usize,
-) -> Vec<std::ops::Range<usize>> {
+) -> (Vec<std::ops::Range<usize>>, usize) {
     if data.len() <= 5 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
 
     let cmp_mask = if include_e9 { 0xFE } else { 0xFF };
     let mut clusters: Vec<(usize, usize, usize)> = Vec::new();
     let mut current: Option<(usize, usize, usize)> = None;
     let mut scan_pos = 0usize;
+    let mut opcodes = 0usize;
     while let Some(pos) = next_x86_opcode(data, scan_pos, data.len() - 4, cmp_mask) {
+        opcodes += 1;
         match current {
             Some((start, last, count)) if pos - last <= cluster_gap => {
                 current = Some((start, pos, count + 1));
@@ -413,7 +437,7 @@ fn auto_x86_filter_ranges_with_cluster_gap(
     for (start, last, _) in clusters {
         push_x86_filter_range(&mut ranges, data.len(), start, last);
     }
-    ranges
+    (ranges, opcodes)
 }
 
 fn push_x86_filter_range(
@@ -629,8 +653,8 @@ mod x86_tests {
     /// Independent scalar reimplementation of the cluster logic, used to
     /// cross-check the scanner at chunk boundaries.
     fn scalar_ranges(data: &[u8], include_e9: bool) -> Vec<std::ops::Range<usize>> {
-        let mut out = auto_x86_filter_ranges_with_cluster_gap(data, include_e9, 4096);
-        for r in auto_x86_filter_ranges_with_cluster_gap(data, include_e9, 512) {
+        let mut out = auto_x86_filter_ranges_with_cluster_gap(data, include_e9, 4096).0;
+        for r in auto_x86_filter_ranges_with_cluster_gap(data, include_e9, 512).0 {
             if !out.contains(&r) {
                 out.push(r);
             }

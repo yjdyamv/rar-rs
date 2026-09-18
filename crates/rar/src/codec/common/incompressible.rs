@@ -444,6 +444,41 @@ mod probe_tests {
         assert!(raw);
     }
 
+    /// The screen is a pure optimization: for a structured member the codec's
+    /// bytes are identical with the screen on and off, because the sample
+    /// encodes it skips would have cleared the member anyway. (This replaces an
+    /// archive-level version of the same check, which made `src/archive/tests.rs`
+    /// reach into this module — forbidden by the layer boundaries.)
+    #[test]
+    fn structural_screen_keeps_codec_bytes_identical() {
+        let _lock = screen_test_lock();
+        let (_, data) = structured_corpora().remove(0);
+        set_screen_enabled(true);
+        let screened = crate::codec::lzss_huff::encode_chunked(
+            &data,
+            crate::codec::lzss_huff::EncodeOptions::new(3, 8),
+        )
+        .unwrap();
+        set_screen_enabled(false);
+        let raw = crate::codec::lzss_huff::encode_chunked(
+            &data,
+            crate::codec::lzss_huff::EncodeOptions::new(3, 8),
+        )
+        .unwrap();
+        set_screen_enabled(true);
+        assert!(
+            screened.len() < data.len() / 2,
+            "the member must compress, else the screen never mattered"
+        );
+        assert_eq!(
+            screened,
+            raw,
+            "the screen must not change the codec's bytes ({} vs {})",
+            screened.len(),
+            raw.len()
+        );
+    }
+
     /// Minimal standard base64 (test-only): enough to build a high-entropy
     /// text corpus without a dependency.
     fn base64(data: &[u8]) -> Vec<u8> {
