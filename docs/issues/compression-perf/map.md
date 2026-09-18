@@ -126,23 +126,25 @@ The codec-only ladder measured earlier through `collectbench` (no filter policy,
 same file, same dictionary) is the frame of reference for the "cliff": m1 1067
 ms / 54.05%, m2 6548 ms / 46.88%, m3 7242 ms / 46.67%, m5 9247 ms / 46.67%. On
 the CLI numbers the m1 -> m2 step is 6,766,361 -> 5,779,542 B (**-14.6%** for
-6.3x the time), and above m2 the ladder is nearly flat: m3 -> m5 buys under
-0.02% for +39% time, with m5 not even monotone (5,751,001 B against m4's
-5,750,782 B) — the repricing passes add fraction-of-a-percent noise, which is
-what issue 09 records.
+6.3x the time) and, after the level-scaled search gate landed below, the m3 ->
+m5 step is 5,751,821 -> 5,738,595 B (**-0.23%**) for +19% time — against
+WinRAR's own m3 -> m5 of 5,645,705 -> 5,623,330 B (-0.4% for +76% time). The
+intermediate rungs still trade almost nothing: chain budget 96 -> 1024 is
+byte-identical (measured), and the pricing passes move under 0.02% (issue 09).
 
-What a level changes comes from `LEVEL_PARAMS` plus the parse-pass table, and
-nothing else (the dictionary is **not** level-dependent: `dict_log_for` defaults
-to 32 MiB at every level, capped at twice the file size, and `max_match` is
-0x1001 everywhere):
+What a level changes comes from `LEVEL_PARAMS`, the parse-pass table and
+[the search gate](#the-m3-m5-ladder-was-flat-because-one-gate-was-not-level-scaled-landed-2026-09-18):
+the dictionary is **not** level-dependent (`dict_log_for` defaults to 32 MiB at
+every level, capped at twice the file size, and `max_match` is 0x1001
+everywhere).
 
-| level | matcher       | chain budget | price passes | long-range table |
-| ----- | ------------- | ------------ | ------------ | ---------------- |
-| 1     | greedy + lazy | 4            | 0            | no               |
-| 2     | optimal DP    | 16           | 2            | yes              |
-| 3     | optimal DP    | 96           | 2            | yes              |
-| 4     | optimal DP    | 256          | 3            | yes              |
-| 5     | optimal DP    | 1024         | 4            | yes              |
+| level | matcher       | chain budget | price passes | long-range table | search gate |
+| ----- | ------------- | ------------ | ------------ | ---------------- | ----------- |
+| 1     | greedy + lazy | 4            | 0            | no               | 256         |
+| 2     | optimal DP    | 16           | 2            | yes              | 256         |
+| 3     | optimal DP    | 96           | 2            | yes              | 256         |
+| 4     | optimal DP    | 256          | 3            | yes              | 1024        |
+| 5     | optimal DP    | 1024         | 4            | yes              | 4096        |
 
 `-m` under `-mt`: the MT row-index tier carries its own level dial, a candidate
 depth per level (`MT_ROW_INDEX_DEPTH` = 16/32/64/128/256 for m1..m5, measured in
@@ -283,6 +285,54 @@ on the DLL), plus the three experimental switches of this work
 (`RAR_RS_MT_ROW_INDEX`, `RAR_RS_MT_ROW_DEPTH`, `RAR_RS_MT_DP_BLOCK`). The
 sequential path never reaches any of this, so the ratio contract is untouched.
 
+### The m3-m5 ladder was flat because one gate was not level-scaled (landed 2026-09-18)
+
+The complaint was that `-m4`/`-m5` bought nothing: m3 5,751,821 B against m5's
+5,751,001 B, i.e. 0.014%, while WinRAR's m5 is 0.4% below its own m3. Sweeping
+the parse's knobs with temporary env switches (dll.bin 12.5 MiB, m3, `-mt1`,
+dict 32m) showed the candidates were all _dead ends_:
+
+| knob                             | m3 result                | verdict                    |
+| -------------------------------- | ------------------------ | -------------------------- |
+| chain budget x8 (96 -> 768)      | 5,751,821 B (identical)  | not binding at all         |
+| finder stop length 64 -> 273     | 5,748,278 B (-0.06%)     | noise-scale                |
+| relaxation cap 12 -> 32/64 slots | 5,749,689 B (-0.04%)     | noise-scale                |
+| probe all 4 repeat distances     | 5,750,002 B (-0.03%)     | noise-scale                |
+| DP block cap x8 (128 KiB -> 1 M) | 5,751,821 B (identical)  | byte-neutral, time-neutral |
+| never commit to a long match     | 5,743,005 B (-0.15%)     | real, see below            |
+| **level-scaled search gate**     | **5,742,924 B (-0.15%)** | **landed**                 |
+
+The one gate that matters is the collector's fast mode: after 256 consecutive
+positions that found _no match at all_, the tree walk drops to a recovery
+cadence and stops inserting. It exists for incompressible data — every skipped
+search also skips a tree insert, which is why its _time_ saving is real — but on
+a dense binary it also truncates the runs where a long match is about to appear,
+dropping candidates at **every** level. Threshold curve on the DLL: 256 today
+5,751,821 B / 6184 ms, 1024 5,742,924 B, 4096 5,739,533 B / 6608 ms, beyond 4096
+nothing (10 B).
+
+So the gate is now `COLLECT_MISS_THRESHOLD = [-, 256, 256, 256, 1024, 4096]`:
+m1-m3 keep today's value — the default level's bytes are byte-identical, which
+is what makes this safe to land under the ratio contract — and the two top rungs
+buy the ratio they were supposed to. Measured ladder at `-mt1`, dict 32m:
+
+| level | dll.bin 12.5 MiB    | src.txt 4.88 MiB  | xml6 6 MiB       |
+| ----- | ------------------- | ----------------- | ---------------- |
+| m3    | 5,751,821 / 8048 ms | 922,257 / 2233 ms | 128,624 / 625 ms |
+| m4    | 5,741,977 (-0.17%)  | 901,411 (-2.3%)   | 128,495 (-0.10%) |
+| m5    | 5,738,595 (-0.23%)  | 900,475 (-2.4%)   | 128,442 (-0.14%) |
+
+m3 -> m5 is now 0.23% on the DLL and 2.4% on text, for +19% and +79% time
+respectively, and MT m3 is unchanged (5,858,387 B). Two things this rules out
+for anyone picking this up again: the commit heuristic (`reach >= 64` -> step
+over) only costs 0.06% (measured with the gate also relaxed) and is redundant
+with the gate change on text, while disabling it _does_ cost time on every
+corpus, so it was dropped rather than level-scaled; and "never enter fast mode"
+is not an option — with the gate off entirely a 6 MiB XML member went from 625
+ms to 24 s, because a gate that never fires also never skips an insert, and a
+dense tree makes every later descent more expensive. Beyond 4096 the ratio
+saturates while that cost keeps growing.
+
 ### The MT floor was silently excluding 4-12 MiB unfiltered members (2026-09-18)
 
 `MT_MIN = 3 * DEFAULT_CHUNK_SIZE` came in with the first mid-size MT change
@@ -313,11 +363,7 @@ What the floor implicitly balanced, now measured: a slice re-inserts its
 lookbehind (up to `NEAR_WINDOW_MAX` = 8 MiB) for a slice floored at 2 MiB, so
 the band pays a large insert volume for only 2-5 slices. That insert is exactly
 what the row index removed (above), which is why the floor could come down at
-all. chunk (`add.rs`, single-member path only; the batch gate stays at 3 chunks
-to avoid nested MT inside a pool wave) gives: 4.88 MiB text 2799 -> 2340 ms
-(**+1.2x**) with **byte-identical** output, very compressible data unchanged (6
-MiB XML: 617 vs 614 ms, same bytes — the sequential parse already steps over
-it), DLL and sub-4 MiB members unchanged.
+all.
 
 ### Buffered members: the filter competition was half the runtime (fixed 2026-09-18)
 

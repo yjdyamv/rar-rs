@@ -505,6 +505,10 @@ pub(super) fn find_matches_in_range(
 
 /// Longest match the optimal parse commits to and steps over without
 /// pricing the bytes it covers (rars `NICE_MATCH_LENGTH`).
+///
+/// Two roles, both experiment seams below: the finder stops comparing bytes at
+/// this length (a match that reaches it is measured out to its real end
+/// afterwards), and the parse stops pricing positions it covers.
 pub(crate) const NICE_MATCH_LENGTH: usize = 64;
 
 /// After this many consecutive positions with no match found, the optimal
@@ -521,22 +525,28 @@ const FAST_MODE_AFTER: usize = 64 * 1024;
 const FAST_RECOVER_INTERVAL: usize = 128;
 
 /// Consecutive failed tree probes before the block collector's tree walk
-/// drops to the [`FAST_RECOVER_INTERVAL`] cadence. A probe fails only when
-/// the tree found *no match at all* (not merely a short one): on
-/// text-like data 4-15 byte matches are real signal (word prefixes) and
-/// must keep the full search cadence — gating on them would let fast mode
-/// starve the recovery searches of candidates and measurably worsen the
-/// ratio on text — while on truly incompressible data a 4-byte
-/// hash-collision match is ~2^-32 per position, so the miss run still
+/// drops to the [`FAST_RECOVER_INTERVAL`] cadence, **by level**: this is the
+/// one shortcut that measurably moved ratio when relaxed, and it is why the
+/// m3-m5 ladder used to be flat.
+///
+/// A probe fails only when the tree found *no match at all* (not merely a short
+/// one): on text-like data 4-15 byte matches are real signal (word prefixes) and
+/// must keep the full search cadence, while on truly incompressible data a
+/// 4-byte hash-collision match is ~2^-32 per position, so the miss run still
 /// accumulates and the mode engages after a couple of KiB of wasted
 /// cache-missing descents into the multi-MiB son array.
-const COLLECT_TREE_MISS_THRESHOLD: usize = 256;
-
-/// Same gating for the long-range probe: `COLLECT_TREE_MISS_THRESHOLD`
-/// failed probes into the multi-MiB random-access table drops it to the
-/// recovery cadence. A spurious short tree match must not reset this — only
-/// an actual long-range hit pays for the probe.
-const COLLECT_LR_MISS_THRESHOLD: usize = 256;
+///
+/// The gate is meant for the incompressible case, but on a **dense binary** it
+/// also truncates the runs where a long match is about to appear, dropping
+/// candidates at every level. Measured on the 12.5 MiB DLL at `-mt1` (dict 32m):
+/// threshold 256 (today) 5,751,821 B / 6184 ms, 1024 5,742,924 B, 4096
+/// 5,739,533 B / 6608 ms, and beyond 4096 nothing on that member (10 B). m5 takes
+/// 4096 rather than "never" because the *time* is not flat there: with the gate
+/// off entirely a 6 MiB XML member went from 625 ms to 24 s, since the gate also
+/// stops inserting the positions it steps over and a dense tree makes every
+/// later descent more expensive. m1-m3 keep 256 — which is why the default
+/// level's bytes do not move at all — and m4 takes 1024.
+pub(super) const COLLECT_MISS_THRESHOLD: [usize; 6] = [0, 256, 256, 256, 1024, 4096];
 
 /// Test seam: force the full pricing passes even for matchless blocks, to
 /// prove the matchless fast path is byte-identical.
@@ -914,6 +924,8 @@ fn collect_block_matches(
     max_match: usize,
     window: usize,
     lr: Option<(&match_finder::LongRange, usize, usize)>,
+    // Per-level dial: when the search drops to the recovery cadence.
+    miss_threshold: usize,
 ) -> BlockMatches {
     let span = block.end - block.start;
     let mut matches = BlockMatches {
@@ -1034,7 +1046,7 @@ fn collect_block_matches(
         // still accumulates and the mode engages as quickly as ever.
         if longest == 0 {
             tree_misses += 1;
-            if !fast_tree && tree_misses >= COLLECT_TREE_MISS_THRESHOLD {
+            if !fast_tree && tree_misses >= miss_threshold {
                 fast_tree = true;
             }
         } else {
@@ -1077,7 +1089,7 @@ fn collect_block_matches(
                 // failed probes (a couple of KiB of incompressible data)
                 // is already definitive and leaves room to act within
                 // the block.
-                if !lr_fast && lr_misses >= COLLECT_LR_MISS_THRESHOLD {
+                if !lr_fast && lr_misses >= miss_threshold {
                     lr_fast = true;
                 }
             }
@@ -1508,6 +1520,8 @@ pub(super) fn find_matches_optimal(
     lr_anchor: usize,
     variant: ArchiveVersion,
     passes: usize,
+    // Per-level parse dial (see [`COLLECT_MISS_THRESHOLD`]).
+    miss_threshold: usize,
     seed_tail: bool,
 ) -> Vec<Symbol> {
     let tail_len = state.tail.len();
@@ -1629,6 +1643,7 @@ pub(super) fn find_matches_optimal(
                 lr,
                 variant,
                 passes,
+                miss_threshold,
             );
             symbols.extend(block_symbols);
             splitter = BlockSplitter::new();
@@ -1651,6 +1666,7 @@ pub(super) fn find_matches_optimal(
             lr,
             variant,
             passes,
+            miss_threshold,
         );
         symbols.extend(block_symbols);
     }
@@ -1688,6 +1704,8 @@ fn parse_one_block(
     lr: Option<(&match_finder::LongRange, usize, usize)>,
     variant: ArchiveVersion,
     passes: usize,
+    // Per-level dial (see [`COLLECT_MISS_THRESHOLD`]).
+    miss_threshold: usize,
 ) -> Vec<Symbol> {
     let matches = collect_block_matches(
         finder,
@@ -1698,6 +1716,7 @@ fn parse_one_block(
         max_match,
         window,
         lr,
+        miss_threshold,
     );
 
     // Fast path: a block with no match candidates at all parses to pure

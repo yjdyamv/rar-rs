@@ -178,11 +178,25 @@ fn filtered_member_with_encrypted_header_interops() {
 #[test]
 fn filtered_member_with_multivolume_interops() {
     let dir = temp_dir();
-    // A 20 MiB correlated-PCM WAV: compresses hard (delta filter) and spans
-    // several 4 MiB volumes, exercising the filter + volume-boundary path.
+    // A 20 MiB correlated-PCM WAV: compresses hard (delta filter) and should
+    // span several volumes, exercising the filter + volume-boundary path.
     let src = dir.path().join("big.wav");
     write_wav(&src, 2, 2_500_000);
-    let vol_size = 4 * 1024 * 1024;
+    // Size the volumes from the member itself rather than fixing 4 MiB: the
+    // delta-filtered PCM packs into a fraction of its input (and the parse keeps
+    // getting better — a 4 MiB volume stopped splitting this member into several
+    // at all, which is what the `>= 3` below is about).
+    let vol_size = {
+        let scratch = dir.path().join("sizing.rar");
+        let mut rar = ArchiveWriter::create_with(&scratch, WriterOptions::default()).unwrap();
+        rar.add_path(
+            &src,
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(5u8).unwrap()),
+        )
+        .unwrap();
+        rar.finish().unwrap();
+        (std::fs::metadata(&scratch).unwrap().len() / 4).max(64 * 1024)
+    };
 
     // WinRAR -> ours (delta-filtered, multi-volume).
     if let Some(rar) = rar_bin() {
@@ -194,6 +208,8 @@ fn filtered_member_with_multivolume_interops() {
             .current_dir(dir.path()));
         assert!(ok, "WinRAR -v delta failed:\n{out}");
         let volumes = rar_rs::discover_volumes(&arc);
+        // WinRAR's own `-v4m` fits this member in one volume; the point here is
+        // reading whatever it produced, so no count assertion.
         let mut ar = ArchiveReader::open(&volumes[0]).unwrap();
         let name = ar.entries().next().unwrap().name().to_string();
         assert_eq!(

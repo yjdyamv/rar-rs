@@ -187,6 +187,7 @@ fn encode_chunked_raw_inner(
                 0,
                 variant,
                 OPTIMAL_PARSE_PASSES[level],
+                super::parse::COLLECT_MISS_THRESHOLD[level],
                 true,
             )
         } else {

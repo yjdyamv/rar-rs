@@ -187,6 +187,7 @@ pub fn encode_with_filters(
                 0,
                 variant,
                 OPTIMAL_PARSE_PASSES[level],
+                super::parse::COLLECT_MISS_THRESHOLD[level],
                 true,
             )
         } else {
