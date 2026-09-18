@@ -161,6 +161,34 @@ like a real DLL, but its windows are all distinct. Pinned by
 end, `writer_structural_screen_keeps_archive_bytes_identical` (packed streams
 compared with the screen on and off).
 
+### Issue 15 lever "cheap candidates + global DP": measured negative (2026-09-18)
+
+The tempting way to make the windowed tier cheap is to search fewer positions:
+the greedy tier only searches where a token starts and merely inserts the bytes
+a match covers, while the windowed DP needs a candidate wherever it may start.
+Striding the candidate search to every 16th byte (inserting the rest) makes it
+_worse in both directions_ (dll.bin 12.5 MiB, m3, mt8, real CLI):
+
+| candidate search                  | time    | packed               |
+| --------------------------------- | ------- | -------------------- |
+| greedy (today's MT)               | 1655 ms | 6,516,302            |
+| every position (full windowed DP) | 3667 ms | **5,997,137**        |
+| every 16th byte (grid)            | 2592 ms | **8,103,275 (+24%)** |
+
+So the DP's gain is _made of_ dense candidates; there is no cheap-candidate
+shortcut. Combined with the BT4 finding (re-inserting a slice's lookbehind costs
+~5x the member at the tree's measured 5.3 MiB/s, so a per-slice sequential parse
+is slower than the sequential member), the frontier for "MT with near-seq ratio"
+is the full windowed tier: **~2.2x today's MT time for -8% packed** on this
+member (6,516,302 -> 5,997,137), i.e. still ~1.9x slower than WinRAR's
+single-threaded m3 and ~8x slower than its mt8. Matching WinRAR's MT (fast _and_
+ratio-neutral) needs a parallelizable finder this codebase does not have; that
+is a design change, not a tuning one.
+
+Measured while sweeping: the buffered writer only parallelizes a single member
+at or above its `MT_MIN` (3 x 4 MiB), so a 4.88 MiB member ignores `-mt`
+entirely. Text at m3 therefore reports seq numbers for every `-threads` value.
+
 ### Buffered members: the filter competition was half the runtime (fixed 2026-09-18)
 
 Same defect as the streaming gate above, one layer down. On a 4.88 MiB source
