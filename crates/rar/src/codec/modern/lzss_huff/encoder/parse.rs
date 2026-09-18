@@ -371,40 +371,33 @@ impl EncoderMatchState {
         Self { reps, last_length }
     }
 
-    /// Classify a match the way the encoder will emit it. `None` when the
-    /// match cannot be encoded: a fresh distance's length bonus can exceed
-    /// the raw length (the format's minimum match length is 2), and the
-    /// optimal parser must not price a token the writer cannot emit.
-    fn encode_match(
-        &self,
-        length: u32,
-        distance: u32,
-        variant: ArchiveVersion,
-    ) -> Option<EncodedMatch> {
-        if distance == self.reps[0] && length == self.last_length && self.last_length != 0 {
-            return Some(EncodedMatch::Repeat);
+    /// The distance-side half of a match's classification: everything
+    /// [`MatchDistancePlan::shape`] needs besides the length. The optimal
+    /// parser walks one run of lengths at a fixed distance, so it computes
+    /// this once per run instead of re-deriving the cache slot, the length
+    /// bonus and the distance slot for every candidate length (the per-pair
+    /// recomputation zstd's optimal parser does and Fast LZMA2 hoists).
+    fn plan(&self, distance: u32, variant: ArchiveVersion) -> MatchDistancePlan {
+        let repeat_length = if distance == self.reps[0] && self.last_length != 0 {
+            self.last_length
+        } else {
+            0
+        };
+        let cache_index = self.reps.iter().position(|&d| d == distance && d != 0);
+        let fresh = cache_index.is_none().then(|| {
+            let (dist_slot, dist_extra, dbits) = encode_distance_slot(distance, variant);
+            FreshDistancePlan {
+                bonus: length_bonus(distance),
+                dist_slot,
+                dist_extra,
+                dbits,
+            }
+        });
+        MatchDistancePlan {
+            repeat_length,
+            cache_index,
+            fresh,
         }
-        if let Some(index) = self.reps.iter().position(|&d| d == distance && d != 0) {
-            let len_slot = encode_length_slot(length);
-            return Some(EncodedMatch::CacheRef {
-                index,
-                len_slot,
-                len_extra: length_extra_bits(length, len_slot),
-            });
-        }
-        let raw_length = length.checked_sub(length_bonus(distance))?;
-        if raw_length < 2 {
-            return None;
-        }
-        let len_slot = encode_length_slot(raw_length);
-        let (dist_slot, dist_extra, dbits) = encode_distance_slot(distance, variant);
-        Some(EncodedMatch::New {
-            len_slot,
-            len_extra: length_extra_bits(raw_length, len_slot),
-            dist_slot,
-            dist_extra,
-            dbits,
-        })
     }
 
     /// Advance the distance memory for an emitted match, mirroring the
@@ -423,21 +416,70 @@ impl EncoderMatchState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EncodedMatch {
+/// What a match costs besides its length: the distance-side facts the
+/// parser resolves once per length run (see [`EncoderMatchState::plan`]).
+#[derive(Debug, Clone, Copy)]
+struct MatchDistancePlan {
+    /// The remembered length that codes as a repeat at `reps[0]`; `0` when
+    /// this distance is not the repeat distance.
+    repeat_length: u32,
+    /// Cache slot of a remembered distance; `None` means a fresh distance.
+    cache_index: Option<usize>,
+    /// The fresh-distance facts, present exactly when `cache_index` is `None`.
+    fresh: Option<FreshDistancePlan>,
+}
+
+/// A fresh (uncached) distance's fixed part: the length bonus the raw length
+/// must absorb, and the distance slot, extra value and bit depth the slot
+/// costs.
+#[derive(Debug, Clone, Copy)]
+struct FreshDistancePlan {
+    bonus: u32,
+    dist_slot: usize,
+    dist_extra: u32,
+    dbits: usize,
+}
+
+/// One length's worth of a [`MatchDistancePlan`], mirroring the three shapes
+/// the writer can emit.
+#[derive(Debug, Clone, Copy)]
+enum MatchShape {
     Repeat,
-    CacheRef {
+    Cache {
         index: usize,
         len_slot: usize,
-        len_extra: usize,
     },
     New {
         len_slot: usize,
-        len_extra: usize,
-        dist_slot: usize,
-        dist_extra: u32,
-        dbits: usize,
+        fresh: FreshDistancePlan,
     },
+}
+
+impl MatchDistancePlan {
+    /// Resolve the shape for one length. `None` when the match cannot be
+    /// encoded: a fresh distance's length bonus can exceed the raw length
+    /// (the format's minimum match length is 2), and the optimal parser must
+    /// not price a token the writer cannot emit.
+    fn shape(self, length: u32) -> Option<MatchShape> {
+        if self.repeat_length != 0 && length == self.repeat_length {
+            return Some(MatchShape::Repeat);
+        }
+        if let Some(index) = self.cache_index {
+            return Some(MatchShape::Cache {
+                index,
+                len_slot: encode_length_slot(length),
+            });
+        }
+        let fresh = self.fresh?;
+        let raw_length = length.checked_sub(fresh.bonus)?;
+        if raw_length < 2 {
+            return None;
+        }
+        Some(MatchShape::New {
+            len_slot: encode_length_slot(raw_length),
+            fresh,
+        })
+    }
 }
 
 /// The length bonus added at decode time for a match at `distance`.
@@ -445,93 +487,113 @@ fn length_bonus(distance: u32) -> u32 {
     u32::from(distance > 0x100) + u32::from(distance > 0x2000) + u32::from(distance > 0x40000)
 }
 
-/// Extra bits written after a length slot (0 for slots below 8).
-fn length_extra_bits(_length: u32, slot: usize) -> usize {
-    if slot < 8 { 0 } else { slot / 4 - 1 }
+/// Extra bits written after a length slot (0 for slots below 8). Depends on
+/// the slot alone, so a pass can tabulate it (see [`TokenPrices`]).
+fn slot_extra_bits(slot: usize) -> u32 {
+    if slot < 8 { 0 } else { (slot / 4 - 1) as u32 }
 }
 
 /// Estimated bit cost of a match before any block has been priced (rars
 /// `estimated_match_cost`). `None` when the match cannot be encoded.
-fn estimated_match_cost(
-    state: &EncoderMatchState,
-    length: u32,
-    distance: u32,
-    variant: ArchiveVersion,
-) -> Option<usize> {
-    match state.encode_match(length, distance, variant)? {
-        EncodedMatch::Repeat => Some(2),
-        EncodedMatch::CacheRef { len_slot, .. } => Some(5 + length_extra_bits(length, len_slot)),
-        EncodedMatch::New {
-            len_slot, dbits, ..
-        } => {
-            let raw = length - length_bonus(distance);
-            Some(10 + length_extra_bits(raw, len_slot) + dbits)
-        }
-    }
+fn estimated_match_cost(plan: &MatchDistancePlan, length: u32) -> Option<u32> {
+    Some(match plan.shape(length)? {
+        MatchShape::Repeat => 2,
+        MatchShape::Cache { len_slot, .. } => 5 + slot_extra_bits(len_slot),
+        MatchShape::New { len_slot, fresh } => 10 + slot_extra_bits(len_slot) + fresh.dbits as u32,
+    })
 }
 
 /// The Huffman code lengths a block of symbols produces, as the block
 /// writer computes them (same frequency counting, same `ensure_nonzero`,
-/// same length-limit pass). The optimal parse needs these to know what each
-/// token it is considering will actually cost.
-struct TokenPrices<'a> {
-    nc: &'a [u8],
-    dc: &'a [u8],
-    ldc: &'a [u8],
-    rc: &'a [u8],
+/// same length-limit pass), reduced once per pricing pass to the per-symbol
+/// bit costs the optimal parse adds up.
+///
+/// The parse prices a candidate once per length slot of every run, so it adds
+/// precomputed components instead of re-deriving slot, extra bits and code
+/// length per candidate — the same tabulation zstd's optimal parser wants for
+/// `ZSTD_getMatchPrice`/`ZSTD_litLengthPrice`.
+struct TokenPrices {
+    /// Cost of one literal byte (and, at the symbol bases, of a cache/repeat
+    /// or match symbol).
+    nc_cost: [u32; HUFF_NC],
+    repeat_cost: u32,
+    /// Cost of a cached distance's symbol, by cache slot.
+    cache_cost: [u32; DIST_CACHE_SIZE],
+    /// `rc[len_slot]` cost plus the slot's extra bits.
+    cache_len_cost: [u32; HUFF_RC],
+    /// `nc[SYM_MATCH_BASE + len_slot]` cost plus the slot's extra bits.
+    new_len_cost: [u32; HUFF_RC],
+    /// `dc[dist_slot]` cost (v70's wider table included).
+    dc_cost: [u32; HUFF_DCX],
+    /// `ldc` cost for a distance slot's low extra nibble.
+    ldc_cost: [u32; 16],
 }
 
-impl TokenPrices<'_> {
-    fn code(bits: u8) -> usize {
+impl TokenPrices {
+    /// Derive the cost tables from one pass's code lengths.
+    fn new(nc: &[u8], dc: &[u8], ldc: &[u8], rc: &[u8]) -> Self {
+        let mut nc_cost = [0u32; HUFF_NC];
+        for (cost, &bits) in nc_cost.iter_mut().zip(nc) {
+            *cost = Self::code(bits);
+        }
+        let mut dc_cost = [0u32; HUFF_DCX];
+        for (cost, &bits) in dc_cost.iter_mut().zip(dc) {
+            *cost = Self::code(bits);
+        }
+        let mut ldc_cost = [0u32; 16];
+        for (cost, &bits) in ldc_cost.iter_mut().zip(ldc) {
+            *cost = Self::code(bits);
+        }
+        let mut cache_len_cost = [0u32; HUFF_RC];
+        let mut new_len_cost = [0u32; HUFF_RC];
+        for slot in 0..HUFF_RC {
+            let extra = slot_extra_bits(slot);
+            cache_len_cost[slot] = Self::code(rc[slot]) + extra;
+            new_len_cost[slot] = nc_cost[SYM_MATCH_BASE + slot] + extra;
+        }
+        let mut cache_cost = [0u32; DIST_CACHE_SIZE];
+        for (index, cost) in cache_cost.iter_mut().enumerate() {
+            *cost = nc_cost[SYM_CACHE_BASE + index];
+        }
+        Self {
+            nc_cost,
+            repeat_cost: nc_cost[SYM_REPEAT],
+            cache_cost,
+            cache_len_cost,
+            new_len_cost,
+            dc_cost,
+            ldc_cost,
+        }
+    }
+
+    fn code(bits: u8) -> u32 {
         if bits == 0 {
-            UNUSED_SYMBOL_COST
+            UNUSED_SYMBOL_COST as u32
         } else {
-            usize::from(bits)
+            u32::from(bits)
         }
     }
 
-    fn literal(&self, byte: u8) -> usize {
-        Self::code(self.nc[byte as usize])
+    fn literal(&self, byte: u8) -> u32 {
+        self.nc_cost[byte as usize]
     }
 
-    fn match_cost(
-        &self,
-        state: &EncoderMatchState,
-        length: u32,
-        distance: u32,
-        variant: ArchiveVersion,
-    ) -> Option<usize> {
-        match state.encode_match(length, distance, variant)? {
-            EncodedMatch::Repeat => Some(Self::code(self.nc[SYM_REPEAT])),
-            EncodedMatch::CacheRef {
-                index,
-                len_slot,
-                len_extra,
-            } => Some(
-                Self::code(self.nc[SYM_CACHE_BASE + index])
-                    + Self::code(self.rc[len_slot])
-                    + len_extra,
-            ),
-            EncodedMatch::New {
-                len_slot,
-                len_extra,
-                dist_slot,
-                dist_extra,
-                dbits,
-            } => {
-                let distance_bits = if dbits >= 4 {
-                    dbits - 4 + Self::code(self.ldc[(dist_extra & 0xF) as usize])
-                } else {
-                    dbits
-                };
-                Some(
-                    Self::code(self.nc[SYM_MATCH_BASE + len_slot])
-                        + len_extra
-                        + Self::code(self.dc[dist_slot])
-                        + distance_bits,
-                )
+    /// Bits to code a match of `length` bytes at the plan's distance.
+    fn match_cost(&self, plan: &MatchDistancePlan, length: u32) -> Option<u32> {
+        Some(match plan.shape(length)? {
+            MatchShape::Repeat => self.repeat_cost,
+            MatchShape::Cache { index, len_slot } => {
+                self.cache_cost[index] + self.cache_len_cost[len_slot]
             }
-        }
+            MatchShape::New { len_slot, fresh } => {
+                let distance_bits = if fresh.dbits >= 4 {
+                    fresh.dbits as u32 - 4 + self.ldc_cost[(fresh.dist_extra & 0xF) as usize]
+                } else {
+                    fresh.dbits as u32
+                };
+                self.new_len_cost[len_slot] + self.dc_cost[fresh.dist_slot] + distance_bits
+            }
+        })
     }
 }
 
@@ -870,7 +932,7 @@ fn optimal_parse_tokens(
     max_match: usize,
     window: usize,
     variant: ArchiveVersion,
-    prices: Option<&TokenPrices<'_>>,
+    prices: Option<&TokenPrices>,
     matches: &BlockMatches,
     initial: EncoderMatchState,
 ) -> Vec<(u32, u32)> {
@@ -905,7 +967,7 @@ fn optimal_parse_tokens(
             continue;
         }
         let literal_cost = prices.map_or(ESTIMATED_LITERAL_COST, |prices| {
-            prices.literal(combined[pos]) as u32
+            prices.literal(combined[pos])
         });
         let literal = here.saturating_add(literal_cost);
         if literal < price[index + 1] {
@@ -985,6 +1047,10 @@ fn optimal_parse_tokens(
         }
         let mut steps_left = MAX_PARSE_STEPS_PER_POSITION;
         for (i, &(run_start, run_end, distance)) in reaches.iter().enumerate().rev() {
+            // The distance side of every candidate in this run is the same,
+            // so classify it once: the per-length step below only resolves
+            // the length slot (and the repeat length's exact match).
+            let plan = state.plan(distance, variant);
             let mut length = run_start.max(4);
             while length <= run_end {
                 if i != longest_idx {
@@ -996,14 +1062,14 @@ fn optimal_parse_tokens(
                 let reach =
                     same_price_run_end(&state, length, distance, variant, max_match).min(run_end);
                 let cost = match prices {
-                    Some(prices) => prices.match_cost(&state, reach, distance, variant),
-                    None => estimated_match_cost(&state, reach, distance, variant),
+                    Some(prices) => prices.match_cost(&plan, reach),
+                    None => estimated_match_cost(&plan, reach),
                 };
                 // `None`: a fresh-distance match whose length bonus would
                 // underflow the encodable raw length — the writer cannot
                 // emit it, so it is not a candidate.
                 if let Some(cost) = cost {
-                    let reached = here.saturating_add(cost as u32);
+                    let reached = here.saturating_add(cost);
                     let target = index + reach as usize;
                     if reached < price[target] {
                         price[target] = reached;
@@ -1499,12 +1565,7 @@ fn parse_one_block(
         let (_, (nc, dc, ldc, rc)) =
             convert_tokens(&tokens, combined, block.clone(), &mut screen, variant);
         let (nc_l, dc_l, ldc_l, rc_l) = prices_from_frequencies(&nc, &dc, &ldc, &rc);
-        let prices = TokenPrices {
-            nc: &nc_l,
-            dc: &dc_l,
-            ldc: &ldc_l,
-            rc: &rc_l,
-        };
+        let prices = TokenPrices::new(&nc_l, &dc_l, &ldc_l, &rc_l);
         tokens = optimal_parse_tokens(
             combined,
             block.clone(),
