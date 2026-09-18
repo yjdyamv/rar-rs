@@ -125,10 +125,30 @@ open ones (04, 09, 15) still have their own file.
 Readings: (1) the cliff is m1 -> m2 — one unpriced DP pass buys 7.2pp for ~6x
 the time, so the DP's per-position cost (not the repricing passes, which add
 0.2pp for up to 2.7 s) is what issue 09 is up against; (2) the MT tier is the
-hash-chain greedy+lazy parse at every level, so it sits at m1 quality (+11.5%
-packed on this corpus) while being ~6x faster — this is the gap a priced cheap
-tier would close, spending it on ratio at the same speed or on speed (smaller
-chain budget) at the same ratio. See issue 15.
+hash-chain greedy+lazy parse at every level, capped at a 16-step chain, so its
+_level_ mostly changes that budget: mt8 m1 (`chain = 4`) is 419 ms at 53.77%
+against mt8 m3's 1166 ms at 52.05% — 2.6x for 1.7pp. The chain budget is the MT
+speed dial, and m1-quality ratio is the price of the cheap parse.
+
+### Issue 15 lever "priced cheap tier": measured negative (2026-09-18)
+
+Replacing the MT tier's raw-length lazy rule with a price-driven choice (the
+finder's best, the two most recent distances and the repeat length, compared by
+estimated bits per byte, plus a priced one-position lookahead — zstd's `opt0`
+shape) was implemented behind `RAR_RS_MT_PRICED` and measured on `ntoskrnl.exe`
+m3/mt8: 52.05% without it, 54.45% with it, at the same speed. Sweeping the
+model's literal price (3, 5, 6, 9, 14 bits) moved the result only between 53.07%
+and 54.45% — never below the baseline. Diagnosis: the static pre-block estimate
+cannot see the table cost of the extra symbols a per-byte rule creates (it
+fragments long matches into short cheap ones), so the length rule's "take the
+longest, lazy-skip when the next is longer" is a better proxy. Reverted, no
+switch left (same handling as issue 14's negative).
+
+What that leaves for issue 15: a _global_ decision with _real_ prices — a
+bounded/windowed DP over the cheap finder's single candidate per position,
+re-priced from the statistics of a first cheap pass (zstd's `opt1` shape). The
+unpriced full DP (`-m2`) is 6x the cheap walk; a windowed one is the unmeasured
+middle point.
 
 ## Real head-to-head vs WinRAR 7.23 (2026-08, m3)
 
