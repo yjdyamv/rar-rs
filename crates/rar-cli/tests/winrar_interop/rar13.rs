@@ -281,12 +281,13 @@ fn rar13_created_volume_sets_roundtrip_through_unrar() {
 }
 
 /// Write-side interop: a RAR 1.3/1.4 member at or above the streaming
-/// threshold is stored without buffering, and a multi-volume encrypted set
-/// keeps one cipher stream across its fragments. UnRAR 7.23 must extract it
-/// byte-identically. `#[ignore]`d: needs a 66 MiB member.
+/// threshold is compressed in bounded memory into a spill and then split
+/// across volumes, with one cipher stream continuing across its fragments.
+/// UnRAR 7.23 must extract it byte-identically. `#[ignore]`d: needs a 66 MiB
+/// member.
 #[test]
 #[ignore = "slow: 66 MiB member"]
-fn rar13_streamed_store_matches_unrar() {
+fn rar13_streamed_compressed_matches_unrar() {
     let Some(_unrar) = unrar_bin() else {
         eprintln!("skipped: UnRAR not found");
         return;
@@ -303,13 +304,13 @@ fn rar13_streamed_store_matches_unrar() {
     std::fs::write(&src, &payload).unwrap();
 
     let arc = dir.path().join("big.rar");
-    {
+    let volumes = {
         let mut writer = ArchiveWriter::create_with(
             &arc,
             WriterOptions::new()
                 .compression(ArchiveVersion::V14)
                 .password("pw")
-                .volume_size(8 * 1024 * 1024),
+                .volume_size(128 * 1024),
         )
         .unwrap();
         writer
@@ -319,8 +320,12 @@ fn rar13_streamed_store_matches_unrar() {
                     .compression_level(CompressionLevel::try_from(5u8).unwrap()),
             )
             .unwrap();
-        writer.finish().unwrap();
-    }
+        writer.finish().unwrap().volume_paths().len()
+    };
+    assert!(
+        volumes > 1,
+        "the streamed member must span several volumes, got {volumes}"
+    );
 
     let (ok, out) = unrar_test(&arc, Some("pw"));
     assert!(ok, "UnRAR rejected our streamed RAR13 set:\n{out}");

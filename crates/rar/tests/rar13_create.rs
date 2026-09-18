@@ -256,11 +256,12 @@ fn rar13_multivolume_store_fills_volumes_exactly() {
     assert_eq!(reader.read_entry(id).unwrap(), tail);
 }
 
-/// A member at or above the streaming threshold cannot be compressed in
-/// bounded memory (`Unpack15` is a whole-member codec), so it is streamed as
-/// STORE instead of buffered — the same trade the RAR4 legacy path makes.
+/// A member at or above the streaming threshold streams compressed: the
+/// `Unpack15` encoder is incremental now (rolling window plus one chunk, bit
+/// stream continuing across chunks), so the member is neither buffered nor
+/// stored.
 #[test]
-fn rar13_create_large_member_streams_as_store() {
+fn rar13_create_large_member_streams_compressed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("big.rar");
     let src = dir.path().join("big.txt");
@@ -279,18 +280,25 @@ fn rar13_create_large_member_streams_as_store() {
 
     let mut reader = ArchiveReader::open(&path).unwrap();
     let id = reader.unique_entry("big.txt").unwrap();
-    assert_eq!(
-        reader.entry(id).unwrap().method(),
+    let entry = reader.entry(id).unwrap();
+    assert_ne!(
+        entry.method(),
         0,
-        "a huge RAR13 member must be stored, not buffered"
+        "a huge RAR13 member must stream compressed, not as STORE"
+    );
+    assert!(
+        entry.compressed_size() < size as u64 / 8,
+        "the streamed member must really compress ({} packed)",
+        entry.compressed_size()
     );
     assert_eq!(reader.read_entry(id).unwrap(), payload);
 }
 
-/// Multi-volume streamed STORE: each fragment is copied from the file and the
-/// RAR13 cipher continues across fragments (one stream per member).
+/// Multi-volume streamed compression: a fragment is copied from the spill and
+/// the RAR13 cipher continues across fragments (one stream per member), while
+/// each fragment header carries the packed checksum rolled so far.
 #[test]
-fn rar13_multivolume_large_member_streams_as_store() {
+fn rar13_multivolume_large_member_streams_compressed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mv.rar");
     let src = dir.path().join("big.txt");
@@ -303,9 +311,22 @@ fn rar13_multivolume_large_member_streams_as_store() {
     payload.truncate(size);
     std::fs::write(&src, &payload).unwrap();
 
+    // Learn the packed size first, so the volume size is guaranteed to split
+    // the streamed payload into several fragments.
+    let probe_path = dir.path().join("probe.rar");
+    let mut probe = ArchiveWriter::create_with(&probe_path, writer_options()).unwrap();
+    probe.add_path(&src, level(5)).unwrap();
+    probe.finish().unwrap();
+    let packed = {
+        let reader = ArchiveReader::open(&probe_path).unwrap();
+        let id = reader.unique_entry("big.txt").unwrap();
+        reader.entry(id).unwrap().compressed_size()
+    };
+    let volume_size = (packed / 3).clamp(64 * 1024, 4 * 1024 * 1024);
+
     let mut writer = ArchiveWriter::create_with(
         &path,
-        writer_options().password("pw").volume_size(8 * 1024 * 1024),
+        writer_options().password("pw").volume_size(volume_size),
     )
     .unwrap();
     writer.add_path(&src, level(5)).unwrap();
@@ -318,7 +339,13 @@ fn rar13_multivolume_large_member_streams_as_store() {
 
     let mut reader = ArchiveReader::open_with(&path, OpenOptions::new().password("pw")).unwrap();
     let id = reader.unique_entry("big.txt").unwrap();
-    assert_eq!(reader.entry(id).unwrap().method(), 0);
+    let entry = reader.entry(id).unwrap();
+    assert_ne!(entry.method(), 0, "the split member must stay compressed");
+    assert_eq!(
+        entry.compressed_size(),
+        packed,
+        "packed size across volumes"
+    );
     assert_eq!(reader.read_entry(id).unwrap(), payload);
 }
 

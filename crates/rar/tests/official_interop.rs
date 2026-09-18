@@ -123,6 +123,133 @@ fn official_unrar_validates_solid_legacy_filter_chain() {
     );
 }
 
+/// A streamed (at or above 64 MiB) RAR 1.5 member is one incremental adaptive
+/// stream whose bit stream continues across chunk boundaries, and `-p` XORs a
+/// keystream over the streamed payload. Official UnRAR has to decode both.
+#[test]
+fn official_unrar_validates_streamed_legacy_large_members() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(), // skipped unless the interop script sets it
+    };
+    let dir = make_temp_dir();
+    let src = dir.path().join("big15.bin");
+    let block = b"streamed rar15 interop payload 0123456789abcdef\n";
+    let mut content = Vec::with_capacity(64 * 1024 * 1024);
+    while content.len() < 64 * 1024 * 1024 {
+        content.extend_from_slice(block);
+    }
+    std::fs::write(&src, &content).unwrap();
+
+    for (tag, password) in [("plain", None), ("encrypted", Some("streampw"))] {
+        let path = dir.path().join(format!("big15-{tag}.rar"));
+        let mut options = rar_rs::WriterOptions::default().compression(rar_rs::ArchiveVersion::V15);
+        if let Some(password) = password {
+            options = options.password(password);
+        }
+        let mut rar = rar_rs::ArchiveWriter::create_with(&path, options)
+            .unwrap_or_else(|e| panic!("create {tag}: {e}"));
+        let opts =
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(5u8).unwrap());
+        rar.add_path(&src, opts).unwrap();
+        rar.finish().unwrap();
+
+        let mut command = std::process::Command::new(&unrar);
+        command.arg("t").arg("-idq");
+        if let Some(password) = password {
+            command.arg(format!("-p{password}"));
+        }
+        let status = command.arg(path.as_os_str()).status().expect("spawn unrar");
+        assert!(
+            status.success(),
+            "unrar t rejected the streamed v15 member ({tag})"
+        );
+    }
+}
+
+/// A streamed (at or above the threshold) RAR 1.3/1.4 member is compressed
+/// into a spill and then split across volumes, with one cipher stream
+/// continuing across the fragments and each fragment header carrying the
+/// packed checksum rolled so far. Official UnRAR has to decode the set.
+#[test]
+fn official_unrar_validates_streamed_rar13_large_member() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(), // skipped unless the interop script sets it
+    };
+    let dir = make_temp_dir();
+    let src = dir.path().join("big13.bin");
+    let block = b"streamed rar13 interop payload 0123456789abcdef\n";
+    let mut content = Vec::with_capacity(66 * 1024 * 1024);
+    while content.len() < 66 * 1024 * 1024 {
+        content.extend_from_slice(block);
+    }
+    std::fs::write(&src, &content).unwrap();
+    let opts = EntryWriteOptions::new().compression_level(CompressionLevel::try_from(5u8).unwrap());
+
+    // Learn the packed size so the volume size is guaranteed to split the
+    // streamed payload.
+    let probe = dir.path().join("probe13.rar");
+    let mut writer = rar_rs::ArchiveWriter::create_with(
+        &probe,
+        rar_rs::WriterOptions::default().compression(rar_rs::ArchiveVersion::V14),
+    )
+    .unwrap();
+    writer.add_path(&src, opts).unwrap();
+    writer.finish().unwrap();
+    let packed = {
+        let archive = ArchiveReader::open(&probe).unwrap();
+        let entries: Vec<_> = archive.entries().collect();
+        assert_ne!(entries[0].method(), 0, "the large member must compress");
+        entries[0].compressed_size()
+    };
+    let volume_size = (packed / 3).clamp(64 * 1024, 4 * 1024 * 1024);
+
+    let path = dir.path().join("big13-vols.rar");
+    let mut writer = rar_rs::ArchiveWriter::create_with(
+        &path,
+        rar_rs::WriterOptions::default()
+            .compression(rar_rs::ArchiveVersion::V14)
+            .password("streampw")
+            .volume_size(volume_size),
+    )
+    .unwrap();
+    writer.add_path(&src, opts).unwrap();
+    let report = writer.finish().unwrap();
+    assert!(
+        report.volume_paths().len() > 1,
+        "expected a volume set, got {}",
+        report.volume_paths().len()
+    );
+
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg("-idq")
+        .arg("-pstreampw")
+        .arg(path.as_os_str())
+        .status()
+        .expect("spawn unrar");
+    assert!(status.success(), "unrar t rejected the streamed RAR13 set");
+
+    let out = dir.path().join("out13");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(&unrar)
+        .arg("x")
+        .arg("-idq")
+        .arg("-o+")
+        .arg("-pstreampw")
+        .arg(path.as_os_str())
+        .arg(out.as_os_str())
+        .status()
+        .expect("spawn unrar");
+    assert!(status.success(), "unrar x failed on the streamed RAR13 set");
+    assert_eq!(
+        std::fs::read(out.join("big13.bin")).unwrap(),
+        content,
+        "UnRAR must reassemble the streamed RAR13 member byte-identically"
+    );
+}
+
 #[test]
 #[allow(clippy::type_complexity)]
 fn official_unrar_validates_our_feature_archives() {

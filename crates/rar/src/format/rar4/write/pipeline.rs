@@ -478,7 +478,15 @@ impl RarArchive {
                         path, file_size, level,
                     )?
                 }
-                // RAR 1.5 and anything without a streaming encoder.
+                // RAR 1.5's adaptive stream now encodes incrementally, so its
+                // large members compress in bounded memory too, solid chain
+                // included.
+                Some(LegacyCodec::Rar15) => {
+                    !crate::codec::common::incompressible::sample_is_incompressible_file(
+                        path, file_size, level,
+                    )?
+                }
+                // Anything without a streaming encoder.
                 _ => false,
             };
             let stream_level = if compressible { level } else { 0 };
@@ -578,6 +586,14 @@ impl RarArchive {
             };
             let mut spill_file = crate::fs::atomic::read_write_create(&spill)?;
             let mut counter = CountingWriter::new(&mut spill_file);
+            // A RAR 1.5 solid run's encoder is advanced by the trial encode
+            // and committed only when this member actually packs: the reader
+            // skips a STORE member without touching its adaptive tables, and
+            // a RAR 1.5 chain is position-derived, so a stored member must
+            // leave the carried encoder exactly where it was.
+            let mut legacy_encoder_to_commit: Option<
+                crate::codec::legacy::rar15_encoder::Unpack15Encoder,
+            > = None;
             {
                 let codec = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver);
                 let progress = self.progress.clone();
@@ -608,6 +624,31 @@ impl RarArchive {
                         crate::codec::legacy::rar20_encoder::RAR20_STREAM_WINDOW,
                         Some(&mut report),
                     )?;
+                } else if codec == Some(LegacyCodec::Rar15) {
+                    // RAR 1.5 is one adaptive stream over the whole member, so
+                    // it encodes incrementally: a rolling window plus a chunk,
+                    // with the bit stream continuing across chunk boundaries.
+                    // A solid run clones the carried encoder for the trial and
+                    // commits it after the size check below.
+                    use crate::codec::legacy::rar15_encoder::Unpack15Encoder;
+                    let mut encoder = if solid_mode {
+                        match self.write_ctx().solid.legacy_encoder.as_ref() {
+                            Some(crate::archive::LegacySolidEncoder::Rar15(encoder)) => {
+                                encoder.clone_for_trial()
+                            }
+                            _ => Unpack15Encoder::with_options(legacy_rar15_options(level)),
+                        }
+                    } else {
+                        Unpack15Encoder::with_options(legacy_rar15_options(level))
+                    };
+                    encoder.encode_member_streaming(
+                        &mut source,
+                        &mut counter,
+                        Some(&mut report),
+                    )?;
+                    if solid_mode {
+                        legacy_encoder_to_commit = Some(encoder);
+                    }
                 } else {
                     let options = crate::codec::legacy::rar29_encoder::options_for_level(level);
                     if solid_mode {
@@ -651,9 +692,14 @@ impl RarArchive {
             if compressed < file_size {
                 packed_len = compressed;
                 method = crate::format::rar4::RAR4_METHOD_STORE + level;
+                if let Some(encoder) = legacy_encoder_to_commit.take() {
+                    self.write_ctx_mut().solid.legacy_encoder =
+                        Some(crate::archive::LegacySolidEncoder::Rar15(Box::new(encoder)));
+                }
             } else {
                 // Compression is a net loss: stream STORE from the source
-                // instead (the spill is dropped by its guard).
+                // instead (the spill is dropped by its guard). Any trial chain
+                // state is dropped with it.
                 packed_len = file_size;
                 method = crate::format::rar4::RAR4_METHOD_STORE;
             }

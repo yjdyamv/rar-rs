@@ -26,18 +26,34 @@ use crate::error::{RarError, RarResult};
 /// not-yet-reached positions.
 #[derive(Debug, Clone)]
 struct Rar13MatchFinder {
-    buckets: Vec<Vec<usize>>,
+    /// Flat bucket directory: hash `h` owns
+    /// `positions[starts[h]..starts[h + 1]]`, ascending.
+    starts: Vec<usize>,
+    positions: Vec<usize>,
 }
 
 const LONG_LZ_HASH_BITS: u32 = 16;
+const LONG_LZ_BUCKET_COUNT: usize = 1 << LONG_LZ_HASH_BITS;
 
 impl Rar13MatchFinder {
     fn build(input: &[u8]) -> Self {
-        let mut buckets = vec![Vec::new(); 1 << LONG_LZ_HASH_BITS];
-        for pos in 0..input.len().saturating_sub(2) {
-            buckets[Self::hash(input, pos)].push(pos);
+        let count = input.len().saturating_sub(2);
+        let mut starts = vec![0usize; LONG_LZ_BUCKET_COUNT + 1];
+        for pos in 0..count {
+            starts[Self::hash(input, pos) + 1] += 1;
         }
-        Self { buckets }
+        for hash in 0..LONG_LZ_BUCKET_COUNT {
+            starts[hash + 1] += starts[hash];
+        }
+        // Walking the positions backwards while shrinking each bucket's end
+        // fills it in ascending order without a second cursor array.
+        let mut positions = vec![0usize; count];
+        for pos in (0..count).rev() {
+            let slot = &mut starts[Self::hash(input, pos) + 1];
+            *slot -= 1;
+            positions[*slot] = pos;
+        }
+        Self { starts, positions }
     }
 
     fn hash(input: &[u8], pos: usize) -> usize {
@@ -50,7 +66,8 @@ impl Rar13MatchFinder {
     /// Candidate positions strictly before `pos` sharing its 3-byte hash,
     /// newest first. The caller must ensure 3 bytes are readable at `pos`.
     fn candidates_before(&self, input: &[u8], pos: usize) -> impl Iterator<Item = usize> + '_ {
-        let bucket = &self.buckets[Self::hash(input, pos)];
+        let hash = Self::hash(input, pos);
+        let bucket = &self.positions[self.starts[hash]..self.starts[hash + 1]];
         let end = bucket.partition_point(|&candidate| candidate < pos);
         bucket[..end].iter().rev().copied()
     }
@@ -58,6 +75,20 @@ impl Rar13MatchFinder {
 
 const MAX_LONG_MATCH_CANDIDATES: usize = 64;
 const MAX_LONG_LZ_DISTANCE: usize = 0x7fff;
+
+/// Longest LZ match the format can code.
+const MAX_MATCH_LENGTH: usize = 258;
+/// Bytes a matcher may read past the current position: a lazy-matching probe
+/// at `pos + 1` can follow a [`MAX_MATCH_LENGTH`] match.
+const MATCH_LOOKAHEAD: usize = MAX_MATCH_LENGTH + 1;
+/// Bytes a whole flags group may consume: up to eight [`MAX_MATCH_LENGTH`]
+/// tokens (eight one-bit flags) plus the lazy probe. Waiting for this much
+/// input keeps every token and group decision identical to a whole-member
+/// encode, so a chunk boundary is never mistaken for the member end.
+const GROUP_LOOKAHEAD: usize = 8 * MAX_MATCH_LENGTH + MATCH_LOOKAHEAD;
+/// Input read per refill of the streaming encoder: the rolling window plus
+/// about this much pending input is all a streamed member holds.
+const STREAM_CHUNK: usize = 1024 * 1024;
 
 const DEC_L1: &[u16] = &[
     0x8000, 0xa000, 0xc000, 0xd000, 0xe000, 0xea00, 0xee00, 0xf000, 0xf200, 0xf200, 0xffff,
@@ -326,102 +357,253 @@ impl Unpack15Encoder {
         if input.is_empty() {
             return Ok(Vec::new());
         }
-        self.bits = BitWriter::new();
-        // Everything the decoder drops at a member boundary has to be dropped
-        // here too. The adaptive tables carry across a solid run, but the
-        // short-LZ literal run does not: `Unpack15::init_member` clears it for
-        // every member, solid or not. Leaving it set here made the encoder
-        // write a break bit at the start of the next member that no decoder
-        // was going to read, and one stray bit desynchronises the rest of the
-        // archive.
-        self.l_count = 0;
+        self.begin_member();
         let buckets = long_lz_buckets(input);
-        let mut pos = 0usize;
+        let mut state = MemberLoopState::default();
         let mut next_report = 0usize;
-        let mut straddle: Option<Straddle> = None;
-        while pos < input.len() || straddle.is_some() {
-            let mut flags = 0u8;
-            let mut flag_bits = 0usize;
-            let mut payloads = Vec::new();
-            let mut plan_encoder = self.clone_for_planning();
-            let mut group_enters_stmode = false;
-
-            if let Some(carried) = straddle.take() {
-                write_planned_flag_bits(&mut flags, 0, carried.rest);
-                flag_bits = carried.rest.len();
-                payloads.push(carried.token);
-                plan_encoder.emit_payloads(vec![carried.token])?;
-            }
-
-            while flag_bits < 8 && pos < input.len() {
-                let state = plan_encoder.lz_plan_state();
-                if let Some(token) = plan_encoder
-                    .choose_lz_token(input, pos, &buckets, state)
-                    .filter(|token| {
-                        !self.options.lazy_matching
-                            || !should_lazy_emit_literal(
-                                input,
-                                pos,
-                                &buckets,
-                                *token,
-                                state.max_dist3,
-                                self.options,
-                            )
-                    })
+        while state.can_step(input, true) {
+            self.encode_one_step(input, &buckets, &mut state)?;
+            if state.pos >= next_report {
+                if progress
+                    .as_deref_mut()
+                    .is_some_and(|report| !report(state.pos))
                 {
-                    let flag = token.flag_bits(state.nlzb, state.nhfb);
-                    let next_pos = pos + token.length() as usize;
-                    if flag_fits(flag_bits, flag) {
-                        write_planned_flag_bits(&mut flags, flag_bits, flag);
-                        flag_bits += flag.len();
-                        pos = next_pos;
-                        plan_encoder.emit_payloads(vec![token])?;
-                        payloads.push(token);
-                        continue;
-                    }
-                }
-
-                let flag = huff_flag_bits(plan_encoder.nlzb <= plan_encoder.nhfb);
-                if flag_bits + flag.len() > 8 {
-                    straddle = Some(split_flag(
-                        &mut flags,
-                        flag_bits,
-                        flag,
-                        EncodedToken::Literal(input[pos]),
-                    ));
-                    pos += 1;
-                    break;
-                }
-                write_planned_flag_bits(&mut flags, flag_bits, flag);
-                let literal = input[pos];
-                payloads.push(EncodedToken::Literal(input[pos]));
-                flag_bits += flag.len();
-                if flag_bits == 8 && plan_encoder.num_huf >= 16 && pos + 1 < input.len() {
-                    group_enters_stmode = true;
-                }
-                pos += 1;
-                plan_encoder.emit_literal(literal)?;
-            }
-
-            self.emit_flags_byte(flags)?;
-            self.emit_payloads(payloads)?;
-            if group_enters_stmode {
-                if self.options.stmode_literal_runs {
-                    self.emit_stmode_literal_run(input, Some(&buckets), &mut pos)?;
-                }
-                self.emit_stmode_exit()?;
-            }
-            if pos >= next_report {
-                if progress.as_deref_mut().is_some_and(|report| !report(pos)) {
                     return Err(RarError::Cancelled);
                 }
-                next_report = pos.saturating_add(1024 * 1024);
+                next_report = state.pos.saturating_add(1024 * 1024);
             }
         }
         if progress.is_some_and(|report| !report(input.len())) {
             return Err(RarError::Cancelled);
         }
         Ok(std::mem::take(&mut self.bits).into_bytes())
+    }
+
+    /// Encode one member straight from `reader` to `writer` with bounded
+    /// memory, returning the bytes read.
+    ///
+    /// The matcher never reaches further than [`MAX_LONG_LZ_DISTANCE`] bytes
+    /// back or [`MATCH_LOOKAHEAD`] bytes forward, so the encoder holds a
+    /// rolling window plus one [`STREAM_CHUNK`] of pending input instead of
+    /// the whole member. The bit stream is continuous across chunks (only
+    /// whole bytes are handed to `writer`). Output is byte-identical to
+    /// [`Self::encode_member`]: a step only runs while the input still holds
+    /// the lookahead a token or group decision can read, so a chunk boundary
+    /// is never mistaken for the member end.
+    pub fn encode_member_streaming<R: std::io::Read, W: std::io::Write>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+        progress: Option<&mut dyn FnMut(usize) -> bool>,
+    ) -> RarResult<u64> {
+        self.encode_member_streaming_chunked(reader, writer, STREAM_CHUNK, progress)
+    }
+
+    /// [`Self::encode_member_streaming`] with an explicit refill size, so
+    /// tests can put chunk boundaries at many different offsets.
+    fn encode_member_streaming_chunked<R: std::io::Read, W: std::io::Write>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+        chunk_size: usize,
+        mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    ) -> RarResult<u64> {
+        self.begin_member();
+        // `buf` holds the member from the rolling-window boundary on:
+        // `buf[..state.pos]` is history, `buf[state.pos..]` is unprocessed
+        // plus lookahead. While the window has not filled, the buffer starts
+        // at member offset 0, so the local position still equals the member
+        // position and the matchers' position-relative bounds come out the
+        // same as in a whole-member encode.
+        let mut buf: Vec<u8> = Vec::new();
+        let mut state = MemberLoopState::default();
+        let mut read_total: u64 = 0;
+        let mut eof = false;
+        let mut next_report = 0usize;
+        // A refill must also leave enough for one step, or a chunk smaller
+        // than the lookahead would make the loop read a byte at a time.
+        let target = chunk_size.max(GROUP_LOOKAHEAD + 1);
+        loop {
+            // Drop the history the window cannot reach, then refill.
+            let keep_from = state.pos.saturating_sub(MAX_LONG_LZ_DISTANCE);
+            if keep_from != 0 {
+                buf.drain(..keep_from);
+                state.pos -= keep_from;
+            }
+            while !eof && (buf.len() - state.pos < target || !state.can_step(&buf, false)) {
+                let old_len = buf.len();
+                let want = target.saturating_sub(old_len - state.pos).max(1);
+                buf.resize(old_len + want, 0);
+                let mut filled = 0usize;
+                while filled < want {
+                    match reader.read(&mut buf[old_len + filled..]) {
+                        Ok(0) => break,
+                        Ok(n) => filled += n,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) => return Err(RarError::Io(error)),
+                    }
+                }
+                buf.truncate(old_len + filled);
+                read_total += filled as u64;
+                if filled < want {
+                    eof = true;
+                }
+            }
+            let buckets = long_lz_buckets(&buf);
+            while state.can_step(&buf, eof) {
+                self.encode_one_step(&buf, &buckets, &mut state)?;
+            }
+            self.bits.drain_to(writer).map_err(RarError::Io)?;
+            // Unpacked bytes consumed so far: everything read, minus what the
+            // buffer still holds past the cursor.
+            let consumed = read_total - (buf.len() - state.pos) as u64;
+            if consumed >= next_report as u64 {
+                if progress
+                    .as_deref_mut()
+                    .is_some_and(|report| !report(consumed as usize))
+                {
+                    return Err(RarError::Cancelled);
+                }
+                next_report = (consumed as usize).saturating_add(1024 * 1024);
+            }
+            // Only stop once the member is done; a short tail at a chunk
+            // boundary is what the next refill is for.
+            if eof && !state.can_step(&buf, eof) {
+                break;
+            }
+        }
+        self.bits.finish_to(writer).map_err(RarError::Io)?;
+        Ok(read_total)
+    }
+
+    /// Reset what the decoder drops at a member boundary. The adaptive tables
+    /// carry across a solid run, but the short-LZ literal run does not:
+    /// `Unpack15::init_member` clears it for every member, solid or not.
+    /// Leaving it set made the encoder write a break bit at the start of the
+    /// next member that no decoder was going to read, and one stray bit
+    /// desynchronises the rest of the archive.
+    fn begin_member(&mut self) {
+        self.bits = BitWriter::new();
+        self.l_count = 0;
+    }
+
+    /// Encode one flags group, or take one step of an open stmode run.
+    fn encode_one_step(
+        &mut self,
+        input: &[u8],
+        buckets: &Rar13MatchFinder,
+        state: &mut MemberLoopState,
+    ) -> RarResult<()> {
+        if state.stmode_pending {
+            return self.stmode_step(input, buckets, state);
+        }
+        self.encode_flag_group(input, buckets, state)
+    }
+
+    /// One step of the literal run a full literal-heavy group opens. The run
+    /// ends at the first LZ token, or two bytes before the member end where
+    /// the outer loop resumes, and emits its exit exactly once.
+    fn stmode_step(
+        &mut self,
+        input: &[u8],
+        buckets: &Rar13MatchFinder,
+        state: &mut MemberLoopState,
+    ) -> RarResult<()> {
+        if !self.options.stmode_literal_runs
+            || state.pos + 1 >= input.len()
+            || find_lz_token(
+                input,
+                state.pos,
+                buckets,
+                self.lz_plan_state(),
+                self.options,
+            )
+            .is_some()
+        {
+            self.emit_stmode_exit()?;
+            state.stmode_pending = false;
+            return Ok(());
+        }
+        self.emit_stmode_literal(input[state.pos])?;
+        state.pos += 1;
+        Ok(())
+    }
+
+    /// Encode one flags byte and its payloads, starting with the flag bits a
+    /// previous group had to hand over.
+    fn encode_flag_group(
+        &mut self,
+        input: &[u8],
+        buckets: &Rar13MatchFinder,
+        state: &mut MemberLoopState,
+    ) -> RarResult<()> {
+        let mut flags = 0u8;
+        let mut flag_bits = 0usize;
+        let mut payloads = Vec::new();
+        let mut plan_encoder = self.clone_for_planning();
+        let mut group_enters_stmode = false;
+
+        if let Some(carried) = state.straddle.take() {
+            write_planned_flag_bits(&mut flags, 0, carried.rest);
+            flag_bits = carried.rest.len();
+            payloads.push(carried.token);
+            plan_encoder.emit_payloads(vec![carried.token])?;
+        }
+
+        while flag_bits < 8 && state.pos < input.len() {
+            let plan_state = plan_encoder.lz_plan_state();
+            if let Some(token) = plan_encoder
+                .choose_lz_token(input, state.pos, buckets, plan_state)
+                .filter(|token| {
+                    !self.options.lazy_matching
+                        || !should_lazy_emit_literal(
+                            input,
+                            state.pos,
+                            buckets,
+                            *token,
+                            plan_state.max_dist3,
+                            self.options,
+                        )
+                })
+            {
+                let flag = token.flag_bits(plan_state.nlzb, plan_state.nhfb);
+                let next_pos = state.pos + token.length() as usize;
+                if flag_fits(flag_bits, flag) {
+                    write_planned_flag_bits(&mut flags, flag_bits, flag);
+                    flag_bits += flag.len();
+                    state.pos = next_pos;
+                    plan_encoder.emit_payloads(vec![token])?;
+                    payloads.push(token);
+                    continue;
+                }
+            }
+
+            let flag = huff_flag_bits(plan_encoder.nlzb <= plan_encoder.nhfb);
+            if flag_bits + flag.len() > 8 {
+                state.straddle = Some(split_flag(
+                    &mut flags,
+                    flag_bits,
+                    flag,
+                    EncodedToken::Literal(input[state.pos]),
+                ));
+                state.pos += 1;
+                break;
+            }
+            write_planned_flag_bits(&mut flags, flag_bits, flag);
+            let literal = input[state.pos];
+            payloads.push(EncodedToken::Literal(input[state.pos]));
+            flag_bits += flag.len();
+            if flag_bits == 8 && plan_encoder.num_huf >= 16 && state.pos + 1 < input.len() {
+                group_enters_stmode = true;
+            }
+            state.pos += 1;
+            plan_encoder.emit_literal(literal)?;
+        }
+
+        self.emit_flags_byte(flags)?;
+        self.emit_payloads(payloads)?;
+        state.stmode_pending = group_enters_stmode;
+        Ok(())
     }
 
     fn clone_for_planning(&self) -> Self {
@@ -1084,6 +1266,41 @@ struct Straddle {
     rest: &'static [bool],
 }
 
+/// What a member encode carries between steps: how far it has consumed, the
+/// flag bits a group had to hand to the next one, and whether an stmode
+/// literal run is still open. The whole-member encode drives it to completion
+/// in one call; the streaming encode suspends and resumes it at chunk
+/// boundaries, which is why it is a value and not a local.
+#[derive(Default)]
+struct MemberLoopState {
+    pos: usize,
+    straddle: Option<Straddle>,
+    stmode_pending: bool,
+}
+
+impl MemberLoopState {
+    /// Whether one more step can run on `input`.
+    ///
+    /// With `at_eof` false, `input` must still hold the lookahead a decision
+    /// can read — [`GROUP_LOOKAHEAD`] for a flags group, [`MATCH_LOOKAHEAD`]
+    /// for one stmode step — so a chunk boundary is never mistaken for the
+    /// end of the member.
+    fn can_step(&self, input: &[u8], at_eof: bool) -> bool {
+        if self.pos >= input.len() && self.straddle.is_none() && !self.stmode_pending {
+            return false;
+        }
+        if at_eof {
+            return true;
+        }
+        let need = if self.stmode_pending {
+            MATCH_LOOKAHEAD
+        } else {
+            GROUP_LOOKAHEAD
+        };
+        self.pos + need <= input.len()
+    }
+}
+
 fn split_flag(
     flags: &mut u8,
     flag_bits: usize,
@@ -1590,5 +1807,70 @@ mod tests {
                 roundtrip(data, options);
             }
         }
+    }
+
+    /// A streamed member must match the whole-member encode byte for byte,
+    /// at every refill size: the adaptive tables, flag-group straddles,
+    /// stmode runs and the long-LZ window all have to survive a chunk
+    /// boundary, and a boundary must never read as the end of the member.
+    #[test]
+    fn streaming_encode_matches_in_memory() {
+        // Text (stmode runs), pseudo-random (literal-heavy), a long run and a
+        // member longer than the rolling window and than the default chunk.
+        let text = b"the quick brown fox jumps over the lazy dog 0123456789\n".repeat(2_000);
+        let mut mixed = pseudo_random(70_000);
+        mixed.extend_from_slice(&b"lorem ipsum dolor sit amet ".repeat(3_000));
+        mixed.extend_from_slice(&pseudo_random(9_000));
+        let run = vec![0xAAu8; 40_000];
+        let long = b"chunk boundary stress: shared boilerplate across the member\n".repeat(20_000);
+        let corpora: [&[u8]; 5] = [&text, &mixed, &run, &pseudo_random(5_000), &long];
+
+        for options in [
+            EncodeOptions::new(),
+            EncodeOptions::new()
+                .with_old_distance_tokens(false)
+                .with_stmode_literal_runs(false)
+                .with_lazy_matching(false),
+        ] {
+            for data in corpora {
+                let expected = Unpack15Encoder::with_options(options)
+                    .encode_member(data)
+                    .expect("in-memory encode");
+                let sizes: &[usize] = if data.len() > 400_000 {
+                    &[4_096, 65_536, 1 << 20]
+                } else {
+                    &[1, 7, 4_096, 65_536]
+                };
+                for &chunk in sizes {
+                    let mut encoder = Unpack15Encoder::with_options(options);
+                    let mut reader = data;
+                    let mut out = Vec::new();
+                    let read = encoder
+                        .encode_member_streaming_chunked(&mut reader, &mut out, chunk, None)
+                        .unwrap_or_else(|e| panic!("chunk {chunk}: {e:?}"));
+                    assert_eq!(read, data.len() as u64, "chunk {chunk}: bytes read");
+                    assert_eq!(
+                        out,
+                        expected,
+                        "chunk {chunk} (member {} bytes) must match the in-memory encode",
+                        data.len()
+                    );
+                }
+            }
+        }
+
+        // And the streamed bytes decode back to the original member.
+        let mut encoder = Unpack15Encoder::new();
+        let mut reader: &[u8] = &long;
+        let mut packed = Vec::new();
+        encoder
+            .encode_member_streaming_chunked(&mut reader, &mut packed, 4_096, None)
+            .unwrap();
+        let mut decoder = Rar15Decoder::new();
+        let mut out = Vec::new();
+        decoder
+            .decode_member_to(&packed, long.len(), false, &mut out)
+            .expect("decode streamed member");
+        assert_eq!(out, long, "streamed member roundtrip");
     }
 }

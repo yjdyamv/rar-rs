@@ -32,6 +32,7 @@ use super::{
 use crate::archive::{ArchiveEntry, LegacySolidEncoder, RarArchive, STREAM_COMPRESS_THRESHOLD};
 use crate::codec::legacy::rar15_encoder::{EncodeOptions, Unpack15Encoder};
 use crate::error::{RarError, RarResult};
+use crate::format::shared::engine::{CountingWriter, SpillGuard, spill_path_for};
 use crate::format::shared::stream_mut;
 use crate::model::DataChunk;
 
@@ -331,21 +332,25 @@ impl RarArchive {
         Ok(())
     }
 
-    /// Emit a large RAR 1.3/1.4 member as STORE without buffering it.
+    /// Emit a large RAR 1.3/1.4 member without buffering it.
     ///
-    /// `Unpack15` is a whole-member codec (adaptive Huffman over the whole
-    /// input), so a member at or above the streaming threshold cannot be
-    /// compressed in bounded memory; this path stores it instead. The
-    /// whole-member rolling checksum is one cheap sequential pass over the
-    /// file, then the payload is copied in chunks — encrypted on the fly under
-    /// `-p`, since the RAR13 cipher is one stream over the member and volume
-    /// fragments continue it.
-    fn add_rar13_file_streaming_store(
+    /// `Unpack15` is one adaptive stream over the whole member, so it is
+    /// encoded incrementally into a spill with a rolling window plus one
+    /// chunk; a member that does not pack is copied straight from the source
+    /// instead. The spill is what makes the emission possible at all: the file
+    /// header needs the packed size before the payload, and a split fragment's
+    /// header carries the packed checksum rolled so far, so neither can be
+    /// streamed blind. The whole-member rolling checksum is one cheap
+    /// sequential pass over the file, then the payload is copied in chunks —
+    /// encrypted on the fly under `-p`, since the RAR13 cipher is one stream
+    /// over the member and volume fragments continue it.
+    fn add_rar13_file_streaming(
         &mut self,
         path: &Path,
         name: &str,
         mtime: u32,
         file_size: u64,
+        level: u8,
     ) -> RarResult<()> {
         self.check_cancel()?;
         super::create::ensure_member_size(file_size)?;
@@ -380,19 +385,84 @@ impl RarArchive {
             })?;
             cipher = Some(crate::crypto::Rar13Cipher::new(password.as_bytes()));
         }
+
+        // Pass 2: compress the member into a spill (bounded memory), unless
+        // the level, the solid rule or the incompressibility probe says STORE.
+        // A solid run never stores — the reference writer keeps the compressed
+        // output even when it grows slightly, so the decoder's window stays in
+        // sync — and only a member that is emitted compressed may commit the
+        // carried encoder.
+        let solid = self.write_ctx().solid.mode;
+        let spill = spill_path_for(&self.path);
+        let _guard = SpillGuard(spill.clone());
+        let store_only = level == 0
+            || (!solid
+                && crate::codec::common::incompressible::sample_is_incompressible_file(
+                    path, file_size, level,
+                )?);
+        let (payload_path, packed_size, method) = if store_only {
+            (path.to_path_buf(), file_size, METHOD_STORE)
+        } else {
+            let mut source = fs::File::open(path)?;
+            let mut spill_file = crate::fs::atomic::read_write_create(&spill)?;
+            let mut counter = CountingWriter::new(&mut spill_file);
+            {
+                let mut encoder = if solid {
+                    match self.write_ctx().solid.legacy_encoder.as_ref() {
+                        Some(LegacySolidEncoder::Rar15(encoder)) => encoder.clone_for_trial(),
+                        _ => Unpack15Encoder::with_options(rar13_encode_options(level)),
+                    }
+                } else {
+                    Unpack15Encoder::with_options(rar13_encode_options(level))
+                };
+                let progress = self.progress.clone();
+                let cancel = self.cancel.clone();
+                let member_index = self.progress_member;
+                let mut report = |position: usize| -> bool {
+                    if cancel
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+                    {
+                        return false;
+                    }
+                    if let Some(progress) = &progress {
+                        progress.lock().expect("progress lock").report(
+                            member_index,
+                            position as u64,
+                            file_size,
+                        );
+                    }
+                    true
+                };
+                encoder.encode_member_streaming(&mut source, &mut counter, Some(&mut report))?;
+                if solid {
+                    self.write_ctx_mut().solid.legacy_encoder =
+                        Some(LegacySolidEncoder::Rar15(Box::new(encoder)));
+                }
+            }
+            let packed = counter.written();
+            if solid || packed < file_size {
+                (spill.clone(), packed, METHOD_BEST)
+            } else {
+                (path.to_path_buf(), file_size, METHOD_STORE)
+            }
+        };
+        if solid && method == METHOD_BEST {
+            flags |= LHD_SOLID;
+        }
         let member = MemberHeader {
             name,
-            packed_size: file_size,
+            packed_size,
             unpacked_size: file_size,
             file_crc,
             file_time,
             file_attr: 0x20,
             flags,
-            method: METHOD_STORE,
+            method,
             extra: Vec::new(),
         };
 
-        let mut reader = fs::File::open(path)?;
+        let mut reader = fs::File::open(&payload_path)?;
         let mut read = 0u64;
         let mut running = 0u16;
         let mut chunks = Vec::new();
@@ -402,15 +472,15 @@ impl RarArchive {
                 let mut first = true;
                 let mut data_offset = 0u64;
                 let mut buf = vec![0u8; 1 << 20];
-                while read < file_size {
+                while read < packed_size {
                     self.check_cancel()?;
-                    let want = ((file_size - read) as usize).min(buf.len());
+                    let want = ((packed_size - read) as usize).min(buf.len());
                     let n = reader.read(&mut buf[..want])?;
                     if n == 0 {
                         return Err(RarError::Io(std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
                             format!(
-                                "file changed size while being archived: expected {file_size} bytes, read {read}"
+                                "packed payload ended early: expected {packed_size} bytes, read {read}"
                             ),
                         )));
                     }
@@ -426,12 +496,12 @@ impl RarArchive {
                         first = false;
                     }
                     read += n as u64;
-                    self.report_progress(read, file_size);
+                    self.report_progress(read, packed_size);
                 }
                 chunks.push(DataChunk {
                     volume_index: self.write_ctx().output.current_volume.saturating_sub(1),
                     data_offset,
-                    packed_size: file_size,
+                    packed_size,
                     crc32_val: None,
                     is_final: true,
                     extra_data: Vec::new(),
@@ -458,7 +528,7 @@ impl RarArchive {
                 let mut sent = 0u64;
                 let mut split_before = false;
                 let mut buf = vec![0u8; 1 << 20];
-                while sent < file_size {
+                while sent < packed_size {
                     let header_len = if split_before {
                         continuation_len
                     } else {
@@ -485,8 +555,8 @@ impl RarArchive {
                     }
                     let used = self.write_ctx().output.bytes_written;
                     let available = volume_size - used - header_len;
-                    let chunk_len = (file_size - sent).min(available);
-                    let split_after = sent + chunk_len < file_size;
+                    let chunk_len = (packed_size - sent).min(available);
+                    let split_after = sent + chunk_len < packed_size;
                     let mut chunk = Vec::with_capacity(chunk_len as usize);
                     while (chunk.len() as u64) < chunk_len {
                         self.check_cancel()?;
@@ -496,7 +566,7 @@ impl RarArchive {
                             return Err(RarError::Io(std::io::Error::new(
                                 std::io::ErrorKind::UnexpectedEof,
                                 format!(
-                                    "file changed size while being archived: expected {file_size} bytes, read {}",
+                                    "packed payload ended early: expected {packed_size} bytes, read {}",
                                     sent + chunk.len() as u64
                                 ),
                             )));
@@ -820,7 +890,7 @@ impl RarArchive {
         // compressed in bounded memory; stream it as STORE instead (the same
         // trade the RAR4 legacy path makes).
         if file_size >= STREAM_COMPRESS_THRESHOLD {
-            return self.add_rar13_file_streaming_store(path, &name, mtime, file_size);
+            return self.add_rar13_file_streaming(path, &name, mtime, file_size, level);
         }
         let data = fs::read(path)?;
         self.add_rar13_data(name, data, level, mtime, 0, None)

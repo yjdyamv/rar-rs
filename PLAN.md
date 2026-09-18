@@ -1,7 +1,7 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-18 @ `1fbfaba`（solid
-> 链内过滤器为本轮改动）；实现细节以源码为准。
+> 最后核对：2026-09-18 @ `1fbfaba`（solid 链内过滤器、v15/RAR13
+> 大成员增量压缩为本轮改动）；实现细节以源码为准。
 
 本文件只留**结论**与**下一步**。历次审计、逐批修复与加固的过程记录在 git 历史
 （旧版详单：`git show c2c43d4:PLAN.md`）；本文件不再维护 CHANGELOG。
@@ -130,13 +130,15 @@
 - [x] **(B) legacy 大成员 STORE 流式**（2026-09-17）：`add_file_rar4` 对 ≥
       `STREAM_COMPRESS_THRESHOLD`（64 MiB）的 **v15/v20** 成员走既有 spill
       流式通道但 **强制 STORE**（RAR29
-      仍走压缩流式），从而有界内存；代价是大成员不压缩（文档化
-      取舍）。验证：本机官方 UnRAR 7.23 对 `-ma15`/`-ma2` × {66 MiB 可压、8 MiB
-      随机} 的 `t`/`x` 全部字节一致；`-ma4` 大成员仍压缩（archive 55 KB / raw 66
-      MiB）。**回归修复（2026-09-17）**：流式发射器当时写死 RAR30（v29）密码，
-      于是加密的 v15/v20 大成员一度用错密码流（官方 UnRAR 报 CRC 错、exit
-      3）；先以 `!password_encrypted` 守卫留在缓冲路径并加回归测试，随后由下面
-      (C) Stage 2 的**分代流式密码**彻底取代该守卫（现在加密大成员也有界内存）。
+      仍走压缩流式），从而有界内存；代价是大成员不压缩（文档化 取舍）。v15
+      的这条取舍已由下面 (C) Stage 3 取消（现在 v15 也压缩流式）； v20
+      仍走这一条。验证：本机官方 UnRAR 7.23 对 `-ma15`/`-ma2` × {66 MiB 可压、8
+      MiB 随机} 的 `t`/`x` 全部字节一致；`-ma4` 大成员仍压缩（archive 55 KB /
+      raw 66 MiB）。**回归修复（2026-09-17）**：流式发射器当时写死
+      RAR30（v29）密码， 于是加密的 v15/v20 大成员一度用错密码流（官方 UnRAR 报
+      CRC 错、exit 3）；先以 `!password_encrypted`
+      守卫留在缓冲路径并加回归测试，随后由下面 (C) Stage 2
+      的**分代流式密码**彻底取代该守卫（现在加密大成员也有界内存）。
 - [x] **(C) Stage 1 · RAR20 窗口多块压缩流式**（2026-09-17，已完成）：
       `rar20_encoder.rs` 新增 `EncodeToken::EndOfBlock`（主表符号 269，**仅在
       用到时给码**，单块输出逐字节不变）、`BitSink` trait + `StreamingBitSink`
@@ -167,19 +169,36 @@
       全部字节一致；库测试
       `create_rar4_legacy_large_encrypted_members_roundtrip` （v15/v20 × 单卷/8
       MiB 分卷，v20 断言 method ≠ 0）。
-- [ ] **(C) Stage 3 · RAR15/RAR13 压缩流式（原「窗口化」方案不可行，待定）**：
-      RAR 1.5 与 RAR13（后者复用一个 `Unpack15` 编码器）是**单一自适应流**：
-      解码端 `init_huff` 只在成员/链开始时建初表，之后每符号经 `corr_huff`
-      演化，`get_flags_buf` 读的是同一个自适应集合；**格式里既无块结束标记、
-      也无重发表语法**，所以 Stage 1 那种「每窗口重发一张表」在这里**不存在**
-      （与「PPMd 块级 MT」同类的结构性限制）。可行替代是把 `Unpack15Encoder`
-      改成**增量（跨块续传状态）编码器**：
-      状态已经可整体克隆（`clone_for_planning()` 列全了自适应字段），只差 (a)
-      `long_lz_buckets` 从「先建全量索引」改成边插边查、 (b)
-      `pos + 1 < input.len()` 这类向前看改成带 carry（≤ 最大匹配长度）、 (c)
-      跨块保留 flag 组 / `straddle` / stmode 局部量。产物与整块编码
-      **逐字节相同**，用「整块 vs 分块」对拍即可直接验证，无互操作风险。
-      收益：>64 MiB 的 v15/RAR13 成员从 STORE 变成压缩（现已是有界内存）。
+- [x] **(C) Stage 3 · RAR15/RAR13 压缩流式**（已完成 2026-09-18）： RAR 1.5 与
+      RAR13（同一个 `Unpack15` 编码器）是**单一自适应流**：格式里既无
+      块结束标记、也无重发表语法，所以 Stage 1
+      那种「每窗口重发一张表」**不存在**； 可行的替代是把 `Unpack15Encoder`
+      改成**增量（跨块续传状态）编码器**。已落地： 主循环拆成
+      `MemberLoopState { pos, straddle, stmode_pending }` + `encode_one_step`
+      （一个 flag 分组，或 stmode 运行的一步）；`encode_member_streaming` 持有
+      **滚动窗口（≤ `MAX_LONG_LZ_DISTANCE` 32 KiB）+ 一个 1 MiB 读取块 + carry
+      前视** （`MATCH_LOOKAHEAD` 259 B / `GROUP_LOOKAHEAD`
+      8×258+259），只在输入还有该前视时
+      才推进一步，所以块边界不会被当作成员末尾；`BitWriter::drain_to/finish_to`
+      把整字节 交给 sink、只驻留半个字节，位流跨块连续。`long_lz_buckets`
+      改为在缓冲上重建， 候选序与全量索引一致（已把 `Vec<Vec<usize>>` 换成扁平
+      CSR，去掉了每次重建的 65536
+      次分配）。产物与整成员编码**逐字节相同**，用「整块 vs 分块」对拍验证 （5
+      组语料 × 多种块大小，含 chunk=1/7，2 组选项，另加解码回环）。接线：
+      `add_rar4_file_streaming` 的 v15 分支（非 solid 用新编码器；solid 用
+      `clone_for_trial` 试编、仅在产物确实缩小时提交链状态，否则 STORE
+      且链不动）、 `add_rar13_file_streaming`（原来只能 STORE：现在压缩进 spill
+      再发卷，solid 恒用 BEST 以与缓冲路径的「solid 不
+      STORE」一致）。验证：库级单卷/多卷/solid 用例
+      （`create_rar4_legacy_large_members_stream_compressed_v15`、
+      `rar13_create_large_member_streams_compressed`、
+      `rar13_multivolume_large_member_streams_compressed`、加密大成员用例），新增
+      官方互操作
+      `official_unrar_validates_streamed_legacy_large_members`（V15，明文 +
+      `-p`）与
+      `official_unrar_validates_streamed_rar13_large_member`（V14，加密多卷，
+      `t` + `x` 字节一致），本机官方 UnRAR 7.23 全部通过。收益：>64 MiB 的
+      v15/RAR13 成员从 STORE 变成压缩，且内存有界。
 - [x] **RAR13 大成员 STORE 流式**（已实现 2026-09-17）：`add_file_rar13` 对 ≥
       `STREAM_COMPRESS_THRESHOLD` 的成员改走新的
       `add_rar13_file_streaming_store`：
@@ -270,7 +289,8 @@
   solid（链内亦应用 VM 过滤器；PPMd 模型续见「下一步」的开放项）+ 并行 batch +
   单大成员块级 MT（字节同等）+ NEWSUB 恢复记录。
 - **RAR 1.3 / 1.4 / 1.5 / 2.x 创建**：`-ma13` / `-ma14` / `-ma15` / `-ma2`，含
-  solid、`-p` / `-hp`、旧命名分卷。
+  solid、`-p` / `-hp`、旧命名分卷；≥ 64 MiB 的 v15/RAR13 成员也增量压缩流式
+  （spill，内存有界），v20 大成员仍走 STORE 流式。
 - **RAR4 编辑全补**（ADR 0005）：头/块级操作 + 非 solid 块拷贝 + solid 整档
   repack；`-hp` 与分卷（`rn`/`ch`/`k`/注释）均已支持。
 - **命令面**：官方 `rar` 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt` 列表变体）。

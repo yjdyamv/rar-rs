@@ -145,6 +145,23 @@ impl BitWriter {
         }
     }
 
+    /// Hand every complete byte written so far to `writer`, keeping the
+    /// partial byte (and its bit position) so the bit stream continues where
+    /// it left off. A streaming encoder calls this per chunk so it never
+    /// holds a whole member's packed output; the caller decides what error
+    /// type an I/O failure becomes.
+    pub fn drain_to<W: std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_all(&self.buf)?;
+        self.buf.clear();
+        Ok(())
+    }
+
+    /// Pad and hand over the final partial byte, ending the bit stream.
+    pub fn finish_to<W: std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.flush_align();
+        self.drain_to(writer)
+    }
+
     /// Write `n` bits of `value` (MSB-first). Max 32 bits.
     pub fn write_bits(&mut self, value: u32, n: u8) {
         if n == 0 {

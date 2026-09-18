@@ -295,17 +295,18 @@ fn create_rar4_legacy_incompressible_members_store() {
     }
 }
 
-/// A large RAR 1.5 member is streamed as STORE: `Unpack15` is a whole-member
-/// codec, so buffering it would put the member in memory twice. Compressible
-/// content proves this is the size-based streaming decision, not the
-/// incompressibility probe. (RAR 2.x streams compressed; see
-/// `create_rar4_legacy_large_members_stream_compressed`.)
+/// A large RAR 1.5 member streams compressed: `Unpack15Encoder` was made
+/// incremental (rolling window plus one chunk, bit stream continuing across
+/// chunk boundaries), so the member is never buffered and no longer falls
+/// back to STORE. The solid case pins the trial/commit rule: the streamed
+/// member advances the carried adaptive tables only because it really packs,
+/// and the next member must continue the same chain.
 #[test]
-fn create_rar4_legacy_large_members_stream_as_store() {
+fn create_rar4_legacy_large_members_stream_compressed_v15() {
     let dir = make_temp_dir();
-    let size = 66 * 1024 * 1024usize;
-    let src = dir.path().join("big.bin");
-    let block = b"streamed legacy member payload 0123456789abcdef\n";
+    let size = 64 * 1024 * 1024usize;
+    let src = dir.path().join("big-v15.bin");
+    let block = b"streamed rar15 member payload 0123456789abcdef\n";
     let mut content = Vec::with_capacity(size);
     while content.len() < size {
         content.extend_from_slice(block);
@@ -322,18 +323,81 @@ fn create_rar4_legacy_large_members_stream_as_store() {
     archive.add_path(&src, ewo(5)).unwrap();
     archive.finish().unwrap();
 
-    let mut archive = ArchiveReader::open(&arc).unwrap();
-    let entries: Vec<_> = archive.entries().collect();
-    assert_eq!(
-        entries[0].method(),
-        0,
-        "a huge RAR 1.5 member must be streamed as STORE, not buffered"
+    let packed = {
+        let mut archive = ArchiveReader::open(&arc).unwrap();
+        let entries: Vec<_> = archive.entries().collect();
+        let method = entries[0].method();
+        let packed = entries[0].compressed_size();
+        drop(entries);
+        assert_ne!(
+            method, 0,
+            "a large RAR 1.5 member must stream compressed, not as STORE"
+        );
+        let out = archive
+            .read_entry(archive.unique_entry("big-v15.bin").unwrap())
+            .unwrap();
+        assert_eq!(out, content, "streamed v15 roundtrip");
+        packed
+    };
+    assert!(
+        packed < content.len() as u64 / 8,
+        "the streamed member must really compress ({packed} packed)"
     );
+
+    // Multi-volume: a volume size well under the packed size forces several
+    // splits of the streamed compressed payload.
+    let volume_size = (packed / 4).clamp(64 * 1024, 4 * 1024 * 1024);
+    let arc = dir.path().join("big-v15-vols.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default()
+            .compression(ArchiveVersion::V15)
+            .volume_size(volume_size),
+    )
+    .unwrap();
+    archive.add_path(&src, ewo(5)).unwrap();
+    archive.finish().unwrap();
+    assert!(
+        discover_volumes(&arc).len() > 1,
+        "the streamed member must span several volumes"
+    );
+    let mut archive = ArchiveReader::open(&arc).unwrap();
     let out = archive
-        .read_entry(archive.unique_entry("big.bin").unwrap())
+        .read_entry(archive.unique_entry("big-v15.bin").unwrap())
         .unwrap();
-    assert_eq!(out.len(), content.len());
-    assert_eq!(out, content, "streamed STORE roundtrip");
+    assert_eq!(out, content, "streamed multi-volume v15 roundtrip");
+
+    // Solid: the streamed member commits the carried encoder, so the buffered
+    // member after it must continue the same adaptive chain.
+    let tail = dir.path().join("tail.txt");
+    let tail_content = b"small solid tail member after the large one\n".repeat(4_000);
+    std::fs::write(&tail, &tail_content).unwrap();
+    let arc = dir.path().join("big-v15-solid.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default()
+            .compression(ArchiveVersion::V15)
+            .solid_mode(SolidMode::Continuous),
+    )
+    .unwrap();
+    archive.add_path(&src, ewo(5)).unwrap();
+    archive.add_path(&tail, ewo(5)).unwrap();
+    archive.finish().unwrap();
+    let mut archive = ArchiveReader::open(&arc).unwrap();
+    assert_eq!(
+        archive
+            .read_entry(archive.unique_entry("big-v15.bin").unwrap())
+            .unwrap(),
+        content,
+        "solid streamed v15 member"
+    );
+    assert_eq!(
+        archive
+            .read_entry(archive.unique_entry("tail.txt").unwrap())
+            .unwrap(),
+        tail_content,
+        "the member after a streamed solid v15 member must stay in the chain"
+    );
 }
 
 /// A large RAR 2.x member is compressed with bounded memory: the encoder emits
@@ -383,10 +447,11 @@ fn create_rar4_legacy_large_members_stream_compressed() {
 }
 
 /// Large encrypted RAR 1.5/2.x members stream too: each generation's own cipher
-/// is emitted over the streamed payload (RAR 2.x compressed, RAR 1.5 as STORE),
-/// so a password no longer puts the member in memory twice. A wrong cipher only
-/// "round-trips" when both sides are wrong, so the reader's CRC check is the
-/// guard (official UnRAR covers the interop side).
+/// is emitted over the streamed compressed payload (RAR 2.x as LZ blocks, RAR
+/// 1.5 as one incremental adaptive stream), so a password no longer puts the
+/// member in memory twice. A wrong cipher only "round-trips" when both sides
+/// are wrong, so the reader's CRC check is the guard (official UnRAR covers the
+/// interop side).
 #[test]
 fn create_rar4_legacy_large_encrypted_members_roundtrip() {
     let dir = make_temp_dir();
@@ -414,16 +479,11 @@ fn create_rar4_legacy_large_encrypted_members_roundtrip() {
             let mut reader =
                 ArchiveReader::open_with(&arc, OpenOptions::new().password("pw")).unwrap();
             let entries: Vec<_> = reader.entries().collect();
-            // RAR 2.x streams compressed, RAR 1.5 stores.
-            assert_eq!(
-                entries[0].method() != 0,
-                version == ArchiveVersion::V20,
-                "{tag} {volume_size:?} must stream {} with its own cipher",
-                if version == ArchiveVersion::V20 {
-                    "compressed"
-                } else {
-                    "as STORE"
-                }
+            // Both generations stream compressed.
+            assert_ne!(
+                entries[0].method(),
+                0,
+                "{tag} {volume_size:?} must stream compressed with its own cipher"
             );
             let id = reader.unique_entry("big-enc.bin").unwrap();
             assert_eq!(
