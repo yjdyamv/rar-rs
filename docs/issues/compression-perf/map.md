@@ -109,6 +109,27 @@ open ones (04, 09, 15) still have their own file.
   per-window piecewise transform, records relative to window start, solid-chain
   break, regression in large_paths)
 
+## Measured level ladder (2026-09-18, single host)
+
+`cargo run --release --features parallel --example collectbench -- \
+/Windows/System32/ntoskrnl.exe <level> 8`
+(12.5 MiB DLL, dict 32 MiB). Snapshot, not a contract:
+
+| level | seq     | seq ratio | mt8     | mt8 ratio | mt8 vs seq |
+| ----- | ------- | --------- | ------- | --------- | ---------- |
+| m1    | 1067 ms | 54.05%    | 419 ms  | 53.77%    | -0.5%      |
+| m2    | 6548 ms | 46.88%    | 1006 ms | 52.70%    | +12.4%     |
+| m3    | 7242 ms | 46.67%    | 1166 ms | 52.05%    | +11.5%     |
+| m5    | 9247 ms | 46.67%    | 1221 ms | 52.05%    | +11.5%     |
+
+Readings: (1) the cliff is m1 -> m2 — one unpriced DP pass buys 7.2pp for ~6x
+the time, so the DP's per-position cost (not the repricing passes, which add
+0.2pp for up to 2.7 s) is what issue 09 is up against; (2) the MT tier is the
+hash-chain greedy+lazy parse at every level, so it sits at m1 quality (+11.5%
+packed on this corpus) while being ~6x faster — this is the gap a priced cheap
+tier would close, spending it on ratio at the same speed or on speed (smaller
+chain budget) at the same ratio. See issue 15.
+
 ## Real head-to-head vs WinRAR 7.23 (2026-08, m3)
 
 Corpus: text64 (68 MB repetitive text), rand64, mixed20 (text+random+text), dll
