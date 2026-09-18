@@ -54,6 +54,15 @@ Open frontier (see issues/):
   still ~3x slower than the matchless fast path — see issue 13 verdict.)
 - 09 dll single-threaded parse speed (~5.9x behind WinRAR -mt1 on a real DLL;
   BT4 descent steps are structurally locked, see issue 09)
+- 15 Fast-LZMA2 / zstd-style parser ideas for speed (intended, opened
+  2026-09-18): price-driven effort tiers (a cheap bounded-candidate priced DP to
+  fill the m1 -> m2 cliff, first on the MT low-step tier), tabulated price
+  components (byte-identical), a row/radix-style bounded-depth finder for the
+  fast tiers, and a cheaper incompressibility pre-gate (issue 04's other half).
+  The default `-m` levels keep their bytes; FL2's own trade (1-5% larger output
+  at the same dictionary) is only acceptable in a new documented tier, and
+  upstream entropy coders/format cannot be transplanted into RAR. See
+  [issues/15-fl2-zstd-parser-tiers.md](issues/15-fl2-zstd-parser-tiers.md).
 
 Closed: 05 streaming delta + x86 landed (`delta_stream_window` /
 `x86_stream_window`, PLAN 旧版 `git show c2c43d4:PLAN.md`「RAR5（压缩面）」,
@@ -73,7 +82,7 @@ member-level parallelism needs a shared window, PLAN 旧版
 ## Closed issues (verdicts)
 
 The individual ticket files were folded into this table once they closed; the
-open ones (04, 09) still have their own file.
+open ones (04, 09, 15) still have their own file.
 
 | #  | Issue                                         | Verdict                                                                                                                                                                                                                        |
 | -- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

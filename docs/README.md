@@ -50,7 +50,7 @@
 - [`issues/compression-perf/map.md`](issues/compression-perf/map.md) —
   压缩性能地图（结论、基线、Open frontier）。
 - [`issues/compression-perf/issues/`](issues/compression-perf/issues/) —
-  只留未关闭议题（04、09）；关闭后结论并入 `map.md` 并删文件。
+  只留未关闭议题（04、09、15）；关闭后结论并入 `map.md` 并删文件。
 - [`issues/rar4-recovery-volumes.md`](issues/rar4-recovery-volumes.md) — RAR4
   `.rev` 两种布局、命名与修复语义。
 - [`rar4-creation-spec.md`](rar4-creation-spec.md) — RAR4 创建行为与格式规格。
