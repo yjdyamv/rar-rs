@@ -430,8 +430,18 @@ impl RarArchive {
         // tier differs from the sequential chain — the same documented MT
         // divergence, now visible inside a chain as well. Filter members
         // stay sequential (the transform runs over the whole buffer).
+        //
+        // One chunk (4 MiB), not three: a member *without* a filter took the
+        // sequential path below this, so `-mt` silently did nothing for text
+        // and other unfiltered members in the 4-12 MiB band — very common
+        // sizes (measured: a 4.88 MiB source tree encoded identically at
+        // `--threads 1` and `8`). Filtered members already parallelize at any
+        // size through `encode_with_filters_mt`, which is why the band only
+        // looked covered. The batch and streaming gates keep their own
+        // thresholds: those run inside a pool wave (nested MT) or only ever
+        // see >= 64 MiB members.
         #[cfg(feature = "parallel")]
-        const MT_MIN: usize = 3 * crate::codec::DEFAULT_CHUNK_SIZE;
+        const MT_MIN: usize = crate::codec::DEFAULT_CHUNK_SIZE;
         #[cfg(feature = "parallel")]
         let threads = self.effective_threads();
         #[cfg(not(feature = "parallel"))]

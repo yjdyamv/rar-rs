@@ -185,9 +185,32 @@ single-threaded m3 and ~8x slower than its mt8. Matching WinRAR's MT (fast _and_
 ratio-neutral) needs a parallelizable finder this codebase does not have; that
 is a design change, not a tuning one.
 
-Measured while sweeping: the buffered writer only parallelizes a single member
-at or above its `MT_MIN` (3 x 4 MiB), so a 4.88 MiB member ignores `-mt`
+Measured while sweeping: the buffered writer only parallelized a single member
+at or above its `MT_MIN` (3 x 4 MiB), so a 4.88 MiB member ignored `-mt`
 entirely. Text at m3 therefore reports seq numbers for every `-threads` value.
+
+### The MT floor was silently excluding 4-12 MiB unfiltered members (2026-09-18)
+
+`MT_MIN = 3 * DEFAULT_CHUNK_SIZE` came in with the first mid-size MT change
+(`7d7008c`) and spread to the batch and streaming sites. **It had no recorded
+rationale**: that commit touched no docs, measured only a 19.5 MB text member
+(711 -> 369 ms at `-mt8`, +40 bytes), and its message described the band as
+"2–64 MiB" while the constant says 12 MiB.
+
+It only ever guarded the _unfiltered_ in-memory path: members with a filter run
+`encode_with_filters_mt`, which is parallel at any size. So a text/JSON/CSV/XML
+member in the 4-12 MiB band (a very common size) took the sequential path even
+with `-mt8` — measured: a 4.88 MiB source tree encoded identically, same bytes
+and same milliseconds, at `--threads` 1 and 8.
+
+What the floor implicitly balanced, now measured: a slice re-inserts its
+lookbehind (up to `NEAR_WINDOW_MAX` = 8 MiB) for a slice floored at 2 MiB, so
+the band pays a large insert volume for only 2-5 slices. Lowering it to one
+chunk (`add.rs`, single-member path only; the batch gate stays at 3 chunks to
+avoid nested MT inside a pool wave) gives: 4.88 MiB text 2799 -> 2340 ms
+(**+1.2x**) with **byte-identical** output, very compressible data unchanged (6
+MiB XML: 617 vs 614 ms, same bytes — the sequential parse already steps over
+it), DLL and sub-4 MiB members unchanged.
 
 ### Buffered members: the filter competition was half the runtime (fixed 2026-09-18)
 
