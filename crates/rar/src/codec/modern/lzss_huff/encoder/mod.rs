@@ -36,8 +36,16 @@ pub use filter::{
 pub(crate) use filter::{
     delta_stream_window, forced_combined_stream_window, merge_ranges, x86_stream_window,
 };
-#[cfg(all(test, feature = "parallel"))]
+#[cfg(test)]
 pub(crate) use parse::set_fast_path_enabled;
+
+/// How many times the matchless fast path returned literals without running
+/// the pricing passes. Test seam: a byte-identity check whose corpus never
+/// triggers the path would pass vacuously, so the default-suite smoke test
+/// asserts this moved (`mt_tests` covers the full corpus matrix).
+#[cfg(test)]
+pub(crate) static MATCHLESS_FAST_PATH_USES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 use super::DIST_CACHE_SIZE;
 use crate::codec::common::match_finder;

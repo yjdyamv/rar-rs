@@ -160,20 +160,39 @@ Measured with `cargo nextest run` on a 16-core host, `--all-features`.
 Re-measure rather than updating this table; it exists to tell you _which_ tests
 dominate so you can filter them.
 
-| Test                                                                        | Time  | What it does                                                                                         |
-| --------------------------------------------------------------------------- | ----- | ---------------------------------------------------------------------------------------------------- |
-| `codec::modern::lzss_huff::mt_tests::matchless_fast_path_is_byte_identical` | ~89 s | 7 corpora (~89 MiB) × 9 (level, dictionary, variant) combos × 2 (fast path on/off): ~1.6 GiB encoded |
-| `...::mt_tests::cli_like_external_chunking_serial_chain`                    | ~20 s | three 14 MiB members, chunked the way `add_file` does                                                |
-| `...::mt_tests::sequential_solid_chain_random_shared_blocks`                | ~18 s | three 13 MiB members against a 16 MiB dictionary                                                     |
-| `rar50_roundtrip` (3 tests)                                                 | ~22 s | large-file batch, parallel extraction, per-archive thread counts                                     |
-| everything else                                                             | ~40 s |                                                                                                      |
+| Test                                                                        | Time   | What it does                                                                                         |
+| --------------------------------------------------------------------------- | ------ | ---------------------------------------------------------------------------------------------------- |
+| `codec::modern::lzss_huff::mt_tests::matchless_fast_path_is_byte_identical` | ~7 min | 7 corpora (~89 MiB) × 9 (level, dictionary, variant) combos × 2 (fast path on/off): ~1.6 GiB encoded |
+| `...::mt_tests::cli_like_external_chunking_serial_chain`                    | ~20 s  | three 14 MiB members, chunked the way `add_file` does                                                |
+| `...::mt_tests::sequential_solid_chain_random_shared_blocks`                | ~18 s  | three 13 MiB members against a 16 MiB dictionary                                                     |
+| everything else (~1200 tests)                                               | ~60 s  |                                                                                                      |
 
-Three tests are ~80% of the wall clock. They are **not** shrunk and **not**
-`#[ignore]`d on purpose: each guards a regression that already shipped once —
-the persistent match-finder tree corrupting output across chunk grows, the solid
-chain losing its shared window past the second member, and the
-incompressible-data fast path diverging from the full pricing passes. The cost
-is wall clock; the coverage is the point.
+**The first row is `#[ignore]`d on purpose, and no CI job runs it.** On the
+reference box it alone was 85% of the suite's wall clock, so it is a manual gate
+(not worth ~7 minutes on every weekly run):
+
+```sh
+cargo test -p rar-rs --all-features -- --include-ignored   # default suite + the ~1.6 GiB codec guard
+```
+
+A cheap companion runs in the default suite:
+`codec::modern::lzss_huff::fast_path_tests::matchless_fast_path_smoke_is_byte_identical`
+(~2 s) exercises the two things the matrix mostly pays for — the relaxed trigger
+(dense accidental 4-byte collisions with a dead repeat cache) and a long-range
+dictionary — compares both fast-path arms, and asserts the path actually _fired_
+(a corpus that misses it would otherwise compare the full pricing passes against
+themselves). The matrix stays for the full corpus × level × dictionary × variant
+cross. Run it by hand when touching the relaxed gate, `collect_block_matches`,
+or the pricing passes.
+
+Do not shrink the matrix instead of ignoring it: the guard is that the fast path
+never diverges from the full pricing passes on _any_ corpus, so a sampled prefix
+would let a divergence in a later block through.
+
+The other two heavy tests stay in the default suite: each guards a regression
+that already shipped once — the persistent match-finder tree corrupting output
+across chunk grows, and the solid chain losing its shared window past the second
+member. The cost is wall clock; the coverage is the point.
 
 For a faster local loop, filter rather than change the tests:
 

@@ -20,7 +20,7 @@ pub use decode::{
 #[cfg(feature = "parallel")]
 pub(crate) use encode::encode_chunked_mt_with_progress;
 pub(crate) use encode::encode_chunked_raw_with_lead;
-#[cfg(all(test, feature = "parallel"))]
+#[cfg(test)]
 pub(crate) use encode::set_fast_path_enabled;
 pub use encode::{
     DEFAULT_CHUNK_SIZE, EncodeOptions, EncoderState, FilterSpec, MAX_FILTER_BLOCK_LENGTH, encode,
@@ -106,6 +106,128 @@ pub const BLOCK_CHECKSUM_SEED: u8 = 0x5A;
 
 /// Nibble-based RLE escape value for Huffman table encoding.
 pub const NIBBLE_ESCAPE: u8 = 15;
+
+/// Serializes the tests that toggle the process-global fast-path switch, so
+/// the default-suite smoke test and the full `mt_tests` matrix cannot
+/// interleave their on/off arms (or their counter deltas).
+#[cfg(test)]
+fn fast_path_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Cheap default-suite guard for the matchless fast path (see
+/// `docs/testing.md`). The full corpus matrix lives in `mt_tests` and is
+/// `#[ignore]`d (~7 min on the reference box), so this runs the two things
+/// that matrix mostly pays for — the *relaxed* trigger (dense accidental
+/// 4-byte collisions with a dead repeat cache) and a long-range dictionary —
+/// on one 4 MiB chunk each, and asserts the path actually fired: a corpus that
+/// misses it would compare the full pricing passes against themselves.
+#[cfg(test)]
+mod fast_path_tests {
+    use super::encoder::MATCHLESS_FAST_PATH_USES;
+    use super::{DEFAULT_CHUNK_SIZE, EncodeOptions, encode_chunked, set_fast_path_enabled};
+    use crate::version::ArchiveVersion;
+    use std::sync::atomic::Ordering;
+
+    /// xorshift64 byte stream (the generator `mt_tests` also uses).
+    fn prng_block(len: usize, seed: u64) -> Vec<u8> {
+        let mut s = seed | 1;
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                s as u8
+            })
+            .collect()
+    }
+
+    /// Dense accidental 4-byte hash collisions: the relaxed path's trigger.
+    fn random() -> Vec<u8> {
+        prng_block(DEFAULT_CHUNK_SIZE, 42)
+    }
+
+    /// Isolated 4-byte repeats at pseudo-random distances over random data:
+    /// the shape the relaxed gate must still treat as noise (a length-4 match
+    /// with a dead repeat cache can never beat four literals).
+    fn sparse_4byte() -> Vec<u8> {
+        let mut s = prng_block(DEFAULT_CHUNK_SIZE, 123);
+        for i in (0..s.len()).step_by(137).take(4000) {
+            if i + 4 <= s.len() {
+                s[i..i + 4].copy_from_slice(b"ZAP!");
+            }
+        }
+        s
+    }
+
+    /// `false` (fast path on) is the arm that matters; the guard restores the
+    /// process-wide default on the way out (including on panic).
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            set_fast_path_enabled(true);
+        }
+    }
+
+    fn encode(data: &[u8], level: u8, dict_log: u8) -> Vec<u8> {
+        encode_chunked(
+            data,
+            EncodeOptions {
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                state: None,
+                is_final: true,
+                variant: ArchiveVersion::V50,
+                // The archive write path probes the *file* and sets this; the
+                // sequential entry point would otherwise route random data
+                // straight to STORE and never reach the parser at all.
+                skip_incompressible_probe: true,
+                ..EncodeOptions::new(level, dict_log)
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn matchless_fast_path_smoke_is_byte_identical() {
+        let _g = Guard;
+        let _serial = super::fast_path_lock().lock().expect("fast path lock");
+
+        let mut fired_total = 0usize;
+        for (name, data) in [("random", random()), ("sparse-4byte", sparse_4byte())] {
+            for (level, dict_log) in [(3u8, 6u8), (3, 15)] {
+                let before = MATCHLESS_FAST_PATH_USES.load(Ordering::Relaxed);
+                set_fast_path_enabled(true);
+                let fast = encode(&data, level, dict_log);
+                let fired = MATCHLESS_FAST_PATH_USES.load(Ordering::Relaxed) - before;
+                fired_total += fired;
+                set_fast_path_enabled(false);
+                let full = encode(&data, level, dict_log);
+                assert_eq!(
+                    fast, full,
+                    "{name} l{level} dict{dict_log}: fast path diverged from the full pricing passes"
+                );
+                // Dense 4-byte collisions with a dead repeat cache are the
+                // relaxed gate's trigger, so this corpus must fire at every
+                // configuration. The sparse corpus may legitimately not (an
+                // extended collision makes the block's `longest > 4`, which
+                // hands it to the DP); it is here to compare bytes on that
+                // shape, and the aggregate below still catches a path that
+                // stopped firing altogether.
+                if name == "random" {
+                    assert!(
+                        fired > 0,
+                        "{name} l{level} dict{dict_log}: the fast path must fire on dense collisions"
+                    );
+                }
+            }
+        }
+        assert!(
+            fired_total > 0,
+            "the matchless fast path never fired, so the byte comparison is vacuous"
+        );
+    }
+}
 
 #[cfg(all(test, feature = "parallel"))]
 mod mt_tests {
@@ -552,11 +674,17 @@ mod mt_tests {
     ///
     /// Cost: the matrix is seven corpora (~89 MiB) x nine
     /// level/dictionary/variant combinations x two arms (fast path on and
-    /// off), so it encodes ~1.6 GiB — the single largest test in the suite
-    /// (see `docs/testing.md`). It is deliberately neither shrunk nor
-    /// ignored: this is the guard that the fast path never diverges from the
-    /// full pricing passes.
+    /// off), so it encodes ~1.6 GiB and measured ~7 minutes on the reference
+    /// box — by itself more than the rest of the suite combined. It is
+    /// therefore `#[ignore]`d and *no CI job runs it*: it is a manual gate for
+    /// changes to the relaxed gate, `collect_block_matches` or the pricing
+    /// passes (see `docs/testing.md`; the ~2 s smoke in `fast_path_tests` is
+    /// what runs on every push). Do not shrink the corpus matrix instead: the
+    /// guard is that the fast path never diverges from the full pricing passes
+    /// on *any* corpus, and a sampled prefix would let a divergence in a later
+    /// block through.
     #[test]
+    #[ignore = "slow: ~1.6 GiB of encoding (~7 min, the largest test in the suite); manual gate, run with --include-ignored"]
     fn matchless_fast_path_is_byte_identical() {
         struct Guard;
         impl Drop for Guard {
@@ -565,6 +693,7 @@ mod mt_tests {
             }
         }
         let _g = Guard;
+        let _serial = super::fast_path_lock().lock().expect("fast path lock");
 
         let mut corpora: Vec<(String, Vec<u8>)> = Vec::new();
         corpora.push(("random".into(), prng_block(3 * DEFAULT_CHUNK_SIZE, 42)));

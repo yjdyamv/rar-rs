@@ -63,8 +63,12 @@ version`，以及 `crates/rar-napi/package.json` 的
   （`pub(crate)`）折叠 legacy 别名并做读/写/repack/密码分派。
 - `options.rs` / `error.rs` / `features.rs` / `write_progress.rs` — 选项、错误、
   能力报告、进度。
+- `time.rs` — 公开的 legacy 民用时间原语（`days_from_civil` / `civil_from_days`
+  / `epoch_to_local_civil` / `local_civil_to_epoch` / `local_civil_now`）： RAR
+  1.3–4.x 头字段与 CLI 的 `-ts` 用同一份实现，不再两边各存一份。
 - `fs/` — 原子暂存、有界读取、卷命名、安全路径。
-- `parallel.rs` — `parallel` 特性的 Rayon 池。`detect.rs` — 签名 / SFX 扫描。
+- `parallel.rs` — `parallel` 特性的 Rayon 池。`detect.rs` — **签名表的唯一归属**
+  （RAR5/RAR4/RAR13 签名）与 SFX 扫描。
 
 `name_policy`（`-ep` / `-x` / `-n` 的路径收集与掩码）**不在库里**，在
 `crates/rar-cli/src/name_policy.rs`——CLI 是它唯一的消费者。
@@ -76,8 +80,13 @@ version`，以及 `crates/rar-napi/package.json` 的
 
 - `engine/ctx.rs` — `Engine` trait 与 `Parts` 拆借视图。`format` 的族内读写实现
   都是**自由函数**，上下文参数为 `cx: &mut dyn Engine`（只读用 `&dyn Engine`），
-  因此 `format` 从不命名 `RarArchive`；`Parts` 一次借出同一结构体的不相交字段
-  （`entries` + `stream` + `read` + `password` +
+  因此 `format` 从不命名 `RarArchive`。除状态访问器外，trait 还提供了少数
+  **带不变量的服务**，让引擎而不是每个族写入器去维护它们：`push_entry` /
+  `clear_catalog` / `replace_catalog`（catalog 只能经引擎增删，顺序与
+  payload-offset 身份不被绕过）、`bytes_written` / `add_bytes_written` /
+  `current_volume_index`（卷字节记账单一入口）、`record_quick_open_entry`、
+  `begin_solid_member`（RAR5 链状态播种 + 成员帧开始）。`Parts` 一次借出同一
+  结构体的不相交字段 （`entries` + `stream` + `read` + `password` +
   `cancel`），保留转换前的借用形状。
   引擎**行为**（`write_block_header`、`start_next_volume`、`report_progress` …）
   仍取整个 `Engine`，所以 `Parts` 借用在调用服务前结束。
@@ -105,9 +114,15 @@ version`，以及 `crates/rar-napi/package.json` 的
   （单卷 + `.rar/.rNN` 分卷、solid / 注释 / `-p`）。
 - `format/shared/` — 内部：跨格式读写。读编排（`extract/`：`open`/`members`/
   `dest`/`read` + 每操作唯一 family match，并行抽取仅 RAR5）、跨卷分片合并
-  （`split.rs`）、legacy 时间换算（`legacy_time.rs`）、通用 writer 适配器
-  （`engine.rs`）、流访问（`stream.rs`）、格式中性成员写门面（`write_ops.rs`：
-  `add*` 分发 + solid 链重置）。
+  （`split.rs`）、legacy 时间换算（`legacy_time.rs`；civil 原语在公开的
+  `crate::time`）、跨族校验和（`checksum.rs`：RAR13 文件头与 RAR4 分卷片段共用
+  的 16 位滚动和）、通用 writer 适配器（`engine.rs`）、流访问（`stream.rs`）、
+  格式中性成员写门面（`write_ops.rs`：`add*` 分发 + solid 链重置）。
+
+`format/shared` 不是“与格式无关”，而是**派发与适配层**：跨族的 family
+match（`extract/mod.rs`、`write_ops.rs`）集中在这里，RAR5-only 的概念
+（redirect、STM/ADS、并行抽取、blake2 校验）经 `entry_ext` 与 `extract/*` 适配。
+
 - `codec/modern/lzss_huff/` — **公开**：RAR5 LZSS+Huffman 编解码器。
   `codec/mod.rs` 重导出整个模块（`encode*` / `decode*` / `analyze_stream` /
   `trace_stream` / `FilterSpec` / `EncodeOptions` / `DecoderState` 与 Huffman
@@ -140,11 +155,22 @@ version`，以及 `crates/rar-napi/package.json` 的
 ## 3 · 设计不变量
 
 **分层单向。** 依赖方向 `archive` → `format` → `engine` → 底层
-（`codec`/`crypto`/`fs`/`model`/`options`）。`format` 不得命名 `archive`：族内
-读写全部是取 `&mut dyn Engine` 的自由函数，旧的 `impl RarArchive` 块已清零。
-角色门面（reader/writer/editor）不得命名 `format`/`codec`/`crypto`/`recovery`，
-需要时经 `archive/ops.rs` 的方法接缝转发。三条都由
-`tests/architecture_boundaries.rs` 在源码行级别钉住。
+（`codec`/`crypto`/`fs`/`model`/`options`），根级词汇 `detect`/`version`/`vint`
+/`time`/`error` 为叶子。具体约束：
+
+- `format` 不得命名 `archive`（族内读写全为取 `&mut dyn Engine` 的自由函数，
+  旧的 `impl RarArchive` 块已清零），也不得通过 crate 根再导出绕过（签名表在
+  `detect`，`DictionarySize`/`MAX_METADATA_BYTES` 在 `options`）；
+- `engine`/`codec`/`crypto`/`fs`/`model`/`options`/`detect`/`version` 等
+  `format` 之下的层不得反向命名 `format`；
+- `format` 的族模块之间不互相取值（`checksum`、DOS 时间、`max_packed_bytes` 等
+  跨族原语在 `format/shared`）；
+- 角色门面（reader/writer/editor）不得命名
+  `format`/`codec`/`crypto`/`recovery`， 需要时经 `archive/ops.rs`
+  的方法接缝转发；
+- `recovery` 在 `format` **之上**（复用 RAR4 信封 + `REPAIR` 策略），反向禁止。
+
+以上每条都由 `tests/architecture_boundaries.rs` 在源码行级别钉住。
 
 **有界内存。** 成员从不整块进内存。
 

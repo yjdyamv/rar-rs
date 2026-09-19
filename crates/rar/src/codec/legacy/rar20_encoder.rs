@@ -11,7 +11,8 @@
 // Reference-implementation parity surface: the rars-port entry points
 // (literals-only encoders, progress hooks, tuning knobs) are kept verbatim
 // even where this pipeline does not call them yet.
-#![allow(dead_code)]
+// The unused rars-parity entry points carry individual `allow(dead_code)`
+// annotations so *new* dead code in this module is still reported.
 
 use std::io::{Read, Write};
 
@@ -31,6 +32,7 @@ const LEVEL_COUNT: usize = 19;
 const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LENGTH_COUNT;
 const AUDIO_COUNT: usize = 257;
 const MAX_CHANNELS: usize = 4;
+#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
 const OLD_LEVEL_COUNT: usize = AUDIO_COUNT * MAX_CHANNELS;
 const MAX_HISTORY: usize = 1024 * 1024;
 
@@ -82,6 +84,7 @@ impl EncodeOptions {
         }
     }
 
+    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
     pub const fn with_max_match_distance(mut self, distance: usize) -> Self {
         self.max_match_distance = if distance > MAX_ENCODER_MATCH_OFFSET {
             MAX_ENCODER_MATCH_OFFSET
@@ -130,6 +133,7 @@ pub struct Unpack20Encoder {
 }
 
 impl Unpack20Encoder {
+    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
     pub fn new() -> Self {
         Self::default()
     }
@@ -146,6 +150,7 @@ impl Unpack20Encoder {
         self.encode_member_inner(input, None)
     }
 
+    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
     pub(crate) fn encode_member_with_progress(
         &mut self,
         input: &[u8],
@@ -191,6 +196,7 @@ impl Unpack20Encoder {
 //  Free functions (public entry points kept from rars)
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
 pub fn unpack20_encode_literals(input: &[u8]) -> RarResult<Vec<u8>> {
     unpack20_encode_literals_with_options(input, EncodeOptions::default())
 }
@@ -202,6 +208,7 @@ pub fn unpack20_encode_literals_with_options(
     encode_member(input, &[], None, options, None)
 }
 
+#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
 pub fn unpack20_encode_auto(input: &[u8]) -> RarResult<Vec<u8>> {
     unpack20_encode_auto_with_options(input, EncodeOptions::default())
 }
@@ -226,6 +233,7 @@ pub fn unpack20_encode_auto_with_options(
     Ok(best)
 }
 
+#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
 pub(crate) fn unpack20_encode_auto_with_options_and_progress(
     input: &[u8],
     options: EncodeOptions,

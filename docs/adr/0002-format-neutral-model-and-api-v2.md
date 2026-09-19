@@ -110,17 +110,38 @@ archive orchestration and transactions
     |----------------------|
 format-neutral model       filesystem policy
     |
-format implementations (RAR4, RAR5/RAR7)
+engine (Engine seam: shared state + vocabulary)
     |
-codecs / crypto / recovery
+format implementations (RAR13, RAR4, RAR5/RAR7) <-- recovery (RR / .rev / REPAIR)
+    |
+codecs / crypto
 ```
+
+`recovery` sits _above_ `format`, not beside the codecs: the recovery scanners
+reuse the RAR4 header reader with `EnvelopePolicy::REPAIR` (one envelope
+implementation for scan and repair), so `recovery -> format` is intended while
+`format -> recovery` must not exist. The `Engine` trait (in `engine`) is what
+lets the family code name its context without naming `RarArchive`; see
+[`ARCHITECTURE.md`](../../ARCHITECTURE.md) for the module map.
 
 Forbidden dependency directions include:
 
 - `model -> rar40` or `model -> rar50`;
 - `rar40 -> rar50::headers` for common entry/chunk types;
 - CLI or N-API calling internal codecs directly;
-- wire-format structs leaking into new high-level API signatures.
+- wire-format structs leaking into new high-level API signatures;
+- `format -> archive` (the family code is free functions over
+  `&mut dyn Engine`);
+- `engine`/`codec`/`crypto`/`fs`/`model`/`options`/`detect`/`version` ->
+  `format`;
+- `format`'s family modules reaching into each other for shared primitives (they
+  belong in `format::shared`);
+- the role facades (`reader`/`writer`/`editor`) naming
+  `format`/`codec`/`crypto`/ `recovery` internals (they go through
+  `archive/ops.rs`).
+
+`tests/architecture_boundaries.rs` pins each of these on the shipped source
+lines (comments and test modules exempt).
 
 ## Compatibility policy
 

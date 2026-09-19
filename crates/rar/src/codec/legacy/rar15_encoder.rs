@@ -11,7 +11,8 @@
 // Reference-implementation parity surface: the rars-port entry points
 // (literals-only encoders, progress hooks, tuning knobs) are kept verbatim
 // even where this pipeline does not call them yet.
-#![allow(dead_code)]
+// The unused rars-parity entry points carry individual `allow(dead_code)`
+// annotations so *new* dead code in this module is still reported.
 
 use crate::codec::common::bitstream::BitWriter;
 use crate::error::{RarError, RarResult};
@@ -141,6 +142,7 @@ pub fn unpack15_encode_with_options(input: &[u8], options: EncodeOptions) -> Rar
     encoder.encode_member(input)
 }
 
+#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
 pub(crate) fn unpack15_encode_with_options_and_progress(
     input: &[u8],
     options: EncodeOptions,
@@ -265,10 +267,12 @@ impl Unpack15Encoder {
         encoder
     }
 
+    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
     pub fn encode_literals_only(mut self, input: &[u8]) -> RarResult<Vec<u8>> {
         self.encode_literals_only_member(input)
     }
 
+    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
     fn encode_literals_only_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
         if input.is_empty() {
             return Ok(Vec::new());
@@ -332,6 +336,7 @@ impl Unpack15Encoder {
         self.encode_member_inner(input, None)
     }
 
+    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
     pub(crate) fn encode_member_with_progress(
         &mut self,
         input: &[u8],
@@ -789,6 +794,7 @@ impl Unpack15Encoder {
         self.emit_literal_place(byte_place + 1, byte_place, false)
     }
 
+    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
     fn emit_stmode_literal_run(
         &mut self,
         input: &[u8],
@@ -1327,6 +1333,7 @@ fn flag_fits(used: usize, flag: &[bool]) -> bool {
     used + flag.len() <= 8
 }
 
+#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
 fn plan_huff_effect(nhfb: &mut u32, nlzb: &mut u32) {
     *nhfb += 16;
     if *nhfb > 0xff {

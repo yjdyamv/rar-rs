@@ -1805,6 +1805,8 @@ fn parse_one_block(
                 }
             }
             if all_literal {
+                #[cfg(test)]
+                super::MATCHLESS_FAST_PATH_USES.fetch_add(1, Ordering::Relaxed);
                 let mut symbols = Vec::with_capacity(span);
                 for index in 0..span {
                     symbols.push(Symbol::Literal(combined[block.start + index]));
