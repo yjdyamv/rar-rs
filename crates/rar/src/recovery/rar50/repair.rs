@@ -27,7 +27,7 @@ pub fn repair_inline_recovery_prefix(
     recovery_data: &[u8],
 ) -> Result<Vec<u8>> {
     let chunks = parse_available_inline_recovery_chunks(recovery_data)?;
-    let first = chunks.first().ok_or(Error::BadRecoveryChunk)?;
+    let first = chunks.first().ok_or(Error::NoRecoveryRecord)?;
     let plan = first.plan;
     if first.protected_size != archive_prefix.len() as u64 {
         return Err(Error::BadRecoveryChunk);
@@ -199,7 +199,7 @@ where
     F: FnMut(std::ops::Range<usize>) -> Result<Vec<u8>>,
 {
     let chunks = parse_available_inline_recovery_chunks(recovery_data)?;
-    let first = chunks.first().ok_or(Error::BadRecoveryChunk)?;
+    let first = chunks.first().ok_or(Error::NoRecoveryRecord)?;
     if first.protected_size != protected_size as u64 {
         return Err(Error::BadRecoveryChunk);
     }
@@ -353,7 +353,7 @@ where
 
 pub fn repair_inline_recovery_archive(input: &[u8]) -> Result<Vec<u8>> {
     let chunks = find_inline_recovery_chunks(input)?;
-    let first = chunks.first().ok_or(Error::BadRecoveryChunk)?;
+    let first = chunks.first().ok_or(Error::NoRecoveryRecord)?;
     let protected_size =
         usize::try_from(first.chunk.protected_size).map_err(|_| Error::PlanOverflow)?;
     if protected_size > input.len() {
@@ -380,8 +380,13 @@ pub fn repair_inline_recovery_archive(input: &[u8]) -> Result<Vec<u8>> {
 fn find_inline_recovery_chunks(input: &[u8]) -> Result<Vec<FoundInlineRecoveryChunk>> {
     let mut chunks = Vec::new();
     let mut offset = 0usize;
+    // Distinguish "this archive carries no recovery record" from "a `{RB}`
+    // marker is there but does not parse": the first is `NoRecoveryRecord`
+    // (reported by the callers through `.first()`), the second is corruption.
+    let mut saw_marker = false;
     while let Some(relative) = find_recovery_marker(&input[offset..]) {
         let start = offset + relative;
+        saw_marker = true;
         if let Ok(chunk) = parse_inline_recovery_chunk(&input[start..]) {
             let shard_size =
                 usize::try_from(chunk.plan.shard_size).map_err(|_| Error::PlanOverflow)?;
@@ -396,7 +401,7 @@ fn find_inline_recovery_chunks(input: &[u8]) -> Result<Vec<FoundInlineRecoveryCh
         }
         offset = start + 1;
     }
-    if chunks.is_empty() {
+    if chunks.is_empty() && saw_marker {
         return Err(Error::BadRecoveryChunk);
     }
     Ok(chunks)

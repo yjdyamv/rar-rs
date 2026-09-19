@@ -2042,3 +2042,48 @@ fn delete_with_progress_reports_monotonic_progress() {
         );
     }
 }
+
+/// An archive with no inline recovery record has nothing to repair *with*.
+/// That must be reported as such — the container itself is fine, so it is not
+/// a "recovery chunk is invalid" corruption, and the message must not arrive
+/// with the operation prefixed twice. The streaming and in-memory entry
+/// points share the mapping (`RarError::Unsupported`, the same category the
+/// legacy repair path already used).
+#[test]
+fn repair_without_a_recovery_record_reports_it_clearly() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("no-rr.rar");
+    {
+        // No `recovery_percent`, so the archive carries no RR block at all.
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let opts = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3u8).unwrap());
+        rar.add_bytes("a.bin", b"plain member", opts).unwrap();
+        rar.finish().unwrap();
+    }
+
+    let out = dir.path().join("fixed.rar");
+    let err = rar_rs::repair_archive_path(&path, &out).unwrap_err();
+    match err {
+        rar_rs::RarError::Unsupported(message) => {
+            assert!(
+                message.contains("no recovery record"),
+                "the message must name the missing record, got: {message}"
+            );
+        }
+        other => panic!("expected Unsupported (no record), got: {other:?}"),
+    }
+    assert!(
+        !out.exists(),
+        "a repair that cannot proceed must leave no output behind"
+    );
+
+    // The in-memory entry point maps the same way, so a library caller sees
+    // one category for "nothing to repair with".
+    let bytes = std::fs::read(&path).unwrap();
+    let err = rar_rs::repair_archive(&bytes).unwrap_err();
+    assert!(
+        matches!(err, rar_rs::RarError::Unsupported(_)),
+        "in-memory repair must map to Unsupported too, got: {err:?}"
+    );
+}

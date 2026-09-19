@@ -66,6 +66,21 @@ pub(crate) fn cmd_recovery_volumes(args: &RecoveryVolumesArgs) -> CliResult<()> 
     Ok(())
 }
 
+/// Render a repair failure.
+///
+/// `Unsupported` from the repair entry points means "this archive has no
+/// recovery record" (the RAR5 and legacy scanners both report it that way),
+/// so it is printed as `repair: <message>` instead of `unsupported: …`;
+/// everything else gets the operation as context. Neither branch repeats the
+/// `repair: ` prefix the library used to add as well, which produced
+/// `repair: RAR format error: repair: …`.
+fn repair_failure(error: rar_rs::RarError) -> error::CliError {
+    match error {
+        rar_rs::RarError::Unsupported(message) => format!("repair: {message}").into(),
+        other => error::CliError::from(other).context("repair"),
+    }
+}
+
 /// Repair an archive with its inline recovery record (like `rar r`).
 /// Writes `fixed.<name>` when damage was found and repaired.
 pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
@@ -90,13 +105,13 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
             std::path::Path::new(&fixed_path),
             args.password.password.as_deref(),
         )
-        .map_err(|e| format!("repair: {e}"))?
+        .map_err(repair_failure)?
     } else {
         rar_rs::repair_archive_path(
             std::path::Path::new(archive_path),
             std::path::Path::new(&fixed_path),
         )
-        .map_err(|e| format!("repair: {e}"))?
+        .map_err(repair_failure)?
     };
     if !repaired {
         info!("All OK");

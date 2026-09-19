@@ -209,6 +209,15 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   一致）。 我们把部分尾扇区排除出 parity
   组、只重建完整扇区，故能正确修复同样损坏。**这是 WinRAR
   侧缺陷，不追平**；互操作测试因此用伪随机成员数据。
+- **无恢复记录时的 `rar r`**：官方 7.23 先打印
+  `Data recovery record not found`，
+  然后**仍然重建一份副本**（`rebuilt.<name>`）并以 exit 0 结束；我们拒绝并以
+  exit 2 结束，消息说明缺什么（`repair: archive has no recovery record`，RAR4 为
+  `repair: archive has no legacy PROTECT_HEAD recovery record`）。差异的根源是
+  我们只做“用内联恢复记录修复”，没有官方那条“无记录也照拄可解析块重建”的路径；
+  若要对齐需新增 reconstruct 路径（复用手术重写的块拷贝机制）。我们的行为已由
+  `rewrite_tests::repair_without_a_recovery_record_reports_it_clearly` 与 CLI
+  `cli_repair_without_a_recovery_record_says_so` 钉住。
 
 ## 归属（谁记录什么，别再重新论证）
 

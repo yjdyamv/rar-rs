@@ -46,6 +46,10 @@ pub fn shared_gf16() -> &'static Gf16 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
+    /// The archive carries no inline recovery record (`{RB}`) at all, so there
+    /// is nothing to repair against. Distinct from [`Self::BadRecoveryChunk`],
+    /// which means a record *was* found but does not decode.
+    NoRecoveryRecord,
     BadRecoveryChunk,
     OddShardSize,
     PlanOverflow,
@@ -64,6 +68,7 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NoRecoveryRecord => f.write_str("archive has no recovery record"),
             Self::BadRecoveryChunk => f.write_str("RAR 5 recovery chunk is invalid"),
             Self::OddShardSize => f.write_str("RAR 5 recovery shard size is odd"),
             Self::PlanOverflow => f.write_str("RAR 5 recovery plan overflows"),

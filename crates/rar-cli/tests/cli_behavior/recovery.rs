@@ -302,3 +302,43 @@ fn cli_find_honors_a_password_after_the_archive() {
         );
     }
 }
+
+/// A RAR5 archive with no inline recovery record has nothing to repair
+/// *with*. The CLI used to answer `repair: RAR format error: repair: RAR 5
+/// recovery chunk is invalid`: the wrong failure (nothing is malformed) and
+/// the operation prefixed twice. It must name the missing record in one line
+/// and leave no output behind.
+#[test]
+fn cli_repair_without_a_recovery_record_says_so() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.txt"), b"plain member").unwrap();
+    let arc = dir.path().join("no-rr.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma5", "-m0", "-idq"])
+        .arg(&arc)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["r", "-idq"])
+        .arg(&arc)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "repair without a record must fail");
+    assert_eq!(out.status.code(), Some(2), "the exit code must stay 2");
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("no recovery record"), "{text}");
+    assert!(
+        !text.contains("RAR format error"),
+        "a missing record is not corruption: {text}"
+    );
+    assert!(!text.contains("repair: repair:"), "doubled prefix: {text}");
+    assert!(
+        !dir.path().join("fixed.no-rr.rar").exists(),
+        "a refused repair must not write output"
+    );
+}

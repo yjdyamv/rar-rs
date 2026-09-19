@@ -35,7 +35,15 @@ impl From<rar50::Error> for RarError {
     fn from(e: rar50::Error) -> Self {
         match e {
             rar50::Error::Cancelled => RarError::Cancelled,
-            other => RarError::Format(format!("repair: {other}")),
+            // "No record at all" is not corruption: report it as unsupported
+            // (the same category the legacy repair path uses) so a caller can
+            // tell "nothing to repair with" apart from a malformed record,
+            // and so the CLI can render it without an "unsupported:" prefix.
+            rar50::Error::NoRecoveryRecord => RarError::Unsupported(e.to_string()),
+            // No "repair: " prefix here: the caller supplies the operation as
+            // context, and this used to make the CLI print it twice
+            // ("repair: RAR format error: repair: …").
+            other => RarError::Format(other.to_string()),
         }
     }
 }

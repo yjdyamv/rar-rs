@@ -41,7 +41,7 @@ pub fn repair_inline_recovery_archive_path(
     let found = find_inline_recovery_chunks_in_file(src, file_size, cancel, &mut |pos, _| {
         report(pos, total)
     })?;
-    let first = found.first().ok_or(Error::BadRecoveryChunk)?;
+    let first = found.first().ok_or(Error::NoRecoveryRecord)?;
     let protected_size =
         usize::try_from(first.1.protected_size).map_err(|_| Error::PlanOverflow)?;
     if protected_size as u64 > file_size {
@@ -144,6 +144,10 @@ fn find_inline_recovery_chunks_in_file(
 ) -> Result<Vec<(u64, InlineRecoveryChunk, Vec<u8>)>> {
     const SCAN: usize = 64 * 1024;
     let mut found = Vec::new();
+    // `{RB}` seen but never parsed is corruption; no marker at all means the
+    // archive simply has no recovery record (the caller reports
+    // `NoRecoveryRecord`).
+    let mut saw_marker = false;
     let mut skip_until = 0u64;
     let mut tail = [0u8; 3];
     let mut tail_len = 0usize;
@@ -185,14 +189,14 @@ fn find_inline_recovery_chunks_in_file(
                 } else {
                     buf[i + 3 - tail_len]
                 };
-                if b1 == b'R'
-                    && b2 == b'B'
-                    && b3 == b'}'
-                    && let Some((abs, chunk, raw)) = try_parse_chunk_at(src, file_size, candidate)?
-                {
-                    let shard_size = chunk.plan.shard_size;
-                    skip_until = abs.saturating_add(shard_size);
-                    found.push((abs, chunk, raw));
+                if b1 == b'R' && b2 == b'B' && b3 == b'}' {
+                    saw_marker = true;
+                    if let Some((abs, chunk, raw)) = try_parse_chunk_at(src, file_size, candidate)?
+                    {
+                        let shard_size = chunk.plan.shard_size;
+                        skip_until = abs.saturating_add(shard_size);
+                        found.push((abs, chunk, raw));
+                    }
                 }
                 // `try_parse_chunk_at` seeks the stream to probe a
                 // candidate; restore the scan position so `pos` below
@@ -209,6 +213,9 @@ fn find_inline_recovery_chunks_in_file(
         }
         pos += n as u64;
         progress(pos, file_size);
+    }
+    if found.is_empty() && saw_marker {
+        return Err(Error::BadRecoveryChunk);
     }
     Ok(found)
 }
