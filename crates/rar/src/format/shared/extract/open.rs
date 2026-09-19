@@ -17,7 +17,7 @@ impl RarArchive {
         match self.family {
             ArchiveFamily::Rar13 => crate::format::rar13::extract::open_read_rar13(self)?,
             ArchiveFamily::Rar15To40 => self.open_read_rar4()?,
-            ArchiveFamily::Rar50Plus => self.open_read_rar5()?,
+            ArchiveFamily::Rar50Plus => crate::format::rar5::extract::open::open_read_rar5(self)?,
         }
         self.reset_catalog_token()?;
         Ok(())
@@ -30,7 +30,9 @@ impl RarArchive {
         match self.family {
             ArchiveFamily::Rar13 => crate::format::rar13::extract::open_read_rar13(self)?,
             ArchiveFamily::Rar15To40 => self.open_read_rar4()?,
-            ArchiveFamily::Rar50Plus => self.open_read_quick_rar5()?,
+            ArchiveFamily::Rar50Plus => {
+                crate::format::rar5::extract::open::open_read_quick_rar5(self)?
+            }
         }
         self.reset_catalog_token()?;
         Ok(())

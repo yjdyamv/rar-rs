@@ -3,8 +3,7 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::archive::RarArchive;
-use crate::engine::{ArchiveEntry, StreamRecord};
+use crate::engine::{ArchiveEntry, Engine, StreamRecord};
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{
     ArchiveHeader, BlockMeta, RawBlock, parse_service_block_name, quick_open,
@@ -15,7 +14,6 @@ use crate::format::rar5::{
     BLOCK_TYPE_SERVICE_HEADER, MAX_METADATA_BYTES, RAR5_SIGNATURE,
 };
 use crate::format::shared::extract::{MAX_CATALOG_ENTRIES, check_entry_cap};
-use crate::format::shared::stream_mut;
 use crate::model::{DataChunk, FileHeader};
 
 /// Ceiling on how many data chunks one continuing member may accumulate
@@ -248,249 +246,250 @@ pub(crate) struct MainHeader {
     pub(crate) encrypt_header: Option<Vec<u8>>,
 }
 
-impl RarArchive {
-    /// Read the archive start: the optional plaintext encryption header
-    /// (verifying the password and keeping its key for the following blocks),
-    /// then the main archive header. `reader` may be positioned anywhere;
-    /// this seeks to the archive start (after any SFX stub) and leaves it
-    /// right after the main header.
-    ///
-    /// Append, lock, rewrite planning and the locked check all read the start
-    /// through this opener, so the encryption branch and the missing-header
-    /// error exist once. A caller that already scanned an archive resets the
-    /// encryption state (`clear_archive_encryption`) before calling it.
-    pub(crate) fn read_main_header<R: Read + Seek>(
-        &mut self,
-        reader: &mut R,
-    ) -> RarResult<MainHeader> {
-        reader.seek(SeekFrom::Start(
-            self.sfx_offset + RAR5_SIGNATURE.len() as u64,
-        ))?;
-        let missing = || RarError::Format("archive is missing the main header".into());
-        let first = crate::format::rar5::headers::read_block(
-            reader,
-            crate::format::rar5::extract::verify::archive_block_key(self)?.as_ref(),
-        )?
-        .ok_or_else(missing)?;
-        match first.block_type {
-            BLOCK_TYPE_ENCRYPT_HEADER => {
-                let params =
-                    crate::format::rar5::headers::parse_archive_encrypt_header(&first.raw)?;
-                self.handle_archive_encrypt_header(params)?;
-                let meta = crate::format::rar5::headers::read_block(
-                    reader,
-                    crate::format::rar5::extract::verify::archive_block_key(self)?.as_ref(),
-                )?
-                .ok_or_else(missing)?;
-                if meta.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
-                    return Err(missing());
-                }
-                let parsed = ArchiveHeader::from_raw(&meta.raw)?;
-                Ok(MainHeader {
-                    meta,
-                    parsed,
-                    encrypt_header: Some(first.header_bytes),
-                })
+/// Read the archive start: the optional plaintext encryption header
+/// (verifying the password and keeping its key for the following blocks),
+/// then the main archive header. `reader` may be positioned anywhere;
+/// this seeks to the archive start (after any SFX stub) and leaves it
+/// right after the main header.
+///
+/// Append, lock, rewrite planning and the locked check all read the start
+/// through this opener, so the encryption branch and the missing-header
+/// error exist once. A caller that already scanned an archive resets the
+/// encryption state (`clear_archive_encryption`) before calling it.
+pub(crate) fn read_main_header<R: Read + Seek>(
+    cx: &mut dyn Engine,
+    reader: &mut R,
+) -> RarResult<MainHeader> {
+    reader.seek(SeekFrom::Start(
+        cx.sfx_offset() + RAR5_SIGNATURE.len() as u64,
+    ))?;
+    let missing = || RarError::Format("archive is missing the main header".into());
+    let first = crate::format::rar5::headers::read_block(
+        reader,
+        crate::format::rar5::extract::verify::archive_block_key(cx)?.as_ref(),
+    )?
+    .ok_or_else(missing)?;
+    match first.block_type {
+        BLOCK_TYPE_ENCRYPT_HEADER => {
+            let params = crate::format::rar5::headers::parse_archive_encrypt_header(&first.raw)?;
+            cx.handle_archive_encrypt_header(params)?;
+            let meta = crate::format::rar5::headers::read_block(
+                reader,
+                crate::format::rar5::extract::verify::archive_block_key(cx)?.as_ref(),
+            )?
+            .ok_or_else(missing)?;
+            if meta.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
+                return Err(missing());
             }
-            BLOCK_TYPE_ARCHIVE_HEADER => {
-                let parsed = ArchiveHeader::from_raw(&first.raw)?;
-                Ok(MainHeader {
-                    meta: first,
-                    parsed,
-                    encrypt_header: None,
-                })
+            let parsed = ArchiveHeader::from_raw(&meta.raw)?;
+            Ok(MainHeader {
+                meta,
+                parsed,
+                encrypt_header: Some(first.header_bytes),
+            })
+        }
+        BLOCK_TYPE_ARCHIVE_HEADER => {
+            let parsed = ArchiveHeader::from_raw(&first.raw)?;
+            Ok(MainHeader {
+                meta: first,
+                parsed,
+                encrypt_header: None,
+            })
+        }
+        _ => Err(missing()),
+    }
+}
+
+/// Full RAR5 scan: one catalog walk serves single-volume archives and
+/// volume sets.
+pub(crate) fn open_read_rar5(cx: &mut dyn Engine) -> RarResult<()> {
+    rebuild_catalog(cx)
+}
+
+/// RAR5 quick-open: read only the main archive header, resolve the
+/// quick-open record through the locator, and parse the cached file
+/// headers. Falls back to a full scan when the archive has no usable
+/// quick-open record (multi-volume, header-encrypted, no QO written,
+/// or a corrupt record).
+pub(crate) fn open_read_quick_rar5(cx: &mut dyn Engine) -> RarResult<()> {
+    if cx.volume_paths().len() > 1 {
+        return rebuild_catalog(cx);
+    }
+    if !try_quick_open_entries(cx)? {
+        // The full scan starts at the archive start again, so the
+        // leading plaintext blocks the quick-open probe consumed (e.g.
+        // a -hp encryption header) are seen.
+        rebuild_catalog(cx)?;
+    }
+    Ok(())
+}
+
+/// Try to populate the catalog from the quick-open record.
+/// Returns `Ok(false)` when the archive has no usable record (the
+/// caller falls back to the full scan). QO-specific corruption falls
+/// back too; only genuine I/O errors propagate.
+fn try_quick_open_entries(cx: &mut dyn Engine) -> RarResult<bool> {
+    // Header-encrypted archives never carry a QO record, and reading
+    // their main header would need the derived key — bail out early.
+    let first = match crate::format::rar5::headers::read_block(cx.stream_mut()?, None)? {
+        Some(meta) => meta,
+        None => return Ok(false),
+    };
+    if first.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
+        return Ok(false);
+    }
+    let ah = ArchiveHeader::from_raw(&first.raw)?;
+    if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
+        cx.set_archive_solid(true);
+    }
+    let Some(qo_rel) = crate::format::rar5::headers::locator_quick_open_offset(&ah.extra_data)
+    else {
+        return Ok(false);
+    };
+    let qo_abs = cx
+        .sfx_offset()
+        .checked_add(RAR5_SIGNATURE.len() as u64)
+        .and_then(|base| base.checked_add(qo_rel))
+        .unwrap_or(u64::MAX);
+    let stream = cx.stream_mut()?;
+    stream.seek(SeekFrom::Start(qo_abs))?;
+    // A corrupt QO block (bad CRC, malformed header) must fall back to
+    // the full scan like a corrupt payload does; only I/O errors
+    // propagate.
+    let qo = match crate::format::rar5::headers::read_block(stream, None) {
+        Ok(Some(qo)) => qo,
+        Ok(None) => return Ok(false),
+        Err(RarError::Io(error)) => return Err(RarError::Io(error)),
+        Err(_) => return Ok(false),
+    };
+    if qo.block_type != BLOCK_TYPE_SERVICE_HEADER {
+        return Ok(false);
+    }
+    // The QO payload must fit entirely in memory; a hand-made header can
+    // declare any size, so it is capped like every other service payload.
+    if qo.raw.data_size > MAX_METADATA_BYTES {
+        return Ok(false);
+    }
+    stream.seek(SeekFrom::Start(qo.data_offset))?;
+    // Grown by the read rather than pre-sized: `take` bounds how much can
+    // arrive, so the declared size alone never drives an allocation.
+    let mut payload = Vec::new();
+    stream
+        .take(qo.raw.data_size)
+        .read_to_end(&mut payload)
+        .map_err(RarError::Io)?;
+    if payload.len() as u64 != qo.raw.data_size {
+        return Ok(false);
+    }
+    match parse_quick_open_payload(&payload, qo_abs) {
+        Ok(entries) if !entries.is_empty() => {
+            *cx.entries_mut() = entries;
+            cx.read_ctx_mut().quick_open_catalog = true;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Guarantee that the catalog came from a full block scan, so the
+/// service records the quick-open payload does not cache ("STM" NTFS
+/// streams) are discovered. No-op unless the catalog came from the
+/// quick-open record. The scan reads headers only: payload areas are
+/// skipped with seeks, never loaded.
+///
+/// The scan can reorder members relative to the cached catalog, and the
+/// catalog token is deliberately *not* rotated here: [`crate::EntryId`]s
+/// carry the member's packed-payload offset and are re-resolved by
+/// identity (see `EntryId::resolve`), so IDs issued from the
+/// cached listing survive the reorder while an ID whose member the scan
+/// no longer contains still fails as stale.
+pub(crate) fn ensure_full_catalog(cx: &mut dyn Engine) -> RarResult<()> {
+    if !cx.read_ctx().quick_open_catalog {
+        return Ok(());
+    }
+    rebuild_catalog(cx)
+}
+
+/// Rebuild the catalog from every volume (a single-volume archive is one
+/// source): the single-volume stream is rewound to the archive start,
+/// while volume sets are reopened from the volume paths.
+fn rebuild_catalog(cx: &mut dyn Engine) -> RarResult<()> {
+    rebuild_catalog_capped(cx, MAX_CATALOG_ENTRIES, MAX_MEMBER_CHUNKS)
+}
+
+/// [`rebuild_catalog`] with explicit entry/chunk ceilings. A crafted
+/// volume set can keep adding FILE_HEAD blocks while the catalog grows
+/// without bound (the headers on disk are tiny, the entry objects are
+/// not), and a single continuing member is likewise bounded so its chunk
+/// vector cannot grow without limit.
+fn rebuild_catalog_capped(
+    cx: &mut dyn Engine,
+    max_entries: usize,
+    max_chunks: usize,
+) -> RarResult<()> {
+    let mut builder = CatalogBuilder::new(max_entries, max_chunks);
+
+    if cx.volume_paths().len() > 1 {
+        let volume_paths = cx.volume_paths().to_vec();
+        for (vol_idx, vol_path) in volume_paths.iter().enumerate() {
+            let mut stream = File::open(vol_path)?;
+            // Bound declared data areas against this volume's real size
+            // (see `seek_past_data_area`: an out-of-range skip seek fails
+            // on Linux).
+            let volume_len = stream.metadata().map_err(RarError::Io)?.len();
+
+            // Verify signature. The first volume may be an SFX stub, so
+            // the archive begins at `sfx_offset` there; later volumes
+            // start at 0.
+            if vol_idx == 0 && cx.sfx_offset() > 0 {
+                stream.seek(SeekFrom::Start(cx.sfx_offset()))?;
             }
-            _ => Err(missing()),
-        }
-    }
-
-    /// Full RAR5 scan: one catalog walk serves single-volume archives and
-    /// volume sets.
-    pub(crate) fn open_read_rar5(&mut self) -> RarResult<()> {
-        self.rebuild_catalog()
-    }
-
-    /// RAR5 quick-open: read only the main archive header, resolve the
-    /// quick-open record through the locator, and parse the cached file
-    /// headers. Falls back to a full scan when the archive has no usable
-    /// quick-open record (multi-volume, header-encrypted, no QO written,
-    /// or a corrupt record).
-    pub(crate) fn open_read_quick_rar5(&mut self) -> RarResult<()> {
-        if self.volume_paths.len() > 1 {
-            return self.rebuild_catalog();
-        }
-        if !self.try_quick_open_entries()? {
-            // The full scan starts at the archive start again, so the
-            // leading plaintext blocks the quick-open probe consumed (e.g.
-            // a -hp encryption header) are seen.
-            self.rebuild_catalog()?;
-        }
-        Ok(())
-    }
-
-    /// Try to populate [`Self::entries`] from the quick-open record.
-    /// Returns `Ok(false)` when the archive has no usable record (the
-    /// caller falls back to the full scan). QO-specific corruption falls
-    /// back too; only genuine I/O errors propagate.
-    fn try_quick_open_entries(&mut self) -> RarResult<bool> {
-        // Header-encrypted archives never carry a QO record, and reading
-        // their main header would need the derived key — bail out early.
-        let first =
-            match crate::format::rar5::headers::read_block(stream_mut(&mut self.stream)?, None)? {
-                Some(meta) => meta,
-                None => return Ok(false),
-            };
-        if first.block_type != BLOCK_TYPE_ARCHIVE_HEADER {
-            return Ok(false);
-        }
-        let ah = ArchiveHeader::from_raw(&first.raw)?;
-        if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
-            self.archive_solid = true;
-        }
-        let Some(qo_rel) = crate::format::rar5::headers::locator_quick_open_offset(&ah.extra_data)
-        else {
-            return Ok(false);
-        };
-        let qo_abs = self
-            .sfx_offset
-            .checked_add(RAR5_SIGNATURE.len() as u64)
-            .and_then(|base| base.checked_add(qo_rel))
-            .unwrap_or(u64::MAX);
-        let stream = stream_mut(&mut self.stream)?;
-        stream.seek(SeekFrom::Start(qo_abs))?;
-        // A corrupt QO block (bad CRC, malformed header) must fall back to
-        // the full scan like a corrupt payload does; only I/O errors
-        // propagate.
-        let qo = match crate::format::rar5::headers::read_block(stream, None) {
-            Ok(Some(qo)) => qo,
-            Ok(None) => return Ok(false),
-            Err(RarError::Io(error)) => return Err(RarError::Io(error)),
-            Err(_) => return Ok(false),
-        };
-        if qo.block_type != BLOCK_TYPE_SERVICE_HEADER {
-            return Ok(false);
-        }
-        // The QO payload must fit entirely in memory; a hand-made header can
-        // declare any size, so it is capped like every other service payload.
-        if qo.raw.data_size > MAX_METADATA_BYTES {
-            return Ok(false);
-        }
-        stream.seek(SeekFrom::Start(qo.data_offset))?;
-        // Grown by the read rather than pre-sized: `take` bounds how much can
-        // arrive, so the declared size alone never drives an allocation.
-        let mut payload = Vec::new();
-        stream
-            .take(qo.raw.data_size)
-            .read_to_end(&mut payload)
-            .map_err(RarError::Io)?;
-        if payload.len() as u64 != qo.raw.data_size {
-            return Ok(false);
-        }
-        match parse_quick_open_payload(&payload, qo_abs) {
-            Ok(entries) if !entries.is_empty() => {
-                self.entries = entries;
-                self.read_ctx_mut().quick_open_catalog = true;
-                Ok(true)
+            let mut sig = [0u8; 8];
+            stream.read_exact(&mut sig)?;
+            if sig != *RAR5_SIGNATURE {
+                return Err(RarError::Format(format!(
+                    "volume {} has bad signature",
+                    vol_path.display()
+                )));
             }
-            _ => Ok(false),
-        }
-    }
-
-    /// Guarantee that `self.entries` came from a full block scan, so the
-    /// service records the quick-open payload does not cache ("STM" NTFS
-    /// streams) are discovered. No-op unless the catalog came from the
-    /// quick-open record. The scan reads headers only: payload areas are
-    /// skipped with seeks, never loaded.
-    ///
-    /// The scan can reorder members relative to the cached catalog, and the
-    /// catalog token is deliberately *not* rotated here: [`crate::EntryId`]s
-    /// carry the member's packed-payload offset and are re-resolved by
-    /// identity (see `EntryId::resolve`), so IDs issued from the
-    /// cached listing survive the reorder while an ID whose member the scan
-    /// no longer contains still fails as stale.
-    pub(crate) fn ensure_full_catalog(&mut self) -> RarResult<()> {
-        if !self.read_ctx().quick_open_catalog {
-            return Ok(());
-        }
-        self.rebuild_catalog()
-    }
-
-    /// Rebuild the catalog from every volume (a single-volume archive is one
-    /// source): the single-volume stream is rewound to the archive start,
-    /// while volume sets are reopened from `self.volume_paths`.
-    fn rebuild_catalog(&mut self) -> RarResult<()> {
-        self.rebuild_catalog_capped(MAX_CATALOG_ENTRIES, MAX_MEMBER_CHUNKS)
-    }
-
-    /// [`rebuild_catalog`] with explicit entry/chunk ceilings. A crafted
-    /// volume set can keep adding FILE_HEAD blocks while the catalog grows
-    /// without bound (the headers on disk are tiny, the entry objects are
-    /// not), and a single continuing member is likewise bounded so its chunk
-    /// vector cannot grow without limit.
-    fn rebuild_catalog_capped(&mut self, max_entries: usize, max_chunks: usize) -> RarResult<()> {
-        let mut builder = CatalogBuilder::new(max_entries, max_chunks);
-
-        if self.volume_paths.len() > 1 {
-            let volume_paths = self.volume_paths.clone();
-            for (vol_idx, vol_path) in volume_paths.iter().enumerate() {
-                let mut stream = File::open(vol_path)?;
-                // Bound declared data areas against this volume's real size
-                // (see `seek_past_data_area`: an out-of-range skip seek fails
-                // on Linux).
-                let volume_len = stream.metadata().map_err(RarError::Io)?.len();
-
-                // Verify signature. The first volume may be an SFX stub, so
-                // the archive begins at `sfx_offset` there; later volumes
-                // start at 0.
-                if vol_idx == 0 && self.sfx_offset > 0 {
-                    stream.seek(SeekFrom::Start(self.sfx_offset))?;
-                }
-                let mut sig = [0u8; 8];
-                stream.read_exact(&mut sig)?;
-                if sig != *RAR5_SIGNATURE {
-                    return Err(RarError::Format(format!(
-                        "volume {} has bad signature",
-                        vol_path.display()
-                    )));
-                }
-                builder.scan_source(
-                    &mut stream,
-                    vol_idx,
-                    volume_len,
-                    self.password.as_deref(),
-                    self.cancel.as_deref(),
-                )?;
-            }
-            // Keep the first volume open as the default stream.
-            self.stream = Some(Box::new(File::open(&self.volume_paths[0])?));
-        } else {
-            // A rebuild always starts at the archive start, wherever the
-            // stream was left (the quick-open probe and earlier scans move
-            // it). Declared data areas are bounded against the real file: a
-            // hostile vint size can exceed the filesystem's maximum offset,
-            // where the skip seek fails on Linux instead of hitting EOF.
-            let volume_len = crate::format::shared::stream_len(stream_mut(&mut self.stream)?)?;
-            let password = self.password.clone();
-            let cancel = self.cancel.clone();
-            stream_mut(&mut self.stream)?.seek(SeekFrom::Start(
-                self.sfx_offset + RAR5_SIGNATURE.len() as u64,
-            ))?;
             builder.scan_source(
-                stream_mut(&mut self.stream)?,
-                0,
+                &mut stream,
+                vol_idx,
                 volume_len,
-                password.as_deref(),
-                cancel.as_deref(),
+                cx.password(),
+                cx.cancel_flag(),
             )?;
         }
-
-        self.entries = builder.entries;
-        let streams = builder.streams;
-        self.read_ctx_mut().streams = streams;
-        self.read_ctx_mut().quick_open_catalog = false;
-        self.archive_solid |= builder.archive_solid;
-        Ok(())
+        // Keep the first volume open as the default stream.
+        let primary = cx.volume_paths()[0].clone();
+        cx.set_stream(Box::new(File::open(&primary)?));
+    } else {
+        // A rebuild always starts at the archive start, wherever the
+        // stream was left (the quick-open probe and earlier scans move
+        // it). Declared data areas are bounded against the real file: a
+        // hostile vint size can exceed the filesystem's maximum offset,
+        // where the skip seek fails on Linux instead of hitting EOF.
+        let volume_len = crate::format::shared::stream_len(cx.stream_mut()?)?;
+        let password = cx.password().map(str::to_owned);
+        let cancel = cx.cancel_token();
+        let start = cx.sfx_offset() + RAR5_SIGNATURE.len() as u64;
+        cx.stream_mut()?.seek(SeekFrom::Start(start))?;
+        builder.scan_source(
+            cx.stream_mut()?,
+            0,
+            volume_len,
+            password.as_deref(),
+            cancel.as_deref(),
+        )?;
     }
+
+    *cx.entries_mut() = builder.entries;
+    let streams = builder.streams;
+    cx.read_ctx_mut().streams = streams;
+    cx.read_ctx_mut().quick_open_catalog = false;
+    let solid = cx.archive_solid() || builder.archive_solid;
+    cx.set_archive_solid(solid);
+    Ok(())
 }
 
 /// Parse a quick-open record payload into archive entries.
@@ -552,6 +551,7 @@ fn parse_quick_open_payload_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::RarArchive;
     use crate::engine::discover_volumes;
     use crate::format::rar5::headers::EndOfArchiveHeader;
     use crate::vint;
@@ -610,10 +610,16 @@ mod tests {
         let mut ar = RarArchive::open(&vols[0]).unwrap();
         assert_eq!(ar.entries.len(), 2, "precondition: two catalog entries");
 
-        let err = ar.rebuild_catalog_capped(1, MAX_MEMBER_CHUNKS).unwrap_err();
+        let err = crate::format::rar5::extract::open::rebuild_catalog_capped(
+            &mut ar,
+            1,
+            MAX_MEMBER_CHUNKS,
+        )
+        .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
 
-        ar.rebuild_catalog_capped(2, MAX_MEMBER_CHUNKS).unwrap();
+        crate::format::rar5::extract::open::rebuild_catalog_capped(&mut ar, 2, MAX_MEMBER_CHUNKS)
+            .unwrap();
         assert_eq!(ar.entries.len(), 2);
     }
 
@@ -655,12 +661,16 @@ mod tests {
         std::fs::write(&path, crafted_continuation_archive(4)).unwrap();
 
         let mut ar = RarArchive::open(&path).unwrap();
-        let err = ar
-            .rebuild_catalog_capped(MAX_CATALOG_ENTRIES, 3)
-            .unwrap_err();
+        let err = crate::format::rar5::extract::open::rebuild_catalog_capped(
+            &mut ar,
+            MAX_CATALOG_ENTRIES,
+            3,
+        )
+        .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
 
-        ar.rebuild_catalog_capped(MAX_CATALOG_ENTRIES, 4).unwrap();
+        crate::format::rar5::extract::open::rebuild_catalog_capped(&mut ar, MAX_CATALOG_ENTRIES, 4)
+            .unwrap();
         assert_eq!(
             ar.entries.len(),
             1,
@@ -699,7 +709,8 @@ mod tests {
         }
         let mut ar = RarArchive::open(&plain).unwrap();
         let mut reader = File::open(&plain).unwrap();
-        let main = ar.read_main_header(&mut reader).unwrap();
+        let main =
+            crate::format::rar5::extract::open::read_main_header(&mut ar, &mut reader).unwrap();
         assert_eq!(main.meta.block_type, BLOCK_TYPE_ARCHIVE_HEADER);
         assert!(main.encrypt_header.is_none());
         assert!(!ar.header_encryption);
@@ -721,7 +732,8 @@ mod tests {
         let mut ar = RarArchive::open_with_password(&encrypted, "secret").unwrap();
         let bytes = std::fs::read(&encrypted).unwrap();
         let mut reader = File::open(&encrypted).unwrap();
-        let main = ar.read_main_header(&mut reader).unwrap();
+        let main =
+            crate::format::rar5::extract::open::read_main_header(&mut ar, &mut reader).unwrap();
         assert_eq!(main.meta.block_type, BLOCK_TYPE_ARCHIVE_HEADER);
         let encrypt = main.encrypt_header.expect("header-encrypted archive");
         assert_eq!(
@@ -753,8 +765,7 @@ mod tests {
         }
         let mut ar = RarArchive::open_with_password(&encrypted, "secret").unwrap();
         let mut reader = File::open(&encrypted).unwrap();
-        let enc = ar
-            .read_main_header(&mut reader)
+        let enc = crate::format::rar5::extract::open::read_main_header(&mut ar, &mut reader)
             .unwrap()
             .encrypt_header
             .unwrap();
@@ -778,7 +789,7 @@ mod tests {
         // and must parse as such.
         ar.clear_archive_encryption();
         let mut reader = std::io::Cursor::new(bytes);
-        let err = match ar.read_main_header(&mut reader) {
+        let err = match crate::format::rar5::extract::open::read_main_header(&mut ar, &mut reader) {
             Err(error) => error,
             Ok(_) => panic!("a non-archive second block must be rejected"),
         };
@@ -805,7 +816,7 @@ mod tests {
 
         let mut ar = RarArchive::open(&path).unwrap();
         let mut reader = File::open(&path).unwrap();
-        let err = match ar.read_main_header(&mut reader) {
+        let err = match crate::format::rar5::extract::open::read_main_header(&mut ar, &mut reader) {
             Err(error) => error,
             Ok(_) => panic!("a stream without a main header must be rejected"),
         };
@@ -831,7 +842,12 @@ mod tests {
         let mut ar = RarArchive::open(&path).unwrap();
         ar.read_ctx_mut().quick_open_catalog = true;
 
-        let err = ar.rebuild_catalog_capped(1, MAX_MEMBER_CHUNKS).unwrap_err();
+        let err = crate::format::rar5::extract::open::rebuild_catalog_capped(
+            &mut ar,
+            1,
+            MAX_MEMBER_CHUNKS,
+        )
+        .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
         assert!(
             ar.read_ctx().quick_open_catalog,

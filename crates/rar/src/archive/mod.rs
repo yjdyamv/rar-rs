@@ -559,7 +559,7 @@ impl RarArchive {
         let mut reader = File::open(&path)?;
         let file_len = reader.metadata().map_err(RarError::Io)?.len();
 
-        let main = self.read_main_header(&mut reader)?;
+        let main = crate::format::rar5::extract::open::read_main_header(self, &mut reader)?;
         let ah = main.parsed;
         if ah.flags & ARCHIVE_FLAG_LOCKED != 0 {
             return Err(RarError::ArchiveLocked);
@@ -656,7 +656,8 @@ impl RarArchive {
         }
         let path = self.path.clone();
         let mut reader = File::open(&path)?;
-        let main_meta = self.read_main_header(&mut reader)?.meta;
+        let main_meta =
+            crate::format::rar5::extract::open::read_main_header(self, &mut reader)?.meta;
 
         // Patch the archive-level flags in the plaintext header and
         // recompute the CRC. The flags field lives in the header body at

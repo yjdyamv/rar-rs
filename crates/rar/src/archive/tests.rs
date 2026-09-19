@@ -1719,7 +1719,7 @@ fn header_encryption_key_is_cached_and_matches_a_fresh_derivation() {
     assert!(ar.archive_keys.is_none());
 
     let mut reader = File::open(&path).unwrap();
-    ar.read_main_header(&mut reader).unwrap();
+    crate::format::rar5::extract::open::read_main_header(&mut ar, &mut reader).unwrap();
 
     let expected = ar
         .archive_encr
@@ -1763,7 +1763,7 @@ fn set_password_drops_the_cached_header_key() {
 
     let mut ar = RarArchive::open_with_password(&path, "pw").unwrap();
     let mut reader = File::open(&path).unwrap();
-    ar.read_main_header(&mut reader).unwrap();
+    crate::format::rar5::extract::open::read_main_header(&mut ar, &mut reader).unwrap();
     assert!(ar.archive_keys.is_some(), "precondition: a cached key");
 
     ar.set_password("other");

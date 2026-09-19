@@ -316,7 +316,7 @@ impl RarArchive {
     pub(crate) fn main_header_is_locked(&mut self) -> RarResult<bool> {
         let mut reader = File::open(&self.path)?;
         self.clear_archive_encryption();
-        let main = self.read_main_header(&mut reader)?;
+        let main = crate::format::rar5::extract::open::read_main_header(self, &mut reader)?;
         Ok(main.parsed.flags & ARCHIVE_FLAG_LOCKED != 0)
     }
 
@@ -326,7 +326,7 @@ impl RarArchive {
     fn main_header_declares_volume_set(&mut self) -> RarResult<bool> {
         let mut reader = File::open(&self.path)?;
         self.clear_archive_encryption();
-        let main = self.read_main_header(&mut reader)?;
+        let main = crate::format::rar5::extract::open::read_main_header(self, &mut reader)?;
         Ok(main.parsed.volume_number.is_some()
             || main.parsed.flags & crate::format::rar5::ARCHIVE_FLAG_VOLUME_NUM != 0)
     }

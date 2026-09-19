@@ -169,7 +169,7 @@ impl RarArchive {
         self.read_ctx_mut().extract_options = opts;
         // A quick-open catalog carries no "STM" service records: replace it
         // with the scanned catalog before extraction restores streams.
-        self.ensure_full_catalog()?;
+        crate::format::rar5::extract::open::ensure_full_catalog(self)?;
 
         #[cfg(feature = "parallel")]
         {
@@ -449,7 +449,7 @@ impl RarArchive {
         self.read_ctx_mut().extract_options = opts;
         // A quick-open catalog carries no "STM" service records: replace it
         // with the scanned catalog before extraction restores streams.
-        self.ensure_full_catalog()?;
+        crate::format::rar5::extract::open::ensure_full_catalog(self)?;
         let idx = if rebuilt {
             data_offset
                 .and_then(|offset| {

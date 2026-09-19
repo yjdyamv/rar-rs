@@ -34,7 +34,7 @@ impl RarArchive {
         // then the main archive header (rebuilt so the locator stays
         // consistent with the rewritten archive). The opener re-emits the
         // encryption header verbatim for the rewrite.
-        let main = self.read_main_header(reader)?;
+        let main = crate::format::rar5::extract::open::read_main_header(self, reader)?;
         let encrypt_header = main.encrypt_header;
         let main_meta = main.meta;
         let ah = main.parsed;

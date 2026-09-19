@@ -11,7 +11,7 @@
 //! extraction, destinations) lives in [`crate::format::shared::extract`].
 
 mod decode;
-mod open;
+pub(crate) mod open;
 mod solid;
 pub(crate) mod verify;
 
