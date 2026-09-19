@@ -242,7 +242,7 @@ fn encode_chunked_raw_inner(
 }
 
 /// Multi-threaded encoding of one contiguous window of a member (see
-/// [`encode_chunked_mt_with_progress`]; this is the no-progress form).
+/// `encode_chunked_mt_with_progress`; this is the no-progress form).
 #[cfg(not(feature = "parallel"))]
 #[allow(clippy::too_many_arguments)]
 pub fn encode_chunked_mt(
