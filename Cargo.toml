@@ -31,7 +31,7 @@ libc = "0.2"
 # (rar-cli, rar-napi); the path is what local builds use. Keep it equal to
 # crates/rar's version: `cargo package` refuses a mismatch, and the release tag
 # is checked against crates/rar-napi.
-rar-rs = { version = "0.9.0", path = "crates/rar" }
+rar-rs = { version = "0.10.0", path = "crates/rar" }
 
 [workspace.lints.rust]
 unused_must_use = "deny"

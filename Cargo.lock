@@ -579,7 +579,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rar-cli"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "clap",
  "crc32fast",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "rar-rs"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "aes",
  "crc32fast",
@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "rar-rs-napi"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "napi",
  "napi-build",
