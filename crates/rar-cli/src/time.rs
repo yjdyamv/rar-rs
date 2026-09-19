@@ -1,125 +1,13 @@
 //! DOS/Unix date formatting and -ts spec parsing.
+//!
+//! The civil/local-time primitives themselves live in the library
+//! ([`rar_rs::time`]): the CLI and the legacy format code need exactly the
+//! same offset and calendar math, and keeping two copies meant they could
+//! drift. Callers reach the library module directly (`rar_rs::time::…`).
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
-/// Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
-pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-/// Days since 1970-01-01 for a civil date (inverse of [`civil_from_days`]).
-pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (i64::from(m) + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-/// Current local civil time as `(year, month, day, hour, minute, second)`.
-pub fn local_civil_now() -> (i64, u32, u32, u32, u32, u32) {
-    #[cfg(windows)]
-    {
-        let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
-        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
-        (
-            i64::from(st.wYear),
-            u32::from(st.wMonth),
-            u32::from(st.wDay),
-            u32::from(st.wHour),
-            u32::from(st.wMinute),
-            u32::from(st.wSecond),
-        )
-    }
-    #[cfg(unix)]
-    {
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as libc::time_t)
-            .unwrap_or(0);
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        unsafe { libc::localtime_r(&secs, &mut tm) };
-        (
-            i64::from(tm.tm_year) + 1900,
-            (tm.tm_mon + 1) as u32,
-            tm.tm_mday as u32,
-            tm.tm_hour as u32,
-            tm.tm_min as u32,
-            tm.tm_sec as u32,
-        )
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let days = (secs / 86_400) as i64;
-        let (y, mo, d) = civil_from_days(days);
-        let tod = secs % 86_400;
-        (
-            y,
-            mo,
-            d,
-            (tod / 3600) as u32,
-            ((tod % 3600) / 60) as u32,
-            (tod % 60) as u32,
-        )
-    }
-}
-
-/// Real time zones are whole minutes; snap a raw local-minus-UTC sample so a
-/// platform clock that lags the high-resolution UTC read (Windows'
-/// `GetLocalTime` advances on the ~15.6 ms system tick) cannot make the value
-/// wobble by a second.
-fn snap_to_minute(secs: i64) -> i64 {
-    let rem = secs.rem_euclid(60);
-    if rem >= 30 {
-        secs + (60 - rem)
-    } else {
-        secs - rem
-    }
-}
-
-/// Seconds east of UTC for the current local time (minute precision; the
-/// DST edge is not resolved beyond "now", like WinRAR's date switches).
-fn local_offset_secs() -> i64 {
-    let utc = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let (y, mo, d, h, mi, s) = local_civil_now();
-    // `local_civil_now` samples the clock separately from `utc`; snap the
-    // difference so the two reads can never straddle a second boundary.
-    snap_to_minute(epoch_secs(y, mo, d, h, mi, s) - utc)
-}
-
-/// Interpret a civil time as if it were UTC, returning Unix seconds.
-fn epoch_secs(y: i64, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
-    days_from_civil(y, mo, d) * 86_400 + i64::from(h) * 3600 + i64::from(mi) * 60 + i64::from(s)
-}
-
-/// Convert a *local* civil time to a [`SystemTime`] using the current UTC
-/// offset.
-pub fn local_civil_to_system_time(y: i64, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> SystemTime {
-    let local = epoch_secs(y, mo, d, h, mi, s) - local_offset_secs();
-    if local >= 0 {
-        UNIX_EPOCH + Duration::from_secs(local as u64)
-    } else {
-        UNIX_EPOCH - Duration::from_secs((-local) as u64)
-    }
-}
+use rar_rs::time::{civil_from_days, local_civil_to_system_time};
 
 /// Parse a `-tk<date>` argument: `YYYYMMDDHHMMSS` with optional `-`/`:`
 /// separators and optional trailing components (`2020`, `202001`,
@@ -190,7 +78,7 @@ pub fn format_auto_name(fmt: &str, y: i64, mo: u32, d: u32, h: u32, mi: u32, s: 
 /// Format a Unix timestamp as a local civil timestamp
 /// (`YYYY-MM-DD HH:MM:SS`), the way WinRAR lists member times.
 pub fn format_local_time(secs: u32) -> String {
-    let local = i64::from(secs) + local_offset_secs();
+    let local = i64::from(rar_rs::time::epoch_to_local_civil(secs));
     let days = local.div_euclid(86_400);
     let tod = local.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
@@ -215,19 +103,6 @@ pub fn format_civil_time(secs: u32) -> String {
         (tod % 3600) / 60,
         tod % 60
     )
-}
-
-/// Convert a Unix instant to the local-civil encoding legacy (RAR 1.3–4.x)
-/// headers store, mirroring the library's `epoch_to_local_civil`. Update
-/// comparisons against a legacy member's stored `mtime()` must run in that
-/// same civil space, or files modified within the UTC offset of the archived
-/// timestamp look older than the member.
-pub fn epoch_to_local_civil(secs: u32) -> u32 {
-    epoch_to_local_civil_with_offset(secs, local_offset_secs())
-}
-
-fn epoch_to_local_civil_with_offset(secs: u32, offset: i64) -> u32 {
-    (i64::from(secs) + offset).clamp(0, u32::MAX as i64) as u32
 }
 
 /// Set a file's modification time.
@@ -327,10 +202,9 @@ mod tests {
 
     #[test]
     fn tk_date_parses_forms_and_defaults() {
-        let offset = local_offset_secs();
-        let expect = |y: i64, mo: u32, d: u32, h: u32, mi: u32, s: u32| {
-            UNIX_EPOCH + Duration::from_secs((epoch_secs(y, mo, d, h, mi, s) - offset) as u64)
-        };
+        // `parse_tk_date` must agree with the library's civil-to-instant
+        // conversion (same offset source, no second copy).
+        let expect = rar_rs::time::local_civil_to_system_time;
         assert_eq!(
             parse_tk_date("2020-01-01").unwrap(),
             expect(2020, 1, 1, 0, 0, 0)
@@ -373,27 +247,11 @@ mod tests {
     /// The legacy-civil conversion must add the local offset (and clamp);
     /// update comparisons depend on it being monotone with the stored time.
     #[test]
-    fn epoch_to_local_civil_adds_the_offset() {
-        assert_eq!(
-            epoch_to_local_civil_with_offset(1_000_000, 28_800),
-            1_028_800
-        );
-        assert_eq!(
-            epoch_to_local_civil_with_offset(1_000_000, -28_800),
-            971_200
-        );
-        assert_eq!(epoch_to_local_civil_with_offset(0, -28_800), 0, "clamped");
-        assert_eq!(
-            epoch_to_local_civil_with_offset(u32::MAX, 28_800),
-            u32::MAX,
-            "clamped"
-        );
-    }
-
-    #[test]
     fn local_timestamp_uses_the_local_offset() {
         let secs: u32 = 1_700_000_000;
-        let local = i64::from(secs) + local_offset_secs();
+        // The CLI's formatting must agree with the library's civil encoding
+        // (the offset has exactly one implementation).
+        let local = i64::from(rar_rs::time::epoch_to_local_civil(secs));
         let days = local.div_euclid(86_400);
         let tod = local.rem_euclid(86_400);
         let (y, mo, d) = civil_from_days(days);

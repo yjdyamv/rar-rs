@@ -114,7 +114,7 @@ fn cmd_update_freshen(
             // an instant directly).
             let version = entry.version();
             let source_mtime = if version.is_legacy() || version.is_rar13() {
-                time::epoch_to_local_civil(source_mtime)
+                rar_rs::time::epoch_to_local_civil(source_mtime)
             } else {
                 source_mtime
             };

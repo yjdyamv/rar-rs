@@ -67,7 +67,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // the stamp is inserted before the extension.
     if let Some(fmt) = &args.auto_name {
         // WinRAR stamps the archive name with the current *local* time.
-        let (y, mo, d, hour, minute, second) = time::local_civil_now();
+        let (y, mo, d, hour, minute, second) = rar_rs::time::local_civil_now();
         let stamp = time::format_auto_name(fmt, y, mo, d, hour, minute, second);
         archive_path = if archive_path.contains('*') {
             archive_path.replace('*', &stamp)
