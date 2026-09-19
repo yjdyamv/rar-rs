@@ -38,7 +38,8 @@
   [0004 单一 `ArchiveVersion` 表](adr/0004-single-archive-version-table.md) ·
   [0005 RAR4 编辑架构](adr/0005-rar4-edit-architecture.md) ·
   [0006 公开面收敛到角色门面](adr/0006-public-api-convergence.md) ·
-  [0007 删除 `raw` feature](adr/0007-raw-feature-retired.md)
+  [0007 删除 `raw` feature](adr/0007-raw-feature-retired.md) ·
+  [0008 单向的家族分层与 `Engine` 接缝](adr/0008-one-way-family-layering.md)
 - **议题**（`docs/issues/<feature>/`，只留未关闭的；关闭后**判决并入
   [`../PLAN.md`](../PLAN.md)「性能」段**并删文件）：
   [`compression-perf/`](issues/compression-perf/)（未关闭议题 04、09、15）·

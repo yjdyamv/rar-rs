@@ -101,6 +101,11 @@ behavior is not silently changed during the internal model migration.
 
 ## Dependency direction
 
+> Executed and enforced in 2026-09: see
+> [ADR 0008](0008-one-way-family-layering.md) for the `Engine` seam, the leaf
+> ownership of vocabulary, the `format::shared` dispatch layer and the corrected
+> `recovery` placement.
+
 ```text
 CLI / N-API
     |
