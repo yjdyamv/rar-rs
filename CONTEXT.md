@@ -61,7 +61,8 @@
   表）；解析/预算侧分块上限仍 128
   KiB（`MAX_BLOCK_SIZE`）。发射块大小与解析块解耦（自适应发射块，2026-09）；策略单一
   owner：`EMITTED_BLOCK_SIZE`（4 MiB）与 `find_block_end_adaptive` 同驻
-  `parse.rs`，普通/滤波器、顺序/MT 四条管线共用。
+  `codec/modern/lzss_huff/encoder/parse/block.rs`，普通/滤波器、顺序/MT 四条管线
+  共用（`parse/` 另分 `collect.rs` 匹配收集与 `optimal.rs` 定价解析）。
 - **MemberDecoder** —
   `format/rar5/payload.rs`：统一成员读/解码门面（`ChunkReader` trait +
   `read_packed` + `decode_member`），STORE
@@ -86,7 +87,7 @@
   "STM" 流记录经 `read_streams_with` 解码后由 `write_stream_record`
   重新发射（原加密流重新加密、明文流保持明文），主头声明分卷但只发现单卷（缺卷）的任何编辑拒改（`edit_plan`
   的 `main_header_declares_volume_set` 守卫，2026-09）。
-- **StagedFile / StagedSet / StagedCopy（`fs/atomic.rs`）** — staged
+- **StagedFile / StagedSet / StagedCopy（`fs/atomic/`）** — staged
   写入的所有权值：`StagedFile`
   创建即原子命名（`read_write_create`，绝不截断既有文件）、`commit()` 走
   `install_durable`、未提交时 Drop 自动清理（RAR5 单卷编辑重写、RAR5/legacy

@@ -50,6 +50,11 @@ version`，以及 `crates/rar-napi/package.json` 的
   改三个角色门面（共用 `EntryId::resolve` 身份约定与单一 catalog token）。
 - `archive/mod.rs` — `RarArchive` 共享状态与生命周期（模块内部；公开面只有经
   crate 根 `pub use` 的角色门面）。
+- `archive/engine.rs` — 供 `Engine` trait 实现转发的**固有行为**方法
+  （`write_block_header`、`on_disk_header_len`、`handle_archive_encrypt_header`、
+  `start_next_volume[_rar13]`、`reset_catalog_token`、`check_cancel`、
+  `report_progress`、`effective_threads`、`is_rar4`/`is_rar13`/`is_legacy`
+  等）； `archive/ctx.rs` 是它的 trait 侧接口，两者都只是接缝。
 - `archive/transaction/` — 手术式 delete / rename（字节级重写；
   `multivolume`/`edit`/`plan`/`execute`/`solid`/`header` 角色模块）。
 - `archive/create.rs` — 写生命周期（创建/append/finalize）。
@@ -66,7 +71,9 @@ version`，以及 `crates/rar-napi/package.json` 的
 - `time.rs` — 公开的 legacy 民用时间原语（`days_from_civil` / `civil_from_days`
   / `epoch_to_local_civil` / `local_civil_to_epoch` / `local_civil_now`）： RAR
   1.3–4.x 头字段与 CLI 的 `-ts` 用同一份实现，不再两边各存一份。
-- `fs/` — 原子暂存、有界读取、卷命名、安全路径。
+- `fs/` — 原子暂存、有界读取、卷命名、安全路径。`fs/atomic/` 按角色分文件：
+  `primitives`（临时名与单文件安装）、`staged`（`StagedFile`/`StagedCopy`）、
+  `journal`（提交日志协议）、`set`（`StagedSet`/`commit_files`/恢复）。
 - `parallel.rs` — `parallel` 特性的 Rayon 池。`detect.rs` — **签名表的唯一归属**
   （RAR5/RAR4/RAR13 签名）与 SFX 扫描。
 
@@ -109,7 +116,10 @@ version`，以及 `crates/rar-napi/package.json` 的
   `format/shared/extract/`）、`write/{mod,add,emit,stream,batch,engine,
   filter_policy,layout,windows}`。
 - `format/rar4/` — 内部：老容器族。`envelope.rs` 是块信封与 `-hp` 头解密的**唯一
-  读取器**；另有扫描 / 头解析、解码门面、写管线。
+  读取器**；另有扫描 /
+  头解析、解码门面。写侧按角色分文件：`write/{mod,member,
+  emit,encode,stream,batch,cbc}`（与
+  `format/rar5/write/` 同形）。
 - `format/rar13/` — 内部：DOS 时代 `RE~^` 容器。读取（旧命名分卷拼装）与创建
   （单卷 + `.rar/.rNN` 分卷、solid / 注释 / `-p`）。
 - `format/shared/` — 内部：跨格式读写。读编排（`extract/`：`open`/`members`/
@@ -136,9 +146,10 @@ match（`extract/mod.rs`、`write_ops.rs`）集中在这里，RAR5-only 的概�
 - `crypto/` — 内部（AES/KDF 原语经 `wire` 导出）：`rar50`（AES-256-CBC + KDF +
   hash-key MAC）、老族 `rar13` / `rar15` / `rar20` / `rar30`。
 - `recovery/` — 内部（受支持入口在 crate 根与 `wire` 重导出）：`rar50`（内联
-  RR）、 `parity`（`.rev` / 重建卷的 staged 安装值）、`rev50`（RAR5
-  `.rev`）、`rev3` （RAR 1.5–4.x `.rev`，GF(2^8)）、`legacy`（PROTECT_HEAD /
-  NEWSUB 修复）。受支持 入口如
+  RR，按 `plan`/`gf16`/`encode`/`repair`/`stream` 分文件）、`parity`（`.rev` /
+  重建卷的 staged 安装值）、`rev50`（RAR5 `.rev`）、`rev3`（RAR 1.5–4.x
+  `.rev`，GF(2^8)；同形分文件 `trailer`/`name`/`layout`/`build`/`repair` +
+  `rs8`）、`legacy`（PROTECT_HEAD / NEWSUB 修复）。受支持 入口如
   `repair_archive_path`、`rebuild_missing_volumes`、
   `build_recovery_volumes_for_set`。
 
