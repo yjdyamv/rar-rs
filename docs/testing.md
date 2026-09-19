@@ -1,6 +1,6 @@
 # Testing
 
-> Last verified: 2026-09-17 @ `ee17a08`; the timing table is a host-specific
+> Last verified: 2026-09-19 @ `c2db547`; the timing table is a host-specific
 > snapshot, not a contract.
 
 How the suite is organized, what it costs, and the traps to know before changing

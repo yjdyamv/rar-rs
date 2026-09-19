@@ -1,7 +1,8 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-18 @ `1fbfaba`（solid 链内过滤器、v15/RAR13
-> 大成员增量压缩、solid PPMd 续模型为本轮改动）；实现细节以源码为准。
+> 最后核对：2026-09-19 @ `c2db547`（本轮：提取侧 set-ID 规则对齐 UnRAR、CLI
+> 解压尺寸上限开关、junction 重建为真 NTFS 挂载点、依赖门禁
+> cargo-deny）；实现细节以源码为准。
 
 本文件只留**结论**与**下一步**。历次审计、逐批修复与加固的过程记录在 git 历史
 （旧版详单：`git show c2c43d4:PLAN.md`）；本文件不再维护 CHANGELOG。
