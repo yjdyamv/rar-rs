@@ -14,7 +14,6 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use super::comment::{build_comment_block, comment_block_name_is_cmt, encode_comment_text};
 use super::headers::{file_header_name, rebuild_rar4_header, rename_file_header};
 use super::layout::{
     archive_is_locked, copy_range, emit_block, first_volume, header_password, locate_signature,
@@ -25,6 +24,9 @@ use super::{CMT_HEAD_SIZE, RECOVERY_HEAD_SIZE};
 use crate::archive::RarArchive;
 use crate::archive::transaction::EditSummary;
 use crate::error::{RarError, RarResult};
+use crate::format::rar4::comment::{
+    build_comment_block, comment_block_name_is_cmt, encode_comment_text,
+};
 use crate::format::rar4::{
     COMM_HEAD, EnvelopePolicy, FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY,
     MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD, read_block,
@@ -193,17 +195,6 @@ pub(crate) struct AppendPrelude {
     /// The archive is `-hp` header-encrypted: the appended blocks must be
     /// header-encrypted with the archive password too.
     pub header_encrypted: bool,
-}
-
-/// One member buffered for a deferred solid-archive append.
-pub(crate) struct SolidAppendEntry {
-    pub name: String,
-    pub data: Vec<u8>,
-    pub level: u8,
-    pub mtime: u32,
-    pub mtime_ns: u32,
-    /// On-disk DOS attribute byte to re-emit with the member.
-    pub attr: u32,
 }
 
 /// Prepare an existing single-volume RAR4 archive for appending members.

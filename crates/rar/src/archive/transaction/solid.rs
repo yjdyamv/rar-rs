@@ -9,11 +9,11 @@
 
 use super::super::{DecryptedPayload, RarArchive};
 use crate::codec::{DecoderState, EncoderState, lzss_huff as compression};
+use crate::engine::MemberPlan;
 use crate::error::RarResult;
 use crate::format::rar5::COMP_METHOD_STORE;
 use crate::format::rar5::headers::retain_extra_records;
 use crate::format::rar5::payload::ChunkReader;
-use crate::format::rar5::write::MemberPlan;
 use crate::format::rar5::{EXTRA_FILE_ENCRYPTION, EXTRA_FILE_HASH};
 
 /// Shared window/encoder state of the solid chain being rewritten.

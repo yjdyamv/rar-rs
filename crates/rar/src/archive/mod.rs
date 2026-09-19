@@ -14,13 +14,10 @@
 //! `crate::archive::transaction`.
 
 mod create;
-mod discovery;
 mod editor;
-mod entry;
 pub(crate) mod rar4_edit;
 mod reader;
 mod rename;
-mod state;
 mod transaction;
 mod writer;
 
@@ -28,7 +25,7 @@ mod writer;
 mod tests;
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::crypto;
@@ -46,22 +43,22 @@ use crate::fs::atomic::{copy_prefix, install_durable, read_write_create, temp_si
 use crate::vint;
 use crate::write_progress::ProgressTracker;
 
-use state::{
+use crate::engine::{
     CompressionSettings, LocatorState, MetadataSettings, OutputState, Rar4Append, ReadState,
     SolidChain, WriteState,
 };
-pub(crate) use state::{DecryptedPayload, LegacySolidEncoder, Mode, PendingCommit, StreamRecord};
+// Re-exported for this module's children, which reach them as `super::X`.
+pub(crate) use crate::engine::{
+    ArchiveStream, DecryptedPayload, Mode, PendingCommit, StreamRecord, cancel_requested,
+};
 
+pub use crate::engine::discover_volumes;
+pub use crate::engine::{ArchiveEntry, BatchEntry};
 pub use crate::format::shared::extract::ExtractionReport;
 pub(crate) use crate::fs::volume::{
     volume_base_of, volume_path, volume_path_padded, volume_path_rar4,
 };
-pub use discovery::discover_volumes;
 pub use editor::{ArchiveEditor, EditOp, EditPlan, EditReport};
-pub(crate) use entry::file_header_has_mtime;
-pub use entry::{ArchiveEntry, BatchEntry};
-#[cfg(feature = "parallel")]
-pub(crate) use entry::{BatchPrepareCtx, PreparedEntry};
 pub use reader::{
     ArchiveReader, Entries, EntryId, EntryMatches, EntryRef, OpenOptions, ScanStrategy,
     VerificationFailure, VerificationReport,
@@ -75,27 +72,6 @@ pub use writer::{
 // from disk (see `rar50::build_structural_inline_recovery_data_streaming`), so
 // they are no longer bounded by an in-RAM prefix buffer and can be added to
 // arbitrarily large archives.
-
-/// Maximum accepted RAR5 dictionary-size log (4 GiB, the RAR5 format
-/// ceiling; WinRAR 7.23 accepts the same range — larger, non-power-of-two
-/// dictionaries only exist in the RAR7 format, which is out of scope).
-/// Larger values are rejected at decode time to bound window allocations.
-pub(crate) const MAX_DICT_SIZE_LOG: u8 = 15;
-
-/// Parallel batch compression (feature `parallel`): members up to this
-/// size are compressed whole in Rayon waves; larger non-solid files are
-/// compressed in parallel chunks with bounded memory.
-#[cfg(feature = "parallel")]
-pub(crate) const PARALLEL_COMPRESS_MAX_MEMBER: u64 = 64 * 1024 * 1024;
-/// Members at least this large take the streaming compressed path in
-/// `RarArchive::add_file`: input is compressed in bounded chunks into a
-/// temporary spill file and then streamed into the archive, so memory
-/// stays bounded for any file size (P4: >4 GiB single-file creation).
-pub(crate) const STREAM_COMPRESS_THRESHOLD: u64 = 64 * 1024 * 1024;
-/// Total input bytes buffered per parallel compression wave (feature
-/// `parallel`).
-#[cfg(feature = "parallel")]
-pub(crate) const PARALLEL_COMPRESS_WAVE_BUDGET: u64 = 256 * 1024 * 1024;
 
 /// Legacy RAR archive engine: the shared implementation behind
 /// [`ArchiveReader`], [`ArchiveWriter`] and [`ArchiveEditor`].
@@ -176,9 +152,6 @@ pub struct RarArchive {
 
 /// A seekable read/write sink for archive streams: `File` in production,
 /// `Cursor<Vec<u8>>` for in-memory archives (tests, future `-si` support).
-pub trait ArchiveStream: Read + Write + Seek {}
-impl<T: Read + Write + Seek> ArchiveStream for T {}
-
 impl RarArchive {
     // ── Constructors ───────────────────────────────────────────────────────
 
@@ -949,12 +922,6 @@ impl RarArchive {
                 .report(member, done, member_total);
         }
     }
-}
-
-/// Whether a cancellation flag has been set. Shared with the catalog walker,
-/// which cannot borrow the archive while the archive stream is borrowed.
-pub(crate) fn cancel_requested(cancel: Option<&std::sync::atomic::AtomicBool>) -> bool {
-    cancel.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Replace `dest` with the contents of a temporary sibling filled by

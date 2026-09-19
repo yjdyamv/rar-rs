@@ -2,9 +2,11 @@
 //! encryption/hash extra-record assembly shared by the add and stream
 //! paths.
 
-use crate::archive::{ArchiveEntry, RarArchive};
+use crate::archive::RarArchive;
 use crate::crypto;
 use crate::crypto::ENCR_PBKDF2_ITER_LOG;
+use crate::engine::ArchiveEntry;
+use crate::engine::MemberPlan;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::{
     BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, FILE_FLAG_CRC32, FILE_FLAG_TIME_UNIX,
@@ -12,66 +14,6 @@ use crate::format::rar5::{
 };
 use crate::format::shared::stream_mut;
 use crate::model::{DataChunk, FileHeader};
-
-/// Everything a member write needs besides the payload bytes: the file
-/// header fields and the extra records. Named so the serial, batch and
-/// streamed writers share one value instead of a positional slab.
-pub(crate) struct MemberPlan {
-    pub(crate) name: String,
-    pub(crate) unpacked_size: u64,
-    /// Header CRC: the plaintext CRC, or its hash-key MAC when encrypted.
-    pub(crate) file_crc: u32,
-    pub(crate) method: u8,
-    pub(crate) dict_size_log: u8,
-    pub(crate) dict_size_bytes: Option<u64>,
-    /// Encryption/hash records plus the caller's FILE_TIME/OWNER extras.
-    pub(crate) extra_data: Vec<u8>,
-    pub(crate) attrs: u64,
-    pub(crate) mtime: u32,
-    pub(crate) solid: bool,
-    /// BLAKE2sp hash value (MAC'd when encrypted).
-    pub(crate) stored_hash: Option<[u8; 32]>,
-}
-
-impl MemberPlan {
-    /// Append the caller's FILE_TIME / OWNER records after the
-    /// encryption/hash records `payload_extra_and_crc` built.
-    pub(crate) fn push_extra(&mut self, time_extra: Option<&[u8]>, owner_extra: Option<&[u8]>) {
-        if let Some(time) = time_extra {
-            self.extra_data.extend_from_slice(time);
-        }
-        if let Some(owner) = owner_extra {
-            self.extra_data.extend_from_slice(owner);
-        }
-    }
-
-    /// The member's file header with the on-disk `packed_size` and the
-    /// time-derived `mtime` / `file_flags` filled in.
-    pub(super) fn file_header(&self, packed_size: u64, mtime: u32, file_flags: u64) -> FileHeader {
-        FileHeader {
-            name: self.name.clone(),
-            unpacked_size: self.unpacked_size,
-            packed_size,
-            attributes: self.attrs,
-            mtime,
-            crc32_val: Some(self.file_crc),
-            hash_type: if self.stored_hash.is_some() {
-                0
-            } else {
-                u8::MAX
-            },
-            hash_value: self.stored_hash,
-            comp_method: self.method,
-            comp_solid: self.solid,
-            comp_dict_size: self.dict_size_log,
-            dict_size_bytes: self.dict_size_bytes,
-            host_os: OS_UNIX,
-            file_flags,
-            extra_data: self.extra_data.clone(),
-            ..Default::default()
-        }
-    }
-}
 
 /// Which half of a split chunk the per-chunk source closure is asked for.
 /// The loop invokes it once in [SplitPhase::Crc] (before the block header is

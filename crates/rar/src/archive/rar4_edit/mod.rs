@@ -51,14 +51,12 @@ mod repack;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use comment::{build_comment_block, encode_comment_text, read_comment};
-pub(crate) use engine::{SolidAppendEntry, append_prelude, edit_rar4};
+pub(crate) use crate::format::rar4::comment::CMT_HEAD_SIZE;
+pub(crate) use comment::read_comment;
+pub(crate) use engine::{append_prelude, edit_rar4};
 pub(crate) use layout::lock_archive;
 pub(crate) use repack::repack_solid_archive;
 
-/// Header byte count of the NEWSUB `CMT` archive-comment block (32 fixed
-/// bytes + the 3-byte name `CMT`); the payload follows as data.
-pub(crate) const CMT_HEAD_SIZE: usize = 35;
 /// Header byte count of the NEWSUB `RR` recovery record built by
 /// `build_legacy_recovery_block` (32 fixed + 2-byte name + 20-byte tail);
 /// the tag table and parity sectors follow as data.

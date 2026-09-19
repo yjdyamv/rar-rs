@@ -64,6 +64,21 @@ pub const COMP_METHOD_NORMAL: u8 = 3;
 /// Best LZSS+Huffman level.
 pub const COMP_METHOD_BEST: u8 = 5;
 
+/// Display name of a compression-method byte, for the public
+/// `ArchiveEntry::method_name` accessor. Same vocabulary as the
+/// `COMP_METHOD_*` values above, so it lives with them.
+pub fn method_name(method: u8) -> &'static str {
+    match method {
+        COMP_METHOD_STORE => "Store",
+        COMP_METHOD_FASTEST => "Fastest",
+        2 => "Fast",
+        COMP_METHOD_NORMAL => "Normal",
+        4 => "Good",
+        COMP_METHOD_BEST => "Best",
+        _ => "Unknown",
+    }
+}
+
 /// Maximum Huffman code bit length.
 pub const MAX_CODE_LENGTH: usize = 15;
 

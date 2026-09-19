@@ -15,16 +15,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "parallel")]
 use super::add::{owner_extra_cfg, time_extra_cfg};
 #[cfg(feature = "parallel")]
-use super::emit::MemberPlan;
-#[cfg(feature = "parallel")]
 use super::layout::{dict_params_for, sample_is_incompressible};
-use crate::archive::{BatchEntry, RarArchive};
-#[cfg(feature = "parallel")]
-use crate::archive::{
-    BatchPrepareCtx, PARALLEL_COMPRESS_MAX_MEMBER, PARALLEL_COMPRESS_WAVE_BUDGET, PreparedEntry,
-};
+use crate::archive::RarArchive;
 #[cfg(feature = "parallel")]
 use crate::codec::lzss_huff;
+use crate::engine::BatchEntry;
+#[cfg(feature = "parallel")]
+use crate::engine::MemberPlan;
+#[cfg(feature = "parallel")]
+use crate::engine::{
+    BatchPrepareCtx, PARALLEL_COMPRESS_MAX_MEMBER, PARALLEL_COMPRESS_WAVE_BUDGET, PreparedEntry,
+};
 #[cfg(feature = "parallel")]
 use crate::error::RarError;
 use crate::error::RarResult;

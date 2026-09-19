@@ -13,11 +13,12 @@
 //! STORE members pass through directly; compressed members dispatch to the
 //! implemented Unpack15, Unpack20, Unpack29, and PPMd-compatible paths.
 
+pub(crate) mod comment;
 mod envelope;
 mod extract;
 mod read;
 pub(crate) mod write;
-use crate::archive::ArchiveEntry;
+use crate::engine::ArchiveEntry;
 use crate::error::{RarError, RarResult};
 use crate::format::decode_system_ansi;
 use crate::format::shared::legacy_time::days_from_civil;

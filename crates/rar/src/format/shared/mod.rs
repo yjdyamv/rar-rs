@@ -6,6 +6,7 @@
 //! ([`split`]) and the family-neutral read orchestration in [`extract`].
 
 pub(crate) mod engine;
+pub(crate) mod entry_ext;
 pub(crate) mod extract;
 pub(crate) mod legacy_time;
 pub(crate) mod split;

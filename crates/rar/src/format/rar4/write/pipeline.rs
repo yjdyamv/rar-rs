@@ -13,10 +13,11 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::cbc::{Rar4RangeEmitter, Rar15RangeEmitter, Rar20RangeEmitter, Rar30RangeEmitter};
-use crate::archive::{ArchiveEntry, RarArchive, STREAM_COMPRESS_THRESHOLD};
-#[cfg(feature = "parallel")]
-use crate::archive::{BatchEntry, PARALLEL_COMPRESS_MAX_MEMBER, PARALLEL_COMPRESS_WAVE_BUDGET};
+use crate::archive::RarArchive;
 use crate::codec::legacy::rar29_encoder::Rar29FilterKind;
+use crate::engine::{ArchiveEntry, STREAM_COMPRESS_THRESHOLD};
+#[cfg(feature = "parallel")]
+use crate::engine::{BatchEntry, PARALLEL_COMPRESS_MAX_MEMBER, PARALLEL_COMPRESS_WAVE_BUDGET};
 use crate::error::{RarError, RarResult};
 use crate::format::shared::engine::{CountingWriter, CrcReader, SpillGuard, spill_path_for};
 use crate::format::shared::stream_mut;
@@ -375,7 +376,7 @@ impl RarArchive {
         data_offset: u64,
         chunks: Vec<crate::model::DataChunk>,
     ) {
-        self.entries.push(crate::archive::ArchiveEntry {
+        self.entries.push(crate::engine::ArchiveEntry {
             header: crate::model::FileHeader {
                 name,
                 unpacked_size,
@@ -637,7 +638,7 @@ impl RarArchive {
                     use crate::codec::legacy::rar15_encoder::Unpack15Encoder;
                     let mut encoder = if solid_mode {
                         match self.write_ctx().solid.legacy_encoder.as_ref() {
-                            Some(crate::archive::LegacySolidEncoder::Rar15(encoder)) => {
+                            Some(crate::engine::LegacySolidEncoder::Rar15(encoder)) => {
                                 encoder.clone_for_trial()
                             }
                             _ => Unpack15Encoder::with_options(legacy_rar15_options(level)),
@@ -698,7 +699,7 @@ impl RarArchive {
                 method = crate::format::rar4::RAR4_METHOD_STORE + level;
                 if let Some(encoder) = legacy_encoder_to_commit.take() {
                     self.write_ctx_mut().solid.legacy_encoder =
-                        Some(crate::archive::LegacySolidEncoder::Rar15(Box::new(encoder)));
+                        Some(crate::engine::LegacySolidEncoder::Rar15(Box::new(encoder)));
                 }
             } else {
                 // Compression is a net loss: stream STORE from the source
@@ -892,9 +893,9 @@ impl RarArchive {
         if text.is_empty() {
             return Ok(());
         }
-        const CMT_HEAD: usize = crate::archive::rar4_edit::CMT_HEAD_SIZE;
-        let (payload, unicode) = crate::archive::rar4_edit::encode_comment_text(&text);
-        let block = crate::archive::rar4_edit::build_comment_block(&payload, unicode);
+        const CMT_HEAD: usize = crate::format::rar4::comment::CMT_HEAD_SIZE;
+        let (payload, unicode) = crate::format::rar4::comment::encode_comment_text(&text);
+        let block = crate::format::rar4::comment::build_comment_block(&payload, unicode);
         let stream = stream_mut(&mut self.stream)?;
         if self.header_encryption {
             let password = self.password.as_deref().ok_or_else(|| {
@@ -935,16 +936,17 @@ impl RarArchive {
         // existing solid chain; buffer it and let close() repack the whole
         // archive (surviving members + these additions).
         if self.write_ctx().rar4.solid_append {
-            self.write_ctx_mut().rar4.solid_append_entries.push(
-                crate::archive::rar4_edit::SolidAppendEntry {
+            self.write_ctx_mut()
+                .rar4
+                .solid_append_entries
+                .push(crate::engine::SolidAppendEntry {
                     name,
                     data,
                     level,
                     mtime,
                     mtime_ns,
                     attr: attr.unwrap_or(0x20),
-                },
-            );
+                });
             return Ok(());
         }
         // A queued archive comment is emitted right before the first member
@@ -1128,7 +1130,7 @@ impl RarArchive {
         }
         let method = crate::format::rar4::RAR4_METHOD_STORE + level;
         let packed = if self.write_ctx().solid.mode {
-            use crate::archive::LegacySolidEncoder;
+            use crate::engine::LegacySolidEncoder;
             let mut trial = match self.write_ctx().solid.legacy_encoder.as_ref() {
                 Some(LegacySolidEncoder::Rar15(encoder)) => {
                     LegacySolidEncoder::Rar15(Box::new(encoder.clone_for_trial()))
@@ -1426,8 +1428,8 @@ fn encode_legacy_codec_member(data: &[u8], level: u8, codec: LegacyCodec) -> Rar
 fn build_legacy_solid_encoder(
     codec: LegacyCodec,
     level: u8,
-) -> RarResult<crate::archive::LegacySolidEncoder> {
-    use crate::archive::LegacySolidEncoder;
+) -> RarResult<crate::engine::LegacySolidEncoder> {
+    use crate::engine::LegacySolidEncoder;
     match codec {
         LegacyCodec::Rar20 => Ok(LegacySolidEncoder::Rar20(
             crate::codec::legacy::rar20_encoder::Unpack20Encoder::with_options(

@@ -8,7 +8,7 @@
 //! here once so the two families cannot drift; each family maps
 //! [`SplitMergeError`] to its own message.
 
-use crate::archive::ArchiveEntry;
+use crate::engine::ArchiveEntry;
 
 /// Why a fragment could not be merged.
 #[derive(Debug, PartialEq, Eq)]

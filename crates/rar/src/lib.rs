@@ -43,6 +43,10 @@ pub(crate) mod crypto;
 
 pub mod detect;
 pub mod error;
+// State, entry types and limits shared by the engine (`archive`) and the
+// per-family container code (`format`). Kept below both so neither has to
+// depend on the other.
+mod engine;
 pub mod features;
 mod fs;
 // Generic `std::io` helpers owned by no single layer, so that the public

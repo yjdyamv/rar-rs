@@ -12,8 +12,8 @@ pub(crate) mod write;
 
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::archive::ArchiveEntry;
 use crate::detect::RAR13_SIGNATURE;
+use crate::engine::ArchiveEntry;
 use crate::error::{RarError, RarResult};
 use crate::model::{DataChunk, FileHeader};
 

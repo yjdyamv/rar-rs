@@ -7,7 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::archive::{BatchEntry, RarArchive};
+use crate::archive::RarArchive;
+use crate::engine::BatchEntry;
 use crate::error::{RarError, RarResult};
 
 /// Whether a *whole-member* legacy RAR 1.5–4.x payload should be stored

@@ -3,7 +3,8 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::archive::{ArchiveEntry, RarArchive, StreamRecord};
+use crate::archive::RarArchive;
+use crate::engine::{ArchiveEntry, StreamRecord};
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{
     ArchiveHeader, BlockMeta, RawBlock, parse_service_block_name, quick_open,
@@ -88,7 +89,7 @@ impl CatalogBuilder {
 
         while let Some(meta) = crate::format::rar5::headers::read_block(stream, encr_key.as_ref())?
         {
-            if crate::archive::cancel_requested(cancel) {
+            if crate::engine::cancel_requested(cancel) {
                 return Err(RarError::Cancelled);
             }
             let raw = &meta.raw;
@@ -549,7 +550,7 @@ fn parse_quick_open_payload_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive::discover_volumes;
+    use crate::engine::discover_volumes;
     use crate::format::rar5::headers::EndOfArchiveHeader;
     use crate::vint;
 

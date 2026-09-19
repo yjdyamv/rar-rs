@@ -186,7 +186,7 @@ impl RarArchive {
         // civil-as-UTC seconds, so convert back to an instant here. RAR5
         // regular members default to the Unix epoch when no time record
         // exists (like WinRAR); link redirects without one stay untouched.
-        let time_known = crate::archive::file_header_has_mtime(hdr);
+        let time_known = crate::format::shared::entry_ext::file_header_has_mtime(hdr);
         if time_known {
             let secs = if hdr.uses_local_civil_time() {
                 crate::format::shared::legacy_time::local_civil_to_epoch(hdr.mtime)

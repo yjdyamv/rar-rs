@@ -9,11 +9,13 @@ use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::path::Path;
 
-use super::emit::{MemberPlan, SplitPhase};
+use super::emit::SplitPhase;
 use super::engine::payload_stream;
-use crate::archive::{ArchiveEntry, RarArchive};
+use crate::archive::RarArchive;
 use crate::codec::lzss_huff;
 use crate::crypto;
+use crate::engine::ArchiveEntry;
+use crate::engine::MemberPlan;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::{COMP_METHOD_STORE, FILE_FLAG_CRC32, FILE_FLAG_TIME_UNIX};
 use crate::format::shared::engine::{

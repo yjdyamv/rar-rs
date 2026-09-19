@@ -1,7 +1,7 @@
-use super::super::comment::decode_comment_payload;
+use super::super::header_crc16;
 use super::super::headers::rename_file_header;
 use super::super::layout::{MHD_COMMENT, patch_main_header, scan_layout};
-use super::super::{encode_comment_text, header_crc16};
+use crate::format::rar4::comment::{decode_comment_payload, encode_comment_text};
 
 use crate::archive::RarArchive;
 use crate::format::rar4::RAR4_METHOD_STORE;

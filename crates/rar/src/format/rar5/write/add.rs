@@ -9,13 +9,14 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::emit::MemberPlan;
 use super::layout::{
     SAMPLE_PROBE_HEAD, dict_params_for, hash_file, sample_is_incompressible,
     sample_is_incompressible_stream,
 };
-use crate::archive::{ArchiveEntry, Mode, RarArchive, STREAM_COMPRESS_THRESHOLD};
+use crate::archive::RarArchive;
 use crate::codec::lzss_huff;
+use crate::engine::MemberPlan;
+use crate::engine::{ArchiveEntry, Mode, STREAM_COMPRESS_THRESHOLD};
 use crate::error::{RarError, RarResult};
 #[cfg(unix)]
 use crate::format::rar5::headers::build_owner_extra_record;

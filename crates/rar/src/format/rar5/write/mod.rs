@@ -14,7 +14,6 @@ mod add;
 #[cfg(feature = "parallel")]
 mod batch;
 mod emit;
-pub(crate) use emit::MemberPlan;
 pub(crate) mod engine;
 mod filter_policy;
 pub(crate) mod layout;

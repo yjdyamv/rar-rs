@@ -3,8 +3,9 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::archive::{RarArchive, discover_volumes};
+use crate::archive::RarArchive;
 use crate::detect::{ArchiveFamily, SFX_SCAN_LIMIT};
+use crate::engine::discover_volumes;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::RAR5_SIGNATURE;
 use crate::format::shared::stream_mut;

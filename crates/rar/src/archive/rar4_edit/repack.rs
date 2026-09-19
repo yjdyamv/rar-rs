@@ -12,10 +12,11 @@ use std::collections::HashMap;
 use std::fs;
 
 use super::comment::read_comment;
-use super::engine::{SolidAppendEntry, edit_rar4};
+use super::engine::edit_rar4;
 use super::layout::{archive_is_header_encrypted, header_password};
 use crate::archive::RarArchive;
 use crate::archive::transaction::EditSummary;
+use crate::engine::SolidAppendEntry;
 use crate::error::{RarError, RarResult};
 use crate::fs::atomic::{install_durable, temp_sibling_path};
 use crate::recovery::legacy_rr::scan_protect_file;

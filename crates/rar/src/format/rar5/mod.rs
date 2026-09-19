@@ -69,18 +69,6 @@ pub use crate::codec::lzss_huff::{
     COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_NORMAL, COMP_METHOD_STORE,
 };
 
-pub fn method_name(method: u8) -> &'static str {
-    match method {
-        0 => "Store",
-        1 => "Fastest",
-        2 => "Fast",
-        3 => "Normal",
-        4 => "Good",
-        5 => "Best",
-        _ => "Unknown",
-    }
-}
-
 pub fn level_to_method(level: u8) -> u8 {
     level.min(5)
 }

@@ -32,7 +32,7 @@ const ENDARC_HEADER_SIZE: u16 = 7;
 // ── CRC16 helper ────────────────────────────────────────────────────────────
 
 /// Compute the RAR4 header CRC: standard CRC-32 truncated to 16 bits.
-fn header_crc16(body: &[u8]) -> u16 {
+pub(crate) fn header_crc16(body: &[u8]) -> u16 {
     (crc32::crc32(body) & 0xFFFF) as u16
 }
 

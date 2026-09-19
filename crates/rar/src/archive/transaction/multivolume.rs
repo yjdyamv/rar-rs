@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::io::{Read, Seek, SeekFrom};
 
 use super::super::RarArchive;
+use crate::engine::MemberPlan;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::FileHeader;
-use crate::format::rar5::write::MemberPlan;
 use crate::format::rar5::{COMP_METHOD_STORE, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX};
 use crate::fs::atomic::{parent_dir, read_write_create, temp_suffix};
 

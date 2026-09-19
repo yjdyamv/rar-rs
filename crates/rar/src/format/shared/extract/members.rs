@@ -11,9 +11,10 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::archive::RarArchive;
 #[cfg(feature = "parallel")]
-use crate::archive::DecryptedPayload;
-use crate::archive::{ArchiveEntry, MAX_DICT_SIZE_LOG, RarArchive};
+use crate::engine::DecryptedPayload;
+use crate::engine::{ArchiveEntry, MAX_DICT_SIZE_LOG};
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::parse_redirect_record;
 use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path};
@@ -55,7 +56,7 @@ fn reports_outcome(entry: &ArchiveEntry, options: &crate::options::ExtractOption
 fn member_mtime(hdr: &crate::model::FileHeader) -> Option<std::time::SystemTime> {
     use std::time::{Duration, UNIX_EPOCH};
 
-    if !crate::archive::file_header_has_mtime(hdr) {
+    if !crate::format::shared::entry_ext::file_header_has_mtime(hdr) {
         return None;
     }
     let secs = if hdr.uses_local_civil_time() {
@@ -656,7 +657,7 @@ impl RarArchive {
     ) -> RarResult<PathBuf> {
         // Restore mtime (best-effort), including the nanosecond fraction
         // from the FILE_TIME extra record when present.
-        if crate::archive::file_header_has_mtime(&entry.header) {
+        if crate::format::shared::entry_ext::file_header_has_mtime(&entry.header) {
             self.apply_member_times(&entry.header, &dest_path);
         }
         // Restore NTFS alternate data streams attached to this member

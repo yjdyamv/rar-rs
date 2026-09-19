@@ -9,8 +9,9 @@ use super::*;
 
 use std::io::{self, Write};
 
-use crate::archive::{DecryptedPayload, RarArchive};
+use crate::archive::RarArchive;
 use crate::codec::DecoderState;
+use crate::engine::DecryptedPayload;
 use crate::error::{RarError, RarResult};
 use crate::format::shared::stream_mut;
 /// Write sink that computes CRC32 and optional BLAKE2sp over streamed
@@ -55,7 +56,7 @@ impl Write for IntegritySink<'_> {
 /// decoded bytes.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn decode_stream_payload(
-    record: &crate::archive::StreamRecord,
+    record: &crate::engine::StreamRecord,
     packed: &[u8],
     keys: Option<&crate::crypto::DerivedKeys>,
 ) -> RarResult<Vec<u8>> {
@@ -103,7 +104,7 @@ fn decode_stream_payload(
 /// decode window), and the packed size is narrowed with `try_from` so 32-bit
 /// targets report an error instead of truncating.
 pub(crate) fn read_streams_with<R: crate::format::rar5::payload::ChunkReader + ?Sized>(
-    records: &[crate::archive::StreamRecord],
+    records: &[crate::engine::StreamRecord],
     reader: &mut R,
     password: Option<&str>,
     limit: u64,
@@ -191,7 +192,7 @@ impl RarArchive {
     /// `idx`, returning `(name, bytes)` pairs in archive order.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn read_member_streams(&mut self, idx: usize) -> RarResult<Vec<(String, Vec<u8>)>> {
-        let records: Vec<crate::archive::StreamRecord> = self
+        let records: Vec<crate::engine::StreamRecord> = self
             .read_ctx()
             .streams
             .iter()

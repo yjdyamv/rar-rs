@@ -5,9 +5,9 @@
 //! from, so the chunk-reading source is pushed behind a [`ChunkReader`] seam
 //! and the read+decrypt and decode+verify cores live here once.
 
-use crate::archive::DecryptedPayload;
 use crate::codec::DecoderState;
 use crate::crypto;
+use crate::engine::DecryptedPayload;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::COMP_METHOD_STORE;
 use crate::model::{DataChunk, FileHeader};
@@ -23,7 +23,7 @@ pub(crate) trait ChunkReader {
 /// Chunk source over an archive's primary stream (volume 0) plus the
 /// sibling volume files — the extract path's reader.
 pub(crate) struct StreamReader<'a> {
-    pub stream: &'a mut Box<dyn crate::archive::ArchiveStream>,
+    pub stream: &'a mut Box<dyn crate::engine::ArchiveStream>,
     pub volume_paths: &'a [PathBuf],
 }
 

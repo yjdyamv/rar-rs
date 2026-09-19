@@ -29,8 +29,9 @@ use super::{
     MAIN_HEAD_SIZE, METHOD_BEST, METHOD_STORE, MHD_ALWAYS_SET, MHD_COMMENT, MHD_PACK_COMMENT,
     MHD_SOLID, MHD_VOLUME,
 };
-use crate::archive::{ArchiveEntry, LegacySolidEncoder, RarArchive, STREAM_COMPRESS_THRESHOLD};
+use crate::archive::RarArchive;
 use crate::codec::legacy::rar15_encoder::{EncodeOptions, Unpack15Encoder};
+use crate::engine::{ArchiveEntry, LegacySolidEncoder, STREAM_COMPRESS_THRESHOLD};
 use crate::error::{RarError, RarResult};
 use crate::format::shared::engine::{CountingWriter, SpillGuard, spill_path_for};
 use crate::format::shared::stream_mut;

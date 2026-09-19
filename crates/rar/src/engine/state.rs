@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use crate::codec::DecoderState;
 use crate::crypto;
 
-use super::volume_path;
+use crate::fs::volume::volume_path;
 
 /// Decrypted member payload plus the key material needed for integrity
 /// verification.
@@ -184,6 +184,18 @@ impl Default for SolidChain {
     }
 }
 
+/// One member buffered for a deferred solid-archive append (RAR4 `-s`
+/// continuation, which the writer cannot stream and repacks at close).
+pub(crate) struct SolidAppendEntry {
+    pub name: String,
+    pub data: Vec<u8>,
+    pub level: u8,
+    pub mtime: u32,
+    pub mtime_ns: u32,
+    /// On-disk DOS attribute byte to re-emit with the member.
+    pub attr: u32,
+}
+
 /// Legacy (RAR 1.5–4.x) append bookkeeping.
 #[derive(Default)]
 pub(crate) struct Rar4Append {
@@ -199,7 +211,7 @@ pub(crate) struct Rar4Append {
     pub solid_append: bool,
     /// Buffered additions for a deferred solid-append (see
     /// [`Self::solid_append`]).
-    pub solid_append_entries: Vec<crate::archive::rar4_edit::SolidAppendEntry>,
+    pub solid_append_entries: Vec<SolidAppendEntry>,
     /// Archive-comment text queued for a RAR4 create/repack writer: emitted
     /// as a NEWSUB `CMT` block right before the first member (create writes
     /// members to a stream, so the comment must be queued before the first
@@ -348,7 +360,7 @@ pub(crate) enum PendingCommit {
 
 impl PendingCommit {
     /// Remove staged files that were never committed.
-    pub(super) fn cleanup(&self, volume_count: usize) {
+    pub(crate) fn cleanup(&self, volume_count: usize) {
         match self {
             PendingCommit::Single(tmp) => {
                 let _ = fs::remove_file(tmp);
