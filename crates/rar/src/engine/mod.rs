@@ -19,7 +19,9 @@ mod entry;
 mod plan;
 mod state;
 
-pub(crate) use ctx::{Engine, Parts};
+pub(crate) use ctx::{
+    CatalogOps, Engine, EngineState, HeaderCryptoOps, Parts, StreamOps, VolumeOps, WriteServices,
+};
 pub use discovery::discover_volumes;
 pub use entry::{ArchiveEntry, BatchEntry};
 #[cfg(feature = "parallel")]

@@ -6,10 +6,11 @@
 //! which forced `format` to name `archive`'s type and made the two modules
 //! mutually dependent.
 //!
-//! This trait is the seam that removes it: every family operation is a free
-//! function taking `cx: &mut dyn Engine` (or `cx: &dyn Engine` when it only
-//! reads), and [`RarArchive`](crate::archive::RarArchive) implements the
-//! trait in `archive/ctx.rs`. The dependency runs one way —
+//! The seam that removes it is a set of object-safe traits: every family
+//! operation is a free function taking `cx: &mut dyn Engine` (or
+//! `cx: &dyn Engine` when it only reads), and
+//! [`RarArchive`](crate::archive::RarArchive) implements them in
+//! `archive/ctx.rs`. The dependency runs one way —
 //! `archive` → `format` → `engine` — and `format` no longer names `archive`
 //! at all, which `tests/architecture_boundaries.rs` pins.
 //!
@@ -18,6 +19,17 @@
 //! `read_ctx()` / `write_ctx()` accessors, and the services below are the
 //! complete list of engine *behaviour* (as opposed to data) that the family
 //! code calls.
+//!
+//! The seam is grouped rather than monolithic. [`EngineState`] carries the
+//! state block and the container identity, [`CatalogOps`] the member
+//! catalog, [`StreamOps`] the underlying stream, [`HeaderCryptoOps`] the
+//! archive-level header encryption, [`VolumeOps`] the volume set and its
+//! byte accounting, and [`WriteServices`] the progress/cancellation hooks
+//! plus the single-point write services. [`Engine`] is their umbrella:
+//! family code takes `&mut dyn Engine`, so no call site has to name a group,
+//! while the grouping records what each call is about and lets a narrower
+//! context be spelled `&mut (dyn CatalogOps + VolumeOps)` where that is all
+//! a function needs. `docs/ARCHITECTURE.md` describes the seam.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -39,10 +51,10 @@ use super::{ArchiveEntry, ArchiveStream, Mode, ReadState, WriteState, cancel_req
 /// is two calls that each borrow the whole `&mut dyn Engine`, which it does
 /// not.
 ///
-/// [`Engine::parts`] hands the fields out together so the family code keeps
-/// the borrow structure it had. The engine implements it with plain field
-/// borrows; only the fields the converted family code actually reads are
-/// carried, and `format` never names `RarArchive`.
+/// [`EngineState::parts`] hands the fields out together so the family code
+/// keeps the borrow structure it had. The engine implements it with plain
+/// field borrows; only the fields the converted family code actually reads
+/// are carried, and `format` never names `RarArchive`.
 ///
 /// Services (`write_block_header`, `start_next_volume`, …) still take the
 /// whole `&mut dyn Engine`, so a `Parts` borrow must end before one is
@@ -69,16 +81,13 @@ impl Parts<'_> {
     }
 }
 
-/// Everything a family reader or writer needs from the engine.
+/// The engine's state block and the container identity.
 ///
-/// Implemented by [`RarArchive`](crate::archive::RarArchive); passed to the
-/// family functions as `&mut dyn Engine`.
-pub(crate) trait Engine {
-    // ── State ─────────────────────────────────────────────────────────────
-    //
-    // The bulk of the interface: the family code drives `ReadState` /
-    // `WriteState` directly rather than through one accessor per field.
-
+/// The bulk of the seam: the family code drives `ReadState` / `WriteState`
+/// directly rather than through one accessor per field, and asks the engine
+/// which container it is looking at (the families differ in header layout
+/// and in which operations are legal).
+pub(crate) trait EngineState {
     /// Read-side state. Panics if the archive was not opened for reading.
     fn read_ctx(&self) -> &ReadState;
     /// Mutable read-side state. Panics if not opened for reading.
@@ -90,8 +99,6 @@ pub(crate) trait Engine {
     /// Disjoint borrows of the state fields, for family code that needs two
     /// of them at once. See [`Parts`].
     fn parts(&mut self) -> Parts<'_>;
-
-    // ── Container identity ────────────────────────────────────────────────
 
     /// The container family this archive belongs to.
     fn family(&self) -> ArchiveFamily;
@@ -108,9 +115,15 @@ pub(crate) trait Engine {
     fn is_legacy(&self) -> bool {
         self.is_rar4() || self.is_rar13()
     }
+}
 
-    // ── Catalog ───────────────────────────────────────────────────────────
-
+/// The member catalog: the ordered entry list and its identity token.
+///
+/// The writers may only append (`push_entry`) and the readers may only
+/// publish a whole scan (`clear_catalog` / `replace_catalog`), so archive
+/// order and the payload-offset identity behind
+/// [`EntryId`](crate::EntryId) stay owned here.
+pub(crate) trait CatalogOps {
     /// The member catalog built so far, in archive order.
     fn entries(&self) -> &[ArchiveEntry];
     /// Drop every catalog entry (a scan rebuilds it from scratch).
@@ -128,36 +141,19 @@ pub(crate) trait Engine {
     /// catalog themselves, so "archive order" and the payload-offset identity
     /// used by [`EntryId`](crate::EntryId) have one owner.
     fn push_entry(&mut self, entry: ArchiveEntry);
+}
 
-    // ── Volume accounting ─────────────────────────────────────────────────
-
-    /// Bytes already written to the current volume (the budget the family
-    /// writers measure their next header/payload against).
-    fn bytes_written(&self) -> u64;
-    /// Account `bytes` written to the current volume.
-    fn add_bytes_written(&mut self, bytes: u64);
-    /// Zero-based index of the volume currently being written.
-    fn current_volume_index(&self) -> usize;
-    /// Record a member header in the quick-open locator, when quick-open is
-    /// enabled, at the current stream position. No-op otherwise.
-    fn record_quick_open_entry(&mut self, header_bytes: &[u8]) -> RarResult<()>;
-
-    // ── Solid chain ───────────────────────────────────────────────────────
-
-    /// Seed the RAR5 solid-chain encoder state when absent and start a new
-    /// member frame (`EncoderState::begin_member`). Returns whether the chain
-    /// was already carry-over solid, which the member header records.
-    fn begin_solid_member(&mut self) -> bool;
-
-    // ── Archive stream ────────────────────────────────────────────────────
-
+/// The underlying archive stream.
+pub(crate) trait StreamOps {
     /// The underlying stream, or an error when there is none.
     fn stream_mut(&mut self) -> RarResult<&mut Box<dyn ArchiveStream>>;
     /// Replace the underlying stream (used while opening).
     fn set_stream(&mut self, stream: Box<dyn ArchiveStream>);
+}
 
-    // ── Archive-level encryption ──────────────────────────────────────────
-
+/// Archive-level header encryption (`-hp`) and the headers written through
+/// it.
+pub(crate) trait HeaderCryptoOps {
     /// The archive password, when one was supplied.
     fn password(&self) -> Option<&str>;
     /// Whether archive headers are encrypted (`-hp`).
@@ -175,9 +171,12 @@ pub(crate) trait Engine {
     /// Write one header block, encrypting it first when header encryption is
     /// active.
     fn write_block_header(&mut self, header_bytes: &[u8]) -> RarResult<()>;
+}
 
-    // ── Volumes ───────────────────────────────────────────────────────────
-
+/// The volume set: its identity on disk, the archive-level flags read with
+/// it, the volume rolls, and the byte accounting the writers budget
+/// against.
+pub(crate) trait VolumeOps {
     /// Path of the volume the archive was opened as.
     fn path(&self) -> &Path;
     /// Every volume of the set, in order.
@@ -197,9 +196,19 @@ pub(crate) trait Engine {
     fn start_next_volume(&mut self) -> RarResult<()>;
     /// Close the current volume and open the next `.rNN` legacy volume.
     fn start_next_volume_rar13(&mut self) -> RarResult<()>;
+    /// Bytes already written to the current volume (the budget the family
+    /// writers measure their next header/payload against).
+    fn bytes_written(&self) -> u64;
+    /// Account `bytes` written to the current volume.
+    fn add_bytes_written(&mut self, bytes: u64);
+    /// Zero-based index of the volume currently being written.
+    fn current_volume_index(&self) -> usize;
+}
 
-    // ── Parallelism, progress, cancellation ───────────────────────────────
-
+/// The write-side services the family pipelines call: parallelism,
+/// progress reporting, cancellation, and the operations whose invariant
+/// would otherwise be re-implemented per family.
+pub(crate) trait WriteServices {
     /// Compression worker count for this archive (`-mt`).
     fn effective_threads(&self) -> usize;
     /// The shared progress tracker and the index of the member currently
@@ -222,4 +231,29 @@ pub(crate) trait Engine {
         }
         Ok(())
     }
+    /// Record a member header in the quick-open locator, when quick-open is
+    /// enabled, at the current stream position. No-op otherwise.
+    fn record_quick_open_entry(&mut self, header_bytes: &[u8]) -> RarResult<()>;
+    /// Seed the RAR5 solid-chain encoder state when absent and start a new
+    /// member frame (`EncoderState::begin_member`). Returns whether the chain
+    /// was already carry-over solid, which the member header records.
+    fn begin_solid_member(&mut self) -> bool;
+}
+
+/// Everything a family reader or writer needs from the engine: the umbrella
+/// of the six capability traits above.
+///
+/// Implemented by [`RarArchive`](crate::archive::RarArchive) through the
+/// blanket impl below; passed to the family functions as `&mut dyn Engine`
+/// (`&dyn Engine` when they only read). Nothing is declared here on purpose:
+/// the methods belong to the group that explains them, and a receiver typed
+/// `dyn Engine` still reaches every one of them.
+pub(crate) trait Engine:
+    EngineState + CatalogOps + StreamOps + HeaderCryptoOps + VolumeOps + WriteServices
+{
+}
+
+impl<T> Engine for T where
+    T: EngineState + CatalogOps + StreamOps + HeaderCryptoOps + VolumeOps + WriteServices + ?Sized
+{
 }

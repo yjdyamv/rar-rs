@@ -85,12 +85,18 @@ version`，以及 `crates/rar-napi/package.json` 的
 `archive` 与 `format` **之下**的共享词汇层（`engine` 只依赖
 `{codec, crypto, fs, model, options}`，绝不依赖 `archive`/`format`）：
 
-- `engine/ctx.rs` — `Engine` trait 与 `Parts` 拆借视图。`format` 的族内读写实现
-  都是**自由函数**，上下文参数为 `cx: &mut dyn Engine`（只读用 `&dyn Engine`），
-  因此 `format` 从不命名 `RarArchive`。除状态访问器外，trait 还提供了少数
-  **带不变量的服务**，让引擎而不是每个族写入器去维护它们：`push_entry` /
-  `clear_catalog` / `replace_catalog`（catalog 只能经引擎增删，顺序与
-  payload-offset 身份不被绕过）、`bytes_written` / `add_bytes_written` /
+- `engine/ctx.rs` — `Engine` 族接口与 `Parts` 拆借视图。接口按能力分为六个
+  对象安全 trait：`EngineState`（状态块 + 容器身份）、`CatalogOps`（成员目录）、
+  `StreamOps`（底层流）、`HeaderCryptoOps`（存档级头加密 `-hp`）、`VolumeOps`
+  （卷集与字节记账）、`WriteServices`（并行/进度/取消 + 单点写服务）； `Engine`
+  本身只剩一个 blanket impl 的总接口，因此族代码仍取 `cx: &mut dyn Engine`（只读
+  `&dyn Engine`）——**调用点不因分组而变化**，
+  分组只是把“每次调用属于哪种能力”写明，并允许需要时把上下文收窄为
+  `&mut (dyn CatalogOps + VolumeOps)`。 `format`
+  的族内读写实现都是**自由函数**，因此 `format` 从不命名
+  `RarArchive`。几个方法带**不变量**，让引擎而不是每个族写入器去维护：
+  `push_entry` / `clear_catalog` / `replace_catalog`（catalog 只能经引擎增删，
+  顺序与 payload-offset 身份不被绕过）、`bytes_written` / `add_bytes_written` /
   `current_volume_index`（卷字节记账单一入口）、`record_quick_open_entry`、
   `begin_solid_member`（RAR5 链状态播种 + 成员帧开始）。`Parts` 一次借出同一
   结构体的不相交字段 （`entries` + `stream` + `read` + `password` +

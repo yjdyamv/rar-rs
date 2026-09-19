@@ -1,9 +1,12 @@
-//! `Engine` for the archive engine.
+//! The engine traits for the archive engine.
 //!
-//! The trait itself lives in [`crate::engine`] — it has to, so that the
-//! family code can name it without naming this module. Here it is only wired
-//! up to [`RarArchive`], mostly by delegating to the inherent methods the
-//! engine already had.
+//! The traits themselves live in [`crate::engine`] — they have to, so that
+//! the family code can name them without naming this module. Here they are
+//! only wired up to [`RarArchive`], mostly by delegating to the inherent
+//! methods the engine already had (`archive/engine.rs`), one `impl` per
+//! capability trait so the grouping in `engine::ctx` is visible from the
+//! implementation side too. `Engine` itself is a blanket impl over those six,
+//! so there is nothing to implement for it here.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -11,13 +14,16 @@ use std::sync::{Arc, Mutex};
 
 use crate::crypto;
 use crate::detect::ArchiveFamily;
-use crate::engine::{ArchiveEntry, ArchiveStream, Engine, Mode, Parts, ReadState, WriteState};
+use crate::engine::{
+    ArchiveEntry, ArchiveStream, CatalogOps, EngineState, HeaderCryptoOps, Mode, Parts, ReadState,
+    StreamOps, VolumeOps, WriteServices, WriteState,
+};
 use crate::error::RarResult;
 use crate::write_progress::ProgressTracker;
 
 use super::RarArchive;
 
-impl Engine for RarArchive {
+impl EngineState for RarArchive {
     fn read_ctx(&self) -> &ReadState {
         self.read.as_ref().expect("read context not available")
     }
@@ -64,7 +70,9 @@ impl Engine for RarArchive {
     fn is_rar13(&self) -> bool {
         self.family == ArchiveFamily::Rar13
     }
+}
 
+impl CatalogOps for RarArchive {
     fn entries(&self) -> &[ArchiveEntry] {
         &self.entries
     }
@@ -85,43 +93,9 @@ impl Engine for RarArchive {
     fn push_entry(&mut self, entry: ArchiveEntry) {
         self.entries.push(entry);
     }
+}
 
-    fn bytes_written(&self) -> u64 {
-        self.write_ctx().output.bytes_written
-    }
-
-    fn add_bytes_written(&mut self, bytes: u64) {
-        let ctx = self.write_ctx_mut();
-        ctx.output.bytes_written = ctx.output.bytes_written.saturating_add(bytes);
-    }
-
-    fn current_volume_index(&self) -> usize {
-        self.write_ctx().output.current_volume.saturating_sub(1)
-    }
-
-    fn record_quick_open_entry(&mut self, header_bytes: &[u8]) -> RarResult<()> {
-        if !self.write_ctx().locator.quick_open {
-            return Ok(());
-        }
-        let pos = self.stream_mut()?.stream_position()?;
-        self.write_ctx_mut()
-            .locator
-            .quick_open_entries
-            .push((pos, header_bytes.to_vec()));
-        Ok(())
-    }
-
-    fn begin_solid_member(&mut self) -> bool {
-        let chain_solid =
-            self.write_ctx().solid.mode && self.write_ctx().solid.encoder_state.is_some();
-        self.write_ctx_mut()
-            .solid
-            .encoder_state
-            .get_or_insert_with(Default::default)
-            .begin_member();
-        chain_solid
-    }
-
+impl StreamOps for RarArchive {
     fn stream_mut(&mut self) -> RarResult<&mut Box<dyn ArchiveStream>> {
         self.stream.as_mut().ok_or_else(|| {
             crate::error::RarError::InvalidState("archive has no underlying stream".into())
@@ -131,7 +105,9 @@ impl Engine for RarArchive {
     fn set_stream(&mut self, stream: Box<dyn ArchiveStream>) {
         self.stream = Some(stream);
     }
+}
 
+impl HeaderCryptoOps for RarArchive {
     fn password(&self) -> Option<&str> {
         self.password.as_deref()
     }
@@ -159,7 +135,9 @@ impl Engine for RarArchive {
     fn write_block_header(&mut self, header_bytes: &[u8]) -> RarResult<()> {
         RarArchive::write_block_header(self, header_bytes)
     }
+}
 
+impl VolumeOps for RarArchive {
     fn path(&self) -> &Path {
         &self.path
     }
@@ -196,6 +174,21 @@ impl Engine for RarArchive {
         RarArchive::start_next_volume_rar13(self)
     }
 
+    fn bytes_written(&self) -> u64 {
+        self.write_ctx().output.bytes_written
+    }
+
+    fn add_bytes_written(&mut self, bytes: u64) {
+        let ctx = self.write_ctx_mut();
+        ctx.output.bytes_written = ctx.output.bytes_written.saturating_add(bytes);
+    }
+
+    fn current_volume_index(&self) -> usize {
+        self.write_ctx().output.current_volume.saturating_sub(1)
+    }
+}
+
+impl WriteServices for RarArchive {
     fn effective_threads(&self) -> usize {
         RarArchive::effective_threads(self)
     }
@@ -223,5 +216,28 @@ impl Engine for RarArchive {
 
     fn cancel_flag(&self) -> Option<&AtomicBool> {
         self.cancel.as_deref()
+    }
+
+    fn record_quick_open_entry(&mut self, header_bytes: &[u8]) -> RarResult<()> {
+        if !self.write_ctx().locator.quick_open {
+            return Ok(());
+        }
+        let pos = self.stream_mut()?.stream_position()?;
+        self.write_ctx_mut()
+            .locator
+            .quick_open_entries
+            .push((pos, header_bytes.to_vec()));
+        Ok(())
+    }
+
+    fn begin_solid_member(&mut self) -> bool {
+        let chain_solid =
+            self.write_ctx().solid.mode && self.write_ctx().solid.encoder_state.is_some();
+        self.write_ctx_mut()
+            .solid
+            .encoder_state
+            .get_or_insert_with(Default::default)
+            .begin_member();
+        chain_solid
     }
 }
