@@ -16,6 +16,7 @@
 mod create;
 mod ctx;
 mod editor;
+mod engine;
 mod ops;
 pub(crate) mod rar4_edit;
 mod reader;
@@ -193,21 +194,6 @@ impl RarArchive {
         }
     }
 
-    /// Whether the container is the legacy RAR 1.5–4.x family.
-    pub(crate) fn is_rar4(&self) -> bool {
-        self.family == crate::detect::ArchiveFamily::Rar15To40
-    }
-
-    /// Whether the container is the RAR 1.3/1.4 family.
-    pub(crate) fn is_rar13(&self) -> bool {
-        self.family == crate::detect::ArchiveFamily::Rar13
-    }
-
-    /// Whether the container is any legacy family (RAR 1.3–4.x).
-    pub(crate) fn is_legacy(&self) -> bool {
-        self.is_rar4() || self.is_rar13()
-    }
-
     /// Install a cancellation flag. The flag is an `Arc<AtomicBool>` the
     /// caller owns: set it to `true` from any thread and the current
     /// create / append / extract / read / repair operation returns
@@ -239,28 +225,6 @@ impl RarArchive {
             .as_mut()
             .ok_or_else(|| RarError::InvalidState("write context is not available".into()))?;
         write.compression.threads = threads;
-        Ok(())
-    }
-
-    /// Effective compression worker count for this archive: the per-archive
-    /// override when set, otherwise the process-global default.
-    pub(crate) fn effective_threads(&self) -> usize {
-        #[cfg(feature = "parallel")]
-        {
-            crate::parallel::compression_threads_for(self.write_ctx().compression.threads)
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            1
-        }
-    }
-
-    /// Check the cancellation flag; returns [`crate::RarError::Cancelled`]
-    /// when the caller requested an abort.
-    pub(crate) fn check_cancel(&self) -> RarResult<()> {
-        if cancel_requested(self.cancel.as_deref()) {
-            return Err(RarError::Cancelled);
-        }
         Ok(())
     }
 
@@ -312,13 +276,6 @@ impl RarArchive {
         self.read_ctx().catalog_token
     }
 
-    /// Mint a fresh catalog identity. Called after every catalog rebuild so
-    /// IDs minted from the previous catalog are rejected as stale.
-    pub(crate) fn reset_catalog_token(&mut self) -> RarResult<()> {
-        self.read_ctx_mut().catalog_token = reader::allocate_catalog_token()?;
-        Ok(())
-    }
-
     /// Immutable access to the write-side state. Panics if not opened for writing.
     pub(crate) fn write_ctx(&self) -> &WriteState {
         self.write.as_ref().expect("write context not available")
@@ -327,14 +284,6 @@ impl RarArchive {
     /// Mutable access to the write-side state. Panics if not opened for writing.
     pub(crate) fn write_ctx_mut(&mut self) -> &mut WriteState {
         self.write.as_mut().expect("write context not available")
-    }
-
-    /// Ensure the write-side state exists. Read-mode mutation operations
-    /// (`delete`, `rename`, `set_comment`, `add_recovery_record`) rewrite
-    /// the archive and so need a write context even though the archive was
-    /// opened for reading.
-    fn ensure_write_ctx(&mut self) {
-        self.write.get_or_insert_with(WriteState::default);
     }
 
     /// Abort an in-progress staged write and disarm the legacy auto-commit
@@ -917,19 +866,6 @@ impl RarArchive {
     pub fn set_progress_total(&mut self, total: u64) {
         if let Some(progress) = &self.progress {
             progress.lock().expect("progress lock").set_total(total);
-        }
-    }
-
-    /// Report `done` bytes of the current member (identified by
-    /// `progress_member`) against `member_total` through the shared tracker.
-    /// Safe to call from the single-threaded write paths.
-    pub(crate) fn report_progress(&mut self, done: u64, member_total: u64) {
-        if let Some(progress) = self.progress.clone() {
-            let member = self.progress_member;
-            progress
-                .lock()
-                .expect("progress lock")
-                .report(member, done, member_total);
         }
     }
 }

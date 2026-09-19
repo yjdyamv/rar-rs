@@ -11,7 +11,7 @@ use super::{
     volume_path_rar4,
 };
 use crate::crypto;
-use crate::crypto::{ENCR_IV_SIZE, ENCR_PBKDF2_ITER_LOG};
+use crate::crypto::ENCR_PBKDF2_ITER_LOG;
 use crate::detect::RAR5_SIGNATURE;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::EndOfArchiveHeader;
@@ -103,52 +103,6 @@ impl RarArchive {
         let block = crate::format::rar5::headers::build_archive_encrypt_header_block(params);
         let stream = self.stream.as_mut().unwrap();
         stream.write_all(&block)?;
-        Ok(())
-    }
-
-    /// Verify the password against a parsed archive-encryption (header
-    /// encryption) record and enable header encryption on this archive.
-    /// Shared by every path that encounters the leading `BLOCK_TYPE_ENCRYPT_HEADER`.
-    pub(crate) fn handle_archive_encrypt_header(
-        &mut self,
-        params: crypto::EncryptionParams,
-    ) -> RarResult<()> {
-        let password = self.password.as_ref().ok_or_else(|| {
-            RarError::Encrypted("archive has encrypted headers; provide a password".into())
-        })?;
-        let keys = params
-            .derive_and_verify(password)?
-            .ok_or(RarError::WrongPassword)?;
-        self.archive_encr = Some(params);
-        self.archive_keys = Some(keys);
-        self.header_encryption = true;
-        Ok(())
-    }
-
-    /// On-disk size of a block header: header encryption wraps every header
-    /// in `[16-byte IV][PKCS7-padded ciphertext]`.
-    pub(crate) fn on_disk_header_len(&self, plain_len: u64) -> u64 {
-        if self.header_encryption {
-            16 + ((plain_len + 15) & !15)
-        } else {
-            plain_len
-        }
-    }
-
-    /// Write a block header, wrapping it in `[16-byte IV][AES-256-CBC
-    /// encrypted header]` when header encryption is enabled.
-    pub(crate) fn write_block_header(&mut self, header_bytes: &[u8]) -> RarResult<()> {
-        if self.archive_encr.is_some() {
-            let key = self.archive_header_key()?;
-            let mut iv = [0u8; ENCR_IV_SIZE];
-            rand::fill(&mut iv);
-            let ciphertext = crypto::encrypt_data(header_bytes, &key, &iv);
-            let stream = self.stream.as_mut().unwrap();
-            stream.write_all(&iv)?;
-            stream.write_all(&ciphertext)?;
-        } else {
-            self.stream.as_mut().unwrap().write_all(header_bytes)?;
-        }
         Ok(())
     }
 
@@ -652,56 +606,6 @@ impl RarArchive {
         self.write_block_header(&hdr_bytes)
     }
 
-    pub(crate) fn start_next_volume(&mut self) -> RarResult<()> {
-        if self.is_rar4() {
-            return self.start_next_volume_rar4();
-        }
-        // WinRAR `-sv`: always reset the solid statistics at the start of a
-        // new volume so each volume is an independent solid group.
-        if self.write_ctx().solid.mode
-            && self.write_ctx().solid.reset == crate::options::SolidReset::PerVolume
-        {
-            self.write_ctx_mut().solid.encoder_state = None;
-            self.write_ctx_mut().solid.last_ext = None;
-        }
-        self.write_end_block_flags(true)?;
-        // Close current volume
-        self.stream = None;
-        self.write_ctx_mut().output.current_volume += 1;
-        let (parent, tmp_base, final_base) = match &self.write_ctx().output.pending {
-            Some(PendingCommit::Volumes {
-                parent,
-                tmp_base,
-                final_base,
-            }) => (parent.clone(), tmp_base.clone(), final_base.clone()),
-            // Volume creation only happens in multivolume mode, where
-            // `open_write` (or `rewrite_multivolume`) has staged the set.
-            _ => {
-                return Err(RarError::Format(
-                    "internal error: volume created without a staged volume set".into(),
-                ));
-            }
-        };
-        // The volume is staged under the temporary base and moved over its
-        // final name on close.
-        let tmp_vol = volume_path(&parent, &tmp_base, self.write_ctx().output.current_volume);
-        let final_vol = volume_path(&parent, &final_base, self.write_ctx().output.current_volume);
-        self.volume_paths.push(final_vol);
-        let f = read_write_create(&tmp_vol)?;
-        self.stream = Some(Box::new(f));
-        self.write_signature()?;
-        // Header-encrypted multi-volume sets repeat the plaintext encryption
-        // header on every volume (WinRAR convention); the archive params are
-        // generated once and shared across volumes.
-        self.write_archive_encryption_header_if_needed()?;
-        // Volume number: part2 → 1, part3 → 2, etc.
-        let vol_num = (self.write_ctx().output.current_volume - 1) as u64;
-        self.write_archive_header_vol(Some(vol_num))?;
-        self.write_ctx_mut().output.bytes_written =
-            self.stream.as_mut().unwrap().stream_position()?;
-        Ok(())
-    }
-
     // ── RAR4 write path ──────────────────────────────────────────────────
 
     // ── RAR 1.3/1.4 write path ───────────────────────────────────────────
@@ -745,47 +649,6 @@ impl RarArchive {
         let ctx = self.write_ctx_mut();
         ctx.output.rar13_header_pending = true;
         ctx.output.bytes_written = 0;
-        Ok(())
-    }
-
-    /// Roll a RAR 1.3/1.4 volume set: every volume starts with the signature
-    /// and a plaintext main header carrying `MHD_VOLUME` (only the first
-    /// volume holds the archive comment extension).
-    pub(crate) fn start_next_volume_rar13(&mut self) -> RarResult<()> {
-        if self.write_ctx().output.current_volume >= crate::fs::volume::LEGACY_VOLUME_MAX {
-            return Err(RarError::InvalidOption(format!(
-                "volume set exceeds the {}-volume legacy `.rNN` naming limit",
-                crate::fs::volume::LEGACY_VOLUME_MAX
-            )));
-        }
-        self.stream = None;
-        self.write_ctx_mut().output.current_volume += 1;
-        let (parent, tmp_base, final_base) = match &self.write_ctx().output.pending {
-            Some(PendingCommit::Volumes {
-                parent,
-                tmp_base,
-                final_base,
-            }) => (parent.clone(), tmp_base.clone(), final_base.clone()),
-            _ => {
-                return Err(RarError::Format(
-                    "internal error: volume created without a staged volume set".into(),
-                ));
-            }
-        };
-        let tmp_vol = volume_path(&parent, &tmp_base, self.write_ctx().output.current_volume);
-        let final_vol =
-            volume_path_rar4(&parent, &final_base, self.write_ctx().output.current_volume);
-        self.volume_paths.push(final_vol);
-        let f = read_write_create(&tmp_vol)?;
-        self.stream = Some(Box::new(f));
-        let header = crate::format::rar13::write::build_main_header(
-            self.write_ctx().solid.mode,
-            None,
-            true,
-        )?;
-        let stream = self.stream.as_mut().unwrap();
-        stream.write_all(&header)?;
-        self.write_ctx_mut().output.bytes_written = header.len() as u64;
         Ok(())
     }
 
@@ -978,7 +841,7 @@ impl RarArchive {
         Ok(())
     }
 
-    fn start_next_volume_rar4(&mut self) -> RarResult<()> {
+    pub(super) fn start_next_volume_rar4(&mut self) -> RarResult<()> {
         if self.write_ctx().output.current_volume >= crate::fs::volume::LEGACY_VOLUME_MAX {
             return Err(RarError::InvalidOption(format!(
                 "volume set exceeds the {}-volume legacy `.rNN` naming limit",
