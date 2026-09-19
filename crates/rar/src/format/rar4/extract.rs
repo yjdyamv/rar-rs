@@ -156,7 +156,7 @@ impl RarArchive {
 
         let mut target = Vec::new();
         for i in start_from..=target_idx {
-            self.validate_entry_limits(i)?;
+            crate::format::shared::extract::members::validate_entry_limits(self, i)?;
             let entry = self.entries[i].clone();
             if entry.is_dir() {
                 continue;
@@ -180,7 +180,7 @@ impl RarArchive {
             }
 
             let mut decoder = self.read_ctx_mut().legacy.decoder.take();
-            let max_packed_bytes = self.max_packed_bytes();
+            let max_packed_bytes = crate::format::rar5::extract::decode::max_packed_bytes(self);
             let data = match super::decode_member_bytes(
                 stream_mut(&mut self.stream)?,
                 &self.volume_paths,
@@ -211,7 +211,7 @@ impl RarArchive {
     /// Decode a single RAR4 member in memory, verifying its CRC32. Solid
     /// chain members decode through their chain prefix (shared window).
     pub(crate) fn decode_rar4_at(&mut self, idx: usize) -> RarResult<Vec<u8>> {
-        self.validate_entry_limits(idx)?;
+        crate::format::shared::extract::members::validate_entry_limits(self, idx)?;
         let hdr = self.entries[idx].header.clone();
         if self.is_rar4_solid_member(idx) {
             let chain_start = self.rar4_find_chain_start(idx);
@@ -244,7 +244,7 @@ impl RarArchive {
     /// members decode incrementally); solid-chain members keep the shared
     /// window semantics and decode in one pass.
     pub(crate) fn decode_rar4_to(&mut self, idx: usize, writer: &mut dyn Write) -> RarResult<u64> {
-        self.validate_entry_limits(idx)?;
+        crate::format::shared::extract::members::validate_entry_limits(self, idx)?;
         let hdr = self.entries[idx].header.clone();
         if self.is_rar4_solid_member(idx) {
             let chain_start = self.rar4_find_chain_start(idx);
@@ -259,7 +259,7 @@ impl RarArchive {
             return result;
         }
         let entry = self.entries[idx].clone();
-        let max_alloc_packed_bytes = self.max_packed_bytes();
+        let max_alloc_packed_bytes = crate::format::rar5::extract::decode::max_packed_bytes(self);
         let max_stream_packed_bytes = self.max_stream_packed_bytes();
         let (written, crc, rar13_checksum) = super::decode_member_bytes_to(
             stream_mut(&mut self.stream)?,
@@ -292,7 +292,7 @@ impl RarArchive {
             return self.rar4_decode_solid_through(idx);
         }
         let entry = self.entries[idx].clone();
-        let max_packed_bytes = self.max_packed_bytes();
+        let max_packed_bytes = crate::format::rar5::extract::decode::max_packed_bytes(self);
         super::decode_member_bytes(
             stream_mut(&mut self.stream)?,
             &self.volume_paths,

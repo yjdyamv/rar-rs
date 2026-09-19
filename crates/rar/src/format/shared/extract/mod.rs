@@ -50,7 +50,7 @@ impl RarArchive {
         if self.is_solid_chain_member(idx) {
             return self.decode_solid_through(idx);
         }
-        self.decode_file_at(idx, None)
+        crate::format::rar5::extract::decode::decode_file_at(self, idx, None)
     }
 
     /// Decode member `idx` streaming into `writer`, honoring the family's
@@ -66,7 +66,7 @@ impl RarArchive {
         if self.is_solid_chain_member(idx) {
             return self.decode_solid_through_to(idx, writer);
         }
-        self.decode_file_to(idx, writer, None)
+        crate::format::rar5::extract::decode::decode_file_to(self, idx, writer, None)
     }
 }
 

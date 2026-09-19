@@ -28,6 +28,73 @@ use crate::write_progress::ProgressTracker;
 
 use super::{ArchiveEntry, ArchiveStream, Mode, ReadState, WriteState, cancel_requested};
 
+/// Disjoint borrows of the engine's state.
+///
+/// A family reader or writer routinely holds two pieces of the engine at
+/// once — the catalog entry it is decoding and the stream it reads the
+/// payload from — and `self.entries[idx]` plus `&mut self.stream` is a
+/// disjoint *field* borrow, which the compiler accepts. Through a trait it
+/// is two calls that each borrow the whole `&mut dyn Engine`, which it does
+/// not.
+///
+/// [`Engine::parts`] hands the fields out together so the family code keeps
+/// the borrow structure it had. The engine implements it with plain field
+/// borrows; nothing else changes, and `format` still never names
+/// `RarArchive`.
+///
+/// Services (`write_block_header`, `start_next_volume`, …) still take the
+/// whole `&mut dyn Engine`, so a `Parts` borrow must end before one is
+/// called.
+// MIGRATION: used by the family blocks as they are converted; remove with
+// the trait's `allow` above.
+#[allow(dead_code)]
+pub(crate) struct Parts<'a> {
+    /// Read-side state; `None` when the archive is not open for reading.
+    pub read: &'a mut Option<ReadState>,
+    /// Write-side state; `None` when the archive is not open for writing.
+    pub write: &'a mut Option<WriteState>,
+    /// The member catalog, in archive order.
+    pub entries: &'a mut Vec<ArchiveEntry>,
+    /// The underlying stream; `None` before one is opened.
+    pub stream: &'a mut Option<Box<dyn ArchiveStream>>,
+    /// Every volume of the set, in order.
+    pub volume_paths: &'a [PathBuf],
+    /// Path of the volume the archive was opened as.
+    pub path: &'a Path,
+    /// The archive password, when one was supplied.
+    pub password: Option<&'a str>,
+    /// The caller's cancellation flag, when one is installed.
+    pub cancel: Option<&'a AtomicBool>,
+    /// Parsed archive-level encryption parameters, when headers are
+    /// encrypted.
+    pub archive_encr: Option<&'a crypto::EncryptionParams>,
+    /// Derived header-encryption keys, when header encryption is active.
+    pub archive_keys: Option<&'a crypto::DerivedKeys>,
+}
+
+#[allow(dead_code)]
+impl Parts<'_> {
+    /// Read-side state. Panics if the archive was not opened for reading.
+    pub(crate) fn read_ctx(&self) -> &ReadState {
+        self.read.as_ref().expect("read context not available")
+    }
+
+    /// Mutable read-side state. Panics if not opened for reading.
+    pub(crate) fn read_ctx_mut(&mut self) -> &mut ReadState {
+        self.read.as_mut().expect("read context not available")
+    }
+
+    /// Write-side state. Panics if not opened for writing.
+    pub(crate) fn write_ctx(&self) -> &WriteState {
+        self.write.as_ref().expect("write context not available")
+    }
+
+    /// Mutable write-side state. Panics if not opened for writing.
+    pub(crate) fn write_ctx_mut(&mut self) -> &mut WriteState {
+        self.write.as_mut().expect("write context not available")
+    }
+}
+
 /// Everything a family reader or writer needs from the engine.
 ///
 /// Implemented by [`RarArchive`](crate::archive::RarArchive); passed to the
@@ -54,6 +121,9 @@ pub(crate) trait Engine {
     /// Ensure the write-side state exists, for read-mode operations that
     /// rewrite the archive (`delete`, `rename`, `set_comment`, …).
     fn ensure_write_ctx(&mut self);
+    /// Disjoint borrows of the state fields, for family code that needs two
+    /// of them at once. See [`Parts`].
+    fn parts(&mut self) -> Parts<'_>;
 
     // ── Container identity ────────────────────────────────────────────────
 

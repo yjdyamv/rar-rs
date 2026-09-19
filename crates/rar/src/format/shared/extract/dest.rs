@@ -124,7 +124,9 @@ impl RarArchive {
     pub(super) fn extract_member_streams(&mut self, idx: usize, dest_path: &Path) -> RarResult<()> {
         #[cfg(windows)]
         {
-            for (name, data) in self.read_member_streams(idx)? {
+            for (name, data) in
+                crate::format::rar5::extract::decode::read_member_streams(self, idx)?
+            {
                 rar5_write::write_windows_stream(dest_path, &name, &data)?;
             }
         }

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::crypto;
 use crate::detect::ArchiveFamily;
-use crate::engine::{ArchiveEntry, ArchiveStream, Engine, Mode, ReadState, WriteState};
+use crate::engine::{ArchiveEntry, ArchiveStream, Engine, Mode, Parts, ReadState, WriteState};
 use crate::error::RarResult;
 use crate::write_progress::ProgressTracker;
 
@@ -36,6 +36,21 @@ impl Engine for RarArchive {
 
     fn ensure_write_ctx(&mut self) {
         self.write.get_or_insert_with(WriteState::default);
+    }
+
+    fn parts(&mut self) -> Parts<'_> {
+        Parts {
+            read: &mut self.read,
+            write: &mut self.write,
+            entries: &mut self.entries,
+            stream: &mut self.stream,
+            volume_paths: &self.volume_paths,
+            path: &self.path,
+            password: self.password.as_deref(),
+            cancel: self.cancel.as_deref(),
+            archive_encr: self.archive_encr.as_ref(),
+            archive_keys: self.archive_keys.as_ref(),
+        }
     }
 
     fn family(&self) -> ArchiveFamily {

@@ -37,7 +37,7 @@ impl RarArchive {
             ));
         }
         self.read_ctx_mut().extract_options = opts;
-        self.validate_entry_limits(target_idx)?;
+        crate::format::shared::extract::members::validate_entry_limits(self, target_idx)?;
         self.decode_entry_at(target_idx)
     }
 

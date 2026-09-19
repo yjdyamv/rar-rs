@@ -9,9 +9,9 @@ use super::*;
 
 use std::io::{self, Write};
 
-use crate::archive::RarArchive;
 use crate::codec::DecoderState;
 use crate::engine::DecryptedPayload;
+use crate::engine::Engine;
 use crate::error::{RarError, RarResult};
 use crate::format::shared::stream_mut;
 /// Write sink that computes CRC32 and optional BLAKE2sp over streamed
@@ -187,210 +187,219 @@ pub(crate) fn read_streams_with<R: crate::format::rar5::payload::ChunkReader + ?
     Ok(out)
 }
 
-impl RarArchive {
-    /// Read, decrypt and decode every "STM" stream record owned by member
-    /// `idx`, returning `(name, bytes)` pairs in archive order.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(crate) fn read_member_streams(&mut self, idx: usize) -> RarResult<Vec<(String, Vec<u8>)>> {
-        let records: Vec<crate::engine::StreamRecord> = self
+/// Read, decrypt and decode every "STM" stream record owned by member
+/// `idx`, returning `(name, bytes)` pairs in archive order.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn read_member_streams(
+    cx: &mut dyn Engine,
+    idx: usize,
+) -> RarResult<Vec<(String, Vec<u8>)>> {
+    // Gather everything owned first: the reader below borrows the engine
+    // mutably, so the options and the record list must not come from it.
+    let (records, limit, max_dict_size, password) = {
+        let p = cx.parts();
+        let options = &p.read_ctx().extract_options;
+        let records: Vec<crate::engine::StreamRecord> = p
             .read_ctx()
             .streams
             .iter()
             .filter(|s| s.owner_index == idx)
             .cloned()
             .collect();
-        let limit = self.read_ctx().extract_options.metadata_limit();
-        let max_dict_size = self.read_ctx().extract_options.max_dict_size;
-        let password = self.password.clone();
-        let mut reader = crate::format::rar5::payload::StreamReader {
-            stream: stream_mut(&mut self.stream)?,
-            volume_paths: &self.volume_paths,
-        };
-        let streams = read_streams_with(
-            &records,
-            &mut reader,
-            password.as_deref(),
-            limit,
-            max_dict_size,
-        )?;
-        Ok(streams
-            .into_iter()
-            .map(|(name, data, _encrypted)| (name, data))
-            .collect())
-    }
-
-    /// Read packed data for an entry, potentially across multiple volumes.
-    ///
-    /// The returned payload is decrypted (when applicable) together with
-    /// the derived keys needed for integrity verification.
-    pub(crate) fn read_packed_data(&mut self, idx: usize) -> RarResult<DecryptedPayload> {
-        let entry = &self.entries[idx];
-        let hdr = &entry.header;
-        let max_packed = self.max_packed_bytes();
-        let password = self.password.as_deref();
-        let cancel = &self.cancel;
-        let mut reader = crate::format::rar5::payload::StreamReader {
-            stream: stream_mut(&mut self.stream)?,
-            volume_paths: &self.volume_paths,
-        };
-        crate::format::rar5::payload::read_packed(
-            &mut reader,
-            hdr,
-            &entry.chunks,
-            &hdr.name,
-            password,
-            max_packed,
-            || {
-                if cancel
-                    .as_ref()
-                    .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
-                {
-                    return Err(RarError::Cancelled);
-                }
-                Ok(())
-            },
+        (
+            records,
+            options.metadata_limit(),
+            options.max_dict_size,
+            p.password.map(str::to_owned),
         )
-    }
+    };
+    let p = cx.parts();
+    let mut reader = crate::format::rar5::payload::StreamReader {
+        stream: stream_mut(p.stream)?,
+        volume_paths: p.volume_paths,
+    };
+    let streams = read_streams_with(
+        &records,
+        &mut reader,
+        password.as_deref(),
+        limit,
+        max_dict_size,
+    )?;
+    Ok(streams
+        .into_iter()
+        .map(|(name, data, _encrypted)| (name, data))
+        .collect())
+}
 
-    /// Maximum packed bytes accepted when the payload must be aggregated in
-    /// memory. Bounded by the configured unpacked limit plus a small overhead,
-    /// or a hard 8 GiB allocation guard when output is otherwise unlimited.
-    pub(crate) fn max_packed_bytes(&self) -> u64 {
-        self.read_ctx()
-            .extract_options
-            .max_unpacked_bytes
-            .map(|u| u.saturating_add(1 << 20))
-            .unwrap_or(8 * 1024 * 1024 * 1024)
-    }
-
-    /// Verify the stored checksums of a zero-size member without decoding
-    /// a payload: CRC32 of empty, BLAKE2sp of empty when a hash record
-    /// exists, and their hash-key MAC equivalents when the member is
-    /// encrypted. The parallel extraction path verifies empty members the
-    /// same way; returning early without this check would let a crafted
-    /// zero-size header bypass integrity verification.
-    fn verify_empty_member(&mut self, idx: usize) -> RarResult<()> {
-        let crc = crc32fast::hash(&[]);
-        let blake = self.entries[idx]
-            .header
-            .hash_value
-            .map(|_| crate::format::rar5::blake2sp::hash(&[]));
-        let payload = self.read_packed_data(idx)?;
-        crate::format::rar5::extract::verify::verify_integrity(
-            self,
-            idx,
-            crc,
-            blake,
-            payload.params.as_ref(),
-            payload.keys.as_ref(),
-        )
-    }
-
-    /// Decode a single file into memory, optionally with a shared
-    /// DecoderState (solid archives), verifying CRC32/BLAKE2sp.
-    pub(crate) fn decode_file_at(
-        &mut self,
-        idx: usize,
-        state: Option<&mut DecoderState>,
-    ) -> RarResult<Vec<u8>> {
-        self.validate_entry_limits(idx)?;
-        let _ = self.member_dict_window(idx)?; // enforces the -mdx cap
-        let hdr = &self.entries[idx].header;
-
-        // Empty files / directories
-        if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
-            if self.entries[idx].is_dir() {
-                return Ok(Vec::new());
+/// Read packed data for an entry, potentially across multiple volumes.
+///
+/// The returned payload is decrypted (when applicable) together with
+/// the derived keys needed for integrity verification.
+pub(crate) fn read_packed_data(cx: &mut dyn Engine, idx: usize) -> RarResult<DecryptedPayload> {
+    let max_packed = max_packed_bytes(cx);
+    let p = cx.parts();
+    let entry = &p.entries[idx];
+    let hdr = &entry.header;
+    let mut reader = crate::format::rar5::payload::StreamReader {
+        stream: stream_mut(p.stream)?,
+        volume_paths: p.volume_paths,
+    };
+    crate::format::rar5::payload::read_packed(
+        &mut reader,
+        hdr,
+        &entry.chunks,
+        &hdr.name,
+        p.password,
+        max_packed,
+        || {
+            if p.cancel
+                .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                return Err(RarError::Cancelled);
             }
-            self.verify_empty_member(idx)?;
+            Ok(())
+        },
+    )
+}
+
+/// Maximum packed bytes accepted when the payload must be aggregated in
+/// memory. Bounded by the configured unpacked limit plus a small overhead,
+/// or a hard 8 GiB allocation guard when output is otherwise unlimited.
+pub(crate) fn max_packed_bytes(cx: &dyn Engine) -> u64 {
+    cx.read_ctx()
+        .extract_options
+        .max_unpacked_bytes
+        .map(|u| u.saturating_add(1 << 20))
+        .unwrap_or(8 * 1024 * 1024 * 1024)
+}
+
+/// Verify the stored checksums of a zero-size member without decoding
+/// a payload: CRC32 of empty, BLAKE2sp of empty when a hash record
+/// exists, and their hash-key MAC equivalents when the member is
+/// encrypted. The parallel extraction path verifies empty members the
+/// same way; returning early without this check would let a crafted
+/// zero-size header bypass integrity verification.
+fn verify_empty_member(cx: &mut dyn Engine, idx: usize) -> RarResult<()> {
+    let crc = crc32fast::hash(&[]);
+    let blake = cx.entries()[idx]
+        .header
+        .hash_value
+        .map(|_| crate::format::rar5::blake2sp::hash(&[]));
+    let payload = read_packed_data(cx, idx)?;
+    crate::format::rar5::extract::verify::verify_integrity(
+        cx,
+        idx,
+        crc,
+        blake,
+        payload.params.as_ref(),
+        payload.keys.as_ref(),
+    )
+}
+
+/// Decode a single file into memory, optionally with a shared
+/// DecoderState (solid archives), verifying CRC32/BLAKE2sp.
+pub(crate) fn decode_file_at(
+    cx: &mut dyn Engine,
+    idx: usize,
+    state: Option<&mut DecoderState>,
+) -> RarResult<Vec<u8>> {
+    crate::format::shared::extract::members::validate_entry_limits(cx, idx)?;
+    let _ = member_dict_window(cx, idx)?; // enforces the -mdx cap
+
+    // Empty files / directories
+    if cx.entries()[idx].header.packed_size == 0 && cx.entries()[idx].header.unpacked_size == 0 {
+        if cx.entries()[idx].is_dir() {
             return Ok(Vec::new());
         }
-
-        let payload = self.read_packed_data(idx)?;
-        let mut raw_data = Vec::new();
-        crate::format::rar5::payload::decode_member(
-            &self.entries[idx].header,
-            &payload,
-            state,
-            &mut raw_data,
-        )?;
-
-        let crc = crc32fast::hash(&raw_data);
-        let blake = self.entries[idx]
-            .header
-            .hash_value
-            .map(|_| crate::format::rar5::blake2sp::hash(&raw_data));
-        crate::format::rar5::extract::verify::verify_integrity(
-            self,
-            idx,
-            crc,
-            blake,
-            payload.params.as_ref(),
-            payload.keys.as_ref(),
-        )?;
-        Ok(raw_data)
+        verify_empty_member(cx, idx)?;
+        return Ok(Vec::new());
     }
 
-    /// Actual dictionary size of a member in bytes: RAR5 uses
-    /// `128 KiB << comp_dict_size`, RAR7 carries the byte count directly
-    /// (possibly non-power-of-two). The sliding window rounds up to a
-    /// power of two. Enforces the extraction dictionary cap
-    /// (`ExtractOptions::max_dict_size`, WinRAR's `-mdx`).
-    pub(crate) fn member_dict_window(&self, idx: usize) -> RarResult<usize> {
-        let hdr = &self.entries[idx].header;
-        let bytes = capped_dict_bytes(hdr, self.read_ctx().extract_options.max_dict_size)?;
-        let bytes = usize::try_from(bytes)
-            .map_err(|_| RarError::Format("dictionary size overflows host address space".into()))?;
-        bytes
-            .checked_next_power_of_two()
-            .ok_or_else(|| RarError::Format("dictionary size overflows host address space".into()))
-    }
+    let payload = read_packed_data(cx, idx)?;
+    let mut raw_data = Vec::new();
+    crate::format::rar5::payload::decode_member(
+        &cx.entries()[idx].header,
+        &payload,
+        state,
+        &mut raw_data,
+    )?;
 
-    /// Decode a single file, streaming output to `writer` (bounded memory),
-    /// verifying CRC32/BLAKE2sp over the written bytes.
-    pub(crate) fn decode_file_to(
-        &mut self,
-        idx: usize,
-        writer: &mut dyn Write,
-        state: Option<&mut DecoderState>,
-    ) -> RarResult<u64> {
-        self.validate_entry_limits(idx)?;
-        let hdr = &self.entries[idx].header;
-        let _ = self.member_dict_window(idx)?; // enforces the -mdx cap
-        if hdr.packed_size == 0 && hdr.unpacked_size == 0 {
-            if self.entries[idx].is_dir() {
-                return Ok(0);
-            }
-            self.verify_empty_member(idx)?;
+    let crc = crc32fast::hash(&raw_data);
+    let blake = cx.entries()[idx]
+        .header
+        .hash_value
+        .map(|_| crate::format::rar5::blake2sp::hash(&raw_data));
+    crate::format::rar5::extract::verify::verify_integrity(
+        cx,
+        idx,
+        crc,
+        blake,
+        payload.params.as_ref(),
+        payload.keys.as_ref(),
+    )?;
+    Ok(raw_data)
+}
+
+/// Actual dictionary size of a member in bytes: RAR5 uses
+/// `128 KiB << comp_dict_size`, RAR7 carries the byte count directly
+/// (possibly non-power-of-two). The sliding window rounds up to a
+/// power of two. Enforces the extraction dictionary cap
+/// (`ExtractOptions::max_dict_size`, WinRAR's `-mdx`).
+pub(crate) fn member_dict_window(cx: &dyn Engine, idx: usize) -> RarResult<usize> {
+    let hdr = &cx.entries()[idx].header;
+    let bytes = capped_dict_bytes(hdr, cx.read_ctx().extract_options.max_dict_size)?;
+    let bytes = usize::try_from(bytes)
+        .map_err(|_| RarError::Format("dictionary size overflows host address space".into()))?;
+    bytes
+        .checked_next_power_of_two()
+        .ok_or_else(|| RarError::Format("dictionary size overflows host address space".into()))
+}
+
+/// Decode a single file, streaming output to `writer` (bounded memory),
+/// verifying CRC32/BLAKE2sp over the written bytes.
+pub(crate) fn decode_file_to(
+    cx: &mut dyn Engine,
+    idx: usize,
+    writer: &mut dyn Write,
+    state: Option<&mut DecoderState>,
+) -> RarResult<u64> {
+    crate::format::shared::extract::members::validate_entry_limits(cx, idx)?;
+    let _ = member_dict_window(cx, idx)?; // enforces the -mdx cap
+    if cx.entries()[idx].header.packed_size == 0 && cx.entries()[idx].header.unpacked_size == 0 {
+        if cx.entries()[idx].is_dir() {
             return Ok(0);
         }
-
-        let payload = self.read_packed_data(idx)?;
-        let mut sink = IntegritySink::new(writer, self.entries[idx].header.hash_value.is_some());
-
-        let written = crate::format::rar5::payload::decode_member(
-            &self.entries[idx].header,
-            &payload,
-            state,
-            &mut sink,
-        )?;
-
-        let (crc, blake) = sink.finish();
-        crate::format::rar5::extract::verify::verify_integrity(
-            self,
-            idx,
-            crc,
-            blake,
-            payload.params.as_ref(),
-            payload.keys.as_ref(),
-        )?;
-        Ok(written)
+        verify_empty_member(cx, idx)?;
+        return Ok(0);
     }
+
+    let payload = read_packed_data(cx, idx)?;
+    let want_blake = cx.entries()[idx].header.hash_value.is_some();
+    let mut sink = IntegritySink::new(writer, want_blake);
+
+    let written = crate::format::rar5::payload::decode_member(
+        &cx.entries()[idx].header,
+        &payload,
+        state,
+        &mut sink,
+    )?;
+
+    let (crc, blake) = sink.finish();
+    crate::format::rar5::extract::verify::verify_integrity(
+        cx,
+        idx,
+        crc,
+        blake,
+        payload.params.as_ref(),
+        payload.keys.as_ref(),
+    )?;
+    Ok(written)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::RarArchive;
     use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader};
     use crate::format::rar5::{
         BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_DEPENDS_PREV, BLOCK_FLAG_EXTRA_DATA,
@@ -470,7 +479,8 @@ mod tests {
         let bytes = archive_with_stream(COMP_METHOD_NORMAL, 0x0F, &[0xFF; 4], 4);
         let (_dir, mut archive) = open_archive(&bytes);
         archive.read_ctx_mut().extract_options.max_dict_size = Some(128 * 1024);
-        let err = archive.read_member_streams(0).unwrap_err();
+        let err =
+            crate::format::rar5::extract::decode::read_member_streams(&mut archive, 0).unwrap_err();
         assert!(
             matches!(err, RarError::LimitExceeded { .. }),
             "unexpected: {err:?}"
@@ -485,7 +495,7 @@ mod tests {
         let bytes = archive_with_stream(COMP_METHOD_STORE, 0x0F, payload, payload.len() as u64);
         let (_dir, mut archive) = open_archive(&bytes);
         assert_eq!(
-            archive.read_member_streams(0).unwrap(),
+            crate::format::rar5::extract::decode::read_member_streams(&mut archive, 0).unwrap(),
             vec![(":ads".to_string(), payload.to_vec())]
         );
     }

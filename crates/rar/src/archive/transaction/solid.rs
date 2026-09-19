@@ -46,7 +46,7 @@ impl SolidChainState {
     /// existing packed stream exceed the ring and the member decodes to
     /// wrong bytes.
     fn grow_to_member_dict(&mut self, archive: &RarArchive, idx: usize) -> RarResult<()> {
-        let window = archive.member_dict_window(idx)?;
+        let window = crate::format::rar5::extract::decode::member_dict_window(archive, idx)?;
         if window > self.dec.window_capacity() {
             self.dec.grow_window(window);
         }
@@ -192,7 +192,7 @@ impl RarArchive {
             &entry.chunks,
             &hdr.name,
             self.password.as_deref(),
-            self.max_packed_bytes(),
+            crate::format::rar5::extract::decode::max_packed_bytes(self),
             || Ok(()),
         )
     }

@@ -233,7 +233,7 @@ impl RarArchive {
                 && s == idx
             {
                 chain_state = Some(super::solid::SolidChainState::start(
-                    self.member_dict_window(idx)?,
+                    crate::format::rar5::extract::decode::member_dict_window(self, idx)?,
                 )?);
                 in_chain = true;
                 chain_end = e;

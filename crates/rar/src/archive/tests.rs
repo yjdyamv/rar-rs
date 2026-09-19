@@ -760,22 +760,28 @@ fn official_ntfs_stream_fixtures_decode() {
     )];
 
     let mut plain = RarArchive::open(format!("{base}winrar5_ntfs_stream.rar")).unwrap();
-    assert_eq!(plain.read_member_streams(0).unwrap(), expected);
+    assert_eq!(
+        crate::format::rar5::extract::decode::read_member_streams(&mut plain, 0).unwrap(),
+        expected
+    );
 
     let mut enc =
         RarArchive::open_with_password(format!("{base}winrar5_ntfs_stream_p.rar"), "pw").unwrap();
-    assert_eq!(enc.read_member_streams(0).unwrap(), expected);
+    assert_eq!(
+        crate::format::rar5::extract::decode::read_member_streams(&mut enc, 0).unwrap(),
+        expected
+    );
 
     // Locked archives still list; the password is demanded at stream read.
     let mut locked = RarArchive::open(format!("{base}winrar5_ntfs_stream_p.rar")).unwrap();
     assert!(matches!(
-        locked.read_member_streams(0),
+        crate::format::rar5::extract::decode::read_member_streams(&mut locked, 0),
         Err(RarError::Encrypted(_))
     ));
     let mut wrong =
         RarArchive::open_with_password(format!("{base}winrar5_ntfs_stream_p.rar"), "nope").unwrap();
     assert!(matches!(
-        wrong.read_member_streams(0),
+        crate::format::rar5::extract::decode::read_member_streams(&mut wrong, 0),
         Err(RarError::WrongPassword)
     ));
 }

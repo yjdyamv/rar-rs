@@ -80,7 +80,8 @@ impl RarArchive {
             self.reset_solid_decoder(chain_start);
         }
 
-        let chain_window = self.member_dict_window(chain_start)?;
+        let chain_window =
+            crate::format::rar5::extract::decode::member_dict_window(self, chain_start)?;
         if self.read_ctx().solid_state.is_none() {
             self.read_ctx_mut().solid_state = Some(DecoderState::new(chain_window));
         }
@@ -100,7 +101,8 @@ impl RarArchive {
             // and codec state forward instead of rejecting the archive.
             // `-mdx` still bounds the declared size via `member_dict_window`.
             if entry.header.comp_method != COMP_METHOD_STORE {
-                let member_window = self.member_dict_window(i)?;
+                let member_window =
+                    crate::format::rar5::extract::decode::member_dict_window(self, i)?;
                 let state = self.read_ctx_mut().solid_state.as_mut().unwrap();
                 if member_window > state.window_capacity() {
                     state.grow_window(member_window);
@@ -112,7 +114,12 @@ impl RarArchive {
                 &mut discard
             };
             let mut state = self.read_ctx_mut().solid_state.take().unwrap();
-            let written = match self.decode_file_to(i, sink, Some(&mut state)) {
+            let written = match crate::format::rar5::extract::decode::decode_file_to(
+                self,
+                i,
+                sink,
+                Some(&mut state),
+            ) {
                 Ok(written) => written,
                 Err(err) => {
                     self.reset_solid_decoder(chain_start);

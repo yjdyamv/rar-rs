@@ -10,7 +10,7 @@
 //! The family-neutral read orchestration (opening across families,
 //! extraction, destinations) lives in [`crate::format::shared::extract`].
 
-mod decode;
+pub(crate) mod decode;
 pub(crate) mod open;
 mod solid;
 pub(crate) mod verify;

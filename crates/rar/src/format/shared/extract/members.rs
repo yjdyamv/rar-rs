@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use crate::archive::RarArchive;
 #[cfg(feature = "parallel")]
 use crate::engine::DecryptedPayload;
+use crate::engine::Engine;
 use crate::engine::{ArchiveEntry, MAX_DICT_SIZE_LOG};
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::parse_redirect_record;
@@ -156,6 +157,32 @@ impl ExtractionReport {
     }
 }
 
+/// Validate per-entry header limits against the current extract options.
+pub(crate) fn validate_entry_limits(cx: &dyn Engine, idx: usize) -> RarResult<()> {
+    let hdr = &cx.entries()[idx].header;
+    if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
+        return Err(RarError::LimitExceeded {
+            limit: MAX_DICT_SIZE_LOG as u64,
+            context: format!(
+                "{}: dictionary size log {} exceeds supported maximum {}",
+                hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
+            ),
+        });
+    }
+    if let Some(limit) = cx.read_ctx().extract_options.max_unpacked_bytes
+        && hdr.unpacked_size > limit
+    {
+        return Err(RarError::LimitExceeded {
+            limit,
+            context: format!(
+                "{}: unpacked size {} exceeds limit",
+                hdr.name, hdr.unpacked_size
+            ),
+        });
+    }
+    Ok(())
+}
+
 impl RarArchive {
     /// Extract all archive contents with explicit options, returning what was
     /// written and what the skip-existing policy left untouched.
@@ -261,7 +288,10 @@ impl RarArchive {
         // Phase 1: read + decrypt all payloads sequentially.
         let mut payloads: Vec<(usize, DecryptedPayload)> = Vec::with_capacity(self.entries.len());
         for i in 0..self.entries.len() {
-            payloads.push((i, self.read_packed_data(i)?));
+            payloads.push((
+                i,
+                crate::format::rar5::extract::decode::read_packed_data(self, i)?,
+            ));
         }
         let headers: Vec<FileHeader> = self.entries.iter().map(|e| e.header.clone()).collect();
 
@@ -469,34 +499,8 @@ impl RarArchive {
                 "entry index is outside the scanned catalog".into(),
             ));
         }
-        self.validate_entry_limits(idx)?;
+        crate::format::shared::extract::members::validate_entry_limits(self, idx)?;
         self.extract_entry(idx, &self.entries[idx].clone(), dest, report)
-    }
-
-    /// Validate per-entry header limits against the current extract options.
-    pub(crate) fn validate_entry_limits(&self, idx: usize) -> RarResult<()> {
-        let hdr = &self.entries[idx].header;
-        if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
-            return Err(RarError::LimitExceeded {
-                limit: MAX_DICT_SIZE_LOG as u64,
-                context: format!(
-                    "{}: dictionary size log {} exceeds supported maximum {}",
-                    hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
-                ),
-            });
-        }
-        if let Some(limit) = self.read_ctx().extract_options.max_unpacked_bytes
-            && hdr.unpacked_size > limit
-        {
-            return Err(RarError::LimitExceeded {
-                limit,
-                context: format!(
-                    "{}: unpacked size {} exceeds limit",
-                    hdr.name, hdr.unpacked_size
-                ),
-            });
-        }
-        Ok(())
     }
 
     /// Resolve the destination path for one member, applying the shared
@@ -597,7 +601,7 @@ impl RarArchive {
         dest_dir: &Path,
         report: &mut ExtractionReport,
     ) -> RarResult<PathBuf> {
-        self.validate_entry_limits(idx)?;
+        crate::format::shared::extract::members::validate_entry_limits(self, idx)?;
 
         let dest_path = match self.resolve_dest_path(entry, dest_dir)? {
             Destination::Extract(path) => path,
