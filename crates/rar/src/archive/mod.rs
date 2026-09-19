@@ -32,17 +32,18 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::crypto;
+use crate::crypto::ENCR_IV_SIZE;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{
     BlockCursor, main_header_locator_fields, parse_service_block_name,
     parse_service_recovery_percent, split_main_extra,
 };
-use crate::format::rar5::vint;
 use crate::format::rar5::{
     ARCHIVE_FLAG_LOCKED, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
-    BLOCK_TYPE_SERVICE_HEADER, ENCR_IV_SIZE,
+    BLOCK_TYPE_SERVICE_HEADER,
 };
 use crate::fs::atomic::{copy_prefix, install_durable, read_write_create, temp_sibling_path};
+use crate::vint;
 use crate::write_progress::ProgressTracker;
 
 use state::{

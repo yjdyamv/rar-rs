@@ -4,10 +4,11 @@
 
 use crate::archive::{ArchiveEntry, RarArchive};
 use crate::crypto;
+use crate::crypto::ENCR_PBKDF2_ITER_LOG;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::{
-    BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, ENCR_PBKDF2_ITER_LOG, FILE_FLAG_CRC32,
-    FILE_FLAG_TIME_UNIX, OS_UNIX,
+    BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, FILE_FLAG_CRC32, FILE_FLAG_TIME_UNIX,
+    OS_UNIX,
 };
 use crate::format::shared::stream_mut;
 use crate::model::{DataChunk, FileHeader};
@@ -501,7 +502,7 @@ impl RarArchive {
 fn file_time_record(extra: &[u8]) -> Option<Vec<u8>> {
     let mut offset = 0usize;
     while offset < extra.len() {
-        let (size, n) = crate::format::rar5::vint::decode_from_slice(extra, offset).ok()?;
+        let (size, n) = crate::vint::decode_from_slice(extra, offset).ok()?;
         let record_start = offset;
         offset += n;
         let size = usize::try_from(size).ok()?;
@@ -509,7 +510,7 @@ fn file_time_record(extra: &[u8]) -> Option<Vec<u8>> {
         if end > extra.len() {
             return None;
         }
-        let (rec_type, _) = crate::format::rar5::vint::decode_from_slice(extra, offset).ok()?;
+        let (rec_type, _) = crate::vint::decode_from_slice(extra, offset).ok()?;
         if rec_type == crate::format::rar5::EXTRA_FILE_TIME {
             return Some(extra[record_start..end].to_vec());
         }

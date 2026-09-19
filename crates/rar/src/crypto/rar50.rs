@@ -6,7 +6,23 @@
 //! attribution and the unresolved workspace-metadata/COPYING difference.
 
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::vint;
+use crate::vint;
+
+// ── RAR5 encryption vocabulary ─────────────────────────────────────────────
+//
+// These describe encryption, not container framing, so they live here and
+// `format::rar5` imports them rather than defining them.
+
+pub const ENCR_VERSION_AES256: u8 = 0x00;
+pub const ENCR_SALT_SIZE: usize = 16;
+pub const ENCR_IV_SIZE: usize = 16;
+pub const ENCR_KEY_SIZE: usize = 32;
+pub const ENCR_PBKDF2_ITER_LOG: u8 = 15;
+/// Encryption record flag: the 12-byte password check value follows.
+pub const ENCR_FLAG_CHECKSUM: u8 = 0x01;
+/// Encryption record flag: header checksums are MAC'd with the hash key
+/// (`-htb`); service blocks with plaintext CRCs (NTFS streams) clear it.
+pub const ENCR_FLAG_HASH_MAC: u8 = 0x02;
 /// RAR5 Encryption Support
 ///
 /// RAR5 uses AES-256 in CBC mode with keys derived from a password via a
@@ -21,10 +37,7 @@ use crate::format::rar5::vint;
 /// 4. Header encryption: when an archive-level encryption header is
 ///    present, all subsequent blocks (including file headers) are also
 ///    encrypted.
-use crate::format::rar5::{
-    ENCR_FLAG_CHECKSUM, ENCR_FLAG_HASH_MAC, ENCR_IV_SIZE, ENCR_KEY_SIZE, ENCR_SALT_SIZE,
-    ENCR_VERSION_AES256, EXTRA_FILE_ENCRYPTION,
-};
+use crate::format::rar5::EXTRA_FILE_ENCRYPTION;
 
 use aes::Aes256;
 use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
@@ -44,7 +57,7 @@ pub const MAX_KDF_COUNT_LOG: u8 = 24;
 const ENCR_FLAGS_KNOWN: u64 = (ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC) as u64;
 
 /// Reject an encryption-record `flags` value with undefined bits set.
-fn check_encr_flags(flags: u64) -> RarResult<()> {
+pub(crate) fn check_encr_flags(flags: u64) -> RarResult<()> {
     if flags & !ENCR_FLAGS_KNOWN != 0 {
         return Err(RarError::Format(format!(
             "unsupported encryption flags {flags:#x} (known bits {ENCR_FLAGS_KNOWN:#x})"
@@ -553,30 +566,6 @@ impl EncryptionParams {
         out.extend(body);
         out
     }
-
-    /// Serialize as an archive-level encryption header block (type 0x04).
-    ///
-    /// Written once after the main archive header when header encryption is
-    /// enabled; every subsequent header block is `[16-byte IV][AES-256-CBC
-    /// encrypted header]`. Body: `[block_type vint] [block_flags vint]
-    /// [encr_version vint] [encr_flags vint] [u8 strength] [16-byte salt]
-    /// [12-byte check value]` — matching `parse_archive_encrypt_header`.
-    pub fn to_archive_header_block(&self) -> Vec<u8> {
-        let mut body = Vec::new();
-        body.extend(vint::encode(crate::format::rar5::BLOCK_TYPE_ENCRYPT_HEADER));
-        body.extend(vint::encode(0u64)); // block flags
-        body.extend(vint::encode(ENCR_VERSION_AES256 as u64));
-        // The archive-level record carries only the password-check bit;
-        // the hash-key bit (0x0002) belongs to per-file records.
-        body.extend(vint::encode((self.flags & 0x0001) as u64));
-        body.push(self.strength);
-        body.extend_from_slice(&self.salt);
-        if let Some(ref ck) = self.checksum {
-            body.extend_from_slice(ck);
-        }
-
-        crate::format::rar5::headers::frame_block(&body)
-    }
 }
 
 /// Generate fresh random parameters and derive the key material in the same
@@ -663,103 +652,6 @@ impl MemberEncryption {
     pub(crate) fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
         encrypt_data(plaintext, &self.keys.key, &self.params.iv)
     }
-}
-
-/// Parse the archive-level encryption header block (type 0x04).
-///
-/// The block body (after block_type and flags vints) contains:
-/// `[vint encr_version] [vint encr_flags] [u8 strength] [16-byte salt]`
-/// Optionally followed by a 12-byte password check value if encr_flags & 0x01.
-pub fn parse_archive_encrypt_header(
-    raw: &crate::format::rar5::headers::RawBlock,
-) -> RarResult<EncryptionParams> {
-    let data = &raw.header_data;
-    let mut offset = 0;
-
-    // Skip block_type and block_flags (already parsed, but stored in header_data)
-    let (_, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("block type: {e}")))?;
-    offset += n;
-    let (_, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
-    offset += n;
-
-    // Encryption-specific fields
-    let (version, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("encr version: {e}")))?;
-    offset += n;
-    if version > u64::from(ENCR_VERSION_AES256) {
-        return Err(RarError::Format(format!(
-            "unsupported encryption version {version}"
-        )));
-    }
-    let (flags, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("encr flags: {e}")))?;
-    offset += n;
-    check_encr_flags(flags)?;
-
-    if offset >= data.len() {
-        return Err(RarError::Format("truncated encryption header".into()));
-    }
-    let strength = data[offset];
-    offset += 1;
-    if strength > MAX_KDF_COUNT_LOG {
-        return Err(RarError::Format(format!(
-            "encryption strength {strength} exceeds maximum {MAX_KDF_COUNT_LOG}"
-        )));
-    }
-
-    if offset + ENCR_SALT_SIZE > data.len() {
-        return Err(RarError::Format("truncated encryption header salt".into()));
-    }
-    let mut salt = [0u8; ENCR_SALT_SIZE];
-    salt.copy_from_slice(&data[offset..offset + ENCR_SALT_SIZE]);
-    offset += ENCR_SALT_SIZE;
-
-    let checksum = if flags & u64::from(ENCR_FLAG_CHECKSUM) != 0 {
-        if data.len().saturating_sub(offset) < 12 {
-            return Err(RarError::Format(
-                "truncated encryption header password check value".into(),
-            ));
-        }
-        let mut ck = [0u8; 12];
-        ck.copy_from_slice(&data[offset..offset + 12]);
-        Some(ck)
-    } else {
-        None
-    };
-
-    // Archive-level encryption header doesn't have its own IV —
-    // each subsequent block carries its own IV.
-    let iv = [0u8; ENCR_IV_SIZE];
-    let iterations = 1u32 << strength;
-
-    Ok(EncryptionParams {
-        version: version as u8,
-        flags: flags as u8,
-        strength,
-        salt,
-        iv,
-        checksum,
-        iterations,
-    })
-}
-
-/// Parse an archive encryption header block (type 0x04) that has already been
-/// decoded into `raw`, verify the given password, and return the derived
-/// header-decryption key.
-pub fn derive_header_key(
-    raw: &crate::format::rar5::headers::RawBlock,
-    password: Option<&str>,
-) -> RarResult<[u8; ENCR_KEY_SIZE]> {
-    let password = password.ok_or_else(|| {
-        RarError::Encrypted("archive has encrypted headers; provide a password".into())
-    })?;
-    let params = parse_archive_encrypt_header(raw)?;
-    let keys = params
-        .derive_and_verify(password)?
-        .ok_or(RarError::WrongPassword)?;
-    Ok(keys.key)
 }
 
 /// Parse the extra area of a file header to find encryption parameters.
@@ -932,7 +824,10 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "got {err}");
 
-        let err = parse_archive_encrypt_header(&archive_encrypt_header(1, 0)).unwrap_err();
+        let err = crate::format::rar5::headers::parse_archive_encrypt_header(
+            &archive_encrypt_header(1, 0),
+        )
+        .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "got {err}");
     }
 
@@ -952,7 +847,10 @@ mod tests {
                 "flags {flags:#x}: {err}"
             );
 
-            let err = parse_archive_encrypt_header(&archive_encrypt_header(0, flags)).unwrap_err();
+            let err = crate::format::rar5::headers::parse_archive_encrypt_header(
+                &archive_encrypt_header(0, flags),
+            )
+            .unwrap_err();
             assert!(
                 matches!(err, RarError::Format(_)),
                 "flags {flags:#x}: {err}"
@@ -967,7 +865,10 @@ mod tests {
                 "flags {flags:#x}"
             );
             assert!(
-                parse_archive_encrypt_header(&archive_encrypt_header(0, flags)).is_ok(),
+                crate::format::rar5::headers::parse_archive_encrypt_header(
+                    &archive_encrypt_header(0, flags)
+                )
+                .is_ok(),
                 "flags {flags:#x}"
             );
         }
@@ -978,7 +879,7 @@ mod tests {
         );
         let mut raw = archive_encrypt_header(0, with_check);
         raw.header_data.extend_from_slice(&[0u8; 12]);
-        assert!(parse_archive_encrypt_header(&raw).is_ok());
+        assert!(crate::format::rar5::headers::parse_archive_encrypt_header(&raw).is_ok());
     }
 
     #[test]
@@ -996,7 +897,7 @@ mod tests {
 
         let mut raw = archive_encrypt_header(0, u64::from(ENCR_FLAG_CHECKSUM));
         raw.header_data.extend_from_slice(&[0u8; 11]);
-        let err = parse_archive_encrypt_header(&raw).unwrap_err();
+        let err = crate::format::rar5::headers::parse_archive_encrypt_header(&raw).unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "got {err}");
     }
 

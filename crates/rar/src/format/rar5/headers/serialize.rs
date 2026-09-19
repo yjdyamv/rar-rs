@@ -4,7 +4,6 @@
 #[cfg(unix)]
 use crate::format::rar5::EXTRA_FILE_OWNER;
 use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader, FileHeader};
-use crate::format::rar5::vint;
 use crate::format::rar5::{
     ARCHIVE_FLAG_VOLUME, ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA,
     BLOCK_FLAG_SKIP_IF_UNKNOWN, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_END_ARCHIVE,
@@ -12,6 +11,7 @@ use crate::format::rar5::{
     COMP_INFO_METHOD_SHIFT, COMP_INFO_SOLID_BIT, EXTRA_FILE_HASH, EXTRA_FILE_TIME, FILE_FLAG_CRC32,
     FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX,
 };
+use crate::vint;
 
 /// Frame a plaintext RAR5 block body as the on-disk envelope
 /// `[CRC32 LE][header size vint][body]`, with the CRC taken over the stored

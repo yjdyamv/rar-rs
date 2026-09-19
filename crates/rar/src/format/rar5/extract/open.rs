@@ -4,7 +4,6 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::archive::{ArchiveEntry, RarArchive, StreamRecord};
-use crate::crypto;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{
     ArchiveHeader, BlockMeta, RawBlock, parse_service_block_name, quick_open,
@@ -184,7 +183,9 @@ impl CatalogBuilder {
                     return Ok(());
                 }
                 BLOCK_TYPE_ENCRYPT_HEADER => {
-                    encr_key = Some(crypto::derive_header_key(raw, password)?);
+                    encr_key = Some(crate::format::rar5::headers::derive_header_key(
+                        raw, password,
+                    )?);
                 }
                 _ => {}
             }
@@ -270,7 +271,8 @@ impl RarArchive {
                 .ok_or_else(missing)?;
         match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
-                let params = crypto::parse_archive_encrypt_header(&first.raw)?;
+                let params =
+                    crate::format::rar5::headers::parse_archive_encrypt_header(&first.raw)?;
                 self.handle_archive_encrypt_header(params)?;
                 let meta = crate::format::rar5::headers::read_block(
                     reader,
@@ -549,7 +551,7 @@ mod tests {
     use super::*;
     use crate::archive::discover_volumes;
     use crate::format::rar5::headers::EndOfArchiveHeader;
-    use crate::format::rar5::vint;
+    use crate::vint;
 
     /// One quick-open entry, through the shared codec.
     fn qo_entry(header: &[u8], rel: u64) -> Vec<u8> {

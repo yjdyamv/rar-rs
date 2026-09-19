@@ -59,6 +59,11 @@ mod parallel;
 pub(crate) mod recovery;
 
 pub mod version;
+// Varint coding is a wire-level primitive shared by the RAR5 container, the
+// legacy edit paths and the crypto layer, so it lives at the crate root rather
+// than under any one family (publicly reachable through `wire`).
+#[doc(hidden)]
+pub mod vint;
 pub mod wire;
 mod write_progress;
 

@@ -2,8 +2,9 @@ use crate::archive::RarArchive;
 use crate::error::RarError;
 use crate::format::rar5::{
     BLOCK_FLAG_DATA_AREA, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_END_ARCHIVE,
-    BLOCK_TYPE_SERVICE_HEADER, RAR5_SIGNATURE, vint,
+    BLOCK_TYPE_SERVICE_HEADER, RAR5_SIGNATURE,
 };
+use crate::vint;
 
 /// A block as it sits on disk: CRC over `[size vint][body]`, then the
 /// size vint and the body, then the data area.

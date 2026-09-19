@@ -388,13 +388,13 @@ impl RarArchive {
 mod tests {
     use super::*;
     use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader};
-    use crate::format::rar5::vint;
     use crate::format::rar5::{
         BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_DEPENDS_PREV, BLOCK_FLAG_EXTRA_DATA,
         BLOCK_TYPE_SERVICE_HEADER, COMP_INFO_DICT_SHIFT, COMP_INFO_METHOD_SHIFT,
         COMP_METHOD_NORMAL, COMP_METHOD_STORE, EXTRA_SERVICE_SUBDATA, FILE_FLAG_CRC32, OS_WINDOWS,
         RAR5_SIGNATURE,
     };
+    use crate::vint;
 
     /// Build a minimal single-member RAR5 archive whose member owns one
     /// "STM" service block. The stream's compression info carries `method`

@@ -11,17 +11,18 @@ use super::{
     volume_path_rar4,
 };
 use crate::crypto;
+use crate::crypto::{ENCR_IV_SIZE, ENCR_PBKDF2_ITER_LOG};
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::EndOfArchiveHeader;
-use crate::format::rar5::vint;
 use crate::format::rar5::{
-    ARCHIVE_FLAG_RECOVERY, ARCHIVE_FLAG_SOLID, ARCHIVE_FLAG_VOLUME, ENCR_IV_SIZE,
-    ENCR_PBKDF2_ITER_LOG, END_FLAG_NEXT_VOLUME, RAR5_SIGNATURE,
+    ARCHIVE_FLAG_RECOVERY, ARCHIVE_FLAG_SOLID, ARCHIVE_FLAG_VOLUME, END_FLAG_NEXT_VOLUME,
+    RAR5_SIGNATURE,
 };
 use crate::fs::atomic::{
     commit_files, install_durable, parent_dir, read_write_create, recover_interrupted_commit,
     temp_sibling_path, temp_suffix,
 };
+use crate::vint;
 
 impl RarArchive {
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -98,11 +99,8 @@ impl RarArchive {
             self.archive_encr = Some(encr);
             self.archive_keys = Some(keys);
         }
-        let block = self
-            .archive_encr
-            .as_ref()
-            .unwrap()
-            .to_archive_header_block();
+        let params = self.archive_encr.as_ref().expect("set just above");
+        let block = crate::format::rar5::headers::build_archive_encrypt_header_block(params);
         let stream = self.stream.as_mut().unwrap();
         stream.write_all(&block)?;
         Ok(())

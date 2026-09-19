@@ -6,7 +6,6 @@ use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{
     ArchiveHeader, BlockMeta, EndOfArchiveHeader, FileHeader, RawBlock, RawHeader, RedirectSpec,
 };
-use crate::format::rar5::vint;
 use crate::format::rar5::{
     ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_END_ARCHIVE,
     COMP_INFO_DICT_MASK, COMP_INFO_DICT_SHIFT, COMP_INFO_METHOD_MASK, COMP_INFO_METHOD_SHIFT,
@@ -18,6 +17,7 @@ use crate::format::rar5::{
 use crate::format::rar5::{
     BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER,
 };
+use crate::vint;
 
 pub fn read_block<R: Read + Seek>(
     reader: &mut R,
@@ -187,7 +187,7 @@ fn read_plain_header<R: Read>(reader: &mut R) -> RarResult<Option<RawHeader>> {
 }
 
 fn read_encrypted_header<R: Read>(reader: &mut R, key: &[u8; 32]) -> RarResult<Option<RawHeader>> {
-    let mut iv = [0u8; crate::format::rar5::ENCR_IV_SIZE];
+    let mut iv = [0u8; crate::crypto::ENCR_IV_SIZE];
     match reader.read_exact(&mut iv[..1]) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),

@@ -25,7 +25,7 @@ use crate::options::FilterMode;
 
 #[cfg(windows)]
 use super::windows;
-use crate::format::rar5::vint;
+use crate::vint;
 
 /// Defensive guard: the streaming writer emits its delta and x86 filters as
 /// pre-built `Symbol::Filter` leads, bypassing `encode_with_filters`' overlap
@@ -902,8 +902,8 @@ impl RarArchive {
                 // request hash-MAC'd checksums (flag 0x02).
                 let session = crypto::MemberEncryption::generate_with_flags(
                     password,
-                    crate::format::rar5::ENCR_PBKDF2_ITER_LOG,
-                    crate::format::rar5::ENCR_FLAG_CHECKSUM,
+                    crate::crypto::ENCR_PBKDF2_ITER_LOG,
+                    crate::crypto::ENCR_FLAG_CHECKSUM,
                 );
                 let mut extra = session.extra_bytes();
                 extra.extend_from_slice(&subdata);

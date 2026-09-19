@@ -13,8 +13,8 @@
 //! header; the flags field is always 0 (a file-header entry).
 
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::vint;
 use crate::format::shared::extract::check_entry_cap;
+use crate::vint;
 
 /// Convert a declared quick-open size to `usize`, rejecting lengths that do
 /// not fit the host address space: on 32-bit targets `as usize` would

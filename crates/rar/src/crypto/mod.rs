@@ -19,9 +19,12 @@ pub use rar20::Rar20Cipher;
 pub use rar30::Rar30Cipher;
 pub(crate) use rar50::MemberEncryption;
 pub(crate) use rar50::constant_time_eq;
+// Only the constants a caller outside this module needs: the rest stay
+// reachable as `crypto::rar50::*` for the encryption code itself.
 pub use rar50::{
-    Aes256CbcStream, DerivedKeys, EncryptionParams, decrypt_data, derive_header_key, derive_keys,
-    encrypt_data, parse_archive_encrypt_header, parse_encryption_extra, zero_padded_len,
+    Aes256CbcStream, DerivedKeys, ENCR_FLAG_CHECKSUM, ENCR_IV_SIZE, ENCR_PBKDF2_ITER_LOG,
+    EncryptionParams, decrypt_data, derive_keys, encrypt_data, parse_encryption_extra,
+    zero_padded_len,
 };
 
 /// The longest password any RAR key derivation sees.

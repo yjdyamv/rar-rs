@@ -1,4 +1,3 @@
-pub(crate) mod locator;
 /// The outer RAR5 block envelope is shared by every header:
 /// ```text
 /// [Header CRC32]  4 bytes LE
@@ -14,11 +13,16 @@ pub(crate) mod locator;
 /// Read-side parsing lives in [`parse`]; write-side serialization in
 /// [`serialize`]. RAR5 wire structs and the block envelope stay here, while
 /// shared model types are re-exported for compatibility.
+pub(crate) mod encrypt;
+pub(crate) mod locator;
 pub(crate) mod parse;
 pub(crate) mod quick_open;
 pub(crate) mod serialize;
 
 pub use crate::model::{DataChunk, FileHeader};
+pub(crate) use encrypt::{
+    build_archive_encrypt_header_block, derive_header_key, parse_archive_encrypt_header,
+};
 pub use parse::read_block;
 pub(crate) use parse::{
     BlockCursor, block_extra_area, locator_quick_open_offset, main_header_locator_fields,

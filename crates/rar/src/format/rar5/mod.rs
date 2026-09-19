@@ -21,7 +21,7 @@ pub(crate) mod extract;
 #[doc(hidden)]
 pub mod headers;
 pub(crate) mod payload;
-pub mod vint;
+
 pub(crate) mod write;
 
 // ── Archive Signature ──────────────────────────────────────────────────────
@@ -115,19 +115,6 @@ pub const EXTRA_FILE_OWNER: u64 = 0x06;
 /// the service-specific data (recovery percent for "RR", the NTFS stream
 /// name for "STM").
 pub const EXTRA_SERVICE_SUBDATA: u64 = 0x07;
-
-// ── Encryption Parameters ──────────────────────────────────────────────────
-
-pub const ENCR_VERSION_AES256: u8 = 0x00;
-pub const ENCR_SALT_SIZE: usize = 16;
-pub const ENCR_IV_SIZE: usize = 16;
-pub const ENCR_KEY_SIZE: usize = 32;
-pub const ENCR_PBKDF2_ITER_LOG: u8 = 15;
-/// Encryption record flag: the 12-byte password check value follows.
-pub const ENCR_FLAG_CHECKSUM: u8 = 0x01;
-/// Encryption record flag: header checksums are MAC'd with the hash key
-/// (`-htb`); service blocks with plaintext CRCs (NTFS streams) clear it.
-pub const ENCR_FLAG_HASH_MAC: u8 = 0x02;
 
 // ── Resource Limits ───────────────────────────────────────────────────────
 

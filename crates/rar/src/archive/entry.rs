@@ -307,7 +307,7 @@ pub(crate) fn file_header_has_mtime(header: &FileHeader) -> bool {
 fn has_file_time_extra(extra: &[u8]) -> bool {
     let mut offset = 0usize;
     while offset < extra.len() {
-        let Ok((size, n)) = crate::format::rar5::vint::decode_from_slice(extra, offset) else {
+        let Ok((size, n)) = crate::vint::decode_from_slice(extra, offset) else {
             return false;
         };
         offset += n;
@@ -320,7 +320,7 @@ fn has_file_time_extra(extra: &[u8]) -> bool {
         if end > extra.len() {
             return false;
         }
-        let Ok((rec_type, _)) = crate::format::rar5::vint::decode_from_slice(extra, offset) else {
+        let Ok((rec_type, _)) = crate::vint::decode_from_slice(extra, offset) else {
             return false;
         };
         if rec_type == crate::format::rar5::EXTRA_FILE_TIME {

@@ -6,7 +6,7 @@
 
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{ArchiveHeader, vint_fixed5};
-use crate::format::rar5::vint;
+use crate::vint;
 
 /// Locator record type (extra record type 0x01).
 pub(crate) const LOCATOR_TYPE: u64 = 0x01;
