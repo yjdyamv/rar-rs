@@ -8,16 +8,10 @@ and modify RAR5/RAR7 archives, read legacy RAR 1.3–4.x archives, and create RA
 1.3 / 1.4 / 1.5 / 2.x / 4.x archives with native Rust codecs. No external
 RAR/UNRAR binary is required at runtime.
 
-> Licensed under BSD-2-Clause for original project portions. This is an
-> independent implementation with separately identified upstream portions — see
-> [NOTICE](NOTICE) and the provenance-oriented
-> [third-party source inventory](THIRD_PARTY_LICENSES.md).
-
 ## Features
 
-- **Pure Rust** — no external RAR/UNRAR runtime binary.
-- **Formats** — RAR5 (v50) and RAR7 (v70) create/read/write; RAR 1.3–4.x
-  read/extract; RAR 1.3 / 1.4 / 1.5 / 2.x / 4.x creation (`-ma13` / `-ma14` /
+- **Formats** — RAR5 (v50) and RAR7 (v70) create / read / write; RAR 1.3–4.x
+  read / extract; RAR 1.3 / 1.4 / 1.5 / 2.x / 4.x creation (`-ma13` / `-ma14` /
   `-ma15` / `-ma2` / `-ma4`), including legacy codecs, solid chains and volumes.
 - **Compression** — native LZSS+Huffman and PPMd, levels 0–5, dictionary
   controls, delta/x86 filters, solid archives, parallel compression.
@@ -28,17 +22,17 @@ RAR/UNRAR binary is required at runtime.
 - **Recovery** — inline recovery records and `.rev` recovery volumes (RAR5 REV5
   and legacy RAR 1.5–4.x), with bounded-memory repair paths.
 - **Integrity** — CRC32, BLAKE2sp (`-htb`) and encrypted-data MACs.
-- **Safe extraction** — path sanitization, size limits, atomic staging and
-  cooperative cancellation.
+- **Safe extraction** — path sanitization, size limits (opt-in `--max-unpacked`
+  / `--max-total-unpacked`), atomic staging, cooperative cancellation.
 - **Bindings** — Node.js native and WASI bindings under `crates/rar-napi`.
 
-Behavior is validated against WinRAR/UnRAR; the current status and the accepted
+Behavior is validated against WinRAR/UnRAR; current status and accepted
 divergences live in [PLAN.md](PLAN.md).
 
 ## Build
 
-The workspace targets current stable Rust (`edition = "2024"`); no fixed MSRV is
-declared, and CI runs the full stable validation matrix.
+Current stable Rust (`edition = "2024"`); no fixed MSRV is declared and CI runs
+the full stable matrix.
 
 ```bash
 cargo build --release --locked
@@ -88,9 +82,7 @@ let id = reader.unique_entry("notes.txt")?;
 let data = reader.read_entry(id)?;
 ```
 
-The crate is `rar-rs`. Module map and design notes (bounded memory, safe
-extraction, solid/MT, quick-open, streaming repair, multi-volume transactions):
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Module map and design invariants: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Limitations
 
@@ -109,7 +101,7 @@ The complete list of deliberate refusals and known interop differences is in
 
 ## Documentation
 
-Full index in **[docs/README.md](docs/README.md)**. Suggested reading order:
+Index: **[docs/README.md](docs/README.md)**. Reading order:
 
 1. This file — build and quick start.
 2. [docs/CLI.md](docs/CLI.md) — commands and switches.
@@ -119,24 +111,19 @@ Full index in **[docs/README.md](docs/README.md)**. Suggested reading order:
 6. [docs/FORMAT_RAR5_RAR7.html](docs/FORMAT_RAR5_RAR7.html) — byte-level format
    reference.
 
-All Markdown is formatted with `dprint` at 80 columns; see the conventions in
-[docs/README.md](docs/README.md).
-
 ## Legal
 
-Independent implementation for software conservancy and educational purposes,
-with separately identified upstream portions. See [NOTICE](NOTICE) for
-attribution and license boundaries,
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the source inventory, and
-[`LICENSES/`](LICENSES/) for standard texts of the identified third-party
-license families. Original project portions are licensed under BSD-2-Clause —
-see [LICENSE](LICENSE).
-
-The repository-wide SPDX expression stays `BSD-2-Clause`, which states the
-project's **own** contributions (`Cargo.toml` `[workspace.package]`, inherited
-by all three crates and mirrored in `crates/rar-napi/package.json`). Portions
-derived from other projects keep their own terms instead of being folded into
-that field: the `rars`-derived files are `MIT OR Apache-2.0`, the
-libarchive-derived ones BSD-2-Clause. [NOTICE](NOTICE) and
+Independent implementation for software conservancy and education, with
+separately identified upstream portions. The `license` field (`Cargo.toml`
+`[workspace.package]`, inherited by all three crates and mirrored in
+`crates/rar-napi/package.json`) stays `BSD-2-Clause`: it states the project's
+**own** contributions. Portions derived from other projects keep their own terms
+instead of being folded into it — the `rars`-derived files are
+`MIT OR Apache-2.0`, the libarchive-derived ones BSD-2-Clause — so a
+redistributor has to satisfy both sets. [NOTICE](NOTICE) and
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) record which files came from
-where, so a redistributor can satisfy both sets.
+where; [`LICENSES/`](LICENSES/) holds the standard texts. Full text:
+[LICENSE](LICENSE).
+
+All Markdown is formatted with `dprint` at 80 columns; conventions in
+[docs/README.md](docs/README.md).

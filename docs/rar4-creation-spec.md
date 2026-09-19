@@ -9,40 +9,25 @@ rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver
 
 ## 范围
 
-### Phase 1（本次实现）
+### 功能
 
-| 功能               | 状态 |
-| ------------------ | ---- |
-| STORE（不压缩）    | ✅   |
-| LZSS+Huffman m1-m5 | ✅   |
-| Solid 模式（-s）   | ✅   |
-| 成员级加密（-p）   | ✅   |
-| 多卷（-v）         | ✅   |
-| 单卷创建           | ✅   |
-| CLI -ma4 开关      | ✅   |
-
-### Phase 2（已完成，2026-09）
-
-| 功能                                                          | 状态 |
-| ------------------------------------------------------------- | ---- |
-| PPMd 编码                                                     | ✅   |
-| 头加密（-hp）                                                 | ✅   |
-| 自动 VM 过滤器（E8/E8E9/Delta/Audio 探测 + RGB/Itanium 编码） | ✅   |
-| solid 链内自动 VM 过滤器                                      | ✅   |
-| 内联恢复记录（NEWSUB 0x7a RR）写/修                           | ✅   |
-| 多文件并行 batch                                              | ✅   |
-| solid 链 PPMd 模型延续（0x87 头）                             | ✅   |
+| 功能                                                                                             | 状态 |
+| ------------------------------------------------------------------------------------------------ | ---- |
+| 单卷创建、STORE、LZSS+Huffman m1-m5、Solid（`-s`）、成员级加密（`-p`）、多卷（`-v`）、CLI `-ma4` | ✅   |
+| PPMd 编码（`-m4`/`-m5`）                                                                         | ✅   |
+| 头加密（`-hp`）                                                                                  | ✅   |
+| 自动 VM 过滤器（E8/E8E9/Delta/Audio 探测 + RGB/Itanium 编码），solid 链内同样生效                | ✅   |
+| 内联恢复记录（NEWSUB 0x7a RR）写/修                                                              | ✅   |
+| 多文件并行 batch                                                                                 | ✅   |
+| solid 链 PPMd 模型延续（0x87 头）                                                                | ✅   |
 
 > PPMd 不是独立开关：`-m0` = STORE（WinRAR 定义）；PPMd 由 RAR29 编码器在
-> `-m4/-m5`（非 solid）按候选竞争，solid 链内作为与 LZ 并行的模型链赢者推进（见
-> `codec/legacy/rar29_encoder.rs` 与 `PLAN.md`「现状」的 RAR4 创建能力）。
-> 方法字节仍按 `-m` 级写（0x30+m），块内首个标志位指示 PPMd。
->
-> solid 链内 PPMd 成员续用链上模型：首个 PPMd 成员发新模型头（0xA7），其后连续
-> 的 PPMd 成员发续模型头（0x87）并共享模型（`encode_ppmd_member_chain` 以
-> `last_was_ppmd` 判定，中间夹 LZ 成员则回到新模型）。官方 6.23 与 7.23 的 UnRAR
-> 都能解出该形态（6.23 的 RAR4 写入器不产 PPMd，无写入侧参考）。solid 链内的自动
-> VM 过滤器同样生效（读者窗口持有的即 LZ 层编码的字节，过滤成员仍是普通链环）。
+> `-m4`/`-m5`（非 solid）按候选竞争，solid 链内作为与 LZ 并行的模型链、赢者推进
+> （见 `codec/legacy/rar29_encoder.rs`）。方法字节仍按 `-m`
+> 级写（`0x30+m`），块内 首个标志位指示 PPMd。**续模型**：首个 PPMd
+> 成员发新模型头（0xA7），其后连续的 PPMd
+> 成员发续模型头（0x87）并共享模型，中间夹 LZ 成员则回到新模型；官方 6.23 与
+> 7.23 都能解出。**6.23 的 RAR4 写入器不产 PPMd，所以写入侧没有官方参考。**
 
 Recovery volumes（`.rev`）两种布局均已支持，见
 `docs/issues/rar4-recovery-volumes.md`。
@@ -55,14 +40,13 @@ Recovery volumes（`.rev`）两种布局均已支持，见
 
 （内联 RR 已支持，见 `PLAN.md`「现状」的 RAR4 创建能力。）
 
-## 验证记录（2026-09-07 CLI 实测）
+## 验证
 
-`rar a -ma4` 压缩创建端到端可用：2.36 MB 文本语料上 `-m0` → Store （2,367,201
-B）、`-m3` → Normal（23,048 B，1.0%）、`-m5` → Best （17,497
-B，0.7%）、`-ma4 -s -m5` → Best。互操作覆盖见
-`crates/rar-cli/tests/winrar_interop/rar4_create.rs` 的
-`we_create_rar4_*`（m3/m5、 solid PPMd、Delta 过滤器、`-p`、`-hp`、`-rr`
-双字节校验）与 `cli_behavior/legacy.rs` 的 `cli_ma4_*`。
+端到端由测试锁定，不在此重述过程：`rar4_create.rs`（roundtrip、加密、多卷、solid、
+各级别、边界）、`winrar_interop/rar4_create.rs` 的
+`we_create_rar4_*`（m3/m5、solid PPMd、Delta、`-p`、`-hp`、`-rr` 双字节校验）与
+`cli_behavior/legacy.rs` 的 `cli_ma4_*`。耗时与跑法见
+[`testing.md`](testing.md)。
 
 ## 架构设计
 
@@ -70,12 +54,12 @@ B，0.7%）、`-ma4 -s -m5` → Best。互操作覆盖见
 
 ```
 format/rar4/
-  mod.rs          ← 已有：常量、flag、block 结构、LegacyDecoder（扫描/解析）
-  read.rs         ← 已有：成员解码门面
-  write/{mod,pipeline,cbc}.rs ← 写管线（头序列化 / 编排 / 加密区间）
-  create.rs       ← 选项校验（`validate_rar4_only`）
+  mod.rs          — 常量、flag、block 结构、LegacyDecoder（扫描/解析）
+  read.rs         — 成员解码门面
+  write/{mod,pipeline,cbc}.rs — 写管线（头序列化 / 编排 / 加密区间）
+  create.rs       — 选项校验（`validate_rar4_only`）
 codec/
-  legacy/rar29_encoder.rs ← 新建：RAR29 编码器（从 rars 移植）
+  legacy/rar29_encoder.rs — RAR29 编码器（从 rars 移植）
 ```
 
 ### 写管线流程
@@ -243,17 +227,3 @@ rar a -ma4 -v1m archive.rar file1 file2
 - `rar create -ma4 test.rar` → WinRAR 能解压
 - `rar create -ma4 -p test.rar` → WinRAR 能用密码解压
 - `rar create -ma4 -v1m test.rar` → WinRAR 能识别分卷
-
-## 实现顺序
-
-1. **RAR4 头序列化**：`format/rar4/write/mod.rs` 中的
-   `build_file_header()`、`write_file_header()`、`build_main_header()`
-2. **STORE-only 创建**：最简单的路径，验证头格式正确
-3. **RAR29 编码器移植**：从 rars 移植 `Unpack29Encoder`，适配 rar-rs 错误类型
-4. **LZSS 压缩创建**：m1-m5 各级别
-5. **Solid 模式**：跨成员共享编码器状态
-6. **加密**：成员级 -p
-7. **多卷**：-v 参数
-8. **CLI 集成**：-ma4 开关
-9. **Roundtrip 测试**：创建 → 解压 → diff
-10. **WinRAR 互操作测试**

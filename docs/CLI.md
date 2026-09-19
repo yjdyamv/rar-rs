@@ -118,62 +118,79 @@ it must exist and never changes where outputs are written).
 | `-v<size>`   | Multi-volume (e.g. `-v1m` ≈ 1 MB, `-v100k` ≈ 100 KB); sets of 10+ volumes use zero-padded `part01` names like WinRAR                                                                                                                                                                                                                                                                                     |
 | `-rr[N]`     | Inline recovery record; N = count or `N%` percent, default 10% (the `-rv` switch below takes a **required** value, no default)                                                                                                                                                                                                                                                                           |
 | `-rv<N\|N%>` | Recovery volumes; at creation the count is capped at the data-volume count (the standalone `rv` command at 10×). RAR4 sets (`-ma4`) use the legacy `.rev` layout: trailer format (`base.partNN.rev` / `baseN.rev`) when the volumes end in zero bytes (WinRAR-created sets), legacy full-parity format (`base<data>_<rec>_<idx>.rev`) otherwise; silently skipped when the archive ends up single-volume |
-| `-qo[-       | +]`                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `-qo[-\|+]`  | Quick-open record; `-qo-` disables it (the default, kept for switch parity)                                                                                                                                                                                                                                                                                                                              |
 
 ### Paths, time & misc
 
-`-r`/`-r0`/`-r-` (recurse), `-ep`/`-ep1`/`-ep2`/`-ep3`/`-ep4<path>` (path
-strip), `-ap<path>` (archive path prefix), `-x`/`-x@` (exclude), `-n`/`-n@`
-(include), `-ed`/`-as`/`-ad`/`-ad1`/`-ad2`/`-am` (empty dirs / sync / append the
-archive name to the destination / extract into each archive's own directory
-(with / without a per-archive subdirectory) / archive metadata),
-`-ol`/`-ol-`/`-ola`/`-oh` (store symlinks as redirects / skip links when
-archiving and extracting / extract links with dangerous targets as-is (disables
-the link safety checks); with `-ol` a directory symlink or junction is stored as
-a redirect instead of walking its target — Windows writes a Windows symlink (2)
-or junction (3) like WinRAR; hard links: hard-link groups store the first path
-and redirect the rest, and every redirect keeps the link's modification time —
-Windows and Unix, RAR5 only), `-op<path>`/`-or` (output path / auto-rename),
-`-os`/`-ow` (NTFS streams / owner), `-om[-|1][=ext;ext]` (propagate the
-archive's Mark of the Web to extracted files: zone value only, every field with
-`1`, optional extension filter; Windows only), `-oi[0-4][:<minsize>]` (identical
-files as references: `-oi`/`-oi1` store the first file and reference the rest,
-`-oi2` announces the groups, `-oi3`/`-oi4` list them and create no archive;
-default 64 KiB minimum, RAR5 only), `-df`/`-kb`/`-si<name>` (delete sources /
-keep broken / stdin member), `-sfx[name]` (create an SFX archive at create
-time), `-ta`/`-tb`/`-tn`/`-to` (time filters), `-tl`/`-tk[<date>]` (set archive
-time to newest / keep, or set it to the given local date), `-ts[mca][±,1]`
-(three timestamps; `-ts-` omits the time field for RAR5 and is ignored for RAR
-1.3–4.x, whose fixed headers always carry DOS local time), `-tsp` (preserve
-source access time), `-ver[n]` (versioning), `-ag[fmt]` (auto-name, local time),
-`-z<file>`/`-c-` (comment file / no comment; `-z` is accepted and ignored
-outside the create and comment commands), `-y`/`-o±` (yes / overwrite mode),
-`-ierr`/`-ilog`/`-iver`, `-cfg-`/`-sc<charset>`. With no interactive prompt,
-extraction without `-y`/`-o+` skips existing files (WinRAR's non-interactive
-outcome); `-o+` overwrites, `-o-` skips and `-or` auto-renames.
+**Recursion, selection, destination**
 
-Two long options bound how much a disk extraction may write:
-`--max-unpacked <size>` rejects any member whose declared uncompressed size
-exceeds `<size>`, and `--max-total-unpacked <size>` rejects a run whose total
-declared size would. Sizes take an optional binary `k`/`m`/`g`/`t` suffix. The
-default is unbounded, exactly like WinRAR/UnRAR — these are the opt-in guard
-that keeps a decompression bomb from filling the disk. They apply to the files
-`x`/`e` write; the `-so` stdout stream creates no files and is not bounded. A
-per-member cap larger than the total cap is rejected as a usage error.
+- `-r` / `-r0` / `-r-` — recurse into subdirectories (with / without / none)
+- `-ep` / `-ep1` / `-ep2` / `-ep3` / `-ep4<path>` — path strip
+- `-ap<path>` — archive path prefix
+- `-x` / `-x@<list>` — exclude; `-n` / `-n@<list>` — include
+- `-ed` / `-as` — empty dirs / sync
+- `-ad` / `-ad1` / `-ad2` / `-am` — append the archive name to the destination;
+  extract into each archive's own directory (with / without a per-archive
+  subdirectory); archive metadata
+- `-op<path>` / `-or` — output path / auto-rename
 
-Switches that are Windows-only or interactive in WinRAR (`-ac`, `-ai`, `-ao`,
-`-e[+]<attr>`, `-dh`, `-ieml`, `-ioff`, `-isnd`, `-ri`, `-mlp`, `-oc`, `-oni`,
-`-am[s,r]`, `-vp`, `-sc`) are **accepted as no-ops** on every command of both
-binaries, like WinRAR's own parser. `-os` (NTFS streams) is implemented on
-Windows: create stores the file's alternate data streams as `STM` records (each
-stream is encrypted with the archive password when `-p`/`-hp` is set) and
-extraction restores them; on other platforms it is a no-op. `-dr` (recycle bin),
-`-dw` (wipe) and `-vd` (erase disk) are **rejected with an error** rather than
-silently ignored, since they would otherwise imply destructive changes.
-`-me<par>` (including the undocumented `-mes`) is accepted as a no-op.
-`-log[AFPU]*[=name]` (rar only; UnRAR rejects it like the official binary)
-writes archive names (`A`), processed member names (`F`), appending with `P` and
-UTF-16LE output with `U` to a log file (default `rarinfo.log`).
+**Links, streams, metadata**
+
+- `-ol` / `-ol-` / `-ola` / `-oh` — store symlinks as redirects / skip links
+  when archiving and extracting / extract links with dangerous targets as-is
+  (`-ola` disables the link safety checks). With `-ol` a directory symlink or
+  junction is stored as a redirect instead of walking its target — Windows
+  writes a Windows symlink (2) or junction (3) like WinRAR. Hard links:
+  hard-link groups store the first path and redirect the rest, and every
+  redirect keeps the link's modification time (Windows and Unix, RAR5 only).
+  Extraction recreates a junction as a real NTFS mount point.
+- `-os` / `-ow` — NTFS streams / owner
+- `-om[-|1][=ext;ext]` — propagate the archive's Mark of the Web to extracted
+  files: zone value only, every field with `1`, optional extension filter
+  (Windows only)
+- `-oi[0-4][:<minsize>]` — identical files as references: `-oi`/`-oi1` store the
+  first file and reference the rest, `-oi2` announces the groups, `-oi3`/`-oi4`
+  list them and create no archive; default 64 KiB minimum (RAR5 only)
+- `-sfx[name]` — create an SFX archive at create time
+- `-z<file>` / `-c-` — comment file / no comment (`-z` is accepted and ignored
+  outside the create and comment commands)
+
+**Time**
+
+- `-ta` / `-tb` / `-tn` / `-to` — time filters
+- `-tl` / `-tk[<date>]` — set the archive time to newest / keep it, or set it to
+  the given local date
+- `-ts[mca][±,1]` — three timestamps; `-ts-` omits the time field for RAR5 and
+  is ignored for RAR 1.3–4.x, whose fixed headers always carry DOS local time
+- `-tsp` — preserve source access time
+
+**Misc**
+
+- `-df` / `-kb` / `-si<name>` — delete sources / keep broken / stdin member
+- `-ver[n]` / `-ag[fmt]` — versioning / auto-name (local time)
+- `-y` / `-o±` — yes / overwrite mode. With no interactive prompt, extraction
+  without `-y`/`-o+` skips existing files (WinRAR's non-interactive outcome);
+  `-o+` overwrites, `-o-` skips and `-or` auto-renames
+- `-ierr` / `-ilog` / `-iver`, `-cfg-`, `-sc<charset>`
+- `--max-unpacked <size>` / `--max-total-unpacked <size>` — bound how much a
+  disk extraction may write: the first rejects any member whose _declared_
+  uncompressed size exceeds `<size>`, the second rejects a run whose total
+  would. Sizes take an optional binary `k`/`m`/`g`/`t` suffix. **The default is
+  unbounded, exactly like WinRAR/UnRAR** — this is the opt-in guard that keeps a
+  decompression bomb from filling the disk. It applies to the files `x`/`e`
+  write; `-so` creates no files and is not bounded. A per-member cap larger than
+  the total cap is a usage error.
+- `-me<par>` (including the undocumented `-mes`) — accepted as a no-op
+- `-log[AFPU]*[=name]` — rar only (UnRAR rejects it, like the official binary):
+  writes archive names (`A`), processed member names (`F`), appending with `P`
+  and UTF-16LE output with `U` to a log file (default `rarinfo.log`)
+
+**Accepted as no-ops** (Windows-only or interactive in WinRAR, like WinRAR's own
+parser): `-ac`, `-ai`, `-ao`, `-e[+]<attr>`, `-dh`, `-ieml`, `-ioff`, `-isnd`,
+`-ri`, `-mlp`, `-oc`, `-oni`, `-am[s,r]`, `-vp`, `-sc`. `-os` is a no-op off
+Windows. **Rejected with an error** rather than silently ignored, because they
+would imply destructive changes: `-dr` (recycle bin), `-dw` (wipe), `-vd` (erase
+disk).
 
 ---
 
