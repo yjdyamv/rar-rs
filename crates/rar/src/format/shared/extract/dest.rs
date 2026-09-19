@@ -14,13 +14,44 @@ use crate::format::rar5::write as rar5_write;
 use crate::fs::safe_path::resolve_redirect_target;
 use crate::fs::safe_path::sanitize_archive_path;
 
-/// Restore a stored Unix mode, masking off the file-type bits `chmod`
-/// cannot use. Best-effort like the timestamp restoration: a filesystem
-/// that cannot represent the mode must not fail the extraction.
+/// Restore a stored Unix mode (`chmod`), mirroring official UnRAR's rule.
+///
+/// UnRAR strips the set-user-ID and set-group-ID bits of *files* when the
+/// extracting process is not root (`if (geteuid()!=0) FileAttr &=
+/// ~(S_ISUID|S_ISGID);` in its `extract.cpp`), and keeps them when it is.
+/// Those two bits are the only mode bits that change the identity a later
+/// execution runs as, so an untrusted archive must not be able to install a
+/// setuid executable as a side effect of extraction; a privileged extractor
+/// asked for the stored mode and gets it.
+///
+/// Directories keep their stored mode, like UnRAR (its directory path calls
+/// `SetFileAttr` without the `geteuid` test): the set-group-ID bit there only
+/// selects the group of entries created inside, which confers no privilege
+/// and is a commonly stored mode for shared directories. The sticky bit is
+/// preserved everywhere, and the file-type bits are ignored by `chmod`.
+///
+/// Best-effort like the timestamp restoration: a filesystem that cannot
+/// represent the mode must not fail an otherwise complete extraction.
 #[cfg(unix)]
-fn apply_unix_mode(dest_path: &Path, mode: u32) {
+fn apply_unix_mode(dest_path: &Path, mode: u32, is_directory: bool) {
     use std::os::unix::fs::PermissionsExt;
+    /// `S_ISUID | S_ISGID`.
+    const SET_ID_BITS: u32 = 0o6000;
+    let mode = if is_directory || extractor_is_privileged() {
+        mode
+    } else {
+        mode & !SET_ID_BITS
+    };
     let _ = fs::set_permissions(dest_path, fs::Permissions::from_mode(mode));
+}
+
+/// Whether the extracting process runs with effective uid 0. The same
+/// `geteuid() != 0` test UnRAR uses before it strips stored set-ID bits.
+#[cfg(unix)]
+fn extractor_is_privileged() -> bool {
+    // SAFETY: `geteuid` takes no arguments, has no side effects and cannot
+    // fail; it only reads the process's effective uid.
+    unsafe { libc::geteuid() == 0 }
 }
 
 /// Apply the attributes WinRAR restores on Windows: the stored DOS bits
@@ -193,8 +224,9 @@ impl RarArchive {
     }
 
     /// Restore a member's stored attributes on the extracted path: the
-    /// Unix permission bits (`chmod`) for Unix-host members, the DOS
-    /// attributes (`SetFileAttributesW`) for Windows-host members.
+    /// Unix permission bits (`chmod`, with UnRAR's set-ID rule for
+    /// non-root extractors — see [`apply_unix_mode`]) for Unix-host members,
+    /// the DOS attributes (`SetFileAttributesW`) for Windows-host members.
     ///
     /// Applied after the member's data (and its NTFS streams) are in place,
     /// so a read-only attribute cannot block the writes that follow. The
@@ -204,7 +236,7 @@ impl RarArchive {
     pub(super) fn apply_member_attributes(&self, hdr: &crate::model::FileHeader, dest_path: &Path) {
         #[cfg(unix)]
         if let crate::model::HostAttributes::UnixMode(mode) = hdr.host_attributes() {
-            apply_unix_mode(dest_path, mode);
+            apply_unix_mode(dest_path, mode, hdr.is_directory);
         }
         #[cfg(windows)]
         apply_windows_attributes(hdr, dest_path);
@@ -213,7 +245,168 @@ impl RarArchive {
             let _ = (hdr, dest_path);
         }
     }
+}
 
+/// Create `link` as a real NTFS junction (reparse tag
+/// `IO_REPARSE_TAG_MOUNT_POINT`) to `target`, which must be an absolute
+/// Windows path (a drive path, a `\\server\share` UNC path, or one already
+/// carrying the `\??\` NT prefix).
+///
+/// A junction is what WinRAR/UnRAR write for a stored redirect of type 3,
+/// and unlike a directory *symlink* it needs no
+/// `SeCreateSymbolicLinkPrivilege`, so an unprivileged extraction succeeds.
+/// The buffer layout follows UnRAR's `win32lnk.cpp` (`ReparseDataLength` = 4
+/// lengths + both NUL-terminated names, the substitute name recorded without
+/// its NUL and the print name starting past it).
+///
+/// Any failure (a relative target, an over-long path, a filesystem that
+/// refuses reparse points) returns an error and leaves nothing behind, so
+/// the caller can fall back to a directory symlink instead of losing the
+/// member.
+#[cfg(windows)]
+fn create_windows_junction(link: &Path, target: &str) -> std::io::Result<()> {
+    /// `MAXIMUM_REPARSE_DATA_BUFFER_SIZE`: the documented ceiling for
+    /// `FSCTL_SET_REPARSE_POINT` input.
+    const MAX_BUFFER: usize = 16 * 1024;
+    /// `IO_REPARSE_TAG_MOUNT_POINT` (from `winnt.h`; the enabled
+    /// `windows-sys` features do not carry it, and
+    /// `crates/rar-cli/src/bin/rar/links.rs` defines the same value).
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+    // A junction's substitute name must be an NT path. `read_link` returns
+    // the stored body verbatim, which is the `\??\`-prefixed spelling the
+    // writer captured (or a plain `C:\...` / `\\server\share` when the
+    // archive came from elsewhere); normalize the three accepted shapes and
+    // reject anything relative, which has no meaning as a mount point.
+    let (substitute, print) = if let Some(rest) = target.strip_prefix(r"\??\") {
+        let print = match rest.strip_prefix("UNC\\") {
+            Some(unc) => format!(r"\\{unc}"),
+            None => rest.to_string(),
+        };
+        (target.to_string(), print)
+    } else if let Some(unc) = target.strip_prefix(r"\\") {
+        // `\\server\share` -> `\??\UNC\server\share`.
+        (format!(r"\??\UNC\{unc}"), target.to_string())
+    } else if target.len() >= 3
+        && target.as_bytes()[1] == b':'
+        && matches!(target.as_bytes()[2], b'\\' | b'/')
+    {
+        (format!(r"\??\{target}"), target.to_string())
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "junction target is not an absolute Windows path",
+        ));
+    };
+
+    let substitute: Vec<u16> = substitute.encode_utf16().collect();
+    let print: Vec<u16> = print.encode_utf16().collect();
+    let substitute_bytes = (substitute.len() + 1) * 2; // NUL-terminated
+    let print_bytes = (print.len() + 1) * 2;
+    let data_length = 8 + substitute_bytes + print_bytes;
+    let total = 8 + data_length;
+    if total > MAX_BUFFER || data_length > u16::MAX as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "junction target is too long for a reparse point",
+        ));
+    }
+
+    // Little-endian throughout: every Windows target is little-endian.
+    let mut buffer = Vec::with_capacity(total);
+    buffer.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    buffer.extend_from_slice(&(data_length as u16).to_le_bytes());
+    buffer.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    buffer.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+    buffer.extend_from_slice(&((substitute.len() * 2) as u16).to_le_bytes());
+    buffer.extend_from_slice(&(substitute_bytes as u16).to_le_bytes()); // PrintNameOffset
+    buffer.extend_from_slice(&((print.len() * 2) as u16).to_le_bytes());
+    for unit in substitute.iter().chain(std::iter::once(&0)) {
+        buffer.extend_from_slice(&unit.to_le_bytes());
+    }
+    for unit in print.iter().chain(std::iter::once(&0)) {
+        buffer.extend_from_slice(&unit.to_le_bytes());
+    }
+    debug_assert_eq!(buffer.len(), total);
+
+    // A mount point is set on an existing, empty directory.
+    fs::create_dir(link)?;
+    if let Err(error) = set_reparse_point(link, &buffer) {
+        let _ = fs::remove_dir(link);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Apply a prepared reparse buffer to the directory `path` via
+/// `FSCTL_SET_REPARSE_POINT`.
+#[cfg(windows)]
+fn set_reparse_point(path: &Path, buffer: &[u8]) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    /// `FSCTL_SET_REPARSE_POINT` (`winioctl.h`).
+    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the access,
+    // share and flag values are the documented combination for opening a
+    // directory reparse point without following it.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0x8000_0000 | 0x4000_0000, // GENERIC_READ | GENERIC_WRITE
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut returned = 0u32;
+    // SAFETY: `handle` is a live handle from `CreateFileW`; `buffer` is a
+    // live slice and its exact length is passed; the output buffer is null
+    // with length 0, which is what `FSCTL_SET_REPARSE_POINT` requires.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_SET_REPARSE_POINT,
+            buffer.as_ptr().cast(),
+            buffer.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    let error = if ok == 0 {
+        Some(std::io::Error::last_os_error())
+    } else {
+        None
+    };
+    // SAFETY: `handle` came from `CreateFileW` and is closed exactly once
+    // here, on every path.
+    unsafe { CloseHandle(handle) };
+    match error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+impl RarArchive {
     /// Materialize a RAR5 file redirection (symlink, hardlink or file
     /// copy) at `dest_path`.
     pub(super) fn extract_redirection(
@@ -250,7 +443,18 @@ impl RarArchive {
                     let resolved = self.resolved_link_target(dest_dir, dest_path, &redir.target)?;
                     let is_dir = redir.redir_type == REDIR_WINDOWS_JUNCTION
                         || resolved.as_deref().is_some_and(Path::is_dir);
-                    if is_dir {
+                    if redir.redir_type == REDIR_WINDOWS_JUNCTION {
+                        // Recreate a stored junction as a real NTFS mount
+                        // point, like WinRAR/UnRAR: it needs no
+                        // SeCreateSymbolicLinkPrivilege, so an unprivileged
+                        // extraction succeeds. Fall back to a directory
+                        // symlink when the target is not an absolute
+                        // Windows path (or the buffer is refused), so the
+                        // member is still extracted.
+                        if create_windows_junction(dest_path, &redir.target).is_err() {
+                            std::os::windows::fs::symlink_dir(&redir.target, dest_path)?;
+                        }
+                    } else if is_dir {
                         std::os::windows::fs::symlink_dir(&redir.target, dest_path)?;
                     } else {
                         std::os::windows::fs::symlink_file(&redir.target, dest_path)?;

@@ -62,9 +62,10 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
 /// - trailing dots and spaces are stripped, so `".. "` opens as `".."` and a
 ///   name like `"report."` opens under a different name than it was written
 ///   with;
-/// - the legacy device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
-///   `LPT1`–`LPT9`) refer to devices regardless of any extension, so
-///   `"CON.txt"` writes to the console rather than to a file.
+/// - the legacy device names (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`,
+///   `CONOUT$`, `COM1`–`COM9`, `LPT1`–`LPT9`) refer to devices regardless of
+///   any extension or trailing dot/space, so `"CON.txt"` and `"CON .txt"`
+///   write to the console rather than to a file.
 ///
 /// All three are host hazards rather than archive-format hazards, so the
 /// check is compiled for Windows only — POSIX accepts these names (`:` in
@@ -78,11 +79,17 @@ fn component_is_ambiguous(component: &str) -> bool {
     if component.ends_with('.') || component.ends_with(' ') {
         return true;
     }
-    // `CON.txt` is the console just as `CON` is, so only the stem matters.
+    // `CON.txt` is the console just as `CON` is, so only the stem matters —
+    // and Win32 strips trailing dots and spaces *before* it tests the
+    // reserved names, so a stem of `"CON "` (from `CON .txt`) is the device
+    // too, as are the console/pipe names `CONIN$` and `CONOUT$`.
     let stem = component.split('.').next().unwrap_or(component);
-    let stem = stem.to_ascii_uppercase();
+    let stem = stem.trim_end_matches(['.', ' ']).to_ascii_uppercase();
     let bytes = stem.as_bytes();
-    if matches!(bytes, b"CON" | b"PRN" | b"AUX" | b"NUL") {
+    if matches!(
+        bytes,
+        b"CON" | b"PRN" | b"AUX" | b"NUL" | b"CONIN$" | b"CONOUT$"
+    ) {
         return true;
     }
     bytes.len() == 4
@@ -206,6 +213,15 @@ mod tests {
             "COM1",
             "com9",
             "LPT1.log",
+            // Win32 strips trailing dots and spaces *before* the reserved-name
+            // test, so the stem here is the device, not the literal name.
+            "CON .txt",
+            "NUL .log",
+            "aux  ",
+            "COM1 .txt",
+            // The console/pipe device names.
+            "CONIN$",
+            "conout$",
         ] {
             assert!(
                 component_is_ambiguous(component),
@@ -217,8 +233,10 @@ mod tests {
             );
         }
         // `con.txt.bak` is a device too (only the stem matters), so it is not
-        // in this list; `COM0` and `LPT10` are not reserved names.
-        for component in ["report", "COM", "COM0", "LPT10", "a.b"] {
+        // in this list; `COM0` and `LPT10` are not reserved names, and a
+        // stem that only *looks* like one after stripping is a plain name
+        // when the strip leaves something else (`CONX`).
+        for component in ["report", "COM", "COM0", "LPT10", "a.b", "CONX", "NULX.txt"] {
             assert!(
                 !component_is_ambiguous(component),
                 "{component:?} should be a plain name"

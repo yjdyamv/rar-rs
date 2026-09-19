@@ -33,6 +33,12 @@ simd = ["dep:wide"]
 [dev-dependencies]
 tempfile = "3"
 
+# The Unix attribute tests assert the same `geteuid() != 0` rule the
+# extraction path implements (official UnRAR's set-ID strip), so the test
+# and the implementation must read the same uid source.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
+
 [lints]
 workspace = true
 

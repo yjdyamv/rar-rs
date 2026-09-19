@@ -798,3 +798,85 @@ fn cli_junctions_use_the_official_type_label() {
         "the target must not be walked:\n{text}"
     );
 }
+
+/// A stored junction (redirect type 3) must be recreated as a real NTFS
+/// mount point, not as a directory *symlink*: creating a symlink needs
+/// `SeCreateSymbolicLinkPrivilege`, which ordinary users do not hold, so the
+/// old behavior failed to extract junctions for them. The extracted entry is
+/// checked through `FindFirstFileW`'s reparse tag, which distinguishes the
+/// two, and the link must still resolve to the archived target.
+#[cfg(windows)]
+#[test]
+fn cli_extracts_a_junction_as_a_real_mount_point() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, WIN32_FIND_DATAW};
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+    fn reparse_tag(path: &std::path::Path) -> u32 {
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+        let handle = unsafe { FindFirstFileW(wide.as_ptr(), &mut data) };
+        assert_ne!(handle, INVALID_HANDLE_VALUE, "FindFirstFileW failed");
+        unsafe { FindClose(handle) };
+        data.dwReserved0
+    }
+
+    let dir = make_temp_dir();
+    std::fs::create_dir(dir.path().join("real")).unwrap();
+    std::fs::write(dir.path().join("real/inner.txt"), b"inner").unwrap();
+    let status = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(dir.path().join("link"))
+        .arg(dir.path().join("real"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "mklink /J failed");
+    assert_eq!(
+        reparse_tag(&dir.path().join("link")),
+        IO_REPARSE_TAG_MOUNT_POINT,
+        "the source fixture must be a junction"
+    );
+
+    let archive = dir.path().join("junc.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-ol", "-idq"])
+        .arg(&archive)
+        .arg("link")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "archiving the junction must succeed");
+
+    let out = dir.path().join("out");
+    let status = std::process::Command::new(RAR_CLI)
+        // `-ola`: a junction's target is absolute, and the safe-path policy
+        // refuses absolute targets unless unsafe links were asked for (the
+        // same rule official UnRAR applies). The safety policy itself is
+        // covered by the `-ola` extraction tests elsewhere.
+        .args(["x", "-ola", "-idq"])
+        .arg(&archive)
+        .arg("--dest")
+        .arg(&out)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "extraction must succeed");
+
+    let extracted = out.join("link");
+    assert_eq!(
+        reparse_tag(&extracted),
+        IO_REPARSE_TAG_MOUNT_POINT,
+        "the extracted redirect must be a real NTFS mount point, not a symlink"
+    );
+    // The recreated junction must point at the archived target.
+    assert_eq!(
+        std::fs::read(extracted.join("inner.txt")).unwrap(),
+        b"inner",
+        "the extracted junction must resolve to the archived target"
+    );
+}
