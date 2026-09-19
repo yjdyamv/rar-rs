@@ -712,6 +712,30 @@ fn resolve(newest: usize, link: u32) -> usize {
     newest.wrapping_sub((newest as u32).wrapping_sub(link) as usize)
 }
 
+/// One finder query: the buffer being searched, the position to insert (the
+/// descent searches and inserts in one walk) and the three limits that bound
+/// it. `out` collects `(length, distance)` pairs with both strictly
+/// increasing.
+///
+/// The tree's `matches` / `matches_seeded` / `descent` and the chain form all
+/// walk this same tuple; bundling it stops every call site from spelling six
+/// positional arguments and keeps the seeded and unseeded forms visibly the
+/// same query.
+pub(crate) struct MatchQuery<'a> {
+    /// The whole searchable buffer; `pos + len_limit` must be readable.
+    pub input: &'a [u8],
+    /// The position being inserted and searched from.
+    pub pos: usize,
+    /// How far a match may be compared.
+    pub len_limit: usize,
+    /// Largest distance the decoder window can reach.
+    pub max_distance: usize,
+    /// Bound on the nodes visited (the tree's budget, the chain's length).
+    pub cut: usize,
+    /// Collected `(length, distance)` pairs, nearest distance per length.
+    pub out: &'a mut Vec<(u32, u32)>,
+}
+
 /// A binary-tree match finder, after LZMA's BT4 (ported from the `rars`
 /// project `codec/match_finder.rs`, MIT OR Apache-2.0).
 ///
@@ -871,22 +895,33 @@ impl TreeMatchFinder {
     /// node that matches the whole limit gives its place to the new
     /// position, since the two are interchangeable prefixes and the new one
     /// is nearer everything to come. `cut` bounds the nodes visited.
-    pub fn matches(
-        &mut self,
-        input: &[u8],
-        pos: usize,
-        len_limit: usize,
-        max_distance: usize,
-        cut: usize,
-        out: &mut Vec<(u32, u32)>,
-    ) {
+    pub fn matches(&mut self, q: MatchQuery<'_>) {
+        let MatchQuery {
+            input,
+            pos,
+            len_limit,
+            max_distance,
+            cut,
+            out,
+        } = q;
         if pos + Self::MIN_MATCH > input.len() {
             return;
         }
         let hash = Self::hash4(input, pos);
         let current = resolve(pos, self.head[hash]);
         self.head[hash] = pos as u32;
-        self.descent(input, pos, len_limit, max_distance, cut, out, current, None);
+        self.descent(
+            MatchQuery {
+                input,
+                pos,
+                len_limit,
+                max_distance,
+                cut,
+                out,
+            },
+            current,
+            None,
+        );
     }
 
     /// Like [`Self::matches`], but the first step's loads are supplied
@@ -897,31 +932,35 @@ impl TreeMatchFinder {
     /// has already inserted), so the descent is byte-identical to the
     /// serial form — this is the software-pipelined first step (see the
     /// batch-descent issue).
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn matches_seeded(
         &mut self,
-        input: &[u8],
-        pos: usize,
-        len_limit: usize,
-        max_distance: usize,
-        cut: usize,
-        out: &mut Vec<(u32, u32)>,
+        q: MatchQuery<'_>,
         current: usize,
         son_less: u32,
         son_greater: u32,
     ) {
-        if pos + Self::MIN_MATCH > input.len() {
-            return;
-        }
-        let hash = Self::hash4(input, pos);
-        self.head[hash] = pos as u32;
-        self.descent(
+        let MatchQuery {
             input,
             pos,
             len_limit,
             max_distance,
             cut,
             out,
+        } = q;
+        if pos + Self::MIN_MATCH > input.len() {
+            return;
+        }
+        let hash = Self::hash4(input, pos);
+        self.head[hash] = pos as u32;
+        self.descent(
+            MatchQuery {
+                input,
+                pos,
+                len_limit,
+                max_distance,
+                cut,
+                out,
+            },
             current,
             Some((son_less, son_greater)),
         );
@@ -981,18 +1020,15 @@ impl TreeMatchFinder {
     /// node never alias inside a window-sized walk), so no write sits
     /// between the load and its uses.
     #[inline]
-    #[allow(clippy::too_many_arguments)]
-    fn descent(
-        &mut self,
-        input: &[u8],
-        pos: usize,
-        len_limit: usize,
-        max_distance: usize,
-        cut: usize,
-        out: &mut Vec<(u32, u32)>,
-        mut current: usize,
-        mut seed: Option<(u32, u32)>,
-    ) {
+    fn descent(&mut self, q: MatchQuery<'_>, mut current: usize, mut seed: Option<(u32, u32)>) {
+        let MatchQuery {
+            input,
+            pos,
+            len_limit,
+            max_distance,
+            cut,
+            out,
+        } = q;
         // The two attachment points still waiting for a subtree, starting
         // as the new position's own child slots. Each step down hangs the
         // node just compared on one of them and moves that side into the
@@ -1258,16 +1294,25 @@ mod tests {
             let max_distance = pos.min(window);
             let len_limit = (data.len() - pos).min(127);
             let mut out_s = Vec::new();
-            serial.matches(&data, pos, len_limit, max_distance, 1000, &mut out_s);
-            let (current, less, greater) = seeded.seed_for(&data, pos);
-            let mut out_p = Vec::new();
-            seeded.matches_seeded(
-                &data,
+            serial.matches(MatchQuery {
+                input: &data,
                 pos,
                 len_limit,
                 max_distance,
-                1000,
-                &mut out_p,
+                cut: 1000,
+                out: &mut out_s,
+            });
+            let (current, less, greater) = seeded.seed_for(&data, pos);
+            let mut out_p = Vec::new();
+            seeded.matches_seeded(
+                MatchQuery {
+                    input: &data,
+                    pos,
+                    len_limit,
+                    max_distance,
+                    cut: 1000,
+                    out: &mut out_p,
+                },
                 current,
                 less,
                 greater,

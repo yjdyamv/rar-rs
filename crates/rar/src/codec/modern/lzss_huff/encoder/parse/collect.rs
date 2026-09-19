@@ -96,24 +96,26 @@ impl BlockMatches {
 ///
 /// Long-range candidates beyond the near window are folded in here: they
 /// do not depend on the prices, so collecting them once lets every parse
-/// pass replay the same answers. `lr` is `(table, near_max, anchor)` as in
-/// the lazy path, with the LR query slice being the chunk part of
-/// `combined` (which starts at `tail_len`); the probe only runs where the
+/// pass replay the same answers. `spec.lr` is `(table, near_max, anchor)` as
+/// in the lazy path, with the LR query slice being the chunk part of
+/// `combined` (which starts at `spec.tail_len`); the probe only runs where the
 /// tree found nothing useful (a good near match is never worse than a
 /// far one).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn collect_block_matches(
     finder: &mut match_finder::TreeMatchFinder,
     combined: &[u8],
     block: std::ops::Range<usize>,
-    tail_len: usize,
-    chain_len: usize,
-    max_match: usize,
-    window: usize,
-    lr: Option<(&match_finder::LongRange, usize, usize)>,
-    // Per-level dial: when the search drops to the recovery cadence.
-    miss_threshold: usize,
+    spec: super::BlockSearch<'_>,
 ) -> BlockMatches {
+    let super::BlockSearch {
+        tail_len,
+        chain_len,
+        miss_threshold,
+        limits,
+        lr,
+    } = spec;
+    let max_match = limits.max_match;
+    let window = limits.window;
     let span = block.end - block.start;
     let mut matches = BlockMatches {
         runs: Vec::with_capacity(span),
@@ -167,25 +169,27 @@ pub(super) fn collect_block_matches(
             match pending.take() {
                 Some((seed_pos, current, less, greater)) if seed_pos == pos => {
                     finder.matches_seeded(
-                        combined,
-                        pos,
-                        len_limit,
-                        max_distance,
-                        chain_len,
-                        &mut scratch,
+                        match_finder::MatchQuery {
+                            input: combined,
+                            pos,
+                            len_limit,
+                            max_distance,
+                            cut: chain_len,
+                            out: &mut scratch,
+                        },
                         current,
                         less,
                         greater,
                     );
                 }
-                _ => finder.matches(
-                    combined,
+                _ => finder.matches(match_finder::MatchQuery {
+                    input: combined,
                     pos,
                     len_limit,
                     max_distance,
-                    chain_len,
-                    &mut scratch,
-                ),
+                    cut: chain_len,
+                    out: &mut scratch,
+                }),
             }
             // The tree's internal ordering invariants can break when it is
             // reused across chunks (budget-limited descents against a dense

@@ -22,6 +22,7 @@ mod parse;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use chunked::EncodeSpec;
 #[cfg(feature = "parallel")]
 pub(crate) use chunked::encode_chunked_mt_with_progress;
 pub(crate) use chunked::encode_chunked_raw_with_lead;

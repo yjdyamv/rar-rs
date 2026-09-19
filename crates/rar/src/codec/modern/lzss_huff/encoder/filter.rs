@@ -178,17 +178,20 @@ pub fn encode_with_filters(
             find_matches_optimal(
                 &mut state,
                 chunk,
-                chain_len,
-                lazy_thresh,
-                max_match,
-                dict_size,
-                long_range,
-                None,
-                0,
-                variant,
-                OPTIMAL_PARSE_PASSES[level],
-                super::parse::COLLECT_MISS_THRESHOLD[level],
-                true,
+                super::parse::SequentialSearch {
+                    limits: super::parse::MatchLimits {
+                        max_match,
+                        window: dict_size,
+                        variant,
+                    },
+                    chain_len,
+                    passes: OPTIMAL_PARSE_PASSES[level],
+                    miss_threshold: super::parse::COLLECT_MISS_THRESHOLD[level],
+                    long_range,
+                    lr_shared: None,
+                    lr_anchor: 0,
+                    seed_tail: true,
+                },
             )
         } else {
             find_matches_with_tail(
@@ -317,14 +320,16 @@ pub fn encode_with_filters_mt(
     let mut state = EncoderState::default();
     encode_chunked_mt_with_progress(
         &transformed,
-        method,
-        dict_size_log,
-        DEFAULT_CHUNK_SIZE,
+        EncodeSpec {
+            method,
+            dict_size_log,
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            is_final: true,
+            variant,
+            lead: Some(&lead),
+        },
         &mut state,
         threads,
-        true,
-        variant,
-        Some(&lead),
         None,
         cancel,
     )

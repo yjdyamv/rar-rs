@@ -5,6 +5,7 @@
 //! compression-method byte (STORE/FASTEST..=BEST) into a call on the
 //! underlying raw `encode*_raw` machinery.
 
+pub(crate) use super::encoder::EncodeSpec;
 #[cfg(feature = "parallel")]
 pub(crate) use super::encoder::encode_chunked_mt_with_progress;
 pub(crate) use super::encoder::encode_chunked_raw_with_lead;

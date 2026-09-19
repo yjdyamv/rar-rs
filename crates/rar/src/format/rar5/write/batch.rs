@@ -323,14 +323,16 @@ fn prepare_data_entry(
                     };
                     crate::codec::lzss_huff::encode_chunked_mt_with_progress(
                         data,
-                        method,
-                        dsl,
-                        crate::codec::DEFAULT_CHUNK_SIZE,
+                        crate::codec::lzss_huff::EncodeSpec {
+                            method,
+                            dict_size_log: dsl,
+                            chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                            is_final: true,
+                            variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                            lead: None,
+                        },
                         &mut state,
                         ctx.threads,
-                        true,
-                        crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                        None,
                         Some(&mut cb),
                         ctx.cancel.as_deref(),
                     )?
@@ -409,14 +411,16 @@ fn prepare_data_entry(
             };
             crate::codec::lzss_huff::encode_chunked_mt_with_progress(
                 data,
-                method,
-                dsl,
-                crate::codec::DEFAULT_CHUNK_SIZE,
+                crate::codec::lzss_huff::EncodeSpec {
+                    method,
+                    dict_size_log: dsl,
+                    chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                    is_final: true,
+                    variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                    lead: None,
+                },
                 &mut state,
                 ctx.threads,
-                true,
-                crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                None,
                 Some(&mut cb),
                 ctx.cancel.as_deref(),
             )?

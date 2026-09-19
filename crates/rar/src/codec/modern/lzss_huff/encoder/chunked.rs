@@ -32,6 +32,94 @@ use crate::version::ArchiveVersion;
 /// the chunk size instead of the whole file.
 pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
+/// The encode dimensions a chunked call runs under: the compression method and
+/// dictionary, the chunking, the stream's finality and distance table, plus the
+/// filter lead-in the streaming writer prepends to the first chunk's symbol
+/// stream. These travel together from the public entry points down to
+/// [`encode_chunked_raw_inner`] / [`encode_chunked_mt_with_progress`], so they
+/// are one value rather than eight positional arguments each.
+///
+/// The progress callback is deliberately not a field: it is the only
+/// non-`Copy` member, so it stays a separate parameter and this stays a
+/// `Copy` value.
+#[derive(Clone, Copy)]
+pub(crate) struct EncodeSpec<'a> {
+    /// Compression method: 0 = STORE, 1..=5 = fastest..best.
+    pub method: u8,
+    /// Dictionary size log (`128 KiB << log`).
+    pub dict_size_log: u8,
+    /// Input chunk size; the symbol table and finder stay proportional to it.
+    pub chunk_size: usize,
+    /// Last call of one member: only then does the stream carry its end block.
+    pub is_final: bool,
+    /// RAR5 (64-entry) or RAR7/v70 (80-entry) distance table.
+    pub variant: ArchiveVersion,
+    /// Filter records of a filtered member, prepended to the first chunk's
+    /// symbol stream (or slice's, under `parallel`).
+    pub lead: Option<&'a [Symbol]>,
+}
+
+/// One multi-threaded wave's fixed parameters: everything every worker slice of
+/// the wave needs that is not per-slice geometry. Built once per slice by
+/// [`encode_chunked_mt_with_progress`] and read (never mutated) by the worker.
+#[cfg(feature = "parallel")]
+#[derive(Clone, Copy)]
+struct MtJob<'a> {
+    /// Hash-chain budget for the low-step tier.
+    chain_len: usize,
+    /// Lazy-matcher threshold for the low-step tier.
+    lazy_thresh: usize,
+    /// Candidates compared per position (the row-index tier's level dial).
+    depth: usize,
+    /// Shared read-only row index over the whole member (issue 15 step ③):
+    /// every MT slice parses against it, which is what makes a slice
+    /// self-sufficient. `None` selects the low-step chain tier (the fallback
+    /// for callers that do not have one — the sequential-quality probe and
+    /// tests).
+    index: Option<&'a super::parse::RowIndex>,
+    /// This slice carries the member's last block.
+    is_last_block_of_member: bool,
+    /// Filter records of a filtered member, prepended to the first slice's
+    /// symbol stream so they precede all output (member-relative positions).
+    lead_symbols: Option<&'a [Symbol]>,
+    /// Seed the lookbehind even when its sampled windows look random. The
+    /// incompressibility probe only measures whether the tail repeats *inside
+    /// itself*, which says nothing about how the slice relates to bytes from an
+    /// earlier member of a solid chain (or an earlier window). Skipping the
+    /// seed there leaves a hole: the near finder never sees those positions and
+    /// the long-range table rejects the same distances, because its `min_dist`
+    /// assumes the near finder covered them — cross-member duplicates then
+    /// silently stop compressing.
+    force_seed_tail: bool,
+}
+
+/// One multi-threaded worker slice: the buffer, the half-open range inside it,
+/// and the parse geometry every worker shares. Bundled because the three slice
+/// helpers ([`mt_slice_symbols_row_index`], [`mt_slice_symbols_low_step`],
+/// [`encode_mt_slice`]) carry the same ten values.
+#[cfg(feature = "parallel")]
+#[derive(Clone, Copy)]
+struct MtSlice<'a> {
+    /// The whole slice buffer (tail context + this slice's bytes).
+    data: &'a [u8],
+    /// Start of the slice inside `data`.
+    s0: usize,
+    /// End of the slice inside `data`.
+    e0: usize,
+    /// Absolute stream position of `s0` (the worker slices' long-range anchor).
+    entry_len: usize,
+    /// The shared, read-only long-range table.
+    lr_shared: &'a match_finder::LongRange,
+    /// Longest match the encoder may emit.
+    max_match: usize,
+    /// Dictionary size in bytes.
+    dict_size: usize,
+    /// Whether this level runs the long-range search at all.
+    long_range: bool,
+    /// RAR5 or RAR7 (v70) distance table.
+    variant: ArchiveVersion,
+}
+
 /// Encode raw data into RAR5/RAR7 compressed format. `variant` selects
 /// the RAR7 (v70) 80-entry distance code table (RAR5 uses 64).
 pub fn encode_raw(data: &[u8], method: u8, dict_size_log: u8, variant: ArchiveVersion) -> Vec<u8> {
@@ -77,7 +165,7 @@ pub fn encode_with_progress_raw(
 /// STORE when the result is not smaller than the input.
 ///
 /// `variant` selects the RAR7 (v70) distance code table.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // public API: the historical positional form
 pub fn encode_chunked_raw(
     data: &[u8],
     method: u8,
@@ -90,14 +178,16 @@ pub fn encode_chunked_raw(
 ) -> RarResult<Vec<u8>> {
     encode_chunked_raw_inner(
         data,
-        method,
-        dict_size_log,
-        chunk_size,
+        EncodeSpec {
+            method,
+            dict_size_log,
+            chunk_size,
+            is_final,
+            variant,
+            lead: None,
+        },
         state,
-        is_final,
         progress,
-        variant,
-        None,
     )
 }
 
@@ -106,48 +196,33 @@ pub fn encode_chunked_raw(
 /// symbol stream, so the records are read before any block output. Used by
 /// the streaming writer for per-window delta filter records while keeping
 /// the persistent encoder state across chunks/windows.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_chunked_raw_with_lead(
     data: &[u8],
-    method: u8,
-    dict_size_log: u8,
-    chunk_size: usize,
+    spec: EncodeSpec<'_>,
     state: Option<&mut EncoderState>,
-    is_final: bool,
     progress: Option<&mut dyn FnMut(u64, u64)>,
-    variant: ArchiveVersion,
-    lead: Option<&[Symbol]>,
 ) -> RarResult<Vec<u8>> {
-    encode_chunked_raw_inner(
-        data,
+    encode_chunked_raw_inner(data, spec, state, progress)
+}
+
+// Private entry point of the encoder. Everything that describes the stream
+// travels in `spec` (see [`EncodeSpec`]); only the progress callback and the
+// carried encoder state stay separate (the callback is not `Copy`, and the
+// state is borrowed mutably).
+fn encode_chunked_raw_inner(
+    data: &[u8],
+    spec: EncodeSpec<'_>,
+    state: Option<&mut EncoderState>,
+    mut progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> RarResult<Vec<u8>> {
+    let EncodeSpec {
         method,
         dict_size_log,
         chunk_size,
-        state,
         is_final,
-        progress,
         variant,
         lead,
-    )
-}
-
-// Private entry point of the encoder: one argument per encode dimension
-// (input, method, dictionary, chunking, solid state, finality, progress,
-// codec variant, solid lead-in). Bundling them into a struct would add a layer
-// to the hottest path for no behaviour change; the audit defers codec hot-path
-// restructuring to the breaking release.
-#[allow(clippy::too_many_arguments)]
-fn encode_chunked_raw_inner(
-    data: &[u8],
-    method: u8,
-    dict_size_log: u8,
-    chunk_size: usize,
-    state: Option<&mut EncoderState>,
-    is_final: bool,
-    mut progress: Option<&mut dyn FnMut(u64, u64)>,
-    variant: ArchiveVersion,
-    lead: Option<&[Symbol]>,
-) -> RarResult<Vec<u8>> {
+    } = spec;
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
     }
@@ -178,17 +253,22 @@ fn encode_chunked_raw_inner(
             find_matches_optimal(
                 state,
                 chunk,
-                chain_len,
-                lazy_thresh,
-                max_match,
-                dict_size,
-                long_range,
-                None,
-                0,
-                variant,
-                OPTIMAL_PARSE_PASSES[level],
-                super::parse::COLLECT_MISS_THRESHOLD[level],
-                true,
+                super::parse::SequentialSearch {
+                    limits: super::parse::MatchLimits {
+                        max_match,
+                        window: dict_size,
+                        variant,
+                    },
+                    chain_len,
+                    passes: OPTIMAL_PARSE_PASSES[level],
+                    miss_threshold: super::parse::COLLECT_MISS_THRESHOLD[level],
+                    long_range,
+                    // Sequential path: the state's own long-range table is
+                    // used and extended inside the parse.
+                    lr_shared: None,
+                    lr_anchor: 0,
+                    seed_tail: true,
+                },
             )
         } else {
             find_matches_with_tail(
@@ -244,7 +324,7 @@ fn encode_chunked_raw_inner(
 /// Multi-threaded encoding of one contiguous window of a member (see
 /// `encode_chunked_mt_with_progress`; this is the no-progress form).
 #[cfg(not(feature = "parallel"))]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // public API: the historical positional form
 pub fn encode_chunked_mt(
     data: &[u8],
     method: u8,
@@ -271,7 +351,7 @@ pub fn encode_chunked_mt(
 }
 
 #[cfg(feature = "parallel")]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // public API: the historical positional form
 pub fn encode_chunked_mt(
     data: &[u8],
     method: u8,
@@ -286,14 +366,16 @@ pub fn encode_chunked_mt(
     // never pass one, so this can only fail on an internal error.
     encode_chunked_mt_with_progress(
         data,
-        method,
-        dict_size_log,
-        chunk_size,
+        EncodeSpec {
+            method,
+            dict_size_log,
+            chunk_size,
+            is_final,
+            variant,
+            lead: None,
+        },
         seed,
         threads,
-        is_final,
-        variant,
-        None,
         None,
         None,
     )
@@ -319,20 +401,22 @@ pub fn encode_chunked_mt(
 /// filter records of a filtered member, which must be read before any
 /// output (their positions are member-relative).
 #[cfg(feature = "parallel")]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_chunked_mt_with_progress(
     data: &[u8],
-    method: u8,
-    dict_size_log: u8,
-    chunk_size: usize,
+    spec: EncodeSpec<'_>,
     seed: &mut EncoderState,
     threads: usize,
-    is_final: bool,
-    variant: ArchiveVersion,
-    lead_symbols: Option<&[Symbol]>,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> RarResult<Vec<u8>> {
+    let EncodeSpec {
+        method,
+        dict_size_log,
+        chunk_size,
+        is_final,
+        variant,
+        lead: lead_symbols,
+    } = spec;
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
@@ -444,26 +528,30 @@ pub(crate) fn encode_chunked_mt_with_progress(
                     let (s0, e0) = (bounds[k], bounds[k + 1]);
                     scope.spawn(move |_| {
                         let blocks = encode_mt_slice(
-                            data,
-                            s0,
-                            e0,
+                            MtSlice {
+                                data,
+                                s0,
+                                e0,
+                                entry_len,
+                                lr_shared: lr_ref,
+                                max_match,
+                                dict_size,
+                                long_range,
+                                variant,
+                            },
+                            &MtJob {
+                                chain_len,
+                                lazy_thresh,
+                                depth: row_depth,
+                                index: Some(row_index_ref),
+                                is_last_block_of_member: is_final && k + 1 == n,
+                                lead_symbols: (k == 0).then_some(lead_symbols).flatten(),
+                                // Only the first slice sees chain history as its
+                                // lookbehind; later slices look into this window.
+                                force_seed_tail: k == 0 && !tail_ref.is_empty(),
+                            },
                             tail_ref,
-                            lr_ref,
-                            entry_len,
-                            chain_len,
-                            lazy_thresh,
-                            max_match,
-                            dict_size,
-                            long_range,
-                            is_final && k + 1 == n,
-                            variant,
-                            (k == 0).then_some(lead_symbols).flatten(),
-                            Some(row_index_ref),
-                            row_depth,
                             state,
-                            // Only the first slice sees chain history as its
-                            // lookbehind; later slices look into this window.
-                            k == 0 && !tail_ref.is_empty(),
                         );
                         results_ref.lock().unwrap()[i] = Some(blocks);
                     });
@@ -581,22 +669,24 @@ pub(super) const MT_ROW_INDEX_DP_BLOCK: usize = super::parse::MT_DP_BLOCK_SIZE;
 /// passes; deeper levels beat sequential there instead (m5: 914,457 B against
 /// 921,710 B). The level's candidate depth is [`MT_ROW_INDEX_DEPTH`].
 #[cfg(feature = "parallel")]
-#[allow(clippy::too_many_arguments)]
 fn mt_slice_symbols_row_index(
     state: &mut EncoderState,
-    data: &[u8],
-    s0: usize,
-    e0: usize,
+    slice: MtSlice<'_>,
     index: &super::parse::RowIndex,
-    lr_shared: &match_finder::LongRange,
-    entry_len: usize,
     // Candidates compared per position; the MT tier's level dial.
     depth: usize,
-    max_match: usize,
-    dict_size: usize,
-    long_range: bool,
-    variant: ArchiveVersion,
 ) -> Vec<Symbol> {
+    let MtSlice {
+        data,
+        s0,
+        e0,
+        entry_len,
+        lr_shared,
+        max_match,
+        dict_size,
+        long_range,
+        variant,
+    } = slice;
     let lr_q = if long_range {
         // The row index reaches every byte of this buffer, so matches older than
         // the slice start are the sampled table's job: at `s0` it owns `s0` bytes
@@ -609,13 +699,14 @@ fn mt_slice_symbols_row_index(
     let mut last_length = state.last_length;
     let symbols = super::parse::windowed_priced_parse(
         data,
-        s0,
-        e0,
+        s0..e0,
         &mut dist_cache,
         &mut last_length,
-        max_match,
-        dict_size,
-        variant,
+        super::parse::MatchLimits {
+            max_match,
+            window: dict_size,
+            variant,
+        },
         lr_q,
         |pos, _cache, runs| index.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
     );
@@ -632,41 +723,28 @@ fn mt_slice_symbols_row_index(
 /// tree descent. That divergence is the accepted price for MT speed (see
 /// [`encode_chunked_mt`]).
 #[cfg(feature = "parallel")]
-#[allow(clippy::too_many_arguments)]
 fn encode_mt_slice(
-    data: &[u8],
-    s0: usize,
-    e0: usize,
+    slice: MtSlice<'_>,
+    job: &MtJob<'_>,
     seed_tail: &[u8],
-    lr_shared: &match_finder::LongRange,
-    entry_len: usize,
-    chain_len: usize,
-    lazy_thresh: usize,
-    max_match: usize,
-    dict_size: usize,
-    long_range: bool,
-    is_last_block_of_member: bool,
-    variant: ArchiveVersion,
-    // Filter records of a filtered member, prepended to the first slice's
-    // symbol stream so they precede all output (member-relative positions).
-    lead_symbols: Option<&[Symbol]>,
-    // Shared read-only row index over the whole member (issue 15 step ③): every
-    // MT slice parses against it, which is what makes a slice self-sufficient.
-    index: Option<&super::parse::RowIndex>,
-    // Candidates compared per position (the level dial); only the row-index
-    // branch reads it.
-    depth: usize,
     state: &mut EncoderState,
-    // Seed the lookbehind even when its sampled windows look random. The
-    // probe above only measures whether the tail repeats *inside itself*,
-    // which says nothing about how the slice relates to bytes that came from
-    // an earlier member of a solid chain (or an earlier window). Skipping the
-    // seed there leaves a hole: the near finder never sees those positions
-    // and the long-range table rejects the same distances, because its
-    // `min_dist` assumes the near finder covered them — cross-member
-    // duplicates then silently stop compressing.
-    force_seed_tail: bool,
 ) -> Vec<u8> {
+    let MtSlice {
+        data,
+        s0,
+        dict_size,
+        variant,
+        ..
+    } = slice;
+    let MtJob {
+        chain_len,
+        lazy_thresh,
+        depth,
+        index,
+        is_last_block_of_member,
+        lead_symbols,
+        force_seed_tail,
+    } = *job;
     // Near-window context: the closest bytes before this slice, seeded
     // with the entry tail when the slice starts at the buffer head.
     // The window cap matches the sequential path's `NEAR_WINDOW_MAX`, so
@@ -726,25 +804,9 @@ fn encode_mt_slice(
     // caller passes one; the chain tier below is the fallback for callers that
     // do not (the sequential-quality probe and tests).
     let mut symbols = if let Some(index) = index {
-        mt_slice_symbols_row_index(
-            state, data, s0, e0, index, lr_shared, entry_len, depth, max_match, dict_size,
-            long_range, variant,
-        )
+        mt_slice_symbols_row_index(state, slice, index, depth)
     } else {
-        mt_slice_symbols_low_step(
-            state,
-            data,
-            s0,
-            e0,
-            lr_shared,
-            entry_len,
-            chain_len,
-            lazy_thresh,
-            max_match,
-            dict_size,
-            long_range,
-            seed_tail,
-        )
+        mt_slice_symbols_low_step(state, slice, chain_len, lazy_thresh, seed_tail)
     };
     if let Some(lead) = lead_symbols {
         let mut joined = lead.to_vec();
@@ -776,21 +838,24 @@ fn encode_mt_slice(
 /// (already an accepted, documented divergence); the sequential path never
 /// reaches here.
 #[cfg(feature = "parallel")]
-#[allow(clippy::too_many_arguments)]
 fn mt_slice_symbols_low_step(
     state: &mut EncoderState,
-    data: &[u8],
-    s0: usize,
-    e0: usize,
-    lr_shared: &match_finder::LongRange,
-    entry_len: usize,
+    slice: MtSlice<'_>,
     chain_len: usize,
     lazy_thresh: usize,
-    max_match: usize,
-    dict_size: usize,
-    long_range: bool,
     seed_tail: bool,
 ) -> Vec<Symbol> {
+    let MtSlice {
+        data,
+        s0,
+        e0,
+        entry_len,
+        lr_shared,
+        max_match,
+        dict_size,
+        long_range,
+        variant: _,
+    } = slice;
     let tail_ctx = &state.tail;
     let tl = tail_ctx.len();
     let mut combined = Vec::with_capacity(tl + (e0 - s0));

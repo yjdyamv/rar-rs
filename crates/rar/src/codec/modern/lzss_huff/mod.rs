@@ -17,6 +17,7 @@ pub use decode::{
     TraceSymbol, analyze_stream, decode, decode_raw, decode_standalone,
     decode_standalone_to_writer, decode_to_writer, trace_stream,
 };
+pub(crate) use encode::EncodeSpec;
 #[cfg(feature = "parallel")]
 pub(crate) use encode::encode_chunked_mt_with_progress;
 pub(crate) use encode::encode_chunked_raw_with_lead;

@@ -581,14 +581,16 @@ pub(super) fn add_file_streaming(
             if work.len() >= MT_MIN && threads > 1 {
                 let packed = crate::codec::lzss_huff::encode_chunked_mt_with_progress(
                     work,
-                    method,
-                    dsl,
-                    crate::codec::DEFAULT_CHUNK_SIZE,
+                    crate::codec::lzss_huff::EncodeSpec {
+                        method,
+                        dict_size_log: dsl,
+                        chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                        is_final,
+                        variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                        lead: lead.as_deref(),
+                    },
                     state.get_or_insert_with(Default::default),
                     threads,
-                    is_final,
-                    crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                    lead.as_deref(),
                     None,
                     cancel,
                 )?;
@@ -609,14 +611,16 @@ pub(super) fn add_file_streaming(
                 let compressed = if offset == 0 && lead.is_some() {
                     lzss_huff::encode_chunked_raw_with_lead(
                         &work[offset..end],
-                        method,
-                        dsl,
-                        crate::codec::DEFAULT_CHUNK_SIZE,
+                        lzss_huff::EncodeSpec {
+                            method,
+                            dict_size_log: dsl,
+                            chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
+                            is_final: is_final && end >= work.len(),
+                            variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
+                            lead: lead.as_deref(),
+                        },
                         state.as_mut(),
-                        is_final && end >= work.len(),
                         None,
-                        crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                        lead.as_deref(),
                     )?
                 } else {
                     lzss_huff::encode_chunked(

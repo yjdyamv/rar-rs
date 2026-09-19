@@ -123,22 +123,22 @@ pub(crate) fn find_matches_with_tail(
 /// MT-only: the driver is `chunked::mt_slice_symbols_row_index`, which is
 /// compiled only with the `parallel` feature.
 #[cfg(feature = "parallel")]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn windowed_priced_parse<F>(
     combined: &[u8],
-    start: usize,
-    end: usize,
+    span: std::ops::Range<usize>,
     dist_cache: &mut [u32; DIST_CACHE_SIZE],
     last_length: &mut u32,
-    max_match: usize,
-    window: usize,
-    variant: ArchiveVersion,
+    limits: super::MatchLimits,
     lr: Option<(&match_finder::LongRange, usize, usize)>,
     mut emit: F,
 ) -> Vec<Symbol>
 where
     F: FnMut(usize, &[u32; DIST_CACHE_SIZE], &mut Vec<(u32, u32)>),
 {
+    let start = span.start;
+    let end = span.end;
+    let max_match = limits.max_match;
+    let variant = limits.variant;
     let mut symbols = Vec::with_capacity(end - start);
     let mut state = EncoderMatchState::new(*dist_cache, *last_length);
     let probe_cache = *dist_cache;
@@ -197,9 +197,7 @@ where
             let tokens = optimal_parse_tokens(
                 combined,
                 block_start..block_end,
-                max_match,
-                window,
-                variant,
+                limits,
                 None,
                 &matches,
                 state,
@@ -356,6 +354,13 @@ pub(crate) const MT_DP_BLOCK_SIZE: usize = 256 * 1024;
 /// history: `(long_range, near_max)` where `near_max` is the largest
 /// distance the near finder can produce (tail + chunk), so long-range
 /// hits are only considered beyond it.
+///
+/// The argument list keeps its `too_many_arguments` allow on purpose: unlike
+/// the block parser's clump, it mixes the two mutable decoder registers
+/// (`dist_cache` / `last_length`, borrowed as disjoint fields of the encoder
+/// state by both callers) with the search limits, so bundling what is left
+/// would have to move those registers into a struct and change the callers'
+/// data flow for one allow.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn find_matches_in_range(
     data: &[u8],
@@ -891,19 +896,19 @@ fn same_price_run_end(
 /// memory at the block start (the real encoder state, so cross-block cache
 /// reuse is priced correctly). Returns the chosen tokens as
 /// `(length, distance)` pairs, `(0, byte)` for literals.
-#[allow(clippy::too_many_arguments)]
 fn optimal_parse_tokens(
     combined: &[u8],
     block: std::ops::Range<usize>,
-    max_match: usize,
-    window: usize,
-    variant: ArchiveVersion,
+    limits: super::MatchLimits,
     prices: Option<&TokenPrices>,
     matches: &BlockMatches,
     initial: EncoderMatchState,
 ) -> Vec<(u32, u32)> {
     let start = block.start;
     let end = block.end;
+    let max_match = limits.max_match;
+    let window = limits.window;
+    let variant = limits.variant;
     let span = end - start;
 
     let mut price = vec![u32::MAX; span + 1];
@@ -1083,12 +1088,6 @@ fn optimal_parse_tokens(
     reversed
 }
 
-/// Convert a token stream into symbols with a live cache walk, counting
-/// symbol frequencies at the same time (the block writer counts them the
-/// same way, so prices from these frequencies are exact). Returns the
-/// symbols and the four frequency vectors. `state` is advanced, mirroring
-/// the decoder's cache transitions.
-#[allow(clippy::too_many_arguments)]
 /// Frequency vectors for the four Huffman tables, counted the same way the
 /// block writer counts them.
 type TokenFrequencies = (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>);
@@ -1096,6 +1095,11 @@ type TokenFrequencies = (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>);
 /// Symbols plus their frequency vectors, as produced by [`convert_tokens`].
 type ConvertedTokens = (Vec<Symbol>, TokenFrequencies);
 
+/// Convert a token stream into symbols with a live cache walk, counting
+/// symbol frequencies at the same time (the block writer counts them the
+/// same way, so prices from these frequencies are exact). Returns the
+/// symbols and the four frequency vectors. `state` is advanced, mirroring
+/// the decoder's cache transitions.
 fn convert_tokens(
     tokens: &[(u32, u32)],
     combined: &[u8],
@@ -1205,27 +1209,25 @@ fn prices_from_frequencies(
 /// unaffected — only the wasted fresh-tree seeding of a random tail is
 /// skipped. (The multi-threaded workers do not reach this function; they
 /// run the low-step chain tier in [`mt_slice_symbols_low_step`].)
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn find_matches_optimal(
     state: &mut EncoderState,
     chunk: &[u8],
-    chain_len: usize,
-    _lazy_thresh: usize,
-    max_match: usize,
-    window: usize,
-    long_range: bool,
-    // Multi-threaded path: a read-only shared long-range table plus the
-    // absolute stream anchor of `chunk` (workers query one shared table
-    // and never extend it). `None` uses (and extends) the state's own
-    // table, the sequential behaviour.
-    lr_shared: Option<&match_finder::LongRange>,
-    lr_anchor: usize,
-    variant: ArchiveVersion,
-    passes: usize,
-    // Per-level parse dial (see [`COLLECT_MISS_THRESHOLD`]).
-    miss_threshold: usize,
-    seed_tail: bool,
+    spec: super::SequentialSearch<'_>,
 ) -> Vec<Symbol> {
+    let super::SequentialSearch {
+        limits,
+        chain_len,
+        passes,
+        miss_threshold,
+        long_range,
+        lr_shared,
+        lr_anchor,
+        seed_tail,
+        ..
+    } = spec;
+    let max_match = limits.max_match;
+    let window = limits.window;
+    let variant = limits.variant;
     let tail_len = state.tail.len();
     let mut combined = Vec::with_capacity(tail_len + chunk.len());
     combined.extend_from_slice(&state.tail);
@@ -1293,7 +1295,14 @@ pub(crate) fn find_matches_optimal(
                 } else {
                     chain_len.min(4)
                 };
-                tree_finder.matches(&combined, pos, 4, tree_window, budget, &mut seed);
+                tree_finder.matches(match_finder::MatchQuery {
+                    input: &combined,
+                    pos,
+                    len_limit: 4,
+                    max_distance: tree_window,
+                    cut: budget,
+                    out: &mut seed,
+                });
             }
         }
     } else if state.combined_len > keep {
@@ -1323,6 +1332,20 @@ pub(crate) fn find_matches_optimal(
     let mut state_for_blocks = EncoderMatchState::new(dist_cache, last_length);
     let mut symbols: Vec<Symbol> = Vec::with_capacity(chunk.len());
 
+    // One block-search spec for the whole chunk: the two `parse_one_block`
+    // calls below (the tail block and the final one) differ only in range.
+    let block_spec = super::BlockSearch {
+        tail_len,
+        chain_len,
+        miss_threshold,
+        limits: super::MatchLimits {
+            max_match,
+            window,
+            variant,
+        },
+        lr,
+    };
+
     // Split the chunk into parse blocks by byte distribution.
     let mut splitter = BlockSplitter::new();
     let mut block_start = tail_len;
@@ -1336,16 +1359,10 @@ pub(crate) fn find_matches_optimal(
             let block_symbols = parse_one_block(
                 &combined,
                 block_range,
-                tail_len,
                 finder_kind,
                 &mut state_for_blocks,
-                chain_len,
-                max_match,
-                window,
-                lr,
-                variant,
+                block_spec,
                 passes,
-                miss_threshold,
             );
             symbols.extend(block_symbols);
             splitter = BlockSplitter::new();
@@ -1359,16 +1376,10 @@ pub(crate) fn find_matches_optimal(
         let block_symbols = parse_one_block(
             &combined,
             block_range,
-            tail_len,
             finder_kind,
             &mut state_for_blocks,
-            chain_len,
-            max_match,
-            window,
-            lr,
-            variant,
+            block_spec,
             passes,
-            miss_threshold,
         );
         symbols.extend(block_symbols);
     }
@@ -1393,33 +1404,19 @@ pub(crate) fn find_matches_optimal(
 /// pass before produced. The last pass's tokens are converted to symbols
 /// with the live cache state (which is advanced, so cross-block and
 /// cross-chunk cache reuse is exact).
-#[allow(clippy::too_many_arguments)]
 fn parse_one_block(
     combined: &[u8],
     block: std::ops::Range<usize>,
-    tail_len: usize,
     finder: &mut match_finder::TreeMatchFinder,
     state: &mut EncoderMatchState,
-    chain_len: usize,
-    max_match: usize,
-    window: usize,
-    lr: Option<(&match_finder::LongRange, usize, usize)>,
-    variant: ArchiveVersion,
+    spec: super::BlockSearch<'_>,
     passes: usize,
-    // Per-level dial (see [`COLLECT_MISS_THRESHOLD`]).
-    miss_threshold: usize,
 ) -> Vec<Symbol> {
-    let matches = collect_block_matches(
-        finder,
-        combined,
-        block.clone(),
-        tail_len,
-        chain_len,
-        max_match,
-        window,
-        lr,
-        miss_threshold,
-    );
+    let limits = spec.limits;
+    let max_match = limits.max_match;
+    let window = limits.window;
+    let variant = limits.variant;
+    let matches = collect_block_matches(finder, combined, block.clone(), spec);
 
     // Fast path: a block with no match candidates at all parses to pure
     // literals, deterministically — the pricing passes would price the
@@ -1505,16 +1502,7 @@ fn parse_one_block(
     }
 
     let initial = *state;
-    let mut tokens = optimal_parse_tokens(
-        combined,
-        block.clone(),
-        max_match,
-        window,
-        variant,
-        None,
-        &matches,
-        initial,
-    );
+    let mut tokens = optimal_parse_tokens(combined, block.clone(), limits, None, &matches, initial);
     for _ in 1..passes {
         let mut screen = *state;
         let (_, (nc, dc, ldc, rc)) =
@@ -1524,9 +1512,7 @@ fn parse_one_block(
         tokens = optimal_parse_tokens(
             combined,
             block.clone(),
-            max_match,
-            window,
-            variant,
+            limits,
             Some(&prices),
             &matches,
             initial,
