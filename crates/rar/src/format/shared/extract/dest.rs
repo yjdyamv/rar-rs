@@ -544,7 +544,7 @@ pub(crate) fn safe_dest_path(cx: &dyn Engine, dest_dir: &Path, name: &str) -> Ra
 
 /// [`Self::safe_dest_path`] with an explicit safe-path policy, for
 /// callers that resolve with options not installed in the read context
-/// (see `RarArchive::resolve_dest_path_with`).
+/// (see `members::resolve_dest_path_with`).
 pub(crate) fn safe_dest_path_with(
     _cx: &dyn Engine,
     dest_dir: &Path,
