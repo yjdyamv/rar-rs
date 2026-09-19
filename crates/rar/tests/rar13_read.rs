@@ -1,7 +1,8 @@
 //! RAR 1.3/1.4 read support (`RE~^` container): header parsing, stored and
 //! compressed members, solid chains, encryption, old-style multi-volume
 //! sets, SFX stubs and comments. Fixtures come from the `rars` fixture
-//! corpus (`tests/fixtures/rar13`, WTFPL-derived test data).
+//! corpus (`tests/fixtures/rar13`); see NOTICE for their redistribution
+//! status.
 
 use rar_rs::{ArchiveReader, OpenOptions};
 

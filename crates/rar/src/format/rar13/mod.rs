@@ -4,7 +4,7 @@
 //!
 //! The member payload uses the same `Unpack15` codec as the RAR 1.5
 //! family; the read/write sides are ported from `rars`' `rar13.rs`
-//! (WTFPL; see NOTICE).
+//! (MIT OR Apache-2.0; see NOTICE).
 
 pub(crate) mod create;
 mod extract;

@@ -1,5 +1,5 @@
 //! RAR 1.3/1.4 member and comment cipher (ported from the `rars` project's
-//! `crypto/rar13.rs`, WTFPL; see NOTICE).
+//! `crypto/rar13.rs`, MIT OR Apache-2.0; see NOTICE).
 //!
 //! A three-byte key drives a byte-at-a-time additive stream; every password
 //! character folds into the key and the stream advance, matching the

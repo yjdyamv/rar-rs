@@ -24,7 +24,9 @@
 //!
 //! ## License
 //!
-//! BSD-2-Clause. See LICENSE for details.
+//! The project's own contributions are BSD-2-Clause (see LICENSE). Portions
+//! ported from other projects keep their own terms; see NOTICE and
+//! THIRD_PARTY_LICENSES.md.
 
 // Role facades ([`ArchiveReader`] / [`ArchiveWriter`] / [`ArchiveEditor`]) and
 // the crate-internal `RarArchive` engine behind them (ADR 0006: the engine is

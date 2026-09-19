@@ -1,5 +1,5 @@
 //! RARVM bytecode interpreter (ported from the `rars` project's
-//! `codec/rarvm.rs`, WTFPL; see NOTICE).
+//! `codec/rarvm.rs`, MIT OR Apache-2.0; see NOTICE).
 //!
 //! The five standard RAR 3.x/4.x filters are recognized by bytecode
 //! fingerprint and run natively in `rar29.rs`; any other filter program

@@ -83,11 +83,20 @@
 
 ### P0 · 发布收口（硬门槛）
 
-- [ ] **许可与 SPDX**：确定仓库级 SPDX 表达式。待裁定的两处：① 上游 `rars`
-      仓库的 workspace metadata（MIT OR Apache-2.0）与它后来加入的 `COPYING`
-      （WTFPL）两者的冲突，即解码侧 WTFPL / 编码侧 MIT OR Apache-2.0 的来源；②
-      `recovery/legacy.rs` 声明了 rars 移植但缺许可行。逐文件出处清单见
-      [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)。
+- [x] **许可与 SPDX**（已定 2026-09-19）：仓库级 `license` 字段保持
+      `BSD-2-Clause`，它声明的是**本项目自有**贡献（根 `Cargo.toml` 的
+      `[workspace.package]`，三个 crate 继承，`crates/rar-napi/package.json`
+      同字段）。第三方移植部分**不折进该字段**，而是由 NOTICE 与
+      [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) 逐文件记录
+      （crate-license 的通行做法）：rars 移植为 MIT OR Apache-2.0，libarchive
+      派生为 BSD-2-Clause；使用者两套都要满足。 ① `rars`
+      侧无待裁定项：上游从未发布过 WTFPL（crates.io 所有版本均为 MIT OR
+      Apache-2.0，移植依据的 `c08a17b` 也只有该表达式；2026-07-13 短暂加过
+      一个“WTFPL + don't blame me”的 COPYING，非 WTFPL 正文，作者已于 2026-09-06
+      统一为 Apache-2.0），故树内 rars 移植全部声明 MIT OR Apache-2.0，
+      `LICENSES/WTFPL.txt` 已删。② `recovery/legacy.rs` 缺许可行已补。
+      剩下未做的只是**逐文件与上游对拍**（inventory 已注明目前是 in-tree claim
+      而非 verified copying）。
 - [ ] **打包与发布顺序**：`rar-rs`（0.9.0）已能 `cargo package` 并通过校验；
       `rar-cli` 依赖 workspace 内的 `rar-rs`，需先发布 `rar-rs`。三个 crate 的
       `readme` / `keywords` / `documentation` / `categories` 元数据已补齐

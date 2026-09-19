@@ -132,8 +132,11 @@ attribution and license boundaries,
 license families. Original project portions are licensed under BSD-2-Clause —
 see [LICENSE](LICENSE).
 
-The workspace's current `BSD-2-Clause` Cargo metadata is not intended to
-supersede terms attached to third-party portions. A final repository-wide SPDX
-expression remains pending the per-file provenance audit tracked in
-[PLAN.md](PLAN.md) (「下一步」P0); the metadata is deliberately unchanged until
-that review is complete.
+The repository-wide SPDX expression stays `BSD-2-Clause`, which states the
+project's **own** contributions (`Cargo.toml` `[workspace.package]`, inherited
+by all three crates and mirrored in `crates/rar-napi/package.json`). Portions
+derived from other projects keep their own terms instead of being folded into
+that field: the `rars`-derived files are `MIT OR Apache-2.0`, the
+libarchive-derived ones BSD-2-Clause. [NOTICE](NOTICE) and
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) record which files came from
+where, so a redistributor can satisfy both sets.

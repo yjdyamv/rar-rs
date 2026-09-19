@@ -6,6 +6,10 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
+# The project's own contributions are BSD-2-Clause (LICENSE). Portions ported
+# from other projects keep their own terms and are documented in NOTICE and
+# THIRD_PARTY_LICENSES.md rather than folded into this field, so a
+# redistributor has to read those as well.
 license = "BSD-2-Clause"
 repository = "https://codeberg.org/librar/rar-rs"
 description = "Pure-Rust library and tools for RAR 1.5-4.x, RAR5, and RAR7 archives"

@@ -1,7 +1,8 @@
 //! RAR 2.0–2.9 member decompressor — the legacy `unp_ver` 20/26 codec
 //! (`Rar!\x1a\x07\x00` container, RAR 2.0 through 2.9 era archives).
 //!
-//! Ported from the decode half of bitplane's `rars` (WTFPL) `codec/rar20.rs`.
+//! Ported from the decode half of bitplane's `rars` (MIT OR Apache-2.0)
+//! `codec/rar20.rs`.
 //! Like RAR3/4, a member is a sequence of LZ blocks with optional Huffman
 //! table refreshes; RAR 2.x adds *audio blocks* (bit 15 of the 16-bit block
 //! header) whose bytes are coded by per-channel Huffman tables over an

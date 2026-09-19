@@ -40,37 +40,25 @@ Portions from the `rars` project
 --------------------------------
 
 The RAR5 recovery-record codec
-(`crates/rar/src/recovery/rar50.rs`), the BLAKE2sp hash
+(`crates/rar/src/recovery/rar50/`), the BLAKE2sp hash
 (`crates/rar/src/format/rar5/blake2sp.rs`) and the RAR5 key-derivation / hash-key
 MAC patterns (`crates/rar/src/crypto/rar50.rs`) were ported from the `rars`
 project (https://github.com/bitplane/rars, crates.io `rars`) at upstream
-revision `c08a17b`. At that revision, the `rars` workspace declared
-`MIT OR Apache-2.0` in its Cargo metadata and did not yet contain its later
-WTFPL `COPYING` file. These portions therefore retain the upstream
-`MIT OR Apache-2.0` terms. Other project contributions by yjdyamv are
-licensed under BSD-2-Clause unless otherwise noted.
+revision `c08a17b`. Further `rars` portions followed: the automatic x86 filter
+scan (`crates/rar/src/codec/common/filters.rs`), the binary-tree match finder
+(`crates/rar/src/codec/common/match_finder.rs`, LZMA-style BT4), the optimal
+parse and block splitter, the E8/E8E9 x86 transform normalization, and the
+RAR 3.x/4.x, RAR 2.x and RAR 1.5 member decoders.
 
-Further `rars` portions were ported later: the automatic x86 filter scan
-(`crates/rar/src/codec/common/filters.rs`, `auto_x86_filter_ranges`), the binary-tree
-match finder (`crates/rar/src/codec/common/match_finder.rs`, LZMA-style BT4), the
-optimal parse and block splitter, the E8/E8E9 x86 transform normalization,
-and the RAR 3.x/4.x, RAR 2.x and RAR 1.5 member decoders. The definition-site
-notices currently identify `crates/rar/src/codec/legacy/rar29_encoder.rs` as
-MIT OR Apache-2.0, and identify the decode-side legacy codec ports in
-`legacy/rar15.rs`, `legacy/rar20.rs`, `legacy/rar29.rs`, and `legacy/ppmd.rs` as WTFPL. The `rars`
-workspace metadata declares `MIT OR Apache-2.0`, while a later `COPYING` file
-in that repository declares WTFPL with a no-blame clause; this notice does not
-treat those distinct statements as interchangeable. The file-level inventory
-of these in-tree notices (and the two gaps it exposed) is recorded in
-`THIRD_PARTY_LICENSES.md` under "File-level `rars` port notices"; diffing the
-upstream files themselves remains pending.
-
-The RAR5 key-derivation / hash-key MAC patterns in
-`crates/rar/src/crypto/rar50.rs` and the recovery-record codec in
-`crates/rar/src/recovery/rar50.rs` are `rars` ports under the same terms; they
-now carry their own provenance headers. `crates/rar/src/recovery/legacy.rs`
-states its `rars` port without a license line, which is listed as an open
-item in `THIRD_PARTY_LICENSES.md`.
+Every in-tree `rars` port, encode- and decode-side alike, states
+`MIT OR Apache-2.0` — what revision `c08a17b` declared and what crates.io lists
+for every published release. (A `COPYING` added upstream on 2026-07-13 briefly
+read "WTFPL licensed with 1 extra clause"; it was never reflected in the
+workspace metadata or a release, and the maintainer replaced it with Apache-2.0
+on 2026-09-06. No file here claims WTFPL.) Other project contributions by
+yjdyamv are licensed under BSD-2-Clause unless otherwise noted. The per-file
+inventory is in `THIRD_PARTY_LICENSES.md`; diffing the upstream files remains
+pending.
 
 The legacy fixture directories under `crates/rar/tests/fixtures/rar40/`
 (`rar300/`, `rar2/`, `rar154/`, `multivol/`, `rarvm/`) contain archive files

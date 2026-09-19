@@ -1,7 +1,7 @@
 //! RAR 1.3/1.4 container write.
 //!
 //! Header layout and member emission follow `rars`' `rar13.rs` write half
-//! (WTFPL; see NOTICE).
+//! (MIT OR Apache-2.0; see NOTICE).
 //!
 //! Members are compressed with the `Unpack15` encoder under the RAR 1.4
 //! token policy (old-distance tokens always considered, lazy matching only

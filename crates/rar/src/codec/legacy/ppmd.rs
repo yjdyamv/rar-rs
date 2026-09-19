@@ -1,6 +1,6 @@
 //! PPMd variant H codec (RAR 3.x/4.x m5 members), ported from bitplane's
-//! `rars` (WTFPL) `codec/ppmd.rs`, which is validated against genuine
-//! WinRAR archives. The decoder drives RAR4 reads and the encoder half is
+//! `rars` (MIT OR Apache-2.0) `codec/ppmd.rs`, which is validated against
+//! genuine WinRAR archives. The decoder drives RAR4 reads and the encoder half is
 //! used by [`crate::codec::legacy::rar29_encoder`] for m4/m5 member
 //! writes; the direct encoder/decoder tests live at the bottom of this
 //! file. The shared Suballocator + context model follow the RAR PPMd
@@ -1629,7 +1629,7 @@ impl RangeEncoder {
 // ── PpmdEncoder ──────────────────────────────────────────────────────────────
 
 /// PPMd variant-H block encoder (RAR 3.x/4.x m4/m5 members), ported from
-/// bitplane's `rars` (WTFPL) `codec/ppmd.rs`. The decoder's model is reused
+/// bitplane's `rars` (MIT OR Apache-2.0) `codec/ppmd.rs`. The decoder's model is reused
 /// as-is; [`PpmdDecoder::encode_symbol`] narrows the range coder instead of
 /// reading it, and every model update is shared with decoding.
 #[derive(Debug)]
