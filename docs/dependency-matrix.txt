@@ -1,0 +1,33 @@
+# Cross-layer references in crates/rar/src (one `from -> to` edge per
+# line; comments and test modules excluded; `(none)` = no outbound edge).
+# Checked by `tests/dependency_matrix.rs`; regenerate with
+# `UPDATE_DEPENDENCY_MATRIX=1 cargo test -p rar-rs --test dependency_matrix`.
+#
+# Rows come from lib.rs's `mod …;` declarations (directory modules by
+# name, top-level files by stem; `lib.rs` is the `(crate root)` row). The
+# documented order is `archive -> format -> engine -> {codec, crypto, fs,
+# model, options}` with `detect`/`version`/`vint`/`time`/`error` as
+# leaves; `recovery` sits above `format`. An edge that looks like a
+# violation of that order is a review event, not a snapshot update.
+#
+# layer              -> depends on
+archive            -> codec, crc32, crypto, detect, engine, error, format, fs, model, options, parallel, recovery, version, vint, write_progress
+codec              -> crc32, error, io_util, parallel, version
+crc32              -> (none)
+crypto             -> crc32, error, vint
+detect             -> (none)
+engine             -> codec, crypto, detect, error, fs, model, options, version, write_progress
+error              -> (none)
+features           -> (none)
+format             -> codec, crc32, crypto, detect, engine, error, fs, model, options, parallel, time, version, vint, write_progress
+fs                 -> error
+io_util            -> (none)
+model              -> (none)
+options            -> error, version
+parallel           -> (none)
+recovery           -> crc32, detect, error, format, fs, io_util, vint, write_progress
+time               -> (none)
+version            -> (none)
+vint               -> (none)
+wire               -> crypto, format, recovery, vint
+write_progress     -> (none)
