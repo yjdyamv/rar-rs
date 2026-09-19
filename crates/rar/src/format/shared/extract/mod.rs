@@ -47,8 +47,8 @@ impl RarArchive {
         if self.is_legacy() {
             return self.decode_rar4_at(idx);
         }
-        if self.is_solid_chain_member(idx) {
-            return self.decode_solid_through(idx);
+        if crate::format::rar5::extract::solid::is_solid_chain_member(self, idx) {
+            return crate::format::rar5::extract::solid::decode_solid_through(self, idx);
         }
         crate::format::rar5::extract::decode::decode_file_at(self, idx, None)
     }
@@ -63,8 +63,8 @@ impl RarArchive {
         if self.is_legacy() {
             return self.decode_rar4_to(idx, writer);
         }
-        if self.is_solid_chain_member(idx) {
-            return self.decode_solid_through_to(idx, writer);
+        if crate::format::rar5::extract::solid::is_solid_chain_member(self, idx) {
+            return crate::format::rar5::extract::solid::decode_solid_through_to(self, idx, writer);
         }
         crate::format::rar5::extract::decode::decode_file_to(self, idx, writer, None)
     }

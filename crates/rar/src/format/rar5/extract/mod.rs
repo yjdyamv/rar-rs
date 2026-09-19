@@ -12,7 +12,7 @@
 
 pub(crate) mod decode;
 pub(crate) mod open;
-mod solid;
+pub(crate) mod solid;
 pub(crate) mod verify;
 
 pub(crate) use decode::read_streams_with;

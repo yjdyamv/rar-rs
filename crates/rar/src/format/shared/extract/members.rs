@@ -260,7 +260,9 @@ impl RarArchive {
             return Ok(None);
         }
         for (i, e) in self.entries.iter().enumerate() {
-            if self.is_solid_chain_member(i) || e.chunks.len() != 1 {
+            if crate::format::rar5::extract::solid::is_solid_chain_member(self, i)
+                || e.chunks.len() != 1
+            {
                 return Ok(None);
             }
         }
@@ -404,13 +406,19 @@ impl RarArchive {
                 // root itself; the archived mode must not be applied to the
                 // caller's directory.
                 if dest_path.as_path() != dest {
-                    self.apply_member_attributes(&entry.header, &dest_path);
+                    crate::format::shared::extract::dest::apply_member_attributes(
+                        self,
+                        &entry.header,
+                        &dest_path,
+                    );
                 }
                 continue;
             }
             if let Some(redir) = parse_redirect_record(&entry.header.extra_data) {
                 if !self.read_ctx().extract_options.skip_links {
-                    self.extract_redirection(dest, &dest_path, &redir)?;
+                    crate::format::shared::extract::dest::extract_redirection(
+                        self, dest, &dest_path, &redir,
+                    )?;
                     report.record_written(dest_path);
                 }
                 continue;
@@ -537,7 +545,12 @@ impl RarArchive {
             let base = safe_name.rsplit('/').next().unwrap_or(&safe_name);
             dest_dir.join(base)
         } else {
-            self.safe_dest_path_with(dest_dir, &entry.header.name, options.safe_paths)?
+            crate::format::shared::extract::dest::safe_dest_path_with(
+                self,
+                dest_dir,
+                &entry.header.name,
+                options.safe_paths,
+            )?
         };
 
         // `-o-` (skip existing): members whose destination already exists
@@ -619,7 +632,11 @@ impl RarArchive {
             // itself; the archived mode must not be applied to the caller's
             // directory.
             if dest_path.as_path() != dest_dir {
-                self.apply_member_attributes(&entry.header, &dest_path);
+                crate::format::shared::extract::dest::apply_member_attributes(
+                    self,
+                    &entry.header,
+                    &dest_path,
+                );
             }
             return Ok(dest_path);
         }
@@ -631,7 +648,9 @@ impl RarArchive {
             if self.read_ctx().extract_options.skip_links {
                 return Ok(dest_path);
             }
-            let path = self.extract_redirection(dest_dir, &dest_path, &redir)?;
+            let path = crate::format::shared::extract::dest::extract_redirection(
+                self, dest_dir, &dest_path, &redir,
+            )?;
             report.record_written(path.clone());
             return Ok(path);
         }
@@ -662,13 +681,21 @@ impl RarArchive {
         // Restore mtime (best-effort), including the nanosecond fraction
         // from the FILE_TIME extra record when present.
         if crate::format::shared::entry_ext::file_header_has_mtime(&entry.header) {
-            self.apply_member_times(&entry.header, &dest_path);
+            crate::format::shared::extract::dest::apply_member_times(
+                self,
+                &entry.header,
+                &dest_path,
+            );
         }
         // Restore NTFS alternate data streams attached to this member
         // (no-op on non-Windows, like the reference extractor).
-        self.extract_member_streams(idx, &dest_path)?;
-        self.propagate_member_mark_of_the_web(&dest_path);
-        self.apply_member_attributes(&entry.header, &dest_path);
+        crate::format::shared::extract::dest::extract_member_streams(self, idx, &dest_path)?;
+        crate::format::shared::extract::dest::propagate_member_mark_of_the_web(self, &dest_path);
+        crate::format::shared::extract::dest::apply_member_attributes(
+            self,
+            &entry.header,
+            &dest_path,
+        );
         report.record_written(dest_path.clone());
         Ok(dest_path)
     }
