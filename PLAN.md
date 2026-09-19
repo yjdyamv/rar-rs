@@ -171,8 +171,9 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 - **RAR4 编辑全补**（ADR 0005）：头/块级操作 + 非 solid 块拷贝 + solid 整档
   repack；`-hp` 与分卷（`rn`/`ch`/`k`/注释）均已支持。
 - **命令面**：官方 `rar` 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt` 列表变体）。
-- **工程**：workspace 三 crate；CI fmt / clippy `-D warnings` / 测试 / cargo
-  deny / fuzz smoke + 定时官方互操作 job；七目标 fuzz；取消钩子；QO
+- **工程**：workspace 三 crate；CI 只做 fmt / cargo check / clippy `-D warnings`
+  / cargo deny / rustdoc /**测试不在 CI 里跑**（本地闸门，见
+  [`docs/testing.md`](docs/testing.md)）；七目标 fuzz；取消钩子；QO
   快路径；流式修复； 零填充分卷。
 
 ## 一致拒绝（别"修"）

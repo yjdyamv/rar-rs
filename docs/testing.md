@@ -17,8 +17,16 @@ cargo test --package rar-rs --lib -- archive::   # one module
 `cargo nextest run --workspace --all-features` also works, is roughly twice as
 fast (it parallelizes across test binaries instead of running them one after
 another) and prints a per-test timing report — the easiest way to find what got
-slow. It is a local convenience only: CI stays on plain `cargo test`, and read
-the `rarfiles_lst_lock` trap below before trusting it.
+slow. It is a local convenience only, and read the `rarfiles_lst_lock` trap
+below before trusting it.
+
+**This is the only test gate.** CI does not run tests (2026-09, at the owner's
+request: the WASI binding suite blocked a release on a non-reproducible
+`memory access out of bounds`, and a red run must mean a compile/lint failure,
+not a test flake). CI keeps fmt, the host-path guard, `cargo check`, clippy,
+`cargo deny` and rustdoc; everything under "Running" above is yours to run
+before tagging a release. The Linux half in one command:
+`bash scripts/wsl/ci-linux.sh` (WSL2 — it _is_ the Linux test gate now).
 
 ## The other two platforms
 
@@ -75,16 +83,17 @@ bash scripts/wsl/setup-node.sh         # Node 24 + npm mirror
 git clone /mnt/c/path/to/rar-rs ~/rar-rs   # ext4 target/ beats building there
 bash scripts/wsl/fetch-rarlab.sh       # official rar 6.23 / unrar 7.23
 cd ~/rar-rs
-bash scripts/wsl/ci-linux.sh           # CI's lint + interop + binding steps
+bash scripts/wsl/ci-linux.sh           # the Linux gate: checks + tests + interop + bindings
 bash scripts/wsl/stage12-linux.sh      # legacy streaming vs official unrar
 ```
 
-`ci-linux.sh [FROM] [TO]` mirrors the workflow step for step (default `1 19`),
-with CI's log-only plumbing as plain output: `1-13` the lint job (step 12 is the
-`cargo deny` gate, 13 the workspace tests), `14` official interop, `15-19` the
-binding job, `20` the heavy fuzz smoke (tags/schedule only). With the rarlab
-tools present it exports `SA_OFFICIAL_*`, so the interop suites run instead of
-skipping — including the binding test that otherwise reports
+`ci-linux.sh [FROM] [TO]` runs the Linux half from WSL2 (default `1 20`): `1-13`
+the checks and the workspace test suite (step 12 is the `cargo deny` gate, 13
+the tests), `14` official interop, `15-19` the binding builds and JS tests, `20`
+the optional fuzz smoke. It used to mirror the workflow step for step; CI no
+longer runs tests, so the script is now the Linux test gate itself. With the
+rarlab tools present it exports `SA_OFFICIAL_*`, so the interop suites run
+instead of skipping — including the binding test that otherwise reports
 `SA_OFFICIAL_UNRAR is not set` (59 passed, 0 skipped, instead of 58 + 1).
 
 Mirrors were picked from measurements on the author's box; re-measure before
@@ -167,9 +176,9 @@ dominate so you can filter them.
 | `...::mt_tests::sequential_solid_chain_random_shared_blocks`                | ~18 s  | three 13 MiB members against a 16 MiB dictionary                                                     |
 | everything else (~1200 tests)                                               | ~60 s  |                                                                                                      |
 
-**The first row is `#[ignore]`d on purpose, and no CI job runs it.** On the
-reference box it alone was 85% of the suite's wall clock, so it is a manual gate
-(not worth ~7 minutes on every weekly run):
+**The first row is `#[ignore]`d on purpose, and nothing runs it automatically.**
+On the reference box it alone was 85% of the suite's wall clock, so it is a
+manual gate:
 
 ```sh
 cargo test -p rar-rs --all-features -- --include-ignored   # default suite + the ~1.6 GiB codec guard

@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# Reproduce .github/workflows/CI.yml's Linux jobs locally (WSL2):
+# Run the Linux half of the project's gates locally (WSL2).
 #
-#     1-13  lint job    fmt (workspace + fuzz), host-path guard, cargo check
-#                       (workspace / no-default / wasm -D warnings / fuzz /
-#                       fuzz+fuzzing), clippy -D warnings (workspace, then
-#                       every rar-rs feature combination), the dependency
-#                       gate (cargo deny: advisories/licenses/sources), the
-#                       full workspace test suite (stale `rarfiles.lst`
-#                       removed first, failing test names echoed the way CI
-#                       annotates them), rustdoc -D warnings
-#       14  interop job official rar 6.23 + unrar 7.23 suites, driven with
-#                       SA_REQUIRE_OFFICIAL=1 so a missing tool fails loudly
-#  15-19  binding job   npm ci, native addon build + test, wasm addon build,
-#                       WASI loader patch + WASI-forced test
-#       20  heavy only  fuzz smoke loop (CI runs it on tags/schedule only)
+# CI does not run tests (see docs/testing.md), so this script *is* the Linux
+# test gate; the step list below is its own, not a mirror of the workflow:
+#
+#     1-13  checks        fmt (workspace + fuzz), host-path guard, cargo check
+#                         (workspace / no-default / wasm -D warnings / fuzz /
+#                         fuzz+fuzzing), clippy -D warnings (workspace, then
+#                         every rar-rs feature combination), the dependency
+#                         gate (cargo deny: advisories/licenses/sources), the
+#                         full workspace test suite (stale `rarfiles.lst`
+#                         removed first, failing test names echoed), rustdoc
+#       14  interop       official rar 6.23 + unrar 7.23 suites, driven with
+#                         SA_REQUIRE_OFFICIAL=1 so a missing tool fails loudly
+#  15-19  bindings      npm ci, native addon build + test, wasm addon build,
+#                         WASI loader patch + WASI-forced test
+#       20  heavy only    fuzz smoke loop
 #
 # Not covered: the cross-target binding matrix (needs zig/cargo-zigbuild), the
-# Windows-only CLI job (run it on Windows), and CI's log-only plumbing.
+# Windows-only CLI suite (run it on Windows), and CI's log-only plumbing.
 #
 # Usage: scripts/wsl/ci-linux.sh [FROM] [TO]      (defaults: 1 19)
 # Prereqs: scripts/wsl/setup-{apt,rust,node}.sh, a repo clone (REPO=~ by

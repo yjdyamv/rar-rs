@@ -15,12 +15,16 @@ env:
   ZIG_VERSION: '0.16.0'
   ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
   CARGO_ZIGBUILD_VERSION: '0.23.4'
-  # Full (release-grade) work — binding matrix builds/tests, fuzz smoke runs,
-  # rustdoc — runs on tags, the weekly schedule and manual dispatches. The
-  # per-push/PR run keeps only what catches a broken change fast: fmt, the
-  # host-path guard, cargo check/clippy, the workspace tests and the Windows
-  # CLI suite. A red push is then readable in ~6-8 minutes instead of 8-25.
-  RUN_HEAVY: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v') }}
+  # Release-grade work — the binding matrix builds and rustdoc — runs on tags
+  # and manual dispatches. A push/PR keeps only what catches a broken change
+  # fast: fmt, the host-path guard, cargo check/clippy and cargo-deny.
+  #
+  # Tests are NOT run here: they are a local gate (`cargo test --workspace
+  # --all-features`, see docs/testing.md). The owner asked for that in
+  # 2026-09 after the WASI binding suite blocked a release on a
+  # non-reproducible `memory access out of bounds`; a red CI run is now a
+  # compile/lint failure, never a test flake.
+  RUN_HEAVY: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
 'on':
   push:
     branches:
@@ -34,10 +38,6 @@ env:
       - '**/*.gitignore'
   pull_request:
   workflow_dispatch:
-  schedule:
-    # Weekly official-tool interop sweep (see the `interop` job). Scheduled
-    # workflows only run on the default branch.
-    - cron: '17 4 * * 1'
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -48,18 +48,19 @@ concurrency:
 # is published: the VS Code consumer downloads the compiled artifacts from
 # the GitHub Release assets (tag v*), SHA-256 pinned in its installer —
 # every release ships a SHA-256SUMS manifest for that.
-# The binding's JS tests run with `node --test` under crates/rar-napi.
+# The binding's JS tests run with `node --test` under crates/rar-napi; they are
+# a local gate, like the Rust suites.
 #
-# Trigger split (see `RUN_HEAVY`): pushes/PRs run `lint` + `windows-cli`
-# only; tags, the weekly schedule and manual dispatches additionally run the
-# binding build/test matrices, the fuzz smoke loop and rustdoc.
+# Trigger split (see `RUN_HEAVY`): every push/PR runs `lint`; tags and manual
+# dispatches additionally build the binding matrix and check rustdoc.
+# `release` (tags only) assembles the GitHub Release from those artifacts.
 #
 # This file must live at the repository ROOT: GitHub Actions only executes
 # .github/workflows/*.yml from the default branch root; the old copy under
 # crates/rar-napi/.github/workflows/ was never run.
 jobs:
   lint:
-    name: Lint + workspace tests
+    name: Lint + checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -141,28 +142,6 @@ jobs:
         env:
           RUSTFLAGS: --cfg fuzzing
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --features fuzzing --locked
-      - name: Fuzz smoke (standalone mutation loop)
-        if: env.RUN_HEAVY == 'true'
-        # Bounded run so the targets are exercised, not just compiled: the
-        # read-side targets are cheap, the write-side ones do real file I/O.
-        env:
-          # The smoke run exists to catch panics; a plain `--release` would
-          # compile the arithmetic/assert checks out, so force them back on
-          # for this step only.
-          CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: 'true'
-          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: 'true'
-          # A fixed seed would replay the same mutation sequence every run.
-          # `github.run_id` varies per run but stays deterministic, so a
-          # failure can be reproduced with the seed printed by the target.
-          FUZZ_SEED: ${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          for t in parse crypto recovery rev legacy; do
-            FUZZ_ITERATIONS=5000 cargo run --release --locked --manifest-path fuzz/Cargo.toml --bin "$t"
-          done
-          for t in write rewrite; do
-            FUZZ_ITERATIONS=500 cargo run --release --locked --manifest-path fuzz/Cargo.toml --bin "$t"
-          done
       - name: Clippy (workspace, all features and targets)
         run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
       - name: Clippy (rar-rs, every feature combination)
@@ -193,36 +172,6 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           arguments: --all-features --locked
-      - name: Cargo test (workspace)
-        # `--no-fail-fast`: a platform-specific failure in an early target
-        # must not hide failures in later targets, so one red run reports the
-        # whole list instead of revealing them one per push.
-        #
-        # A stale `rarfiles.lst` next to the binary (left by a killed run in a
-        # cached `target/`) would reorder the solid tests, so drop it first.
-        # Tee the output so the failing test names can be surfaced as check-run
-        # annotations: the raw job log needs repo-admin auth even on a public
-        # repository, while annotations are readable by anyone.
-        run: |
-          set -o pipefail
-          rm -f target/debug/rarfiles.lst
-          cargo test --workspace --all-features --locked --no-fail-fast 2>&1 \
-            | tee target/workspace-tests.log
-      - name: Annotate failing tests
-        if: failure()
-        # `--no-fail-fast` prints one `test <name> ... FAILED` line per slow
-        # check before the final summary; turn each into a check-run
-        # annotation so a red run names the failing test without log access.
-        run: |
-          grep -hE '^test .* \.\.\. FAILED$' target/workspace-tests.log 2>/dev/null \
-            | sed -E 's/^test (.*) \.\.\. FAILED$/::error::failing test: \1/' || true
-      - name: Official interop skip visibility
-        # The workspace test above runs this target with its output captured,
-        # hiding the gating helpers' SKIPPED markers. Replay just the cheap
-        # official_interop target with --nocapture so a green lint run cannot
-        # be read as official-tool coverage (the scheduled `interop` job runs
-        # it for real with SA_REQUIRE_OFFICIAL=1).
-        run: cargo test --workspace --all-features --locked --test official_interop -- --nocapture
       - name: Cargo doc (workspace)
         if: env.RUN_HEAVY == 'true'
         # `-D warnings` catches broken intra-doc links and malformed docs.
@@ -240,10 +189,6 @@ jobs:
         if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
         run: npx napi build --platform --release
-      - name: Test addon (native)
-        if: env.RUN_HEAVY == 'true'
-        working-directory: crates/rar-napi
-        run: npm test
       - name: Build WASM addon
         if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
@@ -252,123 +197,9 @@ jobs:
         if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
         run: node scripts/patch-wasi-loader.mjs
-      - name: Test addon (WASI forced)
-        if: env.RUN_HEAVY == 'true'
-        working-directory: crates/rar-napi
-        run: NAPI_RS_FORCE_WASI=error npm test
-  windows-cli:
-    name: CLI tests (Windows)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: actions/cache@v6
-        continue-on-error: true # transient service outages must not fail builds
-        with:
-          path: |
-            ~/.cargo/git/db/
-            ~/.cargo/registry/
-            target/
-          key: ${{ runner.os }}-cli-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Cargo test (rar-cli)
-        # The CLI's Windows-only paths (ReplaceFileW, registry SFX lookup)
-        # are never exercised by the ubuntu lint job.
-        run: cargo test -p rar-cli --locked
-      - name: Cargo test (rar-rs, Windows-only paths)
-        # quick_open_streams.rs, the Windows half of write_symlink_cycle.rs
-        # and rar5_erase_volume_errors.rs are #[cfg(windows)] and are
-        # compiled out of the ubuntu lint job.
-        run: cargo test -p rar-rs --locked
-      - name: WinRAR interop skip visibility
-        # Hosted runners have no WinRAR, so the suite self-skips. Run it with
-        # --nocapture so the log shows the SKIPPED markers instead of reading
-        # as if the interop ran; when WinRAR is present it runs for real.
-        run: cargo test -p rar-cli --locked --test winrar_interop -- --nocapture
-  interop:
-    name: Official rar/unrar interop (scheduled)
-    # Scheduled/manual only: the push/PR jobs must not depend on the rarlab
-    # network fetch, so the official-binary suites would always self-skip
-    # there. This job fetches the freeware console tools and runs them with
-    # SA_REQUIRE_OFFICIAL=1, turning "silently skipped" into a hard error.
-    # WinRAR itself is not freely installable on hosted runners, so the
-    # winrar_interop suite runs in the windows-cli job when present and
-    # prints visible SKIPPED markers otherwise.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    # The rarlab download is best-effort: a fetch failure is tolerated by
-    # the fetch step's own `continue-on-error` and the test step is gated on
-    # the fetch outcome (a skip warning, not a failure). Once the tools are
-    # present, however, an interop regression fails this job: no job-level
-    # `continue-on-error` masks the test step.
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: actions/cache@v6
-        continue-on-error: true # transient service outages must not fail builds
-        with:
-          path: |
-            ~/.cargo/git/db/
-            ~/.cargo/registry/
-            target/
-          key: ${{ runner.os }}-interop-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Fetch official RAR console tools
-        id: fetch
-        # Kept tolerant so a rarlab outage ends in a green job with an
-        # explicit skip notice, not a red scheduled run.
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/rarlab"
-          mkdir -p "$root"
-          # Two releases are needed: 7.23's UnRAR validates every archive we
-          # emit, while the RAR writer must be 6.23 — the official_interop
-          # suite drives `rar a -ma4` against 6.23-created RAR4 archives and
-          # 7.23 removed RAR4 creation (it rejects `-ma4`). Both tarballs
-          # extract a `rar/` directory, so unpack and rename one at a time.
-          curl -fsSL --retry 3 -o "$root/unrar723.tar.gz" \
-            "https://www.rarlab.com/rar/rarlinux-x64-723.tar.gz"
-          curl -fsSL --retry 3 -o "$root/rar623.tar.gz" \
-            "https://www.rarlab.com/rar/rarlinux-x64-623.tar.gz"
-          tar -xzf "$root/unrar723.tar.gz" -C "$root"
-          mv "$root/rar" "$root/rar723"
-          tar -xzf "$root/rar623.tar.gz" -C "$root"
-          mv "$root/rar" "$root/rar623"
-          for tool in "$root/rar623/rar" "$root/rar723/unrar"; do
-            if [[ ! -x "$tool" ]]; then
-              echo "::error::$tool missing from the rarlab tarball"
-              exit 1
-            fi
-          done
-          {
-            echo "rar=$root/rar623/rar"
-            echo "unrar=$root/rar723/unrar"
-            echo "sfx=$root/rar623/default.sfx"
-          } >> "$GITHUB_OUTPUT"
-      - name: Official rar/unrar interop tests
-        if: steps.fetch.outcome == 'success'
-        env:
-          SA_OFFICIAL_RAR: ${{ steps.fetch.outputs.rar }}
-          SA_OFFICIAL_UNRAR: ${{ steps.fetch.outputs.unrar }}
-          SA_OFFICIAL_SFX: ${{ steps.fetch.outputs.sfx }}
-          # A missing tool must fail the test instead of skipping it.
-          SA_REQUIRE_OFFICIAL: '1'
-        # --nocapture keeps the gating helpers' SKIPPED markers (and any
-        # SA_REQUIRE_* assertion message) visible in the job log. The legacy
-        # solid/store fallback target is gated on SA_OFFICIAL_UNRAR and
-        # covered here together with the RAR5/RAR4 interop suites.
-        run: >-
-          cargo test -p rar-rs --locked --test official_interop --test rewrite_tests
-          --test rar4_solid_store_fallback -- --nocapture
-      - name: Official interop skip notice
-        if: steps.fetch.outcome != 'success'
-        run: echo "::warning title=Official interop skipped::rarlab console tools could not be downloaded; the official-binary suites did not run."
   build:
     name: build - ${{ matrix.settings.target }} - node@24
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.settings.host }}
     strategy:
       fail-fast: false
@@ -487,7 +318,7 @@ jobs:
           if-no-files-found: error
   build-wasm:
     name: build - wasm32-wasip1-threads
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -528,110 +359,14 @@ jobs:
             crates/rar-napi/index.js
             crates/rar-napi/index.d.ts
           if-no-files-found: error
-  test-bindings:
-    name: Test bindings on ${{ matrix.settings.host }} (${{ matrix.settings.target }})
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-    needs:
-      - build
-    strategy:
-      fail-fast: false
-      matrix:
-        settings:
-          - host: windows-latest
-            target: x86_64-pc-windows-msvc
-            triple: win32-x64-msvc
-            architecture: x64
-          - host: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            triple: win32-arm64-msvc
-            architecture: arm64
-          - host: macos-latest
-            target: aarch64-apple-darwin
-            triple: darwin-arm64
-            architecture: arm64
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            triple: linux-x64-gnu
-            architecture: x64
-          - host: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            triple: linux-arm64-gnu
-            architecture: arm64
-    runs-on: ${{ matrix.settings.host }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Setup node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          architecture: ${{ matrix.settings.architecture }}
-          cache: npm
-          cache-dependency-path: crates/rar-napi/package-lock.json
-      - name: Install dependencies
-        working-directory: crates/rar-napi
-        run: npm ci
-      - name: Download artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: bindings-${{ matrix.settings.target }}
-          path: crates/rar-napi
-      - name: Verify addon filename matches loader expectation
-        working-directory: crates/rar-napi
-        run: |
-          node -e "
-          const fs = require('fs');
-          const f = fs.readdirSync('.').find((n) => n.endsWith('.node'));
-          if (!f) { console.error('no .node artifact'); process.exit(1); }
-          const expect = 'rar-rs-napi.${{ matrix.settings.triple }}.node';
-          if (f !== expect) { console.error('expected', expect, 'got', f); process.exit(1); }
-          console.log('ok:', f);
-          "
-        shell: bash
-      - name: Test addon
-        working-directory: crates/rar-napi
-        run: npm test
-        shell: bash
-  test-wasm:
-    name: Test WASI binding on ${{ matrix.os }}
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-    needs:
-      - build-wasm
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Setup node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: crates/rar-napi/package-lock.json
-      - name: Install dependencies
-        working-directory: crates/rar-napi
-        run: npm ci
-      - name: Download WASI artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: bindings-wasm32-wasip1-threads
-          path: crates/rar-napi
-      - name: Test addon (WASI forced)
-        working-directory: crates/rar-napi
-        run: NAPI_RS_FORCE_WASI=error npm test
-        shell: bash
   release:
     name: Release (${{ github.ref_name }})
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - lint
-      - windows-cli
       - build
-      - test-bindings
       - build-wasm
-      - test-wasm
     permissions:
       contents: write
     steps:
