@@ -133,7 +133,9 @@ pub(crate) fn extract_member_streams(
     }
     #[cfg(not(windows))]
     {
-        let _ = (idx, dest_path);
+        // The STM path is Windows-only; keep every parameter consumed so the
+        // Linux/wasm `-D warnings` builds stay clean.
+        let _ = (cx, idx, dest_path);
     }
     Ok(())
 }
@@ -171,7 +173,8 @@ pub(crate) fn propagate_member_mark_of_the_web(cx: &dyn Engine, dest_path: &Path
     }
     #[cfg(not(windows))]
     {
-        let _ = dest_path;
+        // MOTW is a Windows concept; keep both parameters consumed.
+        let _ = (cx, dest_path);
     }
 }
 
