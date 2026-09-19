@@ -61,24 +61,58 @@ fn rar50_does_not_import_the_legacy_families() {
     );
 }
 
-/// Every `use` line under `dir` that contains one of `forbidden`.
-fn use_lines_with(dir: &Path, forbidden: &[&str]) -> Vec<(String, String)> {
+/// Lines of every `.rs` file below `dir`, skipping two things that are not
+/// dependencies:
+///
+/// - comment lines (a doc-comment mention of `crate::format` is prose, not a
+///   dependency), and
+/// - the body of an inline `mod tests { ... }` block, plus every `tests.rs`
+///   file and `tests/` subdirectory. Test code may cross layers freely; these
+///   invariants describe the shipped code.
+///
+/// Scanning whole lines rather than `use` statements matters: a reference
+/// spelled inside an expression (`crate::format::rar4::create::f(..)`) is a
+/// dependency exactly like the import form, and the `use`-only form of this
+/// check silently missed several of them.
+fn dependency_lines_under(dir: &Path) -> Vec<(String, String)> {
     let mut sources = Vec::new();
     rust_sources_below(dir, &mut sources);
-    let mut offenders = Vec::new();
+    let mut out = Vec::new();
     for path in sources {
-        for line in std::fs::read_to_string(&path).unwrap().lines() {
+        let file = path
+            .strip_prefix(dir)
+            .expect("source below dir")
+            .display()
+            .to_string();
+        // Test-only code: the external module form (`mod tests;` ->
+        // `tests.rs`) and any `tests/` subdirectory.
+        if file.ends_with("tests.rs") || file.contains("tests/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read source");
+        for line in text.lines() {
             let trimmed = line.trim_start();
-            if !trimmed.starts_with("use ") {
+            // The inline form (`mod tests {`), conventionally the file tail.
+            if trimmed.starts_with("mod tests") && trimmed.ends_with('{') {
+                break;
+            }
+            if trimmed.starts_with("//") {
                 continue;
             }
-            for token in forbidden {
-                if line.contains(token) {
-                    offenders.push((
-                        path.strip_prefix(dir).unwrap().display().to_string(),
-                        line.trim().to_string(),
-                    ));
-                }
+            out.push((file.clone(), line.to_string()));
+        }
+    }
+    out
+}
+
+/// Every `crate::<layer>` reference under `dir`, as
+/// `(file, trimmed line, layer)`.
+fn layer_references(dir: &Path, layers: &[&str]) -> Vec<(String, String, String)> {
+    let mut offenders = Vec::new();
+    for (file, line) in dependency_lines_under(dir) {
+        for layer in layers {
+            if line.contains(&format!("crate::{layer}")) {
+                offenders.push((file.clone(), line.trim().to_string(), (*layer).to_string()));
             }
         }
     }
@@ -92,41 +126,30 @@ fn use_lines_with(dir: &Path, forbidden: &[&str]) -> Vec<(String, String)> {
 #[test]
 fn role_facades_stay_off_format_and_codec_internals() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let forbidden = [
-        "crate::format",
-        "crate::codec",
-        "crate::crypto",
-        "crate::recovery",
-    ];
-    let offenders = use_lines_with(&manifest_dir.join("src/archive"), &forbidden)
-        .into_iter()
-        .filter(|(file, _)| {
-            matches!(
-                file.as_str(),
-                "reader.rs" | "writer.rs" | "editor.rs" | "tests.rs"
-            )
-        })
-        .collect::<Vec<_>>();
+    let facades = ["reader.rs", "writer.rs", "editor.rs"];
+    let offenders = layer_references(
+        &manifest_dir.join("src/archive"),
+        &["format", "codec", "crypto", "recovery"],
+    )
+    .into_iter()
+    .filter(|(file, _, _)| facades.contains(&file.as_str()))
+    .collect::<Vec<_>>();
     assert!(
         offenders.is_empty(),
-        "role facades must not import format/codec internals: {offenders:?}"
+        "role facades must not reference format/codec/crypto/recovery: {offenders:?}"
     );
 }
 
-/// Filesystem and model policy are leaf layers: they must not import
-/// archive/format/codec internals (nothing above them).
+/// Filesystem and model policy are leaf layers: they must not reach archive,
+/// format, codec, crypto or recovery — nothing above them.
 #[test]
 fn fs_and_model_policy_do_not_depend_upward() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let forbidden = [
-        "crate::archive",
-        "crate::format",
-        "crate::codec",
-        "crate::crypto",
-        "crate::recovery",
-    ];
     for leaf in ["src/fs", "src/model"] {
-        let offenders = use_lines_with(&manifest_dir.join(leaf), &forbidden);
+        let offenders = layer_references(
+            &manifest_dir.join(leaf),
+            &["archive", "format", "codec", "crypto", "recovery"],
+        );
         assert!(
             offenders.is_empty(),
             "{leaf} must not depend upward: {offenders:?}"

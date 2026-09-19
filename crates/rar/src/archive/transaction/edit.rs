@@ -166,6 +166,7 @@ impl RarArchive {
                 &base,
                 false,
                 &self.volume_paths,
+                &crate::recovery::rev3::rev_name_belongs_to_set,
             ));
         }
         // A directory (or other non-file) at a victim path is a conflict:

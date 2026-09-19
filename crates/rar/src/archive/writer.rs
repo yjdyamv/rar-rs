@@ -182,21 +182,23 @@ pub enum SolidMode {
 pub struct WriterOptions {
     compression: ArchiveVersion,
     solid_mode: SolidMode,
-    quick_open: bool,
-    blake2: bool,
+    // The format-validated subset is read by `archive::create`'s
+    // `WriteOptionFlags`, which is the single seam both write surfaces use.
+    pub(super) quick_open: bool,
+    pub(super) blake2: bool,
     password: Option<String>,
-    encrypt_headers: bool,
-    recovery_percent: Option<u8>,
-    recovery_volumes_percent: Option<u8>,
-    recovery_volume_count: Option<u32>,
+    pub(super) encrypt_headers: bool,
+    pub(super) recovery_percent: Option<u8>,
+    pub(super) recovery_volumes_percent: Option<u8>,
+    pub(super) recovery_volume_count: Option<u32>,
     volume_size: Option<u64>,
-    dictionary_size: Option<DictionarySize>,
+    pub(super) dictionary_size: Option<DictionarySize>,
     save_ctime: bool,
     save_atime: bool,
     time_precision_seconds: bool,
     save_mtime: bool,
-    save_owner: bool,
-    save_streams: bool,
+    pub(super) save_owner: bool,
+    pub(super) save_streams: bool,
     thread_count: Option<ThreadCount>,
     filters: FilterOptions,
 }
@@ -423,22 +425,10 @@ impl WriterOptions {
             SolidMode::Disabled | SolidMode::Continuous => SolidReset::Continuous,
         };
         crate::options::validate_solid_reset(self.compression, solid_reset)?;
-        if self.compression.is_legacy() {
-            crate::format::rar4::create::validate_rar4_only(self.into())?;
-        }
-        if self.compression.is_rar13() {
-            crate::format::rar13::create::validate_rar13_only(
-                crate::format::rar13::create::Rar13WriteOptions {
-                    quick_open: self.quick_open,
-                    blake2: self.blake2,
-                    recovery_percent: self.recovery_percent,
-                    recovery_volumes_percent: self.recovery_volumes_percent,
-                    recovery_volume_count: self.recovery_volume_count,
-                    save_owner: self.save_owner,
-                    save_streams: self.save_streams,
-                    has_dictionary: self.dictionary_size.is_some(),
-                    encrypt_headers: self.encrypt_headers,
-                },
+        if self.compression.is_legacy() || self.compression.is_rar13() {
+            super::create::validate_write_options(
+                self.compression,
+                &super::create::WriteOptionFlags::from_writer(self),
             )?;
         }
         // A v50 archive accepts every dictionary size; sizes above 4 GiB
@@ -461,7 +451,7 @@ impl WriterOptions {
         let (dictionary_log, dictionary_bytes) = if self.compression.is_legacy() {
             (None, None)
         } else {
-            crate::format::rar5::create::dictionary_fields(v70, self.dictionary_size)
+            super::create::rar5_dictionary_fields(v70, self.dictionary_size)
         };
 
         Ok(CreateOptions {
@@ -488,18 +478,6 @@ impl WriterOptions {
             save_streams: self.save_streams,
             threads: self.thread_count.map(ThreadCount::get),
         })
-    }
-}
-
-impl From<&WriterOptions> for crate::format::rar4::create::Rar4WriteOptions {
-    fn from(options: &WriterOptions) -> Self {
-        Self {
-            quick_open: options.quick_open,
-            blake2: options.blake2,
-            save_owner: options.save_owner,
-            save_streams: options.save_streams,
-            has_dictionary: options.dictionary_size.is_some(),
-        }
     }
 }
 

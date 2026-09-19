@@ -283,7 +283,13 @@ fn erase_rar4_archive(archive: &mut RarArchive, deleted: usize) -> RarResult<Edi
         .to_path_buf();
     let base = volume_base_of(&archive.path);
     let mut retire = archive.volume_paths.clone();
-    for stale in stale_volume_paths(&parent, &base, true, &retire) {
+    for stale in stale_volume_paths(
+        &parent,
+        &base,
+        true,
+        &retire,
+        &crate::recovery::rev3::rev_name_belongs_to_set,
+    ) {
         if !retire.contains(&stale) {
             retire.push(stale);
         }

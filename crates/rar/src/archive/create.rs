@@ -352,6 +352,7 @@ impl RarArchive {
                     final_base,
                     self.is_legacy(),
                     &keep,
+                    &crate::recovery::rev3::rev_name_belongs_to_set,
                 );
                 let result = commit_files(parent, final_base, &install, &retire);
                 if result.is_ok() {
@@ -1038,4 +1039,104 @@ fn recovery_install_paths(
         .zip(names)
         .map(|(staged, name)| (staged.clone(), parent.join(name)))
         .collect())
+}
+
+// ── Write options: the one seam the format families are validated through ──
+
+/// The subset of write options a format family validates.
+///
+/// Both write surfaces build this: the typed facade
+/// ([`WriterOptions`](super::WriterOptions)) and the plain
+/// [`CreateOptions`](crate::options::CreateOptions). Keeping the mapping in one
+/// place is what stops the two surfaces from drifting, and it keeps the
+/// format-specific rules (`format::{rar4,rar13}::create`) off the facades.
+pub(super) struct WriteOptionFlags {
+    quick_open: bool,
+    blake2: bool,
+    recovery_percent: Option<u8>,
+    recovery_volumes_percent: Option<u8>,
+    recovery_volume_count: Option<u32>,
+    save_owner: bool,
+    save_streams: bool,
+    has_dictionary: bool,
+    encrypt_headers: bool,
+}
+
+impl WriteOptionFlags {
+    /// From the typed facade options.
+    pub(super) fn from_writer(options: &super::writer::WriterOptions) -> Self {
+        Self {
+            quick_open: options.quick_open,
+            blake2: options.blake2,
+            recovery_percent: options.recovery_percent,
+            recovery_volumes_percent: options.recovery_volumes_percent,
+            recovery_volume_count: options.recovery_volume_count,
+            save_owner: options.save_owner,
+            save_streams: options.save_streams,
+            has_dictionary: options.dictionary_size.is_some(),
+            encrypt_headers: options.encrypt_headers,
+        }
+    }
+
+    /// From the plain options struct.
+    pub(super) fn from_create(options: &crate::options::CreateOptions) -> Self {
+        Self {
+            quick_open: options.quick_open,
+            blake2: options.blake2,
+            recovery_percent: options.recovery_percent,
+            recovery_volumes_percent: options.recovery_volumes_percent,
+            recovery_volume_count: options.recovery_volume_count,
+            save_owner: options.save_owner,
+            save_streams: options.save_streams,
+            // The legacy pipeline picks its own per-member window, so either
+            // dictionary field would be silently ignored — reject both.
+            has_dictionary: options.dict_size_log.is_some() || options.dict_size_bytes.is_some(),
+            encrypt_headers: options.encrypt_headers,
+        }
+    }
+}
+
+/// Family-specific policy for the option set `flags` describes. The rules
+/// belong to the family that cannot express them, so this layer carries no
+/// duplicated rule set — it only routes.
+pub(super) fn validate_write_options(
+    version: crate::version::ArchiveVersion,
+    flags: &WriteOptionFlags,
+) -> RarResult<()> {
+    if version.is_legacy() {
+        crate::format::rar4::create::validate_rar4_only(
+            crate::format::rar4::create::Rar4WriteOptions {
+                quick_open: flags.quick_open,
+                blake2: flags.blake2,
+                save_owner: flags.save_owner,
+                save_streams: flags.save_streams,
+                has_dictionary: flags.has_dictionary,
+            },
+        )?;
+    }
+    if version.is_rar13() {
+        crate::format::rar13::create::validate_rar13_only(
+            crate::format::rar13::create::Rar13WriteOptions {
+                quick_open: flags.quick_open,
+                blake2: flags.blake2,
+                recovery_percent: flags.recovery_percent,
+                recovery_volumes_percent: flags.recovery_volumes_percent,
+                recovery_volume_count: flags.recovery_volume_count,
+                save_owner: flags.save_owner,
+                save_streams: flags.save_streams,
+                has_dictionary: flags.has_dictionary,
+                encrypt_headers: flags.encrypt_headers,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// RAR5 dictionary fields for the requested size. Dictionary mapping is owned
+/// by the RAR5 format module; legacy versions take no dictionary.
+pub(super) fn rar5_dictionary_fields(
+    v70: bool,
+    size: Option<super::writer::DictionarySize>,
+) -> (Option<u8>, Option<u64>) {
+    crate::format::rar5::create::dictionary_fields(v70, size)
 }

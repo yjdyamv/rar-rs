@@ -2156,5 +2156,14 @@ mod tests {
         assert_eq!(base(dir.path()), "set");
         assert!(rev_name_belongs_to_set(dir.path(), "set", rev_name));
         assert!(!rev_name_belongs_to_set(dir.path(), "set4", rev_name));
+
+        // Matching is ASCII case-insensitive, like the official tools on
+        // Windows, and a foreign base never matches.
+        assert!(rev_name_belongs_to_set(dir.path(), "set", "SET44_2_1.REV"));
+        assert!(!rev_name_belongs_to_set(
+            dir.path(),
+            "set4",
+            "other4_2_1.rev"
+        ));
     }
 }

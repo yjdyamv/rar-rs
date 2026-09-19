@@ -414,7 +414,13 @@ impl RarArchive {
             }
 
             let keep: Vec<PathBuf> = install.iter().map(|(_, f)| f.clone()).collect();
-            let retire = crate::fs::volume::stale_volume_paths(&parent, &base, false, &keep);
+            let retire = crate::fs::volume::stale_volume_paths(
+                &parent,
+                &base,
+                false,
+                &keep,
+                &crate::recovery::rev3::rev_name_belongs_to_set,
+            );
             crate::fs::atomic::commit_files(&parent, &base, &install, &retire)?;
             self.volume_paths = final_volumes;
             // Canonical padding can differ from the original name (an

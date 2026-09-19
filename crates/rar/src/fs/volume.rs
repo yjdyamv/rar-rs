@@ -155,11 +155,22 @@ fn part_recovery_base(name: &str) -> Option<&str> {
 /// `.rev` recovery volumes — RAR5 and legacy, the latter resolved by data
 /// volumes) of `base` are returned, so the new set's own staged temporaries
 /// never match.
+///
+/// `legacy_rev_owned` answers "does this `.rev` name belong to the set based
+/// at `base`?" for the RAR 1.5–4.x naming family. It is injected because the
+/// answer needs that family's `.rev` name grammar *and* the data-volume
+/// existence scoring that resolves ambiguous names (`set44_2_1.rev` reads as
+/// `set` + data 44 or `set4` + data 4) — knowledge owned by
+/// `recovery::rev3`, which this leaf module must not reach into. The caller
+/// (`archive`, which may depend on both) passes
+/// [`crate::recovery::rev3::rev_name_belongs_to_set`]. RAR5 `.rev` names need
+/// no such help.
 pub(crate) fn stale_volume_paths(
     parent: &Path,
     base: &str,
     rar4: bool,
     keep: &[PathBuf],
+    legacy_rev_owned: &dyn Fn(&Path, &str, &str) -> bool,
 ) -> Vec<PathBuf> {
     // A bare archive name has an empty `parent()`; it still means the current
     // directory, and the `keep` paths were built the same way, so compare by
@@ -189,8 +200,7 @@ pub(crate) fn stale_volume_paths(
         let matches = if rar4 {
             // Legacy data volumes plus their `.rev` recovery volumes: an
             // overwrite that drops `-rv` must retire the old parity files.
-            legacy_volume_base(name).as_deref() == Some(base)
-                || crate::recovery::rev3::rev_name_belongs_to_set(dir, base, name)
+            legacy_volume_base(name).as_deref() == Some(base) || legacy_rev_owned(dir, base, name)
         } else {
             // The old set's `.rev` recovery volumes go with it: they are
             // regenerated after the new data volumes commit.
@@ -208,6 +218,11 @@ pub(crate) fn stale_volume_paths(
 mod tests {
     use super::stale_volume_paths;
     use std::path::Path;
+
+    /// The RAR5 cases below never consult the injected legacy `.rev` verdict.
+    fn no_legacy_rev(_: &Path, _: &str, _: &str) -> bool {
+        false
+    }
 
     #[test]
     fn part_base_splits_at_the_last_part_segment() {
@@ -271,7 +286,7 @@ mod tests {
         std::fs::write(parent.join("other.part01.rar"), b"other").unwrap();
 
         let keep = vec![parent.join("set.part01.rar")];
-        let stale = stale_volume_paths(parent, "set", false, &keep);
+        let stale = stale_volume_paths(parent, "set", false, &keep, &no_legacy_rev);
         let names: Vec<String> = stale
             .iter()
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
@@ -288,43 +303,12 @@ mod tests {
         std::fs::write(parent.join("set.r01"), b"third").unwrap();
 
         let keep = vec![parent.join("set.rar")];
-        let stale = stale_volume_paths(parent, "set", true, &keep);
+        let stale = stale_volume_paths(parent, "set", true, &keep, &no_legacy_rev);
         let names: Vec<String> = stale
             .iter()
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["set.r00", "set.r01"]);
-    }
-
-    #[test]
-    fn rev_ownership_resolves_ambiguous_bases_and_case() {
-        let dir = tempfile::tempdir().unwrap();
-        let parent = dir.path();
-        for name in ["set4.rar", "set4.r00", "set4.r01", "set4.r02"] {
-            std::fs::write(parent.join(name), b"x").unwrap();
-        }
-        // `set44_2_1.rev` parses as `set` + data 44 or `set4` + data 4; the
-        // existing data volumes decide.
-        assert!(!crate::recovery::rev3::rev_name_belongs_to_set(
-            parent,
-            "set",
-            "set44_2_1.rev"
-        ));
-        assert!(crate::recovery::rev3::rev_name_belongs_to_set(
-            parent,
-            "set4",
-            "set44_2_1.rev"
-        ));
-        assert!(crate::recovery::rev3::rev_name_belongs_to_set(
-            parent,
-            "set4",
-            "SET44_2_1.REV"
-        ));
-        assert!(!crate::recovery::rev3::rev_name_belongs_to_set(
-            parent,
-            "set4",
-            "other4_2_1.rev"
-        ));
     }
 
     #[test]
@@ -343,7 +327,18 @@ mod tests {
         std::fs::write(parent.join("set.txt"), b"other").unwrap();
 
         let keep = vec![parent.join("set.rar"), parent.join("set.r00")];
-        let stale = stale_volume_paths(parent, "set", true, &keep);
+        // The legacy `.rev` verdict is injected; the grammar and the
+        // ambiguity scoring that produce it are asserted in `recovery::rev3`
+        // (see its `rev_name_belongs_to_set` tests). Here the verdict is a
+        // stand-in so this test stays a test of the scan's mechanism.
+        let claimed = [
+            "set.part2.rev",
+            "set2.rev",
+            "set3_2_1.rev",
+            "set.part3_2_1.rev",
+        ];
+        let owned = |_: &Path, _: &str, name: &str| claimed.contains(&name);
+        let stale = stale_volume_paths(parent, "set", true, &keep, &owned);
         let names: Vec<String> = stale
             .iter()
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())

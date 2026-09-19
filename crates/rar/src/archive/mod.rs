@@ -33,7 +33,6 @@ use std::path::{Path, PathBuf};
 
 use crate::crypto;
 use crate::error::{RarError, RarResult};
-use crate::format::rar4::create::Rar4WriteOptions;
 use crate::format::rar5::headers::{
     BlockCursor, main_header_locator_fields, parse_service_block_name,
     parse_service_recovery_percent, split_main_extra,
@@ -812,28 +811,14 @@ impl RarArchive {
         opts.validate()?;
         let is_rar4 = opts.compression.is_legacy();
         let is_rar13 = opts.compression.is_rar13();
-        if is_rar4 {
-            // The RAR4 container's own policy: options it cannot express are
-            // rejected by the format module that owns them, so this layer
-            // carries no duplicated RAR4 rule set (and reports the same
-            // `InvalidOption` error the typed `WriterOptions` surface does).
-            crate::format::rar4::create::validate_rar4_only(Rar4WriteOptions::from(&opts))?;
-        }
-        if is_rar13 {
-            crate::format::rar13::create::validate_rar13_only(
-                crate::format::rar13::create::Rar13WriteOptions {
-                    quick_open: opts.quick_open,
-                    blake2: opts.blake2,
-                    recovery_percent: opts.recovery_percent,
-                    recovery_volumes_percent: opts.recovery_volumes_percent,
-                    recovery_volume_count: opts.recovery_volume_count,
-                    save_owner: opts.save_owner,
-                    save_streams: opts.save_streams,
-                    has_dictionary: opts.dict_size_log.is_some() || opts.dict_size_bytes.is_some(),
-                    encrypt_headers: opts.encrypt_headers,
-                },
-            )?;
-        }
+        // Family-specific policy (options a container cannot express) is
+        // validated through the one seam both write surfaces share, so this
+        // layer carries no duplicated rule set and reports the same
+        // `InvalidOption` the typed `WriterOptions` surface does.
+        create::validate_write_options(
+            opts.compression,
+            &create::WriteOptionFlags::from_create(&opts),
+        )?;
         // Header encryption is supported for multi-volume archives: every
         // volume starts with the plaintext encryption header and all
         // subsequent blocks are `[IV][AES-256-CBC header]` (WinRAR -hp
@@ -995,22 +980,6 @@ fn stage_file(
 }
 
 /// Project the plain [`crate::options::CreateOptions`] struct onto the
-/// RAR4-only policy the legacy format module owns, so both write surfaces
-/// are checked by the same rule set.
-impl From<&crate::options::CreateOptions> for Rar4WriteOptions {
-    fn from(options: &crate::options::CreateOptions) -> Self {
-        Self {
-            quick_open: options.quick_open,
-            blake2: options.blake2,
-            save_owner: options.save_owner,
-            save_streams: options.save_streams,
-            // The legacy pipeline picks its own per-member window, so either
-            // dictionary field would be silently ignored — reject both.
-            has_dictionary: options.dict_size_log.is_some() || options.dict_size_bytes.is_some(),
-        }
-    }
-}
-
 impl Drop for RarArchive {
     fn drop(&mut self) {
         // Once finalization has been attempted, never re-enter it: a failed
