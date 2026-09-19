@@ -160,8 +160,7 @@ rename。链接目标同样过清洗与包含性校验：junction 重建为真 N
 solid 链同样走 chunk 级 MT（`encode_chunked_mt`）：窗口经共享 tail
 与长距离表延续， 只有解析层与顺序路径分歧（已文档化的小幅 ratio 差异）。非 solid
 成员各自独立窗口， `add_batch_parallel` 只在非 solid 时启用；RAR4 老编码器的
-solid 链保持串行。结论与 实测见
-[`issues/compression-perf/map.md`](issues/compression-perf/map.md) 的 issue 06
+solid 链保持串行。结论与实测见 [`../PLAN.md`](../PLAN.md)「性能」段的 06
 判决行。
 
 **Quick-open 与取消。** `open_quick` 只读主头 + QO 记录，列目录是 O(QO) 而非

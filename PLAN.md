@@ -10,8 +10,8 @@
 相关文档：术语 [`CONTEXT.md`](CONTEXT.md) · 模块图
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · 字节格式
 [`docs/FORMAT_RAR5_RAR7.html`](docs/FORMAT_RAR5_RAR7.html) · 性能议题
-[`docs/issues/compression-perf/map.md`](docs/issues/compression-perf/map.md) ·
-出处 [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)
+[`docs/issues/compression-perf/`](docs/issues/compression-perf/) · 出处
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)
 
 ## 待办
 
@@ -50,7 +50,39 @@
 - [ ] **issue 15 — 价格驱动解析提速**（2026-09-18 立项）：目标是**压缩速度**——
       给解析器补中间档，把每位置代价从更深的搜索换成更省的价格计算。默认档字节
       不动（比率是契约）。四个杠杆、上游事实与验收判据见
-      [`docs/issues/compression-perf/issues/15-fl2-zstd-parser-tiers.md`](docs/issues/compression-perf/issues/15-fl2-zstd-parser-tiers.md)。
+      [`docs/issues/compression-perf/15-fl2-zstd-parser-tiers.md`](docs/issues/compression-perf/15-fl2-zstd-parser-tiers.md)。
+
+**压缩性能契约（动解析器之前先读）**
+
+- **比率是契约**：任何提速必须让标准语料（text / mixed / xml / sparse +
+  random）的 packed 字节不变或变小。
+- **优先字节相同的快路径**，而不是启发式。
+- **先测再优化**：`mtprobe` / `ratiocheck` 示例是回归闸门，热点需先由探针确认。
+- **发射块策略只有一个 owner**：`EMITTED_BLOCK_SIZE` + `find_block_end_adaptive`
+  在 `parse.rs`。
+- **`-mt` 低步数搜索是已接受的取舍**（ratio 换速度），不是待修的 bug。
+
+**已否决方向（实测为负或结构不可行，别重试）**
+
+| #  | 方向                                | 判决                                                                       |
+| -- | ----------------------------------- | -------------------------------------------------------------------------- |
+| 07 | 字面量密集块跳过重定价              | 否决：闸门只在解析本来就很便宜处触发，却改变了 DLL 字节                    |
+| 10 | 2–3 字节短匹配                      | 否决：短匹配槽码长依赖频率 bootstrap，两遍定价无法安全复现，各变体都掉比率 |
+| 14 | 两制近存（近带 L3 驻留 + 远树重插） | 实测为负（seq −75%、mt8 −98%），废弃                                       |
+| 06 | 成员级 solid MT                     | 结构不可行（无法跨成员并行共享窗口）；chunk 级 MT 已落地                   |
+| 09 | BT4 字节级流水                      | 已到顶（首步 value-carry −3.6% 即全量）；再降步数只剩显式取舍项            |
+| 13 | 远带候选预算 `RAR_RS_FAR_BAND`      | 仅 seq opt-in 有效（−9% @ +0.22pp），非 mt8 解药；现休眠                   |
+
+已落地（别再重新论证）：01 matchless-block DP 快路径（字节相同）、02 collector
+fast-mode 门（`longest==0`，阈值 256）、03 delta 候选通道 + 采样预门、05
+流式路径 auto delta/x86、08 持久树跨 chunk 增长的损坏修复、11 BT4 首步
+value-carry （−3.6%）、12 MT 近窗对齐（已被 13 取代）。
+
+**剩余公开差距**：DLL 单线程解析约 6–8 s vs WinRAR 1.8 s（其中 mt8 7.5×，见
+issue 09）；xml m2/m3 +1.5%（解析差距，非块开销）；text64 MT 片间分歧（6554 vs
+seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
+的多轮头对头、寄存器 级 A/B）是**过程记录**，随 `map.md` 移出长期文档，需要时
+`git log -- docs/issues/compression-perf/` 找回。
 
 ### 暂缓（等决策，不自行推进）
 
@@ -169,10 +201,8 @@
 
 ## 归属（谁记录什么，别再重新论证）
 
-- **压缩与性能**的结论、负例与基线 →
-  [`docs/issues/compression-perf/map.md`](docs/issues/compression-perf/map.md)：
-  seq 与最优解析的字节契约不动；`-mt` 低步数搜索是**接受的取舍**；BT4
-  字节级流水、 FAR_BAND、两制近存等方向已实测为负例。
+- **压缩与性能**的契约、已否决方向与剩余差距 → 本文「性能」段：seq 与最优解析的
+  字节契约不动；`-mt` 低步数搜索是**接受的取舍**；按日期的实测过程在 git 历史。
 - **模块、分层与设计不变量**（有界内存/spill、安全提取、solid 与 MT、多卷
   journaled 提交）→ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 - **术语** → [`CONTEXT.md`](CONTEXT.md)；**字节格式** →

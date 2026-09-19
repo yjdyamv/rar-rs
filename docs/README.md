@@ -25,7 +25,7 @@
 | 现状 / 下一步 / 限制 / 一致拒绝 / 已知小差异  | [`../PLAN.md`](../PLAN.md)                                                                                             |
 | 磁盘格式（字节级）                            | [`FORMAT_RAR5_RAR7.html`](FORMAT_RAR5_RAR7.html)                                                                       |
 | 架构决策                                      | [`adr/`](adr/)                                                                                                         |
-| 压缩性能议题                                  | [`issues/compression-perf/map.md`](issues/compression-perf/map.md)                                                     |
+| 压缩性能议题与契约                            | [`issues/compression-perf/`](issues/compression-perf/) + [`../PLAN.md`](../PLAN.md)「性能」段                          |
 | 测试怎么跑 / 耗时                             | [`testing.md`](testing.md)                                                                                             |
 | fuzz 目标                                     | [`../fuzz/README.md`](../fuzz/README.md)                                                                               |
 | 法务与许可                                    | [`../NOTICE`](../NOTICE) · [`../THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md) · [`../LICENSES/`](../LICENSES/) |
@@ -39,11 +39,10 @@
   [0005 RAR4 编辑架构](adr/0005-rar4-edit-architecture.md) ·
   [0006 公开面收敛到角色门面](adr/0006-public-api-convergence.md) ·
   [0007 删除 `raw` feature](adr/0007-raw-feature-retired.md)
-- **议题**（`docs/issues/<feature>/`，只留未关闭的；关闭后结论并入 `map.md` 并删
-  文件）：[`compression-perf/map.md`](issues/compression-perf/map.md)（结论、基线、
-  open frontier）·
-  [`compression-perf/issues/`](issues/compression-perf/issues/)（04、 09、15）·
-  [`issues/rar4-recovery-volumes.md`](issues/rar4-recovery-volumes.md)
+- **议题**（`docs/issues/<feature>/`，只留未关闭的；关闭后**判决并入
+  [`../PLAN.md`](../PLAN.md)「性能」段**并删文件）：
+  [`compression-perf/`](issues/compression-perf/)（未关闭议题 04、09、15）·
+  [`rar4-recovery-volumes.md`](issues/rar4-recovery-volumes.md)
 - **规格**：[`rar4-creation-spec.md`](rar4-creation-spec.md) — RAR4
   创建行为与格式。
 
