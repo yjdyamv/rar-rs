@@ -3,7 +3,12 @@
 //! Mirrors the reference layout's `detect` module: locating the archive
 //! start (plain or self-extracting) lives here, not in the format modules.
 
-use crate::format::rar5::RAR5_SIGNATURE;
+/// The RAR5/RAR7 container signature (8 bytes, `Rar!\x1a\x07\x01\x00`).
+///
+/// The signature table's single owner: every other layer (including the
+/// RAR5 family modules and the recovery scanners) imports it from here, so
+/// the leaf never has to reach up into `format` for one constant.
+pub const RAR5_SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";
 
 /// The RAR 1.5–4.x container family signature (7 bytes, distinct from
 /// RAR5's 8-byte `Rar!\x1a\x07\x01\x00`).

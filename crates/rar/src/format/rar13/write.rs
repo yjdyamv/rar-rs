@@ -234,7 +234,7 @@ pub(crate) fn emit_rar13_main_header(cx: &mut dyn Engine) -> RarResult<()> {
     }
     let ctx = cx.write_ctx_mut();
     ctx.output.rar13_header_pending = false;
-    ctx.output.bytes_written = ctx.output.bytes_written.saturating_add(header.len() as u64);
+    cx.add_bytes_written(header.len() as u64);
     Ok(())
 }
 
@@ -256,7 +256,7 @@ pub(crate) fn add_rar13_data(
 
     let unpacked = data.len() as u64;
     let is_directory = name.ends_with('/');
-    let file_time = crate::format::rar4::write::unix_to_dos_time(mtime);
+    let file_time = crate::format::shared::legacy_time::unix_to_dos_time(mtime);
     if is_directory {
         let member = MemberHeader {
             name: &name,
@@ -272,7 +272,7 @@ pub(crate) fn add_rar13_data(
         return write_rar13_member(cx, &member, &[]);
     }
 
-    let file_crc = super::file_checksum(&data);
+    let file_crc = crate::format::shared::checksum::rolling_sum_u16(&data);
     let store_incompressible = !cx.write_ctx().solid.mode
         && crate::format::shared::write_ops::whole_member_is_incompressible(&data, level);
     let (payload, method) = if level == 0 || data.is_empty() || store_incompressible {
@@ -356,7 +356,7 @@ fn add_rar13_file_streaming(
     cx.check_cancel()?;
     super::create::ensure_member_size(file_size)?;
     emit_rar13_main_header(cx)?;
-    let file_time = crate::format::rar4::write::unix_to_dos_time(mtime);
+    let file_time = crate::format::shared::legacy_time::unix_to_dos_time(mtime);
 
     // Pass 1: the whole-member checksum, which the file header needs
     // before the payload can be copied.
@@ -503,7 +503,7 @@ fn add_rar13_file_streaming(
                 cx.report_progress(read, packed_size);
             }
             chunks.push(DataChunk {
-                volume_index: cx.write_ctx().output.current_volume.saturating_sub(1),
+                volume_index: cx.current_volume_index(),
                 data_offset,
                 packed_size,
                 crc32_val: None,
@@ -540,7 +540,7 @@ fn add_rar13_file_streaming(
                 };
                 let mut rolled = false;
                 loop {
-                    let used = cx.write_ctx().output.bytes_written;
+                    let used = cx.bytes_written();
                     if volume_size.saturating_sub(used) > header_len {
                         break;
                     }
@@ -557,7 +557,7 @@ fn add_rar13_file_streaming(
                     cx.start_next_volume_rar13()?;
                     rolled = true;
                 }
-                let used = cx.write_ctx().output.bytes_written;
+                let used = cx.bytes_written();
                 let available = volume_size - used - header_len;
                 let chunk_len = (packed_size - sent).min(available);
                 let split_after = sent + chunk_len < packed_size;
@@ -698,7 +698,7 @@ fn write_rar13_split_member(
         // next volume when the header no longer fits.
         let mut rolled = false;
         loop {
-            let used = cx.write_ctx().output.bytes_written;
+            let used = cx.bytes_written();
             if volume_size.saturating_sub(used) >= first_len {
                 break;
             }
@@ -743,7 +743,7 @@ fn write_rar13_split_member(
         };
         let mut rolled = false;
         loop {
-            let used = cx.write_ctx().output.bytes_written;
+            let used = cx.bytes_written();
             if volume_size.saturating_sub(used) > header_len {
                 break;
             }
@@ -760,7 +760,7 @@ fn write_rar13_split_member(
             cx.start_next_volume_rar13()?;
             rolled = true;
         }
-        let used = cx.write_ctx().output.bytes_written;
+        let used = cx.bytes_written();
         let available = volume_size - used - header_len;
         let chunk_len = (total - sent).min(available);
         let split_after = sent + chunk_len < total;
@@ -829,7 +829,7 @@ fn write_rar13_bytes(
     header: &[u8],
     payload: &[u8],
 ) -> RarResult<(usize, u64)> {
-    let volume_index = cx.write_ctx().output.current_volume.saturating_sub(1);
+    let volume_index = cx.current_volume_index();
     let data_offset = {
         let stream = cx.stream_mut()?;
         stream.write_all(header)?;
@@ -837,12 +837,7 @@ fn write_rar13_bytes(
         stream.write_all(payload)?;
         offset
     };
-    let ctx = cx.write_ctx_mut();
-    ctx.output.bytes_written = ctx
-        .output
-        .bytes_written
-        .saturating_add(header.len() as u64)
-        .saturating_add(payload.len() as u64);
+    cx.add_bytes_written((header.len() as u64).saturating_add(payload.len() as u64));
     Ok((volume_index, data_offset))
 }
 
@@ -854,7 +849,7 @@ fn push_rar13_entry(
 ) -> RarResult<()> {
     let data_offset = chunks.first().map_or(0, |chunk| chunk.data_offset);
     let packed_size = chunks.iter().map(|chunk| chunk.packed_size).sum();
-    cx.entries_mut().push(ArchiveEntry {
+    cx.push_entry(ArchiveEntry {
         header: crate::model::FileHeader {
             name: member.name.to_string(),
             unpacked_size: member.unpacked_size,

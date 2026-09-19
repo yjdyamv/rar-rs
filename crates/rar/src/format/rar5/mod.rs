@@ -25,8 +25,10 @@ pub(crate) mod payload;
 pub(crate) mod write;
 
 // ── Archive Signature ──────────────────────────────────────────────────────
-/// RAR5 magic number (8 bytes).
-pub const RAR5_SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";
+// The RAR5 magic lives in `crate::detect` (the signature table's single
+// owner, next to the RAR4/RAR13 signatures); this re-export keeps the
+// family-local path used across the RAR5 modules.
+pub(crate) use crate::detect::RAR5_SIGNATURE;
 
 // ── Block Types ────────────────────────────────────────────────────────────
 
@@ -119,6 +121,10 @@ pub const EXTRA_SERVICE_SUBDATA: u64 = 0x07;
 /// Service payloads are metadata, not member data (member data goes through
 /// the caller-configurable `ExtractOptions` limits), so one fixed ceiling
 /// covers all of them.
-pub const MAX_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+///
+/// Owned by the option layer (it is the default of
+/// `ExtractOptions::max_metadata_bytes`); re-exported here for the RAR5
+/// header parser.
+pub(crate) use crate::options::MAX_METADATA_BYTES;
 
 pub mod create;

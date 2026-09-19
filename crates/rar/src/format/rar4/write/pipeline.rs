@@ -182,7 +182,7 @@ fn emit_rar4_segment(
         stream.write_all(&block_bytes)?;
         written += block_bytes.len() as u64;
     }
-    this.write_ctx_mut().output.bytes_written += written;
+    this.add_bytes_written(written);
     Ok((data_offset, data.len() as u64))
 }
 
@@ -260,13 +260,13 @@ fn emit_rar4_split<'a>(
     );
     let mut chunks = Vec::new();
     let mut sent = 0u64;
-    let mut vol_index = this.write_ctx().output.current_volume - 1;
+    let mut vol_index = this.current_volume_index();
     let mut split_before = false;
     while sent < packed_size {
         // Roll to a volume with room for the header and the EOA.
         let mut rolled = false;
         loop {
-            let used = this.write_ctx().output.bytes_written;
+            let used = this.bytes_written();
             if volume_size.saturating_sub(used) > needed {
                 break;
             }
@@ -276,10 +276,10 @@ fn emit_rar4_split<'a>(
                 )));
             }
             this.start_next_volume()?;
-            vol_index = this.write_ctx().output.current_volume - 1;
+            vol_index = this.current_volume_index();
             rolled = true;
         }
-        let used = this.write_ctx().output.bytes_written;
+        let used = this.bytes_written();
         let available = volume_size - used - needed;
         let chunk_size = (packed_size - sent).min(available);
         let split_after = sent + chunk_size < packed_size;
@@ -380,7 +380,7 @@ fn push_rar4_entry(
     chunks: Vec<crate::model::DataChunk>,
 ) {
     let unp_ver = cx.write_ctx().solid.rar4_unp_ver;
-    cx.entries_mut().push(crate::engine::ArchiveEntry {
+    cx.push_entry(crate::engine::ArchiveEntry {
         header: crate::model::FileHeader {
             name,
             unpacked_size,
@@ -798,7 +798,7 @@ fn add_rar4_file_streaming(
                 let end = (pos + COPY).min(packed_size);
                 let chunk = source.read_range(pos, end)?;
                 cx.stream_mut()?.write_all(&chunk)?;
-                cx.write_ctx_mut().output.bytes_written += chunk.len() as u64;
+                cx.add_bytes_written(chunk.len() as u64);
                 pos = end;
                 cx.report_progress(pos, file_size);
             }
@@ -898,11 +898,10 @@ fn emit_pending_rar4_comment(cx: &mut dyn Engine) -> RarResult<()> {
             crate::format::rar4::write::encrypt_block_header(&block[..CMT_HEAD], password)?;
         stream.write_all(&ciphertext)?;
         stream.write_all(&block[CMT_HEAD..])?;
-        let ctx = cx.write_ctx_mut();
-        ctx.output.bytes_written += on_disk + (block.len() - CMT_HEAD) as u64;
+        cx.add_bytes_written(on_disk + (block.len() - CMT_HEAD) as u64);
     } else {
         stream.write_all(&block)?;
-        cx.write_ctx_mut().output.bytes_written += block.len() as u64;
+        cx.add_bytes_written(block.len() as u64);
     }
     Ok(())
 }
@@ -1286,7 +1285,7 @@ pub(crate) fn write_rar4_dir_entry(
     if let Some(volume_size) = cx.write_ctx().output.volume_size {
         let mut rolled = false;
         loop {
-            let used = cx.write_ctx().output.bytes_written;
+            let used = cx.bytes_written();
             if volume_size.saturating_sub(used) > 7 + hdr.len() as u64 {
                 break;
             }
@@ -1301,9 +1300,9 @@ pub(crate) fn write_rar4_dir_entry(
     }
     let stream = cx.stream_mut()?;
     stream.write_all(&hdr)?;
-    cx.write_ctx_mut().output.bytes_written += hdr.len() as u64;
+    cx.add_bytes_written(hdr.len() as u64);
     let head_crc = u16::from_le_bytes([hdr[0], hdr[1]]);
-    cx.entries_mut().push(ArchiveEntry {
+    cx.push_entry(ArchiveEntry {
         header: FileHeader {
             name: name.to_string(),
             unpacked_size: 0,

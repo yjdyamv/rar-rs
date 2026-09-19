@@ -26,9 +26,9 @@ pub use entry::{ArchiveEntry, BatchEntry};
 pub(crate) use entry::{BatchPrepareCtx, PreparedEntry};
 pub(crate) use plan::MemberPlan;
 pub(crate) use state::{
-    CompressionSettings, DecryptedPayload, LegacySolidEncoder, LocatorState, MetadataSettings,
-    Mode, OutputState, PendingCommit, Rar4Append, ReadState, SolidAppendEntry, SolidChain,
-    StreamRecord, WriteState,
+    CompressionSettings, DecryptedPayload, LegacyDecoder, LegacySolidEncoder, LocatorState,
+    MetadataSettings, Mode, OutputState, PendingCommit, Rar4Append, ReadState, SolidAppendEntry,
+    SolidChain, StreamRecord, WriteState,
 };
 
 /// Maximum accepted RAR5 dictionary-size log (4 GiB, the RAR5 format

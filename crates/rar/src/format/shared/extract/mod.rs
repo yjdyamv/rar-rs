@@ -41,6 +41,31 @@ pub(crate) fn supports_parallel_extract(cx: &dyn Engine) -> bool {
     !cx.is_legacy()
 }
 
+/// Maximum packed bytes accepted when the payload must be aggregated in
+/// memory. Bounded by the configured unpacked limit plus a small overhead,
+/// or a hard 8 GiB allocation guard when output is otherwise unlimited.
+///
+/// Family-neutral: the legacy readers enforce the same budget, so it lives
+/// with the shared extraction policy rather than in the RAR5 decoder.
+pub(crate) fn max_packed_bytes(cx: &dyn Engine) -> u64 {
+    cx.read_ctx()
+        .extract_options
+        .max_unpacked_bytes
+        .map(|u| u.saturating_add(1 << 20))
+        .unwrap_or(8 * 1024 * 1024 * 1024)
+}
+
+/// Replace a quick-open catalog with the fully scanned one before
+/// extraction. A quick-open catalog carries no "STM" service records, and
+/// only RAR5 has one — the legacy families always scan, so this is a no-op
+/// for them. The family reference stays in this dispatcher.
+pub(crate) fn ensure_full_catalog(cx: &mut dyn Engine) -> RarResult<()> {
+    if cx.is_legacy() {
+        return Ok(());
+    }
+    crate::format::rar5::extract::open::ensure_full_catalog(cx)
+}
+
 /// Decode member `idx` to memory, honoring the family's solid chains.
 pub(crate) fn decode_entry_at(cx: &mut dyn Engine, idx: usize) -> RarResult<Vec<u8>> {
     if cx.is_legacy() {

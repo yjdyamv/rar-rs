@@ -69,13 +69,57 @@ impl Engine for RarArchive {
         &self.entries
     }
 
-    fn entries_mut(&mut self) -> &mut Vec<ArchiveEntry> {
-        &mut self.entries
+    fn clear_catalog(&mut self) {
+        self.entries.clear();
+    }
+
+    fn replace_catalog(&mut self, entries: Vec<ArchiveEntry>) {
+        self.entries = entries;
     }
 
     fn reset_catalog_token(&mut self) -> RarResult<()> {
         self.read_ctx_mut().catalog_token = super::reader::allocate_catalog_token()?;
         Ok(())
+    }
+
+    fn push_entry(&mut self, entry: ArchiveEntry) {
+        self.entries.push(entry);
+    }
+
+    fn bytes_written(&self) -> u64 {
+        self.write_ctx().output.bytes_written
+    }
+
+    fn add_bytes_written(&mut self, bytes: u64) {
+        let ctx = self.write_ctx_mut();
+        ctx.output.bytes_written = ctx.output.bytes_written.saturating_add(bytes);
+    }
+
+    fn current_volume_index(&self) -> usize {
+        self.write_ctx().output.current_volume.saturating_sub(1)
+    }
+
+    fn record_quick_open_entry(&mut self, header_bytes: &[u8]) -> RarResult<()> {
+        if !self.write_ctx().locator.quick_open {
+            return Ok(());
+        }
+        let pos = self.stream_mut()?.stream_position()?;
+        self.write_ctx_mut()
+            .locator
+            .quick_open_entries
+            .push((pos, header_bytes.to_vec()));
+        Ok(())
+    }
+
+    fn begin_solid_member(&mut self) -> bool {
+        let chain_solid =
+            self.write_ctx().solid.mode && self.write_ctx().solid.encoder_state.is_some();
+        self.write_ctx_mut()
+            .solid
+            .encoder_state
+            .get_or_insert_with(Default::default)
+            .begin_member();
+        chain_solid
     }
 
     fn stream_mut(&mut self) -> RarResult<&mut Box<dyn ArchiveStream>> {

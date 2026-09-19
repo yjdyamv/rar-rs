@@ -12,11 +12,11 @@ use super::{
 };
 use crate::crypto;
 use crate::crypto::{ENCR_IV_SIZE, ENCR_PBKDF2_ITER_LOG};
+use crate::detect::RAR5_SIGNATURE;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::EndOfArchiveHeader;
 use crate::format::rar5::{
     ARCHIVE_FLAG_RECOVERY, ARCHIVE_FLAG_SOLID, ARCHIVE_FLAG_VOLUME, END_FLAG_NEXT_VOLUME,
-    RAR5_SIGNATURE,
 };
 use crate::fs::atomic::{
     commit_files, install_durable, parent_dir, read_write_create, recover_interrupted_commit,
@@ -835,7 +835,7 @@ impl RarArchive {
 
     fn write_rar4_signature(&mut self) -> RarResult<()> {
         let stream = self.stream.as_mut().unwrap();
-        stream.write_all(crate::format::rar4::write::RAR4_SIGNATURE)?;
+        stream.write_all(crate::detect::RAR4_SIGNATURE)?;
         Ok(())
     }
 
@@ -1134,7 +1134,7 @@ pub(super) fn validate_write_options(
 /// by the RAR5 format module; legacy versions take no dictionary.
 pub(super) fn rar5_dictionary_fields(
     v70: bool,
-    size: Option<super::writer::DictionarySize>,
+    size: Option<crate::options::DictionarySize>,
 ) -> (Option<u8>, Option<u64>) {
     crate::format::rar5::create::dictionary_fields(v70, size)
 }

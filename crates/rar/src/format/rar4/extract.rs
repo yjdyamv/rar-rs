@@ -31,7 +31,7 @@ fn is_rar29_codec(hdr: &FileHeader) -> bool {
 /// positioned right after the signature (SFX-aware); later volumes open
 /// fresh and each starts with its own 7-byte signature.
 pub(crate) fn open_read_rar4(cx: &mut dyn Engine) -> RarResult<()> {
-    cx.entries_mut().clear();
+    cx.clear_catalog();
     let mut scan = Rar4VolumeScan::default();
     let mut out = Vec::new();
 
@@ -63,7 +63,7 @@ pub(crate) fn open_read_rar4(cx: &mut dyn Engine) -> RarResult<()> {
     scan.finish()?;
     cx.set_archive_solid(archive_solid);
     cx.read_ctx_mut().legacy.new_numbering = new_numbering;
-    *cx.entries_mut() = out;
+    cx.replace_catalog(out);
     Ok(())
 }
 
@@ -182,7 +182,7 @@ pub(crate) fn rar4_decode_solid_through(
         }
 
         let mut decoder = cx.read_ctx_mut().legacy.decoder.take();
-        let max_packed_bytes = crate::format::rar5::extract::decode::max_packed_bytes(cx);
+        let max_packed_bytes = crate::format::shared::extract::max_packed_bytes(cx);
         let data = {
             let p = cx.parts();
             super::decode_member_bytes(
@@ -268,7 +268,7 @@ pub(crate) fn decode_rar4_to(
         return result;
     }
     let entry = cx.entries()[idx].clone();
-    let max_alloc_packed_bytes = crate::format::rar5::extract::decode::max_packed_bytes(cx);
+    let max_alloc_packed_bytes = crate::format::shared::extract::max_packed_bytes(cx);
     let max_stream_packed_bytes = max_stream_packed_bytes(cx);
     let (written, crc, rar13_checksum) = {
         let p = cx.parts();
@@ -304,7 +304,7 @@ fn rar4_decode_member(cx: &mut dyn Engine, idx: usize) -> RarResult<Vec<u8>> {
         return rar4_decode_solid_through(cx, idx);
     }
     let entry = cx.entries()[idx].clone();
-    let max_packed_bytes = crate::format::rar5::extract::decode::max_packed_bytes(cx);
+    let max_packed_bytes = crate::format::shared::extract::max_packed_bytes(cx);
     let p = cx.parts();
     super::decode_member_bytes(
         stream_mut(p.stream)?,
@@ -323,7 +323,7 @@ fn rar4_decode_member(cx: &mut dyn Engine, idx: usize) -> RarResult<Vec<u8>> {
 /// Verify a member's CRC32 (or RAR 1.3/1.4 checksum) against its header.
 fn rar4_verify_crc(hdr: &FileHeader, data: &[u8]) -> RarResult<()> {
     let actual = if hdr.uses_rar13_checksum() {
-        u32::from(crate::format::rar13::file_checksum(data))
+        u32::from(crate::format::shared::checksum::rolling_sum_u16(data))
     } else {
         super::member_crc(data)
     };

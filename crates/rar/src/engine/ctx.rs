@@ -113,13 +113,41 @@ pub(crate) trait Engine {
 
     /// The member catalog built so far, in archive order.
     fn entries(&self) -> &[ArchiveEntry];
-    /// Mutable member catalog.
-    fn entries_mut(&mut self) -> &mut Vec<ArchiveEntry>;
+    /// Drop every catalog entry (a scan rebuilds it from scratch).
+    fn clear_catalog(&mut self);
+    /// Replace the whole catalog (a scan publishes its result at once).
+    fn replace_catalog(&mut self, entries: Vec<ArchiveEntry>);
     /// Rotate the catalog identity token so previously issued [`EntryId`]s
     /// are rejected (see [`ReadState::catalog_token`]).
     ///
     /// [`EntryId`]: crate::EntryId
     fn reset_catalog_token(&mut self) -> RarResult<()>;
+    /// Append one emitted member to the catalog.
+    ///
+    /// The single append point: the writer pipelines must not push into the
+    /// catalog themselves, so "archive order" and the payload-offset identity
+    /// used by [`EntryId`](crate::EntryId) have one owner.
+    fn push_entry(&mut self, entry: ArchiveEntry);
+
+    // ── Volume accounting ─────────────────────────────────────────────────
+
+    /// Bytes already written to the current volume (the budget the family
+    /// writers measure their next header/payload against).
+    fn bytes_written(&self) -> u64;
+    /// Account `bytes` written to the current volume.
+    fn add_bytes_written(&mut self, bytes: u64);
+    /// Zero-based index of the volume currently being written.
+    fn current_volume_index(&self) -> usize;
+    /// Record a member header in the quick-open locator, when quick-open is
+    /// enabled, at the current stream position. No-op otherwise.
+    fn record_quick_open_entry(&mut self, header_bytes: &[u8]) -> RarResult<()>;
+
+    // ── Solid chain ───────────────────────────────────────────────────────
+
+    /// Seed the RAR5 solid-chain encoder state when absent and start a new
+    /// member frame (`EncoderState::begin_member`). Returns whether the chain
+    /// was already carry-over solid, which the member header records.
+    fn begin_solid_member(&mut self) -> bool;
 
     // ── Archive stream ────────────────────────────────────────────────────
 

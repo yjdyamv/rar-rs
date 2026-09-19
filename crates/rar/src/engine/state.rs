@@ -22,10 +22,49 @@ pub(crate) struct DecryptedPayload {
     pub(crate) keys: Option<crypto::DerivedKeys>,
 }
 
+/// Persistent decoder state for legacy solid chains.
+///
+/// RAR 2.x and 1.5 decoders retain their window/predictor state across
+/// members; a STORE member does not advance the window but does not break
+/// the chain either (the decoder is simply not called). The variant *is* the
+/// codec identity. Lives in `engine` (not in `format::rar4`) so the engine
+/// state does not name a family module — `format` reaches it as
+/// [`crate::engine`] vocabulary, exactly like [`LegacySolidEncoder`].
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum LegacyDecoder {
+    Rar29(crate::codec::legacy::rar29::Rar29Decoder),
+    Rar20(Box<crate::codec::legacy::rar20::Rar20Decoder>),
+    Rar15(Box<crate::codec::legacy::rar15::Rar15Decoder>),
+}
+
+impl LegacyDecoder {
+    /// The codec this carrier holds: the variant *is* the codec identity.
+    pub(crate) fn codec(&self) -> crate::version::LegacyCodec {
+        match self {
+            LegacyDecoder::Rar29(_) => crate::version::LegacyCodec::Rar29,
+            LegacyDecoder::Rar20(_) => crate::version::LegacyCodec::Rar20,
+            LegacyDecoder::Rar15(_) => crate::version::LegacyCodec::Rar15,
+        }
+    }
+
+    /// A fresh decoder for `codec`, used when a solid chain changes codec
+    /// generation (the chain keeps its own instance otherwise).
+    pub(crate) fn new_for(codec: crate::version::LegacyCodec) -> Self {
+        use crate::version::LegacyCodec;
+        match codec {
+            LegacyCodec::Rar29 => {
+                LegacyDecoder::Rar29(crate::codec::legacy::rar29::Rar29Decoder::new())
+            }
+            LegacyCodec::Rar20 => LegacyDecoder::Rar20(Box::default()),
+            LegacyCodec::Rar15 => LegacyDecoder::Rar15(Box::default()),
+        }
+    }
+}
+
 /// Legacy-family read state (RAR 1.5–4.x and RAR 1.3/1.4).
 pub(crate) struct LegacyReadState {
     /// Persistent legacy decoder for solid chains (RAR 1.5/2.x/3.x).
-    pub decoder: Option<crate::format::rar4::LegacyDecoder>,
+    pub decoder: Option<LegacyDecoder>,
     /// Index of the last legacy-solid member decoded (-1 = none).
     pub decoded_through: isize,
     /// The legacy volume set used MHD_NEWNUMBERING (`.partN.rar` naming).

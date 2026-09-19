@@ -236,7 +236,7 @@ pub(crate) fn read_member_streams(
 /// The returned payload is decrypted (when applicable) together with
 /// the derived keys needed for integrity verification.
 pub(crate) fn read_packed_data(cx: &mut dyn Engine, idx: usize) -> RarResult<DecryptedPayload> {
-    let max_packed = max_packed_bytes(cx);
+    let max_packed = crate::format::shared::extract::max_packed_bytes(cx);
     let p = cx.parts();
     let entry = &p.entries[idx];
     let hdr = &entry.header;
@@ -260,17 +260,6 @@ pub(crate) fn read_packed_data(cx: &mut dyn Engine, idx: usize) -> RarResult<Dec
             Ok(())
         },
     )
-}
-
-/// Maximum packed bytes accepted when the payload must be aggregated in
-/// memory. Bounded by the configured unpacked limit plus a small overhead,
-/// or a hard 8 GiB allocation guard when output is otherwise unlimited.
-pub(crate) fn max_packed_bytes(cx: &dyn Engine) -> u64 {
-    cx.read_ctx()
-        .extract_options
-        .max_unpacked_bytes
-        .map(|u| u.saturating_add(1 << 20))
-        .unwrap_or(8 * 1024 * 1024 * 1024)
 }
 
 /// Verify the stored checksums of a zero-size member without decoding

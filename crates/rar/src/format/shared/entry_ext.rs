@@ -8,6 +8,19 @@
 use crate::engine::ArchiveEntry;
 use crate::model::FileHeader;
 
+/// Everything a redirect (link/copy) member carries: the type follows the
+/// RAR5 convention (1 = Unix symlink, 2 = Windows symlink, 3 = Windows
+/// junction, 4 = hardlink, 5 = file copy) and `target` is the referenced
+/// member name.
+///
+/// Family-neutral vocabulary: the RAR5 header parser constructs it and the
+/// shared extractor consumes it, so it lives here rather than in the RAR5
+/// header module.
+pub(crate) struct RedirectSpec {
+    pub redir_type: u64,
+    pub target: String,
+}
+
 impl ArchiveEntry {
     /// Redirection record `(type, target)` for link/copy members (RAR5
     /// `EXTRA_FILE_REDIRECT`); `None` for regular members.
@@ -42,6 +55,13 @@ pub(crate) fn file_header_has_mtime(header: &FileHeader) -> bool {
                 || has_file_time_extra(&header.extra_data)
         }
     }
+}
+
+/// The redirect record for `entry`, when it is a link/copy member. The
+/// shared extractor uses this instead of reaching into the RAR5 header
+/// parser itself.
+pub(crate) fn redirect_of(entry: &ArchiveEntry) -> Option<RedirectSpec> {
+    crate::format::rar5::headers::parse_redirect_record(&entry.header.extra_data)
 }
 
 /// Whether the RAR5 extra area carries a FILE_TIME (HTIME) record. A record

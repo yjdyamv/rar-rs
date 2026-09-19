@@ -8,13 +8,9 @@ use std::sync::atomic::AtomicBool;
 
 use super::{BatchEntry, RarArchive};
 use crate::error::{RarError, RarResult};
-use crate::options::{CreateOptions, FilterOptions, SolidReset};
+use crate::options::{CreateOptions, DictionarySize, FilterOptions, SolidReset};
 use crate::version::ArchiveVersion;
 
-const MIN_DICTIONARY_BYTES: u64 = 128 * 1024;
-const MAX_RAR5_DICTIONARY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const DEFAULT_RAR70_DICTIONARY_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_DICTIONARY_BYTES: u64 = 126 * 1024 * 1024 * 1024;
 const MAX_THREADS: usize = 64;
 
 /// A validated archive-member compression level in the range `0..=5`.
@@ -58,72 +54,6 @@ impl TryFrom<u8> for CompressionLevel {
                 "compression level must be in 0..=5, got {value}"
             )))
         }
-    }
-}
-
-/// A validated dictionary size accepted by the RAR5 and RAR7 writers.
-///
-/// Sizes from 128 KiB through 4 GiB may be powers of two (with a RAR5
-/// dictionary log) or arbitrary byte counts (RAR7-only, declared with the
-/// 5-bit base plus 1/32 increment encoding). Any byte count through
-/// 126 GiB is supported.
-///
-/// A size above 4 GiB selects RAR7 (v70) members. Under the default
-/// compression version [`ArchiveVersion::V50`] that selection is
-/// automatic, like WinRAR's `-md`: the request is capped at twice the
-/// member size, so small members stay plain v50 and only members whose
-/// effective dictionary exceeds 4 GiB are written as v70. Use
-/// [`ArchiveVersion::V70`] to force v70 members for every member — this
-/// is the only way to get a non-power-of-two dictionary through 4 GiB,
-/// since a plain v50 member's `comp_dict_size` field is a log.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DictionarySize(u64);
-
-impl DictionarySize {
-    /// Smallest supported dictionary size (128 KiB).
-    pub const MIN: Self = Self(MIN_DICTIONARY_BYTES);
-    /// Default dictionary requested for RAR5 and RAR7 creation (32 MiB).
-    pub const DEFAULT: Self = Self(DEFAULT_RAR70_DICTIONARY_BYTES);
-    /// Largest supported dictionary size (126 GiB).
-    pub const MAX: Self = Self(MAX_DICTIONARY_BYTES);
-
-    /// Construct a dictionary size from a RAR5 log (`128 KiB << log`).
-    pub fn from_rar5_log(log: u8) -> RarResult<Self> {
-        if log > 15 {
-            return Err(RarError::InvalidOption(format!(
-                "RAR5 dictionary log must be in 0..=15, got {log}"
-            )));
-        }
-        Ok(Self(MIN_DICTIONARY_BYTES << log))
-    }
-
-    /// Return the dictionary size in bytes.
-    pub const fn bytes(self) -> u64 {
-        self.0
-    }
-
-    /// Return the RAR5 dictionary log, or `None` for a RAR7-only size
-    /// (any request above 4 GiB or a non-power-of-two byte count, which
-    /// only a v70 header can declare exactly).
-    pub const fn rar5_log(self) -> Option<u8> {
-        if self.0 <= MAX_RAR5_DICTIONARY_BYTES && self.0.is_power_of_two() {
-            Some((self.0.trailing_zeros() - MIN_DICTIONARY_BYTES.trailing_zeros()) as u8)
-        } else {
-            None
-        }
-    }
-}
-
-impl TryFrom<u64> for DictionarySize {
-    type Error = RarError;
-
-    fn try_from(value: u64) -> Result<Self, Self::Error> {
-        if !(MIN_DICTIONARY_BYTES..=MAX_DICTIONARY_BYTES).contains(&value) {
-            return Err(RarError::InvalidOption(format!(
-                "dictionary size must be in {MIN_DICTIONARY_BYTES}..={MAX_DICTIONARY_BYTES} bytes, got {value}"
-            )));
-        }
-        Ok(Self(value))
     }
 }
 
@@ -904,7 +834,8 @@ impl Drop for ArchiveWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_RAR70_DICTIONARY_BYTES, DictionarySize, WriterOptions};
+    use super::WriterOptions;
+    use crate::options::{DEFAULT_RAR7_DICTIONARY_BYTES, DictionarySize};
     use crate::version::ArchiveVersion;
 
     #[test]
@@ -915,10 +846,7 @@ mod tests {
             .unwrap();
         assert!(options.force_v70);
         assert_eq!(options.dict_size_log, None);
-        assert_eq!(
-            options.dict_size_bytes,
-            Some(DEFAULT_RAR70_DICTIONARY_BYTES)
-        );
+        assert_eq!(options.dict_size_bytes, Some(DEFAULT_RAR7_DICTIONARY_BYTES));
     }
 
     #[test]

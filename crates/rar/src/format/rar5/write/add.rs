@@ -352,18 +352,7 @@ pub(crate) fn add_file_rar5(
     // WinRAR `-se`: reset the solid statistics when the extension changes.
     crate::format::shared::write_ops::maybe_reset_solid_for_extension(cx, &name);
     let (dsl, dict_bytes) = solid_dict_params(cx, dsl, dict_bytes);
-    let chain_solid = cx.write_ctx().solid.mode && cx.write_ctx().solid.encoder_state.is_some();
-    cx.write_ctx_mut()
-        .solid
-        .encoder_state
-        .get_or_insert_with(Default::default);
-    // Each member starts its own frame; see `EncoderState::begin_member`.
-    cx.write_ctx_mut()
-        .solid
-        .encoder_state
-        .as_mut()
-        .expect("encoder state seeded")
-        .begin_member();
+    let chain_solid = cx.begin_solid_member();
 
     // Try the automatic delta (multimedia) filter first, then the x86
     // (E8/E8E9) filter. Ordering matters: real x86 code is not
@@ -566,7 +555,7 @@ pub(super) fn ensure_rar5_volume_space(cx: &mut dyn Engine, needed: u64) -> RarR
     };
     let mut rolled = false;
     loop {
-        let used = cx.write_ctx().output.bytes_written;
+        let used = cx.bytes_written();
         if volume_size.saturating_sub(used) >= needed {
             return Ok(());
         }
@@ -661,16 +650,10 @@ pub(crate) fn add_redirect_with_time(
     let hdr_on_disk = cx.on_disk_header_len(hdr_bytes.len() as u64);
     let eoa_size = cx.on_disk_header_len(8);
     ensure_rar5_volume_space(cx, hdr_on_disk + eoa_size)?;
-    if cx.write_ctx().locator.quick_open {
-        let pos = cx.stream_mut()?.stream_position()?;
-        cx.write_ctx_mut()
-            .locator
-            .quick_open_entries
-            .push((pos, hdr_bytes.clone()));
-    }
+    cx.record_quick_open_entry(&hdr_bytes)?;
     cx.write_block_header(&hdr_bytes)?;
-    cx.write_ctx_mut().output.bytes_written += hdr_on_disk;
-    cx.entries_mut().push(ArchiveEntry {
+    cx.add_bytes_written(hdr_on_disk);
+    cx.push_entry(ArchiveEntry {
         header: fh,
         chunks: Vec::new(),
     });
@@ -713,16 +696,10 @@ pub(crate) fn write_rar5_dir_entry(
     let hdr_on_disk = cx.on_disk_header_len(hdr_bytes.len() as u64);
     let eoa_size = cx.on_disk_header_len(8);
     ensure_rar5_volume_space(cx, hdr_on_disk + eoa_size)?;
-    if cx.write_ctx().locator.quick_open {
-        let pos = cx.stream_mut()?.stream_position()?;
-        cx.write_ctx_mut()
-            .locator
-            .quick_open_entries
-            .push((pos, hdr_bytes.clone()));
-    }
+    cx.record_quick_open_entry(&hdr_bytes)?;
     cx.write_block_header(&hdr_bytes)?;
-    cx.write_ctx_mut().output.bytes_written += hdr_on_disk;
-    cx.entries_mut().push(ArchiveEntry {
+    cx.add_bytes_written(hdr_on_disk);
+    cx.push_entry(ArchiveEntry {
         header: fh,
         chunks: Vec::new(),
     });

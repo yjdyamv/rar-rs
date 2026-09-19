@@ -4,7 +4,7 @@ use std::io::{self, Read, Seek};
 
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{
-    ArchiveHeader, BlockMeta, EndOfArchiveHeader, FileHeader, RawBlock, RawHeader, RedirectSpec,
+    ArchiveHeader, BlockMeta, EndOfArchiveHeader, FileHeader, RawBlock, RawHeader,
 };
 use crate::format::rar5::{
     ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_END_ARCHIVE,
@@ -17,6 +17,7 @@ use crate::format::rar5::{
 use crate::format::rar5::{
     BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER,
 };
+use crate::format::shared::entry_ext::RedirectSpec;
 use crate::vint;
 
 pub fn read_block<R: Read + Seek>(

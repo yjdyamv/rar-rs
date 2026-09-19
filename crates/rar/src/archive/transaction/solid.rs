@@ -198,7 +198,7 @@ impl RarArchive {
             &entry.chunks,
             &hdr.name,
             self.password.as_deref(),
-            crate::format::rar5::extract::decode::max_packed_bytes(self),
+            crate::format::shared::extract::max_packed_bytes(self),
             || Ok(()),
         )
     }

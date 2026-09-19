@@ -38,13 +38,7 @@ pub(crate) fn write_file_entry(
     if cx.write_ctx().output.volume_size.is_none() {
         // Single-volume
         let hdr_bytes = fh_base.to_bytes();
-        if cx.write_ctx().locator.quick_open {
-            let pos = cx.stream_mut()?.stream_position()?;
-            cx.write_ctx_mut()
-                .locator
-                .quick_open_entries
-                .push((pos, hdr_bytes.clone()));
-        }
+        cx.record_quick_open_entry(&hdr_bytes)?;
         cx.write_block_header(&hdr_bytes)?;
         let stream = cx.stream_mut()?;
         stream.write_all(packed_data)?;
@@ -57,7 +51,7 @@ pub(crate) fn write_file_entry(
             is_final: true,
             extra_data: plan.extra_data.clone(),
         };
-        cx.entries_mut().push(ArchiveEntry {
+        cx.push_entry(ArchiveEntry {
             header: FileHeader {
                 data_offset,
                 ..fh_base
@@ -79,7 +73,7 @@ pub(crate) fn write_file_entry(
     let hdr_bytes = fh_base.to_bytes();
     let hdr_on_disk = cx.on_disk_header_len(hdr_bytes.len() as u64);
     let total_needed = hdr_on_disk + total_packed + eoa_size;
-    let remaining = volume_size.saturating_sub(cx.write_ctx().output.bytes_written);
+    let remaining = volume_size.saturating_sub(cx.bytes_written());
 
     if total_needed <= remaining {
         // Fits entirely
@@ -87,16 +81,16 @@ pub(crate) fn write_file_entry(
         let stream = cx.stream_mut()?;
         stream.write_all(packed_data)?;
         let data_offset = stream.stream_position()? - total_packed;
-        cx.write_ctx_mut().output.bytes_written += hdr_on_disk + total_packed;
+        cx.add_bytes_written(hdr_on_disk + total_packed);
         let chunk = DataChunk {
-            volume_index: cx.write_ctx().output.current_volume - 1,
+            volume_index: cx.current_volume_index(),
             data_offset,
             packed_size: total_packed,
             crc32_val: Some(file_crc),
             is_final: true,
             extra_data: plan.extra_data.clone(),
         };
-        cx.entries_mut().push(ArchiveEntry {
+        cx.push_entry(ArchiveEntry {
             header: FileHeader {
                 data_offset,
                 ..fh_base
@@ -174,10 +168,10 @@ pub(super) fn write_split_member(
     if total_packed == 0 {
         let hdr_bytes = fh_base.to_bytes();
         let hdr_size = cx.on_disk_header_len(hdr_bytes.len() as u64);
-        let remaining = volume_size.saturating_sub(cx.write_ctx().output.bytes_written);
+        let remaining = volume_size.saturating_sub(cx.bytes_written());
         if remaining < hdr_size + eoa_size {
             cx.start_next_volume()?;
-            let remaining = volume_size.saturating_sub(cx.write_ctx().output.bytes_written);
+            let remaining = volume_size.saturating_sub(cx.bytes_written());
             if remaining < hdr_size + eoa_size {
                 return Err(RarError::InvalidOption(format!(
                     "volume size {volume_size} is too small for a member header ({hdr_size} bytes) plus the end block"
@@ -186,9 +180,9 @@ pub(super) fn write_split_member(
         }
         cx.write_block_header(&hdr_bytes)?;
         let data_offset = cx.stream_mut()?.stream_position()?;
-        let volume_index = cx.write_ctx().output.current_volume - 1;
-        cx.write_ctx_mut().output.bytes_written += hdr_size;
-        cx.entries_mut().push(ArchiveEntry {
+        let volume_index = cx.current_volume_index();
+        cx.add_bytes_written(hdr_size);
+        cx.push_entry(ArchiveEntry {
             header: FileHeader {
                 data_offset,
                 ..fh_base
@@ -245,7 +239,7 @@ pub(super) fn write_split_member(
 
     while offset < total_packed {
         cx.check_cancel()?;
-        let remaining_vol = volume_size.saturating_sub(cx.write_ctx().output.bytes_written);
+        let remaining_vol = volume_size.saturating_sub(cx.bytes_written());
 
         // Build chunk flags
         let mut block_flags: u64 = 0;
@@ -358,10 +352,10 @@ pub(super) fn write_split_member(
         let final_hdr_disk = cx.on_disk_header_len(final_hdr.len() as u64);
         cx.write_block_header(&final_hdr)?;
         let data_offset = phase(cx, SplitPhase::Write, offset, chunk_size, is_last)?;
-        cx.write_ctx_mut().output.bytes_written += final_hdr_disk + chunk_size;
+        cx.add_bytes_written(final_hdr_disk + chunk_size);
 
         chunks.push(DataChunk {
-            volume_index: cx.write_ctx().output.current_volume - 1,
+            volume_index: cx.current_volume_index(),
             data_offset,
             packed_size: chunk_size,
             crc32_val: Some(chunk_crc),
@@ -380,7 +374,7 @@ pub(super) fn write_split_member(
     // The header's `data_offset` mirrors the first chunk's on-disk
     // offset, like the single-volume and fits-entirely paths.
     let data_offset = chunks.first().map_or(0, |chunk| chunk.data_offset);
-    cx.entries_mut().push(ArchiveEntry {
+    cx.push_entry(ArchiveEntry {
         header: FileHeader {
             packed_size: total_packed,
             data_offset,

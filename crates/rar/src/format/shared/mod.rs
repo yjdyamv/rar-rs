@@ -3,8 +3,10 @@
 //! ([`stream_mut`](stream::stream_mut), [`stream_len`](stream::stream_len),
 //! [`seek_past_data_area`](stream::seek_past_data_area)), the format-neutral
 //! member entry points in [`write_ops`], the cross-volume split merge
-//! ([`split`]) and the family-neutral read orchestration in [`extract`].
+//! ([`split`]), the shared legacy [`checksum`] and the family-neutral read
+//! orchestration in [`extract`].
 
+pub(crate) mod checksum;
 pub(crate) mod engine;
 pub(crate) mod entry_ext;
 pub(crate) mod extract;

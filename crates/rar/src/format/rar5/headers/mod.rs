@@ -92,10 +92,3 @@ pub struct ArchiveHeader {
 pub struct EndOfArchiveHeader {
     pub flags: u64,
 }
-
-/// RAR5 file redirection (EXTRA_FILE_REDIRECT) record: symlink, hardlink
-/// or file copy target reference.
-pub(crate) struct RedirectSpec {
-    pub redir_type: u64,
-    pub target: String,
-}

@@ -5,7 +5,92 @@ use crate::version::ArchiveVersion;
 
 pub(crate) const MAX_COMPRESSION_THREADS: usize = 64;
 const MIN_DICTIONARY_BYTES: u64 = 128 * 1024;
+const MAX_RAR5_DICTIONARY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub(crate) const DEFAULT_RAR7_DICTIONARY_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const MAX_RAR7_DICTIONARY_BYTES: u64 = 126 * 1024 * 1024 * 1024;
+
+/// Upper bound on a block's *declared* data size when the payload has to be
+/// buffered in memory to be interpreted (archive comment "CMT", NTFS stream
+/// "STM", quick-open "QO").
+///
+/// The RAR5 block reader only validates the header CRC, so a hand-made
+/// archive can declare an arbitrarily large data area — a buffer sized
+/// straight from that field would abort the process on allocation instead of
+/// returning an error. Service payloads are metadata, not member data (member
+/// data goes through the caller-configurable [`ExtractOptions`] limits), so
+/// one fixed ceiling covers all of them. Owned here because it is also the
+/// default of [`ExtractOptions::DEFAULT_MAX_METADATA_BYTES`]; the RAR5 parser
+/// imports it from this leaf rather than the other way round.
+pub(crate) const MAX_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A validated dictionary size accepted by the RAR5 and RAR7 writers.
+///
+/// Sizes from 128 KiB through 4 GiB may be powers of two (with a RAR5
+/// dictionary log) or arbitrary byte counts (RAR7-only, declared with the
+/// 5-bit base plus 1/32 increment encoding). Any byte count through
+/// 126 GiB is supported.
+///
+/// A size above 4 GiB selects RAR7 (v70) members. Under the default
+/// compression version [`ArchiveVersion::V50`] that selection is
+/// automatic, like WinRAR's `-md`: the request is capped at twice the
+/// member size, so small members stay plain v50 and only members whose
+/// effective dictionary exceeds 4 GiB are written as v70. Use
+/// [`ArchiveVersion::V70`] to force v70 members for every member — this
+/// is the only way to get a non-power-of-two dictionary through 4 GiB,
+/// since a plain v50 member's `comp_dict_size` field is a log.
+///
+/// Lives in the option layer rather than with the writer facade: the RAR5
+/// create policy names it too, and `format` must not depend on `archive`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DictionarySize(u64);
+
+impl DictionarySize {
+    /// Smallest supported dictionary size (128 KiB).
+    pub const MIN: Self = Self(MIN_DICTIONARY_BYTES);
+    /// Default dictionary requested for RAR5 and RAR7 creation (32 MiB).
+    pub const DEFAULT: Self = Self(DEFAULT_RAR7_DICTIONARY_BYTES);
+    /// Largest supported dictionary size (126 GiB).
+    pub const MAX: Self = Self(MAX_RAR7_DICTIONARY_BYTES);
+
+    /// Construct a dictionary size from a RAR5 log (`128 KiB << log`).
+    pub fn from_rar5_log(log: u8) -> RarResult<Self> {
+        if log > 15 {
+            return Err(RarError::InvalidOption(format!(
+                "RAR5 dictionary log must be in 0..=15, got {log}"
+            )));
+        }
+        Ok(Self(MIN_DICTIONARY_BYTES << log))
+    }
+
+    /// Return the dictionary size in bytes.
+    pub const fn bytes(self) -> u64 {
+        self.0
+    }
+
+    /// Return the RAR5 dictionary log, or `None` for a RAR7-only size
+    /// (any request above 4 GiB or a non-power-of-two byte count, which
+    /// only a v70 header can declare exactly).
+    pub const fn rar5_log(self) -> Option<u8> {
+        if self.0 <= MAX_RAR5_DICTIONARY_BYTES && self.0.is_power_of_two() {
+            Some((self.0.trailing_zeros() - MIN_DICTIONARY_BYTES.trailing_zeros()) as u8)
+        } else {
+            None
+        }
+    }
+}
+
+impl TryFrom<u64> for DictionarySize {
+    type Error = RarError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if !(MIN_DICTIONARY_BYTES..=MAX_RAR7_DICTIONARY_BYTES).contains(&value) {
+            return Err(RarError::InvalidOption(format!(
+                "dictionary size must be in {MIN_DICTIONARY_BYTES}..={MAX_RAR7_DICTIONARY_BYTES} bytes, got {value}"
+            )));
+        }
+        Ok(Self(value))
+    }
+}
 
 /// How the solid compression chain is split (WinRAR `-s` modifiers).
 ///
@@ -450,7 +535,7 @@ impl ExtractOptions {
     /// Default service-payload ceiling (64 MiB): generous enough for real
     /// comments and alternate data streams, small enough that a forged size
     /// cannot drive an enormous allocation.
-    pub const DEFAULT_MAX_METADATA_BYTES: u64 = crate::format::rar5::MAX_METADATA_BYTES;
+    pub const DEFAULT_MAX_METADATA_BYTES: u64 = MAX_METADATA_BYTES;
 
     /// The effective service-payload ceiling; `None` means unbounded.
     pub(crate) fn metadata_limit(&self) -> u64 {

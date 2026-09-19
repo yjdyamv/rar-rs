@@ -383,7 +383,7 @@ fn try_quick_open_entries(cx: &mut dyn Engine) -> RarResult<bool> {
     }
     match parse_quick_open_payload(&payload, qo_abs) {
         Ok(entries) if !entries.is_empty() => {
-            *cx.entries_mut() = entries;
+            cx.replace_catalog(entries);
             cx.read_ctx_mut().quick_open_catalog = true;
             Ok(true)
         }
@@ -483,7 +483,7 @@ fn rebuild_catalog_capped(
         )?;
     }
 
-    *cx.entries_mut() = builder.entries;
+    cx.replace_catalog(builder.entries);
     let streams = builder.streams;
     cx.read_ctx_mut().streams = streams;
     cx.read_ctx_mut().quick_open_catalog = false;

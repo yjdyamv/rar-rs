@@ -61,6 +61,10 @@ pub(crate) mod format;
 pub mod options;
 mod parallel;
 
+// Legacy civil-time primitives (DOS/local-wall-clock conversions). Public
+// because the CLI's `-ts` handling needs the same math; see `time.rs`.
+pub mod time;
+
 // Recovery-record and recovery-volume support. The supported entry points
 // are re-exported at the crate root and through [`wire`].
 pub(crate) mod recovery;
@@ -76,9 +80,9 @@ mod write_progress;
 
 pub use archive::{
     AppendOptions, ArchiveEditor, ArchiveEntry, ArchiveReader, ArchiveWriter, BatchEntry,
-    CompressionLevel, DictionarySize, EditOp, EditPlan, EditReport, Entries, EntryId, EntryMatches,
-    EntryRef, EntryWriteOptions, ExtractionReport, OpenOptions, ScanStrategy, SolidMode,
-    ThreadCount, VerificationFailure, VerificationReport, WriteEntry, WriteReport, WriterOptions,
+    CompressionLevel, EditOp, EditPlan, EditReport, Entries, EntryId, EntryMatches, EntryRef,
+    EntryWriteOptions, ExtractionReport, OpenOptions, ScanStrategy, SolidMode, ThreadCount,
+    VerificationFailure, VerificationReport, WriteEntry, WriteReport, WriterOptions,
     discover_volumes,
 };
 // Root re-exports of the public codec surface; the full item set lives at
@@ -94,8 +98,8 @@ pub use error::{ErrorCode, RarError, RarResult};
 pub use features::{Feature, FeatureSet};
 pub use fs::atomic::StagedCopy;
 pub use options::{
-    ExtractOptions, FilterMode, FilterOptions, MarkOfTheWeb, SolidReset, parse_dict_bytes,
-    parse_dict_size,
+    DictionarySize, ExtractOptions, FilterMode, FilterOptions, MarkOfTheWeb, SolidReset,
+    parse_dict_bytes, parse_dict_size,
 };
 pub use parallel::{set_compression_threads, set_extraction_threads};
 pub use recovery::rev50::{build_recovery_volumes_for_set, plan_recovery_volume_count};

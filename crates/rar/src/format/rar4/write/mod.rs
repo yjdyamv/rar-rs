@@ -17,9 +17,6 @@ use crate::format::rar4::{
 };
 use crate::format::shared::legacy_time::epoch_to_local_civil;
 
-/// RAR 1.5–4.x signature (7 bytes, not a real block header).
-pub(crate) const RAR4_SIGNATURE: &[u8; 7] = b"Rar!\x1a\x07\x00";
-
 /// Fixed main header size (CRC + type + flags + size + 2 reserved fields).
 const MAIN_HEADER_SIZE: u16 = 13;
 
@@ -304,34 +301,9 @@ fn encode_flag_byte(modes: &[u8]) -> u8 {
 // ── DOS time encoding ───────────────────────────────────────────────────────
 
 /// Convert a Unix timestamp (seconds since epoch) to the RAR4/RAR13 DOS
-/// time field. The field stores *local* wall-clock time (WinRAR's
-/// convention); pre-1980 years wrap like the official writers instead of
-/// underflowing.
-pub(crate) fn unix_to_dos_time(secs: u32) -> u32 {
-    let local = epoch_to_local_civil(secs);
-    let days = local / 86_400;
-    let time_of_day = local % 86_400;
-    let hour = time_of_day / 3_600;
-    let minute = (time_of_day % 3_600) / 60;
-    let second = time_of_day % 60;
-
-    // Howard Hinnant's civil_from_days: 1970-01-01 = day 0.
-    let z = i64::from(days) + 719_468;
-    let era = z / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
-    let year = y + i64::from(month <= 2);
-
-    // Pack into DOS format: Y(7) M(4) D(5) H(5) M(6) S(5/2). A pre-1980
-    // year wraps into the 7-bit field exactly like WinRAR's writers.
-    let year_bits = ((year - 1980) & 0x7F) as u32;
-    (year_bits << 25) | (month << 21) | (day << 16) | (hour << 11) | (minute << 5) | (second / 2)
-}
+/// time field. The conversion is shared with RAR 1.3/1.4; see
+/// [`crate::format::shared::legacy_time::unix_to_dos_time`].
+pub(crate) use crate::format::shared::legacy_time::unix_to_dos_time;
 
 // ── Extended time field ─────────────────────────────────────────────────────
 
@@ -399,8 +371,8 @@ mod tests {
 
     #[test]
     fn signature_is_correct_length() {
-        assert_eq!(RAR4_SIGNATURE.len(), 7);
-        assert_eq!(&RAR4_SIGNATURE[..5], b"Rar!\x1a");
+        assert_eq!(crate::detect::RAR4_SIGNATURE.len(), 7);
+        assert_eq!(&crate::detect::RAR4_SIGNATURE[..5], b"Rar!\x1a");
     }
 
     #[test]

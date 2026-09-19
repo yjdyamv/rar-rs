@@ -32,7 +32,7 @@ pub(crate) fn rar13_archive_comment(cx: &dyn Engine) -> RarResult<Option<Vec<u8>
 /// merging split members across volumes (old-style `.rar`/`.r00`/`.r01`
 /// naming, discovered by `discover_volumes`).
 pub(crate) fn open_read_rar13(cx: &mut dyn Engine) -> RarResult<()> {
-    cx.entries_mut().clear();
+    cx.clear_catalog();
     cx.read_ctx_mut().streams.clear();
 
     let mut merge = SplitMerge::default();
@@ -59,7 +59,7 @@ pub(crate) fn open_read_rar13(cx: &mut dyn Engine) -> RarResult<()> {
                 .push(entry, split_before, split_after)
                 .map_err(map_rar13_split_error)?
             {
-                cx.entries_mut().push(done);
+                cx.push_entry(done);
             }
         }
     }

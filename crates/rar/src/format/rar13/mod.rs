@@ -48,15 +48,6 @@ pub(crate) const DEFAULT_UNP_VER: u8 = 2;
 pub(crate) const MAIN_HEAD_SIZE: usize = 7;
 pub(crate) const FILE_HEAD_BASE_SIZE: usize = 21;
 
-/// The 16-bit rolling checksum RAR 1.3/1.4 stamps on member data.
-pub(crate) fn file_checksum(data: &[u8]) -> u16 {
-    let mut value = 0u16;
-    for &byte in data {
-        value = value.wrapping_add(u16::from(byte)).rotate_left(1);
-    }
-    value
-}
-
 /// One parsed volume: main-header flags/extension plus its entries.
 pub(crate) struct Volume {
     pub flags: u8,
@@ -148,7 +139,7 @@ pub(crate) fn parse_volume(
             unpacked_size: u64::from(unp_size),
             packed_size: u64::from(pack_size),
             attributes: u64::from(file_attr),
-            mtime: crate::format::rar4::dos_time_to_unix(file_time),
+            mtime: crate::format::shared::legacy_time::dos_time_to_unix(file_time),
             crc32_val: Some(u32::from(file_crc)),
             comp_method: method.wrapping_sub(METHOD_STORE),
             comp_solid: lhd_flags & LHD_SOLID != 0,

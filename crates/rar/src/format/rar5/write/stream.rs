@@ -164,13 +164,7 @@ fn write_streamed_payload(
     if cx.write_ctx().output.volume_size.is_none() {
         // ── Single-volume ──
         let hdr_bytes = fh_base.to_bytes();
-        if cx.write_ctx().locator.quick_open {
-            let pos = cx.stream_mut()?.stream_position()?;
-            cx.write_ctx_mut()
-                .locator
-                .quick_open_entries
-                .push((pos, hdr_bytes.clone()));
-        }
+        cx.record_quick_open_entry(&hdr_bytes)?;
         cx.write_block_header(&hdr_bytes)?;
         let written = {
             let stream = cx.stream_mut()?;
@@ -200,7 +194,7 @@ fn write_streamed_payload(
         }
         let stream = cx.stream_mut()?;
         let data_offset = stream.stream_position()? - packed_size;
-        cx.entries_mut().push(ArchiveEntry {
+        cx.push_entry(ArchiveEntry {
             header: FileHeader {
                 data_offset,
                 ..fh_base
@@ -517,18 +511,7 @@ pub(super) fn add_file_streaming(
         crate::format::shared::write_ops::reset_solid_chain(cx);
     }
 
-    let chain_solid = cx.write_ctx().solid.mode && cx.write_ctx().solid.encoder_state.is_some();
-    cx.write_ctx_mut()
-        .solid
-        .encoder_state
-        .get_or_insert_with(Default::default);
-    // Each member starts its own frame; see `EncoderState::begin_member`.
-    cx.write_ctx_mut()
-        .solid
-        .encoder_state
-        .as_mut()
-        .expect("encoder state seeded")
-        .begin_member();
+    let chain_solid = cx.begin_solid_member();
 
     let mut crc_hasher = crc32fast::Hasher::new();
     let mut blake_hasher = if cx.write_ctx().meta.blake2 {
@@ -919,12 +902,7 @@ pub(crate) fn write_stream_record(
     cx.write_block_header(&hdr)?;
     let stream = cx.stream_mut()?;
     stream.write_all(&packed)?;
-    let ctx = cx.write_ctx_mut();
-    ctx.output.bytes_written = ctx
-        .output
-        .bytes_written
-        .saturating_add(hdr_disk)
-        .saturating_add(packed.len() as u64);
+    cx.add_bytes_written(hdr_disk.saturating_add(packed.len() as u64));
     Ok(())
 }
 

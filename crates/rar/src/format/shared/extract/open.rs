@@ -3,11 +3,11 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
+use crate::detect::RAR5_SIGNATURE;
 use crate::detect::{ArchiveFamily, SFX_SCAN_LIMIT};
 use crate::engine::Engine;
 use crate::engine::discover_volumes;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::RAR5_SIGNATURE;
 
 /// Open the archive and scan its catalog (every volume).
 pub(crate) fn open_read(cx: &mut dyn Engine) -> RarResult<()> {

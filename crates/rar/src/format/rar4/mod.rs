@@ -21,7 +21,6 @@ pub(crate) mod write;
 use crate::engine::ArchiveEntry;
 use crate::error::{RarError, RarResult};
 use crate::format::decode_system_ansi;
-use crate::format::shared::legacy_time::days_from_civil;
 use crate::format::shared::split::{SplitMerge, SplitMergeError};
 use crate::model::{DataChunk, FileHeader};
 pub(crate) use envelope::{EnvelopePolicy, Rar4Block, read_block};
@@ -61,39 +60,10 @@ pub(crate) const FHD_EXTTIME: u16 = 0x1000;
 
 /// Persistent decoder state for legacy solid chains.
 ///
-/// RAR 2.x and 1.5 decoders retain their window/predictor state across
-/// members; a STORE member does not advance the window but does not break
-/// the chain either (the decoder is simply not called).
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum LegacyDecoder {
-    Rar29(crate::codec::legacy::rar29::Rar29Decoder),
-    Rar20(Box<crate::codec::legacy::rar20::Rar20Decoder>),
-    Rar15(Box<crate::codec::legacy::rar15::Rar15Decoder>),
-}
-
-impl LegacyDecoder {
-    /// The codec this carrier holds: the variant *is* the codec identity.
-    pub(crate) fn codec(&self) -> crate::version::LegacyCodec {
-        match self {
-            LegacyDecoder::Rar29(_) => crate::version::LegacyCodec::Rar29,
-            LegacyDecoder::Rar20(_) => crate::version::LegacyCodec::Rar20,
-            LegacyDecoder::Rar15(_) => crate::version::LegacyCodec::Rar15,
-        }
-    }
-
-    /// A fresh decoder for `codec`, used when a solid chain changes codec
-    /// generation (the chain keeps its own instance otherwise).
-    pub(crate) fn new_for(codec: crate::version::LegacyCodec) -> Self {
-        use crate::version::LegacyCodec;
-        match codec {
-            LegacyCodec::Rar29 => {
-                LegacyDecoder::Rar29(crate::codec::legacy::rar29::Rar29Decoder::new())
-            }
-            LegacyCodec::Rar20 => LegacyDecoder::Rar20(Box::default()),
-            LegacyCodec::Rar15 => LegacyDecoder::Rar15(Box::default()),
-        }
-    }
-}
+/// Defined in [`crate::engine`] (the shared vocabulary layer) so the engine
+/// state never names a family module; re-exported here because this is the
+/// family that drives it.
+pub(crate) use crate::engine::LegacyDecoder;
 
 /// RAR4 compression method value for the STORE (uncompressed) method.
 pub(crate) const RAR4_METHOD_STORE: u8 = 0x30;
@@ -649,21 +619,9 @@ pub(crate) fn decode_file_name(raw: &[u8], flags: u16) -> String {
 }
 
 /// Convert a RAR4 MS-DOS date/time (10/6/6 packed fields) to a Unix
-/// timestamp (seconds). Best effort: DOS times predate the Unix epoch only
-/// for pre-1980, so the result is a near-epoch non-negative value there.
-pub(crate) fn dos_time_to_unix(dos: u32) -> u32 {
-    let year = ((dos >> 25) & 0x7f) as i64 + 1980;
-    let month = (dos >> 21) & 0x0f;
-    let day = (dos >> 16) & 0x1f;
-    let hour = (dos >> 11) & 0x1f;
-    let minute = (dos >> 5) & 0x3f;
-    let second = (dos & 0x1f) * 2;
-
-    let days_since_epoch = days_from_civil(year, month, day);
-    let secs = days_since_epoch * 86400
-        + (i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second));
-    secs.clamp(0, u32::MAX as i64) as u32
-}
+/// timestamp. The conversion is shared with RAR 1.3/1.4; see
+/// [`crate::format::shared::legacy_time::dos_time_to_unix`].
+pub(crate) use crate::format::shared::legacy_time::dos_time_to_unix;
 
 /// Whether a RAR4 member's payload uses the STORE method.
 pub(crate) fn is_stored(comp_method: u8) -> bool {

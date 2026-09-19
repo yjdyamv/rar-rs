@@ -8,10 +8,10 @@ use std::path::Path;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use super::super::RarArchive;
+use crate::detect::RAR5_SIGNATURE;
 #[cfg(feature = "parallel")]
 use crate::error::RarError;
 use crate::error::RarResult;
-use crate::format::rar5::RAR5_SIGNATURE;
 use crate::format::rar5::headers::build_comment_block;
 
 /// Read-ahead copy job: `len` bytes from `src` in the original archive.

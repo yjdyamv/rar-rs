@@ -1,3 +1,16 @@
+//! Layering invariants, checked on the shipped source lines.
+//!
+//! The dependency direction is `archive` → `format` → `engine` →
+//! `{codec, crypto, fs, model, options}` (see `docs/ARCHITECTURE.md`), with
+//! `detect`/`version`/`vint` as root vocabulary. `archive` owns the
+//! method-shaped seam the facades call (`archive/ops.rs`); `format`'s family
+//! code is free functions over `&mut dyn Engine`.
+//!
+//! These checks are deliberately line-based and comment/test exempt: a
+//! reference spelled inside an expression is a dependency like an import, and
+//! an `impl RarArchive` block in `format` once hid the inversion exactly
+//! because it was not a `use` statement.
+
 use std::path::{Path, PathBuf};
 
 fn rust_sources_below(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -61,35 +74,28 @@ fn rar50_does_not_import_the_legacy_families() {
     );
 }
 
-/// Lines of every `.rs` file below `dir`, skipping two things that are not
-/// dependencies:
+/// Lines of each `.rs` file, skipping two things that are not dependencies:
 ///
 /// - comment lines (a doc-comment mention of `crate::format` is prose, not a
 ///   dependency), and
 /// - the body of an inline `mod tests { ... }` block, plus every `tests.rs`
 ///   file and `tests/` subdirectory. Test code may cross layers freely; these
 ///   invariants describe the shipped code.
-///
-/// Scanning whole lines rather than `use` statements matters: a reference
-/// spelled inside an expression (`crate::format::rar4::create::f(..)`) is a
-/// dependency exactly like the import form, and the `use`-only form of this
-/// check silently missed several of them.
-fn dependency_lines_under(dir: &Path) -> Vec<(String, String)> {
-    let mut sources = Vec::new();
-    rust_sources_below(dir, &mut sources);
+fn dependency_lines(sources: &[PathBuf], base: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for path in sources {
         let file = path
-            .strip_prefix(dir)
-            .expect("source below dir")
+            .strip_prefix(base)
+            .unwrap_or(path)
             .display()
-            .to_string();
+            .to_string()
+            .replace('\\', "/");
         // Test-only code: the external module form (`mod tests;` ->
         // `tests.rs`) and any `tests/` subdirectory.
         if file.ends_with("tests.rs") || file.contains("tests/") {
             continue;
         }
-        let text = std::fs::read_to_string(&path).expect("read source");
+        let text = std::fs::read_to_string(path).expect("read source");
         for line in text.lines() {
             let trimmed = line.trim_start();
             // The inline form (`mod tests {`), conventionally the file tail.
@@ -105,11 +111,15 @@ fn dependency_lines_under(dir: &Path) -> Vec<(String, String)> {
     out
 }
 
-/// Every `crate::<layer>` reference under `dir`, as
+/// Every `crate::<layer>` reference in `sources`, as
 /// `(file, trimmed line, layer)`.
-fn layer_references(dir: &Path, layers: &[&str]) -> Vec<(String, String, String)> {
+fn layer_references_in(
+    sources: &[PathBuf],
+    base: &Path,
+    layers: &[&str],
+) -> Vec<(String, String, String)> {
     let mut offenders = Vec::new();
-    for (file, line) in dependency_lines_under(dir) {
+    for (file, line) in dependency_lines(sources, base) {
         for layer in layers {
             if line.contains(&format!("crate::{layer}")) {
                 offenders.push((file.clone(), line.trim().to_string(), (*layer).to_string()));
@@ -117,6 +127,39 @@ fn layer_references(dir: &Path, layers: &[&str]) -> Vec<(String, String, String)
         }
     }
     offenders
+}
+
+/// [`layer_references_in`] for a whole directory, with paths relative to it.
+fn layer_references(dir: &Path, layers: &[&str]) -> Vec<(String, String, String)> {
+    let mut sources = Vec::new();
+    rust_sources_below(dir, &mut sources);
+    layer_references_in(&sources, dir, layers)
+}
+
+/// The identifiers a `pub use <module>::{ ... };` block re-exports at the
+/// crate root. Used to catch a dependency spelled through a re-export
+/// (`crate::DictionarySize`) rather than the module path
+/// (`crate::archive::…`) — the exact hole that let `format` keep naming
+/// `archive` after the `impl RarArchive` blocks were removed.
+fn crate_root_reexports(lib_rs: &Path, module: &str) -> Vec<String> {
+    let text = std::fs::read_to_string(lib_rs).expect("read lib.rs");
+    let needle = format!("pub use {module}::{{");
+    let Some(start) = text.find(&needle) else {
+        return Vec::new();
+    };
+    let rest = &text[start + needle.len()..];
+    let end = rest.find("};").expect("terminated re-export block");
+    rest[..end]
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|token| {
+            !token.is_empty()
+                && token
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 /// The typed role facades (reader/writer/editor) orchestrate the legacy
@@ -157,19 +200,60 @@ fn fs_and_model_policy_do_not_depend_upward() {
     }
 }
 
-/// The dependency inversion the `Engine` trait exists for: the per-family
-/// container code sits *below* the archive engine, so no `format` source may
-/// name `archive` (the reverse direction is `archive` → `format` and is
-/// expected). `RarArchive` used to be reached through `impl RarArchive`
-/// blocks living in `format`; those are gone, and this pins that they cannot
-/// come back. Test code and doc comments are exempt, like the other layering
-/// checks.
+/// The per-family container code sits *below* the archive engine, so no
+/// `format` source may name `archive` — neither through the module path nor
+/// through a crate-root re-export of an `archive` item. `RarArchive` used to
+/// be reached through `impl RarArchive` blocks living in `format`; those are
+/// gone, and this pins that they cannot come back.
 #[test]
 fn format_does_not_depend_on_the_archive_engine() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let offenders = layer_references(&manifest_dir.join("src/format"), &["archive"]);
+    let mut layers = vec!["archive".to_string()];
+    layers.extend(crate_root_reexports(
+        &manifest_dir.join("src/lib.rs"),
+        "archive",
+    ));
+    let layers = layers.iter().map(String::as_str).collect::<Vec<_>>();
+    let offenders = layer_references(&manifest_dir.join("src/format"), &layers);
     assert!(
         offenders.is_empty(),
-        "format must not name archive; the family code takes `&mut dyn Engine`: {offenders:?}"
+        "format must not name archive (module path or re-exported item); the family code takes `&mut dyn Engine`: {offenders:?}"
+    );
+}
+
+/// Everything `format` is allowed to sit on must not reference it back:
+/// `engine` (the `Engine` seam), the codec/crypto/fs/model leaves, the
+/// option layer, and the root vocabulary (`detect`/`version`/`vint`).
+/// Together with `format_does_not_depend_on_the_archive_engine` this makes
+/// the documented order a one-way acyclic chain up to `archive`.
+#[test]
+fn layers_below_format_do_not_depend_on_it() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    for dir in [
+        "src/engine",
+        "src/codec",
+        "src/crypto",
+        "src/fs",
+        "src/model",
+    ] {
+        rust_sources_below(&manifest_dir.join(dir), &mut sources);
+    }
+    for file in [
+        "src/options.rs",
+        "src/detect.rs",
+        "src/version.rs",
+        "src/vint.rs",
+        "src/parallel.rs",
+        "src/io_util.rs",
+        "src/write_progress.rs",
+        "src/crc32.rs",
+    ] {
+        sources.push(manifest_dir.join(file));
+    }
+    let offenders = layer_references_in(&sources, manifest_dir, &["format"]);
+    assert!(
+        offenders.is_empty(),
+        "layers below format must not depend on it: {offenders:?}"
     );
 }

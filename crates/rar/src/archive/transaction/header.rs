@@ -3,9 +3,10 @@
 use std::io::{Seek, SeekFrom};
 
 use super::super::RarArchive;
+use crate::detect::RAR5_SIGNATURE;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{ArchiveHeader, BlockMeta, split_main_extra};
-use crate::format::rar5::{ARCHIVE_FLAG_LOCKED, ARCHIVE_FLAG_RECOVERY, RAR5_SIGNATURE};
+use crate::format::rar5::{ARCHIVE_FLAG_LOCKED, ARCHIVE_FLAG_RECOVERY};
 
 impl RarArchive {
     /// Rebuild the main archive header for the rewritten archive: original

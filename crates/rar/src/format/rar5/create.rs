@@ -3,7 +3,7 @@
 //! selection rules live here so RAR5/RAR7 concerns stay out of the
 //! shared archive writer layer.
 
-use crate::DictionarySize;
+use crate::options::DictionarySize;
 
 /// Map a requested dictionary onto the legacy `(dict_size_log,
 /// dict_size_bytes)` create fields.

@@ -16,7 +16,6 @@ use crate::engine::DecryptedPayload;
 use crate::engine::Engine;
 use crate::engine::{ArchiveEntry, MAX_DICT_SIZE_LOG};
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::parse_redirect_record;
 use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path};
 use crate::fs::safe_path::sanitize_archive_path;
 #[cfg(feature = "parallel")]
@@ -194,7 +193,7 @@ pub(crate) fn extract_all_with_options(
     cx.read_ctx_mut().extract_options = opts;
     // A quick-open catalog carries no "STM" service records: replace it
     // with the scanned catalog before extraction restores streams.
-    crate::format::rar5::extract::open::ensure_full_catalog(cx)?;
+    crate::format::shared::extract::ensure_full_catalog(cx)?;
 
     #[cfg(feature = "parallel")]
     {
@@ -411,7 +410,7 @@ fn extract_all_parallel(
             }
             continue;
         }
-        if let Some(redir) = parse_redirect_record(&entry.header.extra_data) {
+        if let Some(redir) = crate::format::shared::entry_ext::redirect_of(&entry) {
             if !cx.read_ctx().extract_options.skip_links {
                 crate::format::shared::extract::dest::extract_redirection(
                     cx, dest, &dest_path, &redir,
@@ -485,7 +484,7 @@ pub(crate) fn extract_index_with_options(
     cx.read_ctx_mut().extract_options = opts;
     // A quick-open catalog carries no "STM" service records: replace it
     // with the scanned catalog before extraction restores streams.
-    crate::format::rar5::extract::open::ensure_full_catalog(cx)?;
+    crate::format::shared::extract::ensure_full_catalog(cx)?;
     let idx = if rebuilt {
         data_offset
             .and_then(|offset| {
@@ -647,7 +646,7 @@ fn extract_entry(
     // RAR5 redirect records (symlinks, hardlinks, file copies): the
     // entry carries no data, only the target reference. `-ol-` skips
     // them entirely.
-    if let Some(redir) = parse_redirect_record(&entry.header.extra_data) {
+    if let Some(redir) = crate::format::shared::entry_ext::redirect_of(entry) {
         if cx.read_ctx().extract_options.skip_links {
             return Ok(dest_path);
         }

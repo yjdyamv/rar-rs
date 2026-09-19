@@ -7,9 +7,9 @@ use std::time::UNIX_EPOCH;
 
 use crate::engine::Engine;
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::RedirectSpec;
 #[cfg(windows)]
 use crate::format::rar5::write as rar5_write;
+use crate::format::shared::entry_ext::RedirectSpec;
 #[cfg(any(unix, windows))]
 use crate::fs::safe_path::resolve_redirect_target;
 use crate::fs::safe_path::sanitize_archive_path;
