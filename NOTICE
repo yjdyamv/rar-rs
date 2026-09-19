@@ -1,120 +1,76 @@
 LEGAL NOTICE
-=============
+============
 
-Copyright and authorship
-------------------------
-
-The initial implementation was contributed by librar contributors. The
-original contributions and modifications made by yjdyamv in 2026 are
-copyright (c) 2026 yjdyamv. This statement does not transfer ownership of
-third-party code or test materials identified below, and does not replace the
-license terms applicable to those portions.
-
-Unless otherwise noted, original project contributions are licensed under the
-BSD-2-Clause License. See LICENSE for the full text.
-
-rar-rs is a Rust implementation of the RAR archive format for software
-conservancy, interoperability, and educational purposes. It provides `rar`
-and `unrar` command-line tools. Original project portions are BSD-2-Clause;
-third-party portions retain the licenses identified below.
-
-Implementation sources
-----------------------
-
-The RAR5 LZSS+Huffman codec
-(`crates/rar/src/codec/modern/lzss_huff/`) was independently implemented from the
-public RAR format and from analysis of libarchive's
-`archive_read_support_format_rar5.c` by Grzegorz Antoniak (2018), an
-independent BSD-2-Clause implementation. It is not copied from proprietary
-RARLAB source code.
-
-RAR4 support combines original project code with the upstream-derived decoder
-portions identified in the `rars` section below. The current implementation
-supports RAR 1.5–4.x reading and RAR 1.5 / 2.x / 4.x archive creation, including the relevant
-legacy codecs, filters, encryption, solid chains, and volume handling. It does
-not contain, link to, or derive from the proprietary `unrar` source code
-distributed by RARLAB. Archive structures are implemented from public format
-descriptions and independent open-source references.
-
-Portions from the `rars` project
---------------------------------
-
-The RAR5 recovery-record codec
-(`crates/rar/src/recovery/rar50/`), the BLAKE2sp hash
-(`crates/rar/src/format/rar5/blake2sp.rs`) and the RAR5 key-derivation / hash-key
-MAC patterns (`crates/rar/src/crypto/rar50.rs`) were ported from the `rars`
-project (https://github.com/bitplane/rars, crates.io `rars`) at upstream
-revision `c08a17b`. Further `rars` portions followed: the automatic x86 filter
-scan (`crates/rar/src/codec/common/filters.rs`), the binary-tree match finder
-(`crates/rar/src/codec/common/match_finder.rs`, LZMA-style BT4), the optimal
-parse and block splitter, the E8/E8E9 x86 transform normalization, and the
-RAR 3.x/4.x, RAR 2.x and RAR 1.5 member decoders.
-
-Every in-tree `rars` port, encode- and decode-side alike, states
-`MIT OR Apache-2.0` — what revision `c08a17b` declared and what crates.io lists
-for every published release. (A `COPYING` added upstream on 2026-07-13 briefly
-read "WTFPL licensed with 1 extra clause"; it was never reflected in the
-workspace metadata or a release, and the maintainer replaced it with Apache-2.0
-on 2026-09-06. No file here claims WTFPL.) Other project contributions by
-yjdyamv are licensed under BSD-2-Clause unless otherwise noted. The per-file
-inventory is in `THIRD_PARTY_LICENSES.md`; diffing the upstream files remains
-pending.
-
-The legacy fixture directories under `crates/rar/tests/fixtures/rar40/`
-(`rar300/`, `rar2/`, `rar154/`, `multivol/`, `rarvm/`) contain archive files
-copied from the `rars` test corpus. They are test inputs, not source code; any
-redistribution of those binary fixtures remains subject to the terms applicable
-to their original corpus.
-
-Official RAR/UNRAR binaries are used strictly as black-box interoperability
-references for testing (set `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` to run
-the `official_*` interop tests). Their code is not included in this project
-and is not used as source code.
-
-Scope and Limitations
-----------------------
-
-This software:
-
-  - Does NOT supersede, replace, or replicate the full capabilities of the
-    native RAR archiver produced by RARLAB (Alexander Roshal). The proprietary
-    RAR encoder uses advanced techniques (including optimal parsing, context
-    modelling, and PPMd) that this implementation does not attempt to reproduce.
-    Compression ratios will vary; this implementation may produce larger output
-    than the native tool in many real-world scenarios.
-
-  - Provides RAR5/RAR7 read and write support, plus RAR 1.5–4.x reading and
-    RAR 1.5 / 2.x / 4.x archive creation (legacy `-ma15` / `-ma2` / `-ma4`).
-    The intermediate RAR2.6/RAR3.x members (v26/v36) are written as their base
-    versions (`v20`/`v29`).
-    Legacy-format support has feature-specific limitations documented by the
-    library and CLI.
-
-  - Is intended for software conservancy, interoperability, and educational use.
-    It enables reading and writing of the RAR archive format without depending
-    on proprietary binaries.
-
-Trademarks
------------
-
-RAR and WinRAR are registered trademarks of Alexander Roshal and RARLAB.
-This project is not affiliated with, endorsed by, or connected to RARLAB
-in any way.
-
-napi-rs binding (`crates/rar-napi`)
--------------------------------------
-
-The `smart-archive-rar` napi-rs binding under `crates/rar-napi` wraps the
-`rar-rs` library for Node.js (native `.node` addons) and WASM
-(`wasm32-wasip1-threads`). Its code, tests, and scripts originate from the
-`smart-archive-rar` project (yjdyamv/smart-archive-rar) and remain
-BSD-2-Clause. The napi-rs / emnapi machinery is third-party and carries its
-own licenses. The binding does not ship via npm: compiled artifacts are
-produced by CI and attached to GitHub Releases.
+rar-rs is an independent Rust implementation of the RAR archive format, built
+for software conservancy, interoperability and education. It is not affiliated
+with, endorsed by, or connected to RARLAB, and it contains no code from
+RARLAB's proprietary `unrar`. Archive structures are implemented from public
+format descriptions and the independent open-source references credited below.
 
 License
---------
+-------
 
-Unless otherwise noted, original project contributions are licensed under the
-BSD 2-Clause License. Third-party portions retain the licenses identified in
-this notice. See LICENSE for the full BSD-2-Clause text.
+Original contributions are copyright (c) 2025 librar contributors and
+(c) 2026 yjdyamv, licensed under BSD-2-Clause (full text: LICENSE).
+Third-party portions keep their own terms as credited and inventoried below.
+
+Third-party portions
+--------------------
+
+libarchive RAR5 reader (BSD-2-Clause)
+  The RAR5 LZSS+Huffman codec (crates/rar/src/codec/modern/lzss_huff/) was
+  implemented from the public RAR format and from analysis of libarchive's
+  `archive_read_support_format_rar5.c` by Grzegorz Antoniak (2018). It is not
+  copied from proprietary RARLAB source.
+
+rars (MIT OR Apache-2.0)
+  Ported from https://github.com/bitplane/rars at revision `c08a17b`: the RAR5
+  recovery-record codec (recovery/rar50/), BLAKE2sp (format/rar5/blake2sp.rs),
+  the RAR5 key-derivation and hash-key MAC patterns (crypto/rar50.rs), the x86
+  filter scan (codec/common/filters.rs), the BT4 match finder
+  (codec/common/match_finder.rs), the optimal parse and block splitter, the
+  E8/E8E9 normalization, and the RAR 3.x/4.x, 2.x and 1.5 member decoders.
+  Every in-tree port states MIT OR Apache-2.0 in its own header: the
+  expression revision `c08a17b` declared and crates.io lists for every
+  published release. (An upstream COPYING file read "WTFPL with 1 extra
+  clause" for a few weeks in 2026; it never appeared in that project's
+  workspace metadata or in a release, and was replaced by Apache-2.0. No file
+  here claims WTFPL.)
+
+smart-archive-rar (BSD-2-Clause)
+  The napi-rs binding under crates/rar-napi (Node `.node` addons and
+  wasm32-wasip1-threads) originates from yjdyamv/smart-archive-rar. The
+  napi-rs and emnapi machinery is third-party and carries its own licenses. No
+  npm package is published: CI builds the artifacts for GitHub Releases.
+
+test fixtures
+  crates/rar/tests/fixtures/{rar13,rar40} contain archive files copied from
+  the rars test corpus. They are test inputs, not source code, and remain
+  subject to the terms of that corpus.
+
+RAR/WinRAR tools
+  Used only as black-box interoperability references for testing (set
+  SA_OFFICIAL_RAR / SA_OFFICIAL_UNRAR to run the `official_*` interop suite).
+  No RARLAB binary or source is included or used as source code.
+
+The per-file inventory behind this summary is THIRD_PARTY_LICENSES.md.
+
+Trademarks
+----------
+
+RAR and WinRAR are registered trademarks of Alexander Roshal and RARLAB.
+
+Scope and limitations
+---------------------
+
+  * Not a replacement for RARLAB's archiver, and not an attempt to reproduce
+    it: the proprietary encoder's optimal parsing, context modelling and PPMd
+    are out of scope, so output is usually larger than the native tool's.
+
+  * Formats: RAR5/RAR7 read and write; RAR 1.5-4.x read; RAR 1.5 / 2.x / 4.x
+    creation (`-ma15` / `-ma2` / `-ma4`). Intermediate RAR2.6/RAR3.x members
+    (v26/v36) are written as their base versions (v20/v29). Legacy formats have
+    feature-specific limits, documented by the library and the CLI.
+
+  * Intended for software conservancy, interoperability and education: it makes
+    the archive format readable and writable without proprietary binaries.
