@@ -130,9 +130,11 @@
   容器（`recovery/rev50.rs`，GF(2^16) Cauchy + 每卷 CRC/大小表）；RAR 1.5–4.x 用
   `recovery/rev3/`（GF(2^8) `rs8.rs` + 名称/尾部元数据）：trailer 布局（末 7
   字节 = `data-1/rec-1/index/CRC32`，只保护 `len-7`，重建尾 7 字节置零；新命名
-  `base.partNN.rev`，老命名 `baseN.rev`）（`.rev` 文件名匹配 ASCII
-  大小写不敏感；base 以数字结尾的歧义（`set44_2_1.rev` → `set`+44 或
-  `set4`+4）按现存数据卷评分消解，stale 清理复用同一判定）与 legacy
+  `base.partNN.rev`，老命名 `baseN.rev`）（`.rev` 文件名**解析** ASCII
+  大小写不敏感，但候选要对现存数据卷评分，所以"这个名字属于哪个 base"最终跟随
+  文件系统的大小写语义：Windows 下 `SET44_2_1.REV` 能配 `set.rar`，POSIX 下
+  不能（官方工具在 POSIX 同样不配）；base 以数字结尾的歧义（`set44_2_1.rev` →
+  `set`+44 或 `set4`+4）按现存数据卷评分消解，stale 清理复用同一判定）与 legacy
   全量奇偶布局（`base<data>_<rec>_<idx>.rev`，新命名带 `.part` 中缀）；WinRAR
   按卷尾是否为零字节选择布局，我们逐字节一致；损坏卷用 syndrome+Berlekamp-Massey
   定位后改名 `*.bad` 重建。
