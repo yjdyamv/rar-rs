@@ -240,7 +240,7 @@ impl RarArchive {
         self.mode = Mode::Read;
         self.read_ctx_mut().solid_state = None;
         self.read_ctx_mut().solid_decoded_through = -1;
-        self.open_read()?;
+        crate::format::shared::extract::open::open_read(self)?;
         Ok(())
     }
 

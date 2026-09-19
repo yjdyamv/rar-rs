@@ -45,7 +45,7 @@ impl RarArchive {
     /// Decode member `idx` to memory, honoring the family's solid chains.
     pub(crate) fn decode_entry_at(&mut self, idx: usize) -> RarResult<Vec<u8>> {
         if self.is_legacy() {
-            return self.decode_rar4_at(idx);
+            return crate::format::rar4::extract::decode_rar4_at(self, idx);
         }
         if crate::format::rar5::extract::solid::is_solid_chain_member(self, idx) {
             return crate::format::rar5::extract::solid::decode_solid_through(self, idx);
@@ -61,7 +61,7 @@ impl RarArchive {
         writer: &mut dyn std::io::Write,
     ) -> RarResult<u64> {
         if self.is_legacy() {
-            return self.decode_rar4_to(idx, writer);
+            return crate::format::rar4::extract::decode_rar4_to(self, idx, writer);
         }
         if crate::format::rar5::extract::solid::is_solid_chain_member(self, idx) {
             return crate::format::rar5::extract::solid::decode_solid_through_to(self, idx, writer);

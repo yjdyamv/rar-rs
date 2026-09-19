@@ -15,7 +15,7 @@
 
 pub(crate) mod comment;
 mod envelope;
-mod extract;
+pub(crate) mod extract;
 mod read;
 pub(crate) mod write;
 use crate::engine::ArchiveEntry;

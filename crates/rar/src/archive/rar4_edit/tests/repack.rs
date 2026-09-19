@@ -344,7 +344,7 @@ fn solid_sectioned_content_decode_regression() {
         a.close().unwrap();
     }
     let mut a = crate::archive::RarArchive::open(&path).unwrap();
-    a.rar4_decode_solid_through(1)
+    crate::format::rar4::extract::rar4_decode_solid_through(&mut a, 1)
         .expect("second solid member must decode");
 }
 

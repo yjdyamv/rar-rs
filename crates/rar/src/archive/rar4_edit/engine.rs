@@ -170,7 +170,7 @@ fn apply_multivolume_edits(
     }
     // Re-scan the committed set so the in-memory catalog and every rebuilt
     // header CRC reflect the new bytes.
-    archive.open_read()?;
+    crate::format::shared::extract::open::open_read(archive)?;
     Ok(EditSummary {
         deleted: 0,
         renamed: matched.len(),
@@ -651,7 +651,7 @@ pub(crate) fn edit_rar4(
     }
     // Re-scan the rewritten archive so the in-memory catalog matches the
     // file and every rebuilt header CRC is validated against the new bytes.
-    archive.open_read()?;
+    crate::format::shared::extract::open::open_read(archive)?;
     Ok(EditSummary {
         deleted: deleted_count,
         renamed,

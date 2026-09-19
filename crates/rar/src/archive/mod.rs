@@ -370,7 +370,7 @@ impl RarArchive {
     /// Open an existing RAR archive for reading.
     pub fn open(path: impl AsRef<Path>) -> RarResult<Self> {
         let mut archive = Self::new_for_mode(path.as_ref().to_path_buf(), Mode::Read, None);
-        archive.open_read()?;
+        crate::format::shared::extract::open::open_read(&mut archive)?;
         Ok(archive)
     }
 
@@ -389,7 +389,7 @@ impl RarArchive {
     /// that, reading and extraction work identically to a full scan.
     pub fn open_quick(path: impl AsRef<Path>) -> RarResult<Self> {
         let mut archive = Self::new_for_mode(path.as_ref().to_path_buf(), Mode::Read, None);
-        archive.open_read_quick()?;
+        crate::format::shared::extract::open::open_read_quick(&mut archive)?;
         Ok(archive)
     }
 
@@ -400,7 +400,7 @@ impl RarArchive {
             Mode::Read,
             Some(password.to_string()),
         );
-        archive.open_read()?;
+        crate::format::shared::extract::open::open_read(&mut archive)?;
         Ok(archive)
     }
 
@@ -412,7 +412,7 @@ impl RarArchive {
             Mode::Read,
             Some(password.to_string()),
         );
-        archive.open_read_quick()?;
+        crate::format::shared::extract::open::open_read_quick(&mut archive)?;
         Ok(archive)
     }
 
@@ -484,7 +484,9 @@ impl RarArchive {
             Some(password.to_string())
         };
         let mut archive = Self::new_for_mode(path.as_ref().to_path_buf(), Mode::Append, pw);
-        if let Err(error) = archive.open_read().and_then(|()| archive.prepare_append()) {
+        if let Err(error) = crate::format::shared::extract::open::open_read(&mut archive)
+            .and_then(|()| archive.prepare_append())
+        {
             archive.abort();
             return Err(error);
         }

@@ -238,7 +238,10 @@ pub(crate) fn repack_solid_archive(
                 let data = if archive.entries[kept_member.index].is_dir() {
                     Vec::new()
                 } else {
-                    archive.rar4_decode_solid_through(kept_member.index)?
+                    crate::format::rar4::extract::rar4_decode_solid_through(
+                        archive,
+                        kept_member.index,
+                    )?
                 };
                 writer.add_rar4_data(
                     kept_member.name.clone(),
@@ -291,7 +294,7 @@ pub(crate) fn repack_solid_archive(
             install_durable(&tmp_path, &archive.path)?;
             summary.deleted = deleted_count;
             summary.renamed = renamed;
-            archive.open_read()?;
+            crate::format::shared::extract::open::open_read(archive)?;
             Ok(summary)
         }
         Err(error) => {
