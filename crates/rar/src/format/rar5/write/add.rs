@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::emit::MemberPlan;
 use super::layout::{
     SAMPLE_PROBE_HEAD, dict_params_for, hash_file, sample_is_incompressible,
-    sample_is_incompressible_file,
+    sample_is_incompressible_stream,
 };
 use crate::archive::{ArchiveEntry, Mode, RarArchive, STREAM_COMPRESS_THRESHOLD};
 use crate::codec::lzss_huff;
@@ -251,7 +251,7 @@ impl RarArchive {
         let method = level_to_method(level);
         let probe_incompressible = method != COMP_METHOD_STORE
             && file_size >= (SAMPLE_PROBE_HEAD as u64) * 4
-            && sample_is_incompressible_file(path, file_size, method)?;
+            && sample_is_incompressible_stream(&mut fs::File::open(path)?, file_size, method)?;
         let (dsl, dict_bytes) = dict_params_for(
             file_size as usize,
             self.write_ctx().compression.dict_size_log,

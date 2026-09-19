@@ -474,16 +474,20 @@ impl RarArchive {
                 // have no streaming form yet, so those members stream STORE
                 // instead (bounded memory, no ratio).
                 Some(LegacyCodec::Rar20) if !solid_mode => {
-                    !crate::codec::common::incompressible::sample_is_incompressible_file(
-                        path, file_size, level,
+                    !crate::codec::common::incompressible::sample_is_incompressible_stream(
+                        &mut fs::File::open(path)?,
+                        file_size,
+                        level,
                     )?
                 }
                 // RAR 1.5's adaptive stream now encodes incrementally, so its
                 // large members compress in bounded memory too, solid chain
                 // included.
                 Some(LegacyCodec::Rar15) => {
-                    !crate::codec::common::incompressible::sample_is_incompressible_file(
-                        path, file_size, level,
+                    !crate::codec::common::incompressible::sample_is_incompressible_stream(
+                        &mut fs::File::open(path)?,
+                        file_size,
+                        level,
                     )?
                 }
                 // Anything without a streaming encoder.

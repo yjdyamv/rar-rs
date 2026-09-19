@@ -61,10 +61,13 @@ pub const FILE_FLAG_CRC32: u64 = 0x0004;
 
 // ── Compression Methods ────────────────────────────────────────────────────
 
-pub const COMP_METHOD_STORE: u8 = 0;
-pub const COMP_METHOD_FASTEST: u8 = 1;
-pub const COMP_METHOD_NORMAL: u8 = 3;
-pub const COMP_METHOD_BEST: u8 = 5;
+// Owned by the codec (the layer that switches on them); re-exported so the
+// container keeps one definition. `pub use` rather than an alias chain, so
+// this stays the single source for callers under `format::rar5`.
+#[allow(unused_imports)]
+pub use crate::codec::lzss_huff::{
+    COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_NORMAL, COMP_METHOD_STORE,
+};
 
 pub fn method_name(method: u8) -> &'static str {
     match method {

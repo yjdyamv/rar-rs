@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::error::{RarError, RarResult};
 
 pub(crate) use crate::codec::common::incompressible::{
-    SAMPLE_PROBE_HEAD, sample_is_incompressible, sample_is_incompressible_file,
+    SAMPLE_PROBE_HEAD, sample_is_incompressible, sample_is_incompressible_stream,
 };
 
 /// WinRAR 7.23 dictionary selection for a non-solid member: the requested

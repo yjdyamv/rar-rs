@@ -395,10 +395,14 @@ impl RarArchive {
         let solid = self.write_ctx().solid.mode;
         let spill = spill_path_for(&self.path);
         let _guard = SpillGuard(spill.clone());
+        // The probe reads a stream, so open one only when the cheap checks
+        // leave the decision open.
         let store_only = level == 0
             || (!solid
-                && crate::codec::common::incompressible::sample_is_incompressible_file(
-                    path, file_size, level,
+                && crate::codec::common::incompressible::sample_is_incompressible_stream(
+                    &mut fs::File::open(path)?,
+                    file_size,
+                    level,
                 )?);
         let (payload_path, packed_size, method) = if store_only {
             (path.to_path_buf(), file_size, METHOD_STORE)

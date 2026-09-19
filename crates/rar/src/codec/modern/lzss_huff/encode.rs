@@ -18,10 +18,8 @@ pub use super::encoder::{
     pick_delta_channel,
 };
 
+use super::{COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_NORMAL, COMP_METHOD_STORE};
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::{
-    COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_NORMAL, COMP_METHOD_STORE,
-};
 use crate::version::ArchiveVersion;
 
 /// Options controlling compression of one member.

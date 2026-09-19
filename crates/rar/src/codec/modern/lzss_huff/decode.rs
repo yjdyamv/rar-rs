@@ -11,8 +11,8 @@ pub use super::decoder::{
     decode_to_writer, trace_stream,
 };
 
+use super::{COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_STORE};
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::{COMP_METHOD_BEST, COMP_METHOD_FASTEST, COMP_METHOD_STORE};
 
 /// Decode `data` using the specified RAR5 compression method.
 pub fn decode(

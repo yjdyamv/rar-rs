@@ -48,6 +48,22 @@ pub const HUFF_DCX: usize = 80;
 pub const HUFF_LDC: usize = 16;
 pub const HUFF_RC: usize = 44;
 
+// ── Compression methods ────────────────────────────────────────────────────
+//
+// The codec's own vocabulary. The values are the on-disk RAR5 method bytes
+// (the codec only ever sees those), but the *meaning* belongs here: this is
+// the layer that switches on them, and `format::rar5` re-exports them so the
+// container keeps one definition rather than a copy.
+
+/// Stored, not compressed.
+pub const COMP_METHOD_STORE: u8 = 0;
+/// Fastest LZSS+Huffman level.
+pub const COMP_METHOD_FASTEST: u8 = 1;
+/// Normal LZSS+Huffman level (the default).
+pub const COMP_METHOD_NORMAL: u8 = 3;
+/// Best LZSS+Huffman level.
+pub const COMP_METHOD_BEST: u8 = 5;
+
 /// Maximum Huffman code bit length.
 pub const MAX_CODE_LENGTH: usize = 15;
 

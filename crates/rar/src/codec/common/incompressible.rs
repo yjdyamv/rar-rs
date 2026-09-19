@@ -20,9 +20,7 @@
 //! incompressible, so files with a small random section keep compressing.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{Seek, SeekFrom};
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom};
 
 use crate::codec::lzss_huff;
 use crate::error::RarResult;
@@ -169,20 +167,28 @@ pub(crate) fn sample_is_incompressible(data: &[u8], method: u8) -> bool {
     bad >= 2
 }
 
-/// File-based stride probe: head + samples at the quarter points.
-pub(crate) fn sample_is_incompressible_file(path: &Path, size: u64, method: u8) -> RarResult<bool> {
-    let mut f = File::open(path)?;
+/// Seekable-stream stride probe: head + samples at the quarter points.
+///
+/// Takes a reader rather than a path: this is a codec-layer policy decision,
+/// and the codec layer has no business opening files (it used to reach into
+/// `crate::fs` for exactly that). Callers own the handle and pass the member's
+/// declared `size`.
+pub(crate) fn sample_is_incompressible_stream<R: Read + Seek>(
+    stream: &mut R,
+    size: u64,
+    method: u8,
+) -> RarResult<bool> {
     let mut head = vec![0u8; SAMPLE_PROBE_HEAD];
-    let n = read_up_to(&mut f, &mut head)?;
+    let n = read_up_to(stream, &mut head)?;
     let mut samples: Vec<Vec<u8>> = Vec::new();
     let mut voting: Vec<Vec<u8>> = Vec::new();
     for &quarter in &[size / 4, size / 2, size * 3 / 4] {
         if quarter < SAMPLE_PROBE_HEAD as u64 {
             continue;
         }
-        f.seek(SeekFrom::Start(quarter))?;
+        stream.seek(SeekFrom::Start(quarter))?;
         let mut sample = vec![0u8; SAMPLE_PROBE_TAIL];
-        let n = read_up_to(&mut f, &mut sample)?;
+        let n = read_up_to(stream, &mut sample)?;
         if n > 0 {
             samples.push(sample[..n].to_vec());
             voting.push(sample[..n].to_vec());
