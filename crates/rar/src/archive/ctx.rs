@@ -34,22 +34,14 @@ impl Engine for RarArchive {
         self.write.as_mut().expect("write context not available")
     }
 
-    fn ensure_write_ctx(&mut self) {
-        self.write.get_or_insert_with(WriteState::default);
-    }
-
     fn parts(&mut self) -> Parts<'_> {
         Parts {
             read: &mut self.read,
-            write: &mut self.write,
             entries: &mut self.entries,
             stream: &mut self.stream,
             volume_paths: &self.volume_paths,
-            path: &self.path,
             password: self.password.as_deref(),
             cancel: self.cancel.as_deref(),
-            archive_encr: self.archive_encr.as_ref(),
-            archive_keys: self.archive_keys.as_ref(),
         }
     }
 

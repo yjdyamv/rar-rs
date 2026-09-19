@@ -229,7 +229,10 @@ pub(crate) fn repack_solid_archive(
             .map_err(|e| RarError::Format(format!("repack: create staged archive: {e:?}")))?;
             // The comment is emitted by the writer (it must precede every
             // member and has to be header-encrypted on a `-hp` archive).
-            writer.set_rar4_writer_comment(final_comment.clone());
+            crate::format::rar4::write::pipeline::set_rar4_writer_comment(
+                &mut writer,
+                final_comment.clone(),
+            );
             for kept_member in &kept {
                 archive.check_cancel()?;
                 // Directory members are zero-byte placeholders: they contribute
@@ -243,7 +246,8 @@ pub(crate) fn repack_solid_archive(
                         kept_member.index,
                     )?
                 };
-                writer.add_rar4_data(
+                crate::format::rar4::write::pipeline::add_rar4_data(
+                    &mut writer,
                     kept_member.name.clone(),
                     data,
                     kept_member.level,
@@ -256,7 +260,8 @@ pub(crate) fn repack_solid_archive(
             // Deferred solid-append additions continue the same fresh chain.
             for entry in additions {
                 archive.check_cancel()?;
-                writer.add_rar4_data(
+                crate::format::rar4::write::pipeline::add_rar4_data(
+                    &mut writer,
                     entry.name.clone(),
                     entry.data.clone(),
                     entry.level,

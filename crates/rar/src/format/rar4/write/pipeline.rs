@@ -13,14 +13,13 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::cbc::{Rar4RangeEmitter, Rar15RangeEmitter, Rar20RangeEmitter, Rar30RangeEmitter};
-use crate::archive::RarArchive;
 use crate::codec::legacy::rar29_encoder::Rar29FilterKind;
+use crate::engine::Engine;
 use crate::engine::{ArchiveEntry, STREAM_COMPRESS_THRESHOLD};
 #[cfg(feature = "parallel")]
 use crate::engine::{BatchEntry, PARALLEL_COMPRESS_MAX_MEMBER, PARALLEL_COMPRESS_WAVE_BUDGET};
 use crate::error::{RarError, RarResult};
 use crate::format::shared::engine::{CountingWriter, CrcReader, SpillGuard, spill_path_for};
-use crate::format::shared::stream_mut;
 use crate::format::shared::write_ops::archive_name_from_path;
 use crate::model::FileHeader;
 use crate::version::LegacyCodec;
@@ -51,7 +50,7 @@ fn rar4_segment_header_reserve(
 /// member paths.
 #[allow(clippy::too_many_arguments)]
 fn emit_rar4_segment(
-    this: &mut crate::archive::RarArchive,
+    this: &mut dyn Engine,
     encoded_name: &[u8],
     name_flags: u16,
     file_crc: u32,
@@ -137,22 +136,27 @@ fn emit_rar4_segment(
         let crc = (crate::crc32::crc32(&hdr[2..crc_end]) & 0xFFFF) as u16;
         hdr[0..2].copy_from_slice(&crc.to_le_bytes());
     }
-    let stream = stream_mut(&mut this.stream)?;
     // `-hp`: the file-header block is header-encrypted like every
     // other block after the main header. The member payload (data)
     // itself is NOT part of the ciphertext; it follows the encrypted
     // header on disk and is covered by member-level encryption (`-p`)
     // separately. The data offset is past the `[8B salt][align16]`
     // block, matching the read side's `block.header_end`.
-    let (header_bytes, header_on_disk) = if this.header_encryption {
-        let password = this
-            .password
+    let header_encryption = this.header_encryption();
+    // The password is taken before the stream borrow: `this.password()` and
+    // `this.stream_mut()` both borrow the whole engine.
+    let password = header_encryption
+        .then(|| this.password().map(str::to_owned))
+        .flatten();
+    let (header_bytes, header_on_disk) = if header_encryption {
+        let password = password
             .as_deref()
             .ok_or_else(|| RarError::Encrypted("header encryption requires a password".into()))?;
         crate::format::rar4::write::encrypt_block_header(&hdr, password)?
     } else {
         (hdr.clone(), hdr.len() as u64)
     };
+    let stream = this.stream_mut()?;
     let data_offset = stream.stream_position()? + header_on_disk;
     stream.write_all(&header_bytes)?;
     stream.write_all(data)?;
@@ -167,8 +171,8 @@ fn emit_rar4_segment(
         && !split_after
     {
         let block = build_file_comment_block(comment);
-        let block_bytes = if this.header_encryption {
-            let password = this.password.as_deref().ok_or_else(|| {
+        let block_bytes = if header_encryption {
+            let password = password.as_deref().ok_or_else(|| {
                 RarError::Encrypted("header encryption requires a password".into())
             })?;
             crate::format::rar4::write::encrypt_block_header(&block, password)?.0
@@ -240,19 +244,19 @@ struct Rar4SplitParams<'a> {
 /// carries its own segment's CRC, the final head the whole-file CRC; the
 /// unpacked size is the full file size in every head). `segment(offset, len)`
 /// yields the segment's on-disk (already encrypted) bytes; the closure may
-/// report progress itself.
+/// report progress itcx.
 fn emit_rar4_split<'a>(
-    this: &mut RarArchive,
+    this: &mut dyn Engine,
     params: &Rar4SplitParams<'_>,
     volume_size: u64,
     packed_size: u64,
-    mut segment: impl FnMut(&mut RarArchive, u64, u64) -> RarResult<Cow<'a, [u8]>>,
+    mut segment: impl FnMut(&mut dyn Engine, u64, u64) -> RarResult<Cow<'a, [u8]>>,
 ) -> RarResult<Vec<crate::model::DataChunk>> {
     let needed = 7 + rar4_segment_header_reserve(
         params.encoded_name,
         params.salt.is_some(),
         params.ext_time,
-        this.header_encryption,
+        this.header_encryption(),
     );
     let mut chunks = Vec::new();
     let mut sent = 0u64;
@@ -318,1019 +322,1008 @@ fn emit_rar4_split<'a>(
     Ok(chunks)
 }
 
-impl RarArchive {
-    /// RAR4 solid-chain bookkeeping for one member: returns whether the
-    /// member continues the run and advances the run state. A stored member
-    /// ends the run (dropping the carried encoder state the trial may have
-    /// advanced); a non-empty compressed member marks the run as started.
-    ///
-    /// RAR 1.5 (unp_ver 15) never flags `FHD_SOLID`: the reader derives
-    /// solid continuation from the archive-level `MHD_SOLID` and member
-    /// position instead. RAR 2.x (unp_ver 20/26) flags each continuation
-    /// exactly like RAR3+ — official UnRAR feeds `Arc.FileHead.Solid` to
-    /// `Unpack20` for those versions and resets its tables when the flag is
-    /// clear.
-    fn track_rar4_solid_member(&mut self, method: u8, unpacked_size: u64) -> bool {
-        let codec = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver);
-        let continuation = self.write_ctx().solid.mode
-            && method != crate::format::rar4::RAR4_METHOD_STORE
-            && self.write_ctx().solid.rar4_run_has_member
-            && matches!(codec, Some(LegacyCodec::Rar20 | LegacyCodec::Rar29));
-        if method == crate::format::rar4::RAR4_METHOD_STORE {
-            // RAR3+ flags the break with FHD_SOLID, so a STORE member ends
-            // the run. RAR 1.5 chains are position-derived and carry no
-            // flag: the reader keeps the window across STORE members, so
-            // the writer must keep the encoder alive for the next
-            // compressed member. RAR 2.x also keeps the encoder alive
-            // (official UnRAR skips `Unpack20` for STORE members and keeps
-            // `TablesRead2`); only RAR3+'s flagged break resets it here.
-            if codec == Some(LegacyCodec::Rar29) {
-                self.write_ctx_mut().solid.rar4_encoder = None;
-                self.write_ctx_mut().solid.legacy_encoder = None;
-                self.write_ctx_mut().solid.rar4_run_has_member = false;
-            }
-        } else if unpacked_size != 0 {
-            self.write_ctx_mut().solid.rar4_run_has_member = true;
+/// RAR4 solid-chain bookkeeping for one member: returns whether the
+/// member continues the run and advances the run state. A stored member
+/// ends the run (dropping the carried encoder state the trial may have
+/// advanced); a non-empty compressed member marks the run as started.
+///
+/// RAR 1.5 (unp_ver 15) never flags `FHD_SOLID`: the reader derives
+/// solid continuation from the archive-level `MHD_SOLID` and member
+/// position instead. RAR 2.x (unp_ver 20/26) flags each continuation
+/// exactly like RAR3+ — official UnRAR feeds `Arc.FileHead.Solid` to
+/// `Unpack20` for those versions and resets its tables when the flag is
+/// clear.
+fn track_rar4_solid_member(cx: &mut dyn Engine, method: u8, unpacked_size: u64) -> bool {
+    let codec = LegacyCodec::from_unp_ver(cx.write_ctx().solid.rar4_unp_ver);
+    let continuation = cx.write_ctx().solid.mode
+        && method != crate::format::rar4::RAR4_METHOD_STORE
+        && cx.write_ctx().solid.rar4_run_has_member
+        && matches!(codec, Some(LegacyCodec::Rar20 | LegacyCodec::Rar29));
+    if method == crate::format::rar4::RAR4_METHOD_STORE {
+        // RAR3+ flags the break with FHD_SOLID, so a STORE member ends
+        // the run. RAR 1.5 chains are position-derived and carry no
+        // flag: the reader keeps the window across STORE members, so
+        // the writer must keep the encoder alive for the next
+        // compressed member. RAR 2.x also keeps the encoder alive
+        // (official UnRAR skips `Unpack20` for STORE members and keeps
+        // `TablesRead2`); only RAR3+'s flagged break resets it here.
+        if codec == Some(LegacyCodec::Rar29) {
+            cx.write_ctx_mut().solid.rar4_encoder = None;
+            cx.write_ctx_mut().solid.legacy_encoder = None;
+            cx.write_ctx_mut().solid.rar4_run_has_member = false;
         }
-        continuation
+    } else if unpacked_size != 0 {
+        cx.write_ctx_mut().solid.rar4_run_has_member = true;
     }
+    continuation
+}
 
-    /// Push the catalog entry for one emitted RAR4 member. Shared by the
-    /// buffered, streaming and parallel emission paths so the header fields
-    /// (including the nanosecond mtime) stay in lockstep.
-    #[allow(clippy::too_many_arguments)]
-    fn push_rar4_entry(
-        &mut self,
-        name: String,
-        unpacked_size: u64,
-        packed_size: u64,
-        file_crc: u32,
-        mtime: u32,
-        mtime_ns: u32,
-        method: u8,
-        password: bool,
-        salt: Option<[u8; 8]>,
-        ext_time: Option<Vec<u8>>,
-        comment: Option<Vec<u8>>,
-        is_dir: bool,
-        data_offset: u64,
-        chunks: Vec<crate::model::DataChunk>,
-    ) {
-        self.entries.push(crate::engine::ArchiveEntry {
-            header: crate::model::FileHeader {
-                name,
-                unpacked_size,
-                packed_size,
-                crc32_val: Some(file_crc),
-                mtime,
-                mtime_ns: Some(mtime_ns),
-                comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
-                host_os: 2,
-                format_version: 4,
-                unp_ver: self.write_ctx().solid.rar4_unp_ver,
-                data_offset,
-                is_directory: is_dir,
-                flags: if password {
-                    crate::format::rar4::FHD_PASSWORD as u64
-                } else {
-                    0
-                },
-                salt,
-                extra_data: ext_time.unwrap_or_default(),
-                comment,
-                ..Default::default()
+/// Push the catalog entry for one emitted RAR4 member. Shared by the
+/// buffered, streaming and parallel emission paths so the header fields
+/// (including the nanosecond mtime) stay in lockstep.
+#[allow(clippy::too_many_arguments)]
+fn push_rar4_entry(
+    cx: &mut dyn Engine,
+    name: String,
+    unpacked_size: u64,
+    packed_size: u64,
+    file_crc: u32,
+    mtime: u32,
+    mtime_ns: u32,
+    method: u8,
+    password: bool,
+    salt: Option<[u8; 8]>,
+    ext_time: Option<Vec<u8>>,
+    comment: Option<Vec<u8>>,
+    is_dir: bool,
+    data_offset: u64,
+    chunks: Vec<crate::model::DataChunk>,
+) {
+    let unp_ver = cx.write_ctx().solid.rar4_unp_ver;
+    cx.entries_mut().push(crate::engine::ArchiveEntry {
+        header: crate::model::FileHeader {
+            name,
+            unpacked_size,
+            packed_size,
+            crc32_val: Some(file_crc),
+            mtime,
+            mtime_ns: Some(mtime_ns),
+            comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
+            host_os: 2,
+            format_version: 4,
+            unp_ver,
+            data_offset,
+            is_directory: is_dir,
+            flags: if password {
+                crate::format::rar4::FHD_PASSWORD as u64
+            } else {
+                0
             },
-            chunks,
-        });
+            salt,
+            extra_data: ext_time.unwrap_or_default(),
+            comment,
+            ..Default::default()
+        },
+        chunks,
+    });
+}
+
+/// RAR4 STORE path: write a member in the legacy container — STORE or
+/// LZSS-compressed (m1–m5), optionally AES-encrypted with the member
+/// password. A single-volume member is one FILE_HEAD + data; in a
+/// multi-volume set the member data is split at volume boundaries,
+/// writing `FHD_SPLIT_AFTER` on every non-final head and
+/// `FHD_SPLIT_BEFORE` on every continuation head.
+pub(crate) fn add_file_rar4(
+    cx: &mut dyn Engine,
+    path: &Path,
+    arcname: Option<&str>,
+    level: u8,
+) -> RarResult<()> {
+    let meta = fs::metadata(path)?;
+    let file_size = meta.len();
+    let mtime = meta
+        .modified()
+        .unwrap_or(SystemTime::now())
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as u32;
+    let name = match arcname {
+        Some(s) => s.to_string(),
+        None => archive_name_from_path(path)?,
+    };
+    let name = name.replace('\\', "/");
+
+    if cx.progress_slot().is_some() {
+        cx.report_progress(0, file_size);
     }
 
-    /// RAR4 STORE path: write a member in the legacy container — STORE or
-    /// LZSS-compressed (m1–m5), optionally AES-encrypted with the member
-    /// password. A single-volume member is one FILE_HEAD + data; in a
-    /// multi-volume set the member data is split at volume boundaries,
-    /// writing `FHD_SPLIT_AFTER` on every non-final head and
-    /// `FHD_SPLIT_BEFORE` on every continuation head.
-    pub(crate) fn add_file_rar4(
-        &mut self,
-        path: &Path,
-        arcname: Option<&str>,
-        level: u8,
-    ) -> RarResult<()> {
-        let meta = fs::metadata(path)?;
-        let file_size = meta.len();
-        let mtime = meta
-            .modified()
-            .unwrap_or(SystemTime::now())
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as u32;
-        let name = match arcname {
-            Some(s) => s.to_string(),
-            None => archive_name_from_path(path)?,
+    let mtime_ns = meta
+        .modified()
+        .unwrap_or(SystemTime::now())
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+
+    // Large members stream: the file is compressed (or copied) into a
+    // spill file and then streamed into the archive, so the whole member
+    // never enters memory. RAR29 streams with its LZ engine, RAR 2.x with
+    // its windowed multi-block encoder, and RAR 1.5 (plus any member whose
+    // streaming codec cannot compress here) as STORE — bounded memory, at
+    // the cost of compression for the STORE cases. Each generation's own
+    // cipher is emitted over the streamed payload, so a password no longer
+    // forces the member into memory either. A deferred solid append still
+    // buffers (close() repacks the archive).
+    let streaming_codec = LegacyCodec::from_unp_ver(cx.write_ctx().solid.rar4_unp_ver);
+    let password_encrypted = cx.password().is_some_and(|pw| !pw.is_empty());
+    let solid_mode = cx.write_ctx().solid.mode;
+    // A version whose cipher this pipeline does not implement keeps the
+    // buffered path, where it reports the unsupported version.
+    let streamable = !password_encrypted
+        || matches!(
+            streaming_codec,
+            Some(LegacyCodec::Rar15 | LegacyCodec::Rar20 | LegacyCodec::Rar29)
+        );
+    if file_size >= STREAM_COMPRESS_THRESHOLD && !cx.write_ctx().rar4.solid_append && streamable {
+        // A windowed member the sample probe calls incompressible would
+        // emit literals for minutes only for the pipeline to fall back to
+        // STORE, so probe first (the buffered path does the same through
+        // `whole_member_is_incompressible`).
+        let compressible = match streaming_codec {
+            // RAR 3.x streams with its LZ engine (solid chains included).
+            Some(LegacyCodec::Rar29) => true,
+            // RAR 2.x streams as a sequence of LZ blocks. Its solid chains
+            // have no streaming form yet, so those members stream STORE
+            // instead (bounded memory, no ratio).
+            Some(LegacyCodec::Rar20) if !solid_mode => {
+                !crate::codec::common::incompressible::sample_is_incompressible_stream(
+                    &mut fs::File::open(path)?,
+                    file_size,
+                    level,
+                )?
+            }
+            // RAR 1.5's adaptive stream now encodes incrementally, so its
+            // large members compress in bounded memory too, solid chain
+            // included.
+            Some(LegacyCodec::Rar15) => {
+                !crate::codec::common::incompressible::sample_is_incompressible_stream(
+                    &mut fs::File::open(path)?,
+                    file_size,
+                    level,
+                )?
+            }
+            // Anything without a streaming encoder.
+            _ => false,
         };
-        let name = name.replace('\\', "/");
+        let stream_level = if compressible { level } else { 0 };
+        return add_rar4_file_streaming(cx, path, &name, file_size, mtime, mtime_ns, stream_level);
+    }
 
-        if self.progress.is_some() {
-            self.report_progress(0, file_size);
-        }
+    // Read the whole member, then (for level >= 1) LZSS-compress it.
+    let mut reader = File::open(path)?;
+    let mut data = Vec::with_capacity(file_size as usize);
+    std::io::Read::read_to_end(&mut reader, &mut data)?;
+    if data.len() as u64 != file_size {
+        return Err(RarError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!(
+                "file changed size while being archived: expected {file_size} bytes, read {}",
+                data.len()
+            ),
+        )));
+    }
+    add_rar4_data(cx, name, data, level, mtime, mtime_ns, None, None)
+}
 
-        let mtime_ns = meta
-            .modified()
-            .unwrap_or(SystemTime::now())
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
+/// Create one large RAR4 member with bounded memory: compress the source
+/// into a spill file (falling back to STORE when compression does not
+/// help), optionally encrypting the payload on the fly, then emit the
+/// FILE_HEAD and stream the payload across volumes.
+///
+/// Only the RAR29 codec streams; the v15/v20 encoders need the whole
+/// input and are handled by the buffered path in [`Self::add_file_rar4`].
+/// Large members use the LZ engine only (the PPMd trial and the
+/// automatic VM filters need whole-member buffers).
+fn add_rar4_file_streaming(
+    cx: &mut dyn Engine,
+    path: &Path,
+    name: &str,
+    file_size: u64,
+    mtime: u32,
+    mtime_ns: u32,
+    level: u8,
+) -> RarResult<()> {
+    cx.check_cancel()?;
+    crate::format::rar4::create::ensure_member_size(file_size)?;
+    emit_pending_rar4_comment(cx)?;
+    if cx.write_ctx().solid.mode {
+        crate::format::shared::write_ops::maybe_reset_solid_for_extension(cx, name);
+    }
 
-        // Large members stream: the file is compressed (or copied) into a
-        // spill file and then streamed into the archive, so the whole member
-        // never enters memory. RAR29 streams with its LZ engine, RAR 2.x with
-        // its windowed multi-block encoder, and RAR 1.5 (plus any member whose
-        // streaming codec cannot compress here) as STORE — bounded memory, at
-        // the cost of compression for the STORE cases. Each generation's own
-        // cipher is emitted over the streamed payload, so a password no longer
-        // forces the member into memory either. A deferred solid append still
-        // buffers (close() repacks the archive).
-        let streaming_codec = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver);
-        let password_encrypted = self.password.as_deref().is_some_and(|pw| !pw.is_empty());
-        let solid_mode = self.write_ctx().solid.mode;
-        // A version whose cipher this pipeline does not implement keeps the
-        // buffered path, where it reports the unsupported version.
-        let streamable = !password_encrypted
-            || matches!(
-                streaming_codec,
-                Some(LegacyCodec::Rar15 | LegacyCodec::Rar20 | LegacyCodec::Rar29)
-            );
-        if file_size >= STREAM_COMPRESS_THRESHOLD
-            && !self.write_ctx().rar4.solid_append
-            && streamable
-        {
-            // A windowed member the sample probe calls incompressible would
-            // emit literals for minutes only for the pipeline to fall back to
-            // STORE, so probe first (the buffered path does the same through
-            // `whole_member_is_incompressible`).
-            let compressible = match streaming_codec {
-                // RAR 3.x streams with its LZ engine (solid chains included).
-                Some(LegacyCodec::Rar29) => true,
-                // RAR 2.x streams as a sequence of LZ blocks. Its solid chains
-                // have no streaming form yet, so those members stream STORE
-                // instead (bounded memory, no ratio).
-                Some(LegacyCodec::Rar20) if !solid_mode => {
-                    !crate::codec::common::incompressible::sample_is_incompressible_stream(
-                        &mut fs::File::open(path)?,
-                        file_size,
-                        level,
-                    )?
-                }
-                // RAR 1.5's adaptive stream now encodes incrementally, so its
-                // large members compress in bounded memory too, solid chain
-                // included.
-                Some(LegacyCodec::Rar15) => {
-                    !crate::codec::common::incompressible::sample_is_incompressible_stream(
-                        &mut fs::File::open(path)?,
-                        file_size,
-                        level,
-                    )?
-                }
-                // Anything without a streaming encoder.
-                _ => false,
-            };
-            let stream_level = if compressible { level } else { 0 };
-            return self.add_rar4_file_streaming(
-                path,
-                &name,
-                file_size,
-                mtime,
-                mtime_ns,
-                stream_level,
-            );
-        }
+    let password = cx.password().is_some_and(|pw| !pw.is_empty());
+    let codec = LegacyCodec::from_unp_ver(cx.write_ctx().solid.rar4_unp_ver);
+    let solid_mode = cx.write_ctx().solid.mode;
+    let spill = spill_path_for(cx.path());
+    let _guard = SpillGuard(spill.clone());
 
-        // Read the whole member, then (for level >= 1) LZSS-compress it.
+    // ── Compress into the spill (level 0 skips straight to STORE) and
+    // hash the plaintext in the same pass. ──
+    let file_crc;
+    let packed_len;
+    let method;
+    if level == 0 {
         let mut reader = File::open(path)?;
-        let mut data = Vec::with_capacity(file_size as usize);
-        std::io::Read::read_to_end(&mut reader, &mut data)?;
-        if data.len() as u64 != file_size {
+        let mut hasher = crc32fast::Hasher::new();
+        let mut buf = vec![0u8; 1 << 20];
+        let mut copied = 0u64;
+        loop {
+            cx.check_cancel()?;
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            copied += n as u64;
+            cx.report_progress(copied, file_size);
+        }
+        if copied != file_size {
             return Err(RarError::Io(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!(
-                    "file changed size while being archived: expected {file_size} bytes, read {}",
-                    data.len()
+                    "file changed size while being archived: expected {file_size} bytes, read {copied}"
                 ),
             )));
         }
-        self.add_rar4_data(name, data, level, mtime, mtime_ns, None, None)
-    }
-
-    /// Create one large RAR4 member with bounded memory: compress the source
-    /// into a spill file (falling back to STORE when compression does not
-    /// help), optionally encrypting the payload on the fly, then emit the
-    /// FILE_HEAD and stream the payload across volumes.
-    ///
-    /// Only the RAR29 codec streams; the v15/v20 encoders need the whole
-    /// input and are handled by the buffered path in [`Self::add_file_rar4`].
-    /// Large members use the LZ engine only (the PPMd trial and the
-    /// automatic VM filters need whole-member buffers).
-    fn add_rar4_file_streaming(
-        &mut self,
-        path: &Path,
-        name: &str,
-        file_size: u64,
-        mtime: u32,
-        mtime_ns: u32,
-        level: u8,
-    ) -> RarResult<()> {
-        self.check_cancel()?;
-        crate::format::rar4::create::ensure_member_size(file_size)?;
-        self.emit_pending_rar4_comment()?;
-        if self.write_ctx().solid.mode {
-            self.maybe_reset_solid_for_extension(name);
-        }
-
-        let password = self.password.as_deref().is_some_and(|pw| !pw.is_empty());
-        let codec = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver);
-        let solid_mode = self.write_ctx().solid.mode;
-        let spill = spill_path_for(&self.path);
-        let _guard = SpillGuard(spill.clone());
-
-        // ── Compress into the spill (level 0 skips straight to STORE) and
-        // hash the plaintext in the same pass. ──
-        let file_crc;
-        let packed_len;
-        let method;
-        if level == 0 {
-            let mut reader = File::open(path)?;
-            let mut hasher = crc32fast::Hasher::new();
-            let mut buf = vec![0u8; 1 << 20];
-            let mut copied = 0u64;
-            loop {
-                self.check_cancel()?;
-                let n = reader.read(&mut buf)?;
-                if n == 0 {
-                    break;
+        file_crc = hasher.finalize();
+        packed_len = file_size;
+        method = crate::format::rar4::RAR4_METHOD_STORE;
+    } else {
+        let mut source = CrcReader {
+            inner: File::open(path)?,
+            hasher: crc32fast::Hasher::new(),
+            read: 0,
+        };
+        let mut spill_file = crate::fs::atomic::read_write_create(&spill)?;
+        let mut counter = CountingWriter::new(&mut spill_file);
+        // A RAR 1.5 solid run's encoder is advanced by the trial encode
+        // and committed only when this member actually packs: the reader
+        // skips a STORE member without touching its adaptive tables, and
+        // a RAR 1.5 chain is position-derived, so a stored member must
+        // leave the carried encoder exactly where it was.
+        let mut legacy_encoder_to_commit: Option<
+            crate::codec::legacy::rar15_encoder::Unpack15Encoder,
+        > = None;
+        {
+            let codec = LegacyCodec::from_unp_ver(cx.write_ctx().solid.rar4_unp_ver);
+            let progress = cx.progress_slot().map(|(p, _)| p);
+            let cancel = cx.cancel_token();
+            let member = cx.progress_slot().map(|(_, m)| m).unwrap_or(0);
+            let mut report = |position: usize| -> bool {
+                if cancel
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+                {
+                    return false;
                 }
-                hasher.update(&buf[..n]);
-                copied += n as u64;
-                self.report_progress(copied, file_size);
-            }
-            if copied != file_size {
-                return Err(RarError::Io(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    format!(
-                        "file changed size while being archived: expected {file_size} bytes, read {copied}"
-                    ),
-                )));
-            }
-            file_crc = hasher.finalize();
-            packed_len = file_size;
-            method = crate::format::rar4::RAR4_METHOD_STORE;
-        } else {
-            let mut source = CrcReader {
-                inner: File::open(path)?,
-                hasher: crc32fast::Hasher::new(),
-                read: 0,
+                if let Some(progress) = &progress {
+                    progress.lock().expect("progress lock").report(
+                        member,
+                        position as u64,
+                        file_size,
+                    );
+                }
+                true
             };
-            let mut spill_file = crate::fs::atomic::read_write_create(&spill)?;
-            let mut counter = CountingWriter::new(&mut spill_file);
-            // A RAR 1.5 solid run's encoder is advanced by the trial encode
-            // and committed only when this member actually packs: the reader
-            // skips a STORE member without touching its adaptive tables, and
-            // a RAR 1.5 chain is position-derived, so a stored member must
-            // leave the carried encoder exactly where it was.
-            let mut legacy_encoder_to_commit: Option<
-                crate::codec::legacy::rar15_encoder::Unpack15Encoder,
-            > = None;
-            {
-                let codec = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver);
-                let progress = self.progress.clone();
-                let cancel = self.cancel.clone();
-                let member = self.progress_member;
-                let mut report = |position: usize| -> bool {
-                    if cancel
-                        .as_ref()
-                        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
-                    {
-                        return false;
-                    }
-                    if let Some(progress) = &progress {
-                        progress.lock().expect("progress lock").report(
-                            member,
-                            position as u64,
-                            file_size,
-                        );
-                    }
-                    true
-                };
-                if codec == Some(LegacyCodec::Rar20) && !solid_mode {
-                    // RAR 2.x streams as a sequence of LZ blocks, one per window.
-                    crate::codec::legacy::rar20_encoder::encode_member_windowed_streaming(
-                        &mut source,
-                        &mut counter,
-                        legacy_rar20_options(level),
-                        crate::codec::legacy::rar20_encoder::RAR20_STREAM_WINDOW,
-                        Some(&mut report),
-                    )?;
-                } else if codec == Some(LegacyCodec::Rar15) {
-                    // RAR 1.5 is one adaptive stream over the whole member, so
-                    // it encodes incrementally: a rolling window plus a chunk,
-                    // with the bit stream continuing across chunk boundaries.
-                    // A solid run clones the carried encoder for the trial and
-                    // commits it after the size check below.
-                    use crate::codec::legacy::rar15_encoder::Unpack15Encoder;
-                    let mut encoder = if solid_mode {
-                        match self.write_ctx().solid.legacy_encoder.as_ref() {
-                            Some(crate::engine::LegacySolidEncoder::Rar15(encoder)) => {
-                                encoder.clone_for_trial()
-                            }
-                            _ => Unpack15Encoder::with_options(legacy_rar15_options(level)),
+            if codec == Some(LegacyCodec::Rar20) && !solid_mode {
+                // RAR 2.x streams as a sequence of LZ blocks, one per window.
+                crate::codec::legacy::rar20_encoder::encode_member_windowed_streaming(
+                    &mut source,
+                    &mut counter,
+                    legacy_rar20_options(level),
+                    crate::codec::legacy::rar20_encoder::RAR20_STREAM_WINDOW,
+                    Some(&mut report),
+                )?;
+            } else if codec == Some(LegacyCodec::Rar15) {
+                // RAR 1.5 is one adaptive stream over the whole member, so
+                // it encodes incrementally: a rolling window plus a chunk,
+                // with the bit stream continuing across chunk boundaries.
+                // A solid run clones the carried encoder for the trial and
+                // commits it after the size check below.
+                use crate::codec::legacy::rar15_encoder::Unpack15Encoder;
+                let mut encoder = if solid_mode {
+                    match cx.write_ctx().solid.legacy_encoder.as_ref() {
+                        Some(crate::engine::LegacySolidEncoder::Rar15(encoder)) => {
+                            encoder.clone_for_trial()
                         }
-                    } else {
-                        Unpack15Encoder::with_options(legacy_rar15_options(level))
-                    };
+                        _ => Unpack15Encoder::with_options(legacy_rar15_options(level)),
+                    }
+                } else {
+                    Unpack15Encoder::with_options(legacy_rar15_options(level))
+                };
+                encoder.encode_member_streaming(&mut source, &mut counter, Some(&mut report))?;
+                if solid_mode {
+                    legacy_encoder_to_commit = Some(encoder);
+                }
+            } else {
+                let options = crate::codec::legacy::rar29_encoder::options_for_level(level);
+                if solid_mode {
+                    let encoder = cx
+                        .write_ctx_mut()
+                        .solid
+                        .rar4_encoder
+                        .get_or_insert_with(|| {
+                            crate::codec::legacy::rar29_encoder::Unpack29Encoder::with_options(
+                                options,
+                            )
+                        });
                     encoder.encode_member_streaming(
                         &mut source,
                         &mut counter,
                         Some(&mut report),
                     )?;
-                    if solid_mode {
-                        legacy_encoder_to_commit = Some(encoder);
-                    }
                 } else {
-                    let options = crate::codec::legacy::rar29_encoder::options_for_level(level);
-                    if solid_mode {
-                        let encoder = self.write_ctx_mut().solid.rar4_encoder.get_or_insert_with(
-                            || {
-                                crate::codec::legacy::rar29_encoder::Unpack29Encoder::with_options(
-                                    options,
-                                )
-                            },
-                        );
-                        encoder.encode_member_streaming(
-                            &mut source,
-                            &mut counter,
-                            Some(&mut report),
-                        )?;
-                    } else {
-                        let mut encoder =
-                            crate::codec::legacy::rar29_encoder::Unpack29Encoder::with_options(
-                                options,
-                            );
-                        encoder.encode_member_streaming(
-                            &mut source,
-                            &mut counter,
-                            Some(&mut report),
-                        )?;
-                    }
+                    let mut encoder =
+                        crate::codec::legacy::rar29_encoder::Unpack29Encoder::with_options(options);
+                    encoder.encode_member_streaming(
+                        &mut source,
+                        &mut counter,
+                        Some(&mut report),
+                    )?;
                 }
-            }
-            let read = source.hasher.finalize();
-            if source.read != file_size {
-                return Err(RarError::Io(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    format!(
-                        "file changed size while being archived: expected {file_size} bytes, read {}",
-                        source.read
-                    ),
-                )));
-            }
-            file_crc = read;
-            let compressed = counter.written();
-            if compressed < file_size {
-                packed_len = compressed;
-                method = crate::format::rar4::RAR4_METHOD_STORE + level;
-                if let Some(encoder) = legacy_encoder_to_commit.take() {
-                    self.write_ctx_mut().solid.legacy_encoder =
-                        Some(crate::engine::LegacySolidEncoder::Rar15(Box::new(encoder)));
-                }
-            } else {
-                // Compression is a net loss: stream STORE from the source
-                // instead (the spill is dropped by its guard). Any trial chain
-                // state is dropped with it.
-                packed_len = file_size;
-                method = crate::format::rar4::RAR4_METHOD_STORE;
             }
         }
-
-        // The payload source is the source file for STORE, the spill for a
-        // compressed member; a password wraps either in the RAR29 cipher.
-        let plain_len = packed_len;
-        let source_path = if method == crate::format::rar4::RAR4_METHOD_STORE {
-            path.to_path_buf()
-        } else {
-            spill.clone()
-        };
-        // Each generation has its own cipher for the member payload, and only
-        // RAR 3.x adds a salt: RAR 2.x and 3.x encrypt whole 16-byte blocks
-        // (the final one zero-padded), RAR 1.5 XORs a keystream.
-        let mut salt = None;
-        let mut padded = false;
-        let mut source = if password {
-            let password_bytes = self
-                .password
-                .as_deref()
-                .expect("password checked above")
-                .as_bytes();
-            let emitter: Box<dyn Rar4RangeEmitter> = match codec {
-                Some(LegacyCodec::Rar29) => {
-                    let mut salt_bytes = [0u8; 8];
-                    rand::fill(&mut salt_bytes);
-                    salt = Some(salt_bytes);
-                    padded = true;
-                    let cipher = crate::crypto::Rar30Cipher::new(password_bytes, Some(salt_bytes))
-                        .map_err(|e| RarError::Format(format!("RAR4 member key setup: {e:?}")))?;
-                    Box::new(Rar30RangeEmitter::new(cipher))
-                }
-                Some(LegacyCodec::Rar20) => {
-                    padded = true;
-                    Box::new(Rar20RangeEmitter::new(crate::crypto::Rar20Cipher::new(
-                        password_bytes,
-                    )))
-                }
-                Some(LegacyCodec::Rar15) => Box::new(Rar15RangeEmitter::new(
-                    crate::crypto::Rar15Cipher::new(password_bytes),
-                )),
-                _ => {
-                    return Err(RarError::Unsupported(format!(
-                        "RAR4 write encryption: unp_ver {} has no cipher",
-                        self.write_ctx().solid.rar4_unp_ver
-                    )));
-                }
-            };
-            Rar4PayloadSource::Encrypted {
-                file: File::open(&source_path)?,
-                plain_len,
-                emitter,
+        let read = source.hasher.finalize();
+        if source.read != file_size {
+            return Err(RarError::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "file changed size while being archived: expected {file_size} bytes, read {}",
+                    source.read
+                ),
+            )));
+        }
+        file_crc = read;
+        let compressed = counter.written();
+        if compressed < file_size {
+            packed_len = compressed;
+            method = crate::format::rar4::RAR4_METHOD_STORE + level;
+            if let Some(encoder) = legacy_encoder_to_commit.take() {
+                cx.write_ctx_mut().solid.legacy_encoder =
+                    Some(crate::engine::LegacySolidEncoder::Rar15(Box::new(encoder)));
             }
         } else {
-            Rar4PayloadSource::Plain {
-                file: File::open(&source_path)?,
+            // Compression is a net loss: stream STORE from the source
+            // instead (the spill is dropped by its guard). Any trial chain
+            // state is dropped with it.
+            packed_len = file_size;
+            method = crate::format::rar4::RAR4_METHOD_STORE;
+        }
+    }
+
+    // The payload source is the source file for STORE, the spill for a
+    // compressed member; a password wraps either in the RAR29 cipher.
+    let plain_len = packed_len;
+    let source_path = if method == crate::format::rar4::RAR4_METHOD_STORE {
+        path.to_path_buf()
+    } else {
+        spill.clone()
+    };
+    // Each generation has its own cipher for the member payload, and only
+    // RAR 3.x adds a salt: RAR 2.x and 3.x encrypt whole 16-byte blocks
+    // (the final one zero-padded), RAR 1.5 XORs a keystream.
+    let mut salt = None;
+    let mut padded = false;
+    let mut source = if password {
+        let password_bytes = cx.password().expect("password checked above").as_bytes();
+        let emitter: Box<dyn Rar4RangeEmitter> = match codec {
+            Some(LegacyCodec::Rar29) => {
+                let mut salt_bytes = [0u8; 8];
+                rand::fill(&mut salt_bytes);
+                salt = Some(salt_bytes);
+                padded = true;
+                let cipher = crate::crypto::Rar30Cipher::new(password_bytes, Some(salt_bytes))
+                    .map_err(|e| RarError::Format(format!("RAR4 member key setup: {e:?}")))?;
+                Box::new(Rar30RangeEmitter::new(cipher))
+            }
+            Some(LegacyCodec::Rar20) => {
+                padded = true;
+                Box::new(Rar20RangeEmitter::new(crate::crypto::Rar20Cipher::new(
+                    password_bytes,
+                )))
+            }
+            Some(LegacyCodec::Rar15) => Box::new(Rar15RangeEmitter::new(
+                crate::crypto::Rar15Cipher::new(password_bytes),
+            )),
+            _ => {
+                return Err(RarError::Unsupported(format!(
+                    "RAR4 write encryption: unp_ver {} has no cipher",
+                    cx.write_ctx().solid.rar4_unp_ver
+                )));
             }
         };
-        let packed_size = if padded {
-            plain_len.next_multiple_of(16)
-        } else {
-            plain_len
-        };
-        crate::format::rar4::create::ensure_member_size(packed_size)?;
+        Rar4PayloadSource::Encrypted {
+            file: File::open(&source_path)?,
+            plain_len,
+            emitter,
+        }
+    } else {
+        Rar4PayloadSource::Plain {
+            file: File::open(&source_path)?,
+        }
+    };
+    let packed_size = if padded {
+        plain_len.next_multiple_of(16)
+    } else {
+        plain_len
+    };
+    crate::format::rar4::create::ensure_member_size(packed_size)?;
 
-        // Solid-chain bookkeeping mirrors the buffered path: STORE ends the
-        // run (and drops the encoder state the trial may have advanced).
-        let solid_continuation = self.track_rar4_solid_member(method, file_size);
+    // Solid-chain bookkeeping mirrors the buffered path: STORE ends the
+    // run (and drops the encoder state the trial may have advanced).
+    let solid_continuation = track_rar4_solid_member(cx, method, file_size);
 
-        let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
-        let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
-        let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(name);
-        let unpacked_size = file_size;
-        let mut chunks = Vec::<crate::model::DataChunk>::new();
+    let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
+    let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
+    let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(name);
+    let unpacked_size = file_size;
+    let mut chunks = Vec::<crate::model::DataChunk>::new();
 
-        match self.write_ctx().output.volume_size {
-            None => {
-                // Header first (packed size is known), then stream the
-                // payload in bounded chunks.
-                let (data_offset, _) = emit_rar4_segment(
-                    self,
-                    &encoded_name,
+    match cx.write_ctx().output.volume_size {
+        None => {
+            // Header first (packed size is known), then stream the
+            // payload in bounded chunks.
+            let (data_offset, _) = emit_rar4_segment(
+                cx,
+                &encoded_name,
+                name_flags,
+                file_crc,
+                dos_time,
+                method,
+                packed_size as u32,
+                unpacked_size as u32,
+                &[],
+                password,
+                salt,
+                ext_time.as_deref(),
+                solid_continuation,
+                0x20,
+                None,
+                false,
+                false,
+            )?;
+            const COPY: u64 = 1 << 20;
+            let mut pos = 0u64;
+            while pos < packed_size {
+                cx.check_cancel()?;
+                let end = (pos + COPY).min(packed_size);
+                let chunk = source.read_range(pos, end)?;
+                cx.stream_mut()?.write_all(&chunk)?;
+                cx.write_ctx_mut().output.bytes_written += chunk.len() as u64;
+                pos = end;
+                cx.report_progress(pos, file_size);
+            }
+            chunks.push(crate::model::DataChunk {
+                volume_index: 0,
+                data_offset,
+                packed_size,
+                crc32_val: Some(file_crc),
+                is_final: true,
+                extra_data: Vec::new(),
+            });
+        }
+        Some(volume_size) => {
+            chunks = {
+                let params = Rar4SplitParams {
+                    encoded_name: &encoded_name,
                     name_flags,
                     file_crc,
                     dos_time,
                     method,
-                    packed_size as u32,
-                    unpacked_size as u32,
-                    &[],
+                    unpacked_size: file_size,
                     password,
                     salt,
-                    ext_time.as_deref(),
+                    ext_time: ext_time.as_deref(),
                     solid_continuation,
-                    0x20,
-                    None,
-                    false,
-                    false,
-                )?;
-                const COPY: u64 = 1 << 20;
-                let mut pos = 0u64;
-                while pos < packed_size {
-                    self.check_cancel()?;
-                    let end = (pos + COPY).min(packed_size);
-                    let chunk = source.read_range(pos, end)?;
-                    stream_mut(&mut self.stream)?.write_all(&chunk)?;
-                    self.write_ctx_mut().output.bytes_written += chunk.len() as u64;
-                    pos = end;
-                    self.report_progress(pos, file_size);
-                }
-                chunks.push(crate::model::DataChunk {
+                    attr: 0x20,
+                    comment: None,
+                };
+                emit_rar4_split(
+                    cx,
+                    &params,
+                    volume_size,
+                    packed_size,
+                    |this, offset, len| {
+                        let chunk = source.read_range(offset, offset + len)?;
+                        this.report_progress(offset + len, file_size);
+                        Ok(Cow::Owned(chunk))
+                    },
+                )?
+            };
+        }
+    }
+
+    push_rar4_entry(
+        cx,
+        name.to_string(),
+        unpacked_size,
+        packed_size,
+        file_crc,
+        mtime,
+        mtime_ns,
+        method,
+        password,
+        salt,
+        ext_time,
+        None,
+        false,
+        0,
+        chunks,
+    );
+    cx.report_progress(file_size, file_size);
+    Ok(())
+}
+
+/// Encode one RAR4 member from in-memory bytes: CRC, then the smallest
+/// of LZ / PPMd (m4+) / auto-filter candidates / STORE, per-member
+/// encryption, and the FILE_HEAD + payload emission (single-volume or
+/// split across volumes). Shared by the file path (`add_file_rar4`,
+/// which reads the member first) and the bytes path (`add_bytes`).
+/// Emit a queued RAR4 archive comment (`rar4_writer_comment`) as a
+/// NEWSUB `CMT` block at the current stream position, then clear the
+/// queue. Only the 35-byte CMT header is header-encrypted under `-hp`;
+/// the comment payload follows as plaintext data (the same rule as
+/// FILE members).
+fn emit_pending_rar4_comment(cx: &mut dyn Engine) -> RarResult<()> {
+    let Some(text) = cx.write_ctx_mut().rar4.writer_comment.take() else {
+        return Ok(());
+    };
+    if text.is_empty() {
+        return Ok(());
+    }
+    const CMT_HEAD: usize = crate::format::rar4::comment::CMT_HEAD_SIZE;
+    let (payload, unicode) = crate::format::rar4::comment::encode_comment_text(&text);
+    let block = crate::format::rar4::comment::build_comment_block(&payload, unicode);
+    let header_encryption = cx.header_encryption();
+    // The password is taken before the stream borrow: `cx.password()` and
+    // `cx.stream_mut()` both borrow the whole engine.
+    let password = header_encryption
+        .then(|| cx.password().map(str::to_owned))
+        .flatten();
+    let stream = cx.stream_mut()?;
+    if header_encryption {
+        let password = password
+            .as_deref()
+            .ok_or_else(|| RarError::Encrypted("header encryption requires a password".into()))?;
+        let (ciphertext, on_disk) =
+            crate::format::rar4::write::encrypt_block_header(&block[..CMT_HEAD], password)?;
+        stream.write_all(&ciphertext)?;
+        stream.write_all(&block[CMT_HEAD..])?;
+        let ctx = cx.write_ctx_mut();
+        ctx.output.bytes_written += on_disk + (block.len() - CMT_HEAD) as u64;
+    } else {
+        stream.write_all(&block)?;
+        cx.write_ctx_mut().output.bytes_written += block.len() as u64;
+    }
+    Ok(())
+}
+
+/// Queue the archive comment for a RAR4 create/repack writer (emitted
+/// before the first member).
+pub(crate) fn set_rar4_writer_comment(cx: &mut dyn Engine, text: Option<Vec<u8>>) {
+    cx.write_ctx_mut().rar4.writer_comment = text;
+}
+
+#[allow(clippy::too_many_arguments)] // one member's full descriptor
+pub(crate) fn add_rar4_data(
+    cx: &mut dyn Engine,
+    name: String,
+    data: Vec<u8>,
+    level: u8,
+    mtime: u32,
+    mtime_ns: u32,
+    comment: Option<Vec<u8>>,
+    attr: Option<u32>,
+) -> RarResult<()> {
+    cx.check_cancel()?;
+    crate::format::rar4::create::ensure_member_size(data.len() as u64)?;
+    // Deferred solid-append: the member cannot be streamed after an
+    // existing solid chain; buffer it and let close() repack the whole
+    // archive (surviving members + these additions).
+    if cx.write_ctx().rar4.solid_append {
+        cx.write_ctx_mut()
+            .rar4
+            .solid_append_entries
+            .push(crate::engine::SolidAppendEntry {
+                name,
+                data,
+                level,
+                mtime,
+                mtime_ns,
+                attr: attr.unwrap_or(0x20),
+            });
+        return Ok(());
+    }
+    // A queued archive comment is emitted right before the first member
+    // (it must precede every member; the queue is consumed once).
+    emit_pending_rar4_comment(cx)?;
+    // A directory member is written as a zero-byte placeholder whose name
+    // ends in `/`; its on-disk attribute is the directory bit (0x10)
+    // rather than the regular-file archive bit (0x20). Callers that
+    // rebuild a foreign archive pass the original attribute byte.
+    let is_dir = name.ends_with('/');
+    let attr = attr.unwrap_or(if is_dir { 0x10 } else { 0x20 });
+    let file_size = data.len() as u64;
+    let file_crc = crate::crc32::crc32(&data);
+
+    // Compress with the RAR29 LZSS encoder (m1–m5).  If compressing does
+    // not shrink the data, fall back to STORE.  On m4/m5 (non-solid,
+    // non-empty members) a PPMd pass is tried too and the smallest of
+    // LZ / PPMd / STORE wins; PPMd is where RAR4's text-level ratio
+    // advantage over LZ comes from, matching the pre-6.x WinRARs that
+    // could still produce PPMd blocks.  `method` is the on-disk byte
+    // (0x30 = store, 0x31–0x35 = m1–m5); `packed` is what the write
+    // pipeline emits; `unpacked_size` is always the original size.
+    if cx.write_ctx().solid.mode {
+        crate::format::shared::write_ops::maybe_reset_solid_for_extension(cx, &name);
+    }
+    let (mut packed, method) =
+        if crate::format::shared::write_ops::whole_member_is_incompressible(&data, level) {
+            // Random-data members would only build an O(input) token
+            // vector: store them (the RAR5 path stores them too).
+            (data, crate::format::rar4::RAR4_METHOD_STORE)
+        } else {
+            encode_rar4_member(cx, &data, level)?
+        };
+    let unpacked_size = file_size;
+
+    // Solid-chain bookkeeping (mirrors rars' `solid_run_has_member`
+    // logic): a member is a chain continuation when it compresses and the
+    // run has already emitted a member; storing a member rebuilds the
+    // encoder and ends the run. The reader keeps its window/tables across
+    // members flagged `FHD_SOLID`, so the flags and the encoder must stay
+    // in lockstep.
+    let solid_continuation = track_rar4_solid_member(cx, method, unpacked_size);
+
+    let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
+
+    // Member-level encryption (WinRAR `-p`), dispatched on the cipher
+    // generation (see `rar4_member_encrypt`). The header carries the
+    // RAR29 salt (`FHD_SALT`); the old codecs encrypt without one but
+    // still flag `FHD_PASSWORD`. `packed_size` covers the padded
+    // ciphertext; the header CRC stays the plaintext CRC and is checked
+    // after decryption.
+    let password_encrypted = cx.password().is_some_and(|pw| !pw.is_empty());
+    let mut salt = None;
+    if password_encrypted {
+        salt = rar4_member_encrypt(cx, &mut packed)?;
+    }
+    let packed_size = packed.len() as u64;
+
+    let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
+    let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(&name);
+
+    match cx.write_ctx().output.volume_size {
+        None => {
+            // ── Single-volume ──
+            let (data_offset, _) = emit_rar4_segment(
+                cx,
+                &encoded_name,
+                name_flags,
+                file_crc,
+                dos_time,
+                method,
+                packed_size as u32,
+                unpacked_size as u32,
+                &packed,
+                password_encrypted,
+                salt,
+                ext_time.as_deref(),
+                solid_continuation,
+                attr,
+                comment.clone(),
+                false,
+                false,
+            )?;
+            push_rar4_entry(
+                cx,
+                name,
+                unpacked_size,
+                packed_size,
+                file_crc,
+                mtime,
+                mtime_ns,
+                method,
+                password_encrypted,
+                salt,
+                ext_time,
+                comment,
+                is_dir,
+                data_offset,
+                vec![crate::model::DataChunk {
                     volume_index: 0,
                     data_offset,
                     packed_size,
                     crc32_val: Some(file_crc),
                     is_final: true,
                     extra_data: Vec::new(),
-                });
-            }
-            Some(volume_size) => {
-                chunks = {
-                    let params = Rar4SplitParams {
-                        encoded_name: &encoded_name,
-                        name_flags,
-                        file_crc,
-                        dos_time,
-                        method,
-                        unpacked_size: file_size,
-                        password,
-                        salt,
-                        ext_time: ext_time.as_deref(),
-                        solid_continuation,
-                        attr: 0x20,
-                        comment: None,
-                    };
-                    emit_rar4_split(
-                        self,
-                        &params,
-                        volume_size,
-                        packed_size,
-                        |this, offset, len| {
-                            let chunk = source.read_range(offset, offset + len)?;
-                            this.report_progress(offset + len, file_size);
-                            Ok(Cow::Owned(chunk))
-                        },
-                    )?
-                };
-            }
+                }],
+            );
+            cx.report_progress(file_size, file_size);
+            Ok(())
         }
-
-        self.push_rar4_entry(
-            name.to_string(),
-            unpacked_size,
-            packed_size,
-            file_crc,
-            mtime,
-            mtime_ns,
-            method,
-            password,
-            salt,
-            ext_time,
-            None,
-            false,
-            0,
-            chunks,
-        );
-        self.report_progress(file_size, file_size);
-        Ok(())
-    }
-
-    /// Encode one RAR4 member from in-memory bytes: CRC, then the smallest
-    /// of LZ / PPMd (m4+) / auto-filter candidates / STORE, per-member
-    /// encryption, and the FILE_HEAD + payload emission (single-volume or
-    /// split across volumes). Shared by the file path (`add_file_rar4`,
-    /// which reads the member first) and the bytes path (`add_bytes`).
-    /// Emit a queued RAR4 archive comment (`rar4_writer_comment`) as a
-    /// NEWSUB `CMT` block at the current stream position, then clear the
-    /// queue. Only the 35-byte CMT header is header-encrypted under `-hp`;
-    /// the comment payload follows as plaintext data (the same rule as
-    /// FILE members).
-    fn emit_pending_rar4_comment(&mut self) -> RarResult<()> {
-        let Some(text) = self.write_ctx_mut().rar4.writer_comment.take() else {
-            return Ok(());
-        };
-        if text.is_empty() {
-            return Ok(());
-        }
-        const CMT_HEAD: usize = crate::format::rar4::comment::CMT_HEAD_SIZE;
-        let (payload, unicode) = crate::format::rar4::comment::encode_comment_text(&text);
-        let block = crate::format::rar4::comment::build_comment_block(&payload, unicode);
-        let stream = stream_mut(&mut self.stream)?;
-        if self.header_encryption {
-            let password = self.password.as_deref().ok_or_else(|| {
-                RarError::Encrypted("header encryption requires a password".into())
-            })?;
-            let (ciphertext, on_disk) =
-                crate::format::rar4::write::encrypt_block_header(&block[..CMT_HEAD], password)?;
-            stream.write_all(&ciphertext)?;
-            stream.write_all(&block[CMT_HEAD..])?;
-            self.write_ctx_mut().output.bytes_written += on_disk + (block.len() - CMT_HEAD) as u64;
-        } else {
-            stream.write_all(&block)?;
-            self.write_ctx_mut().output.bytes_written += block.len() as u64;
-        }
-        Ok(())
-    }
-
-    /// Queue the archive comment for a RAR4 create/repack writer (emitted
-    /// before the first member).
-    pub(crate) fn set_rar4_writer_comment(&mut self, text: Option<Vec<u8>>) {
-        self.write_ctx_mut().rar4.writer_comment = text;
-    }
-
-    #[allow(clippy::too_many_arguments)] // one member's full descriptor
-    pub(crate) fn add_rar4_data(
-        &mut self,
-        name: String,
-        data: Vec<u8>,
-        level: u8,
-        mtime: u32,
-        mtime_ns: u32,
-        comment: Option<Vec<u8>>,
-        attr: Option<u32>,
-    ) -> RarResult<()> {
-        self.check_cancel()?;
-        crate::format::rar4::create::ensure_member_size(data.len() as u64)?;
-        // Deferred solid-append: the member cannot be streamed after an
-        // existing solid chain; buffer it and let close() repack the whole
-        // archive (surviving members + these additions).
-        if self.write_ctx().rar4.solid_append {
-            self.write_ctx_mut()
-                .rar4
-                .solid_append_entries
-                .push(crate::engine::SolidAppendEntry {
-                    name,
-                    data,
-                    level,
-                    mtime,
-                    mtime_ns,
-                    attr: attr.unwrap_or(0x20),
-                });
-            return Ok(());
-        }
-        // A queued archive comment is emitted right before the first member
-        // (it must precede every member; the queue is consumed once).
-        self.emit_pending_rar4_comment()?;
-        // A directory member is written as a zero-byte placeholder whose name
-        // ends in `/`; its on-disk attribute is the directory bit (0x10)
-        // rather than the regular-file archive bit (0x20). Callers that
-        // rebuild a foreign archive pass the original attribute byte.
-        let is_dir = name.ends_with('/');
-        let attr = attr.unwrap_or(if is_dir { 0x10 } else { 0x20 });
-        let file_size = data.len() as u64;
-        let file_crc = crate::crc32::crc32(&data);
-
-        // Compress with the RAR29 LZSS encoder (m1–m5).  If compressing does
-        // not shrink the data, fall back to STORE.  On m4/m5 (non-solid,
-        // non-empty members) a PPMd pass is tried too and the smallest of
-        // LZ / PPMd / STORE wins; PPMd is where RAR4's text-level ratio
-        // advantage over LZ comes from, matching the pre-6.x WinRARs that
-        // could still produce PPMd blocks.  `method` is the on-disk byte
-        // (0x30 = store, 0x31–0x35 = m1–m5); `packed` is what the write
-        // pipeline emits; `unpacked_size` is always the original size.
-        if self.write_ctx().solid.mode {
-            self.maybe_reset_solid_for_extension(&name);
-        }
-        let (mut packed, method) =
-            if crate::format::shared::write_ops::whole_member_is_incompressible(&data, level) {
-                // Random-data members would only build an O(input) token
-                // vector: store them (the RAR5 path stores them too).
-                (data, crate::format::rar4::RAR4_METHOD_STORE)
-            } else {
-                self.encode_rar4_member(&data, level)?
-            };
-        let unpacked_size = file_size;
-
-        // Solid-chain bookkeeping (mirrors rars' `solid_run_has_member`
-        // logic): a member is a chain continuation when it compresses and the
-        // run has already emitted a member; storing a member rebuilds the
-        // encoder and ends the run. The reader keeps its window/tables across
-        // members flagged `FHD_SOLID`, so the flags and the encoder must stay
-        // in lockstep.
-        let solid_continuation = self.track_rar4_solid_member(method, unpacked_size);
-
-        let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
-
-        // Member-level encryption (WinRAR `-p`), dispatched on the cipher
-        // generation (see `rar4_member_encrypt`). The header carries the
-        // RAR29 salt (`FHD_SALT`); the old codecs encrypt without one but
-        // still flag `FHD_PASSWORD`. `packed_size` covers the padded
-        // ciphertext; the header CRC stays the plaintext CRC and is checked
-        // after decryption.
-        let password_encrypted = self.password.as_deref().is_some_and(|pw| !pw.is_empty());
-        let mut salt = None;
-        if password_encrypted {
-            salt = self.rar4_member_encrypt(&mut packed)?;
-        }
-        let packed_size = packed.len() as u64;
-
-        let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
-        let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(&name);
-
-        match self.write_ctx().output.volume_size {
-            None => {
-                // ── Single-volume ──
-                let (data_offset, _) = emit_rar4_segment(
-                    self,
-                    &encoded_name,
+        Some(volume_size) => {
+            // ── Multi-volume: split the packed member across volumes ──
+            let chunks = {
+                let params = Rar4SplitParams {
+                    encoded_name: &encoded_name,
                     name_flags,
                     file_crc,
                     dos_time,
                     method,
-                    packed_size as u32,
-                    unpacked_size as u32,
-                    &packed,
-                    password_encrypted,
+                    unpacked_size,
+                    password: password_encrypted,
                     salt,
-                    ext_time.as_deref(),
+                    ext_time: ext_time.as_deref(),
                     solid_continuation,
                     attr,
-                    comment.clone(),
-                    false,
-                    false,
-                )?;
-                self.push_rar4_entry(
-                    name,
-                    unpacked_size,
-                    packed_size,
-                    file_crc,
-                    mtime,
-                    mtime_ns,
-                    method,
-                    password_encrypted,
-                    salt,
-                    ext_time,
-                    comment,
-                    is_dir,
-                    data_offset,
-                    vec![crate::model::DataChunk {
-                        volume_index: 0,
-                        data_offset,
-                        packed_size,
-                        crc32_val: Some(file_crc),
-                        is_final: true,
-                        extra_data: Vec::new(),
-                    }],
-                );
-                self.report_progress(file_size, file_size);
-                Ok(())
-            }
-            Some(volume_size) => {
-                // ── Multi-volume: split the packed member across volumes ──
-                let chunks = {
-                    let params = Rar4SplitParams {
-                        encoded_name: &encoded_name,
-                        name_flags,
-                        file_crc,
-                        dos_time,
-                        method,
-                        unpacked_size,
-                        password: password_encrypted,
-                        salt,
-                        ext_time: ext_time.as_deref(),
-                        solid_continuation,
-                        attr,
-                        comment: comment.clone(),
-                    };
-                    emit_rar4_split(self, &params, volume_size, packed_size, |_, offset, len| {
-                        Ok(Cow::Borrowed(
-                            &packed[offset as usize..(offset + len) as usize],
-                        ))
-                    })?
+                    comment: comment.clone(),
                 };
-                self.push_rar4_entry(
-                    name,
-                    unpacked_size,
-                    packed_size,
-                    file_crc,
-                    mtime,
-                    mtime_ns,
-                    method,
-                    password_encrypted,
-                    salt,
-                    ext_time,
-                    comment,
-                    is_dir,
-                    0,
-                    chunks,
-                );
-                self.report_progress(file_size, file_size);
-                Ok(())
-            }
+                emit_rar4_split(cx, &params, volume_size, packed_size, |_, offset, len| {
+                    Ok(Cow::Borrowed(
+                        &packed[offset as usize..(offset + len) as usize],
+                    ))
+                })?
+            };
+            push_rar4_entry(
+                cx,
+                name,
+                unpacked_size,
+                packed_size,
+                file_crc,
+                mtime,
+                mtime_ns,
+                method,
+                password_encrypted,
+                salt,
+                ext_time,
+                comment,
+                is_dir,
+                0,
+                chunks,
+            );
+            cx.report_progress(file_size, file_size);
+            Ok(())
         }
     }
-    /// Encode one RAR4 member payload, dispatching on the archive's legacy
-    /// member version (`rar4_unp_ver`). RAR29 (the default) keeps the full
-    /// engine set — LZSS with auto VM filters and a PPMd trial on m4/m5.
-    /// RAR 1.5/2.x members (`v15`/`v20`) mirror the `rars` legacy writers'
-    /// level ladders, and STORE wins whenever the configured codec cannot
-    /// shrink the data. In solid archives the legacy encoder instance is
-    /// reused across the members of a run so its adaptive tables (and the
-    /// RAR 2.x window) carry over — historical WinRAR produced solid
-    /// RAR 1.5/2.x archives this way too.
-    ///
-    /// The reader skips STORE members (their bytes never reach the
-    /// decoder), so the persistent encoder must not advance for a member
-    /// that falls back to STORE. The trial encode runs on a clone; only a
-    /// member that actually packs (and is therefore decoded) commits the
-    /// advanced state.
-    fn encode_rar4_member(&mut self, data: &[u8], level: u8) -> RarResult<(Vec<u8>, u8)> {
-        let Some(codec) = LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver) else {
-            return Err(RarError::Unsupported(format!(
-                "RAR4 write dispatch: unp_ver {} has no encoder",
-                self.write_ctx().solid.rar4_unp_ver
-            )));
-        };
-        if codec == LegacyCodec::Rar29 {
-            return self.encode_rar29_member(data, level);
-        }
-        if !(1..=5).contains(&level) {
-            return Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE));
-        }
-        let method = crate::format::rar4::RAR4_METHOD_STORE + level;
-        let packed = if self.write_ctx().solid.mode {
-            use crate::engine::LegacySolidEncoder;
-            let mut trial = match self.write_ctx().solid.legacy_encoder.as_ref() {
-                Some(LegacySolidEncoder::Rar15(encoder)) => {
-                    LegacySolidEncoder::Rar15(Box::new(encoder.clone_for_trial()))
-                }
-                Some(LegacySolidEncoder::Rar20(encoder)) => {
-                    LegacySolidEncoder::Rar20(encoder.clone())
-                }
-                None => build_legacy_solid_encoder(codec, level)?,
-            };
-            let packed = match &mut trial {
-                LegacySolidEncoder::Rar15(encoder) => encoder.encode_member(data)?,
-                LegacySolidEncoder::Rar20(encoder) => encoder.encode_member(data)?,
-            };
-            if packed.len() < data.len() {
-                self.write_ctx_mut().solid.legacy_encoder = Some(trial);
+}
+/// Encode one RAR4 member payload, dispatching on the archive's legacy
+/// member version (`rar4_unp_ver`). RAR29 (the default) keeps the full
+/// engine set — LZSS with auto VM filters and a PPMd trial on m4/m5.
+/// RAR 1.5/2.x members (`v15`/`v20`) mirror the `rars` legacy writers'
+/// level ladders, and STORE wins whenever the configured codec cannot
+/// shrink the data. In solid archives the legacy encoder instance is
+/// reused across the members of a run so its adaptive tables (and the
+/// RAR 2.x window) carry over — historical WinRAR produced solid
+/// RAR 1.5/2.x archives this way too.
+///
+/// The reader skips STORE members (their bytes never reach the
+/// decoder), so the persistent encoder must not advance for a member
+/// that falls back to STORE. The trial encode runs on a clone; only a
+/// member that actually packs (and is therefore decoded) commits the
+/// advanced state.
+fn encode_rar4_member(cx: &mut dyn Engine, data: &[u8], level: u8) -> RarResult<(Vec<u8>, u8)> {
+    let Some(codec) = LegacyCodec::from_unp_ver(cx.write_ctx().solid.rar4_unp_ver) else {
+        return Err(RarError::Unsupported(format!(
+            "RAR4 write dispatch: unp_ver {} has no encoder",
+            cx.write_ctx().solid.rar4_unp_ver
+        )));
+    };
+    if codec == LegacyCodec::Rar29 {
+        return encode_rar29_member(cx, data, level);
+    }
+    if !(1..=5).contains(&level) {
+        return Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE));
+    }
+    let method = crate::format::rar4::RAR4_METHOD_STORE + level;
+    let packed = if cx.write_ctx().solid.mode {
+        use crate::engine::LegacySolidEncoder;
+        let mut trial = match cx.write_ctx().solid.legacy_encoder.as_ref() {
+            Some(LegacySolidEncoder::Rar15(encoder)) => {
+                LegacySolidEncoder::Rar15(Box::new(encoder.clone_for_trial()))
             }
-            packed
-        } else {
-            encode_legacy_codec_member(data, level, codec)?
+            Some(LegacySolidEncoder::Rar20(encoder)) => LegacySolidEncoder::Rar20(encoder.clone()),
+            None => build_legacy_solid_encoder(codec, level)?,
+        };
+        let packed = match &mut trial {
+            LegacySolidEncoder::Rar15(encoder) => encoder.encode_member(data)?,
+            LegacySolidEncoder::Rar20(encoder) => encoder.encode_member(data)?,
         };
         if packed.len() < data.len() {
-            Ok((packed, method))
-        } else {
-            Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE))
+            cx.write_ctx_mut().solid.legacy_encoder = Some(trial);
         }
+        packed
+    } else {
+        encode_legacy_codec_member(data, level, codec)?
+    };
+    if packed.len() < data.len() {
+        Ok((packed, method))
+    } else {
+        Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE))
     }
+}
 
-    /// Member-level encryption (WinRAR `-p`), dispatched on the member's
-    /// cipher generation. RAR29 members get the RAR30 AES-128-CBC cipher
-    /// with a fresh per-member 8-byte salt (flagged `FHD_SALT`); RAR 2.x
-    /// members use the RAR20 block cipher (16-byte padded, no salt); RAR
-    /// 1.5 members the RAR15 stream XOR (no padding, no salt). Returns the
-    /// salt for RAR29 (written into the file header) and `None` for the
-    /// saltless old codecs.
-    fn rar4_member_encrypt(&mut self, packed: &mut Vec<u8>) -> RarResult<Option<[u8; 8]>> {
-        let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) else {
-            return Ok(None);
-        };
-        match LegacyCodec::from_unp_ver(self.write_ctx().solid.rar4_unp_ver) {
-            Some(LegacyCodec::Rar15) => {
-                crate::crypto::Rar15Cipher::new(pw.as_bytes()).crypt_in_place(packed);
-                Ok(None)
-            }
-            Some(LegacyCodec::Rar20) => {
-                let pad = (16 - packed.len() % 16) % 16;
-                packed.resize(packed.len() + pad, 0);
-                crate::crypto::Rar20Cipher::new(pw.as_bytes())
-                    .encrypt_in_place(packed)
-                    .map_err(|e| RarError::Format(format!("RAR4 member (RAR20) encrypt: {e}")))?;
-                Ok(None)
-            }
-            Some(LegacyCodec::Rar29) => {
-                let mut salt = [0u8; 8];
-                rand::fill(&mut salt);
-                let mut cipher = crate::crypto::Rar30Cipher::new(pw.as_bytes(), Some(salt))
-                    .map_err(|e| RarError::Format(format!("RAR4 member key setup: {e:?}")))?;
-                let pad = (16 - packed.len() % 16) % 16;
-                packed.resize(packed.len() + pad, 0);
-                cipher
-                    .encrypt_in_place(packed)
-                    .map_err(|e| RarError::Format(format!("RAR4 member encrypt: {e:?}")))?;
-                Ok(Some(salt))
-            }
-            None => Err(RarError::Unsupported(format!(
-                "RAR4 write encryption: unp_ver {} has no cipher",
-                self.write_ctx().solid.rar4_unp_ver
-            ))),
+/// Member-level encryption (WinRAR `-p`), dispatched on the member's
+/// cipher generation. RAR29 members get the RAR30 AES-128-CBC cipher
+/// with a fresh per-member 8-byte salt (flagged `FHD_SALT`); RAR 2.x
+/// members use the RAR20 block cipher (16-byte padded, no salt); RAR
+/// 1.5 members the RAR15 stream XOR (no padding, no salt). Returns the
+/// salt for RAR29 (written into the file header) and `None` for the
+/// saltless old codecs.
+fn rar4_member_encrypt(cx: &mut dyn Engine, packed: &mut Vec<u8>) -> RarResult<Option<[u8; 8]>> {
+    let Some(pw) = cx.password().filter(|pw| !pw.is_empty()) else {
+        return Ok(None);
+    };
+    match LegacyCodec::from_unp_ver(cx.write_ctx().solid.rar4_unp_ver) {
+        Some(LegacyCodec::Rar15) => {
+            crate::crypto::Rar15Cipher::new(pw.as_bytes()).crypt_in_place(packed);
+            Ok(None)
         }
+        Some(LegacyCodec::Rar20) => {
+            let pad = (16 - packed.len() % 16) % 16;
+            packed.resize(packed.len() + pad, 0);
+            crate::crypto::Rar20Cipher::new(pw.as_bytes())
+                .encrypt_in_place(packed)
+                .map_err(|e| RarError::Format(format!("RAR4 member (RAR20) encrypt: {e}")))?;
+            Ok(None)
+        }
+        Some(LegacyCodec::Rar29) => {
+            let mut salt = [0u8; 8];
+            rand::fill(&mut salt);
+            let mut cipher = crate::crypto::Rar30Cipher::new(pw.as_bytes(), Some(salt))
+                .map_err(|e| RarError::Format(format!("RAR4 member key setup: {e:?}")))?;
+            let pad = (16 - packed.len() % 16) % 16;
+            packed.resize(packed.len() + pad, 0);
+            cipher
+                .encrypt_in_place(packed)
+                .map_err(|e| RarError::Format(format!("RAR4 member encrypt: {e:?}")))?;
+            Ok(Some(salt))
+        }
+        None => Err(RarError::Unsupported(format!(
+            "RAR4 write encryption: unp_ver {} has no cipher",
+            cx.write_ctx().solid.rar4_unp_ver
+        ))),
     }
+}
 
-    fn encode_rar29_member(&mut self, data: &[u8], level: u8) -> RarResult<(Vec<u8>, u8)> {
-        // Compress with the RAR29 LZSS encoder (m1–m5). If compressing does
-        // not shrink the data, fall back to STORE. Non-solid members also try
-        // the automatic VM filters and, on m4/m5, a PPMd pass; the smallest
-        // candidate wins (see `best_rar29_member`).
-        if !(1..=5).contains(&level) {
-            return Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE));
-        }
-        if !self.write_ctx().solid.mode {
-            let filters = self.write_ctx().compression.filters;
-            return Ok(match best_rar29_member(data, level, filters)? {
-                Some(best) => best,
-                None => (data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE),
-            });
-        }
-        // Solid: reuse the persistent encoder so its sliding window, Huffman
-        // table and PPMd model state carry across the members of the run
-        // (this is what makes a real -ms archive compress better than
-        // independent members). The plain member and every `-mc` filter
-        // candidate are measured against the chain as it stands, the smallest
-        // LZ result then competes with the chain-continuing PPMd trial, and
-        // only the winner advances the chain (see
-        // `Unpack29Encoder::encode_solid_member_with_filter_candidates`). A
-        // filtered member stays an ordinary chain link: the reader's window
-        // holds the coded bytes, so the next member may keep matching them.
-        use crate::codec::legacy::rar29_encoder::{Unpack29Encoder, options_for_level};
-        let candidates = rar29_filter_candidates(data, self.write_ctx().compression.filters);
-        let encoder = self
-            .write_ctx_mut()
-            .solid
-            .rar4_encoder
-            .get_or_insert_with(|| Unpack29Encoder::with_options(options_for_level(level)));
-        let lz = if data.is_empty() {
-            encoder.encode_member(data)?
-        } else {
-            encoder.encode_solid_member_with_filter_candidates(data, &candidates)?
-        };
-        if lz.len() < data.len() {
-            Ok((lz, crate::format::rar4::RAR4_METHOD_STORE + level))
-        } else {
-            Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE))
-        }
+fn encode_rar29_member(cx: &mut dyn Engine, data: &[u8], level: u8) -> RarResult<(Vec<u8>, u8)> {
+    // Compress with the RAR29 LZSS encoder (m1–m5). If compressing does
+    // not shrink the data, fall back to STORE. Non-solid members also try
+    // the automatic VM filters and, on m4/m5, a PPMd pass; the smallest
+    // candidate wins (see `best_rar29_member`).
+    if !(1..=5).contains(&level) {
+        return Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE));
     }
-
-    /// Write one RAR4 directory FILE_HEAD member (WinRAR convention: zero
-    /// packed/unpacked sizes, CRC 0, `attr = 0x10`, `unp_ver 20`, name
-    /// without a trailing slash; directories carry no data payload).
-    pub(crate) fn write_rar4_dir_entry(
-        &mut self,
-        name: &str,
-        mtime_secs: u32,
-        mtime_ns: u32,
-    ) -> RarResult<()> {
-        use crate::format::rar4::write::{
-            FileHeaderParams, build_ext_time, build_file_header, encode_file_name, unix_to_dos_time,
-        };
-        // A queued archive comment must precede the first member, whichever
-        // kind it is; directories reached before any file flush it here.
-        self.emit_pending_rar4_comment()?;
-        let (encoded_name, name_flags) = encode_file_name(name);
-        let ext_time = build_ext_time(mtime_secs, Some(mtime_ns));
-        let mut flags = name_flags;
-        if ext_time.is_some() {
-            flags |= crate::format::rar4::FHD_EXTTIME;
-        }
-        let params = FileHeaderParams {
-            flags,
-            packed_size: 0,
-            unpacked_size: 0,
-            host_os: 2,
-            file_crc: 0,
-            file_time: unix_to_dos_time(mtime_secs),
-            unp_ver: 20,
-            method: crate::format::rar4::RAR4_METHOD_STORE,
-            name: &encoded_name,
-            attr: 0x10,
-            // All window bits set: the RAR4 directory marker that UnRAR and
-            // WinRAR use to classify a member as a directory (files carry a
-            // 0..=6 dictionary-size value instead).
-            window_bits: 7,
-            salt: None,
-            ext_time: ext_time.as_deref(),
-        };
-        let hdr = build_file_header(&params)?;
-        // Multi-volume: roll to a volume with room for this head plus the
-        // 7-byte end-of-archive block (same rule as file members). A volume
-        // too small for even a fresh header must error instead of rolling
-        // forever.
-        if let Some(volume_size) = self.write_ctx().output.volume_size {
-            let mut rolled = false;
-            loop {
-                let used = self.write_ctx().output.bytes_written;
-                if volume_size.saturating_sub(used) > 7 + hdr.len() as u64 {
-                    break;
-                }
-                if rolled {
-                    return Err(RarError::InvalidOption(format!(
-                        "volume size {volume_size} is too small for a RAR4 directory header"
-                    )));
-                }
-                self.start_next_volume()?;
-                rolled = true;
-            }
-        }
-        let stream = stream_mut(&mut self.stream)?;
-        stream.write_all(&hdr)?;
-        self.write_ctx_mut().output.bytes_written += hdr.len() as u64;
-        let head_crc = u16::from_le_bytes([hdr[0], hdr[1]]);
-        self.entries.push(ArchiveEntry {
-            header: FileHeader {
-                name: name.to_string(),
-                unpacked_size: 0,
-                packed_size: 0,
-                attributes: 0x10,
-                mtime: mtime_secs,
-                mtime_ns: ext_time.is_some().then_some(mtime_ns),
-                crc32_val: Some(0),
-                comp_method: 0,
-                host_os: 2,
-                format_version: 4,
-                unp_ver: 20,
-                legacy_head_crc: Some(head_crc),
-                is_directory: true,
-                extra_data: ext_time.unwrap_or_default(),
-                ..Default::default()
-            },
-            chunks: Vec::new(),
+    if !cx.write_ctx().solid.mode {
+        let filters = cx.write_ctx().compression.filters;
+        return Ok(match best_rar29_member(data, level, filters)? {
+            Some(best) => best,
+            None => (data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE),
         });
-        Ok(())
     }
+    // Solid: reuse the persistent encoder so its sliding window, Huffman
+    // table and PPMd model state carry across the members of the run
+    // (this is what makes a real -ms archive compress better than
+    // independent members). The plain member and every `-mc` filter
+    // candidate are measured against the chain as it stands, the smallest
+    // LZ result then competes with the chain-continuing PPMd trial, and
+    // only the winner advances the chain (see
+    // `Unpack29Encoder::encode_solid_member_with_filter_candidates`). A
+    // filtered member stays an ordinary chain link: the reader's window
+    // holds the coded bytes, so the next member may keep matching them.
+    use crate::codec::legacy::rar29_encoder::{Unpack29Encoder, options_for_level};
+    let candidates = rar29_filter_candidates(data, cx.write_ctx().compression.filters);
+    let encoder = cx
+        .write_ctx_mut()
+        .solid
+        .rar4_encoder
+        .get_or_insert_with(|| Unpack29Encoder::with_options(options_for_level(level)));
+    let lz = if data.is_empty() {
+        encoder.encode_member(data)?
+    } else {
+        encoder.encode_solid_member_with_filter_candidates(data, &candidates)?
+    };
+    if lz.len() < data.len() {
+        Ok((lz, crate::format::rar4::RAR4_METHOD_STORE + level))
+    } else {
+        Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE))
+    }
+}
+
+/// Write one RAR4 directory FILE_HEAD member (WinRAR convention: zero
+/// packed/unpacked sizes, CRC 0, `attr = 0x10`, `unp_ver 20`, name
+/// without a trailing slash; directories carry no data payload).
+pub(crate) fn write_rar4_dir_entry(
+    cx: &mut dyn Engine,
+    name: &str,
+    mtime_secs: u32,
+    mtime_ns: u32,
+) -> RarResult<()> {
+    use crate::format::rar4::write::{
+        FileHeaderParams, build_ext_time, build_file_header, encode_file_name, unix_to_dos_time,
+    };
+    // A queued archive comment must precede the first member, whichever
+    // kind it is; directories reached before any file flush it here.
+    emit_pending_rar4_comment(cx)?;
+    let (encoded_name, name_flags) = encode_file_name(name);
+    let ext_time = build_ext_time(mtime_secs, Some(mtime_ns));
+    let mut flags = name_flags;
+    if ext_time.is_some() {
+        flags |= crate::format::rar4::FHD_EXTTIME;
+    }
+    let params = FileHeaderParams {
+        flags,
+        packed_size: 0,
+        unpacked_size: 0,
+        host_os: 2,
+        file_crc: 0,
+        file_time: unix_to_dos_time(mtime_secs),
+        unp_ver: 20,
+        method: crate::format::rar4::RAR4_METHOD_STORE,
+        name: &encoded_name,
+        attr: 0x10,
+        // All window bits set: the RAR4 directory marker that UnRAR and
+        // WinRAR use to classify a member as a directory (files carry a
+        // 0..=6 dictionary-size value instead).
+        window_bits: 7,
+        salt: None,
+        ext_time: ext_time.as_deref(),
+    };
+    let hdr = build_file_header(&params)?;
+    // Multi-volume: roll to a volume with room for this head plus the
+    // 7-byte end-of-archive block (same rule as file members). A volume
+    // too small for even a fresh header must error instead of rolling
+    // forever.
+    if let Some(volume_size) = cx.write_ctx().output.volume_size {
+        let mut rolled = false;
+        loop {
+            let used = cx.write_ctx().output.bytes_written;
+            if volume_size.saturating_sub(used) > 7 + hdr.len() as u64 {
+                break;
+            }
+            if rolled {
+                return Err(RarError::InvalidOption(format!(
+                    "volume size {volume_size} is too small for a RAR4 directory header"
+                )));
+            }
+            cx.start_next_volume()?;
+            rolled = true;
+        }
+    }
+    let stream = cx.stream_mut()?;
+    stream.write_all(&hdr)?;
+    cx.write_ctx_mut().output.bytes_written += hdr.len() as u64;
+    let head_crc = u16::from_le_bytes([hdr[0], hdr[1]]);
+    cx.entries_mut().push(ArchiveEntry {
+        header: FileHeader {
+            name: name.to_string(),
+            unpacked_size: 0,
+            packed_size: 0,
+            attributes: 0x10,
+            mtime: mtime_secs,
+            mtime_ns: ext_time.is_some().then_some(mtime_ns),
+            crc32_val: Some(0),
+            comp_method: 0,
+            host_os: 2,
+            format_version: 4,
+            unp_ver: 20,
+            legacy_head_crc: Some(head_crc),
+            is_directory: true,
+            extra_data: ext_time.unwrap_or_default(),
+            ..Default::default()
+        },
+        chunks: Vec::new(),
+    });
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1620,202 +1613,203 @@ pub(crate) fn prepare_rar4_file_member(
 }
 
 #[cfg(feature = "parallel")]
-impl RarArchive {
-    /// Emit a compressed RAR4 member prepared on a worker thread: member
-    /// encryption, header + payload (single or multi-volume split), entry
-    /// bookkeeping and progress. Mirrors `add_file_rar4`'s emission half
-    /// for non-solid members (no FHD_SOLID continuation).
-    fn emit_rar4_prepared(&mut self, prepared: Rar4PreparedMember) -> RarResult<()> {
-        let Rar4PreparedMember {
-            name,
-            mtime,
-            mtime_ns,
-            file_size,
-            file_crc,
-            mut packed,
-            method,
-        } = prepared;
-        let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
+/// Emit a compressed RAR4 member prepared on a worker thread: member
+/// encryption, header + payload (single or multi-volume split), entry
+/// bookkeeping and progress. Mirrors `add_file_rar4`'s emission half
+/// for non-solid members (no FHD_SOLID continuation).
+fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarResult<()> {
+    let Rar4PreparedMember {
+        name,
+        mtime,
+        mtime_ns,
+        file_size,
+        file_crc,
+        mut packed,
+        method,
+    } = prepared;
+    let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
 
-        let password_encrypted = self.password.as_deref().is_some_and(|pw| !pw.is_empty());
-        let mut salt = None;
-        if password_encrypted {
-            salt = self.rar4_member_encrypt(&mut packed)?;
+    let password_encrypted = cx.password().is_some_and(|pw| !pw.is_empty());
+    let mut salt = None;
+    if password_encrypted {
+        salt = rar4_member_encrypt(cx, &mut packed)?;
+    }
+    let packed_size = packed.len() as u64;
+    let unpacked_size = file_size;
+
+    let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
+    let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(&name);
+
+    match cx.write_ctx().output.volume_size {
+        None => {
+            let (data_offset, _) = emit_rar4_segment(
+                cx,
+                &encoded_name,
+                name_flags,
+                file_crc,
+                dos_time,
+                method,
+                packed_size as u32,
+                unpacked_size as u32,
+                &packed,
+                password_encrypted,
+                salt,
+                ext_time.as_deref(),
+                false,
+                0x20,
+                None,
+                false,
+                false,
+            )?;
+            push_rar4_entry(
+                cx,
+                name,
+                unpacked_size,
+                packed_size,
+                file_crc,
+                mtime,
+                mtime_ns,
+                method,
+                password_encrypted,
+                salt,
+                ext_time,
+                None,
+                false,
+                0,
+                vec![crate::model::DataChunk {
+                    volume_index: 0,
+                    data_offset,
+                    packed_size,
+                    crc32_val: Some(file_crc),
+                    is_final: true,
+                    extra_data: Vec::new(),
+                }],
+            );
+            cx.report_progress(file_size, file_size);
+            Ok(())
         }
-        let packed_size = packed.len() as u64;
-        let unpacked_size = file_size;
-
-        let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
-        let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(&name);
-
-        match self.write_ctx().output.volume_size {
-            None => {
-                let (data_offset, _) = emit_rar4_segment(
-                    self,
-                    &encoded_name,
+        Some(volume_size) => {
+            let chunks = {
+                let params = Rar4SplitParams {
+                    encoded_name: &encoded_name,
                     name_flags,
                     file_crc,
                     dos_time,
                     method,
-                    packed_size as u32,
-                    unpacked_size as u32,
-                    &packed,
-                    password_encrypted,
-                    salt,
-                    ext_time.as_deref(),
-                    false,
-                    0x20,
-                    None,
-                    false,
-                    false,
-                )?;
-                self.push_rar4_entry(
-                    name,
                     unpacked_size,
-                    packed_size,
-                    file_crc,
-                    mtime,
-                    mtime_ns,
-                    method,
-                    password_encrypted,
+                    password: password_encrypted,
                     salt,
-                    ext_time,
-                    None,
-                    false,
-                    0,
-                    vec![crate::model::DataChunk {
-                        volume_index: 0,
-                        data_offset,
-                        packed_size,
-                        crc32_val: Some(file_crc),
-                        is_final: true,
-                        extra_data: Vec::new(),
-                    }],
-                );
-                self.report_progress(file_size, file_size);
-                Ok(())
-            }
-            Some(volume_size) => {
-                let chunks = {
-                    let params = Rar4SplitParams {
-                        encoded_name: &encoded_name,
-                        name_flags,
-                        file_crc,
-                        dos_time,
-                        method,
-                        unpacked_size,
-                        password: password_encrypted,
-                        salt,
-                        ext_time: ext_time.as_deref(),
-                        solid_continuation: false,
-                        attr: 0x20,
-                        comment: None,
-                    };
-                    emit_rar4_split(self, &params, volume_size, packed_size, |_, offset, len| {
-                        Ok(Cow::Borrowed(
-                            &packed[offset as usize..(offset + len) as usize],
-                        ))
-                    })?
+                    ext_time: ext_time.as_deref(),
+                    solid_continuation: false,
+                    attr: 0x20,
+                    comment: None,
                 };
-                self.push_rar4_entry(
-                    name,
-                    unpacked_size,
-                    packed_size,
-                    file_crc,
-                    mtime,
-                    mtime_ns,
-                    method,
-                    password_encrypted,
-                    salt,
-                    ext_time,
-                    None,
-                    false,
-                    0,
-                    chunks,
-                );
-                self.report_progress(file_size, file_size);
-                Ok(())
-            }
+                emit_rar4_split(cx, &params, volume_size, packed_size, |_, offset, len| {
+                    Ok(Cow::Borrowed(
+                        &packed[offset as usize..(offset + len) as usize],
+                    ))
+                })?
+            };
+            push_rar4_entry(
+                cx,
+                name,
+                unpacked_size,
+                packed_size,
+                file_crc,
+                mtime,
+                mtime_ns,
+                method,
+                password_encrypted,
+                salt,
+                ext_time,
+                None,
+                false,
+                0,
+                chunks,
+            );
+            cx.report_progress(file_size, file_size);
+            Ok(())
         }
     }
 }
 
 #[cfg(feature = "parallel")]
-impl RarArchive {
-    /// Parallel RAR4 batch: waves of independent non-solid file members are
-    /// compressed on the pool and emitted in archive order (byte-identical
-    /// to the sequential path). Solid runs, directories and oversized
-    /// members fall back to the sequential path at their original position.
-    pub(crate) fn add_batch_parallel_rar4(&mut self, entries: &[BatchEntry<'_>]) -> RarResult<()> {
-        use rayon::prelude::*;
-        self.progress_set_batch_total(entries)?;
-        let mut i = 0usize;
+/// Parallel RAR4 batch: waves of independent non-solid file members are
+/// compressed on the pool and emitted in archive order (byte-identical
+/// to the sequential path). Solid runs, directories and oversized
+/// members fall back to the sequential path at their original position.
+pub(crate) fn add_batch_parallel_rar4(
+    cx: &mut dyn Engine,
+    entries: &[BatchEntry<'_>],
+) -> RarResult<()> {
+    use rayon::prelude::*;
+    crate::format::shared::write_ops::progress_set_batch_total(cx, entries)?;
+    let mut i = 0usize;
+    while i < entries.len() {
+        cx.check_cancel()?;
+        let mut wave: Vec<(usize, BatchEntry<'_>)> = Vec::new();
+        let mut wave_bytes = 0u64;
         while i < entries.len() {
-            self.check_cancel()?;
-            let mut wave: Vec<(usize, BatchEntry<'_>)> = Vec::new();
-            let mut wave_bytes = 0u64;
-            while i < entries.len() {
-                let size = match entries[i] {
-                    BatchEntry::File { path, .. } => fs::metadata(path)
-                        .ok()
-                        .filter(|m| m.len() <= PARALLEL_COMPRESS_MAX_MEMBER)
-                        .map(|m| m.len()),
-                    _ => None,
-                };
-                let Some(size) = size else { break };
-                if wave_bytes + size > PARALLEL_COMPRESS_WAVE_BUDGET && !wave.is_empty() {
-                    break;
-                }
-                wave_bytes += size;
-                wave.push((i, entries[i]));
-                i += 1;
+            let size = match entries[i] {
+                BatchEntry::File { path, .. } => fs::metadata(path)
+                    .ok()
+                    .filter(|m| m.len() <= PARALLEL_COMPRESS_MAX_MEMBER)
+                    .map(|m| m.len()),
+                _ => None,
+            };
+            let Some(size) = size else { break };
+            if wave_bytes + size > PARALLEL_COMPRESS_WAVE_BUDGET && !wave.is_empty() {
+                break;
             }
-            if !wave.is_empty() {
-                let threads = self.effective_threads();
-                let pool = crate::parallel::compression_pool_for(threads);
-                let unp_ver = self.write_ctx().solid.rar4_unp_ver;
-                let codec = LegacyCodec::from_unp_ver(unp_ver).ok_or_else(|| {
-                    RarError::Unsupported(format!(
-                        "RAR4 write dispatch: unp_ver {unp_ver} has no encoder"
-                    ))
-                })?;
-                let filters = self.write_ctx().compression.filters;
-                let prepared: Vec<RarResult<(usize, Rar4PreparedMember)>> = pool.install(|| {
-                    wave.par_iter()
-                        .map(|&(idx, entry)| {
-                            let BatchEntry::File { path, name, level } = entry else {
-                                unreachable!("wave holds only file members")
-                            };
-                            let name = match name {
-                                Some(name) => name.to_string(),
-                                None => path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned(),
-                            };
-                            prepare_rar4_file_member(path, &name, level, codec, filters)
-                                .map(|p| (idx, p))
-                        })
-                        .collect()
-                });
-                self.check_cancel()?;
-                let mut ordered = Vec::with_capacity(prepared.len());
-                for result in prepared {
-                    ordered.push(result?);
-                }
-                ordered.sort_by_key(|(idx, _)| *idx);
-                for (idx, member) in ordered {
-                    self.progress_member = idx;
-                    self.emit_rar4_prepared(member)?;
-                }
+            wave_bytes += size;
+            wave.push((i, entries[i]));
+            i += 1;
+        }
+        if !wave.is_empty() {
+            let threads = cx.effective_threads();
+            let pool = crate::parallel::compression_pool_for(threads);
+            let unp_ver = cx.write_ctx().solid.rar4_unp_ver;
+            let codec = LegacyCodec::from_unp_ver(unp_ver).ok_or_else(|| {
+                RarError::Unsupported(format!(
+                    "RAR4 write dispatch: unp_ver {unp_ver} has no encoder"
+                ))
+            })?;
+            let filters = cx.write_ctx().compression.filters;
+            let prepared: Vec<RarResult<(usize, Rar4PreparedMember)>> = pool.install(|| {
+                wave.par_iter()
+                    .map(|&(idx, entry)| {
+                        let BatchEntry::File { path, name, level } = entry else {
+                            unreachable!("wave holds only file members")
+                        };
+                        let name = match name {
+                            Some(name) => name.to_string(),
+                            None => path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
+                        };
+                        prepare_rar4_file_member(path, &name, level, codec, filters)
+                            .map(|p| (idx, p))
+                    })
+                    .collect()
+            });
+            cx.check_cancel()?;
+            let mut ordered = Vec::with_capacity(prepared.len());
+            for result in prepared {
+                ordered.push(result?);
             }
-            if i < entries.len() {
-                self.progress_member = i;
-                self.add_batch_entry_sequential(&entries[i])?;
-                i += 1;
+            ordered.sort_by_key(|(idx, _)| *idx);
+            for (idx, member) in ordered {
+                cx.set_progress_member(idx);
+                emit_rar4_prepared(cx, member)?;
             }
         }
-        Ok(())
+        if i < entries.len() {
+            cx.set_progress_member(i);
+            crate::format::shared::write_ops::add_batch_entry_sequential(cx, &entries[i])?;
+            i += 1;
+        }
     }
+    Ok(())
 }

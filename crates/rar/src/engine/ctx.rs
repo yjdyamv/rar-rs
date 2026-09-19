@@ -2,20 +2,22 @@
 //!
 //! `format::rar5` and `format::rar4` hold the family half of every engine
 //! operation — the RAR5 add pipeline, the legacy write path, the extract
-//! orchestrators. Those were `impl RarArchive` blocks, which forced `format`
-//! to name `archive`'s type and made the two modules mutually dependent.
+//! orchestrators. They used to be written as `impl RarArchive` blocks,
+//! which forced `format` to name `archive`'s type and made the two modules
+//! mutually dependent.
 //!
-//! This trait is the seam that removes it: a family function takes
-//! `cx: &mut dyn Engine`, and [`RarArchive`](crate::archive::RarArchive)
-//! implements it. The dependency then runs one way —
-//! `archive` → `format` → `engine` — and the families can be read, and
-//! eventually compiled, without the engine's type in view.
+//! This trait is the seam that removes it: every family operation is a free
+//! function taking `cx: &mut dyn Engine` (or `cx: &dyn Engine` when it only
+//! reads), and [`RarArchive`](crate::archive::RarArchive) implements the
+//! trait in `archive/ctx.rs`. The dependency runs one way —
+//! `archive` → `format` → `engine` — and `format` no longer names `archive`
+//! at all, which `tests/architecture_boundaries.rs` pins.
 //!
 //! The member set is deliberately close to what the blocks already used:
 //! `ReadState` / `WriteState` were already reached through
-//! `read_ctx()` / `write_ctx()` accessors, and the dozen services below are
-//! the complete list of engine *behaviour* (as opposed to data) that the
-//! family code calls.
+//! `read_ctx()` / `write_ctx()` accessors, and the services below are the
+//! complete list of engine *behaviour* (as opposed to data) that the family
+//! code calls.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -39,59 +41,31 @@ use super::{ArchiveEntry, ArchiveStream, Mode, ReadState, WriteState, cancel_req
 ///
 /// [`Engine::parts`] hands the fields out together so the family code keeps
 /// the borrow structure it had. The engine implements it with plain field
-/// borrows; nothing else changes, and `format` still never names
-/// `RarArchive`.
+/// borrows; only the fields the converted family code actually reads are
+/// carried, and `format` never names `RarArchive`.
 ///
 /// Services (`write_block_header`, `start_next_volume`, …) still take the
 /// whole `&mut dyn Engine`, so a `Parts` borrow must end before one is
 /// called.
-// MIGRATION: used by the family blocks as they are converted; remove with
-// the trait's `allow` above.
-#[allow(dead_code)]
 pub(crate) struct Parts<'a> {
     /// Read-side state; `None` when the archive is not open for reading.
     pub read: &'a mut Option<ReadState>,
-    /// Write-side state; `None` when the archive is not open for writing.
-    pub write: &'a mut Option<WriteState>,
     /// The member catalog, in archive order.
     pub entries: &'a mut Vec<ArchiveEntry>,
     /// The underlying stream; `None` before one is opened.
     pub stream: &'a mut Option<Box<dyn ArchiveStream>>,
     /// Every volume of the set, in order.
     pub volume_paths: &'a [PathBuf],
-    /// Path of the volume the archive was opened as.
-    pub path: &'a Path,
     /// The archive password, when one was supplied.
     pub password: Option<&'a str>,
     /// The caller's cancellation flag, when one is installed.
     pub cancel: Option<&'a AtomicBool>,
-    /// Parsed archive-level encryption parameters, when headers are
-    /// encrypted.
-    pub archive_encr: Option<&'a crypto::EncryptionParams>,
-    /// Derived header-encryption keys, when header encryption is active.
-    pub archive_keys: Option<&'a crypto::DerivedKeys>,
 }
 
-#[allow(dead_code)]
 impl Parts<'_> {
     /// Read-side state. Panics if the archive was not opened for reading.
     pub(crate) fn read_ctx(&self) -> &ReadState {
         self.read.as_ref().expect("read context not available")
-    }
-
-    /// Mutable read-side state. Panics if not opened for reading.
-    pub(crate) fn read_ctx_mut(&mut self) -> &mut ReadState {
-        self.read.as_mut().expect("read context not available")
-    }
-
-    /// Write-side state. Panics if not opened for writing.
-    pub(crate) fn write_ctx(&self) -> &WriteState {
-        self.write.as_ref().expect("write context not available")
-    }
-
-    /// Mutable write-side state. Panics if not opened for writing.
-    pub(crate) fn write_ctx_mut(&mut self) -> &mut WriteState {
-        self.write.as_mut().expect("write context not available")
     }
 }
 
@@ -99,11 +73,6 @@ impl Parts<'_> {
 ///
 /// Implemented by [`RarArchive`](crate::archive::RarArchive); passed to the
 /// family functions as `&mut dyn Engine`.
-//
-// MIGRATION: the family blocks in `format` are converted one at a time, so
-// part of this surface has no caller yet. Remove this `allow` together with
-// the last `impl RarArchive` block in `format`.
-#[allow(dead_code)]
 pub(crate) trait Engine {
     // ── State ─────────────────────────────────────────────────────────────
     //
@@ -118,9 +87,6 @@ pub(crate) trait Engine {
     fn write_ctx(&self) -> &WriteState;
     /// Mutable write-side state. Panics if not opened for writing.
     fn write_ctx_mut(&mut self) -> &mut WriteState;
-    /// Ensure the write-side state exists, for read-mode operations that
-    /// rewrite the archive (`delete`, `rename`, `set_comment`, …).
-    fn ensure_write_ctx(&mut self);
     /// Disjoint borrows of the state fields, for family code that needs two
     /// of them at once. See [`Parts`].
     fn parts(&mut self) -> Parts<'_>;

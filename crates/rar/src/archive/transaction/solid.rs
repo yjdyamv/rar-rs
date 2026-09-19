@@ -146,15 +146,21 @@ impl SolidChainState {
             None
         };
         let (header_crc, mut extra_data, stored_hash, encr) =
-            RarArchive::payload_extra_and_crc(password, plain_crc, plain_blake);
+            crate::format::rar5::write::emit::payload_extra_and_crc(
+                password,
+                plain_crc,
+                plain_blake,
+            );
         // Carry the member's own metadata records (nanosecond/ctime/atime
         // FILE_TIME, OWNER, ...) over to the rebuilt header; the ENCR/HASH
         // records just rebuilt are dropped from the old set (a fresh
         // encryption session invalidates the old ENCR).
         let kept = retain_extra_records(&hdr.extra_data, &[EXTRA_FILE_ENCRYPTION, EXTRA_FILE_HASH]);
         extra_data.extend_from_slice(&kept);
-        let payload = RarArchive::encrypt_payload_with(encr.as_ref(), &payload);
-        archive.write_file_entry(
+        let payload =
+            crate::format::rar5::write::emit::encrypt_payload_with(encr.as_ref(), &payload);
+        crate::format::rar5::write::emit::write_file_entry(
+            archive,
             &MemberPlan {
                 name: name.to_string(),
                 unpacked_size: data.len() as u64,

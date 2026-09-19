@@ -43,7 +43,7 @@ pub(crate) const MAX_DICT_SIZE_LOG: u8 = 15;
 #[cfg(feature = "parallel")]
 pub(crate) const PARALLEL_COMPRESS_MAX_MEMBER: u64 = 64 * 1024 * 1024;
 /// Members at least this large take the streaming compressed path in
-/// `RarArchive::add_file`: input is compressed in bounded chunks into a
+/// `add_file_rar5`: input is compressed in bounded chunks into a
 /// temporary spill file and then streamed into the archive, so memory
 /// stays bounded for any file size (P4: >4 GiB single-file creation).
 pub(crate) const STREAM_COMPRESS_THRESHOLD: u64 = 64 * 1024 * 1024;

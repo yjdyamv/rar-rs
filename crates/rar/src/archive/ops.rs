@@ -7,14 +7,11 @@
 //! pins. The family operations live in `format` as free functions taking
 //! `&mut dyn Engine`; this module gives the engine back the method shape the
 //! facades call, so `archive` owns the seam and the facades stay clean.
-//!
-//! The legacy write entry points below are still called with method syntax
-//! by code that has not been converted yet (`archive/create.rs`,
-//! `format/shared/write_ops.rs`), so they keep a method-shaped seam here.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::engine::BatchEntry;
 use crate::error::RarResult;
 
 use super::{ExtractionReport, RarArchive};
@@ -77,43 +74,74 @@ impl RarArchive {
         )
     }
 
-    /// Engine-side seam for [`crate::format::rar13::write`].
+    /// Add raw bytes as a named member, dispatching on the container
+    /// family.
+    pub(crate) fn add_bytes(&mut self, arcname: &str, data: &[u8], level: u8) -> RarResult<()> {
+        crate::format::shared::write_ops::add_bytes(self, arcname, data, level)
+    }
+
+    /// Add a path (file or directory) to the archive, dispatching on the
+    /// container family.
+    pub(crate) fn add(&mut self, path: impl AsRef<Path>, compression_level: u8) -> RarResult<()> {
+        crate::format::shared::write_ops::add(self, path, compression_level)
+    }
+
+    /// [`Self::add`] under a caller-supplied archive name.
+    pub(crate) fn add_as(
+        &mut self,
+        path: impl AsRef<Path>,
+        arcname: &str,
+        compression_level: u8,
+    ) -> RarResult<()> {
+        crate::format::shared::write_ops::add_as(self, path, arcname, compression_level)
+    }
+
+    /// Add a directory entry without recursing into its children.
+    pub(crate) fn add_directory_only(
+        &mut self,
+        path: impl AsRef<Path>,
+        arcname: &str,
+    ) -> RarResult<()> {
+        crate::format::shared::write_ops::add_directory_only(self, path, arcname)
+    }
+
+    /// Add a whole batch of entries, preserving archive order.
+    pub(crate) fn add_batch(&mut self, entries: &[BatchEntry<'_>]) -> RarResult<()> {
+        crate::format::shared::write_ops::add_batch(self, entries)
+    }
+
+    /// Queue the RAR4 archive comment (emitted before the first member).
+    pub(crate) fn set_rar4_writer_comment(&mut self, text: Option<Vec<u8>>) {
+        crate::format::rar4::write::pipeline::set_rar4_writer_comment(self, text);
+    }
+
+    /// Emit the deferred RAR 1.3/1.4 main header (before the first member,
+    /// or for an empty archive at close).
     pub(crate) fn emit_rar13_main_header(&mut self) -> RarResult<()> {
         crate::format::rar13::write::emit_rar13_main_header(self)
     }
 
-    /// Engine-side seam for [`crate::format::rar13::write`].
-    pub(crate) fn add_rar13_data(
-        &mut self,
-        name: String,
-        data: Vec<u8>,
-        level: u8,
-        mtime: u32,
-        mtime_ns: u32,
-        comment: Option<Vec<u8>>,
-    ) -> RarResult<()> {
-        crate::format::rar13::write::add_rar13_data(
-            self, name, data, level, mtime, mtime_ns, comment,
-        )
-    }
-
-    /// Engine-side seam for [`crate::format::rar13::write`].
-    pub(crate) fn add_file_rar13(
-        &mut self,
-        path: &Path,
-        arcname: Option<&str>,
-        level: u8,
-    ) -> RarResult<()> {
-        crate::format::rar13::write::add_file_rar13(self, path, arcname, level)
-    }
-
-    /// Engine-side seam for [`crate::format::rar13::write`].
-    pub(crate) fn write_rar13_dir_entry(
+    /// Add a RAR5 redirect (symlink / hardlink / file copy) member.
+    pub(crate) fn add_redirect(
         &mut self,
         name: &str,
-        mtime: u32,
-        mtime_ns: u32,
+        redir_type: u64,
+        target: &str,
     ) -> RarResult<()> {
-        crate::format::rar13::write::write_rar13_dir_entry(self, name, mtime, mtime_ns)
+        crate::format::rar5::write::add::add_redirect(self, name, redir_type, target)
+    }
+
+    /// [`Self::add_redirect`] carrying the link's modification time.
+    pub(crate) fn add_redirect_with_time(
+        &mut self,
+        name: &str,
+        redir_type: u64,
+        target: &str,
+        mtime: u32,
+        mtime_ns: Option<u32>,
+    ) -> RarResult<()> {
+        crate::format::rar5::write::add::add_redirect_with_time(
+            self, name, redir_type, target, mtime, mtime_ns,
+        )
     }
 }

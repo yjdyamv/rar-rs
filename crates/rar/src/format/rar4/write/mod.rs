@@ -8,7 +8,7 @@
 //! volume splitting and the parallel batch) lives in [`pipeline`].
 
 mod cbc;
-mod pipeline;
+pub(crate) mod pipeline;
 
 use crate::crc32;
 use crate::error::{RarError, RarResult};

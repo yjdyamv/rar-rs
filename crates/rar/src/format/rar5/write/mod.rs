@@ -1,6 +1,6 @@
 //! RAR5 write pipeline: member addition, emission, volume splitting and the
-//! parallel batch. Methods on [RarArchive] live in sibling impl blocks (see
-//! src/archive.rs for the shared state).
+//! parallel batch. The entry points take `cx: &mut dyn Engine` (see
+//! [`crate::engine`]); the archive engine owns the state.
 //!
 //! The format-neutral member dispatchers live in
 //! `crate::format::shared::write_ops`. This module tree is RAR5-only:
@@ -10,14 +10,14 @@
 //! the AES-256 range emitter and `layout.rs`/`windows.rs` the sizing and
 //! Windows helpers.
 
-mod add;
+pub(crate) mod add;
 #[cfg(feature = "parallel")]
-mod batch;
-mod emit;
+pub(crate) mod batch;
+pub(crate) mod emit;
 pub(crate) mod engine;
 mod filter_policy;
 pub(crate) mod layout;
-mod stream;
+pub(crate) mod stream;
 #[cfg(windows)]
 pub(crate) mod windows;
 #[cfg(windows)]

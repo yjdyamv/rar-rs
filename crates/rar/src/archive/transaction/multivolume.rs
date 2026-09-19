@@ -119,7 +119,7 @@ impl RarArchive {
             } else {
                 None
             };
-            self.write_stream_record(&name, data, password)?;
+            crate::format::rar5::write::stream::write_stream_record(self, &name, data, password)?;
         }
         Ok(())
     }
@@ -298,7 +298,8 @@ impl RarArchive {
                 }
                 _ => payload.data,
             };
-            self.write_file_entry(
+            crate::format::rar5::write::emit::write_file_entry(
+                self,
                 &MemberPlan {
                     name: entry_name,
                     unpacked_size: hdr.unpacked_size,

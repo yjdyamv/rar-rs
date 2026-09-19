@@ -50,13 +50,11 @@ version`，以及 `crates/rar-napi/package.json` 的
   改三个角色门面（共用 `EntryId::resolve` 身份约定与单一 catalog token）。
 - `archive/mod.rs` — `RarArchive` 共享状态与生命周期（模块内部；公开面只有经
   crate 根 `pub use` 的角色门面）。
-- `archive/state.rs` — `ReadState`/`WriteState` 及其
-  `solid`/`rar4`/`compression`/`meta`/`locator`/`output` 组，加
-  `Mode`/`PendingCommit`/`StreamRecord`。
 - `archive/transaction/` — 手术式 delete / rename（字节级重写；
   `multivolume`/`edit`/`plan`/`execute`/`solid`/`header` 角色模块）。
-- `archive/create.rs` / `entry.rs` / `discovery.rs` —
-  写生命周期、条目类型、分卷发现。
+- `archive/create.rs` — 写生命周期（创建/append/finalize）。
+- `archive/ops.rs` — **方法形接缝**：角色门面与 crate 内测试仍按方法调用，
+  这里逐条转发到 `format` 的自由函数。
 - `archive/rar4_edit/` — RAR4 编辑（rename / delete / comment / RR / lock /
   append / solid repack，含
   `-hp`；`layout`/`headers`/`comment`/`engine`/`repack` 角色模块）。
@@ -70,6 +68,28 @@ version`，以及 `crates/rar-napi/package.json` 的
 
 `name_policy`（`-ep` / `-x` / `-n` 的路径收集与掩码）**不在库里**，在
 `crates/rar-cli/src/name_policy.rs`——CLI 是它唯一的消费者。
+
+### 引擎接缝（`engine/`）
+
+`archive` 与 `format` **之下**的共享词汇层（`engine` 只依赖
+`{codec, crypto, fs, model, options}`，绝不依赖 `archive`/`format`）：
+
+- `engine/ctx.rs` — `Engine` trait 与 `Parts` 拆借视图。`format` 的族内读写实现
+  都是**自由函数**，上下文参数为 `cx: &mut dyn Engine`（只读用 `&dyn Engine`），
+  因此 `format` 从不命名 `RarArchive`；`Parts` 一次借出同一结构体的不相交字段
+  （`entries` + `stream` + `read` + `password` +
+  `cancel`），保留转换前的借用形状。
+  引擎**行为**（`write_block_header`、`start_next_volume`、`report_progress` …）
+  仍取整个 `Engine`，所以 `Parts` 借用在调用服务前结束。
+- `engine/state.rs` — `ReadState`/`WriteState` 及其
+  `solid`/`rar4`/`compression`/`meta`/`locator`/`output` 组，加
+  `Mode`/`PendingCommit`/`StreamRecord`。
+- `engine/entry.rs` / `plan.rs` / `discovery.rs` — `ArchiveEntry`/`BatchEntry`、
+  `MemberPlan`（+ `parallel` 下的 `PreparedEntry`）与分卷发现。
+
+依赖方向因此单向：`archive` → `format` → `engine`；反向命名由
+`tests/architecture_boundaries.rs` 钉住（`archive/ctx.rs` 是 `Engine`
+的唯一实现）。
 
 ### 核心子系统
 
@@ -118,6 +138,13 @@ version`，以及 `crates/rar-napi/package.json` 的
 变更的块，丢弃内联恢复记录并重建 quick-open 记录。
 
 ## 3 · 设计不变量
+
+**分层单向。** 依赖方向 `archive` → `format` → `engine` → 底层
+（`codec`/`crypto`/`fs`/`model`/`options`）。`format` 不得命名 `archive`：族内
+读写全部是取 `&mut dyn Engine` 的自由函数，旧的 `impl RarArchive` 块已清零。
+角色门面（reader/writer/editor）不得命名 `format`/`codec`/`crypto`/`recovery`，
+需要时经 `archive/ops.rs` 的方法接缝转发。三条都由
+`tests/architecture_boundaries.rs` 在源码行级别钉住。
 
 **有界内存。** 成员从不整块进内存。
 

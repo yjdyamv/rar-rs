@@ -19,9 +19,8 @@
 //! cipher stream: the whole payload is encrypted before the split, so volume
 //! fragments continue the same stream (the reader decrypts after assembling).
 //!
-//! The emitted-member entry points take `cx: &mut dyn Engine`: they used to
-//! be an `impl RarArchive` block, which forced this module to name the
-//! engine's type.
+//! The emitted-member entry points take `cx: &mut dyn Engine` (see
+//! [`crate::engine`]), so this module never names the engine's type.
 
 use std::fs;
 use std::io::{Read, Write};

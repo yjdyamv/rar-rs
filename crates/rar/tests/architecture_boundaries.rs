@@ -156,3 +156,20 @@ fn fs_and_model_policy_do_not_depend_upward() {
         );
     }
 }
+
+/// The dependency inversion the `Engine` trait exists for: the per-family
+/// container code sits *below* the archive engine, so no `format` source may
+/// name `archive` (the reverse direction is `archive` → `format` and is
+/// expected). `RarArchive` used to be reached through `impl RarArchive`
+/// blocks living in `format`; those are gone, and this pins that they cannot
+/// come back. Test code and doc comments are exempt, like the other layering
+/// checks.
+#[test]
+fn format_does_not_depend_on_the_archive_engine() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let offenders = layer_references(&manifest_dir.join("src/format"), &["archive"]);
+    assert!(
+        offenders.is_empty(),
+        "format must not name archive; the family code takes `&mut dyn Engine`: {offenders:?}"
+    );
+}
