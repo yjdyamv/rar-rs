@@ -267,9 +267,11 @@ impl RarArchive {
             self.sfx_offset + RAR5_SIGNATURE.len() as u64,
         ))?;
         let missing = || RarError::Format("archive is missing the main header".into());
-        let first =
-            crate::format::rar5::headers::read_block(reader, self.archive_block_key()?.as_ref())?
-                .ok_or_else(missing)?;
+        let first = crate::format::rar5::headers::read_block(
+            reader,
+            crate::format::rar5::extract::verify::archive_block_key(self)?.as_ref(),
+        )?
+        .ok_or_else(missing)?;
         match first.block_type {
             BLOCK_TYPE_ENCRYPT_HEADER => {
                 let params =
@@ -277,7 +279,7 @@ impl RarArchive {
                 self.handle_archive_encrypt_header(params)?;
                 let meta = crate::format::rar5::headers::read_block(
                     reader,
-                    self.archive_block_key()?.as_ref(),
+                    crate::format::rar5::extract::verify::archive_block_key(self)?.as_ref(),
                 )?
                 .ok_or_else(missing)?;
                 if meta.block_type != BLOCK_TYPE_ARCHIVE_HEADER {

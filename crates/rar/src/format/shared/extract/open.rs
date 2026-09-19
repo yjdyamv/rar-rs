@@ -15,7 +15,7 @@ impl RarArchive {
     pub(crate) fn open_read(&mut self) -> RarResult<()> {
         self.open_common()?;
         match self.family {
-            ArchiveFamily::Rar13 => self.open_read_rar13()?,
+            ArchiveFamily::Rar13 => crate::format::rar13::extract::open_read_rar13(self)?,
             ArchiveFamily::Rar15To40 => self.open_read_rar4()?,
             ArchiveFamily::Rar50Plus => self.open_read_rar5()?,
         }
@@ -28,7 +28,7 @@ impl RarArchive {
     pub(crate) fn open_read_quick(&mut self) -> RarResult<()> {
         self.open_common()?;
         match self.family {
-            ArchiveFamily::Rar13 => self.open_read_rar13()?,
+            ArchiveFamily::Rar13 => crate::format::rar13::extract::open_read_rar13(self)?,
             ArchiveFamily::Rar15To40 => self.open_read_rar4()?,
             ArchiveFamily::Rar50Plus => self.open_read_quick_rar5()?,
         }

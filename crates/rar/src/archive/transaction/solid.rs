@@ -80,7 +80,8 @@ impl SolidChainState {
         let blake = hdr
             .hash_value
             .map(|_| crate::format::rar5::blake2sp::hash(&raw_data));
-        archive.verify_integrity(
+        crate::format::rar5::extract::verify::verify_integrity(
+            archive,
             idx,
             crc,
             blake,

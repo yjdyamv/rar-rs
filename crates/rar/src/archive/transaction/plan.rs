@@ -54,7 +54,10 @@ impl RarArchive {
         // was deleted.
         let mut prev_file_deleted = false;
 
-        let mut blocks = BlockCursor::new(file_len, self.archive_block_key()?);
+        let mut blocks = BlockCursor::new(
+            file_len,
+            crate::format::rar5::extract::verify::archive_block_key(self)?,
+        );
         while let Some(meta) = blocks.next(reader)? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,

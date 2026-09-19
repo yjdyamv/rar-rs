@@ -1,43 +1,41 @@
 //! Integrity verification of decoded members.
 
-use crate::archive::RarArchive;
 use crate::crypto;
+use crate::engine::Engine;
 use crate::error::{RarError, RarResult};
 use crate::model::FileHeader;
 
-impl RarArchive {
-    /// Verify CRC32 and BLAKE2sp integrity of decoded data. Encrypted
-    /// members use the hash-key MAC when the encryption record requests it.
-    pub(crate) fn verify_integrity(
-        &self,
-        idx: usize,
-        crc: u32,
-        blake: Option<[u8; 32]>,
-        params: Option<&crypto::EncryptionParams>,
-        keys: Option<&crypto::DerivedKeys>,
-    ) -> RarResult<()> {
-        let hdr = &self.entries[idx].header;
-        verify_integrity_for(hdr, crc, blake, params, keys)
-    }
+/// Verify CRC32 and BLAKE2sp integrity of decoded data. Encrypted
+/// members use the hash-key MAC when the encryption record requests it.
+pub(crate) fn verify_integrity(
+    cx: &dyn Engine,
+    idx: usize,
+    crc: u32,
+    blake: Option<[u8; 32]>,
+    params: Option<&crypto::EncryptionParams>,
+    keys: Option<&crypto::DerivedKeys>,
+) -> RarResult<()> {
+    let hdr = &cx.entries()[idx].header;
+    verify_integrity_for(hdr, crc, blake, params, keys)
+}
 
-    /// [`crate::format::rar5::headers::read_block`].
-    pub(crate) fn archive_block_key(&self) -> RarResult<Option<[u8; 32]>> {
-        let encr = match self.archive_encr.as_ref() {
-            Some(encr) => encr,
-            None => return Ok(None),
-        };
-        // The key is cached after the first derivation (a scan of a
-        // header-encrypted archive keeps its own per-volume key and does not
-        // populate the cache).
-        if let Some(keys) = self.archive_keys.as_ref() {
-            return Ok(Some(keys.key));
-        }
-        let password = match self.password.as_ref() {
-            Some(password) => password,
-            None => return Ok(None),
-        };
-        encr.get_key(password).map(Some)
+/// The key a header-encrypted block is decrypted with, for
+/// [`crate::format::rar5::headers::read_block`]. `None` when the archive has
+/// no archive-level encryption header.
+pub(crate) fn archive_block_key(cx: &dyn Engine) -> RarResult<Option<[u8; 32]>> {
+    let Some(encr) = cx.archive_encr() else {
+        return Ok(None);
+    };
+    // The key is cached after the first derivation (a scan of a
+    // header-encrypted archive keeps its own per-volume key and does not
+    // populate the cache).
+    if let Some(keys) = cx.archive_keys() {
+        return Ok(Some(keys.key));
     }
+    let Some(password) = cx.password() else {
+        return Ok(None);
+    };
+    encr.get_key(password).map(Some)
 }
 
 /// Verify CRC32 and BLAKE2sp integrity against a file header. Encrypted

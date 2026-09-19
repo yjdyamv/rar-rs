@@ -14,6 +14,7 @@
 //! `crate::archive::transaction`.
 
 mod create;
+mod ctx;
 mod editor;
 pub(crate) mod rar4_edit;
 mod reader;
@@ -576,7 +577,10 @@ impl RarArchive {
         let mut truncate_pos = None;
         let mut last_file_end = 0u64;
         let mut rr_percent = None;
-        let mut blocks = BlockCursor::new(file_len, self.archive_block_key()?);
+        let mut blocks = BlockCursor::new(
+            file_len,
+            crate::format::rar5::extract::verify::archive_block_key(self)?,
+        );
         while let Some(meta) = blocks.next(&mut reader)? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => {

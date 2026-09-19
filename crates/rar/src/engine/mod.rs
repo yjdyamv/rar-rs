@@ -13,11 +13,13 @@
 
 use std::io::{Read, Seek, Write};
 
+mod ctx;
 mod discovery;
 mod entry;
 mod plan;
 mod state;
 
+pub(crate) use ctx::Engine;
 pub use discovery::discover_volumes;
 pub use entry::{ArchiveEntry, BatchEntry};
 #[cfg(feature = "parallel")]

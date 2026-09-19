@@ -252,7 +252,7 @@ impl RarArchive {
     /// verified and cached (`archive_block_key`).
     pub fn get_comment(&mut self) -> RarResult<Option<Vec<u8>>> {
         if self.is_rar13() {
-            return self.rar13_archive_comment();
+            return crate::format::rar13::extract::rar13_archive_comment(self);
         }
         if self.is_rar4() {
             return super::super::rar4_edit::read_comment(self);
@@ -267,7 +267,10 @@ impl RarArchive {
         let mut reader = File::open(&first)?;
         reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
         let file_len = reader.metadata().map_err(RarError::Io)?.len();
-        let mut blocks = BlockCursor::new(file_len, self.archive_block_key()?);
+        let mut blocks = BlockCursor::new(
+            file_len,
+            crate::format::rar5::extract::verify::archive_block_key(self)?,
+        );
         while let Some(meta) = blocks.next(&mut reader)? {
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,

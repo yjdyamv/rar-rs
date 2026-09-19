@@ -13,7 +13,7 @@
 mod decode;
 mod open;
 mod solid;
-mod verify;
+pub(crate) mod verify;
 
 pub(crate) use decode::read_streams_with;
 #[cfg(feature = "parallel")]

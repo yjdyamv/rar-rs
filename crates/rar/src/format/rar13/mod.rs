@@ -7,7 +7,7 @@
 //! (MIT OR Apache-2.0; see NOTICE).
 
 pub(crate) mod create;
-mod extract;
+pub(crate) mod extract;
 pub(crate) mod write;
 
 use std::io::{Read, Seek, SeekFrom};

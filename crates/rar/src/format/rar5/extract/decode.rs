@@ -276,7 +276,8 @@ impl RarArchive {
             .hash_value
             .map(|_| crate::format::rar5::blake2sp::hash(&[]));
         let payload = self.read_packed_data(idx)?;
-        self.verify_integrity(
+        crate::format::rar5::extract::verify::verify_integrity(
+            self,
             idx,
             crc,
             blake,
@@ -319,7 +320,8 @@ impl RarArchive {
             .header
             .hash_value
             .map(|_| crate::format::rar5::blake2sp::hash(&raw_data));
-        self.verify_integrity(
+        crate::format::rar5::extract::verify::verify_integrity(
+            self,
             idx,
             crc,
             blake,
@@ -374,7 +376,8 @@ impl RarArchive {
         )?;
 
         let (crc, blake) = sink.finish();
-        self.verify_integrity(
+        crate::format::rar5::extract::verify::verify_integrity(
+            self,
             idx,
             crc,
             blake,
