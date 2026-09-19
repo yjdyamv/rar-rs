@@ -182,6 +182,15 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 - **分卷 append / 分卷删除**：官方 `rar` 同样拒绝（"Cannot modify volume"）。
   分卷的 `rn` / `ch`、`k` 与归档注释**不是**拒绝项：官方支持，我们也支持（逐卷
   重写 / 注释插在首卷主头后）。
+- **把容器族 / recovery 做成编译期 feature**（2026-09 审查后否决）：不把 legacy
+  族（`codec/legacy` + `format/{rar13,rar4}`，21,000 行 ≈ 29%）或
+  recovery（`.rev`/RR，7,037 行 ≈ 10%）做成可选 feature。它们是产品范围本身—— 对
+  RAR 1.3–4.x 的读写、`r`/`rv`/`rc` 与依赖它们的 `-hp`/solid 路径都是对外
+  承诺，默认必须开启，因此 feature 化对本仓库的 CI、本地构建与发布产物**零
+  收益**；代价是 50–90 处新 `#[cfg]`（现有 115 处）、CI clippy 矩阵翻倍、以及
+  此后每次改 legacy/recovery 都要照顾门控。真需要“只读 RAR5”的消费者应该用
+  裁剪的 fork，而不是往主干加开关。（同类先例：ADR 0007 删掉 `raw` feature，
+  因为那个开关的成本大于收益。）
 
 ## 已知小差异（记录，互操作无碍）
 
