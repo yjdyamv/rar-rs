@@ -1,28 +1,29 @@
-//! Match finding and symbol parsing.
+//! The symbol parsers: the fast/lazy walker and the price-driven optimal parse.
 //!
-//! Two parsers share the same match finders (hash chain, BT4 tree, sampled
-//! long range): the fast/lazy walker used by the low levels and the
-//! price-driven optimal parser for levels 2-5. Both emit the [`Symbol`]
-//! stream consumed by [`super::emit`]; blocks are closed early when the local
-//! literal/match distribution drifts so each emitted block gets its own
-//! Huffman tables.
+//! Both share the match finders (hash chain, BT4 tree, sampled long range) and
+//! emit the [`Symbol`] stream consumed by [`super::super::emit`]; the emitted
+//! grouping lives in [`super::block`], the candidate collection in
+//! [`super::collect`].
 
-use super::*;
+use super::super::*;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
-use super::super::{
+use super::super::super::{
     HUFF_DC, HUFF_DCX, HUFF_LDC, HUFF_NC, HUFF_RC, MAX_CODE_LENGTH, SYM_CACHE_BASE, SYM_MATCH_BASE,
     SYM_REPEAT,
 };
-use super::emit::{
+use super::super::emit::{
     apply_length_bonus, cache_find, cache_push, cache_touch, encode_distance_slot,
     encode_length_slot, ensure_nonzero, remove_length_bonus,
+};
+use super::collect::{
+    BlockMatches, DISABLE_MATCHLESS_FAST_PATH, FAST_RECOVER_INTERVAL, NICE_MATCH_LENGTH,
+    RELAXED_MATCHLESS_MAX_LEN, collect_block_matches, match_length_at,
 };
 use crate::codec::common::huffman::build_code_lengths_from_freqs;
 use crate::codec::common::match_finder::MatchFinder;
 use crate::version::ArchiveVersion;
-
 /// Fresh-frame tail seeding shape from the MT worker path (issue 12): the
 /// newest `MT_NEAR_TIGHT_FRONTIER` tail bytes are seeded densely, and the
 /// older tail up to `NEAR_WINDOW_MAX` at `MT_FAR_SEED_STRIDE` with a shorter
@@ -36,13 +37,11 @@ const MT_NEAR_TIGHT_FRONTIER: usize = 2 * 1024 * 1024;
 const MT_FAR_SEED_STRIDE: usize = 16;
 const MT_FAR_SEED_CHAIN: usize = 2;
 
-// ── Match finding ──────────────────────────────────────────────────────────
-
 /// Find matches for `chunk`, searching against `state.tail` as lookbehind.
 /// Advances `state` so a following chunk/file continues the LZ window.
 /// When `long_range` is set, distances beyond the near window are found
 /// through the sampled long-range history (WinRAR `-mcl` semantics).
-pub(super) fn find_matches_with_tail(
+pub(crate) fn find_matches_with_tail(
     state: &mut EncoderState,
     chunk: &[u8],
     chain_len: usize,
@@ -125,7 +124,7 @@ pub(super) fn find_matches_with_tail(
 /// compiled only with the `parallel` feature.
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn windowed_priced_parse<F>(
+pub(crate) fn windowed_priced_parse<F>(
     combined: &[u8],
     start: usize,
     end: usize,
@@ -143,7 +142,7 @@ where
     let mut symbols = Vec::with_capacity(end - start);
     let mut state = EncoderMatchState::new(*dist_cache, *last_length);
     let probe_cache = *dist_cache;
-    let block_size = super::chunked::MT_ROW_INDEX_DP_BLOCK;
+    let block_size = super::super::chunked::MT_ROW_INDEX_DP_BLOCK;
     let mut block_start = start;
     while block_start < end {
         let block_end = (block_start + block_size).min(end);
@@ -253,7 +252,7 @@ pub(crate) struct RowIndex {
 impl RowIndex {
     /// Build the index in two passes (count, then place). O(n) at memory
     /// bandwidth, paid once per member instead of per slice.
-    pub(super) fn build(data: &[u8]) -> Self {
+    pub(crate) fn build(data: &[u8]) -> Self {
         let count = data.len().saturating_sub(3);
         let mut starts = vec![0u32; ROW_INDEX_BUCKETS + 1];
         for pos in 0..count {
@@ -282,7 +281,7 @@ impl RowIndex {
     /// Longest match at `pos` among the newest `depth` candidates within
     /// `max_distance` bytes, or `None` when nothing reaches four bytes.
     #[cfg(test)]
-    pub(super) fn longest(
+    pub(crate) fn longest(
         &self,
         data: &[u8],
         pos: usize,
@@ -300,7 +299,7 @@ impl RowIndex {
     /// `(length, distance)` run per candidate that beats the best length so
     /// far, so the DP can trade a shorter near match against a longer far one.
     /// At most `depth` candidates are compared.
-    pub(super) fn collect(
+    pub(crate) fn collect(
         &self,
         data: &[u8],
         pos: usize,
@@ -350,7 +349,7 @@ impl RowIndex {
 ///
 /// MT-only, like its only reader [`windowed_priced_parse`].
 #[cfg(feature = "parallel")]
-pub(super) const MT_DP_BLOCK_SIZE: usize = 256 * 1024;
+pub(crate) const MT_DP_BLOCK_SIZE: usize = 256 * 1024;
 
 /// Match-finding loop over `data[start..end]` with a distance cache.
 /// `lr` (when present) adds long-range candidates from the sampled
@@ -358,7 +357,7 @@ pub(super) const MT_DP_BLOCK_SIZE: usize = 256 * 1024;
 /// distance the near finder can produce (tail + chunk), so long-range
 /// hits are only considered beyond it.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn find_matches_in_range(
+pub(crate) fn find_matches_in_range(
     data: &[u8],
     finder: &mut MatchFinder<'_>,
     start: usize,
@@ -519,14 +518,6 @@ pub(super) fn find_matches_in_range(
 // reaching one node with different memories still collapse into whichever
 // was cheaper — an approximation, but far closer than lazy matching).
 
-/// Longest match the optimal parse commits to and steps over without
-/// pricing the bytes it covers (rars `NICE_MATCH_LENGTH`).
-///
-/// Two roles, both experiment seams below: the finder stops comparing bytes at
-/// this length (a match that reaches it is measured out to its real end
-/// afterwards), and the parse stops pricing positions it covers.
-pub(crate) const NICE_MATCH_LENGTH: usize = 64;
-
 /// After this many consecutive positions with no match found, the optimal
 /// parse's match collection stops probing the long-range table on every
 /// position and drops to a [`FAST_RECOVER_INTERVAL`] cadence (incompressible
@@ -534,54 +525,6 @@ pub(crate) const NICE_MATCH_LENGTH: usize = 64;
 /// the lazy matcher fast mode does the same).
 const FAST_MODE_AFTER: usize = 64 * 1024;
 
-/// Full-search cadence inside fast mode (power of two): every this many
-/// literal positions a real long-range probe runs, so the mode recovers
-/// when compressible data returns (without it the first 64 KiB
-/// incompressible run would lock the probe off for the whole member).
-const FAST_RECOVER_INTERVAL: usize = 128;
-
-/// Consecutive failed tree probes before the block collector's tree walk
-/// drops to the [`FAST_RECOVER_INTERVAL`] cadence, **by level**: this is the
-/// one shortcut that measurably moved ratio when relaxed, and it is why the
-/// m3-m5 ladder used to be flat.
-///
-/// A probe fails only when the tree found *no match at all* (not merely a short
-/// one): on text-like data 4-15 byte matches are real signal (word prefixes) and
-/// must keep the full search cadence, while on truly incompressible data a
-/// 4-byte hash-collision match is ~2^-32 per position, so the miss run still
-/// accumulates and the mode engages after a couple of KiB of wasted
-/// cache-missing descents into the multi-MiB son array.
-///
-/// The gate is meant for the incompressible case, but on a **dense binary** it
-/// also truncates the runs where a long match is about to appear, dropping
-/// candidates at every level. Measured on the 12.5 MiB DLL at `-mt1` (dict 32m):
-/// threshold 256 (today) 5,751,821 B / 6184 ms, 1024 5,742,924 B, 4096
-/// 5,739,533 B / 6608 ms, and beyond 4096 nothing on that member (10 B). m5 takes
-/// 4096 rather than "never" because the *time* is not flat there: with the gate
-/// off entirely a 6 MiB XML member went from 625 ms to 24 s, since the gate also
-/// stops inserting the positions it steps over and a dense tree makes every
-/// later descent more expensive. m1-m3 keep 256 — which is why the default
-/// level's bytes do not move at all — and m4 takes 1024.
-pub(super) const COLLECT_MISS_THRESHOLD: [usize; 6] = [0, 256, 256, 256, 1024, 4096];
-
-/// Test seam: force the full pricing passes even for matchless blocks, to
-/// prove the matchless fast path is byte-identical.
-static DISABLE_MATCHLESS_FAST_PATH: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn set_fast_path_enabled(enabled: bool) {
-    DISABLE_MATCHLESS_FAST_PATH.store(!enabled, Ordering::Relaxed);
-}
-
-/// Relaxed matchless fast path: a block whose longest candidate match is at
-/// most this many bytes (and that has no live repeat distance) parses to
-/// all-literals, exactly like the strict matchless path. The collector only
-/// ever reports matches of length >= 4 (`collect_block_matches`), so the value
-/// below separates *accidental* 4-byte hash-collision matches (incompressible
-/// data, where a 4-byte match can never beat four literals) from real signal.
-/// Raising it would also skip genuinely useful short matches on compressible
-/// data, so keep it at the collector's floor.
-const RELAXED_MATCHLESS_MAX_LEN: usize = 4;
 /// Estimated cost of a literal before any block has been priced, in the
 /// same bit units as the match cost estimates (a main-table symbol out of
 /// 256 plus the odds that the table is skewed).
@@ -608,7 +551,7 @@ const UNUSED_SYMBOL_COST: usize = 15;
 /// produced. Fewer passes is proportionally cheaper, so the ladder
 /// trades ratio for speed here: m2/m3 (fast/normal) do one reprice,
 /// m4 two and m5 three.
-pub(super) const OPTIMAL_PARSE_PASSES: [usize; 6] = [0, 0, 2, 2, 3, 4];
+pub(crate) const OPTIMAL_PARSE_PASSES: [usize; 6] = [0, 0, 2, 2, 3, 4];
 
 /// Base parse-block size; blocks extend up to [`MAX_BLOCK_SIZE`] while the
 /// byte distribution stays stable (see [`BlockSplitter`]).
@@ -855,21 +798,6 @@ impl TokenPrices {
     }
 }
 
-/// One match finder result list for a block: every position's runs, one
-/// position after another. Each run is `(length, distance)`; the sequence
-/// per position has strictly increasing lengths, and the first distance to
-/// reach a length is the cheapest one that can (nearest-first chains).
-struct BlockMatches {
-    runs: Vec<(u32, u32)>,
-    starts: Vec<u32>,
-}
-
-impl BlockMatches {
-    fn at(&self, index: usize) -> &[(u32, u32)] {
-        &self.runs[self.starts[index] as usize..self.starts[index + 1] as usize]
-    }
-}
-
 /// Decides where one parse block ends, from the raw bytes alone. Blocks
 /// grow over data whose byte distribution is not moving (rars
 /// `BlockSplitter`).
@@ -917,228 +845,6 @@ impl BlockSplitter {
         }
         misplaced / open <= chunk_len / Self::DRIFT_DIVISOR
     }
-}
-
-/// Collect the matches the optimal parse will price at each position of a
-/// block, taking the positions into the shared tree finder as it goes
-/// (blocks must arrive in order, each exactly once).
-///
-/// Long-range candidates beyond the near window are folded in here: they
-/// do not depend on the prices, so collecting them once lets every parse
-/// pass replay the same answers. `lr` is `(table, near_max, anchor)` as in
-/// the lazy path, with the LR query slice being the chunk part of
-/// `combined` (which starts at `tail_len`); the probe only runs where the
-/// tree found nothing useful (a good near match is never worse than a
-/// far one).
-#[allow(clippy::too_many_arguments)]
-fn collect_block_matches(
-    finder: &mut match_finder::TreeMatchFinder,
-    combined: &[u8],
-    block: std::ops::Range<usize>,
-    tail_len: usize,
-    chain_len: usize,
-    max_match: usize,
-    window: usize,
-    lr: Option<(&match_finder::LongRange, usize, usize)>,
-    // Per-level dial: when the search drops to the recovery cadence.
-    miss_threshold: usize,
-) -> BlockMatches {
-    let span = block.end - block.start;
-    let mut matches = BlockMatches {
-        runs: Vec::with_capacity(span),
-        starts: Vec::with_capacity(span + 1),
-    };
-    let mut committed_through = block.start;
-    // Scratch for the tree finder's per-position reports.
-    let mut scratch: Vec<(u32, u32)> = Vec::new();
-    let mut lr_fast = false;
-    let mut lr_misses = 0usize;
-    let mut tree_misses = 0usize;
-    let mut fast_tree = false;
-    // The next gated position's first tree step (its head-resolved
-    // descendant and that node's child pair), computed at the end of the
-    // preceding iteration so its DRAM reads overlap the bookkeeping.
-    let mut pending: Option<(usize, usize, u32, u32)> = None;
-    for pos in block.clone() {
-        matches.starts.push(matches.runs.len() as u32);
-        let searching = pos >= committed_through;
-        let max_distance = pos.min(window);
-        let max_length = (block.end - pos).min(max_match);
-        let before = matches.runs.len();
-        // Inserting into a tree is the same descent as searching it, so a
-        // position the parse steps over is stepped over here too rather
-        // than inserted for nothing (its bytes are a copy of what the
-        // match already points at, so the tree loses little by not holding
-        // them).
-        //
-        // Fast mode: once the tree has found nothing for a long run of
-        // positions (incompressible data), the descent stops paying — it
-        // walks links through a multi-MiB son array that every probe
-        // misses in. Skip the search (and with it the insertion) except
-        // for a full recovery search every FAST_RECOVER_INTERVAL
-        // positions, and resume when any real match (>= 16 bytes, past
-        // spurious 4-byte hash coincidences) shows up.
-        if searching
-            && max_distance > 0
-            && max_length >= 4
-            && pos + 3 < combined.len()
-            && (!fast_tree || (pos & (FAST_RECOVER_INTERVAL - 1)) == 0)
-        {
-            // Warm the next position's head slot while this descent runs;
-            // the seed computed at the tail then hits. Harmless when the
-            // next position ends up unseeded/skipped.
-            if pos + 4 < combined.len() {
-                finder.prefetch_head_for(combined, pos + 1);
-            }
-            let avail = combined.len() - pos;
-            let len_limit = avail.min(NICE_MATCH_LENGTH);
-            scratch.clear();
-            match pending.take() {
-                Some((seed_pos, current, less, greater)) if seed_pos == pos => {
-                    finder.matches_seeded(
-                        combined,
-                        pos,
-                        len_limit,
-                        max_distance,
-                        chain_len,
-                        &mut scratch,
-                        current,
-                        less,
-                        greater,
-                    );
-                }
-                _ => finder.matches(
-                    combined,
-                    pos,
-                    len_limit,
-                    max_distance,
-                    chain_len,
-                    &mut scratch,
-                ),
-            }
-            // The tree's internal ordering invariants can break when it is
-            // reused across chunks (budget-limited descents against a dense
-            // persistent tree — the DLL reproduction hit this: a bogus
-            // match copied the MZ header over real code, and the corrupt
-            // member was silently written). Verify every report byte-exactly
-            // before the parse can price it; a report whose bytes do not
-            // actually match is dropped, a short over-report is truncated to
-            // the true length. Cheap: the descent already compared these
-            // bytes, and matches are sparse relative to positions.
-            let mut w = 0usize;
-            for r in 0..scratch.len() {
-                let (_len, dist) = scratch[r];
-                let actual = match_length_at(combined, pos, dist as usize, len_limit);
-                if actual >= 4 {
-                    scratch[w] = (actual as u32, dist);
-                    w += 1;
-                }
-            }
-            scratch.truncate(w);
-            matches.runs.extend(scratch.iter().copied());
-            // Measure the last report out to its real end: the tree
-            // stops comparing at the limit, and a match reaching it
-            // is what the parse commits to and steps over.
-            if let Some(&(length, distance)) = scratch.last()
-                && length as usize == len_limit
-                && len_limit < avail.min(max_match)
-            {
-                let full = match_length_at(combined, pos, distance as usize, avail.min(max_match));
-                if let Some(last) = matches.runs.last_mut() {
-                    last.0 = full as u32;
-                }
-            }
-        }
-        let mut longest = matches.runs[before..]
-            .iter()
-            .map(|&(len, _)| len as usize)
-            .max()
-            .unwrap_or(0);
-        // Fast mode gates on the tree finding *nothing at all* (`longest
-        // == 0`), not on a short match: on text-like data 4-15 byte
-        // matches are real signal (word prefixes) and must keep the full
-        // search cadence, while on truly incompressible data a 4-byte
-        // hash-collision match is ~2^-32 per position, so the miss run
-        // still accumulates and the mode engages as quickly as ever.
-        if longest == 0 {
-            tree_misses += 1;
-            if !fast_tree && tree_misses >= miss_threshold {
-                fast_tree = true;
-            }
-        } else {
-            tree_misses = 0;
-            fast_tree = false;
-        }
-        // Long-range probe gating: the probe misses in a multi-MiB
-        // random-access table, so once it has failed for a long run of
-        // positions (incompressible data) it drops to the
-        // FAST_RECOVER_INTERVAL cadence. Any hit resumes full probing —
-        // a spurious short tree match must not reset this, only an actual
-        // long-range hit pays for the probe.
-        if let Some((long_range, near_max, anchor)) = lr
-            && searching
-            && longest < 64
-            && pos + 4 <= combined.len()
-            && (!lr_fast || (pos & (FAST_RECOVER_INTERVAL - 1)) == 0)
-        {
-            let chunk_off = pos - tail_len;
-            let before = matches.runs.len();
-            if let Some((ld, ll)) = long_range.find_from(
-                &combined[tail_len..],
-                chunk_off,
-                anchor,
-                near_max + 1,
-                max_length,
-            ) && ll > longest
-            {
-                matches.runs.push((ll as u32, ld));
-                longest = ll;
-            }
-            if matches.runs.len() > before {
-                lr_fast = false;
-                lr_misses = 0;
-            } else {
-                lr_misses += 1;
-                // A 64 KiB parse block holds 64 K positions, so a
-                // 64 K-probe threshold would only fire at the last
-                // position of the block and never pay off; a few hundred
-                // failed probes (a couple of KiB of incompressible data)
-                // is already definitive and leaves room to act within
-                // the block.
-                if !lr_fast && lr_misses >= miss_threshold {
-                    lr_fast = true;
-                }
-            }
-        }
-        // The parse can only take a match the block still has room for, so
-        // the reach it will commit to is measured the way it measures it.
-        let reach = longest.min(block.end - pos).min(max_match);
-        if reach >= NICE_MATCH_LENGTH {
-            committed_through = pos + reach;
-        }
-        // Seed the next position's first tree step. Its values are settled
-        // now (every position through `pos` has inserted and this block does
-        // nothing else to the tree), so reading them here is byte-identical
-        // to reading them at the next turn. Mirror the gate exactly using
-        // the just-updated commit/fast-tree state; the gate the next
-        // iteration evaluates reads the same values.
-        let npos = pos + 1;
-        let n_max_distance = npos.min(window);
-        let n_max_length = (block.end - npos).min(max_match);
-        if npos >= committed_through
-            && n_max_distance > 0
-            && n_max_length >= 4
-            && npos + 3 < combined.len()
-            && (!fast_tree || (npos & (FAST_RECOVER_INTERVAL - 1)) == 0)
-        {
-            let (current, less, greater) = finder.seed_for(combined, npos);
-            pending = Some((npos, current, less, greater));
-        } else {
-            pending = None;
-        }
-    }
-    matches.starts.push(matches.runs.len() as u32);
-    matches
 }
 
 /// The longest match at `distance` that costs exactly what a match of
@@ -1377,26 +1083,6 @@ fn optimal_parse_tokens(
     reversed
 }
 
-/// Length of the match at `pos` against `distance` bytes back, capped at
-/// `max_length` (64-bit word compares with a scalar tail).
-fn match_length_at(data: &[u8], pos: usize, distance: usize, max_length: usize) -> usize {
-    let cand = pos.wrapping_sub(distance);
-    let limit = max_length.min(data.len() - pos).min(data.len() - cand);
-    let mut l = 0usize;
-    while l + 8 <= limit {
-        let a = u64::from_le_bytes(data[cand + l..cand + l + 8].try_into().unwrap());
-        let b = u64::from_le_bytes(data[pos + l..pos + l + 8].try_into().unwrap());
-        if a != b {
-            return l + ((a ^ b).trailing_zeros() / 8) as usize;
-        }
-        l += 8;
-    }
-    while l < limit && data[cand + l] == data[pos + l] {
-        l += 1;
-    }
-    l
-}
-
 /// Convert a token stream into symbols with a live cache walk, counting
 /// symbol frequencies at the same time (the block writer counts them the
 /// same way, so prices from these frequencies are exact). Returns the
@@ -1520,7 +1206,7 @@ fn prices_from_frequencies(
 /// skipped. (The multi-threaded workers do not reach this function; they
 /// run the low-step chain tier in [`mt_slice_symbols_low_step`].)
 #[allow(clippy::too_many_arguments)]
-pub(super) fn find_matches_optimal(
+pub(crate) fn find_matches_optimal(
     state: &mut EncoderState,
     chunk: &[u8],
     chain_len: usize,
@@ -1806,7 +1492,7 @@ fn parse_one_block(
             }
             if all_literal {
                 #[cfg(test)]
-                super::MATCHLESS_FAST_PATH_USES.fetch_add(1, Ordering::Relaxed);
+                super::super::MATCHLESS_FAST_PATH_USES.fetch_add(1, Ordering::Relaxed);
                 let mut symbols = Vec::with_capacity(span);
                 for index in 0..span {
                     symbols.push(Symbol::Literal(combined[block.start + index]));
@@ -1848,122 +1534,4 @@ fn parse_one_block(
     }
     let (symbols, _) = convert_tokens(&tokens, combined, block.clone(), state, variant);
     symbols
-}
-
-/// Cap for grouping parsed symbols into *emitted* blocks. The RAR5 size
-/// field allows blocks up to 4 GiB, so this is purely an encoder choice:
-/// on distribution-stable data (repetitive text) merging many parse blocks
-/// into one emitted block amortises the per-block Huffman table definitions
-/// (WinRAR writes one block per whole member there); on heterogeneous data
-/// the tables stay per-parse-block because the drift check keeps the parse
-/// blocks small. Only the emitted grouping is larger — the parse itself is
-/// unchanged, so token choices are byte-identical to the 128 KiB cap.
-///
-/// This is the one emitted-block policy every encode pipeline uses (plain
-/// and filtered, sequential and multi-threaded); [`find_block_end_adaptive`]
-/// is its splitter.
-pub(super) const EMITTED_BLOCK_SIZE: usize = 4 * 1024 * 1024;
-
-/// Group symbols into emitted blocks of up to `cap` uncompressed bytes, but
-/// close the block early when the symbol stream's *local* literal/match
-/// distribution drifts between adjacent ~64 KiB sub-spans.
-///
-/// The parse-side [`BlockSplitter`] compares each sub-block against the cumulative
-/// counts of the open block, which cannot see section boundaries once the
-/// cumulative mix stabilises (a DLL's code+data+padding blend looks stable
-/// over a 1 MiB span). Comparing each sub-span against the *previous* one
-/// catches those boundaries: repetitive text stays merged (WinRAR writes
-/// one block per member there), heterogeneous binaries keep small blocks
-/// (WinRAR's ~64 KiB DLL blocks). The token stream itself is untouched —
-/// only the emitted grouping changes, so parsers and decoders behave the
-/// same.
-pub(super) fn find_block_end_adaptive(
-    symbols: &[Symbol],
-    start: usize,
-    cap: usize,
-) -> (usize, usize) {
-    const SUB_SPAN: usize = 64 * 1024;
-    const DRIFT_DIVISOR: usize = 128;
-    const LIT: usize = 256;
-    const DIST: usize = 5;
-    const LEN: usize = 3;
-    const BUCKETS: usize = LIT + DIST + LEN;
-    fn dist_bucket(d: u32) -> usize {
-        if d < 4096 {
-            0
-        } else if d < 65536 {
-            1
-        } else if d < 1 << 20 {
-            2
-        } else if d < 4 << 20 {
-            3
-        } else {
-            4
-        }
-    }
-    fn len_bucket(l: u32) -> usize {
-        if l < 16 {
-            0
-        } else if l < 64 {
-            1
-        } else {
-            2
-        }
-    }
-    let mut count = 0usize;
-    let mut last_len = 0u32;
-    let mut cur = [0u64; BUCKETS];
-    let mut prev = [0u64; BUCKETS];
-    let mut span_out = 0usize;
-    let mut drifted = false;
-    let mut have_prev = false;
-    for (offset, symbol) in symbols[start..].iter().enumerate() {
-        let i = start + offset;
-        match symbol {
-            Symbol::Literal(b) => {
-                cur[*b as usize] += 1;
-                count += 1;
-                span_out += 1;
-                last_len = 0;
-            }
-            Symbol::Match { distance, length } => {
-                last_len = apply_length_bonus(*length, *distance);
-                count += last_len as usize;
-                span_out += last_len as usize;
-                cur[LIT + dist_bucket(*distance)] += 1;
-                cur[LIT + DIST + len_bucket(last_len)] += 1;
-            }
-            Symbol::CacheRef { length, .. } => {
-                last_len = *length;
-                count += *length as usize;
-                span_out += *length as usize;
-                cur[LIT + DIST + len_bucket(last_len)] += 1;
-            }
-            Symbol::Repeat => {
-                count += last_len as usize;
-                span_out += last_len as usize;
-            }
-            Symbol::Filter { .. } => {}
-        }
-        if span_out >= SUB_SPAN {
-            // Full sub-span collected: local drift vs the previous sub-span.
-            if have_prev && !drifted {
-                let mut misplaced = 0u64;
-                for (a, b) in cur.iter().zip(prev.iter()) {
-                    misplaced += a.abs_diff(*b);
-                }
-                if misplaced > SUB_SPAN as u64 / DRIFT_DIVISOR as u64 {
-                    drifted = true;
-                }
-            }
-            have_prev = true;
-            prev = cur;
-            cur = [0u64; BUCKETS];
-            span_out = 0;
-        }
-        if drifted || count >= cap {
-            return (i + 1, count);
-        }
-    }
-    (symbols.len(), count)
 }
