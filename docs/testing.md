@@ -50,17 +50,17 @@ RUSTFLAGS="-D warnings" cargo check -p rar-rs --all-features \
 
 ## Dependency gate
 
-`lint` also runs `cargo deny check --all-features --locked`, which judges the
-_dependency graph_ rather than this tree: RustSec advisories, the license
-allow-list, the registry sources. Configuration and the rationale for each
-allowed license family live in the root [`deny.toml`](../deny.toml); a
-dependency under an unlisted license fails on purpose. In-tree `rars` ports are
-_not_ covered by that file — see
+`lint` also runs `cargo deny --all-features --locked check` (the global flags go
+before the subcommand), which judges the _dependency graph_ rather than this
+tree: RustSec advisories, the license allow-list, the registry sources.
+Configuration and the rationale for each allowed license family live in the root
+[`deny.toml`](../deny.toml); a dependency under an unlisted license fails on
+purpose. In-tree `rars` ports are _not_ covered by that file — see
 [`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md).
 
 ```sh
 cargo install cargo-deny --locked    # once
-cargo deny check --all-features --locked
+cargo deny --all-features --locked check
 ```
 
 ## Running the Linux half under WSL2
