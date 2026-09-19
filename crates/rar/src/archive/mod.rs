@@ -54,7 +54,7 @@ pub(crate) use state::{DecryptedPayload, LegacySolidEncoder, Mode, PendingCommit
 
 pub use crate::format::shared::extract::ExtractionReport;
 pub(crate) use crate::fs::volume::{
-    volume_base_of, volume_part_width, volume_path, volume_path_padded, volume_path_rar4,
+    volume_base_of, volume_path, volume_path_padded, volume_path_rar4,
 };
 pub use discovery::discover_volumes;
 pub use editor::{ArchiveEditor, EditOp, EditPlan, EditReport};

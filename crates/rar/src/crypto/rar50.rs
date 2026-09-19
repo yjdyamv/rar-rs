@@ -23,22 +23,31 @@ pub const ENCR_FLAG_CHECKSUM: u8 = 0x01;
 /// Encryption record flag: header checksums are MAC'd with the hash key
 /// (`-htb`); service blocks with plaintext CRCs (NTFS streams) clear it.
 pub const ENCR_FLAG_HASH_MAC: u8 = 0x02;
-/// RAR5 Encryption Support
-///
-/// RAR5 uses AES-256 in CBC mode with keys derived from a password via a
-/// chained HMAC-SHA256 KDF (equivalent to PBKDF2-HMAC-SHA256):
-///
-/// 1. Key derivation: one HMAC chain produces the AES key (at 2^strength
-///    iterations), the 32-byte hash key (16 iterations later, used to MAC
-///    checksums of encrypted data) and the password check value (another
-///    16 iterations later, XOR-folded to 8 bytes).
-/// 2. IV: 16-byte random initialization vector per file.
-/// 3. Padding: zero-fill to a 16-byte AES block boundary.
-/// 4. Header encryption: when an archive-level encryption header is
-///    present, all subsequent blocks (including file headers) are also
-///    encrypted.
-use crate::format::rar5::EXTRA_FILE_ENCRYPTION;
 
+/// Extra-area record type of the ENCR record, which this module parses
+/// ([`parse_encryption_extra`]) and writes
+/// ([`EncryptionParams::to_extra_bytes`]).
+///
+/// The tag is RAR5's numbering, but the record is *this* layer's envelope, and
+/// the rule everywhere else is that whoever switches on a tag defines it
+/// (`format::rar5` still owns the tags whose records it parses itself). The
+/// value is pinned against `format::rar5::EXTRA_FILE_ENCRYPTION` by
+/// `encr_record_tag_matches_the_container_table`.
+pub(crate) const EXTRA_FILE_ENCRYPTION: u64 = 0x01;
+// RAR5 Encryption Support
+//
+// RAR5 uses AES-256 in CBC mode with keys derived from a password via a
+// chained HMAC-SHA256 KDF (equivalent to PBKDF2-HMAC-SHA256):
+//
+// 1. Key derivation: one HMAC chain produces the AES key (at 2^strength
+//    iterations), the 32-byte hash key (16 iterations later, used to MAC
+//    checksums of encrypted data) and the password check value (another
+//    16 iterations later, XOR-folded to 8 bytes).
+// 2. IV: 16-byte random initialization vector per file.
+// 3. Padding: zero-fill to a 16-byte AES block boundary.
+// 4. Header encryption: when an archive-level encryption header is
+//    present, all subsequent blocks (including file headers) are also
+//    encrypted.
 use aes::Aes256;
 use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use hmac::{Hmac, Mac};
@@ -794,26 +803,6 @@ mod tests {
         data
     }
 
-    /// Archive-level encryption header (`[type][flags][version][encr flags]
-    /// [strength][salt][checksum?]`) as a raw block.
-    fn archive_encrypt_header(version: u64, flags: u64) -> crate::format::rar5::headers::RawBlock {
-        let mut data = Vec::new();
-        data.extend(vint::encode(crate::format::rar5::BLOCK_TYPE_ENCRYPT_HEADER));
-        data.extend(vint::encode(0u64));
-        data.extend(vint::encode(version));
-        data.extend(vint::encode(flags));
-        data.push(4);
-        data.extend_from_slice(&[0x11u8; ENCR_SALT_SIZE]);
-        crate::format::rar5::headers::RawBlock {
-            header_crc: 0,
-            header_data: data,
-            data_size: 0,
-            data_offset: 0,
-            block_type: 0,
-            flags: 0,
-        }
-    }
-
     #[test]
     fn unknown_encryption_version_is_rejected() {
         let err = EncryptionParams::from_extra_bytes(&encr_record(
@@ -821,12 +810,6 @@ mod tests {
             u64::from(ENCR_FLAG_CHECKSUM),
             None,
         ))
-        .unwrap_err();
-        assert!(matches!(err, RarError::Format(_)), "got {err}");
-
-        let err = crate::format::rar5::headers::parse_archive_encrypt_header(
-            &archive_encrypt_header(1, 0),
-        )
         .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "got {err}");
     }
@@ -846,15 +829,6 @@ mod tests {
                 matches!(err, RarError::Format(_)),
                 "flags {flags:#x}: {err}"
             );
-
-            let err = crate::format::rar5::headers::parse_archive_encrypt_header(
-                &archive_encrypt_header(0, flags),
-            )
-            .unwrap_err();
-            assert!(
-                matches!(err, RarError::Format(_)),
-                "flags {flags:#x}: {err}"
-            );
         }
 
         // The defined combinations still parse (the check bit needs its
@@ -864,22 +838,12 @@ mod tests {
                 EncryptionParams::from_extra_bytes(&encr_record(0, flags, None)).is_ok(),
                 "flags {flags:#x}"
             );
-            assert!(
-                crate::format::rar5::headers::parse_archive_encrypt_header(
-                    &archive_encrypt_header(0, flags)
-                )
-                .is_ok(),
-                "flags {flags:#x}"
-            );
         }
         let with_check = u64::from(ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC);
         assert!(
             EncryptionParams::from_extra_bytes(&encr_record(0, with_check, Some([0u8; 12])))
                 .is_ok()
         );
-        let mut raw = archive_encrypt_header(0, with_check);
-        raw.header_data.extend_from_slice(&[0u8; 12]);
-        assert!(crate::format::rar5::headers::parse_archive_encrypt_header(&raw).is_ok());
     }
 
     #[test]
@@ -893,11 +857,6 @@ mod tests {
         );
         data.extend_from_slice(&[0u8; 11]);
         let err = EncryptionParams::from_extra_bytes(&data).unwrap_err();
-        assert!(matches!(err, RarError::Format(_)), "got {err}");
-
-        let mut raw = archive_encrypt_header(0, u64::from(ENCR_FLAG_CHECKSUM));
-        raw.header_data.extend_from_slice(&[0u8; 11]);
-        let err = crate::format::rar5::headers::parse_archive_encrypt_header(&raw).unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "got {err}");
     }
 

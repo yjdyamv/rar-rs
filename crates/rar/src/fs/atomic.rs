@@ -1,5 +1,6 @@
-//! Small I/O helpers shared across the crate: bounded reads, atomic
-//! temp-sibling staging and file replacement.
+//! Atomic, durable file staging and replacement: temp siblings, the commit
+//! journal and its recovery path, `fsync` ordering and platform-specific
+//! `replace_file`.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -7,18 +8,6 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::{RarError, RarResult};
-/// Read until `buf` is full or EOF; returns the number of bytes read.
-pub(crate) fn read_up_to<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0usize;
-    while filled < buf.len() {
-        let n = r.read(&mut buf[filled..])?;
-        if n == 0 {
-            break;
-        }
-        filled += n;
-    }
-    Ok(filled)
-}
 
 /// `std::process::id`, so derive uniqueness from the monotonic counter and
 /// the system clock instead.

@@ -7,7 +7,7 @@
 
 use super::rar50::encode_parity_shards;
 use crate::error::{RarError, RarResult};
-use crate::fs::atomic::read_up_to;
+use crate::io_util::read_up_to;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -323,7 +323,7 @@ fn rebuild_missing_volumes_chunked(
         Ok(())
     };
 
-    let base = crate::archive::volume_base_of(first_volume);
+    let base = crate::fs::volume::volume_base_of(first_volume);
     let parent = first_volume
         .parent()
         .unwrap_or(Path::new("."))
@@ -336,7 +336,7 @@ fn rebuild_missing_volumes_chunked(
     // 5-digit part numbers, which a fixed 1..=4 probe would miss. The
     // 1..=4 probe stays as a fallback for renamed or oddly-padded entries
     // and cannot mask the derived width, which is tried first.
-    let derived_width = crate::archive::volume_part_width(first_volume).max(1);
+    let derived_width = crate::fs::volume::volume_part_width(first_volume).max(1);
     let mut widths = vec![derived_width];
     widths.extend((1..=4).filter(|&w| w != derived_width));
     let found = widths.into_iter().find_map(|width| {
@@ -635,13 +635,13 @@ fn build_recovery_volumes_for_set_chunked(
         max_len + 1
     };
 
-    let base = crate::archive::volume_base_of(&volume_paths[0]);
+    let base = crate::fs::volume::volume_base_of(&volume_paths[0]);
     let parent = volume_paths[0].parent().unwrap_or(Path::new("."));
     // `.rev` names must carry the same padding as the volume set (which
     // comes from the file names, not the discovered count: a set with a
     // missing middle volume is discovered as a prefix but keeps its
     // original padding).
-    let pad = crate::archive::volume_part_width(&volume_paths[0]).max(1);
+    let pad = crate::fs::volume::volume_part_width(&volume_paths[0]).max(1);
 
     // Create the `.rev` files as temporary siblings and fill them stripe
     // by stripe; the header is backfilled in place once the volume CRCs
@@ -985,15 +985,15 @@ mod tests {
     #[test]
     fn width_helper_reads_padded_part_numbers() {
         assert_eq!(
-            crate::archive::volume_part_width(Path::new("set.part00001.rar")),
+            crate::fs::volume::volume_part_width(Path::new("set.part00001.rar")),
             5
         );
         assert_eq!(
-            crate::archive::volume_part_width(Path::new("set.part00001.rev")),
+            crate::fs::volume::volume_part_width(Path::new("set.part00001.rev")),
             5
         );
         assert_eq!(
-            crate::archive::volume_part_width(Path::new("set.part01.rar")),
+            crate::fs::volume::volume_part_width(Path::new("set.part01.rar")),
             2
         );
     }

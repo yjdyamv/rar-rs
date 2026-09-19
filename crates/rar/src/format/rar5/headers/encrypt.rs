@@ -132,3 +132,90 @@ pub(crate) fn build_archive_encrypt_header_block(params: &EncryptionParams) -> V
     }
     super::serialize::frame_block(&body)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::rar50::ENCR_FLAG_HASH_MAC;
+
+    /// The archive-level encryption header as a raw block:
+    /// `[type][flags][version][encr flags][strength][salt][checksum?]`.
+    ///
+    /// Moved here from `crypto/rar50.rs`: the body *is* the container
+    /// framing, so its tests belong next to the parser that reads it.
+    fn archive_encrypt_header(version: u64, flags: u64) -> RawBlock {
+        let mut data = Vec::new();
+        data.extend(vint::encode(crate::format::rar5::BLOCK_TYPE_ENCRYPT_HEADER));
+        data.extend(vint::encode(0u64));
+        data.extend(vint::encode(version));
+        data.extend(vint::encode(flags));
+        data.push(4);
+        data.extend_from_slice(&[0x11u8; ENCR_SALT_SIZE]);
+        RawBlock {
+            header_crc: 0,
+            header_data: data,
+            data_size: 0,
+            data_offset: 0,
+            block_type: 0,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn unknown_encryption_version_is_rejected() {
+        let err = parse_archive_encrypt_header(&archive_encrypt_header(1, 0)).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "got {err}");
+    }
+
+    /// Undefined flag bits must be rejected instead of truncated; `flags`
+    /// is a vint, so `0x102` must not become `0x02` (which would silently
+    /// flip `uses_hash_mac`).
+    #[test]
+    fn unknown_encryption_flags_are_rejected() {
+        for flags in [
+            u64::from(ENCR_FLAG_CHECKSUM) | 0x04, // unknown bit next to a known one
+            0x100,                                // only bits above the u8 range
+            u64::from(ENCR_FLAG_HASH_MAC) | 0x100, // truncates to 0x02
+        ] {
+            let err = parse_archive_encrypt_header(&archive_encrypt_header(0, flags)).unwrap_err();
+            assert!(
+                matches!(err, RarError::Format(_)),
+                "flags {flags:#x}: {err}"
+            );
+        }
+
+        // The defined combinations still parse (the check bit needs its
+        // 12-byte value present).
+        for flags in [0u64, u64::from(ENCR_FLAG_HASH_MAC)] {
+            assert!(
+                parse_archive_encrypt_header(&archive_encrypt_header(0, flags)).is_ok(),
+                "flags {flags:#x}"
+            );
+        }
+        let with_check = u64::from(ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC);
+        let mut raw = archive_encrypt_header(0, with_check);
+        raw.header_data.extend_from_slice(&[0u8; 12]);
+        assert!(parse_archive_encrypt_header(&raw).is_ok());
+    }
+
+    #[test]
+    fn truncated_password_check_value_is_rejected() {
+        // Flagged check value with only 11 trailing bytes: treating it as
+        // "no check" would let `verify_password` accept any password.
+        let mut raw = archive_encrypt_header(0, u64::from(ENCR_FLAG_CHECKSUM));
+        raw.header_data.extend_from_slice(&[0u8; 11]);
+        let err = parse_archive_encrypt_header(&raw).unwrap_err();
+        assert!(matches!(err, RarError::Format(_)), "got {err}");
+    }
+
+    /// The ENCR tag is declared in `crypto` (the layer that switches on it)
+    /// and in `format::rar5` (the container's own table). Both must agree, or
+    /// the writer would emit a record the reader cannot find.
+    #[test]
+    fn encr_record_tag_matches_the_container_table() {
+        assert_eq!(
+            crate::crypto::rar50::EXTRA_FILE_ENCRYPTION,
+            crate::format::rar5::EXTRA_FILE_ENCRYPTION
+        );
+    }
+}

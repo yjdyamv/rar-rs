@@ -45,6 +45,9 @@ pub mod detect;
 pub mod error;
 pub mod features;
 mod fs;
+// Generic `std::io` helpers owned by no single layer, so that the public
+// `codec` never has to reach into `fs` for one loop.
+mod io_util;
 mod model;
 // Internal home of the `rar4` / `rar5` module trees. Every in-crate path
 // goes through `crate::format::…`; the wire-level helpers that external

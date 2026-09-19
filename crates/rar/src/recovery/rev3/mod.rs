@@ -1334,7 +1334,7 @@ fn commit_rebuilt_volumes(
 ) -> RarResult<Vec<PathBuf>> {
     let mut set = match crate::fs::atomic::StagedSet::new(
         &crate::fs::atomic::parent_dir(&data_paths[0]),
-        &crate::archive::volume_base_of(&data_paths[0]),
+        &crate::fs::volume::volume_base_of(&data_paths[0]),
     ) {
         Ok(set) => set,
         Err(error) => {

@@ -24,7 +24,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::codec::lzss_huff;
 use crate::error::RarResult;
-use crate::fs::atomic::read_up_to;
+use crate::io_util::read_up_to;
 
 /// Size of the head sample, and the lower bound on the samples below.
 pub(crate) const SAMPLE_PROBE_HEAD: usize = 512 * 1024;
