@@ -253,7 +253,7 @@ impl RarArchive {
     ) -> RarResult<Option<ExtractionReport>> {
         use rayon::prelude::*;
 
-        if !self.supports_parallel_extract() {
+        if !crate::format::shared::extract::supports_parallel_extract(self) {
             return Ok(None);
         }
         if self.progress.is_some() || self.entries.len() < PARALLEL_MIN_MEMBERS {
@@ -661,7 +661,7 @@ impl RarArchive {
 
         let keep_broken = self.read_ctx().extract_options.keep_broken;
         materialize_member_file(&dest_path, keep_broken, |file| {
-            self.decode_entry_to(idx, file).map(|_| ())
+            crate::format::shared::extract::decode_entry_to(self, idx, file).map(|_| ())
         })?;
 
         self.finish_member(idx, entry, dest_path, report)

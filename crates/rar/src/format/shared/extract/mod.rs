@@ -13,7 +13,7 @@ pub(crate) mod read;
 
 pub use members::ExtractionReport;
 
-use crate::archive::RarArchive;
+use crate::engine::Engine;
 use crate::error::{RarError, RarResult};
 
 /// Ceiling on how many entries a catalog may hold. A full scan's entry count
@@ -33,46 +33,45 @@ pub(crate) fn check_entry_cap(count: usize, max: usize) -> RarResult<()> {
     Ok(())
 }
 
-impl RarArchive {
-    /// Whether the parallel extraction path may decode this archive. The
-    /// parallel phase decodes with the RAR5 codec and uses the RAR5 solid
-    /// rule, so legacy families always stream sequentially.
-    #[cfg(feature = "parallel")]
-    pub(crate) fn supports_parallel_extract(&self) -> bool {
-        !self.is_legacy()
-    }
+/// Whether the parallel extraction path may decode this archive. The
+/// parallel phase decodes with the RAR5 codec and uses the RAR5 solid
+/// rule, so legacy families always stream sequentially.
+#[cfg(feature = "parallel")]
+pub(crate) fn supports_parallel_extract(cx: &dyn Engine) -> bool {
+    !cx.is_legacy()
+}
 
-    /// Decode member `idx` to memory, honoring the family's solid chains.
-    pub(crate) fn decode_entry_at(&mut self, idx: usize) -> RarResult<Vec<u8>> {
-        if self.is_legacy() {
-            return crate::format::rar4::extract::decode_rar4_at(self, idx);
-        }
-        if crate::format::rar5::extract::solid::is_solid_chain_member(self, idx) {
-            return crate::format::rar5::extract::solid::decode_solid_through(self, idx);
-        }
-        crate::format::rar5::extract::decode::decode_file_at(self, idx, None)
+/// Decode member `idx` to memory, honoring the family's solid chains.
+pub(crate) fn decode_entry_at(cx: &mut dyn Engine, idx: usize) -> RarResult<Vec<u8>> {
+    if cx.is_legacy() {
+        return crate::format::rar4::extract::decode_rar4_at(cx, idx);
     }
+    if crate::format::rar5::extract::solid::is_solid_chain_member(cx, idx) {
+        return crate::format::rar5::extract::solid::decode_solid_through(cx, idx);
+    }
+    crate::format::rar5::extract::decode::decode_file_at(cx, idx, None)
+}
 
-    /// Decode member `idx` streaming into `writer`, honoring the family's
-    /// solid chains.
-    pub(crate) fn decode_entry_to(
-        &mut self,
-        idx: usize,
-        writer: &mut dyn std::io::Write,
-    ) -> RarResult<u64> {
-        if self.is_legacy() {
-            return crate::format::rar4::extract::decode_rar4_to(self, idx, writer);
-        }
-        if crate::format::rar5::extract::solid::is_solid_chain_member(self, idx) {
-            return crate::format::rar5::extract::solid::decode_solid_through_to(self, idx, writer);
-        }
-        crate::format::rar5::extract::decode::decode_file_to(self, idx, writer, None)
+/// Decode member `idx` streaming into `writer`, honoring the family's
+/// solid chains.
+pub(crate) fn decode_entry_to(
+    cx: &mut dyn Engine,
+    idx: usize,
+    writer: &mut dyn std::io::Write,
+) -> RarResult<u64> {
+    if cx.is_legacy() {
+        return crate::format::rar4::extract::decode_rar4_to(cx, idx, writer);
     }
+    if crate::format::rar5::extract::solid::is_solid_chain_member(cx, idx) {
+        return crate::format::rar5::extract::solid::decode_solid_through_to(cx, idx, writer);
+    }
+    crate::format::rar5::extract::decode::decode_file_to(cx, idx, writer, None)
 }
 
 #[cfg(all(test, feature = "parallel"))]
 mod tests {
-    use super::*;
+    use crate::archive::RarArchive;
+    use crate::format::shared::extract::supports_parallel_extract;
 
     #[test]
     fn parallel_extraction_is_rar5_only() {
@@ -90,7 +89,7 @@ mod tests {
         archive.add_bytes("a.txt", b"legacy data", 0).unwrap();
         archive.close().unwrap();
         let legacy = RarArchive::open(&legacy).unwrap();
-        assert!(!legacy.supports_parallel_extract());
+        assert!(!supports_parallel_extract(&legacy));
 
         let modern = dir.path().join("v50.rar");
         let mut archive =
@@ -99,6 +98,6 @@ mod tests {
         archive.add_bytes("a.txt", b"modern data", 0).unwrap();
         archive.close().unwrap();
         let modern = RarArchive::open(&modern).unwrap();
-        assert!(modern.supports_parallel_extract());
+        assert!(supports_parallel_extract(&modern));
     }
 }

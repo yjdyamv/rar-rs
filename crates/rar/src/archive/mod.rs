@@ -16,12 +16,15 @@
 mod create;
 mod ctx;
 mod editor;
+mod ops;
 pub(crate) mod rar4_edit;
 mod reader;
 mod rename;
 mod transaction;
 mod writer;
 
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;
 
