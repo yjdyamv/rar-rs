@@ -102,7 +102,7 @@
   owner 之后随的 "STM" 服务块（`DEPENDS_PREV`，明文 CRC32；`-p`/`-hp` 时每流独立
   ENCR 记录 + 加密载荷，CRC 不 MAC）。写侧
   `write/stream.rs::write_member_streams`（Windows 枚举，batch
-  并行自动退回顺序）；读侧 `StreamRecord`（`archive/state.rs`）+
+  并行自动退回顺序）；读侧 `StreamRecord`（`engine/state.rs`）+
   `extract/decode.rs::read_member_streams`（读取时校验口令/派生密钥、解密、CRC
   校验；锁定档仍可列表）。
 - **Mark of the Web（MOTW，`-om`）** — 浏览器给下载文件打的 `Zone.Identifier`
