@@ -615,9 +615,17 @@ mod tests {
         assert!(rev_name_belongs_to_set(dir.path(), "set", rev_name));
         assert!(!rev_name_belongs_to_set(dir.path(), "set4", rev_name));
 
-        // Matching is ASCII case-insensitive, like the official tools on
-        // Windows, and a foreign base never matches.
+        // Matching is ASCII case-insensitive in the *name parse*: the
+        // candidate's data volumes are then looked up by name, so the answer
+        // follows the filesystem's case sensitivity. Windows pairs
+        // `SET44_2_1.REV` with `set.rar`; POSIX is case-sensitive and the
+        // official tools there do not pair them either, so POSIX must say no
+        // (see `docs/testing.md`: assert what POSIX actually does rather than
+        // assuming a Windows-only behaviour).
+        #[cfg(windows)]
         assert!(rev_name_belongs_to_set(dir.path(), "set", "SET44_2_1.REV"));
+        #[cfg(not(windows))]
+        assert!(!rev_name_belongs_to_set(dir.path(), "set", "SET44_2_1.REV"));
         assert!(!rev_name_belongs_to_set(
             dir.path(),
             "set4",
