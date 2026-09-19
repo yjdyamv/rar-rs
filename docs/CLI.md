@@ -152,6 +152,15 @@ outside the create and comment commands), `-y`/`-o±` (yes / overwrite mode),
 extraction without `-y`/`-o+` skips existing files (WinRAR's non-interactive
 outcome); `-o+` overwrites, `-o-` skips and `-or` auto-renames.
 
+Two long options bound how much a disk extraction may write:
+`--max-unpacked <size>` rejects any member whose declared uncompressed size
+exceeds `<size>`, and `--max-total-unpacked <size>` rejects a run whose total
+declared size would. Sizes take an optional binary `k`/`m`/`g`/`t` suffix. The
+default is unbounded, exactly like WinRAR/UnRAR — these are the opt-in guard
+that keeps a decompression bomb from filling the disk. They apply to the files
+`x`/`e` write; the `-so` stdout stream creates no files and is not bounded. A
+per-member cap larger than the total cap is rejected as a usage error.
+
 Switches that are Windows-only or interactive in WinRAR (`-ac`, `-ai`, `-ao`,
 `-e[+]<attr>`, `-dh`, `-ieml`, `-ioff`, `-isnd`, `-ri`, `-mlp`, `-oc`, `-oni`,
 `-am[s,r]`, `-vp`, `-sc`) are **accepted as no-ops** on every command of both
@@ -190,7 +199,8 @@ hard error, never a silent dump into a `<name>/` folder.
 | `v` / `lb` / `lt` / `vb` / `vt` | Verbose list / list bare / list technical / verbose bare / verbose technical |
 
 `unrar` accepts the same password/path/time switches as `rar` where they apply
-(e.g. `-p<password>`, `-o±`, `-y`, `-kb`).
+(e.g. `-p<password>`, `-o±`, `-y`, `-kb`), plus `--max-unpacked` /
+`--max-total-unpacked` on `x`/`e` (see _Paths, time & misc_ above).
 
 ---
 

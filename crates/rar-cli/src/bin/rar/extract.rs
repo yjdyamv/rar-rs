@@ -18,6 +18,15 @@ fn dict_cap(spec: Option<&str>) -> Result<Option<u64>, String> {
     spec.map(common::parse_mdx_size).transpose()
 }
 
+/// `--max-unpacked` / `--max-total-unpacked` as library extract limits.
+fn size_limits(args: &ExtractArgs) -> Result<ops::ExtractLimits, String> {
+    ops::ExtractLimits {
+        max_unpacked_bytes: args.max_unpacked,
+        max_total_unpacked_bytes: args.max_total_unpacked,
+    }
+    .validate()
+}
+
 /// Extract with full paths (like `rar x`).
 pub(crate) fn cmd_extract(
     args: &ExtractArgs,
@@ -25,6 +34,7 @@ pub(crate) fn cmd_extract(
     assume_yes: bool,
 ) -> CliResult<()> {
     let max_dict_size = dict_cap(args.dict_extract.as_deref())?;
+    let limits = size_limits(args)?;
     let ts = crate::time::parse_ts_specs(&args.ts_specs)?;
     let (names, dest) = resolve_target(args, misc)?;
     let request = ops::ExtractRequest {
@@ -33,6 +43,8 @@ pub(crate) fn cmd_extract(
         stdout: args.stdout,
         threads: args.threads,
         max_dict_size,
+        max_unpacked_bytes: limits.max_unpacked_bytes,
+        max_total_unpacked_bytes: limits.max_total_unpacked_bytes,
         mark_web: common::mark_web(misc.mark_web.as_deref())?,
         overwrite: args.overwrite.clone(),
         assume_yes,
@@ -115,6 +127,7 @@ pub(crate) fn cmd_extract_flat(
     assume_yes: bool,
 ) -> CliResult<()> {
     let max_dict_size = dict_cap(args.dict_extract.as_deref())?;
+    let limits = size_limits(args)?;
     let ts = crate::time::parse_ts_specs(&args.ts_specs)?;
     let (names, dest) = resolve_target(args, misc)?;
     let request = ops::ExtractRequest {
@@ -124,6 +137,8 @@ pub(crate) fn cmd_extract_flat(
         stdout: args.stdout,
         threads: args.threads,
         max_dict_size,
+        max_unpacked_bytes: limits.max_unpacked_bytes,
+        max_total_unpacked_bytes: limits.max_total_unpacked_bytes,
         mark_web: common::mark_web(misc.mark_web.as_deref())?,
         overwrite: args.overwrite.clone(),
         assume_yes,

@@ -630,6 +630,43 @@ pub(crate) fn verify_options() -> ExtractOptions {
     }
 }
 
+/// Extraction size guards: reject a member (or a whole run) whose declared
+/// uncompressed size exceeds the given byte count. Disk extraction is
+/// otherwise unbounded like WinRAR/UnRAR, which is the right default for a
+/// desktop archiver but leaves a decompression bomb free to fill the disk;
+/// these switches let an untrusted archive be handled with a ceiling.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExtractLimits {
+    /// Largest declared size of a single member (`None` = unlimited).
+    pub max_unpacked_bytes: Option<u64>,
+    /// Largest total declared size across the run (`None` = unlimited).
+    pub max_total_unpacked_bytes: Option<u64>,
+}
+
+impl ExtractLimits {
+    /// Refuse any limit that no member could ever satisfy, so a mistyped
+    /// guard fails the command instead of silently extracting nothing.
+    pub fn validate(self) -> Result<Self, String> {
+        if let Some(limit) = self.max_total_unpacked_bytes
+            && let Some(per_file) = self.max_unpacked_bytes
+            && per_file > limit
+        {
+            return Err(format!(
+                "--max-unpacked ({per_file}) is larger than --max-total-unpacked ({limit})"
+            ));
+        }
+        for (name, limit) in [
+            ("--max-unpacked", self.max_unpacked_bytes),
+            ("--max-total-unpacked", self.max_total_unpacked_bytes),
+        ] {
+            if limit == Some(0) {
+                return Err(format!("{name} must be greater than zero"));
+            }
+        }
+        Ok(self)
+    }
+}
+
 /// One extraction request: the four `x`/`e` arms of both binaries build this
 /// value and hand it to [`extract`], so the flag-to-options assembly for
 /// disk extraction has one owner.
@@ -647,6 +684,12 @@ pub struct ExtractRequest {
     pub threads: Option<usize>,
     /// Raised dictionary cap (like `-mdx<N>`).
     pub max_dict_size: Option<u64>,
+    /// Guard on the uncompressed size of a single member
+    /// (`--max-unpacked`); `None` = unbounded, like WinRAR/UnRAR.
+    pub max_unpacked_bytes: Option<u64>,
+    /// Guard on the total uncompressed size of the run
+    /// (`--max-total-unpacked`); `None` = unbounded.
+    pub max_total_unpacked_bytes: Option<u64>,
     /// Mark of the Web propagation (like `-om`).
     pub mark_web: Option<rar_rs::MarkOfTheWeb>,
     /// Overwrite policy (like `-o+` / `-o-`).
@@ -673,15 +716,17 @@ pub struct ExtractRequest {
 
 impl ExtractRequest {
     /// The library options for this request. Disk extraction is fully
-    /// streaming, so the in-memory size caps do not apply (matching UnRAR
-    /// and WinRAR, which extract members of any size); the dictionary cap
-    /// stays, because it bounds decoder memory and WinRAR itself refuses
-    /// dictionaries over 4 GiB unless `-mdx` raises it.
+    /// streaming, so no size cap is needed to keep memory bounded (matching
+    /// UnRAR and WinRAR, which extract members of any size); the dictionary
+    /// cap stays, because it bounds decoder memory and WinRAR itself refuses
+    /// dictionaries over 4 GiB unless `-mdx` raises it. The two
+    /// `--max-*-unpacked` guards are opt-in ceilings on *disk* growth —
+    /// absent them, a decompression bomb is unconstrained.
     fn options(&self) -> ExtractOptions {
         ExtractOptions {
             flat_paths: self.flat,
-            max_unpacked_bytes: None,
-            max_total_unpacked_bytes: None,
+            max_unpacked_bytes: self.max_unpacked_bytes,
+            max_total_unpacked_bytes: self.max_total_unpacked_bytes,
             max_dict_size: self
                 .max_dict_size
                 .or(Some(ExtractOptions::DEFAULT_MAX_DICT_SIZE)),

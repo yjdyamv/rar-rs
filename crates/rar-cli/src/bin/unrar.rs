@@ -163,6 +163,27 @@ struct ExtractArgs {
     /// stdout (directories are skipped).
     #[arg(long = "stdout")]
     stdout: bool,
+    /// Reject any member whose declared uncompressed size exceeds SIZE on
+    /// extraction (e.g. `--max-unpacked 2g`). Disk extraction is unbounded
+    /// by default, like official UnRAR, so this is the opt-in guard against
+    /// a decompression bomb. It bounds the files written to disk; the `-so`
+    /// stdout stream writes no files and is not bounded.
+    #[arg(long = "max-unpacked", value_name = "SIZE", value_parser = common::parse_byte_size)]
+    max_unpacked: Option<u64>,
+    /// Reject an extraction whose total uncompressed size would exceed SIZE
+    /// (e.g. `--max-total-unpacked 20g`), the whole-run companion to
+    /// `--max-unpacked` (disk extraction only, like it).
+    #[arg(long = "max-total-unpacked", value_name = "SIZE", value_parser = common::parse_byte_size)]
+    max_total_unpacked: Option<u64>,
+}
+
+/// `--max-unpacked` / `--max-total-unpacked` as library extract limits.
+fn size_limits(args: &ExtractArgs) -> Result<ops::ExtractLimits, String> {
+    ops::ExtractLimits {
+        max_unpacked_bytes: args.max_unpacked,
+        max_total_unpacked_bytes: args.max_total_unpacked,
+    }
+    .validate()
 }
 
 fn parse_threads(s: &str) -> Result<usize, String> {
@@ -378,6 +399,7 @@ fn cmd_extract(
     assume_yes: bool,
 ) -> CliResult<()> {
     let (names, dest) = resolve_target(args, misc)?;
+    let limits = size_limits(args)?;
     let request = ops::ExtractRequest {
         names,
         dest,
@@ -385,6 +407,8 @@ fn cmd_extract(
         stdout: args.stdout,
         threads: args.threads,
         max_dict_size,
+        max_unpacked_bytes: limits.max_unpacked_bytes,
+        max_total_unpacked_bytes: limits.max_total_unpacked_bytes,
         mark_web: motw,
         overwrite: args.overwrite.clone(),
         assume_yes,
@@ -424,6 +448,7 @@ fn cmd_extract_flat(
     assume_yes: bool,
 ) -> CliResult<()> {
     let (names, dest) = resolve_target(args, misc)?;
+    let limits = size_limits(args)?;
     let request = ops::ExtractRequest {
         names,
         dest,
@@ -431,6 +456,8 @@ fn cmd_extract_flat(
         stdout: args.stdout,
         threads: args.threads,
         max_dict_size,
+        max_unpacked_bytes: limits.max_unpacked_bytes,
+        max_total_unpacked_bytes: limits.max_total_unpacked_bytes,
         mark_web: motw,
         overwrite: args.overwrite.clone(),
         assume_yes,

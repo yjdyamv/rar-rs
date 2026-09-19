@@ -289,6 +289,18 @@ pub(crate) struct ExtractArgs {
     /// Extraction dictionary cap (like `-mdx<size>`; no unit means GiB)
     #[arg(long = "dict-extract", value_name = "SIZE")]
     pub(crate) dict_extract: Option<String>,
+    /// Reject any member whose declared uncompressed size exceeds SIZE on
+    /// extraction (e.g. `--max-unpacked 2g`). Disk extraction is unbounded
+    /// by default, like WinRAR/UnRAR, so this is the opt-in guard against a
+    /// decompression bomb. It bounds the files `x`/`e` write; the `-so`
+    /// stdout stream writes nothing to disk and is not bounded.
+    #[arg(long = "max-unpacked", value_name = "SIZE", value_parser = parse_size)]
+    pub(crate) max_unpacked: Option<u64>,
+    /// Reject an extraction whose total uncompressed size would exceed SIZE
+    /// (e.g. `--max-total-unpacked 20g`), the whole-run companion to
+    /// `--max-unpacked` (disk extraction only, like it).
+    #[arg(long = "max-total-unpacked", value_name = "SIZE", value_parser = parse_size)]
+    pub(crate) max_total_unpacked: Option<u64>,
     /// Restore file times (like `-ts[m,c,a][+,-,1]`; repeatable — `-tsc`
     /// restores creation times and `-tsa` access times on top of mtime)
     #[arg(long = "ts", value_name = "SPEC", action = clap::ArgAction::Append)]
@@ -674,17 +686,7 @@ fn parse_threads(s: &str) -> Result<usize, String> {
 }
 
 pub(crate) fn parse_size(s: &str) -> Result<u64, String> {
-    let s = s.trim();
-    let (num, multiplier) = match s.chars().last() {
-        Some('k' | 'K') => (&s[..s.len() - 1], 1024),
-        Some('m' | 'M') => (&s[..s.len() - 1], 1024 * 1024),
-        Some('g' | 'G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
-        _ => (s, 1),
-    };
-    num.parse::<u64>()
-        .map_err(|_| format!("invalid size: {s}"))?
-        .checked_mul(multiplier)
-        .ok_or_else(|| format!("size is too large: {s}"))
+    common::parse_byte_size(s)
 }
 
 /// Resolve a `-ma<ver>` archive-format request into the single version

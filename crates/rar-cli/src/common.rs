@@ -110,6 +110,31 @@ pub fn parse_mdx_size(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("dictionary size is too large: {s}"))
 }
 
+/// Parse a byte size with an optional binary `k`/`m`/`g`/`t` suffix
+/// (case-insensitive; `t` is 2^40). No suffix means bytes. A `0` is accepted
+/// here — callers that need a positive size reject it themselves.
+///
+/// Backs the `-v` / `--size-less` / `--size-more` switches and the extraction
+/// size guards (`--max-unpacked` / `--max-total-unpacked`). The official
+/// command-line tools have no equivalent of those guards, so they are
+/// long-option only rather than WinRAR `-` switches.
+pub fn parse_byte_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    // Slicing off the last byte is sound because every suffix arm matched an
+    // ASCII character, so `s.len() - 1` is a char boundary in those arms.
+    let (num, mult) = match s.chars().last() {
+        Some('k') | Some('K') => (&s[..s.len() - 1], 1024u64),
+        Some('m') | Some('M') => (&s[..s.len() - 1], 1024 * 1024),
+        Some('g') | Some('G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        Some('t') | Some('T') => (&s[..s.len() - 1], 1024 * 1024 * 1024 * 1024),
+        _ => (s, 1),
+    };
+    num.parse::<u64>()
+        .map_err(|_| format!("invalid size: {s}"))?
+        .checked_mul(mult)
+        .ok_or_else(|| format!("size is too large: {s}"))
+}
+
 /// Long options that may consume a separate value token, collected from
 /// the whole command tree (root and every subcommand). Options that demand
 /// `=` (like `-hp`/`-ad`) never take the following token, so they are not

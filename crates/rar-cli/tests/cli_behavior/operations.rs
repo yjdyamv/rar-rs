@@ -458,3 +458,114 @@ fn cli_unrar_x_flat_flag_extracts_basenames() {
     assert_eq!(std::fs::read(flat.join("a.txt")).unwrap(), b"payload");
     assert!(!flat.join("sub").exists(), "-ep must drop the stored tree");
 }
+
+/// `--max-unpacked` / `--max-total-unpacked`: opt-in ceilings on the bytes a
+/// disk extraction may write. Without them extraction is unbounded, matching
+/// WinRAR/UnRAR; with them an oversized member (or run) fails with the limit
+/// exit code instead of filling the disk, which is the CLI's only guard
+/// against a decompression bomb. Both binaries accept the switches, and a
+/// per-member cap larger than the total cap is a usage error rather than a
+/// silent no-op.
+#[test]
+fn cli_extract_size_guards_bound_disk_growth() {
+    let dir = make_temp_dir();
+    let payload = "x".repeat(4096);
+    std::fs::write(dir.path().join("a.txt"), &payload).unwrap();
+    std::fs::write(dir.path().join("b.txt"), &payload).unwrap();
+    let archive = dir.path().join("guarded.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .args(["a.txt", "b.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "archive creation must succeed");
+
+    // Per-member cap below the member size: exit 8 (limit), nothing written.
+    let rejected = dir.path().join("per-file-rejected");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "--max-unpacked", "1k", "-idq"])
+        .arg(&archive)
+        .arg("--dest")
+        .arg(&rejected)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(8),
+        "an over-cap member must fail with the limit exit code"
+    );
+    assert!(
+        !rejected.join("a.txt").exists(),
+        "a rejected member must not be left on disk"
+    );
+
+    // A cap above the member size extracts normally.
+    let ok = dir.path().join("per-file-ok");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "--max-unpacked", "8k", "-idq"])
+        .arg(&archive)
+        .arg("--dest")
+        .arg(&ok)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "a generous cap must not block extraction");
+    assert_eq!(std::fs::read(ok.join("a.txt")).unwrap(), payload.as_bytes());
+
+    // Total cap: each member fits on its own, the pair does not.
+    let total = dir.path().join("total-rejected");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "--max-total-unpacked", "6k", "-idq"])
+        .arg(&archive)
+        .arg("--dest")
+        .arg(&total)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(8),
+        "the whole-run cap must be enforced too"
+    );
+
+    // `unrar` accepts the same switches (same `ExtractRequest` owner).
+    let unrar_out = dir.path().join("unrar-rejected");
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "--max-unpacked", "1k", "-idq"])
+        .arg(&archive)
+        .arg("--dest")
+        .arg(&unrar_out)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(8),
+        "unrar must honor --max-unpacked as well"
+    );
+
+    // A per-member cap larger than the total cap is a usage error (exit 2).
+    let status = std::process::Command::new(RAR_CLI)
+        .args([
+            "x",
+            "--max-unpacked",
+            "2g",
+            "--max-total-unpacked",
+            "1g",
+            "-idq",
+        ])
+        .arg(&archive)
+        .arg("--dest")
+        .arg(dir.path().join("bad-limits"))
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "an inconsistent pair of caps must be rejected up front"
+    );
+}
