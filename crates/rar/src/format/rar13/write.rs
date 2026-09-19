@@ -468,7 +468,6 @@ fn add_rar13_file_streaming(
 
     let mut reader = fs::File::open(&payload_path)?;
     let mut read = 0u64;
-    let mut running = 0u16;
     let mut chunks = Vec::new();
     match cx.write_ctx().output.volume_size {
         None => {
@@ -512,118 +511,48 @@ fn add_rar13_file_streaming(
             });
         }
         Some(volume_size) => {
-            // Mirrors `write_rar13_split_member`, sourcing each fragment
-            // from the file instead of a packed buffer. A fragment is
-            // buffered whole because its header carries the cumulative
-            // packed checksum, which is only known after reading it.
-            let continuation = MemberHeader {
-                name: member.name,
-                packed_size: 0,
-                unpacked_size: member.unpacked_size,
-                file_crc: member.file_crc,
-                file_time: member.file_time,
-                file_attr: member.file_attr,
-                flags: (member.flags | LHD_SPLIT_BEFORE) & !LHD_COMMENT,
-                method: member.method,
-                extra: Vec::new(),
-            };
-            let continuation_len = build_file_header(&continuation)?.len() as u64;
-            let first_len = build_file_header(&member)?.len() as u64;
-            let mut sent = 0u64;
-            let mut split_before = false;
-            let mut buf = vec![0u8; 1 << 20];
-            while sent < packed_size {
-                let header_len = if split_before {
-                    continuation_len
-                } else {
-                    first_len
-                };
-                let mut rolled = false;
-                loop {
-                    let used = cx.bytes_written();
-                    if volume_size.saturating_sub(used) > header_len {
-                        break;
+            // The mirrored copy of the split loop that used to live here is
+            // gone: both sources (this reader and the buffered path in
+            // `write_rar13_member`) go through the same driver.
+            return write_rar13_split_member(
+                cx,
+                &member,
+                packed_size,
+                volume_size,
+                |cx, started, len, buf| {
+                    let mut filled = 0u64;
+                    while filled < len {
+                        cx.check_cancel()?;
+                        let want = ((len - filled) as usize).min(1 << 20);
+                        let old = buf.len();
+                        buf.resize(old + want, 0);
+                        reader.read_exact(&mut buf[old..]).map_err(|e| {
+                            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                                RarError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    format!(
+                                        "packed payload ended early: expected {packed_size} bytes, read {}",
+                                        started + filled
+                                    ),
+                                ))
+                            } else {
+                                RarError::Io(e)
+                            }
+                        })?;
+                        filled += want as u64;
                     }
-                    if rolled {
-                        return Err(RarError::InvalidOption(format!(
-                            "volume size {volume_size} is too small for a RAR 1.3/1.4 member header"
-                        )));
+                    // The RAR13 cipher is one stream over the member, so the
+                    // fragments continue it: the stateful cipher lives in this
+                    // closure across the driver's calls.
+                    if let Some(cipher) = cipher.as_mut() {
+                        for byte in buf.iter_mut() {
+                            *byte = cipher.encrypt_byte(*byte);
+                        }
                     }
-                    if rar13_first_volume_is_empty(cx, chunks.len()) {
-                        return Err(RarError::InvalidOption(format!(
-                            "volume size {volume_size} leaves no room for the first member after the archive main header"
-                        )));
-                    }
-                    cx.start_next_volume_rar13()?;
-                    rolled = true;
-                }
-                let used = cx.bytes_written();
-                let available = volume_size - used - header_len;
-                let chunk_len = (packed_size - sent).min(available);
-                let split_after = sent + chunk_len < packed_size;
-                let mut chunk = Vec::with_capacity(chunk_len as usize);
-                while (chunk.len() as u64) < chunk_len {
-                    cx.check_cancel()?;
-                    let want = ((chunk_len - chunk.len() as u64) as usize).min(buf.len());
-                    let n = reader.read(&mut buf[..want])?;
-                    if n == 0 {
-                        return Err(RarError::Io(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            format!(
-                                "packed payload ended early: expected {packed_size} bytes, read {}",
-                                sent + chunk.len() as u64
-                            ),
-                        )));
-                    }
-                    chunk.extend_from_slice(&buf[..n]);
-                }
-                if let Some(cipher) = cipher.as_mut() {
-                    for byte in &mut chunk {
-                        *byte = cipher.encrypt_byte(*byte);
-                    }
-                }
-                for &byte in &chunk {
-                    running = running.wrapping_add(u16::from(byte)).rotate_left(1);
-                }
-                let split_flags = match (split_before, split_after) {
-                    (true, true) => LHD_SPLIT_BEFORE | LHD_SPLIT_AFTER,
-                    (true, false) => LHD_SPLIT_BEFORE,
-                    (false, true) => LHD_SPLIT_AFTER,
-                    (false, false) => 0,
-                };
-                let fragment = MemberHeader {
-                    name: member.name,
-                    packed_size: chunk_len,
-                    unpacked_size: member.unpacked_size,
-                    file_crc: if split_after {
-                        running
-                    } else {
-                        member.file_crc
-                    },
-                    file_time: member.file_time,
-                    file_attr: member.file_attr,
-                    flags: (member.flags & !LHD_COMMENT) | split_flags,
-                    method: member.method,
-                    extra: if split_before {
-                        Vec::new()
-                    } else {
-                        member.extra.clone()
-                    },
-                };
-                let header = build_file_header(&fragment)?;
-                let (volume_index, data_offset) = write_rar13_bytes(cx, &header, &chunk)?;
-                chunks.push(DataChunk {
-                    volume_index,
-                    data_offset,
-                    packed_size: chunk_len,
-                    crc32_val: None,
-                    is_final: !split_after,
-                    extra_data: Vec::new(),
-                });
-                sent += chunk_len;
-                split_before = true;
-                cx.report_progress(sent, file_size);
-            }
+                    cx.report_progress(started + len, file_size);
+                    Ok(())
+                },
+            );
         }
     }
     push_rar13_entry(cx, &member, chunks)
@@ -646,7 +575,16 @@ fn write_rar13_member(
         crate::crypto::Rar13Cipher::new(password.as_bytes()).encrypt_in_place(&mut data);
     }
     match cx.write_ctx().output.volume_size {
-        Some(volume_size) => write_rar13_split_member(cx, member, &data, volume_size),
+        Some(volume_size) => write_rar13_split_member(
+            cx,
+            member,
+            data.len() as u64,
+            volume_size,
+            |_, start, len, buf| {
+                buf.extend_from_slice(&data[start as usize..(start + len) as usize]);
+                Ok(())
+            },
+        ),
         None => {
             let header = build_file_header(member)?;
             let (volume_index, data_offset) = write_rar13_bytes(cx, &header, &data)?;
@@ -668,15 +606,23 @@ fn write_rar13_member(
 
 /// Split a member across a volume set. The first fragment repeats the
 /// caller's header fields (comment extension included); continuation
-/// fragments carry `LHD_SPLIT_BEFORE` and no comment. `packed` holds the
-/// member's final on-disk bytes; intermediate fragments store the
-/// cumulative packed checksum, the final fragment the whole-member
+/// fragments carry `LHD_SPLIT_BEFORE` and no comment. Intermediate fragments
+/// store the cumulative packed checksum, the final fragment the whole-member
 /// checksum.
+///
+/// `source` fills the fragment buffer with the member's on-disk (already
+/// encrypted, for `-p`) bytes for `[start, start + len)`. The budget
+/// arithmetic, the volume rolls, the per-fragment header and the collected
+/// chunks live here once and serve both the buffered path
+/// (`write_rar13_member`) and the streaming one (`add_rar13_file_streaming`) —
+/// the same shape RAR5's `emit::write_split_member` and RAR4's
+/// `pipeline::emit_rar4_split` use.
 fn write_rar13_split_member(
     cx: &mut dyn Engine,
     member: &MemberHeader<'_>,
-    packed: &[u8],
+    packed_size: u64,
     volume_size: u64,
+    mut source: impl FnMut(&mut dyn Engine, u64, u64, &mut Vec<u8>) -> RarResult<()>,
 ) -> RarResult<()> {
     let continuation = MemberHeader {
         name: member.name,
@@ -691,7 +637,7 @@ fn write_rar13_split_member(
     };
     let continuation_len = build_file_header(&continuation)?.len() as u64;
     let first_len = build_file_header(member)?.len() as u64;
-    let total = packed.len() as u64;
+    let total = packed_size;
 
     if total == 0 {
         // Header-only member (directories, empty files): it moves to the
@@ -735,7 +681,11 @@ fn write_rar13_split_member(
     let mut sent = 0u64;
     let mut running: u16 = 0;
     let mut split_before = false;
+    // One buffer for every fragment (each fragment's header carries the
+    // cumulative checksum, so it must be materialised before the header).
+    let mut chunk: Vec<u8> = Vec::new();
     while sent < total {
+        cx.check_cancel()?;
         let header_len = if split_before {
             continuation_len
         } else {
@@ -764,8 +714,16 @@ fn write_rar13_split_member(
         let available = volume_size - used - header_len;
         let chunk_len = (total - sent).min(available);
         let split_after = sent + chunk_len < total;
-        let chunk = &packed[sent as usize..(sent + chunk_len) as usize];
-        for &byte in chunk {
+        chunk.clear();
+        chunk.reserve(chunk_len as usize);
+        source(cx, sent, chunk_len, &mut chunk)?;
+        if chunk.len() as u64 != chunk_len {
+            return Err(RarError::InvalidState(format!(
+                "RAR 1.3/1.4 split source produced {} of {chunk_len} bytes",
+                chunk.len()
+            )));
+        }
+        for &byte in &chunk {
             running = running.wrapping_add(u16::from(byte)).rotate_left(1);
         }
         let split_flags = match (split_before, split_after) {
@@ -794,7 +752,7 @@ fn write_rar13_split_member(
             },
         };
         let header = build_file_header(&fragment)?;
-        let (volume_index, data_offset) = write_rar13_bytes(cx, &header, chunk)?;
+        let (volume_index, data_offset) = write_rar13_bytes(cx, &header, &chunk)?;
         chunks.push(DataChunk {
             volume_index,
             data_offset,
