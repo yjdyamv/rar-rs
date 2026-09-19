@@ -112,7 +112,7 @@ impl RarArchive {
 
     /// Queue the RAR4 archive comment (emitted before the first member).
     pub(crate) fn set_rar4_writer_comment(&mut self, text: Option<Vec<u8>>) {
-        crate::format::rar4::write::pipeline::set_rar4_writer_comment(self, text);
+        crate::format::rar4::write::member::set_rar4_writer_comment(self, text);
     }
 
     /// Emit the deferred RAR 1.3/1.4 main header (before the first member,

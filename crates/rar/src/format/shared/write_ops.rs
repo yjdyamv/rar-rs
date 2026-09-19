@@ -100,7 +100,7 @@ pub(crate) fn add_file(
     if cx.is_rar13() {
         crate::format::rar13::write::add_file_rar13(cx, path, arcname, level)
     } else if cx.is_rar4() {
-        crate::format::rar4::write::pipeline::add_file_rar4(cx, path, arcname, level)
+        crate::format::rar4::write::member::add_file_rar4(cx, path, arcname, level)
     } else {
         crate::format::rar5::write::add::add_file_rar5(cx, path, arcname, level)
     }
@@ -138,7 +138,7 @@ pub(crate) fn add_bytes(
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
-        return crate::format::rar4::write::pipeline::add_rar4_data(
+        return crate::format::rar4::write::member::add_rar4_data(
             cx,
             name,
             data.to_vec(),
@@ -187,7 +187,7 @@ pub(crate) fn add_directory_only(
         return crate::format::rar13::write::write_rar13_dir_entry(cx, &name, mtime, mtime_ns);
     }
     if cx.is_rar4() {
-        return crate::format::rar4::write::pipeline::write_rar4_dir_entry(
+        return crate::format::rar4::write::member::write_rar4_dir_entry(
             cx, &name, mtime, mtime_ns,
         );
     }
@@ -265,7 +265,7 @@ fn add_directory_inner(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
-        crate::format::rar4::write::pipeline::write_rar4_dir_entry(cx, &name, mtime, mtime_ns)?;
+        crate::format::rar4::write::member::write_rar4_dir_entry(cx, &name, mtime, mtime_ns)?;
     } else {
         crate::format::rar5::write::add::write_rar5_dir_entry(cx, &name, &meta, mtime)?;
     }
@@ -316,7 +316,7 @@ pub(crate) fn add_batch(cx: &mut dyn Engine, entries: &[BatchEntry<'_>]) -> RarR
             && !cx.write_ctx().rar4.solid_append
             && !entries.is_empty()
         {
-            return crate::format::rar4::write::pipeline::add_batch_parallel_rar4(cx, entries);
+            return crate::format::rar4::write::batch::add_batch_parallel_rar4(cx, entries);
         }
     }
     progress_set_batch_total(cx, entries)?;

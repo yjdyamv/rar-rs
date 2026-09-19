@@ -616,7 +616,7 @@ fn write_rar13_member(
 /// chunks live here once and serve both the buffered path
 /// (`write_rar13_member`) and the streaming one (`add_rar13_file_streaming`) —
 /// the same shape RAR5's `emit::write_split_member` and RAR4's
-/// `pipeline::emit_rar4_split` use.
+/// `emit::emit_rar4_split` use.
 fn write_rar13_split_member(
     cx: &mut dyn Engine,
     member: &MemberHeader<'_>,

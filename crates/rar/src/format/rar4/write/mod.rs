@@ -4,11 +4,19 @@
 //! 7-byte signature, 13-byte main header, 32+N-byte file headers with
 //! 16-bit CRC, and the 7-byte end-of-archive block.
 //!
-//! The member-addition orchestration (encoder dispatch, member encryption,
-//! volume splitting and the parallel batch) lives in [`pipeline`].
+//! The member-addition orchestration is split by role: [`member`] holds the
+//! member entry points and catalog bookkeeping, [`encode`] the codec and
+//! cipher dispatch, [`emit`] the segment/volume emission, [`stream`] the
+//! bounded-memory large-member path and [`batch`] the parallel batch (feature
+//! `parallel`).
 
+#[cfg(feature = "parallel")]
+pub(crate) mod batch;
 mod cbc;
-pub(crate) mod pipeline;
+pub(crate) mod emit;
+pub(crate) mod encode;
+pub(crate) mod member;
+pub(crate) mod stream;
 
 use crate::crc32;
 use crate::error::{RarError, RarResult};
