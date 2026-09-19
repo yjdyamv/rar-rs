@@ -549,10 +549,15 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 /// of the source tree 922,257 B / 2669 ms, so m5 lands within 1% of the
 /// sequential ratio on the DLL and *below* it on the source tree, while m1 stays
 /// the cheap rung (+2.3% on the source tree, still 3.6x faster than sequential).
+/// MT-only, like the row-index parse whose level dial it is.
+#[cfg(feature = "parallel")]
 const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 32, 64, 128, 256];
 
 /// How far one DP block spans in the MT row-index parse. The driver in
 /// `parse.rs` owns the number; this is the value it uses.
+///
+/// MT-only, like the parse it feeds.
+#[cfg(feature = "parallel")]
 pub(super) const MT_ROW_INDEX_DP_BLOCK: usize = super::parse::MT_DP_BLOCK_SIZE;
 
 /// MT-only row-index parse (issue 15 / step ③): the sequential path's optimal

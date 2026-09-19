@@ -180,6 +180,19 @@ jobs:
             echo "::endgroup::"
           done
         shell: bash
+      - name: Dependency advisories, licenses and sources
+        # `cargo clippy` checks this tree; this checks the crates it pulls in:
+        # RustSec advisories, the license allow-list and the registry sources,
+        # all against the lockfile. The configuration and the rationale for
+        # each allowed license family live in the root `deny.toml`.
+        #
+        # `arguments` is prepended before the `check` subcommand by the
+        # action, so only the global flags belong there; `--all-features`
+        # matches the clippy step's feature set and `--locked` holds the
+        # check to the committed lockfile.
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --all-features --locked
       - name: Cargo test (workspace)
         # `--no-fail-fast`: a platform-specific failure in an early target
         # must not hide failures in later targets, so one red run reports the

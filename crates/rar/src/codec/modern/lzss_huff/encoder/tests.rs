@@ -511,6 +511,10 @@ fn long_range_streaming_simulation() {
 /// positions through the bucket-end array itself, which collapses every range
 /// to empty and silently turns the priced parse into literals (measured as
 /// 10,208,233 B instead of 6,516,302 B on a 12.5 MiB DLL before the fix).
+///
+/// `RowIndex` is the MT row-index tier's index, so it exists only with the
+/// `parallel` feature; without it this test would be a dead-code warning.
+#[cfg(feature = "parallel")]
 #[test]
 fn row_index_buckets_hold_their_positions() {
     let mut data = Vec::new();
@@ -541,6 +545,9 @@ fn row_index_buckets_hold_their_positions() {
 
 /// The walk is newest-first, so an older candidate only reports when it is
 /// strictly longer, and the distance window cuts the walk off.
+///
+/// MT-only, like [`row_index_buckets_hold_their_positions`].
+#[cfg(feature = "parallel")]
 #[test]
 fn row_index_collects_improving_runs_only() {
     let mut data = vec![7u8; 4096];

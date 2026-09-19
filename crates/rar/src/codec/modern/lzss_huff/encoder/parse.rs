@@ -120,6 +120,10 @@ pub(super) fn find_matches_with_tail(
 /// history offset of `start`. A position `k` bytes into the buffer must be
 /// complemented from distance `near_reach + k + 1` on, which is what keeps the
 /// buffer's own bytes from being probed twice.
+///
+/// MT-only: the driver is `chunked::mt_slice_symbols_row_index`, which is
+/// compiled only with the `parallel` feature.
+#[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn windowed_priced_parse<F>(
     combined: &[u8],
@@ -220,7 +224,11 @@ where
 /// Buckets in [`RowIndex`]: a 4-byte hash, like the sequential finders' key
 /// length. Hashing four bytes means every bucket member is a potential 4-byte
 /// match, so no candidate is probed and thrown away on the minimum length.
+///
+/// MT-only (see [`windowed_priced_parse`]).
+#[cfg(feature = "parallel")]
 const ROW_INDEX_HASH_BITS: u32 = 20;
+#[cfg(feature = "parallel")]
 const ROW_INDEX_BUCKETS: usize = 1 << ROW_INDEX_HASH_BITS;
 
 /// A shared, read-only row index over one member buffer: every position grouped
@@ -232,11 +240,16 @@ const ROW_INDEX_BUCKETS: usize = 1 << ROW_INDEX_HASH_BITS;
 /// a per-slice *sequential* parse cost more than the sequential member (the tree
 /// re-insert of a slice's lookbehind measured ~5x the member at ~5.3 MiB/s).
 /// Candidates come out newest-first within the distance window, like the chain's.
+///
+/// MT-only: built by `chunked::mt_slice_symbols_row_index` and queried by
+/// [`windowed_priced_parse`], both `parallel`-gated.
+#[cfg(feature = "parallel")]
 pub(crate) struct RowIndex {
     starts: Vec<u32>,
     positions: Vec<u32>,
 }
 
+#[cfg(feature = "parallel")]
 impl RowIndex {
     /// Build the index in two passes (count, then place). O(n) at memory
     /// bandwidth, paid once per member instead of per slice.
@@ -334,6 +347,9 @@ impl RowIndex {
 /// How far one DP block spans in [`windowed_priced_parse`]. Bigger blocks buy
 /// lookahead and fewer block restarts at the cost of the DP's per-position
 /// arrays (about 16 bytes per block byte, per worker).
+///
+/// MT-only, like its only reader [`windowed_priced_parse`].
+#[cfg(feature = "parallel")]
 pub(super) const MT_DP_BLOCK_SIZE: usize = 256 * 1024;
 
 /// Match-finding loop over `data[start..end]` with a distance cache.

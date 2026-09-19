@@ -53,6 +53,26 @@ The binding crate cannot be checked that way (`napi-build` needs the
 `EMNAPI_LINK_DIR` that `napi build` injects); build it with
 `npx napi build --platform --release --target wasm32-wasip1-threads` instead.
 
+## Dependency gate (`cargo deny`)
+
+The `lint` job also runs `cargo deny check --all-features --locked`, which
+judges the _dependency graph_ rather than this tree: RustSec advisories, the
+license allow-list and the registry sources. Configuration and the rationale for
+each allowed license family live in the root [`deny.toml`](../deny.toml).
+Locally:
+
+```sh
+cargo install cargo-deny --locked    # once
+cargo deny check --all-features --locked
+```
+
+Adding a dependency whose license is not in the allow-list fails the check on
+purpose: the license decision is made when the dependency is added, not at
+release time. In-tree `rars` ports are _not_ covered by this file — their
+provenance is recorded in
+[`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md) and
+[`NOTICE`](../NOTICE).
+
 ## Running the Linux half under WSL2
 
 WSL2 runs the job for real, including the official-tool interop suites. The
@@ -92,13 +112,14 @@ bash scripts/wsl/ci-linux.sh           # CI's lint + interop + binding steps
 bash scripts/wsl/stage12-linux.sh      # legacy streaming vs official unrar
 ```
 
-`ci-linux.sh` takes a step range: `1-12` the lint job, `13` official interop,
-`14-18` the binding job, `19` the heavy fuzz smoke (CI runs that on tags and the
-weekly schedule only). It follows the workflow step for step, except that CI's
-log-only plumbing becomes plain output. When the rarlab tools are present it
-exports `SA_OFFICIAL_*`, so the interop suites run instead of skipping —
-including the binding test that otherwise reports `SA_OFFICIAL_UNRAR is not set`
-(59 passed, 0 skipped, instead of 58 + 1).
+`ci-linux.sh` takes a step range: `1-13` the lint job (its step 12 is the
+`cargo deny` dependency gate, step 13 the workspace tests), `14` official
+interop, `15-19` the binding job, `20` the heavy fuzz smoke (CI runs that on
+tags and the weekly schedule only). It follows the workflow step for step,
+except that CI's log-only plumbing becomes plain output. When the rarlab tools
+are present it exports `SA_OFFICIAL_*`, so the interop suites run instead of
+skipping — including the binding test that otherwise reports
+`SA_OFFICIAL_UNRAR is not set` (59 passed, 0 skipped, instead of 58 + 1).
 
 ## 本地官方工具与互操作套件
 

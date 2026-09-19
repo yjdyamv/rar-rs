@@ -1,0 +1,79 @@
+# cargo-deny configuration: dependency vulnerability and license gate.
+#
+# Run with `cargo deny check --all-features --locked` (CI job `lint`, step
+# "Dependency advisories, licenses and sources"). The flags match the clippy
+# step's, so the same feature set is judged. The tool covers a different axis
+# than the rest of CI: `cargo clippy` checks this tree, `cargo-deny` checks
+# the crates it pulls in. The allow-list below was derived from the locked
+# graph (`cargo metadata --locked`); adding a dependency whose license is not
+# listed fails the check on purpose, so the license decision is made when the
+# dependency is added rather than at release time. See
+# THIRD_PARTY_LICENSES.md for the project's own provenance record (this file
+# governs *registry* dependencies, not the in-tree `rars` ports).
+
+[advisories]
+# RustSec advisory database. `yanked` is set to "warn" (the default) rather
+# than "deny": a yanked crate is still a deliberate, reviewed pin until the
+# lockfile is refreshed, and CI already runs `--locked`.
+version = 2
+yanked = "warn"
+ignore = []
+
+[licenses]
+version = 2
+# Confidence threshold for the license *text* scanner. Every crate in the
+# graph declares an SPDX `license` field, so the scanner is only a backstop
+# for a crate that ships a LICENSE file without metadata.
+confidence-threshold = 0.9
+# Licenses accepted for registry dependencies. Each entry below is present in
+# the locked graph today; the list is intentionally the union of the common
+# permissive families rather than "whatever the graph happens to have", so a
+# new dependency under one of them does not need a config change:
+#
+# - MIT / Apache-2.0 / BSD-2-Clause / ISC / Zlib: the permissive family.
+# - Unicode-3.0: required by ICU-derived crates (`unicode-ident`).
+# - Unlicense: the `Unlicense OR MIT` dual license of `memchr`-style crates.
+# - LLVM-exception: the `Apache-2.0 WITH LLVM-exception` arm that
+#   `wasm-bindgen`-family crates offer alongside MIT/Apache-2.0.
+#
+# LGPL-2.1-or-later is deliberately absent even though one crate offers it as
+# a third *alternative* (`MIT OR Apache-2.0 OR LGPL-2.1-or-later`): the check
+# must not accept the copyleft arm when a permissive one is available.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+]
+
+# The workspace's own crates declare `license = "BSD-2-Clause"` through
+# `license.workspace = true` (see the root Cargo.toml), so cargo-deny reads the
+# expression from their manifests and no clarification block is needed. The
+# `rars`-derived portions are MIT OR Apache-2.0 but are documented in NOTICE
+# rather than declared in the field, which is the crate-license convention:
+# this check judges what the manifests declare, i.e. the project's own grant.
+
+[bans]
+# Duplicate *major* versions of a crate are usually two copies of the same
+# dependency; warn so a lockfile refresh can be checked for it, without
+# blocking a build on a transitive bump.
+multiple-versions = "warn"
+wildcards = "deny"
+# No crate in the graph is denied outright today. Add entries here when a
+# dependency is replaced, e.g. `{ name = "old-crate", reason = "..." }`.
+deny = []
+# `napi-build` and the binding's build tooling legitimately appear under both
+# a normal and a build dependency; the warning is informational.
+skip-tree = []
+
+[sources]
+# Registry dependencies must come from crates.io. A git or alternate-registry
+# source in the lockfile is a supply-chain decision that must be explicit.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
