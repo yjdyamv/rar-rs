@@ -1620,3 +1620,72 @@ fn cli_optional_value_long_options_keep_the_positional() {
     );
     assert_eq!(cli_names(&archive), ["f1.txt"]);
 }
+
+/// Listing prefers the RAR5 quick-open record (like WinRAR): a `-qo` archive
+/// whose real file header is corrupt still lists, because the headers cached
+/// in the QO record are used instead of a full scan. The same archive without
+/// `-qo` has no record to fall back on and fails.
+#[test]
+fn cli_listing_uses_the_quick_open_record() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    std::fs::write(dir.path().join("f2.txt"), b"two").unwrap();
+
+    let qo = dir.path().join("qo.rar");
+    let plain = dir.path().join("plain.rar");
+    for (archive, extra) in [(&qo, Some("-qo")), (&plain, None)] {
+        let mut command = std::process::Command::new(RAR_CLI);
+        command.args(["a", "-m0", "-idq"]);
+        if let Some(extra) = extra {
+            command.arg(extra);
+        }
+        let status = command
+            .arg(archive)
+            .args(["f1.txt", "f2.txt"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        // Corrupt the first *real* file header (the one stored before the QO
+        // record caches a copy of it).
+        let mut bytes = std::fs::read(archive).unwrap();
+        let pos = bytes
+            .windows(6)
+            .position(|window| window == b"f1.txt")
+            .expect("f1 header name");
+        bytes[pos] ^= 0xFF;
+        std::fs::write(archive, &bytes).unwrap();
+    }
+
+    // With the record: the cached headers list both members.
+    let list = std::process::Command::new(RAR_CLI)
+        .args(["lb"])
+        .arg(&qo)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        list.status.success(),
+        "listing must come from the quick-open record:\n{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let names = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        names.contains("f1.txt") && names.contains("f2.txt"),
+        "{names}"
+    );
+
+    // Without the record: the corrupt header aborts the full scan.
+    let list = std::process::Command::new(RAR_CLI)
+        .args(["lb"])
+        .arg(&plain)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        list.status.code(),
+        Some(3),
+        "a full scan must hit the corrupt header"
+    );
+}

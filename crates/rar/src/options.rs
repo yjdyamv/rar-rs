@@ -186,8 +186,8 @@ pub(crate) struct CreateOptions {
     /// every file header. Only effective for single-volume archives
     /// without header encryption.
     pub quick_open: bool,
-    /// Write a BLAKE2sp hash record for every member (in addition to the
-    /// regular CRC32 field), matching WinRAR's `-htb` behavior.
+    /// Write a BLAKE2sp hash record for every member, replacing the regular
+    /// CRC32 field, matching WinRAR's `-htb` behavior.
     pub blake2: bool,
     /// Optional AES-256 password for file-level encryption.
     pub password: Option<String>,

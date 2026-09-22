@@ -167,6 +167,16 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `reconstruct.rs` 四个测试与 CLI
   `cli_repair_without_a_recovery_record_reconstructs` /
   `cli_repair_salvages_past_a_corrupt_header` 钉住。
+- `-htb` 语义对齐官方（2026-09-22 官方对拍）：BLAKE2sp 记录**取代** CRC32 字段
+  （`MemberPlan::file_header` 在有 hash 时不再写 `crc32_val`，序列化器顺带清
+  `FILE_FLAG_CRC32`）。此前是「CRC32 + BLAKE2sp 并存」，每成员比官方多 4 字节；
+  现增量与官方一致（+31/member，实测 `lt` 不再显示 CRC32）。 `options.rs`
+  那句「in addition … matching WinRAR」的错误注释一并修正。
+- 列目录接 QO 快路径（2026-09-22）：CLI 列目录命令（`rar l/v/lt/lb/i`、unrar
+  同） 改用 `ScanStrategy::PreferQuickOpen`（新增 `ops::open_reader_quick`），无
+  QO 时 透明回退全扫；抽取/校验仍走全扫。此前 CLI 从不使用 QO，写 `-qo`
+  等于白写。 契约由 `cli_listing_uses_the_quick_open_record` 钉住（`-qo`
+  档真实文件头损坏仍能 列目录，无 `-qo` 的同档全扫失败）。
 
 **流式与编码**
 

@@ -325,7 +325,7 @@ fn run_inner(cli: Cli) -> CliResult<()> {
         Command::VerboseList(args) => {
             let names = listfile::expand(&args.names, cli.misc.list_files.as_deref())
                 .map_err(error::CliError::from)?;
-            let rar = ops::open_reader(&args.archive, password)?;
+            let rar = ops::open_reader_quick(&args.archive, password)?;
             ops::list_entries(&rar, &args.archive, &names, true);
             Ok(())
         }
@@ -354,7 +354,7 @@ fn cmd_list_bare(
 ) -> CliResult<()> {
     let names =
         listfile::expand(&args.names, misc.list_files.as_deref()).map_err(error::CliError::from)?;
-    let rar = ops::open_reader(&args.archive, password)?;
+    let rar = ops::open_reader_quick(&args.archive, password)?;
     ops::list_bare(&rar, &args.archive, &names);
     Ok(())
 }
@@ -368,7 +368,7 @@ fn cmd_list_technical(
 ) -> CliResult<()> {
     let names =
         listfile::expand(&args.names, misc.list_files.as_deref()).map_err(error::CliError::from)?;
-    let rar = ops::open_reader(&args.archive, password)?;
+    let rar = ops::open_reader_quick(&args.archive, password)?;
     ops::list_technical(&rar, &args.archive, &names);
     Ok(())
 }
@@ -492,7 +492,7 @@ fn cmd_list(
 ) -> CliResult<()> {
     let names =
         listfile::expand(&args.names, misc.list_files.as_deref()).map_err(error::CliError::from)?;
-    let rar = ops::open_reader(&args.archive, password)?;
+    let rar = ops::open_reader_quick(&args.archive, password)?;
     ops::list_entries(&rar, &args.archive, &names, false);
     Ok(())
 }

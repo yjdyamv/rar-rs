@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use crate::error::{CliError, CliResult};
 use crate::output;
 use rar_rs::version::ArchiveVersion;
-use rar_rs::{ArchiveReader, EntryId, EntryRef, ExtractOptions, ExtractionReport};
+use rar_rs::{ArchiveReader, EntryId, EntryRef, ExtractOptions, ExtractionReport, ScanStrategy};
 
 /// Quiet labels (`-idq` / `-inul`) suppress the listing tables entirely,
 /// like WinRAR's `l`/`v`/`lt`.
@@ -20,17 +20,38 @@ fn listing_quiet() -> bool {
     crate::output::QUIET.load(Ordering::Relaxed)
 }
 
-/// Open an archive for reading. A bad archive or wrong password becomes the
-/// user-facing error the command runners return, keeping the library's
-/// error category (wrong password, locked, format) for the exit code.
+/// Open an archive for reading with a full catalog scan. A bad archive or
+/// wrong password becomes the user-facing error the command runners return,
+/// keeping the library's error category (wrong password, locked, format) for
+/// the exit code.
 ///
 /// Like WinRAR, a missing name without an extension is retried with `.rar`
 /// (`rar l exa` reads `exa.rar`); a `.part1.rar` first volume is accepted
 /// the same way. A genuinely missing archive keeps the original error.
 pub fn open_reader(path: impl AsRef<Path>, password: Option<&str>) -> CliResult<ArchiveReader> {
+    open_reader_with_strategy(path, password, ScanStrategy::Full)
+}
+
+/// Open an archive for a *listing* command, preferring the RAR5 quick-open
+/// record and transparently falling back to a full scan when the archive has
+/// none, like WinRAR. Listing never needs member data, so the headers cached
+/// in the QO record are enough (and the scan is O(QO) instead of O(archive)).
+pub fn open_reader_quick(
+    path: impl AsRef<Path>,
+    password: Option<&str>,
+) -> CliResult<ArchiveReader> {
+    open_reader_with_strategy(path, password, ScanStrategy::PreferQuickOpen)
+}
+
+/// [`open_reader`] with an explicit catalog-scan strategy.
+fn open_reader_with_strategy(
+    path: impl AsRef<Path>,
+    password: Option<&str>,
+    strategy: ScanStrategy,
+) -> CliResult<ArchiveReader> {
     let path = path.as_ref();
     let open = |candidate: &Path| {
-        let mut options = rar_rs::OpenOptions::new();
+        let mut options = rar_rs::OpenOptions::new().scan_strategy(strategy);
         if let Some(password) = password {
             options = options.password(password);
         }
