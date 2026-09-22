@@ -154,11 +154,12 @@ fn cli_infers_the_archive_extension_on_read() {
         String::from_utf8_lossy(&part.stderr)
     );
 
-    // Genuinely missing: unchanged I/O error (exit 2, no `.rar` retry).
+    // Genuinely missing: "no files found" (exit 10, no `.rar` retry), like
+    // WinRAR.
     let missing = run(RAR_CLI, &["l", "nope"], dir.path());
     assert_eq!(
         missing.status.code(),
-        Some(2),
+        Some(10),
         "{}",
         String::from_utf8_lossy(&missing.stderr)
     );

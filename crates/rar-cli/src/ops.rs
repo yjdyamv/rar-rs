@@ -47,7 +47,7 @@ pub fn open_reader(path: impl AsRef<Path>, password: Option<&str>) -> CliResult<
             }
         }
     }
-    Err(CliError::from(first))
+    Err(crate::error::open_error(first))
 }
 
 /// The archive names WinRAR infers for an extension-less read request:

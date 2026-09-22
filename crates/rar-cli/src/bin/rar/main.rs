@@ -41,7 +41,7 @@ mod update;
 #[cfg(test)]
 mod tests;
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use std::process;
 
 use args::{Cli, Command, RecoveryVolumesArgs};
@@ -82,7 +82,7 @@ fn main() {
         println!("RAR 7.23 CLI parity (rar-rs {})", env!("CARGO_PKG_VERSION"));
         return;
     }
-    let cli = Cli::parse_from(std::iter::once("rar".to_string()).chain(args));
+    let cli = error::parse_args::<Cli>(std::iter::once("rar".to_string()).chain(args));
     output::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
     output::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
     if let Some(dir) = &cli.work_dir {
@@ -183,7 +183,10 @@ fn run(cli: Cli) -> CliResult<()> {
                     count_spec: if spec.is_empty() { "10%".into() } else { spec },
                 })
             } else {
-                Err(format!("unknown command: {name}").into())
+                Err(error::CliError::with_code(
+                    format!("unknown command: {name}"),
+                    error::EXIT_BAD_COMMAND,
+                ))
             }
         }
     }
