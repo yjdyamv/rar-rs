@@ -230,6 +230,28 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `legacy_rar4_recovery_record_follows_the_rr_forms`（CLI，含 `rec_sectors`
   解析）与
   `recovery_sector_count_is_exact_and_legacy_only`（库，含两种非法组合） 钉住。
+- **CLI 开关面审计（2026-09-22，对拍官方 7.23）**：用「官方开关表 × `l`/`t`/`a`
+  三种命令」做 240 例差分扫描，并在源码里找「解析了但从不读取」的字段（169 个
+  clap 字段中 14 个）。结论：**开关面本身齐全**（那 3 个"缺失"是
+  `-ht`/`-id`/`-o` 的变体 造成的假象；14 个未读取字段里绝大多数是 CLI.md
+  已记录的"接受但无操作"），差的是一类
+  **解析宽松度**——官方把任何已知开关挂任何命令都接受、不适用的**默默忽略**（实测
+  `l -m5`/`l -o+`/`l -kb`/`l -c-`/`t -rr10` 全 exit 0；只有真未知开关才 exit
+  7）， 而我们按命令声明、不适用的直接报 exit 7（扫描里读侧约 45
+  例）。现按官方行为修正： `switches_after_command`
+  在重排之后**无条件**过滤——先把 WinRAR 写法翻译成 `--long`，
+  再丢掉目标子命令未声明的开关（允许集 = 该子命令自身参数 + 根级 `global`
+  开关）。这是 **本
+  CLI「绝不静默丢弃开关」规则的唯一例外**，否则就无法与官方兼容；故意拒绝的
+  `-dr`/`-dw`/`-vd` 仍声明在会生效的命令上，因此仍走到显式拒绝；clap
+  之前消费的内部 标记（裸 `-p` → `--password-prompt`，`reject_bare_password`
+  靠它拒绝明文归档）显式 豁免，否则那条安全检查会被丢掉。同时修
+  **`-v-`**：此前被当成 `--volume-size=-` 报错， 现映射为 `--no-volumes`（与
+  `--volume-size` 互为 `overrides_with`，实现「后写者胜」）。 实测遗留（已写进
+  `docs/CLI.md`）：`-idn`（官方列表不打印成员名）仍不生效、`-idc` 恒
+  等效（我们不打印官方版权/Trial 横幅）、`-iver` 文案与官方不同。契约由
+  `cli_irrelevant_official_switches_are_ignored_like_winrar`（含「未知开关仍
+  exit 7」） 与 `cli_v_minus_cancels_volume_creation` 钉住。
 - `-htb` 语义对齐官方（2026-09-22 官方对拍）：BLAKE2sp 记录**取代** CRC32 字段
   （`MemberPlan::file_header` 在有 hash 时不再写 `crc32_val`，序列化器顺带清
   `FILE_FLAG_CRC32`）。此前是「CRC32 + BLAKE2sp 并存」，每成员比官方多 4 字节；

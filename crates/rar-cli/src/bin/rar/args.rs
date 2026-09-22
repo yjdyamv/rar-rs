@@ -449,6 +449,9 @@ pub(crate) struct CreateArgs {
     /// Volume size (e.g. 1m, 100k)
     #[arg(short = 'v', long = "volume-size", value_name = "SIZE", value_parser = parse_size)]
     pub(crate) volume_size: Option<u64>,
+    /// Cancel volume creation (WinRAR `-v-`)
+    #[arg(long = "no-volumes", overrides_with = "volume_size")]
+    pub(crate) no_volumes: bool,
     /// Solid archive
     #[arg(short = 's', long, overrides_with = "solid")]
     pub(crate) solid: bool,
