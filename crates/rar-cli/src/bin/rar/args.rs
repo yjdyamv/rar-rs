@@ -484,6 +484,13 @@ pub(crate) struct CreateArgs {
         value_parser = clap::value_parser!(u8).range(0..=100)
     )]
     pub(crate) recovery_percent: Option<u8>,
+    /// Recovery record parity sectors (WinRAR RAR4 `-rr<N>`)
+    #[arg(
+        long = "recovery-sectors",
+        value_name = "N",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub(crate) recovery_sectors: Option<u32>,
     /// Recovery volumes: count or percentage (`20` or `20%`)
     #[arg(long = "recovery-volumes", value_name = "N|N%", value_parser = parse_recovery_volumes)]
     pub(crate) recovery_volumes: Option<RecoveryVolumes>,

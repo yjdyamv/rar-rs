@@ -11,6 +11,7 @@ pub(crate) struct Rar13WriteOptions {
     pub quick_open: bool,
     pub blake2: bool,
     pub recovery_percent: Option<u8>,
+    pub recovery_sectors: Option<u32>,
     pub recovery_volumes_percent: Option<u8>,
     pub recovery_volume_count: Option<u32>,
     pub save_owner: bool,
@@ -31,7 +32,7 @@ pub(crate) fn validate_rar13_only(options: Rar13WriteOptions) -> RarResult<()> {
             "BLAKE2sp hashes are not supported for RAR 1.3/1.4 archives".into(),
         ));
     }
-    if options.recovery_percent.is_some() {
+    if options.recovery_percent.is_some() || options.recovery_sectors.is_some() {
         return Err(RarError::InvalidOption(
             "recovery records are not supported for RAR 1.3/1.4 archives".into(),
         ));

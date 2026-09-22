@@ -17,6 +17,72 @@ fn ewo(level: u8) -> EntryWriteOptions {
     EntryWriteOptions::new().compression_level(CompressionLevel::try_from(level).unwrap())
 }
 
+/// `rec_sectors` of a RAR4 archive's NEWSUB (`0x7a`) `RR` record.
+fn recovery_sectors(path: &std::path::Path) -> u32 {
+    let bytes = std::fs::read(path).unwrap();
+    let mark = b"RRProtect+";
+    let at = bytes
+        .windows(mark.len())
+        .position(|window| window == mark)
+        .expect("RR record");
+    let header = at - 32;
+    let name_size = u16::from_le_bytes([bytes[header + 26], bytes[header + 27]]) as usize;
+    let count = at + name_size + 8;
+    u32::from_le_bytes(bytes[count..count + 4].try_into().unwrap())
+}
+
+/// `recovery_sectors` writes an exact parity count for a legacy RAR4 archive
+/// (WinRAR's `-rr<N>`), independent of the archive size; the percent form and
+/// the count are mutually exclusive, and a RAR5 record (sized by percent only)
+/// rejects the count instead of dropping it.
+#[test]
+fn recovery_sector_count_is_exact_and_legacy_only() {
+    let dir = tempfile::tempdir().unwrap();
+    for size in [4_000usize, 400_000] {
+        let src = dir.path().join(format!("m{size}.bin"));
+        std::fs::write(&src, vec![0x3b; size]).unwrap();
+        let arc = dir.path().join(format!("rr{size}.rar"));
+        let mut archive = ArchiveWriter::create_with(
+            &arc,
+            WriterOptions::default()
+                .compression(ArchiveVersion::V29)
+                .recovery_sectors(10),
+        )
+        .expect("create");
+        archive.add_path(&src, ewo(0)).expect("add");
+        archive.finish().expect("close");
+        assert_eq!(
+            recovery_sectors(&arc),
+            10,
+            "an exact count must not scale with the archive ({size} bytes)"
+        );
+    }
+
+    let src = dir.path().join("small.bin");
+    std::fs::write(&src, vec![0x3b; 4_000]).unwrap();
+    let both = dir.path().join("both.rar");
+    assert!(matches!(
+        ArchiveWriter::create_with(
+            &both,
+            WriterOptions::default()
+                .compression(ArchiveVersion::V29)
+                .recovery_percent(10)
+                .recovery_sectors(10),
+        ),
+        Err(rar_rs::RarError::InvalidOption(_))
+    ));
+    let rar5 = dir.path().join("rar5.rar");
+    assert!(matches!(
+        ArchiveWriter::create_with(
+            &rar5,
+            WriterOptions::default()
+                .compression(ArchiveVersion::V50)
+                .recovery_sectors(10),
+        ),
+        Err(rar_rs::RarError::InvalidOption(_))
+    ));
+}
+
 fn crate_crc(data: &[u8]) -> u32 {
     let mut c = 0xFFFFFFFFu32;
     for &b in data {

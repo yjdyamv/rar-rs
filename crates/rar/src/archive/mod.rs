@@ -124,6 +124,8 @@ pub struct RarArchive {
     /// Recovery record: recovery percent (0-100) when the archive is created
     /// with an inline RAR5 recovery record ("RR" service header).
     pub(crate) recovery_percent: Option<u8>,
+    /// Recovery record: exact parity-sector count (WinRAR RAR4 `-rr<N>`).
+    pub(crate) recovery_sectors: Option<u32>,
     /// Recovery volumes: percent (0-100) of `.rev` files created alongside
     /// a multi-volume archive (WinRAR `-rv`).
     pub(crate) recovery_volumes_percent: Option<u8>,
@@ -185,6 +187,7 @@ impl RarArchive {
             archive_encr: None,
             archive_keys: None,
             recovery_percent: None,
+            recovery_sectors: None,
             recovery_volumes_percent: None,
             recovery_volumes_count: None,
             volume_paths: Vec::new(),
@@ -797,6 +800,7 @@ impl RarArchive {
             archive_encr: None,
             archive_keys: None,
             recovery_percent: opts.recovery_percent,
+            recovery_sectors: opts.recovery_sectors,
             recovery_volumes_percent: opts.recovery_volumes_percent,
             recovery_volumes_count: opts.recovery_volume_count,
             cancel: None,

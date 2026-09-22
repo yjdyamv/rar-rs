@@ -687,10 +687,21 @@ pub fn normalize_switch(arg: &str) -> String {
         };
     }
     if let Some(rest) = arg.strip_prefix("-rr") {
-        // WinRAR: `-rr` alone means 10%, `-rrN` / `-rrN%` a percentage.
-        let rest = rest.strip_suffix('%').unwrap_or(rest);
-        let rest = if rest.is_empty() { "10" } else { rest };
-        return format!("--recovery-percent={rest}");
+        // `-rr` alone (and `-rr%`) means WinRAR's default 3 percent. `-rrN%`
+        // is a percentage; a bare `-rrN` is a legacy RAR4 parity-sector count
+        // (the record's native unit), which `create` turns into a percentage
+        // for RAR5, whose record is sized by percent only. Both are measured
+        // against 6.23: `-rr10` writes exactly 10 RAR4 parity sectors at any
+        // size, and bare `-rr` matches `-rr3%` for both formats.
+        match rest.strip_suffix('%') {
+            Some("") => return "--recovery-percent=3".into(),
+            Some(percent) => return format!("--recovery-percent={percent}"),
+            None => {}
+        }
+        if rest.is_empty() {
+            return "--recovery-percent=3".into();
+        }
+        return format!("--recovery-sectors={rest}");
     }
     if let Some(rest) = arg.strip_prefix("-rv") {
         return format!("--recovery-volumes={rest}");

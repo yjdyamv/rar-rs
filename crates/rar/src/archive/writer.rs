@@ -119,6 +119,7 @@ pub struct WriterOptions {
     password: Option<String>,
     pub(super) encrypt_headers: bool,
     pub(super) recovery_percent: Option<u8>,
+    pub(super) recovery_sectors: Option<u32>,
     pub(super) recovery_volumes_percent: Option<u8>,
     pub(super) recovery_volume_count: Option<u32>,
     volume_size: Option<u64>,
@@ -143,6 +144,7 @@ impl Default for WriterOptions {
             password: None,
             encrypt_headers: false,
             recovery_percent: None,
+            recovery_sectors: None,
             recovery_volumes_percent: None,
             recovery_volume_count: None,
             volume_size: None,
@@ -232,6 +234,16 @@ impl WriterOptions {
     #[must_use]
     pub fn recovery_percent(mut self, percent: u8) -> Self {
         self.recovery_percent = Some(percent);
+        self
+    }
+
+    /// Add an inline recovery record of exactly `sectors` parity sectors
+    /// (WinRAR RAR4 `-rr<N>`; the RAR4 record's native unit). Mutually
+    /// exclusive with [`Self::recovery_percent`]. RAR5 records are sized by
+    /// percent only, so validation rejects this for a RAR5 writer.
+    #[must_use]
+    pub fn recovery_sectors(mut self, sectors: u32) -> Self {
+        self.recovery_sectors = Some(sectors);
         self
     }
 
@@ -344,6 +356,7 @@ impl WriterOptions {
             encrypt_headers: self.encrypt_headers,
             password: self.password.as_deref(),
             recovery_percent: self.recovery_percent,
+            recovery_sectors: self.recovery_sectors,
             recovery_volumes_percent: self.recovery_volumes_percent,
             recovery_volume_count: self.recovery_volume_count,
             volume_size: self.volume_size,
@@ -393,6 +406,7 @@ impl WriterOptions {
             password: self.password,
             encrypt_headers: self.encrypt_headers,
             recovery_percent: self.recovery_percent,
+            recovery_sectors: self.recovery_sectors,
             recovery_volumes_percent: self.recovery_volumes_percent,
             recovery_volume_count: self.recovery_volume_count,
             volume_size: self.volume_size,

@@ -360,6 +360,57 @@ fn cli_ma4_rejects_rar5_only_switches() {
     assert_eq!(rar.read_entry(f_id).unwrap(), b"payload");
 }
 
+/// `rec_sectors` of a RAR4 archive's NEWSUB (`0x7a`) `RR` record: the parity
+/// count WinRAR reports and sizes its records by.
+fn recovery_sectors(path: &std::path::Path) -> u32 {
+    let bytes = std::fs::read(path).unwrap();
+    let mark = b"RRProtect+";
+    let at = bytes
+        .windows(mark.len())
+        .position(|window| window == mark)
+        .expect("RR record");
+    let header = at - 32;
+    let name_size = u16::from_le_bytes([bytes[header + 26], bytes[header + 27]]) as usize;
+    let count = at + name_size + 8;
+    u32::from_le_bytes(bytes[count..count + 4].try_into().unwrap())
+}
+
+/// The three `-rr` forms follow WinRAR 6.23 (measured): a bare `-rr<N>` is the
+/// legacy RAR4 parity-sector count (exactly N at any archive size), `-rr<N>%`
+/// a percentage of the protected prefix, and bare `-rr` the 3% default.
+#[test]
+fn legacy_rar4_recovery_record_follows_the_rr_forms() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("big.bin"), vec![0x5a; 200_000]).unwrap();
+    let create = |name: &str, spec: &str| {
+        let arc = dir.path().join(name);
+        let ok = std::process::Command::new(RAR_CLI)
+            .args(["a", "-ma4", "-m0", spec, "-idq"])
+            .arg(&arc)
+            .arg("big.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "{spec} failed");
+        arc
+    };
+
+    // The count form is exact and independent of the archive size.
+    assert_eq!(recovery_sectors(&create("count.rar", "-rr10")), 10);
+    // The percent form is not: 200 KB of members needs far more than ten.
+    let percent = recovery_sectors(&create("percent.rar", "-rr10%"));
+    assert!(
+        percent > 10,
+        "-rr10% must scale with the archive, got {percent}"
+    );
+    // Bare `-rr` is the 3% default, not 10%: it agrees with `-rr3%`.
+    assert_eq!(
+        recovery_sectors(&create("bare.rar", "-rr")),
+        recovery_sectors(&create("three.rar", "-rr3%"))
+    );
+}
+
 /// `-ma13`/`-ma14` create the DOS-era `RE~^` container (RAR 1.3/1.4):
 /// stored, compressed and solid members round-trip through our reader and
 /// `unrar`, and the archive comment is queued ahead of the first member.

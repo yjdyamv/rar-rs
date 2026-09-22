@@ -196,8 +196,11 @@ pub(crate) struct CreateOptions {
     /// encryption setup.
     pub encrypt_headers: bool,
     /// Add an inline recovery record protecting this percent (0-100) of
-    /// the archive (WinRAR `-rr`). Incompatible with multi-volume.
+    /// the archive (WinRAR `-rr<N>%`). Incompatible with multi-volume.
     pub recovery_percent: Option<u8>,
+    /// Add an inline recovery record with exactly this many parity sectors
+    /// (WinRAR RAR4 `-rr<N>`). Mutually exclusive with `recovery_percent`.
+    pub recovery_sectors: Option<u32>,
     /// Create this many `.rev` recovery volumes as a percentage of the
     /// data volume count (WinRAR `-rvN%`). Requires `volume_size`.
     pub recovery_volumes_percent: Option<u8>,
@@ -268,6 +271,7 @@ impl CreateOptions {
             encrypt_headers: self.encrypt_headers,
             password: self.password.as_deref(),
             recovery_percent: self.recovery_percent,
+            recovery_sectors: self.recovery_sectors,
             recovery_volumes_percent: self.recovery_volumes_percent,
             recovery_volume_count: self.recovery_volume_count,
             volume_size: self.volume_size,
@@ -360,6 +364,7 @@ pub(crate) struct CombinationRules<'a> {
     pub encrypt_headers: bool,
     pub password: Option<&'a str>,
     pub recovery_percent: Option<u8>,
+    pub recovery_sectors: Option<u32>,
     pub recovery_volumes_percent: Option<u8>,
     pub recovery_volume_count: Option<u32>,
     pub volume_size: Option<u64>,
@@ -396,7 +401,19 @@ pub(crate) fn validate_combinations(rules: CombinationRules<'_>) -> RarResult<()
             "header encryption requires a non-empty password".into(),
         ));
     }
-    if rules.recovery_percent.is_some() && rules.volume_size.is_some() {
+    if rules.recovery_percent.is_some() && rules.recovery_sectors.is_some() {
+        return Err(RarError::InvalidOption(
+            "recovery percent and an exact recovery-sector count are mutually exclusive".into(),
+        ));
+    }
+    if rules.recovery_sectors == Some(0) {
+        return Err(RarError::InvalidOption(
+            "recovery sector count must be greater than zero".into(),
+        ));
+    }
+    if (rules.recovery_percent.is_some() || rules.recovery_sectors.is_some())
+        && rules.volume_size.is_some()
+    {
         return Err(RarError::InvalidOption(
             "inline recovery records cannot be combined with data volumes".into(),
         ));
@@ -427,6 +444,7 @@ impl Default for CreateOptions {
             password: None,
             encrypt_headers: false,
             recovery_percent: None,
+            recovery_sectors: None,
             recovery_volumes_percent: None,
             recovery_volume_count: None,
             volume_size: None,
