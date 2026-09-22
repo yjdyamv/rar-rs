@@ -84,6 +84,8 @@ pub struct FilterSpec {
 }
 
 impl FilterSpec {
+    /// A filter covering `[block_start, block_start + block_length)` with
+    /// `channels` interleaved streams.
     pub fn new(filter_type: u8, channels: u8, block_start: u32, block_length: u32) -> Self {
         Self {
             filter_type,

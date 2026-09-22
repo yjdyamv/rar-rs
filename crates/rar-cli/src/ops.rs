@@ -758,6 +758,8 @@ impl ExtractRequest {
                 .or(Some(ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
             // `-mt<N>`: scoped to this extraction, like the writer's.
             threads: self.threads,
+            // `-om`: Mark of the Web propagation for this run.
+            mark_web: self.mark_web.clone(),
             // `-f`/`-u` decide overwrites by timestamp themselves; without
             // them the non-interactive default is skip-except-`-y`. An
             // explicit `-o-` still wins.
@@ -799,7 +801,6 @@ pub fn extract(
     rar: &mut ArchiveReader,
     request: &ExtractRequest,
 ) -> CliResult<Option<ExtractionReport>> {
-    rar.set_mark_of_the_web(request.mark_web.clone());
     if request.stdout {
         extract_to_stdout(rar, &request.names, request.max_dict_size)?;
         return Ok(None);
@@ -907,7 +908,7 @@ fn extract_to_stdout(
             .map_err(|error| CliError::from(error).context("resolve archive member"))?
             .name()
             .to_string();
-        rar.copy_entry_to_with_options(id, &mut out, options)
+        rar.copy_entry_to_with_options(id, &mut out, options.clone())
             .map_err(|error| CliError::from(error).context(format!("read {name}")))?;
     }
     out.flush().map_err(CliError::from)
@@ -956,7 +957,7 @@ pub fn print_members(
             .map_err(|error| CliError::from(error).context("resolve archive member"))?
             .name()
             .to_string();
-        rar.copy_entry_to_with_options(id, &mut out, options)
+        rar.copy_entry_to_with_options(id, &mut out, options.clone())
             .map_err(|error| CliError::from(error).context(name))?;
     }
     out.flush().map_err(CliError::from)

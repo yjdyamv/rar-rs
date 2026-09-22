@@ -111,7 +111,7 @@ pub fn reconstruct_archive_path(
 
     let mut report = ReconstructReport::default();
     for (id, name) in members {
-        match reader.read_entry_with_options(id, read_options) {
+        match reader.read_entry_with_options(id, read_options.clone()) {
             Ok(data) => {
                 writer.add_bytes(&name, &data, store)?;
                 report.recovered.push(name);

@@ -350,7 +350,7 @@ mod parallel_extract_options {
         };
         let mut reader = ArchiveReader::open(&archive).unwrap();
         let report = reader
-            .extract_all_with_options(&parallel_out, options)
+            .extract_all_with_options(&parallel_out, options.clone())
             .unwrap();
         assert_eq!(report.written_count(), 0);
         assert_eq!(report.skipped_count(), MEMBERS);
@@ -364,7 +364,7 @@ mod parallel_extract_options {
         for i in 0..MEMBERS {
             let id = reader.unique_entry(&member_name(i)).unwrap();
             reader
-                .extract_entry_with_options(id, &serial_out, options)
+                .extract_entry_with_options(id, &serial_out, options.clone())
                 .unwrap();
         }
 
@@ -405,7 +405,7 @@ mod parallel_extract_options {
         };
         let mut reader = ArchiveReader::open(&archive).unwrap();
         reader
-            .extract_all_with_options(&parallel_out, options)
+            .extract_all_with_options(&parallel_out, options.clone())
             .unwrap();
 
         let mut reader = ArchiveReader::open(&archive).unwrap();
@@ -414,7 +414,7 @@ mod parallel_extract_options {
             let id = reader.unique_entry(&member_name(i)).unwrap();
             serial_paths.push(
                 reader
-                    .extract_entry_with_options(id, &serial_out, options)
+                    .extract_entry_with_options(id, &serial_out, options.clone())
                     .unwrap(),
             );
         }
@@ -476,7 +476,7 @@ mod parallel_extract_options {
 
             let mut reader = ArchiveReader::open(&archive).unwrap();
             let err = reader
-                .extract_all_with_options(&parallel_out, options)
+                .extract_all_with_options(&parallel_out, options.clone())
                 .unwrap_err();
             assert!(matches!(err, rar_rs::RarError::Crc { .. }), "{err}");
 
@@ -484,12 +484,12 @@ mod parallel_extract_options {
             for i in 0..MEMBERS - 1 {
                 let id = reader.unique_entry(&member_name(i)).unwrap();
                 reader
-                    .extract_entry_with_options(id, &serial_out, options)
+                    .extract_entry_with_options(id, &serial_out, options.clone())
                     .unwrap();
             }
             let id = reader.unique_entry(&victim_name).unwrap();
             let err = reader
-                .extract_entry_with_options(id, &serial_out, options)
+                .extract_entry_with_options(id, &serial_out, options.clone())
                 .unwrap_err();
             assert!(matches!(err, rar_rs::RarError::Crc { .. }), "{err}");
 

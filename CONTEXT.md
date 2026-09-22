@@ -109,8 +109,9 @@
 - **Mark of the Web（MOTW，`-om`）** — 浏览器给下载文件打的 `Zone.Identifier`
   ADS；`-om` 把归档文件自身的该流传播到解出的成员（默认只保留 `ZoneTransfer`
   区与 `ZoneId=`，`1` 全字段，可按扩展名过滤；Windows only）。库侧
-  `options::MarkOfTheWeb` + `ArchiveReader::set_mark_of_the_web`，`rar`/`unrar`
-  双侧接线（输出与 WinRAR 逐字节一致）。
+  `options::MarkOfTheWeb` 作为 `ExtractOptions::mark_web`（逐次抽取的策略数据，
+  与 `threads`/`skip_existing` 同处），`rar`/`unrar` 双侧接线（输出与 WinRAR
+  逐字节一致）。
 - **CbcRangeEmitter** — `format/rar5/write/engine.rs` 中连续 CBC
   密文按任意字节区间发出的机制（read-ahead 到块边界 + ≤15B
   carry），使加密分块边界任意、卷大小仍精确（与 WinRAR 字节级一致）。

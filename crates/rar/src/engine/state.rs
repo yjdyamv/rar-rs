@@ -121,8 +121,6 @@ pub(crate) struct ReadState {
     /// keep the token: the payload offset resolves the entry across the
     /// rescan reorder.
     pub catalog_token: u64,
-    /// Mark of the Web propagation for extraction (WinRAR `-om`).
-    pub motw: Option<crate::options::MarkOfTheWeb>,
     /// Interactive overwrite prompt for extraction, installed by the front
     /// end through
     /// [`ArchiveReader::set_overwrite_prompt`](crate::ArchiveReader::set_overwrite_prompt).
@@ -143,7 +141,6 @@ impl Default for ReadState {
             streams: Vec::new(),
             quick_open_catalog: false,
             catalog_token: 0,
-            motw: None,
             overwrite_prompt: None,
             salvage_damaged: false,
         }

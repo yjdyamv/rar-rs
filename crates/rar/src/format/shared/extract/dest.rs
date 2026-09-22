@@ -145,7 +145,7 @@ pub(crate) fn extract_member_streams(
 pub(crate) fn propagate_member_mark_of_the_web(cx: &dyn Engine, dest_path: &Path) {
     #[cfg(windows)]
     {
-        let Some(options) = cx.read_ctx().motw.as_ref() else {
+        let Some(options) = cx.read_ctx().extract_options.mark_web.as_ref() else {
             return;
         };
         if let Some(extensions) = &options.extensions {

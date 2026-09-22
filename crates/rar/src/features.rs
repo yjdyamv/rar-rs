@@ -42,8 +42,11 @@ impl Feature {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FeatureSet {
+    /// Solid compression (members share one window chain).
     pub solid: bool,
+    /// Header encryption (`-hp`): member headers are encrypted too.
     pub header_encryption: bool,
+    /// Quick-open record: a copy of every file header for fast listing.
     pub quick_open: bool,
 }
 

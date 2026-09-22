@@ -350,6 +350,9 @@ pub fn encode_chunked_mt(
     .unwrap_or_default()
 }
 
+/// Multi-threaded chunked encode: each chunk is compressed on the pool and the
+/// bitstream is written in chunk order, so the result is byte-identical to the
+/// single-threaded path.
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)] // public API: the historical positional form
 pub fn encode_chunked_mt(

@@ -190,14 +190,14 @@ pub(crate) fn extract_all_with_options(
 ) -> RarResult<ExtractionReport> {
     let dest = dest_dir.as_ref();
     fs::create_dir_all(dest)?;
-    cx.read_ctx_mut().extract_options = opts;
+    cx.read_ctx_mut().extract_options = opts.clone();
     // A quick-open catalog carries no "STM" service records: replace it
     // with the scanned catalog before extraction restores streams.
     crate::format::shared::extract::ensure_full_catalog(cx)?;
 
     #[cfg(feature = "parallel")]
     {
-        if let Some(report) = extract_all_parallel(cx, dest, opts)? {
+        if let Some(report) = extract_all_parallel(cx, dest, opts.clone())? {
             return Ok(report);
         }
     }
@@ -486,7 +486,7 @@ pub(crate) fn extract_index_with_options(
     let rebuilt = cx.read_ctx().quick_open_catalog;
     let dest = dest_dir.as_ref();
     fs::create_dir_all(dest)?;
-    cx.read_ctx_mut().extract_options = opts;
+    cx.read_ctx_mut().extract_options = opts.clone();
     // A quick-open catalog carries no "STM" service records: replace it
     // with the scanned catalog before extraction restores streams.
     crate::format::shared::extract::ensure_full_catalog(cx)?;

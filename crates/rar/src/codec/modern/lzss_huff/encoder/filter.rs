@@ -279,6 +279,8 @@ pub fn encode_with_filters_mt(
     encode_with_filters(data, method, dict_size_log, filters, variant)
 }
 
+/// [`encode_with_filters`] using up to `threads` workers, honouring `cancel`
+/// between chunks; the output is byte-identical to the single-threaded call.
 #[cfg(feature = "parallel")]
 pub fn encode_with_filters_mt(
     data: &[u8],
@@ -788,6 +790,8 @@ pub fn member_filter_probes(data: &[u8]) -> Vec<FilterProbe<'_>> {
         .collect()
 }
 
+/// Encode `data` with the automatic filter selection: x86 `E8`/`E8E9` for code
+/// and the delta filter for correlated multi-channel data, per emitted block.
 pub fn encode_with_auto_delta_filter(
     data: &[u8],
     method: u8,

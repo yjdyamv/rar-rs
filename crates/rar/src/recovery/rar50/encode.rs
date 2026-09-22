@@ -54,6 +54,8 @@ pub(super) fn encode_inline_recovery_parity_with_progress(
     Ok((plan, parity))
 }
 
+/// Build the data area of a RAR5 inline recovery record protecting
+/// `archive_prefix` at `recovery_percent` percent, single-threaded.
 pub fn build_structural_inline_recovery_data(
     archive_prefix: &[u8],
     recovery_percent: u64,

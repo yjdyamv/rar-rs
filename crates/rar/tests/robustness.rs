@@ -67,7 +67,7 @@ fn archive_parse_random_inputs_do_not_panic() {
         let names: Vec<String> = archive.entries().map(|e| e.name().to_string()).collect();
         for name in &names {
             if let Ok(id) = archive.unique_entry(name) {
-                let _ = archive.read_entry_with_options(id, opts);
+                let _ = archive.read_entry_with_options(id, opts.clone());
             }
         }
     }
