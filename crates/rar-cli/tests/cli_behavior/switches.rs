@@ -273,11 +273,7 @@ fn cli_interactive_overwrite_prompt() {
     std::fs::write(dest.join("a.txt"), b"on disk").unwrap();
 
     let extract = |answer: &str| {
-        run_with_prompt_answer(
-            dir.path(),
-            &["x", "-idq", "--dest", "out", "arc.rar"],
-            answer,
-        )
+        run_with_prompt_answer(dir.path(), &["x", "--dest", "out", "arc.rar"], answer)
     };
 
     // "y": the archived bytes replace the existing file.
@@ -304,6 +300,33 @@ fn cli_interactive_overwrite_prompt() {
     // "q": the run aborts with the user-break code.
     let out = extract("q\n");
     assert_eq!(out.status.code(), Some(255), "quit exits 255");
+}
+
+/// Quiet mode answers WinRAR's prompts with Yes instead of skipping them: an
+/// existing destination is replaced without asking, and the run succeeds.
+#[test]
+fn cli_quiet_mode_overwrites_without_asking() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"archived").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-idq", "arc.rar", "a.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("a.txt"), b"on disk").unwrap();
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["x", "-idq", "--dest", "out", "arc.rar"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "quiet mode must not fail");
+    assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"archived");
 }
 
 /// Run the CLI with one piped answer to the overwrite prompt.

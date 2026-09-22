@@ -139,7 +139,13 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   先例）； TTY 且未给 `-y`/`-o±`/`-or`/`-f`/`-u` 时 CLI 注入 WinRAR 式
   `Y/N/A/R/Q` 询问 （`output::prompt_overwrite`；库不读 stdin），非 TTY
   保持跳过，且询问时强制 串行抽取。契约由 `overwrite_prompt.rs` 与
-  `cli_interactive_overwrite_prompt` 钉住。
+  `cli_interactive_overwrite_prompt` 钉住。**静默语义按二进制区分** （2026-09-22
+  官方 6.23/7.23 实测）：`Rar.exe x -idq` 对询问一律答
+  Yes——同目录已存在目标时**不询问直接覆盖**（退出 0）；`UnRAR.exe x -idq`
+  **仍会询问**（无 stdin 时报读错、目标不动）。故
+  `ExtractRequest::quiet_answers_yes` 由 `rar` 置真、`unrar` 置假，后者保持
+  非交互跳过（退出 10）。契约由 `cli_quiet_mode_overwrites_without_asking` 与
+  `cli_extract_overwrite_defaults_to_skip` 钉住。
 - RAR5 `-hp` 编辑补全（2026-09-22 官方 7.23 实测）：重写头走
   `write_block_header` 重加密（重命名给 `RewriteOp::CopyBlock` 加
   `rebuild_header` 标记；verbatim 拷贝仍写磁盘原字节），多卷重写首卷补发明文
@@ -183,10 +189,14 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `resync_block`：解析失败或尺寸越界时
   重同步到下一个合法块、继续找记录。**另外**：记录存在但够不到损坏时（小归档里
   RR 之前凑不出一个完整 512 字节扇区，`repairable_blocks = 0`）不再谎报
-  `All OK`—— 改为提示 `The recovery record cannot repair this damage`
-  并退到重建，对应官方的 `cannot recover data` →
-  结构重建（官方随后是交互式询问，我们非交互直接重建）。 契约由
-  `cli_repair_reports_an_unreachable_legacy_record_and_rebuilds` 钉住。
+  `All OK`—— 改为提示 `The recovery record cannot repair this damage`，
+  并按官方询问
+  `Reconstruct archive structure ? [Y]es, [N]o`（`output::confirm`； 静默 `-idq`
+  不询问、按 Yes 重建；`N`/读不到答案则只留报告）→ 归档走**退出码 3**（官方此路
+  3，与无记录重建的 0 不同），对应官方的 `cannot recover data` →
+  结构重建。契约由
+  `cli_repair_reports_an_unreachable_legacy_record_and_rebuilds` /
+  `cli_repair_asks_before_rebuilding_after_an_unusable_record` 钉住。
 - `-htb` 语义对齐官方（2026-09-22 官方对拍）：BLAKE2sp 记录**取代** CRC32 字段
   （`MemberPlan::file_header` 在有 hash 时不再写 `crc32_val`，序列化器顺带清
   `FILE_FLAG_CRC32`）。此前是「CRC32 + BLAKE2sp 并存」，每成员比官方多 4 字节；
@@ -262,6 +272,14 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 ## 已知小差异（记录，互操作无碍）
 
+- **`rar r` 没修动时不写 `fixed.<name>` 拷贝**：恢复记录够不到损坏时，官方仍写出
+  `fixed.<name>`——实测它与**损坏输入逐字节相同**（没修成功也照拷一份）；我们按
+  「不能进 行的修复不留产物」的既有契约**不写**，只提示 + （询问后）重建
+  `rebuilt.<name>`。退出码 3 与询问行为已对齐。
+- **无控制台且非静默时的覆盖询问**：官方先打印询问、读 stdin 失败后
+  `Program aborted`（Rar）或 `Read error in the file stdin`（UnRAR）并终止整轮；
+  我们直接按跳过处理（不询问、继续、全跳则退出 10）。同一 TTY
+  场景我们与官方一致。
 - **RAR4 成员注释（`cf`）**：v29+ 写侧在成员数据后发射**独立** `COMM_HEAD`
   （0x75）块，官方 6.23/7.23 `t`/`x` 均 `All OK` 且解出字节一致；pre-RAR3
   （unp_ver<29）保持嵌套布局——官方对 1.5/2.x 注释的校验本身不可作基准，且官方无

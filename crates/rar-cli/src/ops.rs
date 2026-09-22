@@ -733,6 +733,11 @@ pub struct ExtractRequest {
     pub set_creation_time: bool,
     /// Restore the last-access time from FILE_TIME records (like `-tsa`).
     pub set_access_time: bool,
+    /// Quiet mode (`-idq`) answers prompts with Yes instead of keeping the
+    /// non-interactive default. `rar` does — measured, it replaces an existing
+    /// file without asking — while `unrar` keeps asking (measured, it still
+    /// prints its replacement prompt under `-idq`).
+    pub quiet_answers_yes: bool,
 }
 
 impl ExtractRequest {
@@ -801,29 +806,24 @@ pub fn extract(
         return Ok(None);
     }
     let mut options = request.options();
-    if request.wants_prompt() && interactive() {
-        // WinRAR's console mode: ask about every existing destination. The
-        // callback carries the "All" state for this run.
-        options.prompt_overwrite = true;
-        options.skip_existing = false;
-        let all = std::sync::Arc::new(output::OverwriteAllState::new(0));
-        rar.set_overwrite_prompt(Some(std::sync::Arc::new(move |path: &std::path::Path| {
-            output::prompt_overwrite(path, &all)
-        })));
+    if request.wants_prompt() {
+        if output::quiet() && request.quiet_answers_yes {
+            // `rar -idq` answers its prompts with Yes: an existing destination
+            // is replaced without asking.
+            options.skip_existing = false;
+        } else if output::interactive() {
+            // WinRAR's console mode: ask about every existing destination. The
+            // callback carries the "All" state for this run.
+            options.prompt_overwrite = true;
+            options.skip_existing = false;
+            let all = std::sync::Arc::new(output::OverwriteAllState::new(0));
+            rar.set_overwrite_prompt(Some(std::sync::Arc::new(move |path: &std::path::Path| {
+                output::prompt_overwrite(path, &all)
+            })));
+        }
     }
     let report = extract_members(rar, &request.dest, &request.names, options)?;
     Ok(Some(report))
-}
-
-/// Whether the default overwrite mode may ask the console. A terminal on
-/// stdin means a human can answer; `RAR_RS_FORCE_OVERWRITE_PROMPT` forces it
-/// on for the test suite, which cannot allocate a console.
-fn interactive() -> bool {
-    if std::env::var_os("RAR_RS_FORCE_OVERWRITE_PROMPT").is_some() {
-        return true;
-    }
-    use std::io::IsTerminal;
-    std::io::stdin().is_terminal()
 }
 
 /// Extract the whole archive, or only the members whose stored path, mask or

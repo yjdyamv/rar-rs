@@ -6,6 +6,7 @@ use crate::error;
 use crate::error::CliResult;
 use crate::info;
 use crate::list::is_rar4_file;
+use crate::output;
 /// Lock the archive (like `rar k`).
 pub(crate) fn cmd_lock(args: &ArchiveArgs) -> CliResult<()> {
     let mut editor = open_editor(&args.archive, args.password.password.as_deref())
@@ -150,19 +151,26 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
             // damaged where the record cannot reach (a trailing partial sector
             // smaller than 512 bytes lies outside the protection, which is all
             // a small archive has): if it no longer reads, report that and
-            // rebuild, the way WinRAR's "cannot recover data" degrades to a
-            // structural reconstruction.
+            // offer to rebuild, the way WinRAR does.
             if archive_reads(std::path::Path::new(archive_path), password) {
                 info!("All OK");
-                Ok(())
-            } else {
-                reconstruct(
-                    std::path::Path::new(archive_path),
-                    &name,
-                    password,
-                    "The recovery record cannot repair this damage",
-                )
+                return Ok(());
             }
+            info!("The recovery record cannot repair this damage");
+            // WinRAR asks before rebuilding the structure, and rebuilds when it
+            // cannot ask (`-idq`, no console). A declined or unreadable answer
+            // leaves only the report.
+            let rebuild = if output::interactive() && !output::quiet() {
+                output::confirm("Reconstruct archive structure ? [Y]es, [N]o ") == Some(true)
+            } else {
+                true
+            };
+            if rebuild {
+                reconstruct(std::path::Path::new(archive_path), &name, password, None)?;
+            }
+            // The record could not repair the damage: this is a data error even
+            // when the rebuild succeeded (WinRAR exits 3 here).
+            Err(error::CliError::silent(error::EXIT_CRC))
         }
         // Nothing to repair *with*: rebuild from the members that still
         // decode, the way WinRAR does.
@@ -170,7 +178,7 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
             std::path::Path::new(archive_path),
             &name,
             password,
-            "Data recovery record not found",
+            Some("Data recovery record not found"),
         ),
         Err(other) => Err(repair_failure(other)),
     }
@@ -187,17 +195,19 @@ fn archive_reads(archive: &std::path::Path, password: Option<&str>) -> bool {
 }
 
 /// `rar r`'s rebuild fallback: decode every member, keep only the ones that
-/// verify, and write them into `rebuilt.<name>`, like WinRAR. `reason` is the
-/// banner's first line — WinRAR's `Data recovery record not found`, or our
-/// note when a record exists but cannot reach the damage.
+/// verify, and write them into `rebuilt.<name>`, like WinRAR. `reason` is an
+/// optional banner's first line — WinRAR's `Data recovery record not found`
+/// — omitted when the caller already reported why it is rebuilding.
 fn reconstruct(
     archive: &std::path::Path,
     name: &str,
     password: Option<&str>,
-    reason: &str,
+    reason: Option<&str>,
 ) -> CliResult<()> {
     let rebuilt = format!("rebuilt.{name}");
-    info!("{reason}");
+    if let Some(reason) = reason {
+        info!("{reason}");
+    }
     info!("Reconstructing {}", archive.display());
     info!("Building {rebuilt}");
     let report =
