@@ -256,21 +256,25 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   一致）。 我们把部分尾扇区排除出 parity
   组、只重建完整扇区，故能正确修复同样损坏。**这是 WinRAR
   侧缺陷，不追平**；互操作测试因此用伪随机成员数据。
-- **RAR5 元数据风格（字段级实测，2026-09-22）**：我们的 RAR5 写侧一律用 **Unix
-  风格**——`host_os`=1、attributes 为 Unix `st_mode`（0o100644 → 3 字节
-  vint）、置 `FILE_FLAG_TIME_UNIX` 并写 4 字节 unix mtime，FILE_TIME 记录存 unix
-  秒 + ns （flags 0x13）。WinRAR 按**宿主平台**写：Windows 上 `host_os`=0、DOS
-  属性（0x20， 1 字节）、不置 TIME_UNIX、FILE_TIME 记 **Windows FILETIME**（8
-  字节，flags 0x02）。 实测（同输入、`-m0`）：1 成员我们 79 B / WinRAR 83 B，3
-  成员我们 189 B / WinRAR 187 B ⇒ **每成员比 WinRAR-Windows 大 3 字节**（attrs
-  +2、TIME_UNIX 冗余 mtime +4），固定部分小 ~7 字节。另两条与平台无关的 WinRAR
-  惯例我们不复刻：主头**总是** 写 locator 记录（无 QO/RR 时 flags=QO、offset=0
-  占位；其偏移是变长 vint，我们为 可回填用定长 5 字节——也是我们 `-qo`
-  档比官方大的原因），以及 `data_size`/`unpacked_size`/`comp_info` **最少 2
-  字节** vint（13 写 `8d 00`，我们 写
-  `0d`）。**只影响字节外观**：双向读写一致，`official_interop` 与
-  `winrar_interop` 全绿。要对齐需按平台写元数据（并会让同一输入在 Windows/Linux
-  产物不同），属独立 决策，未做。
+- **RAR5 元数据：平台风格 + 两条 WinRAR 惯例（2026-09-22 字段级实测 7.23 的
+  Windows 与 Linux 两个官方构建）**。**平台风格**：WinRAR 按宿主平台写元数据 ——
+  Linux 上 `host_os`=1、Unix `st_mode` 属性（0o100644）、FILE_TIME 记录 flags
+  0x13， **与我们完全一致（记录字节逐字节相同）**；Windows 上则是
+  `host_os`=0、DOS 属性 （0x20，1 字节）、FILE_TIME 记 Windows FILETIME（flags
+  0x02）。我们**一律写 Unix 风格**，因此只在 Windows 上比官方多 2
+  字节/成员（属性宽度），Linux 无此差。
+  **两条与平台无关的惯例我们没复刻**：①官方**总是**写主头 locator 记录（无 QO/RR
+  时 flags=QO、offset=0 占位；其偏移是变长 vint，我们为可回填用定长 5 字节）⇒
+  我们固定部分小 **7 字节**；②官方把 `data_size`/`unpacked_size`/`comp_info`
+  填到**至少 2 字节**（11 写 `8b 00`，我们写 `0b`）⇒ 我们 −3
+  字节/成员。**另外**：官方只在「秒精度」时置 `FILE_FLAG_TIME_UNIX` 并省略
+  FILE_TIME 记录，有时间 ns 时反过来（清 TIME_UNIX、写 flags 0x13
+  的记录）；我们**两者都写** ⇒ +4 字节/成员（ns=0 时还多一条 11 字节的
+  记录）。**净差**（同输入、11 字节载荷、含 ns）：1 成员 我们 77 / 官方 Windows
+  81 / 官方 Linux 83，3 成员 183 / 181 / 187 ⇒ **每成员 +1（vs Linux）/ +3（vs
+  Windows）， 固定部分 −7**。**只影响字节外观**：双向读写一致，interop
+  套件全绿；对齐需按平台写 元数据并复刻两条惯例，会让同一输入在 Windows/Linux
+  产物不同，属独立决策，未做。
 
 ## 归属（谁记录什么，别再重新论证）
 
