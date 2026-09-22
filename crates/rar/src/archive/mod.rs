@@ -20,6 +20,7 @@ mod engine;
 mod ops;
 pub(crate) mod rar4_edit;
 mod reader;
+mod reconstruct;
 mod rename;
 mod transaction;
 mod writer;
@@ -68,6 +69,7 @@ pub use reader::{
     ArchiveReader, Entries, EntryId, EntryMatches, EntryRef, OpenOptions, ScanStrategy,
     VerificationFailure, VerificationReport,
 };
+pub use reconstruct::{ReconstructReport, reconstruct_archive_path};
 pub use writer::{
     AppendOptions, ArchiveWriter, CompressionLevel, EntryWriteOptions, SolidMode, ThreadCount,
     WriteEntry, WriteReport, WriterOptions,

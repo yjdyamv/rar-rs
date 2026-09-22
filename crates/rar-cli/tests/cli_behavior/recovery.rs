@@ -304,12 +304,10 @@ fn cli_find_honors_a_password_after_the_archive() {
 }
 
 /// A RAR5 archive with no inline recovery record has nothing to repair
-/// *with*. The CLI used to answer `repair: RAR format error: repair: RAR 5
-/// recovery chunk is invalid`: the wrong failure (nothing is malformed) and
-/// the operation prefixed twice. It must name the missing record in one line
-/// and leave no output behind.
+/// *with*, so the CLI reconstructs `rebuilt.<name>` from the members that
+/// still decode, like WinRAR: exit 0 and no `fixed.<name>`.
 #[test]
-fn cli_repair_without_a_recovery_record_says_so() {
+fn cli_repair_without_a_recovery_record_reconstructs() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("a.txt"), b"plain member").unwrap();
     let arc = dir.path().join("no-rr.rar");
@@ -322,23 +320,50 @@ fn cli_repair_without_a_recovery_record_says_so() {
         .unwrap();
     assert!(status.success());
 
+    // Quiet run: exit 0, `rebuilt.<name>` written, no `fixed.<name>`.
     let out = std::process::Command::new(RAR_CLI)
         .args(["r", "-idq"])
         .arg(&arc)
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(!out.status.success(), "repair without a record must fail");
-    assert_eq!(out.status.code(), Some(2), "the exit code must stay 2");
-    let text = String::from_utf8_lossy(&out.stderr);
-    assert!(text.contains("no recovery record"), "{text}");
     assert!(
-        !text.contains("RAR format error"),
-        "a missing record is not corruption: {text}"
+        out.status.success(),
+        "reconstruct must succeed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert!(!text.contains("repair: repair:"), "doubled prefix: {text}");
     assert!(
         !dir.path().join("fixed.no-rr.rar").exists(),
-        "a refused repair must not write output"
+        "there is no record, so no fixed.<name>"
     );
+    let rebuilt = dir.path().join("rebuilt.no-rr.rar");
+    assert!(rebuilt.exists(), "reconstruct must write rebuilt.<name>");
+
+    // The rebuilt archive is valid and carries the member.
+    let test = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-idq"])
+        .arg(&rebuilt)
+        .output()
+        .unwrap();
+    assert!(
+        test.status.success(),
+        "the rebuilt archive must verify:\n{}",
+        String::from_utf8_lossy(&test.stderr)
+    );
+
+    // The messages name both the missing record and the rebuild, and never
+    // the old doubled `repair: repair:` prefix.
+    let noisy = std::process::Command::new(RAR_CLI)
+        .args(["r"])
+        .arg(&arc)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(noisy.status.success());
+    let text = String::from_utf8_lossy(&noisy.stdout);
+    assert!(text.contains("Data recovery record not found"), "{text}");
+    assert!(text.contains("Reconstructing"), "{text}");
+    assert!(text.contains("Found  a.txt"), "{text}");
+    assert!(!text.contains("repair: repair:"), "doubled prefix: {text}");
+    assert!(!text.contains("RAR format error"), "{text}");
 }

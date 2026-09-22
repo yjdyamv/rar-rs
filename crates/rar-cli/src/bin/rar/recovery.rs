@@ -81,8 +81,10 @@ fn repair_failure(error: rar_rs::RarError) -> error::CliError {
     }
 }
 
-/// Repair an archive with its inline recovery record (like `rar r`).
-/// Writes `fixed.<name>` when damage was found and repaired.
+/// Repair an archive with its inline recovery record (like `rar r`); when the
+/// archive carries no record, reconstruct a fresh archive from the members
+/// that still decode, like WinRAR. Writes `fixed.<name>` when damage was
+/// repaired and `rebuilt.<name>` when there was no record to repair with.
 pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
     let archive_path = &args.archive;
     // RAR 1.3/1.4 has no recovery records and its fixed-width headers are
@@ -94,6 +96,13 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "archive.rar".to_string());
+    // A `-hp` archive needs the password to read its headers; `-p-` (empty)
+    // means "no password".
+    let password = args
+        .password
+        .password
+        .as_deref()
+        .filter(|pw| !pw.is_empty());
     let fixed_path = format!("fixed.{name}");
     // Streaming repair: bounded memory regardless of archive size; the
     // repaired archive is staged and renamed atomically by the library.
@@ -103,38 +112,61 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
         rar_rs::repair_legacy_archive_path_with_password(
             std::path::Path::new(archive_path),
             std::path::Path::new(&fixed_path),
-            args.password.password.as_deref(),
+            password,
         )
-        .map_err(repair_failure)?
     } else {
         rar_rs::repair_archive_path(
             std::path::Path::new(archive_path),
             std::path::Path::new(&fixed_path),
         )
-        .map_err(repair_failure)?
     };
-    if !repaired {
-        info!("All OK");
-        return Ok(());
+    match repaired {
+        Ok(true) => {
+            // The official tool refuses an obviously truncated archive with a
+            // clear error; validate the repaired bytes with our own reader. A
+            // `-hp` archive must be opened with its password, or the open
+            // fails before we even reach the members.
+            let mut options = rar_rs::OpenOptions::new();
+            if let Some(pw) = password {
+                options = options.password(pw);
+            }
+            if let Err(e) = rar_rs::ArchiveReader::open_with(&fixed_path, options) {
+                let _ = std::fs::remove_file(&fixed_path);
+                return Err(
+                    error::CliError::from(e).context("repair produced an unreadable archive")
+                );
+            }
+            info!("Repaired {archive_path} -> {fixed_path}");
+            Ok(())
+        }
+        Ok(false) => {
+            info!("All OK");
+            Ok(())
+        }
+        // Nothing to repair *with*: rebuild from the members that still
+        // decode, the way WinRAR does.
+        Err(rar_rs::RarError::Unsupported(_)) => {
+            reconstruct(std::path::Path::new(archive_path), &name, password)
+        }
+        Err(other) => Err(repair_failure(other)),
     }
-    // The official tool refuses an obviously truncated archive with a
-    // clear error; validate the repaired bytes with our own reader. A `-hp`
-    // archive must be opened with its password, or the open fails before we
-    // even reach the members.
-    let mut options = rar_rs::OpenOptions::new();
-    if let Some(pw) = args
-        .password
-        .password
-        .as_deref()
-        .filter(|pw| !pw.is_empty())
-    {
-        options = options.password(pw);
+}
+
+/// `rar r`'s fallback when no recovery record is present: decode every member,
+/// keep only the ones that verify, and write them into `rebuilt.<name>`, like
+/// WinRAR.
+fn reconstruct(archive: &std::path::Path, name: &str, password: Option<&str>) -> CliResult<()> {
+    let rebuilt = format!("rebuilt.{name}");
+    info!("Data recovery record not found");
+    info!("Reconstructing {}", archive.display());
+    info!("Building {rebuilt}");
+    let report =
+        rar_rs::reconstruct_archive_path(archive, std::path::Path::new(&rebuilt), password)
+            .map_err(|e| error::CliError::from(e).context("reconstruct"))?;
+    for member in report.recovered() {
+        info!("Found  {member}");
     }
-    if let Err(e) = rar_rs::ArchiveReader::open_with(&fixed_path, options) {
-        let _ = std::fs::remove_file(&fixed_path);
-        return Err(error::CliError::from(e).context("repair produced an unreadable archive"));
-    }
-    info!("Repaired {archive_path} -> {fixed_path}");
+    info!("Done");
     Ok(())
 }
 
