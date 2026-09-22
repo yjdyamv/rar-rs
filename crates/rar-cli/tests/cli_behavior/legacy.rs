@@ -646,10 +646,11 @@ fn cli_legacy_rejects_unexpressible_solid_resets() {
     );
 }
 
-/// `rar r` refuses RAR 1.3/1.4 archives with a clear message instead of
-/// sending them through the RAR5 repair path.
+/// `rar r` on a RAR 1.3/1.4 archive prints the reconstruct banner and then
+/// refuses in one line (`Cannot repair archive with old format`), producing
+/// nothing — WinRAR's behavior, exit 0.
 #[test]
-fn cli_repair_rejects_rar13_archives() {
+fn cli_repair_reports_rar13_as_unrepairable() {
     let dir = make_temp_dir();
     std::fs::write(dir.path().join("f.txt"), b"payload").unwrap();
     let arc = dir.path().join("repair13.rar");
@@ -663,17 +664,27 @@ fn cli_repair_rejects_rar13_archives() {
     assert!(status.success());
 
     let out = std::process::Command::new(RAR_CLI)
-        .args(["r", "-idq"])
+        .args(["r"])
         .arg(&arc)
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(!out.status.success(), "repair of a v14 archive must fail");
-    let text = String::from_utf8_lossy(&out.stderr);
-    assert!(text.contains("RAR 1.3/1.4"), "{text}");
     assert!(
-        !dir.path().join("fixed.repair13.rar").exists(),
-        "a refused repair must not write output"
+        out.status.success(),
+        "WinRAR exits 0 for a RAR 1.3 archive:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !dir.path().join("fixed.repair13.rar").exists()
+            && !dir.path().join("rebuilt.repair13.rar").exists(),
+        "a RAR 1.3/1.4 repair produces nothing"
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Reconstructing"), "{text}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("Cannot repair archive with old format"),
+        "{err}"
     );
 }
 
