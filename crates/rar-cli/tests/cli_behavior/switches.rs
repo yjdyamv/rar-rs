@@ -421,6 +421,97 @@ fn cli_keep_time_preserves_archive_mtime() {
     );
 }
 
+/// WinRAR's parser takes every known switch on every command and ignores the
+/// ones that command has no use for, so an irrelevant-but-valid switch must not
+/// be a usage error here either (measured on 7.23; a genuinely unknown switch
+/// still exits 7).
+#[test]
+fn cli_irrelevant_official_switches_are_ignored_like_winrar() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"payload").unwrap();
+    let arc = dir.path().join("arc.rar");
+    assert!(
+        std::process::Command::new(RAR_CLI)
+            .args(["a", "-m0", "-idq"])
+            .arg(&arc)
+            .arg("f.txt")
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    for args in [
+        ["l", "-m5"],
+        ["l", "-o+"],
+        ["l", "-c-"],
+        ["t", "-rr10"],
+        ["v", "-kb"],
+    ] {
+        let out = std::process::Command::new(RAR_CLI)
+            .args(args)
+            .arg(&arc)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?} must be accepted and ignored: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // A switch nobody defines is still an error, exactly like WinRAR's.
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["l", "-qqq"])
+        .arg(&arc)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "an unknown switch still exits 7"
+    );
+}
+
+/// `-v-` cancels volume creation even after a size (WinRAR), while the size
+/// alone does split the archive.
+#[test]
+fn cli_v_minus_cancels_volume_creation() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("big.bin"), vec![0x5c; 200_000]).unwrap();
+    let split = dir.path().join("split.rar");
+    let single = dir.path().join("single.rar");
+
+    let run = |target: &std::path::Path, cancel: bool| {
+        let mut command = std::process::Command::new(RAR_CLI);
+        command.args(["a", "-m0", "-v100k", "-idq"]);
+        if cancel {
+            command.arg("-v-");
+        }
+        command
+            .arg(target)
+            .arg("big.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    };
+
+    assert!(run(&split, false), "a volume size must split the archive");
+    assert!(
+        dir.path().join("split.part1.rar").exists(),
+        "the sized run must produce a volume set"
+    );
+    assert!(run(&single, true), "-v- must be accepted");
+    assert!(single.exists(), "the cancelled run must write one archive");
+    assert!(
+        !dir.path().join("single.part1.rar").exists(),
+        "-v- must cancel the requested volumes"
+    );
+}
+
 #[test]
 fn cli_clear_password_and_no_comment_switches() {
     let dir = make_temp_dir();

@@ -210,6 +210,11 @@ pub fn command_name(args: &[String], value_options: &HashSet<String>) -> Option<
 /// are left untouched: their remaining arguments are not parsed as
 /// switches.
 pub fn switches_after_command(args: Vec<String>, cmd: &clap::Command) -> Vec<String> {
+    drop_undeclared(reorder_switches(args, cmd), cmd)
+}
+
+/// The reordering half of [`switches_after_command`].
+fn reorder_switches(args: Vec<String>, cmd: &clap::Command) -> Vec<String> {
     let value_options = value_options(cmd);
     let root: HashSet<String> = cmd
         .get_arguments()
@@ -250,6 +255,61 @@ pub fn switches_after_command(args: Vec<String>, cmd: &clap::Command) -> Vec<Str
     reordered.extend(moved);
     reordered.extend(args[index + 1..].iter().cloned());
     reordered
+}
+
+/// Drop translated switches the target subcommand does not declare.
+///
+/// WinRAR's parser accepts every known switch on every command and simply
+/// ignores the ones that command does not use (`rar l -m5` lists the archive;
+/// `-m5` means nothing there). Clap is strict per command, so without this an
+/// irrelevant-but-valid switch was a hard usage error — the parser laxity is
+/// one of the few places where copying WinRAR is the *only* compatible
+/// behavior, and it is the deliberate exception to this CLI's rule that a
+/// switch is never silently dropped.
+///
+/// Only `--name[=value]` tokens are considered, and each is self-contained
+/// (every translation attaches its value with `=`), so dropping one never
+/// strands a following token. Non-switch arguments — the archive path, member
+/// names, selectors — are never touched. The switches this CLI rejects on
+/// purpose (`-dr`, `-dw`, `-vd`) are declared where they would apply, so they
+/// still reach their explicit refusal.
+fn drop_undeclared(args: Vec<String>, cmd: &clap::Command) -> Vec<String> {
+    let value_options = value_options(cmd);
+    let Some(index) = command_index(&args, &value_options) else {
+        return args;
+    };
+    // The command token may be the first argument (`rar l -m5`), which is the
+    // common case: unlike the reordering pass there is nothing to move, but
+    // everything to check.
+    if !subcommand_names(cmd).contains(args[index].as_str()) {
+        return args;
+    }
+    // Only the subcommand's own arguments and the root's *global* switches
+    // are legal after the command token; a root-level non-global option
+    // (`--volume-size`) written after the command is rejected by clap, and
+    // WinRAR would have ignored it on a command that does not use it.
+    let mut allowed: HashSet<String> = cmd
+        .get_arguments()
+        .filter(|arg| arg.is_global_set())
+        .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+        .collect();
+    if let Some(sub) = cmd.find_subcommand(&args[index]) {
+        allowed.extend(
+            sub.get_arguments()
+                .filter_map(|arg| arg.get_long().map(|long| format!("--{long}"))),
+        );
+    }
+    // Markers this CLI consumes before clap ever parses: a bare `-p` becomes
+    // `--password-prompt`, which `password::reject_bare_password` inspects to
+    // refuse an unencrypted archive. Clap has no such option, so it must not
+    // be filtered away.
+    allowed.insert("--password-prompt".to_string());
+    args.into_iter()
+        .filter(|arg| match long_key(arg) {
+            Some(key) => allowed.contains(&format!("--{key}")),
+            None => true,
+        })
+        .collect()
 }
 
 /// Move a normalized switch block that precedes an external subcommand token
@@ -658,6 +718,11 @@ pub fn normalize_switch(arg: &str) -> String {
     }
     if arg == "-vd" {
         return "--erase-disk".into();
+    }
+    if arg == "-v-" {
+        // WinRAR cancels volume creation with `-v-`; volumes are off by
+        // default here, so this only has to clear a requested size.
+        return "--no-volumes".into();
     }
     if let Some(rest) = arg.strip_prefix("-v") {
         return if rest.is_empty() {

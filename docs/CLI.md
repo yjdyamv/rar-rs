@@ -121,8 +121,8 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
 
 | Switch       | Meaning                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-v<size>`   | Multi-volume (e.g. `-v1m` ≈ 1 MB, `-v100k` ≈ 100 KB); sets of 10+ volumes use zero-padded `part01` names like WinRAR                                                                                                                                                                                                                                                                                     |
-| `-rr[N]`     | Inline recovery record; N = count or `N%` percent, default 10% (the `-rv` switch below takes a **required** value, no default)                                                                                                                                                                                                                                                                           |
+| `-v<size>`   | Multi-volume (e.g. `-v1m` ≈ 1 MB, `-v100k` ≈ 100 KB); sets of 10+ volumes use zero-padded `part01` names like WinRAR. `-v-` cancels a requested size (WinRAR), leaving a single archive                                                                                                                                                                                                                  |
+| `-rr[N]`     | Inline recovery record; a bare `N` is the legacy RAR4 parity-sector count, `N%` a percentage (rounded up to whole sectors), and bare `-rr` WinRAR's 3% default (the `-rv` switch below takes a **required** value, no default)                                                                                                                                                                           |
 | `-rv<N\|N%>` | Recovery volumes; at creation the count is capped at the data-volume count (the standalone `rv` command at 10×). RAR4 sets (`-ma4`) use the legacy `.rev` layout: trailer format (`base.partNN.rev` / `baseN.rev`) when the volumes end in zero bytes (WinRAR-created sets), legacy full-parity format (`base<data>_<rec>_<idx>.rev`) otherwise; silently skipped when the archive ends up single-volume |
 | `-qo[-\|+]`  | Quick-open record; `-qo` writes it, `-qo-` disables it (the default, as in WinRAR's console `rar a`). Listing commands (`l`/`v`/`lt`/`lb`/`i`, and UnRAR's) read it when present and fall back to a full scan otherwise, like WinRAR                                                                                                                                                                     |
 
@@ -198,7 +198,23 @@ parser): `-ac`, `-ai`, `-ao`, `-e[+]<attr>`, `-dh`, `-ieml`, `-ioff`, `-isnd`,
 `-ri`, `-mlp`, `-oc`, `-oni`, `-am[s,r]`, `-vp`, `-sc`. `-os` is a no-op off
 Windows. **Rejected with an error** rather than silently ignored, because they
 would imply destructive changes: `-dr` (recycle bin), `-dw` (wipe), `-vd` (erase
-disk).
+disk). A genuinely unknown switch is rejected too (exit 7), like WinRAR.
+
+**An official switch the command has no use for is accepted and ignored**, again
+like WinRAR: `rar l -m5` lists, `t -rr10` tests, `x -m5` extracts. WinRAR parses
+one global switch set and each command uses its subset; we translate the WinRAR
+spelling first and then drop whatever the target command does not declare, so a
+switch that is valid for _some_ command is never a usage error for another
+(measured against 7.23, where `-m5`/`-o+`/`-kb`/`-c-` on `l` all exit 0). This
+is the one deliberate exception to the rule that a switch is never silently
+dropped; the switches we refuse on purpose (`-dr`, `-dw`, `-vd`) stay declared
+where they apply, so they still reach their refusal.
+
+`-id` notes: `-idq`/`-inul` are honored, `-idc` is effectively always on (we
+never print WinRAR's copyright/trial banner, so `rar l` shows the list without
+it), and `-idn` (WinRAR's "list without member names") is accepted but not
+implemented — the names are still printed. `-iver` prints rar-rs's own version
+string rather than WinRAR's bare `<version> <arch>`.
 
 ---
 
