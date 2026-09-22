@@ -146,24 +146,58 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
             Ok(())
         }
         Ok(false) => {
-            info!("All OK");
-            Ok(())
+            // The parity found nothing to fix. The archive may still be
+            // damaged where the record cannot reach (a trailing partial sector
+            // smaller than 512 bytes lies outside the protection, which is all
+            // a small archive has): if it no longer reads, report that and
+            // rebuild, the way WinRAR's "cannot recover data" degrades to a
+            // structural reconstruction.
+            if archive_reads(std::path::Path::new(archive_path), password) {
+                info!("All OK");
+                Ok(())
+            } else {
+                reconstruct(
+                    std::path::Path::new(archive_path),
+                    &name,
+                    password,
+                    "The recovery record cannot repair this damage",
+                )
+            }
         }
         // Nothing to repair *with*: rebuild from the members that still
         // decode, the way WinRAR does.
-        Err(rar_rs::RarError::Unsupported(_)) => {
-            reconstruct(std::path::Path::new(archive_path), &name, password)
-        }
+        Err(rar_rs::RarError::Unsupported(_)) => reconstruct(
+            std::path::Path::new(archive_path),
+            &name,
+            password,
+            "Data recovery record not found",
+        ),
         Err(other) => Err(repair_failure(other)),
     }
 }
 
-/// `rar r`'s fallback when no recovery record is present: decode every member,
-/// keep only the ones that verify, and write them into `rebuilt.<name>`, like
-/// WinRAR.
-fn reconstruct(archive: &std::path::Path, name: &str, password: Option<&str>) -> CliResult<()> {
+/// Whether the archive still opens for reading (with the password, for a
+/// header-encrypted one).
+fn archive_reads(archive: &std::path::Path, password: Option<&str>) -> bool {
+    let mut options = rar_rs::OpenOptions::new();
+    if let Some(password) = password {
+        options = options.password(password);
+    }
+    rar_rs::ArchiveReader::open_with(archive, options).is_ok()
+}
+
+/// `rar r`'s rebuild fallback: decode every member, keep only the ones that
+/// verify, and write them into `rebuilt.<name>`, like WinRAR. `reason` is the
+/// banner's first line — WinRAR's `Data recovery record not found`, or our
+/// note when a record exists but cannot reach the damage.
+fn reconstruct(
+    archive: &std::path::Path,
+    name: &str,
+    password: Option<&str>,
+    reason: &str,
+) -> CliResult<()> {
     let rebuilt = format!("rebuilt.{name}");
-    info!("Data recovery record not found");
+    info!("{reason}");
     info!("Reconstructing {}", archive.display());
     info!("Building {rebuilt}");
     let report =

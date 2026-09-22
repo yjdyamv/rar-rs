@@ -368,6 +368,64 @@ fn cli_repair_without_a_recovery_record_reconstructs() {
     assert!(!text.contains("RAR format error"), "{text}");
 }
 
+/// A legacy archive whose recovery record cannot reach the damage (a small
+/// archive has no complete 512-byte sector before the record): `rar r` says so
+/// and rebuilds, instead of silently reporting "All OK" — WinRAR's "cannot
+/// recover data" degrading to a structural reconstruction.
+#[test]
+fn cli_repair_reports_an_unreachable_legacy_record_and_rebuilds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    std::fs::write(dir.path().join("f2.txt"), b"two").unwrap();
+    let arc = dir.path().join("rr.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-m0", "-rr10", "-idq"])
+        .arg(&arc)
+        .args(["f1.txt", "f2.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // Damage f1's FILE_HEAD (the bytes holding its name).
+    let mut bytes = std::fs::read(&arc).unwrap();
+    let pos = bytes
+        .windows(6)
+        .position(|window| window == b"f1.txt")
+        .expect("f1 header name");
+    bytes[pos] ^= 0xFF;
+    std::fs::write(&arc, &bytes).unwrap();
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["r"])
+        .arg(&arc)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("cannot repair this damage"), "{text}");
+    assert!(
+        !text.contains("All OK"),
+        "damage must not read as healthy: {text}"
+    );
+
+    let rebuilt = dir.path().join("rebuilt.rr.rar");
+    assert!(rebuilt.exists(), "the failure must fall back to a rebuild");
+    let list = std::process::Command::new(RAR_CLI)
+        .args(["lb"])
+        .arg(&rebuilt)
+        .output()
+        .unwrap();
+    let names = String::from_utf8_lossy(&list.stdout);
+    assert!(names.contains("f2.txt"), "salvaged member: {names}");
+    assert!(!names.contains("f1.txt"), "damaged member dropped: {names}");
+}
+
 /// A no-record *legacy* archive whose header is damaged: `rar r` resyncs past
 /// it, keeps the members around it, and exits 0 — WinRAR's legacy convention,
 /// unlike the RAR5 exit 3.

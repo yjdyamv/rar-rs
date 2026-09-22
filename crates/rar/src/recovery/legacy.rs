@@ -81,6 +81,27 @@ pub(crate) fn scan_protect_with_password(
     bytes: &[u8],
     password: Option<&[u8]>,
 ) -> RarResult<Rar4ProtectScan> {
+    scan_protect_impl(bytes, password, false)
+}
+
+/// [`scan_protect_with_password`] tolerating corrupt block headers: a block
+/// that cannot be parsed or whose declared size runs past the archive makes
+/// the walk resync to the next valid header instead of aborting, so the record
+/// is still found when an earlier block is damaged. Only the repair path uses
+/// it; the edit path needs the strict scan (a malformed archive is an error
+/// there).
+pub(crate) fn scan_protect_tolerant(
+    bytes: &[u8],
+    password: Option<&[u8]>,
+) -> RarResult<Rar4ProtectScan> {
+    scan_protect_impl(bytes, password, true)
+}
+
+fn scan_protect_impl(
+    bytes: &[u8],
+    password: Option<&[u8]>,
+    tolerant: bool,
+) -> RarResult<Rar4ProtectScan> {
     let sig = find_bytes(bytes, RAR4_SIGNATURE, 8 * 1024 * 1024)
         .ok_or_else(|| RarError::Format("not a RAR4 archive (signature not found)".into()))?;
     let mut stream = std::io::Cursor::new(bytes);
@@ -89,6 +110,7 @@ pub(crate) fn scan_protect_with_password(
         sig + RAR4_SIGNATURE.len(),
         bytes.len(),
         password,
+        tolerant,
     )?;
     Ok(Rar4ProtectScan {
         sfx_offset: sig,
@@ -125,7 +147,13 @@ pub(crate) fn scan_protect_file(
         .ok_or_else(|| RarError::Format("not a RAR4 archive (signature not found)".into()))?;
     file.seek(SeekFrom::Start((sig + RAR4_SIGNATURE.len()) as u64))
         .map_err(RarError::Io)?;
-    let protect = scan_protect_stream(&mut file, sig + RAR4_SIGNATURE.len(), file_len, password)?;
+    let protect = scan_protect_stream(
+        &mut file,
+        sig + RAR4_SIGNATURE.len(),
+        file_len,
+        password,
+        false,
+    )?;
     Ok(Rar4ProtectScan {
         sfx_offset: sig,
         protect,
@@ -140,6 +168,7 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
     mut pos: usize,
     file_len: usize,
     password: Option<&[u8]>,
+    tolerant: bool,
 ) -> RarResult<Option<Rar4Protect>> {
     const ENDARC_HEAD: u8 = 0x7b;
 
@@ -147,17 +176,40 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
     // `-hp` flag, latched from the (plaintext) main header: every block
     // after it has an encrypted header.
     let mut encrypted = false;
+    // A block found by resynchronizing past a corrupt one; consumed on the
+    // next iteration (the stream is already positioned past it).
+    let mut resynced: Option<crate::format::rar4::Rar4Block> = None;
     while pos + 7 <= file_len {
-        // A damaged header is exactly what this scanner exists to repair, so
-        // the envelope CRC is not checked; only the shared bounds apply.
-        let Some(block) = crate::format::rar4::read_block(
-            &mut *stream,
-            encrypted,
-            password,
-            crate::format::rar4::EnvelopePolicy::REPAIR,
-        )?
-        else {
-            break;
+        let block = match resynced.take() {
+            Some(block) => block,
+            None => {
+                // A damaged header is exactly what this scanner exists to
+                // repair, so the envelope CRC is not checked; only the shared
+                // bounds apply.
+                match crate::format::rar4::read_block(
+                    &mut *stream,
+                    encrypted,
+                    password,
+                    crate::format::rar4::EnvelopePolicy::REPAIR,
+                ) {
+                    Ok(Some(block)) => block,
+                    Ok(None) => break,
+                    // A header too broken to parse means a corrupt block, not
+                    // the record: resync past it and keep looking, the way
+                    // WinRAR searches for the record.
+                    Err(error) if tolerant && !matches!(error, RarError::Io(_)) => {
+                        match crate::format::rar4::resync_block(&mut *stream, pos as u64 + 1)? {
+                            Some(block) => {
+                                pos = block.offset as usize;
+                                resynced = Some(block);
+                                continue;
+                            }
+                            None => break,
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
         };
         let start = block.offset as usize;
         let header = &block.header;
@@ -166,7 +218,20 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
         let on_disk_header = block.on_disk_header() as usize;
         let total = block.total_size as usize;
         if start + total > file_len {
-            return Err(RarError::Format("RAR4: truncated block".into()));
+            if !tolerant {
+                return Err(RarError::Format("RAR4: truncated block".into()));
+            }
+            // The size fields are unusable (a damaged header derailed the
+            // walk): resync to the next valid block rather than giving up on
+            // finding the record at all.
+            match crate::format::rar4::resync_block(&mut *stream, start as u64 + 1)? {
+                Some(block) => {
+                    pos = block.offset as usize;
+                    resynced = Some(block);
+                    continue;
+                }
+                None => break,
+            }
         }
         if head_type == 0x73 && flags & 0x0080 != 0 {
             // MAIN_HEAD + MHD_PASSWORD: the rest of the archive is `-hp`.
@@ -381,7 +446,7 @@ pub fn repair_legacy_archive_path_with_password(
     password: Option<&str>,
 ) -> RarResult<bool> {
     let bytes = std::fs::read(src).map_err(RarError::Io)?;
-    let scan = scan_protect_with_password(&bytes, password.map(str::as_bytes))?;
+    let scan = scan_protect_tolerant(&bytes, password.map(str::as_bytes))?;
     let Some(protect) = scan.protect else {
         return Err(RarError::Unsupported(
             "archive has no legacy PROTECT_HEAD recovery record".into(),

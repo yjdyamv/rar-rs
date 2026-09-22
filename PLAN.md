@@ -175,7 +175,18 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `cli_repair_without_a_recovery_record_reconstructs` /
   `cli_repair_salvages_past_a_corrupt_header` /
   `cli_repair_salvages_a_legacy_header` /
-  `cli_repair_reports_rar13_as_unrepairable` 钉住。
+  `cli_repair_reports_rar13_as_unrepairable` 钉住。**legacy RR 定位加固**
+  （2026-09-22）：`scan_protect_stream` 的走路靠头里的尺寸字段推进，一个坏
+  `packed_size`/`head_size` 就把它带偏——此前直接报 `RAR4: truncated block`、连
+  记录都找不到。现给容忍版 `scan_protect_tolerant`（**仅 repair
+  入口**用；编辑路径 仍走严格版，坏归档在那里就该报错）接上
+  `resync_block`：解析失败或尺寸越界时
+  重同步到下一个合法块、继续找记录。**另外**：记录存在但够不到损坏时（小归档里
+  RR 之前凑不出一个完整 512 字节扇区，`repairable_blocks = 0`）不再谎报
+  `All OK`—— 改为提示 `The recovery record cannot repair this damage`
+  并退到重建，对应官方的 `cannot recover data` →
+  结构重建（官方随后是交互式询问，我们非交互直接重建）。 契约由
+  `cli_repair_reports_an_unreachable_legacy_record_and_rebuilds` 钉住。
 - `-htb` 语义对齐官方（2026-09-22 官方对拍）：BLAKE2sp 记录**取代** CRC32 字段
   （`MemberPlan::file_header` 在有 hash 时不再写 `crc32_val`，序列化器顺带清
   `FILE_FLAG_CRC32`）。此前是「CRC32 + BLAKE2sp 并存」，每成员比官方多 4 字节；
