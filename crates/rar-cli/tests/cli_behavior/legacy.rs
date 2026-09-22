@@ -411,6 +411,52 @@ fn legacy_rar4_recovery_record_follows_the_rr_forms() {
     );
 }
 
+/// `rar rr` re-protects an archive at WinRAR's 3% default when no strength is
+/// given (measured: WinRAR 6.23 and 7.23 write 3% no matter what the command
+/// or the switch requests), and an explicit strength is honored as our own
+/// extension.
+#[test]
+fn legacy_rr_command_defaults_to_three_percent() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("big.bin"), vec![0x77; 60_000]).unwrap();
+    let base = dir.path().join("base.rar");
+    assert!(
+        std::process::Command::new(RAR_CLI)
+            .args(["a", "-ma4", "-m0", "-idq"])
+            .arg(&base)
+            .arg("big.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let rr = |name: &str, percent: Option<&str>| {
+        let arc = dir.path().join(name);
+        std::fs::copy(&base, &arc).unwrap();
+        let mut command = std::process::Command::new(RAR_CLI);
+        command.arg("rr").arg(&arc);
+        if let Some(percent) = percent {
+            command.arg(percent);
+        }
+        assert!(
+            command.current_dir(dir.path()).status().unwrap().success(),
+            "rr {name}"
+        );
+        recovery_sectors(&arc)
+    };
+
+    assert_eq!(
+        rr("bare.rar", None),
+        rr("three.rar", Some("3")),
+        "the rr command's default must be WinRAR's 3%"
+    );
+    assert!(
+        rr("fifty.rar", Some("50")) > rr("three.rar", Some("3")),
+        "an explicit strength must still be honored"
+    );
+}
+
 /// `-ma13`/`-ma14` create the DOS-era `RE~^` container (RAR 1.3/1.4):
 /// stored, compressed and solid members round-trip through our reader and
 /// `unrar`, and the archive comment is queued ahead of the first member.
