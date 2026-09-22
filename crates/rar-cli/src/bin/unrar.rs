@@ -420,6 +420,7 @@ fn cmd_extract(
         set_access_time: ts.save_atime,
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
+        quiet_answers_yes: false,
     };
     let mut rar = ops::open_reader(&args.archive, password)?;
     if let Some(report) = ops::extract(&mut rar, &request)? {
@@ -469,6 +470,7 @@ fn cmd_extract_flat(
         set_access_time: ts.save_atime,
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
+        quiet_answers_yes: false,
     };
     let mut rar = ops::open_reader(&args.archive, password)?;
     if let Some(report) = ops::extract(&mut rar, &request)? {

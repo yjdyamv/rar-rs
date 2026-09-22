@@ -89,6 +89,47 @@ pub fn extract_dest(dest: &str, archive: &str, mode: AppendDir) -> std::path::Pa
 /// extraction (`0` = still asking, `1` = overwrite every later destination).
 pub type OverwriteAllState = std::sync::atomic::AtomicU8;
 
+/// Whether `-idq` / `-inul` (or `-inul`) suppressed informational output.
+pub fn quiet() -> bool {
+    QUIET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether a prompt may be asked on the console: stdin is a terminal. A test
+/// binary has no console, so `RAR_RS_FORCE_PROMPT` (or the older
+/// overwrite-specific spelling) forces prompts on for the CLI suite. Quiet
+/// mode (`-idq`) is *not* folded in here: WinRAR answers its prompts with Yes
+/// in quiet mode instead of skipping them, which each caller decides.
+pub fn interactive() -> bool {
+    use std::io::IsTerminal;
+
+    std::env::var_os("RAR_RS_FORCE_PROMPT").is_some()
+        || std::env::var_os("RAR_RS_FORCE_OVERWRITE_PROMPT").is_some()
+        || std::io::stdin().is_terminal()
+}
+
+/// Ask a yes/no question on the console. `None` when the answer cannot be read
+/// (end of input) or is not a yes/no; callers pick the default.
+#[allow(dead_code)] // `unrar` shares this module and has no yes/no prompt
+pub fn confirm(prompt: &str) -> Option<bool> {
+    use std::io::Write;
+
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line).unwrap_or(0);
+    // A human's answer is echoed by the console and closes the line; a piped
+    // one is silent, so close it here either way.
+    println!();
+    if read == 0 {
+        return None;
+    }
+    match line.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 /// Ask the console whether to overwrite an existing destination, WinRAR's
 /// `Y`/`N`/`A`/`R`/`Q` prompt. Reads a line from stdin; an unreadable or empty
 /// line leaves the file untouched. Once `all` is set, later calls overwrite

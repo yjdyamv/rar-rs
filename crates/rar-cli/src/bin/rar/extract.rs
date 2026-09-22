@@ -56,6 +56,7 @@ pub(crate) fn cmd_extract(
         allow_unsafe_links: misc.unsafe_links,
         set_creation_time: ts.save_ctime,
         set_access_time: ts.save_atime,
+        quiet_answers_yes: true,
         ..ops::ExtractRequest::default()
     };
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
@@ -150,6 +151,7 @@ pub(crate) fn cmd_extract_flat(
         allow_unsafe_links: misc.unsafe_links,
         set_creation_time: ts.save_ctime,
         set_access_time: ts.save_atime,
+        quiet_answers_yes: true,
     };
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     if let Some(report) = ops::extract(&mut rar, &request)? {
