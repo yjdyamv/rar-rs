@@ -1,7 +1,6 @@
 # 架构与模块布局
 
-> 最后核对：2026-09-19 @ `c3a76b7`（本轮：层间依赖矩阵快照、家族分层与 `Engine`
-> 接缝落地（[ADR 0008](adr/0008-one-way-family-layering.md)）、四个大文件按角色拆分）；
+> 最后核对：2026-09-22 @ `fbe2f8c`（本轮：文档失效引用清理）；
 > 实现细节以源码为准。
 
 库 crate `crates/rar`（crate 名 `rar-rs`）的模块地图与设计不变量。
@@ -118,7 +117,7 @@ version`，以及 `crates/rar-napi/package.json` 的
 
 - `format/rar5/` — 内部（`wire` 导出受支持子集）：常量与词汇（`mod.rs`）、
   `create.rs`（字典字段策略）、`headers/{parse,serialize,locator,quick_open}`、
-  `payload.rs`（MemberDecoder）、`vint.rs`、`blake2sp.rs`、`extract/` （读路径
+  `payload.rs`（MemberDecoder）、`blake2sp.rs`、`extract/` （读路径
   `open`/`solid`/`decode`/`verify`；`members`/`dest`/`read` 在
   `format/shared/extract/`）、`write/{mod,add,emit,stream,batch,engine,
   filter_policy,layout,windows}`。

@@ -44,5 +44,5 @@ rar-rs 将增加 RAR3/4（unp_ver=29）归档创建功能。核心决策：
   2026-09**：RR 与 `-hp` 后续均已实现（RAR4 创建能力矩阵现见 `PLAN.md`「现状」；
   当时的详单是旧版 `git show c2c43d4:PLAN.md`「RAR4 写侧 Tier 2 全闭」，与
   [ADR 0005](0005-rar4-edit-architecture.md)）；`.rev`
-  恢复卷也已实现（`recovery/rev3/`，见
-  `docs/issues/rar4-recovery-volumes.md`）；仍不支持的只有 QO 与 BLAKE2sp。
+  恢复卷也已实现（`recovery/rev3/`，格式细节见 `CONTEXT.md`「Recovery
+  volumes」）；仍不支持的只有 QO 与 BLAKE2sp。

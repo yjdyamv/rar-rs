@@ -85,11 +85,7 @@ the time was a claimed ~1 s CLI overhead over the library core (batch-wave +
 nested MT pool nesting); that was **disproven on 2026-09-07** and re-measured on
 2026-09-11 — see the last section.
 
-## 2026-09-08: son-pair prefetch extension — measured negative, keeps the
-
-## BT4 ceiling (issue 11 already killed the interleaved batch on the
-
-## insertion-order invariant; this was the last untried value-neutral lever)
+## 2026-09-08: son-pair prefetch extension — measured negative, keeps the BT4 ceiling (issue 11 already killed the interleaved batch on the insertion-order invariant; this was the last untried value-neutral lever)
 
 Tried the one remaining byte-identical pipelining step: within `descent`, after
 reading the current node's `(child_less, child_greater)` pair, prefetch BOTH

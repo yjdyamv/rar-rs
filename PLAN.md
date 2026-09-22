@@ -1,9 +1,7 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-19 @ `c3a76b7`（本轮：层间解耦收口 + 依赖矩阵快照（ADR
-> 0008）、 四个大文件按角色拆分、测试二进制 46→29、codec
-> 参数团收成命名上下文；上一轮： 提取侧 set-ID 规则对齐 UnRAR、junction 重建为真
-> NTFS 挂载点、cargo-deny 门禁）； 实现细节以源码为准。
+> 最后核对：2026-09-22 @ `fbe2f8c`（本轮：文档失效引用清理 + 新增 WinRAR 对齐
+> 路线图）； 实现细节以源码为准。
 
 本文件只留**结论**与**下一步**：过程与逐批验证记录在 git 历史
 （旧版详单：`git show c2c43d4:PLAN.md`），本文件不维护 CHANGELOG。
@@ -60,7 +58,7 @@
 - **优先字节相同的快路径**，而不是启发式。
 - **先测再优化**：`mtprobe` / `ratiocheck` 示例是回归闸门，热点需先由探针确认。
 - **发射块策略只有一个 owner**：`EMITTED_BLOCK_SIZE` + `find_block_end_adaptive`
-  在 `parse.rs`。
+  在 `codec/modern/lzss_huff/encoder/parse/block.rs`。
 - **`-mt` 低步数搜索是已接受的取舍**（ratio 换速度），不是待修的 bug。
 
 **已否决方向（实测为负或结构不可行，别重试）**
@@ -85,14 +83,39 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 的多轮头对头、寄存器 级 A/B）是**过程记录**，随 `map.md` 移出长期文档，需要时
 `git log -- docs/issues/compression-perf/` 找回。
 
+### WinRAR 对齐（按优先级）
+
+> 命令面已官方全覆盖，缺口全在**行为层**。逐条只记目标 + 代码接缝 + 验收测试；
+> 判据以官方 WinRAR 7.23 实测为准。
+
+- [ ] **P1 退出码对齐** — 与官方一致：缺归档 10（我们 2）、未知开关 7（clap 默认
+      2）、未知命令 7（`rar` 现 2 而 `unrar` 现 7，需统一）。接缝
+      `crates/rar-cli/src/error.rs`（`exit_code_for`）、`ops.rs::open_reader`、
+      `bin/rar/main.rs`、`bin/unrar.rs`。**注意**把「归档不存在」与真 I/O 错误
+      区分开。验收改 `crates/rar-cli/tests/cli_behavior/{switches.rs,fixes.rs}`
+      及未知开关/命令断言。
+- [ ] **P2 交互式覆盖询问** — TTY 下对已存在文件提供 WinRAR 式提示
+      （Yes/No/All/Rename/Quit），非 TTY 或显式 `-y`/`-o±` 时保持现行为。接缝
+      `rar-cli/src/output.rs::skip_existing`、`ops.rs`（`ExtractRequest`）、库侧
+      `options.rs` + `format/shared/extract/members.rs`（抽取决策点）；库里不读
+      stdin，交互回调由 CLI 注入。验收：`cli_behavior` 用管道 stdin 模拟。
+- [ ] **P3 `rar r` 无恢复记录时重建** — 官方打印
+      `Data recovery record not found` 后仍重建 `rebuilt.<name>` 并 exit 0；我们
+      现拒绝（exit 2）。接缝 `recovery/rar50/repair.rs`（reconstruct
+      复用手术重写 的块拷贝）、`recovery/{mod,legacy}.rs`、CLI
+      `bin/rar/recovery.rs`。验收更新 `rewrite_tests.rs` 与
+      `cli_behavior/recovery.rs`（现钉拒绝）。
+- [ ] **P4 RAR5 `-hp` 编辑** — 支持 header-encrypted RAR5 的 `rn`/`ch`/归档注释
+      与分卷删除：重写头用已缓存的 `archive_header_key` 重加密。接缝
+      `archive/transaction/edit.rs`（守卫）、`transaction/multivolume.rs`、
+      `crypto/rar50.rs`、`format/rar5/headers/serialize.rs`；CLI
+      `bin/rar/create.rs` 的建前拒绝。验收更新
+      `cli_behavior/edits.rs`（现钉拒绝）。
+
 ### 暂缓（等决策，不自行推进）
 
-- **退出码差异**：缺失归档我们 exit 2 / 官方 10；未知开关我们经 clap exit 2 /
-  官方 7（未单独映射）。
 - **STORE 成员竞态**：单遍 STORE 先 `hash_file` 再重读同一路径，同尺寸改写真可能
   写出旧 CRC/BLAKE2；回填头需要 patching（`-hp` 还要重加密），已接受。
-- **交互式覆盖询问**：默认按官方非交互语义跳过已存在（`-o+`/`-y` 覆盖、`-or`
-  自动改名）；交互询问未实现。
 
 ## 已修（结论与不变量）
 
@@ -165,7 +188,8 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   过滤器 + 通用 RARVM 解释器，solid 链、分卷、`-hp`、各代数据解密。
 - **RAR4 创建全能力**：LZSS m1–m5 + PPMd + 六大标准 VM 过滤器 + `-hp` + 多卷 +
   solid（链内亦应用 VM 过滤器与 PPMd 模型延续）+ 并行 batch + 单大成员块级 MT
-  （字节同等）+ NEWSUB 恢复记录。
+  （字节同等）+ NEWSUB 恢复记录。能力表见
+  [`docs/rar4-creation-spec.md`](docs/rar4-creation-spec.md)。
 - **RAR 1.3 / 1.4 / 1.5 / 2.x 创建**：`-ma13` / `-ma14` / `-ma15` / `-ma2`，含
   solid、`-p` / `-hp`、旧命名分卷。
 - **RAR4 编辑全补**（ADR 0005）：头/块级操作 + 非 solid 块拷贝 + solid 整档

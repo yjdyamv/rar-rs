@@ -1,6 +1,6 @@
 # CONTEXT — rar-rs
 
-> 最后核对：2026-09-19 @ `c3a76b7`；实现细节以源码为准。
+> 最后核对：2026-09-22 @ `fbe2f8c`；实现细节以源码为准。
 
 领域词汇（本仓库术语的单一来源）。给架构审查和后续 skill 使用；新术语先查这里，
 模糊了就地改。非词汇信息（模块地图、工程状态、限制）不放这里，见文末指针。
@@ -74,8 +74,8 @@
   `write_streamed_payload`（`format/rar5/write/stream.rs`）：统一流式写路径（单卷/分卷 +
   可选流式 AES-256-CBC）；`write_store_member` 是其 STORE 特例（明文 STORE
   不声明字节字典，与旧 `write_stored_file` 一致）。
-- **MemberPlan（`format/rar5/write/emit.rs`）** — 成员发射的命名值：文件头字段 +
-  extra 记录（`push_extra` 追加 FILE_TIME/OWNER）；内存 `write_file_entry`、流式
+- **MemberPlan（`engine/plan.rs`）** — 成员发射的命名值：文件头字段 + extra
+  记录（`push_extra` 追加 FILE_TIME/OWNER）；内存 `write_file_entry`、流式
   `write_streamed_payload`、`write_store_member`
   与多卷切分共用同一引用，`PreparedEntry`（batch）= plan + payload，原
   `SplitParams` 已并入（2026-09）。零长度成员（空文件经流式 STORE
@@ -271,8 +271,8 @@
   Huffman（`ch_set*`/`n_to_pl*` 表随解码自组织）+ st 运行模式，64 KiB
   环窗（`window`/`unp_ptr`）；流以 `new_final`
   结尾标记读取（尾部零填充）。`solid` 参数保留窗口/表，rar4 读侧按归档级
-  MHD_SOLID 跨成员链接（`collection/solid` 见 Legacy solid chain）。写侧为 rars
-  移植的 `rar15_encoder.rs`（`Unpack15Encoder`，见 ArchiveVersion）。
+  MHD_SOLID 跨成员链接（见 Legacy solid chain）。写侧为 rars 移植的
+  `rar15_encoder.rs`（`Unpack15Encoder`，见 ArchiveVersion）。
 - **Legacy LZ core（`codec/legacy/lz.rs`）** — RAR 2.x 与 3.x/4.x
   解码器的共享核心（2026-09）：`BitReader`（MSB 位读器，含
   `align_byte`/`peek_bit`/`from_bytes`/`read_encoded_u32` 与 `PpmdByteReader`
@@ -300,9 +300,9 @@
   块（主 298 符号：256 重末匹配/257–260 旧偏移/261–268 短距/269 块尾/270–297
   全长匹配）；level 长度 19×4bit 直读（无 RAR3 的 0xF 逃逸）。成员尾
   `read_last_tables` 消费块尾标记以续链。solid RAR2.x 链读侧已支持：常驻
-  `Rar20Decoder` 跨成员保窗/保表（`collection/solid` 链，见 Legacy solid
-  chain）。写侧为 rars 移植的 `rar20_encoder.rs`（`Unpack20Encoder` + 自含
-  `Rar20MatchFinder` + 音频块编码，见 ArchiveVersion）。
+  `Rar20Decoder` 跨成员保窗/保表（见 Legacy solid chain）。写侧为 rars 移植的
+  `rar20_encoder.rs`（`Unpack20Encoder` + 自含 `Rar20MatchFinder` +
+  音频块编码，见 ArchiveVersion）。
 - **PpmdDecoder（`codec/legacy/ppmd.rs`）** — PPMd 变体 H 解码器（rars
   解码半移植，编码器不移植）：Suballocator（12 B 单元、双端 bump + 空闲桶 +
   glue）+ 上下文模型（contexts Vec 模拟 C 指针布局）；`decode_init` 由块头 init
