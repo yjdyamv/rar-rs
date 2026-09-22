@@ -29,7 +29,6 @@
 //! redundant parity there is nothing to rebuild from. The legacy `.rev`
 //! recovery volumes are a separate follow-up.
 
-use crate::crc32;
 use crate::detect::RAR4_SIGNATURE;
 use crate::error::{RarError, RarResult};
 
@@ -317,17 +316,71 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
     Ok(protect)
 }
 
-/// Repair a legacy archive that carries a PROTECT_HEAD recovery record.
-/// `sfx_offset` is where the archive signature starts (0 for plain
-/// archives); the 512-byte sector grid is anchored there. Returns
-/// `Ok(None)` when every protected sector already matches its tag (nothing
-/// to do), `Ok(Some(repaired))` after rebuilding, or an error when the
-/// damage exceeds the parity or the record is malformed.
+/// One damaged 512-byte sector of a legacy recovery record, on the sector grid
+/// anchored at the archive signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyDamagedSector {
+    /// Sector index.
+    pub index: u32,
+    /// Byte offset of the sector's first byte in the archive.
+    pub offset: u64,
+    /// Whether parity rebuilt it (`false` = damage the record cannot reach:
+    /// two damaged sectors in one parity group, or a record written without
+    /// coverage for its own final partial sector).
+    pub recovered: bool,
+}
+
+/// Outcome of a legacy repair: every damaged sector and whether a rebuilt
+/// archive was written. WinRAR reports one line per entry
+/// (`Sector N (offsets ...) damaged - data recovered|cannot recover data`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LegacyRepair {
+    /// Damaged sectors in index order, empty when the archive was intact.
+    pub sectors: Vec<LegacyDamagedSector>,
+    /// Whether the rebuilt archive was written to the destination.
+    pub repaired: bool,
+}
+
+impl LegacyRepair {
+    /// Whether the archive was already intact (nothing to fix).
+    pub fn is_intact(&self) -> bool {
+        self.sectors.is_empty()
+    }
+
+    /// The damaged sectors parity could not rebuild.
+    pub fn unrecovered(&self) -> Vec<LegacyDamagedSector> {
+        self.sectors
+            .iter()
+            .copied()
+            .filter(|sector| !sector.recovered)
+            .collect()
+    }
+}
+
+/// The bytes a sector's tag covers: a complete sector as stored, or — for the
+/// record's own final sector, whose tail is where the record block itself sits
+/// — the protected prefix zero-padded to 512. WinRAR tags and parity-cover
+/// that sector the same way (verified against 6.23 output).
+fn protected_sector_image(bytes: &[u8], start: usize, prefix_end: usize) -> [u8; 512] {
+    let mut image = [0u8; 512];
+    let end = (start + 512).min(prefix_end).min(bytes.len());
+    if end > start {
+        image[..end - start].copy_from_slice(&bytes[start..end]);
+    }
+    image
+}
+
+/// Check every sector a record declares and rebuild what parity can, returning
+/// the per-sector outcome and the rebuilt image (only when a sector was
+/// rebuilt). `sfx_offset` is where the archive signature starts (0 for plain
+/// archives); the 512-byte sector grid is anchored there. Damage parity cannot
+/// reach is reported per sector rather than raised: WinRAR reports
+/// `cannot recover data` and lets the caller decide.
 pub(crate) fn repair_protect_head(
     bytes: &[u8],
     sfx_offset: usize,
     protect: &Rar4Protect,
-) -> RarResult<Option<Vec<u8>>> {
+) -> RarResult<(LegacyRepair, Option<Vec<u8>>)> {
     if protect.rec_sectors == 0 {
         return Err(RarError::Format(
             "RAR4: recovery record has no parity sectors".into(),
@@ -336,17 +389,12 @@ pub(crate) fn repair_protect_head(
     if &protect.mark != b"Protect!" && &protect.mark != b"Protect+" {
         return Err(RarError::Format("RAR4: recovery mark is invalid".into()));
     }
-    let protected_len = (protect.total_blocks as usize)
-        .checked_mul(512)
-        .ok_or_else(|| RarError::Format("RAR4: protected range overflows".into()))?;
-    let protected_end = sfx_offset
-        .checked_add(protected_len)
-        .ok_or_else(|| RarError::Format("RAR4: protected range overflows".into()))?;
-    if protected_end > bytes.len() || protect.data_end > bytes.len() {
+    if protect.data_end > bytes.len() {
         return Err(RarError::Format("RAR4: protected range is invalid".into()));
     }
+    let total_blocks = protect.total_blocks as usize;
     let recovery = &bytes[protect.data_start..protect.data_end];
-    let tag_len = (protect.total_blocks as usize)
+    let tag_len = total_blocks
         .checked_mul(2)
         .ok_or_else(|| RarError::Format("RAR4: recovery tag size overflows".into()))?;
     let parity_len = (protect.rec_sectors as usize)
@@ -359,80 +407,88 @@ pub(crate) fn repair_protect_head(
     }
     let tags = &recovery[..tag_len];
     let parity = &recovery[tag_len..];
-    // RAR 2.50 records may declare a final sector that starts before the
-    // PROTECT_HEAD but overlaps the recovery block; only complete sectors
-    // before it are safely repairable.
-    let repairable_blocks =
-        (protect.total_blocks as usize).min((protect.block_offset - sfx_offset) / 512);
+    // The protected prefix ends where the record block begins; the record's
+    // own final sector overlaps it and is only partly on disk.
+    let prefix_end = protect.block_offset;
+    let rec_sectors = protect.rec_sectors as usize;
+    let expected_tag =
+        |index: usize| u16::from_le_bytes(tags[index * 2..index * 2 + 2].try_into().unwrap());
 
+    // Every declared sector is checked, including the final partial one: a
+    // damaged tail sector is a data error WinRAR does not report as healthy.
     let mut damaged = Vec::new();
-    for index in 0..repairable_blocks {
+    for index in 0..total_blocks {
         let start = sfx_offset + index * 512;
-        let sector = &bytes[start..start + 512];
-        let actual = (!crc32::crc32(sector) & 0xffff) as u16;
-        let expected = u16::from_le_bytes(tags[index * 2..index * 2 + 2].try_into().unwrap());
-        if actual != expected {
+        let image = protected_sector_image(bytes, start, prefix_end);
+        if sector_tag(&image) != expected_tag(index) {
             damaged.push(index);
         }
     }
     if damaged.is_empty() {
-        return Ok(None);
-    }
-    if damaged.len() > protect.rec_sectors as usize {
-        return Err(RarError::Format(format!(
-            "RAR4: recovery damage ({} sectors) exceeds parity sector count {}",
-            damaged.len(),
-            protect.rec_sectors
-        )));
-    }
-    let mut used_slots = vec![false; protect.rec_sectors as usize];
-    for &index in &damaged {
-        let slot = index % protect.rec_sectors as usize;
-        if used_slots[slot] {
-            return Err(RarError::Format(
-                "RAR4: recovery cannot repair multiple sectors in the same parity group".into(),
-            ));
-        }
-        used_slots[slot] = true;
+        return Ok((LegacyRepair::default(), None));
     }
 
-    let mut repaired = bytes.to_vec();
-    for &missing_index in &damaged {
-        let slot = missing_index % protect.rec_sectors as usize;
-        let mut sector = parity[slot * 512..slot * 512 + 512].to_vec();
-        for index in (slot..repairable_blocks).step_by(protect.rec_sectors as usize) {
-            if index == missing_index {
-                continue;
+    // A parity slot can rebuild a sector only when it is that slot's single
+    // damaged member; the rest of the group must be intact to divide it out.
+    let mut slots: Vec<Vec<usize>> = vec![Vec::new(); rec_sectors];
+    for &index in &damaged {
+        slots[index % rec_sectors].push(index);
+    }
+
+    let mut rebuilt = bytes.to_vec();
+    let mut sectors = Vec::with_capacity(damaged.len());
+    let mut repaired = false;
+    for (slot, indexes) in slots.iter().enumerate() {
+        for &missing in indexes {
+            let offset = (sfx_offset + missing * 512) as u64;
+            let mut recovered = false;
+            if indexes.len() == 1 {
+                let mut sector = parity[slot * 512..slot * 512 + 512].to_vec();
+                for index in (slot..total_blocks).step_by(rec_sectors) {
+                    if index == missing {
+                        continue;
+                    }
+                    let start = sfx_offset + index * 512;
+                    let image = protected_sector_image(bytes, start, prefix_end);
+                    for (out, byte) in sector.iter_mut().zip(&image) {
+                        *out ^= *byte;
+                    }
+                }
+                // Only the prefix part of the sector exists on disk: the tail
+                // of the record's own final sector is the record block.
+                if sector_tag(&sector) == expected_tag(missing) {
+                    let start = sfx_offset + missing * 512;
+                    let end = (start + 512).min(prefix_end).min(rebuilt.len());
+                    if end > start {
+                        rebuilt[start..end].copy_from_slice(&sector[..end - start]);
+                        recovered = true;
+                        repaired = true;
+                    }
+                }
             }
-            let start = sfx_offset + index * 512;
-            for (out, byte) in sector.iter_mut().zip(&repaired[start..start + 512]) {
-                *out ^= *byte;
-            }
-        }
-        let start = sfx_offset + missing_index * 512;
-        repaired[start..start + 512].copy_from_slice(&sector);
-        let actual = (!crc32::crc32(&sector) & 0xffff) as u16;
-        let expected = u16::from_le_bytes(
-            tags[missing_index * 2..missing_index * 2 + 2]
-                .try_into()
-                .unwrap(),
-        );
-        if actual != expected {
-            return Err(RarError::Crc {
-                expected: expected as u32,
-                actual: actual as u32,
-                context: "RAR4 recovery rebuilt sector".into(),
+            sectors.push(LegacyDamagedSector {
+                index: missing as u32,
+                offset,
+                recovered,
             });
         }
     }
-    Ok(Some(repaired))
+
+    Ok((
+        LegacyRepair { sectors, repaired },
+        repaired.then_some(rebuilt),
+    ))
 }
 
 /// Repair the legacy archive at `src` into `dst` when it carries a
-/// PROTECT_HEAD recovery record. Returns `Ok(true)` when something was
-/// rebuilt, `Ok(false)` when the archive was already intact (nothing
-/// written), and an error when it has no usable recovery record.
-pub fn repair_legacy_archive_path(src: &std::path::Path, dst: &std::path::Path) -> RarResult<bool> {
+/// PROTECT_HEAD recovery record: `dst` is written only when parity rebuilt a
+/// sector. The report names every damaged sector, so a caller can tell an
+/// intact archive from damage the record cannot reach. An error means the
+/// archive has no usable recovery record.
+pub fn repair_legacy_archive_path(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> RarResult<LegacyRepair> {
     repair_legacy_archive_path_with_password(src, dst, None)
 }
 
@@ -444,7 +500,7 @@ pub fn repair_legacy_archive_path_with_password(
     src: &std::path::Path,
     dst: &std::path::Path,
     password: Option<&str>,
-) -> RarResult<bool> {
+) -> RarResult<LegacyRepair> {
     let bytes = std::fs::read(src).map_err(RarError::Io)?;
     let scan = scan_protect_tolerant(&bytes, password.map(str::as_bytes))?;
     let Some(protect) = scan.protect else {
@@ -452,17 +508,17 @@ pub fn repair_legacy_archive_path_with_password(
             "archive has no legacy PROTECT_HEAD recovery record".into(),
         ));
     };
-    let repaired = repair_protect_head(&bytes, scan.sfx_offset, &protect)?;
-    let Some(repaired) = repaired else {
-        return Ok(false);
+    let (report, rebuilt) = repair_protect_head(&bytes, scan.sfx_offset, &protect)?;
+    let Some(rebuilt) = rebuilt else {
+        return Ok(report);
     };
     // Keep the write atomic: stage next to the destination, then rename.
     use std::io::Write;
     let (mut staged, mut file) = crate::fs::atomic::StagedFile::create(dst)?;
-    file.write_all(&repaired).map_err(RarError::Io)?;
+    file.write_all(&rebuilt).map_err(RarError::Io)?;
     drop(file);
     staged.commit()?;
-    Ok(true)
+    Ok(report)
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8], limit: usize) -> Option<usize> {
@@ -515,11 +571,6 @@ pub(crate) fn build_legacy_recovery_block(prefix: &[u8], rec_sectors: u32) -> Ra
             "RAR4: recovery record over an empty archive".into(),
         ));
     }
-    // Complete 512-byte sectors before this block; a partial final sector
-    // (whose tail would overlap this very block) is tagged but never folded
-    // into a parity group — the repair path only rebuilds complete sectors.
-    let full_sectors = prefix.len() / 512;
-
     // Sector tags (little-endian u16 each): every declared sector, with a
     // partial tail zero-padded for its tag CRC, matching the reader.
     let mut tags = Vec::with_capacity(total_blocks as usize * 2);
@@ -531,13 +582,13 @@ pub(crate) fn build_legacy_recovery_block(prefix: &[u8], rec_sectors: u32) -> Ra
         sector[..end - start].copy_from_slice(&prefix[start..end]);
         sector[end - start..].fill(0);
         tags.extend_from_slice(&sector_tag(&sector).to_le_bytes());
-        if block < full_sectors {
-            // Parity group: every complete sector whose index ≡ block
-            // (mod rec_sectors) XORs into parity[block % rec_sectors].
-            let slot = block % rec_sectors as usize;
-            for (out, byte) in parity[slot * 512..slot * 512 + 512].iter_mut().zip(&sector) {
-                *out ^= *byte;
-            }
+        // Every declared sector — the zero-padded final partial one included —
+        // joins its parity group, exactly as WinRAR's records do (verified
+        // against 6.23 output): without it, damage in that sector can be seen
+        // but never repaired.
+        let slot = block % rec_sectors as usize;
+        for (out, byte) in parity[slot * 512..slot * 512 + 512].iter_mut().zip(&sector) {
+            *out ^= *byte;
         }
     }
 
@@ -638,17 +689,21 @@ mod tests {
         let damage_offset = 512 + 16;
         damaged[damage_offset..damage_offset + 64].fill(0xa5);
 
-        let rebuilt = repair_protect_head(&damaged, 0, &protect)
-            .expect("repair")
-            .expect("damage found");
-        assert_eq!(rebuilt, original, "repair restores the original bytes");
+        let (report, rebuilt) = repair_protect_head(&damaged, 0, &protect).expect("repair");
+        assert!(
+            report.repaired,
+            "the damaged sector must be rebuilt: {report:?}"
+        );
+        assert_eq!(
+            rebuilt.expect("damage found"),
+            original,
+            "repair restores the original bytes"
+        );
 
         // An intact archive reports nothing to do.
-        assert!(
-            repair_protect_head(&original, 0, &protect)
-                .expect("intact scan")
-                .is_none()
-        );
+        let (report, rebuilt) = repair_protect_head(&original, 0, &protect).expect("intact scan");
+        assert!(report.is_intact(), "{report:?}");
+        assert!(rebuilt.is_none());
     }
 
     /// Build a NEWSUB (0x7a) recovery block over a synthetic prefix and
@@ -720,11 +775,9 @@ mod tests {
         assert_eq!(protect.data_start, rr_offset + 54);
 
         // Intact: nothing to repair.
-        assert!(
-            repair_protect_head(&archive, 0, &protect)
-                .expect("intact scan")
-                .is_none()
-        );
+        let (report, rebuilt) = repair_protect_head(&archive, 0, &protect).expect("intact scan");
+        assert!(report.is_intact(), "{report:?}");
+        assert!(rebuilt.is_none());
 
         // Damage a stretch of a protected data sector (inside `payload`, far
         // from the recovery block itself) and rebuild it byte-identically.
@@ -733,19 +786,51 @@ mod tests {
         damaged[damage_at..damage_at + 128].fill(0x5a);
         let repaired = repair_protect_head(&damaged, 0, &protect)
             .expect("repair")
+            .1
             .expect("damage found");
         assert_eq!(repaired, archive, "NEWSUB RR repair restores the prefix");
 
+        // The record's own final sector: its tail is where the record block
+        // sits, so only [sector_start, record_start) is on disk. WinRAR both
+        // tags and parity-covers it; damage there must be found (never
+        // reported as healthy) and rebuilt byte-identically.
+        let last = total_blocks as usize - 1;
+        let mut damaged = archive.clone();
+        damaged[(last * 512)..rr_offset].fill(0x3c);
+        let (report, rebuilt) = repair_protect_head(&damaged, 0, &protect).expect("tail scan");
+        assert_eq!(
+            report.sectors,
+            vec![LegacyDamagedSector {
+                index: last as u32,
+                offset: last as u64 * 512,
+                recovered: true,
+            }],
+            "{report:?}"
+        );
+        assert_eq!(
+            rebuilt.expect("tail damage rebuilt"),
+            archive,
+            "the record's own final sector is rebuilt from parity"
+        );
+
         // Two damaged sectors in the SAME parity group exceed that group's
         // capacity (one parity sector can rebuild one member), even though
-        // the global count is far below the parity sector total.
+        // the global count is far below the parity sector total. Both are
+        // reported as unrecovered, the way WinRAR says `cannot recover data`,
+        // rather than aborting the whole repair.
         let mut hopeless = archive.clone();
         hopeless[0..32].fill(0x7e);
         hopeless[(rec as usize * 512)..(rec as usize * 512 + 32)].fill(0x7e);
-        assert!(
-            repair_protect_head(&hopeless, 0, &protect).is_err(),
-            "two damaged sectors in one parity group must fail"
+        let (report, rebuilt) = repair_protect_head(&hopeless, 0, &protect).expect("scan");
+        assert!(!report.repaired, "{report:?}");
+        assert!(rebuilt.is_none());
+        let unrecovered = report.unrecovered();
+        assert_eq!(
+            unrecovered.iter().map(|s| s.index).collect::<Vec<_>>(),
+            vec![0, rec],
+            "{report:?}"
         );
+        assert_eq!(unrecovered[1].offset, u64::from(rec) * 512);
     }
 
     /// The streaming file scanner must agree with the slice scanner it was

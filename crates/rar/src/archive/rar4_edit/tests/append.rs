@@ -75,7 +75,11 @@ fn append_rebuilds_existing_rr_over_the_new_prefix() {
     let dmg_path = dir.path().join("dmg.rar");
     std::fs::write(&dmg_path, &damaged).unwrap();
     let fixed = dir.path().join("fixed.rar");
-    assert!(crate::recovery::repair_legacy_archive_path(&dmg_path, &fixed).unwrap());
+    assert!(
+        crate::recovery::repair_legacy_archive_path(&dmg_path, &fixed)
+            .unwrap()
+            .repaired
+    );
     assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
     let mut a = crate::archive::RarArchive::open(&path).unwrap();
     assert_eq!(
@@ -204,7 +208,11 @@ fn solid_append_preserves_comment_and_rebuilds_rr() {
     let dmg = dir.path().join("dmg.rar");
     std::fs::write(&dmg, &damaged).unwrap();
     let fixed = dir.path().join("fixed.rar");
-    assert!(crate::recovery::repair_legacy_archive_path(&dmg, &fixed).unwrap());
+    assert!(
+        crate::recovery::repair_legacy_archive_path(&dmg, &fixed)
+            .unwrap()
+            .repaired
+    );
     assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
 }
 

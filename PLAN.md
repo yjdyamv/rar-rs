@@ -188,16 +188,30 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   记录都找不到。现给容忍版 `scan_protect_tolerant`（**仅 repair
   入口**用；编辑路径 仍走严格版，坏归档在那里就该报错）接上
   `resync_block`：解析失败或尺寸越界时
-  重同步到下一个合法块、继续找记录。**另外**：记录存在但够不到损坏时（小归档里
-  RR 之前凑不出一个完整 512 字节扇区，`repairable_blocks = 0`）不再谎报
-  `All OK`—— 改为提示 `The recovery record cannot repair this damage`，
-  并按官方询问
+  重同步到下一个合法块、继续找记录。**检测/修复覆盖全扇区**（2026-09-22 官方
+  6.23 逐字节实测）：此前只比对「完整扇区」（`repairable_blocks`），记录**自己
+  那个不完整尾扇区**的 tag 从不比对——坏在那里时我们**谎报 `All OK`**（同一份文件
+  官方 `rar r` 能修好、`unrar t` 也报
+  `p2.txt - checksum error`，我们却说健康）。
+  现比对记录的**每一个**声明扇区：不完整尾部按**前缀零填充**语义算 tag（实测官方
+  tag 与 parity 都是这个语义，`parity slot 7: xor-of-group == parity-on-disk` 为
+  真），重建时**只写回前缀部分**、绝不改写记录自身字节。我们的 writer
+  同步修正：parity 组此前 `if block < full_sectors` 排除了那个尾部扇区（比官方
+  弱），现已与官方一致。
+  **逐扇区报告**也照官方：`Sector N (offsets {起始:X}...{结束:X}) damaged -
+  data recovered|cannot recover data`（十六进制；实测对齐
+  `Sector 5 (offsets
+  A00...C00)` 与
+  `Sector 117 (offsets EA00...EC00)`，两个损坏点重建出的 `fixed`
+  与官方同样逐字节还原）。修不动（同一 parity 组内两个坏扇区）时不再
+  中止，而是逐条报 `cannot recover data`，再按官方询问
   `Reconstruct archive structure ? [Y]es, [N]o`（`output::confirm`； 静默 `-idq`
   不询问、按 Yes 重建；`N`/读不到答案则只留报告）→ 归档走**退出码 3**（官方此路
-  3，与无记录重建的 0 不同），对应官方的 `cannot recover data` →
-  结构重建。契约由
-  `cli_repair_reports_an_unreachable_legacy_record_and_rebuilds` /
-  `cli_repair_asks_before_rebuilding_after_an_unusable_record` 钉住。
+  3，与无记录重建的 0 不同）。库侧 API 由 `bool` 改为
+  `LegacyRepair`/`LegacyDamagedSector` 报告。契约由
+  `cli_repair_recovers_damage_in_the_records_final_sector` /
+  `cli_repair_asks_before_rebuilding_after_an_unusable_record` 与 legacy 单测
+  （尾部扇区检测+修复、同组双坏扇区报 unrecovered）钉住。
 - `-htb` 语义对齐官方（2026-09-22 官方对拍）：BLAKE2sp 记录**取代** CRC32 字段
   （`MemberPlan::file_header` 在有 hash 时不再写 `crc32_val`，序列化器顺带清
   `FILE_FLAG_CRC32`）。此前是「CRC32 + BLAKE2sp 并存」，每成员比官方多 4 字节；
@@ -291,9 +305,10 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `UnRAR.exe lb` 与我们一致；我们随 UnRAR。
 - **WinRAR 的 RAR4 修复对周期数据的缺陷**：恢复记录块落入其保护的最后部分扇区且
   成员数据短周期重复时，WinRAR 自己的 `rar r` 会修坏 RR 尾部（6.23 与 7.23
-  一致）。 我们把部分尾扇区排除出 parity
-  组、只重建完整扇区，故能正确修复同样损坏。**这是 WinRAR
-  侧缺陷，不追平**；互操作测试因此用伪随机成员数据。
+  一致，且与记录是谁写的无关）。我们的 parity 组与官方一致（含那个尾部扇区），
+  差别在**写回范围**：只写回落在前缀里的那部分字节，记录自身字节永不改写，故能
+  逐字节修复同样损坏。**这是 WinRAR 侧缺陷，不追平**；互操作测试因此用伪随机成员
+  数据。
 - **RAR5 元数据：平台风格 + 两条 WinRAR 惯例（2026-09-22 字段级实测 7.23 的
   Windows 与 Linux 两个官方构建）**。**平台风格**：WinRAR 按宿主平台写元数据 ——
   Linux 上 `host_os`=1、Unix `st_mode` 属性（0o100644）、FILE_TIME 记录 flags

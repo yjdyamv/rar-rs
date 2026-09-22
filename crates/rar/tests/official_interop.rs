@@ -1377,7 +1377,11 @@ fn official_unrar_validates_rar4_header_edits() {
     let damaged_path = dir.path().join("damaged.rar");
     std::fs::write(&damaged_path, &damaged).unwrap();
     let fixed_path = dir.path().join("fixed.rar");
-    assert!(rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path).unwrap());
+    assert!(
+        rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path)
+            .unwrap()
+            .repaired
+    );
     assert_eq!(std::fs::read(&fixed_path).unwrap(), with_rr);
     let status = std::process::Command::new(&unrar)
         .arg("t")
@@ -1804,7 +1808,11 @@ fn official_unrar_validates_rar4_appends() {
     let dmg = dir.path().join("dmg.rar");
     std::fs::write(&dmg, &damaged).unwrap();
     let fixed = dir.path().join("fixed.rar");
-    assert!(rar_rs::repair_legacy_archive_path(&dmg, &fixed).unwrap());
+    assert!(
+        rar_rs::repair_legacy_archive_path(&dmg, &fixed)
+            .unwrap()
+            .repaired
+    );
     assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
 }
 
