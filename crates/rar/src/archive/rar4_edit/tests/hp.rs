@@ -247,7 +247,9 @@ fn hp_recovery_record_rebuilds_and_repairs() {
     std::fs::write(&dmg, &damaged).unwrap();
     let fixed = dir.path().join("fixed.rar");
     assert!(
-        crate::recovery::repair_legacy_archive_path_with_password(&dmg, &fixed, Some(HP)).unwrap()
+        crate::recovery::repair_legacy_archive_path_with_password(&dmg, &fixed, Some(HP))
+            .unwrap()
+            .repaired
     );
     assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
 }
@@ -297,7 +299,9 @@ fn hp_delete_rebuilds_an_existing_recovery_record() {
     std::fs::write(&dmg, &damaged).unwrap();
     let fixed = dir.path().join("fixed.rar");
     assert!(
-        crate::recovery::repair_legacy_archive_path_with_password(&dmg, &fixed, Some(HP)).unwrap()
+        crate::recovery::repair_legacy_archive_path_with_password(&dmg, &fixed, Some(HP))
+            .unwrap()
+            .repaired
     );
     assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
 }

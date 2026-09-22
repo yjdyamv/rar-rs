@@ -104,7 +104,8 @@ pub use options::{
 pub use parallel::{set_compression_threads, set_extraction_threads};
 pub use recovery::rev50::{build_recovery_volumes_for_set, plan_recovery_volume_count};
 pub use recovery::{
-    rebuild_missing_volumes, rebuild_missing_volumes_with, repair_archive, repair_archive_path,
-    repair_archive_path_with, repair_legacy_archive_path, repair_legacy_archive_path_with_password,
+    LegacyDamagedSector, LegacyRepair, rebuild_missing_volumes, rebuild_missing_volumes_with,
+    repair_archive, repair_archive_path, repair_archive_path_with, repair_legacy_archive_path,
+    repair_legacy_archive_path_with_password,
 };
 pub use version::ArchiveVersion;

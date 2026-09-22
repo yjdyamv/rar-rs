@@ -1290,7 +1290,10 @@ fn create_rar4_recovery_record_repairs_periodic_damage() {
     std::fs::write(&damaged_path, &damaged).unwrap();
     let fixed_path = dir.path().join("periodic_fixed.rar");
     let repaired = rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path).expect("repair");
-    assert!(repaired, "periodic damage must be repairable by us");
+    assert!(
+        repaired.repaired,
+        "periodic damage must be repairable by us: {repaired:?}"
+    );
     assert_eq!(
         std::fs::read(&fixed_path).unwrap(),
         std::fs::read(&arc).unwrap(),

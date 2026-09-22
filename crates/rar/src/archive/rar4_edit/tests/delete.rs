@@ -102,7 +102,11 @@ fn delete_members_keeps_others_and_rebuilds_rr() {
     let damaged_path = dir.path().join("dmg.rar");
     std::fs::write(&damaged_path, &damaged).unwrap();
     let fixed_path = dir.path().join("fixed.rar");
-    assert!(crate::recovery::repair_legacy_archive_path(&damaged_path, &fixed_path).unwrap());
+    assert!(
+        crate::recovery::repair_legacy_archive_path(&damaged_path, &fixed_path)
+            .unwrap()
+            .repaired
+    );
     assert_eq!(std::fs::read(&fixed_path).unwrap(), bytes);
 }
 

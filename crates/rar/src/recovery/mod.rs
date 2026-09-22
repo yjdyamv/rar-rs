@@ -8,7 +8,10 @@
 // `raw` feature); a few wire-level helpers have no in-tree caller.
 
 mod legacy;
-pub use legacy::{repair_legacy_archive_path, repair_legacy_archive_path_with_password};
+pub use legacy::{
+    LegacyDamagedSector, LegacyRepair, repair_legacy_archive_path,
+    repair_legacy_archive_path_with_password,
+};
 
 /// Legacy recovery-record helpers (crate-internal): the RAR4 creation
 /// path (`archive/create.rs`) builds NEWSUB blocks through here, and the

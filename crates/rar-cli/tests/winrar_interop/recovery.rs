@@ -382,7 +382,10 @@ fn rar4_recovery_record_interops_with_winrar() {
     let fixed_path = dir.path().join("our_rr4_fixed.rar");
     let repaired =
         rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path).expect("our repair");
-    assert!(repaired, "our repair must find and fix the damage");
+    assert!(
+        repaired.repaired,
+        "our repair must find and fix the damage: {repaired:?}"
+    );
     assert_eq!(
         std::fs::read(&fixed_path).unwrap(),
         std::fs::read(&arc).unwrap(),
@@ -433,7 +436,10 @@ fn rar4_recovery_record_interops_with_winrar() {
         let wfixed_path = dir.path().join("win_rr4_fixed.rar");
         let repaired =
             rar_rs::repair_legacy_archive_path(&wdamaged_path, &wfixed_path).expect("our repair");
-        assert!(repaired, "our repair must fix the WinRAR RAR4 RR archive");
+        assert!(
+            repaired.repaired,
+            "our repair must fix the WinRAR RAR4 RR archive: {repaired:?}"
+        );
         let mut ar = ArchiveReader::open(&wfixed_path).unwrap();
         assert_eq!(
             ar.read_entry(ar.unique_entry("rr4.bin").unwrap()).unwrap(),

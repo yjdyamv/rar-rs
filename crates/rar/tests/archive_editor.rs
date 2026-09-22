@@ -857,7 +857,9 @@ fn rar4_recovery_record_adds_replaces_and_survives_repair() {
     std::fs::write(&damaged_path, &damaged).unwrap();
     let fixed_path = dir.path().join("fixed.rar");
     assert!(
-        rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path).unwrap(),
+        rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path)
+            .unwrap()
+            .repaired,
         "damage found and rebuilt"
     );
     assert_eq!(
@@ -868,7 +870,11 @@ fn rar4_recovery_record_adds_replaces_and_survives_repair() {
 
     // An intact archive reports nothing to repair.
     let intact_fixed = dir.path().join("intact-fixed.rar");
-    assert!(!rar_rs::repair_legacy_archive_path(&path, &intact_fixed).unwrap());
+    assert!(
+        rar_rs::repair_legacy_archive_path(&path, &intact_fixed)
+            .unwrap()
+            .is_intact()
+    );
 
     // Replacing the record at a larger percent grows the record; exactly
     // one record remains and the larger record still repairs damage.
@@ -882,7 +888,11 @@ fn rar4_recovery_record_adds_replaces_and_survives_repair() {
     let damaged_path = dir.path().join("damaged2.rar");
     std::fs::write(&damaged_path, &damaged).unwrap();
     let fixed_path = dir.path().join("fixed2.rar");
-    assert!(rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path).unwrap());
+    assert!(
+        rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path)
+            .unwrap()
+            .repaired
+    );
     assert_eq!(std::fs::read(&fixed_path).unwrap(), replaced);
 }
 
@@ -1059,7 +1069,11 @@ fn rar4_rename_rewrites_headers_and_keeps_data() {
     let damaged_path = dir.path().join("dmg.rar");
     std::fs::write(&damaged_path, &damaged).unwrap();
     let fixed_path = dir.path().join("fixed.rar");
-    assert!(rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path).unwrap());
+    assert!(
+        rar_rs::repair_legacy_archive_path(&damaged_path, &fixed_path)
+            .unwrap()
+            .repaired
+    );
     assert_eq!(std::fs::read(&fixed_path).unwrap(), bytes);
 
     // A stale ID (from before the rename) fails without touching the file.

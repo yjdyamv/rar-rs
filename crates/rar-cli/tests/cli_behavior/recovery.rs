@@ -368,12 +368,12 @@ fn cli_repair_without_a_recovery_record_reconstructs() {
     assert!(!text.contains("RAR format error"), "{text}");
 }
 
-/// A legacy archive whose recovery record cannot reach the damage (a small
-/// archive has no complete 512-byte sector before the record): `rar r` says so
-/// and rebuilds, instead of silently reporting "All OK" — WinRAR's "cannot
-/// recover data" degrading to a structural reconstruction.
+/// The record's own final sector covers the tail of the protected prefix —
+/// including, in a small archive, a member header. `rar r` must find that
+/// damage (WinRAR's `Sector 0 (offsets 0...200) damaged - data recovered`),
+/// rebuild `fixed.<name>` byte-identically, and never call it "All OK".
 #[test]
-fn cli_repair_reports_an_unreachable_legacy_record_and_rebuilds() {
+fn cli_repair_recovers_damage_in_the_records_final_sector() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
     std::fs::write(dir.path().join("f2.txt"), b"two").unwrap();
@@ -386,9 +386,11 @@ fn cli_repair_reports_an_unreachable_legacy_record_and_rebuilds() {
         .status()
         .unwrap();
     assert!(status.success());
+    let intact = std::fs::read(&arc).unwrap();
 
-    // Damage f1's FILE_HEAD (the bytes holding its name).
-    let mut bytes = std::fs::read(&arc).unwrap();
+    // Damage f1's FILE_HEAD (the bytes holding its name); in this archive the
+    // record's own final sector is the only one covering it.
+    let mut bytes = intact.clone();
     let pos = bytes
         .windows(6)
         .position(|window| window == b"f1.txt")
@@ -402,55 +404,55 @@ fn cli_repair_reports_an_unreachable_legacy_record_and_rebuilds() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    // WinRAR exits 3 in this path: the record exists but could not repair the
-    // damage, so it is a data error even though the rebuild succeeds.
-    assert_eq!(out.status.code(), Some(3));
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("cannot repair this damage"), "{text}");
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("damaged - data recovered"),
+        "the sector report must name the outcome: {text}"
+    );
+    assert!(
+        text.contains("Sector 0 (offsets 0...200)"),
+        "WinRAR's sector line, hex offsets: {text}"
+    );
     assert!(
         !text.contains("All OK"),
         "damage must not read as healthy: {text}"
     );
-
-    // With no console to ask, WinRAR answers its own prompt with Yes and
-    // rebuilds.
-    let rebuilt = dir.path().join("rebuilt.rr.rar");
-    assert!(rebuilt.exists(), "the failure must fall back to a rebuild");
-    let list = std::process::Command::new(RAR_CLI)
-        .args(["lb"])
-        .arg(&rebuilt)
-        .output()
-        .unwrap();
-    let names = String::from_utf8_lossy(&list.stdout);
-    assert!(names.contains("f2.txt"), "salvaged member: {names}");
-    assert!(!names.contains("f1.txt"), "damaged member dropped: {names}");
+    assert!(
+        text.contains("Repaired"),
+        "a rebuilt archive is written: {text}"
+    );
+    // The parity restores the archive byte for byte.
+    assert_eq!(
+        std::fs::read(dir.path().join("fixed.rr.rar")).unwrap(),
+        intact
+    );
 }
 
 /// `rar r` asks before rebuilding when a recovery record cannot repair the
-/// damage, WinRAR's `Reconstruct archive structure ? [Y]es, [N]o`: `N` leaves
-/// only the report, `Y` also rebuilds. Both answer with exit 3.
+/// damage (two damaged sectors in one parity group), WinRAR's
+/// `Reconstruct archive structure ? [Y]es, [N]o`: `N` leaves only the report,
+/// `Y` also rebuilds. Both answer with exit 3.
 #[test]
 fn cli_repair_asks_before_rebuilding_after_an_unusable_record() {
     for (answer, expect_rebuilt) in [("y", true), ("n", false)] {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
-        std::fs::write(dir.path().join("f2.txt"), b"two").unwrap();
+        std::fs::write(dir.path().join("f1.txt"), vec![b'a'; 6000]).unwrap();
         let arc = dir.path().join("rr.rar");
+        // `-rr2`: two parity sectors, so sectors 0 and 2 share a parity group
+        // and no single parity sector can rebuild both.
         let status = std::process::Command::new(RAR_CLI)
-            .args(["a", "-ma4", "-m0", "-rr10", "-idq"])
+            .args(["a", "-ma4", "-m0", "-rr2", "-idq"])
             .arg(&arc)
-            .args(["f1.txt", "f2.txt"])
+            .arg("f1.txt")
             .current_dir(dir.path())
             .status()
             .unwrap();
         assert!(status.success());
 
         let mut bytes = std::fs::read(&arc).unwrap();
-        let pos = bytes
-            .windows(6)
-            .position(|window| window == b"f1.txt")
-            .expect("f1 header name");
-        bytes[pos] ^= 0xFF;
+        bytes[10] ^= 0xFF; // sector 0
+        bytes[2 * 512 + 8] ^= 0xFF; // sector 2
         std::fs::write(&arc, &bytes).unwrap();
 
         // A terminal is not available to the test binary, so the prompt is
@@ -468,6 +470,10 @@ fn cli_repair_asks_before_rebuilding_after_an_unusable_record() {
 
         assert_eq!(out.status.code(), Some(3), "answer {answer}");
         let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("damaged - cannot recover data"),
+            "answer {answer}: {text}"
+        );
         assert!(
             text.contains("Reconstruct archive structure ? [Y]es, [N]o"),
             "answer {answer}: {text}"

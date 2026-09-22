@@ -112,23 +112,29 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
         .filter(|pw| !pw.is_empty());
     let fixed_path = format!("fixed.{name}");
     // Streaming repair: bounded memory regardless of archive size; the
-    // repaired archive is staged and renamed atomically by the library.
-    let repaired = if is_rar4_file(std::path::Path::new(archive_path)) {
-        // `-hp`: the recovery record's header is encrypted, so locating it
-        // needs the archive password (the protected bytes are not).
-        rar_rs::repair_legacy_archive_path_with_password(
-            std::path::Path::new(archive_path),
-            std::path::Path::new(&fixed_path),
-            password,
-        )
-    } else {
-        rar_rs::repair_archive_path(
-            std::path::Path::new(archive_path),
-            std::path::Path::new(&fixed_path),
-        )
-    };
+    // repaired archive is staged and renamed atomically by the library. A
+    // legacy repair reports per sector (WinRAR's `Sector N (offsets ...)`
+    // lines); the RAR5 record has no such report.
+    let repaired: rar_rs::RarResult<(bool, Vec<rar_rs::LegacyDamagedSector>)> =
+        if is_rar4_file(std::path::Path::new(archive_path)) {
+            // `-hp`: the recovery record's header is encrypted, so locating it
+            // needs the archive password (the protected bytes are not).
+            rar_rs::repair_legacy_archive_path_with_password(
+                std::path::Path::new(archive_path),
+                std::path::Path::new(&fixed_path),
+                password,
+            )
+            .map(|report| (report.repaired, report.sectors))
+        } else {
+            rar_rs::repair_archive_path(
+                std::path::Path::new(archive_path),
+                std::path::Path::new(&fixed_path),
+            )
+            .map(|repaired| (repaired, Vec::new()))
+        };
     match repaired {
-        Ok(true) => {
+        Ok((true, sectors)) => {
+            report_sectors(&sectors);
             // The official tool refuses an obviously truncated archive with a
             // clear error; validate the repaired bytes with our own reader. A
             // `-hp` archive must be opened with its password, or the open
@@ -146,17 +152,15 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
             info!("Repaired {archive_path} -> {fixed_path}");
             Ok(())
         }
-        Ok(false) => {
-            // The parity found nothing to fix. The archive may still be
-            // damaged where the record cannot reach (a trailing partial sector
-            // smaller than 512 bytes lies outside the protection, which is all
-            // a small archive has): if it no longer reads, report that and
-            // offer to rebuild, the way WinRAR does.
-            if archive_reads(std::path::Path::new(archive_path), password) {
-                info!("All OK");
-                return Ok(());
-            }
-            info!("The recovery record cannot repair this damage");
+        // Nothing rebuilt: either the archive is intact, or it is damaged
+        // where the record cannot reach (WinRAR reports the sector and offers
+        // a structural rebuild instead of calling the archive healthy).
+        Ok((false, sectors)) if sectors.is_empty() => {
+            info!("All OK");
+            Ok(())
+        }
+        Ok((false, sectors)) => {
+            report_sectors(&sectors);
             // WinRAR asks before rebuilding the structure, and rebuilds when it
             // cannot ask (`-idq`, no console). A declined or unreadable answer
             // leaves only the report.
@@ -184,14 +188,23 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
     }
 }
 
-/// Whether the archive still opens for reading (with the password, for a
-/// header-encrypted one).
-fn archive_reads(archive: &std::path::Path, password: Option<&str>) -> bool {
-    let mut options = rar_rs::OpenOptions::new();
-    if let Some(password) = password {
-        options = options.password(password);
+/// WinRAR's per-sector diagnosis: `Sector 5 (offsets A00...C00) damaged -
+/// data recovered`, where the offsets are the damaged sector's byte range in
+/// hexadecimal.
+fn report_sectors(sectors: &[rar_rs::LegacyDamagedSector]) {
+    for sector in sectors {
+        let outcome = if sector.recovered {
+            "data recovered"
+        } else {
+            "cannot recover data"
+        };
+        info!(
+            "Sector {} (offsets {:X}...{:X}) damaged - {outcome}",
+            sector.index,
+            sector.offset,
+            sector.offset + 512
+        );
     }
-    rar_rs::ArchiveReader::open_with(archive, options).is_ok()
 }
 
 /// `rar r`'s rebuild fallback: decode every member, keep only the ones that
