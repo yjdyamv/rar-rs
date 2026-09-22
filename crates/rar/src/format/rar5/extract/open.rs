@@ -49,6 +49,8 @@ struct CatalogBuilder {
     archive_solid: bool,
     max_entries: usize,
     max_chunks: usize,
+    /// Set when a salvage scan had to resync past a corrupt block.
+    damaged: bool,
 }
 
 impl CatalogBuilder {
@@ -61,6 +63,7 @@ impl CatalogBuilder {
             archive_solid: false,
             max_entries,
             max_chunks,
+            damaged: false,
         }
     }
 
@@ -71,6 +74,12 @@ impl CatalogBuilder {
     ///
     /// Returns when the source's end-of-archive block is reached, when a
     /// declared data area runs past the source, or at EOF.
+    ///
+    /// With `salvage`, a corrupt plaintext block header does not abort the
+    /// walk: the scanner resyncs to the next structurally valid block and
+    /// keeps whatever still parses, so a damaged archive yields the members
+    /// around the damage (WinRAR's `rar r` behavior). Header-encrypted streams
+    /// (where the block key is known) and real I/O errors still abort.
     fn scan_source<R: Read + Seek>(
         &mut self,
         stream: &mut R,
@@ -78,6 +87,7 @@ impl CatalogBuilder {
         volume_len: u64,
         password: Option<&str>,
         cancel: Option<&std::sync::atomic::AtomicBool>,
+        salvage: bool,
     ) -> RarResult<()> {
         // None until this source's plaintext archive-level encryption header
         // arrives (header-encrypted archives: every block after it is
@@ -85,8 +95,30 @@ impl CatalogBuilder {
         // volume, so the key is re-derived per source).
         let mut encr_key: Option<[u8; 32]> = None;
 
-        while let Some(meta) = crate::format::rar5::headers::read_block(stream, encr_key.as_ref())?
-        {
+        loop {
+            let block_start = stream.stream_position()?;
+            let meta = match crate::format::rar5::headers::read_block(stream, encr_key.as_ref()) {
+                Ok(Some(meta)) => meta,
+                Ok(None) => return Ok(()),
+                Err(error) => {
+                    let salvageable =
+                        salvage && encr_key.is_none() && !matches!(error, RarError::Io(_));
+                    if !salvageable {
+                        return Err(error);
+                    }
+                    // A corrupt block invalidates any pending continuation.
+                    self.pending = None;
+                    self.damaged = true;
+                    match crate::format::rar5::headers::resync_plain_block(
+                        stream,
+                        block_start + 1,
+                        volume_len,
+                    )? {
+                        Some(meta) => meta,
+                        None => return Ok(()),
+                    }
+                }
+            };
             if crate::engine::cancel_requested(cancel) {
                 return Err(RarError::Cancelled);
             }
@@ -195,7 +227,6 @@ impl CatalogBuilder {
                 return Ok(());
             }
         }
-        Ok(())
     }
 
     /// Record one "STM" service block as an NTFS alternate data stream owned
@@ -414,7 +445,14 @@ pub(crate) fn ensure_full_catalog(cx: &mut dyn Engine) -> RarResult<()> {
 /// source): the single-volume stream is rewound to the archive start,
 /// while volume sets are reopened from the volume paths.
 fn rebuild_catalog(cx: &mut dyn Engine) -> RarResult<()> {
-    rebuild_catalog_capped(cx, MAX_CATALOG_ENTRIES, MAX_MEMBER_CHUNKS)
+    rebuild_catalog_capped(cx, MAX_CATALOG_ENTRIES, MAX_MEMBER_CHUNKS, false)
+}
+
+/// [`rebuild_catalog`] tolerating corrupt block headers: the scanner resyncs
+/// past them and the catalog keeps the members that still parse. Used by
+/// `rar r`'s reconstruct fallback on a damaged archive.
+pub(crate) fn rebuild_catalog_salvage(cx: &mut dyn Engine) -> RarResult<()> {
+    rebuild_catalog_capped(cx, MAX_CATALOG_ENTRIES, MAX_MEMBER_CHUNKS, true)
 }
 
 /// [`rebuild_catalog`] with explicit entry/chunk ceilings. A crafted
@@ -426,6 +464,7 @@ fn rebuild_catalog_capped(
     cx: &mut dyn Engine,
     max_entries: usize,
     max_chunks: usize,
+    salvage: bool,
 ) -> RarResult<()> {
     let mut builder = CatalogBuilder::new(max_entries, max_chunks);
 
@@ -458,6 +497,7 @@ fn rebuild_catalog_capped(
                 volume_len,
                 cx.password(),
                 cx.cancel_flag(),
+                salvage,
             )?;
         }
         // Keep the first volume open as the default stream.
@@ -480,6 +520,7 @@ fn rebuild_catalog_capped(
             volume_len,
             password.as_deref(),
             cancel.as_deref(),
+            salvage,
         )?;
     }
 
@@ -487,6 +528,7 @@ fn rebuild_catalog_capped(
     let streams = builder.streams;
     cx.read_ctx_mut().streams = streams;
     cx.read_ctx_mut().quick_open_catalog = false;
+    cx.read_ctx_mut().salvage_damaged = builder.damaged;
     let solid = cx.archive_solid() || builder.archive_solid;
     cx.set_archive_solid(solid);
     Ok(())
@@ -614,12 +656,18 @@ mod tests {
             &mut ar,
             1,
             MAX_MEMBER_CHUNKS,
+            false,
         )
         .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
 
-        crate::format::rar5::extract::open::rebuild_catalog_capped(&mut ar, 2, MAX_MEMBER_CHUNKS)
-            .unwrap();
+        crate::format::rar5::extract::open::rebuild_catalog_capped(
+            &mut ar,
+            2,
+            MAX_MEMBER_CHUNKS,
+            false,
+        )
+        .unwrap();
         assert_eq!(ar.entries.len(), 2);
     }
 
@@ -665,12 +713,18 @@ mod tests {
             &mut ar,
             MAX_CATALOG_ENTRIES,
             3,
+            false,
         )
         .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");
 
-        crate::format::rar5::extract::open::rebuild_catalog_capped(&mut ar, MAX_CATALOG_ENTRIES, 4)
-            .unwrap();
+        crate::format::rar5::extract::open::rebuild_catalog_capped(
+            &mut ar,
+            MAX_CATALOG_ENTRIES,
+            4,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             ar.entries.len(),
             1,
@@ -846,6 +900,7 @@ mod tests {
             &mut ar,
             1,
             MAX_MEMBER_CHUNKS,
+            false,
         )
         .unwrap_err();
         assert!(matches!(err, RarError::Format(_)), "unexpected: {err:?}");

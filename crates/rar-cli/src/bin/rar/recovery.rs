@@ -166,8 +166,23 @@ fn reconstruct(archive: &std::path::Path, name: &str, password: Option<&str>) ->
     for member in report.recovered() {
         info!("Found  {member}");
     }
+    for member in report.dropped() {
+        info!("{member} - the member is damaged and was skipped");
+    }
+    if report.skipped_damage() {
+        info!("Corrupt headers were found; members with unreadable headers were skipped");
+    }
     info!("Done");
-    Ok(())
+    // Match WinRAR's exit code: it reports a data error (exit 3) only when it
+    // hit corrupt *headers*; a payload-damaged member is copied without
+    // verification and still exits 0. We instead drop members that fail to
+    // verify (safer than copying them) and name each one above, but keep the
+    // same code so scripts see what the official tool would report.
+    if report.skipped_damage() {
+        Err(error::CliError::silent(error::EXIT_CRC))
+    } else {
+        Ok(())
+    }
 }
 
 /// Rebuild missing volumes from the `.rev` recovery volumes (like `rar rc`).

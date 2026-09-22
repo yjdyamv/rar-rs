@@ -127,6 +127,10 @@ pub(crate) struct ReadState {
     /// end through
     /// [`ArchiveReader::set_overwrite_prompt`](crate::ArchiveReader::set_overwrite_prompt).
     pub overwrite_prompt: Option<std::sync::Arc<crate::options::OverwritePrompt>>,
+    /// Set by a salvage scan when it had to resync past a corrupt block. The
+    /// damaged member never enters the catalog, so this is how `rar r` still
+    /// reports the loss (and exits 3).
+    pub salvage_damaged: bool,
 }
 
 impl Default for ReadState {
@@ -141,6 +145,7 @@ impl Default for ReadState {
             catalog_token: 0,
             motw: None,
             overwrite_prompt: None,
+            salvage_damaged: false,
         }
     }
 }

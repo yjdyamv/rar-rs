@@ -21,6 +21,26 @@ pub(crate) fn open_read(cx: &mut dyn Engine) -> RarResult<()> {
     Ok(())
 }
 
+/// Open a damaged archive for reading, tolerating corrupt block headers: the
+/// RAR5 scanner resyncs past them and the catalog keeps the members that still
+/// parse. Used by `rar r`'s reconstruct fallback. Only RAR5 is salvageable
+/// (its block walk is self-describing); other families keep their strict scan.
+pub(crate) fn open_read_salvage(cx: &mut dyn Engine) -> RarResult<()> {
+    open_common(cx)?;
+    match cx.family() {
+        ArchiveFamily::Rar50Plus => {
+            crate::format::rar5::extract::open::rebuild_catalog_salvage(cx)?
+        }
+        _ => {
+            return Err(RarError::Unsupported(
+                "salvage scan is only supported for RAR5 archives".into(),
+            ));
+        }
+    }
+    cx.reset_catalog_token()?;
+    Ok(())
+}
+
 /// Open without a full block scan where the family supports a quick
 /// catalog; families without one fall back to their full scan.
 pub(crate) fn open_read_quick(cx: &mut dyn Engine) -> RarResult<()> {
