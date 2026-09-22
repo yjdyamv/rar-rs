@@ -393,21 +393,31 @@ pub(crate) struct RenameArgs {
     pub(crate) pairs: Vec<String>,
 }
 
-/// Archive path plus the recovery percentage.
+/// Archive path plus the recovery-record strength.
 #[derive(Args)]
 pub(crate) struct RecoveryArgs {
     #[command(flatten)]
     pub(crate) password: password::PasswordArgs,
     #[arg(value_name = "ARCHIVE")]
     pub(crate) archive: String,
-    /// Recovery percent; WinRAR's `rr` writes its 3% default no matter what
-    /// is requested, so a value here is our own extension.
+    /// Recovery percent as a trailing argument (`20` or `20%`); WinRAR's `rr`
+    /// ignores it, we honor it.
+    #[arg(value_name = "PERCENT", value_parser = parse_recovery_percent)]
+    pub(crate) percent: Option<u8>,
+    /// Recovery record percentage (WinRAR's `-rr<N>%`)
     #[arg(
-        value_name = "PERCENT",
-        default_value_t = 3,
+        long = "recovery-percent",
+        value_name = "N",
         value_parser = clap::value_parser!(u8).range(0..=100)
     )]
-    pub(crate) percent: u8,
+    pub(crate) recovery_percent: Option<u8>,
+    /// Recovery record parity sectors (WinRAR's `-rr<N>`, legacy RAR4)
+    #[arg(
+        long = "recovery-sectors",
+        value_name = "N",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub(crate) recovery_sectors: Option<u32>,
 }
 
 /// SFX conversion arguments.
@@ -660,6 +670,19 @@ pub(crate) struct CreateArgs {
     pub(crate) archive: String,
     #[arg(value_name = "FILES")]
     pub(crate) files: Vec<String>,
+}
+
+/// `rr`'s trailing strength argument: `N` or `N%`, both a percentage (our own
+/// extension — WinRAR's `rr` ignores the argument entirely).
+fn parse_recovery_percent(s: &str) -> Result<u8, String> {
+    let digits = s.strip_suffix('%').unwrap_or(s);
+    let percent = digits
+        .parse::<u8>()
+        .map_err(|_| format!("invalid recovery percent: {s}"))?;
+    if percent > 100 {
+        return Err(format!("invalid recovery percent: {s}"));
+    }
+    Ok(percent)
 }
 
 /// Recovery volumes parameter: an exact count or a percentage.

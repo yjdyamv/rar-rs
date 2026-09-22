@@ -17,14 +17,54 @@ pub(crate) fn cmd_lock(args: &ArchiveArgs) -> CliResult<()> {
 }
 
 /// Add an inline recovery record (like `rar rr`).
+///
+/// WinRAR's `rr` ignores every requested strength — the `-rr` switch in any
+/// form, a trailing argument, even a stronger record already in the archive —
+/// and always writes its 3% default (measured on 6.23 and 7.23). We take the
+/// 3% default but honor an explicit strength: the same forms as `a` (`-rr<N>`,
+/// `-rr<N>%`, bare `-rr`) plus a trailing percent, which is our own extension.
 pub(crate) fn cmd_rr(args: &RecoveryArgs) -> CliResult<()> {
+    let path = std::path::Path::new(&args.archive);
+    let strength = match (
+        args.recovery_sectors,
+        args.recovery_percent.or(args.percent),
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "give the recovery strength once: -rr<N>, -rr<N>% or a trailing percent".into(),
+            );
+        }
+        // A bare `-rr<N>` is the legacy RAR4 record's parity-sector count; the
+        // formats sized by percent only (RAR5) read the same number as that
+        // percent, exactly like `a` (and WinRAR).
+        (Some(count), None) if crate::list::is_rar4_file(path) => (count, None),
+        (Some(percent), None) => {
+            let percent = u8::try_from(percent)
+                .ok()
+                .filter(|value| *value <= 100)
+                .ok_or_else(|| {
+                    error::CliError::from(format!("invalid recovery percent: -rr{percent}"))
+                })?;
+            (0, Some(percent))
+        }
+        (None, Some(percent)) => (0, Some(percent)),
+        // WinRAR's default strength.
+        (None, None) => (0, Some(3)),
+    };
+    let (label, plan) = match strength {
+        (count, None) => (
+            format!("{count} parity sectors"),
+            rar_rs::EditPlan::new().set_recovery_sectors(count),
+        ),
+        (_, Some(percent)) => (
+            format!("{percent}%"),
+            rar_rs::EditPlan::new().set_recovery(percent),
+        ),
+    };
     let mut editor = open_editor(&args.archive, args.password.password.as_deref())?;
-    editor
-        .apply(rar_rs::EditPlan::new().set_recovery(args.percent))
-        .map_err(|e| format!("rr: {e}"))?;
+    editor.apply(plan).map_err(|e| format!("rr: {e}"))?;
     info!(
-        "Recovery record {}% added to {archive}",
-        args.percent,
+        "Recovery record {label} added to {archive}",
         archive = args.archive
     );
     Ok(())
@@ -93,15 +133,16 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "archive.rar".to_string());
     // RAR 1.3/1.4 has no recovery records and no tolerant walk. WinRAR prints
-    // the reconstruct banner, refuses in one line, produces nothing and exits
-    // 0; match that rather than failing with our own error.
+    // the reconstruct banner, refuses in one line and produces nothing; we
+    // print the same lines but report the failure: a repair that produced
+    // nothing is a data error, not a success (WinRAR exits 0 here).
     if crate::list::is_rar13_file(std::path::Path::new(archive_path)) {
         info!("Data recovery record not found");
         info!("Reconstructing {archive_path}");
         info!("Building rebuilt.{name}");
         eprintln!("Cannot repair archive with old format");
         info!("Done");
-        return Ok(());
+        return Err(error::CliError::silent(error::EXIT_CRC));
     }
     // A `-hp` archive needs the password to read its headers; `-p-` (empty)
     // means "no password".
@@ -236,9 +277,11 @@ fn reconstruct(
         info!("Corrupt headers were found; members with unreadable headers were skipped");
     }
     info!("Done");
-    // WinRAR's exit code for a lost member depends on the container: a RAR5
-    // header glitch exits 3, a legacy one exits 0 (measured on 6.23/7.23).
-    if report.skipped_damage() && !report.legacy() {
+    // The exit code reports what happened, not which container it happened in:
+    // a member that could not be salvaged is a data error. WinRAR answers 3
+    // for a RAR5 header glitch but 0 for the same loss in a legacy archive —
+    // a container fork we deliberately do not copy.
+    if report.skipped_damage() || !report.dropped().is_empty() {
         Err(error::CliError::silent(error::EXIT_CRC))
     } else {
         Ok(())
