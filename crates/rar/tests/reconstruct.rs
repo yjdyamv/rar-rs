@@ -75,6 +75,39 @@ fn reconstruct_drops_a_member_whose_payload_is_damaged() {
 }
 
 #[test]
+fn reconstruct_salvages_past_a_corrupt_header() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("c.rar");
+    let dst = dir.path().join("rebuilt.c.rar");
+    {
+        let mut writer = ArchiveWriter::create(&src).unwrap();
+        writer.add_bytes("f1.txt", b"one", store()).unwrap();
+        writer.add_bytes("f2.txt", b"two", store()).unwrap();
+        writer.add_bytes("f3.txt", b"three", store()).unwrap();
+        writer.finish().unwrap();
+    }
+    // Corrupt f2's FILE_HEADER (the bytes holding its name): the strict scan
+    // fails, and the salvage scan resyncs to f3's header.
+    let mut bytes = std::fs::read(&src).unwrap();
+    let pos = bytes
+        .windows(6)
+        .position(|window| window == b"f2.txt")
+        .expect("f2 header name");
+    bytes[pos] ^= 0xFF;
+    std::fs::write(&src, &bytes).unwrap();
+
+    let report = rar_rs::reconstruct_archive_path(&src, &dst, None).unwrap();
+    assert!(report.skipped_damage(), "a corrupt header must be reported");
+    assert_eq!(names(report.recovered()), ["f1.txt", "f3.txt"]);
+
+    let mut reader = ArchiveReader::open(&dst).unwrap();
+    let rebuilt: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+    assert_eq!(rebuilt, ["f1.txt", "f3.txt"]);
+    let id = reader.unique_entry("f3.txt").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), b"three");
+}
+
+#[test]
 fn reconstruct_rebuilds_a_legacy_archive_as_rar4() {
     let dir = make_temp_dir();
     let src = dir.path().join("legacy.rar");

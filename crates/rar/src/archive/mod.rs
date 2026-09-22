@@ -370,6 +370,20 @@ impl RarArchive {
         Ok(archive)
     }
 
+    /// Open a damaged RAR5 archive for reading, tolerating corrupt block
+    /// headers: the scan resyncs past them and the catalog keeps the members
+    /// that still parse. Used by `rar r`'s reconstruct fallback; other
+    /// families are rejected (see `open_read_salvage`).
+    pub(crate) fn open_salvage(path: impl AsRef<Path>, password: Option<&str>) -> RarResult<Self> {
+        let mut archive = Self::new_for_mode(
+            path.as_ref().to_path_buf(),
+            Mode::Read,
+            password.map(str::to_owned),
+        );
+        crate::format::shared::extract::open::open_read_salvage(&mut archive)?;
+        Ok(archive)
+    }
+
     /// Set the password for decryption. In-crate test helper: public callers
     /// pass the password to [`ArchiveReader::open_with`] /
     /// [`ArchiveWriter::create_with`].

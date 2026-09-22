@@ -73,6 +73,79 @@ pub fn read_block<R: Read + Seek>(
     }))
 }
 
+/// Scan forward from `start` for the next structurally valid *plaintext* block
+/// header. Salvage uses this to resync past a corrupt block: each offset is
+/// cheaply pre-filtered (plausible size vint, known block type, header fits
+/// the file) before the full header is read and its CRC verified, so a corrupt
+/// region costs a few bytes of reads per offset instead of a full (up to
+/// 2 MiB) body read. Returns `Ok(None)` at EOF; on success the reader is left
+/// just past the header, like [`read_block`].
+pub(crate) fn resync_plain_block<R: Read + Seek>(
+    reader: &mut R,
+    start: u64,
+    file_len: u64,
+) -> RarResult<Option<BlockMeta>> {
+    let mut pos = start;
+    while pos < file_len {
+        reader.seek(io::SeekFrom::Start(pos))?;
+        if plain_block_candidate(reader, pos, file_len)? {
+            match read_block(reader, None) {
+                Ok(Some(meta)) => return Ok(Some(meta)),
+                Ok(None) => return Ok(None),
+                Err(RarError::Io(e)) => return Err(RarError::Io(e)),
+                // Structurally plausible but not a real block (CRC failed):
+                // keep scanning.
+                Err(_) => {}
+            }
+        }
+        pos += 1;
+    }
+    Ok(None)
+}
+
+/// Cheap pre-filter for [`resync_plain_block`]: the bytes at `pos` could start
+/// a plaintext block. Reads a few bytes and restores the position, so the
+/// authoritative [`read_block`] still begins at `pos`.
+fn plain_block_candidate<R: Read + Seek>(
+    reader: &mut R,
+    pos: u64,
+    file_len: u64,
+) -> RarResult<bool> {
+    /// A vint plus how many bytes it took, or `None` if malformed/truncated.
+    fn read_vint<R: Read>(reader: &mut R) -> Option<(u64, u64)> {
+        let mut bytes = Vec::with_capacity(2);
+        loop {
+            let mut b = [0u8; 1];
+            reader.read_exact(&mut b).ok()?;
+            bytes.push(b[0]);
+            if b[0] & 0x80 == 0 {
+                let (value, _) = vint::decode_from_slice(&bytes, 0).ok()?;
+                return Some((value, bytes.len() as u64));
+            }
+            if bytes.len() == 10 {
+                return None;
+            }
+        }
+    }
+
+    let plausible = (|| {
+        let mut crc = [0u8; 4];
+        reader.read_exact(&mut crc).ok()?;
+        let (hsize, vint_len) = read_vint(reader)?;
+        if hsize == 0 || hsize > 2 * 1024 * 1024 {
+            return Some(false);
+        }
+        let (block_type, _) = read_vint(reader)?;
+        // Known RAR5 block types: 1 main, 2 file, 3 service, 4 encryption, 5 end.
+        let known = (1..=5).contains(&block_type);
+        // The size vint counts the body (`hsize`), which holds the type vint.
+        let total = 4u64.checked_add(vint_len)?.checked_add(hsize)?;
+        Some(known && pos.checked_add(total).is_some_and(|end| end <= file_len))
+    })();
+    reader.seek(io::SeekFrom::Start(pos))?;
+    Ok(plausible.unwrap_or(false))
+}
+
 /// Walks a RAR5 block sequence within one file, advancing past each block's
 /// data area and stopping at the end block or a declared area that runs past
 /// the file. The key is fixed for the walk: single-file walks read one

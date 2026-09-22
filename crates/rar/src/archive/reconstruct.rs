@@ -24,6 +24,7 @@ use crate::version::ArchiveVersion;
 pub struct ReconstructReport {
     recovered: Vec<String>,
     dropped: Vec<String>,
+    damaged: bool,
 }
 
 impl ReconstructReport {
@@ -35,6 +36,12 @@ impl ReconstructReport {
     /// Names of the members that failed to decode or verify.
     pub fn dropped(&self) -> &[String] {
         &self.dropped
+    }
+
+    /// Whether the scan had to resync past a corrupt header, losing members
+    /// that never reached the catalog. `dropped` cannot name those.
+    pub fn skipped_damage(&self) -> bool {
+        self.damaged
     }
 }
 
@@ -59,7 +66,17 @@ pub fn reconstruct_archive_path(
     if let Some(password) = password {
         open = open.password(password);
     }
-    let mut reader = ArchiveReader::open_with(src, open)?;
+    // A damaged *header* fails the strict scan; retry tolerantly so the
+    // members around the damage are still salvaged (WinRAR's `rar r`). If the
+    // salvage scan cannot run either (a legacy family, or an unreadable
+    // archive start), the original strict error is reported.
+    let mut reader = match ArchiveReader::open_with(src, open) {
+        Ok(reader) => reader,
+        Err(strict) => ArchiveReader::open_salvage(src, password).map_err(|_| strict)?,
+    };
+    // A salvage scan silently loses members whose header was corrupt; carry
+    // that up so the caller can report the damage.
+    let damaged = reader.salvage_damaged();
 
     let mut version = ArchiveVersion::V50;
     for entry in reader.entries() {
@@ -96,5 +113,6 @@ pub fn reconstruct_archive_path(
         }
     }
     writer.finish()?;
+    report.damaged = damaged;
     Ok(report)
 }

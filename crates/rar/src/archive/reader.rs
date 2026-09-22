@@ -393,6 +393,15 @@ impl ArchiveReader {
         Ok(Self { archive })
     }
 
+    /// Crate-internal salvage open (see [`RarArchive::open_salvage`]): scan a
+    /// damaged archive tolerating corrupt block headers. Used by
+    /// `reconstruct_archive_path` when the strict scan fails.
+    pub(crate) fn open_salvage(path: impl AsRef<Path>, password: Option<&str>) -> RarResult<Self> {
+        Ok(Self {
+            archive: RarArchive::open_salvage(path, password)?,
+        })
+    }
+
     /// Configure Mark of the Web propagation for subsequent extractions
     /// (WinRAR's `-om`); `None` disables it.
     ///
@@ -424,6 +433,13 @@ impl ArchiveReader {
     /// (`MHD_NEWNUMBERING`); display-only.
     pub fn is_new_numbering(&self) -> bool {
         self.archive.read_ctx().legacy.new_numbering
+    }
+
+    /// Whether the catalog came from a salvage scan that had to resync past a
+    /// corrupt block (used by `rar r`'s reconstruct fallback to report the
+    /// loss).
+    pub(crate) fn salvage_damaged(&self) -> bool {
+        self.archive.read_ctx().salvage_damaged
     }
 
     /// Whether the archive is solid: the main header carries the
