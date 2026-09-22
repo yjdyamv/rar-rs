@@ -473,7 +473,11 @@ impl Default for CreateOptions {
 /// streaming, so arbitrarily large members (multi-GiB) only need
 /// `max_unpacked_bytes: None`. The 4 GiB default primarily guards the
 /// in-memory `read` API, which materializes whole members in a `Vec`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The type is `Clone` but deliberately not `Copy` (like
+/// [`WriterOptions`](crate::WriterOptions)): it carries owned per-run policies
+/// such as [`mark_web`](Self::mark_web).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractOptions {
     /// Reject member names that could escape the destination directory
     /// (absolute paths, `..`, Windows drive components, NUL bytes) and
@@ -492,6 +496,10 @@ pub struct ExtractOptions {
     /// the global setting. Scoped to the run, so concurrent extractions with
     /// different counts do not configure each other.
     pub threads: Option<usize>,
+    /// Propagate the archive file's Mark of the Web onto every extracted file
+    /// (WinRAR's `-om`); `None` disables it. See [`MarkOfTheWeb`]. A no-op on
+    /// non-Windows platforms.
+    pub mark_web: Option<MarkOfTheWeb>,
     /// Extract members flat: each member is written to the destination
     /// directory under its basename (no directory tree), like `rar e` /
     /// `unrar e`. The safe-path policy still applies — the member name is
@@ -582,6 +590,7 @@ impl Default for ExtractOptions {
             max_unpacked_bytes: Some(4 * 1024 * 1024 * 1024),
             max_total_unpacked_bytes: Some(32 * 1024 * 1024 * 1024),
             threads: None,
+            mark_web: None,
             flat_paths: false,
             skip_existing: false,
             auto_rename: false,
@@ -633,8 +642,7 @@ pub type OverwritePrompt = dyn Fn(&std::path::Path) -> OverwriteChoice + Send + 
 /// Mark of the Web propagation for extraction (WinRAR's `-om`).
 ///
 /// Browsers tag downloaded files with a `Zone.Identifier` alternate data
-/// stream; when set on a [`crate::ArchiveReader`] through
-/// [`crate::ArchiveReader::set_mark_of_the_web`], the archive file's
+/// stream; when set as [`ExtractOptions::mark_web`], the archive file's
 /// own stream is copied onto every extracted file. Windows only: the
 /// setting is ignored on other platforms, where the concept does not exist.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

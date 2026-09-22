@@ -54,6 +54,7 @@ pub fn plan_inline_recovery(
     })
 }
 
+/// CRC-64/XZ over `data`, the checksum the RAR5 recovery record header stores.
 pub fn crc64_xz(data: &[u8]) -> u64 {
     crc64_update(data, CRC64_XZ_INIT) ^ CRC64_XZ_INIT
 }
@@ -70,6 +71,8 @@ fn crc64_update(data: &[u8], initial: u64) -> u64 {
     crc
 }
 
+/// CRC-64 with the initial value RAR's own recovery code uses (no final XOR),
+/// for the fields RAR computes that way rather than as CRC-64/XZ.
 pub fn crc64_rar_state(data: &[u8]) -> u64 {
     crc64_update(data, 0)
 }

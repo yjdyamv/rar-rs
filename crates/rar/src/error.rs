@@ -9,21 +9,41 @@ use std::io;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorCode {
+    /// Malformed archive bytes: a header, block or field the format cannot
+    /// produce.
     Format,
+    /// The call is invalid for the archive's current mode (writing an archive
+    /// opened read-only, finishing twice, ...).
     InvalidState,
+    /// An option value or combination the writer/reader refuses.
     InvalidOption,
+    /// A stored CRC32 does not match the decoded bytes.
     CrcMismatch,
+    /// A stored BLAKE2sp (or other file hash) does not match.
     HashMismatch,
+    /// Encrypted content was reached without a usable password.
     Encrypted,
+    /// The archive uses a valid RAR feature this crate does not implement.
     Unsupported,
+    /// A security policy refused the operation (path escape, unsafe link,
+    /// set-ID owner, ...).
     Security,
+    /// A configured size, dictionary or resource limit was exceeded.
     LimitExceeded,
+    /// `unique_entry` (or an extractor selector) found no such member.
     MemberNotFound,
+    /// A name expected to identify one member matched several entries.
     AmbiguousMember,
+    /// An [`EntryId`](crate::EntryId) came from an older catalog generation
+    /// (see [`ArchiveEditor::apply`](crate::ArchiveEditor::apply)).
     StaleEntryId,
+    /// The archive carries the lock bit and cannot be rewritten.
     ArchiveLocked,
+    /// The caller's cancellation flag was signalled.
     Cancelled,
+    /// Header-encrypted archive opened with the wrong password.
     WrongPassword,
+    /// Underlying I/O failure.
     Io,
 }
 
@@ -57,6 +77,12 @@ impl fmt::Display for ErrorCode {
     }
 }
 
+/// Every failure this crate reports, with a structured payload where the
+/// caller can act on it (compare a CRC, retry a password, name the member).
+///
+/// [`RarError::code`] maps a value to the stable, machine-readable
+/// [`ErrorCode`] used by bindings, logs and exit-code mapping. The enum is
+/// `#[non_exhaustive]`, so match with a trailing `_` arm.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RarError {
@@ -68,14 +94,20 @@ pub enum RarError {
     InvalidOption(String),
     /// CRC32 checksum mismatch.
     Crc {
+        /// The CRC32 the archive stored for the member.
         expected: u32,
+        /// The CRC32 computed from the decoded bytes.
         actual: u32,
+        /// What was being decoded, for the error message.
         context: String,
     },
     /// BLAKE2sp (or other file hash) mismatch.
     HashMismatch {
+        /// The hash the archive stored.
         expected: [u8; 32],
+        /// The hash computed from the decoded bytes.
         actual: [u8; 32],
+        /// What was being decoded, for the error message.
         context: String,
     },
     /// Encrypted content encountered without a password.
@@ -92,7 +124,10 @@ pub enum RarError {
         context: String,
     },
     /// The requested member does not exist in the archive.
-    MemberNotFound { name: String },
+    MemberNotFound {
+        /// The member name (or selector) that matched nothing.
+        name: String,
+    },
     /// A name expected to identify one member matched multiple entries.
     AmbiguousMember {
         /// The duplicate archive member name.
@@ -205,6 +240,7 @@ impl From<io::Error> for RarError {
     }
 }
 
+/// Result type of every fallible entry point in this crate.
 pub type RarResult<T> = Result<T, RarError>;
 
 #[cfg(test)]

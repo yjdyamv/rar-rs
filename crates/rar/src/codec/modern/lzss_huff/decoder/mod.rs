@@ -55,6 +55,7 @@ pub struct DecoderState {
 }
 
 impl DecoderState {
+    /// Fresh decoder state with a sliding window of `dict_size` bytes.
     pub fn new(dict_size: usize) -> Self {
         DecoderState {
             window: SlidingWindow::new(dict_size),

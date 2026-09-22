@@ -361,12 +361,19 @@ pub fn decrypt_data(ciphertext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> RarResu
 /// Holds the encryption parameters for a single encrypted file or header.
 #[derive(Clone, Debug)]
 pub struct EncryptionParams {
+    /// Encryption-version byte from the header (`0` = AES-256).
     pub version: u8,
+    /// Header flag byte (`0x01` = the salt/IV are present).
     pub flags: u8,
+    /// Key-derivation strength: KDF iteration count as `2^strength`.
     pub strength: u8,
+    /// Per-file (or per-header) salt.
     pub salt: [u8; ENCR_SALT_SIZE],
+    /// AES-CBC initialisation vector.
     pub iv: [u8; ENCR_IV_SIZE],
+    /// First 12 bytes of the key-check value when the header stores one.
     pub checksum: Option<[u8; 12]>,
+    /// KDF iteration count, derived from `strength` (WinRAR's `-me`).
     pub iterations: u32,
 }
 

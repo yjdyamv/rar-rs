@@ -402,17 +402,6 @@ impl ArchiveReader {
         })
     }
 
-    /// Configure Mark of the Web propagation for subsequent extractions
-    /// (WinRAR's `-om`); `None` disables it.
-    ///
-    /// The archive file's own `Zone.Identifier` stream is copied onto each
-    /// extracted file (filtered to the security zone unless
-    /// [`crate::options::MarkOfTheWeb::all_fields`] is set). The setting is
-    /// a no-op on non-Windows platforms.
-    pub fn set_mark_of_the_web(&mut self, options: Option<crate::options::MarkOfTheWeb>) {
-        self.archive.read_ctx_mut().motw = options;
-    }
-
     /// Install the interactive overwrite prompt. When
     /// [`ExtractOptions::prompt_overwrite`](crate::options::ExtractOptions::prompt_overwrite)
     /// is set, the extraction loop calls this for each existing destination
@@ -617,7 +606,7 @@ impl ArchiveReader {
         let mut sink = std::io::sink();
 
         for &id in ids {
-            if let Err(error) = self.copy_entry_to_with_options(id, &mut sink, options) {
+            if let Err(error) = self.copy_entry_to_with_options(id, &mut sink, options.clone()) {
                 if matches!(error, RarError::Cancelled) {
                     return Err(error);
                 }
@@ -713,8 +702,12 @@ impl ArchiveReader {
             // Resolve freshly per member: the first extraction can rebuild a
             // quick-open catalog, which may reorder the indexes.
             let index = self.resolve_id(id)?;
-            self.archive
-                .extract_index_with_options(index, destination, options, &mut report)?;
+            self.archive.extract_index_with_options(
+                index,
+                destination,
+                options.clone(),
+                &mut report,
+            )?;
         }
         Ok(report)
     }

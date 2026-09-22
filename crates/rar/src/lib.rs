@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! # rar-rs
 //!
 //! Pure-Rust RAR archive library. Creates, reads, and extracts legacy RAR

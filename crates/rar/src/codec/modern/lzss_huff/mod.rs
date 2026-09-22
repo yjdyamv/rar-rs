@@ -41,12 +41,16 @@ pub(crate) use encoder::{
 
 /// Huffman table symbol counts.
 pub const HUFF_BC: usize = 20;
+/// Block-length code table size (RAR5 NC table).
 pub const HUFF_NC: usize = 306;
+/// Distance code table size.
 pub const HUFF_DC: usize = 64;
 /// RAR7 (v70) extended distance codes: 80 codes cover distances up to
 /// ~1 TB (the RAR5 table stops at 4 GB).
 pub const HUFF_DCX: usize = 80;
+/// Low-distance table size (`LD` table).
 pub const HUFF_LDC: usize = 16;
+/// Repeat-distance (`RC`) table size.
 pub const HUFF_RC: usize = 44;
 
 // ── Compression methods ────────────────────────────────────────────────────
@@ -85,12 +89,16 @@ pub const MAX_CODE_LENGTH: usize = 15;
 
 /// Quick lookup table size (2^QUICK_BITS entries).
 pub const QUICK_BITS: usize = 10;
+/// Number of entries in the quick (single-lookup) Huffman decode table.
 pub const QUICK_SIZE: usize = 1 << QUICK_BITS;
 
 /// Special symbols in the NC table.
 pub const SYM_FILTER: usize = 256;
+/// Run-of-lengths symbol, repeating the previous match.
 pub const SYM_REPEAT: usize = 257;
+/// Base symbol of the distance-cache references.
 pub const SYM_CACHE_BASE: usize = 258;
+/// Base symbol of ordinary match-length codes.
 pub const SYM_MATCH_BASE: usize = 262;
 
 /// Distance cache size.
@@ -98,8 +106,11 @@ pub const DIST_CACHE_SIZE: usize = 4;
 
 /// Filter types.
 pub const FILTER_DELTA: u8 = 0;
+/// x86 `E8` call-target filter.
 pub const FILTER_E8: u8 = 1;
+/// x86 `E8`/`E9` call/jump filter (the usual choice for code).
 pub const FILTER_E8E9: u8 = 2;
+/// ARM branch filter.
 pub const FILTER_ARM: u8 = 3;
 
 /// Block header checksum seed.

@@ -242,6 +242,8 @@ impl ExtractArchiveOptions {
       max_total_unpacked_bytes: None,
       // Workers come from the binding's own thread pool / the global default.
       threads: None,
+      // Mark of the Web is not exposed through the JS API.
+      mark_web: None,
       max_dict_size,
       max_metadata_bytes,
       skip_existing: self.skip_existing.unwrap_or(false),

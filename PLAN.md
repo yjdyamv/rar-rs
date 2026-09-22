@@ -138,12 +138,12 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   未知命令统一），无参数仍 exit 0。契约由
   `cli_bad_command_lines_match_winrar_exit_codes` 与两个缺归档断言钉住。
 - 交互式覆盖询问（2026-09-22）：`ExtractOptions::prompt_overwrite` 配
-  `ArchiveReader::set_overwrite_prompt`（回调挂在 `ReadState`，同 `motw`
-  先例）； TTY 且未给 `-y`/`-o±`/`-or`/`-f`/`-u` 时 CLI 注入 WinRAR 式
-  `Y/N/A/R/Q` 询问 （`output::prompt_overwrite`；库不读 stdin），非 TTY
-  保持跳过，且询问时强制 串行抽取。契约由 `overwrite_prompt.rs` 与
-  `cli_interactive_overwrite_prompt` 钉住。**静默语义按二进制区分** （2026-09-22
-  官方 6.23/7.23 实测）：`Rar.exe x -idq` 对询问一律答
+  `ArchiveReader::set_overwrite_prompt`（回调挂在 `ReadState`；此后 MOTW 已改为
+  `ExtractOptions::mark_web`，见下条）； TTY 且未给 `-y`/`-o±`/`-or`/`-f`/`-u`
+  时 CLI 注入 WinRAR 式 `Y/N/A/R/Q` 询问 （`output::prompt_overwrite`；库不读
+  stdin），非 TTY 保持跳过，且询问时强制 串行抽取。契约由 `overwrite_prompt.rs`
+  与 `cli_interactive_overwrite_prompt` 钉住。**静默语义按二进制区分**
+  （2026-09-22 官方 6.23/7.23 实测）：`Rar.exe x -idq` 对询问一律答
   Yes——同目录已存在目标时**不询问直接覆盖**（退出 0）；`UnRAR.exe x -idq`
   **仍会询问**（无 stdin 时报读错、目标不动）。故
   `ExtractRequest::quiet_answers_yes` 由 `rar` 置真、`unrar` 置假，后者保持
@@ -269,6 +269,21 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `examples/` 只有 bench/probe，新用户没有普通用法的样板；README 现在指向它们。
   契约由 `extract_options_threads_drive_the_parallel_path`（≥4 成员、≥64 MiB
   解开量 走批量路径，`threads=Some(2)` 与 `Some(0)` 都逐字节校验）钉住。
+- **库 API：抽取设置归位 + 文档闸门（2026-09-22）**：审计发现两处可改。①
+  `ArchiveReader` 上的 `set_*` 里，**MOTW 本来就是逐次抽取的策略数据**（CLI
+  也只是把它 放进请求再推给 reader），现已移入
+  `ExtractOptions::mark_web`，`set_mark_of_the_web` 与 `ReadState.motw`
+  一并删除——抽取入口本来就把 `opts` 存进 `read_ctx.extract_options`，
+  传播处直接读它，连参数都不用加。代价是 **`ExtractOptions` 放弃
+  `Copy`**（`MarkOfTheWeb` 带 `Vec<String>` 扩展名过滤），这也正好与
+  `WriterOptions`（Clone 不 Copy）对齐；受影响的 调用点改 `.clone()`（库内 5
+  处 + 测试 5 处），语义不变。② 加 **`#![warn(missing_docs)]`**： 一次性补齐 74
+  处公开项文档（`ErrorCode` 16 个变体、`RarError`/`Result` 别名、`FileHeader`
+  /`DataChunk` 字段、codec 常量、`EncryptionParams`、`FeatureSet`、恢复记录 CRC
+  辅助函数、 parallel 门控下的
+  `encode_chunked_mt`/`encode_with_filters_mt`），默认与 `parallel` 两种 feature
+  配置都零缺口，并由 clippy `-D warnings` 长期强制执行。契约：`CONTEXT.md` 的
+  MOTW 词条与 `docs/CLI.md` 已同步（`-om` 现在是 `ExtractOptions::mark_web`）。
 - `-htb` 语义对齐官方（2026-09-22 官方对拍）：BLAKE2sp 记录**取代** CRC32 字段
   （`MemberPlan::file_header` 在有 hash 时不再写 `crc32_val`，序列化器顺带清
   `FILE_FLAG_CRC32`）。此前是「CRC32 + BLAKE2sp 并存」，每成员比官方多 4 字节；

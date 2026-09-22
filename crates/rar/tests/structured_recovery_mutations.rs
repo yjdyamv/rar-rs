@@ -371,7 +371,7 @@ fn structured_legacy_block_mutations_are_classified() {
                     for name in names.iter().take(4) {
                         if let Some(id) = reader.entries_named(name).next().map(|entry| entry.id())
                         {
-                            let _ = reader.read_entry_with_options(id, opts);
+                            let _ = reader.read_entry_with_options(id, opts.clone());
                         }
                     }
                 }

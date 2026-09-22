@@ -10,10 +10,17 @@ const DEFAULT_FILE_FLAGS: u64 = 0x0002 | 0x0004;
 /// Normalized file metadata shared by the supported RAR format families.
 #[derive(Clone, Debug)]
 pub struct FileHeader {
+    /// Member name as stored (forward-slash separated, UTF-8).
     pub name: String,
+    /// Uncompressed size in bytes.
     pub unpacked_size: u64,
+    /// Packed (on-disk) size in bytes.
     pub packed_size: u64,
+    /// Host attributes: RAR5 Unix mode bits or Windows DOS attributes,
+    /// RAR4 the legacy 32-bit attribute word.
     pub attributes: u64,
+    /// Modification time: Unix seconds for RAR5, DOS local wall-clock
+    /// seconds for RAR 1.5–4.x (see [`ArchiveEntry::mtime`](crate::ArchiveEntry::mtime)).
     pub mtime: u32,
     /// Member checksum. CRC-32 for RAR4/RAR5 members, except RAR 1.3/1.4
     /// members (`format_version == 3`) where it holds the 16-bit rolling
@@ -24,8 +31,13 @@ pub struct FileHeader {
     pub hash_type: u8,
     /// Expected file hash from the extra-area hash record.
     pub hash_value: Option<[u8; 32]>,
+    /// Numeric compression method (`0` = store, `1`..=`5` = level); RAR 1.3/1.4
+    /// reuse the field for their own codec selector.
     pub comp_method: u8,
+    /// Codec generation within the family (RAR5: `0` = v50, `1` = RAR7 v70).
     pub comp_version: u8,
+    /// Whether the member continues a solid chain (its data depends on the
+    /// previous member's window).
     pub comp_solid: bool,
     /// Dictionary setting. RAR5: `log2(dictionary/128 KiB)`, with RAR7
     /// members carrying the byte count in
@@ -33,11 +45,20 @@ pub struct FileHeader {
     /// the window-bits field, `log2(window/64 KiB)` (7 marks a directory
     /// block).
     pub comp_dict_size: u8,
+    /// Host OS the archive was written on (RAR5: `0` = Windows, `1` = Unix).
     pub host_os: u64,
+    /// Raw member flags of the family's header (RAR5 file flags, RAR4
+    /// `FILE_HEAD` flags).
     pub flags: u64,
+    /// RAR5 file flag word (dictionary/hash/time flags); `0` for RAR4 members,
+    /// whose flags live in [`flags`](Self::flags).
     pub file_flags: u64,
+    /// Raw extra-area bytes of the member header (RAR5 extras / RAR4
+    /// after-name records), undecoded.
     pub extra_data: Vec<u8>,
+    /// Whether the member is a directory entry rather than a file.
     pub is_directory: bool,
+    /// Offset of the member's packed data in its first volume.
     pub data_offset: u64,
     /// Archive format version (4 or 5).
     pub format_version: u8,
@@ -58,6 +79,7 @@ pub struct FileHeader {
     pub atime: Option<(u64, u32)>,
     /// Owner and group names (OWNER extra record).
     pub owner: Option<String>,
+    /// Group name (OWNER extra record), when the archive recorded one.
     pub group: Option<String>,
     /// File version (VERSION extra record).
     pub version: Option<u64>,
