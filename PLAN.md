@@ -212,6 +212,17 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `cli_repair_recovers_damage_in_the_records_final_sector` /
   `cli_repair_asks_before_rebuilding_after_an_unusable_record` 与 legacy 单测
   （尾部扇区检测+修复、同组双坏扇区报 unrecovered）钉住。
+- `-rr` 三种形式的语义对齐官方（2026-09-22 官方 6.23 实测）：**裸 `-rr<N>` 是
+  legacy RAR4 的 parity 扇区数（计数）**——`-rr10` 在任何尺寸下都写出恰好 10 个
+  扇区；`-rr<N>%` 是受保护前缀的百分比；**裸 `-rr` 是官方默认 3%**（不是我们此前
+  假设的 10%）。此前 CLI 把三种形式全映射成百分比，于是 `-rr10` 在 400 KB 上变成
+  78 个扇区（官方的 7.8 倍）。RAR5 的记录只按百分比定尺（实测官方 `-rr10` 与
+  `-rr10%` 产出的记录**同尺寸**），因此裸数字在 RAR5 上按百分比解释。库侧新增
+  `WriterOptions::recovery_sectors(u32)`（与 `recovery_percent` 互斥；RAR5 与
+  RAR13 拒绝计数而不是静默丢弃），CLI 新增 `--recovery-sectors`。契约由
+  `legacy_rar4_recovery_record_follows_the_rr_forms`（CLI，含 `rec_sectors`
+  解析）与
+  `recovery_sector_count_is_exact_and_legacy_only`（库，含两种非法组合） 钉住。
 - `-htb` 语义对齐官方（2026-09-22 官方对拍）：BLAKE2sp 记录**取代** CRC32 字段
   （`MemberPlan::file_header` 在有 hash 时不再写 `crc32_val`，序列化器顺带清
   `FILE_FLAG_CRC32`）。此前是「CRC32 + BLAKE2sp 并存」，每成员比官方多 4 字节；
@@ -287,6 +298,19 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 ## 已知小差异（记录，互操作无碍）
 
+- **`-rr<N>%` 的百分比取整**：官方 6.23 的百分比形式不是干净的 P%（受量化与
+  「最少 2 扇区」影响、且大档反而低于标称），我们用
+  `max(2, floor(prefix*P/(100*512)))`，实测残差 **±1–3 扇区（≤ ~1.5 KiB）**。
+  实测表（前缀字节 → 官方 parity 扇区，P=10）：4066→2、10067→3、25067→6、
+  50067→11、75067→16、100068→20、150068→30、200068→39、300068→58、500069→95；
+  我们给 2/2/4/9/14/19/29/39/58/97。试过 floor/round/ceil × 基准∈{前缀, 完整
+  扇区数, total_blocks, 载荷} × 是否不动点，**都拟合不上**；基准已确认是「记录
+  之前的前缀」（同载荷、成员数 1→100 时 parity 95→96，与 +5352 字节前缀的 10%
+  吻合）。裸 `-rr<N>`（计数）与默认 3% 已精确对齐，不受此影响。对齐需要另找
+  判据（如按扇区边界反推官方取整口径），暂记录。
+- **`rar rr` 命令的单位**：官方 `rr <archive> N` / `N%` 与 `a -rr` 不是同一口径
+  （同一 118 块前缀实测：`a -rr10%` → 13 扇区，`rr 10%` → 5 扇区），规则未查清；
+  我们仍按百分比处理该命令的位置参数。`a`/`update` 的 `-rr` 已对齐。
 - **`rar r` 没修动时不写 `fixed.<name>` 拷贝**：恢复记录够不到损坏时，官方仍写出
   `fixed.<name>`——实测它与**损坏输入逐字节相同**（没修成功也照拷一份）；我们按
   「不能进 行的修复不留产物」的既有契约**不写**，只提示 + （询问后）重建

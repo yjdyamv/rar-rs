@@ -176,10 +176,26 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     } else {
         opts
     };
-    let opts = if let Some(percent) = args.recovery_percent {
-        opts.recovery_percent(percent)
-    } else {
-        opts
+    let opts = match (args.recovery_percent, args.recovery_sectors) {
+        (Some(percent), None) => opts.recovery_percent(percent),
+        // A bare `-rr<N>` is the legacy RAR4 record's native unit: exactly N
+        // parity sectors (measured against 6.23, size-independent). A RAR5
+        // record is sized by percent only, and WinRAR reads the same number
+        // there as that percent (`-rr10` and `-rr10%` write identical RAR5
+        // records), so it maps onto the percent option.
+        (None, Some(sectors)) if version.is_legacy() => opts.recovery_sectors(sectors),
+        (None, Some(sectors)) => {
+            let percent = u8::try_from(sectors)
+                .ok()
+                .filter(|percent| *percent <= 100)
+                .ok_or_else(|| {
+                    error::CliError::from(format!("invalid recovery percent: -rr{sectors}"))
+                })?;
+            opts.recovery_percent(percent)
+        }
+        // Both were given: the library rejects the combination.
+        (Some(percent), Some(_)) => opts.recovery_percent(percent),
+        (None, None) => opts,
     };
     let opts = if let Some(percent) = recovery_volumes_percent {
         opts.recovery_volumes_percent(percent)

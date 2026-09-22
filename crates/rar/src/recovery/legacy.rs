@@ -571,10 +571,15 @@ pub(crate) fn build_legacy_recovery_block(prefix: &[u8], rec_sectors: u32) -> Ra
             "RAR4: recovery record over an empty archive".into(),
         ));
     }
+    // The parity is held in memory while it is built (like the prefix), so an
+    // absurd `-rr<N>` count is rejected instead of overflowing the size math.
+    let parity_len = (rec_sectors as usize)
+        .checked_mul(512)
+        .ok_or_else(|| RarError::Format("RAR4: recovery parity size overflows".into()))?;
     // Sector tags (little-endian u16 each): every declared sector, with a
     // partial tail zero-padded for its tag CRC, matching the reader.
     let mut tags = Vec::with_capacity(total_blocks as usize * 2);
-    let mut parity = vec![0u8; rec_sectors as usize * 512];
+    let mut parity = vec![0u8; parity_len];
     let mut sector = [0u8; 512];
     for block in 0..total_blocks as usize {
         let start = block * 512;

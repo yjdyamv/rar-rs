@@ -724,7 +724,7 @@ impl RarArchive {
             // matching `scan_volume`).
             flags |= crate::format::rar4::MHD_PASSWORD;
         }
-        if self.recovery_percent.is_some() {
+        if self.recovery_percent.is_some() || self.recovery_sectors.is_some() {
             // MHD_RECOVERY: the archive carries a recovery record (the
             // NEWSUB `RR` block written at close). WinRAR's repair looks
             // for this bit before scanning for the record.
@@ -765,7 +765,10 @@ impl RarArchive {
             // only, matching WinRAR's RAR4 writer). Appending to an
             // archive that carried a record rebuilds it over the whole new
             // prefix at its original parity strength.
-            if self.recovery_percent.is_some() || self.write_ctx().rar4.rr_sectors.is_some() {
+            if self.recovery_percent.is_some()
+                || self.recovery_sectors.is_some()
+                || self.write_ctx().rar4.rr_sectors.is_some()
+            {
                 self.write_rar4_recovery_block()?;
             }
             self.write_rar4_end_block()?;
@@ -792,7 +795,10 @@ impl RarArchive {
             let mut reader = std::fs::File::open(&path)?;
             std::io::Read::read_exact(&mut reader, &mut prefix)?;
         }
-        let rec_sectors = match self.write_ctx().rar4.rr_sectors {
+        // An explicit parity-sector count (WinRAR RAR4 `-rr<N>`) is used
+        // verbatim; otherwise the record is sized by percent (or, when an
+        // existing archive is rewritten, at its original strength).
+        let rec_sectors = match self.recovery_sectors.or(self.write_ctx().rar4.rr_sectors) {
             Some(rec) => rec,
             None => {
                 let percent = self.recovery_percent.unwrap_or(0);
@@ -915,6 +921,7 @@ pub(super) struct WriteOptionFlags {
     quick_open: bool,
     blake2: bool,
     recovery_percent: Option<u8>,
+    recovery_sectors: Option<u32>,
     recovery_volumes_percent: Option<u8>,
     recovery_volume_count: Option<u32>,
     save_owner: bool,
@@ -930,6 +937,7 @@ impl WriteOptionFlags {
             quick_open: options.quick_open,
             blake2: options.blake2,
             recovery_percent: options.recovery_percent,
+            recovery_sectors: options.recovery_sectors,
             recovery_volumes_percent: options.recovery_volumes_percent,
             recovery_volume_count: options.recovery_volume_count,
             save_owner: options.save_owner,
@@ -945,6 +953,7 @@ impl WriteOptionFlags {
             quick_open: options.quick_open,
             blake2: options.blake2,
             recovery_percent: options.recovery_percent,
+            recovery_sectors: options.recovery_sectors,
             recovery_volumes_percent: options.recovery_volumes_percent,
             recovery_volume_count: options.recovery_volume_count,
             save_owner: options.save_owner,
@@ -981,6 +990,7 @@ pub(super) fn validate_write_options(
                 quick_open: flags.quick_open,
                 blake2: flags.blake2,
                 recovery_percent: flags.recovery_percent,
+                recovery_sectors: flags.recovery_sectors,
                 recovery_volumes_percent: flags.recovery_volumes_percent,
                 recovery_volume_count: flags.recovery_volume_count,
                 save_owner: flags.save_owner,
@@ -989,6 +999,13 @@ pub(super) fn validate_write_options(
                 encrypt_headers: flags.encrypt_headers,
             },
         )?;
+    }
+    // Parity sectors are the legacy RAR4 record's native unit; a RAR5 record is
+    // sized by percent, so an exact count would otherwise be dropped silently.
+    if flags.recovery_sectors.is_some() && !version.is_legacy() && !version.is_rar13() {
+        return Err(RarError::InvalidOption(
+            "an exact recovery-sector count is a legacy RAR4 option; a RAR5 recovery record is sized by percent".into(),
+        ));
     }
     Ok(())
 }
