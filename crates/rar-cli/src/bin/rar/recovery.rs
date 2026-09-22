@@ -87,15 +87,21 @@ fn repair_failure(error: rar_rs::RarError) -> error::CliError {
 /// repaired and `rebuilt.<name>` when there was no record to repair with.
 pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
     let archive_path = &args.archive;
-    // RAR 1.3/1.4 has no recovery records and its fixed-width headers are
-    // not RAR5 blocks; refuse before the RAR5 repair path misparses them.
-    if crate::list::is_rar13_file(std::path::Path::new(archive_path)) {
-        return Err("repair is not supported for RAR 1.3/1.4 archives".into());
-    }
     let name = std::path::Path::new(archive_path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "archive.rar".to_string());
+    // RAR 1.3/1.4 has no recovery records and no tolerant walk. WinRAR prints
+    // the reconstruct banner, refuses in one line, produces nothing and exits
+    // 0; match that rather than failing with our own error.
+    if crate::list::is_rar13_file(std::path::Path::new(archive_path)) {
+        info!("Data recovery record not found");
+        info!("Reconstructing {archive_path}");
+        info!("Building rebuilt.{name}");
+        eprintln!("Cannot repair archive with old format");
+        info!("Done");
+        return Ok(());
+    }
     // A `-hp` archive needs the password to read its headers; `-p-` (empty)
     // means "no password".
     let password = args
@@ -173,12 +179,9 @@ fn reconstruct(archive: &std::path::Path, name: &str, password: Option<&str>) ->
         info!("Corrupt headers were found; members with unreadable headers were skipped");
     }
     info!("Done");
-    // Match WinRAR's exit code: it reports a data error (exit 3) only when it
-    // hit corrupt *headers*; a payload-damaged member is copied without
-    // verification and still exits 0. We instead drop members that fail to
-    // verify (safer than copying them) and name each one above, but keep the
-    // same code so scripts see what the official tool would report.
-    if report.skipped_damage() {
+    // WinRAR's exit code for a lost member depends on the container: a RAR5
+    // header glitch exits 3, a legacy one exits 0 (measured on 6.23/7.23).
+    if report.skipped_damage() && !report.legacy() {
         Err(error::CliError::silent(error::EXIT_CRC))
     } else {
         Ok(())

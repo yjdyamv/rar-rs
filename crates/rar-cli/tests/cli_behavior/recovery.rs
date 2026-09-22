@@ -368,6 +368,69 @@ fn cli_repair_without_a_recovery_record_reconstructs() {
     assert!(!text.contains("RAR format error"), "{text}");
 }
 
+/// A no-record *legacy* archive whose header is damaged: `rar r` resyncs past
+/// it, keeps the members around it, and exits 0 — WinRAR's legacy convention,
+/// unlike the RAR5 exit 3.
+#[test]
+fn cli_repair_salvages_a_legacy_header() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("f1.txt"), b"one").unwrap();
+    std::fs::write(dir.path().join("f2.txt"), b"two").unwrap();
+    let arc = dir.path().join("legacy.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-m0", "-idq"])
+        .arg(&arc)
+        .args(["f1.txt", "f2.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // Corrupt f2's FILE_HEAD (the bytes holding its name).
+    let mut bytes = std::fs::read(&arc).unwrap();
+    let pos = bytes
+        .windows(6)
+        .position(|window| window == b"f2.txt")
+        .expect("f2 header name");
+    bytes[pos] ^= 0xFF;
+    std::fs::write(&arc, &bytes).unwrap();
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["r", "-idq"])
+        .arg(&arc)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "legacy header damage exits 0 like WinRAR:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let rebuilt = dir.path().join("rebuilt.legacy.rar");
+    assert!(rebuilt.exists(), "the salvage must write rebuilt.<name>");
+    let list = std::process::Command::new(RAR_CLI)
+        .args(["lb"])
+        .arg(&rebuilt)
+        .output()
+        .unwrap();
+    let names = String::from_utf8_lossy(&list.stdout);
+    assert!(names.contains("f1.txt"), "salvaged member: {names}");
+    assert!(!names.contains("f2.txt"), "corrupt member dropped: {names}");
+
+    let test = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-idq"])
+        .arg(&rebuilt)
+        .output()
+        .unwrap();
+    assert!(
+        test.status.success(),
+        "the salvaged legacy archive must verify:\n{}",
+        String::from_utf8_lossy(&test.stderr)
+    );
+}
+
 /// A no-record archive whose *header* is damaged: `rar r` resyncs past the
 /// corrupt block, salvages the members around it, and exits 3 like WinRAR.
 #[test]

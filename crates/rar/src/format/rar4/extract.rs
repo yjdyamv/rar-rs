@@ -31,13 +31,28 @@ fn is_rar29_codec(hdr: &FileHeader) -> bool {
 /// positioned right after the signature (SFX-aware); later volumes open
 /// fresh and each starts with its own 7-byte signature.
 pub(crate) fn open_read_rar4(cx: &mut dyn Engine) -> RarResult<()> {
+    open_read_rar4_with(cx, false)
+}
+
+/// [`open_read_rar4`] tolerating corrupt block headers: the scanner resyncs
+/// past them and keeps the members that still parse (used by `rar r`'s
+/// reconstruct fallback on a damaged legacy archive).
+pub(crate) fn open_read_rar4_salvage(cx: &mut dyn Engine) -> RarResult<()> {
+    open_read_rar4_with(cx, true)
+}
+
+/// [`open_read_rar4`] with an explicit salvage flag: volume 0 is the
+/// already-open primary stream, positioned right after the signature
+/// (SFX-aware); later volumes open fresh and each starts with its own 7-byte
+/// signature.
+fn open_read_rar4_with(cx: &mut dyn Engine, salvage: bool) -> RarResult<()> {
     cx.clear_catalog();
     let mut scan = Rar4VolumeScan::default();
     let mut out = Vec::new();
 
     {
         let p = cx.parts();
-        scan.scan_volume(stream_mut(p.stream)?, 0, p.password, &mut out)?;
+        scan.scan_volume(stream_mut(p.stream)?, 0, p.password, &mut out, salvage)?;
     }
     check_entry_cap(out.len(), MAX_CATALOG_ENTRIES)?;
     let volume_paths = cx.volume_paths().to_vec();
@@ -54,15 +69,17 @@ pub(crate) fn open_read_rar4(cx: &mut dyn Engine) -> RarResult<()> {
         }
         {
             let p = cx.parts();
-            scan.scan_volume(&mut stream, vol_idx, p.password, &mut out)?;
+            scan.scan_volume(&mut stream, vol_idx, p.password, &mut out, salvage)?;
         }
         check_entry_cap(out.len(), MAX_CATALOG_ENTRIES)?;
     }
     let archive_solid = scan.archive_solid;
     let new_numbering = scan.new_numbering;
+    let damaged = scan.damaged;
     scan.finish()?;
     cx.set_archive_solid(archive_solid);
     cx.read_ctx_mut().legacy.new_numbering = new_numbering;
+    cx.read_ctx_mut().salvage_damaged = damaged;
     cx.replace_catalog(out);
     Ok(())
 }

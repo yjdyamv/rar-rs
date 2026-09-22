@@ -22,18 +22,19 @@ pub(crate) fn open_read(cx: &mut dyn Engine) -> RarResult<()> {
 }
 
 /// Open a damaged archive for reading, tolerating corrupt block headers: the
-/// RAR5 scanner resyncs past them and the catalog keeps the members that still
-/// parse. Used by `rar r`'s reconstruct fallback. Only RAR5 is salvageable
-/// (its block walk is self-describing); other families keep their strict scan.
+/// RAR5 and RAR4 scanners resync past them and the catalog keeps the members
+/// that still parse. Used by `rar r`'s reconstruct fallback. RAR 1.3/1.4 has
+/// no tolerant walk (the official tool refuses it too).
 pub(crate) fn open_read_salvage(cx: &mut dyn Engine) -> RarResult<()> {
     open_common(cx)?;
     match cx.family() {
         ArchiveFamily::Rar50Plus => {
             crate::format::rar5::extract::open::rebuild_catalog_salvage(cx)?
         }
-        _ => {
+        ArchiveFamily::Rar15To40 => crate::format::rar4::extract::open_read_rar4_salvage(cx)?,
+        ArchiveFamily::Rar13 => {
             return Err(RarError::Unsupported(
-                "salvage scan is only supported for RAR5 archives".into(),
+                "salvage scan is not supported for RAR 1.3/1.4 archives".into(),
             ));
         }
     }

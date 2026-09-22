@@ -108,6 +108,42 @@ fn reconstruct_salvages_past_a_corrupt_header() {
 }
 
 #[test]
+fn reconstruct_salvages_past_a_corrupt_legacy_header() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("legacy-dmg.rar");
+    let dst = dir.path().join("rebuilt.legacy-dmg.rar");
+    {
+        let options = rar_rs::WriterOptions::default().compression(ArchiveVersion::V29);
+        let mut writer = ArchiveWriter::create_with(&src, options).unwrap();
+        writer.add_bytes("f1.txt", b"one", store()).unwrap();
+        writer.add_bytes("f2.txt", b"two", store()).unwrap();
+        writer.finish().unwrap();
+    }
+    // Corrupt f2's FILE_HEAD (the bytes holding its name); the salvage scan
+    // must resync to the next valid header.
+    let mut bytes = std::fs::read(&src).unwrap();
+    let pos = bytes
+        .windows(6)
+        .position(|window| window == b"f2.txt")
+        .expect("f2 header name");
+    bytes[pos] ^= 0xFF;
+    std::fs::write(&src, &bytes).unwrap();
+
+    let report = rar_rs::reconstruct_archive_path(&src, &dst, None).unwrap();
+    assert!(
+        report.skipped_damage(),
+        "a corrupt legacy header must be reported"
+    );
+    assert!(report.legacy(), "the source is a legacy archive");
+    assert_eq!(names(report.recovered()), ["f1.txt"]);
+
+    let mut reader = ArchiveReader::open(&dst).unwrap();
+    let id = reader.unique_entry("f1.txt").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), b"one");
+    assert!(reader.unique_entry("f2.txt").is_err());
+}
+
+#[test]
 fn reconstruct_rebuilds_a_legacy_archive_as_rar4() {
     let dir = make_temp_dir();
     let src = dir.path().join("legacy.rar");

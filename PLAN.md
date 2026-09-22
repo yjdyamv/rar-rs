@@ -160,15 +160,22 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   失败即逐字节重同步（`resync_plain_block`， 带「vint 合理 +
   已知块类型」的廉价预筛，避免每字节读满 2 MiB），跳过坏块继续， 并在
   `ReadState.salvage_damaged` 记「曾丢成员」（这些成员根本没进目录，`dropped`
-  说不出名字）。**退出码对齐官方**：仅「头损坏」（`skipped_damage`）时 exit
-  **3**，载荷损坏仍 exit 0——官方对载荷损坏是**不校验、原样拷贝坏成员**并 exit 0
-  （实测 `rebuilt` 里 f1 报 checksum
-  error），我们改为丢坏成员并逐条打印，更安全，
-  但退出码保持官方语义。**范围**：打捞扫描仅 RAR5、且仅**非 `-hp`**（加密流的块
-  头无法廉价探测）；`-hp` 或 legacy 的严格扫描失败仍原样报错。契约由
-  `reconstruct.rs` 四个测试与 CLI
+  说不出名字）。**RAR4 同样可打捞**（2026-09-22 对拍官方
+  6.23/7.23）：`scan_volume` 加 `salvage`，坏块处用 `envelope::resync_block`
+  逐字节重同步（廉价预筛：head type ∈ `0x72..=0x7b` 且 `head_size`
+  装得下），并清掉待续分片；重同步丢下的成员 同样计入
+  `salvage_damaged`。**退出码按容器对齐官方**（实测）：RAR5 头损坏 exit
+  **3**，**legacy 头损坏 exit 0**；载荷损坏两边都 exit 0——官方对载荷损坏是**不
+  校验、原样拷贝坏成员**（实测 `rebuilt` 里 f1 报 checksum error），我们改为丢坏
+  成员并逐条打印，更安全，但退出码保持官方语义。**RAR 1.3/1.4**：官方打印同样的
+  重建横幅后一行 `Cannot repair archive with old format`、**不产物、exit
+  0**，我们 照抄（不再报 `Unsupported`）。**范围**：打捞扫描覆盖 RAR5 与
+  RAR4，且仅**非 `-hp`**（加密流的块头无法廉价探测）；RAR 1.3/1.4 无打捞。契约由
+  `reconstruct.rs` 五个测试与 CLI
   `cli_repair_without_a_recovery_record_reconstructs` /
-  `cli_repair_salvages_past_a_corrupt_header` 钉住。
+  `cli_repair_salvages_past_a_corrupt_header` /
+  `cli_repair_salvages_a_legacy_header` /
+  `cli_repair_reports_rar13_as_unrepairable` 钉住。
 - `-htb` 语义对齐官方（2026-09-22 官方对拍）：BLAKE2sp 记录**取代** CRC32 字段
   （`MemberPlan::file_header` 在有 hash 时不再写 `crc32_val`，序列化器顺带清
   `FILE_FLAG_CRC32`）。此前是「CRC32 + BLAKE2sp 并存」，每成员比官方多 4 字节；

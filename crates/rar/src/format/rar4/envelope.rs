@@ -124,6 +124,50 @@ pub(crate) fn read_block<R: Read + Seek>(
     Ok(block)
 }
 
+/// Scan forward from `start` for the next structurally valid plaintext block
+/// header, so a salvage scan can resync past a corrupt one. Each offset is
+/// cheaply pre-filtered (a known head type and a `head_size` that fits the
+/// file) before the header is read and its CRC-16 verified, so a corrupt
+/// region costs a few bytes of reads per offset instead of a full header read.
+/// Returns `Ok(None)` past the last block; on success the stream is left just
+/// past the header, like [`read_block`].
+pub(crate) fn resync_block<R: Read + Seek>(
+    stream: &mut R,
+    start: u64,
+) -> RarResult<Option<Rar4Block>> {
+    let end = stream.seek(SeekFrom::End(0))?;
+    let mut pos = start;
+    while pos < end {
+        stream.seek(SeekFrom::Start(pos))?;
+        if block_candidate(stream, pos, end)? {
+            match read_block(stream, false, None, EnvelopePolicy::SCAN) {
+                Ok(Some(block)) => return Ok(Some(block)),
+                Ok(None) => return Ok(None),
+                Err(RarError::Io(e)) => return Err(RarError::Io(e)),
+                // Structurally plausible but not a real block (CRC failed):
+                // keep scanning.
+                Err(_) => {}
+            }
+        }
+        pos += 1;
+    }
+    Ok(None)
+}
+
+/// Cheap pre-filter for [`resync_block`]: the bytes at `pos` could start a
+/// plaintext block. RAR4 head types are `0x72..=0x7b` and `head_size` counts
+/// the whole header. The stream is left at an unspecified position (the caller
+/// seeks before every attempt).
+fn block_candidate<R: Read + Seek>(stream: &mut R, pos: u64, end: u64) -> RarResult<bool> {
+    let mut base = [0u8; 7];
+    if read_some(stream, &mut base)? < base.len() {
+        return Ok(false);
+    }
+    let head_type = base[2];
+    let head_size = u64::from(u16::from_le_bytes([base[5], base[6]]));
+    Ok((0x72..=0x7b).contains(&head_type) && head_size >= 7 && pos + head_size <= end)
+}
+
 /// Read a plaintext block header.
 fn read_plain_block<R: Read + Seek>(
     stream: &mut R,

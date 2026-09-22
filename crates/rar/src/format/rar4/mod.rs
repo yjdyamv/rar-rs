@@ -128,6 +128,8 @@ pub(crate) struct Rar4VolumeScan {
     /// The main header of the first volume carried MHD_NEWNUMBERING (a
     /// `.partN.rar` legacy set).
     pub new_numbering: bool,
+    /// Set when a salvage scan had to resync past a corrupt block.
+    pub damaged: bool,
 }
 
 /// Map the shared merge error to the RAR4 texts.
@@ -155,24 +157,50 @@ impl Rar4VolumeScan {
     /// signature; later volumes open fresh). Completed entries are pushed to
     /// `out`; an entry whose data continues into the next volume stays
     /// pending here. `password` decrypts `-hp` encrypted headers.
+    ///
+    /// With `salvage`, a corrupt plaintext block header does not abort the
+    /// walk: the scanner resyncs to the next structurally valid block and
+    /// keeps whatever still parses. Header-encrypted volumes (where a wrong
+    /// password is indistinguishable from damage) and real I/O errors still
+    /// abort.
     pub(crate) fn scan_volume(
         &mut self,
         stream: &mut (impl Read + Seek),
         volume_index: usize,
         password: Option<&str>,
         out: &mut Vec<ArchiveEntry>,
+        salvage: bool,
     ) -> RarResult<()> {
         // Set when this volume's main header carries MHD_PASSWORD: every
         // later block is header-encrypted. Resets per volume (each volume
         // starts with its own plaintext marker + main header).
         let mut header_encrypted = false;
         let mut password_bytes: Option<&[u8]> = None;
-        while let Some(block) = read_block(
-            stream,
-            header_encrypted,
-            password_bytes,
-            EnvelopePolicy::SCAN,
-        )? {
+        loop {
+            let block_start = stream.stream_position()?;
+            let block = match read_block(
+                stream,
+                header_encrypted,
+                password_bytes,
+                EnvelopePolicy::SCAN,
+            ) {
+                Ok(Some(block)) => block,
+                Ok(None) => break,
+                Err(error) => {
+                    let salvageable =
+                        salvage && !header_encrypted && !matches!(error, RarError::Io(_));
+                    if !salvageable {
+                        return Err(error);
+                    }
+                    self.damaged = true;
+                    // A corrupt block invalidates any pending split fragment.
+                    self.merge = SplitMerge::default();
+                    match envelope::resync_block(stream, block_start + 1)? {
+                        Some(block) => block,
+                        None => break,
+                    }
+                }
+            };
             match block.head_type {
                 MARK_HEAD | MAIN_HEAD => {
                     if block.head_type == MAIN_HEAD && block.flags & MHD_PASSWORD != 0 {

@@ -22,8 +22,9 @@ RAR/UNRAR binary is required at runtime.
 - **Recovery** — inline recovery records and `.rev` recovery volumes (RAR5 REV5
   and legacy RAR 1.5–4.x), with bounded-memory repair paths. When an archive has
   no record at all, `rar r` reconstructs `rebuilt.<name>` from the members that
-  still decode and verify, resyncing past corrupt headers (RAR5, unencrypted
-  headers) and exiting 3 when a header was lost, like WinRAR.
+  still decode and verify, resyncing past corrupt RAR5/RAR4 headers (plaintext
+  headers) and exiting 3 (RAR5) or 0 (legacy) when a header was lost, like
+  WinRAR.
 - **Integrity** — CRC32, BLAKE2sp (`-htb`) and encrypted-data MACs.
 - **Safe extraction** — path sanitization, size limits (opt-in `--max-unpacked`
   / `--max-total-unpacked`), atomic staging, cooperative cancellation.

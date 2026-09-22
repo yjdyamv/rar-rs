@@ -25,6 +25,7 @@ pub struct ReconstructReport {
     recovered: Vec<String>,
     dropped: Vec<String>,
     damaged: bool,
+    legacy: bool,
 }
 
 impl ReconstructReport {
@@ -42,6 +43,12 @@ impl ReconstructReport {
     /// that never reached the catalog. `dropped` cannot name those.
     pub fn skipped_damage(&self) -> bool {
         self.damaged
+    }
+
+    /// Whether the source was a legacy (RAR 1.5–4.x) archive, whose rebuilt
+    /// container is RAR4.
+    pub fn legacy(&self) -> bool {
+        self.legacy
     }
 }
 
@@ -114,5 +121,6 @@ pub fn reconstruct_archive_path(
     }
     writer.finish()?;
     report.damaged = damaged;
+    report.legacy = version == ArchiveVersion::V29;
     Ok(report)
 }
