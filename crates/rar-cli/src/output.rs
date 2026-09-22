@@ -84,3 +84,45 @@ pub fn extract_dest(dest: &str, archive: &str, mode: AppendDir) -> std::path::Pa
         AppendDir::ArchiveDirFlat => archive_dir(archive),
     }
 }
+
+/// The "All" answer to the overwrite prompt, shared across the calls of one
+/// extraction (`0` = still asking, `1` = overwrite every later destination).
+pub type OverwriteAllState = std::sync::atomic::AtomicU8;
+
+/// Ask the console whether to overwrite an existing destination, WinRAR's
+/// `Y`/`N`/`A`/`R`/`Q` prompt. Reads a line from stdin; an unreadable or empty
+/// line leaves the file untouched. Once `all` is set, later calls overwrite
+/// without asking again.
+pub fn prompt_overwrite(
+    path: &std::path::Path,
+    all: &OverwriteAllState,
+) -> rar_rs::OverwriteChoice {
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+
+    if all.load(Ordering::Relaxed) == 1 {
+        return rar_rs::OverwriteChoice::Overwrite;
+    }
+    loop {
+        print!(
+            "{} already exists\nOverwrite? (Y)es, (N)o, (A)ll, (R)ename, (Q)uit: ",
+            path.display()
+        );
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+            return rar_rs::OverwriteChoice::Skip;
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => return rar_rs::OverwriteChoice::Overwrite,
+            "n" | "no" => return rar_rs::OverwriteChoice::Skip,
+            "a" | "all" => {
+                all.store(1, Ordering::Relaxed);
+                return rar_rs::OverwriteChoice::Overwrite;
+            }
+            "r" | "rename" => return rar_rs::OverwriteChoice::Rename,
+            "q" | "quit" => return rar_rs::OverwriteChoice::Quit,
+            _ => {}
+        }
+    }
+}

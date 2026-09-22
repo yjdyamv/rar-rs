@@ -254,6 +254,82 @@ fn cli_bad_command_lines_match_winrar_exit_codes() {
     );
 }
 
+/// The interactive overwrite prompt (WinRAR's `Y`/`N`/`R`/`Q`). The suite
+/// cannot allocate a console, so `RAR_RS_FORCE_OVERWRITE_PROMPT` forces the
+/// prompt on and the answer is piped in on stdin.
+#[test]
+fn cli_interactive_overwrite_prompt() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"archived").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-idq", "arc.rar", "a.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("a.txt"), b"on disk").unwrap();
+
+    let extract = |answer: &str| {
+        run_with_prompt_answer(
+            dir.path(),
+            &["x", "-idq", "--dest", "out", "arc.rar"],
+            answer,
+        )
+    };
+
+    // "y": the archived bytes replace the existing file.
+    let out = extract("y\n");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"archived");
+
+    // "n": the existing file is left untouched (all skipped -> exit 10).
+    std::fs::write(dest.join("a.txt"), b"on disk").unwrap();
+    let out = extract("n\n");
+    assert_eq!(out.status.code(), Some(10), "all-skipped run exits 10");
+    assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"on disk");
+
+    // "r": a numbered copy is written and the original kept.
+    let out = extract("r\n");
+    assert!(out.status.success());
+    assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"on disk");
+    assert_eq!(std::fs::read(dest.join("a(1).txt")).unwrap(), b"archived");
+
+    // "q": the run aborts with the user-break code.
+    let out = extract("q\n");
+    assert_eq!(out.status.code(), Some(255), "quit exits 255");
+}
+
+/// Run the CLI with one piped answer to the overwrite prompt.
+fn run_with_prompt_answer(
+    cwd: &std::path::Path,
+    args: &[&str],
+    answer: &str,
+) -> std::process::Output {
+    let mut child = std::process::Command::new(RAR_CLI)
+        .args(args)
+        .env("RAR_RS_FORCE_OVERWRITE_PROMPT", "1")
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(answer.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
 #[test]
 fn cli_stdin_name_reads_stdin() {
     let dir = make_temp_dir();

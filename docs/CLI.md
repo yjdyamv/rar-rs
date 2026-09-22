@@ -168,9 +168,11 @@ it must exist and never changes where outputs are written).
 
 - `-df` / `-kb` / `-si<name>` — delete sources / keep broken / stdin member
 - `-ver[n]` / `-ag[fmt]` — versioning / auto-name (local time)
-- `-y` / `-o±` — yes / overwrite mode. With no interactive prompt, extraction
-  without `-y`/`-o+` skips existing files (WinRAR's non-interactive outcome);
-  `-o+` overwrites, `-o-` skips and `-or` auto-renames
+- `-y` / `-o±` — yes / overwrite mode. On a console (stdin is a terminal),
+  extraction without `-y`/`-o±`/`-or` asks before replacing each existing file
+  (`Y`es / `N`o / `A`ll / `R`ename / `Q`uit), like WinRAR; a non-interactive run
+  (piped stdin, CI) keeps WinRAR's non-interactive outcome and skips. `-o+`
+  overwrites, `-o-` skips and `-or` auto-renames — none of them prompt
 - `-ierr` / `-ilog` / `-iver`, `-cfg-`, `-sc<charset>`
 - `--max-unpacked <size>` / `--max-total-unpacked <size>` — bound how much a
   disk extraction may write: the first rejects any member whose _declared_

@@ -478,6 +478,13 @@ pub struct ExtractOptions {
     /// Rename the destination automatically when it already exists
     /// (like `-or`): `name.ext` becomes `name(1).ext`, `name(2).ext`, ...
     pub auto_rename: bool,
+    /// Ask the installed overwrite prompt about every existing destination,
+    /// like WinRAR's interactive console mode. The prompt is installed with
+    /// [`ArchiveReader::set_overwrite_prompt`](crate::ArchiveReader::set_overwrite_prompt);
+    /// with none installed this falls back to skipping, so setting the flag
+    /// alone never overwrites. `-y` / `-o+` / `-o-` / `-or` take precedence
+    /// (the CLI does not set the flag in those cases).
+    pub prompt_overwrite: bool,
     /// Freshen (`-f`): extract a member only when its destination exists and
     /// the archived modification time is newer; a missing destination is
     /// skipped.
@@ -552,6 +559,7 @@ impl Default for ExtractOptions {
             flat_paths: false,
             skip_existing: false,
             auto_rename: false,
+            prompt_overwrite: false,
             freshen: false,
             update: false,
             keep_broken: false,
@@ -564,6 +572,37 @@ impl Default for ExtractOptions {
         }
     }
 }
+
+/// The answer the interactive overwrite prompt gave for one destination
+/// (WinRAR's `Y`/`N`/`A`/`R`/`Q` on an existing file).
+///
+/// [`ExtractOptions::prompt_overwrite`] makes the extraction loop ask the
+/// installed [`OverwritePrompt`] for one of these before replacing a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverwriteChoice {
+    /// Yes: overwrite this destination.
+    Overwrite,
+    /// No: leave this destination untouched.
+    Skip,
+    /// All: overwrite this and every later existing destination. The prompt
+    /// callback is responsible for remembering this and answering the later
+    /// calls without asking again.
+    OverwriteAll,
+    /// Rename: write to the next free `name(N).ext` instead.
+    Rename,
+    /// Quit: abort the extraction with
+    /// [`RarError::Cancelled`](crate::RarError::Cancelled).
+    Quit,
+}
+
+/// Callback asked for each existing destination when
+/// [`ExtractOptions::prompt_overwrite`] is set.
+///
+/// Installed with
+/// [`ArchiveReader::set_overwrite_prompt`](crate::ArchiveReader::set_overwrite_prompt).
+/// The library never reads the terminal itself, so a front end supplies the
+/// prompt (and any "all" state) here.
+pub type OverwritePrompt = dyn Fn(&std::path::Path) -> OverwriteChoice + Send + Sync;
 
 /// Mark of the Web propagation for extraction (WinRAR's `-om`).
 ///

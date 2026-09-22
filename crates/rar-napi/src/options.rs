@@ -244,6 +244,8 @@ impl ExtractArchiveOptions {
       max_metadata_bytes,
       skip_existing: self.skip_existing.unwrap_or(false),
       auto_rename: self.auto_rename.unwrap_or(false),
+      // The binding is non-interactive: never prompt for overwrites.
+      prompt_overwrite: false,
       freshen: false,
       update: false,
       keep_broken: self.keep_broken.unwrap_or(false),
