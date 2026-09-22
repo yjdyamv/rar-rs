@@ -261,7 +261,7 @@ fn main() {
         );
         return;
     }
-    let cli = Cli::parse_from(std::iter::once("unrar".to_string()).chain(args));
+    let cli = error::parse_args::<Cli>(std::iter::once("unrar".to_string()).chain(args));
     output::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
     output::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
     if let Err(e) = run(cli) {

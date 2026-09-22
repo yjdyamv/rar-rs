@@ -12,6 +12,8 @@
 
 use std::fmt;
 
+use clap::Parser;
+use clap::error::ErrorKind;
 use rar_rs::{ErrorCode, RarError};
 
 /// WinRAR-compatible process exit codes.
@@ -138,6 +140,36 @@ pub fn exit_code_for(code: ErrorCode) -> i32 {
     }
 }
 
+/// Map a failed archive open onto WinRAR's exit codes: a genuinely missing
+/// archive (an I/O `NotFound`) is "no files found" (10); any other failure
+/// keeps its library category. Official 7.23 exits 10 for a missing archive.
+pub fn open_error(error: RarError) -> CliError {
+    if matches!(&error, RarError::Io(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        return CliError::with_code(error.to_string(), EXIT_NO_FILES);
+    }
+    CliError::from(error)
+}
+
+/// Parse a clap command line, matching WinRAR's exit codes: help and version
+/// print and exit 0, while any other command-line error (an unknown switch,
+/// a missing value) exits 7 (`EXIT_BAD_COMMAND`). Clap's own default for a
+/// parse error is 2; official 7.23 exits 7 for `-j` / `--verbose`.
+pub fn parse_args<T: Parser>(args: impl IntoIterator<Item = String>) -> T {
+    match T::try_parse_from(args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let code = match error.kind() {
+                ErrorKind::DisplayHelp
+                | ErrorKind::DisplayVersion
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => EXIT_SUCCESS,
+                _ => EXIT_BAD_COMMAND,
+            };
+            let _ = error.print();
+            std::process::exit(code);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +204,20 @@ mod tests {
         let error = CliError::from(RarError::WrongPassword).context("extract a.bin");
         assert_eq!(error.exit_code(), 11);
         assert!(error.message().starts_with("extract a.bin: "));
+    }
+
+    #[test]
+    fn a_missing_archive_is_no_files_but_other_io_stays_fatal() {
+        let missing = RarError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file",
+        ));
+        assert_eq!(open_error(missing).exit_code(), EXIT_NO_FILES);
+
+        let denied = RarError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ));
+        assert_eq!(open_error(denied).exit_code(), EXIT_FATAL);
     }
 }

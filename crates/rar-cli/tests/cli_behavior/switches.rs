@@ -198,7 +198,7 @@ fn cli_exit_codes_distinguish_failure_categories() {
         .unwrap();
     assert_eq!(status.code(), Some(3), "damaged payload must exit 3");
 
-    // Missing archive: generic fatal (2).
+    // Missing archive: "no files found" (10), like WinRAR.
     let missing = dir.path().join("missing.rar");
     let status = std::process::Command::new(RAR_CLI)
         .args(["t", "-idq"])
@@ -206,7 +206,52 @@ fn cli_exit_codes_distinguish_failure_categories() {
         .current_dir(dir.path())
         .status()
         .unwrap();
-    assert_eq!(status.code(), Some(2), "missing archive must exit 2");
+    assert_eq!(status.code(), Some(10), "missing archive must exit 10");
+}
+
+/// WinRAR's exit codes for a bad command line: an unknown switch and an
+/// unknown command are both 7 (`unknown option`), while a missing archive is
+/// 10 (`no files found`). Clap defaults to 2, which the official tools never
+/// emit for these.
+#[test]
+fn cli_bad_command_lines_match_winrar_exit_codes() {
+    let dir = make_temp_dir();
+
+    let unknown_switch = std::process::Command::new(RAR_CLI)
+        .args(["l", "-j", "-idq", "irrelevant.rar"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        unknown_switch.status.code(),
+        Some(7),
+        "unknown switch must exit 7: {}",
+        String::from_utf8_lossy(&unknown_switch.stderr)
+    );
+
+    for binary in [RAR_CLI, UNRAR_CLI] {
+        let unknown_command = std::process::Command::new(binary)
+            .arg("zzz")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            unknown_command.status.code(),
+            Some(7),
+            "unknown command must exit 7 for {binary}"
+        );
+    }
+
+    let missing = std::process::Command::new(UNRAR_CLI)
+        .args(["l", "nope.rar"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        missing.status.code(),
+        Some(10),
+        "missing archive must exit 10"
+    );
 }
 
 #[test]

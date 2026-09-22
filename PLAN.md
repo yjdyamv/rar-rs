@@ -88,12 +88,6 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 > 命令面已官方全覆盖，缺口全在**行为层**。逐条只记目标 + 代码接缝 + 验收测试；
 > 判据以官方 WinRAR 7.23 实测为准。
 
-- [ ] **P1 退出码对齐** — 与官方一致：缺归档 10（我们 2）、未知开关 7（clap 默认
-      2）、未知命令 7（`rar` 现 2 而 `unrar` 现 7，需统一）。接缝
-      `crates/rar-cli/src/error.rs`（`exit_code_for`）、`ops.rs::open_reader`、
-      `bin/rar/main.rs`、`bin/unrar.rs`。**注意**把「归档不存在」与真 I/O 错误
-      区分开。验收改 `crates/rar-cli/tests/cli_behavior/{switches.rs,fixes.rs}`
-      及未知开关/命令断言。
 - [ ] **P2 交互式覆盖询问** — TTY 下对已存在文件提供 WinRAR 式提示
       （Yes/No/All/Rename/Quit），非 TTY 或显式 `-y`/`-o±` 时保持现行为。接缝
       `rar-cli/src/output.rs::skip_existing`、`ops.rs`（`ExtractRequest`）、库侧
@@ -155,6 +149,11 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 - 写侧不可压缩预检 → 直接
   STORE（`whole_member_is_incompressible`）。老编码器要先 建 O(input) 的 token
   向量，随机数据此前会白分配上百 MiB。
+- CLI 退出码对齐 WinRAR（2026-09-22 实测 7.23）：缺归档现在 exit **10**
+  （`error::open_error` 把 I/O `NotFound` 与真 I/O 错误分开），未知开关与未知
+  命令 exit **7**（`error::parse_args` 覆盖 clap 默认的 2；`rar`/`unrar`
+  未知命令统一），无参数仍 exit 0。契约由
+  `cli_bad_command_lines_match_winrar_exit_codes` 与两个缺归档断言钉住。
 
 **流式与编码**
 
