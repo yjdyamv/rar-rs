@@ -311,7 +311,7 @@ fn extract_all_parallel(
     // abort before that member's output is staged (like the serial path,
     // which validates before creating its temp file); decode and
     // integrity failures travel back with the partial bytes.
-    let results: Vec<RarResult<DecodedMember>> = extraction_pool().install(|| {
+    let results: Vec<RarResult<DecodedMember>> = extraction_pool(opts.threads).install(|| {
         payloads
             .into_par_iter()
             .map(|(i, payload)| {

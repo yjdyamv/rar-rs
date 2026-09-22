@@ -252,6 +252,22 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   等效（我们不打印官方版权/Trial 横幅）、`-iver` 文案与官方不同。契约由
   `cli_irrelevant_official_switches_are_ignored_like_winrar`（含「未知开关仍
   exit 7」） 与 `cli_v_minus_cancels_volume_creation` 钉住。
+- **库 API 对称性 +
+  可运行示例（2026-09-22）**：审计发现唯一的真设计缺口是**线程配置
+  不对称**——`WriterOptions::threads` 是 per-archive，而抽取端只能在**进程全局**
+  `set_extraction_threads` 上设（`ExtractOptions`
+  根本没有该字段），同一进程两个消费者
+  会互相覆盖。现补齐对称：`ExtractOptions::threads`（`None` → 全局 →
+  自动；`Some(0)`
+  跳过全局、直接自动），抽取池**按线程数缓存**（原先是一个池、按需重建，会在两个不同
+  线程数的并发抽取间抖动），解析规则与压缩侧同构并有单测
+  （`extraction_run_threads_win_over_the_global_override`）；CLI 的 `-mt`
+  改为逐次下发
+  （`ExtractRequest::options()`），不再改全局。另补两个**可运行示例**
+  （`examples/create_and_extract.rs`、`examples/edit_and_repair.rs`）——此前
+  `examples/` 只有 bench/probe，新用户没有普通用法的样板；README 现在指向它们。
+  契约由 `extract_options_threads_drive_the_parallel_path`（≥4 成员、≥64 MiB
+  解开量 走批量路径，`threads=Some(2)` 与 `Some(0)` 都逐字节校验）钉住。
 - `-htb` 语义对齐官方（2026-09-22 官方对拍）：BLAKE2sp 记录**取代** CRC32 字段
   （`MemberPlan::file_header` 在有 hash 时不再写 `crc32_val`，序列化器顺带清
   `FILE_FLAG_CRC32`）。此前是「CRC32 + BLAKE2sp 并存」，每成员比官方多 4 字节；

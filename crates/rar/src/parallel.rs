@@ -18,7 +18,8 @@ pub fn set_compression_threads(threads: usize) {
     COMPRESSION_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Set the extraction thread count used by the `parallel` feature.
+/// Set the extraction thread count used by the `parallel` feature when a run
+/// does not ask for its own (`ExtractOptions::threads` takes precedence).
 /// `0` restores automatic sizing.
 pub fn set_extraction_threads(threads: usize) {
     EXTRACTION_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
@@ -137,34 +138,58 @@ fn build_compression_pool(threads: usize) -> rayon::ThreadPool {
         .expect("build rar5 compression pool")
 }
 
-/// Rayon pool for parallel extraction, sized with
-/// [`set_extraction_threads`] (default: all cores). Rebuilt when the
-/// requested count changes, like the compression pool.
+/// Effective worker count for an extraction-local override, mirroring
+/// [`compression_threads_for`]: `Some(0)` selects automatic sizing without
+/// consulting the global override, `Some(n)` uses `n`, and `None` falls back to
+/// [`set_extraction_threads`] and then to automatic sizing.
 #[cfg(feature = "parallel")]
-pub(crate) fn extraction_pool() -> std::sync::Arc<rayon::ThreadPool> {
-    use std::sync::{OnceLock, RwLock};
-    static POOL: OnceLock<RwLock<std::sync::Arc<rayon::ThreadPool>>> = OnceLock::new();
-    let lock = POOL.get_or_init(|| RwLock::new(std::sync::Arc::new(build_extraction_pool())));
-    let current = lock.read().expect("pool lock").clone();
-    let want = configured_extraction_threads().unwrap_or_else(|| pool_threads(4));
-    if current.current_num_threads() != want {
-        let mut guard = lock.write().expect("pool lock");
-        if guard.current_num_threads() != want {
-            *guard = std::sync::Arc::new(build_extraction_pool());
-        }
-        return guard.clone();
+fn resolve_extraction_threads(
+    run_threads: Option<usize>,
+    global_threads: Option<usize>,
+    automatic_threads: usize,
+) -> usize {
+    match run_threads {
+        Some(0) => automatic_threads,
+        Some(threads) => threads,
+        None => global_threads.unwrap_or(automatic_threads),
     }
-    current
 }
 
 #[cfg(feature = "parallel")]
-fn build_extraction_pool() -> rayon::ThreadPool {
-    let threads = configured_extraction_threads().unwrap_or_else(|| pool_threads(4));
+fn extraction_threads_for(run_threads: Option<usize>) -> usize {
+    resolve_extraction_threads(
+        run_threads,
+        configured_extraction_threads(),
+        pool_threads(4),
+    )
+}
+
+/// Pool for one extraction, sized by its own
+/// [`ExtractOptions::threads`](crate::options::ExtractOptions::threads) when
+/// given, otherwise by [`set_extraction_threads`] and then by the host's core
+/// count. Cached per worker count (like the compression pools), so two
+/// extractions asking for different counts do not rebuild each other's pool.
+#[cfg(feature = "parallel")]
+pub(crate) fn extraction_pool(run_threads: Option<usize>) -> std::sync::Arc<rayon::ThreadPool> {
+    let threads = extraction_threads_for(run_threads);
+    use std::sync::{Mutex, OnceLock};
+    static POOLS: OnceLock<
+        Mutex<std::collections::HashMap<usize, std::sync::Arc<rayon::ThreadPool>>>,
+    > = OnceLock::new();
+    let pools = POOLS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut map = pools.lock().expect("extraction pools lock");
+    map.entry(threads)
+        .or_insert_with(|| std::sync::Arc::new(build_pool(threads, "rar5-extract")))
+        .clone()
+}
+
+#[cfg(feature = "parallel")]
+fn build_pool(threads: usize, prefix: &'static str) -> rayon::ThreadPool {
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
-        .thread_name(|i| format!("rar5-extract-{i}"))
+        .thread_name(move |i| format!("{prefix}-{i}"))
         .build()
-        .expect("build rar5 extraction pool")
+        .expect("build rayon pool")
 }
 
 // Set while a Rayon worker is preparing batch members. Nested parallelism
@@ -208,6 +233,17 @@ mod tests {
         assert_eq!(resolve_compression_threads(Some(0), Some(2), 7), 7);
         assert_eq!(resolve_compression_threads(None, Some(2), 7), 2);
         assert_eq!(resolve_compression_threads(Some(3), Some(2), 7), 3);
+    }
+
+    /// Extraction mirrors the compression rule: the run's own count wins,
+    /// `Some(0)` means automatic sizing even with a global override set, and
+    /// only `None` consults the global.
+    #[test]
+    fn extraction_run_threads_win_over_the_global_override() {
+        assert_eq!(resolve_extraction_threads(Some(0), Some(2), 7), 7);
+        assert_eq!(resolve_extraction_threads(None, Some(2), 7), 2);
+        assert_eq!(resolve_extraction_threads(Some(3), Some(2), 7), 3);
+        assert_eq!(resolve_extraction_threads(None, None, 7), 7);
     }
 
     #[test]
