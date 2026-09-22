@@ -51,15 +51,17 @@ RUSTFLAGS="-D warnings" cargo check -p rar-rs --all-features \
 - **wasm32-wasip1-threads** is the quietest: it is neither unix nor windows, so
   helpers those branches use are dead there. That is why the library gates such
   helpers on `any(unix, windows)`.
-- The binding crate is **excluded from the workspace default members** and
-  cannot be checked with plain cargo either way (`napi-build` needs the
-  `EMNAPI_LINK_DIR` that `napi build` injects; on Windows it panics with
-  `libnode.dll not found in any search path`). A bare `cargo build` /
-  `cargo
-  test` therefore covers the library and the CLI; build the binding
-  with `npx napi build --platform --release --target wasm32-wasip1-threads`, and
-  on Windows run the suite as `cargo test -p rar-rs -p rar-cli` instead of
-  `--workspace` (which would drag the binding in).
+- **The binding crate needs an MSVC target on Windows.** Node ships MSVC-built
+  binaries and `napi-build` does nothing for a Windows MSVC target, but its
+  `windows-gnu` path insists on a `libnode.dll` in `LIBNODE_PATH` / `LIBPATH` /
+  `PATH` that no Node distribution ships — so on a host whose rustup default is
+  `x86_64-pc-windows-gnu` a workspace-wide `cargo build` dies in the binding's
+  build script with `libnode.dll not found in any search path`. Select the MSVC
+  toolchain (`rustup default stable-x86_64-pc-windows-msvc`) or pass
+  `--target x86_64-pc-windows-msvc`; Linux and macOS need nothing, which is why
+  CI's `--workspace` jobs pass. The `wasm32-wasip1-threads` binding additionally
+  needs the `EMNAPI_LINK_DIR` that `napi build` injects, so build it with
+  `npx napi build --platform --release --target wasm32-wasip1-threads`.
 
 ## Dependency gate
 

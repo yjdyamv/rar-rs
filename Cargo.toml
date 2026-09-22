@@ -1,15 +1,15 @@
 [workspace]
 members = ["crates/rar", "crates/rar-cli", "crates/rar-napi"]
-# The binding crate is not part of the default set: `napi-build` needs the
-# `EMNAPI_LINK_DIR` that `npx napi build` injects (on Windows it panics with
-# "libnode.dll not found in any search path"), so a bare `cargo build` /
-# `test` / `check` would fail for anyone who has not set that up. The default
-# members are the library and the CLI — the two crates a normal local build
-# wants — and `--workspace` / `-p rar-rs-napi` still reach the binding
-# (CI builds it through the napi CLI; see docs/testing.md).
-default-members = ["crates/rar", "crates/rar-cli"]
 # Resolver 3 (edition 2024 generation): dev-dependency features no longer
 # leak into normal builds.
+#
+# Note for Windows: the binding crate builds for an **MSVC** target (Node
+# itself is MSVC-built and `napi-build` does nothing there), while its
+# `windows-gnu` path insists on a `libnode.dll` in `LIBNODE_PATH` / `LIBPATH` /
+# `PATH` that no Node distribution ships. A host whose rustup default is
+# `x86_64-pc-windows-gnu` therefore has to select the MSVC one
+# (`rustup default stable-x86_64-pc-windows-msvc`, or `--target` per command),
+# or a workspace-wide `cargo build` fails in the binding's build script.
 resolver = "3"
 
 [workspace.package]
