@@ -536,15 +536,17 @@ pub(crate) fn sector_tag(sector: &[u8]) -> u16 {
 }
 
 /// Number of 512-byte sectors a legacy `-rrN%` record declares over a
-/// `prefix` of `prefix_len` bytes, mirroring WinRAR 6.23: `N%` of the
-/// protected bytes, rounded down to whole sectors, with a floor of two
-/// sectors so a tiny archive still gets a usable record. The `-rrN` (no
+/// `prefix` of `prefix_len` bytes: `N%` of the protected bytes **rounded up**
+/// to whole sectors, with a floor of two sectors so a tiny archive still gets
+/// a usable record. Rounding up is deliberate — the record must never protect
+/// less than the requested percent — and it is the closest reading of WinRAR
+/// 6.23, whose own count sits on or one above the ceiling (it drifts below
+/// only for multi-hundred-KiB archives; see `PLAN.md`). The `-rrN` (no
 /// percent) count form is used verbatim by the caller instead.
 pub(crate) fn recovery_sector_count(prefix_len: usize, percent: u8) -> u32 {
     let percent = u64::from(percent);
-    let count = (prefix_len as u64)
-        .saturating_mul(percent)
-        .saturating_div(100 * 512);
+    let bytes = (prefix_len as u64).saturating_mul(percent);
+    let count = bytes.div_ceil(100 * 512);
     (count as u32).max(2)
 }
 
@@ -751,12 +753,13 @@ mod tests {
         prefix.extend_from_slice(&fh);
         prefix.extend_from_slice(&payload);
 
-        // 10% recovery, matching the WinRAR 6.23 rec formula.
+        // 10% recovery, rounded up: the record never protects less than the
+        // requested percent.
         let rec = recovery_sector_count(prefix.len(), 10);
         assert_eq!(
             rec,
-            (prefix.len() as u64 * 10 / 51_200) as u32,
-            "rec formula"
+            (prefix.len() as u64 * 10).div_ceil(51_200) as u32,
+            "rec formula rounds up"
         );
         let block = build_legacy_recovery_block(&prefix, rec).expect("build");
         let total_blocks = prefix.len().div_ceil(512) as u32;
@@ -864,5 +867,19 @@ mod tests {
         assert_eq!(file.block_offset, slice.block_offset);
         assert_eq!(file.data_start, slice.data_start);
         assert_eq!(file.data_end, slice.data_end);
+    }
+
+    /// The percent form rounds **up**: a record must never protect less than
+    /// the requested percent (the caller uses the `-rr<N>` count verbatim).
+    #[test]
+    fn percent_recovery_count_rounds_up() {
+        // 50_000 bytes at 10% is 9.77 sectors: 10, never 9.
+        assert_eq!(recovery_sector_count(50_000, 10), 10);
+        // A whole multiple stays exact.
+        assert_eq!(recovery_sector_count(100 * 512, 10), 10);
+        // One byte past a multiple still rounds up.
+        assert_eq!(recovery_sector_count(100 * 512 + 1, 10), 11);
+        // A tiny archive keeps the two-sector floor.
+        assert_eq!(recovery_sector_count(1_000, 1), 2);
     }
 }
