@@ -400,9 +400,11 @@ pub(crate) struct RecoveryArgs {
     pub(crate) password: password::PasswordArgs,
     #[arg(value_name = "ARCHIVE")]
     pub(crate) archive: String,
+    /// Recovery percent; WinRAR's `rr` writes its 3% default no matter what
+    /// is requested, so a value here is our own extension.
     #[arg(
         value_name = "PERCENT",
-        default_value_t = 10,
+        default_value_t = 3,
         value_parser = clap::value_parser!(u8).range(0..=100)
     )]
     pub(crate) percent: u8,
