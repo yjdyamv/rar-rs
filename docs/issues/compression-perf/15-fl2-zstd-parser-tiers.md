@@ -24,7 +24,7 @@ ultra 三档策略。**实现前先读上游源码核对**档位命名与价格�
 
 ## 我们的现状（已核对源码）
 
-- 顺序/未过滤（`codec/modern/lzss_huff/encoder/chunked.rs`、`codec/modern/lzss_huff/encoder/parse.rs`）：`-m1`
+- 顺序/未过滤（`codec/modern/lzss_huff/encoder/chunked.rs`、`codec/modern/lzss_huff/encoder/parse/`）：`-m1`
   = 哈希链 greedy+lazy（`find_matches_with_tail`）；`-m2`–`-m5` = 一次 DP 加
   `OPTIMAL_PARSE_PASSES`（0/2/2/3/4）次重定价，匹配用 BT4 风格
   `TreeMatchFinder`（`son` 树），长程靠采样表 `LongRange`。
@@ -65,10 +65,10 @@ ultra 三档策略。**实现前先读上游源码核对**档位命名与价格�
 
 ## 已试（2026-09-18）：一正一负
 
-### 成立：窗口内有界 DP（开关 `RAR_RS_MT_WINDOW_DP`）
+### 成立：窗口内有界 DP（原型开关 `RAR_RS_MT_WINDOW_DP`，未落地——当前树中无此环境变量）
 
-把链式 finder 的「每位置单一候选」喂给 seq 自己那条已验证的 DP
-（`windowed_chain_parse` → `optimal_parse_tokens` +
+把链式 finder 的「每位置单一候选」喂给 seq 自己那条已验证的 DP （原型
+`windowed_chain_parse` → `optimal_parse_tokens` +
 `convert_tokens`，不新增决策逻辑），
 加上共享长程探测与首次估计价格。`ntoskrnl.exe` 12.5 MiB、mt8、同二进制 A/B：
 

@@ -42,8 +42,7 @@
   [0008 单向的家族分层与 `Engine` 接缝](adr/0008-one-way-family-layering.md)
 - **议题**（`docs/issues/<feature>/`，只留未关闭的；关闭后**判决并入
   [`../PLAN.md`](../PLAN.md)「性能」段**并删文件）：
-  [`compression-perf/`](issues/compression-perf/)（未关闭议题 04、09、15）·
-  [`rar4-recovery-volumes.md`](issues/rar4-recovery-volumes.md)
+  [`compression-perf/`](issues/compression-perf/)（未关闭议题 04、09、15）
 - **规格**：[`rar4-creation-spec.md`](rar4-creation-spec.md) — RAR4
   创建行为与格式。
 

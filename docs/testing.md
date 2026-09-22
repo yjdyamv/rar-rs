@@ -1,6 +1,6 @@
 # Testing
 
-> Last verified: 2026-09-19 @ `c3a76b7`; every timing number here is a
+> Last verified: 2026-09-22 @ `fbe2f8c`; every timing number here is a
 > host-specific snapshot, not a contract.
 
 How the suite is organized, what it costs, and the traps to know before changing
@@ -17,8 +17,7 @@ cargo test --package rar-rs --lib -- archive::   # one module
 `cargo nextest run --workspace --all-features` also works, is roughly twice as
 fast (it parallelizes across test binaries instead of running them one after
 another) and prints a per-test timing report — the easiest way to find what got
-slow. It is a local convenience only, and read the `rarfiles_lst_lock` trap
-below before trusting it.
+slow. It is a local convenience only.
 
 **This is the only test gate.** CI does not run tests (2026-09, at the owner's
 request: the WASI binding suite blocked a release on a non-reproducible
@@ -212,11 +211,6 @@ cargo nextest run -E 'not test(/mt_tests::/)'
 
 ## Traps
 
-- **`rarfiles_lst_lock()` is process-local.** `cli_behavior` guards the tests
-  that read `rarfiles.lst` with a `static OnceLock<Mutex<()>>`. That works under
-  `cargo test` (one process per test binary) but not under `cargo nextest` (one
-  process per test), where those tests can race. It is a test-isolation
-  artifact, not a product defect — and it is why CI does not use nextest.
 - **Concurrency is not free.** Compression tests build Rayon pools sized from
   `available_parallelism()`, so running every test at once can oversubscribe the
   machine: on a 16-core host the library test binary went from 104 s at 16

@@ -127,7 +127,7 @@ reuse the RAR4 header reader with `EnvelopePolicy::REPAIR` (one envelope
 implementation for scan and repair), so `recovery -> format` is intended while
 `format -> recovery` must not exist. The `Engine` trait (in `engine`) is what
 lets the family code name its context without naming `RarArchive`; see
-[`ARCHITECTURE.md`](../../ARCHITECTURE.md) for the module map.
+[`ARCHITECTURE.md`](../ARCHITECTURE.md) for the module map.
 
 Forbidden dependency directions include:
 

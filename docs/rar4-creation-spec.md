@@ -1,6 +1,6 @@
 # RAR4 Creation Feature Spec
 
-> 最后核对：2026-09-19 @ `c3a76b7`；字节级行为由测试与官方工具对拍锁定。
+> 最后核对：2026-09-22 @ `fbe2f8c`；字节级行为由测试与官方工具对拍锁定。
 
 ## 目标
 
@@ -29,8 +29,8 @@ rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver
 > 成员发续模型头（0x87）并共享模型，中间夹 LZ 成员则回到新模型；官方 6.23 与
 > 7.23 都能解出。**6.23 的 RAR4 写入器不产 PPMd，所以写入侧没有官方参考。**
 
-Recovery volumes（`.rev`）两种布局均已支持，见
-`docs/issues/rar4-recovery-volumes.md`。
+**Recovery volumes（`.rev`）** 两种布局均已支持；格式细节见
+[`../CONTEXT.md`](../CONTEXT.md) 的「Recovery volumes」条目。
 
 ### 不支持（RAR4 格式无此功能）
 
@@ -38,7 +38,7 @@ Recovery volumes（`.rev`）两种布局均已支持，见
 - BLAKE2sp 哈希
 - RAR5 vint 编码头
 
-（内联 RR 已支持，见 `PLAN.md`「现状」的 RAR4 创建能力。）
+（内联 RR 已支持，见 [`../PLAN.md`](../PLAN.md)「现状」的 RAR4 创建能力。）
 
 ## 验证
 
@@ -50,17 +50,8 @@ Recovery volumes（`.rev`）两种布局均已支持，见
 
 ## 架构设计
 
-### 模块结构
-
-```
-format/rar4/
-  mod.rs          — 常量、flag、block 结构、LegacyDecoder（扫描/解析）
-  read.rs         — 成员解码门面
-  write/{mod,pipeline,cbc}.rs — 写管线（头序列化 / 编排 / 加密区间）
-  create.rs       — 选项校验（`validate_rar4_only`）
-codec/
-  legacy/rar29_encoder.rs — RAR29 编码器（从 rars 移植）
-```
+模块拆分（`format/rar4/` 一族与 `format/rar5/write/` 同形）见
+[`ARCHITECTURE.md`](ARCHITECTURE.md)。以下只记 RAR4 写的格式与编解码事实。
 
 ### 写管线流程
 
@@ -119,17 +110,9 @@ ArchiveWriter::close()
 
 ### 编码器接口
 
-```rust
-// format/rar4/write/pipeline.rs
-pub fn encode_member(
-    data: &[u8],
-    solid: bool,
-    level: u8,        // 1-5
-    encoder_state: &mut Option<LegacyEncoder>,
-) -> RarResult<Vec<u8>>
-```
-
-编码器输出 RAR3/4 格式的压缩块序列（不含
+编码器是 `codec/legacy/rar{29,20,15}_encoder.rs` 上的 `Unpack29Encoder` /
+`Unpack20Encoder` / `Unpack15Encoder`，各有 `encode_member(&mut self, input)`
+方法（不是自由函数）。输出 RAR3/4 格式的压缩块 序列（不含
 FILE_HEAD，只含压缩数据流）。写管线负责：
 
 1. 调用编码器得到压缩数据 `Vec<u8>`
@@ -160,7 +143,8 @@ extra；每卷开头写 MAIN_HEAD。
 
 ### 加密
 
-RAR4 成员级加密（-p）按代分派（`archive/create.rs` 的 `rar4_member_encrypt`）：
+RAR4
+成员级加密（-p）按代分派（`format/rar4/write/encode.rs::rar4_member_encrypt`）：
 
 - **v29（RAR3/4，`crypto/rar30.rs`）**：每成员 8 字节随机 salt；密钥/IV 由 SHA-1
   链式 KDF（`HASH_ROUNDS = 0x40000`）从口令 + salt 派生（AES-128-CBC，非
@@ -211,19 +195,5 @@ rar a -ma4 -v1m archive.rar file1 file2
 
 ## 测试策略
 
-### 集成测试（`crates/rar/tests/rar4_create.rs`）
-
-1. **Roundtrip**：创建 → 解压 → diff 原始文件
-2. **WinRAR 兼容**：`unrar l` / `unrar x` 能正确处理我们创建的归档
-3. **加密**：创建加密归档 → 用密码解压 → 验证内容
-4. **多卷**：创建多卷归档 → 解压 → 验证内容
-5. **Solid**：solid 归档 → 解压 → 验证内容
-6. **各压缩级别**：m1-m5 各创建一个 → 解压 → 验证
-7. **STORE**：不压缩 → 解压 → 验证
-8. **空文件/目录**：边界情况
-
-### 互操作测试（需要 WinRAR 6.23）
-
-- `rar create -ma4 test.rar` → WinRAR 能解压
-- `rar create -ma4 -p test.rar` → WinRAR 能用密码解压
-- `rar create -ma4 -v1m test.rar` → WinRAR 能识别分卷
+测试布局与跑法归 [`testing.md`](testing.md)：RAR4 创建端的
+roundtrip、加密、多卷、 solid 与官方 WinRAR 6.23 对拍都在那里索引。

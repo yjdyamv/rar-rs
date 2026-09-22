@@ -19,12 +19,12 @@ The 2026-09 audit found:
 - no external consumer — the only importers are in-tree tests and `fuzz/`;
 - a small, enumerable API subset actually used:
 
-| consumer                                   | items                                                                                                                                               |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `crates/rar/tests/support` (`scan_blocks`) | `read_block`, `BlockMeta`, `RawBlock`                                                                                                               |
-| `crates/rar/tests/robustness.rs`           | `vint::encode`, `crc64_xz`, `crc64_rar_state`                                                                                                       |
-| `crates/rar/tests/model_api_compat.rs`     | `DataChunk`, `FileHeader`, `RawBlock`                                                                                                               |
-| `fuzz/`                                    | `build_structural_inline_recovery_data`, `build_recovery_volume_file`, `crc64_*`, `EncryptionParams`, `decrypt_data`, `derive_keys`, `encrypt_data` |
+| consumer                                                                                        | items                                                                                                                                               |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/rar/tests/support` (`scan_blocks`)                                                      | `read_block`, `BlockMeta`, `RawBlock`                                                                                                               |
+| `crates/rar/tests/robustness.rs`                                                                | `vint::encode`, `crc64_xz`, `crc64_rar_state`                                                                                                       |
+| `crates/rar/tests/model_api_compat.rs`（现为 `rar5_edge_cases.rs` 内的 `mod model_api_compat`） | `DataChunk`, `FileHeader`, `RawBlock`                                                                                                               |
+| `fuzz/`                                                                                         | `build_structural_inline_recovery_data`, `build_recovery_volume_file`, `crc64_*`, `EncryptionParams`, `decrypt_data`, `derive_keys`, `encrypt_data` |
 
 Keeping the feature cost a self dev-dependency (`rar-rs` enabling its own
 feature for the dev graph), module-level `allow(dead_code, unused_imports)` in
@@ -48,7 +48,8 @@ the three trees, and an entirely undocumented public surface (the items were
   gains the small `wire` re-export list.
 - In-tree tests and fuzz drop the self dev-dependency and import
   `rar_rs::wire::…`.
-- `model_api_compat.rs` loses its legacy-alias subject; it now checks the `wire`
-  model structs' serialization helpers.
+- `model_api_compat` (now `mod model_api_compat` inside
+  `crates/rar/tests/rar5_edge_cases.rs`) loses its legacy-alias subject; it now
+  checks the `wire` model structs' serialization helpers.
 - The feature matrix in CI shrinks from eight combinations to four (`""`,
   `parallel`, `simd`, `parallel,simd`).
