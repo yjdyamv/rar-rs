@@ -172,13 +172,19 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   6.23/7.23）：`scan_volume` 加 `salvage`，坏块处用 `envelope::resync_block`
   逐字节重同步（廉价预筛：head type ∈ `0x72..=0x7b` 且 `head_size`
   装得下），并清掉待续分片；重同步丢下的成员 同样计入
-  `salvage_damaged`。**退出码按容器对齐官方**（实测）：RAR5 头损坏 exit
-  **3**，**legacy 头损坏 exit 0**；载荷损坏两边都 exit 0——官方对载荷损坏是**不
-  校验、原样拷贝坏成员**（实测 `rebuilt` 里 f1 报 checksum error），我们改为丢坏
-  成员并逐条打印，更安全，但退出码保持官方语义。**RAR 1.3/1.4**：官方打印同样的
-  重建横幅后一行 `Cannot repair archive with old format`、**不产物、exit
-  0**，我们 照抄（不再报 `Unsupported`）。**范围**：打捞扫描覆盖 RAR5 与
-  RAR4，且仅**非 `-hp`**（加密流的块头无法廉价探测）；RAR 1.3/1.4 无打捞。契约由
+  `salvage_damaged`。**退出码只由结果决定（不照抄官方的按容器分叉）**：丢了成员
+  （`dropped` 或 `skipped_damage`）或修复没产出任何东西 → exit **3**；全部救回 →
+  exit **0**。官方实测这里是按容器分的——RAR5 头损坏 3、**legacy 头损坏
+  0**、载荷损坏两边 0、RAR 1.3/1.4 不产物也
+  0——同一「丢数据」事实给出不同信号，属官方缺陷，**不追平** （2026-09-22
+  定案）。官方对载荷损坏是**不校验、原样拷贝坏成员**（实测 `rebuilt` 里 f1 报
+  checksum error），我们改为丢坏成员并逐条打印。**RAR 1.3/1.4**：官方打印
+  同样的横幅后一行 `Cannot repair archive with old format`、不产物、exit 0；我们
+  打印同样的行，但按「没产出＝失败」报 exit 3。契约由
+  `cli_repair_salvages_a_legacy_header`（legacy 丢成员 → 3）与
+  `cli_repair_reports_rar13_as_unrepairable`（RAR13 不产物 →
+  3）钉住。**范围**：打捞扫描覆盖 RAR5 与 RAR4，且仅**非
+  `-hp`**（加密流的块头无法廉价探测）；RAR 1.3/1.4 无打捞。契约由
   `reconstruct.rs` 五个测试与 CLI
   `cli_repair_without_a_recovery_record_reconstructs` /
   `cli_repair_salvages_past_a_corrupt_header` /
@@ -317,9 +323,12 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 - **`rar rr` 命令只在 3% 上写记录**：官方 6.23/7.23 实测（22 组）——该命令对
   `-rr10` / `-rr10%` / `-rr20` / 裸 `-rr`、尾随位置参数、以及**归档里已有的 20%
   记录**一律无视，总是写出 **3%** 记录（开关放命令前后都一样）。我们按「静默丢弃
-  用户请求」的缺陷处理：显式强度照样生效（我们的扩展，`rar rr <archive> <percent>`），
+  用户请求」的缺陷处理：**显式强度照样生效**，而且与 `a` 同一套口径—— `-rr20%` =
+  20%、`-rr20` = legacy RAR4 的 **20 个 parity 扇区**（RAR5 同样读作
+  20%，因为它的记录只按百分比定尺）、裸 `-rr` 或什么都不给 = 官方默认 **3%**；
+  另有我们的扩展形式：尾随参数（`rar rr <archive> 20` / `20%`）恒为百分比。
   **默认值已从 10% 对齐到 3%**。契约由
-  `legacy_rr_command_defaults_to_three_percent` 钉住。
+  `legacy_rr_command_honors_the_requested_strength` 钉住。
 - **`rar r` 没修动时不写 `fixed.<name>` 拷贝**：恢复记录够不到损坏时，官方仍写出
   `fixed.<name>`——实测它与**损坏输入逐字节相同**（没修成功也照拷一份）；我们按
   「不能进 行的修复不留产物」的既有契约**不写**，只提示 + （询问后）重建

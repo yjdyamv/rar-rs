@@ -411,14 +411,14 @@ fn legacy_rar4_recovery_record_follows_the_rr_forms() {
     );
 }
 
-/// `rar rr` re-protects an archive at WinRAR's 3% default when no strength is
-/// given (measured: WinRAR 6.23 and 7.23 write 3% no matter what the command
-/// or the switch requests), and an explicit strength is honored as our own
-/// extension.
+/// `rar rr` takes WinRAR's 3% default when no strength is given, and honors an
+/// explicit one in every spelling: the `a` switch forms (`-rr20%` percent,
+/// `-rr20` legacy parity-sector count) and our trailing percent. WinRAR's own
+/// `rr` ignores all of them and always writes 3% (measured on 6.23/7.23).
 #[test]
-fn legacy_rr_command_defaults_to_three_percent() {
+fn legacy_rr_command_honors_the_requested_strength() {
     let dir = make_temp_dir();
-    std::fs::write(dir.path().join("big.bin"), vec![0x77; 60_000]).unwrap();
+    std::fs::write(dir.path().join("big.bin"), vec![0x77; 200_000]).unwrap();
     let base = dir.path().join("base.rar");
     assert!(
         std::process::Command::new(RAR_CLI)
@@ -431,30 +431,43 @@ fn legacy_rr_command_defaults_to_three_percent() {
             .success()
     );
 
-    let rr = |name: &str, percent: Option<&str>| {
+    let rr = |name: &str, spec: &[&str]| {
         let arc = dir.path().join(name);
         std::fs::copy(&base, &arc).unwrap();
-        let mut command = std::process::Command::new(RAR_CLI);
-        command.arg("rr").arg(&arc);
-        if let Some(percent) = percent {
-            command.arg(percent);
-        }
         assert!(
-            command.current_dir(dir.path()).status().unwrap().success(),
-            "rr {name}"
+            std::process::Command::new(RAR_CLI)
+                .arg("rr")
+                .arg(&arc)
+                .args(spec)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success(),
+            "rr {spec:?}"
         );
         recovery_sectors(&arc)
     };
 
+    let default = rr("bare.rar", &[]);
     assert_eq!(
-        rr("bare.rar", None),
-        rr("three.rar", Some("3")),
+        default,
+        rr("three.rar", &["3%"]),
         "the rr command's default must be WinRAR's 3%"
     );
-    assert!(
-        rr("fifty.rar", Some("50")) > rr("three.rar", Some("3")),
-        "an explicit strength must still be honored"
+    assert_eq!(
+        rr("switch3.rar", &["-rr"]),
+        default,
+        "bare -rr is the default"
     );
+    // The percent forms agree whichever way they are spelled.
+    let percent = rr("switch-percent.rar", &["-rr20%"]);
+    assert_eq!(rr("trail.rar", &["20"]), percent);
+    assert_eq!(rr("trail-percent.rar", &["20%"]), percent);
+    assert!(percent > default, "3% must be weaker than 20%");
+    // A bare `-rr20` is the legacy record's native unit: exactly 20 sectors,
+    // whatever the archive size — smaller than 20% of this archive.
+    assert_eq!(rr("switch-count.rar", &["-rr20"]), 20);
+    assert!(rr("switch-count.rar", &["-rr20"]) < percent);
 }
 
 /// `-ma13`/`-ma14` create the DOS-era `RE~^` container (RAR 1.3/1.4):
@@ -745,7 +758,8 @@ fn cli_legacy_rejects_unexpressible_solid_resets() {
 
 /// `rar r` on a RAR 1.3/1.4 archive prints the reconstruct banner and then
 /// refuses in one line (`Cannot repair archive with old format`), producing
-/// nothing — WinRAR's behavior, exit 0.
+/// nothing — WinRAR's lines, but the failure is reported: exit 3, not the 0
+/// WinRAR answers for a repair that produced nothing.
 #[test]
 fn cli_repair_reports_rar13_as_unrepairable() {
     let dir = make_temp_dir();
@@ -766,9 +780,10 @@ fn cli_repair_reports_rar13_as_unrepairable() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(
-        out.status.success(),
-        "WinRAR exits 0 for a RAR 1.3 archive:\n{}",
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a repair that produced nothing is an error:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(

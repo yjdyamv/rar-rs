@@ -313,11 +313,17 @@ pub(crate) fn edit_rar4(
     renames: &[(usize, String)],
     comment: Option<&[u8]>,
     force_rr: Option<u8>,
+    force_sectors: Option<u32>,
     member_comments: &[(usize, Option<Vec<u8>>)],
 ) -> RarResult<EditSummary> {
     if force_rr.is_some_and(|percent| percent > 100) {
         return Err(RarError::InvalidOption(
             "recovery percent must be in 0..=100".into(),
+        ));
+    }
+    if force_sectors == Some(0) {
+        return Err(RarError::InvalidOption(
+            "recovery sector count must be greater than zero".into(),
         ));
     }
     let layout = {
@@ -364,7 +370,8 @@ pub(crate) fn edit_rar4(
     // solid archives as well (no repack needed when nothing survives) and
     // to multi-volume sets (every volume is removed).
     if deleted_count == archive.entries.len() {
-        if force_rr.is_some() || comment.is_some() || !renames.is_empty() {
+        if force_rr.is_some() || force_sectors.is_some() || comment.is_some() || !renames.is_empty()
+        {
             return Err(RarError::InvalidOption(
                 "cannot combine comment, recovery-record or rename changes with deleting every member".into(),
             ));
@@ -383,7 +390,7 @@ pub(crate) fn edit_rar4(
                 "cannot delete members from a multi-volume RAR4 archive (volume rebalancing is required; official rar refuses too)".into(),
             ));
         }
-        if force_rr.is_some() || !member_comments.is_empty() {
+        if force_rr.is_some() || force_sectors.is_some() || !member_comments.is_empty() {
             return Err(RarError::Unsupported(
                 "recovery-record and per-member-comment edits on multi-volume RAR4 archives are not supported (a volume set uses .rev recovery volumes)".into(),
             ));
@@ -402,6 +409,7 @@ pub(crate) fn edit_rar4(
             &rename_map,
             comment,
             force_rr,
+            force_sectors,
             renamed,
             &[],
             member_comments,
@@ -452,12 +460,13 @@ pub(crate) fn edit_rar4(
     // `region_end`/`tail_from`: a rewrite with a record rebuilds the prefix
     // up to where the old record started (or the end-of-archive block) and
     // keeps everything from the old record's data end (or ENDARC) onward.
-    let (region_end, tail_from, keep_sectors) = match (&force_rr, existing) {
+    let forced = force_rr.is_some() || force_sectors.is_some();
+    let (region_end, tail_from, keep_sectors) = match (forced, existing) {
         (_, Some((old_start, old_end, rec))) => (old_start, old_end, Some(rec)),
-        (Some(_), None) => (layout.endarc_offset, layout.endarc_offset, None),
-        (None, None) => (layout.endarc_offset, layout.endarc_offset, None),
+        (true, None) => (layout.endarc_offset, layout.endarc_offset, None),
+        (false, None) => (layout.endarc_offset, layout.endarc_offset, None),
     };
-    let wants_record = force_rr.is_some() || keep_sectors.is_some();
+    let wants_record = forced || keep_sectors.is_some();
     let patched_main = if wants_record {
         patch_main_header(&layout.main_header, MHD_RECOVERY)?
     } else {
@@ -596,10 +605,15 @@ pub(crate) fn edit_rar4(
                 reader.seek(SeekFrom::Start(layout.sfx_offset as u64))?;
                 reader.read_exact(&mut prefix).map_err(RarError::Io)?;
             }
-            let rec_sectors = match (force_rr, keep_sectors) {
-                (Some(percent), _) => recovery_sector_count(prefix.len(), percent),
-                (None, Some(rec)) => rec,
-                (None, None) => unreachable!("wants_record implies a source"),
+            // An explicit parity-sector count is used verbatim; the percent
+            // form is sized over the rebuilt prefix, and a record that is
+            // merely carried over keeps its original strength.
+            let rec_sectors = if let Some(count) = force_sectors {
+                count
+            } else if let Some(percent) = force_rr {
+                recovery_sector_count(prefix.len(), percent)
+            } else {
+                keep_sectors.expect("wants_record implies a source")
             };
             let block = build_legacy_recovery_block(&prefix, rec_sectors)?;
             // `-hp`: only the 54-byte NEWSUB header is encrypted; the tag

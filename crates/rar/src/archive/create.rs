@@ -752,6 +752,7 @@ impl RarArchive {
                 &std::collections::HashMap::new(),
                 None,
                 None,
+                None,
                 0,
                 &additions,
                 &[],

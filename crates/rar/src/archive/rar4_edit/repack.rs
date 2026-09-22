@@ -93,6 +93,7 @@ pub(crate) fn repack_solid_archive(
     rename_map: &HashMap<usize, String>,
     comment: Option<&[u8]>,
     force_rr: Option<u8>,
+    force_sectors: Option<u32>,
     renamed: usize,
     additions: &[SolidAppendEntry],
     member_comments: &[(usize, Option<Vec<u8>>)],
@@ -146,9 +147,9 @@ pub(crate) fn repack_solid_archive(
     } else {
         None
     };
-    // Recovery record strength: the explicit percent, or an approximation
-    // of the original record's strength (the archive is a fresh whole, so
-    // the record is rebuilt over it).
+    // Recovery record strength: the explicit count or percent, or an
+    // approximation of the original record's strength (the archive is a fresh
+    // whole, so the record is rebuilt over it).
     let rr_percent: Option<u8> = if force_rr.is_some() {
         force_rr
     } else {
@@ -284,11 +285,23 @@ pub(crate) fn repack_solid_archive(
                     None => crate::archive::RarArchive::open(&tmp_path),
                 }
                 .map_err(|e| RarError::Format(format!("repack: reopen staged archive: {e:?}")))?;
-                edit_rar4(&mut staged, &[], &[], None, Some(percent), &[])?
+                edit_rar4(&mut staged, &[], &[], None, Some(percent), None, &[])?
             }
-            None => EditSummary {
-                deleted: 0,
-                renamed: 0,
+            None => match force_sectors {
+                Some(count) => {
+                    let mut staged = match password.as_deref() {
+                        Some(pw) => crate::archive::RarArchive::open_with_password(&tmp_path, pw),
+                        None => crate::archive::RarArchive::open(&tmp_path),
+                    }
+                    .map_err(|e| {
+                        RarError::Format(format!("repack: reopen staged archive: {e:?}"))
+                    })?;
+                    edit_rar4(&mut staged, &[], &[], None, None, Some(count), &[])?
+                }
+                None => EditSummary {
+                    deleted: 0,
+                    renamed: 0,
+                },
             },
         };
         Ok(summary)

@@ -487,8 +487,9 @@ fn cli_repair_asks_before_rebuilding_after_an_unusable_record() {
 }
 
 /// A no-record *legacy* archive whose header is damaged: `rar r` resyncs past
-/// it, keeps the members around it, and exits 0 — WinRAR's legacy convention,
-/// unlike the RAR5 exit 3.
+/// it, keeps the members around it, and reports the loss with exit 3 — the
+/// same signal as the RAR5 path (WinRAR answers 0 for a legacy loss, a
+/// container fork we do not copy).
 #[test]
 fn cli_repair_salvages_a_legacy_header() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -521,8 +522,8 @@ fn cli_repair_salvages_a_legacy_header() {
         .unwrap();
     assert_eq!(
         out.status.code(),
-        Some(0),
-        "legacy header damage exits 0 like WinRAR:\n{}",
+        Some(3),
+        "a lost member is a data error, whatever the container:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
 

@@ -126,6 +126,11 @@ pub enum EditOp {
     /// archives. Without this op the record is rebuilt at its original
     /// percentage when the archive had one.
     SetRecovery(u8),
+    /// Rebuild the inline recovery record with exactly this many parity
+    /// sectors (like a legacy RAR4 `-rr<N>`; the record's native unit).
+    /// Mutually exclusive with [`EditOp::SetRecovery`], and rejected for the
+    /// formats whose record is sized by percent only (RAR5).
+    SetRecoverySectors(u32),
 }
 
 /// A sequence of structural edits applied to an [`ArchiveEditor`] in one
@@ -181,6 +186,16 @@ impl EditPlan {
     #[must_use]
     pub fn set_recovery(mut self, percent: u8) -> Self {
         self.ops.push(EditOp::SetRecovery(percent));
+        self
+    }
+
+    /// Queue an inline recovery-record rebuild of exactly `count` parity
+    /// sectors (a legacy RAR4 record's native unit, like `-rr<N>`). Mutually
+    /// exclusive with [`Self::set_recovery`]; RAR5 records are sized by
+    /// percent only and reject it.
+    #[must_use]
+    pub fn set_recovery_sectors(mut self, count: u32) -> Self {
+        self.ops.push(EditOp::SetRecoverySectors(count));
         self
     }
 
@@ -285,6 +300,14 @@ impl ArchiveEditor {
                     }
                     force_rr = Some(*percent);
                 }
+                EditOp::SetRecoverySectors(_) => {
+                    // Parity sectors are the legacy RAR4 record's native unit;
+                    // a RAR5 record is sized by percent, so an exact count
+                    // would otherwise be dropped silently.
+                    return Err(RarError::InvalidOption(
+                        "an exact recovery-sector count is a legacy RAR4 option; a RAR5 recovery record is sized by percent".into(),
+                    ));
+                }
             }
         }
         let summary = self
@@ -305,6 +328,7 @@ impl ArchiveEditor {
     /// implemented. A failed plan never touches the file.
     fn apply_rar4(&mut self, plan: &EditPlan) -> RarResult<EditReport> {
         let mut force_rr: Option<u8> = None;
+        let mut force_sectors: Option<u32> = None;
         let mut comment: Option<Vec<u8>> = None;
         let mut deletes: Vec<usize> = Vec::with_capacity(plan.ops().len());
         let mut renames: Vec<(usize, String)> = Vec::with_capacity(plan.ops().len());
@@ -338,12 +362,20 @@ impl ArchiveEditor {
                     member_comments.push((idx, value));
                 }
                 EditOp::SetRecovery(percent) => {
-                    if force_rr.is_some() {
+                    if force_rr.is_some() || force_sectors.is_some() {
                         return Err(RarError::InvalidOption(
                             "an edit plan can carry only one recovery-record change".into(),
                         ));
                     }
                     force_rr = Some(*percent);
+                }
+                EditOp::SetRecoverySectors(count) => {
+                    if force_rr.is_some() || force_sectors.is_some() {
+                        return Err(RarError::InvalidOption(
+                            "an edit plan can carry only one recovery-record change".into(),
+                        ));
+                    }
+                    force_sectors = Some(*count);
                 }
             }
         }
@@ -351,6 +383,7 @@ impl ArchiveEditor {
             && renames.is_empty()
             && comment.is_none()
             && force_rr.is_none()
+            && force_sectors.is_none()
             && member_comments.is_empty()
         {
             return Err(RarError::Format("no members to edit".into()));
@@ -363,6 +396,7 @@ impl ArchiveEditor {
             &renames,
             comment.as_deref(),
             force_rr,
+            force_sectors,
             &member_comments,
         )?;
         self.archive.reset_catalog_token()?;
