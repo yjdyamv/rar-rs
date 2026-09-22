@@ -751,6 +751,17 @@ impl ExtractRequest {
             ..Default::default()
         }
     }
+
+    /// Whether the interactive prompt owns the overwrite decision: only in
+    /// the default mode, with no explicit `-y` / `-o±` / `-or` and no
+    /// timestamp mode (`-f` / `-u`) deciding instead.
+    fn wants_prompt(&self) -> bool {
+        !self.freshen
+            && !self.update
+            && !self.assume_yes
+            && !self.auto_rename
+            && self.overwrite.is_none()
+    }
 }
 
 /// Run one extraction request: install the thread budget and Mark of the
@@ -768,8 +779,30 @@ pub fn extract(
         extract_to_stdout(rar, &request.names, request.max_dict_size)?;
         return Ok(None);
     }
-    let report = extract_members(rar, &request.dest, &request.names, request.options())?;
+    let mut options = request.options();
+    if request.wants_prompt() && interactive() {
+        // WinRAR's console mode: ask about every existing destination. The
+        // callback carries the "All" state for this run.
+        options.prompt_overwrite = true;
+        options.skip_existing = false;
+        let all = std::sync::Arc::new(output::OverwriteAllState::new(0));
+        rar.set_overwrite_prompt(Some(std::sync::Arc::new(move |path: &std::path::Path| {
+            output::prompt_overwrite(path, &all)
+        })));
+    }
+    let report = extract_members(rar, &request.dest, &request.names, options)?;
     Ok(Some(report))
+}
+
+/// Whether the default overwrite mode may ask the console. A terminal on
+/// stdin means a human can answer; `RAR_RS_FORCE_OVERWRITE_PROMPT` forces it
+/// on for the test suite, which cannot allocate a console.
+fn interactive() -> bool {
+    if std::env::var_os("RAR_RS_FORCE_OVERWRITE_PROMPT").is_some() {
+        return true;
+    }
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }
 
 /// Extract the whole archive, or only the members whose stored path, mask or

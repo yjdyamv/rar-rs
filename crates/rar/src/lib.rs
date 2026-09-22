@@ -98,8 +98,8 @@ pub use error::{ErrorCode, RarError, RarResult};
 pub use features::{Feature, FeatureSet};
 pub use fs::atomic::StagedCopy;
 pub use options::{
-    DictionarySize, ExtractOptions, FilterMode, FilterOptions, MarkOfTheWeb, SolidReset,
-    parse_dict_bytes, parse_dict_size,
+    DictionarySize, ExtractOptions, FilterMode, FilterOptions, MarkOfTheWeb, OverwriteChoice,
+    OverwritePrompt, SolidReset, parse_dict_bytes, parse_dict_size,
 };
 pub use parallel::{set_compression_threads, set_extraction_threads};
 pub use recovery::rev50::{build_recovery_volumes_for_set, plan_recovery_volume_count};

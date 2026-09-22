@@ -404,6 +404,17 @@ impl ArchiveReader {
         self.archive.read_ctx_mut().motw = options;
     }
 
+    /// Install the interactive overwrite prompt. When
+    /// [`ExtractOptions::prompt_overwrite`](crate::options::ExtractOptions::prompt_overwrite)
+    /// is set, the extraction loop calls this for each existing destination
+    /// and acts on the returned
+    /// [`OverwriteChoice`](crate::options::OverwriteChoice). The library never
+    /// reads the terminal itself, so a front end supplies the prompt (and any
+    /// "all" state) here. `None` removes it (the default).
+    pub fn set_overwrite_prompt(&mut self, prompt: Option<Arc<crate::options::OverwritePrompt>>) {
+        self.archive.read_ctx_mut().overwrite_prompt = prompt;
+    }
+
     /// Iterate over all entries in archive order.
     pub fn entries(&self) -> Entries<'_> {
         Entries::new(self.archive.catalog_token(), &self.archive.entries)

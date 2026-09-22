@@ -123,6 +123,10 @@ pub(crate) struct ReadState {
     pub catalog_token: u64,
     /// Mark of the Web propagation for extraction (WinRAR `-om`).
     pub motw: Option<crate::options::MarkOfTheWeb>,
+    /// Interactive overwrite prompt for extraction, installed by the front
+    /// end through
+    /// [`ArchiveReader::set_overwrite_prompt`](crate::ArchiveReader::set_overwrite_prompt).
+    pub overwrite_prompt: Option<std::sync::Arc<crate::options::OverwritePrompt>>,
 }
 
 impl Default for ReadState {
@@ -136,6 +140,7 @@ impl Default for ReadState {
             quick_open_catalog: false,
             catalog_token: 0,
             motw: None,
+            overwrite_prompt: None,
         }
     }
 }

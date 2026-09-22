@@ -88,11 +88,6 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 > 命令面已官方全覆盖，缺口全在**行为层**。逐条只记目标 + 代码接缝 + 验收测试；
 > 判据以官方 WinRAR 7.23 实测为准。
 
-- [ ] **P2 交互式覆盖询问** — TTY 下对已存在文件提供 WinRAR 式提示
-      （Yes/No/All/Rename/Quit），非 TTY 或显式 `-y`/`-o±` 时保持现行为。接缝
-      `rar-cli/src/output.rs::skip_existing`、`ops.rs`（`ExtractRequest`）、库侧
-      `options.rs` + `format/shared/extract/members.rs`（抽取决策点）；库里不读
-      stdin，交互回调由 CLI 注入。验收：`cli_behavior` 用管道 stdin 模拟。
 - [ ] **P3 `rar r` 无恢复记录时重建** — 官方打印
       `Data recovery record not found` 后仍重建 `rebuilt.<name>` 并 exit 0；我们
       现拒绝（exit 2）。接缝 `recovery/rar50/repair.rs`（reconstruct
@@ -154,6 +149,12 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   命令 exit **7**（`error::parse_args` 覆盖 clap 默认的 2；`rar`/`unrar`
   未知命令统一），无参数仍 exit 0。契约由
   `cli_bad_command_lines_match_winrar_exit_codes` 与两个缺归档断言钉住。
+- 交互式覆盖询问（2026-09-22）：`ExtractOptions::prompt_overwrite` 配
+  `ArchiveReader::set_overwrite_prompt`（回调挂在 `ReadState`，同 `motw`
+  先例）； TTY 且未给 `-y`/`-o±`/`-or`/`-f`/`-u` 时 CLI 注入 WinRAR 式
+  `Y/N/A/R/Q` 询问 （`output::prompt_overwrite`；库不读 stdin），非 TTY
+  保持跳过，且询问时强制 串行抽取。契约由 `overwrite_prompt.rs` 与
+  `cli_interactive_overwrite_prompt` 钉住。
 
 **流式与编码**
 
