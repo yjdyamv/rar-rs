@@ -138,11 +138,6 @@ impl RarArchive {
         chain: Option<(usize, usize)>,
         rename_map: Option<&std::collections::HashMap<usize, String>>,
     ) -> RarResult<()> {
-        if self.header_encryption {
-            return Err(RarError::Unsupported(
-                "deleting from header-encrypted multi-volume archives is not supported".into(),
-            ));
-        }
         // Read the archive comment before the stream is redirected to the
         // staged set; it is re-emitted verbatim after the rebuilt main
         // header so a delete does not silently drop it.
@@ -192,6 +187,10 @@ impl RarArchive {
             &parent, &tmp_base, 1,
         ))?));
         self.write_signature()?;
+        // A header-encrypted set repeats the plaintext encryption header at
+        // the start of every volume (WinRAR convention); the first volume
+        // needs it here too, and the later ones get it in `start_next_volume`.
+        self.write_archive_encryption_header_if_needed()?;
         self.write_archive_header_vol(None)?;
         self.write_ctx_mut().output.bytes_written =
             self.stream.as_mut().unwrap().stream_position()?;
@@ -199,14 +198,19 @@ impl RarArchive {
             && !comment.is_empty()
         {
             let block = crate::format::rar5::headers::build_comment_block(comment);
+            // The comment bytes are the block's data area (plaintext); only
+            // the header goes through the encrypting writer.
+            let comment_on_disk =
+                self.on_disk_header_len(block.len() as u64) + comment.len() as u64;
             let eoa_size = self.on_disk_header_len(8);
-            if self.write_ctx().output.bytes_written + block.len() as u64 + eoa_size > volume_size {
+            if self.write_ctx().output.bytes_written + comment_on_disk + eoa_size > volume_size {
                 return Err(RarError::Unsupported(
                     "rewriting a multi-volume archive whose comment does not fit in one volume is not supported"
                         .into(),
                 ));
             }
             self.write_block_header(&block)?;
+            self.stream.as_mut().unwrap().write_all(comment)?;
             self.write_ctx_mut().output.bytes_written =
                 self.stream.as_mut().unwrap().stream_position()?;
         }

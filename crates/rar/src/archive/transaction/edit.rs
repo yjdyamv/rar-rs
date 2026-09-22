@@ -54,19 +54,6 @@ impl RarArchive {
         {
             return Err(RarError::ArchiveLocked);
         }
-        // Renaming or setting the archive comment rewrites header blocks; a
-        // header-encrypted (RAR5 `-hp`) archive would need each rewritten or
-        // new block re-encrypted, which this transaction does not implement.
-        // Refuse before touching the file — the previous behaviour replaced
-        // the archive with a corrupt one. Deletes and recovery-record
-        // changes keep working (they only copy encrypted blocks verbatim or
-        // write service records through the encrypting writer).
-        if self.header_encryption && (!renames.is_empty() || comment.is_some()) {
-            return Err(RarError::Unsupported(
-                "renaming and archive comments are not supported for header-encrypted (RAR5 -hp) archives"
-                    .into(),
-            ));
-        }
 
         // Delete mask: duplicates are fine (a member can only be deleted
         // once); out-of-range indexes are callers' bugs, so surface them.
@@ -265,7 +252,14 @@ impl RarArchive {
             .cloned()
             .unwrap_or_else(|| self.path.clone());
         let mut reader = File::open(&first)?;
-        reader.seek(SeekFrom::Start(self.sfx_offset + 8))?;
+        // Consume the optional plaintext encryption header (`-hp`) and the
+        // main header in one place, deriving the archive-level encryption
+        // state from the file: a plain open scans members with a per-volume
+        // key and never populates it, so `self.header_encryption` cannot be
+        // trusted here. The walk below then starts at the first member or
+        // service block, decrypted with that key.
+        self.clear_archive_encryption();
+        let _ = crate::format::rar5::extract::open::read_main_header(self, &mut reader)?;
         let file_len = reader.metadata().map_err(RarError::Io)?.len();
         let mut blocks = BlockCursor::new(
             file_len,

@@ -119,8 +119,11 @@ impl RarArchive {
         if let Some(ref comment) = plan.comment
             && !comment.is_empty()
         {
+            // The comment bytes are the block's data area and stay plaintext:
+            // only the header goes through the encrypting writer.
             let block = build_comment_block(comment);
             self.write_block_header(&block)?;
+            self.stream.as_mut().unwrap().write_all(comment)?;
         }
 
         // Prefetch every verbatim block with a background reader when the
@@ -181,6 +184,7 @@ impl RarArchive {
                     header_bytes,
                     src_data,
                     len,
+                    rebuild_header,
                     qo_header,
                 } => {
                     let out_pos = self.stream.as_mut().unwrap().stream_position()?;
@@ -190,7 +194,15 @@ impl RarArchive {
                             .quick_open_entries
                             .push((out_pos, qh.clone()));
                     }
-                    self.stream.as_mut().unwrap().write_all(header_bytes)?;
+                    if *rebuild_header {
+                        // Re-serialized plaintext header (a rename): emit it
+                        // through the encrypting writer so `-hp` re-encrypts it.
+                        self.write_block_header(header_bytes)?;
+                    } else {
+                        // Verbatim copy: the on-disk header bytes are already
+                        // encrypted on an `-hp` archive.
+                        self.stream.as_mut().unwrap().write_all(header_bytes)?;
+                    }
                     processed += len;
                     #[cfg_attr(not(feature = "parallel"), allow(unused_mut))]
                     let mut left = *len;

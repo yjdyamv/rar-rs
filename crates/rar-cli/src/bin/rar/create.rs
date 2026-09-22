@@ -121,22 +121,13 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                 .into(),
         );
     }
-    // The RAR5 editor cannot rewrite headers of a header-encrypted archive
-    // (`-hp`): renaming and comment changes would corrupt it, so refuse the
-    // operations up front instead of committing an archive without them.
-    // The RAR4 editor supports `-hp` comments; RAR 1.3/1.4 rejects `-hp`.
-    if header_encrypt && !version.is_legacy() && !version.is_rar13() {
-        if misc.comment_file.is_some() {
-            return Err(
-                "-z/--comment-file is not supported for header-encrypted (RAR5 -hp) archives"
-                    .into(),
-            );
-        }
-        if misc.lock {
-            return Err(
-                "-k/--lock is not supported for header-encrypted (RAR5 -hp) archives".into(),
-            );
-        }
+    // `-k`/`--lock` stays refused for header-encrypted (`-hp`) RAR5 archives:
+    // locking grows the archive flags field, which the fixed-size encrypted
+    // main-header patch cannot accommodate. RAR 1.3/1.4 rejects `-hp`; the
+    // RAR4 editor supports `-hp` comments. `-z`/`--comment-file` is supported
+    // for `-hp` (the comment is attached after creation through the editor).
+    if header_encrypt && !version.is_legacy() && !version.is_rar13() && misc.lock {
+        return Err("-k/--lock is not supported for header-encrypted (RAR5 -hp) archives".into());
     }
     // The version table is the single write knob: `-ma4` selects v29 (the
     // legacy RAR4 pipeline), `-ma7` v70 (every member v70, 32 MiB default
