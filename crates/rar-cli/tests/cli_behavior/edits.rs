@@ -141,12 +141,12 @@ fn cli_rar4_multivolume_archive_comment_roundtrips() {
     assert_eq!(reader.entries().count(), 3);
 }
 
-/// Header-encrypted RAR5 archives refuse rename and archive-comment edits
-/// (the transaction cannot re-encrypt rewritten headers) and the archive is
-/// left byte-identical; delete and recovery-record edits keep working, as
-/// does the RAR4 `-hp` comment path.
+/// Header-encrypted RAR5 archives now support rename and archive-comment
+/// edits: rewritten headers are re-encrypted through the encrypting writer.
+/// Create-time `-z` is supported too; `-k`/lock stays refused, as do delete
+/// and recovery-record edits (which keep working).
 #[test]
-fn cli_header_encrypted_rar5_edits_are_refused() {
+fn cli_header_encrypted_rar5_edits_work() {
     let dir = make_temp_dir();
     std::fs::write(dir.path().join("f.txt"), b"one").unwrap();
     std::fs::write(dir.path().join("g.txt"), b"two").unwrap();
@@ -161,48 +161,84 @@ fn cli_header_encrypted_rar5_edits_are_refused() {
         .status()
         .unwrap();
     assert!(status.success());
-    let before = std::fs::read(&archive).unwrap();
 
-    for args in [
-        vec!["c", "-psecret", "-znote.txt"],
-        vec!["rn", "-psecret", "-idq"],
-    ] {
-        let mut command = std::process::Command::new(RAR_CLI);
-        command.args(&args).arg(&archive);
-        if args[0] == "rn" {
-            command.arg("f.txt").arg("zz.txt");
-        }
-        let output = command.current_dir(dir.path()).output().unwrap();
-        assert!(
-            !output.status.success(),
-            "{args:?} must be refused on an -hp archive"
-        );
-        assert_eq!(
-            std::fs::read(&archive).unwrap(),
-            before,
-            "{args:?} must not touch the archive"
-        );
-    }
+    // Archive comment: written, re-encrypted and read back.
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["c", "-psecret", "-idq", "-znote.txt"])
+        .arg(&archive)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "comment edit on an -hp archive");
+    let cw = std::process::Command::new(RAR_CLI)
+        .args(["cw", "-psecret"])
+        .arg(&archive)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(cw.status.success());
+    assert_eq!(String::from_utf8_lossy(&cw.stdout).trim_end(), "note");
 
-    // Create-time `-z`/`-k` are rejected before anything is written.
-    for (name, extra) in [("nz", "-znote.txt"), ("nk", "-k")] {
-        let target = dir.path().join(format!("{name}.rar"));
-        let status = std::process::Command::new(RAR_CLI)
-            .args(["a", "-hpsecret", "-idq", extra])
-            .arg(&target)
-            .arg("f.txt")
-            .current_dir(dir.path())
-            .status()
-            .unwrap();
-        assert!(!status.success(), "a -hp {extra} must be rejected");
-        assert!(!target.exists(), "{name}.rar must not be created");
-    }
+    // Rename: the re-serialized header is re-encrypted.
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["rn", "-psecret", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .arg("zz.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "rename on an -hp archive");
+    let list = std::process::Command::new(RAR_CLI)
+        .args(["lb", "-psecret"])
+        .arg(&archive)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let names = String::from_utf8_lossy(&list.stdout);
+    assert!(names.contains("zz.txt"), "renamed member: {names}");
+    assert!(!names.contains("f.txt"), "old name must be gone: {names}");
+
+    // The official tool reads the edited archive.
+    let test = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-psecret", "-idq"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(
+        test.status.success(),
+        "official unrar must read the edited -hp archive:\n{}",
+        String::from_utf8_lossy(&test.stderr)
+    );
+
+    // Create-time `-z` is supported; `-k` is still refused before writing.
+    let with_comment = dir.path().join("nz.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-hpsecret", "-idq", "-znote.txt"])
+        .arg(&with_comment)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "a -hp -z must now succeed");
+    assert!(with_comment.exists());
+
+    let locked = dir.path().join("nk.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-hpsecret", "-idq", "-k"])
+        .arg(&locked)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(!status.success(), "a -hp -k must still be rejected");
+    assert!(!locked.exists(), "nk.rar must not be created");
 
     // Delete still works on the encrypted archive.
     let status = std::process::Command::new(RAR_CLI)
         .args(["d", "-psecret", "-idq"])
         .arg(&archive)
-        .arg("f.txt")
+        .arg("zz.txt")
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -215,11 +251,11 @@ fn cli_header_encrypted_rar5_edits_are_refused() {
     assert!(status.success());
 }
 
-/// Deleting from a header-encrypted multi-volume RAR5 set must be refused
-/// before anything is written (the volume rewrite cannot re-encrypt the
-/// re-split blocks; the previous behavior exited 0 with a corrupt set).
+/// Deleting from a header-encrypted multi-volume RAR5 set now works: the
+/// re-split blocks (and the per-volume encryption header) are re-encrypted
+/// and the set stays valid.
 #[test]
-fn cli_header_encrypted_multivolume_delete_is_refused() {
+fn cli_header_encrypted_multivolume_delete_works() {
     let dir = make_temp_dir();
     let big: Vec<u8> = (0..60_000u32)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
@@ -239,7 +275,6 @@ fn cli_header_encrypted_multivolume_delete_is_refused() {
     assert!(status.success(), "create the encrypted volume set");
 
     let first = dir.path().join("hp-mv.part1.rar");
-    let before = std::fs::read(&first).unwrap();
     let delete = std::process::Command::new(RAR_CLI)
         .args(["d", "-ppw", "-idq"])
         .arg(&first)
@@ -248,14 +283,21 @@ fn cli_header_encrypted_multivolume_delete_is_refused() {
         .output()
         .unwrap();
     assert!(
-        !delete.status.success(),
-        "deleting from a header-encrypted volume set must be refused"
+        delete.status.success(),
+        "deleting from a header-encrypted volume set:\n{}",
+        String::from_utf8_lossy(&delete.stderr)
     );
-    assert_eq!(
-        std::fs::read(&first).unwrap(),
-        before,
-        "the refused delete must leave the first volume untouched"
-    );
+
+    // The deleted member is gone and the set still verifies.
+    let list = std::process::Command::new(RAR_CLI)
+        .args(["lb", "-ppw"])
+        .arg(&first)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let names = String::from_utf8_lossy(&list.stdout);
+    assert!(names.contains("big.bin"), "kept member: {names}");
+    assert!(!names.contains("a.txt"), "deleted member: {names}");
 
     let test = std::process::Command::new(UNRAR_CLI)
         .args(["t", "-ppw", "-idq"])

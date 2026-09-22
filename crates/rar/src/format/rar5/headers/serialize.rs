@@ -264,6 +264,11 @@ pub(crate) fn build_owner_extra_record(owner: &str, group: &str) -> Vec<u8> {
 }
 /// Serialize a "CMT" archive comment service block (type 3, name "CMT",
 /// comment bytes in the data area), matching the official `rar c` format.
+///
+/// Returns only the block header frame; the comment bytes are the block's
+/// data area and must be written separately right after it. Splitting them
+/// is what lets header encryption (`-hp`) wrap only the header — the data
+/// area stays plaintext, like every other block.
 pub(crate) fn build_comment_block(comment: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend(vint::encode(BLOCK_TYPE_SERVICE_HEADER));
@@ -278,9 +283,7 @@ pub(crate) fn build_comment_block(comment: &[u8]) -> Vec<u8> {
     body.extend(vint::encode(3u64)); // name length
     body.extend(b"CMT");
 
-    let mut block = frame_block(&body);
-    block.extend_from_slice(comment);
-    block
+    frame_block(&body)
 }
 /// Serialize a "QO"/"RR"/"STM"-style service block: type 3, the given
 /// name, an extra area holding the service-data record (`subdata`),

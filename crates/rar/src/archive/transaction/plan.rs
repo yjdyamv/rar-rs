@@ -80,6 +80,7 @@ impl RarArchive {
                             // record.
                             if !deleted[idx] {
                                 ops.push(RewriteOp::CopyBlock {
+                                    rebuild_header: false,
                                     qo_header: capture_qo.then(|| meta.header_bytes.clone()),
                                     header_bytes: meta.header_bytes,
                                     src_data: meta.data_offset,
@@ -99,15 +100,20 @@ impl RarArchive {
                     } else if deleted[idx] {
                         prev_file_deleted = true;
                     } else {
-                        let header_bytes = match rename_map.and_then(|m| m.get(&idx)) {
-                            Some(new_name) => {
-                                let mut fh = self.entries[idx].header.clone();
-                                fh.name = new_name.clone();
-                                fh.to_bytes()
-                            }
-                            None => meta.header_bytes,
-                        };
+                        // A rename re-serializes the header in plaintext (it
+                        // must be re-encrypted for `-hp`); every other kept
+                        // member copies its original on-disk header bytes.
+                        let (header_bytes, rebuild_header) =
+                            match rename_map.and_then(|m| m.get(&idx)) {
+                                Some(new_name) => {
+                                    let mut fh = self.entries[idx].header.clone();
+                                    fh.name = new_name.clone();
+                                    (fh.to_bytes(), true)
+                                }
+                                None => (meta.header_bytes, false),
+                            };
                         ops.push(RewriteOp::CopyBlock {
+                            rebuild_header,
                             qo_header: if capture_qo {
                                 Some(header_bytes.clone())
                             } else {
@@ -131,6 +137,7 @@ impl RarArchive {
                         || (meta.flags & BLOCK_FLAG_DEPENDS_PREV != 0 && prev_file_deleted);
                     if !drops {
                         ops.push(RewriteOp::CopyBlock {
+                            rebuild_header: false,
                             qo_header: None,
                             header_bytes: meta.header_bytes,
                             src_data: meta.data_offset,
@@ -139,6 +146,7 @@ impl RarArchive {
                     }
                 }
                 _ => ops.push(RewriteOp::CopyBlock {
+                    rebuild_header: false,
                     qo_header: None,
                     header_bytes: meta.header_bytes,
                     src_data: meta.data_offset,

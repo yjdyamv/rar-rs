@@ -32,6 +32,11 @@ enum RewriteOp {
         header_bytes: Vec<u8>,
         src_data: u64,
         len: u64,
+        /// The header was re-serialized in plaintext (a rename) and must be
+        /// re-emitted through `write_block_header`, so `-hp` encrypts it.
+        /// Verbatim copies carry their original on-disk bytes (already
+        /// encrypted) and are written raw.
+        rebuild_header: bool,
         qo_header: Option<Vec<u8>>,
     },
     /// Decode (and recompress when kept) one member of the affected solid

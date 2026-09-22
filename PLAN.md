@@ -94,12 +94,6 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
       复用手术重写 的块拷贝）、`recovery/{mod,legacy}.rs`、CLI
       `bin/rar/recovery.rs`。验收更新 `rewrite_tests.rs` 与
       `cli_behavior/recovery.rs`（现钉拒绝）。
-- [ ] **P4 RAR5 `-hp` 编辑** — 支持 header-encrypted RAR5 的 `rn`/`ch`/归档注释
-      与分卷删除：重写头用已缓存的 `archive_header_key` 重加密。接缝
-      `archive/transaction/edit.rs`（守卫）、`transaction/multivolume.rs`、
-      `crypto/rar50.rs`、`format/rar5/headers/serialize.rs`；CLI
-      `bin/rar/create.rs` 的建前拒绝。验收更新
-      `cli_behavior/edits.rs`（现钉拒绝）。
 
 ### 暂缓（等决策，不自行推进）
 
@@ -155,6 +149,15 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `Y/N/A/R/Q` 询问 （`output::prompt_overwrite`；库不读 stdin），非 TTY
   保持跳过，且询问时强制 串行抽取。契约由 `overwrite_prompt.rs` 与
   `cli_interactive_overwrite_prompt` 钉住。
+- RAR5 `-hp` 编辑补全（2026-09-22 官方 7.23 实测）：重写头走
+  `write_block_header` 重加密（重命名给 `RewriteOp::CopyBlock` 加
+  `rebuild_header` 标记；verbatim 拷贝仍写磁盘原字节），多卷重写首卷补发明文
+  ENCR 头。**根因修正**：RAR5 `build_comment_block` 原把头 frame + data area
+  一起返回，`-hp` 下把 data area 也加密了——现只返回头 frame、注释 payload
+  单独写（与 RAR4 侧一致）； `get_comment` 改用 `read_main_header`
+  重建加密状态（普通 open 不缓存它）。建前 `-z`+`-hp` 拒绝已移除，`-k`
+  保留。契约由 `cli_header_encrypted_rar5_edits_work` 与
+  `cli_header_encrypted_multivolume_delete_works` 钉住。
 
 **流式与编码**
 
