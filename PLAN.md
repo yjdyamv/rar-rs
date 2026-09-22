@@ -442,5 +442,15 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 - 卷大小必须精确：新增块类型（如 QO）记得同步配额记账。
 - 加密块 padding 是 **zero-fill 不是 PKCS7**——7-Zip 会校验 padding 区全零。
+- **Windows 上绑定 crate（`crates/rar-napi`）必须用 MSVC 目标构建**：Node 是
+  MSVC 构建的，`napi-build` 在 windows+msvc 下什么都不做，而 windows+gnu
+  那条路要求 `LIBNODE_PATH`/`LIBPATH`/`PATH` 里存在一个**没有发行版会带**的
+  `libnode.dll` （缺了就 `libnode.dll not found in any search path`
+  panic）。这台机 rustup 默认 已是 `stable-x86_64-pc-windows-msvc`，所以裸
+  `cargo build` 覆盖全 workspace ✓； 默认若是 GNU，则须
+  `--target x86_64-pc-windows-msvc`（或 `rustup default` 切换）。 Linux/macOS
+  无需任何设置（故 CI 的 `--workspace` 能过）；wasm 目标另需 `napi build` 注入的
+  `EMNAPI_LINK_DIR`。详见 Cargo.toml 注释与
+  [`docs/testing.md`](docs/testing.md)。
 - **Markdown 由 `dprint` 格式化、正文 80 列**：改完跑 `npx dprint@0.50.2 fmt`
   （配置 `dprint.json`，约定见 [`docs/README.md`](docs/README.md)）。

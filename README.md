@@ -43,6 +43,13 @@ cargo build --release --locked
 # Binaries: target/release/rar and target/release/unrar
 ```
 
+On Windows the binding crate (`crates/rar-napi`) needs an **MSVC** target — Node
+is MSVC-built, and `napi-build`'s `windows-gnu` path wants a `libnode.dll` that
+no Node distribution ships — so a host whose rustup default is GNU should build
+it as `cargo build -p rar-rs-napi --target x86_64-pc-windows-msvc`, or produce
+the `.node` with `npx napi build --platform` (see
+[docs/testing.md](docs/testing.md)).
+
 ## Quick start
 
 ### Command line
