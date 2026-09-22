@@ -264,10 +264,10 @@ pub fn parse(data: &[u8]) {
         let names: Vec<String> = a.entries().map(|e| e.name().to_string()).collect();
         for name in &names {
             if let Some(id) = a.entries_named(name).next().map(|e| e.id()) {
-                let _ = a.read_entry_with_options(id, opts);
+                let _ = a.read_entry_with_options(id, opts.clone());
             }
         }
-        let _ = a.extract_all_with_options(dir.path().join("x"), opts);
+        let _ = a.extract_all_with_options(dir.path().join("x"), opts.clone());
     }
     // Password path: also walks the header-encryption scan. A random
     // input almost never forms a valid block envelope, so the KDF is
@@ -952,7 +952,7 @@ pub fn legacy(data: &[u8]) {
                     .collect();
                 for name in names.iter().take(4) {
                     if let Some(id) = reader.entries_named(name).next().map(|entry| entry.id()) {
-                        let _ = reader.read_entry_with_options(id, opts);
+                        let _ = reader.read_entry_with_options(id, opts.clone());
                     }
                 }
             }

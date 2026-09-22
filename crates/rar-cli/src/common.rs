@@ -304,12 +304,30 @@ fn drop_undeclared(args: Vec<String>, cmd: &clap::Command) -> Vec<String> {
     // refuse an unencrypted archive. Clap has no such option, so it must not
     // be filtered away.
     allowed.insert("--password-prompt".to_string());
-    args.into_iter()
-        .filter(|arg| match long_key(arg) {
-            Some(key) => allowed.contains(&format!("--{key}")),
-            None => true,
-        })
-        .collect()
+
+    // Everything up to and including the command token is already legal where
+    // it sits (a root option written before its subcommand); only the block
+    // behind the command is checked against what the subcommand declares.
+    let mut out: Vec<String> = args[..=index].to_vec();
+    let mut cursor = index + 1;
+    while cursor < args.len() {
+        let arg = &args[cursor];
+        let key = long_key(arg);
+        let known = key
+            .as_ref()
+            .is_none_or(|key| allowed.contains(&format!("--{key}")));
+        // An undeclared option spelled with a split value (`--dest out`) takes
+        // its value down with it; leaving the value behind would turn it into
+        // a positional.
+        let split_value = !known
+            && !arg.contains('=')
+            && key.is_some_and(|key| value_options.contains(&format!("--{key}")));
+        if known {
+            out.push(arg.clone());
+        }
+        cursor += if split_value { 2 } else { 1 };
+    }
+    out
 }
 
 /// Move a normalized switch block that precedes an external subcommand token
@@ -1118,6 +1136,48 @@ mod tests {
         assert_eq!(
             switches_after_command(args, &cmd),
             ["--work-dir", ".", "a", "--level", "5", "arc.rar"]
+        );
+    }
+
+    #[test]
+    fn undeclared_switch_takes_its_split_value_with_it() {
+        // `--level` belongs to `a`, so on `l` it is not declared. Both the
+        // switch and the value it was spelled with must go, or the value would
+        // be read as the archive positional.
+        let cmd = clap::Command::new("t")
+            .subcommand(
+                clap::Command::new("a").arg(
+                    clap::Arg::new("level")
+                        .long("level")
+                        .action(clap::ArgAction::Set),
+                ),
+            )
+            .subcommand(
+                clap::Command::new("l").arg(clap::Arg::new("archive").action(clap::ArgAction::Set)),
+            );
+        let args: Vec<String> = ["l", "--level", "5", "arc.rar"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(switches_after_command(args, &cmd), ["l", "arc.rar"]);
+
+        // A switch the command does declare keeps its value.
+        let cmd = clap::Command::new("t").subcommand(
+            clap::Command::new("l")
+                .arg(
+                    clap::Arg::new("dest")
+                        .long("dest")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(clap::Arg::new("archive").action(clap::ArgAction::Set)),
+        );
+        let args: Vec<String> = ["l", "--dest", "out", "arc.rar"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            switches_after_command(args, &cmd),
+            ["l", "--dest", "out", "arc.rar"]
         );
     }
 
