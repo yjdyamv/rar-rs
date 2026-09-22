@@ -98,7 +98,7 @@ pub(crate) fn cmd_find(cmd: &str, args: &[String], password: Option<&str>) -> Cl
 /// columns.
 pub(crate) fn cmd_verbose_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let names = filter_names(args, misc).map_err(error::CliError::from)?;
-    let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
+    let rar = ops::open_reader_quick(&args.archive, args.password.password.as_deref())?;
     ops::list_entries(&rar, &args.archive, &names, true);
     write_list_logs(misc, &rar, &args.archive, &names)
 }
@@ -135,7 +135,7 @@ pub(crate) fn cmd_test(args: &ListArgs, misc: &common::MiscSwitches) -> CliResul
 
 pub(crate) fn cmd_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let names = filter_names(args, misc).map_err(error::CliError::from)?;
-    let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
+    let rar = ops::open_reader_quick(&args.archive, args.password.password.as_deref())?;
     ops::list_entries(&rar, &args.archive, &names, false);
     write_list_logs(misc, &rar, &args.archive, &names)
 }
@@ -143,7 +143,7 @@ pub(crate) fn cmd_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResul
 /// Bare list (`lb` / `vb`): member names only.
 pub(crate) fn cmd_list_bare(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let names = filter_names(args, misc).map_err(error::CliError::from)?;
-    let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
+    let rar = ops::open_reader_quick(&args.archive, args.password.password.as_deref())?;
     ops::list_bare(&rar, &args.archive, &names);
     write_list_logs(misc, &rar, &args.archive, &names)
 }
@@ -152,7 +152,7 @@ pub(crate) fn cmd_list_bare(args: &ListArgs, misc: &common::MiscSwitches) -> Cli
 /// method per member, in the spirit of the official `rar lt`.
 pub(crate) fn cmd_list_technical(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let names = filter_names(args, misc).map_err(error::CliError::from)?;
-    let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
+    let rar = ops::open_reader_quick(&args.archive, args.password.password.as_deref())?;
     ops::list_technical(&rar, &args.archive, &names);
     write_list_logs(misc, &rar, &args.archive, &names)
 }
@@ -178,7 +178,7 @@ fn write_list_logs(
 }
 
 pub(crate) fn cmd_info(args: &ArchiveArgs) -> CliResult<()> {
-    let rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
+    let rar = ops::open_reader_quick(&args.archive, args.password.password.as_deref())?;
 
     let files: Vec<_> = rar.entries().filter(|e| !e.is_dir()).collect();
     let dirs: Vec<_> = rar.entries().filter(|e| e.is_dir()).collect();

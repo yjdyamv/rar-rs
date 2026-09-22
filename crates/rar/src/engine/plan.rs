@@ -53,7 +53,14 @@ impl MemberPlan {
             packed_size,
             attributes: self.attrs,
             mtime,
-            crc32_val: Some(self.file_crc),
+            // `-htb`: the BLAKE2sp record *replaces* the CRC32 field, like
+            // WinRAR (which clears `FILE_FLAG_CRC32`); the serializer drops
+            // the flag and the field when this is `None`.
+            crc32_val: if self.stored_hash.is_some() {
+                None
+            } else {
+                Some(self.file_crc)
+            },
             hash_type: if self.stored_hash.is_some() {
                 0
             } else {
