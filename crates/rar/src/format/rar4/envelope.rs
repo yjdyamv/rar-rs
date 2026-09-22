@@ -156,8 +156,8 @@ pub(crate) fn resync_block<R: Read + Seek>(
 
 /// Cheap pre-filter for [`resync_block`]: the bytes at `pos` could start a
 /// plaintext block. RAR4 head types are `0x72..=0x7b` and `head_size` counts
-/// the whole header. The stream is left at an unspecified position (the caller
-/// seeks before every attempt).
+/// the whole header. The position is restored, so the authoritative
+/// [`read_block`] still starts at `pos`.
 fn block_candidate<R: Read + Seek>(stream: &mut R, pos: u64, end: u64) -> RarResult<bool> {
     let mut base = [0u8; 7];
     if read_some(stream, &mut base)? < base.len() {
@@ -165,7 +165,9 @@ fn block_candidate<R: Read + Seek>(stream: &mut R, pos: u64, end: u64) -> RarRes
     }
     let head_type = base[2];
     let head_size = u64::from(u16::from_le_bytes([base[5], base[6]]));
-    Ok((0x72..=0x7b).contains(&head_type) && head_size >= 7 && pos + head_size <= end)
+    let candidate = (0x72..=0x7b).contains(&head_type) && head_size >= 7 && pos + head_size <= end;
+    stream.seek(SeekFrom::Start(pos))?;
+    Ok(candidate)
 }
 
 /// Read a plaintext block header.

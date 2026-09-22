@@ -23,7 +23,7 @@ use crate::error::{RarError, RarResult};
 use crate::format::decode_system_ansi;
 use crate::format::shared::split::{SplitMerge, SplitMergeError};
 use crate::model::{DataChunk, FileHeader};
-pub(crate) use envelope::{EnvelopePolicy, Rar4Block, read_block};
+pub(crate) use envelope::{EnvelopePolicy, Rar4Block, read_block, resync_block};
 pub(crate) use read::{
     MemberDecodeOptions, decode_member_bytes, decode_member_bytes_to, member_crc,
 };
