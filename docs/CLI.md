@@ -1,6 +1,6 @@
 # Command-Line Reference
 
-> Last verified: 2026-09-22 @ `daef65c`; switch coverage is checked against the
+> Last verified: 2026-09-22 @ `b4b8e04`; switch coverage is checked against the
 > clap surface, behavior against the tests and the official WinRAR 7.23 tools.
 
 rar-rs ships two binaries, `rar` and `unrar`, modelled on the WinRAR 7.x console
