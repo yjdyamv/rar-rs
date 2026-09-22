@@ -1,5 +1,13 @@
 [workspace]
 members = ["crates/rar", "crates/rar-cli", "crates/rar-napi"]
+# The binding crate is not part of the default set: `napi-build` needs the
+# `EMNAPI_LINK_DIR` that `npx napi build` injects (on Windows it panics with
+# "libnode.dll not found in any search path"), so a bare `cargo build` /
+# `test` / `check` would fail for anyone who has not set that up. The default
+# members are the library and the CLI — the two crates a normal local build
+# wants — and `--workspace` / `-p rar-rs-napi` still reach the binding
+# (CI builds it through the napi CLI; see docs/testing.md).
+default-members = ["crates/rar", "crates/rar-cli"]
 # Resolver 3 (edition 2024 generation): dev-dependency features no longer
 # leak into normal builds.
 resolver = "3"
