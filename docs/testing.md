@@ -51,9 +51,15 @@ RUSTFLAGS="-D warnings" cargo check -p rar-rs --all-features \
 - **wasm32-wasip1-threads** is the quietest: it is neither unix nor windows, so
   helpers those branches use are dead there. That is why the library gates such
   helpers on `any(unix, windows)`.
-- The binding crate cannot be checked either way (`napi-build` needs the
-  `EMNAPI_LINK_DIR` that `napi build` injects); build it with
-  `npx napi build --platform --release --target wasm32-wasip1-threads`.
+- The binding crate is **excluded from the workspace default members** and
+  cannot be checked with plain cargo either way (`napi-build` needs the
+  `EMNAPI_LINK_DIR` that `napi build` injects; on Windows it panics with
+  `libnode.dll not found in any search path`). A bare `cargo build` /
+  `cargo
+  test` therefore covers the library and the CLI; build the binding
+  with `npx napi build --platform --release --target wasm32-wasip1-threads`, and
+  on Windows run the suite as `cargo test -p rar-rs -p rar-cli` instead of
+  `--workspace` (which would drag the binding in).
 
 ## Dependency gate
 
