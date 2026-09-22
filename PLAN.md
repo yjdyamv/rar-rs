@@ -84,18 +84,6 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 的多轮头对头、寄存器 级 A/B）是**过程记录**，随 `map.md` 移出长期文档，需要时
 `git log -- docs/issues/compression-perf/` 找回。
 
-### WinRAR 对齐（按优先级）
-
-> 命令面已官方全覆盖，缺口全在**行为层**。逐条只记目标 + 代码接缝 + 验收测试；
-> 判据以官方 WinRAR 7.23 实测为准。
-
-- [ ] **P3 `rar r` 无恢复记录时重建** — 官方打印
-      `Data recovery record not found` 后仍重建 `rebuilt.<name>` 并 exit 0；我们
-      现拒绝（exit 2）。接缝 `recovery/rar50/repair.rs`（reconstruct
-      复用手术重写 的块拷贝）、`recovery/{mod,legacy}.rs`、CLI
-      `bin/rar/recovery.rs`。验收更新 `rewrite_tests.rs` 与
-      `cli_behavior/recovery.rs`（现钉拒绝）。
-
 ### 暂缓（等决策，不自行推进）
 
 - **STORE 成员竞态**：单遍 STORE 先 `hash_file` 再重读同一路径，同尺寸改写真可能
@@ -159,6 +147,15 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   重建加密状态（普通 open 不缓存它）。建前 `-z`+`-hp` 拒绝已移除，`-k`
   保留。契约由 `cli_header_encrypted_rar5_edits_work` 与
   `cli_header_encrypted_multivolume_delete_works` 钉住。
+- `rar r` 无恢复记录时的重建（2026-09-22 官方 7.23 实测）：新增
+  `reconstruct_archive_path`（放在 `archive` 层编排 reader/writer——`recovery`
+  不得依赖 `archive`）：**解码并校验**每个成员、只保留通过的，写
+  `rebuilt.<name>`（legacy 源重建为 RAR4、其余 RAR5；STORE；不保留时间/属性；
+  一次驻留一个成员）。CLI `rar r` 在 `Unsupported`（无记录）时走它，打印官方的
+  `Data recovery record not found` / `Reconstructing` / `Found  <name>` / `Done`
+  并 exit 0。**已知限制**：头本身损坏（open 失败）的归档仍报错、不重建。契约由
+  `reconstruct.rs` 三个测试与
+  `cli_repair_without_a_recovery_record_reconstructs` 钉住。
 
 **流式与编码**
 
@@ -237,15 +234,6 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   一致）。 我们把部分尾扇区排除出 parity
   组、只重建完整扇区，故能正确修复同样损坏。**这是 WinRAR
   侧缺陷，不追平**；互操作测试因此用伪随机成员数据。
-- **无恢复记录时的 `rar r`**：官方 7.23 先打印
-  `Data recovery record not found`，
-  然后**仍然重建一份副本**（`rebuilt.<name>`）并以 exit 0 结束；我们拒绝并以
-  exit 2 结束，消息说明缺什么（`repair: archive has no recovery record`，RAR4 为
-  `repair: archive has no legacy PROTECT_HEAD recovery record`）。差异的根源是
-  我们只做“用内联恢复记录修复”，没有官方那条“无记录也照拄可解析块重建”的路径；
-  若要对齐需新增 reconstruct 路径（复用手术重写的块拷贝机制）。我们的行为已由
-  `rewrite_tests::repair_without_a_recovery_record_reports_it_clearly` 与 CLI
-  `cli_repair_without_a_recovery_record_says_so` 钉住。
 
 ## 归属（谁记录什么，别再重新论证）
 
