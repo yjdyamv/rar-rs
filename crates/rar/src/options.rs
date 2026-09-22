@@ -485,6 +485,13 @@ pub struct ExtractOptions {
     /// Maximum total uncompressed bytes allowed across one extraction
     /// (`None` = unlimited).
     pub max_total_unpacked_bytes: Option<u64>,
+    /// Extraction worker threads for this run (like `-mt<N>`), mirroring
+    /// [`WriterOptions::threads`](crate::WriterOptions). `None` falls back to
+    /// [`set_extraction_threads`](crate::set_extraction_threads) and then to
+    /// automatic sizing; `Some(0)` selects automatic sizing without consulting
+    /// the global setting. Scoped to the run, so concurrent extractions with
+    /// different counts do not configure each other.
+    pub threads: Option<usize>,
     /// Extract members flat: each member is written to the destination
     /// directory under its basename (no directory tree), like `rar e` /
     /// `unrar e`. The safe-path policy still applies — the member name is
@@ -574,6 +581,7 @@ impl Default for ExtractOptions {
             safe_paths: true,
             max_unpacked_bytes: Some(4 * 1024 * 1024 * 1024),
             max_total_unpacked_bytes: Some(32 * 1024 * 1024 * 1024),
+            threads: None,
             flat_paths: false,
             skip_existing: false,
             auto_rename: false,

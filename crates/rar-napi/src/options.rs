@@ -240,6 +240,8 @@ impl ExtractArchiveOptions {
       flat_paths: self.flat.unwrap_or(false),
       max_unpacked_bytes: None,
       max_total_unpacked_bytes: None,
+      // Workers come from the binding's own thread pool / the global default.
+      threads: None,
       max_dict_size,
       max_metadata_bytes,
       skip_existing: self.skip_existing.unwrap_or(false),

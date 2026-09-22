@@ -86,6 +86,15 @@ let id = reader.unique_entry("notes.txt")?;
 let data = reader.read_entry(id)?;
 ```
 
+Per-archive and per-run tuning follows the same shape: `WriterOptions::threads`
+for the writer, `ExtractOptions::threads` for one extraction (both fall back to
+`set_compression_threads` / `set_extraction_threads`), `set_cancel_flag` for
+cancellation and `set_progress_callback` for progress.
+
+Runnable examples: `cargo run --example create_and_extract` (the ordinary create
+/ list / read / extract / verify flow) and `cargo run --example edit_and_repair`
+(editing, a recovery record, then repair and rebuild after damage).
+
 Module map and design invariants: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Limitations

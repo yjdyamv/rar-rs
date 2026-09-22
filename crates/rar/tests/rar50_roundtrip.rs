@@ -1354,8 +1354,60 @@ fn x86_like(size: usize) -> Vec<u8> {
 
 // ── Deletion ────────────────────────────────────────────────────────────────
 
-// ── Per-archive compression threads (CreateOptions::threads) ────────────────
+/// An extraction-local thread count (`ExtractOptions::threads`, mirroring the
+/// writer's) drives the batch path and produces byte-identical output,
+/// independent of the process-global [`rar_rs::set_extraction_threads`]. The
+/// archive is sized past the batch thresholds (>= 4 members, >= 64 MiB
+/// unpacked) so the parallel path is the one under test.
+#[cfg(feature = "parallel")]
+#[test]
+fn extract_options_threads_drive_the_parallel_path() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("extract_threads.rar");
+    let members: Vec<Vec<u8>> = (0u8..5)
+        .map(|i| {
+            b"extraction threads payload 0123456789abcdef\n"
+                .iter()
+                .cycle()
+                .take(16 * 1024 * 1024)
+                .map(|b| b.wrapping_add(i))
+                .collect()
+        })
+        .collect();
+    {
+        let mut writer = ArchiveWriter::create(&path).unwrap();
+        for (i, data) in members.iter().enumerate() {
+            writer
+                .add_bytes(&format!("m{i}.bin"), data, opts(0))
+                .unwrap();
+        }
+        writer.finish().unwrap();
+    }
 
+    for threads in [Some(2usize), Some(0)] {
+        let out = dir.path().join(format!("out{}", threads.unwrap_or(99)));
+        let mut reader = ArchiveReader::open(&path).unwrap();
+        let report = reader
+            .extract_all_with_options(
+                &out,
+                rar_rs::ExtractOptions {
+                    threads,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(report.written_count(), members.len(), "threads={threads:?}");
+        for (i, data) in members.iter().enumerate() {
+            assert_eq!(
+                &std::fs::read(out.join(format!("m{i}.bin"))).unwrap(),
+                data,
+                "threads={threads:?}, member m{i}.bin"
+            );
+        }
+    }
+}
+
+// ── Per-archive compression threads (CreateOptions::threads) ────────────────
 /// A >= 64 MiB member goes through the streaming path whose flush_window
 /// uses the per-archive thread count. CreateOptions::threads must produce a
 /// valid MT archive that decodes byte-identically, independent of the

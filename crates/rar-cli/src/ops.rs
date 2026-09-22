@@ -756,6 +756,8 @@ impl ExtractRequest {
             max_dict_size: self
                 .max_dict_size
                 .or(Some(ExtractOptions::DEFAULT_MAX_DICT_SIZE)),
+            // `-mt<N>`: scoped to this extraction, like the writer's.
+            threads: self.threads,
             // `-f`/`-u` decide overwrites by timestamp themselves; without
             // them the non-interactive default is skip-except-`-y`. An
             // explicit `-o-` still wins.
@@ -797,9 +799,6 @@ pub fn extract(
     rar: &mut ArchiveReader,
     request: &ExtractRequest,
 ) -> CliResult<Option<ExtractionReport>> {
-    if let Some(threads) = request.threads {
-        rar_rs::set_extraction_threads(threads);
-    }
     rar.set_mark_of_the_web(request.mark_web.clone());
     if request.stdout {
         extract_to_stdout(rar, &request.names, request.max_dict_size)?;
