@@ -47,7 +47,16 @@ pub(crate) enum Destination {
 /// Whether an outcome for `entry` belongs in an [`ExtractionReport`]:
 /// directories (their creation is silent) and `-ol-`-skipped links do not.
 fn reports_outcome(entry: &ArchiveEntry, options: &crate::options::ExtractOptions) -> bool {
-    !entry.is_dir() && !(options.skip_links && entry.redirect().is_some())
+    !is_directory_entry(entry) && !(options.skip_links && entry.redirect().is_some())
+}
+
+/// Whether the member is a real directory, not a redirect that merely carries
+/// WinRAR's DIRECTORY flag. WinRAR sets that flag on a junction (a directory
+/// reparse point), but the member is still materialized as a link, so it must
+/// never take the directory path — not in destination resolution (flat mode
+/// folds directories into the destination root) and not in extraction.
+fn is_directory_entry(entry: &ArchiveEntry) -> bool {
+    entry.is_dir() && entry.redirect().is_none()
 }
 
 /// The member's stored modification time as an instant, when the header
@@ -422,7 +431,7 @@ fn extract_all_parallel(
                 continue;
             }
         };
-        if entry.is_dir() {
+        if is_directory_entry(&entry) {
             fs::create_dir_all(&dest_path)?;
             // Flat extraction resolves directories to the destination
             // root itself; the archived mode must not be applied to the
@@ -571,7 +580,7 @@ pub(crate) fn resolve_dest_path_with(
     options: &crate::options::ExtractOptions,
 ) -> RarResult<Destination> {
     let dest_path = if options.flat_paths {
-        if entry.is_dir() {
+        if is_directory_entry(entry) {
             return Ok(Destination::Extract(dest_dir.to_path_buf()));
         }
         let safe_name = sanitize_archive_path(&entry.header.name)?;
@@ -598,7 +607,11 @@ pub(crate) fn resolve_dest_path_with(
     // overwrite. Directories never prompt (an existing directory is a no-op),
     // and `-or` (`auto_rename`) takes precedence as documented: with both set
     // the member is renamed without asking.
-    if options.prompt_overwrite && !options.auto_rename && !entry.is_dir() && dest_path.exists() {
+    if options.prompt_overwrite
+        && !options.auto_rename
+        && !is_directory_entry(entry)
+        && dest_path.exists()
+    {
         let prompt = cx.read_ctx().overwrite_prompt.clone();
         let choice = match prompt {
             Some(prompt) => prompt(&dest_path),
@@ -620,7 +633,7 @@ pub(crate) fn resolve_dest_path_with(
     // `-f` / `-u` (freshen/update): only replace a destination that is
     // older than the archived member. A missing destination is skipped
     // by freshen and extracted by update.
-    if !entry.is_dir() && (options.freshen || options.update) {
+    if !is_directory_entry(entry) && (options.freshen || options.update) {
         match fs::metadata(&dest_path) {
             Ok(meta) => {
                 let newer = match (member_mtime(&entry.header), meta.modified().ok()) {
@@ -642,7 +655,7 @@ pub(crate) fn resolve_dest_path_with(
     // `-or` (auto rename): when the destination exists, insert `(N)`
     // before the extension (like WinRAR: a.txt -> a(1).txt).
     let mut dest_path = dest_path;
-    if options.auto_rename && !entry.is_dir() {
+    if options.auto_rename && !is_directory_entry(entry) {
         dest_path = next_free_name(&dest_path);
     }
     Ok(Destination::Extract(dest_path))
@@ -696,7 +709,7 @@ fn extract_entry(
         }
     };
 
-    if entry.is_dir() {
+    if is_directory_entry(entry) {
         fs::create_dir_all(&dest_path)?;
         // Flat extraction resolves directories to the destination root
         // itself; the archived mode must not be applied to the caller's
