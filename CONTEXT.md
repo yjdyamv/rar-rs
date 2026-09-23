@@ -184,8 +184,10 @@
 - **ExtractionReport（`format/shared/extract/members.rs`，经
   `archive/reader.rs`）** —
   抽取操作的唯一回报值（2026-09）：`written`（真正写出的文件与创建的链接，按归档序）+
-  `skipped`（`-o-`
-  未动的成员，带目标路径）；目录条目不记（创建无文件数据），`-ol-`
+  `skipped`（`-o-` 未动的成员，带目标路径）+
+  `refused`（目标逃出目的目录、被安全策略拒绝的链接 ——
+  只拒该链接、不中止整轮，CLI 按 WinRAR 记 exit
+  1）；目录条目不记（创建无文件数据），`-ol-`
   跳过的链接也不记。`extract_all_with_options`/`extract_ids_with_options`
   返回它，写入循环自己记录，因此不可能与落盘不一致；CLI 的 `Skipping` 行与
   `Extracted N file(s)` 计数直接来自它（预测式

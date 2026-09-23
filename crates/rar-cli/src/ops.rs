@@ -867,7 +867,26 @@ fn extract_members(
     for path in report.skipped() {
         crate::info!("Skipping {}", display_name(&path.to_string_lossy()));
     }
+    for path in report.refused() {
+        crate::info!(
+            "Skipping the potentially unsafe {} link",
+            display_name(&path.to_string_lossy())
+        );
+    }
     Ok(report)
+}
+
+/// WinRAR's exit for a completed disk extraction: a link refused because its
+/// target escapes the destination is a *warning*, exit 1, even though the
+/// rest of the archive extracted (`UnRAR` prints its `Skipping the potentially
+/// unsafe ... link` line and returns 1). Ordinary `-o-` skips are not a
+/// warning — they still exit 0, like WinRAR — and the "every member skipped"
+/// case is exit 10, reported by the callers themselves.
+pub fn refused_link_exit(report: &ExtractionReport) -> CliResult<()> {
+    if report.refused_count() > 0 {
+        return Err(CliError::silent(crate::error::EXIT_WARNING));
+    }
+    Ok(())
 }
 
 /// Extract every file member to stdout, concatenated (`-so`), for piping.

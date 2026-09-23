@@ -1434,11 +1434,13 @@ fn symlink_and_hardlink_redirects_extract() {
 }
 
 /// A redirect target is attacker-controlled data, so it goes through the
-/// same containment policy as member names: links that point outside the
-/// extraction root must be rejected instead of materialized, otherwise a
-/// later member (or any other consumer) could write through them.
+/// same containment policy as member names: a link that points outside the
+/// extraction root is refused instead of materialized (otherwise a later
+/// member, or any other consumer, could write through it). Only that link is
+/// skipped — the run continues, like WinRAR's "Skipping the potentially
+/// unsafe ... link".
 #[test]
-fn symlink_targets_escaping_the_destination_are_rejected() {
+fn symlink_targets_escaping_the_destination_are_skipped() {
     // Drive prefixes are absolute only on Windows; on POSIX
     // `C:/Windows/win.ini` and `\\?\C:\Windows` are ordinary relative names
     // inside the root, so they are not escape attempts there (official unrar
@@ -1475,10 +1477,18 @@ fn symlink_targets_escaping_the_destination_are_rejected() {
 
         let out = dir.path().join("out");
         let mut rar = ArchiveReader::open(&path).unwrap();
-        let err = rar.extract_all(&out).unwrap_err();
+        let report = rar.extract_all(&out).unwrap();
+        // An escaping link target is refused on its own (WinRAR prints
+        // "Skipping the potentially unsafe ... link" and keeps going); it
+        // must not abort the whole run, and it is reported as refused.
+        assert_eq!(
+            report.refused_count(),
+            1,
+            "target {target:?}: the refused link must be reported as refused"
+        );
         assert!(
-            matches!(err, rar_rs::RarError::Security(_)),
-            "target {target:?} should be rejected as a security violation, got {err}"
+            out.join("dir/target.txt").is_file(),
+            "target {target:?}: the run must continue past the refused link"
         );
         // No link was created, so nothing outside the destination is
         // reachable through the extracted tree.

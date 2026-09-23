@@ -435,6 +435,7 @@ fn cmd_extract(
             report.written_count(),
             request.dest.display()
         );
+        ops::refused_link_exit(&report)?;
     }
     Ok(())
 }
@@ -483,6 +484,7 @@ fn cmd_extract_flat(
             report.written_count(),
             request.dest.display()
         );
+        ops::refused_link_exit(&report)?;
     }
     Ok(())
 }

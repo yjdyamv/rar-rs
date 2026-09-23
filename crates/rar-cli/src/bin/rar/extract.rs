@@ -68,6 +68,7 @@ pub(crate) fn cmd_extract(
             // member was left untouched -> "No files to extract", exit 10.
             return Err(error::CliError::silent(error::EXIT_NO_FILES));
         }
+        ops::refused_link_exit(&report)?;
     }
     Ok(())
 }
@@ -160,6 +161,7 @@ pub(crate) fn cmd_extract_flat(
         if report.written_count() == 0 && report.skipped_count() > 0 {
             return Err(error::CliError::silent(error::EXIT_NO_FILES));
         }
+        ops::refused_link_exit(&report)?;
     }
     Ok(())
 }
