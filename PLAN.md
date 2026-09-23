@@ -1,6 +1,12 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-23 @ `7c03a6a`（本轮：**真实用户语料 ×
+> 最后核对：2026-09-23 @ `8e94db3`（本轮：**元数据改为按宿主平台写** ——新增
+> `platform.rs` 统一 `host_os`/属性/时间载体，Windows 上写 `host_os`=0 + DOS
+> 属性 + FILE_TIME 记录的 Windows
+> FILETIME，WinRAR/我们都恢复只读/隐藏/系统位、也不再被 NFC 归一化成员名；RAR4
+> 顺带落 DOS 属性位（直拷，含 `0x00` 那个官方用例）。另修 抽取侧「带 DIRECTORY
+> 位的重定向被当目录」与 `-si`/`add_bytes` 在 Windows 丢 mtime
+> 两处缺陷；两条平台无关的惯例仍不复刻）。 前轮：**真实用户语料 ×
 > 多文件类型的双向对拍** ——新增
 > `winrar_interop::scenarios`（空文件/无扩展名/点文件/含空格引号井号的名字/ CJK
 > 与 emoji 名/200 字节长名/多级目录/空目录/大量小文件/文本与随机与结构化数据，
@@ -123,6 +129,14 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `winrar_interop::scenarios::windows_metadata_round_trips_through_winrar`、
   `format_assertions::nanosecond_mtime_roundtrip` 与
   `cli_behavior::parity2::cli_extracts_a_junction_as_a_real_mount_point` 钉住。
+- **RAR4 落 DOS 属性位**（2026-09-23 对拍官方 6.23）：RAR4 的属性字段是 DOS 位，
+  写侧此前只落 `0x20`/`0x10`，只读/隐藏/系统位丢失（只读文件解出仍是读写）。现按
+  宿主平台取——Windows 上直拷文件属性（`0x1|0x2|0x4|0x20`，目录含 `0x10`；
+  `FILE_ATTRIBUTE_NORMAL` 不落，故无 archive 位的文件落 `0x00`，与官方一致）、非
+  Windows 保持 `0x20`/`0x10`（Unix 产物不变）。属性同时写进**模型条目**
+  （`push_rar4_entry` 新收 `attr`），使 `lt` 与后续重打包（`attributes & 0xFF`）
+  与磁盘一致。契约由
+  `winrar_interop::rar4_create::rar4_stores_and_restores_dos_attributes` 钉住。
 
 - **不安全链接目标不再中止整轮抽取**（2026-09-23 对拍官方 7.23）：目标逃出目的
   目录的 symlink/junction 此前让 `extract_all` 直接返回 `Security`
@@ -525,10 +539,6 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   与语料对拍全绿。契约由
   `winrar_interop::scenarios`（`windows_metadata_round_trips_through_winrar` /
   `varied_corpus_round_trips_through_both_tools`）钉住。
-- **RAR4（`-ma4`）不保留 DOS 属性位**（2026-09-23 实测官方 6.23）：RAR4 的 host
-  固定 Windows(2)、属性字段是 DOS 位，但写侧只落 `0x20`/`0x10` ——
-  只读/隐藏/系统位不落盘 （只读文件解出仍是读写；官方写 `0x21`/`0x22`）。与 RAR5
-  无关的独立缺口，未做。
 - **Windows 联接点的 redirect 目标字符串**（2026-09-23 对拍官方 7.23）：`-ol` 存
   junction 时我们写其原始路径（`C:\dir\target`，反斜杠），WinRAR 写 NT 打印名、
   正斜杠、带 `/??/`
