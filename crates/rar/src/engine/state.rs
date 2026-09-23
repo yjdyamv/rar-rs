@@ -323,6 +323,9 @@ impl Default for MetadataSettings {
 pub(crate) struct LocatorState {
     /// Write a quick-open ("QO") service record at close time.
     pub quick_open: bool,
+    /// Reserved width of the QO/RR offset fields, when the caller supplied a
+    /// size estimate (WinRAR's byte layout); `None` uses the default.
+    pub offset_width: Option<usize>,
     /// Cached (offset, full header bytes) of file headers for quick-open.
     pub quick_open_entries: Vec<(u64, Vec<u8>)>,
     /// File offset of the quick-open offset vint inside the main header's

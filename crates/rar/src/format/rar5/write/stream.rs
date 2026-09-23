@@ -139,8 +139,13 @@ fn write_streamed_payload(
     progress: bool,
 ) -> RarResult<()> {
     let file_crc = plan.file_crc;
-    let (mtime, file_flags) =
-        super::add::rar5_time_fields(cx, plan.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
+    let has_time_record = super::emit::file_time_record(&plan.extra_data).is_some();
+    let (mtime, file_flags) = super::add::rar5_time_fields(
+        cx,
+        plan.mtime,
+        FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
+        has_time_record,
+    );
     let fh_base = plan.file_header(packed_size, mtime, file_flags);
 
     // Two independent encryptors are seeded from the session's key/IV:

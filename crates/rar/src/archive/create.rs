@@ -531,6 +531,16 @@ impl RarArchive {
 
     // ── Writing ────────────────────────────────────────────────────────────
 
+    /// Reserved width of the locator's QO/RR offset fields: the caller's size
+    /// estimate selects a WinRAR-matching width, otherwise the default
+    /// preallocated 5 bytes.
+    pub(super) fn locator_offset_width(&self) -> usize {
+        self.write_ctx()
+            .locator
+            .offset_width
+            .unwrap_or(crate::format::rar5::headers::locator::DEFAULT_OFFSET_WIDTH)
+    }
+
     pub(super) fn write_archive_header(&mut self) -> RarResult<()> {
         if self.recovery_percent.is_some() || self.write_ctx().locator.quick_open {
             return self.write_archive_header_with_locators();
@@ -546,6 +556,7 @@ impl RarArchive {
             false,
             false,
             None,
+            self.locator_offset_width(),
         );
         self.write_block_header(&hdr)
     }
@@ -573,6 +584,7 @@ impl RarArchive {
             quick_open,
             recovery,
             None,
+            self.locator_offset_width(),
         );
 
         let main_header_start = self.stream.as_mut().unwrap().stream_position()?;
@@ -591,6 +603,7 @@ impl RarArchive {
             false,
             false,
             volume_number,
+            self.locator_offset_width(),
         );
         self.write_block_header(&hdr)
     }

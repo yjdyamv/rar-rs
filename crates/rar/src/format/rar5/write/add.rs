@@ -89,12 +89,21 @@ pub(super) fn time_extra_cfg(
     } else {
         None
     };
-    let mtime = save_mtime.then_some((mtime as u64, if precision_seconds { 0 } else { mtime_ns }));
+    let mtime = save_mtime.then_some((mtime as u64, ns(mtime_ns)));
     let present = mtime.is_some() || ctime.is_some() || atime.is_some();
     // Windows keeps its times in the FILETIME form unless the caller asked for
     // whole seconds (`-ts1`), which WinRAR stores in the Unix form.
     let windows_form = crate::platform::file_time_is_windows() && !precision_seconds;
-    present.then(|| {
+    // On Windows the record is always the time carrier. On Unix the header's
+    // 4-byte mtime already holds a whole-second modification time, so WinRAR
+    // writes no record for it and only adds one to carry what the header
+    // cannot: a fractional second, or the creation/access times (measured
+    // against WinRAR 7.23).
+    let needs_record = crate::platform::file_time_is_windows()
+        || ctime.is_some()
+        || atime.is_some()
+        || mtime.is_some_and(|(_, sub)| sub != 0);
+    (present && needs_record).then(|| {
         if windows_form {
             file_time_extra_record_windows(mtime, ctime, atime)
         } else {
@@ -591,14 +600,28 @@ pub(super) fn ensure_rar5_volume_space(cx: &mut dyn Engine, needed: u64) -> RarR
 }
 
 /// Effective header time and file flags for a RAR5 member: `-tsm-`
-/// (`save_mtime == false`) omits the time field entirely, like WinRAR.
+/// (`save_mtime == false`) omits the time field entirely, like WinRAR, and so
+/// does an all-zero time — the "unknown" sentinel the reader renders as
+/// `????-??-??` (e.g. a redirect created without one).
 ///
-/// On Windows the header's 4-byte Unix mtime is never used — WinRAR clears
+/// The 4-byte Unix mtime field and the FILE_TIME record are never both
+/// present. Windows never uses the header field — WinRAR clears
 /// `FILE_FLAG_TIME_UNIX` and keeps the times in the FILE_TIME record (as
-/// FILETIME, unless `-ts1` asks for whole seconds) — so the flag is cleared
-/// there too, leaving the record as the only time carrier.
-pub(crate) fn rar5_time_fields(cx: &dyn Engine, mtime: u32, flags: u64) -> (u32, u64) {
-    if cx.write_ctx().meta.mtime && !crate::platform::file_time_is_windows() {
+/// FILETIME, unless `-ts1` asks for whole seconds) — and on Unix the header
+/// field is used only when there is no record, i.e. a whole-second
+/// modification time with no creation/access time (`has_time_record`; see
+/// `time_extra_cfg`). This mirrors WinRAR 7.23 byte-for-byte.
+pub(crate) fn rar5_time_fields(
+    cx: &dyn Engine,
+    mtime: u32,
+    flags: u64,
+    has_time_record: bool,
+) -> (u32, u64) {
+    if cx.write_ctx().meta.mtime
+        && mtime != 0
+        && !crate::platform::file_time_is_windows()
+        && !has_time_record
+    {
         (mtime, flags)
     } else {
         (0, flags & !FILE_FLAG_TIME_UNIX)
@@ -649,10 +672,17 @@ pub(crate) fn add_redirect_with_time(
     // A junction is a directory redirect; WinRAR flags it as one and drops the
     // (meaningless) CRC32, while a file symlink / hardlink keeps the CRC32.
     let is_directory = redir_type == REDIR_WINDOWS_JUNCTION;
-    // `-tsm-` omits the link's time like a regular member.
-    let mut extra_data = if cx.write_ctx().meta.mtime && mtime != 0 {
-        let time = Some((u64::from(mtime), mtime_ns.unwrap_or(0)));
-        if crate::platform::file_time_is_windows() && !cx.write_ctx().meta.time_precision_seconds {
+    // `-tsm-` omits the link's time like a regular member. The record carries
+    // the time only when the header cannot: always on Windows, and on Unix
+    // only for a fractional second (`rar5_time_fields`).
+    let precision_seconds = cx.write_ctx().meta.time_precision_seconds;
+    let mtime_sub = mtime_ns.unwrap_or(0);
+    let has_time_record = cx.write_ctx().meta.mtime
+        && mtime != 0
+        && (crate::platform::file_time_is_windows() || (!precision_seconds && mtime_sub != 0));
+    let mut extra_data = if has_time_record {
+        let time = Some((u64::from(mtime), mtime_sub));
+        if crate::platform::file_time_is_windows() && !precision_seconds {
             file_time_extra_record_windows(time, None, None)
         } else {
             file_time_extra_record(time, None, None)
@@ -670,6 +700,7 @@ pub(crate) fn add_redirect_with_time(
             } else {
                 FILE_FLAG_CRC32
             },
+        has_time_record,
     );
     let fh = FileHeader {
         name: name.replace('\\', "/"),
@@ -710,7 +741,7 @@ pub(crate) fn write_rar5_dir_entry(
     let attrs = crate::platform::directory_attributes(meta);
 
     let (mtime, file_flags) =
-        rar5_time_fields(cx, mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY);
+        rar5_time_fields(cx, mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY, false);
     let fh = FileHeader {
         name: format!("{name}/"),
         attributes: attrs,

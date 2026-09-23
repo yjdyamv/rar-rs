@@ -30,6 +30,33 @@ pub(crate) fn frame_block(body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Encode `value` as a vint occupying at least `min` bytes. WinRAR writes the
+/// member/service header size fields (`data_size`, `unpacked_size`,
+/// `comp_info`) with a two-byte minimum, so a small value carries a redundant
+/// zero continuation byte (`11` renders as `8b 00`); larger values keep their
+/// natural width. The other header vints (`attributes`, `host_os`, the name
+/// length, the extra-area size) stay minimal. (Measured against WinRAR 7.23.)
+pub(crate) fn vint_at_least(value: u64, min: usize) -> Vec<u8> {
+    let mut out = vint::encode(value);
+    while out.len() < min {
+        if let Some(last) = out.last_mut() {
+            *last |= 0x80;
+        }
+        out.push(0);
+    }
+    out
+}
+
+/// The reserved field width WinRAR uses for an "STM" record's `data_size` and
+/// `unpacked_size`: it emits the stream header before the stream's packed size
+/// is known and reserves room for `unpacked_size << 12`, never fewer than two
+/// bytes, then patches the real values in. (Measured against WinRAR 7.23: a
+/// 4-byte stream reserves three bytes, 512 bytes four, 64 KiB five.) The
+/// same archive's file headers use the two-byte minimum, not this estimate.
+fn stream_size_field_width(unpacked_size: u64) -> usize {
+    vint::encoded_size(unpacked_size.saturating_mul(1 << 12)).max(2)
+}
+
 impl ArchiveHeader {
     /// Serialize to RAR5 binary format (including CRC).
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -94,11 +121,11 @@ impl FileHeader {
             body.extend(vint::encode(self.extra_data.len() as u64));
         }
         if eff_block_flags & BLOCK_FLAG_DATA_AREA != 0 {
-            body.extend(vint::encode(self.packed_size));
+            body.extend(vint_at_least(self.packed_size, 2));
         }
 
         body.extend(vint::encode(eff_file_flags));
-        body.extend(vint::encode(self.unpacked_size));
+        body.extend(vint_at_least(self.unpacked_size, 2));
         body.extend(vint::encode(self.attributes));
 
         if eff_file_flags & FILE_FLAG_TIME_UNIX != 0 {
@@ -132,7 +159,7 @@ impl FileHeader {
         } else {
             comp_info |= ((self.comp_dict_size as u64) & 0x0F) << COMP_INFO_DICT_SHIFT;
         }
-        body.extend(vint::encode(comp_info));
+        body.extend(vint_at_least(comp_info, 2));
         body.extend(vint::encode(self.host_os));
 
         let name_bytes = self.name.as_bytes();
@@ -317,12 +344,12 @@ pub(crate) fn build_comment_block(comment: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend(vint::encode(BLOCK_TYPE_SERVICE_HEADER));
     body.extend(vint::encode(BLOCK_FLAG_DATA_AREA));
-    body.extend(vint::encode(comment.len() as u64));
+    body.extend(vint_at_least(comment.len() as u64, 2)); // data size
     body.extend(vint::encode(FILE_FLAG_CRC32));
-    body.extend(vint::encode(comment.len() as u64)); // unpacked size
+    body.extend(vint_at_least(comment.len() as u64, 2)); // unpacked size
     body.extend(vint::encode(0u64)); // attributes
     body.extend(crc32fast::hash(comment).to_le_bytes());
-    body.extend(vint::encode(0u64)); // compression info (store)
+    body.extend(vint_at_least(0, 2)); // compression info (store)
     body.extend(vint::encode(OS_UNIX));
     body.extend(vint::encode(3u64)); // name length
     body.extend(b"CMT");
@@ -346,11 +373,11 @@ pub(crate) fn build_service_block(
         BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | extra_flags,
     ));
     body.extend(vint::encode(subdata.len() as u64)); // extra area size
-    body.extend(vint::encode(data_size)); // data size
+    body.extend(vint_at_least(data_size, 2)); // data size
     body.extend(vint::encode(0u64)); // file flags
-    body.extend(vint::encode(data_size)); // unpacked size
+    body.extend(vint_at_least(data_size, 2)); // unpacked size
     body.extend(vint::encode(0u64)); // attributes
-    body.extend(vint::encode(0u64)); // compression info (store)
+    body.extend(vint_at_least(0, 2)); // compression info (store)
     body.extend(vint::encode(OS_UNIX));
     body.extend(vint::encode(name.len() as u64));
     body.extend(name.as_bytes());
@@ -378,14 +405,16 @@ pub(crate) fn build_stream_block(
         BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | BLOCK_FLAG_DEPENDS_PREV,
     ));
     body.extend(vint::encode(extra.len() as u64)); // extra area size
-    body.extend(vint::encode(packed_size)); // data size
+    let size_width = stream_size_field_width(unpacked_size);
+    body.extend(vint_at_least(packed_size, size_width)); // data size
     body.extend(vint::encode(FILE_FLAG_CRC32)); // file flags
-    body.extend(vint::encode(unpacked_size));
+    body.extend(vint_at_least(unpacked_size, size_width));
     body.extend(vint::encode(0u64)); // attributes
     body.extend(stream_crc32.to_le_bytes());
-    body.extend(vint::encode(
+    body.extend(vint_at_least(
         (u64::from(dict_log) << COMP_INFO_DICT_SHIFT)
             | (u64::from(method) << COMP_INFO_METHOD_SHIFT),
+        2,
     ));
     body.extend(vint::encode(OS_WINDOWS));
     body.extend(vint::encode(3u64)); // name length
@@ -395,15 +424,18 @@ pub(crate) fn build_stream_block(
     frame_block(&body)
 }
 
-/// Encode `value` as a fixed 5-byte RAR5 vint (LSB-first, continuation bit
-/// on every byte except the last). Valid for values < 2^35.
-pub(crate) fn vint_fixed5(value: u64) -> [u8; 5] {
-    let mut out = [0x80u8; 5];
+/// Encode `value` as a fixed `width`-byte RAR5 vint (LSB-first, continuation
+/// bit on every byte except the last). WinRAR preallocates the locator offset
+/// fields this way (see [`crate::format::rar5::headers::locator`]); the caller
+/// must ensure `value` fits in `7 * width` bits, since a wrapped value would
+/// name arbitrary bytes.
+pub(crate) fn vint_fixed(value: u64, width: usize) -> Vec<u8> {
+    let mut out = vec![0x80u8; width];
     let mut v = value;
     for (i, byte) in out.iter_mut().enumerate() {
         let mut b = (v & 0x7F) as u8;
         v >>= 7;
-        if i < 4 {
+        if i + 1 < width {
             b |= 0x80;
         }
         *byte = b;
@@ -449,5 +481,121 @@ mod tests {
             crc32fast::hash(content)
         );
         assert_eq!(content[0] as usize, body.len());
+    }
+
+    /// Decode one vint and advance the cursor.
+    fn next(body: &[u8], off: &mut usize) -> (u64, usize) {
+        let (v, n) = vint::decode_from_slice(body, *off).unwrap();
+        *off += n;
+        (v, n)
+    }
+
+    #[test]
+    fn vint_at_least_pads_small_values() {
+        assert_eq!(vint_at_least(0, 2), vec![0x80, 0x00]);
+        assert_eq!(vint_at_least(11, 2), vec![0x8b, 0x00]);
+        assert_eq!(vint_at_least(127, 2), vec![0xff, 0x00]);
+        assert_eq!(vint_at_least(128, 2), vec![0x80, 0x01]);
+        // Already two bytes or wider: the natural width is kept.
+        assert_eq!(vint_at_least(128, 2), vint::encode(128));
+        assert_eq!(vint_at_least(16384, 2), vint::encode(16384));
+        for v in [0u64, 1, 11, 127, 128, 16383, 16384, u32::MAX as u64] {
+            let encoded = vint_at_least(v, 2);
+            let (decoded, n) = vint::decode_from_slice(&encoded, 0).unwrap();
+            assert_eq!(decoded, v);
+            assert!(n >= 2, "value {v} must occupy at least two bytes");
+        }
+    }
+
+    #[test]
+    fn stream_size_field_width_matches_winrar() {
+        assert_eq!(stream_size_field_width(0), 2);
+        assert_eq!(stream_size_field_width(1), 2);
+        assert_eq!(stream_size_field_width(3), 2);
+        assert_eq!(stream_size_field_width(4), 3);
+        assert_eq!(stream_size_field_width(511), 3);
+        assert_eq!(stream_size_field_width(512), 4);
+        assert_eq!(stream_size_field_width(65535), 4);
+        assert_eq!(stream_size_field_width(65536), 5);
+        assert_eq!(stream_size_field_width(1 << 23), 6);
+        // Saturates rather than wrapping for absurd sizes.
+        assert_eq!(stream_size_field_width(u64::MAX), 10);
+    }
+
+    #[test]
+    fn member_size_fields_use_a_two_byte_minimum() {
+        let header = FileHeader {
+            name: "a.txt".into(),
+            unpacked_size: 11,
+            packed_size: 11,
+            crc32_val: Some(0x1234_5678),
+            ..Default::default()
+        };
+        let raw = crate::format::rar5::headers::parse_block_bytes(&header.to_bytes()).unwrap();
+        let body = &raw.header_data;
+        let mut off = 0usize;
+        let (_ty, _) = next(body, &mut off);
+        let (flags, _) = next(body, &mut off);
+        assert_eq!(flags & crate::format::rar5::BLOCK_FLAG_EXTRA_DATA, 0);
+        let (ds, ds_n) = next(body, &mut off);
+        let (ff, _) = next(body, &mut off);
+        let (us, us_n) = next(body, &mut off);
+        let (_at, _) = next(body, &mut off);
+        if ff & crate::format::rar5::FILE_FLAG_TIME_UNIX != 0 {
+            off += 4;
+        }
+        if ff & crate::format::rar5::FILE_FLAG_CRC32 != 0 {
+            off += 4;
+        }
+        let (ci, ci_n) = next(body, &mut off);
+        assert_eq!((ds, ds_n), (11, 2), "data_size must occupy two bytes");
+        assert_eq!((us, us_n), (11, 2), "unpacked_size must occupy two bytes");
+        assert_eq!((ci, ci_n), (0, 2), "comp_info must occupy two bytes");
+        // ...and the padded header still parses back to the same values.
+        let parsed = FileHeader::from_raw(&raw, raw.data_offset).unwrap();
+        assert_eq!(parsed.packed_size, 11);
+        assert_eq!(parsed.unpacked_size, 11);
+        assert_eq!(parsed.crc32_val, Some(0x1234_5678));
+    }
+
+    #[test]
+    fn service_block_size_fields_use_a_two_byte_minimum() {
+        let framed = build_service_block("QO", &[1, 0x07], 5, 0);
+        let raw = crate::format::rar5::headers::parse_block_bytes(&framed).unwrap();
+        let body = &raw.header_data;
+        let mut off = 0usize;
+        let (_ty, _) = next(body, &mut off);
+        let (_flags, _) = next(body, &mut off);
+        let (_esz, _) = next(body, &mut off); // extra area size (present)
+        let (ds, ds_n) = next(body, &mut off);
+        let (_ff, _) = next(body, &mut off);
+        let (us, us_n) = next(body, &mut off);
+        let (_at, _) = next(body, &mut off);
+        let (ci, ci_n) = next(body, &mut off);
+        assert_eq!((ds, ds_n), (5, 2));
+        assert_eq!((us, us_n), (5, 2));
+        assert_eq!((ci, ci_n), (0, 2));
+    }
+
+    #[test]
+    fn stream_block_size_fields_use_the_reserved_width() {
+        let framed = build_stream_block(4, 4, 0, 0, 0, &[]);
+        let raw = crate::format::rar5::headers::parse_block_bytes(&framed).unwrap();
+        let body = &raw.header_data;
+        let mut off = 0usize;
+        let (_ty, _) = next(body, &mut off);
+        let (_flags, _) = next(body, &mut off);
+        let (_esz, _) = next(body, &mut off); // extra area size
+        let (ds, ds_n) = next(body, &mut off);
+        let (ff, _) = next(body, &mut off);
+        let (us, us_n) = next(body, &mut off);
+        let (_at, _) = next(body, &mut off);
+        if ff & crate::format::rar5::FILE_FLAG_CRC32 != 0 {
+            off += 4;
+        }
+        let (ci, ci_n) = next(body, &mut off);
+        assert_eq!((ds, ds_n), (4, 3), "a 4-byte stream reserves three bytes");
+        assert_eq!((us, us_n), (4, 3));
+        assert_eq!((ci, ci_n), (0, 2));
     }
 }

@@ -36,7 +36,7 @@ pub(crate) use serialize::build_stream_block;
 pub use serialize::hash_extra_record;
 pub(crate) use serialize::{
     build_comment_block, build_service_block, file_time_extra_record,
-    file_time_extra_record_windows, frame_block, redirect_extra_bytes, vint_fixed5,
+    file_time_extra_record_windows, frame_block, redirect_extra_bytes, vint_fixed,
 };
 
 /// A raw, unparsed RAR5 block as read from the archive stream.
