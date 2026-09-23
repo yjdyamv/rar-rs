@@ -513,13 +513,7 @@ fn prepare_file_entry(
     );
     let owner_extra = owner_extra_cfg(ctx.save_owner, &meta);
 
-    #[cfg(unix)]
-    let attrs = {
-        use std::os::unix::fs::MetadataExt;
-        meta.mode() as u64
-    };
-    #[cfg(not(unix))]
-    let attrs = 0o100644u64;
+    let attrs = crate::platform::file_attributes(&meta);
 
     let name = match arcname {
         Some(s) => s.to_string(),

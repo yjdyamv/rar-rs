@@ -20,10 +20,11 @@ use crate::engine::{ArchiveEntry, Mode, STREAM_COMPRESS_THRESHOLD};
 use crate::error::{RarError, RarResult};
 #[cfg(unix)]
 use crate::format::rar5::headers::build_owner_extra_record;
-use crate::format::rar5::headers::{file_time_extra_record, redirect_extra_bytes};
+use crate::format::rar5::headers::{
+    file_time_extra_record, file_time_extra_record_windows, redirect_extra_bytes,
+};
 use crate::format::rar5::{
-    COMP_METHOD_STORE, FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX,
-    level_to_method,
+    COMP_METHOD_STORE, FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, level_to_method,
 };
 use crate::format::shared::write_ops::archive_name_from_path;
 use crate::model::FileHeader;
@@ -90,7 +91,16 @@ pub(super) fn time_extra_cfg(
     };
     let mtime = save_mtime.then_some((mtime as u64, if precision_seconds { 0 } else { mtime_ns }));
     let present = mtime.is_some() || ctime.is_some() || atime.is_some();
-    present.then(|| file_time_extra_record(mtime, ctime, atime))
+    // Windows keeps its times in the FILETIME form unless the caller asked for
+    // whole seconds (`-ts1`), which WinRAR stores in the Unix form.
+    let windows_form = crate::platform::file_time_is_windows() && !precision_seconds;
+    present.then(|| {
+        if windows_form {
+            file_time_extra_record_windows(mtime, ctime, atime)
+        } else {
+            file_time_extra_record(mtime, ctime, atime)
+        }
+    })
 }
 
 /// Build the OWNER extra record (numeric uid/gid) per `-ow`; `None`
@@ -133,6 +143,23 @@ fn time_extra_for(
         mtime,
         mtime_ns,
     )
+}
+
+/// The FILE_TIME record for a member whose only time is `mtime` seconds (a
+/// raw-bytes / `-si` member, which has no filesystem metadata), in the
+/// running platform's form. `None` when the platform stores the time in the
+/// header itself (Unix) or when times are switched off — on Windows the
+/// header carries no mtime, so the record is the only carrier.
+fn mtime_record(cx: &dyn Engine, mtime: u32) -> Option<Vec<u8>> {
+    if !crate::platform::file_time_is_windows() || !cx.write_ctx().meta.mtime || mtime == 0 {
+        return None;
+    }
+    let time = Some((u64::from(mtime), 0u32));
+    Some(if cx.write_ctx().meta.time_precision_seconds {
+        file_time_extra_record(time, None, None)
+    } else {
+        file_time_extra_record_windows(time, None, None)
+    })
 }
 
 /// Build the OWNER extra record (numeric uid/gid) when `-ow` is on;
@@ -227,13 +254,7 @@ pub(crate) fn add_file_rar5(
     let time_extra = time_extra_for(cx, &meta, path, mtime, mtime_ns);
     let owner_extra = owner_extra_for(cx, &meta);
 
-    #[cfg(unix)]
-    let attrs = {
-        use std::os::unix::fs::MetadataExt;
-        meta.mode() as u64
-    };
-    #[cfg(not(unix))]
-    let attrs = 0o100644u64;
+    let attrs = crate::platform::file_attributes(&meta);
 
     let name = match arcname {
         Some(s) => s.to_string(),
@@ -571,8 +592,13 @@ pub(super) fn ensure_rar5_volume_space(cx: &mut dyn Engine, needed: u64) -> RarR
 
 /// Effective header time and file flags for a RAR5 member: `-tsm-`
 /// (`save_mtime == false`) omits the time field entirely, like WinRAR.
+///
+/// On Windows the header's 4-byte Unix mtime is never used — WinRAR clears
+/// `FILE_FLAG_TIME_UNIX` and keeps the times in the FILE_TIME record (as
+/// FILETIME, unless `-ts1` asks for whole seconds) — so the flag is cleared
+/// there too, leaving the record as the only time carrier.
 pub(crate) fn rar5_time_fields(cx: &dyn Engine, mtime: u32, flags: u64) -> (u32, u64) {
-    if cx.write_ctx().meta.mtime {
+    if cx.write_ctx().meta.mtime && !crate::platform::file_time_is_windows() {
         (mtime, flags)
     } else {
         (0, flags & !FILE_FLAG_TIME_UNIX)
@@ -618,30 +644,42 @@ pub(crate) fn add_redirect_with_time(
         ));
     }
     crate::format::shared::write_ops::reset_solid_chain(cx);
+    // Redirect type 3: a Windows junction (always a directory).
+    const REDIR_WINDOWS_JUNCTION: u64 = 0x03;
+    // A junction is a directory redirect; WinRAR flags it as one and drops the
+    // (meaningless) CRC32, while a file symlink / hardlink keeps the CRC32.
+    let is_directory = redir_type == REDIR_WINDOWS_JUNCTION;
     // `-tsm-` omits the link's time like a regular member.
-    let (mtime, mtime_ns) = if cx.write_ctx().meta.mtime {
-        (mtime, mtime_ns)
-    } else {
-        (0, None)
-    };
-    let mut extra_data = if mtime != 0 {
-        file_time_extra_record(Some((u64::from(mtime), mtime_ns.unwrap_or(0))), None, None)
+    let mut extra_data = if cx.write_ctx().meta.mtime && mtime != 0 {
+        let time = Some((u64::from(mtime), mtime_ns.unwrap_or(0)));
+        if crate::platform::file_time_is_windows() && !cx.write_ctx().meta.time_precision_seconds {
+            file_time_extra_record_windows(time, None, None)
+        } else {
+            file_time_extra_record(time, None, None)
+        }
     } else {
         Vec::new()
     };
     extra_data.extend_from_slice(&redirect_extra_bytes(redir_type, target));
-    let file_flags = if mtime != 0 {
-        FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32
-    } else {
-        FILE_FLAG_CRC32
-    };
+    let (mtime, file_flags) = rar5_time_fields(
+        cx,
+        mtime,
+        FILE_FLAG_TIME_UNIX
+            | if is_directory {
+                FILE_FLAG_DIRECTORY
+            } else {
+                FILE_FLAG_CRC32
+            },
+    );
     let fh = FileHeader {
         name: name.replace('\\', "/"),
         unpacked_size: 0,
         packed_size: 0,
-        crc32_val: Some(0),
+        attributes: crate::platform::redirect_attributes(redir_type),
+        crc32_val: (!is_directory).then_some(0),
         mtime,
-        host_os: OS_UNIX,
+        is_directory,
+        host_os: crate::platform::host_os(),
         file_flags,
         extra_data,
         ..Default::default()
@@ -669,16 +707,7 @@ pub(crate) fn write_rar5_dir_entry(
     meta: &fs::Metadata,
     mtime: u32,
 ) -> RarResult<()> {
-    #[cfg(unix)]
-    let attrs = {
-        use std::os::unix::fs::MetadataExt;
-        meta.mode() as u64
-    };
-    #[cfg(not(unix))]
-    let attrs = {
-        let _ = meta;
-        0o040755u64
-    };
+    let attrs = crate::platform::directory_attributes(meta);
 
     let (mtime, file_flags) =
         rar5_time_fields(cx, mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY);
@@ -686,7 +715,7 @@ pub(crate) fn write_rar5_dir_entry(
         name: format!("{name}/"),
         attributes: attrs,
         mtime,
-        host_os: OS_UNIX,
+        host_os: crate::platform::host_os(),
         file_flags,
         is_directory: true,
         ..Default::default()
@@ -729,6 +758,7 @@ pub(crate) fn add_bytes_rar5(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as u32;
+    let time_extra = mtime_record(cx, mtime);
 
     let method = level_to_method(compression_level);
     cx.report_progress(0, data.len() as u64);
@@ -737,7 +767,7 @@ pub(crate) fn add_bytes_rar5(
         let (header_crc, extra_data, stored_hash, encr) =
             super::emit::payload_extra_and_crc(cx.password(), plain_crc, plain_blake);
         let packed_data = super::emit::encrypt_payload_with(encr.as_ref(), data);
-        let plan = MemberPlan {
+        let mut plan = MemberPlan {
             name: name.clone(),
             unpacked_size: data.len() as u64,
             file_crc: header_crc,
@@ -745,11 +775,12 @@ pub(crate) fn add_bytes_rar5(
             dict_size_log: 0,
             dict_size_bytes: None,
             extra_data,
-            attrs: 0o100644,
+            attrs: crate::platform::memory_attributes(),
             mtime,
             solid: false,
             stored_hash,
         };
+        plan.push_extra(time_extra.as_deref(), None);
         super::emit::write_file_entry(cx, &plan, &packed_data)?;
     } else {
         let (dsl, dict_bytes) = dict_params_for(
@@ -804,7 +835,7 @@ pub(crate) fn add_bytes_rar5(
             let (header_crc, extra_data, stored_hash, encr) =
                 super::emit::payload_extra_and_crc(cx.password(), plain_crc, plain_blake);
             let packed_data = super::emit::encrypt_payload_with(encr.as_ref(), data);
-            let plan = MemberPlan {
+            let mut plan = MemberPlan {
                 name: name.clone(),
                 unpacked_size: data.len() as u64,
                 file_crc: header_crc,
@@ -812,17 +843,18 @@ pub(crate) fn add_bytes_rar5(
                 dict_size_log: 0,
                 dict_size_bytes: None,
                 extra_data,
-                attrs: 0o100644,
+                attrs: crate::platform::memory_attributes(),
                 mtime,
                 solid: false,
                 stored_hash,
             };
+            plan.push_extra(time_extra.as_deref(), None);
             super::emit::write_file_entry(cx, &plan, &packed_data)?;
         } else {
             let (header_crc, extra_data, stored_hash, encr) =
                 super::emit::payload_extra_and_crc(cx.password(), plain_crc, plain_blake);
             let packed_data = super::emit::encrypt_payload_with(encr.as_ref(), &packed);
-            let plan = MemberPlan {
+            let mut plan = MemberPlan {
                 name: name.clone(),
                 unpacked_size: data.len() as u64,
                 file_crc: header_crc,
@@ -830,11 +862,12 @@ pub(crate) fn add_bytes_rar5(
                 dict_size_log: dsl,
                 dict_size_bytes: dict_bytes,
                 extra_data,
-                attrs: 0o100644,
+                attrs: crate::platform::memory_attributes(),
                 mtime,
                 solid: chain_solid,
                 stored_hash,
             };
+            plan.push_extra(time_extra.as_deref(), None);
             super::emit::write_file_entry(cx, &plan, &packed_data)?;
         }
     }

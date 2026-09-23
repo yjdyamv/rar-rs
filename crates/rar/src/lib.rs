@@ -62,6 +62,9 @@ pub(crate) mod format;
 
 pub mod options;
 mod parallel;
+// The running platform's RAR5 metadata style (host marker, attribute bits,
+// time form). A leaf named by both `engine` and `format`, like `time`.
+pub(crate) mod platform;
 
 // Legacy civil-time primitives (DOS/local-wall-clock conversions). Public
 // because the CLI's `-ts` handling needs the same math; see `time.rs`.
