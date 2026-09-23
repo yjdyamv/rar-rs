@@ -108,6 +108,22 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **RAR5 元数据按宿主平台写**（2026-09-23）：此前一律写 Unix 风格（`host_os`=1 +
+  `st_mode` + 头内 mtime），Windows 上因此丢只读/隐藏/系统属性，WinRAR 还会把
+  NFD 成员名 NFC 归一化（根因由实验钉住：只把成员头 Host OS 字节 1→0
+  即消失）。现按平台 写：Windows 上 `host_os`=0 + DOS 属性（普通文件
+  `0x20`+R/H/S、目录 `0x10`、symlink `0x420`、junction `0x410`、hardlink/copy
+  `0x20`）+ FILE_TIME 记录的 Windows FILETIME （清
+  `FILE_FLAG_TIME_UNIX`、头里不写 4 字节 mtime；`-ts1` 仍用 unix 秒）；Unix 侧
+  不变（与官方 Linux 构建逐字节相同）。目录/联接点的 DIRECTORY
+  位也与官方一致，抽取侧
+  相应改为**先认重定向再当目录**（`is_directory_entry`），否则会把带 DIRECTORY
+  位的 联接点建成空目录（`-oh`/`-oi` 重定向同理）。`-si`/`add_bytes` 成员的
+  mtime 在 Windows 上改由 FILE_TIME 记录承载（此前会整条丢失）。契约由
+  `winrar_interop::scenarios::windows_metadata_round_trips_through_winrar`、
+  `format_assertions::nanosecond_mtime_roundtrip` 与
+  `cli_behavior::parity2::cli_extracts_a_junction_as_a_real_mount_point` 钉住。
+
 - **不安全链接目标不再中止整轮抽取**（2026-09-23 对拍官方 7.23）：目标逃出目的
   目录的 symlink/junction 此前让 `extract_all` 直接返回 `Security`
   错误并**中止整轮** （`extract_redirection` 的 `?`）——既违背 `-ola`
@@ -493,41 +509,26 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   差别在**写回范围**：只写回落在前缀里的那部分字节，记录自身字节永不改写，故能
   逐字节修复同样损坏。**这是 WinRAR 侧缺陷，不追平**；互操作测试因此用伪随机成员
   数据。
-- **RAR5 元数据：平台风格 + 两条 WinRAR 惯例（2026-09-22 字段级实测 7.23 的
-  Windows 与 Linux 两个官方构建）**。**平台风格**：WinRAR 按宿主平台写元数据 ——
-  Linux 上 `host_os`=1、Unix `st_mode` 属性（0o100644）、FILE_TIME 记录 flags
-  0x13， **与我们完全一致（记录字节逐字节相同）**；Windows 上则是
-  `host_os`=0、DOS 属性 （0x20，1 字节）、FILE_TIME 记 Windows FILETIME（flags
-  0x02）。我们**一律写 Unix 风格**，因此只在 Windows 上比官方多 2
-  字节/成员（属性宽度），Linux 无此差。
-  **两条与平台无关的惯例我们没复刻**：①官方**总是**写主头 locator 记录（无 QO/RR
-  时 flags=QO、offset=0 占位；其偏移是变长 vint，我们为可回填用定长 5 字节）⇒
-  我们固定部分小 **7 字节**；②官方把 `data_size`/`unpacked_size`/`comp_info`
-  填到**至少 2 字节**（11 写 `8b 00`，我们写 `0b`）⇒ 我们 −3
-  字节/成员。**另外**：官方只在「秒精度」时置 `FILE_FLAG_TIME_UNIX` 并省略
-  FILE_TIME 记录，有时间 ns 时反过来（清 TIME_UNIX、写 flags 0x13
-  的记录）；我们**两者都写** ⇒ +4 字节/成员（ns=0 时还多一条 11 字节的
-  记录）。**净差**（同输入、11 字节载荷、含 ns）：1 成员 我们 77 / 官方 Windows
-  81 / 官方 Linux 83，3 成员 183 / 181 / 187 ⇒ **每成员 +1（vs Linux）/ +3（vs
-  Windows）， 固定部分 −7**。**双向读写一致，interop 套件全绿**；对齐需按平台写
-  元数据并复刻两条惯例，会让同一输入在 Windows/Linux
-  产物不同，属独立决策，未做。 **但这不只影响字节外观（2026-09-23
-  语料实测）**：在 Windows 上读我们的 Unix-host 归档时，WinRAR
-  的**读取器**有两处可见差异 —— ①**成员名被 NFC 归一化**（NFD 的 `e`+U+0301
-  解出为 U+00E9；所有**有预组合形式**的序列都被组合：拉丁重音、希腊
-  `α`+U+0301、韩文 jamo `ᄀ`+`ᅡ`；**无预组合形式**的如 `q`+U+0301 保持不变，CJK /
-  emoji 也不受影响）； ②**只读 / 隐藏 / 系统属性丢失**（读取器对 Unix-mode
-  成员只 落 `ARCHIVE`/`DIRECTORY` 位，见
-  `format/shared/extract/dest.rs::apply_windows_attributes` ——
-  这与官方一致：官方 读它的 Windows-host 归档才保留 `RA`/`HA`/`SA`，读 Unix-host
-  归档同样丢）。 **因果已由实验钉住**：只把成员头的 Host OS 字节 1→0（并重算头
-  CRC）即可让 UnRAR 7.23 原样保留 NFD 名 ⇒ 根因是「**Windows 上写 Unix
-  元数据**」，与名字编码无关； 对拍只用官方 Windows 构建。对齐（Windows 上按 DOS
-  属性 + FILETIME + host 0 写）
-  就是官方自身的平台相关行为，属独立决策，未做。契约由
-  `winrar_interop::scenarios` （`varied_corpus_round_trips_through_both_tools` /
-  `decomposed_unicode_names_survive_our_round_trip` /
-  `unicode_archive_comment_matches_winrar`）与本节记录钉住。
+- **RAR5 元数据：两台平台的风格都已对齐（2026-09-23）**。WinRAR
+  按宿主平台写元数据 —— Linux 上 `host_os`=1、Unix `st_mode`、FILE_TIME 记录
+  flags 0x13；Windows 上 `host_os`=0、DOS 属性（1 字节）、FILE_TIME 记 Windows
+  FILETIME（flags 0x02，头里 不写 4 字节
+  mtime）。**我们也按平台写了**（见「已修」），故不再有属性丢失/名字归一化
+  的差异。**仍没复刻的两条与平台无关的惯例**：①官方**总是**写主头 locator
+  记录（无 QO/RR 时 flags=QO、offset=0 占位；其偏移是变长
+  vint，我们为可回填用定长 5 字节）⇒ 固定部分小 **7 字节**；②官方把
+  `data_size`/`unpacked_size`/`comp_info` 填到**至少 2 字节**（11 写
+  `8b 00`，我们写 `0b`）⇒ −3 字节/成员。**另外（仅 Unix）**：官方只在 秒精度时置
+  `FILE_FLAG_TIME_UNIX` 并省略记录，有 ns 时反过来；我们两者都写 ⇒ +4
+  字节/成员（Windows 侧现在与官方同为「清 TIME_UNIX +
+  记录」，一致）。**只影响字节 外观**：双向读写一致，interop
+  与语料对拍全绿。契约由
+  `winrar_interop::scenarios`（`windows_metadata_round_trips_through_winrar` /
+  `varied_corpus_round_trips_through_both_tools`）钉住。
+- **RAR4（`-ma4`）不保留 DOS 属性位**（2026-09-23 实测官方 6.23）：RAR4 的 host
+  固定 Windows(2)、属性字段是 DOS 位，但写侧只落 `0x20`/`0x10` ——
+  只读/隐藏/系统位不落盘 （只读文件解出仍是读写；官方写 `0x21`/`0x22`）。与 RAR5
+  无关的独立缺口，未做。
 - **Windows 联接点的 redirect 目标字符串**（2026-09-23 对拍官方 7.23）：`-ol` 存
   junction 时我们写其原始路径（`C:\dir\target`，反斜杠），WinRAR 写 NT 打印名、
   正斜杠、带 `/??/`
