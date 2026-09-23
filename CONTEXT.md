@@ -181,6 +181,14 @@
 - **BlockCursor（`headers/parse.rs`）** — 单文件 RAR5 块遍历器：固定
   key、逐块跳过 data area（越出文件即停）、END 返回一次后终止；append/rewrite
   plan/get_comment 三处循环共用同一文件长度约束（2026-09）。
+- **Platform metadata（`platform.rs`）** — 按宿主平台写 RAR5
+  成员元数据的唯一出处 （2026-09-23）：`host_os()`（Windows 0 / Unix
+  1）、属性（Windows 取 DOS 位、目录 `0x10`、symlink `0x420`、junction
+  `0x410`、hardlink/copy `0x20`；Unix 取 `st_mode`）、 时间载体
+  `file_time_is_windows()`（Windows 上清 `FILE_FLAG_TIME_UNIX`、时间放进
+  FILE_TIME 记录并写 Windows FILETIME；`-ts1` 仍用 unix 秒）。`engine` 与
+  `format`
+  都经它取头字段，因此同一输入在两平台各产出与官方对应平台一致的元数据。
 - **ExtractionReport（`format/shared/extract/members.rs`，经
   `archive/reader.rs`）** —
   抽取操作的唯一回报值（2026-09）：`written`（真正写出的文件与创建的链接，按归档序）+
