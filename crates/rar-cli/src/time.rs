@@ -121,9 +121,12 @@ pub struct TsSettings {
 }
 
 /// Parse repeatable `-ts[m,c,a][+,-,1]` specs with WinRAR semantics:
-/// a bare `-ts` (or no kinds) selects all three times; `-` omits a time,
-/// `1` selects 1-second precision, `+` high precision (default). All
-/// times of a member share one precision (`+` wins over `1`).
+/// a bare `-ts` (or no kinds) selects all three times; naming kinds *adds*
+/// them on top of the default (the modification time is on unless `-tsm-`
+/// removes it — `-tsc` keeps mtime and adds the creation time, like
+/// WinRAR); `-` omits the named times, `1` selects 1-second precision, `+`
+/// high precision (default). All times of a member share one precision
+/// (`+` wins over `1`).
 pub fn parse_ts_specs(specs: &[String]) -> Result<TsSettings, String> {
     let mut settings = TsSettings {
         save_mtime: true,
@@ -132,7 +135,7 @@ pub fn parse_ts_specs(specs: &[String]) -> Result<TsSettings, String> {
     if specs.is_empty() {
         return Ok(settings);
     }
-    let mut save = [false, false, false]; // m, c, a
+    let mut save = [true, false, false]; // m, c, a (mtime defaults on)
     let mut saw_plus = false;
     let mut saw_one = false;
     for spec in specs {
@@ -226,6 +229,41 @@ mod tests {
         assert!(parse_tk_date("abcd").is_err());
         assert!(parse_tk_date("2020-13-01").is_err());
         assert!(parse_tk_date("2020-01-01-25").is_err());
+    }
+
+    /// Naming a time *adds* it: `-tsc`/`-tsa` keep the modification time
+    /// (WinRAR shows both `Modified:` and `Created:`/`Accessed:`), only an
+    /// explicit `-` removes a time.
+    #[test]
+    fn ts_specs_add_times_without_dropping_mtime() {
+        // The specs are the value part after `-ts` (bare `-ts` is "").
+        let ts = |spec: &str| parse_ts_specs(&[spec.to_string()]).unwrap();
+        let base = parse_ts_specs(&[]).unwrap();
+        assert!(base.save_mtime && !base.save_ctime && !base.save_atime);
+
+        let c = ts("c");
+        assert!(c.save_mtime, "-tsc must keep the modification time");
+        assert!(c.save_ctime && !c.save_atime);
+
+        let a = ts("a");
+        assert!(a.save_mtime, "-tsa must keep the modification time");
+        assert!(a.save_atime && !a.save_ctime);
+
+        let all = ts(""); // bare -ts
+        assert!(all.save_mtime && all.save_ctime && all.save_atime);
+
+        let no_m = ts("m-");
+        assert!(!no_m.save_mtime, "-tsm- removes the modification time");
+
+        let no_c = ts("c-");
+        assert!(
+            no_c.save_mtime,
+            "-tsc- must not touch the modification time"
+        );
+        assert!(!no_c.save_ctime);
+
+        assert!(ts("1").precision_seconds);
+        assert!(!ts("c").precision_seconds);
     }
 
     #[test]
