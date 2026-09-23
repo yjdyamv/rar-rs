@@ -287,6 +287,16 @@ fn erase_rar4_archive(archive: &mut RarArchive, deleted: usize) -> RarResult<Edi
     }
     retire.sort();
     retire.dedup();
+    // A directory (or other non-file) at a victim path is a conflict:
+    // `commit_files` would park and retire it, then strand the parked entry
+    // because only files are dropped on success. The RAR5 erase path refuses
+    // the same shape.
+    if let Some(conflict) = retire.iter().find(|path| path.exists() && !path.is_file()) {
+        return Err(RarError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{}: refusing to erase a non-file entry", conflict.display()),
+        )));
+    }
     commit_files(&parent, &base, &[], &retire)?;
     archive.entries.clear();
     Ok(EditSummary {

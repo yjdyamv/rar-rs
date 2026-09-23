@@ -135,7 +135,7 @@ impl RarArchive {
     pub(super) fn rewrite_multivolume(
         &mut self,
         deleted: &[bool],
-        chain: Option<(usize, usize)>,
+        chains: &[(usize, usize)],
         rename_map: Option<&std::collections::HashMap<usize, String>>,
     ) -> RarResult<()> {
         // Read the archive comment before the stream is redirected to the
@@ -168,23 +168,73 @@ impl RarArchive {
         // original set).
         let tmp_base = format!(".{base}.rar5tmp-{}", temp_suffix());
         let tmp_base_path = parent.join(&tmp_base);
+        let saved_path = self.path.clone();
 
+        let result = self.write_staged_volume_set(
+            deleted,
+            chains,
+            rename_map,
+            &comment,
+            &orig_volumes,
+            volume_size,
+            &base,
+            &parent,
+            &tmp_base,
+            &tmp_base_path,
+            &saved_path,
+        );
+        if result.is_err() {
+            // A failed rewrite must leave the original set exactly as it was.
+            // `Drop` runs `RarArchive::close`, whose `commit_pending` would
+            // otherwise install the truncated staged first volume over the
+            // original and retire every other volume (the `pending` set stays
+            // armed until the whole rewrite succeeds). Disarm it, drop the
+            // staged write handle, restore the archive's file bookkeeping and
+            // remove every staged file before returning.
+            self.stream = None;
+            self.write_ctx_mut().output.pending = None;
+            self.write_ctx_mut().output.volume_size = None;
+            self.path = saved_path;
+            self.volume_paths = orig_volumes;
+            remove_staged_volume_set(&parent, &tmp_base);
+        }
+        result
+    }
+
+    /// The staged half of [`Self::rewrite_multivolume`]: arm the pending
+    /// volume set under `tmp_base`, write every volume and commit it. Split
+    /// out so the caller can restore the archive's in-memory state when any
+    /// step fails.
+    #[allow(clippy::too_many_arguments)] // mirrors the rewrite state machine
+    fn write_staged_volume_set(
+        &mut self,
+        deleted: &[bool],
+        chains: &[(usize, usize)],
+        rename_map: Option<&std::collections::HashMap<usize, String>>,
+        comment: &Option<Vec<u8>>,
+        orig_volumes: &[PathBuf],
+        volume_size: u64,
+        base: &str,
+        parent: &Path,
+        tmp_base: &str,
+        tmp_base_path: &Path,
+        saved_path: &Path,
+    ) -> RarResult<()> {
         // Write the new volume set. Swapping `self.path` makes the
         // streamed payload spill file land next to the temporary volumes;
         // volume naming itself comes from the staged `pending` set.
-        let saved_path = self.path.clone();
-        self.path = tmp_base_path;
+        self.path = tmp_base_path.to_path_buf();
         self.write_ctx_mut().output.volume_size = Some(volume_size);
-        self.volume_paths = vec![volume_path(&parent, &base, 1)];
+        self.volume_paths = vec![volume_path(parent, base, 1)];
         self.write_ctx_mut().output.current_volume = 1;
         self.write_ctx_mut().output.bytes_written = 0;
         self.write_ctx_mut().output.pending = Some(PendingCommit::Volumes {
-            parent: parent.clone(),
-            tmp_base: tmp_base.clone(),
-            final_base: base.clone(),
+            parent: parent.to_path_buf(),
+            tmp_base: tmp_base.to_string(),
+            final_base: base.to_string(),
         });
         self.stream = Some(Box::new(read_write_create(&volume_path(
-            &parent, &tmp_base, 1,
+            parent, tmp_base, 1,
         ))?));
         self.write_signature()?;
         // A header-encrypted set repeats the plaintext encryption header at
@@ -194,7 +244,7 @@ impl RarArchive {
         self.write_archive_header_vol(None)?;
         self.write_ctx_mut().output.bytes_written =
             self.stream.as_mut().unwrap().stream_position()?;
-        if let Some(comment) = &comment
+        if let Some(comment) = comment
             && !comment.is_empty()
         {
             let block = crate::format::rar5::headers::build_comment_block(comment);
@@ -215,10 +265,12 @@ impl RarArchive {
                 self.stream.as_mut().unwrap().stream_position()?;
         }
 
-        let mut readers = VolumeReaders::new(&orig_volumes);
+        let mut readers = VolumeReaders::new(orig_volumes);
         let mut chain_state: Option<super::solid::SolidChainState> = None;
         let mut in_chain = false;
         let mut chain_end = usize::MAX;
+        // Cursor into the sorted, disjoint affected-chain ranges.
+        let mut chain_cursor = 0usize;
         let total_bytes: u64 = self
             .entries
             .iter()
@@ -233,7 +285,7 @@ impl RarArchive {
                 self.report_progress(processed, total_bytes);
             }
             if !in_chain
-                && let Some((s, e)) = chain
+                && let Some(&(s, e)) = chains.get(chain_cursor)
                 && s == idx
             {
                 chain_state = Some(super::solid::SolidChainState::start(
@@ -245,6 +297,7 @@ impl RarArchive {
             let is_chain = in_chain && idx <= chain_end;
             if is_chain && idx == chain_end {
                 in_chain = false;
+                chain_cursor += 1;
             }
 
             if deleted[idx] {
@@ -327,7 +380,7 @@ impl RarArchive {
         self.write_end_block()?;
         self.stream = None;
         self.write_ctx_mut().output.volume_size = None;
-        self.path = saved_path;
+        self.path = saved_path.to_path_buf();
 
         // Move the new volumes (and regenerated `.rev` recovery volumes)
         // into place as one journaled commit. `commit_files` parks every
@@ -341,12 +394,12 @@ impl RarArchive {
             // additional volumes) can produce more volumes than the archive
             // had, and every one of them must be installed.
             let mut staged: Vec<(usize, PathBuf)> = Vec::new();
-            for entry in fs::read_dir(&parent)? {
+            for entry in fs::read_dir(parent)? {
                 let entry = entry?;
                 let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                     continue;
                 };
-                let Some(rest) = name.strip_prefix(&tmp_base) else {
+                let Some(rest) = name.strip_prefix(tmp_base) else {
                     continue;
                 };
                 let Some(rest) = rest.strip_prefix(".part") else {
@@ -380,7 +433,7 @@ impl RarArchive {
             let mut install: Vec<(PathBuf, PathBuf)> = Vec::new();
             let mut final_volumes: Vec<PathBuf> = Vec::new();
             for (n, tmp) in &staged {
-                let final_path = volume_path_padded(&parent, &base, *n, width);
+                let final_path = volume_path_padded(parent, base, *n, width);
                 install.push((tmp.clone(), final_path.clone()));
                 final_volumes.push(final_path);
             }
@@ -420,13 +473,13 @@ impl RarArchive {
 
             let keep: Vec<PathBuf> = install.iter().map(|(_, f)| f.clone()).collect();
             let retire = crate::fs::volume::stale_volume_paths(
-                &parent,
-                &base,
+                parent,
+                base,
                 false,
                 &keep,
                 &crate::recovery::rev3::rev_name_belongs_to_set,
             );
-            crate::fs::atomic::commit_files(&parent, &base, &install, &retire)?;
+            crate::fs::atomic::commit_files(parent, base, &install, &retire)?;
             self.volume_paths = final_volumes;
             // Canonical padding can differ from the original name (an
             // unpadded set that grew past nine volumes); reopen from the
@@ -448,8 +501,23 @@ impl RarArchive {
             // A `.rev` generation failure may leave staged rev siblings that
             // never made it into `staged_paths`; sweep them by their unique
             // staged base.
-            Self::remove_staged_recovery_files(&parent, &tmp_base);
+            Self::remove_staged_recovery_files(parent, tmp_base);
         }
         result
+    }
+}
+
+/// Remove every staged file of a multi-volume rewrite (the temporary volume
+/// base and its `.rev` siblings). Used when the rewrite fails before its own
+/// commit path runs, so no partial staged set is left next to the original.
+fn remove_staged_volume_set(parent: &Path, tmp_base: &str) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with(tmp_base) {
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }

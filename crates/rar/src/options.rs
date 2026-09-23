@@ -494,7 +494,9 @@ pub struct ExtractOptions {
     /// [`set_extraction_threads`](crate::set_extraction_threads) and then to
     /// automatic sizing; `Some(0)` selects automatic sizing without consulting
     /// the global setting. Scoped to the run, so concurrent extractions with
-    /// different counts do not configure each other.
+    /// different counts do not configure each other. Like the writer's, the
+    /// field is only consulted when the `parallel` feature is enabled;
+    /// without it extraction is sequential regardless.
     pub threads: Option<usize>,
     /// Propagate the archive file's Mark of the Web onto every extracted file
     /// (WinRAR's `-om`); `None` disables it. See [`MarkOfTheWeb`]. A no-op on

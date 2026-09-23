@@ -16,14 +16,14 @@ use crate::format::rar5::{
 
 impl RarArchive {
     /// Walk the archive and build the rewrite plan: verbatim copies for
-    /// every kept block, recompression ops for the affected solid chain,
+    /// every kept block, recompression ops for the affected solid chains,
     /// and the dropped QO/RR service records (the RR percentage is parsed
     /// so the record can be rebuilt).
     pub(super) fn plan_rewrite(
         &mut self,
         reader: &mut File,
         deleted: &[bool],
-        chain: Option<(usize, usize)>,
+        chains: &[(usize, usize)],
         force_rr: Option<u8>,
         rename_map: Option<&std::collections::HashMap<usize, String>>,
         comment: Option<&[u8]>,
@@ -47,7 +47,11 @@ impl RarArchive {
         let mut ops = Vec::new();
         let mut entry_idx = 0usize;
         let mut chain_active = false;
+        let mut chain_start = usize::MAX;
         let mut chain_end = usize::MAX;
+        // Cursor into the sorted, disjoint affected-chain ranges: advance it
+        // as each chain closes.
+        let mut chain_cursor = 0usize;
         let mut rr_percent = force_rr;
         // Service blocks flagged as dependent on the previous block (e.g.
         // NTFS streams/ACLs) belong to their file: drop them when that file
@@ -65,10 +69,11 @@ impl RarArchive {
                     let idx = entry_idx;
                     entry_idx += 1;
                     if !chain_active
-                        && let Some((s, e)) = chain
+                        && let Some(&(s, e)) = chains.get(chain_cursor)
                         && s == idx
                     {
                         chain_active = true;
+                        chain_start = s;
                         chain_end = e;
                     }
                     if chain_active && idx <= chain_end {
@@ -91,10 +96,12 @@ impl RarArchive {
                             ops.push(RewriteOp::Recompress {
                                 idx,
                                 is_deleted: deleted[idx],
+                                chain_head: idx == chain_start,
                             });
                         }
                         if idx == chain_end {
                             chain_active = false;
+                            chain_cursor += 1;
                         }
                         prev_file_deleted = deleted[idx];
                     } else if deleted[idx] {

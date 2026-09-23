@@ -510,7 +510,12 @@ fn map_rar15_error(hdr: &FileHeader, error: crate::codec::legacy::rar15::Error) 
 /// Map codec-level errors to user-facing errors: encrypted members with a
 /// password provided treat CRC/codec/crypto errors as
 /// `WrongPassword` (mirrors rars `map_encrypted_payload_error`).
-fn map_codec_error(hdr: &FileHeader, error: RarError) -> RarError {
+///
+/// Also the mapper for the member-level CRC check in `extract.rs`: a RAR4
+/// archive carries no password check value, so a wrong password and a
+/// corrupt stream are indistinguishable, and both must report
+/// `WrongPassword` (CLI exit 11) rather than a bare `Crc` (exit 3).
+pub(super) fn map_codec_error(hdr: &FileHeader, error: RarError) -> RarError {
     let encrypted = hdr.flags & super::FHD_PASSWORD as u64 != 0;
     if !encrypted {
         return error;

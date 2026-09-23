@@ -15,6 +15,7 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::detect::RAR13_SIGNATURE;
 use crate::engine::ArchiveEntry;
 use crate::error::{RarError, RarResult};
+use crate::format::shared::extract::{MAX_CATALOG_ENTRIES, check_entry_cap};
 use crate::model::{DataChunk, FileHeader};
 
 /// Main header flag: always set (the reference writer stamps `0x80`).
@@ -162,6 +163,9 @@ pub(crate) fn parse_volume(
                 extra_data: Vec::new(),
             }],
         });
+        // A crafted file of minimum-size headers could otherwise expand
+        // without bound (RAR4 and RAR5 apply the same ceiling).
+        check_entry_cap(entries.len(), MAX_CATALOG_ENTRIES)?;
     }
 
     Ok(Volume {

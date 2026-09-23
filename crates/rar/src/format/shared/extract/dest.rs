@@ -431,6 +431,24 @@ pub(crate) fn extract_redirection(
     const REDIR_WINDOWS_JUNCTION: u64 = 0x03;
     const REDIR_HARDLINK: u64 = 0x04;
     const REDIR_FILE_COPY: u64 = 0x05;
+    // Re-extraction replaces an existing destination (the caller already
+    // resolved the overwrite policy — a skip, freshen or auto-rename never
+    // reaches this call). Creating a link does not overwrite an existing
+    // entry the way the atomic replace used for regular members does, so
+    // drop it first. A directory in the way is refused rather than deleted.
+    match fs::symlink_metadata(dest_path) {
+        Ok(meta) if meta.is_dir() => {
+            return Err(RarError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "{}: refusing to replace a directory with a link member",
+                    dest_path.display()
+                ),
+            )));
+        }
+        Ok(_) => fs::remove_file(dest_path)?,
+        Err(_) => {}
+    }
     match redir.redir_type {
         REDIR_UNIX_SYMLINK | REDIR_WINDOWS_SYMLINK | REDIR_WINDOWS_JUNCTION => {
             if let Some(parent) = dest_path.parent() {
