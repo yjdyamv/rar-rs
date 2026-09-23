@@ -114,6 +114,52 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 - 测试共享状态 → `rarfiles.lst` 从二进制旁改为**二进制私有副本**（跨进程共享位置
   在并发下 31/60 失败）；`name_policy` 单测不再改进程 CWD（`collect` 加显式
   `base`）。
+- **跨多条固态链的删除**（2026-09-23）：`edit_plan`
+  原先只按**最低被删序号**取一条
+  链范围，链外的被删成员被静默跳过，其后的固态幸存者逐字拷贝却引用着已消失的窗口
+  （产出损坏、`apply` 仍报成功）。现收集**全部**受影响链（逐条
+  `chain_range_around`、去重排序），planner 以游标进入每条链，并给
+  `RewriteOp::Recompress` 加 `chain_head` ——
+  执行器在**每条**链头重建共享窗口（此前
+  只建一次，第二条链会引用第一条链的窗口）。契约由
+  `delete_across_two_solid_chains_recompresses_both` 钉住。
+- **多卷重写失败不再提交半成品**（2026-09-23）：`rewrite_multivolume` 先把
+  `pending` （暂存卷集）挂上、只在写循环全部成功后摘除；循环内任一 `?`
+  早退都会让 `Drop` 的 `close()` 把**截断的首卷**装上并 retire
+  其余卷（静默丢数据）。现把挂载段拆成
+  `write_staged_volume_set`，失败时在其外恢复 path/volume 状态、摘除 `pending`
+  并清除 暂存文件（此前 `ArchiveEditor` 缺 `ArchiveWriter` 那样的失败即
+  abort）。契约由 `multivolume_edit_recovers_state_after_an_abort` 钉住。
+- **`-or` / 交互 Rename 的编号不嵌套**（2026-09-23）：`next_free_name`
+  从**已被改名** 的候选上重取 stem/ext，两次冲突就写成
+  `a(1)(2).txt`（WinRAR/UnRAR 是 `a(2).txt`）。 现只从原文件名取一次。契约由
+  `auto_rename_numbers_without_nesting_the_suffix` 钉住。
+- **重定向成员可被覆盖**（2026-09-23）：symlink/hardlink/junction
+  此前直接创建、不删 既有目标，重复抽取在 `EEXIST`
+  上中止（普通成员走原子替换，行为不一致）。现先删既有
+  非目录目标，目录挡路则明确拒绝。契约由
+  `redirect_members_are_replaced_on_reextract` 钉住。
+- **`-or` 对询问的优先级**（2026-09-23）：`prompt_overwrite` 与 `auto_rename`
+  同设时，代码先走询问块再落到改名，与 `ExtractOptions::prompt_overwrite`
+  文档「`-or` 优先」不符（`Skip`
+  会连改名一起吞掉）。现同设时**不询问**、直接编号 改名。契约由
+  `auto_rename_takes_precedence_over_the_prompt` 钉住。
+- **RAR4 加密 STORE 成员的错口令**（2026-09-23）：成员级 CRC 校验不经过
+  `map_codec_error`，错误口令报 `Crc`（exit 3）而压缩成员报
+  `WrongPassword`（exit 11）。现加密成员的 CRC 失配统一映射为
+  `WrongPassword`（RAR4 无口令校验值，与损坏 不可区分）。契约由
+  `rar4_wrong_password_on_a_stored_member_is_wrong_password` 钉住。
+- **RAR5 打包读取的截断与缺卷**（2026-09-23）：`read_chunk` 用
+  `take(len).read_to_end`（短读静默）并按 `volume_paths[vol]`
+  直接索引。现校验读满 声明长度（否则报 `Format` 截断）并用 `get(vol)`
+  防御缺卷，与 RAR4 的 `read_exact` 口径一致。
+- **RAR4 清空归档的目录挡路**（2026-09-23）：`erase_rar4_archive` 缺 RAR5 同款
+  「victim 非文件」守卫，会把同名目录 park 成隐藏备份、删失败后遗留。现与 RAR5
+  一致 地拒绝。
+- **RAR13 目录无上限**（2026-09-23）：`rar13::parse_volume` 每条 21 字节头就
+  push 一个条目且不查上限（RAR4/RAR5 都走
+  `check_entry_cap`），手工构造的文件可无界膨胀。 现同样按 `MAX_CATALOG_ENTRIES`
+  设限。
 
 **工程**
 
@@ -269,6 +315,18 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `examples/` 只有 bench/probe，新用户没有普通用法的样板；README 现在指向它们。
   契约由 `extract_options_threads_drive_the_parallel_path`（≥4 成员、≥64 MiB
   解开量 走批量路径，`threads=Some(2)` 与 `Some(0)` 都逐字节校验）钉住。
+- **绑定（rar-napi）对齐 WinRAR + API
+  补全（2026-09-23）**：`ExtractArchiveOptions` 此前无逐次线程、无
+  freshen/update、无大小上限（且注释谎称有「绑定自己的线程池」——
+  实际只有全局默认）。现补 `threads`（逐次 `-mt`，与写侧 `threads` 命名对称）、
+  `freshen`/`update`（`-f`/`-u`）、`maxUnpackedBytes`/`maxTotalUnpackedBytes`（未设或
+  0 = 不限，磁盘抽取仍是流式）；`CreateArchiveOptions` 补
+  `recoverySectors`（legacy RAR4 的 `-rr<N>` 精确扇区数，RAR5
+  记录只按百分比定尺，故被拒）。契约由
+  `extractArchive honors freshen and update (-f/-u)`、
+  `extractArchive enforces the size limits and threads option` 与
+  `createArchive recoverySectors is the legacy RAR4 sector count` 三个 JS
+  用例钉住。
 - **库 API：抽取设置归位 + 文档闸门（2026-09-22）**：审计发现两处可改。①
   `ArchiveReader` 上的 `set_*` 里，**MOTW 本来就是逐次抽取的策略数据**（CLI
   也只是把它 放进请求再推给 reader），现已移入
