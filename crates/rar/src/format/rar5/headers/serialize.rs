@@ -36,8 +36,9 @@ impl ArchiveHeader {
         let mut body = Vec::new();
         body.extend(vint::encode(BLOCK_TYPE_ARCHIVE_HEADER));
 
-        // Block-level flags (not archive-level flags)
-        let mut block_flags = 0u64;
+        // Block-level flags (not archive-level flags). WinRAR marks the main
+        // header skippable-if-unknown (0x04) as well, for every archive shape.
+        let mut block_flags = BLOCK_FLAG_SKIP_IF_UNKNOWN;
         if !self.extra_data.is_empty() {
             block_flags |= BLOCK_FLAG_EXTRA_DATA;
         }
