@@ -15,27 +15,31 @@ pub(crate) const LOCATOR_FLAG_RECOVERY: u64 = 0x0002;
 
 /// Build the locator record body `[flags vint][qo offset vint][rr offset
 /// vint]`, returning the body bytes and the positions (relative to the body
-/// start) of the preallocated QO and RR offset fields. Only the offsets
-/// whose flags are set are present; absent fields are `None`.
+/// start) of the preallocated QO and RR offset fields.
+///
+/// WinRAR always writes the locator and always includes the QO offset field —
+/// with the QO flag set and the offset 0 when the archive has no quick-open
+/// record (its console `a` writes one only for larger archives) — while the
+/// RR field appears only when a recovery record exists. Readers treat a 0 QO
+/// offset as "no usable record" and fall back to a full scan, so the
+/// placeholder is inert.
 pub(crate) fn build_locator_body(
     quick_open: bool,
     recovery: bool,
 ) -> (Vec<u8>, Option<usize>, Option<usize>) {
-    let mut flags = 0u64;
-    if quick_open {
-        flags |= LOCATOR_FLAG_QUICK_OPEN;
-    }
+    let _ = quick_open;
+    let mut flags = LOCATOR_FLAG_QUICK_OPEN;
     if recovery {
         flags |= LOCATOR_FLAG_RECOVERY;
     }
     let mut body = Vec::new();
     body.extend(vint::encode(flags));
-    let qo = if quick_open {
+    // The QO field is always present; `quick_open` only says whether a real
+    // offset will be patched into it.
+    let qo = {
         let p = body.len();
         body.extend_from_slice(&vint_fixed5(0));
         Some(p)
-    } else {
-        None
     };
     let rr = if recovery {
         let p = body.len();
@@ -61,15 +65,18 @@ pub(crate) fn frame_locator_record(body: &[u8]) -> Vec<u8> {
 /// Build a complete main archive header and frame it for the wire.
 ///
 /// `extra` is the archive-header extra area (an existing archive's records,
-/// or empty for a fresh archive); when `quick_open` or `recovery` is set,
-/// the locator record is appended after those records. `volume_number`
-/// selects the volume-header shape through [`ArchiveHeader::to_bytes`]: the
-/// `MHD_VOLUME`/`VOLUME_NUM` flags and the volume-number field.
+/// or empty for a fresh archive); the locator record is always appended after
+/// those records, like WinRAR. `quick_open` says whether a real quick-open
+/// offset will be patched into the (always present) QO field; `recovery`
+/// controls the RR field. `volume_number` selects the volume-header shape
+/// through [`ArchiveHeader::to_bytes`]: the `MHD_VOLUME`/`VOLUME_NUM` flags
+/// and the volume-number field.
 ///
 /// Returns the framed header plus the header-relative offsets (including
 /// the CRC and the size vint) of the preallocated QO and RR offset fields;
-/// absent fields are `None`. The offsets feed [`patch_locator_fields`] at
-/// close time, so no caller has to sum field widths by hand.
+/// the RR field is `None` without a recovery record. The offsets feed
+/// [`patch_locator_fields`] at close time, so no caller has to sum field
+/// widths by hand.
 pub(crate) fn build_main_header(
     arch_flags: u64,
     extra: &[u8],
@@ -79,16 +86,11 @@ pub(crate) fn build_main_header(
 ) -> (Vec<u8>, Option<usize>, Option<usize>) {
     let (locator, qo_pos, rr_pos) = build_locator_body(quick_open, recovery);
     let mut all_extra = extra.to_vec();
-    let locator_body_start = if quick_open || recovery {
-        let record = frame_locator_record(&locator);
-        // The record is [record size vint][type vint][body]; the body is
-        // its tail, so it starts this far into the record.
-        let start = all_extra.len() + record.len() - locator.len();
-        all_extra.extend(record);
-        Some(start)
-    } else {
-        None
-    };
+    let record = frame_locator_record(&locator);
+    // The record is [record size vint][type vint][body]; the body is its
+    // tail, so it starts this far into the record.
+    let start = all_extra.len() + record.len() - locator.len();
+    all_extra.extend(record);
 
     let ah = ArchiveHeader {
         flags: arch_flags,
@@ -100,13 +102,8 @@ pub(crate) fn build_main_header(
     // before the end of the framed header.
     let extra_base = hdr.len() - ah.extra_data.len();
 
-    let (qo_field, rr_field) = match locator_body_start {
-        Some(start) => (
-            qo_pos.map(|p| extra_base + start + p),
-            rr_pos.map(|p| extra_base + start + p),
-        ),
-        None => (None, None),
-    };
+    let qo_field = qo_pos.map(|p| extra_base + start + p);
+    let rr_field = rr_pos.map(|p| extra_base + start + p);
     (hdr, qo_field, rr_field)
 }
 
@@ -162,7 +159,8 @@ pub(crate) fn patch_locator_fields(
 mod tests {
     use super::*;
     use crate::format::rar5::headers::{
-        ArchiveHeader, BlockMeta, main_header_locator_fields, parse_block_bytes,
+        ArchiveHeader, BlockMeta, locator_quick_open_offset, main_header_locator_fields,
+        parse_block_bytes, split_main_extra,
     };
 
     #[test]
@@ -265,11 +263,32 @@ mod tests {
             false,
             Some(2),
         );
-        assert_eq!((qo_field, rr_field), (None, None));
+        // The locator is always written, so its QO field exists (left at 0);
+        // the RR field only exists with a recovery record.
+        assert!(qo_field.is_some());
+        assert_eq!(rr_field, None);
 
         let raw = parse_block_bytes(&hdr).unwrap();
         let ah = ArchiveHeader::from_raw(&raw).unwrap();
         assert_eq!(ah.volume_number, Some(2));
         assert_ne!(ah.flags & crate::format::rar5::ARCHIVE_FLAG_VOLUME_NUM, 0);
+    }
+
+    /// The locator is written even for an archive with no quick-open and no
+    /// recovery record, like WinRAR: the QO flag is set and its offset stays 0
+    /// (the inert placeholder the reader treats as "no record").
+    #[test]
+    fn locator_is_always_present_with_a_zero_qo_placeholder() {
+        let (hdr, qo_field, rr_field) = build_main_header(0, &[], false, false, None);
+        assert!(qo_field.is_some());
+        assert!(rr_field.is_none());
+
+        let raw = parse_block_bytes(&hdr).unwrap();
+        let ah = ArchiveHeader::from_raw(&raw).unwrap();
+        let (had_qo, had_rr, rest) = split_main_extra(&ah.extra_data).unwrap();
+        assert!(!had_qo, "a 0 placeholder is not a quick-open record");
+        assert!(!had_rr);
+        assert!(rest.is_empty(), "only the locator was written");
+        assert_eq!(locator_quick_open_offset(&ah.extra_data), Some(0));
     }
 }
