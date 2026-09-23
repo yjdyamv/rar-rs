@@ -106,3 +106,40 @@ pub(crate) const fn redirect_attributes(redir_type: u64) -> u64 {
         0o100644
     }
 }
+
+/// DOS attribute bits for a RAR4 file member.
+///
+/// RAR4 has one DOS attribute field on every host, and our RAR4 writer fixes
+/// `host_os` to Windows, so WinRAR stores the file's real Windows attributes
+/// there — read-only (`0x1`), hidden (`0x2`), system (`0x4`), archive
+/// (`0x20`) — and nothing else: `FILE_ATTRIBUTE_NORMAL` is not stored, so a
+/// file without the archive bit comes back as `0`. Unix has no DOS
+/// attributes, so the archive bit WinRAR uses for a plain member is kept
+/// there (unchanged Unix output).
+pub(crate) fn rar4_file_attributes(meta: &std::fs::Metadata) -> u32 {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & STORED_DOS_ATTRIBUTES
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta;
+        0x20
+    }
+}
+
+/// DOS attribute bits for a RAR4 directory member (see
+/// [`rar4_file_attributes`]); a directory carries `0x10`.
+pub(crate) fn rar4_dir_attributes(meta: &std::fs::Metadata) -> u32 {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & STORED_DOS_ATTRIBUTES
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta;
+        0x10
+    }
+}

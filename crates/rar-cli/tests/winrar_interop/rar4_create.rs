@@ -10,7 +10,97 @@ use crate::support::{
     write_correlated_pcm,
 };
 
-/// The RAR4 write side can emit legacy RAR 1.5 (unp_ver 15) and RAR 2.x
+/// RAR4 carries one DOS attribute field on every host, and WinRAR 6.23 stores
+/// the file's real Windows attributes there (read-only/hidden/system plus
+/// archive). Ours must write the same byte — official UnRAR reports it, and
+/// both readers restore the bits on extraction.
+#[cfg(windows)]
+#[test]
+fn rar4_stores_and_restores_dos_attributes() {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
+        FILE_ATTRIBUTE_SYSTEM, SetFileAttributesW,
+    };
+
+    fn set_attrs(path: &std::path::Path, attrs: u32) {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), attrs) }, 0);
+    }
+    fn attrs(path: &std::path::Path) -> u32 {
+        const STORED: u32 = 0x1 | 0x2 | 0x4 | 0x20;
+        std::fs::metadata(path).unwrap().file_attributes() & STORED
+    }
+
+    let Some(unrar) = unrar_bin() else {
+        eprintln!("skipped: WinRAR not found");
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let cases = [
+        ("ro.txt", FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_ARCHIVE),
+        ("hidden.txt", FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE),
+        ("sys.txt", FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE),
+        ("plain.txt", FILE_ATTRIBUTE_ARCHIVE),
+    ];
+    for (name, a) in cases {
+        let p = src.join(name);
+        std::fs::write(&p, b"payload").unwrap();
+        set_attrs(&p, a);
+    }
+
+    let archive = dir.path().join("attrs4.rar");
+    let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
+        .args(["a", "-ma4", "-m0", "-idq"])
+        .arg(&archive)
+        .args(cases.map(|(n, _)| n))
+        .current_dir(&src));
+    assert!(ok, "create failed:\n{out}");
+
+    // Official UnRAR's technical listing renders the byte we stored.
+    let (_, listing) = run(Command::new(&unrar).args(["lt"]).arg(&archive));
+    for (name, a) in cases {
+        let cell = if a & 0x1 != 0 {
+            "..A...R"
+        } else if a & 0x2 != 0 {
+            "..A..H."
+        } else if a & 0x4 != 0 {
+            "..A.S.."
+        } else {
+            "..A...."
+        };
+        assert!(
+            listing.contains(&format!("Attributes: {cell}")),
+            "{name}: UnRAR should read {cell}:\n{listing}"
+        );
+    }
+
+    // Both readers restore the bits.
+    for (reader, tag) in [
+        (unrar.as_path(), "winrar"),
+        (std::path::Path::new(env!("CARGO_BIN_EXE_unrar")), "ours"),
+    ] {
+        let dest = dir.path().join(format!("out_{tag}"));
+        std::fs::create_dir_all(&dest).unwrap();
+        let mut cmd = Command::new(reader);
+        cmd.arg("x").arg("-idq").arg("-o+").arg("-y");
+        if tag == "ours" {
+            cmd.arg("--dest").arg(&dest).arg(&archive);
+        } else {
+            cmd.arg(&archive)
+                .arg(format!("{}{}", dest.display(), std::path::MAIN_SEPARATOR));
+        }
+        let (ok, out) = run(&mut cmd);
+        assert!(ok, "{tag} extract failed:\n{out}");
+        for (name, a) in cases {
+            assert_eq!(attrs(&dest.join(name)), a, "{tag}: {name} attributes");
+        }
+    }
+}
+
 /// (unp_ver 20) members via `ArchiveVersion::V15`/`V20`. Real WinRAR
 /// UnRAR still carries the old unpack tables (versions 15..36), so it must
 /// test and extract such members byte-for-byte — an external

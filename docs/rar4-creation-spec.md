@@ -102,7 +102,8 @@ ArchiveWriter::close()
 24    1    unp_ver (29 default; 15/20 for -ma15/-ma2)
 25    1    method (0x30=STORE, 0x31-0x35=m1-m5)
 26    2    name_size
-28    4    file_attr (0x20 file / 0x10 directory)
+28    4    file_attr (the file's DOS attributes: 0x20 archive, plus 0x1
+              read-only / 0x2 hidden / 0x4 system; 0x10 for a directory)
 32    N    filename (UTF-16LE if FHD_UNICODE)
 32+N  8    salt (if FHD_PASSWORD; v29 only — v15/v20 are saltless)
 40+N  ?    exttime (if FHD_EXTTIME)

@@ -24,6 +24,7 @@ use crate::version::LegacyCodec;
 /// input and are handled by the buffered path in [`Self::add_file_rar4`].
 /// Large members use the LZ engine only (the PPMd trial and the
 /// automatic VM filters need whole-member buffers).
+#[allow(clippy::too_many_arguments)] // one member's full descriptor
 pub(super) fn add_rar4_file_streaming(
     cx: &mut dyn Engine,
     path: &Path,
@@ -32,6 +33,7 @@ pub(super) fn add_rar4_file_streaming(
     mtime: u32,
     mtime_ns: u32,
     level: u8,
+    attr: u32,
 ) -> RarResult<()> {
     cx.check_cancel()?;
     crate::format::rar4::create::ensure_member_size(file_size)?;
@@ -286,7 +288,7 @@ pub(super) fn add_rar4_file_streaming(
                 salt,
                 ext_time.as_deref(),
                 solid_continuation,
-                0x20,
+                attr,
                 None,
                 false,
                 false,
@@ -324,7 +326,7 @@ pub(super) fn add_rar4_file_streaming(
                     salt,
                     ext_time: ext_time.as_deref(),
                     solid_continuation,
-                    attr: 0x20,
+                    attr,
                     comment: None,
                 };
                 emit_rar4_split(
@@ -356,6 +358,7 @@ pub(super) fn add_rar4_file_streaming(
         ext_time,
         None,
         false,
+        attr,
         0,
         chunks,
     );
