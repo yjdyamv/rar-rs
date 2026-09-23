@@ -56,6 +56,10 @@ impl CreateArchiveOptions {
       checked_optional_js_integer(self.recovery_percent, "recoveryPercent", 0, 100)?
         .filter(|&value| value != 0)
         .map(|value| value as u8);
+    let recovery_sectors =
+      checked_optional_js_integer(self.recovery_sectors, "recoverySectors", 0, u32::MAX as u64)?
+        .filter(|&value| value != 0)
+        .map(|value| value as u32);
     let recovery_volume_count = checked_optional_js_integer(
       self.recovery_volume_count,
       "recoveryVolumeCount",
@@ -166,6 +170,11 @@ impl CreateArchiveOptions {
     } else {
       opts
     };
+    let opts = if let Some(sectors) = recovery_sectors {
+      opts.recovery_sectors(sectors)
+    } else {
+      opts
+    };
     let opts = if let Some(count) = recovery_volume_count {
       opts.recovery_volume_count(count)
     } else {
@@ -238,10 +247,27 @@ impl ExtractArchiveOptions {
     Ok(rar_rs::ExtractOptions {
       safe_paths: true,
       flat_paths: self.flat.unwrap_or(false),
-      max_unpacked_bytes: None,
-      max_total_unpacked_bytes: None,
-      // Workers come from the binding's own thread pool / the global default.
-      threads: None,
+      // Unset or 0 means unbounded: extraction to disk is streaming, so the
+      // limits are opt-in hardening (like the CLI's `--max-unpacked`).
+      max_unpacked_bytes: checked_optional_js_integer(
+        self.max_unpacked_bytes,
+        "maxUnpackedBytes",
+        0,
+        JS_MAX_SAFE_INTEGER as u64,
+      )?
+      .filter(|&value| value != 0),
+      max_total_unpacked_bytes: checked_optional_js_integer(
+        self.max_total_unpacked_bytes,
+        "maxTotalUnpackedBytes",
+        0,
+        JS_MAX_SAFE_INTEGER as u64,
+      )?
+      .filter(|&value| value != 0),
+      // Per-run worker count (`-mt<N>`), scoped to this extraction like
+      // `WriterOptions::threads` is scoped to one archive; unset falls back
+      // to the process-global default.
+      threads: checked_optional_js_integer(self.threads, "threads", 0, 64)?
+        .map(|value| value as usize),
       // Mark of the Web is not exposed through the JS API.
       mark_web: None,
       max_dict_size,
@@ -250,8 +276,8 @@ impl ExtractArchiveOptions {
       auto_rename: self.auto_rename.unwrap_or(false),
       // The binding is non-interactive: never prompt for overwrites.
       prompt_overwrite: false,
-      freshen: false,
-      update: false,
+      freshen: self.freshen.unwrap_or(false),
+      update: self.update.unwrap_or(false),
       keep_broken: self.keep_broken.unwrap_or(false),
       set_creation_time: self.set_creation_time.unwrap_or(false),
       set_access_time: self.set_access_time.unwrap_or(false),
