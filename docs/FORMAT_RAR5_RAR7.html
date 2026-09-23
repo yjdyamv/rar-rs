@@ -134,7 +134,7 @@
               <div class="flex justify-between"><span>…</span><span class="text-slate-500">最多 10 字节</span></div>
             </div>
             <div class="mt-3 rounded-lg border border-red-200 bg-red-50 p-3">
-              <p class="text-xs text-red-700"><strong class="mono">⚠ 非规范定宽 vint</strong>：WinRAR 7.x 写头部大小等字段用<strong>非最简</strong>定宽 vint，短值也可能占 9–10 字节。块头 CRC32 必须对<strong>磁盘原始 vint 字节 + body</strong> 算，而非重编码后的规范 vint；locator 偏移用 <span class="mono">vint_fixed5</span> 预分配、close 时回填。</p>
+              <p class="text-xs text-red-700"><strong class="mono">⚠ 非规范定宽 vint</strong>：WinRAR 7.x 写头部大小等字段用<strong>非最简</strong>定宽 vint，短值也可能占 9–10 字节。块头 CRC32 必须对<strong>磁盘原始 vint 字节 + body</strong> 算，而非重编码后的规范 vint；locator 偏移用 <span class="mono">vint_fixed</span> 预分配、close 时回填。</p>
             </div>
           </div>
         </div>
@@ -253,7 +253,7 @@
               </div>
             </div>
             <div class="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
-              <p class="text-xs text-emerald-700">🔧 <strong>rar-rs 做法</strong>：locator 的 QO/RR 偏移字段用 <span class="mono">vint_fixed5</span> 预分配成固定 5 字节，写文件时在对应绝对位置<strong>原地回填</strong>——偏移在写文件头时尚未知。读端用 <span class="mono">main_header_locator_fields</span> 定位这两个 5 字节字段。</p>
+              <p class="text-xs text-emerald-700">🔧 <strong>rar-rs 做法</strong>：locator 的 QO/RR 偏移字段用 <span class="mono">vint_fixed</span> 预分配（宽度默认 5 字节，调用方给出预计大小时按官方分档 3/4/5/6），写文件时在对应绝对位置<strong>原地回填</strong>——偏移在写文件头时尚未知。读端用 <span class="mono">main_header_locator_fields</span> 定位这两个字段。</p>
             </div>
           </div>
 
