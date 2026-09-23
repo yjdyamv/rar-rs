@@ -420,17 +420,58 @@ fn set_reparse_point(path: &Path, buffer: &[u8]) -> std::io::Result<()> {
 
 /// Materialize a RAR5 file redirection (symlink, hardlink or file
 /// copy) at `dest_path`.
+///
+/// Returns `Ok(None)` when the link's target is refused by the safe-path
+/// policy (a target that escapes the extraction root). The caller skips the
+/// member and keeps going, like WinRAR's "Skipping the potentially unsafe
+/// ... link"; only the link is refused, never the whole run. The check runs
+/// before the existing destination is touched, so a refused link leaves an
+/// earlier file in place.
 pub(crate) fn extract_redirection(
     cx: &dyn Engine,
     dest_dir: &Path,
     dest_path: &Path,
     redir: &RedirectSpec,
-) -> RarResult<PathBuf> {
+) -> RarResult<Option<PathBuf>> {
     const REDIR_UNIX_SYMLINK: u64 = 0x01;
     const REDIR_WINDOWS_SYMLINK: u64 = 0x02;
     const REDIR_WINDOWS_JUNCTION: u64 = 0x03;
     const REDIR_HARDLINK: u64 = 0x04;
     const REDIR_FILE_COPY: u64 = 0x05;
+    // A link body is an attacker-controlled string, so it goes through the
+    // safe-path policy just like member names do: a link whose target
+    // escapes the destination would let a later member (or any other
+    // consumer of the tree) write through it. `safe_paths = false` (or
+    // `-ola`) opts out, which is the documented "trusted archive" escape
+    // hatch. The policy is applied *before* the destination is touched, so
+    // refusing a link cannot delete the file that was already there.
+    // Hardlink / file-copy targets name archive members (already sanitized
+    // by `safe_dest_path` below), so only the symlink types are checked here.
+    #[cfg(any(unix, windows))]
+    let is_symlink_target = matches!(
+        redir.redir_type,
+        REDIR_UNIX_SYMLINK | REDIR_WINDOWS_SYMLINK | REDIR_WINDOWS_JUNCTION
+    );
+    #[cfg(windows)]
+    let resolved_target = if is_symlink_target {
+        match resolved_link_target(cx, dest_dir, dest_path, &redir.target) {
+            Ok(resolved) => resolved,
+            Err(RarError::Security(_)) => return Ok(None),
+            Err(other) => return Err(other),
+        }
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    {
+        if is_symlink_target {
+            match check_link_target(cx, dest_dir, dest_path, &redir.target) {
+                Ok(()) => {}
+                Err(RarError::Security(_)) => return Ok(None),
+                Err(other) => return Err(other),
+            }
+        }
+    }
     // Re-extraction replaces an existing destination (the caller already
     // resolved the overwrite policy — a skip, freshen or auto-rename never
     // reaches this call). Creating a link does not overwrite an existing
@@ -454,24 +495,16 @@ pub(crate) fn extract_redirection(
             if let Some(parent) = dest_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            // The link body is an attacker-controlled string, so it goes
-            // through the safe-path policy just like member names do:
-            // a link whose target escapes the destination would let a
-            // later member (or any other consumer of the tree) write
-            // through it. `safe_paths = false` opts out, which is the
-            // documented "trusted archive" escape hatch.
             #[cfg(unix)]
             {
-                check_link_target(cx, dest_dir, dest_path, &redir.target)?;
                 std::os::unix::fs::symlink(&redir.target, dest_path)?;
             }
             #[cfg(windows)]
             {
                 // Windows must know whether the link points at a
                 // directory before it is created; a junction always does.
-                let resolved = resolved_link_target(cx, dest_dir, dest_path, &redir.target)?;
                 let is_dir = redir.redir_type == REDIR_WINDOWS_JUNCTION
-                    || resolved.as_deref().is_some_and(Path::is_dir);
+                    || resolved_target.as_deref().is_some_and(Path::is_dir);
                 if redir.redir_type == REDIR_WINDOWS_JUNCTION {
                     // Recreate a stored junction as a real NTFS mount
                     // point, like WinRAR/UnRAR: it needs no
@@ -516,7 +549,7 @@ pub(crate) fn extract_redirection(
             fs::write(dest_path, [])?;
         }
     }
-    Ok(dest_path.to_path_buf())
+    Ok(Some(dest_path.to_path_buf()))
 }
 
 /// Reject a link target that escapes the extraction root (safe-path

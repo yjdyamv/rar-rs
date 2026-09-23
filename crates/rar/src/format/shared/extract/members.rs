@@ -110,17 +110,21 @@ where
     }
 }
 
-/// What one extraction operation wrote and what the skip-existing policy left
-/// untouched, each in archive order.
+/// What one extraction operation wrote and which members it left alone, each
+/// in archive order.
 ///
 /// Directory entries are neither: they carry no file data, so their creation
 /// is silent. Members skipped by `-ol-` (`skip_links`) are not recorded
-/// either. The report is the writer's own account — it cannot disagree with
-/// what landed on disk, unlike a caller-side prediction.
+/// either. `skipped` covers the members the skip-existing policy left
+/// untouched (`-o-`); a link refused because its target escapes the extraction
+/// root (WinRAR's "Skipping the potentially unsafe ... link") is recorded
+/// separately in `refused`. The report is the writer's own account — it cannot
+/// disagree with what landed on disk, unlike a caller-side prediction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExtractionReport {
     written: Vec<PathBuf>,
     skipped: Vec<PathBuf>,
+    refused: Vec<PathBuf>,
 }
 
 impl ExtractionReport {
@@ -146,12 +150,29 @@ impl ExtractionReport {
         self.skipped.len()
     }
 
+    /// Destination paths of the links refused because their target escapes
+    /// the extraction root, in archive order. Kept apart from [`Self::skipped`]
+    /// so a caller can treat a refused link as a warning (WinRAR exits 1)
+    /// rather than as an ordinary skip.
+    pub fn refused(&self) -> &[PathBuf] {
+        &self.refused
+    }
+
+    /// Number of links refused for an unsafe target.
+    pub fn refused_count(&self) -> usize {
+        self.refused.len()
+    }
+
     pub(crate) fn record_written(&mut self, path: PathBuf) {
         self.written.push(path);
     }
 
     pub(crate) fn record_skipped(&mut self, path: PathBuf) {
         self.skipped.push(path);
+    }
+
+    pub(crate) fn record_refused(&mut self, path: PathBuf) {
+        self.refused.push(path);
     }
 }
 
@@ -417,10 +438,15 @@ fn extract_all_parallel(
         }
         if let Some(redir) = crate::format::shared::entry_ext::redirect_of(&entry) {
             if !cx.read_ctx().extract_options.skip_links {
-                crate::format::shared::extract::dest::extract_redirection(
+                match crate::format::shared::extract::dest::extract_redirection(
                     cx, dest, &dest_path, &redir,
-                )?;
-                report.record_written(dest_path);
+                )? {
+                    Some(path) => report.record_written(path),
+                    // A link whose target escapes the destination is
+                    // refused on its own (WinRAR "Skipping the potentially
+                    // unsafe ... link") and the run continues.
+                    None => report.record_refused(dest_path),
+                }
             }
             continue;
         }
@@ -692,11 +718,19 @@ fn extract_entry(
         if cx.read_ctx().extract_options.skip_links {
             return Ok(dest_path);
         }
-        let path = crate::format::shared::extract::dest::extract_redirection(
+        match crate::format::shared::extract::dest::extract_redirection(
             cx, dest_dir, &dest_path, &redir,
-        )?;
-        report.record_written(path.clone());
-        return Ok(path);
+        )? {
+            Some(path) => {
+                report.record_written(path.clone());
+                return Ok(path);
+            }
+            // Refused link target: skip just this member, like WinRAR.
+            None => {
+                report.record_refused(dest_path.clone());
+                return Ok(dest_path);
+            }
+        }
     }
 
     if let Some(parent) = dest_path.parent() {
