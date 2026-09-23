@@ -1264,15 +1264,20 @@ pub(crate) fn split_main_extra(extra: &[u8]) -> RarResult<(bool, bool, Vec<u8>)>
                 .map_err(|e| RarError::Format(format!("locator flags: {e}")))?;
             p += ln;
             if loc_flags & LOCATOR_FLAG_QUICK_OPEN != 0 {
-                had_qo = true;
-                let (_, qn) = vint::decode_from_slice(extra, p)
+                let (qo, qn) = vint::decode_from_slice(extra, p)
                     .map_err(|e| RarError::Format(format!("quick-open offset: {e}")))?;
+                // A 0 offset means "no quick-open record". WinRAR always sets
+                // the flag but leaves the field 0 when it wrote no record (its
+                // console `a` writes one only for larger archives), and the
+                // quick-open fast path already treats 0 as unusable — so a
+                // rewrite must not invent a record from the placeholder.
+                had_qo = qo != 0;
                 p += qn;
             }
             if loc_flags & LOCATOR_FLAG_RECOVERY != 0 {
-                had_rr = true;
-                let (_, rn) = vint::decode_from_slice(extra, p)
+                let (rr, rn) = vint::decode_from_slice(extra, p)
                     .map_err(|e| RarError::Format(format!("recovery offset: {e}")))?;
+                had_rr = rr != 0;
                 p += rn;
             }
             off = p;
