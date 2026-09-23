@@ -17,6 +17,7 @@ mod rar13;
 mod rar4_create;
 mod rar4_edit;
 mod recovery;
+mod scenarios;
 mod solid;
 mod streaming;
 mod streams;
