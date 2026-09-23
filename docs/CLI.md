@@ -144,9 +144,12 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
 
 - `-ol` / `-ol-` / `-ola` / `-oh` — store symlinks as redirects / skip links
   when archiving and extracting / extract links with dangerous targets as-is
-  (`-ola` disables the link safety checks). With `-ol` a directory symlink or
-  junction is stored as a redirect instead of walking its target — Windows
-  writes a Windows symlink (2) or junction (3) like WinRAR. Hard links:
+  (`-ola` disables the link safety checks). A link whose target escapes the
+  destination is refused **on its own**: the rest of the archive still extracts
+  and the run prints `Skipping the potentially unsafe <name> link` and exits
+  **1**, like WinRAR. Ordinary `-o-` skips still exit 0. With `-ol` a directory
+  symlink or junction is stored as a redirect instead of walking its target —
+  Windows writes a Windows symlink (2) or junction (3) like WinRAR. Hard links:
   hard-link groups store the first path and redirect the rest, and every
   redirect keeps the link's modification time (Windows and Unix, RAR5 only).
   Extraction recreates a junction as a real NTFS mount point.
@@ -166,8 +169,10 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
 - `-ta` / `-tb` / `-tn` / `-to` — time filters
 - `-tl` / `-tk[<date>]` — set the archive time to newest / keep it, or set it to
   the given local date
-- `-ts[mca][±,1]` — three timestamps; `-ts-` omits the time field for RAR5 and
-  is ignored for RAR 1.3–4.x, whose fixed headers always carry DOS local time
+- `-ts[mca][±,1]` — three timestamps; naming kinds **adds** them to the
+  defaults, so `-tsc`/`-tsa` keep the modification time and only `-tsm-` removes
+  it, like WinRAR; `-ts-` omits the time field for RAR5 and is ignored for RAR
+  1.3–4.x, whose fixed headers always carry DOS local time
 - `-tsp` — preserve source access time
 
 **Misc**
