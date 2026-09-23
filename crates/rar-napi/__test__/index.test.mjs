@@ -13,6 +13,7 @@ import {
   writeSync,
   closeSync,
   existsSync,
+  utimesSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1433,6 +1434,153 @@ test('extractArchive honors overwrite policies (skipExisting, autoRename)', asyn
     assert.equal(readFileSync(join(d3, 'a.txt'), 'utf8'), 'original')
     assert.equal(existsSync(join(d3, 'a(1).txt')), true, 'colliding member renamed')
     assert.equal(readFileSync(join(d3, 'a(1).txt'), 'utf8'), 'new conent ')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('extractArchive honors freshen and update (-f/-u)', async () => {
+  const dir = tempDir()
+  try {
+    const out = join(dir, 'fu.rar')
+    await createArchive({
+      outPath: out,
+      entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('archived') }],
+    })
+    const { extractArchive } = await import('../index.js')
+    const old = new Date('2001-01-01T00:00:00Z')
+    const future = new Date('2035-01-01T00:00:00Z')
+
+    // Existing destination newer than the archived member: both skip.
+    for (const [mode, tag] of [
+      ['freshen', 'f'],
+      ['update', 'u'],
+    ]) {
+      const dest = join(dir, `newer-${tag}`)
+      mkdirSync(dest)
+      writeFileSync(join(dest, 'a.txt'), 'newer dest')
+      utimesSync(join(dest, 'a.txt'), future, future)
+      await extractArchive(out, { destPath: dest, [mode]: true })
+      assert.equal(readFileSync(join(dest, 'a.txt'), 'utf8'), 'newer dest')
+    }
+
+    // Existing destination older than the archived member: both replace it.
+    for (const mode of ['freshen', 'update']) {
+      const dest = join(dir, `older-${mode}`)
+      mkdirSync(dest)
+      writeFileSync(join(dest, 'a.txt'), 'stale dest')
+      utimesSync(join(dest, 'a.txt'), old, old)
+      await extractArchive(out, { destPath: dest, [mode]: true })
+      assert.equal(readFileSync(join(dest, 'a.txt'), 'utf8'), 'archived')
+    }
+
+    // Missing destination: freshen skips it, update creates it.
+    const freshenDest = join(dir, 'missing-f')
+    await extractArchive(out, { destPath: freshenDest, freshen: true })
+    assert.equal(
+      existsSync(join(freshenDest, 'a.txt')),
+      false,
+      'freshen must not create a missing destination',
+    )
+    const updateDest = join(dir, 'missing-u')
+    await extractArchive(out, { destPath: updateDest, update: true })
+    assert.equal(readFileSync(join(updateDest, 'a.txt'), 'utf8'), 'archived')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('extractArchive enforces the size limits and threads option', async () => {
+  const dir = tempDir()
+  try {
+    const out = join(dir, 'lim.rar')
+    const payload = Buffer.alloc(10_000, 7)
+    await createArchive({
+      outPath: out,
+      entries: [{ kind: 'bytes', name: 'big.bin', data: payload }],
+    })
+    const { extractArchive } = await import('../index.js')
+
+    await assert.rejects(
+      extractArchive(out, { destPath: join(dir, 'per-member'), maxUnpackedBytes: 100 }),
+      (error) => error.code === 'InvalidArg',
+    )
+    await assert.rejects(
+      extractArchive(out, {
+        destPath: join(dir, 'total'),
+        maxTotalUnpackedBytes: 100,
+      }),
+      (error) => error.code === 'InvalidArg',
+    )
+
+    // Unset or 0 means unbounded, and a per-run thread count is accepted.
+    await extractArchive(out, { destPath: join(dir, 'unbounded'), maxUnpackedBytes: 0 })
+    assert.equal(readFileSync(join(dir, 'unbounded', 'big.bin')).length, payload.length)
+    await extractArchive(out, { destPath: join(dir, 'threads'), threads: 2 })
+    assert.equal(readFileSync(join(dir, 'threads', 'big.bin')).length, payload.length)
+    await assert.rejects(
+      extractArchive(out, { destPath: join(dir, 'bad-threads'), threads: 65 }),
+      (error) => error.code === 'InvalidArg',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('createArchive recoverySectors is the legacy RAR4 sector count', async () => {
+  const dir = tempDir()
+  try {
+    const { readMember } = await import('../index.js')
+    const payload = Buffer.alloc(60_000, 0x41)
+    const plain = join(dir, 'plain.rar')
+    const withRr = join(dir, 'with-rr.rar')
+    await createArchive({
+      outPath: plain,
+      format: 'rar4',
+      level: 0,
+      entries: [{ kind: 'bytes', name: 'a.bin', data: payload }],
+    })
+    await createArchive({
+      outPath: withRr,
+      format: 'rar4',
+      level: 0,
+      recoverySectors: 10,
+      entries: [{ kind: 'bytes', name: 'a.bin', data: payload }],
+    })
+    assert.ok(
+      readFileSync(withRr).length > readFileSync(plain).length,
+      'an exact parity-sector record must add bytes to the archive',
+    )
+    assert.deepEqual(await readMember(withRr, 'a.bin'), payload)
+
+    // Mutually exclusive with a percentage, and a RAR5 record is
+    // percent-only (an exact count is refused rather than dropped).
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'conflict.rar'),
+        format: 'rar4',
+        recoverySectors: 10,
+        recoveryPercent: 5,
+        entries: [{ kind: 'bytes', name: 'a.bin', data: payload }],
+      }),
+      (error) => error.code === 'InvalidArg',
+    )
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'rar5.rar'),
+        recoverySectors: 10,
+        entries: [{ kind: 'bytes', name: 'a.bin', data: payload }],
+      }),
+      (error) => error.code === 'InvalidArg',
+    )
+    await assert.rejects(
+      createArchive({
+        outPath: join(dir, 'bad.rar'),
+        recoverySectors: 1.5,
+        entries: [{ kind: 'bytes', name: 'a.bin', data: payload }],
+      }),
+      (error) => error.code === 'InvalidArg',
+    )
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

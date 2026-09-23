@@ -54,6 +54,11 @@ pub struct CreateArchiveOptions {
   /// Add a WinRAR-compatible inline recovery record protecting this percent
   /// (0-100) of the archive. Incompatible with multi-volume.
   pub recovery_percent: Option<f64>,
+  /// Add an inline recovery record with exactly this many parity sectors
+  /// (the legacy RAR4 record's native unit, like a bare `-rr<N>`).
+  /// Mutually exclusive with `recovery_percent`; a RAR5 record is sized by
+  /// percent only and rejects it.
+  pub recovery_sectors: Option<f64>,
   /// Create this many `.rev` recovery volumes (WinRAR `-rv`); auto-capped
   /// at the actual data volume count. Requires `volume_size`.
   pub recovery_volume_count: Option<f64>,
@@ -206,6 +211,24 @@ pub struct ExtractArchiveOptions {
   pub max_metadata_bytes: Option<f64>,
   /// Skip members whose destination path already exists (like `-o-`).
   pub skip_existing: Option<bool>,
+  /// Freshen (`-f`): extract a member only when its destination exists and
+  /// the archived modification time is newer; a missing destination is
+  /// skipped.
+  pub freshen: Option<bool>,
+  /// Update (`-u`): like `freshen`, but a missing destination is extracted
+  /// too. Takes precedence when both are set.
+  pub update: Option<bool>,
+  /// Extraction worker threads for this run (1..=64; 0 = automatic).
+  /// Scoped to this call, like `-mt<N>`; falls back to the process-global
+  /// default when unset.
+  pub threads: Option<f64>,
+  /// Maximum uncompressed size of a single member, in bytes (like
+  /// `-mdx`-style caps). Unset or 0 means no limit; extraction to disk is
+  /// streaming, so this is opt-in hardening.
+  pub max_unpacked_bytes: Option<f64>,
+  /// Maximum total uncompressed size for this run, in bytes. Unset or 0
+  /// means no limit.
+  pub max_total_unpacked_bytes: Option<f64>,
   /// Rename colliding outputs `name(1).ext` instead of overwriting
   /// (like `-or`).
   pub auto_rename: Option<bool>,
