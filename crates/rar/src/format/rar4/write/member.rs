@@ -74,6 +74,7 @@ pub(super) fn push_rar4_entry(
     ext_time: Option<Vec<u8>>,
     comment: Option<Vec<u8>>,
     is_dir: bool,
+    attr: u32,
     data_offset: u64,
     chunks: Vec<crate::model::DataChunk>,
 ) {
@@ -92,6 +93,7 @@ pub(super) fn push_rar4_entry(
             unp_ver,
             data_offset,
             is_directory: is_dir,
+            attributes: u64::from(attr),
             flags: if password {
                 crate::format::rar4::FHD_PASSWORD as u64
             } else {
@@ -120,6 +122,9 @@ pub(crate) fn add_file_rar4(
 ) -> RarResult<()> {
     let meta = fs::metadata(path)?;
     let file_size = meta.len();
+    // RAR4 stores the file's DOS attributes (read-only/hidden/system), like
+    // WinRAR; the model entry carries the same byte so a later repack keeps it.
+    let attr = crate::platform::rar4_file_attributes(&meta);
     let mtime = meta
         .modified()
         .unwrap_or(SystemTime::now())
@@ -194,7 +199,16 @@ pub(crate) fn add_file_rar4(
             _ => false,
         };
         let stream_level = if compressible { level } else { 0 };
-        return add_rar4_file_streaming(cx, path, &name, file_size, mtime, mtime_ns, stream_level);
+        return add_rar4_file_streaming(
+            cx,
+            path,
+            &name,
+            file_size,
+            mtime,
+            mtime_ns,
+            stream_level,
+            attr,
+        );
     }
 
     // Read the whole member, then (for level >= 1) LZSS-compress it.
@@ -210,7 +224,7 @@ pub(crate) fn add_file_rar4(
             ),
         )));
     }
-    add_rar4_data(cx, name, data, level, mtime, mtime_ns, None, None)
+    add_rar4_data(cx, name, data, level, mtime, mtime_ns, None, Some(attr))
 }
 
 /// Emit a queued RAR4 archive comment (`rar4_writer_comment`) as a
@@ -387,6 +401,7 @@ pub(crate) fn add_rar4_data(
                 ext_time,
                 comment,
                 is_dir,
+                attr,
                 data_offset,
                 vec![crate::model::DataChunk {
                     volume_index: 0,
@@ -437,6 +452,7 @@ pub(crate) fn add_rar4_data(
                 ext_time,
                 comment,
                 is_dir,
+                attr,
                 0,
                 chunks,
             );
@@ -447,11 +463,13 @@ pub(crate) fn add_rar4_data(
 }
 
 /// Write one RAR4 directory FILE_HEAD member (WinRAR convention: zero
-/// packed/unpacked sizes, CRC 0, `attr = 0x10`, `unp_ver 20`, name
-/// without a trailing slash; directories carry no data payload).
+/// packed/unpacked sizes, CRC 0, the directory's DOS attribute byte (at least
+/// `0x10`), `unp_ver 20`, name without a trailing slash; directories carry no
+/// data payload).
 pub(crate) fn write_rar4_dir_entry(
     cx: &mut dyn Engine,
     name: &str,
+    meta: &fs::Metadata,
     mtime_secs: u32,
     mtime_ns: u32,
 ) -> RarResult<()> {
@@ -467,6 +485,9 @@ pub(crate) fn write_rar4_dir_entry(
     if ext_time.is_some() {
         flags |= crate::format::rar4::FHD_EXTTIME;
     }
+    // The directory's own DOS attributes (directory bit plus hidden/system),
+    // like WinRAR; the model entry carries the same byte.
+    let attr = crate::platform::rar4_dir_attributes(meta);
     let params = FileHeaderParams {
         flags,
         packed_size: 0,
@@ -477,7 +498,7 @@ pub(crate) fn write_rar4_dir_entry(
         unp_ver: 20,
         method: crate::format::rar4::RAR4_METHOD_STORE,
         name: &encoded_name,
-        attr: 0x10,
+        attr,
         // All window bits set: the RAR4 directory marker that UnRAR and
         // WinRAR use to classify a member as a directory (files carry a
         // 0..=6 dictionary-size value instead).
@@ -515,7 +536,7 @@ pub(crate) fn write_rar4_dir_entry(
             name: name.to_string(),
             unpacked_size: 0,
             packed_size: 0,
-            attributes: 0x10,
+            attributes: u64::from(attr),
             mtime: mtime_secs,
             mtime_ns: ext_time.is_some().then_some(mtime_ns),
             crc32_val: Some(0),

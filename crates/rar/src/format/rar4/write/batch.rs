@@ -24,6 +24,8 @@ pub(crate) struct Rar4PreparedMember {
     pub file_crc: u32,
     pub packed: Vec<u8>,
     pub method: u8,
+    /// The member's DOS attributes (read-only/hidden/system), like WinRAR.
+    pub attr: u32,
 }
 
 /// Compress one RAR4 file member (non-solid, independent engine state)
@@ -51,6 +53,7 @@ pub(crate) fn prepare_rar4_file_member(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos();
+    let attr = crate::platform::rar4_file_attributes(&meta);
     let mut reader = File::open(path)?;
     let mut data = Vec::with_capacity(file_size as usize);
     std::io::Read::read_to_end(&mut reader, &mut data)?;
@@ -82,6 +85,7 @@ pub(crate) fn prepare_rar4_file_member(
         file_crc,
         packed,
         method,
+        attr,
     })
 }
 
@@ -98,6 +102,7 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
         file_crc,
         mut packed,
         method,
+        attr,
     } = prepared;
     let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
 
@@ -128,7 +133,7 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
                 salt,
                 ext_time.as_deref(),
                 false,
-                0x20,
+                attr,
                 None,
                 false,
                 false,
@@ -147,6 +152,7 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
                 ext_time,
                 None,
                 false,
+                attr,
                 0,
                 vec![crate::model::DataChunk {
                     volume_index: 0,
@@ -173,7 +179,7 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
                     salt,
                     ext_time: ext_time.as_deref(),
                     solid_continuation: false,
-                    attr: 0x20,
+                    attr,
                     comment: None,
                 };
                 emit_rar4_split(cx, &params, volume_size, packed_size, |_, offset, len| {
@@ -196,6 +202,7 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
                 ext_time,
                 None,
                 false,
+                attr,
                 0,
                 chunks,
             );
