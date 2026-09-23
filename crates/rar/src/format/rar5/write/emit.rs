@@ -10,7 +10,6 @@ use crate::engine::MemberPlan;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::{
     BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, FILE_FLAG_CRC32, FILE_FLAG_TIME_UNIX,
-    OS_UNIX,
 };
 use crate::model::{DataChunk, FileHeader};
 
@@ -265,7 +264,7 @@ pub(super) fn write_split_member(
             comp_solid: plan.solid,
             comp_dict_size: plan.dict_size_log,
             dict_size_bytes: plan.dict_size_bytes,
-            host_os: OS_UNIX,
+            host_os: crate::platform::host_os(),
             flags: block_flags | BLOCK_FLAG_DATA_CONTINUE_TO,
             file_flags: chunk_flags,
             extra_data: chunk_extra(false, is_first),
@@ -341,7 +340,7 @@ pub(super) fn write_split_member(
             comp_solid: plan.solid,
             comp_dict_size: plan.dict_size_log,
             dict_size_bytes: plan.dict_size_bytes,
-            host_os: OS_UNIX,
+            host_os: crate::platform::host_os(),
             flags: block_flags,
             file_flags: final_flags,
             extra_data: chunk_extra(is_last, is_first),

@@ -463,6 +463,100 @@ fn flat_extraction_with_collisions_matches_winrar() {
     );
 }
 
+/// On Windows our archives carry the platform's RAR5 metadata — `host_os = 0`,
+/// DOS attribute bits, Windows FILETIME in the FILE_TIME record — exactly like
+/// WinRAR's Windows output. That is what makes WinRAR restore the
+/// read-only/hidden/system bits and keep a decomposed (NFD) name instead of
+/// NFC-composing it (a Unix-host archive gets neither).
+#[cfg(windows)]
+#[test]
+fn windows_metadata_round_trips_through_winrar() {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
+        FILE_ATTRIBUTE_SYSTEM, SetFileAttributesW,
+    };
+
+    fn set_attrs(path: &Path, attrs: u32) {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), attrs) }, 0);
+    }
+    fn attrs(path: &Path) -> u32 {
+        const STORED: u32 = 0x1 | 0x2 | 0x4 | 0x20;
+        std::fs::metadata(path).unwrap().file_attributes() & STORED
+    }
+
+    let Some(unrar) = unrar_bin() else {
+        return;
+    };
+    let ours_rar = Path::new(env!("CARGO_BIN_EXE_rar"));
+    let dir = temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let ro = src.join("ro.txt");
+    let hidden = src.join("hidden.txt");
+    let sys = src.join("sys.txt");
+    let nfd = src.join("decomposed_e\u{301}.txt");
+    for f in [&ro, &hidden, &sys, &nfd] {
+        std::fs::write(f, b"body").unwrap();
+    }
+    set_attrs(&ro, FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_ARCHIVE);
+    set_attrs(&hidden, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE);
+    set_attrs(&sys, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE);
+
+    let archive = dir.path().join("attrs.rar");
+    let (ok, out) = run(Command::new(ours_rar)
+        .args(["a", "-m0", "-idq"])
+        .arg(&archive)
+        .args(["ro.txt", "hidden.txt", "sys.txt", "decomposed_e\u{301}.txt"])
+        .current_dir(&src));
+    assert!(ok, "create failed:\n{out}");
+
+    // WinRAR must restore the bits it was given by our (Windows-host) archive.
+    for (reader, tag) in [
+        (unrar.as_path(), "winrar"),
+        (Path::new(env!("CARGO_BIN_EXE_unrar")), "ours"),
+    ] {
+        let dest = dir.path().join(format!("out_{tag}"));
+        std::fs::create_dir_all(&dest).unwrap();
+        let mut cmd = Command::new(reader);
+        cmd.arg("x").arg("-idq").arg("-o+").arg("-y");
+        if tag == "ours" {
+            cmd.arg("--dest").arg(&dest).arg(&archive);
+        } else {
+            cmd.arg(&archive)
+                .arg(format!("{}{}", dest.display(), std::path::MAIN_SEPARATOR));
+        }
+        let (ok, out) = run(&mut cmd);
+        assert!(ok, "{tag} extract failed:\n{out}");
+        assert_eq!(
+            attrs(&dest.join("ro.txt")),
+            FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_ARCHIVE,
+            "{tag}: read-only must survive"
+        );
+        assert_eq!(
+            attrs(&dest.join("hidden.txt")),
+            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE,
+            "{tag}: hidden must survive"
+        );
+        assert_eq!(
+            attrs(&dest.join("sys.txt")),
+            FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE,
+            "{tag}: system must survive"
+        );
+        // The decomposed name is kept exactly, not NFC-composed.
+        let names: Vec<String> = std::fs::read_dir(&dest)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "decomposed_e\u{301}.txt"),
+            "{tag}: the NFD name must be preserved, got {names:?}"
+        );
+    }
+}
+
 /// A Unicode archive comment set by our CLI must read back identically
 /// through WinRAR (and a comment WinRAR sets must read back through us).
 #[test]

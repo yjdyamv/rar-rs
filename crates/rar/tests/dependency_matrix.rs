@@ -123,8 +123,8 @@ fn render(src_dir: &Path, layers: &[String]) -> String {
          # Rows come from lib.rs's `mod …;` declarations (directory modules by\n\
          # name, top-level files by stem; `lib.rs` is the `(crate root)` row). The\n\
          # documented order is `archive -> format -> engine -> {codec, crypto, fs,\n\
-         # model, options}` with `detect`/`version`/`vint`/`time`/`error` as\n\
-         # leaves; `recovery` sits above `format`. An edge that looks like a\n\
+         # model, options}` with `detect`/`version`/`vint`/`time`/`error`/`platform`\n\
+         # as leaves; `recovery` sits above `format`. An edge that looks like a\n\
          # violation of that order is a review event, not a snapshot update.\n\
          #\n\
          # layer              -> depends on\n",

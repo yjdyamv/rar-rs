@@ -943,10 +943,10 @@ mod extract_attributes {
         use super::*;
         use rar_rs::{ArchiveReader, ArchiveWriter, EntryWriteOptions};
 
-        /// Rewrite the `attributes` and `host_os` vints of `name`'s file header
-        /// in place (same-width vints) and repair the block header CRC. `0x4021`
-        /// has the DOS read-only (0x1) and archive (0x20) bits set; host 0 is
-        /// Windows.
+        /// Set the DOS read-only bit in `name`'s attribute vint (`0x20` ->
+        /// `0x21`, the same one-byte width) and repair the block header CRC.
+        /// Our Windows writer already stores a one-byte DOS attribute vint and
+        /// `host_os = 0` for a Windows archive, so the marker needs no patch.
         fn mark_read_only(bytes: &mut [u8], name: &str) {
             let mut cursor = std::io::Cursor::new(&bytes[..]);
             cursor.set_position(8);
@@ -972,10 +972,15 @@ mod extract_attributes {
                     off = n;
                     let (_, n) = support::read_vint(&header, off); // unpacked size
                     off = n;
-                    let (_, after) = support::read_vint(&header, off); // attributes
-                    let attrs = rar_rs::wire::vint::encode(0x4021);
-                    assert_eq!(attrs.len(), after - off, "patch must keep the vint width");
-                    header[off..after].copy_from_slice(&attrs);
+                    let (attrs, after) = support::read_vint(&header, off); // attributes
+                    assert_eq!(
+                        attrs & !0x1,
+                        0x20,
+                        "expected the DOS archive attribute in a Windows archive"
+                    );
+                    let patched = rar_rs::wire::vint::encode(attrs | 0x1);
+                    assert_eq!(patched.len(), after - off, "patch must keep the vint width");
+                    header[off..after].copy_from_slice(&patched);
                     off = after;
                     if file_flags & 0x0002 != 0 {
                         off += 4; // Unix mtime
@@ -986,13 +991,9 @@ mod extract_attributes {
                     let (_, n) = support::read_vint(&header, off); // compression info
                     off = n;
                     let host_start = off;
-                    let (_, after) = support::read_vint(&header, off); // host OS
-                    assert_eq!(
-                        after - host_start,
-                        1,
-                        "the writer emits a one-byte OS_UNIX vint"
-                    );
-                    header[host_start] = 0; // OS_WINDOWS
+                    let (host, after) = support::read_vint(&header, off); // host OS
+                    assert_eq!(after - host_start, 1, "one-byte host OS vint");
+                    assert_eq!(host, 0, "a Windows archive carries host_os = 0");
                     let crc = crc32fast::hash(&header[4..]);
                     header[..4].copy_from_slice(&crc.to_le_bytes());
                     let start = meta.block_start as usize;

@@ -428,8 +428,15 @@ fn list_tables_follow_the_official_shape() {
         text.contains("----------- ----------  ---------- -----  ----"),
         "{text}"
     );
-    assert!(text.contains("-rw-r--r--"), "{text}");
-    assert!(text.contains("drwxr-xr-x"), "{text}");
+    // The attribute cell follows the host marker the writer stored: Unix
+    // modes on Unix, DOS flags on Windows (like WinRAR on each platform).
+    let (file_attrs, dir_attrs) = if cfg!(windows) {
+        ("..A....", "...D...")
+    } else {
+        ("-rw-r--r--", "drwxr-xr-x")
+    };
+    assert!(text.contains(file_attrs), "{text}");
+    assert!(text.contains(dir_attrs), "{text}");
 
     let verbose = std::process::Command::new(RAR_CLI)
         .arg("v")
@@ -453,7 +460,12 @@ fn list_tables_follow_the_official_shape() {
     assert!(text.contains(&format!("        Name: {nested}")), "{text}");
     assert!(text.contains("        Type: File"), "{text}");
     assert!(text.contains(" Compression: RAR 5.0(v50) -m0"), "{text}");
-    assert!(text.contains("     Host OS: Unix"), "{text}");
+    let host = if cfg!(windows) {
+        "     Host OS: Windows"
+    } else {
+        "     Host OS: Unix"
+    };
+    assert!(text.contains(host), "{text}");
 
     // Unknown `-z...` values are accepted and ignored outside the comment
     // commands, like WinRAR.

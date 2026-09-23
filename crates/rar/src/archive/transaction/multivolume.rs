@@ -13,7 +13,7 @@ use super::super::RarArchive;
 use crate::engine::MemberPlan;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::FileHeader;
-use crate::format::rar5::{COMP_METHOD_STORE, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX};
+use crate::format::rar5::{COMP_METHOD_STORE, FILE_FLAG_DIRECTORY};
 use crate::fs::atomic::{parent_dir, read_write_create, temp_suffix};
 
 use super::super::{PendingCommit, volume_base_of, volume_path, volume_path_padded};
@@ -319,8 +319,8 @@ impl RarArchive {
                     name: entry_name.clone(),
                     attributes: entry.header.attributes,
                     mtime: entry.header.mtime,
-                    host_os: OS_UNIX,
-                    file_flags: FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY,
+                    host_os: entry.header.host_os,
+                    file_flags: entry.header.file_flags | FILE_FLAG_DIRECTORY,
                     is_directory: true,
                     ..Default::default()
                 };

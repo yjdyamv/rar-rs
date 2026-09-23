@@ -234,6 +234,49 @@ pub(crate) fn file_time_extra_record(
     out.extend(record);
     out
 }
+
+/// The same FILE_TIME record in WinRAR's Windows form: the `unix format` and
+/// `nanosecond precision` bits are clear and every present time is one 8-byte
+/// Windows FILETIME (100 ns ticks since 1601), in mtime/ctime/atime order.
+/// WinRAR on Windows writes this whenever it is not truncating times to whole
+/// seconds (`-ts1`), and clears `FILE_FLAG_TIME_UNIX` on the header so the
+/// 4-byte Unix mtime field is absent — the record is the only time carrier.
+pub(crate) fn file_time_extra_record_windows(
+    mtime: Option<(u64, u32)>,
+    ctime: Option<(u64, u32)>,
+    atime: Option<(u64, u32)>,
+) -> Vec<u8> {
+    let mut flags = 0u64;
+    if mtime.is_some() {
+        flags |= 0x0002;
+    }
+    if ctime.is_some() {
+        flags |= 0x0004;
+    }
+    if atime.is_some() {
+        flags |= 0x0008;
+    }
+    let mut record = Vec::with_capacity(1 + 24);
+    record.extend(vint::encode(flags));
+    for (secs, ns) in [mtime, ctime, atime].into_iter().flatten() {
+        record.extend_from_slice(&unix_to_filetime(secs, ns).to_le_bytes());
+    }
+
+    let mut out = Vec::with_capacity(12 + record.len());
+    out.extend(vint::encode((1 + record.len()) as u64));
+    out.extend(vint::encode(EXTRA_FILE_TIME));
+    out.extend(record);
+    out
+}
+
+/// A Unix time (seconds + nanoseconds) as a Windows FILETIME: 100 ns ticks
+/// since 1601-01-01, the epoch NTFS and WinRAR's FILE_TIME record use.
+fn unix_to_filetime(secs: u64, ns: u32) -> u64 {
+    /// Seconds from 1601-01-01 to 1970-01-01.
+    const EPOCH_DELTA_SECS: u64 = 11_644_473_600;
+    (secs + EPOCH_DELTA_SECS) * 10_000_000 + u64::from(ns / 100)
+}
+
 /// Serialize an OWNER extra record (`EXTRA_FILE_OWNER`) with owner and
 /// group names: `[flags][owner len][owner][group len][group]`. Flag bits
 /// 0x01 = owner present, 0x02 = group present (mirrors the parser).

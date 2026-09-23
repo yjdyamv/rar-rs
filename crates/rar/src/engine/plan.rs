@@ -7,11 +7,6 @@
 
 use crate::model::FileHeader;
 
-/// Host-OS byte for Unix. RAR5 owns the numbering (`format::rar5::OS_UNIX`);
-/// declared locally so this module stays a leaf, matching
-/// `model::entry`'s handling of the same value.
-const HOST_OS_UNIX: u64 = 0x01;
-
 /// Everything a member write needs besides the payload bytes: the file
 /// header fields and the extra records. Named so the serial, batch and
 /// streamed writers share one value instead of a positional slab.
@@ -71,7 +66,7 @@ impl MemberPlan {
             comp_solid: self.solid,
             comp_dict_size: self.dict_size_log,
             dict_size_bytes: self.dict_size_bytes,
-            host_os: HOST_OS_UNIX,
+            host_os: crate::platform::host_os(),
             file_flags,
             extra_data: self.extra_data.clone(),
             ..Default::default()

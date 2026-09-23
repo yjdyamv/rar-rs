@@ -109,8 +109,10 @@ fn nanosecond_mtime_roundtrip() {
         .unwrap();
         rar.finish().unwrap();
     }
-    // The writer emits the FILE_TIME extra record (byte-identical to the
-    // official `rar` format: flags 0x13 + seconds + nanoseconds).
+    // The writer emits the FILE_TIME extra record in the running platform's
+    // official form: flags 0x13 + Unix seconds + nanoseconds on Unix, or
+    // flags 0x02 + a Windows FILETIME on Windows (where the header's 4-byte
+    // Unix mtime is absent and the record is the only time carrier).
     let bytes = std::fs::read(&path).unwrap();
     for block in scan_blocks(&bytes) {
         if block.block_type == 0x02 {
@@ -146,9 +148,19 @@ fn nanosecond_mtime_roundtrip() {
             let name = &block.body[q..q + nl as usize];
             assert_eq!(name, b"ns.bin");
             let extra = &block.body[q + nl as usize..];
-            let mut expected = vec![0x0a, 0x03, 0x13];
-            expected.extend_from_slice(&(disk_secs.as_secs() as u32).to_le_bytes());
-            expected.extend_from_slice(&disk_ns.to_le_bytes());
+            let mut expected = vec![0x0a, 0x03];
+            if cfg!(windows) {
+                expected.push(0x02);
+                // Seconds from 1601-01-01 to 1970-01-01, in 100 ns ticks.
+                const EPOCH_DELTA_SECS: u64 = 11_644_473_600;
+                let filetime = (disk_secs.as_secs() + EPOCH_DELTA_SECS) * 10_000_000
+                    + u64::from(disk_ns / 100);
+                expected.extend_from_slice(&filetime.to_le_bytes());
+            } else {
+                expected.push(0x13);
+                expected.extend_from_slice(&(disk_secs.as_secs() as u32).to_le_bytes());
+                expected.extend_from_slice(&disk_ns.to_le_bytes());
+            }
             assert_eq!(
                 extra,
                 &expected[..],
