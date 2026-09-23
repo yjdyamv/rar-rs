@@ -1,9 +1,14 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-23 @ `4620434`（本轮：**主头 locator 恒写**（含 QO 0 占位、
-> 主头块 flags 0x5），并顺带修 `split_main_extra` 只看标志位就重建 QO 记录的真
-> bug；locator 的偏移**宽度**仍是我们定长 5 字节 vs 官方按预计大小 3–6 字节）。
-> 前轮：**元数据改为按宿主平台写** ——新增 `platform.rs` 统一
+> 最后核对：2026-09-23 @ `4620434`（本轮：**RAR5 头字节对齐官方**——成员头与
+> QO/RR/CMT 服务块的 `data_size`/`unpacked_size`/`comp_info` 改写到官方的最小 2
+> 字节、STM 服务块按官方的 `vint_size(unpacked_size << 12)` 预留（此前三者全是
+> 最小编码，−3 字节/成员）；**Unix 时间载体去重**，头内 mtime 与 FILE_TIME 记录
+> 二选一（此前两者都写））。另记 Windows 属性位子集、`-ts` 数字组合两处差异。
+> 前轮：**主头 locator 恒写**（含 QO 0 占位、主头块 flags 0x5），并顺带修
+> `split_main_extra` 只看标志位 就重建 QO 记录的真 bug；locator
+> 的偏移**宽度**仍是我们定长 5 字节 vs 官方按预计 大小 3–6
+> 字节）。更前轮：**元数据改为按宿主平台写** ——新增 `platform.rs` 统一
 > `host_os`/属性/时间载体，Windows 上写 `host_os`=0 + DOS 属性 + FILE_TIME
 > 记录的 Windows FILETIME，WinRAR/我们都恢复只读/隐藏/系统位、也不再被 NFC
 > 归一化成员名；RAR4 顺带落 DOS 属性位（直拷，含 `0x00` 那个官方用例）。另修
@@ -115,6 +120,28 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **RAR5 成员/服务头的尺寸字段补到官方宽度**（2026-09-23 对拍官方 7.23）：官方把
+  `data_size`（块信封的 Data Size）、`unpacked_size`、`comp_info` 三个 vint 一律
+  写到**至少 2 字节**（值 11 写作 `8b 00`，我们此前写 `0b`），`-m0` 档实测每个
+  成员因此比我们多 3 字节；其余字段（`attributes`/`host_os`/名字长度/extra 区
+  大小/块 flags）官方仍用最小编码。现同口径补齐——文件头与 QO/RR/CMT 服务块
+  一律最小 2 字节；**STM 服务块**按官方口径预留 `vint_size(unpacked_size << 12)`
+  （≥2 字节，实测 4 字节流→3、512→4、64 KiB→5、8 MiB→6），官方对 STM 是「先
+  写头、后回填」，故比其它块宽。契约由 `format::rar5::headers::serialize` 的
+  `member_size_fields_use_a_two_byte_minimum` /
+  `service_block_size_fields_use_a_two_byte_minimum` /
+  `stream_block_size_fields_use_the_reserved_width` /
+  `stream_size_field_width_matches_winrar` 钉住。
+- **RAR5 时间载体去重（Unix）**（2026-09-23 对拍官方 7.23 Linux 构建）：官方成员
+  的时间只占**一处**——头内 4 字节 mtime（置 `FILE_FLAG_TIME_UNIX`）**或**
+  FILE_TIME extra 记录，绝不同时出现（实测：秒精度仅 mtime ⇒ `ff=6`、无记录； 有
+  ns 或带 ctime/atime ⇒ `ff=4`、记录带全部出现的时间与 ns 位；多卷每个分片头
+  同规则，中间卷也只带 FILE_TIME 一条）。我们此前两者都写（Unix 多写入记录、ns
+  档还多出头内 4 字节）。现按「有记录即清标志」判定
+  （`rar5_time_fields(.., has_time_record)`，记录由 `time_extra_cfg` 只在
+  Windows 或「有 ctime/atime/亚秒」时生成），redirect 与多卷分片头同规则。契约
+  由 `format_assertions::whole_second_mtime_has_no_file_time_record_on_unix` 与
+  `nanosecond_mtime_roundtrip`（新增「有记录 ⇒ 头内字段不置位」断言）钉住。
 - **RAR5 元数据按宿主平台写**（2026-09-23）：此前一律写 Unix 风格（`host_os`=1 +
   `st_mode` + 头内 mtime），Windows 上因此丢只读/隐藏/系统属性，WinRAR 还会把
   NFD 成员名 NFC 归一化（根因由实验钉住：只把成员头 Host OS 字节 1→0
@@ -541,25 +568,39 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   flags 0x13；Windows 上 `host_os`=0、DOS 属性（1 字节）、FILE_TIME 记 Windows
   FILETIME（flags 0x02，头里 不写 4 字节
   mtime）。**我们也按平台写了**（见「已修」），故不再有属性丢失/名字归一化
-  的差异。**仍差的两处**：①主头 locator 的**偏移字段宽度**——官方按「写主头时对
-  最终大小的估计」预留 3–6 字节（实测：小归档 3 字节，阈值量级 2^9 / 2^16 / 2^23
-  / 2^30；QO 与 RR 同样宽、无记录时 QO 写 0），我们为可回填用**定长 5 字节**（35
-  位， 超 32 GiB 写哨兵 0）⇒ 主头比官方 **+2 字节**（最小档）到 **−1 字节**
-  （≥256 MiB 档）；locator 本身（恒写、QO 占位、主头块 flags 0x5）已与官方一致。
-  宽度依赖「写头时尚不知道的总量」，要逐字节对齐得让调用方给写侧一个预计大小，
-  属独立决策，未做。②**官方默认就写 QO 记录**（2026-09-23 实测 7.23 的 console `a`）：
-  归档越大越会写——实测 ~4 KB 输入不写（QO 偏移 0）、8 KB 起写（QO 偏移 8056），
-  我们只按 `-qo` 写（CLI 默认不写，`docs/CLI.md` 的“console 默认不写 QO”只对
+  的差异；成员头与 QO/RR/CMT 服务块的 `data_size`/`unpacked_size`/`comp_info`
+  也已补到官方的最小 2 字节、STM
+  的预留宽度也对齐（见「已修」）。**仍差的两处**：①主头 locator
+  的**偏移字段宽度**——官方按「写主头时对最终大小的估计」预留（实测：3/4/5/6
+  字节，阈值 2^9 / 2^16 / 2^23；更大的归档继续变宽，1 GiB 档实测 9 字节；QO 与
+  RR 同样宽、无记录时 QO 写 0）。现提供 `WriterOptions::estimated_size(bytes)`
+  （及 `CreateOptions::estimated_size`）：给出预计大小即按官方分档预留，**`-m0`
+  小归档与官方逐字节相同**；不给则沿用历史定长 5 字节（35 位，超 32 GiB 写哨兵
+  0）⇒ 默认仍比官方 **+2 字节**（最小档）到 **−1 字节**（≥256 MiB 档）。**CLI
+  未接线**：官方的估计是内部经验式（按成员累加，含成员名字长度、且带 16 字节量级
+  的取整与饱和），无法由我们自身的头字节推出，故 CLI 不自动填。locator 本身（恒
+  写、QO 占位、主头块 flags 0x5）已与官方一致。②**官方默认就写 QO 记录**
+  （2026-09-23 实测 7.23 的 console `a`）： 归档越大越会写——实测 ~4 KB
+  输入不写（QO 偏移 0）、8 KB 起写（QO 偏移 8056）， 我们只按 `-qo` 写（CLI
+  默认不写，`docs/CLI.md` 的“console 默认不写 QO”只对
   小归档成立）。只影响字节（官方多一条 QO 服务块），不影响读取（无 QO 时双方都
-  回退全扫）。③官方把
-  `data_size`/`unpacked_size`/`comp_info` 填到**至少 2
-  字节**（11 写 `8b 00`，我们写 `0b`）⇒ −3 字节/成员。**另外（仅
-  Unix）**：官方只在 秒精度时置 `FILE_FLAG_TIME_UNIX` 并省略记录，有 ns
-  时反过来；我们两者都写 ⇒ +4 字节/成员（Windows 侧现在与官方同为「清
-  TIME_UNIX + 记录」，一致）。**只影响字节 外观**：双向读写一致，interop
-  与语料对拍全绿。契约由
+  回退全扫）。**只影响字节 外观**：双向读写一致，interop 与语料对拍全绿。契约由
   `winrar_interop::scenarios`（`windows_metadata_round_trips_through_winrar` /
   `varied_corpus_round_trips_through_both_tools`）钉住。
+- **`-ts` 的「字母+数字」组合**（2026-09-23 对拍官方 7.23 Linux 构建）：官方只认
+  `-ts`/`-tsm`/`-tsc`/`-tsa`/`-ts1`/`-tsm1` 等少量形式——实测
+  `-tsc2`/`-tsc3`/`-tsa2`/`-tsa3`/`-ts2`/`-ts3` 一律**静默退化成仅 mtime**（用户
+  点名的 ctime/atime 被丢掉），而 `-tsc1`/`-tsa1` 又不做秒截断（保留
+  ns）。我们按 文档语义统一处理（`<种类><精度>`，`1`
+  对**已选**时间做秒截断），故 `-tsc1`/`-tsa1` 与官方差一个 ns
+  位，`-tsc2`/`-ts3` 之类我们仍按请求存
+  ctime/atime。按「静默丢弃用户请求＝缺陷，不照抄」的既有口径处理，未追平。
+- **Windows 属性的位子集**（2026-09-23 对拍官方 7.23）：`platform.rs` 的
+  `STORED_DOS_ATTRIBUTES` 只映射只读/隐藏/系统/目录/归档/重解析点六位，于是从
+  目录继承了「内容未索引」（`FILE_ATTRIBUTE_NOT_CONTENT_INDEXED`，`0x2000`）的
+  文件，我们属性字段写 `0x20`、官方写 `0x2020`（`A0 40`），解出后我们丢该位、
+  官方保留。官方显然照抄了更多 Windows 位；逐位对齐需先测清它的取舍。属有意
+  子集，未对齐。
 - **Windows 联接点的 redirect 目标字符串**（2026-09-23 对拍官方 7.23）：`-ol` 存
   junction 时我们写其原始路径（`C:\dir\target`，反斜杠），WinRAR 写 NT 打印名、
   正斜杠、带 `/??/`
