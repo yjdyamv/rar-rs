@@ -157,13 +157,17 @@
   redirect（不跟随目标），Windows 写 2/3 型（symlink/junction）与官方一致；官方
   `-sfx` 前置于 RAR 1.3/1.4 会被拒绝（官方只认 DOS stub）。
 - **SFX** — 归档前带 stub 的自解压文件；`detect::sfx_offset_of` 定位归档起点。
-- **Locator（定位器）** — 主头中的 QO/RR 偏移记录，close 时回填。主头唯一构造者
+- **Locator（定位器）** — 主头中的 QO/RR 偏移记录，close 时回填。**恒写**
+  （2026-09-23 起，与官方一致）：无 QO 记录时 QO 字段照样发、偏移写 0 占位，RR
+  只在 有恢复记录时出现；读侧（`split_main_extra`、QO 快路径）把 **0
+  偏移**当「无记录」。 主头唯一构造者
   `headers/locator.rs::build_main_header`（把 locator 追加到调用方 extra 后、经
   `ArchiveHeader::to_bytes` 发射，并返回 QO/RR 字段的 header
   相对偏移），`patch_locator_fields`
   负责原地回填；调用方不再手数字段宽度。偏移字段是定长 5 字节 vint（35
   位）：超过 32 GiB 无法命名的偏移写入哨兵 0（QO 退化为全扫、RR
-  视为无记录），不再静默回绕（2026-09）。
+  视为无记录），不再静默回绕（2026-09；官方按写头时的预计大小预留 3–6 字节，见
+  `PLAN.md`「已知小差异」）。
 - **RAR5 block envelope（`frame_block`）** —
   `format/rar5/headers/serialize.rs`：`[CRC32 LE][size vint][body]`（CRC 覆盖
   size vint +

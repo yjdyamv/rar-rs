@@ -1,13 +1,14 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-23 @ `8e94db3`（本轮：**元数据改为按宿主平台写** ——新增
-> `platform.rs` 统一 `host_os`/属性/时间载体，Windows 上写 `host_os`=0 + DOS
-> 属性 + FILE_TIME 记录的 Windows
-> FILETIME，WinRAR/我们都恢复只读/隐藏/系统位、也不再被 NFC 归一化成员名；RAR4
-> 顺带落 DOS 属性位（直拷，含 `0x00` 那个官方用例）。另修 抽取侧「带 DIRECTORY
-> 位的重定向被当目录」与 `-si`/`add_bytes` 在 Windows 丢 mtime
-> 两处缺陷；两条平台无关的惯例仍不复刻）。 前轮：**真实用户语料 ×
-> 多文件类型的双向对拍** ——新增
+> 最后核对：2026-09-23 @ `4620434`（本轮：**主头 locator 恒写**（含 QO 0 占位、
+> 主头块 flags 0x5），并顺带修 `split_main_extra` 只看标志位就重建 QO 记录的真
+> bug；locator 的偏移**宽度**仍是我们定长 5 字节 vs 官方按预计大小 3–6 字节）。
+> 前轮：**元数据改为按宿主平台写** ——新增 `platform.rs` 统一
+> `host_os`/属性/时间载体，Windows 上写 `host_os`=0 + DOS 属性 + FILE_TIME
+> 记录的 Windows FILETIME，WinRAR/我们都恢复只读/隐藏/系统位、也不再被 NFC
+> 归一化成员名；RAR4 顺带落 DOS 属性位（直拷，含 `0x00` 那个官方用例）。另修
+> 抽取侧「带 DIRECTORY 位的重定向被当目录」与 `-si`/`add_bytes` 在 Windows 丢
+> mtime 两处缺陷）；更前轮：**真实用户语料 × 多文件类型的双向对拍** ——新增
 > `winrar_interop::scenarios`（空文件/无扩展名/点文件/含空格引号井号的名字/ CJK
 > 与 emoji 名/200 字节长名/多级目录/空目录/大量小文件/文本与随机与结构化数据，
 > 默认/m0/m5/solid/分卷 五个开关档 × 两种创建 × 两种读取，另加 unicode
@@ -137,6 +138,18 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   （`push_rar4_entry` 新收 `attr`），使 `lt` 与后续重打包（`attributes & 0xFF`）
   与磁盘一致。契约由
   `winrar_interop::rar4_create::rar4_stores_and_restores_dos_attributes` 钉住。
+- **主头 locator 改为恒写**（2026-09-23 对拍官方
+  7.23）：官方**每个**归档都在主头 尾写 locator 记录（主头块 flags 含
+  `SKIP_IF_UNKNOWN`，即 0x5），QO 字段恒在—— 无 QO 记录时 QO 标志仍置、偏移写 0
+  占位，RR 字段只在有恢复记录时才出现；我们 此前只在有 QO/RR
+  时写。现同样恒写（`build_locator_body` 恒发 QO 字段）并置 0x4
+  块标志，主头定长部分不再比官方小 7 字节。**顺带修一个真 bug**：
+  `split_main_extra` 只看 QO **标志位**就认定「有 QO 记录」，于是追加/重写一个
+  官方归档（或我们现在写的任何归档）时**凭空重建出一条 QO 记录**（实测 509→615
+  字节、前缀不再逐字节不变）——现按官方的语义只认**非零偏移**，`had_qo`/`had_rr`
+  同此。契约由
+  `locator::tests::locator_is_always_present_with_a_zero_qo_placeholder` 与
+  `rewrite_tests::delete_from_solid_archive_recompresses_chain` 钉住。
 
 - **不安全链接目标不再中止整轮抽取**（2026-09-23 对拍官方 7.23）：目标逃出目的
   目录的 symlink/junction 此前让 `extract_all` 直接返回 `Security`
@@ -528,14 +541,17 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   flags 0x13；Windows 上 `host_os`=0、DOS 属性（1 字节）、FILE_TIME 记 Windows
   FILETIME（flags 0x02，头里 不写 4 字节
   mtime）。**我们也按平台写了**（见「已修」），故不再有属性丢失/名字归一化
-  的差异。**仍没复刻的两条与平台无关的惯例**：①官方**总是**写主头 locator
-  记录（无 QO/RR 时 flags=QO、offset=0 占位；其偏移是变长
-  vint，我们为可回填用定长 5 字节）⇒ 固定部分小 **7 字节**；②官方把
-  `data_size`/`unpacked_size`/`comp_info` 填到**至少 2 字节**（11 写
-  `8b 00`，我们写 `0b`）⇒ −3 字节/成员。**另外（仅 Unix）**：官方只在 秒精度时置
-  `FILE_FLAG_TIME_UNIX` 并省略记录，有 ns 时反过来；我们两者都写 ⇒ +4
-  字节/成员（Windows 侧现在与官方同为「清 TIME_UNIX +
-  记录」，一致）。**只影响字节 外观**：双向读写一致，interop
+  的差异。**仍差的两处**：①主头 locator 的**偏移字段宽度**——官方按「写主头时对
+  最终大小的估计」预留 3–6 字节（实测：小归档 3 字节，阈值量级 2^9 / 2^16 / 2^23
+  / 2^30；QO 与 RR 同样宽、无记录时 QO 写 0），我们为可回填用**定长 5 字节**（35
+  位， 超 32 GiB 写哨兵 0）⇒ 主头比官方 **+2 字节**（最小档）到 **−1 字节**
+  （≥256 MiB 档）；locator 本身（恒写、QO 占位、主头块 flags 0x5）已与官方一致。
+  宽度依赖「写头时尚不知道的总量」，要逐字节对齐得让调用方给写侧一个预计大小，
+  属独立决策，未做。②官方把 `data_size`/`unpacked_size`/`comp_info` 填到**至少 2
+  字节**（11 写 `8b 00`，我们写 `0b`）⇒ −3 字节/成员。**另外（仅
+  Unix）**：官方只在 秒精度时置 `FILE_FLAG_TIME_UNIX` 并省略记录，有 ns
+  时反过来；我们两者都写 ⇒ +4 字节/成员（Windows 侧现在与官方同为「清
+  TIME_UNIX + 记录」，一致）。**只影响字节 外观**：双向读写一致，interop
   与语料对拍全绿。契约由
   `winrar_interop::scenarios`（`windows_metadata_round_trips_through_winrar` /
   `varied_corpus_round_trips_through_both_tools`）钉住。
