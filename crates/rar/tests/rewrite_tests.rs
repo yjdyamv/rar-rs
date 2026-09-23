@@ -291,6 +291,177 @@ fn delete_from_solid_archive_recompresses_chain() {
     );
 }
 
+/// Deleting members of *two* different solid chains in one plan must
+/// recompress both. The planner used to derive a single affected range from
+/// the lowest deleted index, so a member deleted from a second chain left
+/// that chain's surviving solid successors copied verbatim — referencing a
+/// window the deleted member contributed, which the output no longer holds.
+#[test]
+fn delete_across_two_solid_chains_recompresses_both() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("del-two-chains.rar");
+    let a = compressible(51, 100_000);
+    let b = compressible(52, 100_000);
+    // Incompressible: the writer stores it and resets the solid chain, so the
+    // members after it form a second, disjoint chain.
+    let stored: Vec<u8> = (0..50_000u32)
+        .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
+        .collect();
+    let d = compressible(54, 100_000);
+    let e = compressible(55, 100_000);
+    let f = compressible(56, 100_000);
+    {
+        let mut rar = ArchiveWriter::create_with(
+            &path,
+            rar_rs::WriterOptions::default().solid_mode(rar_rs::SolidMode::Continuous),
+        )
+        .unwrap();
+        let opts3 = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3u8).unwrap());
+        let opts0 = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
+        rar.add_bytes("a.bin", &a, opts3).unwrap();
+        rar.add_bytes("b.bin", &b, opts3).unwrap();
+        rar.add_bytes("stored.bin", &stored, opts0).unwrap();
+        rar.add_bytes("d.bin", &d, opts3).unwrap();
+        rar.add_bytes("e.bin", &e, opts3).unwrap();
+        rar.add_bytes("f.bin", &f, opts3).unwrap();
+        rar.finish().unwrap();
+    }
+    // Precondition: two chains split by the STORE member — [a,b] and [d,e,f].
+    let reader = ArchiveReader::open(&path).unwrap();
+    let solid: Vec<bool> = reader
+        .entries()
+        .map(|entry| entry.metadata().comp_solid())
+        .collect();
+    assert_eq!(
+        solid,
+        [false, true, false, false, true, true],
+        "precondition: two solid chains split by the STORE member"
+    );
+    drop(reader);
+
+    // Delete the head of chain 1 (a) and a middle member of chain 2 (e) in one
+    // plan: both chains need recompression.
+    let mut ed = ArchiveEditor::open(&path).unwrap();
+    let ids: Vec<_> = ["a.bin", "e.bin"]
+        .iter()
+        .map(|n| ed.unique_entry(n).unwrap())
+        .collect();
+    let n = ed.delete_entries(&ids).unwrap();
+    assert_eq!(n, 2);
+    drop(ed);
+
+    let mut rar = ArchiveReader::open(&path).unwrap();
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["b.bin", "stored.bin", "d.bin", "f.bin"]
+    );
+    for (name, expected) in [
+        ("b.bin", &b),
+        ("stored.bin", &stored),
+        ("d.bin", &d),
+        ("f.bin", &f),
+    ] {
+        assert_eq!(
+            &rar.read_entry(rar.unique_entry(name).unwrap()).unwrap(),
+            expected,
+            "content of {name} lost across the multi-chain edit"
+        );
+    }
+}
+
+/// A redirect member (symlink/hardlink) re-extracted over an existing link
+/// must be replaced, not fail with `EEXIST` (regular members already go
+/// through an atomic replace).
+#[test]
+#[cfg(unix)]
+fn redirect_members_are_replaced_on_reextract() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("relink.rar");
+    {
+        let mut rar = ArchiveWriter::create_with(&path, rar_rs::WriterOptions::default()).unwrap();
+        let opts0 = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
+        rar.add_bytes("dir/target.txt", b"target content", opts0)
+            .unwrap();
+        rar.add_redirect("dir/lnk.txt", 1, "target.txt").unwrap();
+        rar.add_redirect("dir/hard.txt", 4, "dir/target.txt")
+            .unwrap();
+        rar.finish().unwrap();
+    }
+
+    let out = dir.path().join("out");
+    for _ in 0..2 {
+        let mut rar = ArchiveReader::open(&path).unwrap();
+        rar.extract_all(&out).expect("re-extraction over links");
+    }
+    for name in ["dir/target.txt", "dir/lnk.txt", "dir/hard.txt"] {
+        assert_eq!(
+            std::fs::read(out.join(name)).unwrap(),
+            b"target content",
+            "{name} must be a working link to the target"
+        );
+    }
+    assert_eq!(
+        std::fs::read_link(out.join("dir/lnk.txt")).unwrap(),
+        std::path::Path::new("target.txt")
+    );
+}
+
+/// A RAR 4.x archive has no password check value: a wrong password on an
+/// encrypted *stored* member decrypts into garbage whose CRC mismatches, and
+/// that must report `WrongPassword` (CLI exit 11) like a compressed member
+/// does — not a bare CRC error (exit 3).
+#[test]
+fn rar4_wrong_password_on_a_stored_member_is_wrong_password() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("rar4-pw-store.rar");
+    let stored: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+    let packed = compressible(71, 20_000);
+    {
+        let mut rar = ArchiveWriter::create_with(
+            &path,
+            rar_rs::WriterOptions::default()
+                .compression(rar_rs::ArchiveVersion::V29)
+                .password("hunter2"),
+        )
+        .unwrap();
+        let opts0 = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(0u8).unwrap());
+        let opts3 = rar_rs::EntryWriteOptions::new()
+            .compression_level(rar_rs::CompressionLevel::try_from(3u8).unwrap());
+        rar.add_bytes("stored.bin", &stored, opts0).unwrap();
+        rar.add_bytes("packed.bin", &packed, opts3).unwrap();
+        rar.finish().unwrap();
+    }
+
+    let mut wrong =
+        ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("wrong")).unwrap();
+    for name in ["stored.bin", "packed.bin"] {
+        let err = wrong
+            .read_entry(wrong.unique_entry(name).unwrap())
+            .unwrap_err();
+        assert!(
+            matches!(err, rar_rs::RarError::WrongPassword),
+            "{name}: expected WrongPassword, got {err:?}"
+        );
+    }
+
+    // The correct password still reads every member.
+    let mut right =
+        ArchiveReader::open_with(&path, rar_rs::OpenOptions::new().password("hunter2")).unwrap();
+    for (name, expected) in [("stored.bin", &stored), ("packed.bin", &packed)] {
+        assert_eq!(
+            &right.read_entry(right.unique_entry(name).unwrap()).unwrap(),
+            expected,
+            "{name} with the correct password"
+        );
+    }
+}
+
 #[test]
 fn delete_from_encrypted_archives_roundtrips() {
     let dir = make_temp_dir();

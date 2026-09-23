@@ -40,8 +40,14 @@ enum RewriteOp {
         qo_header: Option<Vec<u8>>,
     },
     /// Decode (and recompress when kept) one member of the affected solid
-    /// chain.
-    Recompress { idx: usize, is_deleted: bool },
+    /// chain. `chain_head` marks the first member of a chain range: the
+    /// executor starts a fresh shared encoder/decoder state there, so a
+    /// member of a later chain never references an earlier chain's window.
+    Recompress {
+        idx: usize,
+        is_deleted: bool,
+        chain_head: bool,
+    },
 }
 
 /// The result of planning a rewrite: the blocks to emit, in order.

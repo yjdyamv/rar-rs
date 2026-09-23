@@ -569,8 +569,10 @@ pub(crate) fn resolve_dest_path_with(
     // Interactive overwrite prompt (WinRAR's console mode): with an installed
     // prompt and `prompt_overwrite`, ask about each existing file. Without a
     // prompt installed the flag falls back to skipping, never a silent
-    // overwrite. Directories never prompt (an existing directory is a no-op).
-    if options.prompt_overwrite && !entry.is_dir() && dest_path.exists() {
+    // overwrite. Directories never prompt (an existing directory is a no-op),
+    // and `-or` (`auto_rename`) takes precedence as documented: with both set
+    // the member is renamed without asking.
+    if options.prompt_overwrite && !options.auto_rename && !entry.is_dir() && dest_path.exists() {
         let prompt = cx.read_ctx().overwrite_prompt.clone();
         let choice = match prompt {
             Some(prompt) => prompt(&dest_path),
@@ -624,18 +626,21 @@ pub(crate) fn resolve_dest_path_with(
 /// uses for `-or` and the interactive "Rename" answer (`a.txt` ->
 /// `a(1).txt`, then `a(2).txt`, ...).
 fn next_free_name(path: &Path) -> PathBuf {
+    // The stem and extension come from the *original* name: re-deriving them
+    // from each renamed candidate would nest the suffix (`a(1)(2).txt`
+    // instead of `a(2).txt`).
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (stem, ext) = match file_name.rfind('.') {
+        Some(dot) if dot > 0 => (&file_name[..dot], &file_name[dot..]),
+        _ => (file_name.as_str(), ""),
+    };
     let mut dest = path.to_path_buf();
     let mut n = 1;
     while dest.exists() {
-        let file_name = dest
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let (stem, ext) = match file_name.rfind('.') {
-            Some(dot) if dot > 0 => (&file_name[..dot], &file_name[dot..]),
-            _ => (file_name.as_str(), ""),
-        };
-        dest = dest.with_file_name(format!("{stem}({n}){ext}"));
+        dest = path.with_file_name(format!("{stem}({n}){ext}"));
         n += 1;
     }
     dest

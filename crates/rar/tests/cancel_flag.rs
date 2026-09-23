@@ -181,3 +181,65 @@ fn multivolume_edit_aborts_when_flag_already_set() {
         assert_eq!(std::fs::read(path).expect("read volume"), old);
     }
 }
+
+/// A failed multi-volume rewrite must restore the editor's in-memory file
+/// state (path, volume list, staged commit) — otherwise a retry on the same
+/// editor addresses the discarded temporary base, and a later `Drop` could
+/// install the partial staged set over the original.
+#[test]
+fn multivolume_edit_recovers_state_after_an_abort() {
+    let dir = temp_dir();
+    let base = dir.path().join("mv-recover.rar");
+    let member = payload();
+    {
+        let mut rar = rar_rs::ArchiveWriter::create_with(
+            &base,
+            rar_rs::WriterOptions::new().volume_size(1_000_000),
+        )
+        .expect("create");
+        let opts =
+            rar_rs::EntryWriteOptions::new().compression_level(rar_rs::CompressionLevel::STORE);
+        rar.add_bytes("a.bin", &member, opts).expect("add a");
+        rar.add_bytes("b.bin", &member, opts).expect("add b");
+        rar.finish().expect("close");
+    }
+    let volumes = rar_rs::discover_volumes(&base);
+    assert!(volumes.len() > 1, "precondition: multi-volume set");
+
+    let flag = Arc::new(AtomicBool::new(true));
+    let mut editor = rar_rs::ArchiveEditor::open(&volumes[0]).expect("open editor");
+    editor.set_cancel_flag(Some(flag.clone()));
+    let id = editor.unique_entry("a.bin").expect("entry");
+    assert!(
+        matches!(editor.delete_entries(&[id]), Err(RarError::Cancelled)),
+        "the armed flag must abort the rewrite"
+    );
+
+    // No staged files may survive the failed attempt.
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("rar5tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "staged leftovers: {leftovers:?}");
+
+    // Retry on the same editor with the flag cleared: the failed attempt must
+    // have restored the archive's path/volume state, so this succeeds.
+    flag.store(false, Ordering::Relaxed);
+    let deleted = editor.delete_entries(&[id]).expect("retry after abort");
+    assert_eq!(deleted, 1);
+    drop(editor);
+
+    let volumes = rar_rs::discover_volumes(&base);
+    let mut rar = rar_rs::ArchiveReader::open(&volumes[0]).expect("open after retry");
+    assert_eq!(
+        rar.entries()
+            .map(|e| e.name().to_string())
+            .collect::<Vec<_>>(),
+        ["b.bin"]
+    );
+    assert_eq!(
+        rar.read_entry(rar.unique_entry("b.bin").unwrap()).unwrap(),
+        member
+    );
+}

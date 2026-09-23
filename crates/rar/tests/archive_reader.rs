@@ -119,6 +119,50 @@ fn duplicate_entries_are_addressable_by_id() {
     );
 }
 
+/// `-or` numbers collisions `name(N).ext`; the suffix must not nest across
+/// successive collisions (`a(1)(2).txt` is wrong, `a(2).txt` is right).
+#[test]
+fn auto_rename_numbers_without_nesting_the_suffix() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("dups.rar");
+    let opts = EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0u8).unwrap());
+    {
+        let mut archive = ArchiveWriter::create(&path).expect("create archive");
+        for byte in *b"abc" {
+            archive
+                .add_bytes("same.bin", &[byte; 16], opts)
+                .expect("add duplicate");
+        }
+        archive.finish().expect("close archive");
+    }
+
+    let output = dir.path().join("output");
+    let mut reader = ArchiveReader::open(&path).expect("open");
+    let report = reader
+        .extract_all_with_options(
+            &output,
+            ExtractOptions {
+                auto_rename: true,
+                ..Default::default()
+            },
+        )
+        .expect("extract");
+    let names: Vec<String> = report
+        .written()
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        ["same.bin", "same(1).bin", "same(2).bin"],
+        "collision suffixes must be numbered, not nested"
+    );
+    assert_eq!(
+        std::fs::read(output.join("same(2).bin")).unwrap(),
+        [b'c'; 16]
+    );
+}
+
 fn assert_solid_reader_recovers_after_writer_failure(version: ArchiveVersion, file_name: &str) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join(file_name);

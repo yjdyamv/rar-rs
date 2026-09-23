@@ -309,7 +309,7 @@ pub(crate) fn decode_rar4_to(
     } else {
         crc
     };
-    verify_member_crc(&hdr, actual)?;
+    verify_member_crc(&hdr, actual).map_err(|error| super::read::map_codec_error(&hdr, error))?;
     Ok(written)
 }
 
@@ -338,13 +338,17 @@ fn rar4_decode_member(cx: &mut dyn Engine, idx: usize) -> RarResult<Vec<u8>> {
 }
 
 /// Verify a member's CRC32 (or RAR 1.3/1.4 checksum) against its header.
+///
+/// A mismatch on an encrypted member maps to `WrongPassword`: RAR4 has no
+/// password check value, so it cannot be told apart from a corrupt stream
+/// (same rule the codec-level errors follow via `read::map_codec_error`).
 fn rar4_verify_crc(hdr: &FileHeader, data: &[u8]) -> RarResult<()> {
     let actual = if hdr.uses_rar13_checksum() {
         u32::from(crate::format::shared::checksum::rolling_sum_u16(data))
     } else {
         super::member_crc(data)
     };
-    verify_member_crc(hdr, actual)
+    verify_member_crc(hdr, actual).map_err(|error| super::read::map_codec_error(hdr, error))
 }
 
 /// Compare a member's stored checksum with the computed one.

@@ -139,3 +139,41 @@ fn the_prompt_is_asked_only_for_existing_destinations() {
         "only the existing a.txt may prompt"
     );
 }
+
+/// `-or` takes precedence over the prompt, as documented on
+/// `ExtractOptions::prompt_overwrite`: with both set the member is renamed
+/// without consulting the prompt.
+#[test]
+fn auto_rename_takes_precedence_over_the_prompt() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("f.rar");
+    write_archive(&archive, &[("a.txt", b"archived")]);
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("a.txt"), b"on disk").unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let mut rar = ArchiveReader::open(&archive).unwrap();
+    rar.set_overwrite_prompt(Some(Arc::new(move |_| {
+        counter.fetch_add(1, Ordering::Relaxed);
+        OverwriteChoice::Skip
+    })));
+    rar.extract_all_with_options(
+        &dest,
+        ExtractOptions {
+            prompt_overwrite: true,
+            auto_rename: true,
+            ..ExtractOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "`-or` must not consult the overwrite prompt"
+    );
+    assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"on disk");
+    assert_eq!(std::fs::read(dest.join("a(1).txt")).unwrap(), b"archived");
+}

@@ -35,7 +35,10 @@ impl ChunkReader for StreamReader<'_> {
             stream.seek(SeekFrom::Start(offset))?;
             stream.take(len).read_to_end(&mut buf)?;
         } else {
-            let mut f = std::fs::File::open(&self.volume_paths[vol])?;
+            let path = self.volume_paths.get(vol).ok_or_else(|| {
+                RarError::Format(format!("member data references missing volume {vol}"))
+            })?;
+            let mut f = std::fs::File::open(path)?;
             f.seek(SeekFrom::Start(offset))?;
             f.take(len).read_to_end(&mut buf)?;
         }
@@ -128,6 +131,17 @@ pub(crate) fn read_packed<R: ChunkReader + ?Sized>(
                 });
             }
         }
+    }
+
+    // A chunk's declared packed size may run past the end of its volume (a
+    // truncated or replaced volume file). `take(len).read_to_end` stops short
+    // silently, so report the truncation here instead of letting a downstream
+    // decode or checksum failure describe it.
+    if packed.len() != packed_len {
+        return Err(RarError::Format(format!(
+            "{name}: packed payload is truncated (read {} of {packed_len} bytes)",
+            packed.len()
+        )));
     }
 
     let params = if !hdr.extra_data.is_empty() {

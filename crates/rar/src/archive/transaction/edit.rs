@@ -110,19 +110,32 @@ impl RarArchive {
             });
         }
 
-        let chain = if deleted_count > 0 {
-            let first_deleted = deleted.iter().position(|d| *d).unwrap();
-            self.chain_range_around(first_deleted)
-        } else {
-            None
-        };
+        // Every affected solid chain, not only the one holding the lowest
+        // deleted index: an archive can hold several disjoint chains (a STORE
+        // fallback, a filter reset or an extension reset breaks one), and each
+        // chain that loses a non-tail member must be recompressed. A deleted
+        // member outside a single "first" chain would otherwise leave its
+        // surviving solid successors copied verbatim, referencing a window
+        // that is no longer in the output. `chain_range_around` returns the
+        // same range for every member of one chain, so identical ranges are
+        // deduplicated.
+        let mut chains: Vec<(usize, usize)> = Vec::new();
+        for (idx, &is_deleted) in deleted.iter().enumerate() {
+            if is_deleted
+                && let Some(range) = self.chain_range_around(idx)
+                && !chains.contains(&range)
+            {
+                chains.push(range);
+            }
+        }
+        chains.sort_unstable();
         // The engine applies renames to verbatim copies only; a kept member
         // of a recompressed chain would silently keep its old name. Refuse
         // that combination up front. Deleted members are irrelevant (they
-        // are not emitted), so only kept members in the chain matter.
-        if let Some((start, end)) = chain {
+        // are not emitted), so only kept members in a chain matter.
+        for (start, end) in &chains {
             for idx in map.keys() {
-                if !deleted[*idx] && (start..=end).contains(idx) {
+                if !deleted[*idx] && (*start..=*end).contains(idx) {
                     return Err(RarError::Unsupported(
                         "renaming a member of a solid chain that also loses a member is not supported; split the edit into separate transactions"
                             .into(),
@@ -131,7 +144,7 @@ impl RarArchive {
             }
         }
 
-        self.rewrite_edit(deleted, chain, &map, force_rr, comment)?;
+        self.rewrite_edit(deleted, &chains, &map, force_rr, comment)?;
         Ok(EditSummary {
             deleted: deleted_count,
             renamed: renamed_count,
@@ -176,7 +189,7 @@ impl RarArchive {
     fn rewrite_edit(
         &mut self,
         deleted: Vec<bool>,
-        chain: Option<(usize, usize)>,
+        chains: &[(usize, usize)],
         map: &std::collections::HashMap<usize, String>,
         force_rr: Option<u8>,
         comment: Option<&[u8]>,
@@ -197,7 +210,7 @@ impl RarArchive {
             if self.main_header_is_locked()? {
                 return Err(RarError::ArchiveLocked);
             }
-            self.rewrite_multivolume(&deleted, chain, rename_map)?;
+            self.rewrite_multivolume(&deleted, chains, rename_map)?;
         } else {
             let src_path = self.path.clone();
             let (mut staged, file) = crate::fs::atomic::StagedFile::create(&src_path)?;
@@ -211,7 +224,7 @@ impl RarArchive {
             let result = self.rewrite_blocks(
                 &mut reader,
                 &deleted,
-                chain,
+                chains,
                 force_rr,
                 rename_map,
                 comment,
@@ -371,7 +384,7 @@ impl RarArchive {
     /// `reader` reads the original archive; the rewritten bytes go to
     /// `self.stream` (the replacement file). With the `parallel` feature,
     /// verbatim block data is prefetched by a background thread and the
-    /// affected solid chain is recompressed while the tail is already
+    /// affected solid chains are recompressed while the tail is already
     /// being read. Inline recovery records are rebuilt when the original
     /// had one (the percentage is carried over).
     #[allow(clippy::too_many_arguments)] // mirrors the delete() state machine
@@ -379,14 +392,14 @@ impl RarArchive {
         &mut self,
         reader: &mut File,
         deleted: &[bool],
-        chain: Option<(usize, usize)>,
+        chains: &[(usize, usize)],
         force_rr: Option<u8>,
         rename_map: Option<&std::collections::HashMap<usize, String>>,
         comment: Option<&[u8]>,
         src_path: &Path,
         tmp_path: &Path,
     ) -> RarResult<()> {
-        let plan = self.plan_rewrite(reader, deleted, chain, force_rr, rename_map, comment)?;
+        let plan = self.plan_rewrite(reader, deleted, chains, force_rr, rename_map, comment)?;
         self.execute_rewrite(&plan, src_path, tmp_path)?;
         Ok(())
     }

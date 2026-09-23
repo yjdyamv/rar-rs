@@ -227,8 +227,16 @@ impl RarArchive {
                         io::copy(&mut limited, self.stream.as_mut().unwrap())?;
                     }
                 }
-                RewriteOp::Recompress { idx, is_deleted } => {
-                    if chain.is_none() {
+                RewriteOp::Recompress {
+                    idx,
+                    is_deleted,
+                    chain_head,
+                } => {
+                    // A chain head starts a fresh shared window; reusing the
+                    // previous chain's state would make this member's stream
+                    // reference a window the output no longer holds in that
+                    // position.
+                    if *chain_head || chain.is_none() {
                         chain = Some(super::solid::SolidChainState::start(
                             crate::format::rar5::extract::decode::member_dict_window(self, *idx)?,
                         )?);
