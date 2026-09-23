@@ -39,7 +39,12 @@ impl RarArchive {
         let recovery = self.recovery_percent.is_some();
         let (hdr, qo_field_pos, rr_field_pos) =
             crate::format::rar5::headers::locator::build_main_header(
-                arch_flags, &extra, quick_open, recovery, None,
+                arch_flags,
+                &extra,
+                quick_open,
+                recovery,
+                None,
+                crate::format::rar5::headers::locator::DEFAULT_OFFSET_WIDTH,
             );
 
         let main_start = self.stream.as_mut().unwrap().stream_position()?;
@@ -48,8 +53,8 @@ impl RarArchive {
     }
 
     /// Patch the rewritten main header with the real quick-open and/or
-    /// recovery-record offsets and rewrite it in place (the offset fields
-    /// were preallocated as fixed 5-byte vints, so the header length never
+    /// recovery-record offsets and rewrite it in place (the offset fields were
+    /// preallocated when the header was built, so the header length never
     /// changes).
     pub(super) fn patch_main_header(
         &mut self,

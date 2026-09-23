@@ -779,6 +779,9 @@ impl RarArchive {
         // records or volumes with the wrong volume setting) were already
         // rejected by `validate` with the same wording as `WriterOptions`.
         let quick_open = opts.quick_open;
+        let offset_width = opts
+            .estimated_size
+            .map(crate::format::rar5::headers::locator::locator_offset_width);
 
         let archive = RarArchive {
             path,
@@ -843,6 +846,7 @@ impl RarArchive {
                 },
                 locator: LocatorState {
                     quick_open,
+                    offset_width,
                     quick_open_entries: Vec::new(),
                     qo_offset_field_pos: None,
                     main_header_start: None,

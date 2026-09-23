@@ -1366,7 +1366,8 @@ mod tests {
 
     #[test]
     fn main_locator_accepts_legacy_size_without_type_vint() {
-        let (body, _, _) = crate::format::rar5::headers::locator::build_locator_body(true, false);
+        let (body, _, _) =
+            crate::format::rar5::headers::locator::build_locator_body(true, false, 5);
         let mut extra = vint::encode(body.len() as u64);
         extra.extend(vint::encode(
             crate::format::rar5::headers::locator::LOCATOR_TYPE,

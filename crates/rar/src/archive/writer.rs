@@ -115,6 +115,7 @@ pub struct WriterOptions {
     // The format-validated subset is read by `archive::create`'s
     // `WriteOptionFlags`, which is the single seam both write surfaces use.
     pub(super) quick_open: bool,
+    pub(super) estimated_size: Option<u64>,
     pub(super) blake2: bool,
     password: Option<String>,
     pub(super) encrypt_headers: bool,
@@ -140,6 +141,7 @@ impl Default for WriterOptions {
             compression: ArchiveVersion::V50,
             solid_mode: SolidMode::Disabled,
             quick_open: false,
+            estimated_size: None,
             blake2: false,
             password: None,
             encrypt_headers: false,
@@ -195,6 +197,27 @@ impl WriterOptions {
     #[must_use]
     pub fn quick_open(mut self, enabled: bool) -> Self {
         self.quick_open = enabled;
+        self
+    }
+
+    /// Supply the expected final archive size, so the main header's locator
+    /// reserves its quick-open and recovery offset fields at the width WinRAR
+    /// uses for an archive that size (3 / 4 / 5 / 6 bytes for estimates below
+    /// 512 / 2^16 / 2^23). WinRAR derives that estimate from the planned
+    /// member set before it writes the main header; without it rar-rs keeps
+    /// its default preallocated 5-byte fields. RAR5 only; the value must be
+    /// greater than zero. This changes bytes only (the offsets are patched in
+    /// at close time either way).
+    #[must_use]
+    pub fn estimated_size(mut self, bytes: u64) -> Self {
+        self.estimated_size = Some(bytes);
+        self
+    }
+
+    /// Drop a previously configured size estimate (see [`Self::estimated_size`]).
+    #[must_use]
+    pub fn without_estimated_size(mut self) -> Self {
+        self.estimated_size = None;
         self
     }
 
@@ -362,6 +385,7 @@ impl WriterOptions {
             volume_size: self.volume_size,
         })?;
         crate::options::require_writable_version(self.compression)?;
+        crate::options::validate_locator_estimate(self.estimated_size, self.compression)?;
         let solid_reset = match self.solid_mode {
             SolidMode::PerVolume => SolidReset::PerVolume,
             SolidMode::PerExtension => SolidReset::PerExtension,
@@ -402,6 +426,7 @@ impl WriterOptions {
             solid,
             solid_reset,
             quick_open: self.quick_open,
+            estimated_size: self.estimated_size,
             blake2: self.blake2,
             password: self.password,
             encrypt_headers: self.encrypt_headers,

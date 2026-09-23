@@ -30,8 +30,13 @@ pub(crate) fn write_file_entry(
     packed_data: &[u8],
 ) -> RarResult<()> {
     let file_crc = plan.file_crc;
-    let (mtime, file_flags) =
-        super::add::rar5_time_fields(cx, plan.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
+    let has_time_record = file_time_record(&plan.extra_data).is_some();
+    let (mtime, file_flags) = super::add::rar5_time_fields(
+        cx,
+        plan.mtime,
+        FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
+        has_time_record,
+    );
     let fh_base = plan.file_header(packed_data.len() as u64, mtime, file_flags);
 
     if cx.write_ctx().output.volume_size.is_none() {
@@ -213,6 +218,7 @@ pub(super) fn write_split_member(
     // member's nanoseconds); the other records stay on the first and
     // final chunks (the encryption record is per chunk by design).
     let file_time = file_time_record(&plan.extra_data);
+    let has_time_record = file_time.is_some();
     let chunk_extra = |is_last: bool, is_first: bool| -> Vec<u8> {
         let mut extra = if let Some(ref p) = encr_params {
             if is_last {
@@ -251,8 +257,12 @@ pub(super) fn write_split_member(
         // full encryption record), so a chunk sized by the mid estimate
         // alone can turn out to be the last one and overflow the volume
         // by the extra-record delta. Budget against both.
-        let (chunk_mtime, chunk_flags) =
-            super::add::rar5_time_fields(cx, plan.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
+        let (chunk_mtime, chunk_flags) = super::add::rar5_time_fields(
+            cx,
+            plan.mtime,
+            FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
+            has_time_record,
+        );
         let chunk_fh = FileHeader {
             name: plan.name.to_string(),
             unpacked_size: plan.unpacked_size,
@@ -327,8 +337,12 @@ pub(super) fn write_split_member(
 
         let chunk_crc = phase(cx, SplitPhase::Crc, offset, chunk_size, is_last)? as u32;
 
-        let (final_mtime, final_flags) =
-            super::add::rar5_time_fields(cx, plan.mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32);
+        let (final_mtime, final_flags) = super::add::rar5_time_fields(
+            cx,
+            plan.mtime,
+            FILE_FLAG_TIME_UNIX | FILE_FLAG_CRC32,
+            has_time_record,
+        );
         let final_fh = FileHeader {
             name: plan.name.to_string(),
             unpacked_size: plan.unpacked_size,
@@ -432,7 +446,7 @@ pub(crate) fn encrypt_payload_with(
 }
 
 /// The FILE_TIME (0x03) record from a RAR5 extra area, if present.
-fn file_time_record(extra: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn file_time_record(extra: &[u8]) -> Option<Vec<u8>> {
     let mut offset = 0usize;
     while offset < extra.len() {
         let (size, n) = crate::vint::decode_from_slice(extra, offset).ok()?;

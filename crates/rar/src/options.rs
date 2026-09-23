@@ -186,6 +186,11 @@ pub(crate) struct CreateOptions {
     /// every file header. Only effective for single-volume archives
     /// without header encryption.
     pub quick_open: bool,
+    /// Expected final archive size, used to reserve the locator's QO/RR
+    /// offset fields at the width WinRAR would use for an archive that size
+    /// (see [`WriterOptions::estimated_size`](crate::WriterOptions::estimated_size)).
+    /// `None` keeps the default preallocated 5-byte fields. RAR5 only.
+    pub estimated_size: Option<u64>,
     /// Write a BLAKE2sp hash record for every member, replacing the regular
     /// CRC32 field, matching WinRAR's `-htb` behavior.
     pub blake2: bool,
@@ -263,6 +268,7 @@ pub(crate) struct CreateOptions {
 impl CreateOptions {
     pub(crate) fn validate(&self) -> RarResult<()> {
         require_writable_version(self.compression)?;
+        validate_locator_estimate(self.estimated_size, self.compression)?;
         validate_solid_reset(self.compression, self.solid_reset)?;
         validate_dictionary(self.dict_size_log, self.dict_size_bytes)?;
         validate_threads(self.threads)?;
@@ -349,6 +355,29 @@ pub(crate) fn validate_threads(threads: Option<usize>) -> RarResult<()> {
         return Err(RarError::InvalidOption(format!(
             "compression threads must be in 0..={MAX_COMPRESSION_THREADS}, got {threads}"
         )));
+    }
+    Ok(())
+}
+
+/// The locator size estimate only shapes the RAR5 main header's offset fields;
+/// the legacy writers have no locator, so a set estimate would otherwise be
+/// dropped silently.
+pub(crate) fn validate_locator_estimate(
+    estimate: Option<u64>,
+    version: ArchiveVersion,
+) -> RarResult<()> {
+    let Some(estimate) = estimate else {
+        return Ok(());
+    };
+    if estimate == 0 {
+        return Err(RarError::InvalidOption(
+            "the locator size estimate must be greater than zero".into(),
+        ));
+    }
+    if version.is_legacy() || version.is_rar13() {
+        return Err(RarError::InvalidOption(
+            "the locator size estimate is a RAR5 option".into(),
+        ));
     }
     Ok(())
 }
@@ -440,6 +469,7 @@ impl Default for CreateOptions {
             solid: false,
             solid_reset: SolidReset::Continuous,
             quick_open: false,
+            estimated_size: None,
             blake2: false,
             password: None,
             encrypt_headers: false,

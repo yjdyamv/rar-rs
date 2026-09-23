@@ -1,11 +1,11 @@
 //! The main archive header (and its locator record, type 0x01), owned here
-//! once so the byte rules (record layout, fixed-5-byte preallocated offset
-//! fields, relative offset patching, CRC recompute) live in a single place.
+//! once so the byte rules (record layout, preallocated offset fields,
+//! relative offset patching, CRC recompute) live in a single place.
 //! The create/close path (`archive/create.rs`) and the surgical rewrite path
 //! (`archive/transaction.rs`) both build through [`build_main_header`].
 
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::{ArchiveHeader, vint_fixed5};
+use crate::format::rar5::headers::{ArchiveHeader, vint_fixed};
 use crate::vint;
 
 /// Locator record type (extra record type 0x01).
@@ -13,9 +13,31 @@ pub(crate) const LOCATOR_TYPE: u64 = 0x01;
 pub(crate) const LOCATOR_FLAG_QUICK_OPEN: u64 = 0x0001;
 pub(crate) const LOCATOR_FLAG_RECOVERY: u64 = 0x0002;
 
+/// Offset-field width used when the caller gives no size estimate (the
+/// historical rar-rs default). A 5-byte vint names offsets below 32 GiB.
+pub(crate) const DEFAULT_OFFSET_WIDTH: usize = 5;
+
+/// The offset-field width WinRAR reserves for an archive it expects to reach
+/// `estimate` bytes: 3 bytes below 512, then one more per 7-bit boundary
+/// (4 / 5 / 6 for < 2^16 / < 2^23 / >= 2^23). WinRAR derives the estimate
+/// from the planned member set before writing the main header and patches the
+/// real offsets in at the end; its estimate is an internal heuristic (a
+/// per-member total that grows with the member name), so a caller that wants
+/// the same byte layout must supply a matching estimate.
+pub(crate) fn locator_offset_width(estimate: u64) -> usize {
+    match estimate {
+        ..0x200 => 3,
+        0x200..0x10000 => 4,
+        0x10000..0x800000 => 5,
+        _ => 6,
+    }
+}
+
 /// Build the locator record body `[flags vint][qo offset vint][rr offset
 /// vint]`, returning the body bytes and the positions (relative to the body
-/// start) of the preallocated QO and RR offset fields.
+/// start) of the preallocated QO and RR offset fields. `offset_width` is the
+/// reserved field width (the QO and RR fields always share one width, like
+/// WinRAR).
 ///
 /// WinRAR always writes the locator and always includes the QO offset field —
 /// with the QO flag set and the offset 0 when the archive has no quick-open
@@ -26,6 +48,7 @@ pub(crate) const LOCATOR_FLAG_RECOVERY: u64 = 0x0002;
 pub(crate) fn build_locator_body(
     quick_open: bool,
     recovery: bool,
+    offset_width: usize,
 ) -> (Vec<u8>, Option<usize>, Option<usize>) {
     let _ = quick_open;
     let mut flags = LOCATOR_FLAG_QUICK_OPEN;
@@ -38,12 +61,12 @@ pub(crate) fn build_locator_body(
     // offset will be patched into it.
     let qo = {
         let p = body.len();
-        body.extend_from_slice(&vint_fixed5(0));
+        body.extend_from_slice(&vint_fixed(0, offset_width));
         Some(p)
     };
     let rr = if recovery {
         let p = body.len();
-        body.extend_from_slice(&vint_fixed5(0));
+        body.extend_from_slice(&vint_fixed(0, offset_width));
         Some(p)
     } else {
         None
@@ -83,8 +106,9 @@ pub(crate) fn build_main_header(
     quick_open: bool,
     recovery: bool,
     volume_number: Option<u64>,
+    offset_width: usize,
 ) -> (Vec<u8>, Option<usize>, Option<usize>) {
-    let (locator, qo_pos, rr_pos) = build_locator_body(quick_open, recovery);
+    let (locator, qo_pos, rr_pos) = build_locator_body(quick_open, recovery, offset_width);
     let mut all_extra = extra.to_vec();
     let record = frame_locator_record(&locator);
     // The record is [record size vint][type vint][body]; the body is its
@@ -112,10 +136,11 @@ pub(crate) fn build_main_header(
 /// to `base` (the archive start after the signature, plus any SFX stub).
 /// Returns whether any field was patched (and thus the CRC rewritten).
 ///
-/// The fields are fixed 5-byte vints (35 bits). An archive larger than
-/// 32 GiB cannot name its trailing QO/RR record; a wrapped offset would
-/// point at arbitrary bytes, so the sentinel 0 is written instead: quick-open
-/// then treats the record as unusable and falls back to a full scan.
+/// Each field's width is read back from the placeholder already on disk (see
+/// [`build_locator_body`]), so a narrow reservation is never overrun. An
+/// offset the reserved width cannot hold would wrap and name arbitrary bytes,
+/// so the sentinel 0 is written instead: quick-open then treats the record as
+/// unusable and falls back to a full scan.
 pub(crate) fn patch_locator_fields(
     hdr: &mut [u8],
     qo_offset: Option<u64>,
@@ -124,26 +149,21 @@ pub(crate) fn patch_locator_fields(
     rr_field: Option<usize>,
     base: u64,
 ) -> RarResult<bool> {
-    // Largest offset a 5-byte vint can carry.
-    const LOCATOR_MAX_OFFSET: u64 = (1 << 35) - 1;
-
     let mut patched = false;
-    if let (Some(qo), Some(field)) = (qo_offset, qo_field) {
-        let rel = qo.saturating_sub(base);
-        let field_bytes = vint_fixed5(if rel <= LOCATOR_MAX_OFFSET { rel } else { 0 });
-        if field + field_bytes.len() > hdr.len() {
-            return Err(RarError::Format("locator field out of bounds".into()));
-        }
-        hdr[field..field + field_bytes.len()].copy_from_slice(&field_bytes);
-        patched = true;
-    }
-    if let (Some(rr), Some(field)) = (rr_offset, rr_field) {
-        let rel = rr.saturating_sub(base);
-        let field_bytes = vint_fixed5(if rel <= LOCATOR_MAX_OFFSET { rel } else { 0 });
-        if field + field_bytes.len() > hdr.len() {
-            return Err(RarError::Format("locator field out of bounds".into()));
-        }
-        hdr[field..field + field_bytes.len()].copy_from_slice(&field_bytes);
+    for (offset, field) in [(qo_offset, qo_field), (rr_offset, rr_field)] {
+        let (Some(value), Some(field)) = (offset, field) else {
+            continue;
+        };
+        let width = placeholder_width(hdr, field)
+            .ok_or_else(|| RarError::Format("locator field out of bounds".into()))?;
+        let max = if width >= 10 {
+            u64::MAX
+        } else {
+            (1u64 << (7 * width)) - 1
+        };
+        let rel = value.saturating_sub(base);
+        let field_bytes = vint_fixed(if rel <= max { rel } else { 0 }, width);
+        hdr[field..field + width].copy_from_slice(&field_bytes);
         patched = true;
     }
     if patched {
@@ -153,6 +173,19 @@ pub(crate) fn patch_locator_fields(
         hdr[..4].copy_from_slice(&crc.to_le_bytes());
     }
     Ok(patched)
+}
+
+/// Width in bytes of the vint placeholder starting at `field`, or `None` when
+/// the field runs past the header.
+fn placeholder_width(hdr: &[u8], field: usize) -> Option<usize> {
+    for n in 1..=10 {
+        match hdr.get(field + n - 1) {
+            Some(&byte) if byte & 0x80 != 0 => continue,
+            Some(_) => return Some(n),
+            None => return None,
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -185,7 +218,7 @@ mod tests {
         };
         for (quick_open, recovery) in [(false, false), (true, false), (false, true), (true, true)] {
             let (hdr, qo_field, rr_field) =
-                build_main_header(0, &extra, quick_open, recovery, None);
+                build_main_header(0, &extra, quick_open, recovery, None, DEFAULT_OFFSET_WIDTH);
             let raw = parse_block_bytes(&hdr).unwrap();
             let (_, hsize_vint_len) = vint::decode_from_slice(&hdr, 4).unwrap();
             let meta = BlockMeta {
@@ -209,7 +242,8 @@ mod tests {
 
     #[test]
     fn build_main_header_patch_round_trips_through_the_parser() {
-        let (mut hdr, qo_field, rr_field) = build_main_header(0, &[], true, true, None);
+        let (mut hdr, qo_field, rr_field) =
+            build_main_header(0, &[], true, true, None, DEFAULT_OFFSET_WIDTH);
         let patched =
             patch_locator_fields(&mut hdr, Some(1234), Some(5678), qo_field, rr_field, 0).unwrap();
         assert!(patched);
@@ -240,7 +274,8 @@ mod tests {
     /// sentinel (quick-open falls back to a full scan), not wrap.
     #[test]
     fn patched_offsets_beyond_35_bits_use_the_sentinel() {
-        let (mut hdr, qo_field, _) = build_main_header(0, &[], true, false, None);
+        let (mut hdr, qo_field, _) =
+            build_main_header(0, &[], true, false, None, DEFAULT_OFFSET_WIDTH);
         let huge = (1u64 << 40) + 1234;
         patch_locator_fields(&mut hdr, Some(huge), None, qo_field, None, 0).unwrap();
         let raw = parse_block_bytes(&hdr).unwrap();
@@ -262,6 +297,7 @@ mod tests {
             false,
             false,
             Some(2),
+            DEFAULT_OFFSET_WIDTH,
         );
         // The locator is always written, so its QO field exists (left at 0);
         // the RR field only exists with a recovery record.
@@ -279,7 +315,8 @@ mod tests {
     /// (the inert placeholder the reader treats as "no record").
     #[test]
     fn locator_is_always_present_with_a_zero_qo_placeholder() {
-        let (hdr, qo_field, rr_field) = build_main_header(0, &[], false, false, None);
+        let (hdr, qo_field, rr_field) =
+            build_main_header(0, &[], false, false, None, DEFAULT_OFFSET_WIDTH);
         assert!(qo_field.is_some());
         assert!(rr_field.is_none());
 
@@ -290,5 +327,46 @@ mod tests {
         assert!(!had_rr);
         assert!(rest.is_empty(), "only the locator was written");
         assert_eq!(locator_quick_open_offset(&ah.extra_data), Some(0));
+    }
+
+    #[test]
+    fn offset_width_matches_winrar_buckets() {
+        assert_eq!(locator_offset_width(0), 3);
+        assert_eq!(locator_offset_width(511), 3);
+        assert_eq!(locator_offset_width(512), 4);
+        assert_eq!(locator_offset_width(65535), 4);
+        assert_eq!(locator_offset_width(65536), 5);
+        assert_eq!(locator_offset_width(0x7F_FFFF), 5);
+        assert_eq!(locator_offset_width(0x80_0000), 6);
+    }
+
+    /// A narrow reservation (what a small size estimate selects) still patches
+    /// and reads back, and a value that cannot fit its width uses the sentinel
+    /// instead of wrapping.
+    #[test]
+    fn narrow_reservation_patches_and_reads_back() {
+        for width in [3usize, 4, 6] {
+            let (mut hdr, qo_field, _) = build_main_header(0, &[], true, false, None, width);
+            let fits = (1u64 << (7 * width)) - 1;
+            patch_locator_fields(&mut hdr, Some(fits), None, qo_field, None, 0).unwrap();
+            let raw = parse_block_bytes(&hdr).unwrap();
+            let ah = ArchiveHeader::from_raw(&raw).unwrap();
+            assert_eq!(
+                crate::format::rar5::headers::locator_quick_open_offset(&ah.extra_data),
+                Some(fits),
+                "a value filling width {width} must round-trip"
+            );
+
+            let (mut hdr, qo_field, _) = build_main_header(0, &[], true, false, None, width);
+            patch_locator_fields(&mut hdr, Some(1u64 << (7 * width)), None, qo_field, None, 0)
+                .unwrap();
+            let raw = parse_block_bytes(&hdr).unwrap();
+            let ah = ArchiveHeader::from_raw(&raw).unwrap();
+            assert_eq!(
+                crate::format::rar5::headers::locator_quick_open_offset(&ah.extra_data),
+                Some(0),
+                "a value past width {width} must use the sentinel"
+            );
+        }
     }
 }
