@@ -188,7 +188,9 @@
   `file_time_is_windows()`（Windows 上清 `FILE_FLAG_TIME_UNIX`、时间放进
   FILE_TIME 记录并写 Windows FILETIME；`-ts1` 仍用 unix 秒）。`engine` 与
   `format`
-  都经它取头字段，因此同一输入在两平台各产出与官方对应平台一致的元数据。
+  都经它取头字段，因此同一输入在两平台各产出与官方对应平台一致的元数据。RAR4 的
+  DOS 属性字段也走这里（`rar4_file_attributes`/`rar4_dir_attributes`：Windows
+  直拷 文件属性、非 Windows 落 `0x20`/`0x10`）。
 - **ExtractionReport（`format/shared/extract/members.rs`，经
   `archive/reader.rs`）** —
   抽取操作的唯一回报值（2026-09）：`written`（真正写出的文件与创建的链接，按归档序）+
