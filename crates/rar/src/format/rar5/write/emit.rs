@@ -23,6 +23,44 @@ pub(super) enum SplitPhase {
     Write,
 }
 
+/// Bytes a volume must keep free once it holds `prefix_len` bytes: the
+/// end-of-archive block plus this volume's inline recovery record (0 without
+/// `-rr`).
+///
+/// A per-volume record protects the bytes written before it, so WinRAR keeps
+/// it inside `volume_size` too — a volume carrying one holds slightly less
+/// payload than a volume that does not.
+pub(super) fn volume_tail_reserve(cx: &dyn Engine, prefix_len: u64) -> u64 {
+    cx.on_disk_header_len(8) + cx.recovery_volume_reserve(prefix_len)
+}
+
+/// Largest data budget that fits `remaining` volume bytes behind a
+/// `hdr`-byte header once the tail reserve is accounted for.
+///
+/// `hdr + budget + reserve(prefix(budget))` grows with the budget, so the
+/// feasible budgets form a prefix of `0..=remaining - hdr` and bisecting for
+/// the largest one lands on the exact fill WinRAR uses (a plain
+/// "shrink until it fits" walk would stop at the first feasible value and
+/// leave the recovered bytes of a smaller reserve unused).
+fn data_budget(cx: &dyn Engine, used: u64, hdr: u64, remaining: u64) -> u64 {
+    let fits =
+        |budget: u64| hdr + budget + volume_tail_reserve(cx, used + hdr + budget) <= remaining;
+    let mut lo = 0u64;
+    let mut hi = remaining.saturating_sub(hdr);
+    if fits(hi) {
+        return hi;
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
 /// Write a file entry, splitting across volumes if needed.
 pub(crate) fn write_file_entry(
     cx: &mut dyn Engine,
@@ -67,17 +105,17 @@ pub(crate) fn write_file_entry(
 
     // Multi-volume splitting
     let volume_size = cx.write_ctx().output.volume_size.unwrap();
-    // End-of-archive block: 8 plaintext bytes, or `[IV][padded]` when
-    // header encryption wraps every block.
-    let eoa_plain: u64 = 8;
-    let eoa_size: u64 = cx.on_disk_header_len(eoa_plain);
     let total_packed = packed_data.len() as u64;
 
     // Check if it fits in current volume
     let hdr_bytes = fh_base.to_bytes();
     let hdr_on_disk = cx.on_disk_header_len(hdr_bytes.len() as u64);
-    let total_needed = hdr_on_disk + total_packed + eoa_size;
-    let remaining = volume_size.saturating_sub(cx.bytes_written());
+    let used = cx.bytes_written();
+    // The recovery record protects this member too, so the tail reserve is
+    // sized from the prefix the member would leave behind.
+    let total_needed =
+        hdr_on_disk + total_packed + volume_tail_reserve(cx, used + hdr_on_disk + total_packed);
+    let remaining = volume_size.saturating_sub(used);
 
     if total_needed <= remaining {
         // Fits entirely
@@ -110,7 +148,6 @@ pub(crate) fn write_file_entry(
         total_packed,
         plan,
         volume_size,
-        eoa_size,
         fh_base,
         |this, phase, offset, chunk_size, is_last| match phase {
             SplitPhase::Crc => {
@@ -151,7 +188,6 @@ pub(super) fn write_split_member(
     total_packed: u64,
     plan: &MemberPlan,
     volume_size: u64,
-    eoa_size: u64,
     fh_base: FileHeader,
     mut phase: impl FnMut(&mut dyn Engine, SplitPhase, u64, u64, bool) -> RarResult<u64>,
 ) -> RarResult<()> {
@@ -167,16 +203,18 @@ pub(super) fn write_split_member(
     // path, or a member whose payload exactly filled the previous
     // volume) has no data to split, but it still needs its file header
     // on disk. Emit it as a single empty chunk in the current volume,
-    // rolling to a fresh one when the header plus the end block does not
+    // rolling to a fresh one when the header plus the volume tail does not
     // fit.
     if total_packed == 0 {
         let hdr_bytes = fh_base.to_bytes();
         let hdr_size = cx.on_disk_header_len(hdr_bytes.len() as u64);
-        let remaining = volume_size.saturating_sub(cx.bytes_written());
-        if remaining < hdr_size + eoa_size {
+        let used = cx.bytes_written();
+        let remaining = volume_size.saturating_sub(used);
+        if remaining < hdr_size + volume_tail_reserve(cx, used + hdr_size) {
             cx.start_next_volume()?;
-            let remaining = volume_size.saturating_sub(cx.bytes_written());
-            if remaining < hdr_size + eoa_size {
+            let used = cx.bytes_written();
+            let remaining = volume_size.saturating_sub(used);
+            if remaining < hdr_size + volume_tail_reserve(cx, used + hdr_size) {
                 return Err(RarError::InvalidOption(format!(
                     "volume size {volume_size} is too small for a member header ({hdr_size} bytes) plus the end block"
                 )));
@@ -294,8 +332,11 @@ pub(super) fn write_split_member(
             .len() as u64,
         );
 
-        let bytes_for_data = remaining_vol.saturating_sub(hdr_size + eoa_size);
-        let bytes_for_last = remaining_vol.saturating_sub(last_hdr_size + eoa_size);
+        // The recovery record protects this chunk, so both budgets are
+        // settled against the tail reserve the chunk's own prefix implies.
+        let used = cx.bytes_written();
+        let bytes_for_data = data_budget(cx, used, hdr_size, remaining_vol);
+        let bytes_for_last = data_budget(cx, used, last_hdr_size, remaining_vol);
         let remaining_member = total_packed - offset;
 
         // Middle chunks keep the mid estimate's budget; a chunk that

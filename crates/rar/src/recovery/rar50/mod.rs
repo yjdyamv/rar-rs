@@ -23,6 +23,7 @@ mod tests;
 pub use encode::build_structural_inline_recovery_data;
 pub(crate) use encode::build_structural_inline_recovery_data_streaming;
 pub use gf16::{Gf16, encode_parity_shards, make_encoder_matrix};
+pub(crate) use plan::inline_recovery_payload_len;
 pub use plan::{crc64_rar_state, crc64_xz};
 pub use repair::{reconstruct_data_shards, repair_inline_recovery_archive};
 pub use stream::repair_inline_recovery_archive_path;

@@ -66,11 +66,6 @@ fn create_options_reject_the_same_combinations_as_the_typed_builder() {
             ..Default::default()
         },
         crate::options::CreateOptions {
-            recovery_percent: Some(5),
-            volume_size: Some(32 * 1024),
-            ..Default::default()
-        },
-        crate::options::CreateOptions {
             recovery_volume_count: Some(1),
             ..Default::default()
         },
@@ -343,6 +338,65 @@ fn recovery_volume_exact_count_roundtrip() {
         })
         .collect();
     assert_eq!(revs.len(), 2, "expected exactly 2 .rev files");
+    std::fs::remove_dir_all(dir.path()).ok();
+}
+
+#[test]
+fn inline_recovery_records_cover_every_volume_of_a_set() {
+    // `-rr` with `-v` (WinRAR's shape): every data volume carries its own
+    // inline record, sized from that volume's own prefix, and `.rev` recovery
+    // volumes coexist with them.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("pv.part1.rar");
+    let data = b"per-volume recovery payload ".repeat(4000); // ~120 KiB
+    {
+        let mut ar = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                volume_size: Some(32768),
+                recovery_percent: Some(5),
+                recovery_volumes_percent: Some(20),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ar.add_bytes("big.bin", &data, 0).unwrap();
+        ar.close().unwrap();
+    }
+    let entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let mut volumes: Vec<_> = entries
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "rar"))
+        .cloned()
+        .collect();
+    volumes.sort();
+    assert!(volumes.len() >= 2, "expected a multi-volume set");
+    for volume in &volumes {
+        let bytes = std::fs::read(volume).unwrap();
+        assert!(
+            bytes.windows(4).any(|window| window == b"RR\x02\x07"),
+            "{} carries no inline recovery record",
+            volume.display()
+        );
+        assert!(
+            bytes.len() <= 32768,
+            "{} exceeds the requested volume size",
+            volume.display()
+        );
+    }
+    assert!(
+        entries
+            .iter()
+            .any(|p| p.extension().is_some_and(|e| e == "rev")),
+        "a `.rev` recovery volume must coexist with the per-volume records"
+    );
+    // The protected set still reads back whole.
+    let mut archive = crate::ArchiveReader::open(&volumes[0]).unwrap();
+    let id = archive.unique_entry("big.bin").unwrap();
+    assert_eq!(archive.read_entry(id).unwrap(), data);
     std::fs::remove_dir_all(dir.path()).ok();
 }
 

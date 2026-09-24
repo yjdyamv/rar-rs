@@ -200,8 +200,10 @@ pub(crate) struct CreateOptions {
     /// `password`; in multi-volume archives each volume carries the required
     /// encryption setup.
     pub encrypt_headers: bool,
-    /// Add an inline recovery record protecting this percent (0-100) of
-    /// the archive (WinRAR `-rr<N>%`). Incompatible with multi-volume.
+    /// Add an inline recovery record protecting this percent (0-100) of the
+    /// archive (WinRAR `-rr<N>%`). Combined with `volume_size`, every data
+    /// volume carries its own record protecting that volume (WinRAR `-rr`
+    /// with `-v`), and it may be combined with `.rev` recovery volumes.
     pub recovery_percent: Option<u8>,
     /// Add an inline recovery record with exactly this many parity sectors
     /// (WinRAR RAR4 `-rr<N>`). Mutually exclusive with `recovery_percent`.
@@ -438,13 +440,6 @@ pub(crate) fn validate_combinations(rules: CombinationRules<'_>) -> RarResult<()
     if rules.recovery_sectors == Some(0) {
         return Err(RarError::InvalidOption(
             "recovery sector count must be greater than zero".into(),
-        ));
-    }
-    if (rules.recovery_percent.is_some() || rules.recovery_sectors.is_some())
-        && rules.volume_size.is_some()
-    {
-        return Err(RarError::InvalidOption(
-            "inline recovery records cannot be combined with data volumes".into(),
         ));
     }
     if rules.recovery_volumes_percent.is_some() && rules.recovery_volume_count.is_some() {

@@ -952,20 +952,23 @@ test('core errors expose stable napi codes and archive testing is async', async 
       return true
     })
 
-    // This option combination is rejected by the typed writer's option
-    // validation (InvalidOption) and must retain the InvalidArg code.
-    await assert.rejects(
-      createArchive({
-        outPath: join(dir, 'unsupported.rar'),
-        volumeSize: 100_000,
-        recoveryPercent: 10,
-        entries: [{ kind: 'bytes', name: 'a.bin', data: Buffer.alloc(200_000) }],
-      }),
-      (error) => {
-        assert.equal(error.code, 'InvalidArg')
-        return true
-      },
-    )
+    // A recovery record is legal alongside data volumes: `-rr` with `-v`
+    // gives every volume its own inline record (WinRAR's shape).
+    const rrSet = join(dir, 'rr-set.rar')
+    await createArchive({
+      outPath: rrSet,
+      volumeSize: 100_000,
+      recoveryPercent: 10,
+      entries: [{ kind: 'bytes', name: 'a.bin', data: Buffer.alloc(200_000) }],
+    })
+    const rrVolumes = readdirSync(dir).filter((name) => name.startsWith('rr-set') && name.endsWith('.rar'))
+    assert.ok(rrVolumes.length >= 2, 'expected a multi-volume set')
+    for (const name of rrVolumes) {
+      assert.ok(
+        readFileSync(join(dir, name)).includes(Buffer.from('RR\x02\x07')),
+        `${name} carries no inline recovery record`,
+      )
+    }
 
     const pendingTest = testArchive(plain)
     assert.equal(typeof pendingTest.then, 'function', 'testArchive must be async')
