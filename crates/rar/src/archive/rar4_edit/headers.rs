@@ -20,30 +20,26 @@ use crate::format::rar4::{FHD_COMMENT, FHD_LARGE, FHD_UNICODE, FILE_HEAD};
 /// before the comment, otherwise it covers the whole header body.
 pub(super) fn rename_file_header(header: &[u8], new_name: &str) -> RarResult<Vec<u8>> {
     if header.len() < 32 || header[2] != FILE_HEAD {
-        return Err(RarError::Format(
-            "RAR4: file header block is malformed".into(),
-        ));
+        return Err(RarError::format("RAR4: file header block is malformed"));
     }
     let flags = u16::from_le_bytes([header[3], header[4]]);
     let name_start = 32 + if flags & FHD_LARGE != 0 { 8 } else { 0 };
     if name_start + 2 > header.len() {
-        return Err(RarError::Format(
-            "RAR4: file header is missing its name field".into(),
+        return Err(RarError::format(
+            "RAR4: file header is missing its name field",
         ));
     }
     let old_name_size = u16::from_le_bytes([header[26], header[27]]) as usize;
     let name_end = name_start + old_name_size;
     if name_end > header.len() {
-        return Err(RarError::Format(
-            "RAR4: file name extends past header".into(),
-        ));
+        return Err(RarError::format("RAR4: file name extends past header"));
     }
 
     let (new_name_bytes, name_flags) = encode_file_name(new_name);
     let new_name_size = new_name_bytes.len();
     if new_name_size > u16::MAX as usize {
-        return Err(RarError::InvalidOption(
-            "RAR4: renamed member name is too long".into(),
+        return Err(RarError::invalid_option(
+            "RAR4: renamed member name is too long",
         ));
     }
     let new_flags = (flags & !FHD_UNICODE) | name_flags;
@@ -58,9 +54,7 @@ pub(super) fn rename_file_header(header: &[u8], new_name: &str) -> RarResult<Vec
     // keeps its byte length).
     let new_head_size = out.len();
     if new_head_size > u16::MAX as usize {
-        return Err(RarError::Format(
-            "RAR4: renamed member header is too large".into(),
-        ));
+        return Err(RarError::format("RAR4: renamed member header is too large"));
     }
     out[3..5].copy_from_slice(&new_flags.to_le_bytes());
     out[5..7].copy_from_slice(&(new_head_size as u16).to_le_bytes());
@@ -82,23 +76,19 @@ pub(super) fn rename_file_header(header: &[u8], new_name: &str) -> RarResult<Vec
 /// the name-keyed multi-volume rename.
 pub(super) fn file_header_name(header: &[u8]) -> RarResult<String> {
     if header.len() < 32 || header[2] != FILE_HEAD {
-        return Err(RarError::Format(
-            "RAR4: file header block is malformed".into(),
-        ));
+        return Err(RarError::format("RAR4: file header block is malformed"));
     }
     let flags = u16::from_le_bytes([header[3], header[4]]);
     let name_start = 32 + if flags & FHD_LARGE != 0 { 8 } else { 0 };
     if name_start + 2 > header.len() {
-        return Err(RarError::Format(
-            "RAR4: file header is missing its name field".into(),
+        return Err(RarError::format(
+            "RAR4: file header is missing its name field",
         ));
     }
     let name_size = u16::from_le_bytes([header[26], header[27]]) as usize;
     let name_end = name_start + name_size;
     if name_end > header.len() {
-        return Err(RarError::Format(
-            "RAR4: file name extends past header".into(),
-        ));
+        return Err(RarError::format("RAR4: file name extends past header"));
     }
     Ok(crate::format::rar4::decode_file_name(
         &header[name_start..name_end],

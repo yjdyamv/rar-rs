@@ -52,7 +52,7 @@ const MAX_MATCH_CANDIDATES: usize = 256;
 // ── Error helper ───────────────────────────────────────────────────────────
 
 fn enc_err(msg: &'static str) -> RarError {
-    RarError::Format(format!("RAR 2.0 encoder: {msg}"))
+    RarError::format(format!("RAR 2.0 encoder: {msg}"))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

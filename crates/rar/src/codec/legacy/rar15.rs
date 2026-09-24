@@ -802,28 +802,29 @@ impl Rar15Decoder {
         target: u64,
         solid: bool,
     ) -> crate::error::RarResult<Vec<u8>> {
-        let target =
-            usize::try_from(target).map_err(|_| crate::error::RarError::LimitExceeded {
-                limit: u64::MAX,
-                context: "RAR 1.5 member is too large for this platform".into(),
-            })?;
+        let target = usize::try_from(target).map_err(|_| {
+            crate::error::RarError::limit_exceeded(
+                u64::MAX,
+                "RAR 1.5 member is too large for this platform",
+            )
+        })?;
         // Reserve fallibly: `target` is the member's declared size, so a tiny
         // hostile member claiming a multi-GiB output must surface an error
         // instead of aborting the process on allocation failure.
         let mut output = Vec::new();
-        output
-            .try_reserve_exact(target)
-            .map_err(|_| crate::error::RarError::LimitExceeded {
-                limit: target as u64,
-                context: "RAR 1.5 member output cannot be allocated".into(),
-            })?;
+        output.try_reserve_exact(target).map_err(|_| {
+            crate::error::RarError::limit_exceeded(
+                target as u64,
+                "RAR 1.5 member output cannot be allocated",
+            )
+        })?;
         self.decode_member_to(packed, target, solid, &mut output)
             .map_err(|error| match error {
                 Error::InvalidData(message) => {
-                    crate::error::RarError::Format(format!("RAR 1.5 stream: {message}"))
+                    crate::error::RarError::format(format!("RAR 1.5 stream: {message}"))
                 }
                 Error::NeedMoreInput => {
-                    crate::error::RarError::Format("RAR 1.5 bitstream is truncated".into())
+                    crate::error::RarError::format("RAR 1.5 bitstream is truncated")
                 }
             })?;
         Ok(output)

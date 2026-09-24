@@ -220,15 +220,15 @@ impl RarArchive {
     /// `parallel` feature; without it compression stays sequential.
     pub fn set_compression_threads(&mut self, threads: Option<usize>) -> RarResult<()> {
         if self.mode == Mode::Read {
-            return Err(RarError::InvalidState(
-                "compression threads can only be set while writing or appending".into(),
+            return Err(RarError::invalid_state(
+                "compression threads can only be set while writing or appending",
             ));
         }
         crate::options::validate_threads(threads)?;
         let write = self
             .write
             .as_mut()
-            .ok_or_else(|| RarError::InvalidState("write context is not available".into()))?;
+            .ok_or_else(|| RarError::invalid_state("write context is not available"))?;
         write.compression.threads = threads;
         Ok(())
     }
@@ -251,11 +251,11 @@ impl RarArchive {
         let encr = self
             .archive_encr
             .as_ref()
-            .ok_or_else(|| RarError::Format("no archive encryption params".into()))?;
+            .ok_or_else(|| RarError::format("no archive encryption params"))?;
         let password = self
             .password
             .as_deref()
-            .ok_or_else(|| RarError::Encrypted("no password set".into()))?;
+            .ok_or_else(|| RarError::encrypted("no password set"))?;
         let keys = encr.derive_keys(password)?;
         let key = keys.key;
         self.archive_keys = Some(keys);
@@ -427,20 +427,20 @@ impl RarArchive {
         dict_size_bytes: Option<u64>,
     ) -> RarResult<()> {
         if self.mode == Mode::Read {
-            return Err(RarError::InvalidState(
-                "dictionary can only be set while writing or appending".into(),
+            return Err(RarError::invalid_state(
+                "dictionary can only be set while writing or appending",
             ));
         }
         crate::options::validate_dictionary(dict_size_log, dict_size_bytes)?;
         if self.is_rar4() && dict_size_bytes.is_some() {
-            return Err(RarError::InvalidOption(
-                "RAR4 does not support byte-sized RAR7 dictionaries".into(),
+            return Err(RarError::invalid_option(
+                "RAR4 does not support byte-sized RAR7 dictionaries",
             ));
         }
         let write = self
             .write
             .as_mut()
-            .ok_or_else(|| RarError::InvalidState("write context is not available".into()))?;
+            .ok_or_else(|| RarError::invalid_state("write context is not available"))?;
         write.compression.dict_size_log = dict_size_log;
         write.compression.dict_size_bytes = dict_size_bytes;
         Ok(())
@@ -470,8 +470,8 @@ impl RarArchive {
     /// quick-open / recovery blocks.
     fn prepare_append(&mut self) -> RarResult<()> {
         if self.is_rar13() {
-            return Err(RarError::Unsupported(
-                "appending to RAR 1.3/1.4 archives is not supported".into(),
+            return Err(RarError::unsupported(
+                "appending to RAR 1.3/1.4 archives is not supported",
             ));
         }
         // Recover a multi-volume commit another process was killed in the
@@ -523,9 +523,8 @@ impl RarArchive {
             return Ok(());
         }
         if self.volume_paths.len() > 1 {
-            return Err(RarError::Unsupported(
-                "appending to multi-volume archives is not supported (the official rar refuses too)"
-                    .into(),
+            return Err(RarError::unsupported(
+                "appending to multi-volume archives is not supported (the official rar refuses too)",
             ));
         }
         let path = self.path.clone();
@@ -614,14 +613,13 @@ impl RarArchive {
     /// side opens it lazily per operation.
     pub(crate) fn lock(&mut self) -> RarResult<()> {
         if self.mode != Mode::Read {
-            return Err(RarError::Format(
-                "lock requires an archive opened for reading".into(),
+            return Err(RarError::format(
+                "lock requires an archive opened for reading",
             ));
         }
         if self.volume_paths.len() > 1 {
-            return Err(RarError::Unsupported(
-                "locking multi-volume archives is not supported (lock the first volume instead)"
-                    .into(),
+            return Err(RarError::unsupported(
+                "locking multi-volume archives is not supported (lock the first volume instead)",
             ));
         }
         if self.main_header_is_locked()? {
@@ -639,23 +637,23 @@ impl RarArchive {
         let data = &main_meta.raw.header_data;
         let mut offset = 0usize;
         let (_, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("block type: {e}")))?;
+            .map_err(|e| RarError::format(format!("block type: {e}")))?;
         offset += n;
         let (flags, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
+            .map_err(|e| RarError::format(format!("block flags: {e}")))?;
         offset += n;
         if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
             let (_, n) = vint::decode_from_slice(data, offset)
-                .map_err(|e| RarError::Format(format!("extra size: {e}")))?;
+                .map_err(|e| RarError::format(format!("extra size: {e}")))?;
             offset += n;
         }
         let (arch_flags, vint_len) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("archive flags: {e}")))?;
+            .map_err(|e| RarError::format(format!("archive flags: {e}")))?;
         let new_flags = arch_flags | ARCHIVE_FLAG_LOCKED;
         let new_vint = vint::encode(new_flags);
         if new_vint.len() != vint_len {
-            return Err(RarError::Unsupported(
-                "cannot lock: the archive flags field grows when locked".into(),
+            return Err(RarError::unsupported(
+                "cannot lock: the archive flags field grows when locked",
             ));
         }
         let mut body = main_meta.raw.header_data.clone();
@@ -690,8 +688,8 @@ impl RarArchive {
                 }
                 let file_len = reader.metadata().map_err(RarError::Io)?.len();
                 if file_len < main_end {
-                    return Err(RarError::Format(
-                        "archive tail lies past the end of the archive".into(),
+                    return Err(RarError::format(
+                        "archive tail lies past the end of the archive",
                     ));
                 }
                 reader.seek(SeekFrom::Start(main_end))?;
@@ -735,18 +733,18 @@ impl RarArchive {
         sink: Box<dyn ArchiveStream>,
     ) -> RarResult<Self> {
         if opts.volume_size.is_some() {
-            return Err(RarError::Unsupported(
-                "in-memory sinks are single-volume only".into(),
+            return Err(RarError::unsupported(
+                "in-memory sinks are single-volume only",
             ));
         }
         if opts.compression.is_rar13() {
-            return Err(RarError::Unsupported(
-                "in-memory sinks are not supported for RAR 1.3/1.4 archives".into(),
+            return Err(RarError::unsupported(
+                "in-memory sinks are not supported for RAR 1.3/1.4 archives",
             ));
         }
         if opts.recovery_volumes_percent.is_some() || opts.recovery_volume_count.is_some() {
-            return Err(RarError::Unsupported(
-                "recovery volumes require files on disk".into(),
+            return Err(RarError::unsupported(
+                "recovery volumes require files on disk",
             ));
         }
         let mut archive = Self::new_with_options(path, opts)?;

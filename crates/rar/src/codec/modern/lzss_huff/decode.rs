@@ -36,14 +36,14 @@ pub fn decode(
             },
         )?;
         if result.len() != unpacked_size as usize {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "decoded size mismatch: expected {unpacked_size}, got {}",
                 result.len()
             )));
         }
         return Ok(result);
     }
-    Err(RarError::Unsupported(format!(
+    Err(RarError::unsupported(format!(
         "unknown compression method: {method}"
     )))
 }

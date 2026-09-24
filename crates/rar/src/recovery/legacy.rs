@@ -102,7 +102,7 @@ fn scan_protect_impl(
     tolerant: bool,
 ) -> RarResult<Rar4ProtectScan> {
     let sig = find_bytes(bytes, RAR4_SIGNATURE, 8 * 1024 * 1024)
-        .ok_or_else(|| RarError::Format("not a RAR4 archive (signature not found)".into()))?;
+        .ok_or_else(|| RarError::format("not a RAR4 archive (signature not found)"))?;
     let mut stream = std::io::Cursor::new(bytes);
     let protect = scan_protect_stream(
         &mut stream,
@@ -129,7 +129,7 @@ pub(crate) fn scan_protect_file(
     let mut file = std::fs::File::open(path).map_err(RarError::Io)?;
     let file_len_u64 = file.metadata().map_err(RarError::Io)?.len();
     let file_len = usize::try_from(file_len_u64)
-        .map_err(|_| RarError::Format("RAR4: archive size overflows host address space".into()))?;
+        .map_err(|_| RarError::format("RAR4: archive size overflows host address space"))?;
     // The signature may sit behind an SFX stub, like the slice scanner.
     let probe_len = (8 * 1024 * 1024).min(file_len);
     let mut prefix = vec![0u8; probe_len];
@@ -143,7 +143,7 @@ pub(crate) fn scan_protect_file(
     }
     prefix.truncate(filled);
     let sig = find_bytes(&prefix, RAR4_SIGNATURE, probe_len)
-        .ok_or_else(|| RarError::Format("not a RAR4 archive (signature not found)".into()))?;
+        .ok_or_else(|| RarError::format("not a RAR4 archive (signature not found)"))?;
     file.seek(SeekFrom::Start((sig + RAR4_SIGNATURE.len()) as u64))
         .map_err(RarError::Io)?;
     let protect = scan_protect_stream(
@@ -218,7 +218,7 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
         let total = block.total_size as usize;
         if start + total > file_len {
             if !tolerant {
-                return Err(RarError::Format("RAR4: truncated block".into()));
+                return Err(RarError::format("RAR4: truncated block"));
             }
             // The size fields are unusable (a damaged header derailed the
             // walk): resync to the next valid block rather than giving up on
@@ -251,8 +251,8 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
             if u64::from(total_blocks) * 2 + u64::from(rec_sectors) * 512
                 != (data_end - data_start) as u64
             {
-                return Err(RarError::Format(
-                    "RAR4: recovery data size does not match header".into(),
+                return Err(RarError::format(
+                    "RAR4: recovery data size does not match header",
                 ));
             }
             protect = Some(Rar4Protect {
@@ -281,10 +281,10 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
                 // the very end of the header; the two four-byte fields that
                 // follow need their own bounds check.
                 let Some(rec_bytes) = header.get(tail + 8..tail + 12) else {
-                    return Err(RarError::Format("RAR4: recovery header truncated".into()));
+                    return Err(RarError::format("RAR4: recovery header truncated"));
                 };
                 let Some(total_bytes) = header.get(tail + 12..tail + 16) else {
-                    return Err(RarError::Format("RAR4: recovery header truncated".into()));
+                    return Err(RarError::format("RAR4: recovery header truncated"));
                 };
                 let rec_sectors = u32::from_le_bytes(rec_bytes.try_into().unwrap());
                 let total_blocks = u32::from_le_bytes(total_bytes.try_into().unwrap());
@@ -293,8 +293,8 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
                 if u64::from(total_blocks) * 2 + u64::from(rec_sectors) * 512
                     != (data_end - data_start) as u64
                 {
-                    return Err(RarError::Format(
-                        "RAR4: recovery data size does not match header".into(),
+                    return Err(RarError::format(
+                        "RAR4: recovery data size does not match header",
                     ));
                 }
                 protect = Some(Rar4Protect {
@@ -382,28 +382,26 @@ pub(crate) fn repair_protect_head(
     protect: &Rar4Protect,
 ) -> RarResult<(LegacyRepair, Option<Vec<u8>>)> {
     if protect.rec_sectors == 0 {
-        return Err(RarError::Format(
-            "RAR4: recovery record has no parity sectors".into(),
+        return Err(RarError::format(
+            "RAR4: recovery record has no parity sectors",
         ));
     }
     if &protect.mark != b"Protect!" && &protect.mark != b"Protect+" {
-        return Err(RarError::Format("RAR4: recovery mark is invalid".into()));
+        return Err(RarError::format("RAR4: recovery mark is invalid"));
     }
     if protect.data_end > bytes.len() {
-        return Err(RarError::Format("RAR4: protected range is invalid".into()));
+        return Err(RarError::format("RAR4: protected range is invalid"));
     }
     let total_blocks = protect.total_blocks as usize;
     let recovery = &bytes[protect.data_start..protect.data_end];
     let tag_len = total_blocks
         .checked_mul(2)
-        .ok_or_else(|| RarError::Format("RAR4: recovery tag size overflows".into()))?;
+        .ok_or_else(|| RarError::format("RAR4: recovery tag size overflows"))?;
     let parity_len = (protect.rec_sectors as usize)
         .checked_mul(512)
-        .ok_or_else(|| RarError::Format("RAR4: recovery parity size overflows".into()))?;
+        .ok_or_else(|| RarError::format("RAR4: recovery parity size overflows"))?;
     if recovery.len() != tag_len + parity_len {
-        return Err(RarError::Format(
-            "RAR4: recovery data size is invalid".into(),
-        ));
+        return Err(RarError::format("RAR4: recovery data size is invalid"));
     }
     let tags = &recovery[..tag_len];
     let parity = &recovery[tag_len..];
@@ -504,8 +502,8 @@ pub fn repair_legacy_archive_path_with_password(
     let bytes = std::fs::read(src).map_err(RarError::Io)?;
     let scan = scan_protect_tolerant(&bytes, password.map(str::as_bytes))?;
     let Some(protect) = scan.protect else {
-        return Err(RarError::Unsupported(
-            "archive has no legacy PROTECT_HEAD recovery record".into(),
+        return Err(RarError::unsupported(
+            "archive has no legacy PROTECT_HEAD recovery record",
         ));
     };
     let (report, rebuilt) = repair_protect_head(&bytes, scan.sfx_offset, &protect)?;
@@ -563,21 +561,21 @@ pub(crate) fn recovery_sector_count(prefix_len: usize, percent: u8) -> u32 {
 /// end-of-archive block.
 pub(crate) fn build_legacy_recovery_block(prefix: &[u8], rec_sectors: u32) -> RarResult<Vec<u8>> {
     if rec_sectors == 0 {
-        return Err(RarError::Format(
-            "RAR4: recovery record needs at least one parity sector".into(),
+        return Err(RarError::format(
+            "RAR4: recovery record needs at least one parity sector",
         ));
     }
     let total_blocks = prefix.len().div_ceil(512) as u32;
     if total_blocks == 0 {
-        return Err(RarError::Format(
-            "RAR4: recovery record over an empty archive".into(),
+        return Err(RarError::format(
+            "RAR4: recovery record over an empty archive",
         ));
     }
     // The parity is held in memory while it is built (like the prefix), so an
     // absurd `-rr<N>` count is rejected instead of overflowing the size math.
     let parity_len = (rec_sectors as usize)
         .checked_mul(512)
-        .ok_or_else(|| RarError::Format("RAR4: recovery parity size overflows".into()))?;
+        .ok_or_else(|| RarError::format("RAR4: recovery parity size overflows"))?;
     // Sector tags (little-endian u16 each): every declared sector, with a
     // partial tail zero-padded for its tag CRC, matching the reader.
     let mut tags = Vec::with_capacity(total_blocks as usize * 2);

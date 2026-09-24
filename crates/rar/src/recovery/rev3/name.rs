@@ -297,11 +297,11 @@ pub(crate) fn canonical_recovery_names(
     let name = first
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| RarError::Format(format!("{}: not a recovery path", first.display())))?;
+        .ok_or_else(|| RarError::format(format!("{}: not a recovery path", first.display())))?;
     let candidates = rev_name_candidates(name);
     let parsed = candidates
         .first()
-        .ok_or_else(|| RarError::Format(format!("{name}: not a recovery-volume name")))?;
+        .ok_or_else(|| RarError::format(format!("{name}: not a recovery-volume name")))?;
     // RAR5 recovery volumes (`REV5` signature) use the `.partN.rev` scheme
     // with the data set's padding; the legacy codec's `.rev` layout is only
     // chosen for a real legacy set.
@@ -317,7 +317,7 @@ pub(crate) fn canonical_recovery_names(
     let trailer = trailer_style(first);
     let legacy_name = candidates.iter().find_map(|candidate| candidate.meta);
     if !trailer && legacy_name.is_none() {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{name}: legacy recovery name without counts"
         )));
     }

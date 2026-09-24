@@ -38,9 +38,8 @@ use crate::vint;
 /// against a future regression.
 fn ensure_compatible_stream_filters(delta_used: bool, x86_used: bool) -> RarResult<()> {
     if delta_used && x86_used {
-        return Err(RarError::InvalidOption(
-            "cannot force the delta and x86 filters on the same member; choose one filter mode"
-                .into(),
+        return Err(RarError::invalid_option(
+            "cannot force the delta and x86 filters on the same member; choose one filter mode",
         ));
     }
     Ok(())

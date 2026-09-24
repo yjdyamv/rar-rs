@@ -31,7 +31,7 @@ fn solid_repack_version(archive: &RarArchive) -> RarResult<crate::version::Archi
     let mut target: Option<LegacyCodec> = None;
     for entry in archive.entries.iter().filter(|entry| !entry.is_dir()) {
         let codec = LegacyCodec::from_unp_ver(entry.header.unp_ver).ok_or_else(|| {
-            RarError::Unsupported(format!(
+            RarError::unsupported(format!(
                 "repacking solid archives with unp_ver {} members is not supported",
                 entry.header.unp_ver
             ))
@@ -40,9 +40,8 @@ fn solid_repack_version(archive: &RarArchive) -> RarResult<crate::version::Archi
             None => target = Some(codec),
             Some(existing) if existing == codec => {}
             Some(_) => {
-                return Err(RarError::Unsupported(
-                    "repacking solid archives with mixed member generations is not supported"
-                        .into(),
+                return Err(RarError::unsupported(
+                    "repacking solid archives with mixed member generations is not supported",
                 ));
             }
         }
@@ -100,8 +99,8 @@ pub(crate) fn repack_solid_archive(
 ) -> RarResult<EditSummary> {
     for idx in rename_map.keys() {
         if deleted[*idx] {
-            return Err(RarError::InvalidOption(
-                "cannot rename a member that the same edit deletes".into(),
+            return Err(RarError::invalid_option(
+                "cannot rename a member that the same edit deletes",
             ));
         }
     }
@@ -166,8 +165,8 @@ pub(crate) fn repack_solid_archive(
                 Some(percent as u8)
             }
             Some(_) => {
-                return Err(RarError::Unsupported(
-                    "RAR4: archives with a PROTECT_HEAD recovery record cannot be repacked in place; recreate the archive".into(),
+                return Err(RarError::unsupported(
+                    "RAR4: archives with a PROTECT_HEAD recovery record cannot be repacked in place; recreate the archive",
                 ));
             }
             None => None,
@@ -227,7 +226,7 @@ pub(crate) fn repack_solid_archive(
                     ..Default::default()
                 },
             )
-            .map_err(|e| RarError::Format(format!("repack: create staged archive: {e:?}")))?;
+            .map_err(|e| RarError::format(format!("repack: create staged archive: {e:?}")))?;
             // The comment is emitted by the writer (it must precede every
             // member and has to be header-encrypted on a `-hp` archive).
             crate::format::rar4::write::member::set_rar4_writer_comment(
@@ -284,7 +283,7 @@ pub(crate) fn repack_solid_archive(
                     Some(pw) => crate::archive::RarArchive::open_with_password(&tmp_path, pw),
                     None => crate::archive::RarArchive::open(&tmp_path),
                 }
-                .map_err(|e| RarError::Format(format!("repack: reopen staged archive: {e:?}")))?;
+                .map_err(|e| RarError::format(format!("repack: reopen staged archive: {e:?}")))?;
                 edit_rar4(&mut staged, &[], &[], None, Some(percent), None, &[])?
             }
             None => match force_sectors {
@@ -294,7 +293,7 @@ pub(crate) fn repack_solid_archive(
                         None => crate::archive::RarArchive::open(&tmp_path),
                     }
                     .map_err(|e| {
-                        RarError::Format(format!("repack: reopen staged archive: {e:?}"))
+                        RarError::format(format!("repack: reopen staged archive: {e:?}"))
                     })?;
                     edit_rar4(&mut staged, &[], &[], None, None, Some(count), &[])?
                 }

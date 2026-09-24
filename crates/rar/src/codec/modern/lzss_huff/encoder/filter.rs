@@ -57,13 +57,13 @@ fn validate_filter_specs(data_len: usize, filters: &[FilterSpec]) -> RarResult<(
     let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(filters.len());
     for f in filters {
         if !is_supported_filter_type(f.filter_type) {
-            return Err(RarError::InvalidOption(format!(
+            return Err(RarError::invalid_option(format!(
                 "unsupported RAR5 filter type {}",
                 f.filter_type
             )));
         }
         if f.block_length == 0 {
-            return Err(RarError::InvalidOption(format!(
+            return Err(RarError::invalid_option(format!(
                 "RAR5 filter region at {} has zero length",
                 f.block_start
             )));
@@ -71,7 +71,7 @@ fn validate_filter_specs(data_len: usize, filters: &[FilterSpec]) -> RarResult<(
         let start = u64::from(f.block_start);
         let end = start + u64::from(f.block_length);
         if end > data_len {
-            return Err(RarError::InvalidOption(format!(
+            return Err(RarError::invalid_option(format!(
                 "RAR5 filter region {start}..{end} exceeds member size {data_len}"
             )));
         }
@@ -80,7 +80,7 @@ fn validate_filter_specs(data_len: usize, filters: &[FilterSpec]) -> RarResult<(
     ranges.sort_unstable();
     for pair in ranges.windows(2) {
         if pair[1].0 < pair[0].1 {
-            return Err(RarError::InvalidOption(format!(
+            return Err(RarError::invalid_option(format!(
                 "overlapping RAR5 filter regions {}..{} and {}..{}",
                 pair[0].0, pair[0].1, pair[1].0, pair[1].1
             )));

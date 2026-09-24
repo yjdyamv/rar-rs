@@ -82,8 +82,8 @@ fn read_code_lengths(
             i += 1;
         } else if sym < 18 {
             if i == 0 {
-                return Err(RarError::Format(
-                    "run-length repeat with no previous length".into(),
+                return Err(RarError::format(
+                    "run-length repeat with no previous length",
                 ));
             }
             let repeat = if sym == 16 {

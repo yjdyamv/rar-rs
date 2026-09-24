@@ -68,7 +68,7 @@ const ENCR_FLAGS_KNOWN: u64 = (ENCR_FLAG_CHECKSUM | ENCR_FLAG_HASH_MAC) as u64;
 /// Reject an encryption-record `flags` value with undefined bits set.
 pub(crate) fn check_encr_flags(flags: u64) -> RarResult<()> {
     if flags & !ENCR_FLAGS_KNOWN != 0 {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "unsupported encryption flags {flags:#x} (known bits {ENCR_FLAGS_KNOWN:#x})"
         )));
     }
@@ -165,7 +165,7 @@ pub fn derive_keys(
     strength: u8,
 ) -> RarResult<DerivedKeys> {
     if strength > MAX_KDF_COUNT_LOG {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "KDF strength {strength} exceeds maximum {MAX_KDF_COUNT_LOG}"
         )));
     }
@@ -261,7 +261,7 @@ impl Aes256Cbc {
 
     fn encrypt_in_place(&mut self, data: &mut [u8]) -> RarResult<()> {
         if !data.len().is_multiple_of(16) {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "plaintext length {} is not a multiple of 16",
                 data.len()
             )));
@@ -278,7 +278,7 @@ impl Aes256Cbc {
 
     fn decrypt_in_place(&mut self, data: &mut [u8]) -> RarResult<()> {
         if !data.len().is_multiple_of(16) {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "ciphertext length {} is not a multiple of 16",
                 data.len()
             )));
@@ -343,7 +343,7 @@ impl Aes256CbcStream {
 /// zero-fill padding; caller should truncate to the known unpacked size.
 pub fn decrypt_data(ciphertext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> RarResult<Vec<u8>> {
     if !ciphertext.len().is_multiple_of(16) {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "ciphertext length {} is not a multiple of 16",
             ciphertext.len()
         )));
@@ -352,7 +352,7 @@ pub fn decrypt_data(ciphertext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> RarResu
     let mut cipher = Aes256Cbc::new(key, iv);
     cipher
         .decrypt_in_place(&mut buf)
-        .map_err(|e| RarError::Format(format!("AES decrypt error: {e}")))?;
+        .map_err(|e| RarError::format(format!("AES decrypt error: {e}")))?;
     Ok(buf)
 }
 
@@ -383,38 +383,38 @@ impl EncryptionParams {
         let mut offset = 0;
 
         let (version, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("encr version: {e}")))?;
+            .map_err(|e| RarError::format(format!("encr version: {e}")))?;
         offset += n;
         if version > u64::from(ENCR_VERSION_AES256) {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "unsupported encryption version {version}"
             )));
         }
         let (flags, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("encr flags: {e}")))?;
+            .map_err(|e| RarError::format(format!("encr flags: {e}")))?;
         offset += n;
         check_encr_flags(flags)?;
 
         if offset >= data.len() {
-            return Err(RarError::Format("truncated encryption record".into()));
+            return Err(RarError::format("truncated encryption record"));
         }
         let strength = data[offset];
         offset += 1;
         if strength > MAX_KDF_COUNT_LOG {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "encryption strength {strength} exceeds maximum {MAX_KDF_COUNT_LOG}"
             )));
         }
 
         if offset + ENCR_SALT_SIZE > data.len() {
-            return Err(RarError::Format("truncated salt".into()));
+            return Err(RarError::format("truncated salt"));
         }
         let mut salt = [0u8; ENCR_SALT_SIZE];
         salt.copy_from_slice(&data[offset..offset + ENCR_SALT_SIZE]);
         offset += ENCR_SALT_SIZE;
 
         if offset + ENCR_IV_SIZE > data.len() {
-            return Err(RarError::Format("truncated IV".into()));
+            return Err(RarError::format("truncated IV"));
         }
         let mut iv = [0u8; ENCR_IV_SIZE];
         iv.copy_from_slice(&data[offset..offset + ENCR_IV_SIZE]);
@@ -425,8 +425,8 @@ impl EncryptionParams {
             // one as "no check" would make `verify_password` accept any
             // password for the member.
             if data.len().saturating_sub(offset) < 12 {
-                return Err(RarError::Format(
-                    "truncated encryption password check value".into(),
+                return Err(RarError::format(
+                    "truncated encryption password check value",
                 ));
             }
             let mut ck = [0u8; 12];
@@ -676,7 +676,7 @@ pub fn parse_encryption_extra(extra_data: &[u8]) -> RarResult<Option<EncryptionP
     let mut offset = 0;
     while offset < extra_data.len() {
         let (rec_size, n) = vint::decode_from_slice(extra_data, offset)
-            .map_err(|e| RarError::Format(format!("extra record size: {e}")))?;
+            .map_err(|e| RarError::format(format!("extra record size: {e}")))?;
         offset += n;
 
         // `rec_size` is attacker-controlled (a vint can decode to u64::MAX).
@@ -691,13 +691,13 @@ pub fn parse_encryption_extra(extra_data: &[u8]) -> RarResult<Option<EncryptionP
         };
 
         let (rec_type, tn) = vint::decode_from_slice(extra_data, offset)
-            .map_err(|e| RarError::Format(format!("extra record type: {e}")))?;
+            .map_err(|e| RarError::format(format!("extra record type: {e}")))?;
 
         if rec_type == EXTRA_FILE_ENCRYPTION {
             let body_start = offset
                 .checked_add(tn)
                 .filter(|start| *start <= rec_end)
-                .ok_or_else(|| RarError::Format("encryption record is malformed".into()))?;
+                .ok_or_else(|| RarError::format("encryption record is malformed"))?;
             let params = EncryptionParams::from_extra_bytes(&extra_data[body_start..rec_end])?;
             return Ok(Some(params));
         }

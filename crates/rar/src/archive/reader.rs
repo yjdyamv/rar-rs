@@ -24,7 +24,7 @@ pub(crate) fn allocate_catalog_token() -> RarResult<u64> {
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             (current != 0).then(|| current.checked_add(1).unwrap_or(0))
         })
-        .map_err(|_| RarError::InvalidState("archive reader ID space is exhausted".into()))
+        .map_err(|_| RarError::invalid_state("archive reader ID space is exhausted"))
 }
 
 /// Controls how an [`ArchiveReader`] discovers archive entries while opening.
@@ -469,15 +469,12 @@ impl ArchiveReader {
     /// return [`RarError::AmbiguousMember`] with the number of matches.
     pub fn unique_entry(&self, name: &str) -> RarResult<EntryId> {
         let mut matches = self.entries_named(name);
-        let first = matches.next().ok_or_else(|| RarError::MemberNotFound {
-            name: name.to_string(),
-        })?;
+        let first = matches
+            .next()
+            .ok_or_else(|| RarError::member_not_found(name.to_string()))?;
         let additional = matches.count();
         if additional != 0 {
-            return Err(RarError::AmbiguousMember {
-                name: name.to_string(),
-                matches: additional + 1,
-            });
+            return Err(RarError::ambiguous_member(name.to_string(), additional + 1));
         }
         Ok(first.id())
     }
@@ -553,21 +550,21 @@ impl ArchiveReader {
         let mut total_unpacked = 0u64;
         for entry in self.entries().filter(|entry| !entry.is_dir()) {
             total_unpacked = total_unpacked.checked_add(entry.size()).ok_or_else(|| {
-                RarError::LimitExceeded {
-                    limit: options.max_total_unpacked_bytes.unwrap_or(u64::MAX),
-                    context: "total unpacked size overflow while verifying archive".into(),
-                }
+                RarError::limit_exceeded(
+                    options.max_total_unpacked_bytes.unwrap_or(u64::MAX),
+                    "total unpacked size overflow while verifying archive",
+                )
             })?;
             if let Some(limit) = options.max_total_unpacked_bytes
                 && total_unpacked > limit
             {
-                return Err(RarError::LimitExceeded {
+                return Err(RarError::limit_exceeded(
                     limit,
-                    context: format!(
+                    format!(
                         "total unpacked size {total_unpacked} exceeds limit while verifying {}",
                         entry.name()
                     ),
-                });
+                ));
             }
             ids.push(entry.id());
         }
@@ -584,21 +581,21 @@ impl ArchiveReader {
         for &id in ids {
             let entry = self.entry(id)?;
             total_unpacked = total_unpacked.checked_add(entry.size()).ok_or_else(|| {
-                RarError::LimitExceeded {
-                    limit: options.max_total_unpacked_bytes.unwrap_or(u64::MAX),
-                    context: "total unpacked size overflow while verifying archive".into(),
-                }
+                RarError::limit_exceeded(
+                    options.max_total_unpacked_bytes.unwrap_or(u64::MAX),
+                    "total unpacked size overflow while verifying archive",
+                )
             })?;
             if let Some(limit) = options.max_total_unpacked_bytes
                 && total_unpacked > limit
             {
-                return Err(RarError::LimitExceeded {
+                return Err(RarError::limit_exceeded(
                     limit,
-                    context: format!(
+                    format!(
                         "total unpacked size {total_unpacked} exceeds limit while verifying {}",
                         entry.name()
                     ),
-                });
+                ));
             }
         }
 
@@ -665,21 +662,21 @@ impl ArchiveReader {
         for &id in ids {
             let entry = self.entry(id)?;
             total_unpacked = total_unpacked.checked_add(entry.size()).ok_or_else(|| {
-                RarError::LimitExceeded {
-                    limit: options.max_total_unpacked_bytes.unwrap_or(u64::MAX),
-                    context: "total unpacked size overflow".into(),
-                }
+                RarError::limit_exceeded(
+                    options.max_total_unpacked_bytes.unwrap_or(u64::MAX),
+                    "total unpacked size overflow",
+                )
             })?;
             if let Some(limit) = options.max_total_unpacked_bytes
                 && total_unpacked > limit
             {
-                return Err(RarError::LimitExceeded {
+                return Err(RarError::limit_exceeded(
                     limit,
-                    context: format!(
+                    format!(
                         "total unpacked size {total_unpacked} exceeds limit while extracting {}",
                         entry.name()
                     ),
-                });
+                ));
             }
         }
 

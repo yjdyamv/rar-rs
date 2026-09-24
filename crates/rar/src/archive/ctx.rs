@@ -98,7 +98,7 @@ impl CatalogOps for RarArchive {
 impl StreamOps for RarArchive {
     fn stream_mut(&mut self) -> RarResult<&mut Box<dyn ArchiveStream>> {
         self.stream.as_mut().ok_or_else(|| {
-            crate::error::RarError::InvalidState("archive has no underlying stream".into())
+            crate::error::RarError::invalid_state("archive has no underlying stream")
         })
     }
 

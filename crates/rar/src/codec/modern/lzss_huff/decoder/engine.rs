@@ -119,7 +119,7 @@ pub(super) fn checked_dict_size(
         Some(bytes) => bytes,
         None => {
             if dict_size_log > 15 {
-                return Err(RarError::Format(format!(
+                return Err(RarError::format(format!(
                     "dictionary size log {dict_size_log} exceeds supported maximum 15"
                 )));
             }
@@ -127,12 +127,12 @@ pub(super) fn checked_dict_size(
         }
     };
     let bytes_usize = usize::try_from(bytes).map_err(|_| {
-        RarError::Format(format!(
+        RarError::format(format!(
             "dictionary size {bytes} overflows host address space"
         ))
     })?;
     bytes_usize.checked_next_power_of_two().ok_or_else(|| {
-        RarError::Format(format!(
+        RarError::format(format!(
             "dictionary size {bytes} overflows host address space"
         ))
     })
@@ -170,7 +170,7 @@ fn run_engine(
                 // bytes instead of failing like unrar/libarchive.
                 let max_dist = window.total_written().min(window.capacity() as u64);
                 if dist == 0 || dist > max_dist {
-                    return Err(RarError::Format(format!(
+                    return Err(RarError::format(format!(
                         "match distance {dist} exceeds the {max_dist}-byte window"
                     )));
                 }
@@ -205,18 +205,14 @@ fn run_engine(
 
     // Any filter whose region was never produced is malformed.
     if pending_filters.iter().any(|f| !f.applied) {
-        return Err(RarError::Format(
-            "unapplied RAR5 filter at end of stream".into(),
-        ));
+        return Err(RarError::format("unapplied RAR5 filter at end of stream"));
     }
     if sink.staging_len() != 0 {
-        return Err(RarError::Format(
-            "internal streaming decode staging error".into(),
-        ));
+        return Err(RarError::format("internal streaming decode staging error"));
     }
     let produced = written - output_start;
     if produced != unpacked_size {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "decompressed size mismatch: expected {unpacked_size}, got {produced}"
         )));
     }
@@ -258,7 +254,7 @@ impl<'a> OutputSink<'a> {
         }
         let bytes = window.get_output(from, (to - from) as usize);
         if self.staging_len() + bytes.len() > MAX_STREAMING_FILTER_BUFFER as usize {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "filtered output region exceeds streaming buffer limit {}",
                 MAX_STREAMING_FILTER_BUFFER
             )));
@@ -280,9 +276,7 @@ impl<'a> OutputSink<'a> {
             // index `consumed`, not 0.
             let base = self.consumed;
             if base + end_off > self.staging.len() {
-                return Err(RarError::Format(
-                    "filter region out of staging bounds".into(),
-                ));
+                return Err(RarError::format("filter region out of staging bounds"));
             }
             let region = &mut self.staging[base + start_off..base + end_off];
             // The E8/ARM inverse transforms read a file-relative position
@@ -297,7 +291,7 @@ impl<'a> OutputSink<'a> {
                 filt.block_start - self.member_start,
             )?;
             if filtered.len() != region.len() {
-                return Err(RarError::Format("RAR5 filter changed output length".into()));
+                return Err(RarError::format("RAR5 filter changed output length"));
             }
             region.copy_from_slice(&filtered);
             filt.applied = true;
@@ -315,7 +309,7 @@ impl<'a> OutputSink<'a> {
         let drain_to = earliest_filter.min(written);
         let n = (drain_to - self.staging_start) as usize;
         if n > self.staging_len() {
-            return Err(RarError::Format("internal drain beyond staging".into()));
+            return Err(RarError::format("internal drain beyond staging"));
         }
         if n > 0 {
             self.writer

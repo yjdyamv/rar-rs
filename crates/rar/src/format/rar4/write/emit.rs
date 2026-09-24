@@ -153,7 +153,7 @@ pub(super) fn emit_rar4_segment(
     let (header_bytes, header_on_disk) = if header_encryption {
         let password = password
             .as_deref()
-            .ok_or_else(|| RarError::Encrypted("header encryption requires a password".into()))?;
+            .ok_or_else(|| RarError::encrypted("header encryption requires a password"))?;
         crate::format::rar4::write::encrypt_block_header(&hdr, password)?
     } else {
         (hdr.clone(), hdr.len() as u64)
@@ -174,9 +174,9 @@ pub(super) fn emit_rar4_segment(
     {
         let block = build_file_comment_block(comment);
         let block_bytes = if header_encryption {
-            let password = password.as_deref().ok_or_else(|| {
-                RarError::Encrypted("header encryption requires a password".into())
-            })?;
+            let password = password
+                .as_deref()
+                .ok_or_else(|| RarError::encrypted("header encryption requires a password"))?;
             crate::format::rar4::write::encrypt_block_header(&block, password)?.0
         } else {
             block
@@ -317,7 +317,7 @@ pub(super) fn emit_rar4_split<'a>(
                 break;
             }
             if rolled {
-                return Err(RarError::InvalidOption(format!(
+                return Err(RarError::invalid_option(format!(
                     "volume size {volume_size} is too small for a RAR4 member header"
                 )));
             }

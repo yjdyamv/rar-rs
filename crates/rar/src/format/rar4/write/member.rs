@@ -252,7 +252,7 @@ pub(super) fn emit_pending_rar4_comment(cx: &mut dyn Engine) -> RarResult<()> {
     if header_encryption {
         let password = password
             .as_deref()
-            .ok_or_else(|| RarError::Encrypted("header encryption requires a password".into()))?;
+            .ok_or_else(|| RarError::encrypted("header encryption requires a password"))?;
         let (ciphertext, on_disk) =
             crate::format::rar4::write::encrypt_block_header(&block[..CMT_HEAD], password)?;
         stream.write_all(&ciphertext)?;
@@ -539,7 +539,7 @@ pub(crate) fn write_rar4_dir_entry(
                 break;
             }
             if rolled {
-                return Err(RarError::InvalidOption(format!(
+                return Err(RarError::invalid_option(format!(
                     "volume size {volume_size} is too small for a RAR4 directory header"
                 )));
             }

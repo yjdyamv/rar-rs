@@ -20,14 +20,14 @@ pub(crate) trait Rar4BlockCipher {
 impl Rar4BlockCipher for crypto::Rar30Cipher {
     fn encrypt_blocks(&mut self, block: &mut [u8]) -> RarResult<()> {
         self.encrypt_in_place(block)
-            .map_err(|e| RarError::Format(format!("RAR4 member (RAR29) encrypt: {e:?}")))
+            .map_err(|e| RarError::format(format!("RAR4 member (RAR29) encrypt: {e:?}")))
     }
 }
 
 impl Rar4BlockCipher for crypto::Rar20Cipher {
     fn encrypt_blocks(&mut self, block: &mut [u8]) -> RarResult<()> {
         self.encrypt_in_place(block)
-            .map_err(|e| RarError::Format(format!("RAR4 member (RAR20) encrypt: {e}")))
+            .map_err(|e| RarError::format(format!("RAR4 member (RAR20) encrypt: {e}")))
     }
 }
 
@@ -149,7 +149,7 @@ impl Rar4RangeEmitter for Rar15RangeEmitter {
         out: &mut Vec<u8>,
     ) -> RarResult<()> {
         if start < self.position {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "RAR4 member (RAR15) cipher ranges must be ascending: {start} after {}",
                 self.position
             )));

@@ -28,7 +28,7 @@ pub(super) fn encode_rar4_member(
     level: u8,
 ) -> RarResult<(Vec<u8>, u8)> {
     let Some(codec) = LegacyCodec::from_unp_ver(cx.write_ctx().solid.rar4_unp_ver) else {
-        return Err(RarError::Unsupported(format!(
+        return Err(RarError::unsupported(format!(
             "RAR4 write dispatch: unp_ver {} has no encoder",
             cx.write_ctx().solid.rar4_unp_ver
         )));
@@ -91,22 +91,22 @@ pub(super) fn rar4_member_encrypt(
             packed.resize(packed.len() + pad, 0);
             crate::crypto::Rar20Cipher::new(pw.as_bytes())
                 .encrypt_in_place(packed)
-                .map_err(|e| RarError::Format(format!("RAR4 member (RAR20) encrypt: {e}")))?;
+                .map_err(|e| RarError::format(format!("RAR4 member (RAR20) encrypt: {e}")))?;
             Ok(None)
         }
         Some(LegacyCodec::Rar29) => {
             let mut salt = [0u8; 8];
             rand::fill(&mut salt);
             let mut cipher = crate::crypto::Rar30Cipher::new(pw.as_bytes(), Some(salt))
-                .map_err(|e| RarError::Format(format!("RAR4 member key setup: {e:?}")))?;
+                .map_err(|e| RarError::format(format!("RAR4 member key setup: {e:?}")))?;
             let pad = (16 - packed.len() % 16) % 16;
             packed.resize(packed.len() + pad, 0);
             cipher
                 .encrypt_in_place(packed)
-                .map_err(|e| RarError::Format(format!("RAR4 member encrypt: {e:?}")))?;
+                .map_err(|e| RarError::format(format!("RAR4 member encrypt: {e:?}")))?;
             Ok(Some(salt))
         }
-        None => Err(RarError::Unsupported(format!(
+        None => Err(RarError::unsupported(format!(
             "RAR4 write encryption: unp_ver {} has no cipher",
             cx.write_ctx().solid.rar4_unp_ver
         ))),

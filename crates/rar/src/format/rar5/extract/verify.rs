@@ -53,7 +53,7 @@ pub(crate) fn verify_integrity_for(
         let mut actual = crc;
         if uses_mac {
             let keys = keys.ok_or_else(|| {
-                RarError::Encrypted(format!(
+                RarError::encrypted(format!(
                     "{}: missing derived keys for MAC verification",
                     hdr.name
                 ))
@@ -61,18 +61,14 @@ pub(crate) fn verify_integrity_for(
             actual = keys.mac_crc32(actual);
         }
         if actual != expected {
-            return Err(RarError::Crc {
-                expected,
-                actual,
-                context: hdr.name.clone(),
-            });
+            return Err(RarError::crc(expected, actual, hdr.name.clone()));
         }
     }
 
     if let (Some(expected), Some(actual)) = (hdr.hash_value, blake) {
         let actual = if uses_mac {
             let keys = keys.ok_or_else(|| {
-                RarError::Encrypted(format!(
+                RarError::encrypted(format!(
                     "{}: missing derived keys for hash MAC verification",
                     hdr.name
                 ))
@@ -82,11 +78,7 @@ pub(crate) fn verify_integrity_for(
             actual
         };
         if !crypto::constant_time_eq(&expected, &actual) {
-            return Err(RarError::HashMismatch {
-                expected,
-                actual,
-                context: hdr.name.clone(),
-            });
+            return Err(RarError::hash_mismatch(expected, actual, hdr.name.clone()));
         }
     }
     Ok(())

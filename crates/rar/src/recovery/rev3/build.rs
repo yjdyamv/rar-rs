@@ -34,12 +34,12 @@ pub(super) fn build_recovery_volumes_for_set_chunked(
 ) -> RarResult<Vec<PathBuf>> {
     let nd = volume_paths.len();
     if nd < 2 {
-        return Err(RarError::InvalidOption(
-            "recovery volumes require a multi-volume archive".into(),
+        return Err(RarError::invalid_option(
+            "recovery volumes require a multi-volume archive",
         ));
     }
     if nd + rec_count > MAX_CODEWORD {
-        return Err(RarError::InvalidOption(format!(
+        return Err(RarError::invalid_option(format!(
             "legacy recovery volumes support at most {MAX_CODEWORD} data + recovery volumes"
         )));
     }
@@ -48,8 +48,8 @@ pub(super) fn build_recovery_volumes_for_set_chunked(
     let (parent, layout, format, sizes) = recovery_name_layout(volume_paths)?;
     let shard_len = *sizes.iter().max().unwrap_or(&0);
     if shard_len < (TRAILER_LEN + 1) as u64 {
-        return Err(RarError::Format(
-            "volumes are too small for recovery volumes".into(),
+        return Err(RarError::format(
+            "volumes are too small for recovery volumes",
         ));
     }
     let protected = match format {

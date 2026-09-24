@@ -698,7 +698,7 @@ impl Task for DeleteEntriesTask {
           .entries_named(name)
           .map(|entry| entry.id())
           .find(|id| !ids.contains(id))
-          .ok_or_else(|| to_napi_error(rar_rs::RarError::MemberNotFound { name: name.clone() }))?;
+          .ok_or_else(|| to_napi_error(rar_rs::RarError::member_not_found(name.clone())))?;
         ids.push(id);
       }
       let progress = self.progress.take();
@@ -969,11 +969,7 @@ impl Task for RenameEntriesTask {
             entry.name().trim_end_matches('/') == from_norm && !chosen.contains(&entry.id())
           })
           .map(|entry| entry.id())
-          .ok_or_else(|| {
-            to_napi_error(rar_rs::RarError::MemberNotFound {
-              name: pair.from.clone(),
-            })
-          })?;
+          .ok_or_else(|| to_napi_error(rar_rs::RarError::member_not_found(pair.from.clone())))?;
         chosen.push(id);
         ids.push((id, pair.to.clone()));
       }

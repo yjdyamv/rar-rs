@@ -78,14 +78,12 @@ pub(crate) fn parse_volume(
     let mut main = [0u8; MAIN_HEAD_SIZE];
     stream.read_exact(&mut main).map_err(RarError::Io)?;
     if &main[..RAR13_SIGNATURE.len()] != RAR13_SIGNATURE {
-        return Err(RarError::Format(
-            "RAR 1.3: volume signature mismatch".into(),
-        ));
+        return Err(RarError::format("RAR 1.3: volume signature mismatch"));
     }
     let head_size = usize::from(u16::from_le_bytes([main[4], main[5]]));
     let flags = main[6];
     if head_size < MAIN_HEAD_SIZE || offset + head_size as u64 > file_len {
-        return Err(RarError::Format("RAR 1.3: main header is truncated".into()));
+        return Err(RarError::format("RAR 1.3: main header is truncated"));
     }
     let mut extra = vec![0u8; head_size - MAIN_HEAD_SIZE];
     stream.read_exact(&mut extra).map_err(RarError::Io)?;
@@ -109,8 +107,8 @@ pub(crate) fn parse_volume(
 
         let minimum_size = FILE_HEAD_BASE_SIZE + name_size;
         if head_size < minimum_size || pos + head_size as u64 > file_len {
-            return Err(RarError::Format(
-                "RAR 1.3: file header is truncated or shorter than its name".into(),
+            return Err(RarError::format(
+                "RAR 1.3: file header is truncated or shorter than its name",
             ));
         }
         let mut tail = vec![0u8; head_size - FILE_HEAD_BASE_SIZE];
@@ -121,10 +119,10 @@ pub(crate) fn parse_volume(
         let data_start = pos + head_size as u64;
         let data_end = data_start
             .checked_add(u64::from(pack_size))
-            .ok_or_else(|| RarError::Format("RAR 1.3: member data size overflows".into()))?;
+            .ok_or_else(|| RarError::format("RAR 1.3: member data size overflows"))?;
         if data_end > file_len {
-            return Err(RarError::Format(
-                "RAR 1.3: member data extends past the volume".into(),
+            return Err(RarError::format(
+                "RAR 1.3: member data extends past the volume",
             ));
         }
         pos = data_end;
@@ -194,44 +192,44 @@ fn archive_comment(flags: u8, extra: &[u8]) -> RarResult<Option<Vec<u8>>> {
     let length = usize::from(u16::from_le_bytes(
         extra
             .get(0..2)
-            .ok_or_else(|| RarError::Format("RAR 1.3: comment size is missing".into()))?
+            .ok_or_else(|| RarError::format("RAR 1.3: comment size is missing"))?
             .try_into()
             .expect("fixed slice"),
     ));
     if flags & MHD_PACK_COMMENT != 0 {
         if length < 2 {
-            return Err(RarError::Format(
-                "RAR 1.3: packed comment is shorter than its size field".into(),
+            return Err(RarError::format(
+                "RAR 1.3: packed comment is shorter than its size field",
             ));
         }
         let unpacked_len = usize::from(u16::from_le_bytes(
             extra
                 .get(2..4)
-                .ok_or_else(|| RarError::Format("RAR 1.3: packed comment is truncated".into()))?
+                .ok_or_else(|| RarError::format("RAR 1.3: packed comment is truncated"))?
                 .try_into()
                 .expect("fixed slice"),
         ));
         let packed_len = length - 2;
         let packed_end = 4usize
             .checked_add(packed_len)
-            .ok_or_else(|| RarError::Format("RAR 1.3: comment size overflows".into()))?;
+            .ok_or_else(|| RarError::format("RAR 1.3: comment size overflows"))?;
         let packed = extra
             .get(4..packed_end)
-            .ok_or_else(|| RarError::Format("RAR 1.3: packed comment is truncated".into()))?;
+            .ok_or_else(|| RarError::format("RAR 1.3: packed comment is truncated"))?;
         let mut packed = packed.to_vec();
         crate::crypto::Rar13Cipher::new_comment().decrypt_in_place(&mut packed);
         let decoded = crate::codec::legacy::rar15::Rar15Decoder::new()
             .decode_member(&packed, unpacked_len as u64, false)
-            .map_err(|error| RarError::Format(format!("RAR 1.3 packed comment: {error:?}")))?;
+            .map_err(|error| RarError::format(format!("RAR 1.3 packed comment: {error:?}")))?;
         return Ok(Some(decoded));
     }
     let end = 2usize
         .checked_add(length)
-        .ok_or_else(|| RarError::Format("RAR 1.3: comment size overflows".into()))?;
+        .ok_or_else(|| RarError::format("RAR 1.3: comment size overflows"))?;
     Ok(Some(
         extra
             .get(2..end)
-            .ok_or_else(|| RarError::Format("RAR 1.3: comment is truncated".into()))?
+            .ok_or_else(|| RarError::format("RAR 1.3: comment is truncated"))?
             .to_vec(),
     ))
 }

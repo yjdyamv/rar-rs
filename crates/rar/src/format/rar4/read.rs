@@ -149,7 +149,7 @@ fn decode_member_bytes_to_inner(
 
     if streams_store {
         if hdr.packed_size != hdr.unpacked_size {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "RAR4: {}: STORE packed size {} does not match unpacked size {}",
                 hdr.name, hdr.packed_size, hdr.unpacked_size
             )));
@@ -161,17 +161,17 @@ fn decode_member_bytes_to_inner(
                 stream.seek(SeekFrom::Start(chunk.data_offset))?;
                 Box::new(stream.by_ref())
             } else {
-                let mut f =
-                    std::fs::File::open(volume_paths.get(chunk.volume_index).ok_or_else(
-                        || RarError::Format("RAR4: chunk volume out of range".into()),
-                    )?)?;
+                let mut f = std::fs::File::open(
+                    volume_paths
+                        .get(chunk.volume_index)
+                        .ok_or_else(|| RarError::format("RAR4: chunk volume out of range"))?,
+                )?;
                 f.seek(SeekFrom::Start(chunk.data_offset))?;
                 Box::new(f)
             };
             while remaining > 0 {
-                let take = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| {
-                    RarError::Format("RAR4: packed chunk size overflows usize".into())
-                })?;
+                let take = usize::try_from(remaining.min(buffer.len() as u64))
+                    .map_err(|_| RarError::format("RAR4: packed chunk size overflows usize"))?;
                 source
                     .read_exact(&mut buffer[..take])
                     .map_err(RarError::Io)?;
@@ -182,9 +182,11 @@ fn decode_member_bytes_to_inner(
         return Ok(());
     }
 
-    let unp_size = usize::try_from(hdr.unpacked_size).map_err(|_| RarError::LimitExceeded {
-        limit: hdr.unpacked_size,
-        context: format!("{}: unpacked size overflows host address space", hdr.name),
+    let unp_size = usize::try_from(hdr.unpacked_size).map_err(|_| {
+        RarError::limit_exceeded(
+            hdr.unpacked_size,
+            format!("{}: unpacked size overflows host address space", hdr.name),
+        )
     })?;
     let packed_len = packed_len_for_allocation(hdr, packed_size, max_alloc_packed_bytes)?;
     let mut packed = read_packed_payload(
@@ -199,7 +201,7 @@ fn decode_member_bytes_to_inner(
     if encrypted {
         let password = password
             .ok_or_else(|| {
-                RarError::Encrypted(format!(
+                RarError::encrypted(format!(
                     "{}: encrypted member, no password provided",
                     hdr.name
                 ))
@@ -215,7 +217,7 @@ fn decode_member_bytes_to_inner(
         }
         if super::is_stored(hdr.comp_method) {
             if packed.len() < unp_size {
-                return Err(RarError::Format(format!(
+                return Err(RarError::format(format!(
                     "RAR4: {}: encrypted STORE payload is shorter than declared unpacked size {}",
                     hdr.name, hdr.unpacked_size
                 )));
@@ -273,22 +275,22 @@ fn checked_packed_size(
     let total = chunks.iter().try_fold(0u64, |total, chunk| {
         total
             .checked_add(chunk.packed_size)
-            .ok_or_else(|| RarError::Format(format!("RAR4: {}: packed size overflow", hdr.name)))
+            .ok_or_else(|| RarError::format(format!("RAR4: {}: packed size overflow", hdr.name)))
     })?;
     if total != hdr.packed_size {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "RAR4: {}: chunk packed size {total} does not match header packed size {}",
             hdr.name, hdr.packed_size
         )));
     }
     if total > max_packed_bytes {
-        return Err(RarError::LimitExceeded {
-            limit: max_packed_bytes,
-            context: format!(
+        return Err(RarError::limit_exceeded(
+            max_packed_bytes,
+            format!(
                 "{}: packed size {total} exceeds the extraction limit",
                 hdr.name
             ),
-        });
+        ));
     }
     Ok(total)
 }
@@ -298,9 +300,11 @@ fn packed_len_for_allocation(
     packed_size: u64,
     max_packed_bytes: u64,
 ) -> RarResult<usize> {
-    usize::try_from(packed_size).map_err(|_| RarError::LimitExceeded {
-        limit: max_packed_bytes,
-        context: format!("{}: packed size overflows host address space", hdr.name),
+    usize::try_from(packed_size).map_err(|_| {
+        RarError::limit_exceeded(
+            max_packed_bytes,
+            format!("{}: packed size overflows host address space", hdr.name),
+        )
     })
 }
 
@@ -313,29 +317,28 @@ fn read_packed_payload(
     max_packed_bytes: u64,
 ) -> RarResult<Vec<u8>> {
     let mut packed = Vec::new();
-    packed
-        .try_reserve_exact(packed_len)
-        .map_err(|_| RarError::LimitExceeded {
-            limit: max_packed_bytes,
-            context: format!(
+    packed.try_reserve_exact(packed_len).map_err(|_| {
+        RarError::limit_exceeded(
+            max_packed_bytes,
+            format!(
                 "{}: unable to reserve {packed_len} bytes for RAR4 packed payload",
                 hdr.name
             ),
-        })?;
+        )
+    })?;
     for chunk in chunks {
-        let segment_len =
-            usize::try_from(chunk.packed_size).map_err(|_| RarError::LimitExceeded {
-                limit: max_packed_bytes,
-                context: format!("{}: packed chunk overflows host address space", hdr.name),
-            })?;
+        let segment_len = usize::try_from(chunk.packed_size).map_err(|_| {
+            RarError::limit_exceeded(
+                max_packed_bytes,
+                format!("{}: packed chunk overflows host address space", hdr.name),
+            )
+        })?;
         let start = packed.len();
         let end = start
             .checked_add(segment_len)
-            .ok_or_else(|| RarError::Format("RAR4: packed buffer size overflow".into()))?;
+            .ok_or_else(|| RarError::format("RAR4: packed buffer size overflow"))?;
         if end > packed_len {
-            return Err(RarError::Format(
-                "RAR4: packed chunks exceed reserved size".into(),
-            ));
+            return Err(RarError::format("RAR4: packed chunks exceed reserved size"));
         }
         packed.resize(end, 0);
         if chunk.volume_index == 0 {
@@ -347,7 +350,7 @@ fn read_packed_payload(
             let mut file = std::fs::File::open(
                 volume_paths
                     .get(chunk.volume_index)
-                    .ok_or_else(|| RarError::Format("RAR4: chunk volume out of range".into()))?,
+                    .ok_or_else(|| RarError::format("RAR4: chunk volume out of range"))?,
             )?;
             file.seek(SeekFrom::Start(chunk.data_offset))?;
             file.read_exact(&mut packed[start..end])
@@ -359,7 +362,7 @@ fn read_packed_payload(
 
 fn validate_output_size(hdr: &FileHeader, actual: u64) -> RarResult<()> {
     if actual != hdr.unpacked_size {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "RAR4: {}: decoded size {actual} does not match declared unpacked size {}",
             hdr.name, hdr.unpacked_size
         )));
@@ -399,7 +402,7 @@ pub(crate) fn decode_member_bytes(
     if encrypted {
         let password = password
             .ok_or_else(|| {
-                RarError::Encrypted(format!(
+                RarError::encrypted(format!(
                     "{}: encrypted member, no password provided",
                     hdr.name
                 ))
@@ -413,13 +416,15 @@ pub(crate) fn decode_member_bytes(
         }
     }
 
-    let unp_size = usize::try_from(hdr.unpacked_size).map_err(|_| RarError::LimitExceeded {
-        limit: hdr.unpacked_size,
-        context: format!("{}: unpacked size overflows host address space", hdr.name),
+    let unp_size = usize::try_from(hdr.unpacked_size).map_err(|_| {
+        RarError::limit_exceeded(
+            hdr.unpacked_size,
+            format!("{}: unpacked size overflows host address space", hdr.name),
+        )
     })?;
     if super::is_stored(hdr.comp_method) {
         if !encrypted && packed.len() != unp_size {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "RAR4: {}: STORE packed size {} does not match unpacked size {}",
                 hdr.name,
                 packed.len(),
@@ -427,7 +432,7 @@ pub(crate) fn decode_member_bytes(
             )));
         }
         if packed.len() < unp_size {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "RAR4: {}: STORE payload is shorter than declared unpacked size {}",
                 hdr.name, hdr.unpacked_size
             )));
@@ -479,7 +484,7 @@ pub(crate) fn decode_member_bytes(
 /// A RAR4 member whose `unp_ver` names no legacy codec (the RAR13 and RAR5
 /// families have their own read paths).
 fn unsupported_unp_ver(unp_ver: u8) -> RarError {
-    RarError::Unsupported(format!(
+    RarError::unsupported(format!(
         "RAR4 compressed member with unsupported unpack version {unp_ver}"
     ))
 }
@@ -487,7 +492,7 @@ fn unsupported_unp_ver(unp_ver: u8) -> RarError {
 /// A solid-chain carrier whose codec differs from the member's: callers
 /// rebuild the decoder on a codec change, so this is a corrupted chain.
 fn wrong_decoder(expected: LegacyCodec, actual: LegacyCodec) -> RarError {
-    RarError::Format(format!(
+    RarError::format(format!(
         "RAR4: {} member in a solid chain carrying the {} decoder",
         expected.name(),
         actual.name()
@@ -498,10 +503,10 @@ fn wrong_decoder(expected: LegacyCodec, actual: LegacyCodec) -> RarError {
 fn map_rar15_error(hdr: &FileHeader, error: crate::codec::legacy::rar15::Error) -> RarError {
     let error = match error {
         crate::codec::legacy::rar15::Error::NeedMoreInput => {
-            RarError::Format("RAR 1.5 bitstream is truncated".into())
+            RarError::format("RAR 1.5 bitstream is truncated")
         }
         crate::codec::legacy::rar15::Error::InvalidData(message) => {
-            RarError::Format(format!("RAR 1.5 stream: {message}"))
+            RarError::format(format!("RAR 1.5 stream: {message}"))
         }
     };
     map_codec_error(hdr, error)
@@ -542,15 +547,15 @@ pub(crate) fn decrypt_in_place(
         }
         Some(LegacyCodec::Rar20) => Rar20Cipher::new(password)
             .decrypt_in_place(data)
-            .map_err(|e| RarError::Format(format!("RAR4 RAR20 decrypt: {e}"))),
+            .map_err(|e| RarError::format(format!("RAR4 RAR20 decrypt: {e}"))),
         Some(LegacyCodec::Rar29) => {
             let mut cipher = Rar30Cipher::new(password, hdr.salt)
-                .map_err(|e| RarError::Format(format!("RAR4 RAR30 key setup: {e}")))?;
+                .map_err(|e| RarError::format(format!("RAR4 RAR30 key setup: {e}")))?;
             cipher
                 .decrypt_in_place(data)
-                .map_err(|e| RarError::Format(format!("RAR4 RAR30 decrypt: {e}")))
+                .map_err(|e| RarError::format(format!("RAR4 RAR30 decrypt: {e}")))
         }
-        None => Err(RarError::Unsupported(format!(
+        None => Err(RarError::unsupported(format!(
             "RAR4 encryption unpack version {} not supported",
             hdr.unp_ver
         ))),

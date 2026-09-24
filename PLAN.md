@@ -408,6 +408,16 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `decoder/engine.rs` 去掉 `map_err`）。③ `fuzz/README.md` 更正「CI 跑 fuzz
   smoke」的说法：GitHub CI 只 `cargo check`/`fmt` fuzz workspace，bounded smoke
   在本地 `scripts/wsl/ci-linux.sh` step 20/20。
+- **错误构造集中化**（2026-09-24）：`RarError` 的构造此前是 900+ 处散落的变体
+  字面量（`RarError::Format(format!(...))`、`RarError::Format(x.into())`、
+  `RarError::LimitExceeded { limit, context }` …），文案风格没有单一出处。现
+  `error.rs` 为每个变体加一个构造函数（`format` / `invalid_state` /
+  `invalid_option` / `encrypted` / `unsupported` / `security` / `crc` /
+  `hash_mismatch` / `limit_exceeded` / `member_not_found` /
+  `ambiguous_member`），
+  所有**构造点**改经它们（消息文本逐字不变，纯机制集中；冗余 `.into()` 去掉）；
+  匹配分支与 `matches!` 仍直接用变体。风格约定（小写、无句点、家族前缀 `RAR4:` /
+  `RAR 1.3:` / `RAR5:` / `RARVM:`）写在构造函数文档处。
 - **CI lint 闸门修复**（2026-09-24）：`format/rar5/write/add.rs` 的
   `time_extra_cfg` 把 `-ts1` 用的纳秒归一化闭包 `ns` 门成了
   `#[cfg(any(unix, windows))]`，但它对 header 的 mtime

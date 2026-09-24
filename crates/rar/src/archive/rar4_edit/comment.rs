@@ -43,8 +43,7 @@ pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
             saw_main = true;
             if main_flags(&view.header)? & MHD_PASSWORD != 0 {
                 let password = header_password(archive).ok_or_else(|| {
-                    RarError::Encrypted(
-                        "reading the comment of a header-encrypted (-hp) RAR4 archive requires its password".into(),
+                    RarError::encrypted("reading the comment of a header-encrypted (-hp) RAR4 archive requires its password",
                     )
                 })?;
                 hp = Some(password.as_bytes());
@@ -63,16 +62,14 @@ pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
                 // reader does.
                 let limit = archive.read_ctx().extract_options.metadata_limit();
                 if view.add_size > limit {
-                    return Err(RarError::LimitExceeded {
+                    return Err(RarError::limit_exceeded(
                         limit,
-                        context: format!("RAR4 archive comment declares {} bytes", view.add_size),
-                    });
+                        format!("RAR4 archive comment declares {} bytes", view.add_size),
+                    ));
                 }
-                let data_len =
-                    usize::try_from(view.add_size).map_err(|_| RarError::LimitExceeded {
-                        limit,
-                        context: "RAR4: comment size does not fit in usize".into(),
-                    })?;
+                let data_len = usize::try_from(view.add_size).map_err(|_| {
+                    RarError::limit_exceeded(limit, "RAR4: comment size does not fit in usize")
+                })?;
                 let mut data = vec![0u8; data_len];
                 file.seek(SeekFrom::Start(view.data_offset()))
                     .map_err(RarError::Io)?;

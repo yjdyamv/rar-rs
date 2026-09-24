@@ -129,9 +129,7 @@ impl<'d, 's> SymbolReader<'d, 's> {
             Some(symbol) => Ok(Some(symbol)),
             None => {
                 if self.max_filter_end > self.end {
-                    return Err(RarError::Format(
-                        "unapplied RAR5 filter at end of stream".into(),
-                    ));
+                    return Err(RarError::format("unapplied RAR5 filter at end of stream"));
                 }
                 Ok(None)
             }
@@ -200,12 +198,12 @@ impl<'d, 's> SymbolReader<'d, 's> {
             expected_ck ^= b;
         }
         if checksum_byte != expected_ck {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "block checksum mismatch: got {checksum_byte:#x}, expected {expected_ck:#x}"
             )));
         }
         if block_size == 0 {
-            return Err(RarError::Format("zero-length block".into()));
+            return Err(RarError::format("zero-length block"));
         }
 
         let bits = ((block_size as u64) - 1) * 8 + (1 + bit_size as u64);
@@ -315,5 +313,5 @@ impl<'d, 's> SymbolReader<'d, 's> {
 }
 
 fn no_huffman_tables() -> RarError {
-    RarError::Format("no Huffman tables defined".into())
+    RarError::format("no Huffman tables defined")
 }

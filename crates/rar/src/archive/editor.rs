@@ -90,15 +90,12 @@ impl ArchiveEditor {
     /// Use [`Self::entries_named`] to pick a duplicate by ID.
     pub fn unique_entry(&self, name: &str) -> RarResult<EntryId> {
         let mut matches = self.entries_named(name);
-        let first = matches.next().ok_or_else(|| RarError::MemberNotFound {
-            name: name.to_string(),
-        })?;
+        let first = matches
+            .next()
+            .ok_or_else(|| RarError::member_not_found(name.to_string()))?;
         let additional = matches.count();
         if additional != 0 {
-            return Err(RarError::AmbiguousMember {
-                name: name.to_string(),
-                matches: additional + 1,
-            });
+            return Err(RarError::ambiguous_member(name.to_string(), additional + 1));
         }
         Ok(first.id())
     }
@@ -263,8 +260,8 @@ impl ArchiveEditor {
         if self.archive.is_rar13() {
             // RAR 1.3/1.4 has no editor: the fixed-width headers are not
             // RAR5 blocks, so every rewrite path would misparse them.
-            return Err(RarError::Unsupported(
-                "editing RAR 1.3/1.4 archives is not supported".into(),
+            return Err(RarError::unsupported(
+                "editing RAR 1.3/1.4 archives is not supported",
             ));
         }
         // Resolve every operation against the current catalog before any
@@ -281,21 +278,21 @@ impl ArchiveEditor {
                 }
                 EditOp::SetComment(bytes) => {
                     if comment.is_some() {
-                        return Err(RarError::InvalidOption(
-                            "an edit plan can carry only one comment change".into(),
+                        return Err(RarError::invalid_option(
+                            "an edit plan can carry only one comment change",
                         ));
                     }
                     comment = Some(bytes.clone());
                 }
                 EditOp::SetMemberComment(_, _) => {
-                    return Err(RarError::Unsupported(
-                        "per-member comments are only supported for RAR 1.5-4.x archives".into(),
+                    return Err(RarError::unsupported(
+                        "per-member comments are only supported for RAR 1.5-4.x archives",
                     ));
                 }
                 EditOp::SetRecovery(percent) => {
                     if force_rr.is_some() {
-                        return Err(RarError::InvalidOption(
-                            "an edit plan can carry only one recovery-record change".into(),
+                        return Err(RarError::invalid_option(
+                            "an edit plan can carry only one recovery-record change",
                         ));
                     }
                     force_rr = Some(*percent);
@@ -304,8 +301,8 @@ impl ArchiveEditor {
                     // Parity sectors are the legacy RAR4 record's native unit;
                     // a RAR5 record is sized by percent, so an exact count
                     // would otherwise be dropped silently.
-                    return Err(RarError::InvalidOption(
-                        "an exact recovery-sector count is a legacy RAR4 option; a RAR5 recovery record is sized by percent".into(),
+                    return Err(RarError::invalid_option(
+                        "an exact recovery-sector count is a legacy RAR4 option; a RAR5 recovery record is sized by percent",
                     ));
                 }
             }
@@ -343,8 +340,8 @@ impl ArchiveEditor {
                 }
                 EditOp::SetComment(bytes) => {
                     if comment.is_some() {
-                        return Err(RarError::InvalidOption(
-                            "an edit plan can carry only one comment change".into(),
+                        return Err(RarError::invalid_option(
+                            "an edit plan can carry only one comment change",
                         ));
                     }
                     comment = Some(bytes.clone());
@@ -363,16 +360,16 @@ impl ArchiveEditor {
                 }
                 EditOp::SetRecovery(percent) => {
                     if force_rr.is_some() || force_sectors.is_some() {
-                        return Err(RarError::InvalidOption(
-                            "an edit plan can carry only one recovery-record change".into(),
+                        return Err(RarError::invalid_option(
+                            "an edit plan can carry only one recovery-record change",
                         ));
                     }
                     force_rr = Some(*percent);
                 }
                 EditOp::SetRecoverySectors(count) => {
                     if force_rr.is_some() || force_sectors.is_some() {
-                        return Err(RarError::InvalidOption(
-                            "an edit plan can carry only one recovery-record change".into(),
+                        return Err(RarError::invalid_option(
+                            "an edit plan can carry only one recovery-record change",
                         ));
                     }
                     force_sectors = Some(*count);
@@ -386,7 +383,7 @@ impl ArchiveEditor {
             && force_sectors.is_none()
             && member_comments.is_empty()
         {
-            return Err(RarError::Format("no members to edit".into()));
+            return Err(RarError::format("no members to edit"));
         }
         // One atomic rewrite carries every delete, rename, comment change
         // and recovery change.
@@ -492,8 +489,8 @@ impl ArchiveEditor {
             return super::rar4_edit::lock_archive(&self.archive);
         }
         if self.archive.is_rar13() {
-            return Err(RarError::Unsupported(
-                "locking RAR 1.3/1.4 archives is not supported".into(),
+            return Err(RarError::unsupported(
+                "locking RAR 1.3/1.4 archives is not supported",
             ));
         }
         self.archive.lock()

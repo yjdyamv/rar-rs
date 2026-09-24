@@ -279,7 +279,7 @@ pub(crate) fn read_main_header<R: Read + Seek>(
     reader.seek(SeekFrom::Start(
         cx.sfx_offset() + RAR5_SIGNATURE.len() as u64,
     ))?;
-    let missing = || RarError::Format("archive is missing the main header".into());
+    let missing = || RarError::format("archive is missing the main header");
     let first = crate::format::rar5::headers::read_block(
         reader,
         crate::format::rar5::extract::verify::archive_block_key(cx)?.as_ref(),
@@ -471,7 +471,7 @@ fn rebuild_catalog_capped(
             let mut sig = [0u8; 8];
             stream.read_exact(&mut sig)?;
             if sig != *RAR5_SIGNATURE {
-                return Err(RarError::Format(format!(
+                return Err(RarError::format(format!(
                     "volume {} has bad signature",
                     vol_path.display()
                 )));
@@ -549,12 +549,12 @@ fn parse_quick_open_payload_capped(
     for (rel, header_bytes) in catalog {
         let raw = crate::format::rar5::headers::parse_block_bytes(&header_bytes)?;
         if raw.block_type != BLOCK_TYPE_FILE_HEADER {
-            return Err(RarError::Format("quick-open: unexpected block type".into()));
+            return Err(RarError::format("quick-open: unexpected block type"));
         }
         // The original file header sat `rel` bytes before the QO record;
         // its data area starts right after the header envelope.
         let header_abs = qo_abs.checked_sub(rel).ok_or_else(|| {
-            RarError::Format("quick-open: relative offset points past the archive start".into())
+            RarError::format("quick-open: relative offset points past the archive start")
         })?;
         let data_offset = header_abs + header_bytes.len() as u64;
         // `stream_pos` carries the data-area offset, matching the full scan.

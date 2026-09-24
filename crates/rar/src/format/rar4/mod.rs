@@ -209,9 +209,8 @@ impl Rar4VolumeScan {
                     if block.head_type == MAIN_HEAD && block.flags & MHD_PASSWORD != 0 {
                         header_encrypted = true;
                         let Some(password) = password else {
-                            return Err(RarError::Encrypted(
-                                "RAR4: header-encrypted archive, a password is required to list it"
-                                    .into(),
+                            return Err(RarError::encrypted(
+                                "RAR4: header-encrypted archive, a password is required to list it",
                             ));
                         };
                         password_bytes = Some(password.as_bytes());
@@ -393,12 +392,10 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
     let start = 0usize;
     let head_end = h.len();
     if head_end < FILE_HEADER_FIXED {
-        return Err(RarError::Format("RAR4: file header too short".into()));
+        return Err(RarError::format("RAR4: file header too short"));
     }
     if block.flags & LONG_BLOCK == 0 {
-        return Err(RarError::Format(
-            "RAR4: file header missing data size".into(),
-        ));
+        return Err(RarError::format("RAR4: file header missing data size"));
     }
 
     let pack_low = u32::from_le_bytes(h[start + 7..start + 11].try_into().unwrap()) as u64;
@@ -417,8 +414,8 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         // set FHD_LARGE while head_size stops at the fixed 32 bytes, so check
         // the extent before slicing instead of relying on `name_end` below.
         if pos + 8 > head_end {
-            return Err(RarError::Format(
-                "RAR4: FHD_LARGE header too short for 64-bit sizes".into(),
+            return Err(RarError::format(
+                "RAR4: FHD_LARGE header too short for 64-bit sizes",
             ));
         }
         let high_pack = u32::from_le_bytes(h[pos..pos + 4].try_into().unwrap()) as u64;
@@ -431,11 +428,9 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
 
     let name_end = pos
         .checked_add(name_size)
-        .ok_or_else(|| RarError::Format("RAR4: name size overflow".into()))?;
+        .ok_or_else(|| RarError::format("RAR4: name size overflow"))?;
     if name_end > head_end {
-        return Err(RarError::Format(
-            "RAR4: file name extends past header".into(),
-        ));
+        return Err(RarError::format("RAR4: file name extends past header"));
     }
     let name = decode_file_name(&h[pos..name_end], block.flags);
     pos = name_end;
@@ -443,9 +438,9 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
     let salt = if block.flags & FHD_SALT != 0 {
         let salt_end = pos
             .checked_add(8)
-            .ok_or_else(|| RarError::Format("RAR4: salt overflow".into()))?;
+            .ok_or_else(|| RarError::format("RAR4: salt overflow"))?;
         if salt_end > head_end {
-            return Err(RarError::Format("RAR4: salt extends past header".into()));
+            return Err(RarError::format("RAR4: salt extends past header"));
         }
         let s: [u8; 8] = h[pos..salt_end].try_into().unwrap();
         pos = salt_end;

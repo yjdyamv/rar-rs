@@ -43,7 +43,7 @@ pub(crate) use repair::rebuild_missing_volumes;
 use crate::error::RarError;
 
 pub(super) fn map_coder(error: rs8::Rs8Error) -> RarError {
-    RarError::Format(format!("legacy recovery: {error}"))
+    RarError::format(format!("legacy recovery: {error}"))
 }
 
 #[cfg(test)]

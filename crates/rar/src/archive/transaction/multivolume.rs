@@ -38,7 +38,7 @@ impl crate::format::rar5::payload::ChunkReader for VolumeReaders {
         let file = self
             .files
             .get_mut(vol)
-            .ok_or_else(|| RarError::Format(format!("chunk references missing volume {vol}")))?;
+            .ok_or_else(|| RarError::format(format!("chunk references missing volume {vol}")))?;
         if file.is_none() {
             *file = Some(File::open(&self.paths[vol])?);
         }
@@ -49,7 +49,7 @@ impl crate::format::rar5::payload::ChunkReader for VolumeReaders {
         // not drive an allocation on its own, and `take` bounds how much can
         // actually arrive. `try_from` keeps 32-bit targets honest.
         let len = usize::try_from(len)
-            .map_err(|_| RarError::Format("chunk size does not fit in usize".into()))?;
+            .map_err(|_| RarError::format("chunk size does not fit in usize"))?;
         let mut buf = Vec::new();
         f.take(len as u64).read_to_end(&mut buf)?;
         Ok(buf)
@@ -63,14 +63,14 @@ fn rev_params_from_file(path: &Path) -> RarResult<(u32, u32)> {
     if data.len() < 8 + 4 + 4 + 1 + 2 + 2 + 2 + 4
         || &data[..8] != crate::recovery::rev50::REV5_SIGNATURE
     {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{}: not a RAR5 recovery volume",
             path.display()
         )));
     }
     let mut off = 8 + 4 + 4; // signature + header CRC + header size
     if data[off] != 1 {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{}: unsupported recovery volume version",
             path.display()
         )));
@@ -155,9 +155,7 @@ impl RarArchive {
             .min()
             .unwrap_or(&vol_sizes[0]);
         if volume_size == 0 {
-            return Err(RarError::Format(
-                "cannot rewrite: volume size is zero".into(),
-            ));
+            return Err(RarError::format("cannot rewrite: volume size is zero"));
         }
 
         let base = volume_base_of(&self.path);
@@ -257,9 +255,8 @@ impl RarArchive {
             let eoa_size = self.on_disk_header_len(8);
             let prefix = self.write_ctx().output.bytes_written + comment_on_disk;
             if prefix + eoa_size + self.recovery_volume_reserve(prefix) > volume_size {
-                return Err(RarError::Unsupported(
-                    "rewriting a multi-volume archive whose comment does not fit in one volume is not supported"
-                        .into(),
+                return Err(RarError::unsupported(
+                    "rewriting a multi-volume archive whose comment does not fit in one volume is not supported",
                 ));
             }
             self.write_block_header(&block)?;
@@ -426,7 +423,7 @@ impl RarArchive {
             }
             staged.sort_by_key(|(n, _)| *n);
             if staged.len() > 65535 {
-                return Err(RarError::Format(format!(
+                return Err(RarError::format(format!(
                     "volume set of {} parts exceeds the RAR5 limit of 65535",
                     staged.len()
                 )));

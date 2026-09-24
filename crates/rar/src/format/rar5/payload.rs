@@ -36,7 +36,7 @@ impl ChunkReader for StreamReader<'_> {
             stream.take(len).read_to_end(&mut buf)?;
         } else {
             let path = self.volume_paths.get(vol).ok_or_else(|| {
-                RarError::Format(format!("member data references missing volume {vol}"))
+                RarError::format(format!("member data references missing volume {vol}"))
             })?;
             let mut f = std::fs::File::open(path)?;
             f.seek(SeekFrom::Start(offset))?;
@@ -67,9 +67,8 @@ impl ChunkReader for SingleFileReader<'_> {
 /// fit the host address space: on 32-bit targets `as usize` would silently
 /// truncate them and defeat the surrounding size limits.
 fn size_to_usize(size: u64, name: &str, what: &str) -> RarResult<usize> {
-    usize::try_from(size).map_err(|_| RarError::LimitExceeded {
-        limit: size,
-        context: format!("{name}: {what} overflows host address space"),
+    usize::try_from(size).map_err(|_| {
+        RarError::limit_exceeded(size, format!("{name}: {what} overflows host address space"))
     })
 }
 
@@ -87,29 +86,22 @@ pub(crate) fn read_packed<R: ChunkReader + ?Sized>(
 ) -> RarResult<DecryptedPayload> {
     let mut total_packed = 0u64;
     for c in chunks {
-        total_packed =
-            total_packed
-                .checked_add(c.packed_size)
-                .ok_or_else(|| RarError::LimitExceeded {
-                    limit: max_packed,
-                    context: format!("{name}: packed size overflow"),
-                })?;
+        total_packed = total_packed.checked_add(c.packed_size).ok_or_else(|| {
+            RarError::limit_exceeded(max_packed, format!("{name}: packed size overflow"))
+        })?;
         if total_packed > max_packed {
-            return Err(RarError::LimitExceeded {
-                limit: max_packed,
-                context: format!("{name}: packed data {total_packed} bytes exceeds limit"),
-            });
+            return Err(RarError::limit_exceeded(
+                max_packed,
+                format!("{name}: packed data {total_packed} bytes exceeds limit"),
+            ));
         }
     }
 
     let packed_len = size_to_usize(total_packed, name, "packed size")?;
     let mut packed = Vec::new();
-    packed
-        .try_reserve_exact(packed_len)
-        .map_err(|_| RarError::LimitExceeded {
-            limit: max_packed,
-            context: format!("{name}: cannot allocate packed data"),
-        })?;
+    packed.try_reserve_exact(packed_len).map_err(|_| {
+        RarError::limit_exceeded(max_packed, format!("{name}: cannot allocate packed data"))
+    })?;
 
     for chunk in chunks {
         cancel()?;
@@ -124,11 +116,11 @@ pub(crate) fn read_packed<R: ChunkReader + ?Sized>(
         {
             let actual_crc = crc32fast::hash(&packed[chunk_start..]);
             if actual_crc != expected_crc {
-                return Err(RarError::Crc {
-                    expected: expected_crc,
-                    actual: actual_crc,
-                    context: format!("{name} vol {}", chunk.volume_index),
-                });
+                return Err(RarError::crc(
+                    expected_crc,
+                    actual_crc,
+                    format!("{name} vol {}", chunk.volume_index),
+                ));
             }
         }
     }
@@ -138,7 +130,7 @@ pub(crate) fn read_packed<R: ChunkReader + ?Sized>(
     // silently, so report the truncation here instead of letting a downstream
     // decode or checksum failure describe it.
     if packed.len() != packed_len {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{name}: packed payload is truncated (read {} of {packed_len} bytes)",
             packed.len()
         )));
@@ -151,7 +143,7 @@ pub(crate) fn read_packed<R: ChunkReader + ?Sized>(
     };
     let keys = if let Some(ref p) = params {
         let password = password
-            .ok_or_else(|| RarError::Encrypted(format!("{name}: encrypted, no password set")))?;
+            .ok_or_else(|| RarError::encrypted(format!("{name}: encrypted, no password set")))?;
         let keys = p
             .derive_and_verify(password)?
             .ok_or(RarError::WrongPassword)?;
@@ -193,7 +185,7 @@ pub(crate) fn decode_member(
         let take = payload.data.len().min(declared);
         out.write_all(&payload.data[..take]).map_err(RarError::Io)?;
         if payload.data.len() > declared {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "member {}: stored payload has {} bytes, header declares {}",
                 hdr.name,
                 payload.data.len(),
@@ -218,7 +210,7 @@ pub(crate) fn decode_member(
         // A short STORE payload (or a packed stream that stopped early) must
         // not surface as a silently truncated member even when the stored CRC
         // was recomputed over the truncated data.
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "member {}: decoded {written} bytes, header declares {}",
             hdr.name, hdr.unpacked_size
         )));

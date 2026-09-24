@@ -37,19 +37,13 @@ mod tests {
   #[test]
   fn core_error_variants_have_stable_napi_statuses() {
     let invalid_arguments = [
-      rar_rs::RarError::Format("bad header".into()),
-      rar_rs::RarError::InvalidOption("bad option".into()),
-      rar_rs::RarError::Encrypted("password required".into()),
-      rar_rs::RarError::Security("unsafe path".into()),
-      rar_rs::RarError::LimitExceeded {
-        limit: 1,
-        context: "test".into(),
-      },
-      rar_rs::RarError::MemberNotFound { name: "x".into() },
-      rar_rs::RarError::AmbiguousMember {
-        name: "x".into(),
-        matches: 2,
-      },
+      rar_rs::RarError::format("bad header"),
+      rar_rs::RarError::invalid_option("bad option"),
+      rar_rs::RarError::encrypted("password required"),
+      rar_rs::RarError::security("unsafe path"),
+      rar_rs::RarError::limit_exceeded(1, "test"),
+      rar_rs::RarError::member_not_found("x"),
+      rar_rs::RarError::ambiguous_member("x", 2),
       rar_rs::RarError::StaleEntryId,
       rar_rs::RarError::WrongPassword,
     ];
@@ -58,19 +52,11 @@ mod tests {
     }
 
     let operation_failures = [
-      rar_rs::RarError::InvalidState("read mode".into()),
-      rar_rs::RarError::Unsupported("feature".into()),
+      rar_rs::RarError::invalid_state("read mode"),
+      rar_rs::RarError::unsupported("feature"),
       rar_rs::RarError::ArchiveLocked,
-      rar_rs::RarError::Crc {
-        expected: 1,
-        actual: 2,
-        context: "member".into(),
-      },
-      rar_rs::RarError::HashMismatch {
-        expected: [1; 32],
-        actual: [2; 32],
-        context: "member".into(),
-      },
+      rar_rs::RarError::crc(1, 2, "member"),
+      rar_rs::RarError::hash_mismatch([1; 32], [2; 32], "member"),
       rar_rs::RarError::Io(std::io::Error::other("disk")),
     ];
     for err in operation_failures {

@@ -23,38 +23,38 @@ pub(crate) struct Rar13WriteOptions {
 /// Reject typed options the RAR 1.3/1.4 container cannot express.
 pub(crate) fn validate_rar13_only(options: Rar13WriteOptions) -> RarResult<()> {
     if options.quick_open {
-        return Err(RarError::InvalidOption(
-            "quick-open is not supported for RAR 1.3/1.4 archives".into(),
+        return Err(RarError::invalid_option(
+            "quick-open is not supported for RAR 1.3/1.4 archives",
         ));
     }
     if options.blake2 {
-        return Err(RarError::InvalidOption(
-            "BLAKE2sp hashes are not supported for RAR 1.3/1.4 archives".into(),
+        return Err(RarError::invalid_option(
+            "BLAKE2sp hashes are not supported for RAR 1.3/1.4 archives",
         ));
     }
     if options.recovery_percent.is_some() || options.recovery_sectors.is_some() {
-        return Err(RarError::InvalidOption(
-            "recovery records are not supported for RAR 1.3/1.4 archives".into(),
+        return Err(RarError::invalid_option(
+            "recovery records are not supported for RAR 1.3/1.4 archives",
         ));
     }
     if options.recovery_volumes_percent.is_some() || options.recovery_volume_count.is_some() {
-        return Err(RarError::InvalidOption(
-            "recovery volumes are not supported for RAR 1.3/1.4 archives".into(),
+        return Err(RarError::invalid_option(
+            "recovery volumes are not supported for RAR 1.3/1.4 archives",
         ));
     }
     if options.save_owner || options.save_streams {
-        return Err(RarError::InvalidOption(
-            "owner and stream records are not supported for RAR 1.3/1.4 archives".into(),
+        return Err(RarError::invalid_option(
+            "owner and stream records are not supported for RAR 1.3/1.4 archives",
         ));
     }
     if options.has_dictionary {
-        return Err(RarError::InvalidOption(
-            "RAR 1.3/1.4 archives do not support configurable dictionary sizes".into(),
+        return Err(RarError::invalid_option(
+            "RAR 1.3/1.4 archives do not support configurable dictionary sizes",
         ));
     }
     if options.encrypt_headers {
-        return Err(RarError::InvalidOption(
-            "header encryption is not supported for RAR 1.3/1.4 archives".into(),
+        return Err(RarError::invalid_option(
+            "header encryption is not supported for RAR 1.3/1.4 archives",
         ));
     }
     Ok(())
@@ -64,7 +64,7 @@ pub(crate) fn validate_rar13_only(options: Rar13WriteOptions) -> RarResult<()> {
 /// header stores both sizes in 32-bit fields.
 pub(crate) fn ensure_member_size(unpacked: u64) -> RarResult<()> {
     if unpacked > u32::MAX as u64 {
-        return Err(RarError::InvalidOption(format!(
+        return Err(RarError::invalid_option(format!(
             "RAR 1.3/1.4 members cannot exceed {} bytes (got {unpacked})",
             u32::MAX
         )));

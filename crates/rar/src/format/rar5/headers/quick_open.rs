@@ -21,9 +21,11 @@ use crate::vint;
 /// truncate `2^32 + N` to `N`, so the entry CRC would be verified over — and
 /// the embedded header parsed from — a range other than the declared one.
 fn size_to_usize(size: u64, what: &str) -> RarResult<usize> {
-    usize::try_from(size).map_err(|_| RarError::LimitExceeded {
-        limit: size,
-        context: format!("quick-open: {what} overflows host address space"),
+    usize::try_from(size).map_err(|_| {
+        RarError::limit_exceeded(
+            size,
+            format!("quick-open: {what} overflows host address space"),
+        )
     })
 }
 
@@ -55,46 +57,42 @@ pub(crate) fn decode_payload(payload: &[u8], max_entries: usize) -> RarResult<Ve
     while off < payload.len() {
         check_entry_cap(entries.len(), max_entries)?;
         if off + 4 > payload.len() {
-            return Err(RarError::Format("quick-open: truncated entry CRC".into()));
+            return Err(RarError::format("quick-open: truncated entry CRC"));
         }
         let stored_crc = u32::from_le_bytes(payload[off..off + 4].try_into().unwrap());
         off += 4;
         let (body_size, n) = vint::decode_from_slice(payload, off)
-            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
+            .map_err(|e| RarError::format(format!("quick-open: {e}")))?;
         off += n;
         let body_len = size_to_usize(body_size, "entry body size")?;
         let body_end = off
             .checked_add(body_len)
-            .ok_or_else(|| RarError::Format("quick-open: body size overflow".into()))?;
+            .ok_or_else(|| RarError::format("quick-open: body size overflow"))?;
         if body_end > payload.len() {
-            return Err(RarError::Format("quick-open: truncated entry body".into()));
+            return Err(RarError::format("quick-open: truncated entry body"));
         }
         let actual = crc32fast::hash(&payload[off..body_end]);
         if actual != stored_crc {
-            return Err(RarError::Crc {
-                expected: stored_crc,
-                actual,
-                context: "quick-open entry".into(),
-            });
+            return Err(RarError::crc(stored_crc, actual, "quick-open entry"));
         }
 
         let mut p = off;
         // flags vint (writer always emits 0 = file header)
         let (_, fn_) = vint::decode_from_slice(payload, p)
-            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
+            .map_err(|e| RarError::format(format!("quick-open: {e}")))?;
         p += fn_;
         let (rel, rn) = vint::decode_from_slice(payload, p)
-            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
+            .map_err(|e| RarError::format(format!("quick-open: {e}")))?;
         p += rn;
         let (hdr_size, hn) = vint::decode_from_slice(payload, p)
-            .map_err(|e| RarError::Format(format!("quick-open: {e}")))?;
+            .map_err(|e| RarError::format(format!("quick-open: {e}")))?;
         p += hn;
         let hdr_len = size_to_usize(hdr_size, "file header size")?;
         let hdr_end = p
             .checked_add(hdr_len)
-            .ok_or_else(|| RarError::Format("quick-open: header size overflow".into()))?;
+            .ok_or_else(|| RarError::format("quick-open: header size overflow"))?;
         if hdr_end > body_end {
-            return Err(RarError::Format("quick-open: truncated file header".into()));
+            return Err(RarError::format("quick-open: truncated file header"));
         }
 
         entries.push((rel, payload[p..hdr_end].to_vec()));

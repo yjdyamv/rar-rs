@@ -41,18 +41,14 @@ pub fn read_block<R: Read + Seek>(
     hasher.update(&header.body);
     let computed = hasher.finalize();
     if computed != header.stored_crc {
-        return Err(RarError::Crc {
-            expected: header.stored_crc,
-            actual: computed,
-            context: "block header".into(),
-        });
+        return Err(RarError::crc(header.stored_crc, computed, "block header"));
     }
 
     let (block_type, flags, data_size) = parse_block_fields(&header.body)?;
     let data_offset = reader.stream_position()?;
     let data_end = data_offset
         .checked_add(data_size)
-        .ok_or_else(|| RarError::Format("block data offset overflows u64".into()))?;
+        .ok_or_else(|| RarError::format("block data offset overflows u64"))?;
     let raw = RawBlock {
         header_crc: header.stored_crc,
         header_data: header.body,
@@ -198,7 +194,7 @@ fn read_plain_header<R: Read>(reader: &mut R) -> RarResult<Option<RawHeader>> {
     }
     reader.read_exact(&mut crc_buf[1..]).map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {
-            RarError::Format("truncated plaintext header CRC".into())
+            RarError::format("truncated plaintext header CRC")
         } else {
             e.into()
         }
@@ -210,7 +206,7 @@ fn read_plain_header<R: Read>(reader: &mut R) -> RarResult<Option<RawHeader>> {
         let mut b = [0u8; 1];
         reader.read_exact(&mut b).map_err(|e| {
             if e.kind() == io::ErrorKind::UnexpectedEof {
-                RarError::Format("truncated plaintext header size vint".into())
+                RarError::format("truncated plaintext header size vint")
             } else {
                 e.into()
             }
@@ -218,27 +214,27 @@ fn read_plain_header<R: Read>(reader: &mut R) -> RarResult<Option<RawHeader>> {
         vint_bytes.push(b[0]);
         if b[0] & 0x80 == 0 {
             break vint::decode_from_slice(&vint_bytes, 0)
-                .map_err(|e| RarError::Format(format!("bad vint: {e}")))?
+                .map_err(|e| RarError::format(format!("bad vint: {e}")))?
                 .0;
         }
         if vint_bytes.len() == 10 {
-            return Err(RarError::Format(
-                "plaintext header size vint exceeds 10 bytes".into(),
+            return Err(RarError::format(
+                "plaintext header size vint exceeds 10 bytes",
             ));
         }
     };
     if hsize == 0 || hsize > 2 * 1024 * 1024 {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "implausible header size: {hsize}"
         )));
     }
 
     let hsize = usize::try_from(hsize)
-        .map_err(|_| RarError::Format("header size overflows host address space".into()))?;
+        .map_err(|_| RarError::format("header size overflows host address space"))?;
     let mut body = vec![0u8; hsize];
     reader.read_exact(&mut body).map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {
-            RarError::Format("truncated plaintext header body".into())
+            RarError::format("truncated plaintext header body")
         } else {
             e.into()
         }
@@ -247,7 +243,7 @@ fn read_plain_header<R: Read>(reader: &mut R) -> RarResult<Option<RawHeader>> {
     let capacity = 4usize
         .checked_add(vint_bytes.len())
         .and_then(|n| n.checked_add(body.len()))
-        .ok_or_else(|| RarError::Format("plaintext header size overflows usize".into()))?;
+        .ok_or_else(|| RarError::format("plaintext header size overflows usize"))?;
     let mut on_disk = Vec::with_capacity(capacity);
     on_disk.extend_from_slice(&crc_buf);
     on_disk.extend_from_slice(&vint_bytes);
@@ -269,7 +265,7 @@ fn read_encrypted_header<R: Read>(reader: &mut R, key: &[u8; 32]) -> RarResult<O
     }
     reader.read_exact(&mut iv[1..]).map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {
-            RarError::Format("truncated encrypted header IV".into())
+            RarError::format("truncated encrypted header IV")
         } else {
             e.into()
         }
@@ -281,27 +277,26 @@ fn read_encrypted_header<R: Read>(reader: &mut R, key: &[u8; 32]) -> RarResult<O
     let (stored_crc, vint_len, hsize) = {
         let stored_crc = u32::from_le_bytes(first_pt[..4].try_into().unwrap());
         let (hsize, vint_len) = vint::decode_from_slice(&first_pt, 4)
-            .map_err(|e| RarError::Format(format!("encrypted block vint: {e}")))?;
+            .map_err(|e| RarError::format(format!("encrypted block vint: {e}")))?;
         (stored_crc, vint_len, hsize)
     };
     if hsize == 0 || hsize > 2 * 1024 * 1024 {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "implausible encrypted header size: {hsize}"
         )));
     }
 
     // Total raw bytes = CRC(4) + vint + body, padded to 16 bytes.
-    let hsize = usize::try_from(hsize).map_err(|_| {
-        RarError::Format("encrypted header size overflows host address space".into())
-    })?;
+    let hsize = usize::try_from(hsize)
+        .map_err(|_| RarError::format("encrypted header size overflows host address space"))?;
     let total_raw = 4usize
         .checked_add(vint_len)
         .and_then(|n| n.checked_add(hsize))
-        .ok_or_else(|| RarError::Format("encrypted header size overflows usize".into()))?;
+        .ok_or_else(|| RarError::format("encrypted header size overflows usize"))?;
     let enc_size = total_raw
         .checked_add(15)
         .map(|n| n / 16 * 16)
-        .ok_or_else(|| RarError::Format("encrypted header padding overflows usize".into()))?;
+        .ok_or_else(|| RarError::format("encrypted header padding overflows usize"))?;
     let mut full_ct = vec![0u8; enc_size];
     full_ct[..16].copy_from_slice(&first_ct);
     if enc_size > 16 {
@@ -311,17 +306,15 @@ fn read_encrypted_header<R: Read>(reader: &mut R, key: &[u8; 32]) -> RarResult<O
 
     let body_start = 4usize
         .checked_add(vint_len)
-        .ok_or_else(|| RarError::Format("encrypted header offset overflows usize".into()))?;
+        .ok_or_else(|| RarError::format("encrypted header offset overflows usize"))?;
     if total_raw > full_pt.len() || body_start > total_raw {
-        return Err(RarError::Format(
-            "truncated encrypted header plaintext".into(),
-        ));
+        return Err(RarError::format("truncated encrypted header plaintext"));
     }
     let vint_bytes = full_pt[4..body_start].to_vec();
     let body = full_pt[body_start..total_raw].to_vec();
     let on_disk_capacity = 16usize
         .checked_add(enc_size)
-        .ok_or_else(|| RarError::Format("encrypted header size overflows usize".into()))?;
+        .ok_or_else(|| RarError::format("encrypted header size overflows usize"))?;
     let mut on_disk = Vec::with_capacity(on_disk_capacity);
     on_disk.extend_from_slice(&iv);
     on_disk.extend_from_slice(&full_ct);
@@ -338,20 +331,20 @@ fn read_encrypted_header<R: Read>(reader: &mut R, key: &[u8; 32]) -> RarResult<O
 fn parse_block_fields(body: &[u8]) -> RarResult<(u64, u64, u64)> {
     let mut offset = 0usize;
     let (block_type, n) = vint::decode_from_slice(body, offset)
-        .map_err(|e| RarError::Format(format!("block type: {e}")))?;
+        .map_err(|e| RarError::format(format!("block type: {e}")))?;
     offset += n;
     let (flags, n) = vint::decode_from_slice(body, offset)
-        .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
+        .map_err(|e| RarError::format(format!("block flags: {e}")))?;
     offset += n;
     if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
         let (_, n) = vint::decode_from_slice(body, offset)
-            .map_err(|e| RarError::Format(format!("extra size: {e}")))?;
+            .map_err(|e| RarError::format(format!("extra size: {e}")))?;
         offset += n;
     }
     let mut data_size = 0u64;
     if flags & BLOCK_FLAG_DATA_AREA != 0 {
         let (v, n) = vint::decode_from_slice(body, offset)
-            .map_err(|e| RarError::Format(format!("data size: {e}")))?;
+            .map_err(|e| RarError::format(format!("data size: {e}")))?;
         data_size = v;
         offset += n;
     }
@@ -395,14 +388,13 @@ impl ArchiveHeader {
         };
 
         let extra_data = if extra_size > 0 {
-            let extra_size = usize::try_from(extra_size).map_err(|_| {
-                RarError::Format("archive extra size overflows host address space".into())
-            })?;
+            let extra_size = usize::try_from(extra_size)
+                .map_err(|_| RarError::format("archive extra size overflows host address space"))?;
             let end = offset
                 .checked_add(extra_size)
-                .ok_or_else(|| RarError::Format("archive extra size overflows usize".into()))?;
+                .ok_or_else(|| RarError::format("archive extra size overflows usize"))?;
             if end > data.len() {
-                return Err(RarError::Format("truncated archive extra area".into()));
+                return Err(RarError::format("truncated archive extra area"));
             }
             data[offset..end].to_vec()
         } else {
@@ -459,9 +451,9 @@ impl FileHeader {
         if file_flags & FILE_FLAG_TIME_UNIX != 0 {
             let end = offset
                 .checked_add(4)
-                .ok_or_else(|| RarError::Format("mtime offset overflows usize".into()))?;
+                .ok_or_else(|| RarError::format("mtime offset overflows usize"))?;
             if end > data.len() {
-                return Err(RarError::Format("truncated mtime".into()));
+                return Err(RarError::format("truncated mtime"));
             }
             mtime = u32::from_le_bytes(data[offset..end].try_into().unwrap());
             offset = end;
@@ -471,9 +463,9 @@ impl FileHeader {
         if file_flags & FILE_FLAG_CRC32 != 0 {
             let end = offset
                 .checked_add(4)
-                .ok_or_else(|| RarError::Format("CRC32 offset overflows usize".into()))?;
+                .ok_or_else(|| RarError::format("CRC32 offset overflows usize"))?;
             if end > data.len() {
-                return Err(RarError::Format("truncated CRC32".into()));
+                return Err(RarError::format("truncated CRC32"));
             }
             crc32_val = Some(u32::from_le_bytes(data[offset..end].try_into().unwrap()));
             offset = end;
@@ -504,27 +496,25 @@ impl FileHeader {
             vint::decode_from_slice(data, offset).map_err(|e| RarError::Format(e.to_string()))?;
         offset += n;
 
-        let name_len = usize::try_from(name_len).map_err(|_| {
-            RarError::Format("file name length overflows host address space".into())
-        })?;
+        let name_len = usize::try_from(name_len)
+            .map_err(|_| RarError::format("file name length overflows host address space"))?;
         let name_end = offset
             .checked_add(name_len)
-            .ok_or_else(|| RarError::Format("file name length overflows usize".into()))?;
+            .ok_or_else(|| RarError::format("file name length overflows usize"))?;
         if name_end > data.len() {
-            return Err(RarError::Format("truncated file name".into()));
+            return Err(RarError::format("truncated file name"));
         }
         let name = String::from_utf8_lossy(&data[offset..name_end]).into_owned();
         offset = name_end;
 
         let extra_data = if extra_size > 0 {
-            let extra_size = usize::try_from(extra_size).map_err(|_| {
-                RarError::Format("file extra size overflows host address space".into())
-            })?;
+            let extra_size = usize::try_from(extra_size)
+                .map_err(|_| RarError::format("file extra size overflows host address space"))?;
             let end = offset
                 .checked_add(extra_size)
-                .ok_or_else(|| RarError::Format("file extra size overflows usize".into()))?;
+                .ok_or_else(|| RarError::format("file extra size overflows usize"))?;
             if end > data.len() {
-                return Err(RarError::Format("truncated file extra area".into()));
+                return Err(RarError::format("truncated file extra area"));
             }
             data[offset..end].to_vec()
         } else {
@@ -775,23 +765,22 @@ pub(crate) fn retain_extra_records(extra_data: &[u8], skip: &[u64]) -> Vec<u8> {
 pub(crate) fn block_extra_area(body: &[u8]) -> RarResult<Vec<u8>> {
     let mut offset = 0usize;
     let (_, n) = vint::decode_from_slice(body, offset)
-        .map_err(|e| RarError::Format(format!("block type: {e}")))?;
+        .map_err(|e| RarError::format(format!("block type: {e}")))?;
     offset += n;
     let (flags, n) = vint::decode_from_slice(body, offset)
-        .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
+        .map_err(|e| RarError::format(format!("block flags: {e}")))?;
     offset += n;
     let mut extra_size = 0usize;
     if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
         let (value, _) = vint::decode_from_slice(body, offset)
-            .map_err(|e| RarError::Format(format!("block extra size: {e}")))?;
-        extra_size = usize::try_from(value).map_err(|_| {
-            RarError::Format("block extra size overflows host address space".into())
-        })?;
+            .map_err(|e| RarError::format(format!("block extra size: {e}")))?;
+        extra_size = usize::try_from(value)
+            .map_err(|_| RarError::format("block extra size overflows host address space"))?;
     }
     let start = body
         .len()
         .checked_sub(extra_size)
-        .ok_or_else(|| RarError::Format("truncated block extra area".into()))?;
+        .ok_or_else(|| RarError::format("truncated block extra area"))?;
     Ok(body[start..].to_vec())
 }
 
@@ -836,28 +825,28 @@ pub(crate) fn parse_service_recovery_percent(body: &[u8]) -> Option<u8> {
 pub(crate) fn parse_service_block_name(body: &[u8]) -> RarResult<Option<String>> {
     let mut offset = 0usize;
     let (_, n) = vint::decode_from_slice(body, offset)
-        .map_err(|e| RarError::Format(format!("service block type: {e}")))?;
+        .map_err(|e| RarError::format(format!("service block type: {e}")))?;
     offset += n;
     let (flags, n) = vint::decode_from_slice(body, offset)
-        .map_err(|e| RarError::Format(format!("service block flags: {e}")))?;
+        .map_err(|e| RarError::format(format!("service block flags: {e}")))?;
     offset += n;
     if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
         let (_, n) = vint::decode_from_slice(body, offset)
-            .map_err(|e| RarError::Format(format!("service block extra size: {e}")))?;
+            .map_err(|e| RarError::format(format!("service block extra size: {e}")))?;
         offset += n;
     }
     if flags & BLOCK_FLAG_DATA_AREA != 0 {
         let (_, n) = vint::decode_from_slice(body, offset)
-            .map_err(|e| RarError::Format(format!("service block data size: {e}")))?;
+            .map_err(|e| RarError::format(format!("service block data size: {e}")))?;
         offset += n;
     }
     let (file_flags, n) = vint::decode_from_slice(body, offset)
-        .map_err(|e| RarError::Format(format!("service block file flags: {e}")))?;
+        .map_err(|e| RarError::format(format!("service block file flags: {e}")))?;
     offset += n;
     // unpacked size, attributes
     for _ in 0..2 {
         let (_, n) = vint::decode_from_slice(body, offset)
-            .map_err(|e| RarError::Format(format!("service block field: {e}")))?;
+            .map_err(|e| RarError::format(format!("service block field: {e}")))?;
         offset += n;
     }
     for flag in [FILE_FLAG_TIME_UNIX, FILE_FLAG_CRC32] {
@@ -872,11 +861,11 @@ pub(crate) fn parse_service_block_name(body: &[u8]) -> RarResult<Option<String>>
     // compression info, host OS
     for _ in 0..2 {
         let (_, n) = vint::decode_from_slice(body, offset)
-            .map_err(|e| RarError::Format(format!("service block field: {e}")))?;
+            .map_err(|e| RarError::format(format!("service block field: {e}")))?;
         offset += n;
     }
     let (name_len, n) = vint::decode_from_slice(body, offset)
-        .map_err(|e| RarError::Format(format!("service block name: {e}")))?;
+        .map_err(|e| RarError::format(format!("service block name: {e}")))?;
     offset += n;
     let Ok(name_len) = usize::try_from(name_len) else {
         return Ok(None);
@@ -982,7 +971,7 @@ fn parse_hash_record(extra_data: &[u8]) -> RarResult<(u8, Option<[u8; 32]>)> {
         };
         if rec_type == EXTRA_FILE_HASH {
             let malformed =
-                |what: &str| RarError::Format(format!("malformed file hash extra record: {what}"));
+                |what: &str| RarError::format(format!("malformed file hash extra record: {what}"));
             let (hash_type, hn) = vint::decode_from_slice(extra_data, body_start)
                 .map_err(|_| malformed("hash type"))?;
             let data_start = body_start
@@ -1046,61 +1035,58 @@ pub(crate) fn main_header_locator_fields(
     let data = &meta.raw.header_data;
     let mut offset = 0usize;
     let (_, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("block type: {e}")))?;
+        .map_err(|e| RarError::format(format!("block type: {e}")))?;
     offset += n;
     let (flags, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
+        .map_err(|e| RarError::format(format!("block flags: {e}")))?;
     offset += n;
     let mut extra_size = 0usize;
     if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
         let (v, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("extra size: {e}")))?;
-        extra_size = usize::try_from(v).map_err(|_| {
-            RarError::Format("main header extra size overflows host address space".into())
-        })?;
+            .map_err(|e| RarError::format(format!("extra size: {e}")))?;
+        extra_size = usize::try_from(v)
+            .map_err(|_| RarError::format("main header extra size overflows host address space"))?;
         offset += n;
     }
     if flags & BLOCK_FLAG_DATA_AREA != 0 {
         let (_, n) = vint::decode_from_slice(data, offset)
-            .map_err(|e| RarError::Format(format!("data size: {e}")))?;
+            .map_err(|e| RarError::format(format!("data size: {e}")))?;
         offset += n;
     }
     let (_, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("archive flags: {e}")))?;
+        .map_err(|e| RarError::format(format!("archive flags: {e}")))?;
     offset += n;
     let extra_end = offset
         .checked_add(extra_size)
-        .ok_or_else(|| RarError::Format("main header extra size overflows usize".into()))?;
+        .ok_or_else(|| RarError::format("main header extra size overflows usize"))?;
     if extra_end > data.len() {
-        return Err(RarError::Format("truncated main header extra area".into()));
+        return Err(RarError::format("truncated main header extra area"));
     }
     let extra = &data[offset..extra_end];
     // Header layout: [crc 4][size vint][body ...][extra area].
     let extra_base = 4usize
         .checked_add(meta.hsize_vint_len)
         .and_then(|n| n.checked_add(offset))
-        .ok_or_else(|| RarError::Format("main header locator offset overflows usize".into()))?;
+        .ok_or_else(|| RarError::format("main header locator offset overflows usize"))?;
 
     let mut e = 0usize;
     while e < extra.len() {
         let (rec_size, n) = vint::decode_from_slice(extra, e)
-            .map_err(|e| RarError::Format(format!("extra record: {e}")))?;
-        e = e.checked_add(n).ok_or_else(|| {
-            RarError::Format("main header extra record offset overflows usize".into())
-        })?;
+            .map_err(|e| RarError::format(format!("extra record: {e}")))?;
+        e = e
+            .checked_add(n)
+            .ok_or_else(|| RarError::format("main header extra record offset overflows usize"))?;
         let rec_start = e;
         let rec_size = usize::try_from(rec_size).map_err(|_| {
-            RarError::Format("main header extra record size overflows host address space".into())
+            RarError::format("main header extra record size overflows host address space")
         })?;
         let (rec_type, type_len) = vint::decode_from_slice(extra, e)
-            .map_err(|e| RarError::Format(format!("extra record type: {e}")))?;
+            .map_err(|e| RarError::format(format!("extra record type: {e}")))?;
         let type_end = e.checked_add(type_len).ok_or_else(|| {
-            RarError::Format("main header extra record type offset overflows usize".into())
+            RarError::format("main header extra record type offset overflows usize")
         })?;
         if type_end > extra.len() {
-            return Err(RarError::Format(
-                "truncated main header extra record type".into(),
-            ));
+            return Err(RarError::format("truncated main header extra record type"));
         }
         e = type_end;
         if rec_type == LOCATOR_TYPE {
@@ -1108,31 +1094,32 @@ pub(crate) fn main_header_locator_fields(
             // rar-rs archives count only the locator body. Parse the known
             // fields first, then require one of those exact boundaries.
             let (loc_flags, n) = vint::decode_from_slice(extra, e)
-                .map_err(|e| RarError::Format(format!("locator flags: {e}")))?;
+                .map_err(|e| RarError::format(format!("locator flags: {e}")))?;
             e = e
                 .checked_add(n)
-                .ok_or_else(|| RarError::Format("locator flags offset overflows usize".into()))?;
+                .ok_or_else(|| RarError::format("locator flags offset overflows usize"))?;
             let mut qo = None;
             if loc_flags & LOCATOR_FLAG_QUICK_OPEN != 0 {
                 qo = Some(extra_base.checked_add(e).ok_or_else(|| {
-                    RarError::Format("quick-open locator offset overflows usize".into())
+                    RarError::format("quick-open locator offset overflows usize")
                 })?);
                 let (_, qn) = vint::decode_from_slice(extra, e)
-                    .map_err(|e| RarError::Format(format!("quick-open offset: {e}")))?;
-                e = e.checked_add(qn).ok_or_else(|| {
-                    RarError::Format("quick-open locator end overflows usize".into())
-                })?;
+                    .map_err(|e| RarError::format(format!("quick-open offset: {e}")))?;
+                e = e
+                    .checked_add(qn)
+                    .ok_or_else(|| RarError::format("quick-open locator end overflows usize"))?;
             }
             let mut rr = None;
             if loc_flags & LOCATOR_FLAG_RECOVERY != 0 {
-                rr = Some(extra_base.checked_add(e).ok_or_else(|| {
-                    RarError::Format("recovery locator offset overflows usize".into())
-                })?);
+                rr =
+                    Some(extra_base.checked_add(e).ok_or_else(|| {
+                        RarError::format("recovery locator offset overflows usize")
+                    })?);
                 let (_, rn) = vint::decode_from_slice(extra, e)
-                    .map_err(|e| RarError::Format(format!("recovery offset: {e}")))?;
-                e = e.checked_add(rn).ok_or_else(|| {
-                    RarError::Format("recovery locator end overflows usize".into())
-                })?;
+                    .map_err(|e| RarError::format(format!("recovery offset: {e}")))?;
+                e = e
+                    .checked_add(rn)
+                    .ok_or_else(|| RarError::format("recovery locator end overflows usize"))?;
             }
             let includes_type = rec_start
                 .checked_add(rec_size)
@@ -1141,20 +1128,18 @@ pub(crate) fn main_header_locator_fields(
                 .checked_add(rec_size)
                 .is_some_and(|rec_end| rec_end == e);
             if !includes_type && !excludes_type {
-                return Err(RarError::Format(
-                    "malformed main header locator record size".into(),
+                return Err(RarError::format(
+                    "malformed main header locator record size",
                 ));
             }
             return Ok((qo, rr));
         }
 
-        let rec_end = rec_start.checked_add(rec_size).ok_or_else(|| {
-            RarError::Format("main header extra record size overflows usize".into())
-        })?;
+        let rec_end = rec_start
+            .checked_add(rec_size)
+            .ok_or_else(|| RarError::format("main header extra record size overflows usize"))?;
         if rec_end > extra.len() || rec_end < type_end {
-            return Err(RarError::Format(
-                "truncated main header extra record".into(),
-            ));
+            return Err(RarError::format("truncated main header extra record"));
         }
         e = rec_end;
     }
@@ -1198,31 +1183,27 @@ pub(crate) fn locator_quick_open_offset(extra: &[u8]) -> Option<u64> {
 /// size vint bytes plus the body (non-canonical vints included).
 pub(crate) fn parse_block_bytes(data: &[u8]) -> RarResult<RawBlock> {
     if data.len() < 5 {
-        return Err(RarError::Format("truncated block envelope".into()));
+        return Err(RarError::format("truncated block envelope"));
     }
     let stored_crc = u32::from_le_bytes(data[..4].try_into().unwrap());
     let (hsize, vint_len) =
         vint::decode_from_slice(data, 4).map_err(|e| RarError::Format(e.to_string()))?;
     let body_start = 4usize
         .checked_add(vint_len)
-        .ok_or_else(|| RarError::Format("header body offset overflows usize".into()))?;
+        .ok_or_else(|| RarError::format("header body offset overflows usize"))?;
     let hsize = usize::try_from(hsize)
-        .map_err(|_| RarError::Format("header size overflows host address space".into()))?;
+        .map_err(|_| RarError::format("header size overflows host address space"))?;
     let body_end = body_start
         .checked_add(hsize)
-        .ok_or_else(|| RarError::Format("header size overflow".into()))?;
+        .ok_or_else(|| RarError::format("header size overflow"))?;
     if body_end > data.len() {
-        return Err(RarError::Format("truncated block body".into()));
+        return Err(RarError::format("truncated block body"));
     }
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&data[4..body_end]);
     let computed = hasher.finalize();
     if computed != stored_crc {
-        return Err(RarError::Crc {
-            expected: stored_crc,
-            actual: computed,
-            context: "block header".into(),
-        });
+        return Err(RarError::crc(stored_crc, computed, "block header"));
     }
     let (block_type, flags, data_size) = parse_block_fields(&data[body_start..body_end])?;
     Ok(RawBlock {
@@ -1247,25 +1228,25 @@ pub(crate) fn split_main_extra(extra: &[u8]) -> RarResult<(bool, bool, Vec<u8>)>
     let mut off = 0usize;
     while off < extra.len() {
         let (rec_size, n) = vint::decode_from_slice(extra, off)
-            .map_err(|e| RarError::Format(format!("main header extra record: {e}")))?;
-        let rec_start = off.checked_add(n).ok_or_else(|| {
-            RarError::Format("main header extra record offset overflows usize".into())
-        })?;
+            .map_err(|e| RarError::format(format!("main header extra record: {e}")))?;
+        let rec_start = off
+            .checked_add(n)
+            .ok_or_else(|| RarError::format("main header extra record offset overflows usize"))?;
         let (rec_type, tn) = vint::decode_from_slice(extra, rec_start)
-            .map_err(|e| RarError::Format(format!("main header extra record type: {e}")))?;
+            .map_err(|e| RarError::format(format!("main header extra record type: {e}")))?;
         if rec_type == LOCATOR_TYPE {
             // The locator record size convention differs between writers
             // (WinRAR counts the type byte, rar-rs does not), so the record
             // boundary is derived from the parsed fields instead.
-            let mut p = rec_start.checked_add(tn).ok_or_else(|| {
-                RarError::Format("main header locator offset overflows usize".into())
-            })?;
+            let mut p = rec_start
+                .checked_add(tn)
+                .ok_or_else(|| RarError::format("main header locator offset overflows usize"))?;
             let (loc_flags, ln) = vint::decode_from_slice(extra, p)
-                .map_err(|e| RarError::Format(format!("locator flags: {e}")))?;
+                .map_err(|e| RarError::format(format!("locator flags: {e}")))?;
             p += ln;
             if loc_flags & LOCATOR_FLAG_QUICK_OPEN != 0 {
                 let (qo, qn) = vint::decode_from_slice(extra, p)
-                    .map_err(|e| RarError::Format(format!("quick-open offset: {e}")))?;
+                    .map_err(|e| RarError::format(format!("quick-open offset: {e}")))?;
                 // A 0 offset means "no quick-open record". WinRAR always sets
                 // the flag but leaves the field 0 when it wrote no record (its
                 // console `a` writes one only for larger archives), and the
@@ -1276,22 +1257,20 @@ pub(crate) fn split_main_extra(extra: &[u8]) -> RarResult<(bool, bool, Vec<u8>)>
             }
             if loc_flags & LOCATOR_FLAG_RECOVERY != 0 {
                 let (rr, rn) = vint::decode_from_slice(extra, p)
-                    .map_err(|e| RarError::Format(format!("recovery offset: {e}")))?;
+                    .map_err(|e| RarError::format(format!("recovery offset: {e}")))?;
                 had_rr = rr != 0;
                 p += rn;
             }
             off = p;
         } else {
             let rec_size = usize::try_from(rec_size).map_err(|_| {
-                RarError::Format(
-                    "main header extra record size overflows host address space".into(),
-                )
+                RarError::format("main header extra record size overflows host address space")
             })?;
-            let rec_end = rec_start.checked_add(rec_size).ok_or_else(|| {
-                RarError::Format("main header extra record size overflows".into())
-            })?;
+            let rec_end = rec_start
+                .checked_add(rec_size)
+                .ok_or_else(|| RarError::format("main header extra record size overflows"))?;
             if rec_end > extra.len() || rec_end <= rec_start {
-                return Err(RarError::Format("malformed main header extra area".into()));
+                return Err(RarError::format("malformed main header extra area"));
             }
             rest.extend_from_slice(&extra[off..rec_end]);
             off = rec_end;

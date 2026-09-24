@@ -36,9 +36,7 @@ pub(super) const MHD_COMMENT: u16 = 0x0002;
 /// (see `format::rar4::header_crc_end`).
 pub(super) fn patch_main_header(main: &[u8], set_bits: u16) -> RarResult<Vec<u8>> {
     if main.len() < 13 || main[2] != MAIN_HEAD {
-        return Err(RarError::Format(
-            "RAR4: main header block is malformed".into(),
-        ));
+        return Err(RarError::format("RAR4: main header block is malformed"));
     }
     let flags = u16::from_le_bytes([main[3], main[4]]);
     let mut patched = main.to_vec();
@@ -57,9 +55,7 @@ pub(super) fn patch_main_header(main: &[u8], set_bits: u16) -> RarResult<Vec<u8>
 /// Parse the flags out of a raw main header block.
 pub(super) fn main_flags(main: &[u8]) -> RarResult<u16> {
     if main.len() < 13 || main[2] != MAIN_HEAD {
-        return Err(RarError::Format(
-            "RAR4: main header block is malformed".into(),
-        ));
+        return Err(RarError::format("RAR4: main header block is malformed"));
     }
     Ok(u16::from_le_bytes([main[3], main[4]]))
 }
@@ -98,12 +94,12 @@ pub(super) fn first_volume_signature_offset(archive: &RarArchive) -> RarResult<u
 pub(super) fn locate_signature(stream: &mut File) -> RarResult<usize> {
     let file_len = stream.metadata().map_err(RarError::Io)?.len();
     let scan = usize::try_from(file_len.min(crate::detect::SFX_SCAN_LIMIT as u64))
-        .map_err(|_| RarError::Format("RAR4: volume size overflows host address space".into()))?;
+        .map_err(|_| RarError::format("RAR4: volume size overflows host address space"))?;
     let mut head = vec![0u8; scan];
     stream.seek(SeekFrom::Start(0))?;
     stream.read_exact(&mut head).map_err(RarError::Io)?;
     crate::detect::find_bytes(&head, crate::detect::RAR4_SIGNATURE)
-        .ok_or_else(|| RarError::Format("RAR4: volume has no archive signature".into()))
+        .ok_or_else(|| RarError::format("RAR4: volume has no archive signature"))
 }
 
 /// Copy `len` bytes starting at `offset` from `reader` to `writer` with a
@@ -146,12 +142,10 @@ fn read_main_from_file(path: &Path, sfx_offset: u64) -> RarResult<(u64, Vec<u8>)
     let mut sig = [0u8; 7];
     file.read_exact(&mut sig).map_err(RarError::Io)?;
     if &sig != crate::detect::RAR4_SIGNATURE {
-        return Err(RarError::Format(
-            "RAR4: signature mismatch while editing".into(),
-        ));
+        return Err(RarError::format("RAR4: signature mismatch while editing"));
     }
     let block = read_block(&mut file, false, None, EnvelopePolicy::PLAN)?
-        .ok_or_else(|| RarError::Format("RAR4: missing main header".into()))?;
+        .ok_or_else(|| RarError::format("RAR4: missing main header"))?;
     Ok((block.offset, block.header))
 }
 
@@ -163,8 +157,8 @@ pub(super) fn refuse_unsupported_containers(
     main_flags: u16,
 ) -> RarResult<()> {
     if archive.volume_paths.len() > 1 || main_flags & MHD_VOLUME != 0 {
-        return Err(RarError::Unsupported(
-            "editing multi-volume RAR4 archives is not supported".into(),
+        return Err(RarError::unsupported(
+            "editing multi-volume RAR4 archives is not supported",
         ));
     }
     Ok(())
@@ -254,8 +248,8 @@ fn parse_protect_record(view: &Rar4Block) -> RarResult<Option<ProtectRecord>> {
         let rec_sectors = u16::from_le_bytes(header[12..14].try_into().unwrap());
         let total_blocks = u32::from_le_bytes(header[14..18].try_into().unwrap());
         if u64::from(total_blocks) * 2 + u64::from(rec_sectors) * 512 != view.add_size {
-            return Err(RarError::Format(
-                "RAR4: recovery data size does not match header".into(),
+            return Err(RarError::format(
+                "RAR4: recovery data size does not match header",
             ));
         }
         return Ok(Some(ProtectRecord {
@@ -278,16 +272,16 @@ fn parse_protect_record(view: &Rar4Block) -> RarResult<Option<ProtectRecord>> {
             return Ok(None);
         }
         let Some(rec_bytes) = header.get(tail + 8..tail + 12) else {
-            return Err(RarError::Format("RAR4: recovery header truncated".into()));
+            return Err(RarError::format("RAR4: recovery header truncated"));
         };
         let Some(total_bytes) = header.get(tail + 12..tail + 16) else {
-            return Err(RarError::Format("RAR4: recovery header truncated".into()));
+            return Err(RarError::format("RAR4: recovery header truncated"));
         };
         let rec_sectors = u32::from_le_bytes(rec_bytes.try_into().unwrap());
         let total_blocks = u32::from_le_bytes(total_bytes.try_into().unwrap());
         if u64::from(total_blocks) * 2 + u64::from(rec_sectors) * 512 != view.add_size {
-            return Err(RarError::Format(
-                "RAR4: recovery data size does not match header".into(),
+            return Err(RarError::format(
+                "RAR4: recovery data size does not match header",
             ));
         }
         return Ok(Some(ProtectRecord {
@@ -314,9 +308,7 @@ pub(super) fn scan_layout_stream(
     let mut sig = [0u8; 7];
     stream.read_exact(&mut sig).map_err(RarError::Io)?;
     if &sig != crate::detect::RAR4_SIGNATURE {
-        return Err(RarError::Format(
-            "RAR4: signature mismatch while editing".into(),
-        ));
+        return Err(RarError::format("RAR4: signature mismatch while editing"));
     }
     let mut main: Option<(usize, Vec<u8>, u16)> = None;
     let mut endarc: Option<usize> = None;
@@ -335,9 +327,8 @@ pub(super) fn scan_layout_stream(
             let flags = main_flags(&view.header)?;
             if flags & MHD_PASSWORD != 0 {
                 let password = password.ok_or_else(|| {
-                    RarError::Encrypted(
-                        "editing a header-encrypted (-hp) RAR4 archive requires its password"
-                            .into(),
+                    RarError::encrypted(
+                        "editing a header-encrypted (-hp) RAR4 archive requires its password",
                     )
                 })?;
                 hp = Some(password.as_bytes());
@@ -353,7 +344,7 @@ pub(super) fn scan_layout_stream(
         }
     }
     let (main_offset, main_header, main_flags) =
-        main.ok_or_else(|| RarError::Format("RAR4: archive is missing its main header".into()))?;
+        main.ok_or_else(|| RarError::format("RAR4: archive is missing its main header"))?;
     // RAR 2.9-era archives omit the end-of-archive block entirely; editing
     // them is still supported (the rebuild emits a fresh one at the end).
     let endarc_offset = endarc.unwrap_or(stream_end);

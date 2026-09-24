@@ -268,7 +268,7 @@ pub(super) fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<R
         }
     }
     let Some(chosen) = chosen else {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{}: no recovery volumes found",
             parent.join(base).display()
         )));
@@ -304,8 +304,8 @@ pub(super) fn collect_recovery_volumes(parent: &Path, base: &str) -> RarResult<R
     let mut seen = vec![false; chosen.rec_count];
     for source in &payloads {
         if source.index >= chosen.rec_count || std::mem::replace(&mut seen[source.index], true) {
-            return Err(RarError::Format(
-                "duplicate or out-of-range recovery volume".into(),
+            return Err(RarError::format(
+                "duplicate or out-of-range recovery volume",
             ));
         }
     }
@@ -327,7 +327,7 @@ pub(super) fn identify(path: &Path) -> RarResult<(PathBuf, Layout, Option<Meta>)
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| RarError::Format(format!("{}: not a volume path", path.display())))?;
+        .ok_or_else(|| RarError::format(format!("{}: not a volume path", path.display())))?;
 
     let candidates = rev_name_candidates(name);
     if !candidates.is_empty() {
@@ -382,7 +382,7 @@ pub(super) fn identify(path: &Path) -> RarResult<(PathBuf, Layout, Option<Meta>)
         ));
     }
 
-    Err(RarError::Format(format!(
+    Err(RarError::format(format!(
         "{}: not a volume or recovery-volume name",
         path.display()
     )))

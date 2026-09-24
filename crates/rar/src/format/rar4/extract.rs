@@ -62,7 +62,7 @@ fn open_read_rar4_with(cx: &mut dyn Engine, salvage: bool) -> RarResult<()> {
         let mut sig = [0u8; 7];
         stream.read_exact(&mut sig)?;
         if &sig != RAR4_SIGNATURE {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "volume {} has a bad RAR4 signature",
                 vol_path.display()
             )));
@@ -356,11 +356,11 @@ fn verify_member_crc(hdr: &FileHeader, actual: u32) -> RarResult<()> {
     if let Some(expected) = hdr.crc32_val
         && actual != expected
     {
-        return Err(RarError::Crc {
+        return Err(RarError::crc(
             expected,
             actual,
-            context: format!("{}: checksum mismatch", hdr.name),
-        });
+            format!("{}: checksum mismatch", hdr.name),
+        ));
     }
     Ok(())
 }

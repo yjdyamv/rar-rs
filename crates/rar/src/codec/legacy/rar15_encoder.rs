@@ -126,7 +126,7 @@ const SHORT_XOR2: [u8; 15] = [
 ];
 
 fn enc_err(msg: &'static str) -> RarError {
-    RarError::Format(format!("RAR 1.5 encoder: {msg}"))
+    RarError::format(format!("RAR 1.5 encoder: {msg}"))
 }
 
 pub fn unpack15_encode(input: &[u8]) -> RarResult<Vec<u8>> {
