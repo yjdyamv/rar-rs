@@ -185,6 +185,19 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `winrar_interop::recovery::rar4_recovery_volumes_match_winrar_byte_for_byte`
   钉住。
 
+- **`rc` 重建卷沿用数据卷自己的零填充宽度**（2026-09-24 对拍官方 4.20）：WinRAR
+  的 trailer `.rev`
+  名按*恢复卷号*填充（`set.part1.rev`），数据卷却按预估卷数填充
+  （`set.part01.rar`..`set.part03.rar`），两者位数可不同。`rc` 之前拿 `.rev`
+  的宽度 当数据卷宽度，对这类官方集重建出的卷名是
+  `set.part2.rar`，我们自己的读取器随即报
+  `split member ... is missing its final volume`（官方自己的 `rc` 写
+  `set.part02.rar`）。现 `resolve_data_slots` 一律从现存数据卷取宽度（legacy
+  `.rev` 本就无填充、trailer `.rev` 的宽度是恢复卷号），`layout.width`
+  只在没有现存数据卷时 兜底。契约由
+  `rev3::tests::trailer_rev_with_narrower_padding_rebuilds_with_the_data_sets_width`
+  钉住。
+
 - **RAR5 成员/服务头的尺寸字段补到官方宽度**（2026-09-23 对拍官方 7.23）：官方把
   `data_size`（块信封的 Data Size）、`unpacked_size`、`comp_info` 三个 vint 一律
   写到**至少 2 字节**（值 11 写作 `8b 00`，我们此前写 `0b`），`-m0` 档实测每个

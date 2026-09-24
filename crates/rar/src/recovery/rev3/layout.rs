@@ -445,16 +445,19 @@ pub(super) fn resolve_data_slots(
     let mut slots: Vec<Option<PathBuf>> = Vec::with_capacity(data_count);
     let mut new_hits = 0usize;
     let mut old_hits = 0usize;
-    // A legacy `.rev` name carries no part padding, so recover it from the
-    // first existing data volume; reconstructed volumes must keep the
-    // set's own padding (`part02.rar`, not `part2.rar`).
-    let mut new_width = layout.width;
+    // A rebuilt volume must keep the data set's own padding, which neither
+    // `.rev` name shape reliably carries: a legacy name has none at all, and a
+    // trailer `.rev` name (`set.part1.rev`) carries the *recovery* volume
+    // number's width, which WinRAR lets differ from the data volumes' padding
+    // (`set.part01.rar`..`set.part03.rar` when it estimates ten-plus volumes).
+    // So take the width from the first existing data volume instead.
+    let mut new_width: Option<usize> = None;
     for index in 0..data_count {
         let mut found = new_data_path(parent, &layout.base, layout.width, index);
         if let Some(path) = &found {
             new_hits += 1;
-            if new_width == 0 {
-                new_width = volume_part_width(path);
+            if new_width.is_none() {
+                new_width = Some(volume_part_width(path));
             }
         } else {
             let legacy = old_path(index);
@@ -465,6 +468,7 @@ pub(super) fn resolve_data_slots(
         }
         slots.push(found);
     }
+    let new_width = new_width.unwrap_or(layout.width);
     let fallback_new = |index: usize| -> PathBuf {
         let width = new_width.max(1);
         parent.join(format!(
