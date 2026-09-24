@@ -74,19 +74,24 @@ fn bare_relative_name_creates_a_rar5_volume_set() {
 
 #[test]
 fn bare_relative_name_creates_rar4_and_rar13_volume_sets() {
-    for (switch, label) in [("-ma4", "RAR4"), ("-ma14", "RAR13")] {
+    // RAR4 defaults to WinRAR's modern `.partNN.rar` naming; RAR13 keeps the
+    // old `.rar`/`.rNN` scheme.
+    for (switch, label, first, second) in [
+        ("-ma4", "RAR4", "set.part1.rar", "set.part2.rar"),
+        ("-ma14", "RAR13", "set.rar", "set.r00"),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let files = create_with_bare_name(dir.path(), "set.rar", &[switch, "-m0", "-v8k"]);
         assert!(
-            files.contains(&"set.rar".to_string()),
-            "{label}: first legacy volume missing: {files:?}"
+            files.contains(&first.to_string()),
+            "{label}: first volume missing: {files:?}"
         );
         assert!(
-            files.contains(&"set.r00".to_string()),
-            "{label}: expected a second legacy volume: {files:?}"
+            files.contains(&second.to_string()),
+            "{label}: expected a second volume: {files:?}"
         );
 
-        let reader = rar_rs::ArchiveReader::open(dir.path().join("set.rar")).unwrap();
+        let reader = rar_rs::ArchiveReader::open(dir.path().join(first)).unwrap();
         let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
         assert!(
             names.iter().any(|n| n == "payload.bin"),

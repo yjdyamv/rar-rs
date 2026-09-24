@@ -129,23 +129,26 @@ fn cli_rv_and_rc_roundtrip_rar4_volume_sets() {
         .unwrap();
     assert!(status.success());
 
+    // A modern `.partNN.rar` set is addressed by its first volume, matching
+    // WinRAR (which cannot open the bare base name).
+    let first = dir.path().join("mv4.part1.rar");
     let status = std::process::Command::new(RAR_CLI)
         .args(["rv", "-idq"])
-        .arg(&base)
+        .arg(&first)
         .current_dir(dir.path())
         .status()
         .unwrap();
     assert!(status.success(), "rar rv must accept a RAR4 set");
-    let rev = dir.path().join("mv44_1_1.rev");
-    assert!(rev.exists(), "legacy RAR4 rev name expected: {rev:?}");
+    let rev = dir.path().join("mv4.part1.rev");
+    assert!(rev.exists(), "modern RAR4 rev name expected: {rev:?}");
 
     // Delete a middle volume and rebuild it byte-identically.
-    let victim = dir.path().join("mv4.r00");
+    let victim = dir.path().join("mv4.part2.rar");
     let saved = std::fs::read(&victim).unwrap();
     std::fs::remove_file(&victim).unwrap();
     let status = std::process::Command::new(RAR_CLI)
         .args(["rc", "-idq"])
-        .arg(&base)
+        .arg(&first)
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -155,7 +158,7 @@ fn cli_rv_and_rc_roundtrip_rar4_volume_sets() {
     // The rebuilt set must pass our own test.
     let status = std::process::Command::new(UNRAR_CLI)
         .args(["t", "-idq"])
-        .arg(&base)
+        .arg(&first)
         .status()
         .unwrap();
     assert!(status.success());
@@ -185,15 +188,15 @@ fn cli_ma4_create_with_rv_creates_recovery_volumes() {
         .status()
         .unwrap();
     assert!(status.success());
-    assert!(dir.path().join("rv44_2_1.rev").exists());
-    assert!(dir.path().join("rv44_2_2.rev").exists());
+    assert!(dir.path().join("rv4.part1.rev").exists());
+    assert!(dir.path().join("rv4.part2.rev").exists());
 
-    let victim = dir.path().join("rv4.r01");
+    let victim = dir.path().join("rv4.part3.rar");
     let saved = std::fs::read(&victim).unwrap();
     std::fs::remove_file(&victim).unwrap();
     let status = std::process::Command::new(RAR_CLI)
         .args(["rc", "-idq"])
-        .arg(&base)
+        .arg(dir.path().join("rv4.part1.rar"))
         .current_dir(dir.path())
         .status()
         .unwrap();

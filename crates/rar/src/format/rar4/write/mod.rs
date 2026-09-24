@@ -31,8 +31,16 @@ const MAIN_HEADER_SIZE: u16 = 13;
 /// Base file header size (before name, salt, ext-time).
 pub(crate) const FILE_HEADER_FIXED_SIZE: u16 = 32;
 
-/// End-of-archive header size.
+/// End-of-archive header size of a single-volume archive (the short form).
 const ENDARC_HEADER_SIZE: u16 = 7;
+
+/// End-of-archive header size of a multi-volume set. Every volume of a set
+/// carries the 20-byte form (WinRAR 4.20+), whatever the naming family.
+const ENDARC_VOLUME_HEADER_SIZE: u16 = 20;
+
+/// HEAD_FLAGS base of a volume-set ENDARC_HEAD (WinRAR writes `0x400e`;
+/// `EHFL_NEXTVOLUME` — bit 0 — is ORed in on every volume but the last).
+const ENDARC_VOLUME_FLAGS: u16 = 0x400e;
 
 // ── CRC16 helper ────────────────────────────────────────────────────────────
 
@@ -190,18 +198,55 @@ pub(crate) fn build_file_comment_block(comment: &[u8]) -> Vec<u8> {
 
 // ── End-of-archive ──────────────────────────────────────────────────────────
 
-/// Build a 7-byte ENDARC_HEAD block.
+/// Build the 7-byte ENDARC_HEAD block of a **single-volume** archive.
 ///
 /// For header-encrypted archives (`-hp`), this marks the end of the
 /// encrypted group. For plain archives, this block is optional but
-/// WinRAR writes it anyway.
-pub(crate) fn build_endarc(flags: u16) -> [u8; 7] {
+/// WinRAR writes it anyway; its flags carry WinRAR's `0x4000` base and no
+/// volume fields.
+pub(crate) fn build_endarc_single() -> [u8; 7] {
     let mut buf = [0u8; 7];
     buf[2] = ENDARC_HEAD;
-    buf[3..5].copy_from_slice(&flags.to_le_bytes());
+    buf[3..5].copy_from_slice(&0x4000u16.to_le_bytes());
     buf[5..7].copy_from_slice(&ENDARC_HEADER_SIZE.to_le_bytes());
     patch_crc16(&mut buf, 0);
     buf
+}
+
+/// Build the 20-byte ENDARC_HEAD block of a multi-volume set. Layout
+/// (verified byte-for-byte against WinRAR 5.91/6.23):
+/// `HEAD_CRC(2) HEAD_TYPE(1)=0x7b HEAD_FLAGS(2) HEAD_SIZE(2)=0x14
+///  prefix_crc32(4) volume_index(2) 0(7)`.
+///
+/// `prefix_crc32` is the CRC-32 of the raw volume bytes written before this
+/// block (the "protected prefix", the same range the inline recovery record
+/// covers); `volume_index` is the zero-based volume number; `next_volume`
+/// sets `EHFL_NEXTVOLUME` on every volume but the last. The seven trailing
+/// zero bytes are what makes WinRAR's `use_trailer_format` pick the trailer
+/// `.rev` layout.
+pub(crate) fn build_endarc(next_volume: bool, prefix_crc32: u32, volume_index: u16) -> [u8; 20] {
+    let mut buf = [0u8; 20];
+    buf[2] = ENDARC_HEAD;
+    let flags = ENDARC_VOLUME_FLAGS | u16::from(next_volume);
+    buf[3..5].copy_from_slice(&flags.to_le_bytes());
+    buf[5..7].copy_from_slice(&ENDARC_VOLUME_HEADER_SIZE.to_le_bytes());
+    buf[7..11].copy_from_slice(&prefix_crc32.to_le_bytes());
+    buf[11..13].copy_from_slice(&volume_index.to_le_bytes());
+    // bytes 13..20 stay zero (the trailer the `.rev` layout keys on).
+    patch_crc16(&mut buf, 0);
+    buf
+}
+
+/// On-disk size of a volume-set ENDARC block, for volume-budget arithmetic:
+/// the 20 plaintext bytes, or `[8-byte salt][align16(20)]` under `-hp`
+/// header encryption. Every split/defer decision must reserve this much.
+pub(crate) fn endarc_volume_reserve(header_encryption: bool) -> u64 {
+    let plain = u64::from(ENDARC_VOLUME_HEADER_SIZE);
+    if header_encryption {
+        8 + plain.next_multiple_of(16)
+    } else {
+        plain
+    }
 }
 
 /// Encrypt a RAR4 block header for a `-hp` header-encrypted archive.
@@ -439,14 +484,43 @@ mod tests {
     }
 
     #[test]
-    fn endarc_block() {
-        let buf = build_endarc(0x4000);
+    fn endarc_single_block() {
+        let buf = build_endarc_single();
         assert_eq!(buf.len(), 7);
         assert_eq!(buf[2], ENDARC_HEAD);
         let flags = u16::from_le_bytes([buf[3], buf[4]]);
         assert_eq!(flags, 0x4000);
         let head_size = u16::from_le_bytes([buf[5], buf[6]]);
         assert_eq!(head_size, ENDARC_HEADER_SIZE);
+        // WinRAR's constant single-volume ENDARC: flags 0x4000, head_size 7.
+        assert_eq!(buf, [0xc4, 0x3d, 0x7b, 0x00, 0x40, 0x07, 0x00]);
+    }
+
+    #[test]
+    fn endarc_volume_block() {
+        let next = build_endarc(true, 0xDEAD_BEEF, 3);
+        assert_eq!(next.len(), 20);
+        assert_eq!(next[2], ENDARC_HEAD);
+        assert_eq!(u16::from_le_bytes([next[3], next[4]]), 0x400f);
+        assert_eq!(
+            u16::from_le_bytes([next[5], next[6]]),
+            ENDARC_VOLUME_HEADER_SIZE
+        );
+        assert_eq!(
+            u32::from_le_bytes(next[7..11].try_into().unwrap()),
+            0xDEAD_BEEF
+        );
+        assert_eq!(u16::from_le_bytes([next[11], next[12]]), 3);
+        assert!(next[13..].iter().all(|&byte| byte == 0), "trailing zeros");
+        assert_eq!(
+            u16::from_le_bytes([next[0], next[1]]),
+            header_crc16(&next[2..]),
+            "HEAD_CRC covers the 20-byte body"
+        );
+
+        // The final volume drops EHFL_NEXTVOLUME (0x400e).
+        let last = build_endarc(false, 0, 0);
+        assert_eq!(u16::from_le_bytes([last[3], last[4]]), 0x400e);
     }
 
     #[test]

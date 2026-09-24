@@ -216,6 +216,12 @@ pub(crate) struct CreateOptions {
     pub recovery_volume_count: Option<u32>,
     /// Volume size in bytes; when set, produces a multi-volume archive.
     pub volume_size: Option<u64>,
+    /// RAR4 only (WinRAR `-vn`): name the volume set the old way —
+    /// `{base}.rar`, `{base}.r00`, … — and leave `MHD_NEWNUMBERING` clear,
+    /// instead of the default zero-padded `{base}.partNN.rar` naming with the
+    /// flag set. RAR 1.3/1.4 always use the old names; RAR5 has no old
+    /// naming, so the flag is ignored there.
+    pub old_numbering: bool,
     /// Dictionary size as a RAR5 log (`128 KiB << log`), like WinRAR's
     /// `-md`; `None` = WinRAR's default (32 MiB, capped at 2x the file
     /// size rounded down to a power of two). Valid logs: 0..=15
@@ -473,6 +479,7 @@ impl Default for CreateOptions {
             recovery_volumes_percent: None,
             recovery_volume_count: None,
             volume_size: None,
+            old_numbering: false,
             dict_size_log: None,
             dict_size_bytes: None,
             force_v70: false,

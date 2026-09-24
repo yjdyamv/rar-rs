@@ -349,6 +349,11 @@ pub(crate) struct OutputState {
     pub pending: Option<PendingCommit>,
     /// Volume size limit for multi-volume creation (None = single volume).
     pub volume_size: Option<u64>,
+    /// RAR4 only (WinRAR `-vn`): name the volume set the old way —
+    /// `{base}.rar`/`{base}.rNN` instead of the zero-padded
+    /// `{base}.partNN.rar` — and leave `MHD_NEWNUMBERING` clear. RAR 1.3/1.4
+    /// always use the old names and ignore this.
+    pub old_numbering: bool,
     /// Current volume number during creation (1-indexed).
     pub current_volume: usize,
     /// Bytes written in the current volume during creation.

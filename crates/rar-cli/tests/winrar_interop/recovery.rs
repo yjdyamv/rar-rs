@@ -452,7 +452,7 @@ fn rar4_recovery_record_interops_with_winrar() {
 // ── RAR 1.5–4.x `.rev` (legacy recovery volumes) ──────────────────────────
 
 /// Legacy RAR4 sets: our `rv` output is byte-identical to WinRAR's (the
-/// full-parity layout with the counts in the file name), and each side can
+/// trailer layout our zero-tailed `ENDARC` selects), and each side can
 /// rebuild a deleted volume from the other's `.rev` files.
 #[test]
 fn rar4_recovery_volumes_match_winrar_byte_for_byte() {
@@ -464,16 +464,16 @@ fn rar4_recovery_volumes_match_winrar_byte_for_byte() {
     let src = dir.path().join("big.bin");
     write_pattern_file(&src, 400_000, 21);
 
-    // Our RAR4 set (`-ma4`, old `.rar`/`.rNN` naming).
+    // Our RAR4 set (`-ma4`, modern `.partNN.rar` naming).
     let (ok, out) = run(Command::new(env!("CARGO_BIN_EXE_rar"))
         .args(["a", "-ma4", "-m0", "-v100k", "-idq"])
         .arg(dir.path().join("r4.rar"))
         .arg("big.bin")
         .current_dir(dir.path()));
     assert!(ok, "our -ma4 creation failed:\n{out}");
-    let first = dir.path().join("r4.rar");
-    let volumes = rar_rs::discover_volumes(&first);
+    let volumes = rar_rs::discover_volumes(&dir.path().join("r4.rar"));
     assert!(volumes.len() >= 4, "expected several volumes");
+    let first = volumes[0].clone();
 
     let ours = dir.path().join("ours");
     let theirs = dir.path().join("theirs");
@@ -623,11 +623,11 @@ fn rar4_create_rv_winrar_rc_rebuilds() {
         .arg("big.bin")
         .current_dir(dir.path()));
     assert!(ok, "our -ma4 -rv2 creation failed:\n{out}");
-    let first = dir.path().join("cr.rar");
-    let volumes = rar_rs::discover_volumes(&first);
+    let volumes = rar_rs::discover_volumes(&dir.path().join("cr.rar"));
     assert!(volumes.len() >= 4, "expected several volumes");
-    assert!(dir.path().join("cr4_2_1.rev").exists());
-    assert!(dir.path().join("cr4_2_2.rev").exists());
+    let first = volumes[0].clone();
+    assert!(dir.path().join("cr.part1.rev").exists());
+    assert!(dir.path().join("cr.part2.rev").exists());
 
     let victim = volumes[1].clone();
     let saved = std::fs::read(&victim).unwrap();

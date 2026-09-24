@@ -1863,6 +1863,90 @@ fn create_rar4_streams_large_members_beyond_the_threshold() {
     assert_eq!(reader.read_entry(entry).unwrap(), data);
 }
 
+/// Reflected CRC-32 (IEEE), matching `crc32fast` / `crate::crc32::crc32`.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// A RAR4 multi-volume set uses WinRAR's modern shape: zero-padded
+/// `.partNN.rar` names, `MHD_NEWNUMBERING` in every main header, and the
+/// 20-byte volume-set `ENDARC` (prefix CRC-32 + zero-based volume index +
+/// seven zero bytes) as each volume's last block. Verified byte-for-byte
+/// against WinRAR 6.23.
+#[test]
+fn rar4_multivolume_uses_new_numbering_and_the_volume_endarc() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("big.bin");
+    let mut data = vec![0u8; 250_000];
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for b in &mut data {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *b = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8;
+    }
+    std::fs::write(&src, &data).unwrap();
+    let arc = dir.path().join("nb.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::new()
+            .compression(ArchiveVersion::V29)
+            .volume_size(100_000),
+    )
+    .unwrap();
+    archive.add_path(&src, ewo(0)).unwrap();
+    archive.finish().unwrap();
+
+    let volumes = discover_volumes(&arc);
+    assert!(volumes.len() >= 2, "{volumes:?}");
+    for (index, path) in volumes.iter().enumerate() {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name, format!("nb.part{}.rar", index + 1), "modern naming");
+
+        let bytes = std::fs::read(path).unwrap();
+        let flags = u16::from_le_bytes([bytes[10], bytes[11]]);
+        assert_ne!(flags & 0x0001, 0, "{name}: MHD_VOLUME");
+        assert_ne!(flags & 0x0010, 0, "{name}: MHD_NEWNUMBERING");
+
+        let endarc = &bytes[bytes.len() - 20..];
+        assert_eq!(endarc[2], 0x7b, "{name}: ENDARC type");
+        assert_eq!(
+            u16::from_le_bytes([endarc[5], endarc[6]]),
+            20,
+            "{name}: ENDARC head size"
+        );
+        let expected = if index + 1 == volumes.len() {
+            0x400e
+        } else {
+            0x400f
+        };
+        assert_eq!(
+            u16::from_le_bytes([endarc[3], endarc[4]]),
+            expected,
+            "{name}: ENDARC flags"
+        );
+        assert_eq!(
+            u16::from_le_bytes([endarc[11], endarc[12]]) as usize,
+            index,
+            "{name}: zero-based volume index"
+        );
+        assert!(endarc[13..].iter().all(|&b| b == 0), "{name}: zero trailer");
+        assert_eq!(
+            u32::from_le_bytes(endarc[7..11].try_into().unwrap()),
+            crc32(&bytes[..bytes.len() - 20]),
+            "{name}: ENDARC prefix CRC-32"
+        );
+    }
+}
+
 /// RAR4 volume sets build legacy `.rev` recovery volumes through the same
 /// library surface as RAR5 sets (dispatched by the volume signature).
 #[test]
@@ -1894,11 +1978,12 @@ fn rar4_volumes_build_legacy_recovery_volumes() {
         "expected multiple volumes, got {volumes:?}"
     );
 
-    // Our volumes keep a live `ENDARC` tail, so the legacy full-parity
-    // layout with the counts in the file name is used.
+    // Our volumes end with the 20-byte volume-set `ENDARC` (a zero tail), so
+    // the trailer `.rev` layout is chosen and the name is the `.partNN.rev`
+    // of the (now default) modern naming.
     let revs = rar_rs::build_recovery_volumes_for_set(&volumes, 1).unwrap();
     assert_eq!(revs.len(), 1);
-    let expected = dir.path().join(format!("mv4{}_1_1.rev", volumes.len()));
+    let expected = dir.path().join("mv4.part1.rev");
     assert_eq!(revs[0], expected);
 
     // Everything present: nothing to rebuild.

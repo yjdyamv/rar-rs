@@ -225,7 +225,9 @@ impl RarArchive {
         } else {
             return Ok(Vec::new());
         };
-        let staged: Vec<PathBuf> = (1..=nd).map(|n| volume_path(parent, tmp_base, n)).collect();
+        let staged: Vec<PathBuf> = (1..=nd)
+            .map(|n| self.rar4_staged_volume_path(parent, tmp_base, n))
+            .collect();
         crate::recovery::rev50::build_recovery_volumes_for_set(&staged, rec_count)
     }
 
@@ -250,7 +252,14 @@ impl RarArchive {
             Some(PendingCommit::Single(tmp)) => tmp.clone(),
             Some(PendingCommit::Volumes {
                 parent, tmp_base, ..
-            }) => volume_path(parent, tmp_base, self.write_ctx().output.current_volume),
+            }) => {
+                let volume = self.write_ctx().output.current_volume;
+                if self.write_ctx().output.old_numbering {
+                    volume_path_rar4(parent, tmp_base, volume)
+                } else {
+                    volume_path(parent, tmp_base, volume)
+                }
+            }
             _ => self.path.clone(),
         }
     }
@@ -311,11 +320,16 @@ impl RarArchive {
                 let mut data_paths = Vec::with_capacity(nd);
                 let mut install = Vec::with_capacity(nd);
                 for n in 1..=nd {
-                    let tmp = volume_path(parent, tmp_base, n);
-                    // RAR4/RAR13 volume sets use the legacy `.rar`/`.rNN`
-                    // naming; RAR5 uses the zero-padded `.partN.rar` naming.
-                    let final_path = if self.is_legacy() {
+                    let tmp = self.rar4_staged_volume_path(parent, tmp_base, n);
+                    // RAR4 sets use the zero-padded `.partNN.rar` naming
+                    // (WinRAR's default) unless `-vn` asked for the old
+                    // `.rar`/`.rNN` scheme; RAR13 always uses the old names;
+                    // RAR5 always the zero-padded ones. (`is_legacy()` covers
+                    // RAR13 too, so test RAR13 first.)
+                    let final_path = if self.is_rar13() {
                         volume_path_rar4(parent, final_base, n)
+                    } else if self.is_legacy() {
+                        self.rar4_final_volume_path(parent, final_base, n, width)
                     } else {
                         volume_path_padded(parent, final_base, n, width)
                     };
@@ -747,14 +761,15 @@ impl RarArchive {
             let base = volume_base_of(&self.path);
             let parent = parent_dir(&self.path);
             let tmp_base = format!(".{base}.rar4tmp-{}", temp_suffix());
-            self.volume_paths = vec![volume_path_rar4(&parent, &base, 1)];
+            self.volume_paths = vec![self.rar4_final_volume_path(&parent, &base, 1, 1)];
             self.write_ctx_mut().output.current_volume = 1;
             self.write_ctx_mut().output.pending = Some(PendingCommit::Volumes {
                 parent: parent.clone(),
                 tmp_base: tmp_base.clone(),
                 final_base: base,
             });
-            let f = read_write_create(&volume_path(&parent, &tmp_base, 1))?;
+            let staged = self.rar4_staged_volume_path(&parent, &tmp_base, 1);
+            let f = read_write_create(&staged)?;
             self.stream = Some(Box::new(f));
             self.write_rar4_signature()?;
             self.write_rar4_main_header()?;
@@ -780,7 +795,7 @@ impl RarArchive {
     }
 
     fn write_rar4_main_header(&mut self) -> RarResult<()> {
-        use crate::format::rar4::{MHD_FIRSTVOLUME, MHD_SOLID, MHD_VOLUME};
+        use crate::format::rar4::{MHD_FIRSTVOLUME, MHD_NEWNUMBERING, MHD_SOLID, MHD_VOLUME};
         let is_solid = self.write_ctx().solid.mode;
         let is_multivolume = self.write_ctx().output.volume_size.is_some();
         let mut flags: u16 = 0;
@@ -789,6 +804,11 @@ impl RarArchive {
         }
         if is_multivolume {
             flags |= MHD_VOLUME;
+            // WinRAR flags every volume of a modern set MHD_NEWNUMBERING
+            // (`.partNN.rar` names); `-vn` (`old_numbering`) leaves it clear.
+            if !self.write_ctx().output.old_numbering {
+                flags |= MHD_NEWNUMBERING;
+            }
             // The first volume of a RAR4 set flags MHD_FIRSTVOLUME alongside
             // MHD_VOLUME (matches WinRAR's convention).
             if self.write_ctx().output.current_volume == 1 {
@@ -843,19 +863,21 @@ impl RarArchive {
             // a set (matching WinRAR's RAR4 writer). Appending to an archive
             // that carried a record rebuilds it over the whole new prefix at
             // its original parity strength.
-            self.finish_volume_rar4()?;
+            self.finish_volume_rar4(false)?;
             self.mode = Mode::Read;
         }
         Ok(())
     }
 
     /// Legacy equivalent of [`Self::finish_volume`]: append this volume's
-    /// NEWSUB recovery record and its end-of-archive block.
-    fn finish_volume_rar4(&mut self) -> RarResult<()> {
+    /// NEWSUB recovery record and its end-of-archive block. `next_volume`
+    /// marks a volume that continues into a successor (every volume but the
+    /// last); it drives the ENDARC's `EHFL_NEXTVOLUME` bit.
+    fn finish_volume_rar4(&mut self, next_volume: bool) -> RarResult<()> {
         if self.rar4_recovery_requested() {
             self.write_rar4_recovery_block()?;
         }
-        self.write_rar4_end_block()
+        self.write_rar4_end_block(next_volume)
     }
 
     /// Whether a legacy recovery record was requested (`-rr` in any form, or
@@ -943,8 +965,64 @@ impl RarArchive {
         })
     }
 
-    fn write_rar4_end_block(&mut self) -> RarResult<()> {
-        let buf = crate::format::rar4::write::build_endarc(0);
+    /// CRC-32 of the first `len` bytes of the file currently being written —
+    /// the volume's protected prefix. Read back through a second handle
+    /// (like the recovery record's prefix) and hashed in bounded chunks, so a
+    /// large volume is never buffered.
+    fn rar4_prefix_crc32(&self, len: u64) -> RarResult<u32> {
+        let path = self.write_file_path();
+        let mut reader = std::fs::File::open(&path)?;
+        let mut hasher = crc32fast::Hasher::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut remaining = len;
+        while remaining > 0 {
+            let want = remaining.min(buf.len() as u64) as usize;
+            std::io::Read::read_exact(&mut reader, &mut buf[..want])?;
+            hasher.update(&buf[..want]);
+            remaining -= want as u64;
+        }
+        Ok(hasher.finalize())
+    }
+
+    /// Staged path of volume `n` (1-based) of a RAR4 set under the naming
+    /// policy: `{base}.partN.rar` for the default new numbering,
+    /// `{base}.rar`/`{base}.rNN` for `-vn` (old numbering). The staged names
+    /// must match the final family so the recovery-volume builder recognises
+    /// them (`identify` keys off the name shape).
+    fn rar4_staged_volume_path(&self, parent: &Path, tmp_base: &str, n: usize) -> PathBuf {
+        if self.write_ctx().output.old_numbering {
+            volume_path_rar4(parent, tmp_base, n)
+        } else {
+            volume_path(parent, tmp_base, n)
+        }
+    }
+
+    /// Final path of volume `n` (1-based) of a RAR4 set under the naming
+    /// policy, with the part number zero-padded to `width` digits for the
+    /// new numbering (matching WinRAR's `part01..part15`).
+    fn rar4_final_volume_path(&self, parent: &Path, base: &str, n: usize, width: usize) -> PathBuf {
+        if self.write_ctx().output.old_numbering {
+            volume_path_rar4(parent, base, n)
+        } else {
+            volume_path_padded(parent, base, n, width)
+        }
+    }
+
+    /// Append this volume's ENDARC_HEAD. A multi-volume set uses WinRAR's
+    /// 20-byte form carrying the protected prefix's CRC-32 and the zero-based
+    /// volume index; a single-volume archive keeps the short 7-byte form.
+    fn write_rar4_end_block(&mut self, next_volume: bool) -> RarResult<()> {
+        let buf: Vec<u8> = if self.write_ctx().output.volume_size.is_some() {
+            let prefix_crc = {
+                let stream = self.stream.as_mut().unwrap();
+                let prefix_len = stream.stream_position()?;
+                self.rar4_prefix_crc32(prefix_len)?
+            };
+            let index = self.write_ctx().output.current_volume.saturating_sub(1) as u16;
+            crate::format::rar4::write::build_endarc(next_volume, prefix_crc, index).to_vec()
+        } else {
+            crate::format::rar4::write::build_endarc_single().to_vec()
+        };
         let stream = self.stream.as_mut().unwrap();
         if self.header_encryption {
             // `-hp`: the end-of-archive block is header-encrypted like every
@@ -970,7 +1048,7 @@ impl RarArchive {
                 crate::fs::volume::LEGACY_VOLUME_MAX
             )));
         }
-        self.finish_volume_rar4()?;
+        self.finish_volume_rar4(true)?;
         self.stream = None;
         self.write_ctx_mut().output.current_volume += 1;
         let (parent, tmp_base, final_base) = match &self.write_ctx().output.pending {
@@ -985,9 +1063,9 @@ impl RarArchive {
                 ));
             }
         };
-        let tmp_vol = volume_path(&parent, &tmp_base, self.write_ctx().output.current_volume);
-        let final_vol =
-            volume_path_rar4(&parent, &final_base, self.write_ctx().output.current_volume);
+        let index = self.write_ctx().output.current_volume;
+        let tmp_vol = self.rar4_staged_volume_path(&parent, &tmp_base, index);
+        let final_vol = self.rar4_final_volume_path(&parent, &final_base, index, 1);
         self.volume_paths.push(final_vol);
         let f = read_write_create(&tmp_vol)?;
         self.stream = Some(Box::new(f));
