@@ -659,8 +659,7 @@ pub enum OverwriteChoice {
     OverwriteAll,
     /// Rename: write to the next free `name(N).ext` instead.
     Rename,
-    /// Quit: abort the extraction with
-    /// [`RarError::Cancelled`](crate::RarError::Cancelled).
+    /// Quit: abort the extraction with [`RarError::Cancelled`].
     Quit,
 }
 

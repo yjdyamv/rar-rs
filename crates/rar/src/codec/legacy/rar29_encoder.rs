@@ -603,7 +603,7 @@ fn build_block_table_lengths(
     let mut main_frequencies = vec![0usize; MAIN_COUNT];
     let mut offset_frequencies = vec![0usize; OFFSET_COUNT];
     let mut low_offset_frequencies = [0usize; LOW_OFFSET_COUNT];
-    let mut length_frequencies = vec![0usize; LENGTH_COUNT];
+    let mut length_frequencies = [0usize; LENGTH_COUNT];
     main_frequencies[257] += filter_count;
     let mut match_state = EncoderMatchState::default();
     for token in tokens {

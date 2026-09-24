@@ -47,9 +47,9 @@ pub(super) fn time_extra_cfg(
     mtime: u32,
     mtime_ns: u32,
 ) -> Option<Vec<u8>> {
-    // Only unix/windows branches use the nanosecond normalizer; on other
-    // targets (e.g. wasm) the closure would be dead code.
-    #[cfg(any(unix, windows))]
+    // `-ts1` drops the fractional second everywhere it is read — the header's
+    // mtime below as well as the unix/windows ctime/atime reads — so this
+    // normalizer must exist on every target, wasm included.
     let ns = |v: u32| if precision_seconds { 0 } else { v };
     let ctime = if save_ctime {
         #[cfg(unix)]

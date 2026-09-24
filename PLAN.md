@@ -390,6 +390,16 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **工程**
 
+- **CI lint 闸门修复**（2026-09-24）：`format/rar5/write/add.rs` 的
+  `time_extra_cfg` 把 `-ts1` 用的纳秒归一化闭包 `ns` 门成了
+  `#[cfg(any(unix, windows))]`，但它对 header 的 mtime
+  是**无条件**调用的——`wasm32-wasip1-threads` 既非 unix 也非 windows，于是
+  `cargo check --target wasm32-wasip1-threads` 报 `E0425`（CI 的 wasm lint
+  步骤因此 一直红）。现该闭包对所有 target
+  定义。另修两处同属闸门的：`rar29_encoder.rs` 的
+  `vec![0usize; LENGTH_COUNT]`（wasm32 指针 4 字节时数组够小，触发 clippy
+  `useless_vec`）改为数组；`options.rs` 一处文档链接的冗余 target（rustdoc
+  `redundant_explicit_link`）去掉。
 - 许可与 SPDX（2026-09-19 定）：顶层 `license` 字段**只声明本项目自有贡献**
   （BSD-2-Clause）；第三方移植不折进该字段，由 `NOTICE` +
   [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) 逐文件记录。rars
