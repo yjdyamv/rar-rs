@@ -133,6 +133,15 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **legacy 分卷成员的 chunk 上限**（2026-09-24）：`MAX_MEMBER_CHUNKS` 此前只在
+  RAR5 目录构建器里执行，RAR4/RAR13 的跨卷合并（`format/shared/split.rs` 的
+  `SplitMerge`）不设上限——手工构造的、每条 continuation 头极小的卷集能让单个成员
+  的 chunk 向量无界增长。现把常量与 `check_chunk_cap` 移到
+  `format/shared/extract` （RAR5 从那里引用），`SplitMerge`
+  也按同一上限拒绝（新增
+  `SplitMergeError::ChunkCountExceeded`，两族各映射一条消息）。契约由
+  `format::shared::split::tests::a_continuation_past_the_chunk_ceiling_is_rejected`
+  钉住。
 - **逐卷内联恢复记录**（2026-09-24 对拍官方 7.23 + 6.23）：`-rr` 配 `-v`
   时**每卷 各带一份**内联记录（官方 `rar l` 逐卷显示
   `recovery record`），每卷只保护该卷 自己的前缀（`-rr<N>%` =
@@ -390,6 +399,15 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **工程**
 
+- **移植去重与两处小一致性**（2026-09-24）：① `header_crc16`（RAR4 头 CRC =
+  CRC-32 截 16 位）此前在 `format/rar4/write/mod.rs` 与
+  `archive/rar4_edit/mod.rs` 各有一份，现移入 `format/shared/checksum.rs`
+  单一定义（两处经引用/re-export 复用，`rar4/comment.rs` 亦改从这里取）。②
+  `codec/common/filters.rs::apply_filter_decode` 的 `Result<_, String>` 改为
+  `RarResult`（与 codec 层的私有 `Error` 模式一致；唯一生产调用点
+  `decoder/engine.rs` 去掉 `map_err`）。③ `fuzz/README.md` 更正「CI 跑 fuzz
+  smoke」的说法：GitHub CI 只 `cargo check`/`fmt` fuzz workspace，bounded smoke
+  在本地 `scripts/wsl/ci-linux.sh` step 20/20。
 - **CI lint 闸门修复**（2026-09-24）：`format/rar5/write/add.rs` 的
   `time_extra_cfg` 把 `-ts1` 用的纳秒归一化闭包 `ns` 门成了
   `#[cfg(any(unix, windows))]`，但它对 header 的 mtime
