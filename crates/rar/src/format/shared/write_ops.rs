@@ -351,8 +351,12 @@ fn set_rar4_dict_bits(cx: &mut dyn Engine, entries: &[BatchEntry<'_>]) -> RarRes
         sum = sum.saturating_add(size);
     }
     let size = if solid { sum } else { max };
-    cx.write_ctx_mut().solid.rar4_dict_bits =
-        Some(crate::format::rar4::write::dict_bits(size, solid));
+    let bits = crate::format::rar4::write::archive_dict_bits(
+        cx.write_ctx().solid.rar4_unp_ver,
+        size,
+        solid,
+    );
+    cx.write_ctx_mut().solid.rar4_dict_bits = Some(bits);
     Ok(())
 }
 

@@ -214,15 +214,17 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `LONG_BLOCK`（官方从不置）；② 成员窗口位按官方的**归档级**规则
   `clamp(ceil_log2(size)−16, min, 6)`（`size` = 非 solid 的最大成员 / solid
   的整链 总量；`min` = 非 solid 1、solid 4=1 MiB），在 `add_batch`
-  里按批算出（单成员流式 无批时回退到成员大小，仍是安全上界）；③ 请求 level 0
-  的成员写 `unp_ver` 20 （`-m0`），加密成员仍 29——`-p` 布局是 RAR29 的，写 20
-  会让读取器选错密码。 结果：单卷与分卷 `-m0` 与官方 3.00–6.23
-  **逐字节相同**（13 个版本）；`-m1`–`-m5`
-  的**头**逐字节相同（载荷按各自实现不同）。契约由
+  里按批算出（单成员流式 无批时回退到成员大小，仍是安全上界）；RAR
+  2.x（`unp_ver` < 29）不用该规则，恒写 4（1 MiB，RAR 2.x 的字典上限；实测官方
+  2.90 对 store/压缩/solid 一律写 4）；③ 请求 level 0 的成员写 `unp_ver` 20
+  （`-m0`），加密成员仍 29——`-p` 布局是 RAR29 的，写 20 会让读取器选错密码。
+  结果：单卷与分卷 `-m0` 与官方 3.00–6.23 **逐字节相同**（13
+  个版本）；`-m1`–`-m5` 的**头**逐字节相同（载荷按各自实现不同）。契约由
   `rar4_create::{create_rar4_m0_headers_match_winrar,
-  create_rar4_dict_bits_follow_the_largest_member}`
+  create_rar4_dict_bits_follow_the_largest_member,
+  create_rar4_v20_declares_the_fixed_window_bits}`
   与
-  `write::tests::{dict_bits_follow_winrar,
+  `write::tests::{dict_bits_follow_winrar, archive_dict_bits_is_fixed_for_pre_rar3,
   member_unp_ver_turns_level0_into_20_only_for_v29}`
   钉住。
 - **无 ENDARC 的老归档（RAR 2.9）可编辑**（2026-09-24 对拍官方 2.90）：2.90

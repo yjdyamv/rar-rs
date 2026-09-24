@@ -442,6 +442,20 @@ pub(crate) fn dict_bits(size: u64, solid: bool) -> u8 {
     ceil_log2.saturating_sub(16).clamp(min, 6) as u8
 }
 
+/// The archive-wide `FHD` window bits a RAR4 archive declares, by member
+/// version. The RAR 2.x family (`unp_ver` < 29) predates the size-driven rule
+/// and always declares the era's 1 MiB dictionary — WinRAR 2.90 writes 4 for
+/// every archive (store/compress/solid alike), and 1 MiB is also the RAR 2.x
+/// dictionary ceiling, so the size-based rule would over-declare there. RAR
+/// 3.0+ (`29`) uses [`dict_bits`].
+pub(crate) fn archive_dict_bits(unp_ver: u8, size: u64, solid: bool) -> u8 {
+    if unp_ver < 29 {
+        4
+    } else {
+        dict_bits(size, solid)
+    }
+}
+
 /// Encode a dictionary size (in bytes) into the upper bits of the FILE_HEAD
 /// flags word (bits 5–7). Test-only: production code passes the 3-bit
 /// `window_bits` straight to [`build_file_header`], so this pins the
@@ -672,6 +686,19 @@ mod tests {
         ] {
             assert_eq!(dict_bits(size, solid), bits, "size={size} solid={solid}");
         }
+    }
+
+    /// The RAR 2.x family declares the era's fixed 1 MiB dictionary (WinRAR
+    /// 2.90 writes 4 for every archive), independent of the member size; the
+    /// size-based rule would over-declare past the RAR 2.x ceiling.
+    #[test]
+    fn archive_dict_bits_is_fixed_for_pre_rar3() {
+        for size in [0u64, 60_000, 2_000_000, 8_000_000] {
+            assert_eq!(archive_dict_bits(20, size, false), 4, "size={size}");
+            assert_eq!(archive_dict_bits(15, size, false), 4, "size={size}");
+        }
+        assert_eq!(archive_dict_bits(29, 60_000, false), 1);
+        assert_eq!(archive_dict_bits(29, 8_000_000, false), 6);
     }
 
     /// Level 0 writes a RAR 2.x member in a v29 container, unless encrypted

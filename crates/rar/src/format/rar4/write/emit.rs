@@ -93,12 +93,14 @@ pub(super) fn emit_rar4_segment(
         fhd |= FHD_COMMENT;
     }
     // `FHD` window bits: the archive-wide value WinRAR declares when the member
-    // set is known upfront (`add_batch`), else a safe per-member stand-in — a
-    // solid run's window spans members, so the solid fallback stays at the 4 MiB
-    // maximum.
+    // set is known upfront (`add_batch`), else a safe per-member stand-in. A
+    // RAR 2.x member declares the era's fixed 1 MiB; a solid run's window spans
+    // members, so the solid fallback stays at the 4 MiB maximum.
     let solid_mode = this.write_ctx().solid.mode;
     let window_bits = this.write_ctx().solid.rar4_dict_bits.unwrap_or_else(|| {
-        if solid_mode {
+        if unp_ver < 29 {
+            4
+        } else if solid_mode {
             6
         } else {
             super::dict_bits(u64::from(unpacked_size), false)
