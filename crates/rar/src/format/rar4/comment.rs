@@ -14,8 +14,7 @@ use std::io::{Read, Seek};
 
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::LONG_BLOCK;
-
-use super::write::header_crc16;
+use crate::format::shared::checksum::header_crc16;
 
 /// Header byte count of the NEWSUB `CMT` archive-comment block (32 fixed
 /// bytes + the 3-byte name `CMT`); the payload follows as data.

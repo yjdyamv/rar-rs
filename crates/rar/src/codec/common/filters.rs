@@ -3,6 +3,7 @@
 //! Post-processing filters applied to regions of decompressed output.
 //! Each filter has decode (inverse) and encode (forward) functions.
 use crate::codec::lzss_huff::{FILTER_ARM, FILTER_DELTA, FILTER_E8, FILTER_E8E9};
+use crate::error::{RarError, RarResult};
 
 /// Apply the inverse filter (for decompression).
 ///
@@ -18,13 +19,15 @@ pub fn apply_filter_decode(
     data: &mut [u8],
     channels: u8,
     file_offset: u64,
-) -> Result<Vec<u8>, String> {
+) -> RarResult<Vec<u8>> {
     match filter_type {
         FILTER_DELTA => Ok(delta_decode(data, channels)),
         FILTER_E8 => Ok(e8_decode(data, file_offset, true)),
         FILTER_E8E9 => Ok(e8_decode(data, file_offset, false)),
         FILTER_ARM => Ok(arm_decode(data, file_offset)),
-        other => Err(format!("unsupported RAR5 filter type {other}")),
+        other => Err(RarError::Format(format!(
+            "unsupported RAR5 filter type {other}"
+        ))),
     }
 }
 
@@ -761,7 +764,10 @@ mod tests {
         // the raw data (which would corrupt output without a clear error).
         let mut data = vec![0xAB; 64];
         let err = apply_filter_decode(4, &mut data, 1, 0).unwrap_err();
-        assert!(err.contains("unsupported RAR5 filter type 4"), "{err}");
+        assert!(
+            err.to_string().contains("unsupported RAR5 filter type 4"),
+            "{err}"
+        );
     }
 
     /// Build `n` samples of `bytes`-byte little-endian values (8/16/24-bit)
