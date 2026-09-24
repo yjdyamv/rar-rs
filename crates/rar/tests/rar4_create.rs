@@ -1195,6 +1195,43 @@ fn create_rar4_m0_headers_match_winrar() {
     );
 }
 
+/// A RAR 2.x archive (`-ma2`) declares the era's fixed 1 MiB window bits (4)
+/// for every member, like WinRAR 2.90 — not the size-based v29 value.
+#[test]
+fn create_rar4_v20_declares_the_fixed_window_bits() {
+    let dir = make_temp_dir();
+    let arc = dir.path().join("v20.rar");
+    let a = vec![7u8; 60_000];
+    let b = vec![9u8; 40_000];
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default().compression(ArchiveVersion::V20),
+    )
+    .unwrap();
+    archive
+        .add_batch(&[
+            WriteEntry::Bytes {
+                name: "a.bin",
+                data: &a,
+                options: ewo(0),
+            },
+            WriteEntry::Bytes {
+                name: "b.bin",
+                data: &b,
+                options: ewo(0),
+            },
+        ])
+        .unwrap();
+    archive.finish().unwrap();
+
+    let shape = rar4_member_shape(&std::fs::read(&arc).unwrap());
+    assert_eq!(shape.len(), 2);
+    for (name, dict, unp_ver) in shape {
+        assert_eq!(dict, 4, "{name}: RAR 2.x declares the fixed 1 MiB window");
+        assert_eq!(unp_ver, 20, "{name}");
+    }
+}
+
 /// The `FHD` window bits are archive-wide (the *largest* member), not per
 /// member: an 8 MiB + 10 KiB pair declares 6 for both, matching WinRAR.
 #[test]
