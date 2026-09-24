@@ -53,6 +53,27 @@
 
 - [ ] **RAR4 solid 归档 MT**：legacy solid 链保持串行；成员级并行需跨成员共享
       窗口，属结构性代价（RAR5 的 chunk 级 MT 已兑现）。
+- [ ] **RAR4 分卷创建对齐官方新式命名 + `.rev` trailer 布局**（2026-09-24 查清，
+      未实施）：口径「**创建用新式，修复必须同时支持老式与新式**」。实测 5.91 与
+      6.23（7.23 已无 `-ma4`）产出的 RAR4 分卷是 `base.partNN.rar`（零填充）、
+      `.rev` 是 `base.partNN.rev` 且为 **trailer 布局**（末 7 字节
+      `data-1, rec-1,
+      index, CRC32`，实测计数正确）；我们产旧式
+      `base.rar`/`base.rNN` + **legacy 全量奇偶布局**（计数写进文件名），官方
+      `t` 因此报 `Unknown method in …rev`、 `rc` 用不上。**根因三层**：①
+      命名（我们旧式、未置 `MHD_NEWNUMBERING`）； ②
+      `rev3/layout.rs::use_trailer_format` 判据是「**每个卷最后 7 字节全为 0**」
+      ——官方含末卷 tail7 都是 0，我们以「活的 ENDARC」收尾故被判 Legacy； ③ 官方
+      ENDARC 是 **20 字节**（head_size 0x0014）且**其后补零填卷**（中间卷正好
+      `volume_size`、末卷补到如 2385），我们的 ENDARC 只 7 字节且不补零。
+      实施顺序：dump 定出 ENDARC+补零精确规则 → 改 ENDARC 形状与补零 → `.partNN`
+      命名 + 置 `MHD_NEWNUMBERING` → `.rev` 自然落 trailer + `base.partNN.rev` →
+      修 `canonical_recovery_names` 歧义候选 bug（取首个候选把 `…part25_3_1`
+      读成 data=5，应按数据卷评分选）→ 补两条 `rc`
+      往返测试（老式/新式各一，读取与修复 两侧都保留）→
+      更新受影响用例（`cli_behavior/recovery.rs` 的 `mv4.r00`、 `rar4_create.rs`
+      多卷用户名等）→ 以 6.23 逐字节 + 官方 `t`/`rc` 验收。 **待定**：是否补
+      `-vn`（官方默认新式、`-vn` 旧式；我们目前没有旧式创建出口）。
 
 **有意不做（设计决定，别当缺口修）：**
 
