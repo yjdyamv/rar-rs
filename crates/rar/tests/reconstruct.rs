@@ -157,14 +157,30 @@ fn reconstruct_rebuilds_a_legacy_archive_as_rar4() {
 
     let report = rar_rs::reconstruct_archive_path(&src, &dst, None).unwrap();
     assert_eq!(names(report.recovered()), ["f.txt"]);
+    assert!(
+        report.legacy(),
+        "the rebuilt container keeps the legacy family"
+    );
 
+    // The rebuilt container is RAR4, not RAR5.
+    let bytes = std::fs::read(&dst).unwrap();
+    assert_eq!(
+        &bytes[..rar_rs::detect::RAR4_SIGNATURE.len()],
+        rar_rs::detect::RAR4_SIGNATURE,
+        "a legacy source rebuilds as a RAR4 container"
+    );
+
+    // Members are stored, and a STORE member in a v29 container carries the
+    // official `-m0` `unp_ver` 20 (see `format::rar4::write::member_unp_ver`),
+    // so the member reports V20 — a legacy (RAR4) codec, not the container's
+    // V29. The container, not the member codec, is what reconstruct preserves.
     let mut reader = ArchiveReader::open(&dst).unwrap();
     let id = reader.unique_entry("f.txt").unwrap();
     let version = reader.entry(id).unwrap().version();
     assert_eq!(
         version,
-        ArchiveVersion::V29,
-        "legacy source rebuilds as RAR4"
+        ArchiveVersion::V20,
+        "a STORE member in a RAR4 container is the -m0 layout"
     );
     assert_eq!(reader.read_entry(id).unwrap(), b"legacy bytes");
 }
