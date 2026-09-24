@@ -31,16 +31,18 @@ CRC32 / 16-bit-header checksums recomputed — otherwise the shard arithmetic,
 Reed-Solomon solve and `.rev` naming code would stop at the checksum gate.
 
 Targets reach the wire-level surface through `rar_rs::wire` (the old `raw`
-feature was retired in [ADR 0007](../docs/adr/0007-raw-feature-retired.md)). CI
-runs a bounded standalone smoke (5k iterations for
-parse/crypto/recovery/rev/legacy, 500 for write/rewrite) in addition to the
-compile check.
+feature was retired in [ADR 0007](../docs/adr/0007-raw-feature-retired.md)).
+GitHub CI only _compiles_ the fuzz workspace (`cargo check` / `cargo fmt`, with
+and without the `fuzzing` feature); the bounded standalone smoke below runs in
+the local Linux gate, [`scripts/wsl/ci-linux.sh`](../scripts/wsl/ci-linux.sh)
+step 20/20 (5k iterations for parse/crypto/recovery/rev/legacy, 500 for
+write/rewrite).
 
 ## Standalone (stable Rust, no extra toolchain)
 
 Each target is a `fn(&[u8])` runner on a deterministic mutation loop. A panic
 saves the crashing input to `fuzz/crashes/` and exits non-zero, so this doubles
-as a quick local smoke and as CI:
+as a quick local smoke (and as the `scripts/wsl/ci-linux.sh` fuzz step):
 
 ```sh
 cargo run --release --bin parse      # 200k iterations
