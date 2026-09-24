@@ -322,11 +322,15 @@ pub(super) fn scan_layout_stream(
     let mut endarc: Option<usize> = None;
     let mut files = Vec::new();
     let mut protect = None;
+    // End of the last block parsed; RAR 2.9-era archives carry no ENDARC, so
+    // the rebuild appends the fresh end block there.
+    let mut stream_end = sfx_offset;
     // Latched from the main header: `MHD_PASSWORD` means every later block
     // header is encrypted.
     let mut hp: Option<&[u8]> = None;
     while let Some(view) = read_block(stream, hp.is_some(), hp, EnvelopePolicy::PLAN)? {
         let start = view.offset as usize;
+        stream_end = (view.offset + view.total_size) as usize;
         if view.head_type == MAIN_HEAD && main.is_none() {
             let flags = main_flags(&view.header)?;
             if flags & MHD_PASSWORD != 0 {
@@ -350,9 +354,9 @@ pub(super) fn scan_layout_stream(
     }
     let (main_offset, main_header, main_flags) =
         main.ok_or_else(|| RarError::Format("RAR4: archive is missing its main header".into()))?;
-    let endarc_offset = endarc.ok_or_else(|| {
-        RarError::Format("RAR4: archive is missing the end-of-archive block".into())
-    })?;
+    // RAR 2.9-era archives omit the end-of-archive block entirely; editing
+    // them is still supported (the rebuild emits a fresh one at the end).
+    let endarc_offset = endarc.unwrap_or(stream_end);
     Ok(Rar4Layout {
         sfx_offset,
         main_offset,

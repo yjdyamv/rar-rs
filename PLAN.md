@@ -7,10 +7,10 @@
 >   名字自动成 `base.partNN.rev`；新增 `-vn`（`old_numbering`）回旧式
 >   `.rar`/`.rNN` 命名。官方 6.23 `t` 读我们产的新式集与 `.rev` 报
 >   `All OK`、`rc` 重建缺失卷 **逐字节还原**，`.rev` 与官方逐字节相同；RAR13
->   仍旧式命名。**已知残余**：RAR4 成员头的三个字节字段（主头
->   `LONG_BLOCK`、窗口位、store 的 `unp_ver`）仍未对齐
->   官方，属既有纯字节外观差异，见「已知小差异」。 前轮：**RAR5
->   头字节对齐官方**——成员头与 QO/RR/CMT 服务块的
+>   仍旧式命名。 本轮另修：**RAR4 头对齐官方**（主头去 `LONG_BLOCK`、窗口位按
+>   官方归档级规则、level 0 写 `unp_ver` 20）——单卷与分卷 `-m0` 现与官方
+>   3.00–6.23 **逐字节相同**；并让无 ENDARC 的 RAR 2.9 老归档可编辑。
+>   前轮：**RAR5 头字节对齐官方**——成员头与 QO/RR/CMT 服务块的
 >   `data_size`/`unpacked_size`/`comp_info` 改写到官方的最小 2 字节、STM
 >   服务块按官方的 `vint_size(unpacked_size << 12)` 预留（此前三者全是
 >   最小编码，−3 字节/成员）；**Unix 时间载体去重**，头内 mtime 与 FILE_TIME
@@ -208,6 +208,31 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   路径都改走它。契约由
   `rar4_create::create_rar4_pre_rar3_members_carry_no_exttime_record` 与
   `write::tests::member_ext_time_is_v29_only` 钉住。
+
+- **RAR4 头对齐官方，`-m0` 与 3.00–6.23 逐字节一致**（2026-09-24 对拍官方
+  3.00–6.23 全部 RAR4 构建）：三处既往的「纯字节外观」差异已改：① 主头不再置
+  `LONG_BLOCK`（官方从不置）；② 成员窗口位按官方的**归档级**规则
+  `clamp(ceil_log2(size)−16, min, 6)`（`size` = 非 solid 的最大成员 / solid
+  的整链 总量；`min` = 非 solid 1、solid 4=1 MiB），在 `add_batch`
+  里按批算出（单成员流式 无批时回退到成员大小，仍是安全上界）；③ 请求 level 0
+  的成员写 `unp_ver` 20 （`-m0`），加密成员仍 29——`-p` 布局是 RAR29 的，写 20
+  会让读取器选错密码。 结果：单卷与分卷 `-m0` 与官方 3.00–6.23
+  **逐字节相同**（13 个版本）；`-m1`–`-m5`
+  的**头**逐字节相同（载荷按各自实现不同）。契约由
+  `rar4_create::{create_rar4_m0_headers_match_winrar,
+  create_rar4_dict_bits_follow_the_largest_member}`
+  与
+  `write::tests::{dict_bits_follow_winrar,
+  member_unp_ver_turns_level0_into_20_only_for_v29}`
+  钉住。
+- **无 ENDARC 的老归档（RAR 2.9）可编辑**（2026-09-24 对拍官方 2.90）：2.90
+  的归档 不写 ENDARC，编辑扫描原先原样报 `missing the end-of-archive block`
+  而拒绝。现 `scan_layout_stream` 无 ENDARC
+  时以最后一个块的结束为重建插入点（重写时补一条新
+  ENDARC），改名/注释/删除全部可用，改完我们与 2.90 官方 `Rar.exe` 都能读、抽取
+  正确。契约由
+  `rar4_edit::tests::basic::scan_layout_accepts_an_archive_without_endarc`
+  钉住。
 
 - **RAR5 成员/服务头的尺寸字段补到官方宽度**（2026-09-23 对拍官方 7.23）：官方把
   `data_size`（块信封的 Data Size）、`unpacked_size`、`comp_info` 三个 vint 一律
@@ -604,19 +629,9 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 ## 已知小差异（记录，互操作无碍）
 
-- **RAR4 成员头的三个字节字段未对齐官方**（2026-09-24 对拍 6.23）：`-ma4 -m0`
-  单卷/多卷逐字节对拍后，除下列 6 字节外**全部相同**（卷尺寸、载荷、20 字节
-  `ENDARC`、`.rev` 均一致）：① 主头 `HEAD_FLAGS` 我们多置
-  `LONG_BLOCK`（`0x8000`）， 官方不置（`-ma4` 单卷 `0x0000`、分卷 `0x0111`）；②
-  FILE_HEAD 窗口位 （flags 位 5–7）我们恒写 6（4 MiB），官方按成员定尺——store 恒
-  1（128 KiB）、 压缩为 `min(4MiB, max(128KiB, next_pow2(size)))`（实测 5 K/50
-  K→1、500 K→3、 5 M/50 M→6）；③ FILE_HEAD `unp_ver` 我们按容器写 29，官方对
-  `-m0`（请求 level 0）写 20（即便成员因不可压而 store，只要请求 level ≥3 仍是
-  29）。三处是 **纯字节外观**差异：双向读写正常、官方 `t`/`rc`
-  无碍，且是**既有**行为（与分卷 无关，单卷同样如此，本轮未改动）。对齐 ②
-  需要改成员发射器的字典口径（solid
-  链尤需谨慎，声明过小会损坏解码），属独立一轮，故按「已知小差异」记录，不改
-  代码。
+- **RAR4 solid 归档的成员排序**：solid 时官方按名字/扩展名启发式排序，我们按参数
+  顺序，因此 solid 归档无法逐字节对拍（载荷与链字典同样按各自实现）。非 solid 的
+  头字段与 `-m0` 已逐字节对齐（见「已修」）。
 
 - **`-rr<N>%` 的百分比取整**：官方 6.23 的百分比形式不是干净的 P%。已量清的结构
   （细扫 20–100 KB、步进 4096 字节）：**斜率精确等于 P%**（边界严格相隔 5120

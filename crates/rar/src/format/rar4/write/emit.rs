@@ -55,6 +55,7 @@ pub(super) fn emit_rar4_segment(
     comment: Option<Vec<u8>>,
     split_before: bool,
     split_after: bool,
+    unp_ver: u8,
 ) -> RarResult<(u64, u64)> {
     use crate::format::rar4::write::{
         FileHeaderParams, build_file_comment_block, build_file_header,
@@ -86,12 +87,23 @@ pub(super) fn emit_rar4_segment(
     // after the member's data (the layout official UnRAR accepts); pre-RAR3
     // archives nest it inside the FILE_HEAD behind `FHD_COMMENT`, their
     // historical layout.
-    let standalone_comment = comment.is_some()
-        && LegacyCodec::from_unp_ver(this.write_ctx().solid.rar4_unp_ver)
-            == Some(LegacyCodec::Rar29);
+    let standalone_comment =
+        comment.is_some() && LegacyCodec::from_unp_ver(unp_ver) == Some(LegacyCodec::Rar29);
     if comment.is_some() && !standalone_comment {
         fhd |= FHD_COMMENT;
     }
+    // `FHD` window bits: the archive-wide value WinRAR declares when the member
+    // set is known upfront (`add_batch`), else a safe per-member stand-in — a
+    // solid run's window spans members, so the solid fallback stays at the 4 MiB
+    // maximum.
+    let solid_mode = this.write_ctx().solid.mode;
+    let window_bits = this.write_ctx().solid.rar4_dict_bits.unwrap_or_else(|| {
+        if solid_mode {
+            6
+        } else {
+            super::dict_bits(u64::from(unpacked_size), false)
+        }
+    });
     let params = FileHeaderParams {
         flags: fhd,
         packed_size,
@@ -99,13 +111,13 @@ pub(super) fn emit_rar4_segment(
         host_os: 2,
         file_crc,
         file_time: dos_time,
-        unp_ver: this.write_ctx().solid.rar4_unp_ver,
+        unp_ver,
         method,
         name: encoded_name,
         attr,
         salt,
         ext_time,
-        window_bits: 6, // 4 MiB dictionary
+        window_bits,
     };
     let mut hdr = build_file_header(&params)?;
     // Append the per-file comment subblock (COMM_HEAD 0x75) after the
@@ -225,6 +237,9 @@ pub(super) struct Rar4SplitParams<'a> {
     pub(super) solid_continuation: bool,
     pub(super) attr: u32,
     pub(super) comment: Option<Vec<u8>>,
+    /// Effective member `unp_ver` (see `super::member_unp_ver`); every
+    /// segment of the member carries it.
+    pub(super) unp_ver: u8,
 }
 
 /// Largest segment size that fits the current volume behind a
@@ -336,6 +351,7 @@ pub(super) fn emit_rar4_split<'a>(
             params.comment.clone(),
             split_before,
             split_after,
+            params.unp_ver,
         )?;
         chunks.push(crate::model::DataChunk {
             volume_index: vol_index,

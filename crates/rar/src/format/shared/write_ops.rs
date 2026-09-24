@@ -300,6 +300,7 @@ fn add_directory_inner(
 /// otherwise the sequential fallback; archive order is always preserved.
 pub(crate) fn add_batch(cx: &mut dyn Engine, entries: &[BatchEntry<'_>]) -> RarResult<()> {
     cx.check_cancel()?;
+    set_rar4_dict_bits(cx, entries)?;
     #[cfg(feature = "parallel")]
     {
         if !cx.is_legacy()
@@ -326,6 +327,32 @@ pub(crate) fn add_batch(cx: &mut dyn Engine, entries: &[BatchEntry<'_>]) -> RarR
         cx.set_progress_member(i);
         add_batch_entry_sequential(cx, entry)?;
     }
+    Ok(())
+}
+
+/// Compute the archive-wide RAR4 dictionary/window bits WinRAR declares (the
+/// largest member, or the whole run when solid) from the batch, so every
+/// member header carries the same value. Single-add streaming has no known
+/// member set; emission then falls back to a per-member safe value.
+fn set_rar4_dict_bits(cx: &mut dyn Engine, entries: &[BatchEntry<'_>]) -> RarResult<()> {
+    if !cx.is_rar4() {
+        return Ok(());
+    }
+    let solid = cx.write_ctx().solid.mode;
+    let mut max = 0u64;
+    let mut sum = 0u64;
+    for e in entries {
+        let size = match e {
+            BatchEntry::Bytes { data, .. } => data.len() as u64,
+            BatchEntry::File { path, .. } => fs::metadata(path)?.len(),
+            BatchEntry::Directory { .. } => 0,
+        };
+        max = max.max(size);
+        sum = sum.saturating_add(size);
+    }
+    let size = if solid { sum } else { max };
+    cx.write_ctx_mut().solid.rar4_dict_bits =
+        Some(crate::format::rar4::write::dict_bits(size, solid));
     Ok(())
 }
 

@@ -26,6 +26,9 @@ pub(crate) struct Rar4PreparedMember {
     pub method: u8,
     /// The member's DOS attributes (read-only/hidden/system), like WinRAR.
     pub attr: u32,
+    /// The requested compression level, needed to pick the member's
+    /// `unp_ver` (0 writes a RAR 2.x member).
+    pub level: u8,
 }
 
 /// Compress one RAR4 file member (non-solid, independent engine state)
@@ -86,6 +89,7 @@ pub(crate) fn prepare_rar4_file_member(
         packed,
         method,
         attr,
+        level,
     })
 }
 
@@ -103,12 +107,15 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
         mut packed,
         method,
         attr,
+        level,
     } = prepared;
-    let ext_time = crate::format::rar4::write::build_member_ext_time(
+    let member_unp_ver = crate::format::rar4::write::member_unp_ver(
         cx.write_ctx().solid.rar4_unp_ver,
-        mtime,
-        Some(mtime_ns),
+        level,
+        cx.password().is_some_and(|pw| !pw.is_empty()),
     );
+    let ext_time =
+        crate::format::rar4::write::build_member_ext_time(member_unp_ver, mtime, Some(mtime_ns));
 
     let password_encrypted = cx.password().is_some_and(|pw| !pw.is_empty());
     let mut salt = None;
@@ -141,6 +148,7 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
                 None,
                 false,
                 false,
+                member_unp_ver,
             )?;
             push_rar4_entry(
                 cx,
@@ -166,6 +174,7 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
                     is_final: true,
                     extra_data: Vec::new(),
                 }],
+                member_unp_ver,
             );
             cx.report_progress(file_size, file_size);
             Ok(())
@@ -185,6 +194,7 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
                     solid_continuation: false,
                     attr,
                     comment: None,
+                    unp_ver: member_unp_ver,
                 };
                 emit_rar4_split(cx, &params, volume_size, packed_size, |_, offset, len| {
                     Ok(Cow::Borrowed(
@@ -209,6 +219,7 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
                 attr,
                 0,
                 chunks,
+                member_unp_ver,
             );
             cx.report_progress(file_size, file_size);
             Ok(())
